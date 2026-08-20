@@ -594,10 +594,12 @@ function CreateAgentPanel({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState(DEFAULT_INSTRUCTIONS);
-  const [runtime, setRuntime] = useState<Runtime>(
-    backend === "cloud" ? "cloud" : "copilot"
-  );
-  const [model, setModel] = useState(backend === "cloud" ? "gpt-5.1" : "auto");
+  // Both backends now run a harness: the cloud backend runs it inside a
+  // per-agent sandbox container, the local backend runs it on this machine.
+  // Neither holds a model provider API key, so there is no provider runtime to
+  // pick and `auto` lets the signed-in harness choose its own model.
+  const [runtime, setRuntime] = useState<Runtime>("copilot");
+  const [model, setModel] = useState("auto");
   const [workspace, setWorkspace] = useState(
     backend === "cloud" ? "/workspace" : ""
   );
@@ -621,7 +623,7 @@ function CreateAgentPanel({
             instructions,
             model,
             name,
-            runtime: backend === "cloud" ? "cloud" : runtime,
+            runtime,
             ...(workspace ? { workspace } : {}),
           }).catch(() => undefined);
         }}
@@ -646,29 +648,31 @@ function CreateAgentPanel({
               value={description}
             />
           </Field>
-          {backend === "local" && (
-            <Field label="CLI runtime">
-              <select
-                className="h-9 w-full rounded-md border border-white/10 bg-black/30 px-3 text-sm"
-                onChange={(event) => setRuntime(event.target.value as Runtime)}
-                value={runtime}
-              >
-                <option value="copilot">GitHub Copilot CLI</option>
-                <option value="codex">Codex CLI</option>
-                <option value="claude">Claude Code</option>
-              </select>
-            </Field>
-          )}
+          <Field label="Harness">
+            <select
+              className="h-9 w-full rounded-md border border-white/10 bg-black/30 px-3 text-sm"
+              onChange={(event) => setRuntime(event.target.value as Runtime)}
+              value={runtime}
+            >
+              <option value="copilot">GitHub Copilot CLI</option>
+              <option disabled value="codex">
+                Codex CLI (not wired up yet)
+              </option>
+              <option disabled value="claude">
+                Claude Code (not wired up yet)
+              </option>
+            </select>
+          </Field>
           <Field label="Model">
             <Input
               className="border-white/10 bg-black/30 font-mono"
               onChange={(event) => setModel(event.target.value)}
-              placeholder={backend === "cloud" ? "gpt-5.1" : "auto"}
+              placeholder="auto"
               required
               value={model}
             />
           </Field>
-          <div className={backend === "cloud" ? "" : "md:col-span-2"}>
+          <div>
             <Field label="Workspace">
               <Input
                 className="border-white/10 bg-black/30 font-mono"
@@ -693,8 +697,9 @@ function CreateAgentPanel({
           </div>
           <div className="md:col-span-2 flex gap-3 rounded-xl border border-rose-300/15 bg-rose-300/5 p-4 text-rose-100/60 text-xs leading-relaxed">
             <ShieldAlert className="mt-0.5 size-4 shrink-0 text-rose-300" />
-            YOLO mode removes interactive tool approvals. Cloud runs remain
-            inside their per-agent container; local runs inherit the
+            YOLO mode removes interactive tool approvals. Runs are driven by
+            your signed-in coding CLI, never by a model provider API key. Cloud
+            runs stay inside their per-agent container; local runs inherit the
             operating-system access of the local runner process.
           </div>
         </div>

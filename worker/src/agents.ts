@@ -1,18 +1,17 @@
 import { getSandbox } from "@cloudflare/sandbox";
-import { Editor, Shell } from "@cloudflare/sandbox/openai";
-import {
-  applyPatchTool,
-  Agent as OpenAIAgent,
-  run,
-  shellTool,
-} from "@openai/agents";
 import {
   type AgentDefinition,
   agentDefinitionSchema,
   type RunResult,
   runAgentInputSchema,
 } from "@opencoven/agent-contracts";
+import type { HarnessStatus } from "@opencoven/harness";
 import { Agent } from "agents";
+import {
+  HarnessError,
+  listCloudHarnesses,
+  runHarnessInSandbox,
+} from "./harness-runner";
 
 type DirectoryState = {
   agents: AgentDefinition[];
@@ -48,6 +47,15 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
       agents: this.state.agents.filter((agent) => agent.id !== agentId),
     });
   }
+
+  harnesses(): Promise<HarnessStatus[]> {
+    return listCloudHarnesses(
+      getSandbox(this.env.Sandbox, "harness-probe", {
+        enableDefaultSession: false,
+        sleepAfter: "30s",
+      })
+    );
+  }
 }
 
 export class YoloAgent extends Agent<Env, YoloAgentState> {
@@ -63,6 +71,12 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     return this.state.definition;
   }
 
+  /**
+   * Executes the mission by driving an already-signed-in coding CLI inside the
+   * sandbox. The Worker never calls a model provider, so no provider API key
+   * exists in this path — only the harness's own credential, which the harness
+   * itself reads from its documented environment variable.
+   */
   async execute(input: unknown): Promise<RunResult> {
     const { task } = runAgentInputSchema.parse(input);
     const { definition } = this.state;
@@ -75,54 +89,62 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
 
     const startedAt = new Date().toISOString();
     this.updateDefinition({ status: "running", updatedAt: startedAt });
-    const sandbox = getSandbox(this.env.Sandbox, `agent-${definition.id}`);
-    const shell = new Shell(sandbox);
-    const editor = new Editor(sandbox, definition.workspace ?? "/workspace");
-    const agent = new OpenAIAgent({
-      instructions: `${definition.instructions}
-
-You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work only inside the sandbox, verify the result, and include exact evidence in your final response.`,
-      model: definition.model,
-      name: definition.name,
-      tools: [
-        shellTool({ needsApproval: false, shell }),
-        applyPatchTool({ editor, needsApproval: false }),
-      ],
-    });
 
     try {
-      const result = await run(agent, task);
+      const run = await runHarnessInSandbox({
+        env: this.env,
+        instructions: `${definition.instructions}
+
+You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work only inside the sandbox, verify the result, and include exact evidence in your final response.`,
+        model: definition.model,
+        runtime: definition.runtime,
+        sandbox: getSandbox(this.env.Sandbox, `agent-${definition.id}`),
+        task,
+        workspace: definition.workspace,
+      });
+
       const completedAt = new Date().toISOString();
-      const runResult: RunResult = {
+      const failed = run.summary.status === "failed" || run.exitCode !== 0;
+      const result: RunResult = {
         agentId: definition.id,
-        commandResults: [...shell.results],
+        commandResults: [
+          {
+            command: run.command,
+            exitCode: run.exitCode,
+            stderr: run.stderr,
+            stdout: run.summary.output,
+          },
+          ...run.summary.toolCalls,
+        ],
         completedAt,
-        fileOperations: [...editor.results],
+        fileOperations: run.summary.fileOperations,
         id: crypto.randomUUID(),
         output:
-          typeof result.finalOutput === "string"
-            ? result.finalOutput
-            : JSON.stringify(result.finalOutput ?? ""),
+          run.summary.output ||
+          run.stderr.trim() ||
+          "The harness produced no output.",
         startedAt,
-        status: "completed",
+        status: failed ? "failed" : "completed",
       };
-      this.finishRun(runResult, completedAt, "idle");
-      return runResult;
+      this.finishRun(result, completedAt, failed ? "error" : "idle");
+      return result;
     } catch (error) {
       const completedAt = new Date().toISOString();
-      const failed: RunResult = {
+      const result: RunResult = {
         agentId: definition.id,
-        commandResults: [...shell.results],
+        commandResults: [],
         completedAt,
-        fileOperations: [...editor.results],
+        fileOperations: [],
         id: crypto.randomUUID(),
         output:
-          error instanceof Error ? error.message : "Agent execution failed.",
+          error instanceof HarnessError || error instanceof Error
+            ? error.message
+            : "Agent execution failed.",
         startedAt,
         status: "failed",
       };
-      this.finishRun(failed, completedAt, "error");
-      return failed;
+      this.finishRun(result, completedAt, "error");
+      return result;
     }
   }
 

@@ -1,46 +1,53 @@
 import { z } from "zod";
 
 export const backendSchema = z.enum(["cloud", "local"]);
+/**
+ * `cloud` is retained only so agent records created before Coven Agents moved to
+ * harness execution still parse. It selects the retired provider-key runtime and
+ * is rejected for new agents; every runnable runtime is a harness.
+ */
 export const runtimeSchema = z.enum(["cloud", "codex", "claude", "copilot"]);
 export const agentStatusSchema = z.enum(["idle", "running", "error"]);
 export const agentIdSchema = z.string().uuid();
 
-export const createAgentInputSchema = z
-  .object({
-    backend: backendSchema,
-    description: z.string().trim().max(240).default(""),
-    instructions: z.string().trim().min(1).max(12_000),
-    model: z.string().trim().min(1).max(120),
-    name: z.string().trim().min(1).max(64),
-    runtime: runtimeSchema,
-    workspace: z.string().trim().max(1024).optional(),
-  })
-  .superRefine((value, context) => {
-    if (value.backend === "cloud" && value.runtime !== "cloud") {
-      context.addIssue({
-        code: "custom",
-        message: "Cloud agents must use the cloud runtime.",
-        path: ["runtime"],
-      });
-    }
-    if (value.backend === "local" && value.runtime === "cloud") {
-      context.addIssue({
-        code: "custom",
-        message: "Local agents must select a local CLI runtime.",
-        path: ["runtime"],
-      });
-    }
-  });
+const agentShapeSchema = z.object({
+  backend: backendSchema,
+  description: z.string().trim().max(240).default(""),
+  instructions: z.string().trim().min(1).max(12_000),
+  model: z.string().trim().min(1).max(120),
+  name: z.string().trim().min(1).max(64),
+  runtime: runtimeSchema,
+  workspace: z.string().trim().max(1024).optional(),
+});
 
-export const agentDefinitionSchema = createAgentInputSchema.and(
-  z.object({
-    createdAt: z.string().datetime(),
-    id: agentIdSchema,
-    lastRunAt: z.string().datetime().nullable(),
-    status: agentStatusSchema,
-    updatedAt: z.string().datetime(),
-  })
+export const createAgentInputSchema = agentShapeSchema.superRefine(
+  (value, context) => {
+    // Both backends now execute a harness. The cloud backend runs it inside a
+    // sandbox container and the local backend runs it on the operator's machine,
+    // but neither holds a model provider API key.
+    if (value.runtime === "cloud") {
+      context.addIssue({
+        code: "custom",
+        message:
+          "The provider-key `cloud` runtime is retired. Select a harness runtime such as `copilot`.",
+        path: ["runtime"],
+      });
+    }
+  }
 );
+
+/**
+ * Deliberately built from the plain shape rather than from
+ * `createAgentInputSchema`, so tightening a create-time rule cannot make already
+ * stored definitions unreadable and strand an agent in durable state.
+ */
+export const agentDefinitionSchema = agentShapeSchema.extend({
+  createdAt: z.string().datetime(),
+  id: agentIdSchema,
+  lastRunAt: z.string().datetime().nullable(),
+  status: agentStatusSchema,
+  updatedAt: z.string().datetime(),
+});
 
 export const runAgentInputSchema = z.object({
   task: z.string().trim().min(1).max(40_000),

@@ -3,6 +3,7 @@ import {
   agentIdSchema,
   createAgentInputSchema,
 } from "@opencoven/agent-contracts";
+import { isRunnableHarness, SUPPORTED_HARNESS_IDS } from "@opencoven/harness";
 import { getAgentByName } from "agents";
 import type { AgentDirectory, YoloAgent } from "./agents";
 import {
@@ -93,6 +94,14 @@ export default {
       "default"
     );
 
+    if (url.pathname === "/api/harnesses" && request.method === "GET") {
+      try {
+        return json({ harnesses: await directory.harnesses() }, {}, cors);
+      } catch (error) {
+        return fail(error, cors);
+      }
+    }
+
     try {
       if (url.pathname === "/api/agents") {
         if (request.method === "GET") {
@@ -105,6 +114,13 @@ export default {
               "Cloud runner only accepts cloud agents.",
               400,
               "backend_mismatch"
+            );
+          }
+          if (!isRunnableHarness(input.runtime)) {
+            throw new HttpError(
+              `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+              400,
+              "harness_unsupported"
             );
           }
           const now = new Date().toISOString();

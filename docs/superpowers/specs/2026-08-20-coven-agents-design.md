@@ -13,16 +13,29 @@ surface owns runner connection settings, agent creation, mission submission,
 and result display. It talks only to the shared versioned JSON contract in
 `@opencoven/agent-contracts`.
 
+Both backends use one execution model: drive an already-authenticated coding
+CLI — the *harness* — and translate its event stream into a normalized run
+vocabulary. Neither backend is a model client, so neither holds a model provider
+API key. `packages/harness` is the single definition of the CLI subset, the
+JSONL normalizer, and the run summarizer, so the two backends cannot drift.
+
 The cloud backend is a Cloudflare Worker. An `AgentDirectory` Durable Object
 indexes agents, while each `YoloAgent` Durable Object owns one definition and a
-bounded run history. The agent receives a stable Cloudflare Sandbox container.
-OpenAI Agents SDK shell and patch tools run with `needsApproval: false`, but all
-effects remain inside that container.
+bounded run history. The agent receives a stable Cloudflare Sandbox container
+built from `worker/Dockerfile`, which installs the harness CLI. The Worker
+spawns the harness inside that container with the harness's own credential
+(`COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN`) and blanks provider keys
+in the command environment. Tool approvals are pre-granted, but all effects
+remain inside the container.
 
 The local backend is a loopback-only Node service with the same REST contract.
 It persists definitions to a private JSON file and starts an installed Copilot,
 Codex, or Claude CLI with that harness's explicit no-approval flags. Workspace
 paths must resolve under `OPENCOVEN_LOCAL_ROOT`.
+
+GitHub Copilot CLI is the supported harness subset. Codex CLI and Claude Code
+are probed and reported but refused for runs until their event translation
+exists: rendering an untranslated stream would show invented detail.
 
 ## Data flow
 
