@@ -99,11 +99,30 @@ pnpm deploy
 Update `ALLOWED_ORIGIN` in `worker/wrangler.jsonc` to the deployed web origin and
 set `NEXT_PUBLIC_CLOUD_RUNNER_URL` on the web deployment.
 
+`AGENT_CONTROL_TOKEN` is read from the `env` binding, not from `process.env`.
+A Worker only exposes `vars` on `process.env`, and only under `nodejs_compat`;
+secrets never appear there. Reading a secret from `process.env` yields
+`undefined`, and because the token check treats an unset token as "deny", the
+symptom is a Worker that returns `401` to every request including a correct
+one. `worker/src/worker-secrets.d.ts` declares the secret on `Env` so this
+stays type-checked.
+
 After deployment, `POST /api/diagnostics/sandbox` performs an authenticated,
 one-shot command in a dedicated Cloudflare container. The fixed diagnostic
 sandbox is reused and automatically sleeps after 30 seconds of inactivity,
 which bounds container allocation without keeping it alive. Use it as the
-deployment smoke test.
+deployment smoke test:
+
+```bash
+curl -s -X POST \
+  -H "authorization: Bearer $AGENT_CONTROL_TOKEN" \
+  https://<your-worker>.workers.dev/api/diagnostics/sandbox
+# {"exitCode":0,"ok":true,"output":"coven-agents"}
+```
+
+Agent create, list, and delete work without an OpenAI key. Running an agent
+requires `OPENAI_API_KEY`; without it a run completes with status `failed` and
+a missing-credentials message rather than erroring the request.
 
 ## Verify
 

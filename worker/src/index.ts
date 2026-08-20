@@ -56,7 +56,7 @@ export default {
       return json({ mode: "cloud", ok: true }, {}, cors);
     }
 
-    if (!hasValidBearerToken(request, process.env.AGENT_CONTROL_TOKEN ?? "")) {
+    if (!hasValidBearerToken(request, env.AGENT_CONTROL_TOKEN ?? "")) {
       return json(
         { code: "unauthorized", error: "Runner token was rejected." },
         { status: 401 },
