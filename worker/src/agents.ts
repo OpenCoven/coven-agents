@@ -12,6 +12,7 @@ import {
   listCloudHarnesses,
   runHarnessInSandbox,
 } from "./harness-runner";
+import { sandboxKey, tenantOf } from "./tenant";
 
 type DirectoryState = {
   agents: AgentDefinition[];
@@ -25,10 +26,10 @@ type YoloAgentState = {
 export class AgentDirectory extends Agent<Env, DirectoryState> {
   initialState: DirectoryState = { agents: [] };
 
-  list(): AgentDefinition[] {
-    return [...this.state.agents].sort((left, right) =>
-      right.updatedAt.localeCompare(left.updatedAt)
-    );
+  list(tenantId: string): AgentDefinition[] {
+    return this.state.agents
+      .filter((agent) => tenantOf(agent) === tenantId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
   upsert(definition: AgentDefinition): AgentDefinition {
@@ -98,7 +99,10 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
 You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work only inside the sandbox, verify the result, and include exact evidence in your final response.`,
         model: definition.model,
         runtime: definition.runtime,
-        sandbox: getSandbox(this.env.Sandbox, `agent-${definition.id}`),
+        sandbox: getSandbox(
+          this.env.Sandbox,
+          sandboxKey(tenantOf(definition), definition.id)
+        ),
         task,
         workspace: definition.workspace,
       });
@@ -151,7 +155,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   async decommission(): Promise<void> {
     const { definition } = this.state;
     if (definition) {
-      await getSandbox(this.env.Sandbox, `agent-${definition.id}`).destroy();
+      await getSandbox(
+        this.env.Sandbox,
+        sandboxKey(tenantOf(definition), definition.id)
+      ).destroy();
     }
     this.setState(this.initialState);
   }

@@ -45,6 +45,13 @@ export const agentDefinitionSchema = agentShapeSchema.extend({
   createdAt: z.string().datetime(),
   id: agentIdSchema,
   lastRunAt: z.string().datetime().nullable(),
+  /**
+   * Server-assigned, and deliberately absent from `createAgentInputSchema`: a
+   * client that could name its own owner could name someone else's and read
+   * into their sandbox. Nullable so definitions stored before ownership existed
+   * still parse.
+   */
+  owner: z.string().trim().min(1).max(64).nullable().default(null),
   status: agentStatusSchema,
   updatedAt: z.string().datetime(),
 });
