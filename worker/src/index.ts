@@ -68,7 +68,10 @@ export default {
       url.pathname === "/api/diagnostics/sandbox" &&
       request.method === "POST"
     ) {
-      const sandbox = getSandbox(env.Sandbox, "deployment-diagnostic");
+      const sandbox = getSandbox(env.Sandbox, "deployment-diagnostic", {
+        enableDefaultSession: false,
+        sleepAfter: "30s",
+      });
       try {
         const result = await sandbox.exec("printf coven-agents");
         return json(
@@ -80,8 +83,8 @@ export default {
           {},
           cors
         );
-      } finally {
-        await sandbox.destroy();
+      } catch (error) {
+        return fail(error, cors);
       }
     }
 

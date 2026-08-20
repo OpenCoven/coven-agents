@@ -100,8 +100,10 @@ Update `ALLOWED_ORIGIN` in `worker/wrangler.jsonc` to the deployed web origin an
 set `NEXT_PUBLIC_CLOUD_RUNNER_URL` on the web deployment.
 
 After deployment, `POST /api/diagnostics/sandbox` performs an authenticated,
-one-shot command in a temporary Cloudflare container and destroys it before
-returning. Use it as the deployment smoke test.
+one-shot command in a dedicated Cloudflare container. The fixed diagnostic
+sandbox is reused and automatically sleeps after 30 seconds of inactivity,
+which bounds container allocation without keeping it alive. Use it as the
+deployment smoke test.
 
 ## Verify
 
