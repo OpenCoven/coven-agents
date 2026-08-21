@@ -8,6 +8,8 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test:unit": "tsx --test lib/agents/*.test.ts && pnpm --filter @opencoven/agent-contracts test && pnpm --filter @opencoven/local-runner test && pnpm --filter @opencoven/cloud-runner test",
+    "contract:check": "node scripts/export-agent-runner-contract.mjs --check",
+    "contract:export": "node scripts/export-agent-runner-contract.mjs",
     "dev:cloud": "pnpm --filter @opencoven/cloud-runner dev",
     "dev:local-runner": "pnpm --filter @opencoven/local-runner dev",
     "check": "ultracite check",
