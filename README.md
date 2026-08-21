@@ -125,11 +125,26 @@ Agent create, list, and delete work without an OpenAI key. Running an agent
 requires `OPENAI_API_KEY`; without it a run completes with status `failed` and
 a missing-credentials message rather than erroring the request.
 
-## Run lifecycle API
+## Agent Runner v1 routes and lifecycle
+
+Both the local and cloud Agent Runner v1 endpoints expose the same lifecycle
+routes. The local base URL is `http://127.0.0.1:7331`; the cloud base URL is
+the deployed Worker URL. Every route except `GET /api/health` requires the
+runner bearer token.
+
+| Method | Route | Result |
+| --- | --- | --- |
+| `GET` | `/api/health` | Version, capabilities, and runner mode |
+| `GET`, `POST` | `/api/agents` | List or create profiles |
+| `GET`, `PUT`, `DELETE` | `/api/agents/:id` | Read, update, or remove a profile |
+| `POST` | `/api/agents/:id/runs` | Asynchronously accept a mission (`202`) |
+| `GET` | `/api/runs/:id` | Read the latest run snapshot |
+| `GET` | `/api/runs/:id/events` | Replay and follow lifecycle events as SSE |
+| `POST` | `/api/runs/:id/stop` | Request cancellation |
 
 Starting a mission is asynchronous. Send a UUID `operationId` with the task;
-repeating the same normalized request returns the original run, while reusing
-the operation ID for a different request returns `409`.
+repeating the same normalized request returns the original retained run, while
+reusing the operation ID for a different request returns `409`.
 
 ```bash
 curl -s -X POST \
@@ -142,9 +157,19 @@ curl -s -X POST \
 
 Poll `GET /api/runs/<run-id>`, replay lifecycle events with
 `GET /api/runs/<run-id>/events` and `Last-Event-ID`, or cancel with
-`POST /api/runs/<run-id>/stop`. Event replay uses
-`text/event-stream`; terminal snapshots and bounded evidence remain available
-after a local-runner restart.
+`POST /api/runs/<run-id>/stop`. SSE cursors replay each retained event once in
+monotonic ID order. A cloud event stream remains open for a live run until it
+reaches a terminal state, the client aborts, or its bounded idle policy expires.
+Terminal snapshots and bounded evidence remain available after a local-runner
+restart.
+
+### Cloud scratch-only limitation
+
+Cloud profiles may use only the `/workspace` scratch sandbox (or omit
+`workspace`, which resolves to `/workspace`). The cloud runner rejects host
+paths and Git URLs; it does not mount an operator filesystem or clone a
+client-supplied repository. Use the local runner when a mission must operate
+on a local checkout.
 
 ## Verify
 

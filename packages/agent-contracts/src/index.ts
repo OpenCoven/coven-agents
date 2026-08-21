@@ -2,6 +2,10 @@ import { z } from "zod";
 import { contractDescriptor } from "../contract-descriptor.js";
 
 export { contractDescriptor } from "../contract-descriptor.js";
+export {
+  sanitizeEvidencePath,
+  sanitizeEvidenceText,
+} from "./evidence.js";
 
 if (contractDescriptor.apiVersions.length !== 1) {
   throw new Error("Agent Runner must publish exactly one API version.");

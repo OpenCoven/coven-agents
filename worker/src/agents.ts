@@ -1,10 +1,5 @@
 import { getSandbox } from "@cloudflare/sandbox";
-import {
-  type CommandResult,
-  Editor,
-  type FileOperationResult,
-  Shell,
-} from "@cloudflare/sandbox/openai";
+import { Editor, Shell } from "@cloudflare/sandbox/openai";
 import {
   applyPatchTool,
   Agent as OpenAIAgent,
@@ -31,12 +26,19 @@ import {
 import {
   appendEvents,
   type CloudRunRecord,
-  createQueuedRun,
+  cloudFiberKey,
+  destroyCloudAgentSandbox,
+  dispatchCloudRun,
+  finishCloudRunRecord,
   hashOperation,
   isTerminal,
-  MAX_CAPTURED_OUTPUT_BYTES,
-  MAX_EVIDENCE_PER_RUN,
   nextEventId,
+  normalizeCloudCommandEvidence,
+  normalizeCloudFileEvidence,
+  OperationConflictError,
+  planCloudRunStart,
+  recoverCloudRunRecord,
+  retainCloudRuns,
   safeRunText,
   validateCloudWorkspace,
 } from "./run-state.js";
@@ -57,13 +59,6 @@ type RecoverySnapshot = {
   runId: string;
 };
 
-export class OperationConflictError extends Error {
-  constructor() {
-    super("Operation ID was already used for a different request.");
-    this.name = "OperationConflictError";
-  }
-}
-
 function createRunError(
   code: string,
   message: string,
@@ -78,60 +73,6 @@ function createRunError(
   };
 }
 
-function retainRuns(records: CloudRunRecord[]): CloudRunRecord[] {
-  const active = records.filter((record) => !isTerminal(record.run.status));
-  const terminal = records
-    .filter((record) => isTerminal(record.run.status))
-    .sort(
-      (left, right) =>
-        Date.parse(right.run.completedAt ?? right.run.createdAt) -
-        Date.parse(left.run.completedAt ?? left.run.createdAt)
-    )
-    .slice(0, 20);
-  return [...active, ...terminal];
-}
-
-function commandEvidence(results: CommandResult[]): {
-  evidence: CommandEvidence[];
-  outputExceeded: boolean;
-} {
-  let remainingBytes = MAX_CAPTURED_OUTPUT_BYTES;
-  let outputExceeded = false;
-  const fit = (value: string): string => {
-    const text = safeRunText(value);
-    const bytes = new TextEncoder().encode(text);
-    if (bytes.byteLength <= remainingBytes) {
-      remainingBytes -= bytes.byteLength;
-      return text;
-    }
-    outputExceeded = true;
-    const bounded = new TextDecoder().decode(bytes.slice(0, remainingBytes));
-    remainingBytes = 0;
-    return safeRunText(bounded);
-  };
-  return {
-    evidence: results.slice(-MAX_EVIDENCE_PER_RUN).map((result) => ({
-      command: result.command.trim() || "sandbox command",
-      completedAt: new Date(result.timestamp).toISOString(),
-      exitCode: result.exitCode,
-      stderr: fit(result.stderr),
-      stdout: fit(result.stdout),
-    })),
-    outputExceeded,
-  };
-}
-
-function fileEvidence(results: FileOperationResult[]): FileEvidence[] {
-  return results
-    .filter((result) => result.status === "completed")
-    .slice(-MAX_EVIDENCE_PER_RUN)
-    .map((result) => ({
-      occurredAt: new Date(result.timestamp).toISOString(),
-      operation: result.operation === "update" ? "modify" : result.operation,
-      path: result.path,
-    }));
-}
-
 function finalOutput(value: unknown): string {
   if (typeof value === "string") {
     return safeRunText(value);
@@ -141,6 +82,34 @@ function finalOutput(value: unknown): string {
   } catch {
     return "Cloud agent returned a non-serializable final response.";
   }
+}
+
+function captureCloudEvidence(
+  commandResults: unknown[],
+  fileResults: unknown[]
+): {
+  commandEvidence: CommandEvidence[];
+  diagnostics: string[];
+  fileEvidence: FileEvidence[];
+  outputExceeded: boolean;
+} {
+  const commands = normalizeCloudCommandEvidence(commandResults);
+  const files = normalizeCloudFileEvidence(fileResults);
+  return {
+    commandEvidence: commands.evidence,
+    diagnostics: [...commands.diagnostics, ...files.diagnostics],
+    fileEvidence: files.evidence,
+    outputExceeded: commands.outputExceeded,
+  };
+}
+
+function appendEvidenceDiagnostics(
+  output: string,
+  diagnostics: string[]
+): string {
+  return diagnostics.length > 0
+    ? safeRunText(`${output}\n${diagnostics.join("\n")}`)
+    : output;
 }
 
 function recoverySnapshot(value: unknown): RecoverySnapshot | null {
@@ -255,6 +224,20 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     return record?.events.filter((event) => event.id > lastEventId) ?? null;
   }
 
+  getEventStream(
+    runId: string,
+    lastEventId: number
+  ): { events: RunEvent[]; terminal: boolean } | null {
+    const record = this.findRecord(runId);
+    if (!record) {
+      return null;
+    }
+    return {
+      events: record.events.filter((event) => event.id > lastEventId),
+      terminal: isTerminal(record.run.status),
+    };
+  }
+
   async start(input: unknown): Promise<{
     created: boolean;
     run: RunSnapshot;
@@ -262,62 +245,54 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     const request = startRunInputSchema.parse(input);
     const definition = this.requireDefinition();
     const operationHash = await hashOperation(definition.id, request.task);
-    const existing = this.state.runs.find(
-      (candidate) => candidate.run.operationId === request.operationId
-    );
-    const key = this.fiberKey(request.operationId);
-    if (existing) {
-      await this.inspectFiberByKey(key);
-      if (existing.operationHash !== operationHash) {
-        throw new OperationConflictError();
-      }
-      return { created: false, run: existing.run };
-    }
-
     const createdAt = new Date().toISOString();
-    const record = {
-      ...createQueuedRun(
-        definition.id,
-        request.operationId,
-        request.task,
-        crypto.randomUUID(),
-        createdAt
-      ),
+    const plan = planCloudRunStart({
+      agentId: definition.id,
+      createdAt,
       operationHash,
-    };
+      operationId: request.operationId,
+      records: this.state.runs,
+      runId: crypto.randomUUID(),
+      task: request.task,
+    });
+    if (plan.kind === "conflict") {
+      throw new OperationConflictError();
+    }
+    if (plan.kind === "existing") {
+      return dispatchCloudRun(plan);
+    }
+    const { record } = plan;
     this.setRuns([record, ...this.state.runs]);
     this.updateDefinition({ status: "running", updatedAt: createdAt });
     await this.syncDirectory();
 
-    const receipt = await this.startFiber(
-      "agent-run",
-      async (context) => {
-        const checkpoint: RecoverySnapshot = {
-          agentId: definition.id,
-          operationId: request.operationId,
-          runId: record.run.id,
-        };
-        context.stash(checkpoint);
-        await this.executeRun(record.run.id, context.signal, (value) =>
-          context.stash(value)
-        );
-      },
-      {
-        fiberId: record.run.id,
-        idempotencyKey: key,
-        metadata: {
-          agentId: definition.id,
-          operationHash,
-          operationId: request.operationId,
-          runId: record.run.id,
+    return dispatchCloudRun(plan, async (fiberRecord, fiberKey) => {
+      const receipt = await this.startFiber(
+        "agent-run",
+        async (context) => {
+          const checkpoint: RecoverySnapshot = {
+            agentId: definition.id,
+            operationId: request.operationId,
+            runId: fiberRecord.run.id,
+          };
+          context.stash(checkpoint);
+          await this.executeRun(fiberRecord.run.id, context.signal, (value) =>
+            context.stash(value)
+          );
         },
-      }
-    );
-    if (!receipt.accepted) {
-      const duplicate = this.findRecord(record.run.id);
-      return { created: false, run: duplicate?.run ?? record.run };
-    }
-    return { created: true, run: record.run };
+        {
+          fiberId: fiberRecord.run.id,
+          idempotencyKey: fiberKey,
+          metadata: {
+            agentId: definition.id,
+            operationHash,
+            operationId: request.operationId,
+            runId: fiberRecord.run.id,
+          },
+        }
+      );
+      return { accepted: receipt.accepted };
+    });
   }
 
   async stop(runId: string): Promise<RunSnapshot | null> {
@@ -326,7 +301,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       return record?.run ?? null;
     }
     await this.cancelFiberByKey(
-      this.fiberKey(record.run.operationId),
+      cloudFiberKey(record.run.id),
       "Cancelled by operator request."
     );
     const completedAt = new Date().toISOString();
@@ -347,9 +322,9 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
 
   async decommission(): Promise<void> {
     const { definition } = this.state;
-    if (definition) {
-      await getSandbox(this.env.Sandbox, `agent-${definition.id}`).destroy();
-    }
+    await destroyCloudAgentSandbox(definition, async (name) => {
+      await getSandbox(this.env.Sandbox, name).destroy();
+    });
     this.setState(this.initialState);
   }
 
@@ -372,16 +347,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       return { status: "completed" };
     }
     const completedAt = new Date().toISOString();
-    const interrupted = this.finishRecord(record, {
-      completedAt,
-      error: createRunError(
-        "interrupted",
-        "Cloud run was interrupted before completion.",
-        true
-      ),
-      output: "Cloud durable execution was interrupted.",
-      status: "failed",
-    });
+    const interrupted = recoverCloudRunRecord(record, completedAt);
     this.replaceRecord(interrupted);
     this.updateDefinition({
       lastRunAt: completedAt,
@@ -440,30 +406,36 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         return;
       }
       if (signal.aborted) {
-        const captured = commandEvidence(shell.results);
+        const captured = captureCloudEvidence(shell.results, editor.results);
         const cancelled = this.finishRecord(current, {
-          commandEvidence: captured.evidence,
+          commandEvidence: captured.commandEvidence,
           completedAt: new Date().toISOString(),
-          fileEvidence: fileEvidence(editor.results),
-          output: "Run cancelled by operator request.",
+          fileEvidence: captured.fileEvidence,
+          output: appendEvidenceDiagnostics(
+            "Run cancelled by operator request.",
+            captured.diagnostics
+          ),
           status: "cancelled",
         });
         this.replaceRecord(cancelled);
         await this.finishDefinition(cancelled.run);
         return;
       }
-      const captured = commandEvidence(shell.results);
+      const captured = captureCloudEvidence(shell.results, editor.results);
       if (captured.outputExceeded) {
         const failed = this.finishRecord(current, {
-          commandEvidence: captured.evidence,
+          commandEvidence: captured.commandEvidence,
           completedAt: new Date().toISOString(),
           error: createRunError(
             "output_limit",
             "Cloud run exceeded the captured output limit.",
             false
           ),
-          fileEvidence: fileEvidence(editor.results),
-          output: "Cloud run exceeded the captured output limit.",
+          fileEvidence: captured.fileEvidence,
+          output: appendEvidenceDiagnostics(
+            "Cloud run exceeded the captured output limit.",
+            captured.diagnostics
+          ),
           status: "failed",
         });
         this.replaceRecord(failed);
@@ -471,10 +443,13 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         return;
       }
       const completed = this.finishRecord(current, {
-        commandEvidence: captured.evidence,
+        commandEvidence: captured.commandEvidence,
         completedAt: new Date().toISOString(),
-        fileEvidence: fileEvidence(editor.results),
-        output: finalOutput(result.finalOutput),
+        fileEvidence: captured.fileEvidence,
+        output: appendEvidenceDiagnostics(
+          finalOutput(result.finalOutput),
+          captured.diagnostics
+        ),
         status: "completed",
       });
       this.replaceRecord(completed);
@@ -485,9 +460,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         return;
       }
       const status = signal.aborted ? "cancelled" : "failed";
-      const captured = commandEvidence(shell.results);
+      const captured = captureCloudEvidence(shell.results, editor.results);
       const failed = this.finishRecord(current, {
-        commandEvidence: captured.evidence,
+        commandEvidence: captured.commandEvidence,
         completedAt: new Date().toISOString(),
         error:
           status === "failed"
@@ -503,13 +478,15 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
                   true
                 )
             : undefined,
-        fileEvidence: fileEvidence(editor.results),
-        output:
+        fileEvidence: captured.fileEvidence,
+        output: appendEvidenceDiagnostics(
           status === "failed"
             ? captured.outputExceeded
               ? "Cloud run exceeded the captured output limit."
               : "Cloud agent execution failed."
             : "Run cancelled by operator request.",
+          captured.diagnostics
+        ),
         status,
       });
       this.replaceRecord(failed);
@@ -519,10 +496,6 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
 
   private findRecord(runId: string): CloudRunRecord | null {
     return this.state.runs.find((record) => record.run.id === runId) ?? null;
-  }
-
-  private fiberKey(operationId: string): string {
-    return `run:${operationId}`;
   }
 
   private finishRecord(
@@ -539,72 +512,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       >;
     }
   ): CloudRunRecord {
-    if (isTerminal(record.run.status)) {
-      return record;
-    }
-    const run: RunSnapshot = {
-      ...record.run,
-      commandEvidence: result.commandEvidence ?? record.run.commandEvidence,
-      completedAt: result.completedAt,
-      error: result.error ?? null,
-      fileEvidence: result.fileEvidence ?? record.run.fileEvidence,
-      output: safeRunText(result.output),
-      status: result.status,
-    };
-    const events: RunEvent[] = [];
-    let eventId = nextEventId(record);
-    const takeEventId = (): number => {
-      const id = eventId;
-      eventId += 1;
-      return id;
-    };
-    for (const evidence of run.commandEvidence) {
-      events.push({
-        at: result.completedAt,
-        evidence,
-        id: takeEventId(),
-        type: "command",
-      });
-    }
-    for (const evidence of run.fileEvidence) {
-      events.push({
-        at: result.completedAt,
-        evidence,
-        id: takeEventId(),
-        type: "file",
-      });
-    }
-    if (run.output) {
-      events.push({
-        at: result.completedAt,
-        id: takeEventId(),
-        output: run.output,
-        type: "output",
-      });
-    }
-    events.push({
-      at: result.completedAt,
-      id: takeEventId(),
-      status: result.status,
-      type: "status",
-    });
-    if (result.status === "completed") {
-      events.push({
-        at: result.completedAt,
-        id: takeEventId(),
-        run,
-        type: "completed",
-      });
-    }
-    if (result.status === "failed" && result.error) {
-      events.push({
-        at: result.completedAt,
-        error: result.error,
-        id: takeEventId(),
-        type: "failed",
-      });
-    }
-    return appendEvents({ ...record, run }, events);
+    return finishCloudRunRecord(record, result);
   }
 
   private async finishDefinition(run: RunSnapshot): Promise<void> {
@@ -636,7 +544,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   private setRuns(runs: CloudRunRecord[]): void {
     this.setState({
       ...this.state,
-      runs: retainRuns(runs),
+      runs: retainCloudRuns(runs),
     });
   }
 

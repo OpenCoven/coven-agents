@@ -328,3 +328,92 @@ test("retains timeout evidence after terminating the specific child", async () =
     { runTimeoutMs: 5 }
   );
 });
+
+test("persists only sanitized local output and event evidence", async () => {
+  await withRunner(async ({ baseUrl, child }) => {
+    const agent = await createAgent(baseUrl);
+    const run = await startRun(baseUrl, agent.id, "Capture safe diagnostics.");
+    const activeChild = await waitFor(child);
+    const secrets = [
+      "bearer-local-value",
+      "runner-access-value",
+      "local-password-value",
+      "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+      "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD",
+    ];
+
+    activeChild.stdout.emit(
+      "data",
+      Buffer.from(
+        [
+          "preflight: local runner started",
+          "Authorization: Bearer bearer-local-value",
+          "RUNNER_ACCESS_KEY=runner-access-value",
+          "DATABASE_PASSWORD=local-password-value",
+          "PATH=/usr/local/bin",
+          "HOME=/root",
+          "SHELL=/bin/sh",
+          "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+          "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD",
+          "postflight: focused checks passed",
+        ].join("\n")
+      )
+    );
+    activeChild.close(0);
+
+    const completed = await waitFor(async () => {
+      const response = await request(baseUrl, `/api/runs/${run.id}`);
+      const current = (await response.json()) as {
+        run: { status: string };
+      };
+      return current.run.status === "completed" ? current : undefined;
+    });
+    const persisted = JSON.stringify(completed);
+    const events = await request(baseUrl, `/api/runs/${run.id}/events`);
+    const replay = await events.text();
+
+    for (const secret of secrets) {
+      assert.equal(persisted.includes(secret), false, `persisted ${secret}`);
+      assert.equal(replay.includes(secret), false, `streamed ${secret}`);
+    }
+    assert.match(persisted, /preflight: local runner started/);
+    assert.match(persisted, /postflight: focused checks passed/);
+    assert.match(replay, /\[environment output redacted\]/);
+  });
+});
+
+test("does not leak environment dumps split across local output events", async () => {
+  await withRunner(async ({ baseUrl, child }) => {
+    const agent = await createAgent(baseUrl);
+    const run = await startRun(
+      baseUrl,
+      agent.id,
+      "Capture streamed diagnostics."
+    );
+    const activeChild = await waitFor(child);
+
+    activeChild.stdout.emit("data", Buffer.from("PATH=/usr/local/bin\n"));
+    activeChild.stdout.emit("data", Buffer.from("HOME=/root\n"));
+    activeChild.stdout.emit("data", Buffer.from("SHELL=/bin/sh\n"));
+    activeChild.stdout.emit("data", Buffer.from("focused checks passed\n"));
+    activeChild.close(0);
+
+    const completed = await waitFor(async () => {
+      const response = await request(baseUrl, `/api/runs/${run.id}`);
+      const current = (await response.json()) as {
+        run: { status: string };
+      };
+      return current.run.status === "completed" ? current : undefined;
+    });
+    const events = await request(baseUrl, `/api/runs/${run.id}/events`);
+    const replay = await events.text();
+    const persisted = JSON.stringify(completed);
+
+    for (const leakedValue of ["/usr/local/bin", "/root", "/bin/sh"]) {
+      assert.equal(persisted.includes(leakedValue), false);
+      assert.equal(replay.includes(leakedValue), false);
+    }
+    assert.match(replay, /\[environment assignment redacted\]/);
+    assert.match(replay, /focused checks passed/);
+  });
+});

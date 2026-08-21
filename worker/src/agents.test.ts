@@ -68,8 +68,8 @@ test("creates an accepted queued cloud run with its first event", () => {
 
 test("redacts bearer credentials and environment dumps from cloud evidence", () => {
   assert.equal(
-    safeRunText("authorization: Bearer cloud-secret"),
-    "authorization: Bearer [REDACTED]"
+    safeRunText("authorization: Bearer cloud-header-token"),
+    "authorization: [REDACTED]"
   );
   assert.equal(
     safeRunText("PATH=/bin\nHOME=/root\nOPENAI_API_KEY=secret"),

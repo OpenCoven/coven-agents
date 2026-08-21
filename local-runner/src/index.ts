@@ -18,9 +18,11 @@ import {
   type RunError,
   type RunEvent,
   type RunSnapshot,
+  sanitizeEvidenceText,
   startRunInputSchema,
 } from "@opencoven/agent-contracts";
 import { z } from "zod";
+import { RunEventBroker } from "./event-broker.js";
 import {
   MAX_EVENTS_PER_RUN,
   RunStore,
@@ -90,28 +92,29 @@ function withEvents(record: StoredRun, events: RunEvent[]): StoredRun {
   };
 }
 
-function redactDiagnostic(value: string, token: string): string {
-  const environmentLines = value
-    .split(/\r?\n/u)
-    .filter((line) => /^[A-Z_][A-Z0-9_]*=/u.test(line));
-  if (environmentLines.length >= 3) {
-    return "[environment output redacted]";
-  }
-  const withoutBearer = value.replace(
-    /(Bearer\s+)[^\s"'`]+/giu,
-    "$1[REDACTED]"
+function sanitizeLocalEvidence(value: string, token: string): string {
+  return sanitizeEvidenceText(value, token ? [token] : []).replace(
+    /(^|\r?\n)(?:(?:export|declare -x)\s+)?[A-Za-z_][A-Za-z0-9_]*=[^\r\n]*/gmu,
+    "$1[environment assignment redacted]"
   );
-  const withoutKnownSecrets = withoutBearer.replace(
-    /\b(AGENT_CONTROL_TOKEN|OPENAI_API_KEY|OPENCOVEN_LOCAL_TOKEN)\s*=\s*[^\s]+/giu,
-    "$1=[REDACTED]"
-  );
-  return token
-    ? withoutKnownSecrets.replaceAll(token, "[REDACTED]")
-    : withoutKnownSecrets;
 }
 
-function appendOutput(current: string, addition: string): string {
-  return truncateRunText(current ? `${current}${addition}` : addition);
+function appendOutput(
+  current: string,
+  addition: string,
+  token: string
+): string {
+  return truncateRunText(
+    sanitizeLocalEvidence(current ? `${current}${addition}` : addition, token)
+  );
+}
+
+function truncateCommand(value: string): string {
+  if (value.length <= AGENT_RUNNER_LIMITS.maxCommandLength) {
+    return value;
+  }
+  const suffix = "\n[command truncated by runner]";
+  return `${value.slice(0, AGENT_RUNNER_LIMITS.maxCommandLength - suffix.length)}${suffix}`;
 }
 
 function operationHash(agentId: string, task: string): string {
@@ -249,12 +252,6 @@ function authorized(request: IncomingMessage, token: string): boolean {
   return sameToken(authorization.slice(7), token);
 }
 
-function writeSse(response: ServerResponse, event: RunEvent): void {
-  response.write(
-    `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
-  );
-}
-
 export function createLocalRunner(options: LocalRunnerOptions): {
   initialize: () => Promise<void>;
   server: Server;
@@ -271,7 +268,7 @@ export function createLocalRunner(options: LocalRunnerOptions): {
   const activeRunByAgent = new Map<string, string>();
   const launchingAgents = new Set<string>();
   const stopRequested = new Set<string>();
-  const subscribers = new Map<string, Set<ServerResponse>>();
+  const eventBroker = new RunEventBroker();
 
   function runInBackground(task: Promise<void>): void {
     task.catch(() => {
@@ -279,40 +276,24 @@ export function createLocalRunner(options: LocalRunnerOptions): {
     });
   }
 
-  function publish(runId: string, events: RunEvent[], terminal: boolean): void {
-    const listeners = subscribers.get(runId);
-    if (!listeners) {
-      return;
-    }
-    for (const response of listeners) {
-      for (const event of events) {
-        writeSse(response, event);
-      }
-      if (terminal) {
-        response.end();
-        listeners.delete(response);
-      }
-    }
-    if (listeners.size === 0) {
-      subscribers.delete(runId);
-    }
-  }
-
-  async function updateRun(
+  function updateRun(
     runId: string,
     change: (record: StoredRun) => StoredRun
   ): Promise<StoredRun | null> {
-    let events: RunEvent[] = [];
-    const record = await runStore.update(runId, (current) => {
-      const previousId = current.events.at(-1)?.id ?? 0;
-      const next = change(current);
-      events = next.events.filter((event) => event.id > previousId);
-      return next;
+    return eventBroker.update(runId, async () => {
+      let events: RunEvent[] = [];
+      const record = await runStore.update(runId, (current) => {
+        const previousId = current.events.at(-1)?.id ?? 0;
+        const next = change(current);
+        events = next.events.filter((event) => event.id > previousId);
+        return next;
+      });
+      return {
+        events,
+        terminal: record ? isTerminal(record.run.status) : false,
+        value: record,
+      };
     });
-    if (record) {
-      publish(runId, events, isTerminal(record.run.status));
-    }
-    return record;
   }
 
   async function refreshAgentStatus(agentId: string): Promise<void> {
@@ -361,17 +342,27 @@ export function createLocalRunner(options: LocalRunnerOptions): {
         return record;
       }
       const output = result.diagnostic
-        ? appendOutput(record.run.output, `\n${result.diagnostic}`)
+        ? appendOutput(
+            record.run.output,
+            `\n${result.diagnostic}`,
+            options.token
+          )
         : record.run.output;
       const commandEvidence = [
         ...record.run.commandEvidence,
         {
-          command: result.command ?? "local-cli",
+          command: truncateCommand(
+            sanitizeLocalEvidence(result.command ?? "local-cli", options.token)
+          ),
           completedAt: result.completedAt,
           exitCode: result.exitCode,
           startedAt: record.run.startedAt ?? record.run.createdAt,
-          stderr: truncateRunText(result.stderr),
-          stdout: truncateRunText(result.stdout),
+          stderr: truncateRunText(
+            sanitizeLocalEvidence(result.stderr, options.token)
+          ),
+          stdout: truncateRunText(
+            sanitizeLocalEvidence(result.stdout, options.token)
+          ),
         },
       ].slice(-MAX_EVIDENCE_PER_RUN);
       const run: RunSnapshot = {
@@ -537,11 +528,11 @@ export function createLocalRunner(options: LocalRunnerOptions): {
         }
         return;
       }
-      const text = redactDiagnostic(chunk.toString("utf8"), options.token);
+      const text = sanitizeLocalEvidence(chunk.toString("utf8"), options.token);
       if (target === "stdout") {
-        stdout = appendOutput(stdout, text);
+        stdout = appendOutput(stdout, text, options.token);
       } else {
-        stderr = appendOutput(stderr, text);
+        stderr = appendOutput(stderr, text, options.token);
       }
       writes = writes.then(async () => {
         await updateRun(runId, (record) => {
@@ -556,7 +547,7 @@ export function createLocalRunner(options: LocalRunnerOptions): {
               ...record,
               run: {
                 ...record.run,
-                output: appendOutput(record.run.output, text),
+                output: appendOutput(record.run.output, text, options.token),
               },
             },
             [event]
@@ -636,7 +627,7 @@ export function createLocalRunner(options: LocalRunnerOptions): {
       await finishRun(runId, {
         command: invocation.command,
         completedAt,
-        diagnostic: redactDiagnostic(outcome.error.message, options.token),
+        diagnostic: sanitizeLocalEvidence(outcome.error.message, options.token),
         error: toRunError(
           "cli_unavailable",
           "Local CLI could not start.",
@@ -925,25 +916,22 @@ export function createLocalRunner(options: LocalRunnerOptions): {
             "text/event-stream; charset=utf-8"
           );
           response.setHeader("x-accel-buffering", "no");
-          for (const event of record.events) {
-            if (event.id > lastEventId) {
-              writeSse(response, event);
-            }
-          }
-          if (isTerminal(record.run.status)) {
-            response.end();
-            return;
-          }
           response.write(": connected\n\n");
-          const listeners = subscribers.get(runId) ?? new Set<ServerResponse>();
-          listeners.add(response);
-          subscribers.set(runId, listeners);
           request.once("close", () => {
-            listeners.delete(response);
-            if (listeners.size === 0) {
-              subscribers.delete(runId);
-            }
+            eventBroker.unsubscribe(runId, response);
           });
+          await eventBroker.subscribe(
+            runId,
+            lastEventId,
+            async () => {
+              const current = await runStore.get(runId);
+              return {
+                events: current?.events ?? [],
+                terminal: current ? isTerminal(current.run.status) : true,
+              };
+            },
+            response
+          );
           return;
         }
         if (action === "stop" && request.method === "POST") {
