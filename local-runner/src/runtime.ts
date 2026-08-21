@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { AgentDefinition } from "@opencoven/agent-contracts";
 
@@ -19,6 +20,24 @@ export function resolveWorkspace(root: string, requested?: string): string {
     throw new Error("Workspace must stay inside OPENCOVEN_LOCAL_ROOT.");
   }
   return workspace;
+}
+
+export function resolveSecureWorkspace(
+  root: string,
+  requested?: string
+): string {
+  const workspace = resolveWorkspace(root, requested);
+  const resolvedRoot = realpathSync(resolve(root));
+  const resolvedWorkspace = realpathSync(workspace);
+  const pathFromRoot = relative(resolvedRoot, resolvedWorkspace);
+  if (
+    pathFromRoot === ".." ||
+    pathFromRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
+    isAbsolute(pathFromRoot)
+  ) {
+    throw new Error("Workspace must stay inside OPENCOVEN_LOCAL_ROOT.");
+  }
+  return resolvedWorkspace;
 }
 
 export function buildInvocation(

@@ -67,6 +67,7 @@ Optional variables:
 | `OPENCOVEN_LOCAL_PORT` | `7331` | Loopback port |
 | `OPENCOVEN_LOCAL_ROOT` | current directory | Maximum workspace boundary |
 | `OPENCOVEN_AGENT_STORE` | `.opencoven/agents.json` | Private agent registry |
+| `OPENCOVEN_RUN_STORE` | `.opencoven/runs.json` | Private persistent run snapshots and events |
 | `OPENCOVEN_RUN_TIMEOUT_MS` | `900000` | Per-run timeout |
 | `OPENCOVEN_ALLOWED_ORIGIN` | `http://localhost:3000` | Browser origin |
 
@@ -123,6 +124,27 @@ curl -s -X POST \
 Agent create, list, and delete work without an OpenAI key. Running an agent
 requires `OPENAI_API_KEY`; without it a run completes with status `failed` and
 a missing-credentials message rather than erroring the request.
+
+## Run lifecycle API
+
+Starting a mission is asynchronous. Send a UUID `operationId` with the task;
+repeating the same normalized request returns the original run, while reusing
+the operation ID for a different request returns `409`.
+
+```bash
+curl -s -X POST \
+  -H "authorization: Bearer <token>" \
+  -H "content-type: application/json" \
+  -d '{"operationId":"0f6f31ae-7b6c-49c9-bc82-0f2cbf56cc4d","task":"Run the focused tests."}' \
+  http://127.0.0.1:7331/api/agents/<agent-id>/runs
+# HTTP 202: {"apiVersion":"1.0","run":{"status":"queued",...}}
+```
+
+Poll `GET /api/runs/<run-id>`, replay lifecycle events with
+`GET /api/runs/<run-id>/events` and `Last-Event-ID`, or cancel with
+`POST /api/runs/<run-id>/stop`. Event replay uses
+`text/event-stream`; terminal snapshots and bounded evidence remain available
+after a local-runner restart.
 
 ## Verify
 

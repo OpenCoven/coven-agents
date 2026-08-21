@@ -1,47 +1,96 @@
 import { getSandbox } from "@cloudflare/sandbox";
 import {
+  AGENT_RUNNER_API_VERSION,
+  AGENT_RUNNER_CAPABILITIES,
   agentIdSchema,
   createAgentInputSchema,
 } from "@opencoven/agent-contracts";
 import { getAgentByName } from "agents";
-import type { AgentDirectory, YoloAgent } from "./agents";
+import {
+  type AgentDirectory,
+  OperationConflictError,
+  type YoloAgent,
+} from "./agents.js";
 import {
   corsHeaders,
+  errorEnvelope,
   HttpError,
   hasValidBearerToken,
   json,
   readJson,
-} from "./http";
+  serializeSse,
+} from "./http.js";
 
 export { Sandbox } from "@cloudflare/sandbox";
-export { AgentDirectory, YoloAgent } from "./agents";
+export { AgentDirectory, YoloAgent } from "./agents.js";
 
 function fail(error: unknown, cors: Headers): Response {
   if (error instanceof HttpError) {
     return json(
-      { code: error.code, error: error.message },
+      errorEnvelope(error.code, error.message, error.retryable, error.details),
       { status: error.status },
+      cors
+    );
+  }
+  if (error instanceof OperationConflictError) {
+    return json(
+      errorEnvelope(
+        "operation_conflict",
+        "Operation ID was already used for a different request.",
+        false
+      ),
+      { status: 409 },
       cors
     );
   }
   if (error instanceof Error && error.name === "ZodError") {
     return json(
-      { code: "invalid_request", error: "Request validation failed." },
+      errorEnvelope("invalid_request", "Request validation failed.", false),
       { status: 400 },
       cors
     );
   }
-  console.error(
-    JSON.stringify({
-      error: error instanceof Error ? error.message : String(error),
-      event: "runner.request.failed",
-    })
-  );
+  console.error("Cloud runner request failed.");
   return json(
-    { code: "internal_error", error: "Runner request failed." },
+    errorEnvelope("internal_error", "Runner request failed.", true),
     { status: 500 },
     cors
   );
+}
+
+function eventStream(
+  events: Parameters<typeof serializeSse>[0],
+  lastEventId: number,
+  cors: Headers
+): Response {
+  const headers = new Headers(cors);
+  headers.set("cache-control", "no-cache");
+  headers.set("content-type", "text/event-stream; charset=utf-8");
+  headers.set("x-accel-buffering", "no");
+  return new Response(serializeSse(events, lastEventId), { headers });
+}
+
+function parseLastEventId(request: Request): number {
+  const raw = request.headers.get("last-event-id");
+  if (raw === null) {
+    return 0;
+  }
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new HttpError(
+      "Last-Event-ID must be a non-negative integer.",
+      400,
+      "invalid_event_cursor"
+    );
+  }
+  return parsed;
+}
+
+function yoloAgent(
+  env: Env,
+  agentId: string
+): Promise<DurableObjectStub<YoloAgent>> {
+  return getAgentByName<Env, YoloAgent>(env.YoloAgent, agentId);
 }
 
 export default {
@@ -53,12 +102,21 @@ export default {
 
     const url = new URL(request.url);
     if (url.pathname === "/api/health" && request.method === "GET") {
-      return json({ mode: "cloud", ok: true }, {}, cors);
+      return json(
+        {
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          capabilities: [...AGENT_RUNNER_CAPABILITIES],
+          minimumClientVersion: "1.0.0",
+          mode: "cloud",
+        },
+        {},
+        cors
+      );
     }
 
     if (!hasValidBearerToken(request, env.AGENT_CONTROL_TOKEN ?? "")) {
       return json(
-        { code: "unauthorized", error: "Runner token was rejected." },
+        errorEnvelope("unauthorized", "Runner token was rejected.", false),
         { status: 401 },
         cors
       );
@@ -116,28 +174,47 @@ export default {
             status: "idle" as const,
             updatedAt: now,
           };
-          const agent = await getAgentByName<Env, YoloAgent>(
-            env.YoloAgent,
-            definition.id
-          );
-          await agent.configure(definition);
-          await directory.upsert(definition);
-          return json({ agent: definition }, { status: 201 }, cors);
+          const agent = await yoloAgent(env, definition.id);
+          const configured = await agent.configure(definition);
+          await directory.upsert(configured);
+          return json({ agent: configured }, { status: 201 }, cors);
         }
       }
 
-      const match = url.pathname.match(/^\/api\/agents\/([^/]+)(?:\/(runs))?$/);
-      if (match) {
-        const [, rawId, action] = match;
+      const agentMatch = url.pathname.match(
+        /^\/api\/agents\/([^/]+)(?:\/(runs))?$/
+      );
+      if (agentMatch) {
+        const [, rawId, action] = agentMatch;
         const id = agentIdSchema.parse(decodeURIComponent(rawId ?? ""));
-        const agent = await getAgentByName<Env, YoloAgent>(env.YoloAgent, id);
+        const agent = await yoloAgent(env, id);
+        const current = await agent.snapshot();
+        if (!current) {
+          throw new HttpError("Agent was not found.", 404, "not_found");
+        }
 
         if (!action && request.method === "GET") {
-          const definition = await agent.snapshot();
-          if (!definition) {
-            throw new HttpError("Agent was not found.", 404, "not_found");
+          return json({ agent: current }, {}, cors);
+        }
+        if (!action && request.method === "PUT") {
+          const input = createAgentInputSchema.parse(await readJson(request));
+          if (input.backend !== "cloud") {
+            throw new HttpError(
+              "Cloud runner only accepts cloud agents.",
+              400,
+              "backend_mismatch"
+            );
           }
-          return json({ agent: definition }, {}, cors);
+          const configured = await agent.configure({
+            ...input,
+            createdAt: current.createdAt,
+            id,
+            lastRunAt: current.lastRunAt,
+            status: current.status,
+            updatedAt: new Date().toISOString(),
+          });
+          await directory.upsert(configured);
+          return json({ agent: configured }, {}, cors);
         }
         if (!action && request.method === "DELETE") {
           await agent.decommission();
@@ -145,20 +222,58 @@ export default {
           return json({ ok: true }, {}, cors);
         }
         if (action === "runs" && request.method === "POST") {
-          const result = await agent.execute(await readJson(request));
-          const definition = await agent.snapshot();
-          if (definition) {
-            await directory.upsert(definition);
-          }
-          return json({ run: result }, {}, cors);
+          const started = await agent.start(await readJson(request));
+          await directory.registerRun(started.run.id, id);
+          return json(
+            {
+              apiVersion: AGENT_RUNNER_API_VERSION,
+              run: started.run,
+            },
+            { status: 202 },
+            cors
+          );
         }
       }
 
-      return json(
-        { code: "not_found", error: "Route was not found." },
-        { status: 404 },
-        cors
+      const runMatch = url.pathname.match(
+        /^\/api\/runs\/([^/]+)(?:\/(events|stop))?$/
       );
+      if (runMatch) {
+        const [, rawId, action] = runMatch;
+        const runId = agentIdSchema.parse(decodeURIComponent(rawId ?? ""));
+        const agentId = await directory.lookupRun(runId);
+        if (!agentId) {
+          throw new HttpError("Run was not found.", 404, "run_not_found");
+        }
+        const agent = await yoloAgent(env, agentId);
+        if (!action && request.method === "GET") {
+          const run = await agent.getRun(runId);
+          if (!run) {
+            throw new HttpError("Run was not found.", 404, "run_not_found");
+          }
+          return json({ apiVersion: AGENT_RUNNER_API_VERSION, run }, {}, cors);
+        }
+        if (action === "events" && request.method === "GET") {
+          const events = await agent.getEvents(
+            runId,
+            parseLastEventId(request)
+          );
+          if (!events) {
+            throw new HttpError("Run was not found.", 404, "run_not_found");
+          }
+          return eventStream(events, parseLastEventId(request), cors);
+        }
+        if (action === "stop" && request.method === "POST") {
+          await readJson(request, true);
+          const run = await agent.stop(runId);
+          if (!run) {
+            throw new HttpError("Run was not found.", 404, "run_not_found");
+          }
+          return json({ apiVersion: AGENT_RUNNER_API_VERSION, run }, {}, cors);
+        }
+      }
+
+      throw new HttpError("Route was not found.", 404, "not_found");
     } catch (error) {
       return fail(error, cors);
     }

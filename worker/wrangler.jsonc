@@ -39,6 +39,9 @@
     {
       "new_sqlite_classes": ["Sandbox", "AgentDirectory", "YoloAgent"],
       "tag": "v1"
+    },
+    {
+      "tag": "v2"
     }
   ]
 }

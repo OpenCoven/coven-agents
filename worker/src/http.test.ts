@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   corsHeaders,
+  errorEnvelope,
   HttpError,
   hasValidBearerToken,
   readJson,
+  serializeSse,
 } from "./http.js";
 
 test("only reflects the configured CORS origin", () => {
@@ -85,4 +87,49 @@ test("denies every request when the runner token is unconfigured", () => {
   for (const unset of ["", undefined]) {
     assert.equal(hasValidBearerToken(request, unset ?? ""), false);
   }
+});
+
+test("serializes only events after an SSE cursor", () => {
+  const stream = serializeSse(
+    [
+      {
+        at: "2026-08-20T20:00:00.000Z",
+        id: 1,
+        operationId: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
+        runId: "3a3f2c72-9b1b-47f7-8c83-28d5f94bf4ce",
+        type: "accepted",
+      },
+      {
+        at: "2026-08-20T20:00:01.000Z",
+        id: 2,
+        status: "running",
+        type: "status",
+      },
+    ],
+    1
+  );
+
+  assert.equal(stream.includes("id: 1\n"), false);
+  assert.match(stream, /id: 2\nevent: status\n/);
+});
+
+test("wraps runner errors in the versioned error envelope", () => {
+  assert.deepEqual(
+    errorEnvelope(
+      "not_found",
+      "Run was not found.",
+      false,
+      undefined,
+      "test-request-id"
+    ),
+    {
+      apiVersion: "1.0",
+      error: {
+        code: "not_found",
+        message: "Run was not found.",
+        retryable: false,
+      },
+      requestId: "test-request-id",
+    }
+  );
 });
