@@ -13,32 +13,20 @@ const hashPath = resolve(
   "packages/agent-contracts/fixtures/agent-runner-v1.sha256"
 );
 const jsonName = "agent-runner-v1.json";
-
-const capabilities = [
-  "agent-profiles",
-  "async-runs",
-  "idempotent-runs",
-  "run-events",
-  "run-cancel",
-  "command-evidence",
-  "file-evidence",
-];
+const { contractDescriptor } = await import(
+  "../packages/agent-contracts/contract-descriptor.mjs"
+);
+const [apiVersion] = contractDescriptor.apiVersions;
+const { capabilities, eventTypes, limits, routes, statuses } =
+  contractDescriptor;
 
 const fixture = {
-  apiVersion: "1.0",
+  apiVersion,
   capabilities,
-  eventTypes: [
-    "accepted",
-    "status",
-    "output",
-    "command",
-    "file",
-    "completed",
-    "failed",
-  ],
+  eventTypes,
   examples: {
     error: {
-      apiVersion: "1.0",
+      apiVersion,
       error: {
         code: "run_not_found",
         details: "The requested run does not exist.",
@@ -48,16 +36,16 @@ const fixture = {
       requestId: "request-123",
     },
     health: {
-      apiVersion: "1.0",
+      apiVersion,
       capabilities,
       minimumClientVersion: "1.0.0",
       mode: "local",
     },
     success: {
-      apiVersion: "1.0",
+      apiVersion,
       run: {
         agentId: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
-        apiVersion: "1.0",
+        apiVersion,
         commandEvidence: [],
         completedAt: null,
         createdAt: "2026-08-20T19:00:00.000Z",
@@ -66,26 +54,12 @@ const fixture = {
         operationId: "0f6f31ae-7b6c-49c9-bc82-0f2cbf56cc4d",
         output: "",
         startedAt: null,
-        status: "queued",
+        status: statuses[0],
         task: "Run the tests.",
       },
     },
   },
-  limits: {
-    maxCommandLength: 8000,
-    maxDescriptionLength: 240,
-    maxDetailsLength: 2000,
-    maxEventOutputLength: 100_000,
-    maxInstructionsLength: 12_000,
-    maxMessageLength: 500,
-    maxModelLength: 120,
-    maxOwnerIdLength: 128,
-    maxPathLength: 1024,
-    maxRequestIdLength: 128,
-    maxSourceRevisionLength: 256,
-    maxTaskLength: 40_000,
-    maxWorkspaceLength: 1024,
-  },
+  limits,
   owners: [
     { kind: "standalone" },
     {
@@ -95,19 +69,8 @@ const fixture = {
       sourceRevision: "rev-2026-08-20",
     },
   ],
-  routes: [
-    { method: "GET", path: "/api/health" },
-    { method: "GET", path: "/api/agents" },
-    { method: "POST", path: "/api/agents" },
-    { method: "PUT", path: "/api/agents/:id" },
-    { method: "GET", path: "/api/agents/:id" },
-    { method: "DELETE", path: "/api/agents/:id" },
-    { method: "POST", path: "/api/agents/:id/runs" },
-    { method: "GET", path: "/api/runs/:id" },
-    { method: "GET", path: "/api/runs/:id/events" },
-    { method: "POST", path: "/api/runs/:id/stop" },
-  ],
-  statuses: ["queued", "running", "completed", "failed", "cancelled"],
+  routes,
+  statuses,
 };
 
 const prettyJson = JSON.stringify(fixture, null, 2);

@@ -9,6 +9,7 @@ import {
   agentOwnerSchema,
   agentRunnerHealthSchema,
   commandEvidenceSchema,
+  compareAgentTimestamps,
   createAgentInputSchema,
   fileEvidenceSchema,
   runErrorEnvelopeSchema,
@@ -26,7 +27,12 @@ const contractFixture = JSON.parse(
     "utf8"
   )
 ) as {
+  apiVersion: string;
+  capabilities: string[];
+  eventTypes: string[];
+  limits: Record<string, number>;
   routes: Array<{ method: string; path: string }>;
+  statuses: string[];
 };
 
 test("accepts an isolated cloud agent", () => {
@@ -100,6 +106,23 @@ test("publishes the full Agent Runner v1 route inventory", () => {
   ]);
 });
 
+test("keeps the exported contract values aligned with the fixture", async () => {
+  const contract = (await import("./index.js")) as Record<string, unknown>;
+
+  assert.equal(contractFixture.apiVersion, contract.AGENT_RUNNER_API_VERSION);
+  assert.deepEqual(
+    contractFixture.capabilities,
+    contract.AGENT_RUNNER_CAPABILITIES
+  );
+  assert.deepEqual(
+    contractFixture.eventTypes,
+    contract.AGENT_RUNNER_EVENT_TYPES
+  );
+  assert.deepEqual(contractFixture.limits, contract.AGENT_RUNNER_LIMITS);
+  assert.deepEqual(contractFixture.routes, contract.AGENT_RUNNER_ROUTES);
+  assert.deepEqual(contractFixture.statuses, contract.AGENT_RUNNER_STATUSES);
+});
+
 test("defaults new and legacy agent definitions to standalone ownership", () => {
   const result = createAgentInputSchema.parse({
     backend: "local",
@@ -127,6 +150,26 @@ test("defaults new and legacy agent definitions to standalone ownership", () => 
     }).owner,
     { kind: "standalone" }
   );
+});
+
+test("rejects unknown fields on agent definitions", () => {
+  const result = agentDefinitionSchema.safeParse({
+    backend: "local",
+    createdAt: "2026-08-20T19:00:00.000Z",
+    description: "Run locally.",
+    id: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
+    instructions: "Run locally.",
+    lastRunAt: null,
+    model: "auto",
+    name: "Strict",
+    owner: { kind: "standalone" },
+    runtime: "copilot",
+    status: "idle",
+    unexpected: true,
+    updatedAt: "2026-08-20T19:00:00.000Z",
+  });
+
+  assert.equal(result.success, false);
 });
 
 test("requires a source revision for cave-managed profiles", () => {
@@ -206,6 +249,27 @@ test("accepts strict command and file evidence", () => {
       path: "src/index.ts",
     }).success,
     false
+  );
+});
+
+test("orders equivalent timestamp formats by epoch value", () => {
+  assert.equal(
+    compareAgentTimestamps(
+      "2026-08-20T19:00:00.000Z",
+      "2026-08-20T19:00:00.00Z"
+    ),
+    0
+  );
+  assert.equal(
+    commandEvidenceSchema.safeParse({
+      command: "pnpm test",
+      completedAt: "2026-08-20T19:00:00.000Z",
+      exitCode: 0,
+      startedAt: "2026-08-20T19:00:00.00Z",
+      stderr: "",
+      stdout: "ok",
+    }).success,
+    true
   );
 });
 

@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import {
   type AgentDefinition,
   agentDefinitionSchema,
+  compareAgentTimestamps,
 } from "@opencoven/agent-contracts";
 import { z } from "zod";
 
@@ -20,7 +21,7 @@ export class AgentStore {
 
   async list(): Promise<AgentDefinition[]> {
     return (await this.read()).agents.sort((left, right) =>
-      right.updatedAt.localeCompare(left.updatedAt)
+      compareAgentTimestamps(right.updatedAt, left.updatedAt)
     );
   }
 

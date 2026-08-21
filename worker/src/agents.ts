@@ -9,6 +9,7 @@ import {
 import {
   type AgentDefinition,
   agentDefinitionSchema,
+  compareAgentTimestamps,
   type RunResult,
   runAgentInputSchema,
 } from "@opencoven/agent-contracts";
@@ -28,7 +29,7 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
 
   list(): AgentDefinition[] {
     return [...this.state.agents].sort((left, right) =>
-      right.updatedAt.localeCompare(left.updatedAt)
+      compareAgentTimestamps(right.updatedAt, left.updatedAt)
     );
   }
 

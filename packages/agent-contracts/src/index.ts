@@ -1,32 +1,20 @@
 import { z } from "zod";
+import { contractDescriptor } from "../contract-descriptor.mjs";
 
-export const AGENT_RUNNER_API_VERSION = "1.0" as const;
+if (contractDescriptor.apiVersions.length !== 1) {
+  throw new Error("Agent Runner must publish exactly one API version.");
+}
+const [apiVersion] = contractDescriptor.apiVersions;
+export const AGENT_RUNNER_API_VERSION = apiVersion;
 
-export const AGENT_RUNNER_CAPABILITIES = [
-  "agent-profiles",
-  "async-runs",
-  "idempotent-runs",
-  "run-events",
-  "run-cancel",
-  "command-evidence",
-  "file-evidence",
-] as const;
+export const AGENT_RUNNER_CAPABILITIES = contractDescriptor.capabilities;
+export const AGENT_RUNNER_EVENT_TYPES = contractDescriptor.eventTypes;
+export const AGENT_RUNNER_LIMITS = contractDescriptor.limits;
+export const AGENT_RUNNER_ROUTES = contractDescriptor.routes;
+export const AGENT_RUNNER_STATUSES = contractDescriptor.statuses;
 
-export const AGENT_RUNNER_LIMITS = {
-  maxCommandLength: 8000,
-  maxDescriptionLength: 240,
-  maxDetailsLength: 2000,
-  maxEventOutputLength: 100_000,
-  maxInstructionsLength: 12_000,
-  maxMessageLength: 500,
-  maxModelLength: 120,
-  maxOwnerIdLength: 128,
-  maxPathLength: 1024,
-  maxRequestIdLength: 128,
-  maxSourceRevisionLength: 256,
-  maxTaskLength: 40_000,
-  maxWorkspaceLength: 1024,
-} as const;
+export const compareAgentTimestamps = (left: string, right: string) =>
+  Date.parse(left) - Date.parse(right);
 
 const apiVersionSchema = z.literal(AGENT_RUNNER_API_VERSION);
 const boundedString = (max: number) => z.string().trim().min(1).max(max);
@@ -61,57 +49,65 @@ export const agentOwnerSchema = z.discriminatedUnion("kind", [
 ]);
 export const ownerSchema = agentOwnerSchema;
 
-export const createAgentInputSchema = z
-  .object({
-    backend: backendSchema,
-    description: z
-      .string()
-      .trim()
-      .max(AGENT_RUNNER_LIMITS.maxDescriptionLength)
-      .default(""),
-    instructions: z
-      .string()
-      .trim()
-      .min(1)
-      .max(AGENT_RUNNER_LIMITS.maxInstructionsLength),
-    model: z.string().trim().min(1).max(AGENT_RUNNER_LIMITS.maxModelLength),
-    name: z.string().trim().min(1).max(64),
-    owner: agentOwnerSchema.default({ kind: "standalone" }),
-    runtime: runtimeSchema,
-    workspace: z
-      .string()
-      .trim()
-      .max(AGENT_RUNNER_LIMITS.maxWorkspaceLength)
-      .optional(),
-  })
-  .superRefine((value, context) => {
-    if (value.backend === "cloud" && value.runtime !== "cloud") {
-      context.addIssue({
-        code: "custom",
-        message: "Cloud agents must use the cloud runtime.",
-        path: ["runtime"],
-      });
-    }
-    if (value.backend === "local" && value.runtime === "cloud") {
-      context.addIssue({
-        code: "custom",
-        message: "Local agents must select a local CLI runtime.",
-        path: ["runtime"],
-      });
-    }
-  });
+const agentDefinitionInputShape = {
+  backend: backendSchema,
+  description: z
+    .string()
+    .trim()
+    .max(AGENT_RUNNER_LIMITS.maxDescriptionLength)
+    .default(""),
+  instructions: z
+    .string()
+    .trim()
+    .min(1)
+    .max(AGENT_RUNNER_LIMITS.maxInstructionsLength),
+  model: z.string().trim().min(1).max(AGENT_RUNNER_LIMITS.maxModelLength),
+  name: z.string().trim().min(1).max(64),
+  owner: agentOwnerSchema.default({ kind: "standalone" }),
+  runtime: runtimeSchema,
+  workspace: z
+    .string()
+    .trim()
+    .max(AGENT_RUNNER_LIMITS.maxWorkspaceLength)
+    .optional(),
+};
 
-export const agentDefinitionSchema = createAgentInputSchema.and(
-  z
-    .object({
-      createdAt: datetimeSchema,
-      id: agentIdSchema,
-      lastRunAt: datetimeSchema.nullable(),
-      status: agentStatusSchema,
-      updatedAt: datetimeSchema,
-    })
-    .strict()
-);
+const validateAgentBackendRuntime = (
+  value: { backend: Backend; runtime: Runtime },
+  context: z.RefinementCtx
+) => {
+  if (value.backend === "cloud" && value.runtime !== "cloud") {
+    context.addIssue({
+      code: "custom",
+      message: "Cloud agents must use the cloud runtime.",
+      path: ["runtime"],
+    });
+  }
+  if (value.backend === "local" && value.runtime === "cloud") {
+    context.addIssue({
+      code: "custom",
+      message: "Local agents must select a local CLI runtime.",
+      path: ["runtime"],
+    });
+  }
+};
+
+export const createAgentInputSchema = z
+  .object(agentDefinitionInputShape)
+  .strict()
+  .superRefine(validateAgentBackendRuntime);
+
+export const agentDefinitionSchema = z
+  .object({
+    ...agentDefinitionInputShape,
+    createdAt: datetimeSchema,
+    id: agentIdSchema,
+    lastRunAt: datetimeSchema.nullable(),
+    status: agentStatusSchema,
+    updatedAt: datetimeSchema,
+  })
+  .strict()
+  .superRefine(validateAgentBackendRuntime);
 
 export const runAgentInputSchema = z.object({
   task: z.string().trim().min(1).max(AGENT_RUNNER_LIMITS.maxTaskLength),
@@ -125,13 +121,7 @@ export const startRunInputSchema = z
   .strict();
 export const runStartInputSchema = startRunInputSchema;
 
-export const runStatusSchema = z.enum([
-  "queued",
-  "running",
-  "completed",
-  "failed",
-  "cancelled",
-]);
+export const runStatusSchema = z.enum(AGENT_RUNNER_STATUSES);
 export type RunStatus = z.infer<typeof runStatusSchema>;
 
 export const commandEvidenceSchema = z
@@ -148,7 +138,7 @@ export const commandEvidenceSchema = z
     if (
       value.startedAt &&
       value.completedAt &&
-      value.completedAt < value.startedAt
+      compareAgentTimestamps(value.completedAt, value.startedAt) < 0
     ) {
       context.addIssue({
         code: "custom",
@@ -195,15 +185,7 @@ export const runSnapshotSchema = z
   .strict();
 
 export const runEventIdSchema = z.number().int().nonnegative();
-export const runEventTypeSchema = z.enum([
-  "accepted",
-  "status",
-  "output",
-  "command",
-  "file",
-  "completed",
-  "failed",
-]);
+export const runEventTypeSchema = z.enum(AGENT_RUNNER_EVENT_TYPES);
 
 const runEventBaseSchema = {
   at: datetimeSchema.optional(),
@@ -383,7 +365,7 @@ export const apiErrorSchema = z.object({
 export type Backend = z.infer<typeof backendSchema>;
 export type Runtime = z.infer<typeof runtimeSchema>;
 export type CreateAgentInput = z.input<typeof createAgentInputSchema>;
-export type AgentDefinition = z.input<typeof agentDefinitionSchema>;
+export type AgentDefinition = z.output<typeof agentDefinitionSchema>;
 export type AgentOwner = z.infer<typeof agentOwnerSchema>;
 export type RunAgentInput = z.infer<typeof runAgentInputSchema>;
 export type StartRunInput = z.infer<typeof startRunInputSchema>;
