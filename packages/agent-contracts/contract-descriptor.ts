@@ -1,0 +1,59 @@
+const { freeze } = Object;
+
+export const contractDescriptor = freeze({
+  apiVersions: freeze(["1.0"] as const),
+  capabilities: freeze([
+    "agent-profiles",
+    "async-runs",
+    "idempotent-runs",
+    "run-events",
+    "run-cancel",
+    "command-evidence",
+    "file-evidence",
+  ] as const),
+  eventTypes: freeze([
+    "accepted",
+    "status",
+    "output",
+    "command",
+    "file",
+    "completed",
+    "failed",
+  ] as const),
+  limits: freeze({
+    maxCommandLength: 8000,
+    maxDescriptionLength: 240,
+    maxDetailsLength: 2000,
+    maxEventOutputLength: 100_000,
+    maxInstructionsLength: 12_000,
+    maxMessageLength: 500,
+    maxModelLength: 120,
+    maxOwnerIdLength: 128,
+    maxPathLength: 1024,
+    maxRequestIdLength: 128,
+    maxSourceRevisionLength: 256,
+    maxTaskLength: 40_000,
+    maxWorkspaceLength: 1024,
+  }),
+  routes: freeze([
+    freeze({ method: "GET", path: "/api/health" }),
+    freeze({ method: "GET", path: "/api/agents" }),
+    freeze({ method: "POST", path: "/api/agents" }),
+    freeze({ method: "PUT", path: "/api/agents/:id" }),
+    freeze({ method: "GET", path: "/api/agents/:id" }),
+    freeze({ method: "DELETE", path: "/api/agents/:id" }),
+    freeze({ method: "POST", path: "/api/agents/:id/runs" }),
+    freeze({ method: "GET", path: "/api/runs/:id" }),
+    freeze({ method: "GET", path: "/api/runs/:id/events" }),
+    freeze({ method: "POST", path: "/api/runs/:id/stop" }),
+  ] as const),
+  statuses: freeze([
+    "queued",
+    "running",
+    "completed",
+    "failed",
+    "cancelled",
+  ] as const),
+});
+
+export type ContractDescriptor = typeof contractDescriptor;

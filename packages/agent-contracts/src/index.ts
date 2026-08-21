@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { contractDescriptor } from "../contract-descriptor.mjs";
+import { contractDescriptor } from "../contract-descriptor.js";
+
+export { contractDescriptor } from "../contract-descriptor.js";
 
 if (contractDescriptor.apiVersions.length !== 1) {
   throw new Error("Agent Runner must publish exactly one API version.");
@@ -16,7 +18,7 @@ export const AGENT_RUNNER_STATUSES = contractDescriptor.statuses;
 export const compareAgentTimestamps = (left: string, right: string) =>
   Date.parse(left) - Date.parse(right);
 
-const apiVersionSchema = z.literal(AGENT_RUNNER_API_VERSION);
+export const agentRunnerApiVersionSchema = z.literal(AGENT_RUNNER_API_VERSION);
 const boundedString = (max: number) => z.string().trim().min(1).max(max);
 const datetimeSchema = z.string().datetime();
 
@@ -26,6 +28,48 @@ export const agentStatusSchema = z.enum(["idle", "running", "error"]);
 export const agentIdSchema = z.string().uuid();
 
 export const agentRunnerCapabilitySchema = z.enum(AGENT_RUNNER_CAPABILITIES);
+export const agentRunnerCapabilitiesSchema = z
+  .array(agentRunnerCapabilitySchema)
+  .length(AGENT_RUNNER_CAPABILITIES.length)
+  .superRefine((capabilities, context) => {
+    const expected = new Set(AGENT_RUNNER_CAPABILITIES);
+    const actual = new Set(capabilities);
+    if (
+      actual.size !== expected.size ||
+      [...expected].some((capability) => !actual.has(capability))
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Capabilities must match Agent Runner v1.",
+      });
+    }
+  });
+export const agentRunnerLimitsSchema = z
+  .object({
+    maxCommandLength: z.number().int().positive(),
+    maxDescriptionLength: z.number().int().positive(),
+    maxDetailsLength: z.number().int().positive(),
+    maxEventOutputLength: z.number().int().positive(),
+    maxInstructionsLength: z.number().int().positive(),
+    maxMessageLength: z.number().int().positive(),
+    maxModelLength: z.number().int().positive(),
+    maxOwnerIdLength: z.number().int().positive(),
+    maxPathLength: z.number().int().positive(),
+    maxRequestIdLength: z.number().int().positive(),
+    maxSourceRevisionLength: z.number().int().positive(),
+    maxTaskLength: z.number().int().positive(),
+    maxWorkspaceLength: z.number().int().positive(),
+  })
+  .strict();
+export const agentRunnerRouteSchema = z
+  .object({
+    method: z.enum(["DELETE", "GET", "POST", "PUT"]),
+    path: z.string().trim().min(1),
+  })
+  .strict();
+export const agentRunnerRoutesSchema = z
+  .array(agentRunnerRouteSchema)
+  .length(10);
 export type AgentRunnerCapability = z.infer<typeof agentRunnerCapabilitySchema>;
 
 const standaloneAgentOwnerSchema = z
@@ -122,6 +166,7 @@ export const startRunInputSchema = z
 export const runStartInputSchema = startRunInputSchema;
 
 export const runStatusSchema = z.enum(AGENT_RUNNER_STATUSES);
+export const agentRunnerStatusesSchema = z.array(runStatusSchema);
 export type RunStatus = z.infer<typeof runStatusSchema>;
 
 export const commandEvidenceSchema = z
@@ -169,7 +214,7 @@ export const runErrorSchema = z
 export const runSnapshotSchema = z
   .object({
     agentId: agentIdSchema,
-    apiVersion: apiVersionSchema,
+    apiVersion: agentRunnerApiVersionSchema,
     commandEvidence: z.array(commandEvidenceSchema),
     completedAt: datetimeSchema.nullable().default(null),
     createdAt: datetimeSchema,
@@ -186,6 +231,9 @@ export const runSnapshotSchema = z
 
 export const runEventIdSchema = z.number().int().nonnegative();
 export const runEventTypeSchema = z.enum(AGENT_RUNNER_EVENT_TYPES);
+export const agentRunnerEventTypesSchema = z
+  .array(runEventTypeSchema)
+  .length(AGENT_RUNNER_EVENT_TYPES.length);
 
 const runEventBaseSchema = {
   at: datetimeSchema.optional(),
@@ -261,7 +309,7 @@ export const runEventsSchema = z
 
 export const runSnapshotEnvelopeSchema = z
   .object({
-    apiVersion: apiVersionSchema,
+    apiVersion: agentRunnerApiVersionSchema,
     run: runSnapshotSchema,
   })
   .strict();
@@ -273,14 +321,14 @@ export const runGetEnvelopeSchema = getRunEnvelopeSchema;
 export const runStopEnvelopeSchema = stopRunEnvelopeSchema;
 export const runEventsEnvelopeSchema = z
   .object({
-    apiVersion: apiVersionSchema,
+    apiVersion: agentRunnerApiVersionSchema,
     events: runEventsSchema,
   })
   .strict();
 
 export const runErrorEnvelopeSchema = z
   .object({
-    apiVersion: apiVersionSchema,
+    apiVersion: agentRunnerApiVersionSchema,
     error: runErrorSchema,
     requestId: boundedString(AGENT_RUNNER_LIMITS.maxRequestIdLength),
   })
@@ -315,23 +363,8 @@ export const runResultSchema = z.object({
 
 export const agentRunnerHealthSchema = z
   .object({
-    apiVersion: apiVersionSchema,
-    capabilities: z
-      .array(agentRunnerCapabilitySchema)
-      .length(AGENT_RUNNER_CAPABILITIES.length)
-      .superRefine((capabilities, context) => {
-        const expected = new Set(AGENT_RUNNER_CAPABILITIES);
-        const actual = new Set(capabilities);
-        if (
-          actual.size !== expected.size ||
-          [...expected].some((capability) => !actual.has(capability))
-        ) {
-          context.addIssue({
-            code: "custom",
-            message: "Health capabilities must match Agent Runner v1.",
-          });
-        }
-      }),
+    apiVersion: agentRunnerApiVersionSchema,
+    capabilities: agentRunnerCapabilitiesSchema,
     minimumClientVersion: boundedString(32),
     mode: z.enum(["local", "cloud"]),
   })
@@ -376,7 +409,10 @@ export type RunSnapshot = z.infer<typeof runSnapshotSchema>;
 export type RunResult = z.infer<typeof runResultSchema>;
 export type AgentRunnerHealth = z.infer<typeof agentRunnerHealthSchema>;
 export type AgentRunnerMode = AgentRunnerHealth["mode"];
+export type AgentRunnerLimits = z.infer<typeof agentRunnerLimitsSchema>;
+export type AgentRunnerRoute = z.infer<typeof agentRunnerRouteSchema>;
 export type RunError = z.infer<typeof runErrorSchema>;
 export type RunErrorEnvelope = z.infer<typeof runErrorEnvelopeSchema>;
 export type RunEventType = z.infer<typeof runEventTypeSchema>;
 export type RunEventsEnvelope = z.infer<typeof runEventsEnvelopeSchema>;
+export type RunSnapshotEnvelope = z.infer<typeof runSnapshotEnvelopeSchema>;
