@@ -14,7 +14,10 @@
   "containers": [
     {
       "class_name": "Sandbox",
-      "image": "docker.io/cloudflare/sandbox:0.7.0",
+      // Built from worker/Dockerfile so the harness CLI exists in the sandbox.
+      // The stock image has no coding CLI, and Coven Agents runs the harness
+      // rather than calling a model provider from the Worker.
+      "image": "./Dockerfile",
       "instance_type": "lite",
       "max_instances": 10
     }

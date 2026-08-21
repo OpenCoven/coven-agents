@@ -3,6 +3,7 @@ import {
   agentIdSchema,
   createAgentInputSchema,
 } from "@opencoven/agent-contracts";
+import { isRunnableHarness, SUPPORTED_HARNESS_IDS } from "@opencoven/harness";
 import { getAgentByName } from "agents";
 import type { AgentDirectory, YoloAgent } from "./agents";
 import {
@@ -12,6 +13,7 @@ import {
   json,
   readJson,
 } from "./http";
+import { UNOWNED_TENANT } from "./tenant";
 
 export { Sandbox } from "@cloudflare/sandbox";
 export { AgentDirectory, YoloAgent } from "./agents";
@@ -64,6 +66,15 @@ export default {
       );
     }
 
+    /**
+     * The single shared runner token proves authorization, not identity, so
+     * every caller today resolves to one tenant. The tenant is threaded through
+     * ownership, listing, and sandbox keys regardless, so introducing real
+     * per-user identity becomes a change to this one expression rather than a
+     * search for every place isolation was assumed.
+     */
+    const callerTenant = UNOWNED_TENANT;
+
     if (
       url.pathname === "/api/diagnostics/sandbox" &&
       request.method === "POST"
@@ -93,10 +104,18 @@ export default {
       "default"
     );
 
+    if (url.pathname === "/api/harnesses" && request.method === "GET") {
+      try {
+        return json({ harnesses: await directory.harnesses() }, {}, cors);
+      } catch (error) {
+        return fail(error, cors);
+      }
+    }
+
     try {
       if (url.pathname === "/api/agents") {
         if (request.method === "GET") {
-          return json({ agents: await directory.list() }, {}, cors);
+          return json({ agents: await directory.list(callerTenant) }, {}, cors);
         }
         if (request.method === "POST") {
           const input = createAgentInputSchema.parse(await readJson(request));
@@ -107,12 +126,20 @@ export default {
               "backend_mismatch"
             );
           }
+          if (!isRunnableHarness(input.runtime)) {
+            throw new HttpError(
+              `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+              400,
+              "harness_unsupported"
+            );
+          }
           const now = new Date().toISOString();
           const definition = {
             ...input,
             createdAt: now,
             id: crypto.randomUUID(),
             lastRunAt: null,
+            owner: callerTenant,
             status: "idle" as const,
             updatedAt: now,
           };
@@ -132,12 +159,19 @@ export default {
         const id = agentIdSchema.parse(decodeURIComponent(rawId ?? ""));
         const agent = await getAgentByName<Env, YoloAgent>(env.YoloAgent, id);
 
+        /**
+         * Knowing an agent id must not be enough to reach it. Every per-agent
+         * route resolves the definition first and refuses one owned by another
+         * tenant, reported as 404 so the endpoint does not confirm that an id
+         * exists for someone else.
+         */
+        const owned = await agent.snapshot();
+        if (!owned || (owned.owner ?? UNOWNED_TENANT) !== callerTenant) {
+          throw new HttpError("Agent was not found.", 404, "not_found");
+        }
+
         if (!action && request.method === "GET") {
-          const definition = await agent.snapshot();
-          if (!definition) {
-            throw new HttpError("Agent was not found.", 404, "not_found");
-          }
-          return json({ agent: definition }, {}, cors);
+          return json({ agent: owned }, {}, cors);
         }
         if (!action && request.method === "DELETE") {
           await agent.decommission();

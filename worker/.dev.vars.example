@@ -1,2 +1,4 @@
 AGENT_CONTROL_TOKEN=replace-with-a-long-random-token
-OPENAI_API_KEY=replace-with-an-openai-key
+# Harness credential, not a model provider key. A fine-grained PAT with the
+# "Copilot Requests" permission, or an OAuth token from the Copilot CLI or gh app.
+COPILOT_GITHUB_TOKEN=replace-with-a-github-token-that-has-copilot-access

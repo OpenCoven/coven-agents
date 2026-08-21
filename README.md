@@ -76,8 +76,16 @@ Create `worker/.dev.vars`:
 
 ```dotenv
 AGENT_CONTROL_TOKEN=replace-with-a-long-random-token
-OPENAI_API_KEY=replace-with-an-openai-key
+COPILOT_GITHUB_TOKEN=replace-with-a-github-token-that-has-copilot-access
 ```
+
+`COPILOT_GITHUB_TOKEN` is a *harness* credential, not a model provider key.
+Coven Agents never holds an `OPENAI_API_KEY` or any other provider key: it
+drives a signed-in coding CLI inside the sandbox, and that CLI authenticates
+itself. Accepted values are a fine-grained PAT with the "Copilot Requests"
+permission, or an OAuth token from the Copilot CLI or `gh` app. Classic `ghp_`
+tokens are not supported. `GH_TOKEN` and `GITHUB_TOKEN` are also honoured, in
+that order of precedence.
 
 Then:
 
@@ -92,7 +100,7 @@ For deployment, set the secrets without committing them:
 ```bash
 cd worker
 pnpm wrangler secret put AGENT_CONTROL_TOKEN
-pnpm wrangler secret put OPENAI_API_KEY
+pnpm wrangler secret put COPILOT_GITHUB_TOKEN
 pnpm deploy
 ```
 
@@ -120,9 +128,31 @@ curl -s -X POST \
 # {"exitCode":0,"ok":true,"output":"coven-agents"}
 ```
 
-Agent create, list, and delete work without an OpenAI key. Running an agent
-requires `OPENAI_API_KEY`; without it a run completes with status `failed` and
-a missing-credentials message rather than erroring the request.
+## Harness execution
+
+Both backends run the same way: Coven Agents spawns an already-authenticated
+coding CLI — the *harness* — and translates its event stream into one normalized
+vocabulary. The control plane is never a model client, so it needs no provider
+credential.
+
+- `packages/harness` is the single definition of the CLI subset, the JSONL event
+  normalizer, and the run summarizer. The local runner and the sandbox both call
+  it, so the two backends cannot drift.
+- The cloud backend runs the harness inside the per-agent Cloudflare sandbox
+  container. `worker/Dockerfile` installs `@github/copilot`, and
+  `worker/wrangler.jsonc` builds the container from that Dockerfile.
+- `GET /api/harnesses` probes the sandbox and reports which harnesses are
+  installed, their versions, and whether their event translation is implemented.
+- GitHub Copilot CLI is the supported subset today. Codex CLI and Claude Code
+  are detected and reported but refused for runs, because inventing a rendering
+  for an untranslated event stream would put invented detail on screen.
+- Provider keys are blanked in the sandbox command environment, so a run cannot
+  quietly consume one even if it leaks into the container.
+
+Agent create, list, and delete work without any credential. Running an agent
+requires the harness credential; without it a run completes with status `failed`
+and a message naming the harness variable to set, rather than erroring the
+request.
 
 ## Verify
 
@@ -130,6 +160,7 @@ a missing-credentials message rather than erroring the request.
 pnpm test:unit
 pnpm typecheck
 pnpm --filter @opencoven/agent-contracts typecheck
+pnpm --filter @opencoven/harness typecheck
 pnpm --filter @opencoven/local-runner typecheck
 pnpm --filter @opencoven/cloud-runner typecheck
 pnpm build
