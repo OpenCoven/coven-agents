@@ -97,9 +97,15 @@ const fixture = {
   ],
   routes: [
     { method: "GET", path: "/api/health" },
-    { method: "POST", path: "/api/agents/:agentId/runs" },
-    { method: "GET", path: "/api/agents/:agentId/runs/:runId" },
-    { method: "POST", path: "/api/agents/:agentId/runs/:runId/stop" },
+    { method: "GET", path: "/api/agents" },
+    { method: "POST", path: "/api/agents" },
+    { method: "PUT", path: "/api/agents/:id" },
+    { method: "GET", path: "/api/agents/:id" },
+    { method: "DELETE", path: "/api/agents/:id" },
+    { method: "POST", path: "/api/agents/:id/runs" },
+    { method: "GET", path: "/api/runs/:id" },
+    { method: "GET", path: "/api/runs/:id/events" },
+    { method: "POST", path: "/api/runs/:id/stop" },
   ],
   statuses: ["queued", "running", "completed", "failed", "cancelled"],
 };

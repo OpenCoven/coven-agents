@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   AGENT_RUNNER_API_VERSION,
   AGENT_RUNNER_CAPABILITIES,
@@ -17,6 +19,15 @@ import {
   runStatusSchema,
   startRunInputSchema,
 } from "./index.js";
+
+const contractFixture = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL("../fixtures/agent-runner-v1.json", import.meta.url)),
+    "utf8"
+  )
+) as {
+  routes: Array<{ method: string; path: string }>;
+};
 
 test("accepts an isolated cloud agent", () => {
   const result = createAgentInputSchema.safeParse({
@@ -72,6 +83,21 @@ test("publishes the version and exact runner capabilities", () => {
       "file-evidence",
     ]
   );
+});
+
+test("publishes the full Agent Runner v1 route inventory", () => {
+  assert.deepEqual(contractFixture.routes, [
+    { method: "GET", path: "/api/health" },
+    { method: "GET", path: "/api/agents" },
+    { method: "POST", path: "/api/agents" },
+    { method: "PUT", path: "/api/agents/:id" },
+    { method: "GET", path: "/api/agents/:id" },
+    { method: "DELETE", path: "/api/agents/:id" },
+    { method: "POST", path: "/api/agents/:id/runs" },
+    { method: "GET", path: "/api/runs/:id" },
+    { method: "GET", path: "/api/runs/:id/events" },
+    { method: "POST", path: "/api/runs/:id/stop" },
+  ]);
 });
 
 test("defaults new and legacy agent definitions to standalone ownership", () => {
