@@ -48,6 +48,10 @@ jobs:
       - name: Delete branches whose pull request was merged
         env:
           GH_TOKEN: ${{ github.token }}
+          # This job deliberately has no checkout — it needs no git. Without
+          # one there is no remote for `gh` to infer a repository from, so
+          # `gh pr list`, `gh label` and `gh issue` need it stated outright.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 

@@ -29,24 +29,39 @@ jobs:
         env:
           DEPS: ${{ steps.meta.outputs.updated-dependencies-json }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
-          if [ -z "${DEPS}" ] || [ "${DEPS}" = "null" ]; then
-            echo "No dependency metadata; treating as unsafe."
+          # Deliberately not `set -e`. Every failure below must fall through
+          # to safe=false so the labelling path still runs; aborting the step
+          # would leave the pull request unclassified and unlabelled, which is
+          # the opposite of failing closed.
+          unsafe() {
+            echo "$1 Treating as unsafe."
             echo "safe=false" >> "$GITHUB_OUTPUT"
             exit 0
-          fi
+          }
 
-          count=$(printf '%s' "$DEPS" | jq 'length')
-          if printf '%s' "$DEPS" \
-               | jq -e 'any(.[]; .updateType == "version-update:semver-major")' \
-               >/dev/null; then
-            echo "${count} dependencies, at least one major bump."
-            echo "safe=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "${count} dependencies, all minor or patch."
-            echo "safe=true" >> "$GITHUB_OUTPUT"
-          fi
+          [ -n "${DEPS}" ] && [ "${DEPS}" != "null" ] \
+            || unsafe "No dependency metadata."
+
+          count=$(printf '%s' "$DEPS" | jq 'length' 2>/dev/null) \
+            || unsafe "Dependency metadata is not valid JSON."
+
+          case "$count" in
+            ''|*[!0-9]*) unsafe "Could not count dependencies." ;;
+            0) unsafe "Metadata lists no dependencies." ;;
+          esac
+
+          printf '%s' "$DEPS" \
+            | jq -e 'any(.[]; .updateType == "version-update:semver-major")' \
+            >/dev/null
+          case $? in
+            0) echo "${count} dependencies, at least one major bump."
+               echo "safe=false" >> "$GITHUB_OUTPUT" ;;
+            1) echo "${count} dependencies, all minor or patch."
+               echo "safe=true" >> "$GITHUB_OUTPUT" ;;
+            *) unsafe "Could not inspect dependency update types." ;;
+          esac
 
       - name: Enable auto-merge when every bump is minor or patch
         if: steps.classify.outputs.safe == 'true'
