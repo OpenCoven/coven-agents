@@ -28,6 +28,7 @@ export const BEAD_STATUSES = [
   "deferred",
   "closed",
 ] as const;
+export const BEAD_ID_PATTERN = /^coven-agents-[a-z0-9.-]+$/;
 
 const dependencySchema = z
   .object({
@@ -51,7 +52,7 @@ const beadSourceSchema = z
     acceptance_criteria: z.string().trim().min(1),
     dependencies: z.array(dependencySchema).default([]),
     description: z.string().trim().min(1),
-    id: z.string().regex(/^coven-agents-[a-z0-9.-]+$/),
+    id: z.string().regex(BEAD_ID_PATTERN),
     issue_type: z.enum(BEAD_TYPES),
     metadata: metadataSchema,
     parent: z.string().trim().min(1).optional(),

@@ -80,6 +80,15 @@ function expectUnsafe(
   );
 }
 
+function expectInvalidBeadId(run: () => void, field: string): void {
+  assert.throws(run, (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, new RegExp(`^${field}: invalid bead id$`));
+    assert.ok(!error.message.includes("/api/agents"));
+    return true;
+  });
+}
+
 test("rejects sensitive content categories", () => {
   expectUnsafe("title", "sk-live-abc123", /provider token/i);
   expectUnsafe("description", "xoxb-1234567890", /provider token/i);
@@ -90,7 +99,7 @@ test("rejects sensitive content categories", () => {
   );
   expectUnsafe("acceptance", "AWS_KEY=supersecret", /env assignment/i);
   expectUnsafe("acceptance", "API_TOKEN = value", /env assignment/i);
-  expectUnsafe("description", "Authorization: Bearer secret", /bearer header/i);
+  expectUnsafe("description", "Authorization: ******", /authorization header/i);
   expectUnsafe(
     "acceptance",
     "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
@@ -98,14 +107,48 @@ test("rejects sensitive content categories", () => {
   );
 });
 
+test("rejects authentication headers and command output markers", () => {
+  expectUnsafe(
+    "description",
+    "Authorization: Bearer token",
+    /authorization header/i
+  );
+  expectUnsafe(
+    "description",
+    "Proxy-Authorization: Basic abc",
+    /authorization header/i
+  );
+  expectUnsafe("description", "X-API-Key: secret", /api key header/i);
+  expectUnsafe("description", "Cookie: session=abc", /cookie header/i);
+  expectUnsafe("description", "Set-Cookie: session=abc", /cookie header/i);
+  expectUnsafe("description", "$ npm run build", /shell prompt/i);
+  expectUnsafe("description", "stdout: build complete", /stdout marker/i);
+  expectUnsafe("description", "stderr: failed", /stderr marker/i);
+  expectUnsafe(
+    "description",
+    "2026-08-23 05:35:51 INFO build complete",
+    /timestamped log line/i
+  );
+  expectUnsafe("description", "[ERROR] build failed", /log level marker/i);
+  expectUnsafe("description", "Logged in to GitHub", /login output/i);
+});
+
 test("rejects absolute paths and overlong title", () => {
   expectUnsafe("description", "/Users/alice/private.txt", /absolute path/i);
   expectUnsafe("description", "/home/alice/private.txt", /absolute path/i);
+  expectUnsafe("description", "/private/secret.txt", /absolute path/i);
+  expectUnsafe("description", "/tmp/cache.bin", /absolute path/i);
+  expectUnsafe("description", "/var/log/app.log", /absolute path/i);
+  expectUnsafe("description", "/etc/passwd", /absolute path/i);
+  expectUnsafe("description", "/opt/tools/bin", /absolute path/i);
+  expectUnsafe("description", "/usr/local/bin/node", /absolute path/i);
+  expectUnsafe("description", "/Volumes/Data/archive.zip", /absolute path/i);
   expectUnsafe(
     "description",
     "D:\\Users\\alice\\private.txt",
     /absolute path/i
   );
+  expectUnsafe("description", "C:\\temp\\build.log", /absolute path/i);
   assert.throws(
     () => validateSafeText("title", "x".repeat(121)),
     (error: unknown) => {
@@ -113,6 +156,71 @@ test("rejects absolute paths and overlong title", () => {
       assert.match(error.message, /120/);
       return true;
     }
+  );
+});
+
+test("allows ordinary API route prose", () => {
+  assert.doesNotThrow(() =>
+    validateSafeText("description", "Use /api/agents to list agents.")
+  );
+
+  const item = projectBead(
+    makeBead({
+      acceptance_criteria: "Use /api/agents in the product copy.",
+      description: "Document the /api/agents route in prose.",
+      id: "coven-agents-route-prose",
+      title: "Keep API route prose allowed",
+    }),
+    beadMap()
+  );
+
+  assert.equal(item.fields["Bead ID"], "coven-agents-route-prose");
+});
+
+test("rejects malformed parent and dependency bead ids", () => {
+  expectInvalidBeadId(
+    () =>
+      projectBead(
+        makeBead({
+          parent: "/api/agents",
+        }),
+        beadMap()
+      ),
+    "parent"
+  );
+
+  expectInvalidBeadId(
+    () =>
+      projectBead(
+        makeBead({
+          dependencies: [
+            {
+              depends_on_id: "coven-agents-parent",
+              issue_id: "/api/agents",
+              type: "blocks",
+            },
+          ],
+        }),
+        beadMap()
+      ),
+    "dependency issue_id"
+  );
+
+  expectInvalidBeadId(
+    () =>
+      projectBead(
+        makeBead({
+          dependencies: [
+            {
+              depends_on_id: "/api/agents",
+              issue_id: "coven-agents-child",
+              type: "blocks",
+            },
+          ],
+        }),
+        beadMap()
+      ),
+    "dependency depends_on_id"
   );
 });
 
