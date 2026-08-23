@@ -183,14 +183,31 @@ fields, against Teamwork's 26:
   boards are ever merged
 - **Priority**
 
-Automation uses Projects' built-in workflows, not a custom Action: auto-add
-issues and pull requests from this repository, `pull request merged → Done`,
-`item closed → Done`, `review requested → In review`. These cost zero Actions
-minutes, which is why the server plane has no `project-sync.yml`.
+Automation uses Projects' built-in workflows, not a custom Action, which is why
+the server plane has no `project-sync.yml`. These cost zero Actions minutes:
 
-`Todo → In progress` stays manual. It marks the point where someone commits to
-the work; inferring it from branch creation would mark abandoned experiments as
-active.
+- **Auto-add to project**, filtered to `repo:OpenCoven/coven-agents
+  is:issue,pr is:open`
+- **Pull request merged** → `Done`
+- **Item closed** → `Done`
+
+This section originally also promised `review requested → In review`. **That
+workflow does not exist.** The board offers exactly six built-ins — auto-add
+sub-issues, auto-close issue, item added, item closed, pull request linked to
+issue, and pull request merged — and none of them fires on a review request.
+
+So two Status transitions are manual, not one:
+
+- `Todo → In progress`, manual by design. It marks the point where someone
+  commits to the work; inferring it from branch creation would mark abandoned
+  experiments as active.
+- `→ In review`, manual because nothing can automate it.
+
+**These workflows cannot be enabled programmatically.** The GraphQL schema
+exposes `ProjectV2Workflow` for reading and `deleteProjectV2Workflow` for
+removal, but there is no create or update mutation. Enabling them is a manual
+step in the Projects UI, under **⋯ → Workflows**, and it is the one part of
+this design that cannot be scripted.
 
 The existing boards were considered and rejected. Teamwork's 338 items are 279
 drafts plus 59 from `coven-cave`, and its schema (Bead ID, Bead status, Surface,

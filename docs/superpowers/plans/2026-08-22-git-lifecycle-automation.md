@@ -1722,23 +1722,49 @@ Run:
 ```bash
 gh project field-list <N> --owner OpenCoven
 ```
-Expected: `Status`, `Runner`, `Size`, and `Priority` all present. `Status` and `Priority` exist by default.
+Expected: `Status`, `Runner`, `Size`, and `Priority` all present.
 
-If `Status` lacks an `In review` option, add it in the web UI — `gh` cannot edit options on the built-in Status field.
+Two corrections found during execution. `Priority` does **not** exist by
+default and must be created like the others. And `Status` can be given its
+`In review` option through GraphQL after all — `gh project field-list` cannot
+edit it, but `updateProjectV2Field` can, passing the full option list:
+
+```bash
+gh api graphql -f query='
+mutation($fieldId: ID!) {
+  updateProjectV2Field(input: {
+    fieldId: $fieldId
+    singleSelectOptions: [
+      {name: "Todo", color: GRAY, description: ""}
+      {name: "In Progress", color: YELLOW, description: ""}
+      {name: "In review", color: PURPLE, description: ""}
+      {name: "Done", color: GREEN, description: ""}
+    ]
+  }) { projectV2Field { ... on ProjectV2SingleSelectField { options { name } } } }
+}' -F fieldId=<STATUS_FIELD_ID>
+```
 
 - [ ] **Step 5: Enable built-in workflows**
 
-These are configured in the web UI only; `gh` has no API for them. Open the
-project → **⋯ → Workflows** and enable:
+Open the project → **⋯ → Workflows** and enable:
 
 - **Auto-add to project** — filter `repo:OpenCoven/coven-agents is:issue,pr is:open`
 - **Item closed** → set Status to `Done`
 - **Pull request merged** → set Status to `Done`
-- **Code review requested** → set Status to `In review`
 
-Leave `Todo → In progress` unautomated. It marks the point where someone
-commits to the work; inferring it from branch creation would mark abandoned
-experiments as active.
+This step genuinely cannot be scripted. The GraphQL schema exposes
+`ProjectV2Workflow` for reading and `deleteProjectV2Workflow` for removal, but
+no create or update mutation exists. Verified against the live schema.
+
+**`Code review requested → In review` was in this plan and does not exist.**
+The board offers exactly six built-ins — auto-add sub-issues, auto-close issue,
+item added, item closed, pull request linked to issue, and pull request merged.
+None fires on a review request, so `In review` has to be set by hand.
+
+That leaves two manual transitions rather than one. `Todo → In progress` is
+manual by design: it marks the point where someone commits to the work, and
+inferring it from branch creation would mark abandoned experiments as active.
+`→ In review` is manual because nothing can automate it.
 
 - [ ] **Step 6: Verify auto-add works**
 
