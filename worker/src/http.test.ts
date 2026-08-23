@@ -46,6 +46,44 @@ test("rejects oversized JSON before buffering it", async () => {
   );
 });
 
+test("stops reading a chunked body as soon as it exceeds the byte cap", async () => {
+  let pulls = 0;
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    cancel() {
+      cancelled = true;
+    },
+    pull(controller) {
+      pulls += 1;
+      if (pulls === 1) {
+        controller.enqueue(new Uint8Array(64 * 1024));
+        return;
+      }
+      if (pulls === 2) {
+        controller.enqueue(new Uint8Array([0x20]));
+        return;
+      }
+      controller.error(new Error("read past the request body limit"));
+    },
+  });
+  const request = new Request("https://runner.example/api/agents", {
+    body,
+    // Node's Request implementation requires this for stream bodies.
+    duplex: "half",
+    method: "POST",
+  } as RequestInit);
+
+  await assert.rejects(
+    readJson(request),
+    (error: unknown) =>
+      error instanceof HttpError &&
+      error.status === 413 &&
+      error.code === "body_too_large"
+  );
+  assert.equal(pulls, 2);
+  assert.equal(cancelled, true);
+});
+
 test("accepts the exact runner token and rejects every near miss", () => {
   const token = "runner-token-value";
   const authed = (value: string | null) =>

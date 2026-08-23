@@ -16,8 +16,12 @@ import {
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
 
-export const MAX_EVENTS_PER_RUN = 200;
-export const MAX_EVIDENCE_PER_RUN = 20;
+export const MAX_COMMAND_RESULTS_PER_RUN =
+  AGENT_RUNNER_LIMITS.maxCommandResults;
+export const MAX_FILE_OPERATIONS_PER_RUN =
+  AGENT_RUNNER_LIMITS.maxFileOperations;
+export const MAX_EVENTS_PER_RUN =
+  MAX_COMMAND_RESULTS_PER_RUN + MAX_FILE_OPERATIONS_PER_RUN + 4;
 export const MAX_CAPTURED_OUTPUT_BYTES = 2 * 1024 * 1024;
 export const MAX_TERMINAL_RUNS_PER_AGENT = 20;
 
@@ -41,6 +45,10 @@ export type CloudRunStartPlan =
       record: CloudRunRecord;
     }
   | {
+      kind: "already_running";
+      record: CloudRunRecord;
+    }
+  | {
       kind: "conflict";
       record: CloudRunRecord;
     };
@@ -61,6 +69,13 @@ export class OperationConflictError extends Error {
   constructor() {
     super("Operation ID was already used for a different request.");
     this.name = "OperationConflictError";
+  }
+}
+
+export class AlreadyRunningError extends Error {
+  constructor() {
+    super("An agent already has an active run.");
+    this.name = "AlreadyRunningError";
   }
 }
 
@@ -302,7 +317,7 @@ export function normalizeCloudCommandEvidence(
   let remainingBytes = MAX_CAPTURED_OUTPUT_BYTES;
   let outputExceeded = false;
 
-  for (const result of results.slice(-MAX_EVIDENCE_PER_RUN)) {
+  for (const result of results.slice(-MAX_COMMAND_RESULTS_PER_RUN)) {
     const candidate = asRecord(result);
     if (!candidate || typeof candidate.command !== "string") {
       diagnostics.push(
@@ -383,7 +398,7 @@ export function normalizeCloudFileEvidence(
   const diagnostics: string[] = [];
   const evidence: FileEvidence[] = [];
 
-  for (const result of results.slice(-MAX_EVIDENCE_PER_RUN)) {
+  for (const result of results.slice(-MAX_FILE_OPERATIONS_PER_RUN)) {
     const candidate = asRecord(result);
     if (candidate?.status !== "completed") {
       continue;
@@ -506,6 +521,10 @@ export function planCloudRunStart(input: {
       record: existing,
     };
   }
+  const active = input.records.find((record) => !isTerminal(record.run.status));
+  if (active) {
+    return { kind: "already_running", record: active };
+  }
   const record = {
     ...createQueuedRun(
       input.agentId,
@@ -524,7 +543,7 @@ export function planCloudRunStart(input: {
 }
 
 export async function dispatchCloudRun(
-  plan: Exclude<CloudRunStartPlan, { kind: "conflict" }>,
+  plan: Exclude<CloudRunStartPlan, { kind: "already_running" | "conflict" }>,
   dispatch?: (
     record: CloudRunRecord,
     fiberKey: string

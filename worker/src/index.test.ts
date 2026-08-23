@@ -10,6 +10,7 @@ import {
 } from "@opencoven/agent-contracts";
 import { createCloudRunner } from "./routes.js";
 import {
+  AlreadyRunningError,
   createQueuedRun,
   isTerminal,
   OperationConflictError,
@@ -115,6 +116,15 @@ class FakeYoloAgent {
         throw new OperationConflictError();
       }
       return { created: false, run: existing.run };
+    }
+    if (
+      [...this.records.values()].some(
+        (candidate) =>
+          candidate.run.status === "queued" ||
+          candidate.run.status === "running"
+      )
+    ) {
+      throw new AlreadyRunningError();
     }
     const record: FakeRecord = {
       ...createQueuedRun(
@@ -224,6 +234,30 @@ test("cloud lifecycle routes asynchronously start, replay, stream, get, and canc
   const replayedPayload = (await replayed.json()) as { run: RunSnapshot };
   assert.equal(replayed.status, 202);
   assert.equal(replayedPayload.run.id, startedPayload.run.id);
+
+  const alreadyRunning = await invoke(
+    new Request(
+      `https://runner.example/api/agents/${agentDefinition.id}/runs`,
+      {
+        body: JSON.stringify({
+          operationId: "8380f207-fb4f-424d-8e17-d2671b222a49",
+          task: "Run another mission.",
+        }),
+        headers: {
+          authorization: `Bearer ${env.AGENT_CONTROL_TOKEN}`,
+          "content-type": "application/json",
+        },
+        method: "POST",
+      }
+    )
+  );
+  const alreadyRunningPayload = (await alreadyRunning.json()) as {
+    apiVersion: string;
+    error: { code: string };
+  };
+  assert.equal(alreadyRunning.status, 409);
+  assert.equal(alreadyRunningPayload.apiVersion, AGENT_RUNNER_API_VERSION);
+  assert.equal(alreadyRunningPayload.error.code, "already_running");
 
   const conflicted = await invoke(
     new Request(

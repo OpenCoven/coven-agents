@@ -14,7 +14,7 @@ import {
   json,
   readJson,
 } from "./http.js";
-import { OperationConflictError } from "./run-state.js";
+import { AlreadyRunningError, OperationConflictError } from "./run-state.js";
 import {
   createRunEventStream,
   type RunEventStreamOptions,
@@ -23,8 +23,10 @@ import {
 
 type Awaitable<T> = T | Promise<T>;
 
-export type CloudRunnerEnvironment = {
-  AGENT_CONTROL_TOKEN?: string;
+export type CloudRunnerEnvironment = Omit<
+  Pick<Env, "AGENT_CONTROL_TOKEN" | "ALLOWED_ORIGIN">,
+  "ALLOWED_ORIGIN"
+> & {
   ALLOWED_ORIGIN: string;
 };
 
@@ -83,6 +85,17 @@ function fail(error: unknown, cors: Headers): Response {
       errorEnvelope(
         "operation_conflict",
         "Operation ID was already used for a different request.",
+        false
+      ),
+      { status: 409 },
+      cors
+    );
+  }
+  if (error instanceof AlreadyRunningError) {
+    return json(
+      errorEnvelope(
+        "already_running",
+        "An agent already has an active run.",
         false
       ),
       { status: 409 },

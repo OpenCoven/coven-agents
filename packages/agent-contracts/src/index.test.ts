@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   AGENT_RUNNER_API_VERSION,
   AGENT_RUNNER_CAPABILITIES,
+  AGENT_RUNNER_LIMITS,
   agentDefinitionSchema,
   agentOwnerSchema,
   agentRunnerHealthSchema,
@@ -15,6 +16,7 @@ import {
   runErrorEnvelopeSchema,
   runEventSchema,
   runEventsSchema,
+  runResultSchema,
   runSnapshotEnvelopeSchema,
   runSnapshotSchema,
   runStatusSchema,
@@ -397,6 +399,65 @@ test("uses a stable bounded versioned error envelope", () => {
       },
       requestId: "request-123",
     }).success,
+    false
+  );
+});
+
+test("bounds command and file evidence arrays in snapshots and legacy results", () => {
+  const expectedLimit = 256;
+  assert.equal(AGENT_RUNNER_LIMITS.maxCommandResults, expectedLimit);
+  assert.equal(AGENT_RUNNER_LIMITS.maxFileOperations, expectedLimit);
+
+  const commandEvidence = {
+    command: "pnpm test",
+    exitCode: 0,
+    stderr: "",
+    stdout: "ok",
+  };
+  const fileEvidence = {
+    operation: "modify",
+    path: "src/index.ts",
+  };
+  const snapshot = (count: number) => ({
+    agentId: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
+    apiVersion: "1.0",
+    commandEvidence: Array.from({ length: count }, () => commandEvidence),
+    createdAt: "2026-08-20T19:00:00.000Z",
+    fileEvidence: Array.from({ length: count }, () => fileEvidence),
+    id: "3a3f2c72-9b1b-47f7-8c83-28d5f94bf4ce",
+    operationId: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
+    output: "",
+    startedAt: null,
+    status: "queued",
+    task: "Run the tests.",
+  });
+  const result = (count: number) => ({
+    agentId: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
+    commandResults: Array.from({ length: count }, () => ({
+      command: "pnpm test",
+      exitCode: 0,
+    })),
+    completedAt: "2026-08-20T19:00:01.000Z",
+    fileOperations: Array.from({ length: count }, () => ({
+      operation: "modify",
+      path: "src/index.ts",
+    })),
+    id: "3a3f2c72-9b1b-47f7-8c83-28d5f94bf4ce",
+    output: "ok",
+    startedAt: "2026-08-20T19:00:00.000Z",
+    status: "completed",
+  });
+
+  for (const count of [20, expectedLimit]) {
+    assert.equal(runSnapshotSchema.safeParse(snapshot(count)).success, true);
+    assert.equal(runResultSchema.safeParse(result(count)).success, true);
+  }
+  assert.equal(
+    runSnapshotSchema.safeParse(snapshot(expectedLimit + 1)).success,
+    false
+  );
+  assert.equal(
+    runResultSchema.safeParse(result(expectedLimit + 1)).success,
     false
   );
 });

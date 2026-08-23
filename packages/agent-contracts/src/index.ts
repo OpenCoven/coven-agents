@@ -51,9 +51,11 @@ export const agentRunnerCapabilitiesSchema = z
 export const agentRunnerLimitsSchema = z
   .object({
     maxCommandLength: z.number().int().positive(),
+    maxCommandResults: z.number().int().positive(),
     maxDescriptionLength: z.number().int().positive(),
     maxDetailsLength: z.number().int().positive(),
     maxEventOutputLength: z.number().int().positive(),
+    maxFileOperations: z.number().int().positive(),
     maxInstructionsLength: z.number().int().positive(),
     maxMessageLength: z.number().int().positive(),
     maxModelLength: z.number().int().positive(),
@@ -219,11 +221,15 @@ export const runSnapshotSchema = z
   .object({
     agentId: agentIdSchema,
     apiVersion: agentRunnerApiVersionSchema,
-    commandEvidence: z.array(commandEvidenceSchema),
+    commandEvidence: z
+      .array(commandEvidenceSchema)
+      .max(AGENT_RUNNER_LIMITS.maxCommandResults),
     completedAt: datetimeSchema.nullable().default(null),
     createdAt: datetimeSchema,
     error: runErrorSchema.nullable().optional(),
-    fileEvidence: z.array(fileEvidenceSchema),
+    fileEvidence: z
+      .array(fileEvidenceSchema)
+      .max(AGENT_RUNNER_LIMITS.maxFileOperations),
     id: z.string().uuid(),
     operationId: z.string().uuid(),
     output: z.string().max(AGENT_RUNNER_LIMITS.maxEventOutputLength),
@@ -356,9 +362,13 @@ export const fileOperationSchema = z.object({
 
 export const runResultSchema = z.object({
   agentId: agentIdSchema,
-  commandResults: z.array(z.unknown()),
+  commandResults: z
+    .array(commandResultSchema)
+    .max(AGENT_RUNNER_LIMITS.maxCommandResults),
   completedAt: datetimeSchema,
-  fileOperations: z.array(z.unknown()),
+  fileOperations: z
+    .array(fileOperationSchema)
+    .max(AGENT_RUNNER_LIMITS.maxFileOperations),
   id: z.string().uuid(),
   output: z.string(),
   startedAt: datetimeSchema,

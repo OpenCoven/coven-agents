@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "agents": ["./test-support/agents.ts"],
+      "@cloudflare/sandbox": ["./test-support/cloudflare-sandbox.ts"],
+      "@cloudflare/sandbox/openai": [
+        "./test-support/cloudflare-sandbox-openai.ts"
+      ]
+    }
+  }
+}

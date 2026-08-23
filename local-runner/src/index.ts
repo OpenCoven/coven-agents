@@ -38,7 +38,8 @@ import { AgentStore } from "./store.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
-const MAX_EVIDENCE_PER_RUN = 20;
+const MAX_EVIDENCE_PER_RUN = AGENT_RUNNER_LIMITS.maxCommandResults;
+const MAX_REDACTION_CARRY_LENGTH = AGENT_RUNNER_LIMITS.maxEventOutputLength;
 
 type TerminationReason = "output_limit" | "stop" | "timeout";
 
@@ -46,6 +47,93 @@ type LiveRun = {
   child: ChildProcess;
   terminationReason?: TerminationReason;
 };
+
+class StreamingEvidenceRedactor {
+  private droppingEnvironment = false;
+  private droppingLine = false;
+  private pendingEnvironment = "";
+  private pendingLine = "";
+
+  constructor(private readonly token: string) {}
+
+  push(value: string): string {
+    let emitted = "";
+    for (const character of value) {
+      if (this.droppingLine) {
+        if (character === "\n") {
+          this.droppingLine = false;
+          emitted += "\n";
+        }
+        continue;
+      }
+
+      this.pendingLine += character;
+      if (this.pendingLine.length > MAX_REDACTION_CARRY_LENGTH) {
+        emitted += "[output line redacted after exceeding the safety window]";
+        this.pendingLine = "";
+        this.droppingLine = true;
+        continue;
+      }
+      if (character === "\n") {
+        emitted += this.completeLine();
+      }
+    }
+    if (
+      value.endsWith("\n") &&
+      !this.droppingEnvironment &&
+      !this.droppingLine
+    ) {
+      emitted += this.flushEnvironment();
+    }
+    return emitted;
+  }
+
+  flush(): string {
+    if (this.droppingLine) {
+      this.droppingLine = false;
+      return this.flushEnvironment();
+    }
+    const line = this.pendingLine;
+    this.pendingLine = "";
+    if (line) {
+      return this.completeLine(line);
+    }
+    return this.flushEnvironment();
+  }
+
+  private completeLine(line = this.pendingLine): string {
+    this.pendingLine = "";
+    if (this.droppingEnvironment) {
+      if (isEnvironmentAssignment(line)) {
+        return "";
+      }
+      this.droppingEnvironment = false;
+      return sanitizeLocalEvidence(line, this.token);
+    }
+    if (isEnvironmentAssignment(line)) {
+      this.pendingEnvironment += line;
+      if (this.pendingEnvironment.length > MAX_REDACTION_CARRY_LENGTH) {
+        this.pendingEnvironment = "";
+        this.droppingEnvironment = true;
+        return "[environment output redacted]";
+      }
+      return "";
+    }
+    return `${this.flushEnvironment()}${sanitizeLocalEvidence(line, this.token)}`;
+  }
+
+  private flushEnvironment(): string {
+    const environment = this.pendingEnvironment;
+    this.pendingEnvironment = "";
+    return environment ? sanitizeLocalEvidence(environment, this.token) : "";
+  }
+}
+
+function isEnvironmentAssignment(value: string): boolean {
+  return /^(?:(?:export|declare -x)\s+)?[A-Za-z_][A-Za-z0-9_]*=(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n]*)$/u.test(
+    value.trim()
+  );
+}
 
 export type LocalRunnerOptions = {
   allowedOrigin?: string;
@@ -519,16 +607,16 @@ export function createLocalRunner(options: LocalRunnerOptions): {
     let stderr = "";
     let outputBytes = 0;
     let writes = Promise.resolve();
-    const collect = (target: "stderr" | "stdout", chunk: Buffer): void => {
-      outputBytes += chunk.byteLength;
-      if (outputBytes > MAX_OUTPUT_BYTES) {
-        if (!live.terminationReason) {
-          live.terminationReason = "output_limit";
-          child.kill("SIGTERM");
-        }
+    const redactor = new StreamingEvidenceRedactor(options.token);
+    let lastOutputTarget: "stderr" | "stdout" = "stdout";
+    const collectRedacted = (
+      target: "stderr" | "stdout",
+      text: string
+    ): void => {
+      if (!text) {
         return;
       }
-      const text = sanitizeLocalEvidence(chunk.toString("utf8"), options.token);
+      lastOutputTarget = target;
       if (target === "stdout") {
         stdout = appendOutput(stdout, text, options.token);
       } else {
@@ -555,6 +643,17 @@ export function createLocalRunner(options: LocalRunnerOptions): {
         });
       });
     };
+    const collect = (target: "stderr" | "stdout", chunk: Buffer): void => {
+      outputBytes += chunk.byteLength;
+      if (outputBytes > MAX_OUTPUT_BYTES) {
+        if (!live.terminationReason) {
+          live.terminationReason = "output_limit";
+          child.kill("SIGTERM");
+        }
+        return;
+      }
+      collectRedacted(target, redactor.push(chunk.toString("utf8")));
+    };
     child.stdout?.on("data", (chunk: Buffer) => collect("stdout", chunk));
     child.stderr?.on("data", (chunk: Buffer) => collect("stderr", chunk));
 
@@ -579,6 +678,7 @@ export function createLocalRunner(options: LocalRunnerOptions): {
       child.once("close", (exitCode) => resolveOutcome({ exitCode }));
     });
     clearTimeout(timer);
+    collectRedacted(lastOutputTarget, redactor.flush());
     await writes;
 
     const completedAt = new Date().toISOString();

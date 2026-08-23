@@ -22,9 +22,11 @@ export const contractDescriptor = freeze({
   ] as const),
   limits: freeze({
     maxCommandLength: 8000,
+    maxCommandResults: 256,
     maxDescriptionLength: 240,
     maxDetailsLength: 2000,
     maxEventOutputLength: 100_000,
+    maxFileOperations: 256,
     maxInstructionsLength: 12_000,
     maxMessageLength: 500,
     maxModelLength: 120,

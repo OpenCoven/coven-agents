@@ -24,6 +24,7 @@ import {
   getAgentByName,
 } from "agents";
 import {
+  AlreadyRunningError,
   appendEvents,
   type CloudRunRecord,
   cloudFiberKey,
@@ -258,6 +259,9 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     if (plan.kind === "conflict") {
       throw new OperationConflictError();
     }
+    if (plan.kind === "already_running") {
+      throw new AlreadyRunningError();
+    }
     if (plan.kind === "existing") {
       return dispatchCloudRun(plan);
     }
@@ -304,24 +308,51 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       cloudFiberKey(record.run.id),
       "Cancelled by operator request."
     );
+    const current = this.findRecord(runId);
+    if (!current || isTerminal(current.run.status)) {
+      return current?.run ?? null;
+    }
     const completedAt = new Date().toISOString();
-    const cancelled = this.finishRecord(record, {
+    const cancelled = this.finishRecord(current, {
       completedAt,
       output: "Run cancelled by operator request.",
       status: "cancelled",
     });
     this.replaceRecord(cancelled);
-    this.updateDefinition({
-      lastRunAt: completedAt,
-      status: "idle",
-      updatedAt: completedAt,
-    });
-    await this.syncDirectory();
+    await this.finishDefinition(cancelled.run);
     return cancelled.run;
   }
 
   async decommission(): Promise<void> {
     const { definition } = this.state;
+    const activeRuns = this.state.runs.filter(
+      (record) => !isTerminal(record.run.status)
+    );
+    await Promise.all(
+      activeRuns.map(async (record) => {
+        try {
+          await this.cancelFiberByKey(
+            cloudFiberKey(record.run.id),
+            "Cancelled because the agent was decommissioned."
+          );
+        } catch {
+          // Sandbox destruction below still interrupts an unresponsive fiber.
+        }
+      })
+    );
+    const completedAt = new Date().toISOString();
+    this.setRuns(
+      this.state.runs.map((record) => {
+        if (isTerminal(record.run.status)) {
+          return record;
+        }
+        return this.finishRecord(record, {
+          completedAt,
+          output: "Run cancelled because the agent was decommissioned.",
+          status: "cancelled",
+        });
+      })
+    );
     await destroyCloudAgentSandbox(definition, async (name) => {
       await getSandbox(this.env.Sandbox, name).destroy();
     });
@@ -349,12 +380,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     const completedAt = new Date().toISOString();
     const interrupted = recoverCloudRunRecord(record, completedAt);
     this.replaceRecord(interrupted);
-    this.updateDefinition({
-      lastRunAt: completedAt,
-      status: "error",
-      updatedAt: completedAt,
-    });
-    await this.syncDirectory();
+    await this.finishDefinition(interrupted.run);
     return {
       error: "Cloud run was interrupted before completion.",
       snapshot: checkpoint,
@@ -516,6 +542,15 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   }
 
   private async finishDefinition(run: RunSnapshot): Promise<void> {
+    if (
+      !this.state.definition ||
+      this.state.runs.some(
+        (candidate) =>
+          candidate.run.id !== run.id && !isTerminal(candidate.run.status)
+      )
+    ) {
+      return;
+    }
     const status = run.status === "failed" ? "error" : "idle";
     this.updateDefinition({
       lastRunAt: run.completedAt,

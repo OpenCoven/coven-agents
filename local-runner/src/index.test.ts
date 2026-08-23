@@ -417,3 +417,55 @@ test("does not leak environment dumps split across local output events", async (
     assert.match(replay, /focused checks passed/);
   });
 });
+
+test("does not reconstruct secrets split across stdout and stderr events", async () => {
+  await withRunner(async ({ baseUrl, child }) => {
+    const agent = await createAgent(baseUrl);
+    const run = await startRun(
+      baseUrl,
+      agent.id,
+      "Capture chunk-boundary-safe diagnostics."
+    );
+    const activeChild = await waitFor(child);
+    const bearerSecret = "bearer-split-value-abcdefghijklmnopqrstuvwxyz";
+    const providerSecret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    const assignmentSecret =
+      "assignment-split-value-abcdefghijklmnopqrstuvwxyz";
+
+    activeChild.stdout.emit("data", Buffer.from("Bear"));
+    activeChild.stderr.emit("data", Buffer.from(`er ${bearerSecret}`));
+    activeChild.stdout.emit("data", Buffer.from("\ns"));
+    activeChild.stderr.emit(
+      "data",
+      Buffer.from(`k-proj-${providerSecret.slice(8)}`)
+    );
+    activeChild.stdout.emit("data", Buffer.from("\nSENSITIVE_"));
+    activeChild.stderr.emit(
+      "data",
+      Buffer.from(`KEY=${assignmentSecret}\nfocused checks passed\n`)
+    );
+    activeChild.close(0);
+
+    const completed = await waitFor(async () => {
+      const response = await request(baseUrl, `/api/runs/${run.id}`);
+      const current = (await response.json()) as {
+        run: { status: string };
+      };
+      return current.run.status === "completed" ? current : undefined;
+    });
+    const events = await request(baseUrl, `/api/runs/${run.id}/events`);
+    const replay = await events.text();
+    const output = replay
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)) as { output?: string })
+      .flatMap((event) => (event.output ? [event.output] : []))
+      .join("");
+
+    for (const secret of [bearerSecret, providerSecret, assignmentSecret]) {
+      assert.equal(JSON.stringify(completed).includes(secret), false);
+      assert.equal(output.includes(secret), false, `streamed ${secret}`);
+    }
+    assert.match(output, /focused checks passed/);
+  });
+});

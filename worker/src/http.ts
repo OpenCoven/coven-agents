@@ -68,10 +68,40 @@ export async function readJson(
   if (Number.isFinite(declaredLength) && declaredLength > MAX_JSON_BYTES) {
     throw new HttpError("Request body is too large.", 413, "body_too_large");
   }
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > MAX_JSON_BYTES) {
-    throw new HttpError("Request body is too large.", 413, "body_too_large");
+  const reader = request.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+
+  if (reader) {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        const chunk = value as Uint8Array;
+        size += chunk.byteLength;
+        if (size > MAX_JSON_BYTES) {
+          await reader.cancel("Request body is too large.");
+          throw new HttpError(
+            "Request body is too large.",
+            413,
+            "body_too_large"
+          );
+        }
+        chunks.push(chunk);
+      }
+    } finally {
+      reader.releaseLock();
+    }
   }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const text = new TextDecoder().decode(bytes);
   if (allowEmpty && !text) {
     return null;
   }

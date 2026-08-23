@@ -267,3 +267,34 @@ test("sanitizes cloud evidence again before finalized state and events are store
   }
   assert.match(persisted, /\[REDACTED\]/);
 });
+
+test("retains the newest bounded cloud command and file evidence before storage", () => {
+  const expectedLimit = 256;
+  const record = createQueuedRun(
+    agentId,
+    "0f6f31ae-7b6c-49c9-bc82-0f2cbf56cc4d",
+    "Inspect the sandbox.",
+    "3a3f2c72-9b1b-47f7-8c83-28d5f94bf4ce",
+    "2026-08-20T20:01:00.000Z"
+  );
+  const finished = finishCloudRunRecord(record, {
+    commandEvidence: Array.from({ length: expectedLimit + 1 }, (_, index) => ({
+      command: `command-${index}`,
+      exitCode: 0,
+      stderr: "",
+      stdout: `stdout-${index}`,
+    })),
+    completedAt: "2026-08-20T20:02:00.000Z",
+    fileEvidence: Array.from({ length: expectedLimit + 1 }, (_, index) => ({
+      operation: "modify" as const,
+      path: `src/file-${index}.ts`,
+    })),
+    output: "completed",
+    status: "completed",
+  });
+
+  assert.equal(finished.run.commandEvidence.length, expectedLimit);
+  assert.equal(finished.run.fileEvidence.length, expectedLimit);
+  assert.equal(finished.run.commandEvidence[0]?.command, "command-1");
+  assert.equal(finished.run.fileEvidence[0]?.path, "src/file-1.ts");
+});

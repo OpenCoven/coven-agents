@@ -58,3 +58,11 @@ test("replaces complete environment dumps without discarding adjacent non-secret
   assert.equal(sanitized.includes("/usr/local/bin"), false);
   assert.equal(sanitized.includes("/root"), false);
 });
+
+test("redacts an isolated sensitive environment assignment", () => {
+  const secret = "isolated-cloud-secret";
+  const sanitized = sanitizeEvidenceText(`OPENAI_API_KEY=${secret}`);
+
+  assert.equal(sanitized.includes(secret), false);
+  assert.equal(sanitized, "OPENAI_API_KEY=[REDACTED]");
+});
