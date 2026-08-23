@@ -104,16 +104,30 @@ async function reap(confirmed: boolean): Promise<number> {
   // Removals run sequentially — concurrent `git worktree remove`/
   // `git branch -d` calls against the same repo can race on the shared git
   // index and refs.
+  const failures: string[] = [];
+  let removedCount = 0;
   for (const row of reapable) {
-    // biome-ignore lint/performance/noAwaitInLoops: sequential by design, see above.
-    await runCmd("git", ["worktree", "remove", row.state.path]);
-    if (row.state.branch !== null) {
-      await runCmd("git", ["branch", "-d", row.state.branch]);
+    const label = row.state.branch ?? row.state.path;
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: sequential by design, see above.
+      await runCmd("git", ["worktree", "remove", row.state.path]);
+      if (row.state.branch !== null) {
+        await runCmd("git", ["branch", "-d", row.state.branch]);
+      }
+      console.log(`Removed ${label}`);
+      removedCount += 1;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error(`Failed to reap ${label}: ${detail}`);
+      failures.push(label);
     }
-    console.log(`Removed ${row.state.branch ?? row.state.path}`);
   }
 
-  console.log(`\nReaped ${reapable.length} worktree(s).`);
+  console.log(`\nReaped ${removedCount}/${reapable.length} worktree(s).`);
+  if (failures.length > 0) {
+    console.error(`${failures.length} failed: ${failures.join(", ")}`);
+    return 1;
+  }
   return 0;
 }
 
