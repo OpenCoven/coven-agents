@@ -10,7 +10,7 @@ import { collectState } from "./hygiene-git";
 
 export const WORKTREE_SOFT_CAP = 3;
 
-type Row = { state: WorktreeState; verdict: ReapVerdict };
+export type Row = { state: WorktreeState; verdict: ReapVerdict };
 
 function classify(states: WorktreeState[]): Row[] {
   return states.map((state) => ({ state, verdict: isReapable(state) }));
@@ -26,7 +26,7 @@ export function isAtRisk(state: WorktreeState): boolean {
   );
 }
 
-function describe(row: Row): string {
+export function describe(row: Row): string {
   const { state, verdict } = row;
   const name = state.branch ?? "(detached)";
   const tag = state.isPrimary
@@ -36,8 +36,11 @@ function describe(row: Row): string {
       : isAtRisk(state)
         ? "AT RISK"
         : "active";
+  const detail = state.isPrimary
+    ? "current checkout"
+    : verdict.reasons.join(", ") || "no blockers";
 
-  return `  [${tag}] ${name}\n      ${state.path}\n      ${verdict.reasons.join(", ") || "no blockers"}`;
+  return `  [${tag}] ${name}\n      ${state.path}\n      ${detail}`;
 }
 
 async function status(): Promise<number> {
