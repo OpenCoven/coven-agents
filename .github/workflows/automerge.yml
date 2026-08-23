@@ -53,15 +53,28 @@ jobs:
             0) unsafe "Metadata lists no dependencies." ;;
           esac
 
-          printf '%s' "$DEPS" \
-            | jq -e 'any(.[]; .updateType == "version-update:semver-major")' \
-            >/dev/null
-          case $? in
-            0) echo "${count} dependencies, at least one major bump."
-               echo "safe=false" >> "$GITHUB_OUTPUT" ;;
-            1) echo "${count} dependencies, all minor or patch."
-               echo "safe=true" >> "$GITHUB_OUTPUT" ;;
-            *) unsafe "Could not inspect dependency update types." ;;
+          # Deliberately not `jq -e`. Actions runs this with `bash -eo pipefail`,
+          # and `set -uo pipefail` above does NOT turn errexit off. With -e, a
+          # `jq -e` exiting 1 to mean "no major found" — the safe case — killed
+          # the step before the exit status could be read, so grouped PRs of
+          # pure minor/patch bumps failed instead of auto-merging. Plain jq
+          # prints true/false and exits 0, so only a real jq error is non-zero.
+          has_major=$(printf '%s' "$DEPS" \
+            | jq 'any(.[]; .updateType == "version-update:semver-major")' \
+            2>/dev/null) || unsafe "Could not inspect dependency update types."
+
+          case "$has_major" in
+            true)
+              echo "${count} dependencies, at least one major bump."
+              echo "safe=false" >> "$GITHUB_OUTPUT"
+              ;;
+            false)
+              echo "${count} dependencies, all minor or patch."
+              echo "safe=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              unsafe "Unexpected jq result: '${has_major}'."
+              ;;
           esac
 
       - name: Enable auto-merge when every bump is minor or patch
