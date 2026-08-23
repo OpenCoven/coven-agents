@@ -1,0 +1,10 @@
+# Commit-pinned actions are only safe while something keeps the pins current,
+# so the pins in .github/workflows are maintained here rather than by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore(ci)

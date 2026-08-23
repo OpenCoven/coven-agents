@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A superseded push has nothing left to prove, so its run is cancelled rather
+# than left to compete with the newer one for runners.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # Third-party and first-party actions alike are pinned to a commit, so a
+      # retagged release cannot change what runs against this repository.
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Reads the version from the `packageManager` field so CI and developers
+      # never drift onto different pnpm releases.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6.0.10
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # `--frozen-lockfile` fails when the lockfile disagrees with any manifest,
+      # which is the only place a dependency change lands without review.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Every gate runs even after an earlier one fails, so a single run reports
+      # the full set of problems instead of only the first.
+      - name: Lint
+        run: pnpm check
+
+      - name: Typecheck
+        if: ${{ !cancelled() }}
+        run: pnpm typecheck
+
+      # Covers the app, both runners, and the shared contracts packages. The
+      # Playwright suite is deliberately excluded: it needs a database and a
+      # browser download, so it belongs in its own workflow rather than
+      # blocking every pull request on infrastructure this job does not have.
+      - name: Unit tests
+        if: ${{ !cancelled() }}
+        run: pnpm test:unit
