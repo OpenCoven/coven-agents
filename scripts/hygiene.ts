@@ -117,6 +117,44 @@ async function reap(confirmed: boolean): Promise<number> {
   return 0;
 }
 
+async function configValue(key: string): Promise<string> {
+  try {
+    const { stdout } = await runCmd("git", ["config", "--get", key]);
+    return stdout.trim();
+  } catch {
+    return "";
+  }
+}
+
+async function doctor(): Promise<number> {
+  const [signingKey, format] = await Promise.all([
+    configValue("user.signingkey"),
+    configValue("gpg.format"),
+  ]);
+  const problems: string[] = [];
+
+  if (signingKey === "") {
+    problems.push("user.signingkey is not set");
+  }
+  if (format === "") {
+    problems.push("gpg.format is not set (expected: ssh, openpgp, or x509)");
+  }
+
+  if (problems.length > 0) {
+    console.error("\nCommit signing is NOT configured:\n");
+    for (const problem of problems) {
+      console.error(`  - ${problem}`);
+    }
+    console.error("\nDo not commit until this is fixed.");
+    return 1;
+  }
+
+  console.log(
+    `Signing configured: ${format} key ${signingKey.slice(0, 32)}...`
+  );
+  return 0;
+}
+
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "status";
   const confirmed = process.argv.includes("--yes");
@@ -129,8 +167,12 @@ async function main(): Promise<void> {
     process.exit(await reap(confirmed));
   }
 
+  if (command === "doctor") {
+    process.exit(await doctor());
+  }
+
   console.error(`Unknown command: ${command}`);
-  console.error("Usage: pnpm hygiene [status|reap [--yes]]");
+  console.error("Usage: pnpm hygiene [status|reap [--yes]|doctor]");
   process.exit(2);
 }
 
