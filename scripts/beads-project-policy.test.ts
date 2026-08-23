@@ -110,10 +110,51 @@ test("rejects absolute paths and overlong title", () => {
     () => validateSafeText("title", "x".repeat(121)),
     (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.match(error.message, /^title: /);
-      assert.match(error.message, /length/i);
+      assert.match(error.message, /120/);
       return true;
     }
+  );
+});
+
+test("projects the security fixture deterministically", () => {
+  const security = makeBead({
+    acceptance_criteria: "The roadmap item is visible in the project board.",
+    dependencies: [
+      {
+        depends_on_id: "coven-agents-security",
+        issue_id: "coven-agents-security.1",
+        type: "blocks",
+      },
+    ],
+    description: "Add redaction to the sync projection.",
+    id: "coven-agents-security.1",
+    parent: "coven-agents-security",
+    status: "in_progress",
+    title: "Add secret redaction",
+  });
+
+  const item = projectBead(security, beadMap(security));
+
+  assert.equal(item.fields["Bead ID"], "coven-agents-security.1");
+  assert.equal(
+    item.body,
+    [
+      `${MARKER_PREFIX}coven-agents-security.1 -->`,
+      "",
+      "## Objective",
+      "",
+      "Add redaction to the sync projection.",
+      "",
+      "## Acceptance criteria",
+      "",
+      "The roadmap item is visible in the project board.",
+      "",
+      "## Tracking",
+      "",
+      "- Bead: `coven-agents-security.1`",
+      "- Parent: `coven-agents-security`",
+      "- Active dependencies: `coven-agents-security`",
+    ].join("\n")
   );
 });
 

@@ -30,7 +30,7 @@ const SENSITIVE_PATTERNS: ReadonlyArray<{
   },
   {
     category: "bearer header",
-    pattern: /\bAuthorization[ \t]*:[ \t]*Bearer[ \t]+\S+/i,
+    pattern: /authorization\s*:\s*bearer\s+\S+/i,
   },
   {
     category: "github token",
@@ -89,6 +89,10 @@ function getUnsafeCategory(
 }
 
 export function validateSafeText(field: SafeField, value: string): void {
+  if (value.length > SAFE_TEXT_LIMITS[field]) {
+    throw new Error(`${field} exceeds ${SAFE_TEXT_LIMITS[field]} characters`);
+  }
+
   const category = getUnsafeCategory(field, value);
 
   if (category) {
