@@ -1,0 +1,197 @@
+import type { Bead } from "./beads-project-model";
+
+export const MARKER_PREFIX = "<!-- coven-agents-bead-sync:v1 id=";
+
+export type DesiredProjectItem = {
+  beadId: string;
+  body: string;
+  fields: Record<string, string>;
+  title: string;
+};
+
+type SafeField = "acceptance" | "description" | "title";
+
+const SAFE_TEXT_LIMITS: Record<SafeField, number> = {
+  acceptance: 3000,
+  description: 2000,
+  title: 120,
+};
+
+const CLOSING_PUNCTUATION = /[)"'`>\]}.,;:!?]+$/;
+const OPENING_PUNCTUATION = /^[("'`<[{]+/;
+
+const SENSITIVE_PATTERNS: ReadonlyArray<{
+  category: string;
+  pattern: RegExp;
+}> = [
+  {
+    category: "pem private key",
+    pattern: /-----BEGIN [^-]*PRIVATE KEY-----/i,
+  },
+  {
+    category: "bearer header",
+    pattern: /\bAuthorization\s*:\s*Bearer\s+\S+/i,
+  },
+  {
+    category: "github token",
+    pattern: /\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+/i,
+  },
+  {
+    category: "provider token",
+    pattern: /\b(?:sk-[A-Za-z0-9_-]+|xox[a-z]-[A-Za-z0-9-]+)/i,
+  },
+  {
+    category: "env assignment",
+    pattern: /\b[A-Z][A-Z0-9_]*=[^\s]+/,
+  },
+];
+
+function unsafeError(field: string, category: string): never {
+  throw new Error(`${field}: unsafe ${category}`);
+}
+
+function tokenize(value: string): string[] {
+  return value.match(/[^\s]+/g) ?? [];
+}
+
+function stripToken(token: string): string {
+  return token
+    .replace(OPENING_PUNCTUATION, "")
+    .replace(CLOSING_PUNCTUATION, "");
+}
+
+function getUnsafeCategory(
+  field: SafeField,
+  value: string
+): string | undefined {
+  if (value.length > SAFE_TEXT_LIMITS[field]) {
+    return "length";
+  }
+
+  for (const { category, pattern } of SENSITIVE_PATTERNS) {
+    if (pattern.test(value)) {
+      return category;
+    }
+  }
+
+  for (const token of tokenize(value)) {
+    const normalized = stripToken(token);
+    if (
+      normalized.startsWith("/Users/") ||
+      normalized.startsWith("/home/") ||
+      normalized.startsWith("C:\\Users\\")
+    ) {
+      return "absolute path";
+    }
+  }
+
+  return undefined;
+}
+
+export function validateSafeText(field: SafeField, value: string): void {
+  const category = getUnsafeCategory(field, value);
+
+  if (category) {
+    unsafeError(field, category);
+  }
+}
+
+function projectStatusFor(bead: Bead): string {
+  if (bead.status === "closed") {
+    return "Done";
+  }
+
+  if (bead.metadata.projectStatus === "In review") {
+    return "In review";
+  }
+
+  if (bead.status === "in_progress") {
+    return "In Progress";
+  }
+
+  return "Todo";
+}
+
+function priorityLabel(priority: Bead["priority"]): string {
+  return `P${priority}`;
+}
+
+function isClosed(bead: Bead | undefined): boolean {
+  return bead?.status === "closed";
+}
+
+function activeDependencies(bead: Bead, all: readonly Bead[]): string[] {
+  const beadById = new Map(all.map((candidate) => [candidate.id, candidate]));
+  const parentId = bead.parent;
+  const blockers = new Set<string>();
+
+  for (const dependency of bead.dependencies) {
+    if (dependency.type !== "blocks") {
+      continue;
+    }
+
+    if (dependency.depends_on_id === parentId) {
+      continue;
+    }
+
+    const blocker = beadById.get(dependency.depends_on_id);
+    if (!isClosed(blocker)) {
+      blockers.add(dependency.depends_on_id);
+    }
+  }
+
+  return [...blockers].sort();
+}
+
+function renderLines(lines: string[]): string {
+  return lines.join("\n");
+}
+
+export function projectBead(
+  bead: Bead,
+  all: readonly Bead[]
+): DesiredProjectItem {
+  validateSafeText("title", bead.title);
+  validateSafeText("description", bead.description);
+  validateSafeText("acceptance", bead.acceptance_criteria);
+
+  const blockers = activeDependencies(bead, all);
+  const blocked =
+    bead.status === "blocked" || blockers.length > 0 ? "Yes" : "No";
+  const body = renderLines([
+    `${MARKER_PREFIX}${bead.id} -->`,
+    "",
+    "## Objective",
+    bead.description,
+    "",
+    "## Acceptance criteria",
+    bead.acceptance_criteria,
+    "",
+    "## Bead ID",
+    bead.id,
+    "",
+    "## Parent",
+    bead.parent ?? "None",
+    "",
+    "## Active dependencies",
+    blockers.length > 0
+      ? blockers.map((dependency) => `- ${dependency}`).join("\n")
+      : "None",
+  ]);
+
+  return {
+    beadId: bead.id,
+    body,
+    fields: {
+      "Bead ID": bead.id,
+      Blocked: blocked,
+      Priority: priorityLabel(bead.priority),
+      Runner: bead.metadata.runner,
+      Size: bead.metadata.size,
+      Status: projectStatusFor(bead),
+      Type: bead.issue_type,
+      Workstream: bead.metadata.workstream,
+    },
+    title: bead.title,
+  };
+}
