@@ -8,9 +8,10 @@ export function getSandbox(
   destroy: () => Promise<void>;
 } {
   return {
-    async destroy() {
+    destroy() {
       destroyed.push(name);
       lifecycle.push(`destroy:${name}`);
+      return Promise.resolve();
     },
   };
 }

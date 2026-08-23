@@ -39,10 +39,10 @@ class YoloAgentHarness extends YoloAgent {
     this.setState({ definition: null, runs: [] });
   }
 
-  override async cancelFiberByKey(key: string): Promise<boolean> {
+  override cancelFiberByKey(key: string): Promise<boolean> {
     this.cancelledFiberKeys.push(key);
     recordSandboxLifecycle(`cancel:${key}`);
-    return true;
+    return Promise.resolve(true);
   }
 
   override setState(state: this["state"]): void {
@@ -50,20 +50,20 @@ class YoloAgentHarness extends YoloAgent {
     super.setState(state);
   }
 
-  override async startFiber(
+  override startFiber(
     ...args: Parameters<YoloAgent["startFiber"]>
   ): Promise<Awaited<ReturnType<YoloAgent["startFiber"]>>> {
     const [name, _work, options] = args;
     if (options?.idempotencyKey) {
       this.startedFiberKeys.push(options.idempotencyKey);
     }
-    return {
+    return Promise.resolve({
       accepted: true,
       createdAt: 0,
       fiberId: options?.fiberId ?? "",
       name,
       status: "pending",
-    };
+    });
   }
 }
 

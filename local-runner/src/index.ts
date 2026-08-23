@@ -54,7 +54,11 @@ class StreamingEvidenceRedactor {
   private pendingEnvironment = "";
   private pendingLine = "";
 
-  constructor(private readonly token: string) {}
+  private readonly token: string;
+
+  constructor(token: string) {
+    this.token = token;
+  }
 
   push(value: string): string {
     let emitted = "";

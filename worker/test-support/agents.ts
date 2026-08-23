@@ -20,26 +20,28 @@ export class Agent<Environment, State> {
     this.state = {} as State;
   }
 
-  async cancelFiberByKey(): Promise<boolean> {
-    return true;
+  cancelFiberByKey(): Promise<boolean> {
+    return Promise.resolve(true);
   }
 
   setState(state: State): void {
     this.state = state;
   }
 
-  async startFiber(): Promise<{ accepted: boolean }> {
-    return { accepted: true };
+  startFiber(): Promise<{ accepted: boolean }> {
+    return Promise.resolve({ accepted: true });
   }
 }
 
 const directory = {
-  async syncRuns(): Promise<void> {},
-  async upsert<T>(value: T): Promise<T> {
-    return value;
+  syncRuns(): Promise<void> {
+    return Promise.resolve();
+  },
+  upsert<T>(value: T): Promise<T> {
+    return Promise.resolve(value);
   },
 };
 
-export async function getAgentByName<T>(): Promise<T> {
-  return directory as T;
+export function getAgentByName<T>(): Promise<T> {
+  return Promise.resolve(directory as T);
 }

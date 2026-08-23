@@ -75,6 +75,7 @@ export async function readJson(
   if (reader) {
     try {
       while (true) {
+        // biome-ignore lint/performance/noAwaitInLoops: a stream is read sequentially by definition — the next chunk does not exist until this read resolves, so there is nothing to parallelise.
         const { done, value } = await reader.read();
         if (done) {
           break;

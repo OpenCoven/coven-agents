@@ -521,7 +521,9 @@ export function planCloudRunStart(input: {
       record: existing,
     };
   }
-  const active = input.records.find((record) => !isTerminal(record.run.status));
+  const active = input.records.find(
+    (candidate) => !isTerminal(candidate.run.status)
+  );
   if (active) {
     return { kind: "already_running", record: active };
   }
