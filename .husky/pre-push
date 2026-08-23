@@ -16,12 +16,22 @@ else
   range='origin/main..HEAD'
 fi
 
-unsigned="$(git log "$range" --pretty='%H %G?' 2>/dev/null | awk '$2 != "G" {print}')"
+# %G? is not a boolean. Block only on a real problem:
+#   N  no signature at all
+#   B  bad signature
+# Everything else means a signature exists. In particular E means "signature
+# present but the public key is unavailable locally", which is what every
+# GitHub-signed bot commit looks like on a developer machine — dependabot
+# commits are signed by GitHub's key, which is not in anyone's keyring. Treating
+# E as unsigned blocked pushing any branch built on a bot commit, and no amount
+# of re-signing could fix it because those commits are not ours to rewrite.
+bad="$(git log "$range" --pretty='%H %G? %an' 2>/dev/null \
+        | awk '$2 == "N" || $2 == "B" {print}')"
 
-if [ -n "$unsigned" ]; then
+if [ -n "$bad" ]; then
   echo ""
-  echo "BLOCKED: the following commits are not signed:"
-  echo "$unsigned"
+  echo "BLOCKED: the following commits are unsigned or have a bad signature:"
+  echo "$bad"
   echo ""
   echo "Sign them before pushing (git rebase --exec 'git commit --amend --no-edit -S')."
   exit 1
