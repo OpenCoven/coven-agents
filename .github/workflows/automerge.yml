@@ -41,8 +41,9 @@ jobs:
             exit 0
           }
 
-          [ -n "${DEPS}" ] && [ "${DEPS}" != "null" ] \
-            || unsafe "No dependency metadata."
+          if [ -z "${DEPS}" ] || [ "${DEPS}" = "null" ]; then
+            unsafe "No dependency metadata."
+          fi
 
           count=$(printf '%s' "$DEPS" | jq 'length' 2>/dev/null) \
             || unsafe "Dependency metadata is not valid JSON."
