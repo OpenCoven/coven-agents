@@ -1,4 +1,7 @@
-export const PROTECTED_BRANCHES = ["main", "master"];
+export const PROTECTED_BRANCHES: readonly string[] = Object.freeze([
+  "main",
+  "master",
+]);
 
 export type WorktreeState = {
   branch: string | null;
@@ -34,13 +37,20 @@ export function isReapable(state: WorktreeState): ReapVerdict {
     reasons.push("locked");
   }
 
-  if (state.branch === null) {
+  const trimmedBranch = state.branch?.trim();
+
+  if (state.branch === null || trimmedBranch === "") {
     reasons.push("detached HEAD");
-  } else if (PROTECTED_BRANCHES.includes(state.branch)) {
-    reasons.push(`protected branch: ${state.branch}`);
+  } else if (
+    trimmedBranch !== undefined &&
+    PROTECTED_BRANCHES.includes(trimmedBranch)
+  ) {
+    reasons.push(`protected branch: ${trimmedBranch}`);
   }
 
-  if (state.dirtyCount > 0) {
+  if (!Number.isInteger(state.dirtyCount) || state.dirtyCount < 0) {
+    reasons.push(`invalid dirty count: ${state.dirtyCount}`);
+  } else if (state.dirtyCount > 0) {
     reasons.push(`${state.dirtyCount} uncommitted file(s)`);
   }
 
@@ -48,7 +58,9 @@ export function isReapable(state: WorktreeState): ReapVerdict {
     reasons.push("branch not on origin");
   }
 
-  if (state.unpushedCommits > 0) {
+  if (!Number.isInteger(state.unpushedCommits) || state.unpushedCommits < 0) {
+    reasons.push(`invalid unpushed count: ${state.unpushedCommits}`);
+  } else if (state.unpushedCommits > 0) {
     reasons.push(`${state.unpushedCommits} unpushed commit(s)`);
   }
 

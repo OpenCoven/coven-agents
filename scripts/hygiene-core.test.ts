@@ -118,3 +118,41 @@ test("reasons accumulate so the report can explain every blocker", () => {
   assert.ok(verdict.reasons.includes("branch not on origin"));
   assert.ok(verdict.reasons.includes("5 unpushed commit(s)"));
 });
+
+test("structural guards accumulate with each other", () => {
+  const verdict = isReapable(state({ branch: "main", isLocked: true }));
+
+  assert.equal(verdict.safe, false);
+  assert.ok(verdict.reasons.includes("locked"));
+  assert.ok(verdict.reasons.some((r) => r.includes("protected branch")));
+});
+
+test("whitespace-padded protected branches are blocked", () => {
+  for (const branch of ["main ", "  main"]) {
+    const verdict = isReapable(state({ branch }));
+
+    assert.equal(
+      verdict.safe,
+      false,
+      `${JSON.stringify(branch)} must not be reapable`
+    );
+    assert.ok(
+      verdict.reasons.some((r) => r.includes("protected branch")),
+      `${JSON.stringify(branch)} should report a protected branch reason`
+    );
+  }
+});
+
+test("invalid counters fail closed", () => {
+  const nanDirty = isReapable(state({ dirtyCount: Number.NaN }));
+  assert.equal(nanDirty.safe, false);
+  assert.ok(nanDirty.reasons.includes("invalid dirty count: NaN"));
+
+  const negativeDirty = isReapable(state({ dirtyCount: -1 }));
+  assert.equal(negativeDirty.safe, false);
+  assert.ok(negativeDirty.reasons.includes("invalid dirty count: -1"));
+
+  const nanUnpushed = isReapable(state({ unpushedCommits: Number.NaN }));
+  assert.equal(nanUnpushed.safe, false);
+  assert.ok(nanUnpushed.reasons.includes("invalid unpushed count: NaN"));
+});
