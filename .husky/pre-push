@@ -1,0 +1,30 @@
+#!/bin/sh
+# Blocks pushes containing unsigned commits.
+# Mirrors the global rule: every commit must land Verified on GitHub.
+
+branch="$(git rev-parse --abbrev-ref HEAD)"
+
+if [ "$branch" = "main" ]; then
+  echo "WARNING: pushing directly to main."
+fi
+
+# Commits about to be pushed. Falls back to origin/main for a new branch
+# with no upstream yet.
+if git rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+  range='@{u}..HEAD'
+else
+  range='origin/main..HEAD'
+fi
+
+unsigned="$(git log "$range" --pretty='%H %G?' 2>/dev/null | awk '$2 != "G" {print}')"
+
+if [ -n "$unsigned" ]; then
+  echo ""
+  echo "BLOCKED: the following commits are not signed:"
+  echo "$unsigned"
+  echo ""
+  echo "Sign them before pushing (git rebase --exec 'git commit --amend --no-edit -S')."
+  exit 1
+fi
+
+exit 0
