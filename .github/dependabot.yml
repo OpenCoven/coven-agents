@@ -20,6 +20,18 @@ updates:
         applies-to: security-updates
         patterns:
           - "*"
+    # Declined 2026-08-23 as PRs #9 and #10. Closing a Dependabot pull request
+    # is not a durable signal — it would have re-raised both the following
+    # Monday. Minor and patch updates still flow, so fixes within the current
+    # major still arrive; only the major jump is suppressed. Remove an entry
+    # here when the upgrade is actually wanted.
+    ignore:
+      - dependency-name: lucide-react
+        update-types:
+          - version-update:semver-major
+      - dependency-name: nanoid
+        update-types:
+          - version-update:semver-major
     commit-message:
       prefix: "chore(deps)"
 
