@@ -1,0 +1,12 @@
+#!/bin/sh
+# After pulling main, quietly point out worktrees that are reapable or at risk.
+# Never blocks — this is a nudge, not a gate.
+
+if [ "$(git rev-parse --abbrev-ref HEAD)" != "main" ]; then
+  exit 0
+fi
+
+corepack pnpm hygiene status >/dev/null 2>&1 || \
+  echo "hygiene: worktrees need attention — run 'pnpm hygiene'"
+
+exit 0
