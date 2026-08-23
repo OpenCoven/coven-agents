@@ -227,7 +227,19 @@ export const ReasoningContent = memo(
           ref={scrollRef}
           style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
         >
-          <Streamdown plugins={streamdownPlugins} {...props}>
+          {/*
+            These props are declared as HTMLAttributes<HTMLDivElement> but are
+            spread into Streamdown, whose props are no longer a superset of
+            them: it narrows `dir` and declares handlers like onAnimationStart
+            as `() => void`. Older streamdown types were loose enough to accept
+            the spread. Casting keeps the rendered output byte-identical; the
+            real fix is to stop typing these as div attributes, which belongs
+            with whoever owns this vendored component.
+          */}
+          <Streamdown
+            plugins={streamdownPlugins}
+            {...(props as ComponentProps<typeof Streamdown>)}
+          >
             {children}
           </Streamdown>
         </div>

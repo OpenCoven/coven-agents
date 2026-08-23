@@ -159,7 +159,8 @@ const PureHitboxLayer = ({
   result,
   setArtifact,
 }: {
-  hitboxRef: React.RefObject<HTMLDivElement>;
+  // React 19 types: useRef<T>(null) yields RefObject<T | null>.
+  hitboxRef: React.RefObject<HTMLDivElement | null>;
   result?: Partial<DocumentToolOutput>;
   setArtifact: (
     updaterFn: UIArtifact | ((currentArtifact: UIArtifact) => UIArtifact)
