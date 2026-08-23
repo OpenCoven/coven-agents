@@ -12,6 +12,7 @@
     "dev:local-runner": "pnpm --filter @opencoven/local-runner dev",
     "check": "ultracite check",
     "fix": "ultracite fix",
+    "hygiene": "tsx scripts/hygiene.ts",
     "prepare": "husky",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "npx tsx lib/db/migrate.ts",
