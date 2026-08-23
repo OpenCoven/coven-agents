@@ -15,6 +15,7 @@ import {
   sanitizeEvidencePath,
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
+import { HttpError } from "./http.js";
 
 export const MAX_COMMAND_RESULTS_PER_RUN =
   AGENT_RUNNER_LIMITS.maxCommandResults;
@@ -249,7 +250,11 @@ export function validateCloudWorkspace(
   ) {
     return "/workspace";
   }
-  throw new Error("Cloud agents may only use the /workspace scratch sandbox.");
+  throw new HttpError(
+    "Cloud agents may only use the /workspace scratch sandbox.",
+    400,
+    "invalid_workspace"
+  );
 }
 
 export function createQueuedRun(

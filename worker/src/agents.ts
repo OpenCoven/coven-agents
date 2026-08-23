@@ -55,7 +55,9 @@ export function toFileEvidence(
   operations: { operation: string; path: string }[]
 ): FileEvidence[] {
   return operations.flatMap((entry) => {
-    const operation = FILE_OPERATIONS[entry.operation];
+    const operation = Object.hasOwn(FILE_OPERATIONS, entry.operation)
+      ? FILE_OPERATIONS[entry.operation]
+      : undefined;
     if (!operation) {
       // An unmapped verb means the harness grew one the contract has not
       // learned. Say so rather than discarding the evidence silently.
