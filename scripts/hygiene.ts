@@ -193,7 +193,16 @@ async function main(): Promise<void> {
   process.exit(2);
 }
 
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exit(2);
-});
+// Guard so importing this module (e.g. from tests, for `describe()`) doesn't
+// also execute the CLI and call `process.exit()`.
+const isMain =
+  process.argv[1] === undefined
+    ? false
+    : import.meta.url === `file://${process.argv[1]}`;
+
+if (isMain) {
+  main().catch((error: unknown) => {
+    console.error(error);
+    process.exit(2);
+  });
+}

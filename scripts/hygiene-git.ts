@@ -57,13 +57,11 @@ async function countDirty(path: string): Promise<number> {
   return out.split("\n").length;
 }
 
-async function existsOnOrigin(branch: string): Promise<boolean> {
-  const out = await tryGit([
-    "ls-remote",
-    "--heads",
-    "origin",
-    `refs/heads/${branch}`,
-  ]);
+async function existsOnOrigin(branch: string, cwd?: string): Promise<boolean> {
+  const out = await tryGit(
+    ["ls-remote", "--heads", "origin", `refs/heads/${branch}`],
+    cwd
+  );
   return out !== null && out.length > 0;
 }
 
@@ -140,7 +138,7 @@ export async function collectState(
       const [dirtyCount, onOrigin, unpushedCommits, mergedIntoMain] =
         await Promise.all([
           countDirty(wt.path),
-          existsOnOrigin(wt.branch),
+          existsOnOrigin(wt.branch, cwd),
           countUnpushed(wt.path, wt.branch),
           checkMerged(wt.branch),
         ]);
