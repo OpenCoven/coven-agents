@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test:unit": "tsx --test lib/agents/*.test.ts && pnpm --filter @opencoven/agent-contracts test && pnpm --filter @opencoven/harness test && pnpm --filter @opencoven/local-runner test && pnpm --filter @opencoven/cloud-runner test",
+    "test:unit": "tsx --test scripts/*.test.ts && tsx --test lib/agents/*.test.ts && pnpm --filter @opencoven/agent-contracts test && pnpm --filter @opencoven/harness test && pnpm --filter @opencoven/local-runner test && pnpm --filter @opencoven/cloud-runner test",
     "dev:cloud": "pnpm --filter @opencoven/cloud-runner dev",
     "dev:local-runner": "pnpm --filter @opencoven/local-runner dev",
     "check": "ultracite check",
