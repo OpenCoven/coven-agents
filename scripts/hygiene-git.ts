@@ -68,16 +68,18 @@ async function existsOnOrigin(branch: string): Promise<boolean> {
 }
 
 async function countUnpushed(path: string, branch: string): Promise<number> {
+  // Commits on this branch that no remote ref can reach. Correct whether or
+  // not origin/<branch> exists, unlike a `origin/<branch>..<branch>` range.
   const out = await tryGit(
-    ["rev-list", "--count", `origin/${branch}..${branch}`],
+    ["rev-list", "--count", branch, "--not", "--remotes"],
     path
   );
   if (out === null) {
-    // No remote-tracking ref: every commit on the branch is unpushed.
-    const total = await tryGit(["rev-list", "--count", branch], path);
-    return total === null ? 1 : Number.parseInt(total, 10);
+    // Unknown. Assume unpushed so the predicate fails closed.
+    return 1;
   }
-  return Number.parseInt(out, 10);
+  const parsed = Number.parseInt(out, 10);
+  return Number.isNaN(parsed) ? 1 : parsed;
 }
 
 /**
