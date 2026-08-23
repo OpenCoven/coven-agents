@@ -1,5 +1,6 @@
 import { getSandbox } from "@cloudflare/sandbox";
 import {
+  AGENT_RUNNER_LIMITS,
   type AgentDefinition,
   agentDefinitionSchema,
   type RunResult,
@@ -118,8 +119,16 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
             stderr: run.stderr,
             stdout: run.summary.output,
           },
-          ...run.summary.toolCalls,
-        ],
+          // A harness tool call is {tool, summary, success}, which is not the
+          // command-result shape. It was previously spread in raw because
+          // commandResults was typed z.unknown(); the contract now describes
+          // and caps the field, so the translation has to be explicit.
+          ...run.summary.toolCalls.map((call) => ({
+            command: call.tool,
+            exitCode: call.success ? 0 : 1,
+            stdout: call.summary,
+          })),
+        ].slice(0, AGENT_RUNNER_LIMITS.maxCommandResults),
         completedAt,
         fileOperations: run.summary.fileOperations,
         id: crypto.randomUUID(),

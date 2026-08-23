@@ -1,20 +1,30 @@
 import { timingSafeEqual } from "node:crypto";
+import {
+  AGENT_RUNNER_API_VERSION,
+  AGENT_RUNNER_LIMITS,
+  type RunError,
+  type RunEvent,
+} from "@opencoven/agent-contracts";
 
 const MAX_JSON_BYTES = 64 * 1024;
 
 export class HttpError extends Error {
   readonly code: string;
+  readonly details?: string;
+  readonly retryable: boolean;
   readonly status: number;
 
   constructor(
     message: string,
     status: number,
     code: string,
-    options?: ErrorOptions
+    options: ErrorOptions & { details?: string; retryable?: boolean } = {}
   ) {
     super(message, options);
     this.code = code;
+    this.details = options.details;
     this.name = "HttpError";
+    this.retryable = options.retryable ?? false;
     this.status = status;
   }
 }
@@ -22,8 +32,9 @@ export class HttpError extends Error {
 export function corsHeaders(request: Request, allowedOrigin: string): Headers {
   const origin = request.headers.get("origin");
   const headers = new Headers({
-    "access-control-allow-headers": "authorization, content-type",
-    "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+    "access-control-allow-headers":
+      "authorization, content-type, last-event-id",
+    "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
     "access-control-max-age": "86400",
     vary: "Origin",
   });
@@ -49,14 +60,51 @@ export function hasValidBearerToken(
   return timingSafeEqual(supplied, expected);
 }
 
-export async function readJson(request: Request): Promise<unknown> {
+export async function readJson(
+  request: Request,
+  allowEmpty = false
+): Promise<unknown> {
   const declaredLength = Number(request.headers.get("content-length") ?? "0");
   if (Number.isFinite(declaredLength) && declaredLength > MAX_JSON_BYTES) {
     throw new HttpError("Request body is too large.", 413, "body_too_large");
   }
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > MAX_JSON_BYTES) {
-    throw new HttpError("Request body is too large.", 413, "body_too_large");
+  const reader = request.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+
+  if (reader) {
+    try {
+      while (true) {
+        // biome-ignore lint/performance/noAwaitInLoops: a stream is read sequentially by definition — the next chunk does not exist until this read resolves, so there is nothing to parallelise.
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        const chunk = value as Uint8Array;
+        size += chunk.byteLength;
+        if (size > MAX_JSON_BYTES) {
+          await reader.cancel("Request body is too large.");
+          throw new HttpError(
+            "Request body is too large.",
+            413,
+            "body_too_large"
+          );
+        }
+        chunks.push(chunk);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const text = new TextDecoder().decode(bytes);
+  if (allowEmpty && !text) {
+    return null;
   }
   try {
     return JSON.parse(text) as unknown;
@@ -69,6 +117,41 @@ export async function readJson(request: Request): Promise<unknown> {
       { cause: error }
     );
   }
+}
+
+export function errorEnvelope(
+  code: string,
+  message: string,
+  retryable: boolean,
+  details?: string,
+  requestId: string = crypto.randomUUID()
+): {
+  apiVersion: string;
+  error: RunError;
+  requestId: string;
+} {
+  return {
+    apiVersion: AGENT_RUNNER_API_VERSION,
+    error: {
+      code: code.slice(0, 64),
+      ...(details
+        ? { details: details.slice(0, AGENT_RUNNER_LIMITS.maxDetailsLength) }
+        : {}),
+      message: message.slice(0, AGENT_RUNNER_LIMITS.maxMessageLength),
+      retryable,
+    },
+    requestId: requestId.slice(0, AGENT_RUNNER_LIMITS.maxRequestIdLength),
+  };
+}
+
+export function serializeSse(events: RunEvent[], lastEventId: number): string {
+  return events
+    .filter((event) => event.id > lastEventId)
+    .map(
+      (event) =>
+        `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
+    )
+    .join("");
 }
 
 export function json(

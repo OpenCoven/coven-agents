@@ -13,7 +13,7 @@ import {
   json,
   readJson,
 } from "./http";
-import { UNOWNED_TENANT } from "./tenant";
+import { tenantOf, UNOWNED_TENANT } from "./tenant";
 
 export { Sandbox } from "@cloudflare/sandbox";
 export { AgentDirectory, YoloAgent } from "./agents";
@@ -139,7 +139,7 @@ export default {
             createdAt: now,
             id: crypto.randomUUID(),
             lastRunAt: null,
-            owner: callerTenant,
+            owner: { kind: "tenant" as const, tenantId: callerTenant },
             status: "idle" as const,
             updatedAt: now,
           };
@@ -166,7 +166,11 @@ export default {
          * exists for someone else.
          */
         const owned = await agent.snapshot();
-        if (!owned || (owned.owner ?? UNOWNED_TENANT) !== callerTenant) {
+        // Routed through tenantOf so ownership is decided in exactly one place.
+        // Comparing owner fields inline here would have to know the shape of
+        // every owner kind, and would silently authorise the wrong caller the
+        // next time a kind is added.
+        if (!owned || tenantOf(owned) !== callerTenant) {
           throw new HttpError("Agent was not found.", 404, "not_found");
         }
 
