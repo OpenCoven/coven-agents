@@ -42,7 +42,7 @@ const SENSITIVE_PATTERNS: ReadonlyArray<{
   },
   {
     category: "env assignment",
-    pattern: /\b[A-Z][A-Z0-9_]*=[^\s]+/,
+    pattern: /\b[A-Z][A-Z0-9_]*\s*=\s*[^\s]+/,
   },
 ];
 
@@ -79,7 +79,7 @@ function getUnsafeCategory(
     if (
       normalized.startsWith("/Users/") ||
       normalized.startsWith("/home/") ||
-      normalized.startsWith("C:\\Users\\")
+      /^[A-Za-z]:\\Users\\/.test(normalized)
     ) {
       return "absolute path";
     }
@@ -122,15 +122,10 @@ function isClosed(bead: Bead | undefined): boolean {
 
 function activeDependencies(bead: Bead, all: readonly Bead[]): string[] {
   const beadById = new Map(all.map((candidate) => [candidate.id, candidate]));
-  const parentId = bead.parent;
   const blockers = new Set<string>();
 
   for (const dependency of bead.dependencies) {
     if (dependency.type !== "blocks") {
-      continue;
-    }
-
-    if (dependency.depends_on_id === parentId) {
       continue;
     }
 
@@ -158,25 +153,27 @@ export function projectBead(
   const blockers = activeDependencies(bead, all);
   const blocked =
     bead.status === "blocked" || blockers.length > 0 ? "Yes" : "No";
+  const parent = bead.parent ? `\`${bead.parent}\`` : "None";
+  const dependencies =
+    blockers.length > 0
+      ? blockers.map((dependency) => `\`${dependency}\``).join(", ")
+      : "None";
   const body = renderLines([
     `${MARKER_PREFIX}${bead.id} -->`,
     "",
     "## Objective",
+    "",
     bead.description,
     "",
     "## Acceptance criteria",
+    "",
     bead.acceptance_criteria,
     "",
-    "## Bead ID",
-    bead.id,
+    "## Tracking",
     "",
-    "## Parent",
-    bead.parent ?? "None",
-    "",
-    "## Active dependencies",
-    blockers.length > 0
-      ? blockers.map((dependency) => `- ${dependency}`).join("\n")
-      : "None",
+    `- Bead: \`${bead.id}\``,
+    `- Parent: ${parent}`,
+    `- Active dependencies: ${dependencies}`,
   ]);
 
   return {

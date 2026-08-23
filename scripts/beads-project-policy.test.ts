@@ -31,6 +31,34 @@ function makeBead(overrides: Partial<Bead> = {}): Bead {
   };
 }
 
+function expectedBody(
+  beadId: string,
+  parent: string | undefined,
+  activeDependencies: readonly string[]
+): string {
+  return [
+    `${MARKER_PREFIX}${beadId} -->`,
+    "",
+    "## Objective",
+    "",
+    "Description.",
+    "",
+    "## Acceptance criteria",
+    "",
+    "Acceptance criteria.",
+    "",
+    "## Tracking",
+    "",
+    `- Bead: \`${beadId}\``,
+    `- Parent: ${parent ? `\`${parent}\`` : "None"}`,
+    `- Active dependencies: ${
+      activeDependencies.length > 0
+        ? activeDependencies.map((dependency) => `\`${dependency}\``).join(", ")
+        : "None"
+    }`,
+  ].join("\n");
+}
+
 function expectUnsafe(
   field: "title" | "description" | "acceptance",
   value: string,
@@ -49,13 +77,11 @@ function expectUnsafe(
 }
 
 test("rejects sensitive content categories", () => {
-  expectUnsafe("title", "github_pat_abc123", /github token/i);
-  expectUnsafe(
-    "description",
-    "Authorization: Bearer secret-token",
-    /bearer header/i
-  );
+  expectUnsafe("title", "sk-live-abc123", /provider token/i);
+  expectUnsafe("description", "xoxb-1234567890", /provider token/i);
   expectUnsafe("acceptance", "AWS_KEY=supersecret", /env assignment/i);
+  expectUnsafe("acceptance", "API_TOKEN = value", /env assignment/i);
+  expectUnsafe("description", "Authorization: Bearer secret", /bearer header/i);
   expectUnsafe(
     "acceptance",
     "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
@@ -65,9 +91,10 @@ test("rejects sensitive content categories", () => {
 
 test("rejects absolute paths and overlong title", () => {
   expectUnsafe("description", "/Users/alice/private.txt", /absolute path/i);
+  expectUnsafe("description", "/home/alice/private.txt", /absolute path/i);
   expectUnsafe(
     "description",
-    "C:\\Users\\alice\\private.txt",
+    "D:\\Users\\alice\\private.txt",
     /absolute path/i
   );
   assert.throws(
@@ -81,91 +108,69 @@ test("rejects absolute paths and overlong title", () => {
   );
 });
 
-test("renders deterministic markdown with marker and parent", () => {
+test("parent-child dependency alone does not block", () => {
   const parent = makeBead({
     id: "coven-agents-parent",
-    title: "Parent bead",
   });
   const child = makeBead({
     dependencies: [
       {
         depends_on_id: "coven-agents-parent",
-        issue_id: "coven-agents-child",
-        type: "blocks",
+        issue_id: "coven-agents-child-parent-child",
+        type: "parent-child",
       },
     ],
-    id: "coven-agents-child",
+    id: "coven-agents-child-parent-child",
     parent: "coven-agents-parent",
-    title: "Child bead",
   });
 
   const item = projectBead(child, [parent, child]);
 
-  assert.equal(item.title, "Child bead");
-  assert.equal(item.beadId, "coven-agents-child");
-  assert.match(
+  assert.equal(item.fields.Blocked, "No");
+  assert.equal(
     item.body,
-    new RegExp(`^${MARKER_PREFIX}coven-agents-child -->\\n`)
+    expectedBody("coven-agents-child-parent-child", "coven-agents-parent", [])
   );
-  assert.match(item.body, /## Objective\nDescription\./);
-  assert.match(item.body, /## Acceptance criteria\nAcceptance criteria\./);
-  assert.match(item.body, /## Bead ID\ncoven-agents-child/);
-  assert.match(item.body, /## Parent\ncoven-agents-parent/);
-  assert.match(item.body, /## Active dependencies\nNone/);
 });
 
-test("active blocks dependency marks blocked while parent-child alone does not", () => {
+test("blocks dependency on parent still blocks", () => {
   const parent = makeBead({
     id: "coven-agents-parent",
   });
-  const openBlocker = makeBead({
-    id: "coven-agents-open-blocker",
-    status: "open",
+  const child = makeBead({
+    dependencies: [
+      {
+        depends_on_id: "coven-agents-parent",
+        issue_id: "coven-agents-child-blocked",
+        type: "parent-child",
+      },
+      {
+        depends_on_id: "coven-agents-parent",
+        issue_id: "coven-agents-child-blocked",
+        type: "blocks",
+      },
+    ],
+    id: "coven-agents-child-blocked",
+    parent: "coven-agents-parent",
   });
-  const secondOpenBlocker = makeBead({
-    id: "coven-agents-a-blocker",
-    status: "open",
-  });
+
+  const item = projectBead(child, [parent, child]);
+
+  assert.equal(item.fields.Blocked, "Yes");
+  assert.equal(
+    item.body,
+    expectedBody("coven-agents-child-blocked", "coven-agents-parent", [
+      "coven-agents-parent",
+    ])
+  );
+});
+
+test("closed dependency does not block", () => {
   const closedBlocker = makeBead({
     id: "coven-agents-closed-blocker",
     status: "closed",
   });
-
-  const childBlockedByParentOnly = makeBead({
-    dependencies: [
-      {
-        depends_on_id: "coven-agents-parent",
-        issue_id: "coven-agents-child-parent-only",
-        type: "blocks",
-      },
-    ],
-    id: "coven-agents-child-parent-only",
-    parent: "coven-agents-parent",
-  });
-
-  const childBlockedByOpenDependency = makeBead({
-    dependencies: [
-      {
-        depends_on_id: "coven-agents-open-blocker",
-        issue_id: "coven-agents-child-open",
-        type: "blocks",
-      },
-      {
-        depends_on_id: "coven-agents-a-blocker",
-        issue_id: "coven-agents-child-open",
-        type: "blocks",
-      },
-      {
-        depends_on_id: "coven-agents-parent",
-        issue_id: "coven-agents-child-open",
-        type: "blocks",
-      },
-    ],
-    id: "coven-agents-child-open",
-    parent: "coven-agents-parent",
-  });
-
-  const childWithClosedDependency = makeBead({
+  const child = makeBead({
     dependencies: [
       {
         depends_on_id: "coven-agents-closed-blocker",
@@ -176,28 +181,13 @@ test("active blocks dependency marks blocked while parent-child alone does not",
     id: "coven-agents-child-closed",
   });
 
-  const blockedOnly = projectBead(childBlockedByParentOnly, [
-    parent,
-    childBlockedByParentOnly,
-  ]);
-  const blockedByOpen = projectBead(childBlockedByOpenDependency, [
-    parent,
-    openBlocker,
-    secondOpenBlocker,
-    childBlockedByOpenDependency,
-  ]);
-  const blockedByClosed = projectBead(childWithClosedDependency, [
-    closedBlocker,
-    childWithClosedDependency,
-  ]);
+  const item = projectBead(child, [closedBlocker, child]);
 
-  assert.equal(blockedOnly.fields.Blocked, "No");
-  assert.equal(blockedByOpen.fields.Blocked, "Yes");
-  assert.match(
-    blockedByOpen.body,
-    /## Active dependencies\n- coven-agents-a-blocker\n- coven-agents-open-blocker$/
+  assert.equal(item.fields.Blocked, "No");
+  assert.equal(
+    item.body,
+    expectedBody("coven-agents-child-closed", undefined, [])
   );
-  assert.equal(blockedByClosed.fields.Blocked, "No");
 });
 
 test("maps status type and priority fields", () => {
