@@ -30,7 +30,7 @@ const SENSITIVE_PATTERNS: ReadonlyArray<{
   },
   {
     category: "bearer header",
-    pattern: /\bAuthorization\s*:\s*Bearer\s+\S+/i,
+    pattern: /\bAuthorization[ \t]*:[ \t]*Bearer[ \t]+\S+/i,
   },
   {
     category: "github token",
@@ -120,8 +120,7 @@ function isClosed(bead: Bead | undefined): boolean {
   return bead?.status === "closed";
 }
 
-function activeDependencies(bead: Bead, all: readonly Bead[]): string[] {
-  const beadById = new Map(all.map((candidate) => [candidate.id, candidate]));
+function activeDependencies(bead: Bead, all: Map<string, Bead>): string[] {
   const blockers = new Set<string>();
 
   for (const dependency of bead.dependencies) {
@@ -129,7 +128,7 @@ function activeDependencies(bead: Bead, all: readonly Bead[]): string[] {
       continue;
     }
 
-    const blocker = beadById.get(dependency.depends_on_id);
+    const blocker = all.get(dependency.depends_on_id);
     if (!isClosed(blocker)) {
       blockers.add(dependency.depends_on_id);
     }
@@ -144,7 +143,7 @@ function renderLines(lines: string[]): string {
 
 export function projectBead(
   bead: Bead,
-  all: readonly Bead[]
+  all: Map<string, Bead>
 ): DesiredProjectItem {
   validateSafeText("title", bead.title);
   validateSafeText("description", bead.description);

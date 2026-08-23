@@ -31,6 +31,10 @@ function makeBead(overrides: Partial<Bead> = {}): Bead {
   };
 }
 
+function beadMap(...beads: Bead[]): Map<string, Bead> {
+  return new Map(beads.map((bead) => [bead.id, bead]));
+}
+
 function expectedBody(
   beadId: string,
   parent: string | undefined,
@@ -79,6 +83,11 @@ function expectUnsafe(
 test("rejects sensitive content categories", () => {
   expectUnsafe("title", "sk-live-abc123", /provider token/i);
   expectUnsafe("description", "xoxb-1234567890", /provider token/i);
+  expectUnsafe(
+    "description",
+    "github_pat_1234567890abcdefghijklmnopqrstuvwxyz",
+    /github token/i
+  );
   expectUnsafe("acceptance", "AWS_KEY=supersecret", /env assignment/i);
   expectUnsafe("acceptance", "API_TOKEN = value", /env assignment/i);
   expectUnsafe("description", "Authorization: Bearer secret", /bearer header/i);
@@ -124,7 +133,7 @@ test("parent-child dependency alone does not block", () => {
     parent: "coven-agents-parent",
   });
 
-  const item = projectBead(child, [parent, child]);
+  const item = projectBead(child, beadMap(parent, child));
 
   assert.equal(item.fields.Blocked, "No");
   assert.equal(
@@ -154,7 +163,7 @@ test("blocks dependency on parent still blocks", () => {
     parent: "coven-agents-parent",
   });
 
-  const item = projectBead(child, [parent, child]);
+  const item = projectBead(child, beadMap(parent, child));
 
   assert.equal(item.fields.Blocked, "Yes");
   assert.equal(
@@ -181,7 +190,7 @@ test("closed dependency does not block", () => {
     id: "coven-agents-child-closed",
   });
 
-  const item = projectBead(child, [closedBlocker, child]);
+  const item = projectBead(child, beadMap(closedBlocker, child));
 
   assert.equal(item.fields.Blocked, "No");
   assert.equal(
@@ -215,8 +224,8 @@ test("maps status type and priority fields", () => {
     status: "open",
   });
 
-  const closedItem = projectBead(closed, [closed]);
-  const reviewItem = projectBead(inReview, [inReview]);
+  const closedItem = projectBead(closed, beadMap(closed));
+  const reviewItem = projectBead(inReview, beadMap(inReview));
 
   assert.deepEqual(closedItem.fields, {
     "Bead ID": "coven-agents-closed",
