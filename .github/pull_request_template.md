@@ -12,7 +12,8 @@
 - [ ] `pnpm typecheck` passes
 - [ ] `pnpm test:unit` passes
 - [ ] `pnpm hygiene` reports no AT RISK worktrees
-- [ ] All commits are signed (`git log --pretty='%G?'` shows only `G`)
+- [ ] No commit is unsigned (`git log --pretty='%G?'` shows no `N` or `B`;
+      `E` is fine and means a bot commit signed with a key you do not hold)
 
 ## Notes
 
