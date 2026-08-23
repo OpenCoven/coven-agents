@@ -9,6 +9,7 @@ import {
   isValidElement,
   memo,
   type ReactNode,
+  type RefObject,
   type SetStateAction,
   useCallback,
   useEffect,
@@ -346,12 +347,18 @@ const PureToolbar = ({
   onClose?: () => void;
 }) => {
   const toolbarRef = useRef<HTMLDivElement>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout>>();
+  // React 19 types require an explicit initial value.
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined
+  );
 
   const [selectedTool, setSelectedTool] = useState<string | null>(null);
   const [isAnimating, setIsAnimating] = useState(false);
 
-  useOnClickOutside(toolbarRef, () => {
+  // usehooks-ts still declares RefObject<HTMLElement>, which React 19's
+  // RefObject<HTMLDivElement | null> no longer satisfies. The ref is only
+  // read, so widening it here is safe until usehooks-ts updates its types.
+  useOnClickOutside(toolbarRef as RefObject<HTMLElement>, () => {
     setIsToolbarVisible(false);
     setSelectedTool(null);
   });
