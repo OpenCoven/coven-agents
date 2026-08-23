@@ -1,3 +1,5 @@
+import type { AgentOwner } from "@opencoven/agent-contracts";
+
 /**
  * Sandbox keys are a tenant boundary, not a naming convention. Two accounts
  * whose keys collide share a container, and therefore share a workspace and
@@ -44,7 +46,30 @@ export function sandboxKey(tenantId: string, agentId: string): string {
   return `agent-${assertTenantId(tenantId)}-${agentId}`;
 }
 
-/** Resolves the tenant that owns a definition, tolerating pre-ownership records. */
-export function tenantOf(definition: { owner?: string | null }): string {
-  return definition.owner ?? UNOWNED_TENANT;
+/**
+ * Resolves the tenant that owns a definition, tolerating pre-ownership records.
+ *
+ * A cave familiar is isolated by its cave instance, not by its familiar id: one
+ * cave may run several familiars, and they belong to the same account, so the
+ * instance is the account boundary. `caveInstanceId` is passed through
+ * unmodified so `assertTenantId` can reject an unsafe one — per the note above,
+ * silently rewriting it would reintroduce the collision the check prevents.
+ *
+ * A standalone agent carries no identifier at all, so it resolves to the shared
+ * unowned tenant. That is safe here only because `sandboxKey` also includes the
+ * agent id, which is a uuid: two standalone agents still get distinct keys.
+ */
+export function tenantOf(definition: { owner?: AgentOwner | null }): string {
+  const { owner } = definition;
+  if (!owner) {
+    return UNOWNED_TENANT;
+  }
+  switch (owner.kind) {
+    case "tenant":
+      return owner.tenantId;
+    case "cave-familiar":
+      return owner.caveInstanceId;
+    default:
+      return UNOWNED_TENANT;
+  }
 }
