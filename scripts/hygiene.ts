@@ -1,4 +1,6 @@
 #!/usr/bin/env tsx
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   isReapable,
   type ReapVerdict,
@@ -79,15 +81,56 @@ async function status(): Promise<number> {
   return 0;
 }
 
+const runCmd = promisify(execFile);
+
+async function reap(confirmed: boolean): Promise<number> {
+  const rows = classify(await collectState());
+  const reapable = rows.filter((r) => r.verdict.safe);
+
+  if (reapable.length === 0) {
+    console.log("Nothing to reap.");
+    return 0;
+  }
+
+  if (!confirmed) {
+    console.log(`\nWould remove ${reapable.length} worktree(s):\n`);
+    for (const row of reapable) {
+      console.log(`  ${row.state.branch ?? "(detached)"}  ${row.state.path}`);
+    }
+    console.log("\nDry run. Re-run with --yes to actually remove them.");
+    return 0;
+  }
+
+  // Removals run sequentially — concurrent `git worktree remove`/
+  // `git branch -d` calls against the same repo can race on the shared git
+  // index and refs.
+  for (const row of reapable) {
+    // biome-ignore lint/performance/noAwaitInLoops: sequential by design, see above.
+    await runCmd("git", ["worktree", "remove", row.state.path]);
+    if (row.state.branch !== null) {
+      await runCmd("git", ["branch", "-d", row.state.branch]);
+    }
+    console.log(`Removed ${row.state.branch ?? row.state.path}`);
+  }
+
+  console.log(`\nReaped ${reapable.length} worktree(s).`);
+  return 0;
+}
+
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "status";
+  const confirmed = process.argv.includes("--yes");
 
   if (command === "status") {
     process.exit(await status());
   }
 
+  if (command === "reap") {
+    process.exit(await reap(confirmed));
+  }
+
   console.error(`Unknown command: ${command}`);
-  console.error("Usage: pnpm hygiene [status]");
+  console.error("Usage: pnpm hygiene [status|reap [--yes]]");
   process.exit(2);
 }
 
