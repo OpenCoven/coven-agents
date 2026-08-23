@@ -38,6 +38,12 @@ Run `pnpm hygiene doctor` before the first commit of a session to confirm
 signing is configured. The `pre-push` hook blocks unsigned commits, but it is
 per-clone — do not rely on it as the only guard.
 
+`git log --pretty='%G?'` reports a state, not a yes or no. `N` (unsigned) and
+`B` (bad signature) are failures. `E` is not: it means the commit is signed but
+the public key is not on this machine, which is how every GitHub-signed bot
+commit looks locally. Never try to "fix" an `E` on a dependabot commit — it is
+not yours to rewrite, and GitHub already shows it as Verified.
+
 ## Cleaning up
 
 ```bash
