@@ -18,22 +18,54 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Enable auto-merge for patch and minor bumps
-        if: >-
-          steps.meta.outputs.update-type ==
-            'version-update:semver-patch' ||
-          steps.meta.outputs.update-type ==
-            'version-update:semver-minor'
+      # `update-type` is a single summary field. For a grouped pull request it
+      # collapses 30+ dependencies into one value, and in practice a grouped
+      # PR reports semver-major, so gating on it means grouped PRs can never
+      # auto-merge — which defeats the point of grouping safe bumps. Inspect
+      # every updated dependency instead, and auto-merge only when none of
+      # them is a major bump.
+      - name: Classify the update
+        id: classify
+        env:
+          DEPS: ${{ steps.meta.outputs.updated-dependencies-json }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DEPS}" ] || [ "${DEPS}" = "null" ]; then
+            echo "No dependency metadata; treating as unsafe."
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          count=$(printf '%s' "$DEPS" | jq 'length')
+          if printf '%s' "$DEPS" \
+               | jq -e 'any(.[]; .updateType == "version-update:semver-major")' \
+               >/dev/null; then
+            echo "${count} dependencies, at least one major bump."
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "${count} dependencies, all minor or patch."
+            echo "safe=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Enable auto-merge when every bump is minor or patch
+        if: steps.classify.outputs.safe == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: gh pr merge --auto --squash "$PR_URL"
 
-      - name: Label major bumps for human review
-        if: >-
-          steps.meta.outputs.update-type ==
-            'version-update:semver-major'
+      - name: Label anything containing a major bump for human review
+        if: steps.classify.outputs.safe == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr edit "$PR_URL" --add-label needs-human-review
+        run: |
+          set -euo pipefail
+          # Create the label if it is missing. Without this the whole job
+          # fails on a fresh repository, which is how it failed the first
+          # time this workflow ran for real.
+          gh label create needs-human-review \
+            --description "Major version bump; do not auto-merge" \
+            --color d93f0b 2>/dev/null || true
+          gh pr edit "$PR_URL" --add-label needs-human-review
