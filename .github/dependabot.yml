@@ -1,10 +1,36 @@
 # Commit-pinned actions are only safe while something keeps the pins current,
 # so the pins in .github/workflows are maintained here rather than by hand.
 version: 2
+
 updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      # One grouped PR for safe bumps instead of a trickle of individual ones.
+      minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore(deps)"
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns:
+          - "*"
     commit-message:
-      prefix: chore(ci)
+      prefix: "chore(ci)"
