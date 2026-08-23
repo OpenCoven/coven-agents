@@ -276,6 +276,27 @@ git add scripts/hygiene-core.ts scripts/hygiene-core.test.ts
 git commit -S -m "feat(hygiene): add pure worktree reap predicate"
 ```
 
+**Hardening applied during execution.** Code review of this task found three
+fail-open gaps in the version above. They landed in a follow-up commit and
+should be treated as part of Task 1:
+
+1. `PROTECTED_BRANCHES` is an exported mutable array — a consumer could empty it
+   and silently disable protection process-wide. Wrap it:
+   `export const PROTECTED_BRANCHES: readonly string[] = Object.freeze([...])`.
+2. The protected-branch comparison is untrimmed, so `"main "` from stray git
+   plumbing whitespace reads as an ordinary reapable branch. Trim before
+   comparing, and treat a whitespace-only branch as detached. Do not lowercase —
+   git refs are case-sensitive.
+3. `dirtyCount > 0` is `false` when the value is `NaN`, so malformed input is
+   treated as clean and can yield `safe: true`. Require
+   `Number.isInteger(n) && n >= 0`; otherwise push
+   `` `invalid dirty count: ${n}` `` / `` `invalid unpushed count: ${n}` ``
+   instead of the normal reason.
+
+Three extra tests cover these: structural guards accumulating with each other,
+whitespace-padded protected branches, and invalid counters failing closed.
+Total after hardening: 11 tests.
+
 ---
 
 ## Task 2: Worktree state collection
@@ -360,16 +381,20 @@ async function existsOnOrigin(branch: string): Promise<boolean> {
 }
 
 async function countUnpushed(path: string, branch: string): Promise<number> {
+  // Commits on this branch that no remote ref can reach. Correct whether or
+  // not origin/<branch> exists, unlike an `origin/<branch>..<branch>` range —
+  // that range's fallback counted every ancestor of the branch, reporting 19
+  // for a branch that was really 6 ahead.
   const out = await tryGit(
-    ["rev-list", "--count", `origin/${branch}..${branch}`],
+    ["rev-list", "--count", branch, "--not", "--remotes"],
     path
   );
   if (out === null) {
-    // No remote-tracking ref: every commit on the branch is unpushed.
-    const total = await tryGit(["rev-list", "--count", branch], path);
-    return total === null ? 1 : Number.parseInt(total, 10);
+    // Unknown. Assume unpushed so the predicate fails closed.
+    return 1;
   }
-  return Number.parseInt(out, 10);
+  const parsed = Number.parseInt(out, 10);
+  return Number.isNaN(parsed) ? 1 : parsed;
 }
 
 /**
@@ -461,7 +486,7 @@ Run:
 ```bash
 pnpm exec tsx -e "import('./scripts/hygiene-git').then(async (m) => console.log(await m.collectState()))"
 ```
-Expected: a two-element array. The primary checkout with `isPrimary: true`, and `agent-runner-v1-contract` with a non-zero `dirtyCount` and `existsOnOrigin: false`.
+Expected: a two-element array. The primary checkout with `isPrimary: true`, and `agent-runner-v1-contract` with `dirtyCount: 24`, `existsOnOrigin: false`, and `unpushedCommits: 6`. A large `unpushedCommits` such as 19 means `countUnpushed` is counting ancestors rather than commits unreachable from any remote — check the `--not --remotes` form.
 
 - [ ] **Step 4: Commit**
 
@@ -1911,8 +1936,8 @@ cd /Users/buns/.config/superpowers/worktrees/coven-agents/agent-runner-v1-contra
 git fetch origin
 git rebase origin/main
 ```
-Expected: clean rebase. Resolve conflicts if any — it was 6 behind before the
-scaffolding landed, so expect some.
+Expected: resolve conflicts if any. The branch was five behind `main` when this
+plan was written and drifts further with every merge, so expect some.
 
 - [ ] **Step 2: Verify every commit is still signed after the rebase**
 

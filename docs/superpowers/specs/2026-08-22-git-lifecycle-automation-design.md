@@ -24,7 +24,7 @@ Measured 2026-08-22.
 - Four remote branches beyond `main`. Two (`chore/dependabot-remediation`,
   `feat/keyless-multi-harness-execution`) are fully merged with zero commits
   ahead. One (PR #4, `next` 16.2.11) is open and `CONFLICTING`.
-- One worktree, `agent-runner-v1-contract`: five commits ahead, six behind, 24
+- One worktree, `agent-runner-v1-contract`: six commits ahead, five behind, 24
   uncommitted files, and **never pushed to origin**. New `env-contract.ts`,
   `yolo-agent.ts`, and `test-support/` exist only on one laptop.
 
