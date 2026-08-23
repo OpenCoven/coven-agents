@@ -20,6 +20,7 @@ import {
   type RunEventStreamOptions,
   type RunEventStreamSnapshot,
 } from "./sse.js";
+import { tenantOf, UNOWNED_TENANT } from "./tenant.js";
 
 type Awaitable<T> = T | Promise<T>;
 
@@ -31,7 +32,11 @@ export type CloudRunnerEnvironment = Omit<
 };
 
 export type CloudRunnerDirectory = {
-  list: () => Awaitable<AgentDefinition[]>;
+  /**
+   * Takes the tenant rather than filtering at the call site, so a listing can
+   * never be assembled without one. An accidental `list()` is a type error.
+   */
+  list: (tenantId: string) => Awaitable<AgentDefinition[]>;
   registerRun: (runId: string, agentId: string) => Awaitable<void>;
   remove: (agentId: string) => Awaitable<void>;
   upsert: (definition: AgentDefinition) => Awaitable<AgentDefinition>;
@@ -184,6 +189,15 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
         );
       }
 
+      /**
+       * The single shared runner token proves authorization, not identity, so
+       * every caller resolves to one tenant today. It is threaded through
+       * ownership, listing and every per-entity lookup regardless, so
+       * introducing real per-user identity becomes a change to this one
+       * expression rather than a hunt for every place isolation was assumed.
+       */
+      const callerTenant = UNOWNED_TENANT;
+
       if (
         url.pathname === "/api/diagnostics/sandbox" &&
         request.method === "POST"
@@ -217,7 +231,11 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
 
         if (url.pathname === "/api/agents") {
           if (request.method === "GET") {
-            return json({ agents: await directory.list() }, {}, cors);
+            return json(
+              { agents: await directory.list(callerTenant) },
+              {},
+              cors
+            );
           }
           if (request.method === "POST") {
             const input = createAgentInputSchema.parse(await readJson(request));
@@ -234,11 +252,10 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               createdAt: now,
               id: crypto.randomUUID(),
               lastRunAt: null,
-              // This route table carries no caller identity yet, so it cannot
-              // make a tenant claim and says so instead of inventing one.
-              // Wiring it in without replacing this would put every agent in
-              // the shared unowned tenant.
-              owner: { kind: "standalone" },
+              // Ownership is stamped from the caller, never from the request:
+              // createAgentInputSchema omits `owner` and is strict, so a
+              // submitted one is rejected rather than reaching this spread.
+              owner: { kind: "tenant", tenantId: callerTenant },
               status: "idle",
               updatedAt: now,
             };
@@ -257,7 +274,12 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
           const id = agentIdSchema.parse(decodeURIComponent(rawId ?? ""));
           const agent = await yoloAgent(id);
           const current = await agent.snapshot();
-          if (!current) {
+          /**
+           * Knowing an agent id must not be enough to reach it. A definition
+           * owned by another tenant is reported as 404 rather than 403, so the
+           * endpoint does not confirm that the id exists for someone else.
+           */
+          if (!current || tenantOf(current) !== callerTenant) {
             throw new HttpError("Agent was not found.", 404, "not_found");
           }
 
@@ -318,6 +340,16 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             throw new HttpError("Run was not found.", 404, "run_not_found");
           }
           const agent = await yoloAgent(agentId);
+          /**
+           * A run id resolves to an agent, so reaching a run without checking
+           * that agent's owner would let anyone holding an id read, stream or
+           * cancel another tenant's run. The ownership check belongs here,
+           * before the action, not on the agent routes alone.
+           */
+          const owning = await agent.snapshot();
+          if (!owning || tenantOf(owning) !== callerTenant) {
+            throw new HttpError("Run was not found.", 404, "run_not_found");
+          }
           if (!action && request.method === "GET") {
             const run = await agent.getRun(runId);
             if (!run) {
