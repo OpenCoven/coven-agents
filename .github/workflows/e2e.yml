@@ -1,11 +1,22 @@
 name: e2e
 
+# Opt-in, not opt-out. The Playwright suite is not CI-ready: chat.test.ts and
+# model-selector.test.ts reach /api/models and the chat route, which call the
+# AI gateway. With placeholder credentials those calls hang until the 240s
+# per-test timeout in playwright.config.ts, and the job burns its full 20
+# minutes without finishing. Running that on every pull request would teach
+# everyone to ignore a red check.
+#
+# Add the `run-e2e` label, or dispatch manually, to run it deliberately.
+# Making this automatic again requires either real credentials in CI or
+# network-boundary mocks in the specs.
 on:
   pull_request:
     branches: [main]
     # `labeled` must be listed explicitly — it is not a default type, and
-    # without it the run-e2e escape hatch below can never fire.
+    # without it the run-e2e gate below can never fire.
     types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
 
 concurrency:
   group: e2e-${{ github.ref }}
@@ -14,9 +25,9 @@ concurrency:
 jobs:
   e2e:
     name: e2e
-    # Runs on every PR to main, or on demand via the run-e2e label.
+    # Deliberate runs only: the run-e2e label, or a manual dispatch.
     if: >-
-      github.event.action != 'labeled' ||
+      github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'run-e2e')
     runs-on: ubuntu-latest
     timeout-minutes: 20

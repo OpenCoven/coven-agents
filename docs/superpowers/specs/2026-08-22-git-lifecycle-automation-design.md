@@ -30,17 +30,31 @@ Measured 2026-08-22.
 
 ## Constraints
 
-**Branch protection is unavailable.** The repository is private on a free plan;
-the protection and rulesets APIs return 403 with "Upgrade to GitHub Pro or make
-this repository public." Enforcement must be advisory today, and structured so
-that enabling real protection later is a settings change rather than a redesign.
+**Branch protection was unavailable — this has since changed.** As designed,
+the repository was private on a free plan and the protection and rulesets APIs
+returned 403 with "Upgrade to GitHub Pro or make this repository public."
+That forced an advisory design, structured so enabling real protection later
+would be a settings change rather than a redesign.
+
+During implementation the repository was made public, which lifted the
+restriction. The advisory structure still stands and the protection-ready seam
+paid off exactly as intended: stable job names (`Verify`, `Actionlint`) drop
+straight into required status checks. Enabling protection also closes the two
+gaps this document flags below — bypassable `--no-verify` hooks and
+`automerge`'s `--auto` having no required checks to wait on.
 
 **Four actor classes push here**: AI coding agents, the solo maintainer,
 Dependabot, and other human collaborators. Any rule that only holds locally
 leaves three of the four uncovered.
 
-**Actions minutes are metered** at 2,000/month for private repositories on the
-free plan.
+**Actions was billing-blocked, and minutes were metered.** As designed, private
+repositories on the free plan draw on 2,000 minutes/month. In practice the
+constraint was harder than metering: every job was rejected before starting
+with "recent account payments have failed or your spending limit needs to be
+increased." That is why all 16 workflow runs in this repository's history had
+failed and the only successes were Dependabot's own infrastructure, which does
+not use Actions runners. Making the repository public removed both the block
+and the meter.
 
 **End-to-end tests need real infrastructure.** `playwright.config.ts` boots
 `pnpm dev` as its `webServer`, and `.env.example` requires `POSTGRES_URL`,
@@ -75,18 +89,29 @@ Four workflow files, kept few deliberately.
 and `actionlint`. No service containers, no browsers, pnpm store cached.
 Roughly 2–3 minutes per run.
 
-**`e2e.yml`** — slow lane. Triggers on pull requests targeting `main`, plus a
-`run-e2e` label as a manual escape hatch. Postgres and Redis run as service
-containers rather than hosted infrastructure. `AUTH_SECRET` is generated per
-run. `AI_GATEWAY_API_KEY` and `BLOB_READ_WRITE_TOKEN` are set to non-empty
-placeholder values rather than real credentials: the four existing specs assert
-on page rendering and auth form structure and never reach a code path that
-calls either service. If a future spec does exercise those paths, it must mock
-at the network boundary rather than promote a live secret into CI. Roughly 6–8
-minutes per run.
+**`e2e.yml`** — slow lane, **opt-in via the `run-e2e` label or manual dispatch**.
+Postgres and Redis run as service containers rather than hosted infrastructure.
+`AUTH_SECRET` is generated per run. `AI_GATEWAY_API_KEY` and
+`BLOB_READ_WRITE_TOKEN` are set to non-empty placeholder values rather than
+real credentials.
 
-Budget: about 100 pushes at 2.5 minutes (250) plus about 20 pull requests at
-two runs of 7 minutes (280) is roughly 530 of 2,000 minutes.
+This section originally claimed the four existing specs "never reach a code
+path that calls either service" and could therefore run on every pull request.
+**That was wrong.** The first real run proved it: every infrastructure step
+passed in 68 seconds — containers, migrations, browsers — and then `pnpm test`
+ran 1,144 seconds and was killed by the job timeout. `chat.test.ts` and
+`model-selector.test.ts` exercise `/api/models` and the chat route, which do
+call the AI gateway; against a placeholder key those calls hang until the 240s
+per-test timeout in `playwright.config.ts`.
+
+The workflow is therefore opt-in. Making it automatic again requires either
+real credentials in CI or network-boundary mocks in the specs — app work,
+outside the scope of this lifecycle design.
+
+Budget: with e2e opt-in, routine spend is the fast lane only — about 100 pushes
+and pull request runs at 2.5 minutes is roughly 250 minutes. Public
+repositories get unmetered Actions, so this is now a runner-time consideration
+rather than a billing one.
 
 **`hygiene.yml`** — two triggers in one file. On `pull_request: closed` where
 merged, delete the head branch. On a weekly schedule, find remote branches
