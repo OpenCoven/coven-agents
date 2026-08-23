@@ -104,6 +104,7 @@ test("rejects priority 4", () => {
             acceptance_criteria: "Valid criteria.",
             description: "Priority must stay in range.",
             id: "coven-agents-priority",
+            issue_type: "task",
             metadata: {
               runner: "Shared",
               size: "XS",
@@ -112,7 +113,6 @@ test("rejects priority 4", () => {
             priority: 4,
             status: "open",
             title: "Reject invalid priority",
-            type: "task",
           },
         ])
       ),
@@ -202,4 +202,5 @@ test("parsed beads are assignable to Bead and keep open status", () => {
   const typedBead: Bead = bead;
 
   assert.equal(typedBead.status, "open");
+  assert.equal(typedBead.issue_type, "task");
 });

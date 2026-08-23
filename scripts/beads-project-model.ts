@@ -61,10 +61,7 @@ const beadSourceSchema = z
   })
   .passthrough();
 
-const beadSchema = beadSourceSchema.transform(({ issue_type, ...bead }) => ({
-  ...bead,
-  type: issue_type,
-}));
+const beadSchema = beadSourceSchema;
 
 export type Bead = z.infer<typeof beadSchema>;
 
