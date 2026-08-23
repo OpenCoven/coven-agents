@@ -20,27 +20,37 @@ function expectZodIssue(
   });
 }
 
-test("parses valid Beads JSON with parent-child dependencies and metadata", () => {
+test("parses real Beads CLI JSON with issue_type and extra fields", () => {
   const parsed = parseBeadsJson(
     JSON.stringify([
       {
         acceptance_criteria:
           "The roadmap item is visible in the project board.",
+        comment_count: 3,
+        created_at: "2026-08-23T09:00:00Z",
+        created_by: "OpenCoven",
+        dependency_count: 0,
+        dependent_count: 1,
         description: "Define the shared security model for project board sync.",
         id: "coven-agents-security",
+        issue_type: "epic",
         metadata: {
           projectStatus: "Todo",
           runner: "Shared",
           size: "M",
           workstream: "Security & privacy",
         },
+        owner: "OpenCoven",
         priority: 1,
         status: "open",
         title: "Define project board security model",
-        type: "epic",
+        updated_at: "2026-08-23T09:15:00Z",
       },
       {
         acceptance_criteria: "Child work can be blocked by the parent epic.",
+        comment_count: 0,
+        created_at: "2026-08-23T09:05:00Z",
+        created_by: "OpenCoven",
         dependencies: [
           {
             depends_on_id: "coven-agents-security",
@@ -48,18 +58,22 @@ test("parses valid Beads JSON with parent-child dependencies and metadata", () =
             type: "blocks",
           },
         ],
+        dependency_count: 1,
+        dependent_count: 0,
         description: "Add redaction to the sync projection.",
         id: "coven-agents-security.1",
+        issue_type: "feature",
         metadata: {
           runner: "Control plane",
           size: "S",
           workstream: "Security & privacy",
         },
+        owner: "OpenCoven",
         parent: "coven-agents-security",
         priority: 2,
         status: "in_progress",
         title: "Add secret redaction",
-        type: "feature",
+        updated_at: "2026-08-23T09:20:00Z",
       },
     ])
   );
@@ -115,6 +129,7 @@ test("rejects unsupported issue type decision", () => {
             acceptance_criteria: "Valid criteria.",
             description: "Unsupported type must fail.",
             id: "coven-agents-decision",
+            issue_type: "decision",
             metadata: {
               runner: "Shared",
               size: "XS",
@@ -123,15 +138,14 @@ test("rejects unsupported issue type decision", () => {
             priority: 0,
             status: "open",
             title: "Reject invalid type",
-            type: "decision",
           },
         ])
       ),
-    (path) => path.at(-1) === "type"
+    (path) => path.at(-1) === "issue_type"
   );
 });
 
-test("parses project draft items and canonicalizes top-level fields", () => {
+test("parses real project item-list JSON with extra content fields", () => {
   const parsed = parseProjectJson(
     JSON.stringify({
       items: [
@@ -139,20 +153,28 @@ test("parses project draft items and canonicalizes top-level fields", () => {
           "bead id": "coven-agents-security.1",
           content: {
             body: "Draft body",
+            number: 42,
+            repository: "OpenCoven/coven-agents",
             title: "Draft title",
             type: "DraftIssue",
+            url: "https://github.com/OpenCoven/coven-agents/issues/42",
           },
           id: "PJI_1",
           runner: "Shared",
           type: "feature",
+          url: "https://github.com/orgs/OpenCoven/projects/10/views/1?pane=issue&itemId=PJI_1",
         },
       ],
+      pageInfo: {
+        hasNextPage: false,
+      },
       totalCount: 1,
     })
   );
 
   assert.equal(parsed.totalCount, 1);
   assert.equal(parsed.items[0].content.type, "DraftIssue");
+  assert.equal(parsed.items[0].content.number, 42);
   assert.equal(parsed.items[0].fields["Bead ID"], "coven-agents-security.1");
   assert.equal(parsed.items[0].fields.Type, "feature");
 });
@@ -164,6 +186,7 @@ test("parsed beads are assignable to Bead and keep open status", () => {
         acceptance_criteria: "The item can be read as a Bead.",
         description: "Return a typed bead instance.",
         id: "coven-agents-assignment",
+        issue_type: "task",
         metadata: {
           runner: "Local",
           size: "XS",
@@ -172,7 +195,6 @@ test("parsed beads are assignable to Bead and keep open status", () => {
         priority: 0,
         status: "open",
         title: "Type check bead return values",
-        type: "task",
       },
     ])
   );

@@ -46,20 +46,25 @@ const metadataSchema = z
   })
   .strict();
 
-export const beadSchema = z
+const beadSourceSchema = z
   .object({
     acceptance_criteria: z.string().trim().min(1),
     dependencies: z.array(dependencySchema).default([]),
     description: z.string().trim().min(1),
     id: z.string().regex(/^coven-agents-[a-z0-9.-]+$/),
+    issue_type: z.enum(BEAD_TYPES),
     metadata: metadataSchema,
     parent: z.string().trim().min(1).optional(),
     priority: z.number().int().min(0).max(2),
     status: z.enum(BEAD_STATUSES),
     title: z.string().trim().min(1),
-    type: z.enum(BEAD_TYPES),
   })
-  .strict();
+  .passthrough();
+
+const beadSchema = beadSourceSchema.transform(({ issue_type, ...bead }) => ({
+  ...bead,
+  type: issue_type,
+}));
 
 export type Bead = z.infer<typeof beadSchema>;
 
@@ -68,7 +73,7 @@ export type ProjectItem = {
     body: string;
     title: string;
     type: string;
-  };
+  } & Record<string, unknown>;
   fields: Record<string, string>;
   id: string;
 };
@@ -84,7 +89,7 @@ const projectContentSchema = z
     title: z.string(),
     type: z.string(),
   })
-  .strict();
+  .passthrough();
 
 const projectItemSchema = z
   .object({
@@ -100,7 +105,7 @@ const projectJsonSchema = z
     items: z.array(projectItemSchema),
     totalCount: z.number().int().nonnegative(),
   })
-  .strict();
+  .passthrough();
 
 const canonicalProjectFieldNames: Readonly<Record<string, string>> = {
   "bead id": "Bead ID",
