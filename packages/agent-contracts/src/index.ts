@@ -165,8 +165,18 @@ const validateAgentBackendRuntime = (
   }
 };
 
+/**
+ * `owner` is omitted deliberately. Ownership is a claim the server makes about
+ * the caller, never one the caller makes about itself, and `.strict()` means a
+ * submitted `owner` is rejected outright rather than silently dropped.
+ *
+ * Today the worker would win anyway, because it spreads its own owner after the
+ * parsed input. That ordering is not something to rely on: reversing the spread
+ * would hand agent ownership to whoever asked for it, with nothing failing.
+ */
 export const createAgentInputSchema = z
   .object(agentDefinitionInputShape)
+  .omit({ owner: true })
   .strict()
   .superRefine(validateAgentBackendRuntime);
 

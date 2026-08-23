@@ -206,11 +206,15 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
         }
       }
 
-      const directory = await dependencies.getDirectory(environment);
-      const yoloAgent = (agentId: string): Promise<CloudRunnerAgent> =>
-        Promise.resolve(dependencies.getYoloAgent(environment, agentId));
-
       try {
+        // Resolved inside the try: a Durable Object binding failure here would
+        // otherwise escape `fail()` and return a bare platform 500, with no
+        // error envelope and no CORS headers, so the browser would report it as
+        // a network error rather than the failure it is.
+        const directory = await dependencies.getDirectory(environment);
+        const yoloAgent = (agentId: string): Promise<CloudRunnerAgent> =>
+          Promise.resolve(dependencies.getYoloAgent(environment, agentId));
+
         if (url.pathname === "/api/agents") {
           if (request.method === "GET") {
             return json({ agents: await directory.list() }, {}, cors);
@@ -230,6 +234,11 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               createdAt: now,
               id: crypto.randomUUID(),
               lastRunAt: null,
+              // This route table carries no caller identity yet, so it cannot
+              // make a tenant claim and says so instead of inventing one.
+              // Wiring it in without replacing this would put every agent in
+              // the shared unowned tenant.
+              owner: { kind: "standalone" },
               status: "idle",
               updatedAt: now,
             };
@@ -269,6 +278,10 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               createdAt: current.createdAt,
               id,
               lastRunAt: current.lastRunAt,
+              // An update must never move an agent between tenants, so the
+              // stored owner is carried forward rather than taken from the
+              // request or re-derived.
+              owner: current.owner,
               status: current.status,
               updatedAt: new Date().toISOString(),
             });

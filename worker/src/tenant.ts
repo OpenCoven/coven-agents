@@ -69,7 +69,26 @@ export function tenantOf(definition: { owner?: AgentOwner | null }): string {
       return owner.tenantId;
     case "cave-familiar":
       return owner.caveInstanceId;
-    default:
+    case "standalone":
       return UNOWNED_TENANT;
+    default:
+      /**
+       * Every kind is handled above, so `owner` narrows to `never` here and
+       * adding one to the contract without deciding its tenant is a compile
+       * error rather than a runtime surprise.
+       *
+       * Falling back to UNOWNED_TENANT would have been an authorization bug,
+       * not a harmless default: `callerTenant` is currently UNOWNED_TENANT, so
+       * an unhandled kind would have matched the ownership check and granted
+       * every caller access. Throwing fails closed instead — the request
+       * becomes a 500 rather than a silent cross-tenant read.
+       */
+      return assertUnreachableOwner(owner);
   }
+}
+
+function assertUnreachableOwner(owner: never): never {
+  throw new TenantKeyError(
+    `Owner kind ${JSON.stringify(owner)} has no tenant mapping. Add one before the kind ships.`
+  );
 }

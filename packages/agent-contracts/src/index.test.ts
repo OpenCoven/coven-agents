@@ -155,7 +155,10 @@ test("defaults new and legacy agent definitions to standalone ownership", () => 
     runtime: "copilot",
   });
 
-  assert.deepEqual(result.owner, { kind: "standalone" });
+  // Create input carries no owner at all — the server assigns it — so the
+  // default belongs to the definition schema, which is what has to keep
+  // parsing records stored before ownership existed.
+  assert.equal("owner" in result, false);
   assert.deepEqual(
     agentDefinitionSchema.parse({
       backend: result.backend,
@@ -481,4 +484,44 @@ test("bounds command and file evidence arrays in snapshots and legacy results", 
     runResultSchema.safeParse(result(expectedLimit + 1)).success,
     false
   );
+});
+
+test("the owner union accepts every kind the worker resolves a tenant for", () => {
+  // tenantOf switches exhaustively over these, so a kind that stops parsing
+  // here would strand definitions the worker still has to authorise.
+  const owners = [
+    { kind: "standalone" },
+    { kind: "tenant", tenantId: "acct_42" },
+    {
+      caveInstanceId: "cave_1",
+      familiarId: "familiar_9",
+      kind: "cave-familiar",
+      sourceRevision: "abc123",
+    },
+  ];
+
+  for (const owner of owners) {
+    assert.equal(
+      agentOwnerSchema.safeParse(owner).success,
+      true,
+      `${JSON.stringify(owner)} must parse`
+    );
+  }
+  assert.equal(agentOwnerSchema.safeParse({ kind: "nope" }).success, false);
+});
+
+test("a client cannot name its own owner when creating an agent", () => {
+  // Ownership is a claim the server makes about the caller. Accepting one from
+  // the request would let a caller create an agent inside another tenant.
+  const result = createAgentInputSchema.safeParse({
+    backend: "cloud",
+    description: "",
+    instructions: "Do the thing.",
+    model: "auto",
+    name: "Impostor",
+    owner: { kind: "tenant", tenantId: "someone_else" },
+    runtime: "copilot",
+  });
+
+  assert.equal(result.success, false);
 });

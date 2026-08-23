@@ -253,6 +253,10 @@ const server = createServer(async (request, response) => {
           createdAt: now,
           id: randomUUID(),
           lastRunAt: null,
+          // The local runner binds to loopback and serves one operator, so
+          // there is no tenant to claim. Standalone says that plainly rather
+          // than inventing an identity the runner cannot verify.
+          owner: { kind: "standalone" },
           status: "idle",
           updatedAt: now,
         };
