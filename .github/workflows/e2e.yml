@@ -1,0 +1,98 @@
+name: e2e
+
+# Opt-in, not opt-out. The Playwright suite is not CI-ready: chat.test.ts and
+# model-selector.test.ts reach /api/models and the chat route, which call the
+# AI gateway. With placeholder credentials those calls hang until the 240s
+# per-test timeout in playwright.config.ts, and the job burns its full 20
+# minutes without finishing. Running that on every pull request would teach
+# everyone to ignore a red check.
+#
+# Add the `run-e2e` label, or dispatch manually, to run it deliberately.
+# Making this automatic again requires either real credentials in CI or
+# network-boundary mocks in the specs.
+on:
+  pull_request:
+    branches: [main]
+    # `labeled` must be listed explicitly — it is not a default type, and
+    # without it the run-e2e gate below can never fire.
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: e2e
+    # Deliberate runs only: the run-e2e label, or a manual dispatch.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'run-e2e')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: coven_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-retries 5
+          --health-timeout 5s
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-retries 5
+          --health-timeout 5s
+        ports:
+          - 6379:6379
+
+    env:
+      # Placeholder values. The four specs assert on page rendering and auth
+      # form structure and never reach a code path that calls these services.
+      # A spec that does must mock at the network boundary, not promote a live
+      # secret into CI.
+      AI_GATEWAY_API_KEY: placeholder-not-a-real-key
+      BLOB_READ_WRITE_TOKEN: placeholder-not-a-real-token
+      POSTGRES_URL: postgres://postgres:postgres@localhost:5432/coven_test
+      REDIS_URL: redis://localhost:6379
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Generate a per-run auth secret
+        run: echo "AUTH_SECRET=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+
+      - name: Run database migrations
+        run: pnpm db:migrate
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+
+      - run: pnpm test
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

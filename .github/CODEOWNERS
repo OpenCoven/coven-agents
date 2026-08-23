@@ -1,0 +1,10 @@
+# Advisory until branch protection is enabled, at which point these become
+# required reviewers with no further changes needed.
+
+*                       @BunsDev
+
+/worker/                @BunsDev
+/local-runner/          @BunsDev
+/packages/              @BunsDev
+/.github/               @BunsDev
+/scripts/               @BunsDev

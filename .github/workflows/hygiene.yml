@@ -1,0 +1,85 @@
+name: hygiene
+
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    # Mondays at 09:00 UTC.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: read
+
+jobs:
+  delete-merged-head:
+    name: delete merged head branch
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete the head branch
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$BRANCH" = "main" ]; then
+            echo "Refusing to delete main."
+            exit 0
+          fi
+          gh api -X DELETE \
+            "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}" \
+            && echo "Deleted ${BRANCH}" \
+            || echo "Already deleted: ${BRANCH}"
+
+  reap-merged-branches:
+    name: reap merged branches
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Delete remote branches already merged into main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          reaped=""
+          for ref in $(git branch -r --merged origin/main \
+                        | grep -v 'origin/main$' \
+                        | grep -v 'HEAD' \
+                        | sed 's|origin/||' \
+                        | tr -d ' '); do
+            case "$ref" in
+              main|master) continue ;;
+            esac
+            gh api -X DELETE \
+              "repos/${GITHUB_REPOSITORY}/git/refs/heads/${ref}" \
+              && reaped="${reaped}- ${ref}"$'\n'
+          done
+
+          if [ -z "$reaped" ]; then
+            echo "Nothing to reap."
+            exit 0
+          fi
+
+          printf 'Reaped:\n%s' "$reaped"
+          {
+            echo "Branches deleted on $(date -u +%Y-%m-%d):"
+            echo ""
+            printf '%s' "$reaped"
+          } > body.md
+
+          existing=$(gh issue list --label branch-hygiene --state open \
+                      --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file body.md
+          else
+            gh issue create --title "Branch hygiene log" \
+              --label branch-hygiene --body-file body.md
+          fi
