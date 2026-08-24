@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { demoTranscriptSchema } from "./index";
+import { demoTranscriptSchema, runEventsSchema } from "./index";
 
 const transcript = {
   events: [
@@ -102,4 +102,25 @@ test("rejects negative event offsets", () => {
     }).success,
     false
   );
+});
+
+test("rejects duplicate and decreasing event ids", () => {
+  for (const ids of [
+    [1, 1],
+    [2, 1],
+  ]) {
+    const events = ids.map((id, index) => ({
+      event: { ...transcript.events[0].event, id },
+      offsetMs: index,
+    }));
+
+    assert.equal(
+      runEventsSchema.safeParse(events.map(({ event }) => event)).success,
+      false
+    );
+    assert.equal(
+      demoTranscriptSchema.safeParse({ ...transcript, events }).success,
+      false
+    );
+  }
 });

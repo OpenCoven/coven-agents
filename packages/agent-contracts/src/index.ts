@@ -433,7 +433,18 @@ export const demoTranscriptSchema = z
           })
           .strict()
       )
-      .min(1),
+      .min(1)
+      .superRefine((events, context) => {
+        for (let index = 1; index < events.length; index += 1) {
+          if (events[index].event.id <= events[index - 1].event.id) {
+            context.addIssue({
+              code: "custom",
+              message: "Run event ids must increase monotonically.",
+              path: [index, "event", "id"],
+            });
+          }
+        }
+      }),
     name: z
       .string()
       .min(1)
