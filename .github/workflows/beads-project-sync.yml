@@ -80,6 +80,7 @@ jobs:
           remote_output="$(bd -C "$BEADS_WORKSPACE" dolt remote list)"
           printf '%s\n' "$remote_output" | grep -Eq '^origin([[:space:]]|$)'
           bd -C "$BEADS_WORKSPACE" dolt status > /dev/null
+          bd -C "$BEADS_WORKSPACE" dolt pull
 
       - name: Preview reconciliation
         run: pnpm beads:sync preview
