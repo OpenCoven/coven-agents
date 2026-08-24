@@ -1,6 +1,5 @@
 import { getSandbox } from "@cloudflare/sandbox";
 import {
-  AGENT_RUNNER_LIMITS,
   type AgentDefinition,
   agentDefinitionSchema,
   type CommandEvidence,
@@ -9,6 +8,7 @@ import {
   type RunResult,
   type RunSnapshot,
   runAgentInputSchema,
+  runSnapshotToResult,
   startRunInputSchema,
 } from "@opencoven/agent-contracts";
 import type { HarnessStatus } from "@opencoven/harness";
@@ -86,35 +86,11 @@ export function toFileEvidence(
 }
 
 /**
- * The HTTP surface still returns a `RunResult`, so a record is projected back
- * onto that shape rather than the API changing shape underneath its clients.
- * A cancelled run has no `RunResult` equivalent and reports as failed, which is
- * what a caller waiting on a result needs to know.
+ * Delegates to the contract so the worker and the browser client cannot
+ * disagree about how a snapshot becomes a result.
  */
 export function toRunResult(record: CloudRunRecord): RunResult {
-  const { run } = record;
-  return {
-    agentId: run.agentId,
-    commandResults: run.commandEvidence
-      .map((evidence) => ({
-        command: evidence.command,
-        exitCode: evidence.exitCode,
-        stderr: evidence.stderr,
-        stdout: evidence.stdout,
-      }))
-      .slice(0, AGENT_RUNNER_LIMITS.maxCommandResults),
-    completedAt: run.completedAt ?? run.createdAt,
-    fileOperations: run.fileEvidence
-      .map((evidence) => ({
-        operation: evidence.operation,
-        path: evidence.path,
-      }))
-      .slice(0, AGENT_RUNNER_LIMITS.maxFileOperations),
-    id: run.id,
-    output: run.output,
-    startedAt: run.startedAt ?? run.createdAt,
-    status: run.status === "completed" ? "completed" : "failed",
-  };
+  return runSnapshotToResult(record.run);
 }
 
 export class AgentDirectory extends Agent<Env, DirectoryState> {
@@ -239,10 +215,23 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     if (plan.kind === "already_running") {
       throw new AlreadyRunningError();
     }
-    if (plan.kind === "conflict" || plan.kind === "existing") {
-      // Unreachable while operation ids are generated per call; returning the
-      // recorded run is still the correct answer if that changes.
-      return toRunResult(plan.record);
+    if (plan.kind === "conflict") {
+      throw new OperationConflictError();
+    }
+    if (plan.kind === "existing") {
+      /**
+       * Unreachable while `execute` mints its own operation id, so this can
+       * only be a replay of a run that is already recorded.
+       *
+       * It previously projected the record onto a result unconditionally,
+       * which would have reported a run still in flight as failed — `execute`
+       * promises a finished outcome and has none to give here. A terminal
+       * record is returned; anything else is reported as still running.
+       */
+      if (isTerminal(plan.record.run.status)) {
+        return toRunResult(plan.record);
+      }
+      throw new AlreadyRunningError();
     }
 
     return toRunResult(await this.driveHarness(definition, plan.record, task));

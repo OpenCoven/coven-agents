@@ -434,6 +434,55 @@ export const agentEnvelopeSchema = z.object({
   agent: agentDefinitionSchema,
 });
 
+/**
+ * Projects a run snapshot onto the older `RunResult` shape.
+ *
+ * Two callers need this and they must agree: the cloud worker, which still
+ * answers `RunResult` on its synchronous route, and the browser client, which
+ * polls a snapshot to completion and hands the caller a result. Defining it
+ * twice would let the two drift over something as small as how a cancelled run
+ * is reported.
+ *
+ * `RunResult` has no cancelled state, so a cancelled run reports as failed —
+ * which is what a caller waiting on an outcome needs to know.
+ */
+export function runSnapshotToResult(
+  snapshot: z.infer<typeof runSnapshotSchema>
+): z.infer<typeof runResultSchema> {
+  if (snapshot.status === "queued" || snapshot.status === "running") {
+    /**
+     * `RunResult` has no in-flight state, so projecting one would report a run
+     * that is still going as failed. Callers must wait for a terminal snapshot
+     * rather than have this quietly invent an outcome.
+     */
+    throw new Error(
+      `Cannot project a ${snapshot.status} run onto a result; wait for it to finish.`
+    );
+  }
+  return {
+    agentId: snapshot.agentId,
+    commandResults: snapshot.commandEvidence
+      .map((evidence) => ({
+        command: evidence.command,
+        exitCode: evidence.exitCode,
+        stderr: evidence.stderr,
+        stdout: evidence.stdout,
+      }))
+      .slice(0, AGENT_RUNNER_LIMITS.maxCommandResults),
+    completedAt: snapshot.completedAt ?? snapshot.createdAt,
+    fileOperations: snapshot.fileEvidence
+      .map((evidence) => ({
+        operation: evidence.operation,
+        path: evidence.path,
+      }))
+      .slice(0, AGENT_RUNNER_LIMITS.maxFileOperations),
+    id: snapshot.id,
+    output: snapshot.output,
+    startedAt: snapshot.startedAt ?? snapshot.createdAt,
+    status: snapshot.status === "completed" ? "completed" : "failed",
+  };
+}
+
 export const runEnvelopeSchema = z.object({
   run: runResultSchema,
 });
