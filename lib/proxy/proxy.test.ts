@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
-import { proxy } from "./proxy";
+import { proxy } from "@/proxy";
 
 function visit(cookie?: string): Promise<Response> {
   const request = new NextRequest("https://app.test/", {
@@ -19,10 +19,10 @@ test("a first-time anonymous visitor is given a demo cookie", async () => {
   assert.match(set, /SameSite=lax/i);
 });
 
-test("a returning demo visitor keeps the same tenant", async () => {
-  // The bug this guards is invisible by hand: reissuing the cookie mints a
-  // fresh `demo:<uuid>` tenant on every request, so the visitor's own state
-  // vanishes between page loads while every page still renders fine.
+test("an existing demo cookie is not reissued", async () => {
+  // Reissuing would replace the id the tenant is derived from. Named for what
+  // it actually asserts — the tenant-stability property it enables is proven
+  // in lib/session.test.ts, against the function that derives the tenant.
   const response = await visit("coven-demo=already-has-one");
 
   assert.equal(

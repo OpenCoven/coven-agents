@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
 import { guestRegex, isDevelopmentEnvironment } from "./lib/constants";
+import { DEMO_COOKIE_NAME } from "./lib/session";
 
 /**
  * Identifies an anonymous visitor across requests, with no database row
@@ -9,7 +10,6 @@ import { guestRegex, isDevelopmentEnvironment } from "./lib/constants";
  * `demo:<uuid>` from it. A value that changed on every request would make a
  * demo visitor's own state vanish between page loads.
  */
-const DEMO_COOKIE_NAME = "coven-demo";
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;

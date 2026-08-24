@@ -28,7 +28,27 @@ export function tenantForUser(userId: string): string {
   return `user:${userId}`;
 }
 
-export function toSession(user: { id: string; type: string } | null): Session {
+export const DEMO_COOKIE_NAME = "coven-demo";
+
+/**
+ * Builds the tenant for a demo visitor from their cookie.
+ *
+ * The cookie is the only thing that makes a demo tenant stable. Without an id
+ * every call mints a fresh one, so the same visitor is a different tenant on
+ * every request — every page still renders, and their own state silently does
+ * not follow them. A random fallback is deliberate: a visitor with no cookie
+ * yet is genuinely new, and sharing one fixed tenant between all of them would
+ * put strangers in the same bucket.
+ */
+export function demoTenant(demoId?: string | null): string {
+  const trimmed = demoId?.trim();
+  return `demo:${trimmed || crypto.randomUUID()}`;
+}
+
+export function toSession(
+  user: { id: string; type: string } | null,
+  demoId?: string | null
+): Session {
   // Fail closed: a subscriber session requires both a signed-in user AND
   // that user's type to be exactly "subscriber". Billing doesn't exist yet,
   // so today nobody gets a subscriber session — that is the correct, safe
@@ -41,7 +61,7 @@ export function toSession(user: { id: string; type: string } | null): Session {
     };
   }
 
-  return { kind: "demo", tenant: `demo:${crypto.randomUUID()}` };
+  return { kind: "demo", tenant: demoTenant(demoId) };
 }
 
 export function isSubscriber(session: Session): session is SubscriberSession {
