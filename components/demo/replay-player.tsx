@@ -239,7 +239,7 @@ export function ReplayPlayer({ transcript }: { transcript: DemoTranscript }) {
         {isComplete ? (
           <Button
             aria-label="Replay recorded run"
-            className="border-white/10 bg-white/5 text-white hover:bg-white/10"
+            className="border-white/10 bg-white/5 text-white hover:bg-white/10 focus-visible:border-white focus-visible:ring-[3px] focus-visible:ring-white/70"
             onClick={restart}
             size="sm"
             variant="outline"

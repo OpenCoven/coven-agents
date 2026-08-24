@@ -44,6 +44,15 @@ test("the client player plans the transcript before scheduling playback", () => 
   assert.match(replayPlayer, /Replay recorded run/);
 });
 
+test("the replay button shows a high-contrast keyboard focus ring", () => {
+  const replayPlayer = read(replayPlayerUrl);
+
+  assert.match(
+    replayPlayer,
+    /aria-label="Replay recorded run"[\s\S]*?className="[^"]*focus-visible:border-white\s+focus-visible:ring-\[3px\]\s+focus-visible:ring-white\/70/
+  );
+});
+
 test("the demo route tree has no live service or network dependency", () => {
   const sources = [read(rootPageUrl), read(demoRootUrl), read(replayPlayerUrl)];
   const forbidden = [
