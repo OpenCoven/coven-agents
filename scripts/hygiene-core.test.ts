@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isReapable, type WorktreeState } from "./hygiene-core";
+import {
+  branchDeleteFlag,
+  isPreservedOnMain,
+  isReapable,
+  type WorktreeState,
+} from "./hygiene-core";
 
 function state(overrides: Partial<WorktreeState> = {}): WorktreeState {
   return {
@@ -270,4 +275,58 @@ test("preserved-on-main relaxes only origin and unpushed, exhaustively", () => {
   }
 
   assert.equal(safeCount, 4, "only cleanliness may block a preserved head");
+});
+
+test("force delete is used only where the merged head proves the tip", () => {
+  // `-d` is git's ancestry check. It cannot see a squash, so it refuses every
+  // branch this repository merges — but it is a real backstop when the only
+  // evidence of a merge came from `gh pr list --head`, which matches on branch
+  // name and can therefore match an older PR after a name is reused.
+  const preserved = state({
+    existsOnOrigin: false,
+    headSha: "f10c255",
+    mergedHeadSha: "f10c255",
+    unpushedCommits: 1,
+  });
+  assert.equal(branchDeleteFlag(preserved), "-D");
+
+  // Reapable by the strict path only: pushed and on origin, but the merged PR
+  // `gh` matched has a different head. Keep git's check.
+  const reusedName = state({
+    existsOnOrigin: true,
+    headSha: "newwork",
+    mergedHeadSha: "f10c255",
+    unpushedCommits: 0,
+  });
+  assert.equal(isReapable(reusedName).safe, true, "strict path still passes");
+  assert.equal(branchDeleteFlag(reusedName), "-d");
+});
+
+test("a reapable worktree always has its commits somewhere else", () => {
+  // The invariant that makes deleting a branch safe at all. Every combination
+  // that reaps must satisfy at least one of: preserved on main, or on origin
+  // with nothing unpushed.
+  const flags = [false, true];
+
+  for (const onOrigin of flags) {
+    for (const pushed of flags) {
+      for (const tipMatches of flags) {
+        const candidate = state({
+          existsOnOrigin: onOrigin,
+          headSha: "tip",
+          mergedHeadSha: tipMatches ? "tip" : "other",
+          unpushedCommits: pushed ? 0 : 1,
+        });
+
+        if (!isReapable(candidate).safe) {
+          continue;
+        }
+
+        assert.ok(
+          isPreservedOnMain(candidate) || (onOrigin && pushed),
+          `reapable but work exists only locally: onOrigin=${onOrigin} pushed=${pushed} tipMatches=${tipMatches}`
+        );
+      }
+    }
+  }
 });

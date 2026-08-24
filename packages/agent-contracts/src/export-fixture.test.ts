@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { contractDescriptor } from "../contract-descriptor.js";
+import { contractDescriptor } from "../contract-descriptor";
 import {
   buildAgentRunnerFixture,
   getAgentRunnerContractArtifacts,
-} from "./export-fixture.js";
+} from "./export-fixture";
 import {
   AGENT_RUNNER_API_VERSION,
   AGENT_RUNNER_CAPABILITIES,
@@ -18,7 +18,7 @@ import {
   agentRunnerHealthSchema,
   runErrorEnvelopeSchema,
   runSnapshotEnvelopeSchema,
-} from "./index.js";
+} from "./index";
 
 const fixturePath = fileURLToPath(
   new URL("../fixtures/agent-runner-v1.json", import.meta.url)

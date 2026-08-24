@@ -1,11 +1,20 @@
 import { z } from "zod";
-import { contractDescriptor } from "../contract-descriptor.js";
+import { contractDescriptor } from "../contract-descriptor";
 
-export { contractDescriptor } from "../contract-descriptor.js";
+export { contractDescriptor } from "../contract-descriptor";
 export {
   sanitizeEvidencePath,
   sanitizeEvidenceText,
-} from "./evidence.js";
+} from "./evidence";
+export type { RunnerClaims } from "./identity";
+export {
+  base64UrlDecode,
+  base64UrlEncode,
+  runnerClaimsSchema,
+  splitToken,
+  TOKEN_ALGORITHM,
+  TOKEN_LIFETIME_SECONDS,
+} from "./identity";
 
 if (contractDescriptor.apiVersions.length !== 1) {
   throw new Error("Agent Runner must publish exactly one API version.");

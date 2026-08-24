@@ -11,26 +11,44 @@ import {
   corsHeaders,
   errorEnvelope,
   HttpError,
-  hasValidBearerToken,
+  hasValidHeaderToken,
   json,
   readJson,
 } from "./http.js";
+import { importVerifyKey, verifyRunnerToken } from "./identity.js";
 import { AlreadyRunningError, OperationConflictError } from "./run-state.js";
 import {
   createRunEventStream,
   type RunEventStreamOptions,
   type RunEventStreamSnapshot,
 } from "./sse.js";
-import { tenantOf, UNOWNED_TENANT } from "./tenant.js";
+import { tenantOf } from "./tenant.js";
 
 type Awaitable<T> = T | Promise<T>;
 
 export type CloudRunnerEnvironment = Omit<
-  Pick<Env, "AGENT_CONTROL_TOKEN" | "ALLOWED_ORIGIN">,
+  Pick<Env, "AGENT_CONTROL_TOKEN" | "ALLOWED_ORIGIN" | "RUNNER_VERIFY_KEY">,
   "ALLOWED_ORIGIN"
 > & {
   ALLOWED_ORIGIN: string;
 };
+
+/**
+ * Importing an SPKI key on every request would be wasteful, but the cache is
+ * keyed on the SPKI string itself rather than unconditionally reused: a
+ * rotated key must be picked up immediately, not served stale until a
+ * redeploy.
+ */
+let verifyKeyCache: { key: CryptoKey; spki: string } | null = null;
+
+async function getVerifyKey(spki: string): Promise<CryptoKey> {
+  if (verifyKeyCache?.spki === spki) {
+    return verifyKeyCache.key;
+  }
+  const key = await importVerifyKey(spki);
+  verifyKeyCache = { key, spki };
+  return key;
+}
 
 export type CloudRunnerDirectory = {
   /**
@@ -196,7 +214,11 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
       }
 
       if (
-        !hasValidBearerToken(request, environment.AGENT_CONTROL_TOKEN ?? "")
+        !hasValidHeaderToken(
+          request,
+          "x-runner-token",
+          environment.AGENT_CONTROL_TOKEN ?? ""
+        )
       ) {
         return json(
           errorEnvelope("unauthorized", "Runner token was rejected.", false),
@@ -206,13 +228,43 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
       }
 
       /**
-       * The single shared runner token proves authorization, not identity, so
-       * every caller resolves to one tenant today. It is threaded through
-       * ownership, listing and every per-entity lookup regardless, so
-       * introducing real per-user identity becomes a change to this one
-       * expression rather than a hunt for every place isolation was assumed.
+       * Identity and authorization are now two different tokens on two
+       * different headers, on purpose. `X-Runner-Token` above proves only
+       * that the caller may reach this worker at all — it is a coarse
+       * deployment gate, and no tenant may ever be derived from it. Identity
+       * comes from `Authorization: Bearer <token>`: a claim signed by a key
+       * this worker can verify but not mint, so the worker can trust the
+       * `tenant` inside it without being able to forge one itself. If the
+       * worker cannot verify identity — no verify key configured — it must
+       * refuse rather than fall back to a default tenant.
        */
-      const callerTenant = UNOWNED_TENANT;
+      if (!environment.RUNNER_VERIFY_KEY) {
+        return json(
+          errorEnvelope("unauthorized", "Identity cannot be verified.", false),
+          { status: 401 },
+          cors
+        );
+      }
+      const authorization = request.headers.get("authorization");
+      if (!authorization?.startsWith("Bearer ")) {
+        return json(
+          errorEnvelope("unauthorized", "Identity was rejected.", false),
+          { status: 401 },
+          cors
+        );
+      }
+      const claims = await verifyRunnerToken(
+        authorization.slice(7),
+        await getVerifyKey(environment.RUNNER_VERIFY_KEY)
+      );
+      if (!claims) {
+        return json(
+          errorEnvelope("unauthorized", "Identity was rejected.", false),
+          { status: 401 },
+          cors
+        );
+      }
+      const callerTenant = claims.tenant;
 
       if (
         url.pathname === "/api/diagnostics/sandbox" &&

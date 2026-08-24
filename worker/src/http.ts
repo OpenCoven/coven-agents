@@ -60,6 +60,23 @@ export function hasValidBearerToken(
   return timingSafeEqual(supplied, expected);
 }
 
+export function hasValidHeaderToken(
+  request: Request,
+  header: string,
+  expectedToken: string
+): boolean {
+  const supplied = request.headers.get(header);
+  if (!supplied || !expectedToken) {
+    return false;
+  }
+  const a = new TextEncoder().encode(supplied);
+  const b = new TextEncoder().encode(expectedToken);
+  if (a.byteLength !== b.byteLength) {
+    return false;
+  }
+  return timingSafeEqual(a, b);
+}
+
 export async function readJson(
   request: Request,
   allowEmpty = false

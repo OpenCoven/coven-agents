@@ -17,6 +17,19 @@ import {
 const RUN_POLL_INTERVAL_MS = 1000;
 
 export type RunnerClientOptions = {
+  /**
+   * Supplies the identity token for the cloud runner.
+   *
+   * When present, `connection.token` stops being identity and becomes only the
+   * deployment gate: it travels as `X-Runner-Token` and proves the caller may
+   * reach the worker, while `Authorization` carries a signed claim naming the
+   * tenant. The two cannot share a header, and identity belongs in the
+   * standard one.
+   *
+   * Absent for the local runner, which has no tenancy and still authenticates
+   * with a single token.
+   */
+  mintIdentity?: () => Promise<string>;
   /** Overridable so tests do not spend real seconds asleep. */
   pollIntervalMs?: number;
 };
@@ -115,6 +128,7 @@ export class RunnerClient {
   private readonly endpoint: string;
   private readonly request: Fetch;
   private readonly pollIntervalMs: number;
+  private readonly mintIdentity?: () => Promise<string>;
 
   constructor(
     connection: RunnerConnection,
@@ -125,6 +139,24 @@ export class RunnerClient {
     this.endpoint = connection.endpoint.replace(/\/+$/, "");
     this.request = request;
     this.pollIntervalMs = options.pollIntervalMs ?? RUN_POLL_INTERVAL_MS;
+    this.mintIdentity = options.mintIdentity;
+  }
+
+  /**
+   * Builds the auth headers for one request.
+   *
+   * With an identity minter the two concerns split across two headers; without
+   * one the single token stays on `Authorization`, which is what the local
+   * runner still expects.
+   */
+  private async authHeaders(): Promise<Record<string, string>> {
+    if (!this.mintIdentity) {
+      return { authorization: `Bearer ${this.connection.token}` };
+    }
+    return {
+      authorization: `Bearer ${await this.mintIdentity()}`,
+      "x-runner-token": this.connection.token,
+    };
   }
 
   async listAgents(signal?: AbortSignal): Promise<AgentDefinition[]> {
@@ -265,7 +297,7 @@ export class RunnerClient {
       ...init,
       headers: {
         accept: "application/json",
-        authorization: `Bearer ${this.connection.token}`,
+        ...(await this.authHeaders()),
         ...(init.body ? { "content-type": "application/json" } : {}),
         ...init.headers,
       },

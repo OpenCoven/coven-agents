@@ -46,6 +46,23 @@ export function isPreservedOnMain(state: WorktreeState): boolean {
 }
 
 /**
+ * Which `git branch` delete flag a reapable worktree has earned.
+ *
+ * `-d` is git's ancestry check. It cannot see a squash, so it refuses every
+ * branch this repository merges — but it is still a real backstop, because
+ * `isReapable` can also pass on the strict path, where the only evidence of a
+ * merge is `gh pr list --head`. That matches on branch *name*, so a reused
+ * name can match an older merged PR whose head is not this tip.
+ *
+ * So bypass git only where we hold strictly better evidence than ancestry:
+ * the tip is exactly the head `gh` reports as merged. Everywhere else, let
+ * `-d` refuse and surface the disagreement.
+ */
+export function branchDeleteFlag(state: WorktreeState): "-D" | "-d" {
+  return isPreservedOnMain(state) ? "-D" : "-d";
+}
+
+/**
  * Decides whether a worktree can be deleted without losing work.
  *
  * Safe requires no uncommitted files, a confirmed merge, and proof the commits
