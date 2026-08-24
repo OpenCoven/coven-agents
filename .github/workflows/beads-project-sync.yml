@@ -77,6 +77,22 @@ jobs:
           echo "$RUNNER_TEMP/beads-bin" >> "$GITHUB_PATH"
           bd version
 
+      - name: Install Dolt 2.3.1
+        env:
+          DOLT_SHA256: 0a2a318f27c5e1088a2883038573c2054e00f356dc9752e74bca934f8321959a
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/dolt-linux-amd64.tar.gz"
+          curl --fail --location --silent --show-error \
+            https://github.com/dolthub/dolt/releases/download/v2.3.1/dolt-linux-amd64.tar.gz \
+            --output "$archive"
+          echo "$DOLT_SHA256  $archive" | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          export PATH="$RUNNER_TEMP/dolt-linux-amd64/bin:$PATH"
+          echo "$RUNNER_TEMP/dolt-linux-amd64/bin" >> "$GITHUB_PATH"
+          dolt_version="$(dolt version | awk 'NR==1 { print $3 }')"
+          test "$dolt_version" = "2.3.1"
+
       - name: Restore private Beads database
         env:
           DOLT_REMOTE_USER: ${{ secrets.DOLT_REMOTE_USER }}
