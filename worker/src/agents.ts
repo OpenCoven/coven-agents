@@ -5,9 +5,11 @@ import {
   agentDefinitionSchema,
   type CommandEvidence,
   type FileEvidence,
+  type RunEvent,
   type RunResult,
   type RunSnapshot,
   runAgentInputSchema,
+  startRunInputSchema,
 } from "@opencoven/agent-contracts";
 import type { HarnessStatus } from "@opencoven/harness";
 import { Agent } from "agents";
@@ -20,9 +22,13 @@ import {
   AlreadyRunningError,
   appendEvents,
   type CloudRunRecord,
+  cloudFiberKey,
+  dispatchCloudRun,
   finishCloudRunRecord,
   hashOperation,
+  isTerminal,
   nextEventId,
+  OperationConflictError,
   planCloudRunStart,
   retainCloudRuns,
   validateCloudWorkspace,
@@ -31,6 +37,12 @@ import { sandboxKey, tenantOf } from "./tenant";
 
 type DirectoryState = {
   agents: AgentDefinition[];
+  /**
+   * Run id to agent id. A run route receives only a run id, and the Durable
+   * Object that owns the run cannot be addressed without knowing which agent
+   * it belongs to, so the mapping has to live somewhere both can reach.
+   */
+  runs?: Record<string, string>;
 };
 
 type YoloAgentState = {
@@ -106,7 +118,7 @@ export function toRunResult(record: CloudRunRecord): RunResult {
 }
 
 export class AgentDirectory extends Agent<Env, DirectoryState> {
-  initialState: DirectoryState = { agents: [] };
+  initialState: DirectoryState = { agents: [], runs: {} };
 
   list(tenantId: string): AgentDefinition[] {
     return this.state.agents
@@ -117,6 +129,9 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
   upsert(definition: AgentDefinition): AgentDefinition {
     const parsed = agentDefinitionSchema.parse(definition);
     this.setState({
+      // Spread first: replacing the whole object would drop the run index and
+      // orphan every run id already registered against this directory.
+      ...this.state,
       agents: [
         parsed,
         ...this.state.agents.filter((agent) => agent.id !== parsed.id),
@@ -126,9 +141,33 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
   }
 
   remove(agentId: string): void {
+    // Drops the agent's run index with it. Leaving entries behind would let a
+    // stale run id resolve to an agent that no longer exists, and the run
+    // route would then address an empty Durable Object rather than 404.
+    const runs = Object.fromEntries(
+      Object.entries(this.state.runs ?? {}).filter(
+        ([, owner]) => owner !== agentId
+      )
+    );
     this.setState({
       agents: this.state.agents.filter((agent) => agent.id !== agentId),
+      runs,
     });
+  }
+
+  registerRun(runId: string, agentId: string): void {
+    this.setState({
+      ...this.state,
+      runs: { ...this.state.runs, [runId]: agentId },
+    });
+  }
+
+  lookupRun(runId: string): string | null {
+    // Own-property check: a run id of "constructor" or "__proto__" would
+    // otherwise resolve to something off Object.prototype and be treated as an
+    // agent id.
+    const runs = this.state.runs ?? {};
+    return Object.hasOwn(runs, runId) ? (runs[runId] ?? null) : null;
   }
 
   harnesses(): Promise<HarnessStatus[]> {
@@ -154,6 +193,14 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     return this.state.definition;
   }
 
+  private requireDefinition(): AgentDefinition {
+    const { definition } = this.state;
+    if (!definition) {
+      throw new Error("Agent has not been configured.");
+    }
+    return definition;
+  }
+
   /**
    * Executes the mission by driving an already-signed-in coding CLI inside the
    * sandbox. The Worker never calls a model provider, so no provider API key
@@ -162,10 +209,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
    */
   async execute(input: unknown): Promise<RunResult> {
     const { task } = runAgentInputSchema.parse(input);
-    const { definition } = this.state;
-    if (!definition) {
-      throw new Error("Agent has not been configured.");
-    }
+    const definition = this.requireDefinition();
 
     // Rejects anything but the /workspace scratch sandbox before a container is
     // started, so a bad workspace fails as a request error rather than as a
@@ -201,11 +245,26 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       return toRunResult(plan.record);
     }
 
+    return toRunResult(await this.driveHarness(definition, plan.record, task));
+  }
+
+  /**
+   * Drives the harness for one planned run and records the outcome.
+   *
+   * Shared by `execute`, which awaits it, and `start`, which runs it inside a
+   * fiber. Keeping one body means the synchronous and asynchronous paths cannot
+   * disagree about how evidence is captured or how a failure is recorded.
+   */
+  private async driveHarness(
+    definition: AgentDefinition,
+    planned: CloudRunRecord,
+    task: string
+  ): Promise<CloudRunRecord> {
     const startedAt = new Date().toISOString();
     let record = appendEvents(
       {
-        ...plan.record,
-        run: { ...plan.record.run, startedAt, status: "running" as const },
+        ...planned,
+        run: { ...planned.run, startedAt, status: "running" as const },
       },
       [
         // There is no "started" event in the contract; a transition is reported
@@ -214,7 +273,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
         // would fail to parse.
         {
           at: startedAt,
-          id: nextEventId(plan.record),
+          id: nextEventId(planned),
           status: "running",
           type: "status",
         },
@@ -280,7 +339,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         status: failed ? "error" : "idle",
         updatedAt: completedAt,
       });
-      return toRunResult(record);
+      return record;
     } catch (error) {
       const completedAt = new Date().toISOString();
       record = finishCloudRunRecord(record, {
@@ -302,8 +361,117 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         status: "error",
         updatedAt: completedAt,
       });
-      return toRunResult(record);
+      return record;
     }
+  }
+
+  /**
+   * Accepts a run and returns immediately, leaving the harness executing in a
+   * durable fiber.
+   *
+   * `startRunInputSchema` carries an operation id, so unlike `execute` this
+   * path deduplicates: replaying the same id returns the recorded run rather
+   * than starting a second one, and reusing it for a different task is a
+   * conflict. The fiber is keyed on the run id so `stop` can find it.
+   */
+  async start(input: unknown): Promise<{ created: boolean; run: RunSnapshot }> {
+    const { operationId, task } = startRunInputSchema.parse(input);
+    const definition = this.requireDefinition();
+    validateCloudWorkspace(definition);
+
+    const plan = planCloudRunStart({
+      agentId: definition.id,
+      createdAt: new Date().toISOString(),
+      operationHash: await hashOperation(definition.id, task),
+      operationId,
+      records: this.state.runs,
+      runId: crypto.randomUUID(),
+      task,
+    });
+
+    if (plan.kind === "already_running") {
+      throw new AlreadyRunningError();
+    }
+    if (plan.kind === "conflict") {
+      throw new OperationConflictError();
+    }
+
+    /**
+     * Recorded before dispatch, not inside the fiber. Answering 202 promises
+     * the run exists, so it has to be readable the instant the caller is told
+     * about it. Persisting only once the fiber begins leaves a window where
+     * `getRun` returns null, `stop` cannot find it, and the concurrency guard
+     * sees no active run and admits a second one.
+     */
+    this.persistRun(plan.record);
+
+    return await dispatchCloudRun(plan, (record, fiberKey) =>
+      this.startFiber(
+        fiberKey,
+        async () => {
+          await this.driveHarness(definition, record, task);
+        },
+        // Keyed on the fiber key rather than the operation id: `stop` cancels
+        // by run, and a run is what a caller can name.
+        { idempotencyKey: fiberKey }
+      )
+    );
+  }
+
+  /**
+   * Cancels a run that is still in flight and records it as cancelled.
+   *
+   * Cancelling the fiber is not enough on its own — a cancelled fiber simply
+   * stops, leaving the record stuck in `running` forever. The record has to be
+   * closed here so a caller polling the run sees a terminal state.
+   */
+  async stop(runId: string): Promise<RunSnapshot | null> {
+    const record = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (!record) {
+      return null;
+    }
+    if (isTerminal(record.run.status)) {
+      // Already finished. Cancelling would be a no-op and rewriting the record
+      // would discard the real outcome.
+      return record.run;
+    }
+
+    await this.cancelFiberByKey(cloudFiberKey(runId), "Cancelled by operator.");
+    const cancelled = finishCloudRunRecord(record, {
+      completedAt: new Date().toISOString(),
+      output: "Run cancelled by operator request.",
+      status: "cancelled",
+    });
+    this.persistRun(cancelled);
+    this.updateDefinition({
+      status: "idle",
+      updatedAt: cancelled.run.completedAt ?? new Date().toISOString(),
+    });
+    return cancelled.run;
+  }
+
+  /**
+   * Events recorded after `lastEventId`, plus whether the run has finished.
+   *
+   * `terminal` is what lets the stream close rather than poll forever, so it
+   * reports the run's status and not whether this batch happened to be empty.
+   */
+  getEventStream(
+    runId: string,
+    lastEventId: number
+  ): { events: RunEvent[]; terminal: boolean } | null {
+    const record = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (!record) {
+      return null;
+    }
+    return {
+      events: record.events.filter((event) => event.id > lastEventId),
+      terminal: isTerminal(record.run.status),
+    };
   }
 
   /** The recorded snapshot for one run, or null when this agent has no such run. */
