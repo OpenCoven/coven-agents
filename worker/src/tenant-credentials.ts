@@ -37,7 +37,7 @@ export async function fetchTenantCredential(
   // A rejected fetch (network failure, DNS failure, etc.) propagates
   // unchanged — that is "we could not ask", not "there is none".
   const response = await transport.fetchImpl(
-    `${transport.endpoint}/api/internal/credential`,
+    new URL("/api/internal/credential", transport.endpoint).toString(),
     {
       body: JSON.stringify({
         harnessId: request.harnessId,
@@ -60,5 +60,26 @@ export async function fetchTenantCredential(
   }
 
   const body = (await response.json()) as { credential?: unknown };
-  return typeof body.credential === "string" ? body.credential : null;
+  if (typeof body.credential !== "string" || !body.credential) {
+    // A 200 means the app found a credential, so an unusable body is a bug in
+    // the app — not a tenant who has configured none. Returning null here
+    // would let that bug masquerade as a configuration state, which is the
+    // exact conflation this function exists to prevent.
+    throw new Error(
+      "Credential endpoint returned 200 with no usable credential."
+    );
+  }
+  return body.credential;
+}
+
+/**
+ * Normalises a fetched credential so its two consumers agree on the bytes.
+ *
+ * `requireHarness` trims before injecting into the sandbox, and the same value
+ * is handed to evidence redaction. Trim in only one of them and the harness
+ * uses one string while redaction searches for another — a credential stored
+ * with stray whitespace would then be used and leaked.
+ */
+export function normalizeCredential(value: string | null): string | null {
+  return value?.trim() || null;
 }

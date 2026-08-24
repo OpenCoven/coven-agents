@@ -34,7 +34,10 @@ import {
   validateCloudWorkspace,
 } from "./run-state";
 import { sandboxKey, tenantOf } from "./tenant";
-import { fetchTenantCredential } from "./tenant-credentials";
+import {
+  fetchTenantCredential,
+  normalizeCredential,
+} from "./tenant-credentials";
 
 type DirectoryState = {
   agents: AgentDefinition[];
@@ -249,7 +252,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
    * quietly resolving to null and letting `requireHarness` report it as
    * merely "not signed in".
    */
-  private resolveTenantCredential(
+  private async resolveTenantCredential(
     definition: AgentDefinition
   ): Promise<string | null> {
     const { APP_ORIGIN, RUNNER_SERVICE_TOKEN } = this.env;
@@ -258,7 +261,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
         "APP_ORIGIN and RUNNER_SERVICE_TOKEN must be configured to fetch a tenant credential."
       );
     }
-    return fetchTenantCredential(
+    const fetched = await fetchTenantCredential(
       { harnessId: definition.runtime, tenant: tenantOf(definition) },
       {
         endpoint: APP_ORIGIN,
@@ -266,6 +269,13 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
         serviceToken: RUNNER_SERVICE_TOKEN,
       }
     );
+
+    // Normalised exactly once, here, because two consumers must agree on the
+    // bytes: `requireHarness` trims before injecting into the sandbox, and the
+    // same value is handed to evidence redaction. Trimming in only one of them
+    // means the harness uses one string while redaction searches for another,
+    // and a credential stored with stray whitespace leaks into stored output.
+    return normalizeCredential(fetched);
   }
 
   /**

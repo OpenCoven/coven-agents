@@ -85,7 +85,9 @@ test("owner deployment secrets can never satisfy a tenant credential", () => {
     );
   } finally {
     for (const name of Object.keys(ownerEnv)) {
-      process.env[name] = undefined;
+      // `process.env[x] = undefined` stores the literal string "undefined",
+      // which would leak into any later test reading these names.
+      delete process.env[name];
     }
   }
 });

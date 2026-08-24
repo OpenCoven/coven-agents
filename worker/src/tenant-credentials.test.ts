@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fetchTenantCredential } from "./tenant-credentials.js";
+import {
+  fetchTenantCredential,
+  normalizeCredential,
+} from "./tenant-credentials.js";
 
 function respondWith(status: number, body: unknown) {
   return () => Promise.resolve(new Response(JSON.stringify(body), { status }));
@@ -107,15 +110,35 @@ test("the service token is sent and the request names one tenant and harness", a
   });
 });
 
-test("a 200 without a credential field yields null", async () => {
-  const credential = await fetchTenantCredential(
-    { harnessId: "copilot", tenant: "acme" },
-    {
-      endpoint: "https://app.test",
-      fetchImpl: respondWith(200, {}),
-      serviceToken: "svc",
-    }
+test("a 200 with no usable credential throws rather than yielding null", async () => {
+  // Corrects an earlier assertion that enshrined the wrong behaviour. A 200
+  // means the app found something; an unusable body is an app bug, and
+  // reporting it as "this tenant has none" is the conflation this module is
+  // built to avoid.
+  await assert.rejects(() =>
+    fetchTenantCredential(
+      { harnessId: "copilot", tenant: "acme" },
+      {
+        endpoint: "https://app.test",
+        fetchImpl: respondWith(200, {}),
+        serviceToken: "svc",
+      }
+    )
   );
+});
 
-  assert.equal(credential, null);
+test("a credential is normalised once so its two consumers agree", () => {
+  // The leak this prevents: `requireHarness` trims before injecting into the
+  // sandbox, while evidence redaction searches for whatever it was handed. If
+  // those differ, a credential stored with stray whitespace is used in one
+  // form and hunted for in another, so it survives redaction.
+  assert.equal(normalizeCredential("  ghp_secret\n"), "ghp_secret");
+  assert.equal(normalizeCredential("ghp_secret"), "ghp_secret");
+});
+
+test("a credential that is only whitespace is no credential", () => {
+  for (const blank of ["", "   ", "\n\t"]) {
+    assert.equal(normalizeCredential(blank), null);
+  }
+  assert.equal(normalizeCredential(null), null);
 });
