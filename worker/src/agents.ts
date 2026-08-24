@@ -3,7 +3,10 @@ import {
   AGENT_RUNNER_LIMITS,
   type AgentDefinition,
   agentDefinitionSchema,
+  type CommandEvidence,
+  type FileEvidence,
   type RunResult,
+  type RunSnapshot,
   runAgentInputSchema,
 } from "@opencoven/agent-contracts";
 import type { HarnessStatus } from "@opencoven/harness";
@@ -13,6 +16,17 @@ import {
   listCloudHarnesses,
   runHarnessInSandbox,
 } from "./harness-runner";
+import {
+  AlreadyRunningError,
+  appendEvents,
+  type CloudRunRecord,
+  finishCloudRunRecord,
+  hashOperation,
+  nextEventId,
+  planCloudRunStart,
+  retainCloudRuns,
+  validateCloudWorkspace,
+} from "./run-state";
 import { sandboxKey, tenantOf } from "./tenant";
 
 type DirectoryState = {
@@ -21,8 +35,75 @@ type DirectoryState = {
 
 type YoloAgentState = {
   definition: AgentDefinition | null;
-  runs: RunResult[];
+  runs: CloudRunRecord[];
 };
+
+/**
+ * The harness and the contract name file operations differently — the harness
+ * reports `created`/`edited`/`deleted`, the contract accepts
+ * `create`/`modify`/`delete`. Translating explicitly is the point: filtering to
+ * the values the contract allows would have matched none of them and dropped
+ * every file operation without a word.
+ */
+export const FILE_OPERATIONS: Record<string, FileEvidence["operation"]> = {
+  created: "create",
+  deleted: "delete",
+  edited: "modify",
+};
+
+export function toFileEvidence(
+  operations: { operation: string; path: string }[]
+): FileEvidence[] {
+  return operations.flatMap((entry) => {
+    const operation = Object.hasOwn(FILE_OPERATIONS, entry.operation)
+      ? FILE_OPERATIONS[entry.operation]
+      : undefined;
+    if (!operation) {
+      // An unmapped verb means the harness grew one the contract has not
+      // learned. Say so rather than discarding the evidence silently.
+      console.warn(
+        JSON.stringify({
+          event: "runner.evidence.unmapped_file_operation",
+          operation: entry.operation,
+        })
+      );
+      return [];
+    }
+    return [{ operation, path: entry.path }];
+  });
+}
+
+/**
+ * The HTTP surface still returns a `RunResult`, so a record is projected back
+ * onto that shape rather than the API changing shape underneath its clients.
+ * A cancelled run has no `RunResult` equivalent and reports as failed, which is
+ * what a caller waiting on a result needs to know.
+ */
+export function toRunResult(record: CloudRunRecord): RunResult {
+  const { run } = record;
+  return {
+    agentId: run.agentId,
+    commandResults: run.commandEvidence
+      .map((evidence) => ({
+        command: evidence.command,
+        exitCode: evidence.exitCode,
+        stderr: evidence.stderr,
+        stdout: evidence.stdout,
+      }))
+      .slice(0, AGENT_RUNNER_LIMITS.maxCommandResults),
+    completedAt: run.completedAt ?? run.createdAt,
+    fileOperations: run.fileEvidence
+      .map((evidence) => ({
+        operation: evidence.operation,
+        path: evidence.path,
+      }))
+      .slice(0, AGENT_RUNNER_LIMITS.maxFileOperations),
+    id: run.id,
+    output: run.output,
+    startedAt: run.startedAt ?? run.createdAt,
+    status: run.status === "completed" ? "completed" : "failed",
+  };
+}
 
 export class AgentDirectory extends Agent<Env, DirectoryState> {
   initialState: DirectoryState = { agents: [] };
@@ -85,11 +166,61 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     if (!definition) {
       throw new Error("Agent has not been configured.");
     }
-    if (definition.status === "running") {
-      throw new Error("Agent is already running a mission.");
+
+    // Rejects anything but the /workspace scratch sandbox before a container is
+    // started, so a bad workspace fails as a request error rather than as a
+    // half-executed run.
+    validateCloudWorkspace(definition);
+
+    const createdAt = new Date().toISOString();
+    const runId = crypto.randomUUID();
+    /**
+     * The HTTP route does not carry an operation id yet, so each call gets a
+     * fresh one and nothing deduplicates. The plan is still the right way in:
+     * it is the single place that decides whether a run may start, and it
+     * refuses while another is active. Threading a client-supplied id through
+     * later turns that dedup on without moving the decision.
+     */
+    const operationId = crypto.randomUUID();
+    const plan = planCloudRunStart({
+      agentId: definition.id,
+      createdAt,
+      operationHash: await hashOperation(definition.id, task),
+      operationId,
+      records: this.state.runs,
+      runId,
+      task,
+    });
+
+    if (plan.kind === "already_running") {
+      throw new AlreadyRunningError();
+    }
+    if (plan.kind === "conflict" || plan.kind === "existing") {
+      // Unreachable while operation ids are generated per call; returning the
+      // recorded run is still the correct answer if that changes.
+      return toRunResult(plan.record);
     }
 
     const startedAt = new Date().toISOString();
+    let record = appendEvents(
+      {
+        ...plan.record,
+        run: { ...plan.record.run, startedAt, status: "running" as const },
+      },
+      [
+        // There is no "started" event in the contract; a transition is reported
+        // as a `status` event carrying the new status. Only `accepted` carries
+        // operationId and runId, and the schema is strict, so adding them here
+        // would fail to parse.
+        {
+          at: startedAt,
+          id: nextEventId(plan.record),
+          status: "running",
+          type: "status",
+        },
+      ]
+    );
+    this.persistRun(record);
     this.updateDefinition({ status: "running", updatedAt: startedAt });
 
     try {
@@ -110,55 +241,86 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
 
       const completedAt = new Date().toISOString();
       const failed = run.summary.status === "failed" || run.exitCode !== 0;
-      const result: RunResult = {
-        agentId: definition.id,
-        commandResults: [
-          {
-            command: run.command,
-            exitCode: run.exitCode,
-            stderr: run.stderr,
-            stdout: run.summary.output,
-          },
-          // A harness tool call is {tool, summary, success}, which is not the
-          // command-result shape. It was previously spread in raw because
-          // commandResults was typed z.unknown(); the contract now describes
-          // and caps the field, so the translation has to be explicit.
-          ...run.summary.toolCalls.map((call) => ({
-            command: call.tool,
-            exitCode: call.success ? 0 : 1,
-            stdout: call.summary,
-          })),
-        ].slice(0, AGENT_RUNNER_LIMITS.maxCommandResults),
+      // A harness tool call is {tool, summary, success}, which is not the
+      // command-evidence shape, so the translation is explicit. Everything is
+      // handed to finishCloudRunRecord rather than trimmed here: that is where
+      // evidence is redacted, normalized and capped, and doing any of it twice
+      // would risk the two disagreeing.
+      const commandEvidence: CommandEvidence[] = [
+        {
+          command: run.command,
+          exitCode: run.exitCode,
+          stderr: run.stderr,
+          stdout: run.summary.output,
+        },
+        // A tool call has no streams of its own, so its summary is the stdout
+        // and stderr stays empty rather than duplicating it into both.
+        ...run.summary.toolCalls.map((call) => ({
+          command: call.tool,
+          exitCode: call.success ? 0 : 1,
+          stderr: "",
+          stdout: call.summary,
+        })),
+      ];
+      const fileEvidence = toFileEvidence(run.summary.fileOperations);
+
+      record = finishCloudRunRecord(record, {
+        commandEvidence,
         completedAt,
-        fileOperations: run.summary.fileOperations,
-        id: crypto.randomUUID(),
+        fileEvidence,
         output:
           run.summary.output ||
           run.stderr.trim() ||
           "The harness produced no output.",
-        startedAt,
         status: failed ? "failed" : "completed",
-      };
-      this.finishRun(result, completedAt, failed ? "error" : "idle");
-      return result;
+      });
+      this.persistRun(record);
+      this.updateDefinition({
+        lastRunAt: completedAt,
+        status: failed ? "error" : "idle",
+        updatedAt: completedAt,
+      });
+      return toRunResult(record);
     } catch (error) {
       const completedAt = new Date().toISOString();
-      const result: RunResult = {
-        agentId: definition.id,
-        commandResults: [],
+      record = finishCloudRunRecord(record, {
         completedAt,
-        fileOperations: [],
-        id: crypto.randomUUID(),
+        error: {
+          code:
+            error instanceof HarnessError ? "harness_failed" : "internal_error",
+          message:
+            error instanceof Error ? error.message : "Agent execution failed.",
+          retryable: false,
+        },
         output:
-          error instanceof HarnessError || error instanceof Error
-            ? error.message
-            : "Agent execution failed.",
-        startedAt,
+          error instanceof Error ? error.message : "Agent execution failed.",
         status: "failed",
-      };
-      this.finishRun(result, completedAt, "error");
-      return result;
+      });
+      this.persistRun(record);
+      this.updateDefinition({
+        lastRunAt: completedAt,
+        status: "error",
+        updatedAt: completedAt,
+      });
+      return toRunResult(record);
     }
+  }
+
+  /** The recorded snapshot for one run, or null when this agent has no such run. */
+  getRun(runId: string): RunSnapshot | null {
+    return (
+      this.state.runs.find((record) => record.run.id === runId)?.run ?? null
+    );
+  }
+
+  /** Every run this agent still retains, newest first. */
+  listRuns(): RunSnapshot[] {
+    return [...this.state.runs]
+      .sort(
+        (left, right) =>
+          Date.parse(right.run.createdAt) - Date.parse(left.run.createdAt)
+      )
+      .map((record) => record.run);
   }
 
   async decommission(): Promise<void> {
@@ -184,19 +346,22 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     return definition;
   }
 
-  private finishRun(
-    result: RunResult,
-    completedAt: string,
-    status: AgentDefinition["status"]
-  ): void {
-    const definition = this.updateDefinition({
-      lastRunAt: completedAt,
-      status,
-      updatedAt: completedAt,
-    });
+  /**
+   * Writes one run record, replacing any earlier revision of the same run so a
+   * queued entry is superseded rather than duplicated as it progresses.
+   *
+   * Retention is delegated to `retainCloudRuns`, which keeps every active run
+   * and only trims terminal ones. The previous `slice(0, 20)` counted from the
+   * front of an unsorted list, so a long-running agent could have dropped a run
+   * that was still executing.
+   */
+  private persistRun(record: CloudRunRecord): void {
+    const others = this.state.runs.filter(
+      (candidate) => candidate.run.id !== record.run.id
+    );
     this.setState({
-      definition,
-      runs: [result, ...this.state.runs].slice(0, 20),
+      ...this.state,
+      runs: retainCloudRuns([record, ...others]),
     });
   }
 }
