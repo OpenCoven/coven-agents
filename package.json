@@ -21,7 +21,7 @@
     "start": "next start",
     "test": "export PLAYWRIGHT=True && pnpm exec playwright test",
     "test:unit": "tsx --test scripts/*.test.ts && tsx --test lib/agents/*.test.ts && pnpm --filter @opencoven/agent-contracts test && pnpm --filter @opencoven/harness test && pnpm --filter @opencoven/local-runner test && pnpm --filter @opencoven/cloud-runner test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && pnpm -r typecheck"
   },
   "lint-staged": {
     "*": "corepack pnpm run fix --"
@@ -132,6 +132,7 @@
       "mermaid": ">=11.16.1",
       "nanoid": ">=3.3.18",
       "postcss": "^8.5.23",
+      "prosemirror-transform": "^1.12.0",
       "sharp": ">=0.35.0",
       "undici": ">=5.29.0",
       "uuid": ">=11.1.1"
