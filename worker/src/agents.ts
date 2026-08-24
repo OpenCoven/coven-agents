@@ -1,6 +1,5 @@
 import { getSandbox } from "@cloudflare/sandbox";
 import {
-  AGENT_RUNNER_LIMITS,
   type AgentDefinition,
   agentDefinitionSchema,
   type CommandEvidence,
@@ -9,6 +8,7 @@ import {
   type RunResult,
   type RunSnapshot,
   runAgentInputSchema,
+  runSnapshotToResult,
   startRunInputSchema,
 } from "@opencoven/agent-contracts";
 import type { HarnessStatus } from "@opencoven/harness";
@@ -86,35 +86,11 @@ export function toFileEvidence(
 }
 
 /**
- * The HTTP surface still returns a `RunResult`, so a record is projected back
- * onto that shape rather than the API changing shape underneath its clients.
- * A cancelled run has no `RunResult` equivalent and reports as failed, which is
- * what a caller waiting on a result needs to know.
+ * Delegates to the contract so the worker and the browser client cannot
+ * disagree about how a snapshot becomes a result.
  */
 export function toRunResult(record: CloudRunRecord): RunResult {
-  const { run } = record;
-  return {
-    agentId: run.agentId,
-    commandResults: run.commandEvidence
-      .map((evidence) => ({
-        command: evidence.command,
-        exitCode: evidence.exitCode,
-        stderr: evidence.stderr,
-        stdout: evidence.stdout,
-      }))
-      .slice(0, AGENT_RUNNER_LIMITS.maxCommandResults),
-    completedAt: run.completedAt ?? run.createdAt,
-    fileOperations: run.fileEvidence
-      .map((evidence) => ({
-        operation: evidence.operation,
-        path: evidence.path,
-      }))
-      .slice(0, AGENT_RUNNER_LIMITS.maxFileOperations),
-    id: run.id,
-    output: run.output,
-    startedAt: run.startedAt ?? run.createdAt,
-    status: run.status === "completed" ? "completed" : "failed",
-  };
+  return runSnapshotToResult(record.run);
 }
 
 export class AgentDirectory extends Agent<Env, DirectoryState> {

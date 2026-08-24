@@ -6,6 +6,7 @@ import {
   createAgentInputSchema,
   type RunSnapshot,
 } from "@opencoven/agent-contracts";
+import { isRunnableHarness, SUPPORTED_HARNESS_IDS } from "@opencoven/harness";
 import {
   corsHeaders,
   errorEnvelope,
@@ -76,6 +77,21 @@ export type CloudRunnerDependencies<
     agentId: string
   ) => Awaitable<CloudRunnerAgent>;
 };
+
+/**
+ * The contract permits any harness runtime; this runner can only drive the ones
+ * it actually ships. Checked at both create and update, because an update that
+ * skipped it could move a working agent onto a runtime that cannot run.
+ */
+function assertRunnableHarness(runtime: string): void {
+  if (!isRunnableHarness(runtime)) {
+    throw new HttpError(
+      `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+      400,
+      "harness_unsupported"
+    );
+  }
+}
 
 function fail(error: unknown, cors: Headers): Response {
   if (error instanceof HttpError) {
@@ -246,6 +262,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 "backend_mismatch"
               );
             }
+            assertRunnableHarness(input.runtime);
             const now = new Date().toISOString();
             const definition: AgentDefinition = {
               ...input,
@@ -295,6 +312,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 "backend_mismatch"
               );
             }
+            assertRunnableHarness(input.runtime);
             const configured = await agent.configure({
               ...input,
               createdAt: current.createdAt,
