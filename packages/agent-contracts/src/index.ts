@@ -422,6 +422,30 @@ export const runResultSchema = z.object({
   status: z.enum(["completed", "failed"]),
 });
 
+export const demoTranscriptSchema = z
+  .object({
+    events: z
+      .array(
+        z
+          .object({
+            event: runEventSchema,
+            offsetMs: z.number().int().nonnegative(),
+          })
+          .strict()
+      )
+      .min(1),
+    name: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[a-z0-9-]+$/),
+    recordedAt: datetimeSchema,
+    result: runResultSchema,
+    task: z.string().min(1),
+  })
+  .strict();
+export type DemoTranscript = z.infer<typeof demoTranscriptSchema>;
+
 export const agentRunnerHealthSchema = z
   .object({
     apiVersion: agentRunnerApiVersionSchema,
