@@ -81,8 +81,12 @@ async function countUnpushed(path: string, branch: string): Promise<number> {
 }
 
 export type MergeResult = {
-  /** Head SHA the merged PR carried, so a later commit can be told apart. */
-  headSha: string | null;
+  /**
+   * Head the merged PR carried. Deliberately not named `headSha`: that name
+   * belongs to the local tip on `WorktreeState`, and the whole predicate turns
+   * on those two being compared rather than confused.
+   */
+  mergedHeadSha: string | null;
   merged: boolean;
 };
 
@@ -114,11 +118,11 @@ export async function isMergedViaGh(branch: string): Promise<MergeResult> {
     }[];
     const pr = parsed.at(0);
     if (pr === undefined) {
-      return { headSha: null, merged: false };
+      return { merged: false, mergedHeadSha: null };
     }
-    return { headSha: pr.headRefOid ?? null, merged: true };
+    return { merged: true, mergedHeadSha: pr.headRefOid ?? null };
   } catch {
-    return { headSha: null, merged: false };
+    return { merged: false, mergedHeadSha: null };
   }
 }
 
@@ -174,7 +178,7 @@ export async function collectState(
         headSha,
         isLocked: wt.isLocked,
         isPrimary: wt.isPrimary,
-        mergedHeadSha: merge.headSha,
+        mergedHeadSha: merge.mergedHeadSha,
         mergedIntoMain: merge.merged,
         path: wt.path,
         unpushedCommits,

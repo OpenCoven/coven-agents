@@ -68,7 +68,7 @@ test("a clean, pushed, merged worktree is reported reapable", async () => {
     sh(["push", "-u", "origin", "feat/done"], join(root, "wt-done"));
 
     const states = await collectState(
-      async () => ({ headSha: null, merged: true }),
+      async () => ({ merged: true, mergedHeadSha: null }),
       clone
     );
     const target = states.find((s) => s.branch === "feat/done");
@@ -94,7 +94,7 @@ test("an unpushed branch is never reapable", async () => {
     sh(["commit", "-m", "unpushed work"], wt);
 
     const states = await collectState(
-      async () => ({ headSha: null, merged: true }),
+      async () => ({ merged: true, mergedHeadSha: null }),
       clone
     );
     const target = states.find((s) => s.branch === "feat/unpushed");
@@ -121,7 +121,7 @@ test("a dirty worktree is never reapable", async () => {
     writeFileSync(join(wt, "scratch.txt"), "uncommitted\n");
 
     const states = await collectState(
-      async () => ({ headSha: null, merged: true }),
+      async () => ({ merged: true, mergedHeadSha: null }),
       clone
     );
     const target = states.find((s) => s.branch === "feat/dirty");
@@ -139,7 +139,7 @@ test("the primary checkout is never reapable", async () => {
 
   try {
     const states = await collectState(
-      async () => ({ headSha: null, merged: true }),
+      async () => ({ merged: true, mergedHeadSha: null }),
       clone
     );
     const primary = states.find((s) => s.isPrimary);
@@ -161,7 +161,7 @@ test("status detail for the primary worktree reads 'current checkout', not reap 
 
   try {
     const states = await collectState(
-      async () => ({ headSha: null, merged: true }),
+      async () => ({ merged: true, mergedHeadSha: null }),
       clone
     );
     const primary = states.find((s) => s.isPrimary);
@@ -201,7 +201,7 @@ test("a merged worktree survives the remote branch being deleted", async () => {
     sh(["push", "origin", "--delete", "feat/merged"], wt);
 
     const states = await collectState(
-      async () => ({ headSha, merged: true }),
+      async () => ({ merged: true, mergedHeadSha: headSha }),
       clone
     );
     const target = states.find((s) => s.branch === "feat/merged");
@@ -246,7 +246,7 @@ test("a commit made after the merge is protected, not reaped", async () => {
     sh(["commit", "-m", "work added after the merge"], wt);
 
     const states = await collectState(
-      async () => ({ headSha: mergedSha, merged: true }),
+      async () => ({ merged: true, mergedHeadSha: mergedSha }),
       clone
     );
     const target = states.find((s) => s.branch === "feat/after");

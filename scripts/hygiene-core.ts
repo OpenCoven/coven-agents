@@ -48,8 +48,14 @@ export function isPreservedOnMain(state: WorktreeState): boolean {
 /**
  * Decides whether a worktree can be deleted without losing work.
  *
- * Safe requires all four spec conditions — clean, on origin, fully pushed,
- * merged — plus structural guards that stop the predicate from recommending
+ * Safe requires no uncommitted files, a confirmed merge, and proof the commits
+ * live somewhere else — either the branch is on origin with nothing unpushed,
+ * or `isPreservedOnMain` holds because the merged head is the tip this
+ * worktree still points at. The second case covers the normal post-merge
+ * state, where the remote branch is already deleted and squashing has made the
+ * local commits look unpushed.
+ *
+ * Structural guards on top of that stop the predicate from ever recommending
  * deletion of the primary checkout or a protected branch.
  */
 export function isReapable(state: WorktreeState): ReapVerdict {
