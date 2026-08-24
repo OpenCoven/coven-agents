@@ -4,7 +4,13 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { type CommandRunner, loadBeads, runCommand } from "./beads-project-io";
+import {
+  type CommandRunner,
+  type InputCommandRunner,
+  loadBeads,
+  runCommand,
+  runInputCommand,
+} from "./beads-project-io";
 import {
   BEAD_TYPES,
   type Bead,
@@ -112,22 +118,31 @@ export type SeedConfig = {
 export type SeedDependencies = {
   readFile: (filePath: string) => Promise<string>;
   runCommand: CommandRunner;
+  runInputCommand: InputCommandRunner;
   write: (line: string) => void;
 };
 
+type SeedImportTarget = {
+  item: SeedItem;
+  kind: "create" | "heal";
+  missingBlockingDependencyIds: string[];
+};
+
 type SeedApplicationPlan = {
-  createChildren: SeedItem[];
-  createEpics: SeedItem[];
+  createIds: string[];
   dependencyAdds: Array<{
     blockerId: string;
     childId: string;
   }>;
   exactIds: string[];
+  healIds: string[];
+  importTargets: SeedImportTarget[];
 };
 
 const defaultDependencies: SeedDependencies = {
   readFile: (filePath) => readFile(filePath, "utf8"),
   runCommand,
+  runInputCommand,
   write: console.log,
 };
 
@@ -161,11 +176,90 @@ function normalizeBlockingDependencies(ids: readonly string[]): string[] {
   return [...new Set(ids)].sort(compareStrings);
 }
 
+function canonicalDependencies(item: SeedItem): Bead["dependencies"] {
+  return [
+    ...(item.parent === undefined
+      ? []
+      : [
+          {
+            depends_on_id: item.parent,
+            issue_id: item.id,
+            type: "parent-child",
+          } as const,
+        ]),
+    ...normalizeBlockingDependencies(item.dependsOn).map((dependsOnId) => ({
+      depends_on_id: dependsOnId,
+      issue_id: item.id,
+      type: "blocks" as const,
+    })),
+  ];
+}
+
+function canonicalBead(item: SeedItem): Bead {
+  return {
+    acceptance_criteria: item.acceptanceCriteria,
+    dependencies: canonicalDependencies(item),
+    description: item.description,
+    id: item.id,
+    issue_type: item.type,
+    metadata: item.metadata,
+    ...(item.parent === undefined ? {} : { parent: item.parent }),
+    priority: item.priority,
+    status: "open",
+    title: item.title,
+  };
+}
+
+function desiredBlockingDependencies(item: SeedItem): string[] {
+  return normalizeBlockingDependencies(item.dependsOn);
+}
+
+function existingDependencyKinds(
+  bead: Bead
+): Record<"blocks" | "parent-child", string[]> {
+  const kinds: Record<"blocks" | "parent-child", string[]> = {
+    blocks: [],
+    "parent-child": [],
+  };
+
+  for (const dependency of bead.dependencies) {
+    if (dependency.type === "blocks" || dependency.type === "parent-child") {
+      kinds[dependency.type].push(dependency.depends_on_id);
+    }
+  }
+
+  return {
+    blocks: kinds.blocks,
+    "parent-child": kinds["parent-child"],
+  };
+}
+
+function hasUnexpectedDependencyShape(bead: Bead): boolean {
+  const dependencyKinds = existingDependencyKinds(bead);
+
+  return (
+    bead.dependencies.some(
+      (dependency) =>
+        dependency.issue_id !== bead.id &&
+        (dependency.type === "blocks" || dependency.type === "parent-child")
+    ) ||
+    bead.dependencies.some(
+      (dependency) =>
+        dependency.type !== "blocks" && dependency.type !== "parent-child"
+    ) ||
+    dependencyKinds.blocks.length !== new Set(dependencyKinds.blocks).size ||
+    dependencyKinds["parent-child"].length !==
+      new Set(dependencyKinds["parent-child"]).size
+  );
+}
+
 function existingBlockingDependencies(bead: Bead): string[] {
-  return normalizeBlockingDependencies(
-    bead.dependencies
-      .filter((dependency) => dependency.type === "blocks")
-      .map((dependency) => dependency.depends_on_id)
+  return normalizeBlockingDependencies(existingDependencyKinds(bead).blocks);
+}
+
+function existingParentDependencies(bead: Bead): string[] {
+  return [...existingDependencyKinds(bead)["parent-child"]].sort(
+    compareStrings
   );
 }
 
@@ -408,47 +502,170 @@ function sameStringArray(
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function diffExistingBead(item: SeedItem, bead: Bead): string[] {
+function diffExistingBead(
+  item: SeedItem,
+  bead: Bead
+): {
+  differences: string[];
+  missingBlockingDependencyIds: string[];
+} {
+  const desired = canonicalBead(item);
   const differences: string[] = [];
 
-  if (bead.title !== item.title) {
+  if (bead.title !== desired.title) {
     differences.push("title");
   }
 
-  if (bead.description !== item.description) {
+  if (bead.description !== desired.description) {
     differences.push("description");
   }
 
-  if (bead.acceptance_criteria !== item.acceptanceCriteria) {
+  if (bead.acceptance_criteria !== desired.acceptance_criteria) {
     differences.push("acceptance");
   }
 
-  if (bead.issue_type !== item.type) {
+  if (bead.issue_type !== desired.issue_type) {
     differences.push("type");
   }
 
-  if (bead.priority !== item.priority) {
+  if (bead.priority !== desired.priority) {
     differences.push("priority");
   }
 
-  if ((bead.parent ?? null) !== (item.parent ?? null)) {
+  if (bead.status !== desired.status) {
+    differences.push("status");
+  }
+
+  if ((bead.parent ?? null) !== (desired.parent ?? null)) {
     differences.push("parent");
   }
 
-  if (metadataSignature(bead.metadata) !== metadataSignature(item.metadata)) {
+  if (
+    metadataSignature(bead.metadata) !== metadataSignature(desired.metadata)
+  ) {
     differences.push("metadata");
   }
 
+  if (hasUnexpectedDependencyShape(bead)) {
+    differences.push("dependency records");
+  }
+
+  const expectedParentDependencies =
+    desired.parent === undefined ? [] : [desired.parent];
+
   if (
     !sameStringArray(
-      existingBlockingDependencies(bead),
-      normalizeBlockingDependencies(item.dependsOn)
+      existingParentDependencies(bead),
+      expectedParentDependencies
     )
   ) {
+    differences.push("parent-child relation");
+  }
+
+  const currentBlockingDependencies = existingBlockingDependencies(bead);
+  const desiredBlockingDependencyIds = desiredBlockingDependencies(item);
+  const missingBlockingDependencyIds = desiredBlockingDependencyIds.filter(
+    (blockerId) => !currentBlockingDependencies.includes(blockerId)
+  );
+  const extraBlockingDependencies = currentBlockingDependencies.filter(
+    (blockerId) => !desiredBlockingDependencyIds.includes(blockerId)
+  );
+
+  if (extraBlockingDependencies.length > 0) {
     differences.push("blocking dependencies");
   }
 
-  return differences.sort(compareStrings);
+  return {
+    differences: [...new Set(differences)].sort(compareStrings),
+    missingBlockingDependencyIds,
+  };
+}
+
+function compareImportTargets(
+  left: SeedImportTarget,
+  right: SeedImportTarget
+): number {
+  return (
+    Number(left.item.parent !== undefined) -
+      Number(right.item.parent !== undefined) ||
+    compareStrings(left.item.id, right.item.id)
+  );
+}
+
+function sortImportTargets(
+  targets: readonly SeedImportTarget[]
+): SeedImportTarget[] {
+  const targetById = new Map(
+    targets.map((target) => [target.item.id, target] as const)
+  );
+  const pendingDependencies = new Map<string, Set<string>>();
+
+  for (const target of targets) {
+    const dependencies = new Set<string>();
+
+    if (
+      target.kind === "create" &&
+      target.item.parent !== undefined &&
+      targetById.has(target.item.parent)
+    ) {
+      dependencies.add(target.item.parent);
+    }
+
+    for (const blockerId of desiredBlockingDependencies(target.item)) {
+      if (targetById.has(blockerId)) {
+        dependencies.add(blockerId);
+      }
+    }
+
+    pendingDependencies.set(target.item.id, dependencies);
+  }
+
+  const ready = targets
+    .filter(
+      (target) => (pendingDependencies.get(target.item.id)?.size ?? 0) === 0
+    )
+    .sort(compareImportTargets);
+  const ordered: SeedImportTarget[] = [];
+  const emitted = new Set<string>();
+
+  while (ready.length > 0) {
+    const next = ready.shift();
+
+    if (next === undefined || emitted.has(next.item.id)) {
+      continue;
+    }
+
+    emitted.add(next.item.id);
+    ordered.push(next);
+
+    for (const candidate of targets) {
+      if (emitted.has(candidate.item.id)) {
+        continue;
+      }
+
+      const dependencies = pendingDependencies.get(candidate.item.id);
+
+      if (dependencies === undefined) {
+        continue;
+      }
+
+      dependencies.delete(next.item.id);
+
+      if (
+        dependencies.size === 0 &&
+        !ready.some((target) => target.item.id === candidate.item.id)
+      ) {
+        ready.push(candidate);
+        ready.sort(compareImportTargets);
+      }
+    }
+  }
+
+  if (ordered.length !== targets.length) {
+    throw new Error("Seed blocking dependencies contain a cycle");
+  }
+
+  return ordered;
 }
 
 function createSeedApplicationPlan(
@@ -465,24 +682,29 @@ function createSeedApplicationPlan(
     currentById.set(bead.id, bead);
   }
 
-  const createEpics: SeedItem[] = [];
-  const createChildren: SeedItem[] = [];
+  const createIds: string[] = [];
   const exactIds: string[] = [];
+  const healIds: string[] = [];
+  const importTargets: SeedImportTarget[] = [];
 
   for (const item of sortItemsById(seed)) {
     const existing = currentById.get(item.id);
 
     if (existing === undefined) {
-      if (item.type === "epic") {
-        createEpics.push(item);
-      } else {
-        createChildren.push(item);
-      }
+      createIds.push(item.id);
+      importTargets.push({
+        item,
+        kind: "create",
+        missingBlockingDependencyIds: desiredBlockingDependencies(item),
+      });
 
       continue;
     }
 
-    const differences = diffExistingBead(item, existing);
+    const { differences, missingBlockingDependencyIds } = diffExistingBead(
+      item,
+      existing
+    );
 
     if (differences.length > 0) {
       throw new Error(
@@ -490,14 +712,24 @@ function createSeedApplicationPlan(
       );
     }
 
+    if (missingBlockingDependencyIds.length > 0) {
+      healIds.push(item.id);
+      importTargets.push({
+        item,
+        kind: "heal",
+        missingBlockingDependencyIds,
+      });
+      continue;
+    }
+
     exactIds.push(item.id);
   }
 
-  const dependencyAdds = [...createEpics, ...createChildren]
-    .flatMap((item) =>
-      normalizeBlockingDependencies(item.dependsOn).map((blockerId) => ({
+  const dependencyAdds = importTargets
+    .flatMap((target) =>
+      target.missingBlockingDependencyIds.map((blockerId) => ({
         blockerId,
-        childId: item.id,
+        childId: target.item.id,
       }))
     )
     .sort(
@@ -507,56 +739,12 @@ function createSeedApplicationPlan(
     );
 
   return {
-    createChildren,
-    createEpics,
+    createIds: createIds.sort(compareStrings),
     dependencyAdds,
     exactIds: exactIds.sort(compareStrings),
+    healIds: healIds.sort(compareStrings),
+    importTargets: sortImportTargets(importTargets),
   };
-}
-
-function createBeadArgs(workspace: string, item: SeedItem): string[] {
-  return [
-    "-C",
-    workspace,
-    "create",
-    item.title,
-    "--id",
-    item.id,
-    "--type",
-    item.type,
-    "--priority",
-    `P${item.priority}`,
-    "--description",
-    item.description,
-    "--acceptance",
-    item.acceptanceCriteria,
-    "--metadata",
-    JSON.stringify(item.metadata),
-    ...(item.parent ? ["--parent", item.parent] : []),
-    "--silent",
-  ];
-}
-
-function dependencyArgs(
-  workspace: string,
-  childId: string,
-  blockerId: string
-): string[] {
-  return ["-C", workspace, "dep", "add", childId, blockerId];
-}
-
-async function runSequentially<T>(
-  values: readonly T[],
-  run: (value: T) => Promise<unknown>
-): Promise<void> {
-  const [first, ...rest] = values;
-
-  if (first === undefined) {
-    return;
-  }
-
-  await run(first);
-  await runSequentially(rest, run);
 }
 
 function validateSeedPath(inputPath: string, repoRoot: string): string {
@@ -586,18 +774,60 @@ function validateSeedPath(inputPath: string, repoRoot: string): string {
   return resolvedPath;
 }
 
-function sanitizeErrorMessage(error: unknown): string {
+function buildImportJsonl(targets: readonly SeedImportTarget[]): string {
+  return targets
+    .map((target) => JSON.stringify(canonicalBead(target.item)))
+    .join("\n");
+}
+
+export function formatSeedCliError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
 
-  return message
-    .replace(
-      /(?:^|[^A-Za-z0-9_])\/(?:Users|home|private|tmp|var|etc|opt|usr|Volumes)\/\S*/g,
-      " [redacted-path]"
-    )
-    .replace(/\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+\b/gi, "[redacted]")
-    .replace(/\bsk-[A-Za-z0-9_-]+\b/gi, "[redacted]")
-    .replace(/\s+/g, " ")
-    .trim();
+  if (message.startsWith("Usage: pnpm beads:seed")) {
+    return "Invalid beads:seed arguments.";
+  }
+
+  if (message.startsWith("Seed file path must")) {
+    return "Invalid seed file path.";
+  }
+
+  if (message === "Unable to read seed file") {
+    return "Unable to read seed file.";
+  }
+
+  if (message === "Seed file must contain valid JSON") {
+    return "Seed file must contain valid JSON.";
+  }
+
+  if (
+    message.startsWith("Seed ") ||
+    message.startsWith("Duplicate seed ID") ||
+    message.startsWith("Invalid seed id") ||
+    message.startsWith("Workstream mismatch") ||
+    message.startsWith("Epic ") ||
+    message.startsWith("missing parent") ||
+    message.startsWith("missing dependency") ||
+    message.startsWith("self-dependency")
+  ) {
+    return "Seed validation failed.";
+  }
+
+  if (
+    message.startsWith("Duplicate existing bead ID") ||
+    message.startsWith("Existing bead differs")
+  ) {
+    return "Existing Beads state does not match the seed.";
+  }
+
+  if (message.includes("Beads dependency graph contains a cycle")) {
+    return "Beads dependency cycle check failed.";
+  }
+
+  if (message.startsWith("bd command failed")) {
+    return "Beads command failed.";
+  }
+
+  return "Roadmap seed failed.";
 }
 
 function parseFinalCycles(output: string): unknown[] {
@@ -616,9 +846,6 @@ function writeSeedSummary(
   write: (line: string) => void
 ): void {
   const sortedSeed = sortItemsById(seed);
-  const createIds = [...plan.createEpics, ...plan.createChildren].map(
-    (item) => item.id
-  );
 
   write(`records: ${sortedSeed.length}`);
   write(`epic count: ${EPIC_DEFINITIONS.length}`);
@@ -627,9 +854,14 @@ function writeSeedSummary(
   write(`cross-epic dependency count: ${crossEpicDependencyCount(sortedSeed)}`);
   write(`p0 child count: ${p0ChildCount(sortedSeed)}`);
   write(`exact count: ${plan.exactIds.length}`);
-  write(`create count: ${createIds.length}`);
+  write(`create count: ${plan.createIds.length}`);
+  write(`heal count: ${plan.healIds.length}`);
+  write(`import count: ${plan.importTargets.length}`);
   write(`dependency add count: ${plan.dependencyAdds.length}`);
   write(`ids: ${formatIdList(sortedSeed.map((item) => item.id))}`);
+  write(`create ids: ${formatIdList(plan.createIds)}`);
+  write(`heal ids: ${formatIdList(plan.healIds)}`);
+  write(`exact ids: ${formatIdList(plan.exactIds)}`);
 }
 
 export function parseSeedJson(input: string): SeedDocument {
@@ -694,18 +926,13 @@ export async function runSeed(
     return 0;
   }
 
-  await runSequentially(plan.createEpics, (item) =>
-    dependencies.runCommand("bd", createBeadArgs(config.workspace, item))
-  );
-  await runSequentially(plan.createChildren, (item) =>
-    dependencies.runCommand("bd", createBeadArgs(config.workspace, item))
-  );
-  await runSequentially(plan.dependencyAdds, (dependency) =>
-    dependencies.runCommand(
+  if (plan.importTargets.length > 0) {
+    await dependencies.runInputCommand(
       "bd",
-      dependencyArgs(config.workspace, dependency.childId, dependency.blockerId)
-    )
-  );
+      ["-C", config.workspace, "import", "-", "--json"],
+      buildImportJsonl(plan.importTargets)
+    );
+  }
 
   const finalCycles = parseFinalCycles(
     await dependencies.runCommand("bd", [
@@ -741,7 +968,7 @@ if (isMain) {
       process.exitCode = code;
     })
     .catch((error: unknown) => {
-      console.error(sanitizeErrorMessage(error));
+      console.error(formatSeedCliError(error));
       process.exitCode = 1;
     });
 }

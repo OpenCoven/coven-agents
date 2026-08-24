@@ -1654,37 +1654,13 @@ pnpm beads:seed apply /absolute/path/to/private-seed.json
 ```
 
 It validates the whole file first. `preview` prints IDs and counts only. `apply`
-loads current Beads IDs, creates epics before children with `bd create --id`,
-then adds missing `blocks` dependencies with `bd dep add`. Existing IDs are
-never updated or deleted automatically; differing existing content is a hard
-failure.
-
-Construct each create call as:
-
-```ts
-[
-  "-C",
-  workspace,
-  "create",
-  item.title,
-  "--id",
-  item.id,
-  "--type",
-  item.type,
-  "--priority",
-  `P${item.priority}`,
-  "--description",
-  item.description,
-  "--acceptance",
-  item.acceptanceCriteria,
-  "--metadata",
-  JSON.stringify(item.metadata),
-  ...(item.parent ? ["--parent", item.parent] : []),
-  "--silent",
-]
-```
-
-Add dependencies only after all 60 items exist. Finish with
+loads current Beads IDs, classifies exact vs. healable vs. fatal drift, then
+builds canonical `bd export` JSONL rows entirely in memory. `apply` sends only
+the selected rows through stdin with `bd -C "$BEADS_WORKSPACE" import - --json`
+so private titles, descriptions, acceptance criteria, and metadata never enter
+argv. Existing IDs are never updated or deleted automatically; differing
+content, scalar fields, metadata, extra blocking dependencies, or wrong
+parent-child relationships remain hard failures. Finish with
 `bd -C "$BEADS_WORKSPACE" dep cycles --json`; a non-empty result fails the
 command.
 

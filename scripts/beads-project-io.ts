@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { type ProjectItem, parseBeadsJson } from "./beads-project-model";
 import type { ReconciliationPlan } from "./beads-project-reconcile";
@@ -137,6 +137,12 @@ export const MAX_GRAPHQL_CONCURRENCY = 2;
 export type CommandRunner = (
   command: string,
   args: string[]
+) => Promise<string>;
+
+export type InputCommandRunner = (
+  command: string,
+  args: string[],
+  input: string
 ) => Promise<string>;
 
 export type GraphqlVariables = Record<string, unknown>;
@@ -365,30 +371,73 @@ function createProcessError(
   return new Error(`${command} ${category} failed with exit code ${code}`);
 }
 
-function execFileWithInput(
+function execCommandWithInput(
   command: string,
   args: string[],
   input: string,
   category: string
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = execFile(
-      command,
-      args,
-      {
-        maxBuffer: MAX_BUFFER,
-      },
-      (error, stdout) => {
-        if (error) {
-          reject(createProcessError(command, category, error));
-          return;
-        }
+    const child = spawn(command, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const stdoutChunks: Buffer[] = [];
+    let stdoutSize = 0;
+    let stderrSize = 0;
+    let settled = false;
 
-        resolve(stdout);
+    const finish = (error?: Error, stdout = ""): void => {
+      if (settled) {
+        return;
       }
-    );
 
-    child.stdin?.end(input);
+      settled = true;
+
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve(stdout);
+    };
+
+    const failForSize = (): void => {
+      child.kill();
+      finish(new Error(`${command} ${category} failed: output too large`));
+    };
+
+    child.on("error", (error) => {
+      finish(createProcessError(command, category, error));
+    });
+    child.stdout.on("data", (dataChunk: Buffer) => {
+      stdoutSize += dataChunk.length;
+
+      if (stdoutSize > MAX_BUFFER) {
+        failForSize();
+        return;
+      }
+
+      stdoutChunks.push(dataChunk);
+    });
+    child.stderr.on("data", (dataChunk: Buffer) => {
+      stderrSize += dataChunk.length;
+
+      if (stderrSize > MAX_BUFFER) {
+        failForSize();
+      }
+    });
+    child.stdin.on("error", (error) => {
+      finish(createProcessError(command, category, error));
+    });
+    child.on("close", (code) => {
+      if (code !== 0) {
+        finish(createProcessError(command, category, { code }));
+        return;
+      }
+
+      finish(undefined, Buffer.concat(stdoutChunks).toString("utf8"));
+    });
+    child.stdin.end(input);
   });
 }
 
@@ -1412,9 +1461,15 @@ export const runCommand: CommandRunner = async (command, args) => {
   }
 };
 
+export const runInputCommand: InputCommandRunner = async (
+  command,
+  args,
+  input
+) => execCommandWithInput(command, args, input, "command");
+
 export const runGraphql: GraphqlRunner = async (query, variables) => {
   const payload = JSON.stringify({ query, variables });
-  const output = await execFileWithInput(
+  const output = await execCommandWithInput(
     "gh",
     ["api", "graphql", "--include", "--input", "-"],
     payload,

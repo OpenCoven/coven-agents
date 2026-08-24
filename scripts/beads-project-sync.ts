@@ -56,18 +56,47 @@ function formatIdList(ids: readonly string[]): string {
   return ids.length === 0 ? "-" : ids.join(", ");
 }
 
-function sanitizeErrorMessage(error: unknown): string {
+export function formatSyncCliError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
 
-  return message
-    .replace(
-      /(?:^|[^A-Za-z0-9_])\/(?:Users|home|private|tmp|var|etc|opt|usr|Volumes)\/\S*/g,
-      " [redacted-path]"
-    )
-    .replace(/\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+\b/gi, "[redacted]")
-    .replace(/\bsk-[A-Za-z0-9_-]+\b/gi, "[redacted]")
-    .replace(/\s+/g, " ")
-    .trim();
+  if (message.startsWith("Usage: pnpm beads:sync")) {
+    return "Invalid beads:sync arguments.";
+  }
+
+  if (message === "COVEN_PROJECT_NUMBER must be a positive integer") {
+    return "Invalid COVEN_PROJECT_NUMBER.";
+  }
+
+  if (message.includes("Beads dependency graph contains a cycle")) {
+    return "Beads dependency cycle check failed.";
+  }
+
+  if (
+    message.startsWith("missing Project field") ||
+    message.startsWith("Project field ")
+  ) {
+    return "Project schema validation failed.";
+  }
+
+  if (
+    message.startsWith("Duplicate bead ID") ||
+    message.startsWith("missing parent") ||
+    message.startsWith("missing dependency") ||
+    message.startsWith("dependency issue_id mismatch") ||
+    message.startsWith("parent-child relation mismatch")
+  ) {
+    return "Beads graph validation failed.";
+  }
+
+  if (
+    message.startsWith("GitHub GraphQL") ||
+    message.startsWith("gh graphql failed") ||
+    message.startsWith("gh command failed")
+  ) {
+    return "GitHub project sync failed.";
+  }
+
+  return "Project sync failed.";
 }
 
 function validateBeadGraph(beads: readonly Bead[]): Map<string, Bead> {
@@ -230,7 +259,7 @@ if (isMain) {
       process.exitCode = code;
     })
     .catch((error: unknown) => {
-      console.error(sanitizeErrorMessage(error));
+      console.error(formatSyncCliError(error));
       process.exitCode = 1;
     });
 }

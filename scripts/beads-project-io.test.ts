@@ -14,6 +14,7 @@ import {
   type ProjectField,
   type ProjectSnapshot,
   runCommand,
+  runInputCommand,
   validateProjectSchema,
 } from "./beads-project-io";
 import { MARKER_PREFIX } from "./beads-project-policy";
@@ -442,6 +443,32 @@ test("the default runner does not echo command arguments on failure", async () =
       assert.match(error.message, /^false command failed /);
       assert.doesNotMatch(error.message, /private acceptance text/);
       assert.doesNotMatch(error.message, /github_pat_/);
+      return true;
+    }
+  );
+});
+
+test("the stdin runner does not echo arguments or input on failure", async () => {
+  await assert.rejects(
+    () =>
+      runInputCommand(
+        "false",
+        [
+          "private roadmap title",
+          "github_pat_1234567890abcdefghijklmnopqrstuvwxyz",
+        ],
+        [
+          "Private acceptance text",
+          "/Users/test/Secret Folder/private roadmap.json",
+        ].join("\n")
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /^false command failed /);
+      assert.doesNotMatch(error.message, /private roadmap title/i);
+      assert.doesNotMatch(error.message, /Private acceptance text/);
+      assert.doesNotMatch(error.message, /github_pat_/);
+      assert.doesNotMatch(error.message, /Secret Folder|private roadmap\.json/);
       return true;
     }
   );

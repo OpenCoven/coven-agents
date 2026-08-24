@@ -6,7 +6,7 @@ import type {
 } from "./beads-project-io";
 import type { Bead, ProjectItem } from "./beads-project-model";
 import { MARKER_PREFIX } from "./beads-project-policy";
-import { runSync } from "./beads-project-sync";
+import { formatSyncCliError, runSync } from "./beads-project-sync";
 
 const config = {
   beadsDirectory: "/private/beads",
@@ -564,4 +564,15 @@ test("rejects invalid arguments and project numbers", async () => {
     () => runSync(["preview"], { ...config, projectNumber: Number.NaN }, deps),
     /positive integer/i
   );
+});
+
+test("top-level sync errors use fixed categories without leaking spaced paths", () => {
+  const message = formatSyncCliError(
+    new Error(
+      "open /Users/test/Secret Folder/project export.json: permission denied"
+    )
+  );
+
+  assert.equal(message, "Project sync failed.");
+  assert.doesNotMatch(message, /Users|Secret|Folder|project export\.json/);
 });

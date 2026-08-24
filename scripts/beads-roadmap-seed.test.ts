@@ -3,6 +3,7 @@ import test from "node:test";
 import type { Bead } from "./beads-project-model";
 import {
   EPIC_DEFINITIONS,
+  formatSeedCliError,
   parseSeedJson,
   runSeed,
   type SeedDocument,
@@ -22,6 +23,7 @@ const externalSeedPath = "/private/coven-agents-roadmap.private.json";
 type CommandCall = {
   args: string[];
   command: string;
+  input?: string;
 };
 
 function makeValidSeed(): SeedDocument {
@@ -191,8 +193,33 @@ function makeRunner(
 ): {
   calls: CommandCall[];
   runCommand: (command: string, args: string[]) => Promise<string>;
+  runInputCommand: (
+    command: string,
+    args: string[],
+    input: string
+  ) => Promise<string>;
 } {
   const calls: CommandCall[] = [];
+
+  const mergeImportedBeads = (input: string): void => {
+    for (const line of input.split(/\r?\n/)) {
+      if (line.trim() === "") {
+        continue;
+      }
+
+      const imported = JSON.parse(line) as Bead;
+      const existingIndex = currentBeads.findIndex(
+        (bead) => bead.id === imported.id
+      );
+
+      if (existingIndex >= 0) {
+        currentBeads[existingIndex] = imported;
+        continue;
+      }
+
+      currentBeads.push(imported);
+    }
+  };
 
   return {
     calls,
@@ -216,7 +243,23 @@ function makeRunner(
 
       return Promise.resolve("");
     },
+    runInputCommand: (command, args, input) => {
+      calls.push({ args, command, input });
+      mergeImportedBeads(input);
+      return Promise.resolve("");
+    },
   };
+}
+
+function importCalls(calls: readonly CommandCall[]): CommandCall[] {
+  return calls.filter((call) => call.args[2] === "import");
+}
+
+function parseImportPayload(call: CommandCall): Bead[] {
+  return (call.input ?? "")
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line) as Bead);
 }
 
 function writeNothing(_line: string): void {
@@ -417,11 +460,12 @@ test("rejects invalid P0, cross-epic, and ready thresholds", () => {
 test("preview prints IDs and counts only and performs no writes", async () => {
   const seed = makeValidSeed();
   const output: string[] = [];
-  const { calls, runCommand } = makeRunner([]);
+  const { calls, runCommand, runInputCommand } = makeRunner([]);
 
   await runSeed(["preview", externalSeedPath], config, {
     readFile: async () => JSON.stringify(seed),
     runCommand,
+    runInputCommand,
     write: (line) => {
       output.push(line);
     },
@@ -440,11 +484,14 @@ test("preview prints IDs and counts only and performs no writes", async () => {
 
 test("apply is an exact idempotent no-op when every bead already matches", async () => {
   const seed = makeValidSeed();
-  const { calls, runCommand } = makeRunner(seed.map(makeCurrentBead));
+  const { calls, runCommand, runInputCommand } = makeRunner(
+    seed.map(makeCurrentBead)
+  );
 
   await runSeed(["apply", externalSeedPath], config, {
     readFile: async () => JSON.stringify(seed),
     runCommand,
+    runInputCommand,
     write: writeNothing,
   });
 
@@ -464,13 +511,14 @@ test("apply fails before writes when an existing bead differs", async () => {
     ...current[0],
     title: "Existing private title that must stay hidden",
   };
-  const { calls, runCommand } = makeRunner(current);
+  const { calls, runCommand, runInputCommand } = makeRunner(current);
 
   await assert.rejects(
     () =>
       runSeed(["apply", externalSeedPath], config, {
         readFile: async () => JSON.stringify(seed),
         runCommand,
+        runInputCommand,
         write: writeNothing,
       }),
     /differs/i
@@ -486,6 +534,7 @@ test("apply fails before writes when an existing bead differs", async () => {
       runSeed(["apply", externalSeedPath], config, {
         readFile: async () => JSON.stringify(seed),
         runCommand,
+        runInputCommand,
         write: writeNothing,
       }),
     (error: unknown) =>
@@ -494,68 +543,189 @@ test("apply fails before writes when an existing bead differs", async () => {
   );
 });
 
-test("apply creates epics first, then children, then dependency edges in sorted order", async () => {
+test("apply sends private canonical JSONL through stdin only", async () => {
   const seed = makeValidSeed();
-  const { calls, runCommand } = makeRunner([]);
+  const targetId = "coven-agents-product.2";
+  const seedTargetIndex = seed.findIndex((item) => item.id === targetId);
+  assert.ok(seedTargetIndex >= 0);
+  seed[seedTargetIndex] = {
+    ...seed[seedTargetIndex],
+    acceptanceCriteria:
+      "Meet the private review gate with measurable evidence.",
+    description:
+      "Coordinate the private roadmap without exposing it through process arguments.",
+    metadata: {
+      ...seed[seedTargetIndex].metadata,
+      runner: "Shared",
+    },
+    title: "Private roadmap task",
+  };
+  const target = seed.find((item) => item.id === targetId);
+  assert.ok(target);
+  const current = seed.map((item) => makeCurrentBead(item));
+  const targetIndex = current.findIndex((item) => item.id === targetId);
+  assert.ok(targetIndex >= 0);
+  current[targetIndex] = {
+    ...current[targetIndex],
+    dependencies: current[targetIndex].dependencies.filter(
+      (dependency) =>
+        !(
+          dependency.type === "blocks" &&
+          dependency.depends_on_id === target.dependsOn.at(-1)
+        )
+    ),
+  };
+  const { calls, runCommand, runInputCommand } = makeRunner(current);
 
   await runSeed(["apply", externalSeedPath], config, {
     readFile: async () => JSON.stringify(seed),
     runCommand,
+    runInputCommand,
     write: writeNothing,
   });
 
-  const createCalls = calls.filter((call) => call.args[2] === "create");
-  const depCalls = calls.filter(
-    (call) => call.args[2] === "dep" && call.args[3] === "add"
+  const imports = importCalls(calls);
+
+  assert.equal(imports.length, 1);
+  assert.deepEqual(imports[0]?.args, [
+    "-C",
+    config.workspace,
+    "import",
+    "-",
+    "--json",
+  ]);
+  assert.doesNotMatch(imports[0]?.args.join(" ") ?? "", /Private roadmap task/);
+  assert.doesNotMatch(
+    imports[0]?.args.join(" ") ?? "",
+    /Coordinate the private roadmap/
   );
-
-  assert.equal(createCalls.length, 60);
-  assert.equal(depCalls.length > 0, true);
-
-  const createdIds = createCalls.map((call) => {
-    const idIndex = call.args.indexOf("--id");
-    return call.args[idIndex + 1];
-  });
-  const epicIds = EPIC_DEFINITIONS.map((definition) => definition.id).sort();
-  const childIds = seed
-    .filter((item) => item.parent)
-    .map((item) => item.id)
-    .sort();
-
-  assert.deepEqual(createdIds.slice(0, 10), epicIds);
-  assert.deepEqual(createdIds.slice(10), childIds);
-
-  const firstDependencyCallIndex = calls.findIndex(
-    (call) => call.args[2] === "dep" && call.args[3] === "add"
+  assert.doesNotMatch(
+    imports[0]?.args.join(" ") ?? "",
+    /Meet the private review gate/
   );
-  const lastCreateCallIndex = calls.findLastIndex(
-    (call) => call.args[2] === "create"
+  assert.doesNotMatch(imports[0]?.args.join(" ") ?? "", /"runner":"Shared"/);
+
+  const [payload] = imports.map(parseImportPayload);
+
+  assert.equal(payload.length, 1);
+  assert.equal(payload[0]?.id, targetId);
+  assert.equal(payload[0]?.title, target.title);
+  assert.equal(payload[0]?.description, target.description);
+  assert.equal(payload[0]?.acceptance_criteria, target.acceptanceCriteria);
+  assert.equal(payload[0]?.status, "open");
+  assert.deepEqual(
+    payload[0]?.dependencies.filter(
+      (dependency) => dependency.type === "blocks"
+    ),
+    target.dependsOn.map((dependsOnId) => ({
+      depends_on_id: dependsOnId,
+      issue_id: target.id,
+      type: "blocks",
+    }))
   );
-
-  assert.equal(firstDependencyCallIndex > lastCreateCallIndex, true);
-
-  const dependencyPairs = depCalls.map((call) => ({
-    blocker: call.args[5],
-    child: call.args[4],
-  }));
-  const sortedPairs = [...dependencyPairs].sort(
-    (left, right) =>
-      left.child.localeCompare(right.child) ||
-      left.blocker.localeCompare(right.blocker)
-  );
-
-  assert.deepEqual(dependencyPairs, sortedPairs);
 });
 
-test("apply rejects a non-empty final dependency cycle check", async () => {
+test("apply rejects extra blocking dependencies before import", async () => {
   const seed = makeValidSeed();
-  const { runCommand } = makeRunner([], [["coven-agents-product.2"]]);
+  const current = seed.map(makeCurrentBead);
+  const targetId = "coven-agents-product.2";
+  const targetIndex = current.findIndex((item) => item.id === targetId);
+  assert.ok(targetIndex >= 0);
+  current[targetIndex] = {
+    ...current[targetIndex],
+    dependencies: [
+      ...current[targetIndex].dependencies,
+      {
+        depends_on_id: "coven-agents-product.5",
+        issue_id: targetId,
+        type: "blocks",
+      },
+    ],
+  };
+  const { calls, runCommand, runInputCommand } = makeRunner(current);
 
   await assert.rejects(
     () =>
       runSeed(["apply", externalSeedPath], config, {
         readFile: async () => JSON.stringify(seed),
         runCommand,
+        runInputCommand,
+        write: writeNothing,
+      }),
+    /blocking dependencies/i
+  );
+
+  assert.equal(importCalls(calls).length, 0);
+  assert.equal(calls.length, 1);
+});
+
+test("apply can resume missing creations and dependency healing", async () => {
+  const seed = makeValidSeed();
+  const current = seed
+    .map(makeCurrentBead)
+    .filter(
+      (item) =>
+        item.id !== "coven-agents-testing.4" &&
+        item.id !== "coven-agents-release.5"
+    );
+  const healId = "coven-agents-dx.5";
+  const healIndex = current.findIndex((item) => item.id === healId);
+  const desiredHeal = seed.find((item) => item.id === healId);
+  assert.ok(healIndex >= 0);
+  assert.ok(desiredHeal);
+  current[healIndex] = {
+    ...current[healIndex],
+    dependencies: current[healIndex].dependencies.filter(
+      (dependency) =>
+        !(
+          dependency.type === "blocks" &&
+          dependency.depends_on_id === desiredHeal.dependsOn.at(-1)
+        )
+    ),
+  };
+  const runner = makeRunner(current);
+
+  await runSeed(["apply", externalSeedPath], config, {
+    readFile: async () => JSON.stringify(seed),
+    runCommand: runner.runCommand,
+    runInputCommand: runner.runInputCommand,
+    write: writeNothing,
+  });
+
+  const [firstImport] = importCalls(runner.calls);
+  assert.ok(firstImport);
+  assert.deepEqual(
+    parseImportPayload(firstImport)
+      .map((bead) => bead.id)
+      .sort(),
+    ["coven-agents-dx.5", "coven-agents-release.5", "coven-agents-testing.4"]
+  );
+
+  runner.calls.length = 0;
+
+  await runSeed(["apply", externalSeedPath], config, {
+    readFile: async () => JSON.stringify(seed),
+    runCommand: runner.runCommand,
+    runInputCommand: runner.runInputCommand,
+    write: writeNothing,
+  });
+
+  assert.equal(importCalls(runner.calls).length, 0);
+});
+
+test("apply rejects a non-empty final dependency cycle check", async () => {
+  const seed = makeValidSeed();
+  const { runCommand, runInputCommand } = makeRunner(
+    [],
+    [["coven-agents-product.2"]]
+  );
+
+  await assert.rejects(
+    () =>
+      runSeed(["apply", externalSeedPath], config, {
+        readFile: async () => JSON.stringify(seed),
+        runCommand,
+        runInputCommand,
         write: writeNothing,
       }),
     /cycle/i
@@ -566,6 +736,7 @@ test("rejects invalid and in-repository seed paths", async () => {
   const deps = {
     readFile: async () => JSON.stringify(makeValidSeed()),
     runCommand: async () => JSON.stringify([]),
+    runInputCommand: async () => "",
     write: writeNothing,
   };
 
@@ -586,4 +757,15 @@ test("rejects invalid and in-repository seed paths", async () => {
       ),
     /outside the repository root/i
   );
+});
+
+test("top-level seed errors use fixed categories without leaking spaced paths", () => {
+  const message = formatSeedCliError(
+    new Error(
+      "ENOENT: no such file or directory, open '/Users/test/Secret Folder/private roadmap.json'"
+    )
+  );
+
+  assert.equal(message, "Roadmap seed failed.");
+  assert.doesNotMatch(message, /Users|Secret|Folder|private roadmap\.json/);
 });
