@@ -210,6 +210,10 @@ function queryResponse(options: {
   endCursor?: string | null;
   extraFieldNodes?: Record<string, unknown>[];
   extraValueNodes?: Record<string, unknown>[][];
+  fieldValuePageInfos?: Array<{
+    endCursor?: string | null;
+    hasNextPage?: boolean;
+  }>;
   fields?: Record<string, ProjectField>;
   hasNextPage?: boolean;
   items?: ProjectSnapshot["items"];
@@ -220,6 +224,7 @@ function queryResponse(options: {
     endCursor = null,
     extraFieldNodes = [],
     extraValueNodes = [],
+    fieldValuePageInfos = [],
     fields = makeProjectFields(),
     hasNextPage = false,
     items = [],
@@ -257,6 +262,10 @@ function queryResponse(options: {
                   ...fieldValueNodes(item.fields, fields),
                   ...(extraValueNodes[index] ?? []),
                 ],
+                pageInfo: {
+                  endCursor: fieldValuePageInfos[index]?.endCursor ?? null,
+                  hasNextPage: fieldValuePageInfos[index]?.hasNextPage ?? false,
+                },
               },
               id: item.id,
             })),
@@ -272,14 +281,26 @@ function queryResponse(options: {
   };
 }
 
-function mutationResponse(data: Record<string, unknown> = {}) {
+function mutationResponse(
+  data: Record<string, unknown> = {},
+  options: {
+    errors?: unknown[];
+    rateLimit?: typeof BASE_RATE_LIMIT;
+  } = {}
+) {
+  const { errors, rateLimit = BASE_RATE_LIMIT } = options;
+
   return {
     data,
-    rateLimit: BASE_RATE_LIMIT,
+    ...(errors === undefined ? {} : { errors }),
+    rateLimit,
   };
 }
 
-function createMutationResponse(query: string) {
+function createMutationResponse(
+  query: string,
+  rateLimit: typeof BASE_RATE_LIMIT = BASE_RATE_LIMIT
+) {
   const data: Record<string, unknown> = {};
   let index = 0;
 
@@ -298,7 +319,7 @@ function createMutationResponse(query: string) {
     index += 1;
   }
 
-  return mutationResponse(data);
+  return mutationResponse(data, { rateLimit });
 }
 
 function countOperations(query: string, name: string): number {
@@ -463,6 +484,7 @@ test("loads a one-page project snapshot in one GraphQL call", async () => {
 
   assert.equal(calls.length, 1);
   assert.match(calls[0]?.query ?? "", /items\(first: 100, after: \$after\)/);
+  assert.match(calls[0]?.query ?? "", /fieldValues\(first: 100\)/);
   assert.equal(project.projectId, "PVT_project");
   assert.equal(project.rateLimit.cost, 7);
   assert.equal(project.rateLimit.remaining, 1234);
@@ -510,6 +532,30 @@ test("paginates project snapshots with exactly one call per page", async () => {
   assert.deepEqual(
     project.items.map((item) => item.fields["Bead ID"]),
     ["coven-agents-a", "coven-agents-b"]
+  );
+});
+
+test("fails closed when a project item fieldValues connection is truncated", async () => {
+  const run: GraphqlRunner = () =>
+    resolved(
+      queryResponse({
+        fieldValuePageInfos: [
+          {
+            endCursor: "cursor-field-1",
+            hasNextPage: true,
+          },
+        ],
+        items: [
+          draftItem("coven-agents-field-values", 1, {
+            "Bead ID": "coven-agents-field-values",
+          }),
+        ],
+      })
+    );
+
+  await assert.rejects(
+    () => loadProject("OpenCoven", 10, run),
+    /fieldValues pagination is not supported/
   );
 });
 
@@ -644,18 +690,14 @@ test("fails content updates without a DraftIssue content id before mutation", as
   assert.equal(calls.length, 0);
 });
 
-test("fails safely when the remaining GraphQL budget is too low", async () => {
+test("fails safely before mutations when the remaining GraphQL budget is too low", async () => {
   const privateBody = "private acceptance text";
   const token = "github_pat_1234567890abcdefghijklmnopqrstuvwxyz";
-  const run: GraphqlRunner = () =>
-    resolved({
-      data: {},
-      rateLimit: {
-        cost: 12,
-        remaining: MIN_GRAPHQL_REMAINING - 1,
-        resetAt: "2026-08-24T18:00:00Z",
-      },
-    });
+  const calls: GraphqlCall[] = [];
+  const run: GraphqlRunner = (query, variables) => {
+    calls.push({ query, variables });
+    return resolved(mutationResponse());
+  };
 
   await assert.rejects(
     () =>
@@ -676,7 +718,13 @@ test("fails safely when the remaining GraphQL budget is too low", async () => {
           unchanged: 0,
           unmanaged: 0,
         },
-        makeProjectSnapshot(),
+        makeProjectSnapshot({
+          rateLimit: {
+            cost: 12,
+            remaining: MIN_GRAPHQL_REMAINING - 1,
+            resetAt: "2026-08-24T18:00:00Z",
+          },
+        }),
         run
       ),
     (error: unknown) => {
@@ -688,6 +736,7 @@ test("fails safely when the remaining GraphQL budget is too low", async () => {
       return true;
     }
   );
+  assert.equal(calls.length, 0);
 });
 
 test("fails safely when GitHub GraphQL returns errors", async () => {
@@ -735,6 +784,265 @@ test("fails safely when GitHub GraphQL returns errors", async () => {
       return true;
     }
   );
+});
+
+test("stops before the next mutation group when the remaining budget reaches the threshold", async () => {
+  const calls: GraphqlCall[] = [];
+  const actions = Array.from(
+    { length: MUTATION_OPERATION_LIMIT * MAX_GRAPHQL_CONCURRENCY + 1 },
+    (_, index) =>
+      updateAction({
+        beadId: `coven-agents-budget-${String(index).padStart(3, "0")}`,
+        changedFields: ["Status"],
+        fields: {
+          Status: "Todo",
+        },
+        itemId: `PVTI_budget_${index}`,
+      })
+  );
+  const items = actions.map((action, index) =>
+    draftItem(action.desired.beadId, index, {
+      Status: "In Progress",
+    })
+  );
+  const run: GraphqlRunner = (query, variables) => {
+    calls.push({ query, variables });
+    return resolved(
+      mutationResponse(
+        {},
+        {
+          rateLimit: {
+            cost: MUTATION_OPERATION_LIMIT,
+            remaining: MIN_GRAPHQL_REMAINING,
+            resetAt: "2026-08-24T18:30:00Z",
+          },
+        }
+      )
+    );
+  };
+
+  await assert.rejects(
+    () =>
+      applyReconciliation(
+        {
+          actions,
+          orphaned: [],
+          unchanged: 0,
+          unmanaged: 0,
+        },
+        makeProjectSnapshot({
+          items,
+          rateLimit: {
+            cost: 7,
+            remaining:
+              MIN_GRAPHQL_REMAINING +
+              MUTATION_OPERATION_LIMIT * MAX_GRAPHQL_CONCURRENCY,
+            resetAt: "2026-08-24T18:30:00Z",
+          },
+        }),
+        run
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /estimatedCost=1/);
+      assert.match(error.message, /remaining=100/);
+      assert.match(error.message, /2026-08-24T18:30:00Z/);
+      return true;
+    }
+  );
+
+  assert.equal(calls.length, MAX_GRAPHQL_CONCURRENCY);
+  assert.equal(
+    countOperations(calls[0]?.query ?? "", "updateProjectV2ItemFieldValue"),
+    MUTATION_OPERATION_LIMIT
+  );
+  assert.equal(
+    countOperations(calls[1]?.query ?? "", "updateProjectV2ItemFieldValue"),
+    MUTATION_OPERATION_LIMIT
+  );
+});
+
+test("reports mixed create success and error as rerun-only recovery", async () => {
+  const calls: GraphqlCall[] = [];
+  const privateBody = "private acceptance text";
+  const token = "github_pat_1234567890abcdefghijklmnopqrstuvwxyz";
+  const plan: ReconciliationPlan = {
+    actions: [
+      {
+        desired: {
+          beadId: "coven-agents-create-alpha",
+          body: managedBody(
+            "coven-agents-create-alpha",
+            `${privateBody} ${token}`
+          ),
+          fields: {},
+          title: "Private title alpha",
+        },
+        kind: "create",
+      },
+      {
+        desired: {
+          beadId: "coven-agents-create-bravo",
+          body: managedBody(
+            "coven-agents-create-bravo",
+            `${privateBody} ${token}`
+          ),
+          fields: {},
+          title: "Private title bravo",
+        },
+        kind: "create",
+      },
+    ],
+    orphaned: [],
+    unchanged: 0,
+    unmanaged: 0,
+  };
+  const run: GraphqlRunner = (query, variables) => {
+    calls.push({ query, variables });
+    assert.match(query, /addProjectV2DraftIssue/);
+
+    return resolved(
+      mutationResponse(
+        {
+          create_000: {
+            projectItem: {
+              content: {
+                __typename: "DraftIssue",
+                body: "Created body 0",
+                id: "created-draft-0",
+                title: "Created title 0",
+              },
+              id: "created-item-0",
+            },
+          },
+          create_001: null,
+        },
+        {
+          errors: [
+            {
+              message: `Rejected "${privateBody}" ${token}`,
+              path: ["create_001"],
+              type: "FORBIDDEN",
+            },
+          ],
+        }
+      )
+    );
+  };
+
+  await assert.rejects(
+    () => applyReconciliation(plan, makeProjectSnapshot(), run),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /partial mutation failure/i);
+      assert.match(error.message, /create stage/i);
+      assert.match(error.message, /create_000=coven-agents-create-alpha/);
+      assert.match(error.message, /create_001=coven-agents-create-bravo/);
+      assert.match(error.message, /rerun is idempotent recovery/i);
+      assert.match(error.message, /no rollback\/delete/i);
+      assert.doesNotMatch(error.message, /private acceptance text/);
+      assert.doesNotMatch(error.message, /github_pat_/);
+      assert.doesNotMatch(error.message, /Private title/);
+      return true;
+    }
+  );
+
+  assert.equal(calls.length, 1);
+});
+
+test("reports mixed content and field update results without leaking sensitive content", async () => {
+  const calls: GraphqlCall[] = [];
+  const privateBody = "private acceptance text";
+  const token = "github_pat_1234567890abcdefghijklmnopqrstuvwxyz";
+  const action: ReconciliationPlan["actions"][number] = {
+    changedFields: ["Runner"],
+    contentChanged: true,
+    desired: {
+      beadId: "coven-agents-update-partial",
+      body: managedBody(
+        "coven-agents-update-partial",
+        `${privateBody} ${token}`
+      ),
+      fields: {
+        Runner: "Shared",
+      },
+      title: "Private title update",
+    },
+    itemId: "PVTI_update_partial",
+    kind: "update",
+  };
+  const run: GraphqlRunner = (query, variables) => {
+    calls.push({ query, variables });
+
+    return resolved(
+      mutationResponse(
+        {
+          content_000: {
+            draftIssue: {
+              id: "DI_update_partial",
+            },
+          },
+          field_001: null,
+        },
+        {
+          errors: [
+            {
+              message: `Rejected "${privateBody}" ${token}`,
+              path: ["field_001"],
+              type: "FORBIDDEN",
+            },
+          ],
+        }
+      )
+    );
+  };
+
+  await assert.rejects(
+    () =>
+      applyReconciliation(
+        {
+          actions: [action],
+          orphaned: [],
+          unchanged: 0,
+          unmanaged: 0,
+        },
+        makeProjectSnapshot({
+          items: [
+            {
+              content: {
+                body: managedBody("coven-agents-update-partial", "Old body"),
+                id: "DI_update_partial",
+                title: "Old title",
+                type: "DraftIssue",
+              },
+              fields: {
+                Runner: "Local",
+              },
+              id: "PVTI_update_partial",
+            },
+          ],
+        }),
+        run
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /partial mutation failure/i);
+      assert.match(error.message, /update stage/i);
+      assert.match(error.message, /content_000=coven-agents-update-partial/);
+      assert.match(
+        error.message,
+        /field_001=coven-agents-update-partial#Runner/
+      );
+      assert.match(error.message, /rerun is idempotent recovery/i);
+      assert.match(error.message, /no rollback\/delete/i);
+      assert.doesNotMatch(error.message, /private acceptance text/);
+      assert.doesNotMatch(error.message, /github_pat_/);
+      assert.doesNotMatch(error.message, /Private title/);
+      return true;
+    }
+  );
+
+  assert.equal(calls.length, 1);
 });
 
 test("splits 41 field operations into two mutation requests", async () => {

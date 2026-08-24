@@ -80,7 +80,7 @@ const PROJECT_SNAPSHOT_QUERY = `
                 body
               }
             }
-            fieldValues(first: 50) {
+            fieldValues(first: 100) {
               nodes {
                 __typename
                 ... on ProjectV2ItemFieldTextValue {
@@ -107,6 +107,10 @@ const PROJECT_SNAPSHOT_QUERY = `
                     }
                   }
                 }
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
               }
             }
           }
@@ -228,10 +232,21 @@ type CreateAction = Extract<
   { kind: "create" }
 >;
 
-type CreateMutationBatch = {
-  actions: CreateAction[];
+type MutationAliasReference = {
+  alias: string;
+  beadId: string;
+  fieldName: string;
+  kind: "content" | "create" | "field";
+};
+
+type GraphqlMutationBatch = {
+  aliases: MutationAliasReference[];
   query: string;
   variables: GraphqlVariables;
+};
+
+type CreateMutationBatch = GraphqlMutationBatch & {
+  actions: CreateAction[];
 };
 
 type MutationOperation =
@@ -248,10 +263,16 @@ type MutationOperation =
       kind: "field";
     };
 
-type MutationBatch = {
+type MutationBatch = GraphqlMutationBatch & {
   operations: MutationOperation[];
-  query: string;
-  variables: GraphqlVariables;
+};
+
+type MutationBatchOutcome = {
+  data: Record<string, unknown>;
+  failures: MutationAliasReference[];
+  rateLimit: RateLimitSnapshot;
+  successes: MutationAliasReference[];
+  unscopedErrorCount: number;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -462,6 +483,14 @@ function sanitizeGraphqlType(error: Record<string, unknown>): string {
   return text === "" ? "GRAPHQL_ERROR" : text;
 }
 
+function sanitizeMutationIdentifier(value: string): string {
+  const normalized = value
+    .replace(/[^A-Za-z0-9_.-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return normalized === "" ? "unknown" : normalized;
+}
+
 function collectVariableStrings(
   value: unknown,
   strings: Set<string> = new Set<string>()
@@ -508,6 +537,157 @@ function sanitizeGraphqlMessage(
   return normalized.slice(0, GRAPHQL_MESSAGE_LIMIT);
 }
 
+function formatGraphqlErrors(
+  rawErrors: readonly unknown[],
+  variables: GraphqlVariables
+): string {
+  const errors = rawErrors
+    .slice(0, GRAPHQL_ERROR_LIMIT)
+    .map((error) => {
+      const record = readRecord(error, "GraphQL error");
+      return `${sanitizeGraphqlType(record)}: ${sanitizeGraphqlMessage(
+        record.message,
+        variables
+      )}`;
+    })
+    .join("; ");
+  const suffix =
+    rawErrors.length > GRAPHQL_ERROR_LIMIT
+      ? `; +${rawErrors.length - GRAPHQL_ERROR_LIMIT} more`
+      : "";
+
+  return `${errors}${suffix}`;
+}
+
+function createGraphqlErrorsError(
+  rawErrors: readonly unknown[],
+  variables: GraphqlVariables
+): Error {
+  return new Error(
+    `GitHub GraphQL errors: ${formatGraphqlErrors(rawErrors, variables)}`
+  );
+}
+
+function readGraphqlErrorAlias(error: unknown): string | undefined {
+  if (!isRecord(error) || !Array.isArray(error.path)) {
+    return undefined;
+  }
+
+  const [pathSegment] = error.path;
+
+  return typeof pathSegment === "string" ? pathSegment : undefined;
+}
+
+function describeMutationAlias(reference: MutationAliasReference): string {
+  const alias = sanitizeMutationIdentifier(reference.alias);
+  const beadId = sanitizeMutationIdentifier(reference.beadId);
+
+  if (reference.kind === "field") {
+    return `${alias}=${beadId}#${sanitizeMutationIdentifier(
+      reference.fieldName
+    )}`;
+  }
+
+  return `${alias}=${beadId}`;
+}
+
+function formatMutationAliasSummary(
+  references: readonly MutationAliasReference[]
+): string {
+  if (references.length === 0) {
+    return "0";
+  }
+
+  const entries = references
+    .slice(0, GRAPHQL_ERROR_LIMIT)
+    .map(describeMutationAlias)
+    .join(", ");
+  const suffix =
+    references.length > GRAPHQL_ERROR_LIMIT
+      ? `, +${references.length - GRAPHQL_ERROR_LIMIT} more`
+      : "";
+
+  return `${references.length} [${entries}${suffix}]`;
+}
+
+// Successful mutations are already durable on GitHub. Recovery is a rerun with
+// a fresh snapshot; we intentionally do not attempt rollback or delete.
+function createPartialMutationFailureError(
+  stage: "create" | "update",
+  successes: readonly MutationAliasReference[],
+  failures: readonly MutationAliasReference[],
+  unscopedErrorCount: number
+): Error {
+  const unscopedSuffix =
+    unscopedErrorCount > 0 ? `; unscopedErrors=${unscopedErrorCount}` : "";
+
+  return new Error(
+    `GitHub GraphQL partial mutation failure during ${stage} stage: succeeded=${formatMutationAliasSummary(
+      successes
+    )}; failed=${formatMutationAliasSummary(
+      failures
+    )}${unscopedSuffix}; rerun is idempotent recovery; no rollback/delete was attempted`
+  );
+}
+
+function createMutationExecutionError(
+  stage: "create" | "update",
+  error: Error,
+  successes: readonly MutationAliasReference[]
+): Error {
+  if (successes.length === 0) {
+    return error;
+  }
+
+  return new Error(
+    `${error.message}; successfulAliases=${formatMutationAliasSummary(
+      successes
+    )}; rerun is idempotent recovery; no rollback/delete was attempted during ${stage} stage`
+  );
+}
+
+function selectMostConservativeRateLimit(
+  snapshots: readonly RateLimitSnapshot[]
+): RateLimitSnapshot {
+  return snapshots.reduce((current, snapshot) => {
+    if (snapshot.remaining < current.remaining) {
+      return snapshot;
+    }
+
+    if (
+      snapshot.remaining === current.remaining &&
+      snapshot.resetAt > current.resetAt
+    ) {
+      return snapshot;
+    }
+
+    return current;
+  });
+}
+
+function assertMutationBudget(
+  rateLimit: RateLimitSnapshot,
+  estimatedCost: number
+): void {
+  if (rateLimit.remaining < MIN_GRAPHQL_REMAINING) {
+    throw new Error(
+      `GitHub GraphQL mutation budget low: remaining=${rateLimit.remaining} resetAt=${rateLimit.resetAt}`
+    );
+  }
+
+  if (rateLimit.remaining - estimatedCost < MIN_GRAPHQL_REMAINING) {
+    throw new Error(
+      `GitHub GraphQL mutation budget insufficient: remaining=${rateLimit.remaining} estimatedCost=${estimatedCost} minRemaining=${MIN_GRAPHQL_REMAINING} resetAt=${rateLimit.resetAt}`
+    );
+  }
+}
+
+function estimateMutationGroupCost(
+  batches: readonly GraphqlMutationBatch[]
+): number {
+  return batches.reduce((total, batch) => total + batch.aliases.length, 0);
+}
+
 function validateGraphqlPayload<TData>(
   payload: GraphqlResponse<TData>,
   variables: GraphqlVariables = {}
@@ -521,31 +701,10 @@ function validateGraphqlPayload<TData>(
     throw new Error("GitHub GraphQL response missing rateLimit");
   }
 
-  if (rateLimit.remaining < MIN_GRAPHQL_REMAINING) {
-    throw new Error(
-      `GitHub GraphQL rate limit low: remaining=${rateLimit.remaining} resetAt=${rateLimit.resetAt}`
-    );
-  }
-
   const rawErrors = payload.errors ?? [];
 
   if (rawErrors.length > 0) {
-    const errors = rawErrors
-      .slice(0, GRAPHQL_ERROR_LIMIT)
-      .map((error) => {
-        const record = readRecord(error, "GraphQL error");
-        return `${sanitizeGraphqlType(record)}: ${sanitizeGraphqlMessage(
-          record.message,
-          variables
-        )}`;
-      })
-      .join("; ");
-    const suffix =
-      rawErrors.length > GRAPHQL_ERROR_LIMIT
-        ? `; +${rawErrors.length - GRAPHQL_ERROR_LIMIT} more`
-        : "";
-
-    throw new Error(`GitHub GraphQL errors: ${errors}${suffix}`);
+    throw createGraphqlErrorsError(rawErrors, variables);
   }
 
   if (payload.data === undefined || payload.data === null) {
@@ -670,6 +829,21 @@ function mapProjectItem(node: unknown): ProjectItem {
     readOptionalString(contentRecord.__typename) ??
     readOptionalString(contentRecord.type) ??
     "Unknown";
+  const fieldValuesConnection = readRecord(
+    record.fieldValues,
+    "Project item.fieldValues"
+  );
+  const fieldValuesPageInfo = readPageInfo(
+    fieldValuesConnection.pageInfo,
+    "Project item.fieldValues.pageInfo"
+  );
+
+  if (fieldValuesPageInfo.hasNextPage) {
+    throw new Error(
+      `Project item fieldValues pagination is not supported: ${readString(record.id, "Project item.id")}`
+    );
+  }
+
   const item: ProjectItem = {
     content: {
       body: readOptionalString(contentRecord.body) ?? "",
@@ -678,10 +852,7 @@ function mapProjectItem(node: unknown): ProjectItem {
       type: contentType,
     },
     fields: mapItemFields(
-      readArray(
-        readRecord(record.fieldValues, "Project item.fieldValues").nodes,
-        "Project item.fieldValues.nodes"
-      )
+      readArray(fieldValuesConnection.nodes, "Project item.fieldValues.nodes")
     ),
     id: readString(record.id, "Project item.id"),
   };
@@ -792,12 +963,19 @@ function buildCreateBatches(
   );
 
   return chunk(sorted, CREATE_BATCH_SIZE).map((group) => {
+    const aliases: MutationAliasReference[] = [];
     const variables: GraphqlVariables = {};
     const declarations: string[] = [];
     const selections: string[] = [];
 
     group.forEach((action, index) => {
       const alias = `create_${String(index).padStart(3, "0")}`;
+      aliases.push({
+        alias,
+        beadId: action.desired.beadId,
+        fieldName: "",
+        kind: "create",
+      });
 
       declarations.push(`$${alias}: AddProjectV2DraftIssueInput!`);
       selections.push(
@@ -812,6 +990,7 @@ function buildCreateBatches(
 
     return {
       actions: group,
+      aliases,
       query: `mutation BeadsProjectCreate(${declarations.join(
         ", "
       )}) { ${selections.join(" ")} }`,
@@ -826,12 +1005,19 @@ function buildMutationBatches(
   const sorted = [...operations].sort(compareOperations);
 
   return chunk(sorted, MUTATION_OPERATION_LIMIT).map((group) => {
+    const aliases: MutationAliasReference[] = [];
     const variables: GraphqlVariables = {};
     const declarations: string[] = [];
     const selections: string[] = [];
 
     group.forEach((operation, index) => {
       const alias = `${operation.kind}_${String(index).padStart(3, "0")}`;
+      aliases.push({
+        alias,
+        beadId: operation.beadId,
+        fieldName: operation.fieldName,
+        kind: operation.kind,
+      });
 
       if (operation.kind === "content") {
         declarations.push(`$${alias}: UpdateProjectV2DraftIssueInput!`);
@@ -850,6 +1036,7 @@ function buildMutationBatches(
     });
 
     return {
+      aliases,
       operations: group,
       query: `mutation BeadsProjectMutate(${declarations.join(
         ", "
@@ -859,18 +1046,97 @@ function buildMutationBatches(
   });
 }
 
-function executeGraphqlBatches<
-  TBatch extends { query: string; variables: GraphqlVariables },
->(
+function inspectMutationPayload(
+  payload: GraphqlResponse<Record<string, unknown>>,
+  batch: GraphqlMutationBatch
+): MutationBatchOutcome {
+  const rateLimit = extractPayloadRateLimit(payload);
+
+  if (rateLimit === undefined) {
+    throw new Error("GitHub GraphQL response missing rateLimit");
+  }
+
+  const rawErrors = payload.errors ?? [];
+  const data: Record<string, unknown> =
+    payload.data === undefined || payload.data === null
+      ? {}
+      : readRecord(payload.data, "GraphQL mutation data");
+  const knownAliases = new Set(
+    batch.aliases.map((reference) => reference.alias)
+  );
+  const failedAliases = new Set<string>();
+  let unscopedErrorCount = 0;
+
+  for (const error of rawErrors) {
+    const alias = readGraphqlErrorAlias(error);
+
+    if (alias !== undefined && knownAliases.has(alias)) {
+      failedAliases.add(alias);
+      continue;
+    }
+
+    unscopedErrorCount += 1;
+  }
+
+  const successes: MutationAliasReference[] = [];
+  const failures: MutationAliasReference[] = [];
+
+  for (const reference of batch.aliases) {
+    const aliasData = data[reference.alias];
+
+    if (rawErrors.length === 0 && aliasData !== null) {
+      successes.push(reference);
+      continue;
+    }
+
+    if (
+      aliasData !== undefined &&
+      aliasData !== null &&
+      !failedAliases.has(reference.alias)
+    ) {
+      successes.push(reference);
+      continue;
+    }
+
+    failures.push(reference);
+  }
+
+  if (
+    rawErrors.length > 0 &&
+    failedAliases.size === 0 &&
+    successes.length === 0
+  ) {
+    throw createGraphqlErrorsError(rawErrors, batch.variables);
+  }
+
+  return {
+    data,
+    failures,
+    rateLimit,
+    successes,
+    unscopedErrorCount,
+  };
+}
+
+function executeMutationBatches<TBatch extends GraphqlMutationBatch>(
+  stage: "create" | "update",
   batches: readonly TBatch[],
   graphql: GraphqlRunner,
   project: ProjectSnapshot
 ): Promise<{ data: Record<string, unknown>; rateLimit: RateLimitSnapshot }[]> {
   async function runGroup(
     batchIndex: number,
-    results: { data: Record<string, unknown>; rateLimit: RateLimitSnapshot }[]
+    results: {
+      data: Record<string, unknown>;
+      rateLimit: RateLimitSnapshot;
+      successes: MutationAliasReference[];
+    }[]
   ): Promise<
-    { data: Record<string, unknown>; rateLimit: RateLimitSnapshot }[]
+    {
+      data: Record<string, unknown>;
+      rateLimit: RateLimitSnapshot;
+      successes: MutationAliasReference[];
+    }[]
   > {
     if (batchIndex >= batches.length) {
       return results;
@@ -880,30 +1146,93 @@ function executeGraphqlBatches<
       batchIndex,
       batchIndex + MAX_GRAPHQL_CONCURRENCY
     );
-    const groupResults = await Promise.all(
-      group.map(async (batch) => {
-        const payload = (await graphql(
-          batch.query,
-          batch.variables
-        )) as GraphqlResponse<Record<string, unknown>>;
-        const validated = validateGraphqlPayload(payload, batch.variables);
+    assertMutationBudget(project.rateLimit, estimateMutationGroupCost(group));
 
-        return {
-          data: readRecord(validated.data, "GraphQL mutation data"),
-          rateLimit: validated.rateLimit,
-        };
-      })
+    const responses = await Promise.allSettled(
+      group.map(
+        async (batch) =>
+          (await graphql(batch.query, batch.variables)) as GraphqlResponse<
+            Record<string, unknown>
+          >
+      )
     );
+    const executionErrors: Error[] = [];
+    const groupResults: MutationBatchOutcome[] = [];
 
-    for (const result of groupResults) {
-      project.rateLimit = result.rateLimit;
-      results.push(result);
+    responses.forEach((response, index) => {
+      const batch = group[index];
+
+      if (batch === undefined) {
+        executionErrors.push(
+          new Error("GraphQL mutation batch metadata missing")
+        );
+        return;
+      }
+
+      if (response.status === "rejected") {
+        executionErrors.push(
+          response.reason instanceof Error
+            ? response.reason
+            : new Error(String(response.reason))
+        );
+        return;
+      }
+
+      try {
+        groupResults.push(inspectMutationPayload(response.value, batch));
+      } catch (error) {
+        executionErrors.push(
+          error instanceof Error ? error : new Error(String(error))
+        );
+      }
+    });
+
+    if (groupResults.length > 0) {
+      project.rateLimit = selectMostConservativeRateLimit(
+        groupResults.map((result) => result.rateLimit)
+      );
     }
+
+    if (
+      groupResults.some(
+        (result) => result.failures.length > 0 || result.unscopedErrorCount > 0
+      )
+    ) {
+      throw createPartialMutationFailureError(
+        stage,
+        [
+          ...results.flatMap((result) => result.successes),
+          ...groupResults.flatMap((result) => result.successes),
+        ],
+        groupResults.flatMap((result) => result.failures),
+        groupResults.reduce(
+          (total, result) => total + result.unscopedErrorCount,
+          0
+        )
+      );
+    }
+
+    if (executionErrors.length > 0) {
+      throw createMutationExecutionError(stage, executionErrors[0], [
+        ...results.flatMap((result) => result.successes),
+        ...groupResults.flatMap((result) => result.successes),
+      ]);
+    }
+
+    results.push(
+      ...groupResults.map((result) => ({
+        data: result.data,
+        rateLimit: result.rateLimit,
+        successes: result.successes,
+      }))
+    );
 
     return runGroup(batchIndex + MAX_GRAPHQL_CONCURRENCY, results);
   }
 
-  return runGroup(0, []);
+  return runGroup(0, []).then((results) =>
+    results.map(({ data, rateLimit }) => ({ data, rateLimit }))
+  );
 }
 
 function collectCreatedItems(
@@ -913,23 +1242,30 @@ function collectCreatedItems(
   const created = new Map<string, { draftIssueId: string; itemId: string }>();
 
   batches.forEach((batch, batchIndex) => {
-    batch.actions.forEach((action, actionIndex) => {
-      const alias = `create_${String(actionIndex).padStart(3, "0")}`;
+    batch.aliases.forEach((reference, actionIndex) => {
+      const action = batch.actions[actionIndex];
+
+      if (action === undefined) {
+        throw new Error(
+          `create mutation metadata missing for ${reference.alias}`
+        );
+      }
+
       const payload = readRecord(
-        responses[batchIndex]?.data[alias],
-        `create mutation ${alias}`
+        responses[batchIndex]?.data[reference.alias],
+        `create mutation ${reference.alias}`
       );
       const projectItem = readRecord(
         payload.projectItem,
-        `${alias}.projectItem`
+        `${reference.alias}.projectItem`
       );
       const content = readRecord(
         projectItem.content,
-        `${alias}.projectItem.content`
+        `${reference.alias}.projectItem.content`
       );
       const typeName = readString(
         content.__typename,
-        `${alias}.content.__typename`
+        `${reference.alias}.content.__typename`
       );
 
       if (typeName !== "DraftIssue") {
@@ -939,8 +1275,8 @@ function collectCreatedItems(
       }
 
       created.set(action.desired.beadId, {
-        draftIssueId: readString(content.id, `${alias}.content.id`),
-        itemId: readString(projectItem.id, `${alias}.projectItem.id`),
+        draftIssueId: readString(content.id, `${reference.alias}.content.id`),
+        itemId: readString(projectItem.id, `${reference.alias}.projectItem.id`),
       });
     });
   });
@@ -1231,7 +1567,8 @@ export async function applyReconciliation(
     (action) => action.kind === "create"
   );
   const createBatches = buildCreateBatches(createActions, project);
-  const createResponses = await executeGraphqlBatches(
+  const createResponses = await executeMutationBatches(
+    "create",
     createBatches,
     graphql,
     project
@@ -1245,7 +1582,7 @@ export async function applyReconciliation(
   );
   const mutationBatches = buildMutationBatches(operations);
 
-  await executeGraphqlBatches(mutationBatches, graphql, project);
+  await executeMutationBatches("update", mutationBatches, graphql, project);
 
   const createCount = createActions.length;
   const contentUpdateCount = plan.actions.filter(
