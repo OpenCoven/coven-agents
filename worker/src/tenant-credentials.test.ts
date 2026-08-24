@@ -109,6 +109,9 @@ test("the service token is sent and the request names one tenant and harness", a
 
   const headers = new Headers(seen?.headers);
   assert.equal(headers.get("x-service-token"), "svc");
+  // The identity header is the security binding, not the service token. This
+  // test asserted only the latter, so deleting the former would have passed.
+  assert.equal(headers.get("authorization"), "Bearer identity");
   assert.equal(seenUrl, "https://app.test/api/internal/credential");
   assert.deepEqual(JSON.parse(String(seen?.body)), {
     harnessId: "copilot",

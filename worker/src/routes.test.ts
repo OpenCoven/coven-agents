@@ -368,3 +368,36 @@ test("a worker with no verify key refuses rather than assuming a tenant", async 
 
   assert.equal(response.status, 401);
 });
+
+test("a demo claim cannot start a run", async () => {
+  // Expiring the plan inside the token achieves nothing unless something
+  // enforces it. A lapsed subscriber is issued a fresh `demo` claim for the
+  // same tenant; without this the run starts and either fails late for a
+  // missing credential, or succeeds outright on one still stored.
+  const pair = await getKeyPair();
+  const demoToken = await mint(pair.privateKey, {
+    exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    plan: "demo",
+    sub: "user-1",
+    tenant: CALLER_TENANT,
+  });
+  const environment = await environmentPromise;
+
+  const response = await runner().fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({
+        operationId: "44444444-5555-4666-8777-888888888888",
+        task: "do the thing",
+      }),
+      headers: {
+        authorization: `Bearer ${demoToken}`,
+        "content-type": "application/json",
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 403);
+});

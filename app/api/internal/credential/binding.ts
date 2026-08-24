@@ -17,12 +17,21 @@ import type { RunnerClaims } from "@opencoven/agent-contracts";
  * unreachable by a unit test.
  */
 export function resolveBoundTenant(
-  claims: Pick<RunnerClaims, "tenant"> | null,
+  claims: Pick<RunnerClaims, "plan" | "tenant"> | null,
   body: { tenant?: unknown },
   options: { strict?: boolean } = {}
 ): string | null {
   const tenant = claims?.tenant?.trim();
   if (!tenant) {
+    return null;
+  }
+
+  // The plan is enforced here, not merely carried. Expiring the plan in the
+  // token achieves nothing on its own: a lapsed subscriber is issued a fresh
+  // `demo` claim for the same tenant, and without this check that claim still
+  // reads the credential row already stored — so they would keep running on
+  // yesterday's credential indefinitely.
+  if (claims?.plan !== "subscriber") {
     return null;
   }
 

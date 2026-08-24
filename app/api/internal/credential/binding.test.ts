@@ -44,3 +44,24 @@ test("a claim with an empty tenant is not a tenant", () => {
     assert.equal(resolveBoundTenant({ ...CLAIMS, tenant }, {}), null);
   }
 });
+
+test("a demo claim cannot read a stored credential", () => {
+  // The gap this closes: expiring the plan in the token achieves nothing if a
+  // freshly minted demo claim still reads the credential row that is already
+  // stored. A lapsed subscriber would keep running on yesterday's credential.
+  const demo = { ...CLAIMS, plan: "demo" as const };
+
+  assert.equal(resolveBoundTenant(demo, { tenant: "acme" }), null);
+});
+
+test("only a subscriber claim yields a tenant", () => {
+  assert.equal(resolveBoundTenant(CLAIMS, { tenant: "acme" }), "acme");
+
+  for (const plan of ["demo", "", "admin"] as const) {
+    assert.equal(
+      resolveBoundTenant({ ...CLAIMS, plan } as never, { tenant: "acme" }),
+      null,
+      `plan ${JSON.stringify(plan)} must not reach a credential`
+    );
+  }
+});
