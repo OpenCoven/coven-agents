@@ -5,6 +5,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import {
+  isInsideRoot,
+  requireConfiguredPath,
+  validatePrivateBeadsWorkspace,
+} from "./beads-private-workspace";
+import {
   type CommandRunner,
   type InputCommandRunner,
   loadBeads,
@@ -111,8 +116,8 @@ export type SeedItem = z.infer<typeof seedItemSchema>;
 export type SeedDocument = z.infer<typeof seedSchema>;
 
 export type SeedConfig = {
-  repositoryRoot: string;
-  workspace: string;
+  repositoryRoot: string | undefined;
+  workspace: string | undefined;
 };
 
 export type SeedDependencies = {
@@ -792,15 +797,6 @@ function createSeedApplicationPlan(
   };
 }
 
-function isInsideRoot(candidatePath: string, rootPath: string): boolean {
-  const relativePath = path.relative(rootPath, candidatePath);
-
-  return (
-    relativePath === "" ||
-    (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))
-  );
-}
-
 async function validateSeedPath(
   inputPath: string,
   repoRoot: string,
@@ -858,6 +854,10 @@ export function formatSeedCliError(error: unknown): string {
 
   if (message.startsWith("Seed file path must")) {
     return "Invalid seed file path.";
+  }
+
+  if (message.startsWith("BEADS_WORKSPACE must")) {
+    return "Invalid BEADS_WORKSPACE.";
   }
 
   if (message === "Unable to read seed file") {
@@ -963,9 +963,18 @@ export async function runSeed(
   }
 
   const resolveRealpath = dependencies.realpath ?? defaultDependencies.realpath;
+  const repositoryRoot = requireConfiguredPath(
+    "repositoryRoot",
+    config.repositoryRoot
+  );
   const validatedPath = await validateSeedPath(
     filePath,
-    config.repositoryRoot,
+    repositoryRoot,
+    resolveRealpath
+  );
+  const workspace = await validatePrivateBeadsWorkspace(
+    config.workspace,
+    repositoryRoot,
     resolveRealpath
   );
 
@@ -989,10 +998,7 @@ export async function runSeed(
     throw error;
   }
 
-  const currentBeads = await loadBeads(
-    config.workspace,
-    dependencies.runCommand
-  );
+  const currentBeads = await loadBeads(workspace, dependencies.runCommand);
   const plan = createSeedApplicationPlan(seed, currentBeads);
 
   writeSeedSummary(seed, plan, dependencies.write);
@@ -1004,7 +1010,7 @@ export async function runSeed(
   if (plan.importTargets.length > 0) {
     await dependencies.runInputCommand(
       "bd",
-      ["-C", config.workspace, "import", "-", "--json"],
+      ["-C", workspace, "import", "-", "--json"],
       buildImportJsonl(plan.importTargets)
     );
   }
@@ -1012,7 +1018,7 @@ export async function runSeed(
   const finalCycles = parseFinalCycles(
     await dependencies.runCommand("bd", [
       "-C",
-      config.workspace,
+      workspace,
       "dep",
       "cycles",
       "--json",
@@ -1037,7 +1043,7 @@ const isMain =
 if (isMain) {
   runSeed(process.argv.slice(2), {
     repositoryRoot,
-    workspace: process.env.BEADS_WORKSPACE ?? process.cwd(),
+    workspace: process.env.BEADS_WORKSPACE,
   })
     .then((code) => {
       process.exitCode = code;

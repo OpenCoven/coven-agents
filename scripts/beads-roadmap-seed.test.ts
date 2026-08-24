@@ -6,13 +6,14 @@ import {
   formatSeedCliError,
   parseSeedJson,
   runSeed,
+  type SeedConfig,
   type SeedDocument,
   type SeedItem,
   seedItemSchema,
   seedSchema,
 } from "./beads-roadmap-seed";
 
-const config = {
+const config: SeedConfig = {
   repositoryRoot:
     "/Users/buns/Documents/GitHub/OpenCoven/coven-agents/.worktrees/chore-beads-project-board",
   workspace: "/private/beads",
@@ -801,6 +802,125 @@ test("apply rejects a non-empty final dependency cycle check", async () => {
   );
 });
 
+test("uses an explicit beads workspace outside the repository", async () => {
+  const calls: CommandCall[] = [];
+
+  await runSeed(
+    ["preview", externalSeedPath],
+    { ...config, workspace: "/private/beads-link" },
+    {
+      readFile: async () => JSON.stringify(makeValidSeed()),
+      realpath: (filePath) => {
+        if (filePath === "/private/beads-link") {
+          return Promise.resolve("/private/beads-real");
+        }
+
+        return Promise.resolve(filePath);
+      },
+      runCommand: (command, args) => {
+        calls.push({ args, command });
+
+        if (
+          command === "bd" &&
+          args.join(" ") ===
+            "-C /private/beads-real --readonly list --all --limit 0 --json"
+        ) {
+          return Promise.resolve(JSON.stringify([]));
+        }
+
+        return Promise.resolve("");
+      },
+      runInputCommand: (command, args, input) => {
+        calls.push({ args, command, input });
+        return Promise.resolve("");
+      },
+      write: writeNothing,
+    }
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0]?.args.join(" "),
+    "-C /private/beads-real --readonly list --all --limit 0 --json"
+  );
+});
+
+test("rejects missing or unsafe beads workspaces before subprocess calls", async () => {
+  const scenarios: Array<{
+    config: SeedConfig;
+    message: RegExp;
+    realpath: (filePath: string) => Promise<string>;
+  }> = [
+    {
+      config: { ...config, workspace: undefined },
+      message: /BEADS_WORKSPACE must be configured/i,
+      realpath: passthroughRealpath,
+    },
+    {
+      config: { ...config, workspace: "   " },
+      message: /BEADS_WORKSPACE must be configured/i,
+      realpath: passthroughRealpath,
+    },
+    {
+      config: {
+        ...config,
+        workspace: `${config.repositoryRoot}/.gitignored/beads`,
+      },
+      message: /outside the repository root/i,
+      realpath: passthroughRealpath,
+    },
+    {
+      config: { ...config, workspace: "/private/repo-beads-link" },
+      message: /outside the repository root/i,
+      realpath: (filePath) => {
+        if (filePath === "/private/repo-beads-link") {
+          return Promise.resolve(`${config.repositoryRoot}/.gitignored/beads`);
+        }
+
+        return Promise.resolve(filePath);
+      },
+    },
+    {
+      config: { ...config, repositoryRoot: undefined },
+      message: /repositoryRoot must be configured/i,
+      realpath: passthroughRealpath,
+    },
+  ];
+
+  await Promise.all(
+    scenarios.map(async (scenario) => {
+      let readFileCalled = false;
+      let runCommandCalled = false;
+      let runInputCommandCalled = false;
+
+      await assert.rejects(
+        () =>
+          runSeed(["preview", externalSeedPath], scenario.config, {
+            readFile: () => {
+              readFileCalled = true;
+              return Promise.resolve(JSON.stringify(makeValidSeed()));
+            },
+            realpath: scenario.realpath,
+            runCommand: () => {
+              runCommandCalled = true;
+              return Promise.resolve(JSON.stringify([]));
+            },
+            runInputCommand: () => {
+              runInputCommandCalled = true;
+              return Promise.resolve("");
+            },
+            write: writeNothing,
+          }),
+        scenario.message
+      );
+
+      assert.equal(readFileCalled, false);
+      assert.equal(runCommandCalled, false);
+      assert.equal(runInputCommandCalled, false);
+    })
+  );
+});
+
 test("rejects invalid and in-repository seed paths", async () => {
   const deps = {
     readFile: async () => JSON.stringify(makeValidSeed()),
@@ -857,6 +977,15 @@ test("rejects lexical seed symlinks that resolve into the repository", async () 
   );
 
   assert.equal(readFileCalled, false);
+});
+
+test("workspace validation errors use a fixed seed category", () => {
+  assert.equal(
+    formatSeedCliError(
+      new Error("BEADS_WORKSPACE must be outside the repository root")
+    ),
+    "Invalid BEADS_WORKSPACE."
+  );
 });
 
 test("top-level seed errors use fixed categories without leaking spaced paths", () => {

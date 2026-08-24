@@ -1,7 +1,9 @@
 #!/usr/bin/env tsx
 
+import { realpath as fsRealpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validatePrivateBeadsWorkspace } from "./beads-private-workspace";
 import {
   applyReconciliation,
   loadBeads,
@@ -19,9 +21,10 @@ import {
 } from "./beads-project-reconcile";
 
 export type SyncConfig = {
-  beadsDirectory: string;
+  beadsDirectory: string | undefined;
   owner: string;
   projectNumber: number;
+  repositoryRoot: string | undefined;
 };
 
 export type SyncDependencies = {
@@ -35,6 +38,7 @@ export type SyncDependencies = {
     owner: string,
     projectNumber: number
   ) => Promise<ProjectSnapshot>;
+  realpath?: (filePath: string) => Promise<string>;
   validateProject: (project: ProjectSnapshot) => void;
   write: (line: string) => void;
 };
@@ -44,6 +48,7 @@ const defaultDependencies: SyncDependencies = {
   loadBeads,
   loadDependencyCycles,
   loadProject,
+  realpath: (filePath) => fsRealpath(filePath),
   validateProject: validateProjectSchema,
   write: console.log,
 };
@@ -86,6 +91,10 @@ export function formatSyncCliError(error: unknown): string {
     message.startsWith("parent-child relation mismatch")
   ) {
     return "Beads graph validation failed.";
+  }
+
+  if (message.startsWith("BEADS_WORKSPACE must")) {
+    return "Invalid BEADS_WORKSPACE.";
   }
 
   if (
@@ -210,9 +219,15 @@ export async function runSync(
     throw new Error("COVEN_PROJECT_NUMBER must be a positive integer");
   }
 
+  const beadsDirectory = await validatePrivateBeadsWorkspace(
+    config.beadsDirectory,
+    config.repositoryRoot,
+    dependencies.realpath ?? defaultDependencies.realpath
+  );
+
   const [beads, cycles, project] = await Promise.all([
-    dependencies.loadBeads(config.beadsDirectory),
-    dependencies.loadDependencyCycles(config.beadsDirectory),
+    dependencies.loadBeads(beadsDirectory),
+    dependencies.loadDependencyCycles(beadsDirectory),
     dependencies.loadProject(config.owner, config.projectNumber),
   ]);
 
@@ -248,12 +263,13 @@ const isMain =
 
 if (isMain) {
   runSync(process.argv.slice(2), {
-    beadsDirectory: process.env.BEADS_WORKSPACE ?? process.cwd(),
+    beadsDirectory: process.env.BEADS_WORKSPACE,
     owner: process.env.COVEN_PROJECT_OWNER ?? "OpenCoven",
     projectNumber: Number.parseInt(
       process.env.COVEN_PROJECT_NUMBER ?? "10",
       10
     ),
+    repositoryRoot: resolve(fileURLToPath(new URL("..", import.meta.url))),
   })
     .then((code) => {
       process.exitCode = code;

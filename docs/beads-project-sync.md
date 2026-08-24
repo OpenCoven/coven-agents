@@ -131,7 +131,7 @@ GitHub reserves `Type`, so the compatible managed field name is `Bead Type`.
 | `Priority` | `P0` / `P1` / `P2` from Beads priority `0` / `1` / `2` |
 | `Runner` | `bead.metadata.runner` |
 | `Size` | `bead.metadata.size` |
-| `Status` | `Done` for closed beads, `In review` when `metadata.projectStatus` is `In review`, `In Progress` for `in_progress`, otherwise `Todo` |
+| `Status` | `Done` for closed beads, `metadata.projectStatus` when it is `In review` or `In Progress`, `In Progress` for stored `in_progress`, otherwise `Todo` |
 | `Bead Type` | `bead.issue_type` |
 | `Workstream` | `bead.metadata.workstream` |
 
@@ -152,9 +152,14 @@ Seed files are private and must stay outside the repository, for example:
 $HOME/.local/share/opencoven/coven-agents-roadmap.beads-private.json
 ```
 
+The seed and sync CLIs require `BEADS_WORKSPACE` to be exported explicitly, and
+they reject any workspace path that resolves inside the repository root,
+including through symlinks.
+
 Preview/apply the private seed:
 
 ```bash
+export BEADS_WORKSPACE="$HOME/.local/share/opencoven/coven-agents-beads"
 pnpm beads:seed preview \
   "$HOME/.local/share/opencoven/coven-agents-roadmap.beads-private.json"
 pnpm beads:seed apply \
@@ -164,6 +169,7 @@ pnpm beads:seed apply \
 Preview/apply Project sync:
 
 ```bash
+export BEADS_WORKSPACE="$HOME/.local/share/opencoven/coven-agents-beads"
 pnpm beads:sync preview
 pnpm beads:sync apply
 ```
@@ -236,6 +242,7 @@ Expected: `60`.
 End-to-end verification:
 
 ```bash
+export BEADS_WORKSPACE="$HOME/.local/share/opencoven/coven-agents-beads"
 pnpm beads:sync preview
 pnpm beads:sync apply
 pnpm beads:sync apply

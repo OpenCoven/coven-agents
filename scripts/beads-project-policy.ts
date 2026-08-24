@@ -184,6 +184,10 @@ function projectStatusFor(bead: Bead): string {
     return "In review";
   }
 
+  if (bead.metadata.projectStatus === "In Progress") {
+    return "In Progress";
+  }
+
   if (bead.status === "in_progress") {
     return "In Progress";
   }

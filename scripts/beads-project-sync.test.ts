@@ -6,12 +6,18 @@ import type {
 } from "./beads-project-io";
 import type { Bead, ProjectItem } from "./beads-project-model";
 import { MARKER_PREFIX } from "./beads-project-policy";
-import { formatSyncCliError, runSync } from "./beads-project-sync";
+import {
+  formatSyncCliError,
+  runSync,
+  type SyncConfig,
+} from "./beads-project-sync";
 
-const config = {
+const config: SyncConfig = {
   beadsDirectory: "/private/beads",
   owner: "OpenCoven",
   projectNumber: 10,
+  repositoryRoot:
+    "/Users/buns/Documents/GitHub/OpenCoven/coven-agents/.worktrees/chore-beads-project-board",
 };
 
 const emptyProject: ProjectSnapshot = {
@@ -49,6 +55,10 @@ function safeBead(overrides: Partial<Bead> = {}): Bead {
     title: "Add staged secret scanning",
     ...rest,
   };
+}
+
+function passthroughRealpath(filePath: string): Promise<string> {
+  return Promise.resolve(filePath);
 }
 
 function unsafeBead(): Bead {
@@ -104,6 +114,7 @@ test("preview never calls the applier", async () => {
     loadBeads: async () => [safeBead()],
     loadDependencyCycles: async () => [],
     loadProject: async () => emptyProject,
+    realpath: passthroughRealpath,
     validateProject: () => undefined,
     write: () => undefined,
   });
@@ -134,6 +145,7 @@ test("apply validates the complete plan before writing", async () => {
         loadBeads: async () => [unsafeBead()],
         loadDependencyCycles: async () => [],
         loadProject: async () => emptyProject,
+        realpath: passthroughRealpath,
         validateProject: () => undefined,
         write: () => undefined,
       }),
@@ -169,6 +181,7 @@ test("validates the project schema before planning", async () => {
             }),
           ],
         }),
+        realpath: passthroughRealpath,
         validateProject: () => {
           throw new Error("schema rejected");
         },
@@ -196,6 +209,7 @@ test("rejects dependency cycles before apply", async () => {
         loadBeads: async () => [safeBead()],
         loadDependencyCycles: async () => [["coven-agents-security.1"]],
         loadProject: async () => emptyProject,
+        realpath: passthroughRealpath,
         validateProject: () => {
           validated = true;
         },
@@ -329,6 +343,7 @@ test("rejects invalid graph relationships before projection", async () => {
             loadBeads: async () => scenario.beadFactory(),
             loadDependencyCycles: async () => [],
             loadProject: async () => emptyProject,
+            realpath: passthroughRealpath,
             validateProject: () => undefined,
             write: () => undefined,
           }),
@@ -453,6 +468,7 @@ test("output contains counts and bead IDs but not private fields", async () => {
         },
       ],
     }),
+    realpath: passthroughRealpath,
     validateProject: () => undefined,
     write: (line) => {
       lines.push(line);
@@ -512,6 +528,7 @@ test("apply outputs aggregate mutation stats and the remaining rate budget", asy
         resetAt: "2026-08-24T00:00:00Z",
       },
     }),
+    realpath: passthroughRealpath,
     validateProject: () => undefined,
     write: (line) => {
       lines.push(line);
@@ -546,6 +563,7 @@ test("rejects invalid arguments and project numbers", async () => {
     loadBeads: async () => [safeBead()],
     loadDependencyCycles: async () => [],
     loadProject: async () => emptyProject,
+    realpath: passthroughRealpath,
     validateProject: () => undefined,
     write: () => undefined,
   };
@@ -563,6 +581,142 @@ test("rejects invalid arguments and project numbers", async () => {
   await assert.rejects(
     () => runSync(["preview"], { ...config, projectNumber: Number.NaN }, deps),
     /positive integer/i
+  );
+});
+
+test("uses an explicit beads workspace outside the repository", async () => {
+  const directories: string[] = [];
+  let loadedProject = false;
+
+  await runSync(
+    ["preview"],
+    { ...config, beadsDirectory: "/private/beads-link" },
+    {
+      apply: async () => ({
+        contentUpdateCount: 0,
+        createCount: 0,
+        createRequests: 0,
+        fieldUpdateCount: 0,
+        totalMutationOperations: 0,
+        totalMutationRequests: 0,
+        updateRequests: 0,
+      }),
+      loadBeads: (directory) => {
+        directories.push(directory);
+        return Promise.resolve([safeBead()]);
+      },
+      loadDependencyCycles: (directory) => {
+        directories.push(directory);
+        return Promise.resolve([]);
+      },
+      loadProject: () => {
+        loadedProject = true;
+        return Promise.resolve(emptyProject);
+      },
+      realpath: (filePath) => {
+        if (filePath === "/private/beads-link") {
+          return Promise.resolve("/private/beads-real");
+        }
+
+        return Promise.resolve(filePath);
+      },
+      validateProject: () => undefined,
+      write: () => undefined,
+    }
+  );
+
+  assert.deepEqual(directories, ["/private/beads-real", "/private/beads-real"]);
+  assert.equal(loadedProject, true);
+});
+
+test("rejects missing or unsafe beads workspaces before subprocess calls", async () => {
+  const scenarios: Array<{
+    config: SyncConfig;
+    message: RegExp;
+    realpath: (filePath: string) => Promise<string>;
+  }> = [
+    {
+      config: { ...config, beadsDirectory: undefined },
+      message: /BEADS_WORKSPACE must be configured/i,
+      realpath: passthroughRealpath,
+    },
+    {
+      config: { ...config, beadsDirectory: "   " },
+      message: /BEADS_WORKSPACE must be configured/i,
+      realpath: passthroughRealpath,
+    },
+    {
+      config: {
+        ...config,
+        beadsDirectory: `${config.repositoryRoot}/.gitignored/beads`,
+      },
+      message: /outside the repository root/i,
+      realpath: passthroughRealpath,
+    },
+    {
+      config: { ...config, beadsDirectory: "/private/repo-beads-link" },
+      message: /outside the repository root/i,
+      realpath: (filePath) => {
+        if (filePath === "/private/repo-beads-link") {
+          return Promise.resolve(`${config.repositoryRoot}/.gitignored/beads`);
+        }
+
+        return Promise.resolve(filePath);
+      },
+    },
+    {
+      config: { ...config, repositoryRoot: undefined },
+      message: /repositoryRoot must be configured/i,
+      realpath: passthroughRealpath,
+    },
+  ];
+
+  await Promise.all(
+    scenarios.map(async (scenario) => {
+      let called = false;
+
+      await assert.rejects(
+        () =>
+          runSync(["preview"], scenario.config, {
+            apply: async () => ({
+              contentUpdateCount: 0,
+              createCount: 0,
+              createRequests: 0,
+              fieldUpdateCount: 0,
+              totalMutationOperations: 0,
+              totalMutationRequests: 0,
+              updateRequests: 0,
+            }),
+            loadBeads: () => {
+              called = true;
+              return Promise.resolve([safeBead()]);
+            },
+            loadDependencyCycles: () => {
+              called = true;
+              return Promise.resolve([]);
+            },
+            loadProject: () => {
+              called = true;
+              return Promise.resolve(emptyProject);
+            },
+            realpath: scenario.realpath,
+            validateProject: () => undefined,
+            write: () => undefined,
+          }),
+        scenario.message
+      );
+
+      assert.equal(called, false);
+    })
+  );
+});
+
+test("workspace validation errors use a fixed sync category", () => {
+  assert.equal(
+    formatSyncCliError(
+      new Error("BEADS_WORKSPACE must be outside the repository root")
+    ),
+    "Invalid BEADS_WORKSPACE."
   );
 });
 

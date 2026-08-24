@@ -481,6 +481,9 @@ function projectStatus(bead: Bead): string {
   if (bead.metadata.projectStatus === "In review") {
     return "In review";
   }
+  if (bead.metadata.projectStatus === "In Progress") {
+    return "In Progress";
+  }
   return bead.status === "in_progress" ? "In Progress" : "Todo";
 }
 
@@ -1487,6 +1490,7 @@ export type SyncConfig = {
   beadsDirectory: string;
   owner: string;
   projectNumber: number;
+  repositoryRoot: string;
 };
 
 export type SyncDependencies = {
@@ -1590,7 +1594,7 @@ const isMain =
 
 if (isMain) {
   runSync(process.argv.slice(2), {
-    beadsDirectory: process.env.BEADS_WORKSPACE ?? process.cwd(),
+    beadsDirectory: process.env.BEADS_WORKSPACE,
     owner: process.env.COVEN_PROJECT_OWNER ?? "OpenCoven",
     projectNumber: Number.parseInt(
       process.env.COVEN_PROJECT_NUMBER ?? "10",
@@ -1649,6 +1653,7 @@ Tests must reject:
 `scripts/beads-roadmap-seed.ts` accepts:
 
 ```text
+export BEADS_WORKSPACE="$HOME/.local/share/opencoven/coven-agents-beads"
 pnpm beads:seed preview /absolute/path/to/private-seed.json
 pnpm beads:seed apply /absolute/path/to/private-seed.json
 ```
@@ -2059,6 +2064,7 @@ Expected:
 Run:
 
 ```bash
+export BEADS_WORKSPACE="$HOME/.local/share/opencoven/coven-agents-beads"
 pnpm beads:sync apply
 ```
 
@@ -2069,6 +2075,7 @@ Expected: 60 private draft items created and populated.
 Run:
 
 ```bash
+export BEADS_WORKSPACE="$HOME/.local/share/opencoven/coven-agents-beads"
 pnpm beads:sync preview
 pnpm beads:sync apply
 ```

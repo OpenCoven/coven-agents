@@ -417,3 +417,56 @@ test("maps status type and priority fields", () => {
   assert.equal(reviewItem.fields.Priority, "P0");
   assert.equal(reviewItem.fields["Bead Type"], "task");
 });
+
+test("honors metadata In Progress for open beads", () => {
+  const bead = makeBead({
+    id: "coven-agents-in-progress",
+    metadata: {
+      projectStatus: "In Progress",
+      runner: "Shared",
+      size: "M",
+      workstream: "Product",
+    },
+    status: "open",
+  });
+
+  const item = projectBead(bead, beadMap(bead));
+
+  assert.equal(item.fields.Status, "In Progress");
+});
+
+test("keeps stored in_progress and metadata Todo/default mappings", () => {
+  const storedInProgress = makeBead({
+    id: "coven-agents-stored-in-progress",
+    metadata: {
+      projectStatus: "Todo",
+      runner: "Shared",
+      size: "M",
+      workstream: "Product",
+    },
+    status: "in_progress",
+  });
+  const explicitTodo = makeBead({
+    id: "coven-agents-explicit-todo",
+    metadata: {
+      projectStatus: "Todo",
+      runner: "Shared",
+      size: "M",
+      workstream: "Product",
+    },
+  });
+  const defaultTodo = makeBead({
+    id: "coven-agents-default-todo",
+  });
+
+  const storedInProgressItem = projectBead(
+    storedInProgress,
+    beadMap(storedInProgress)
+  );
+  const explicitTodoItem = projectBead(explicitTodo, beadMap(explicitTodo));
+  const defaultTodoItem = projectBead(defaultTodo, beadMap(defaultTodo));
+
+  assert.equal(storedInProgressItem.fields.Status, "In Progress");
+  assert.equal(explicitTodoItem.fields.Status, "Todo");
+  assert.equal(defaultTodoItem.fields.Status, "Todo");
+});
