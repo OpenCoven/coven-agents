@@ -115,6 +115,12 @@ test("rejects authentication headers and command output markers", () => {
   );
   expectUnsafe(
     "description",
+    "Run curl -H 'Authorization: Bearer token' https://example.com",
+    /authorization header/i
+  );
+
+  expectUnsafe(
+    "description",
     "Proxy-Authorization: Basic abc",
     /authorization header/i
   );
@@ -143,6 +149,16 @@ test("rejects absolute paths and overlong title", () => {
   expectUnsafe("description", "/opt/tools/bin", /absolute path/i);
   expectUnsafe("description", "/usr/local/bin/node", /absolute path/i);
   expectUnsafe("description", "/Volumes/Data/archive.zip", /absolute path/i);
+  expectUnsafe(
+    "description",
+    "file:///Users/alice/private.txt",
+    /absolute path/i
+  );
+  expectUnsafe(
+    "description",
+    "path=/Users/alice/private.txt",
+    /absolute path/i
+  );
   expectUnsafe(
     "description",
     "D:\\Users\\alice\\private.txt",
@@ -178,6 +194,17 @@ test("allows ordinary API route prose", () => {
 });
 
 test("rejects malformed parent and dependency bead ids", () => {
+  expectInvalidBeadId(
+    () =>
+      projectBead(
+        makeBead({
+          id: "/api/agents",
+        }),
+        beadMap()
+      ),
+    "bead.id"
+  );
+
   expectInvalidBeadId(
     () =>
       projectBead(

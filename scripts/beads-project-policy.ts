@@ -30,15 +30,16 @@ const SENSITIVE_PATTERNS: ReadonlyArray<{
   },
   {
     category: "authorization header",
-    pattern: /^(?:authorization|proxy-authorization)\s*:\s*\S+/i,
+    pattern:
+      /(?:^|[^A-Za-z0-9_])(?:authorization|proxy-authorization)\s*:\s*\S+/i,
   },
   {
     category: "api key header",
-    pattern: /^(?:x-api-key)\s*:\s*\S+/i,
+    pattern: /(?:^|[^A-Za-z0-9_])x-api-key\s*:\s*\S+/i,
   },
   {
     category: "cookie header",
-    pattern: /^(?:cookie|set-cookie)\s*:\s*\S+/i,
+    pattern: /(?:^|[^A-Za-z0-9_])(?:cookie|set-cookie)\s*:\s*\S+/i,
   },
   {
     category: "github token",
@@ -86,8 +87,11 @@ const LOG_PATTERNS: ReadonlyArray<{
 ];
 
 const PROTECTED_PATH_PATTERNS: readonly RegExp[] = [
-  /^\/(?:Users|home|private|tmp|var|etc|opt|usr|Volumes)(?:\/|$)/,
-  /^[A-Za-z]:\\/,
+  /(?:^|[^A-Za-z0-9_])\/(?:Users|home|private|tmp|var|etc|opt|usr|Volumes)(?:\/|$)/,
+  /(?:^|[^A-Za-z0-9_])file:\/\/\/(?:Users|home|private|tmp|var|etc|opt|usr|Volumes)(?:\/|$)/,
+  /(?:^|[^A-Za-z0-9_])path\s*=\s*\/(?:Users|home|private|tmp|var|etc|opt|usr|Volumes)(?:\/|$)/i,
+  /(?:^|[^A-Za-z0-9_])[A-Za-z]:\\/,
+  /(?:^|[^A-Za-z0-9_])path\s*=\s*[A-Za-z]:\\/i,
 ];
 
 function unsafeError(field: string, category: string): never {
@@ -112,10 +116,7 @@ function getLineCategory(value: string): string | undefined {
     }
 
     for (const { category, pattern } of SENSITIVE_PATTERNS) {
-      if (
-        category.endsWith("header") &&
-        pattern.test(trimmedLine.toLowerCase())
-      ) {
+      if (category.endsWith("header") && pattern.test(trimmedLine)) {
         return category;
       }
     }
@@ -229,6 +230,8 @@ export function projectBead(
   bead: Bead,
   all: Map<string, Bead>
 ): DesiredProjectItem {
+  validateBeadIdField("bead.id", bead.id);
+
   if (bead.parent !== undefined) {
     validateBeadIdField("parent", bead.parent);
   }
