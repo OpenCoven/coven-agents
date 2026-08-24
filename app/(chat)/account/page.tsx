@@ -1,0 +1,102 @@
+"use client";
+
+import { useActionState, useEffect } from "react";
+import {
+  type ChangePasswordActionState,
+  changePassword,
+} from "@/app/(auth)/actions";
+import { toast } from "@/components/chat/toast";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+
+const MESSAGES: Record<
+  string,
+  { description: string; type: "error" | "success" }
+> = {
+  failed: { description: "Could not update your password.", type: "error" },
+  mismatch: {
+    description: "The two new passwords do not match.",
+    type: "error",
+  },
+  success: { description: "Password updated.", type: "success" },
+  too_short: {
+    description: "Use at least 6 characters.",
+    type: "error",
+  },
+  unauthorized: { description: "Sign in first.", type: "error" },
+  unchanged: {
+    description: "That is already your password. Choose a different one.",
+    type: "error",
+  },
+  wrong_password: {
+    description: "Current password is incorrect.",
+    type: "error",
+  },
+};
+
+export default function Page() {
+  const [state, formAction] = useActionState<
+    ChangePasswordActionState,
+    FormData
+  >(changePassword, { status: "idle" });
+
+  useEffect(() => {
+    const message = MESSAGES[state.status];
+
+    if (message) {
+      toast(message);
+    }
+  }, [state.status]);
+
+  return (
+    <div className="mx-auto flex w-full max-w-md flex-col gap-6 px-4 py-10">
+      <div className="flex flex-col gap-1">
+        <h1 className="font-semibold text-2xl tracking-tight">Account</h1>
+        <p className="text-muted-foreground text-sm">
+          Change your password. If you signed in with a temporary one, replace
+          it here.
+        </p>
+      </div>
+
+      <form action={formAction} className="flex flex-col gap-4">
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="currentPassword">Current password</Label>
+          <Input
+            autoComplete="current-password"
+            id="currentPassword"
+            name="currentPassword"
+            required
+            type="password"
+          />
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="newPassword">New password</Label>
+          <Input
+            autoComplete="new-password"
+            id="newPassword"
+            minLength={6}
+            name="newPassword"
+            required
+            type="password"
+          />
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="confirmPassword">Confirm new password</Label>
+          <Input
+            autoComplete="new-password"
+            id="confirmPassword"
+            minLength={6}
+            name="confirmPassword"
+            required
+            type="password"
+          />
+        </div>
+
+        <Button type="submit">Update password</Button>
+      </form>
+    </div>
+  );
+}

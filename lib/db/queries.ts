@@ -43,6 +43,24 @@ export async function getUser(email: string): Promise<User[]> {
   }
 }
 
+/**
+ * Replaces a user's password hash.
+ *
+ * Lives here rather than in the server action because `db` is deliberately
+ * restricted to this module — the action decides *whether* the change is
+ * allowed, this decides *how* it is written.
+ */
+export async function updateUserPassword(email: string, password: string) {
+  try {
+    return await db
+      .update(user)
+      .set({ password: generateHashedPassword(password) })
+      .where(eq(user.email, email));
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
 export async function createUser(email: string, password: string) {
   const hashedPassword = generateHashedPassword(password);
 

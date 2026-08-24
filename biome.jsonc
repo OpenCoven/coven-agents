@@ -75,6 +75,7 @@
       // in the rule, so they are listed individually rather than by glob.
       "includes": [
         "app/api/internal/credential/route.ts",
+        "scripts/account.ts",
         "scripts/subscription.ts"
       ],
       "linter": {

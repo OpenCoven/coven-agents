@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
+import { betaVerdict, readBetaGate } from "./lib/beta";
 import { guestRegex, isDevelopmentEnvironment } from "./lib/constants";
 import { DEMO_COOKIE_NAME } from "./lib/session";
 
@@ -29,6 +30,26 @@ export async function proxy(request: NextRequest) {
   });
 
   const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+
+  // Closed beta. Checked before the demo cookie is minted, because the demo
+  // session needs no sign-in — gating only the sign-in path would leave the
+  // beta wide open to anyone holding the URL. `/api/internal` is exempt: the
+  // worker authenticates itself with a service token and a signed identity
+  // claim, and gating it would break runs rather than close the beta.
+  const gate = readBetaGate({
+    BETA_ALLOWLIST: process.env.BETA_ALLOWLIST,
+    BETA_MODE: process.env.BETA_MODE,
+  });
+
+  if (betaVerdict(gate, pathname, token?.email) === "deny") {
+    return new Response(
+      "Closed beta. Sign in at /login with an invited account.",
+      {
+        headers: { "content-type": "text/plain; charset=utf-8" },
+        status: 403,
+      }
+    );
+  }
 
   if (!token) {
     // No sign-in, and no database write either: an anonymous visitor gets a
