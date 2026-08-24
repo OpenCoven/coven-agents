@@ -106,3 +106,19 @@ test("command evidence is capped rather than returned unbounded", () => {
 
   assert.equal(result.commandResults.length, limit);
 });
+
+test("a prototype key cannot smuggle itself in as a file operation", () => {
+  // FILE_OPERATIONS is a plain object, so an unguarded lookup of "constructor"
+  // or "__proto__" returns something truthy off Object.prototype and emits a
+  // bogus operation instead of dropping it.
+  const evidence = toFileEvidence([
+    { operation: "constructor", path: "/workspace/a.ts" },
+    { operation: "__proto__", path: "/workspace/b.ts" },
+    { operation: "toString", path: "/workspace/c.ts" },
+    { operation: "created", path: "/workspace/d.ts" },
+  ]);
+
+  assert.deepEqual(evidence, [
+    { operation: "create", path: "/workspace/d.ts" },
+  ]);
+});
