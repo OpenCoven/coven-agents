@@ -7,15 +7,20 @@
  * This merges into the global `Env` interface that `worker-configuration.d.ts`
  * declares, so regenerating those types does not drop it.
  *
- * Every credential below is a *harness* credential: the token a signed-in coding
- * CLI reads for itself. Coven Agents holds no model provider API key.
+ * Harness credentials are never declared here. They belong to a tenant, not
+ * to this deployment, and are fetched per run from the Next app instead —
+ * see `tenant-credentials.ts`. Coven Agents holds no model provider API key
+ * either.
  */
 
 interface Env {
   AGENT_CONTROL_TOKEN?: string;
-  CLAUDE_CODE_OAUTH_TOKEN?: string;
-  CODEX_API_KEY?: string;
-  COPILOT_GITHUB_TOKEN?: string;
-  GH_TOKEN?: string;
-  GITHUB_TOKEN?: string;
+  /**
+   * Harness credentials are per tenant and fetched at run time. They are
+   * deliberately absent from this deployment: a forbidden fallback survives
+   * refactors, an absent one cannot.
+   */
+  APP_ORIGIN?: string;
+  RUNNER_SERVICE_TOKEN?: string;
+  RUNNER_VERIFY_KEY?: string;
 }

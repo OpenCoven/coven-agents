@@ -6,7 +6,7 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
-    "test": "tsx --test src/*.test.ts",
+    "test": "tsx --tsconfig tsconfig.test.json --test src/*.test.ts",
     "typecheck": "tsc --noEmit",
     "types": "wrangler types"
   },
@@ -17,9 +17,9 @@
     "agents": "0.21.0"
   },
   "devDependencies": {
-    "@types/node": "^24.13.2",
+    "@types/node": "^24.13.3",
     "tsx": "^4.23.12",
     "typescript": "^5.6.3",
-    "wrangler": "4.124.0"
+    "wrangler": "4.125.0"
   }
 }

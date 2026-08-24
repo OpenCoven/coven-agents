@@ -52,6 +52,26 @@ pnpm hygiene reap     # dry run
 pnpm hygiene reap --yes
 ```
 
-`reap` only removes worktrees that are clean, pushed, on origin, and confirmed
-merged by `gh`. It refuses everything else. If it refuses something you expect
-it to remove, the branch is not actually merged — check the PR, do not force it.
+`reap` only removes worktrees with no uncommitted files whose work is provably
+somewhere other than your machine. That means either the branch is on origin
+with nothing unpushed, or `gh` confirms a merged PR whose head is the commit
+this worktree still points at. It refuses everything else. If it refuses
+something you expect it to remove, the branch is not actually merged — check
+the PR, do not force it.
+
+The second case is the normal one after a merge. The hygiene workflow deletes
+the remote branch within seconds, and squashing rewrites the SHA, so a merged
+branch has no remote ref and its commits look unpushed. That is not lost work
+and `reap` will clear it. Commit anything *after* the merge, though, and the
+tip no longer matches what `gh` merged — `reap` protects it and `pnpm hygiene`
+reports it AT RISK until you push it.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

@@ -33,6 +33,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { RunnerClient, type RunnerConnection } from "@/lib/agents/client";
+import { createIdentityMinter } from "@/lib/agents/identity";
 import { cn } from "@/lib/utils";
 
 const CLOUD_ENDPOINT =
@@ -101,7 +102,23 @@ export function AgentConsole() {
   const [showConnection, setShowConnection] = useState(false);
 
   const connection = connections[backend];
-  const client = useMemo(() => new RunnerClient(connection), [connection]);
+  /**
+   * One minter for the whole console, so the 15-minute token is shared across
+   * reconnects rather than re-minted per render.
+   *
+   * Cloud only. The local runner has no tenancy and still authenticates with a
+   * single token on `Authorization`.
+   */
+  const mintIdentity = useMemo(() => createIdentityMinter(), []);
+  const client = useMemo(
+    () =>
+      new RunnerClient(
+        connection,
+        undefined,
+        backend === "cloud" ? { mintIdentity } : {}
+      ),
+    [backend, connection, mintIdentity]
+  );
   const selected = agents.find((agent) => agent.id === selectedId) ?? null;
 
   const refresh = useCallback(async () => {
@@ -548,7 +565,7 @@ function ConnectionPanel({
             value={connection.endpoint}
           />
         </Field>
-        <Field label="Access token">
+        <Field label={backend === "cloud" ? "Runner token" : "Access token"}>
           <Input
             autoComplete="off"
             className="border-white/10 bg-black/30 font-mono"
@@ -557,6 +574,14 @@ function ConnectionPanel({
             type="password"
             value={connection.token}
           />
+          {backend === "cloud" ? (
+            <p className="mt-2 text-white/40 text-xs leading-relaxed">
+              Grants access to the deployment. Who you are is proved separately
+              by a short-lived token minted from your signed-in session, so this
+              no longer identifies you and sharing it does not share your
+              agents.
+            </p>
+          ) : null}
         </Field>
         <div className="flex gap-3 rounded-xl border border-amber-300/15 bg-amber-300/5 p-4 text-amber-100/60 text-xs leading-relaxed">
           <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-300" />

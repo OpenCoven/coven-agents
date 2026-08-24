@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isReapable, type WorktreeState } from "./hygiene-core";
+import {
+  branchDeleteFlag,
+  isPreservedOnMain,
+  isReapable,
+  type WorktreeState,
+} from "./hygiene-core";
 
 function state(overrides: Partial<WorktreeState> = {}): WorktreeState {
   return {
     branch: "feat/example",
     dirtyCount: 0,
     existsOnOrigin: true,
+    headSha: "aaa111",
     isLocked: false,
     isPrimary: false,
+    mergedHeadSha: null,
     mergedIntoMain: true,
     path: "/tmp/wt/example",
     unpushedCommits: 0,
@@ -155,4 +162,171 @@ test("invalid counters fail closed", () => {
   const nanUnpushed = isReapable(state({ unpushedCommits: Number.NaN }));
   assert.equal(nanUnpushed.safe, false);
   assert.ok(nanUnpushed.reasons.includes("invalid unpushed count: NaN"));
+});
+
+test("a merged branch stays reapable after the remote branch is deleted", () => {
+  // The hygiene workflow deletes the remote branch seconds after a merge, and
+  // squashing rewrites the SHA, so the local commits become unreachable from
+  // every remote ref. Nothing is at risk: `gh` reports the exact head that was
+  // merged, and it is the head this worktree still points at.
+  const verdict = isReapable(
+    state({
+      existsOnOrigin: false,
+      headSha: "f10c255",
+      mergedHeadSha: "f10c255",
+      unpushedCommits: 1,
+    })
+  );
+
+  assert.equal(verdict.safe, true, verdict.reasons.join(", "));
+  assert.deepEqual(verdict.reasons, []);
+});
+
+test("a commit added after the merge is never treated as preserved", () => {
+  const verdict = isReapable(
+    state({
+      existsOnOrigin: false,
+      headSha: "newwork",
+      mergedHeadSha: "f10c255",
+      unpushedCommits: 1,
+    })
+  );
+
+  assert.equal(verdict.safe, false);
+  assert.ok(
+    verdict.reasons.some((r) => r.includes("unpushed")),
+    `expected an unpushed blocker, got: ${verdict.reasons.join(", ")}`
+  );
+});
+
+test("uncommitted files block reaping even on a merged, preserved head", () => {
+  const verdict = isReapable(
+    state({
+      dirtyCount: 2,
+      existsOnOrigin: false,
+      headSha: "f10c255",
+      mergedHeadSha: "f10c255",
+    })
+  );
+
+  assert.equal(verdict.safe, false);
+  assert.ok(verdict.reasons.some((r) => r.includes("uncommitted")));
+});
+
+test("an unmerged branch missing from origin is still blocked", () => {
+  const verdict = isReapable(
+    state({
+      existsOnOrigin: false,
+      mergedHeadSha: null,
+      mergedIntoMain: false,
+    })
+  );
+
+  assert.equal(verdict.safe, false);
+  assert.ok(verdict.reasons.includes("branch not on origin"));
+});
+
+test("an unknown merged head fails closed to the strict conditions", () => {
+  // `mergedIntoMain` without a head SHA means gh confirmed a merged PR but the
+  // head could not be matched. That must not unlock the relaxed path.
+  const verdict = isReapable(
+    state({ existsOnOrigin: false, mergedHeadSha: null, unpushedCommits: 1 })
+  );
+
+  assert.equal(verdict.safe, false);
+  assert.ok(verdict.reasons.includes("branch not on origin"));
+});
+
+test("a null local head never matches a merged head", () => {
+  const verdict = isReapable(
+    state({ existsOnOrigin: false, headSha: null, mergedHeadSha: null })
+  );
+
+  assert.equal(verdict.safe, false);
+});
+
+test("preserved-on-main relaxes only origin and unpushed, exhaustively", () => {
+  const flags = [false, true];
+  let safeCount = 0;
+
+  for (const clean of flags) {
+    for (const onOrigin of flags) {
+      for (const pushed of flags) {
+        const verdict = isReapable(
+          state({
+            dirtyCount: clean ? 0 : 1,
+            existsOnOrigin: onOrigin,
+            headSha: "f10c255",
+            mergedHeadSha: "f10c255",
+            unpushedCommits: pushed ? 0 : 1,
+          })
+        );
+
+        assert.equal(
+          verdict.safe,
+          clean,
+          `clean=${clean} onOrigin=${onOrigin} pushed=${pushed}`
+        );
+        if (verdict.safe) {
+          safeCount += 1;
+        }
+      }
+    }
+  }
+
+  assert.equal(safeCount, 4, "only cleanliness may block a preserved head");
+});
+
+test("force delete is used only where the merged head proves the tip", () => {
+  // `-d` is git's ancestry check. It cannot see a squash, so it refuses every
+  // branch this repository merges — but it is a real backstop when the only
+  // evidence of a merge came from `gh pr list --head`, which matches on branch
+  // name and can therefore match an older PR after a name is reused.
+  const preserved = state({
+    existsOnOrigin: false,
+    headSha: "f10c255",
+    mergedHeadSha: "f10c255",
+    unpushedCommits: 1,
+  });
+  assert.equal(branchDeleteFlag(preserved), "-D");
+
+  // Reapable by the strict path only: pushed and on origin, but the merged PR
+  // `gh` matched has a different head. Keep git's check.
+  const reusedName = state({
+    existsOnOrigin: true,
+    headSha: "newwork",
+    mergedHeadSha: "f10c255",
+    unpushedCommits: 0,
+  });
+  assert.equal(isReapable(reusedName).safe, true, "strict path still passes");
+  assert.equal(branchDeleteFlag(reusedName), "-d");
+});
+
+test("a reapable worktree always has its commits somewhere else", () => {
+  // The invariant that makes deleting a branch safe at all. Every combination
+  // that reaps must satisfy at least one of: preserved on main, or on origin
+  // with nothing unpushed.
+  const flags = [false, true];
+
+  for (const onOrigin of flags) {
+    for (const pushed of flags) {
+      for (const tipMatches of flags) {
+        const candidate = state({
+          existsOnOrigin: onOrigin,
+          headSha: "tip",
+          mergedHeadSha: tipMatches ? "tip" : "other",
+          unpushedCommits: pushed ? 0 : 1,
+        });
+
+        if (!isReapable(candidate).safe) {
+          continue;
+        }
+
+        assert.ok(
+          isPreservedOnMain(candidate) || (onOrigin && pushed),
+          `reapable but work exists only locally: onOrigin=${onOrigin} pushed=${pushed} tipMatches=${tipMatches}`
+        );
+      }
+    }
+  }
 });

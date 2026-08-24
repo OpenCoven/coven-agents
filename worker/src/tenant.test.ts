@@ -47,14 +47,55 @@ test("an empty or oversized tenant id is refused rather than collapsed", () => {
 test("a definition stored before ownership resolves to the unowned tenant", () => {
   assert.equal(tenantOf({}), UNOWNED_TENANT);
   assert.equal(tenantOf({ owner: null }), UNOWNED_TENANT);
-  assert.equal(tenantOf({ owner: "alice" }), "alice");
+  assert.equal(
+    tenantOf({ owner: { kind: "tenant", tenantId: "alice" } }),
+    "alice"
+  );
+});
+
+test("each owner kind resolves to the tenant that actually isolates it", () => {
+  // A cave may run several familiars for one account, so the cave instance is
+  // the boundary, not the familiar.
+  assert.equal(
+    tenantOf({
+      owner: {
+        caveInstanceId: "cave_1",
+        familiarId: "familiar_9",
+        kind: "cave-familiar",
+        sourceRevision: "abc123",
+      },
+    }),
+    "cave_1"
+  );
+  // Standalone carries no identifier at all, so it cannot claim a tenant.
+  assert.equal(tenantOf({ owner: { kind: "standalone" } }), UNOWNED_TENANT);
+});
+
+test("two familiars in one cave share a tenant but not a sandbox", () => {
+  const cave = (familiarId: string) =>
+    tenantOf({
+      owner: {
+        caveInstanceId: "cave_1",
+        familiarId,
+        kind: "cave-familiar",
+        sourceRevision: "abc123",
+      },
+    });
+  assert.equal(cave("familiar_1"), cave("familiar_2"));
+  assert.notEqual(
+    sandboxKey(cave("familiar_1"), "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90"),
+    sandboxKey(cave("familiar_2"), "9c1b7d2f-5a6b-4c90-8f1a-0f4e1f4d4a2e")
+  );
 });
 
 test("a missing owner never collapses onto another tenant", () => {
   const agentId = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
   assert.notEqual(
     sandboxKey(tenantOf({ owner: null }), agentId),
-    sandboxKey(tenantOf({ owner: "alice" }), agentId)
+    sandboxKey(
+      tenantOf({ owner: { kind: "tenant", tenantId: "alice" } }),
+      agentId
+    )
   );
 });
 
@@ -64,7 +105,7 @@ test("create and destroy derive the identical key from one definition", () => {
   // tenant's container.
   const definition = {
     id: "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90",
-    owner: "alice",
+    owner: { kind: "tenant" as const, tenantId: "alice" },
   };
   const created = sandboxKey(tenantOf(definition), definition.id);
   const destroyed = sandboxKey(tenantOf(definition), definition.id);

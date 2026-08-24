@@ -59,6 +59,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: pnpm test:unit
 
+      # Typechecking is not enough: `tsc` and Turbopack resolve modules
+      # differently, so the app can fail to build while every other gate is
+      # green. That is exactly how a broken `next build` reached main. The
+      # build needs no secrets — anything requiring a database is resolved at
+      # request time, not at build time.
+      - name: Build
+        if: ${{ !cancelled() }}
+        run: pnpm build
+
   # Workflow files are the one thing this repository cannot verify by running
   # its own tests, so they get a linter of their own.
   actionlint:

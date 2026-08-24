@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    /**
+     * The `agents` package and `@cloudflare/sandbox` both import
+     * `cloudflare:workers`, which plain Node cannot resolve — importing
+     * anything from `agents.ts` under `tsx --test` fails with
+     * ERR_UNSUPPORTED_ESM_URL_SCHEME before a single test runs. These stubs
+     * stand in so the worker's own logic is testable without workerd.
+     *
+     * The worker test script must pass `--tsconfig tsconfig.test.json` or tsx
+     * ignores these mappings and the failure returns.
+     */
+    "paths": {
+      "agents": ["./test-support/agents.ts"],
+      "@cloudflare/sandbox": ["./test-support/cloudflare-sandbox.ts"]
+    }
+  }
+}

@@ -1,0 +1,135 @@
+{
+  "apiVersion": "1.0",
+  "capabilities": [
+    "agent-profiles",
+    "async-runs",
+    "idempotent-runs",
+    "run-events",
+    "run-cancel",
+    "command-evidence",
+    "file-evidence"
+  ],
+  "eventTypes": [
+    "accepted",
+    "status",
+    "output",
+    "command",
+    "file",
+    "completed",
+    "failed"
+  ],
+  "examples": {
+    "error": {
+      "apiVersion": "1.0",
+      "error": {
+        "code": "run_not_found",
+        "details": "The requested run does not exist.",
+        "message": "Run was not found.",
+        "retryable": false
+      },
+      "requestId": "request-123"
+    },
+    "health": {
+      "apiVersion": "1.0",
+      "capabilities": [
+        "agent-profiles",
+        "async-runs",
+        "idempotent-runs",
+        "run-events",
+        "run-cancel",
+        "command-evidence",
+        "file-evidence"
+      ],
+      "minimumClientVersion": "1.0.0",
+      "mode": "local"
+    },
+    "success": {
+      "apiVersion": "1.0",
+      "run": {
+        "agentId": "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
+        "apiVersion": "1.0",
+        "commandEvidence": [],
+        "completedAt": null,
+        "createdAt": "2026-08-20T19:00:00.000Z",
+        "fileEvidence": [],
+        "id": "3a3f2c72-9b1b-47f7-8c83-28d5f94bf4ce",
+        "operationId": "0f6f31ae-7b6c-49c9-bc82-0f2cbf56cc4d",
+        "output": "",
+        "startedAt": null,
+        "status": "queued",
+        "task": "Run the tests."
+      }
+    }
+  },
+  "limits": {
+    "maxCommandLength": 8000,
+    "maxCommandResults": 256,
+    "maxDescriptionLength": 240,
+    "maxDetailsLength": 2000,
+    "maxEventOutputLength": 100000,
+    "maxFileOperations": 256,
+    "maxInstructionsLength": 12000,
+    "maxMessageLength": 500,
+    "maxModelLength": 120,
+    "maxOwnerIdLength": 128,
+    "maxPathLength": 1024,
+    "maxRequestIdLength": 128,
+    "maxSourceRevisionLength": 256,
+    "maxTaskLength": 40000,
+    "maxWorkspaceLength": 1024
+  },
+  "owners": [
+    {
+      "kind": "standalone"
+    },
+    {
+      "caveInstanceId": "cave-123",
+      "familiarId": "familiar-123",
+      "kind": "cave-familiar",
+      "sourceRevision": "rev-2026-08-20"
+    }
+  ],
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/health"
+    },
+    {
+      "method": "GET",
+      "path": "/api/agents"
+    },
+    {
+      "method": "POST",
+      "path": "/api/agents"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/agents/:id"
+    },
+    {
+      "method": "GET",
+      "path": "/api/agents/:id"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/agents/:id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/agents/:id/runs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/runs/:id"
+    },
+    {
+      "method": "GET",
+      "path": "/api/runs/:id/events"
+    },
+    {
+      "method": "POST",
+      "path": "/api/runs/:id/stop"
+    }
+  ],
+  "statuses": ["queued", "running", "completed", "failed", "cancelled"]
+}

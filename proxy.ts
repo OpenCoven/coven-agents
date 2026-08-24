@@ -1,6 +1,15 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
 import { guestRegex, isDevelopmentEnvironment } from "./lib/constants";
+import { DEMO_COOKIE_NAME } from "./lib/session";
+
+/**
+ * Identifies an anonymous visitor across requests, with no database row
+ * behind it. Set only when absent (see below), never overwritten — a demo
+ * visitor's tenant is derived from this value, and `toSession` mints
+ * `demo:<uuid>` from it. A value that changed on every request would make a
+ * demo visitor's own state vanish between page loads.
+ */
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -22,11 +31,22 @@ export async function proxy(request: NextRequest) {
   const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
   if (!token) {
-    const redirectUrl = encodeURIComponent(new URL(request.url).pathname);
+    // No sign-in, and no database write either: an anonymous visitor gets a
+    // stateless, httpOnly cookie identifying them, and the request proceeds.
+    // This replaces the old redirect to a guest-provider route that inserted
+    // a real `User` row for every anonymous request.
+    const response = NextResponse.next();
 
-    return NextResponse.redirect(
-      new URL(`${base}/api/auth/guest?redirectUrl=${redirectUrl}`, request.url)
-    );
+    if (!request.cookies.has(DEMO_COOKIE_NAME)) {
+      response.cookies.set(DEMO_COOKIE_NAME, crypto.randomUUID(), {
+        httpOnly: true,
+        path: "/",
+        sameSite: "lax",
+        secure: !isDevelopmentEnvironment,
+      });
+    }
+
+    return response;
   }
 
   const isGuest = guestRegex.test(token?.email ?? "");
