@@ -2,7 +2,7 @@ export {
   LineAssembler,
   normalizeCopilotEvent,
   normalizeEvent,
-} from "./events.js";
+} from "./events";
 export {
   buildInvocation,
   buildMission,
@@ -10,7 +10,7 @@ export {
   type InvocationRequest,
   shellQuote,
   toShellCommand,
-} from "./invocation.js";
+} from "./invocation";
 export {
   HARNESS_SPECS,
   type HarnessSpec,
@@ -21,7 +21,7 @@ export {
   isRunnableHarness,
   resolveHarnessAuth,
   SUPPORTED_HARNESS_IDS,
-} from "./registry.js";
+} from "./registry";
 export {
   type HarnessId,
   type HarnessStatus,
@@ -30,5 +30,5 @@ export {
   harnessStatusSchema,
   type RunEvent,
   runEventSchema,
-} from "./schema.js";
-export { type RunSummary, summarizeRun } from "./summary.js";
+} from "./schema";
+export { type RunSummary, summarizeRun } from "./summary";

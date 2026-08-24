@@ -1,4 +1,4 @@
-import type { HarnessId, HarnessStatus } from "./schema.js";
+import type { HarnessId, HarnessStatus } from "./schema";
 
 export interface HarnessSpec {
   /**

@@ -6,7 +6,7 @@ import {
   buildMission,
   shellQuote,
   toShellCommand,
-} from "./invocation.js";
+} from "./invocation";
 
 const BASE = {
   cwd: "/workspace",

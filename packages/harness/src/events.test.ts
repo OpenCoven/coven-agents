@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  LineAssembler,
-  normalizeCopilotEvent,
-  normalizeEvent,
-} from "./events.js";
+import { LineAssembler, normalizeCopilotEvent, normalizeEvent } from "./events";
 
 const AT = "2026-08-20T17:00:00.000Z";
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { RunEvent } from "./schema.js";
-import { summarizeRun } from "./summary.js";
+import type { RunEvent } from "./schema";
+import { summarizeRun } from "./summary";
 
 const AT = "2026-08-20T17:00:00.000Z";
 
