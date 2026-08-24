@@ -92,3 +92,33 @@ test("a malformed token is refused without throwing", async () => {
     );
   }
 });
+
+test("a payload is never parsed until its signature is proven", async () => {
+  // Order of operations is a security property, not a style preference:
+  // parsing first means running JSON.parse and the schema over bytes an
+  // attacker chose. Asserting the outcome cannot catch a reorder, because a
+  // bad token is refused either way — so this watches whether the parse
+  // happened at all.
+  const signer = await keyPair();
+  const other = await keyPair();
+  const token = await mint(signer.privateKey, claims({ tenant: "victim" }));
+
+  const realParse = JSON.parse;
+  let parsed = false;
+  JSON.parse = ((...args: Parameters<typeof JSON.parse>) => {
+    parsed = true;
+    return realParse(...args);
+  }) as typeof JSON.parse;
+
+  try {
+    assert.equal(await verifyRunnerToken(token, other.publicKey), null);
+  } finally {
+    JSON.parse = realParse;
+  }
+
+  assert.equal(
+    parsed,
+    false,
+    "the payload must not be parsed when the signature does not verify"
+  );
+});
