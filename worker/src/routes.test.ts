@@ -11,7 +11,10 @@ import { UNOWNED_TENANT } from "./tenant";
 const TOKEN = "test-token";
 const MINE = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
 const THEIRS = "9c1b7d2f-5a6b-4c90-8f1a-0f4e1f4d4a2e";
+/** A run owned by another tenant. */
 const RUN_ID = "11111111-2222-4333-8444-555555555555";
+/** A run owned by the caller, so the negative tests have a control. */
+const MY_RUN_ID = "22222222-3333-4444-8555-666666666666";
 
 const environment = {
   AGENT_CONTROL_TOKEN: TOKEN,
@@ -57,7 +60,9 @@ function runner() {
         (agent) =>
           agent.owner?.kind === "tenant" && agent.owner.tenantId === tenantId
       ),
-    lookupRun: () => THEIRS,
+    // Resolves to a real owner rather than always the other tenant, so the
+    // negative tests cannot pass just because every run route 404s.
+    lookupRun: (runId) => (runId === MY_RUN_ID ? MINE : THEIRS),
     registerRun: () => undefined,
     remove: () => undefined,
     upsert: (value) => value,
@@ -80,7 +85,7 @@ function runner() {
         completedAt: "2026-08-20T12:00:05.000Z",
         createdAt: "2026-08-20T12:00:00.000Z",
         fileEvidence: [],
-        id: RUN_ID,
+        id: agentId === MINE ? MY_RUN_ID : RUN_ID,
         operationId: MINE,
         output: "done",
         startedAt: "2026-08-20T12:00:01.000Z",
@@ -183,4 +188,47 @@ test("a run id belonging to another tenant cannot be stopped", async () => {
 
   assert.equal(response.status, 404);
   assert.deepEqual(stopped, [], "stop must not be reached");
+});
+
+/**
+ * A control for the negative run-route tests above. Without it, a regression
+ * that made every run route 404 — for any reason, not just ownership — would
+ * leave all of them passing.
+ */
+test("a run belonging to the caller is readable", async () => {
+  const response = await call(`/api/runs/${MY_RUN_ID}`);
+
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as { run: { id: string } };
+  assert.equal(body.run.id, MY_RUN_ID);
+});
+
+test("a client-supplied owner is rejected at the route, not just the schema", async () => {
+  // Guards the invariant end to end: ownership is stamped from the caller, and
+  // createAgentInputSchema staying .strict() is what stops a submitted claim
+  // from being silently accepted if the spread order ever changes.
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      body: JSON.stringify({
+        backend: "cloud",
+        instructions: "Do the thing.",
+        model: "auto",
+        name: "Impostor",
+        owner: { kind: "tenant", tenantId: "someone_else" },
+        runtime: "copilot",
+      }),
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        "content-type": "application/json",
+      },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "invalid_request"
+  );
 });
