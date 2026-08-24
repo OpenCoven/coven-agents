@@ -26,9 +26,6 @@ jobs:
       COVEN_PROJECT_OWNER: OpenCoven
       COVEN_PROJECT_NUMBER: "10"
       DOLT_REMOTE_URL: https://doltremoteapi.dolthub.com/OpenCoven/coven-agents-beads
-      GH_TOKEN: ${{ secrets.COVEN_PROJECT_TOKEN }}
-      DOLT_REMOTE_USER: ${{ secrets.DOLT_REMOTE_USER }}
-      DOLT_REMOTE_PASSWORD: ${{ secrets.DOLT_REMOTE_PASSWORD }}
 
     steps:
       - name: Check out
@@ -43,8 +40,24 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - name: Install GitHub CLI 2.98.0
+        env:
+          GH_SHA256: 3b8ac6b30336802fc1a858d7c084e11cdf24ac1a761ca90b68022d7d729208de
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gh_2.98.0_linux_amd64.tar.gz"
+          curl --fail --location --silent --show-error \
+            https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_linux_amd64.tar.gz \
+            --output "$archive"
+          echo "$GH_SHA256  $archive" | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          export PATH="$RUNNER_TEMP/gh_2.98.0_linux_amd64/bin:$PATH"
+          echo "$RUNNER_TEMP/gh_2.98.0_linux_amd64/bin" >> "$GITHUB_PATH"
+          gh_version="$(gh version | awk 'NR==1 { print $3 }')"
+          test "$gh_version" = "2.98.0"
+
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Install Beads 1.2.2
         env:
@@ -63,6 +76,9 @@ jobs:
           bd version
 
       - name: Restore private Beads database
+        env:
+          DOLT_REMOTE_USER: ${{ secrets.DOLT_REMOTE_USER }}
+          DOLT_REMOTE_PASSWORD: ${{ secrets.DOLT_REMOTE_PASSWORD }}
         run: |
           set -euo pipefail
           mkdir -p "$BEADS_WORKSPACE"
@@ -83,7 +99,11 @@ jobs:
           bd -C "$BEADS_WORKSPACE" dolt pull
 
       - name: Preview reconciliation
+        env:
+          GH_TOKEN: ${{ secrets.COVEN_PROJECT_TOKEN }}
         run: pnpm beads:sync preview
 
       - name: Apply reconciliation
+        env:
+          GH_TOKEN: ${{ secrets.COVEN_PROJECT_TOKEN }}
         run: pnpm beads:sync apply

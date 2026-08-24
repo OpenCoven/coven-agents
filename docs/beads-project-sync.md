@@ -27,13 +27,16 @@ DOLT_REMOTE_URL=https://doltremoteapi.dolthub.com/OpenCoven/coven-agents-beads
 ```
 
 CI does not seed/import Beads data and does not `dolt push`; it restores the
-private database read-only and writes only to Project #10.
+private database read-only and writes only to Project #10. DoltHub credentials
+are scoped to the restore step, and `GH_TOKEN` is scoped only to the preview
+and apply steps that call GitHub.
 
 ## Required secrets and minimum permissions
 
 - `DOLT_REMOTE_USER`
 - `DOLT_REMOTE_PASSWORD`
-- `GH_TOKEN` locally, or `secrets.COVEN_PROJECT_TOKEN` in GitHub Actions
+- `GH_TOKEN` locally for `preview` / `apply`, or `secrets.COVEN_PROJECT_TOKEN`
+  in GitHub Actions for the same steps
 
 Minimum access:
 
@@ -49,7 +52,7 @@ Use these exact tool families:
 
 - Beads `bd` `1.2.2`
 - Dolt `2.x`
-- GitHub CLI `gh`
+- GitHub CLI `gh` `2.98.0`
 - Node.js `24.x`
 - pnpm `10.x`
 
@@ -62,6 +65,9 @@ gh --version
 node --version
 pnpm --version
 ```
+
+CI pins `gh` to `2.98.0` and verifies the release tarball SHA-256 before using
+it.
 
 Linux amd64 matches CI:
 
