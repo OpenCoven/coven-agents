@@ -1,6 +1,5 @@
 import type { ProjectItem } from "./beads-project-model";
 import type { DesiredProjectItem } from "./beads-project-policy";
-import { MARKER_PREFIX } from "./beads-project-policy";
 
 export type ReconciliationAction =
   | {
@@ -23,6 +22,7 @@ export type ReconciliationPlan = {
 };
 
 const MALFORMED_MARKER_ERROR = "Malformed managed bead marker";
+const MANAGED_MARKER_NAMESPACE_PATTERN = /<!--\s*coven-agents-bead-sync/i;
 const MANAGED_MARKER_PATTERN =
   /^<!-- coven-agents-bead-sync:v1 id=(coven-agents-[a-z0-9.-]+) -->$/;
 
@@ -41,7 +41,7 @@ function compareStrings(left: string, right: string): number {
 export function parseManagedBeadId(body: string): string | null {
   const line = firstLine(body);
 
-  if (!body.includes(MARKER_PREFIX)) {
+  if (!MANAGED_MARKER_NAMESPACE_PATTERN.test(body)) {
     return null;
   }
 

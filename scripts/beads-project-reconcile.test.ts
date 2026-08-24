@@ -235,7 +235,48 @@ test("parses exact markers, returns null without prefix, and rejects malformed m
   );
   assert.equal(parseManagedBeadId("Plain body"), null);
   assert.throws(
+    () =>
+      parseManagedBeadId(
+        "<!-- coven-agents-bead-sync:v2 id=coven-agents-bad -->"
+      ),
+    /Malformed managed bead marker/
+  );
+  assert.throws(
     () => parseManagedBeadId("<!-- coven-agents-bead-sync:v1 id=bad -->"),
+    /Malformed managed bead marker/
+  );
+  assert.throws(
+    () =>
+      parseManagedBeadId(
+        "<!-- coven-agents-bead-sync v1 id=coven-agents-bad -->"
+      ),
+    /Malformed managed bead marker/
+  );
+  assert.throws(
+    () =>
+      parseManagedBeadId(
+        "<!-- coven-agents-bead-sync:v1 id=coven-agents-bad --> junk"
+      ),
+    /Malformed managed bead marker/
+  );
+});
+
+test("rejects malformed namespace markers before planning creates", () => {
+  assert.throws(
+    () =>
+      planReconciliation(
+        [desiredItem("coven-agents-create")],
+        [
+          existingItem("coven-agents-old", {
+            content: {
+              body: "<!-- coven-agents-bead-sync:v2 id=coven-agents-old -->\n\nBody",
+              title: "Old",
+              type: "Note",
+            },
+            id: "old-item",
+          }),
+        ]
+      ),
     /Malformed managed bead marker/
   );
 });
