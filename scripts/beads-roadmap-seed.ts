@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 
-import { readFile } from "node:fs/promises";
+import { realpath as fsRealpath, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -117,6 +117,7 @@ export type SeedConfig = {
 
 export type SeedDependencies = {
   readFile: (filePath: string) => Promise<string>;
+  realpath?: (filePath: string) => Promise<string>;
   runCommand: CommandRunner;
   runInputCommand: InputCommandRunner;
   write: (line: string) => void;
@@ -139,12 +140,42 @@ type SeedApplicationPlan = {
   importTargets: SeedImportTarget[];
 };
 
-const defaultDependencies: SeedDependencies = {
+const defaultDependencies = {
   readFile: (filePath) => readFile(filePath, "utf8"),
+  realpath: (filePath) => fsRealpath(filePath),
   runCommand,
   runInputCommand,
   write: console.log,
-};
+} satisfies Required<SeedDependencies>;
+
+const CANONICAL_SEED_BEAD_KEYS = new Set<string>([
+  "acceptance_criteria",
+  "dependencies",
+  "description",
+  "id",
+  "issue_type",
+  "metadata",
+  "parent",
+  "priority",
+  "status",
+  "title",
+]);
+
+const READONLY_EXISTING_BEAD_KEYS = new Set<string>([
+  "_type",
+  "comment_count",
+  "created_at",
+  "created_by",
+  "dependency_count",
+  "dependent_count",
+  "owner",
+  "updated_at",
+]);
+
+const HEAL_SAFE_EXISTING_BEAD_KEYS = new Set<string>([
+  ...CANONICAL_SEED_BEAD_KEYS,
+  ...READONLY_EXISTING_BEAD_KEYS,
+]);
 
 function compareStrings(left: string, right: string): number {
   return left.localeCompare(right);
@@ -502,6 +533,12 @@ function sameStringArray(
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function unmodeledMutableFieldNames(bead: Bead): string[] {
+  return Object.keys(bead)
+    .filter((key) => !HEAL_SAFE_EXISTING_BEAD_KEYS.has(key))
+    .sort(compareStrings);
+}
+
 function diffExistingBead(
   item: SeedItem,
   bead: Bead
@@ -713,6 +750,14 @@ function createSeedApplicationPlan(
     }
 
     if (missingBlockingDependencyIds.length > 0) {
+      const mutableFieldNames = unmodeledMutableFieldNames(existing);
+
+      if (mutableFieldNames.length > 0) {
+        throw new Error(
+          `Existing bead contains unmodeled mutable fields for ${item.id}: ${mutableFieldNames.join(", ")}`
+        );
+      }
+
       healIds.push(item.id);
       importTargets.push({
         item,
@@ -747,7 +792,20 @@ function createSeedApplicationPlan(
   };
 }
 
-function validateSeedPath(inputPath: string, repoRoot: string): string {
+function isInsideRoot(candidatePath: string, rootPath: string): boolean {
+  const relativePath = path.relative(rootPath, candidatePath);
+
+  return (
+    relativePath === "" ||
+    (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))
+  );
+}
+
+async function validateSeedPath(
+  inputPath: string,
+  repoRoot: string,
+  realpath: (filePath: string) => Promise<string>
+): Promise<string> {
   if (!path.isAbsolute(inputPath)) {
     throw new Error(
       "Seed file path must be absolute and outside the repository root"
@@ -760,18 +818,29 @@ function validateSeedPath(inputPath: string, repoRoot: string): string {
 
   const resolvedPath = path.resolve(inputPath);
   const resolvedRoot = path.resolve(repoRoot);
-  const relativePath = path.relative(resolvedRoot, resolvedPath);
 
-  if (
-    relativePath === "" ||
-    (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))
-  ) {
+  if (isInsideRoot(resolvedPath, resolvedRoot)) {
     throw new Error(
       "Seed file path must be absolute and outside the repository root"
     );
   }
 
-  return resolvedPath;
+  const realRoot = await realpath(resolvedRoot);
+  let realCandidatePath = "";
+
+  try {
+    realCandidatePath = await realpath(resolvedPath);
+  } catch (error) {
+    throw new Error("Unable to read seed file", { cause: error });
+  }
+
+  if (isInsideRoot(realCandidatePath, realRoot)) {
+    throw new Error(
+      "Seed file path must be absolute and outside the repository root"
+    );
+  }
+
+  return realCandidatePath;
 }
 
 function buildImportJsonl(targets: readonly SeedImportTarget[]): string {
@@ -814,7 +883,8 @@ export function formatSeedCliError(error: unknown): string {
 
   if (
     message.startsWith("Duplicate existing bead ID") ||
-    message.startsWith("Existing bead differs")
+    message.startsWith("Existing bead differs") ||
+    message.startsWith("Existing bead contains unmodeled mutable fields")
   ) {
     return "Existing Beads state does not match the seed.";
   }
@@ -892,7 +962,12 @@ export async function runSeed(
     );
   }
 
-  const validatedPath = validateSeedPath(filePath, config.repositoryRoot);
+  const resolveRealpath = dependencies.realpath ?? defaultDependencies.realpath;
+  const validatedPath = await validateSeedPath(
+    filePath,
+    config.repositoryRoot,
+    resolveRealpath
+  );
 
   let rawSeed = "";
 

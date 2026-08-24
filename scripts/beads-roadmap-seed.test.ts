@@ -266,6 +266,10 @@ function writeNothing(_line: string): void {
   // Intentionally silent in tests.
 }
 
+function passthroughRealpath(filePath: string): Promise<string> {
+  return Promise.resolve(filePath);
+}
+
 test("exports strict schemas and parses a valid roadmap seed", () => {
   const seed = makeValidSeed();
 
@@ -464,6 +468,7 @@ test("preview prints IDs and counts only and performs no writes", async () => {
 
   await runSeed(["preview", externalSeedPath], config, {
     readFile: async () => JSON.stringify(seed),
+    realpath: passthroughRealpath,
     runCommand,
     runInputCommand,
     write: (line) => {
@@ -490,6 +495,7 @@ test("apply is an exact idempotent no-op when every bead already matches", async
 
   await runSeed(["apply", externalSeedPath], config, {
     readFile: async () => JSON.stringify(seed),
+    realpath: passthroughRealpath,
     runCommand,
     runInputCommand,
     write: writeNothing,
@@ -517,6 +523,7 @@ test("apply fails before writes when an existing bead differs", async () => {
     () =>
       runSeed(["apply", externalSeedPath], config, {
         readFile: async () => JSON.stringify(seed),
+        realpath: passthroughRealpath,
         runCommand,
         runInputCommand,
         write: writeNothing,
@@ -533,6 +540,7 @@ test("apply fails before writes when an existing bead differs", async () => {
     () =>
       runSeed(["apply", externalSeedPath], config, {
         readFile: async () => JSON.stringify(seed),
+        realpath: passthroughRealpath,
         runCommand,
         runInputCommand,
         write: writeNothing,
@@ -579,6 +587,7 @@ test("apply sends private canonical JSONL through stdin only", async () => {
 
   await runSeed(["apply", externalSeedPath], config, {
     readFile: async () => JSON.stringify(seed),
+    realpath: passthroughRealpath,
     runCommand,
     runInputCommand,
     write: writeNothing,
@@ -648,6 +657,7 @@ test("apply rejects extra blocking dependencies before import", async () => {
     () =>
       runSeed(["apply", externalSeedPath], config, {
         readFile: async () => JSON.stringify(seed),
+        realpath: passthroughRealpath,
         runCommand,
         runInputCommand,
         write: writeNothing,
@@ -657,6 +667,62 @@ test("apply rejects extra blocking dependencies before import", async () => {
 
   assert.equal(importCalls(calls).length, 0);
   assert.equal(calls.length, 1);
+});
+
+test("apply refuses healing beads with unmodeled mutable fields before import", async () => {
+  const seed = makeValidSeed();
+  const healId = "coven-agents-dx.5";
+  const desiredHeal = seed.find((item) => item.id === healId);
+  assert.ok(desiredHeal);
+  const missingDependencyId = desiredHeal.dependsOn.at(-1);
+  assert.ok(missingDependencyId);
+
+  await Promise.all(
+    (
+      [
+        ["notes", "Keep this private note"],
+        ["labels", ["private", "seed"]],
+        ["custom_field", "unexpected mutable state"],
+      ] as const
+    ).map(async ([fieldName, value]) => {
+      const current = seed.map(makeCurrentBead);
+      const healIndex = current.findIndex((item) => item.id === healId);
+      assert.ok(healIndex >= 0);
+      current[healIndex] = {
+        ...current[healIndex],
+        [fieldName]: value,
+        dependencies: current[healIndex].dependencies.filter(
+          (dependency) =>
+            !(
+              dependency.type === "blocks" &&
+              dependency.depends_on_id === missingDependencyId
+            )
+        ),
+      };
+      const runner = makeRunner(current);
+
+      await assert.rejects(
+        () =>
+          runSeed(["apply", externalSeedPath], config, {
+            readFile: async () => JSON.stringify(seed),
+            realpath: passthroughRealpath,
+            runCommand: runner.runCommand,
+            runInputCommand: runner.runInputCommand,
+            write: writeNothing,
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          error.message.includes("unmodeled mutable fields") &&
+          error.message.includes(fieldName)
+      );
+
+      assert.equal(importCalls(runner.calls).length, 0);
+      assert.deepEqual(
+        runner.calls.map((call) => call.args.join(" ")),
+        [`-C ${config.workspace} --readonly list --all --limit 0 --json`]
+      );
+    })
+  );
 });
 
 test("apply can resume missing creations and dependency healing", async () => {
@@ -687,6 +753,7 @@ test("apply can resume missing creations and dependency healing", async () => {
 
   await runSeed(["apply", externalSeedPath], config, {
     readFile: async () => JSON.stringify(seed),
+    realpath: passthroughRealpath,
     runCommand: runner.runCommand,
     runInputCommand: runner.runInputCommand,
     write: writeNothing,
@@ -705,6 +772,7 @@ test("apply can resume missing creations and dependency healing", async () => {
 
   await runSeed(["apply", externalSeedPath], config, {
     readFile: async () => JSON.stringify(seed),
+    realpath: passthroughRealpath,
     runCommand: runner.runCommand,
     runInputCommand: runner.runInputCommand,
     write: writeNothing,
@@ -724,6 +792,7 @@ test("apply rejects a non-empty final dependency cycle check", async () => {
     () =>
       runSeed(["apply", externalSeedPath], config, {
         readFile: async () => JSON.stringify(seed),
+        realpath: passthroughRealpath,
         runCommand,
         runInputCommand,
         write: writeNothing,
@@ -735,6 +804,7 @@ test("apply rejects a non-empty final dependency cycle check", async () => {
 test("rejects invalid and in-repository seed paths", async () => {
   const deps = {
     readFile: async () => JSON.stringify(makeValidSeed()),
+    realpath: passthroughRealpath,
     runCommand: async () => JSON.stringify([]),
     runInputCommand: async () => "",
     write: writeNothing,
@@ -757,6 +827,36 @@ test("rejects invalid and in-repository seed paths", async () => {
       ),
     /outside the repository root/i
   );
+});
+
+test("rejects lexical seed symlinks that resolve into the repository", async () => {
+  const symlinkPath = "/private/repo-seed-link.json";
+  let readFileCalled = false;
+
+  await assert.rejects(
+    () =>
+      runSeed(["preview", symlinkPath], config, {
+        readFile: () => {
+          readFileCalled = true;
+          return Promise.resolve(JSON.stringify(makeValidSeed()));
+        },
+        realpath: (filePath) => {
+          if (filePath === symlinkPath) {
+            return Promise.resolve(
+              `${config.repositoryRoot}/.gitignored/private-roadmap.json`
+            );
+          }
+
+          return Promise.resolve(filePath);
+        },
+        runCommand: async () => JSON.stringify([]),
+        runInputCommand: async () => "",
+        write: writeNothing,
+      }),
+    /outside the repository root/i
+  );
+
+  assert.equal(readFileCalled, false);
 });
 
 test("top-level seed errors use fixed categories without leaking spaced paths", () => {
