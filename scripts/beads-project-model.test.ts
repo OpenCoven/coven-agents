@@ -53,8 +53,13 @@ test("parses real Beads CLI JSON with issue_type and extra fields", () => {
         created_by: "OpenCoven",
         dependencies: [
           {
+            created_at: "2026-08-23T09:06:00Z",
+            created_by: "OpenCoven",
             depends_on_id: "coven-agents-security",
             issue_id: "coven-agents-security.1",
+            metadata: {
+              note: "extra dependency metadata from bd list --json",
+            },
             type: "blocks",
           },
         ],

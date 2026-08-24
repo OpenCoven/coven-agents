@@ -30,13 +30,19 @@ export const BEAD_STATUSES = [
 ] as const;
 export const BEAD_ID_PATTERN = /^coven-agents-[a-z0-9.-]+$/;
 
-const dependencySchema = z
+const dependencySourceSchema = z
   .object({
     depends_on_id: z.string().trim().min(1),
     issue_id: z.string().trim().min(1),
     type: z.string().trim().min(1),
   })
-  .strict();
+  .passthrough();
+
+const dependencySchema = dependencySourceSchema.transform((dependency) => ({
+  depends_on_id: dependency.depends_on_id,
+  issue_id: dependency.issue_id,
+  type: dependency.type,
+}));
 
 const metadataSchema = z
   .object({
