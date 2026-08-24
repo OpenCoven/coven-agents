@@ -98,6 +98,37 @@ test("a missing credential refuses before loading capture", async () => {
   assert.equal(fixture.captureCalls(), 0);
 });
 
+test("top-level recorder errors redact every configured secret", async () => {
+  const fixture = dependencies();
+  const runnerToken = "runner-token-sensitive";
+  const identityToken = "identity-token-sensitive";
+  const recordingCredential = "recording-credential-sensitive";
+
+  const code = await runDemoRecorder(
+    ["--name", "parser-test", "--task", "Add a parser test."],
+    {
+      DEMO_RECORDING_CREDENTIAL: recordingCredential,
+      DEMO_RUNNER_IDENTITY_TOKEN: identityToken,
+      DEMO_RUNNER_TOKEN: runnerToken,
+    },
+    {
+      ...fixture.dependencies,
+      loadCapture: () =>
+        Promise.reject(
+          new Error(`${runnerToken} ${identityToken} ${recordingCredential}`, {
+            cause: new Error(`${recordingCredential} in cause`),
+          })
+        ),
+    }
+  );
+
+  const printed = fixture.errors.join("");
+  assert.equal(code, 1);
+  for (const secret of [runnerToken, identityToken, recordingCredential]) {
+    assert.equal(printed.includes(secret), false);
+  }
+});
+
 test("captures, validates, redacts, and writes a pretty transcript", async () => {
   const fixture = dependencies();
 

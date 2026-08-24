@@ -6,6 +6,7 @@ import {
   type DemoTranscript,
   demoTranscriptSchema,
   type RunResult,
+  sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
 import { type ArrivedEvent, toOffsets } from "@/lib/demo/offsets";
 import { assertRecordable, DEMO_REPOSITORY } from "@/lib/demo/recordable";
@@ -49,11 +50,13 @@ function argument(
   return value && !value.startsWith("--") ? value : undefined;
 }
 
-function safeErrorMessage(error: unknown): string {
+function safeErrorMessage(error: unknown, secrets: readonly string[]): string {
   if (error instanceof Error && error.name === "ZodError") {
     return "Demo recording data failed schema validation.";
   }
-  return error instanceof Error ? error.message : "Demo recording failed.";
+  const message =
+    error instanceof Error ? error.message : "Demo recording failed.";
+  return sanitizeEvidenceText(message, secrets);
 }
 
 function buildTranscript(
@@ -87,6 +90,11 @@ export async function runDemoRecorder(
   const allowFailure = arguments_.includes("--allow-failure");
   const repository = environment.DEMO_REPOSITORY ?? DEMO_REPOSITORY;
   const credential = environment.DEMO_RECORDING_CREDENTIAL ?? "";
+  const secrets = [
+    credential,
+    environment.DEMO_RUNNER_TOKEN ?? "",
+    environment.DEMO_RUNNER_IDENTITY_TOKEN ?? "",
+  ].filter(Boolean);
 
   try {
     assertRecordable({
@@ -127,7 +135,7 @@ export async function runDemoRecorder(
     dependencies.stdout(`Wrote ${target}\n`);
     return 0;
   } catch (error) {
-    dependencies.stderr(`${safeErrorMessage(error)}\n`);
+    dependencies.stderr(`${safeErrorMessage(error, secrets)}\n`);
     return 1;
   }
 }

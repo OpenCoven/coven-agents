@@ -1,5 +1,6 @@
 import {
   agentEnvelopeSchema,
+  agentIdSchema,
   createAgentInputSchema,
   okEnvelopeSchema,
   type RunEvent,
@@ -8,6 +9,7 @@ import {
   runEventSchema,
   runSnapshotEnvelopeSchema,
   runSnapshotToResult,
+  sanitizeEvidenceText,
   startRunInputSchema,
 } from "@opencoven/agent-contracts";
 import type { ArrivedEvent } from "@/lib/demo/offsets";
@@ -18,7 +20,6 @@ const CLEANUP_TIMEOUT_MS = 10_000;
 const DEMO_REPOSITORY_URL = "https://github.com/OpenCoven/demo-workspace.git";
 const DEMO_WORKSPACE = "/workspace";
 const DEMO_REPOSITORY_WORKSPACE = "/workspace/repo";
-const TERMINAL_EVENT_TYPES = new Set<RunEvent["type"]>(["completed", "failed"]);
 
 type Environment = Readonly<Record<string, string | undefined>>;
 type FetchLike = (
@@ -30,6 +31,7 @@ export type CaptureEnvironment = {
   identityToken: string;
   runnerToken: string;
   runnerUrl: string;
+  secrets: string[];
   timeoutMs: number;
 };
 
@@ -103,6 +105,11 @@ export function readCaptureEnvironment(
     identityToken,
     runnerToken,
     runnerUrl: runnerUrl.trim().replace(/\/+$/, ""),
+    secrets: [
+      runnerToken,
+      identityToken,
+      environment.DEMO_RECORDING_CREDENTIAL ?? "",
+    ].filter(nonblank),
     timeoutMs,
   };
 }
@@ -115,6 +122,36 @@ function abortError(signal: AbortSignal): Error {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown capture failure.";
+}
+
+function sanitizedError(
+  error: unknown,
+  secrets: readonly string[],
+  fallback: string
+): Error {
+  const message = error instanceof Error ? error.message : fallback;
+  return new Error(sanitizeEvidenceText(message, secrets));
+}
+
+function isTerminalEvent(event: RunEvent): boolean {
+  return (
+    event.type === "completed" ||
+    event.type === "failed" ||
+    (event.type === "status" &&
+      ["completed", "failed", "cancelled"].includes(event.status))
+  );
+}
+
+function agentIdFromEnvelope(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || !("agent" in value)) {
+    return undefined;
+  }
+  const { agent } = value;
+  if (typeof agent !== "object" || agent === null || !("id" in agent)) {
+    return undefined;
+  }
+  const parsed = agentIdSchema.safeParse(agent.id);
+  return parsed.success ? parsed.data : undefined;
 }
 
 async function fetchRunner(
@@ -215,7 +252,7 @@ export async function readRunEventStream(
     const event = parseRunEvent(dataLines.join("\n"));
     dataLines = [];
     onEvent(event);
-    terminal ||= TERMINAL_EVENT_TYPES.has(event.type);
+    terminal ||= isTerminalEvent(event);
   };
 
   const consumeLine = (lineWithPossibleCarriageReturn: string): void => {
@@ -241,7 +278,7 @@ export async function readRunEventStream(
   };
 
   try {
-    while (!terminal) {
+    while (true) {
       if (signal?.aborted) {
         throw abortError(signal);
       }
@@ -252,15 +289,14 @@ export async function readRunEventStream(
       }
       buffer += decoder.decode(value, { stream: true });
       let newline = buffer.indexOf("\n");
-      while (newline !== -1 && !terminal) {
+      while (newline !== -1) {
         consumeLine(buffer.slice(0, newline));
         buffer = buffer.slice(newline + 1);
         newline = buffer.indexOf("\n");
       }
     }
-    if (terminal) {
-      await reader.cancel();
-      return true;
+    if (signal?.aborted) {
+      throw abortError(signal);
     }
     buffer += decoder.decode();
     if (buffer) {
@@ -277,6 +313,7 @@ export async function readRunEventStream(
 async function createTemporaryAgent(
   connection: RunnerConnection,
   operationId: string,
+  retainAgentId: (agentId: string) => void,
   signal: AbortSignal
 ): Promise<string> {
   const input = createAgentInputSchema.parse({
@@ -298,9 +335,12 @@ async function createTemporaryAgent(
     { body: JSON.stringify(input), method: "POST" },
     signal
   );
-  const parsed = agentEnvelopeSchema.safeParse(
-    await readJson(response, "agent creation")
-  );
+  const envelope = await readJson(response, "agent creation");
+  const candidateId = agentIdFromEnvelope(envelope);
+  if (candidateId) {
+    retainAgentId(candidateId);
+  }
+  const parsed = agentEnvelopeSchema.safeParse(envelope);
   if (!parsed.success) {
     throw new Error("Runner returned an invalid agent envelope.", {
       cause: parsed.error,
@@ -475,6 +515,9 @@ export async function captureRun(
     agentId = await createTemporaryAgent(
       connection,
       operationId,
+      (createdAgentId) => {
+        agentId = createdAgentId;
+      },
       controller.signal
     );
     const runId = await startRun(
@@ -509,22 +552,33 @@ export async function captureRun(
     }
   }
 
-  if (cleanupError && primaryError) {
+  const safePrimaryError = primaryError
+    ? sanitizedError(primaryError, configuration.secrets, "Capture failed.")
+    : undefined;
+  const safeCleanupError = cleanupError
+    ? sanitizedError(
+        cleanupError,
+        configuration.secrets,
+        "Temporary agent cleanup failed."
+      )
+    : undefined;
+
+  if (safeCleanupError && safePrimaryError) {
     throw new Error(
-      `Demo capture failed: ${errorMessage(primaryError)} Cleanup also failed: ${errorMessage(cleanupError)}`,
+      `Demo capture failed: ${errorMessage(safePrimaryError)} Cleanup also failed: ${errorMessage(safeCleanupError)}`,
       {
         cause: new AggregateError(
-          [primaryError, cleanupError],
+          [safePrimaryError, safeCleanupError],
           "Capture and cleanup both failed."
         ),
       }
     );
   }
-  if (cleanupError) {
-    throw cleanupError;
+  if (safeCleanupError) {
+    throw safeCleanupError;
   }
-  if (primaryError) {
-    throw primaryError;
+  if (safePrimaryError) {
+    throw safePrimaryError;
   }
   if (!captured) {
     throw new Error("Demo capture completed without a result.");
