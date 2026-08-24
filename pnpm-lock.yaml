@@ -88,8 +88,8 @@ importers:
         specifier: 7.0.73
         version: 7.0.73(zod@4.4.3)
       bcrypt-ts:
-        specifier: ^8.0.1
-        version: 8.0.1
+        specifier: ^9.0.2
+        version: 9.0.2
       botid:
         specifier: ^1.5.11
         version: 1.5.11(next@16.3.1(@opentelemetry/api@1.9.1)(@playwright/test@1.62.1)(@types/node@24.13.3)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)
@@ -2980,9 +2980,9 @@ packages:
     engines: {node: '>=6.0.0'}
     hasBin: true
 
-  bcrypt-ts@8.0.1:
-    resolution: {integrity: sha512-ILrO7U7YieyG+71KVIVVuPCmjN8N9DY3gYs4OiEoJvW8A5HOe4eerRhLD0Rgo2CAyANRKssFGXmLF74zJz094g==}
-    engines: {node: '>=20'}
+  bcrypt-ts@9.0.2:
+    resolution: {integrity: sha512-esaMayGbxzD3bOpy7f00pa5wA15wqhP15RbDYGzh/xGbZRNr05G9HdNiqK4ywzrVdzO8rv+Z4l6m01/9pv1FRA==}
+    engines: {node: '>=22'}
 
   blake3-wasm@2.1.5:
     resolution: {integrity: sha512-F1+K8EbfOZE49dtoPtmxUQrpXaBIl3ICvasLh+nJta0xkz+9kF/7uet9fLnwKqhDrmj6g+6K3Tw9yQPUg2ka5g==}
@@ -7760,7 +7760,7 @@ snapshots:
 
   baseline-browser-mapping@2.11.16: {}
 
-  bcrypt-ts@8.0.1: {}
+  bcrypt-ts@9.0.2: {}
 
   blake3-wasm@2.1.5: {}
 
