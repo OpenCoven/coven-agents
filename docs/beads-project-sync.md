@@ -122,6 +122,8 @@ bd -C "$BEADS_WORKSPACE" dolt push
 
 Managed Project fields:
 
+GitHub reserves `Type`, so the compatible managed field name is `Bead Type`.
+
 | Project field | Source |
 | --- | --- |
 | `Bead ID` | `bead.id` |
@@ -130,7 +132,7 @@ Managed Project fields:
 | `Runner` | `bead.metadata.runner` |
 | `Size` | `bead.metadata.size` |
 | `Status` | `Done` for closed beads, `In review` when `metadata.projectStatus` is `In review`, `In Progress` for `in_progress`, otherwise `Todo` |
-| `Type` | `bead.issue_type` |
+| `Bead Type` | `bead.issue_type` |
 | `Workstream` | `bead.metadata.workstream` |
 
 Managed draft bodies start with:

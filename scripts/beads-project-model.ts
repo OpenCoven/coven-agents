@@ -109,12 +109,12 @@ const projectJsonSchema = z
 
 const canonicalProjectFieldNames: Readonly<Record<string, string>> = {
   "bead id": "Bead ID",
+  "bead type": "Bead Type",
   blocked: "Blocked",
   priority: "Priority",
   runner: "Runner",
   size: "Size",
   status: "Status",
-  type: "Type",
   workstream: "Workstream",
 };
 

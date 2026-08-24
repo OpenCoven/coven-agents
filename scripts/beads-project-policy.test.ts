@@ -405,15 +405,15 @@ test("maps status type and priority fields", () => {
 
   assert.deepEqual(closedItem.fields, {
     "Bead ID": "coven-agents-closed",
+    "Bead Type": "bug",
     Blocked: "No",
     Priority: "P2",
     Runner: "Local",
     Size: "XL",
     Status: "Done",
-    Type: "bug",
     Workstream: "Testing & reliability",
   });
   assert.equal(reviewItem.fields.Status, "In review");
   assert.equal(reviewItem.fields.Priority, "P0");
-  assert.equal(reviewItem.fields.Type, "task");
+  assert.equal(reviewItem.fields["Bead Type"], "task");
 });

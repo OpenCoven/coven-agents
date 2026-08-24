@@ -69,9 +69,11 @@ Reuse organization Project #10, **Coven Agents**. Preserve its existing fields:
 Add:
 
 - **Bead ID**: text
-- **Type**: single select matching the supported Beads types
+- **Bead Type**: single select matching the supported Beads types
 - **Workstream**: single select matching the ten roadmap epics
 - **Blocked**: single select with `Yes` and `No`
+
+GitHub reserves `Type`, so `Bead Type` is the compatible managed schema name.
 
 Each seeded bead maps to one private Project draft item. Beads closed after
 creation remain mapped and move to `Done`. Epic draft items provide the

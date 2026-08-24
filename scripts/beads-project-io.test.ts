@@ -49,6 +49,16 @@ function makeProjectFields(
       options: {},
       type: "ProjectV2Field",
     },
+    "Bead Type": {
+      id: "field-bead-type",
+      options: {
+        bug: "type-bug",
+        epic: "type-epic",
+        feature: "type-feature",
+        task: "type-task",
+      },
+      type: "ProjectV2SingleSelectField",
+    },
     Blocked: {
       id: "field-blocked",
       options: {
@@ -94,16 +104,6 @@ function makeProjectFields(
         "In Progress": "status-in-progress",
         "In review": "status-in-review",
         Todo: "status-todo",
-      },
-      type: "ProjectV2SingleSelectField",
-    },
-    Type: {
-      id: "field-type",
-      options: {
-        bug: "type-bug",
-        epic: "type-epic",
-        feature: "type-feature",
-        task: "type-task",
       },
       type: "ProjectV2SingleSelectField",
     },
@@ -492,9 +492,9 @@ test("loads a one-page project snapshot in one GraphQL call", async () => {
         items: [
           draftItem("coven-agents-security.1", 1, {
             "Bead ID": "coven-agents-security.1",
+            "Bead Type": "feature",
             Runner: "Shared",
             Status: "Todo",
-            Type: "feature",
             Workstream: "Security & privacy",
           }),
         ],
@@ -519,6 +519,7 @@ test("loads a one-page project snapshot in one GraphQL call", async () => {
   assert.equal(project.items[0]?.content.id, "DI_1");
   assert.equal(project.items[0]?.content.type, "DraftIssue");
   assert.equal(project.items[0]?.fields["Bead ID"], "coven-agents-security.1");
+  assert.equal(project.items[0]?.fields["Bead Type"], "feature");
   assert.equal(project.items[0]?.fields.Workstream, "Security & privacy");
   assert.equal(project.fields.Sprint, undefined);
 });

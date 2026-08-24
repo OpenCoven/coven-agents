@@ -12,12 +12,12 @@ const GRAPHQL_MESSAGE_LIMIT = 160;
 
 const EXPECTED_PROJECT_FIELDS = {
   "Bead ID": null,
+  "Bead Type": ["bug", "epic", "feature", "task"],
   Blocked: ["No", "Yes"],
   Priority: ["P0", "P1", "P2"],
   Runner: ["Cloud", "Control plane", "Local", "Shared"],
   Size: ["L", "M", "S", "XL", "XS"],
   Status: ["Done", "In Progress", "In review", "Todo"],
-  Type: ["bug", "epic", "feature", "task"],
   Workstream: [
     "Cloud runner",
     "Contracts & harnesses",

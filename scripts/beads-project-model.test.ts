@@ -150,6 +150,7 @@ test("parses real project item-list JSON with extra content fields", () => {
     JSON.stringify({
       items: [
         {
+          "Bead Type": "feature",
           "bead id": "coven-agents-security.1",
           content: {
             body: "Draft body",
@@ -162,7 +163,6 @@ test("parses real project item-list JSON with extra content fields", () => {
           },
           id: "PJI_1",
           runner: "Shared",
-          type: "feature",
           url: "https://github.com/orgs/OpenCoven/projects/10/views/1?pane=issue&itemId=PJI_1",
         },
       ],
@@ -178,7 +178,7 @@ test("parses real project item-list JSON with extra content fields", () => {
   assert.equal(parsed.items[0].content.id, "DI_1");
   assert.equal(parsed.items[0].content.number, 42);
   assert.equal(parsed.items[0].fields["Bead ID"], "coven-agents-security.1");
-  assert.equal(parsed.items[0].fields.Type, "feature");
+  assert.equal(parsed.items[0].fields["Bead Type"], "feature");
 });
 
 test("parsed beads are assignable to Bead and keep open status", () => {

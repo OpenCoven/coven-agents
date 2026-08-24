@@ -276,12 +276,12 @@ export function projectBead(
     body,
     fields: {
       "Bead ID": bead.id,
+      "Bead Type": bead.issue_type,
       Blocked: blocked,
       Priority: priorityLabel(bead.priority),
       Runner: bead.metadata.runner,
       Size: bead.metadata.size,
       Status: projectStatusFor(bead),
-      Type: bead.issue_type,
       Workstream: bead.metadata.workstream,
     },
     title: bead.title,

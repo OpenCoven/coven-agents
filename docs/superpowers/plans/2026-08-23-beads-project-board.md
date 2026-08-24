@@ -244,7 +244,7 @@ function canonicalFieldName(name: string): string {
     "Runner",
     "Size",
     "Status",
-    "Type",
+    "Bead Type",
     "Workstream",
   ];
   return names.find((candidate) => candidate.toLowerCase() === normalized) ?? name;
@@ -533,7 +533,7 @@ export function projectBead(
       Runner: bead.metadata.runner,
       Size: bead.metadata.size,
       Status: projectStatus(bead),
-      Type: bead.issue_type,
+      "Bead Type": bead.issue_type,
       Workstream: bead.metadata.workstream,
     },
     title: bead.title,
@@ -591,7 +591,7 @@ const desired: DesiredProjectItem = {
     Runner: "Shared",
     Size: "S",
     Status: "Todo",
-    Type: "task",
+    "Bead Type": "task",
     Workstream: "Security & privacy",
   },
   title: "Add staged secret scanning",
@@ -1055,7 +1055,7 @@ const FIELD_NAMES = [
   "Runner",
   "Size",
   "Status",
-  "Type",
+  "Bead Type",
   "Workstream",
 ] as const;
 
@@ -1066,7 +1066,7 @@ const EXPECTED_FIELDS: Record<string, string[] | null> = {
   Runner: ["Cloud", "Control plane", "Local", "Shared"],
   Size: ["L", "M", "S", "XL", "XS"],
   Status: ["Done", "In Progress", "In review", "Todo"],
-  Type: ["bug", "epic", "feature", "task"],
+  "Bead Type": ["bug", "epic", "feature", "task"],
   Workstream: [
     "Cloud runner",
     "Contracts & harnesses",
@@ -1877,12 +1877,14 @@ the schema.
 Run each command only when `gh project field-list` confirms the field is
 missing:
 
+GitHub reserves `Type`, so `Bead Type` is the compatible managed schema name.
+
 ```bash
 gh project field-create 10 --owner OpenCoven \
   --name "Bead ID" --data-type TEXT
 
 gh project field-create 10 --owner OpenCoven \
-  --name "Type" --data-type SINGLE_SELECT \
+  --name "Bead Type" --data-type SINGLE_SELECT \
   --single-select-options "epic,feature,task,bug"
 
 gh project field-create 10 --owner OpenCoven \
@@ -1904,7 +1906,7 @@ gh project field-list 10 --owner OpenCoven --format json \
 ```
 
 Expected: the existing Status, Runner, Size, and Priority fields plus Bead ID,
-Type, Workstream, and Blocked with exactly the designed options.
+Bead Type, Workstream, and Blocked with exactly the designed options.
 
 ---
 
