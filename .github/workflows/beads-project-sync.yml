@@ -22,7 +22,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      BEADS_WORKSPACE: ${{ runner.temp }}/coven-agents-beads
       COVEN_PROJECT_OWNER: OpenCoven
       COVEN_PROJECT_NUMBER: "10"
       DOLT_REMOTE_URL: https://doltremoteapi.dolthub.com/OpenCoven/coven-agents-beads
@@ -58,6 +57,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Set private Beads workspace
+        run: echo "BEADS_WORKSPACE=$RUNNER_TEMP/coven-agents-beads" >> "$GITHUB_ENV"
 
       - name: Install Beads 1.2.2
         env:
