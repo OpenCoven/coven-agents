@@ -71,7 +71,10 @@ export type CloudRunnerAgent = {
   ) => Awaitable<RunEventStreamSnapshot | null>;
   getRun: (runId: string) => Awaitable<RunSnapshot | null>;
   snapshot: () => Awaitable<AgentDefinition | null>;
-  start: (input: unknown) => Awaitable<{
+  start: (
+    input: unknown,
+    identityToken: string
+  ) => Awaitable<{
     created: boolean;
     run: RunSnapshot;
   }>;
@@ -386,7 +389,25 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             return json({ ok: true }, {}, cors);
           }
           if (action === "runs" && request.method === "POST") {
-            const started = await agent.start(await readJson(request));
+            // The plan is enforced before the run, not only when the
+            // credential is fetched. A lapsed user is issued a fresh `demo`
+            // claim, and without this a run would start and fail late — or
+            // succeed outright if a credential were still stored.
+            if (claims.plan !== "subscriber") {
+              return json(
+                errorEnvelope(
+                  "subscription_required",
+                  "Starting a run needs an active subscription.",
+                  false
+                ),
+                { status: 403 },
+                cors
+              );
+            }
+            const started = await agent.start(
+              await readJson(request),
+              authorization.slice(7)
+            );
             await directory.registerRun(started.run.id, id);
             return json(
               {
