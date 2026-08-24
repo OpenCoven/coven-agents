@@ -8,7 +8,7 @@ import {
   isRunnableHarness,
   resolveHarnessAuth,
   SUPPORTED_HARNESS_IDS,
-} from "./registry.js";
+} from "./registry";
 
 test("copilot is the supported harness subset", () => {
   assert.deepEqual([...SUPPORTED_HARNESS_IDS], ["copilot"]);

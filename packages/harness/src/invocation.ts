@@ -1,4 +1,4 @@
-import { type HarnessSpec, harnessSpec } from "./registry.js";
+import { type HarnessSpec, harnessSpec } from "./registry";
 
 export interface Invocation {
   readonly args: readonly string[];

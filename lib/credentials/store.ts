@@ -109,3 +109,22 @@ export async function readCredentialForTenant(
     await kek()
   );
 }
+
+/**
+ * Removes a tenant's credential for one harness.
+ *
+ * Scoped through the same predicate as a read, so a delete cannot widen to
+ * another harness — or, with the tenant condition dropped, to another tenant's
+ * row. Revocation is a row deletion rather than a key rotation precisely
+ * because each credential has its own data key.
+ */
+export async function deleteCredential(
+  session: SubscriberSession,
+  harnessId: string
+): Promise<void> {
+  const db = databaseFor(session);
+
+  await db
+    .delete(tenantCredential)
+    .where(credentialWhere(session.tenant, harnessId));
+}
