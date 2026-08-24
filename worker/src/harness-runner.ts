@@ -11,7 +11,6 @@ import {
   normalizeEvent,
   type RunEvent,
   type RunSummary,
-  resolveHarnessAuth,
   summarizeRun,
   toShellCommand,
 } from "@opencoven/harness";
@@ -22,13 +21,10 @@ const PROBE_TIMEOUT_MS = 20_000;
 
 type SandboxLike = Pick<Sandbox, "exec">;
 
-export interface HarnessEnv {
-  readonly CLAUDE_CODE_OAUTH_TOKEN?: string;
-  readonly CODEX_API_KEY?: string;
-  readonly COPILOT_GITHUB_TOKEN?: string;
-  readonly GH_TOKEN?: string;
-  readonly GITHUB_TOKEN?: string;
-}
+export type HarnessCredential = {
+  /** The tenant's credential, or null when they have configured none. */
+  credential: string | null;
+};
 
 export interface HarnessRun {
   readonly command: string;
@@ -84,13 +80,15 @@ export function resolveSandboxWorkspace(requested?: string): string {
 }
 
 /**
- * Resolves the harness credential from Worker secrets. This is deliberately the
- * only credential lookup in the cloud path: Coven Agents drives a signed-in
- * coding CLI and never holds a model provider API key of its own.
+ * Resolves the harness credential from the tenant's own credential, already
+ * fetched by the caller from the Next app. This is deliberately the only
+ * credential lookup in the cloud path: Coven Agents drives a signed-in coding
+ * CLI on the tenant's behalf and never substitutes the owner's identity or a
+ * model provider API key of its own.
  */
 export function requireHarness(
   runtime: string,
-  env: HarnessEnv
+  supplied: HarnessCredential
 ): { auth: { name: string; value: string }; spec: HarnessSpec } {
   const spec = harnessSpec(runtime);
   if (!spec) {
@@ -106,14 +104,17 @@ export function requireHarness(
       "harness_unsupported"
     );
   }
-  const auth = resolveHarnessAuth(
-    spec,
-    env as Record<string, string | undefined>
-  );
-  if (!auth) {
+  // The env var NAME still comes from the harness's own spec — that is what
+  // the sandbox needs to set for the CLI to find it. The VALUE only ever
+  // comes from the tenant's own credential, never from this Worker's
+  // deployment secrets: an owner secret must never be able to satisfy a
+  // tenant's run.
+  const [name] = spec.authEnvVars;
+  const value = supplied.credential?.trim();
+  if (!name || !value) {
     throw new HarnessError(harnessAuthHint(spec), "harness_unauthenticated");
   }
-  return { auth, spec };
+  return { auth: { name, value }, spec };
 }
 
 async function probeInstalled(
@@ -166,7 +167,7 @@ export function parseHarnessStream(
  * no provider credential.
  */
 export async function runHarnessInSandbox(options: {
-  env: HarnessEnv;
+  credential: HarnessCredential;
   instructions: string;
   model: string;
   runtime: string;
@@ -174,7 +175,7 @@ export async function runHarnessInSandbox(options: {
   task: string;
   workspace?: string;
 }): Promise<HarnessRun> {
-  const { auth, spec } = requireHarness(options.runtime, options.env);
+  const { auth, spec } = requireHarness(options.runtime, options.credential);
   const cwd = resolveSandboxWorkspace(options.workspace);
 
   const probe = await probeInstalled(options.sandbox, spec);

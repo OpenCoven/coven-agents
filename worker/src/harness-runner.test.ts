@@ -45,20 +45,69 @@ function fakeSandbox(
 }
 
 test("a missing harness credential is a harness error, not a provider error", () => {
-  const error = caught(() => requireHarness("copilot", {}));
+  const error = caught(() => requireHarness("copilot", { credential: null }));
   assert.equal(error.code, "harness_unauthenticated");
   assert.ok(error.message.includes("COPILOT_GITHUB_TOKEN"));
   assert.ok(!error.message.includes("OPENAI_API_KEY"));
 });
 
 test("an unsupported harness is refused before anything is spawned", () => {
-  const error = caught(() => requireHarness("codex", { CODEX_API_KEY: "x" }));
+  const error = caught(() => requireHarness("codex", { credential: "x" }));
   assert.equal(error.code, "harness_unsupported");
 });
 
 test("the retired cloud runtime is not a harness", () => {
-  const error = caught(() => requireHarness("cloud", {}));
+  const error = caught(() => requireHarness("cloud", { credential: null }));
   assert.equal(error.code, "unknown_harness");
+});
+
+test("owner deployment secrets can never satisfy a tenant credential", () => {
+  // The single most important test in this change. It sets every owner secret
+  // that used to work and asserts the run is still refused. If this ever
+  // passes because the run succeeded, tenant isolation is gone.
+  const ownerEnv = {
+    CLAUDE_CODE_OAUTH_TOKEN: "owner-token",
+    CODEX_API_KEY: "owner-token",
+    COPILOT_GITHUB_TOKEN: "owner-token",
+    GH_TOKEN: "owner-token",
+    GITHUB_TOKEN: "owner-token",
+  };
+  for (const [name, value] of Object.entries(ownerEnv)) {
+    process.env[name] = value;
+  }
+
+  try {
+    assert.throws(
+      () => requireHarness("copilot", { credential: null }),
+      (error: unknown) =>
+        error instanceof HarnessError &&
+        error.code === "harness_unauthenticated"
+    );
+  } finally {
+    for (const name of Object.keys(ownerEnv)) {
+      // `process.env[x] = undefined` stores the literal string "undefined",
+      // which would leak into any later test reading these names.
+      delete process.env[name];
+    }
+  }
+});
+
+test("a tenant credential is used verbatim under the harness's env name", () => {
+  const { auth } = requireHarness("copilot", { credential: "tenant-token" });
+
+  assert.equal(auth.value, "tenant-token");
+  assert.equal(auth.name, "COPILOT_GITHUB_TOKEN");
+});
+
+test("a blank tenant credential is not a credential", () => {
+  for (const blank of ["", "   ", "\n"]) {
+    assert.throws(
+      () => requireHarness("copilot", { credential: blank }),
+      (error: unknown) =>
+        error instanceof HarnessError &&
+        error.code === "harness_unauthenticated"
+    );
+  }
 });
 
 test("workspace traversal is refused", () => {
@@ -104,7 +153,7 @@ test("a run drives the harness CLI and passes only its own credential", async ()
   );
 
   const run = await runHarnessInSandbox({
-    env: { COPILOT_GITHUB_TOKEN: "harness-token" },
+    credential: { credential: "harness-token" },
     instructions: "Be careful.",
     model: "auto",
     runtime: "copilot",
@@ -134,7 +183,7 @@ test("a sandbox image without the CLI names the fix instead of failing opaquely"
   );
   await assert.rejects(
     runHarnessInSandbox({
-      env: { COPILOT_GITHUB_TOKEN: "harness-token" },
+      credential: { credential: "harness-token" },
       instructions: "Be careful.",
       model: "auto",
       runtime: "copilot",
