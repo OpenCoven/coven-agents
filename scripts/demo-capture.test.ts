@@ -400,7 +400,7 @@ test("an initial runner error cannot expose configured tokens or credentials", a
 });
 
 async function captureAfterRecoverableStream(
-  firstStream: ReadableStream<Uint8Array>
+  firstStream: Error | ReadableStream<Uint8Array>
 ) {
   const terminalStatus: RunEvent = {
     id: 2,
@@ -409,6 +409,7 @@ async function captureAfterRecoverableStream(
   };
   const cursors: string[] = [];
   const sleeps: number[] = [];
+  let cleanupRequests = 0;
   let eventRequests = 0;
   // biome-ignore lint/suspicious/useAwait: injected fetch matches the native asynchronous fetch contract.
   const request = async (
@@ -428,9 +429,13 @@ async function captureAfterRecoverableStream(
     if (path === `/api/runs/${RUN_ID}/events`) {
       eventRequests += 1;
       cursors.push(new Headers(init.headers).get("last-event-id") ?? "");
-      return eventRequests === 1
-        ? new Response(firstStream)
-        : new Response(sse(acceptedEvent, terminalStatus));
+      if (eventRequests === 1) {
+        if (firstStream instanceof Error) {
+          throw firstStream;
+        }
+        return new Response(firstStream);
+      }
+      return new Response(sse(acceptedEvent, terminalStatus));
     }
     if (path === `/api/runs/${RUN_ID}`) {
       return Response.json({
@@ -439,6 +444,7 @@ async function captureAfterRecoverableStream(
       });
     }
     if (path === `/api/agents/${AGENT_ID}` && init.method === "DELETE") {
+      cleanupRequests += 1;
       return Response.json({ ok: true });
     }
     return Response.json({ unexpected: path }, { status: 500 });
@@ -461,8 +467,24 @@ async function captureAfterRecoverableStream(
     }
   );
 
-  return { captured, cursors, eventRequests, sleeps };
+  return { captured, cleanupRequests, cursors, eventRequests, sleeps };
 }
+
+test("retries when the initial event-stream request fails before a response", async () => {
+  const { captured, cleanupRequests, cursors, eventRequests, sleeps } =
+    await captureAfterRecoverableStream(
+      new Error("event stream connection failed")
+    );
+
+  assert.equal(eventRequests, 2);
+  assert.deepEqual(cursors, ["0", "0"]);
+  assert.deepEqual(sleeps, [250]);
+  assert.deepEqual(
+    captured.arrivals.map(({ event }) => event.id),
+    [1, 2]
+  );
+  assert.equal(cleanupRequests, 1);
+});
 
 test("reconnects from the last validated event after an SSE transport error", async () => {
   const { captured, cursors, eventRequests, sleeps } =

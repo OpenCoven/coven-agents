@@ -569,22 +569,22 @@ async function collectArrivals(
 
   while (!terminal) {
     const cursorBeforeRequest = cursor;
-    // biome-ignore lint/performance/noAwaitInLoops: reconnects are sequential and advance one SSE cursor.
-    const response = await fetchRunner(
-      connection,
-      `/api/runs/${encodeURIComponent(runId)}/events`,
-      {
-        headers: {
-          accept: "text/event-stream",
-          "last-event-id": String(cursor),
-        },
-      },
-      signal
-    );
-    if (!response.body) {
-      throw new Error("Runner returned an empty run event stream.");
-    }
     try {
+      // biome-ignore lint/performance/noAwaitInLoops: reconnects are sequential and advance one SSE cursor.
+      const response = await fetchRunner(
+        connection,
+        `/api/runs/${encodeURIComponent(runId)}/events`,
+        {
+          headers: {
+            accept: "text/event-stream",
+            "last-event-id": String(cursor),
+          },
+        },
+        signal
+      );
+      if (!response.body) {
+        throw new Error("Runner returned an empty run event stream.");
+      }
       const responseTerminal = await readRunEventStream(
         response.body,
         (event) => {
@@ -605,10 +605,17 @@ async function collectArrivals(
       terminalObservedDuringRecovery = false;
       recoveryAttempts = 0;
     } catch (error) {
-      if (!(error instanceof RetryableSseError)) {
+      if (
+        !(
+          error instanceof RetryableSseError ||
+          error instanceof RunnerTransportError
+        )
+      ) {
         throw error;
       }
-      terminalObservedDuringRecovery ||= error.terminalObserved;
+      if (error instanceof RetryableSseError) {
+        terminalObservedDuringRecovery ||= error.terminalObserved;
+      }
       if (cursor > cursorBeforeRequest) {
         recoveryAttempts = 0;
       }
