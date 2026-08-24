@@ -16,8 +16,7 @@ const config: SyncConfig = {
   beadsDirectory: "/private/beads",
   owner: "OpenCoven",
   projectNumber: 10,
-  repositoryRoot:
-    "/Users/buns/Documents/GitHub/OpenCoven/coven-agents/.worktrees/chore-beads-project-board",
+  repositoryRoot: "/repo/coven-agents",
 };
 
 const emptyProject: ProjectSnapshot = {
