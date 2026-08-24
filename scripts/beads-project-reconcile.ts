@@ -45,7 +45,10 @@ export function parseManagedBeadId(body: string): string | null {
 
   if (!MANAGED_MARKER_CANDIDATE_PATTERN.test(line)) {
     const trimmed = body.trimStart();
-    if (trimmed !== body && MANAGED_MARKER_CANDIDATE_PATTERN.test(firstLine(trimmed))) {
+    if (
+      trimmed !== body &&
+      MANAGED_MARKER_CANDIDATE_PATTERN.test(firstLine(trimmed))
+    ) {
       throw malformedMarkerError();
     }
     return null;
