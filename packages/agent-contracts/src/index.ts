@@ -449,6 +449,16 @@ export const agentEnvelopeSchema = z.object({
 export function runSnapshotToResult(
   snapshot: z.infer<typeof runSnapshotSchema>
 ): z.infer<typeof runResultSchema> {
+  if (snapshot.status === "queued" || snapshot.status === "running") {
+    /**
+     * `RunResult` has no in-flight state, so projecting one would report a run
+     * that is still going as failed. Callers must wait for a terminal snapshot
+     * rather than have this quietly invent an outcome.
+     */
+    throw new Error(
+      `Cannot project a ${snapshot.status} run onto a result; wait for it to finish.`
+    );
+  }
   return {
     agentId: snapshot.agentId,
     commandResults: snapshot.commandEvidence

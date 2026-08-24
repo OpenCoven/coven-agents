@@ -84,7 +84,10 @@ function snapshot(status: string) {
   };
 }
 
-function makeClient(handler: (url: string, init?: RequestInit) => Response) {
+function makeClient(
+  handler: (url: string, init?: RequestInit) => Response,
+  pollIntervalMs?: number
+) {
   const calls: string[] = [];
   const instance = new RunnerClient(
     { endpoint: "https://runner.test", token: "t" },
@@ -92,7 +95,7 @@ function makeClient(handler: (url: string, init?: RequestInit) => Response) {
       calls.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
       return Promise.resolve(handler(url, init));
     }) as unknown as typeof globalThis.fetch,
-    { pollIntervalMs: 0 }
+    { pollIntervalMs: pollIntervalMs ?? 0 }
   );
   return { calls, instance };
 }
@@ -226,4 +229,97 @@ test("an unrecognised run payload is reported rather than silently accepted", as
     () => instance.runAgent(agent.id, "Fix the tests."),
     (error: RunnerApiError) => error.code === "unexpected_run_payload"
   );
+});
+
+test("aborting a poll rejects promptly instead of waiting out the interval", async () => {
+  // The loop checks `aborted` at the top, so a sleep that ignored the signal
+  // would leave a cancel sitting for up to a full interval. The interval here
+  // is 30s: if the wait were not abort-aware this test would not finish.
+  const controller = new AbortController();
+  const { instance } = makeClient(
+    () =>
+      json(
+        { apiVersion: AGENT_RUNNER_API_VERSION, run: snapshot("running") },
+        202
+      ),
+    30_000
+  );
+
+  const started = Date.now();
+  const pending = instance.runAgent(agent.id, "Fix the tests.", {
+    signal: controller.signal,
+  });
+  controller.abort();
+
+  await assert.rejects(
+    () => pending,
+    (error: RunnerApiError) => error.code === "aborted"
+  );
+  assert.ok(
+    Date.now() - started < 5000,
+    "abort must not block on the poll interval"
+  );
+});
+
+test("a run still in flight cannot be projected onto a result", async () => {
+  const { runSnapshotToResult } = await import("@opencoven/agent-contracts");
+
+  for (const status of ["queued", "running"]) {
+    assert.throws(
+      () => runSnapshotToResult(snapshot(status) as never),
+      /Cannot project a (queued|running) run/,
+      `${status} must not silently report as failed`
+    );
+  }
+  // Terminal statuses still project.
+  assert.equal(
+    runSnapshotToResult(snapshot("completed") as never).status,
+    "completed"
+  );
+  assert.equal(
+    runSnapshotToResult(snapshot("cancelled") as never).status,
+    "failed"
+  );
+});
+
+test("a run starts without crypto.randomUUID", async () => {
+  // Browsers only expose randomUUID in a secure context, so a local runner
+  // reached over plain HTTP on a LAN address has none.
+  const original = globalThis.crypto;
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: { getRandomValues: original.getRandomValues.bind(original) },
+  });
+  try {
+    let sentBody: string | undefined;
+    const { instance } = makeClient((_url, init) => {
+      sentBody = init?.body as string;
+      return json({
+        run: {
+          agentId: agent.id,
+          commandResults: [],
+          completedAt: "2026-08-20T12:00:05.000Z",
+          fileOperations: [],
+          id: RUN_ID,
+          output: "done",
+          startedAt: "2026-08-20T12:00:01.000Z",
+          status: "completed",
+        },
+      });
+    });
+
+    await instance.runAgent(agent.id, "Fix the tests.");
+
+    const sent = JSON.parse(sentBody ?? "{}") as { operationId: string };
+    assert.match(
+      sent.operationId,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      "the fallback must still produce a valid v4 uuid"
+    );
+  } finally {
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      value: original,
+    });
+  }
 });

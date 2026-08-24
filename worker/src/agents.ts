@@ -215,10 +215,23 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     if (plan.kind === "already_running") {
       throw new AlreadyRunningError();
     }
-    if (plan.kind === "conflict" || plan.kind === "existing") {
-      // Unreachable while operation ids are generated per call; returning the
-      // recorded run is still the correct answer if that changes.
-      return toRunResult(plan.record);
+    if (plan.kind === "conflict") {
+      throw new OperationConflictError();
+    }
+    if (plan.kind === "existing") {
+      /**
+       * Unreachable while `execute` mints its own operation id, so this can
+       * only be a replay of a run that is already recorded.
+       *
+       * It previously projected the record onto a result unconditionally,
+       * which would have reported a run still in flight as failed — `execute`
+       * promises a finished outcome and has none to give here. A terminal
+       * record is returned; anything else is reported as still running.
+       */
+      if (isTerminal(plan.record.run.status)) {
+        return toRunResult(plan.record);
+      }
+      throw new AlreadyRunningError();
     }
 
     return toRunResult(await this.driveHarness(definition, plan.record, task));

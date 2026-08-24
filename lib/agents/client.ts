@@ -21,6 +21,42 @@ export type RunnerClientOptions = {
   pollIntervalMs?: number;
 };
 
+/**
+ * A v4 uuid for the operation id, without assuming `crypto.randomUUID`.
+ *
+ * Browsers only expose `randomUUID` in a secure context, so reaching a local
+ * runner over plain HTTP on a LAN address — `http://192.168.1.10:7331`, a
+ * documented setup — leaves it undefined and every run would throw before the
+ * request was even sent. `getRandomValues` carries no such restriction, so it
+ * is the fallback rather than `Math.random`, which would weaken the uniqueness
+ * the id exists to provide.
+ */
+function operationId(): string {
+  const source = globalThis.crypto;
+  if (typeof source?.randomUUID === "function") {
+    return source.randomUUID();
+  }
+  if (typeof source?.getRandomValues === "function") {
+    const bytes = source.getRandomValues(new Uint8Array(16));
+    // Version 4, variant 10xx, per RFC 4122.
+    bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+    bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+    const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    return [
+      hex.slice(0, 8),
+      hex.slice(8, 12),
+      hex.slice(12, 16),
+      hex.slice(16, 20),
+      hex.slice(20),
+    ].join("-");
+  }
+  throw new RunnerApiError(
+    "This environment provides no secure random source, so a run cannot be started safely.",
+    "no_random_source",
+    0
+  );
+}
+
 export interface RunnerConnection {
   endpoint: string;
   token: string;
@@ -124,7 +160,7 @@ export class RunnerClient {
         // An operation id makes the start idempotent on the cloud runner: a
         // retried POST resolves to the same run instead of starting a second.
         // The local runner ignores the extra field.
-        body: JSON.stringify({ operationId: crypto.randomUUID(), task }),
+        body: JSON.stringify({ operationId: operationId(), task }),
         method: "POST",
         signal: options.signal,
       }
@@ -162,7 +198,7 @@ export class RunnerClient {
         );
       }
       // biome-ignore lint/performance/noAwaitInLoops: polling is sequential by definition — the next read only makes sense after this interval has elapsed and the previous one has resolved.
-      await new Promise((resolve) => setTimeout(resolve, this.pollIntervalMs));
+      await this.wait(signal);
       const response = await this.fetch(
         `/api/runs/${encodeURIComponent(snapshot.id)}`,
         { signal }
@@ -170,6 +206,26 @@ export class RunnerClient {
       snapshot = runSnapshotEnvelopeSchema.parse(await response.json()).run;
     }
     return runSnapshotToResult(snapshot);
+  }
+
+  /**
+   * Sleeps between polls, waking immediately if the caller aborts.
+   *
+   * A bare `setTimeout` would leave an abort waiting out the rest of the
+   * interval before anything noticed it.
+   */
+  private wait(signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, this.pollIntervalMs);
+      function onAbort() {
+        clearTimeout(timer);
+        resolve();
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   /** Cancels a run in flight. Cloud runner only; the local runner has no such route. */
