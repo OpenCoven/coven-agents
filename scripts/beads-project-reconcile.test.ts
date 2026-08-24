@@ -290,7 +290,19 @@ test("parses exact markers, returns null without prefix, and rejects malformed m
     parseManagedBeadId(managedBody("coven-agents-parse", "Parsed")),
     "coven-agents-parse"
   );
+  assert.equal(
+    parseManagedBeadId(
+      `  ${managedBody("coven-agents-leading-whitespace", "Parsed")}`
+    ),
+    "coven-agents-leading-whitespace"
+  );
   assert.equal(parseManagedBeadId("Plain body"), null);
+  assert.equal(
+    parseManagedBeadId(
+      "This first line mentions coven-agents-bead-sync in prose."
+    ),
+    null
+  );
   assert.throws(
     () =>
       parseManagedBeadId(
