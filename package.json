@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "account": "tsx --env-file-if-exists=.env.local --conditions=react-server scripts/account.ts",
     "beads:seed": "tsx scripts/beads-roadmap-seed.ts",
     "beads:sync": "tsx scripts/beads-project-sync.ts",
     "build": "next build",
