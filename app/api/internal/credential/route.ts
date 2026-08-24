@@ -1,13 +1,15 @@
 import "server-only";
 
-import { readCredentialForTenant } from "@/lib/credentials/store";
 // Service-to-service exemption from the `databaseFor` rule: this route has
 // no session to gate on, because its caller is the worker, not a browser.
 // The gate that replaces `databaseFor`'s session check is the service token
 // verified in `authorizeInternalRequest` below, checked before any database
 // access happens. This is the one place in the codebase permitted to import
 // `db` directly.
+import { importVerifyKey, verifyRunnerToken } from "@opencoven/agent-contracts";
+import { readCredentialForTenant } from "@/lib/credentials/store";
 import { db } from "@/lib/db/queries";
+import { resolveBoundTenant } from "./binding";
 
 /**
  * There is deliberately no session-authenticated path in this module. A
@@ -53,10 +55,41 @@ export async function POST(request: Request): Promise<Response> {
   } catch {
     return Response.json({ error: "invalid_request" }, { status: 400 });
   }
-  const { tenant, harnessId } = body ?? {};
+  const { harnessId } = body ?? {};
 
-  if (typeof tenant !== "string" || typeof harnessId !== "string") {
+  if (typeof harnessId !== "string") {
     return Response.json({ error: "invalid_request" }, { status: 400 });
+  }
+
+  // The service token proves the caller may reach this endpoint. It does not
+  // say who they are acting for — and it used to, because the tenant was read
+  // straight from the body. That made one shared token a master key over every
+  // tenant's credential. Identity now comes from the signed claim the worker
+  // was handed when the run started, forwarded on.
+  const verifyKey = process.env.RUNNER_VERIFY_KEY;
+  if (!verifyKey) {
+    return Response.json({ error: "identity_unavailable" }, { status: 503 });
+  }
+
+  const authorization = request.headers.get("authorization");
+  const claims = authorization?.startsWith("Bearer ")
+    ? await verifyRunnerToken(
+        authorization.slice(7),
+        await importVerifyKey(verifyKey)
+      )
+    : null;
+
+  let tenant: string | null;
+  try {
+    tenant = resolveBoundTenant(claims, body ?? {}, { strict: true });
+  } catch {
+    // A body naming a different tenant than the claim is a caller doing
+    // something it should not, not a malformed request.
+    return Response.json({ error: "tenant_mismatch" }, { status: 403 });
+  }
+
+  if (!tenant) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
   const credential = await readCredentialForTenant(tenant, harnessId, db);

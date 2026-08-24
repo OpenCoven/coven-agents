@@ -42,7 +42,10 @@ function agent(): YoloAgent {
 test("start accepts a run, records it queued, and dispatches one fiber", async () => {
   const yolo = agent();
 
-  const started = await yolo.start({ operationId: OP_A, task: "Fix tests." });
+  const started = await yolo.start(
+    { operationId: OP_A, task: "Fix tests." },
+    "identity"
+  );
 
   assert.equal(started.created, true);
   assert.equal(started.run.status, "queued");
@@ -58,8 +61,14 @@ test("start accepts a run, records it queued, and dispatches one fiber", async (
 test("replaying an operation id returns the same run without a second fiber", async () => {
   const yolo = agent();
 
-  const first = await yolo.start({ operationId: OP_A, task: "Fix tests." });
-  const second = await yolo.start({ operationId: OP_A, task: "Fix tests." });
+  const first = await yolo.start(
+    { operationId: OP_A, task: "Fix tests." },
+    "identity"
+  );
+  const second = await yolo.start(
+    { operationId: OP_A, task: "Fix tests." },
+    "identity"
+  );
 
   assert.equal(second.run.id, first.run.id);
   assert.equal(second.created, false, "a replay must not create a new run");
@@ -68,27 +77,31 @@ test("replaying an operation id returns the same run without a second fiber", as
 
 test("reusing an operation id for a different task is a conflict", async () => {
   const yolo = agent();
-  await yolo.start({ operationId: OP_A, task: "Fix tests." });
+  await yolo.start({ operationId: OP_A, task: "Fix tests." }, "identity");
 
   await assert.rejects(
-    () => yolo.start({ operationId: OP_A, task: "Something else." }),
+    () =>
+      yolo.start({ operationId: OP_A, task: "Something else." }, "identity"),
     OperationConflictError
   );
 });
 
 test("a second concurrent run is refused", async () => {
   const yolo = agent();
-  await yolo.start({ operationId: OP_A, task: "Fix tests." });
+  await yolo.start({ operationId: OP_A, task: "Fix tests." }, "identity");
 
   await assert.rejects(
-    () => yolo.start({ operationId: OP_B, task: "Another job." }),
+    () => yolo.start({ operationId: OP_B, task: "Another job." }, "identity"),
     AlreadyRunningError
   );
 });
 
 test("stop cancels the fiber and closes the record", async () => {
   const yolo = agent();
-  const started = await yolo.start({ operationId: OP_A, task: "Fix tests." });
+  const started = await yolo.start(
+    { operationId: OP_A, task: "Fix tests." },
+    "identity"
+  );
 
   const stopped = await yolo.stop(started.run.id);
 
@@ -104,17 +117,26 @@ test("a cancelled run frees the agent for the next one", async () => {
   // Without closing the record, the run stays "running" forever and every
   // later start is refused as already_running.
   const yolo = agent();
-  const first = await yolo.start({ operationId: OP_A, task: "Fix tests." });
+  const first = await yolo.start(
+    { operationId: OP_A, task: "Fix tests." },
+    "identity"
+  );
   await yolo.stop(first.run.id);
 
-  const second = await yolo.start({ operationId: OP_B, task: "Next job." });
+  const second = await yolo.start(
+    { operationId: OP_B, task: "Next job." },
+    "identity"
+  );
 
   assert.equal(second.created, true);
 });
 
 test("stopping a finished run does not rewrite its outcome", async () => {
   const yolo = agent();
-  const started = await yolo.start({ operationId: OP_A, task: "Fix tests." });
+  const started = await yolo.start(
+    { operationId: OP_A, task: "Fix tests." },
+    "identity"
+  );
   const cancelled = await yolo.stop(started.run.id);
 
   const again = await yolo.stop(started.run.id);
@@ -136,7 +158,10 @@ test("stopping an unknown run reports absence rather than inventing one", async 
 
 test("the event stream returns only events after the cursor", async () => {
   const yolo = agent();
-  const started = await yolo.start({ operationId: OP_A, task: "Fix tests." });
+  const started = await yolo.start(
+    { operationId: OP_A, task: "Fix tests." },
+    "identity"
+  );
 
   const all = yolo.getEventStream(started.run.id, 0);
   const after = yolo.getEventStream(
@@ -151,7 +176,10 @@ test("the event stream returns only events after the cursor", async () => {
 
 test("the event stream reports terminal so a subscriber can stop polling", async () => {
   const yolo = agent();
-  const started = await yolo.start({ operationId: OP_A, task: "Fix tests." });
+  const started = await yolo.start(
+    { operationId: OP_A, task: "Fix tests." },
+    "identity"
+  );
   await yolo.stop(started.run.id);
 
   assert.equal(yolo.getEventStream(started.run.id, 0)?.terminal, true);
