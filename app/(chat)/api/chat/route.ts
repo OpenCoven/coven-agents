@@ -12,7 +12,7 @@ import { checkBotId } from "botid/server";
 import { after } from "next/server";
 import { createResumableStreamContext } from "resumable-stream";
 import { auth, type UserType } from "@/app/(auth)/auth";
-import { entitlementsByUserType } from "@/lib/ai/entitlements";
+import { entitlementsByPlan } from "@/lib/ai/entitlements";
 import {
   allowedModelIds,
   chatModels,
@@ -107,7 +107,7 @@ export async function POST(request: Request) {
       id: session.user.id,
     });
 
-    if (messageCount > entitlementsByUserType[userType].maxMessagesPerHour) {
+    if (messageCount > entitlementsByPlan[userType].maxMessagesPerHour) {
       return new ChatbotError("rate_limit:chat").toResponse();
     }
 
