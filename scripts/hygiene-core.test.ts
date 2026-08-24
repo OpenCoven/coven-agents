@@ -7,8 +7,10 @@ function state(overrides: Partial<WorktreeState> = {}): WorktreeState {
     branch: "feat/example",
     dirtyCount: 0,
     existsOnOrigin: true,
+    headSha: "aaa111",
     isLocked: false,
     isPrimary: false,
+    mergedHeadSha: null,
     mergedIntoMain: true,
     path: "/tmp/wt/example",
     unpushedCommits: 0,
@@ -155,4 +157,117 @@ test("invalid counters fail closed", () => {
   const nanUnpushed = isReapable(state({ unpushedCommits: Number.NaN }));
   assert.equal(nanUnpushed.safe, false);
   assert.ok(nanUnpushed.reasons.includes("invalid unpushed count: NaN"));
+});
+
+test("a merged branch stays reapable after the remote branch is deleted", () => {
+  // The hygiene workflow deletes the remote branch seconds after a merge, and
+  // squashing rewrites the SHA, so the local commits become unreachable from
+  // every remote ref. Nothing is at risk: `gh` reports the exact head that was
+  // merged, and it is the head this worktree still points at.
+  const verdict = isReapable(
+    state({
+      existsOnOrigin: false,
+      headSha: "f10c255",
+      mergedHeadSha: "f10c255",
+      unpushedCommits: 1,
+    })
+  );
+
+  assert.equal(verdict.safe, true, verdict.reasons.join(", "));
+  assert.deepEqual(verdict.reasons, []);
+});
+
+test("a commit added after the merge is never treated as preserved", () => {
+  const verdict = isReapable(
+    state({
+      existsOnOrigin: false,
+      headSha: "newwork",
+      mergedHeadSha: "f10c255",
+      unpushedCommits: 1,
+    })
+  );
+
+  assert.equal(verdict.safe, false);
+  assert.ok(
+    verdict.reasons.some((r) => r.includes("unpushed")),
+    `expected an unpushed blocker, got: ${verdict.reasons.join(", ")}`
+  );
+});
+
+test("uncommitted files block reaping even on a merged, preserved head", () => {
+  const verdict = isReapable(
+    state({
+      dirtyCount: 2,
+      existsOnOrigin: false,
+      headSha: "f10c255",
+      mergedHeadSha: "f10c255",
+    })
+  );
+
+  assert.equal(verdict.safe, false);
+  assert.ok(verdict.reasons.some((r) => r.includes("uncommitted")));
+});
+
+test("an unmerged branch missing from origin is still blocked", () => {
+  const verdict = isReapable(
+    state({
+      existsOnOrigin: false,
+      mergedHeadSha: null,
+      mergedIntoMain: false,
+    })
+  );
+
+  assert.equal(verdict.safe, false);
+  assert.ok(verdict.reasons.includes("branch not on origin"));
+});
+
+test("an unknown merged head fails closed to the strict conditions", () => {
+  // `mergedIntoMain` without a head SHA means gh confirmed a merged PR but the
+  // head could not be matched. That must not unlock the relaxed path.
+  const verdict = isReapable(
+    state({ existsOnOrigin: false, mergedHeadSha: null, unpushedCommits: 1 })
+  );
+
+  assert.equal(verdict.safe, false);
+  assert.ok(verdict.reasons.includes("branch not on origin"));
+});
+
+test("a null local head never matches a merged head", () => {
+  const verdict = isReapable(
+    state({ existsOnOrigin: false, headSha: null, mergedHeadSha: null })
+  );
+
+  assert.equal(verdict.safe, false);
+});
+
+test("preserved-on-main relaxes only origin and unpushed, exhaustively", () => {
+  const flags = [false, true];
+  let safeCount = 0;
+
+  for (const clean of flags) {
+    for (const onOrigin of flags) {
+      for (const pushed of flags) {
+        const verdict = isReapable(
+          state({
+            dirtyCount: clean ? 0 : 1,
+            existsOnOrigin: onOrigin,
+            headSha: "f10c255",
+            mergedHeadSha: "f10c255",
+            unpushedCommits: pushed ? 0 : 1,
+          })
+        );
+
+        assert.equal(
+          verdict.safe,
+          clean,
+          `clean=${clean} onOrigin=${onOrigin} pushed=${pushed}`
+        );
+        if (verdict.safe) {
+          safeCount += 1;
+        }
+      }
+    }
+  }
+
+  assert.equal(safeCount, 4, "only cleanliness may block a preserved head");
 });
