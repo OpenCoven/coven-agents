@@ -69,6 +69,7 @@ export type Bead = z.infer<typeof beadSchema>;
 export type ProjectItem = {
   content: {
     body: string;
+    id?: string;
     title: string;
     type: string;
   } & Record<string, unknown>;
@@ -84,6 +85,7 @@ export type ProjectJson = {
 const projectContentSchema = z
   .object({
     body: z.string(),
+    id: z.string().trim().min(1).optional(),
     title: z.string(),
     type: z.string(),
   })

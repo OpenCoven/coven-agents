@@ -153,6 +153,7 @@ test("parses real project item-list JSON with extra content fields", () => {
           "bead id": "coven-agents-security.1",
           content: {
             body: "Draft body",
+            id: "DI_1",
             number: 42,
             repository: "OpenCoven/coven-agents",
             title: "Draft title",
@@ -174,6 +175,7 @@ test("parses real project item-list JSON with extra content fields", () => {
 
   assert.equal(parsed.totalCount, 1);
   assert.equal(parsed.items[0].content.type, "DraftIssue");
+  assert.equal(parsed.items[0].content.id, "DI_1");
   assert.equal(parsed.items[0].content.number, 42);
   assert.equal(parsed.items[0].fields["Bead ID"], "coven-agents-security.1");
   assert.equal(parsed.items[0].fields.Type, "feature");
