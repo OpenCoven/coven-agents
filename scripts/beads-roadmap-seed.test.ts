@@ -14,8 +14,7 @@ import {
 } from "./beads-roadmap-seed";
 
 const config: SeedConfig = {
-  repositoryRoot:
-    "/Users/buns/Documents/GitHub/OpenCoven/coven-agents/.worktrees/chore-beads-project-board",
+  repositoryRoot: "/repo/coven-agents",
   workspace: "/private/beads",
 };
 
