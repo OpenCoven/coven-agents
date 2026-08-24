@@ -15,7 +15,7 @@ import {
 export async function importVerifyKey(spki: string): Promise<CryptoKey> {
   return await crypto.subtle.importKey(
     "spki",
-    base64UrlDecode(spki),
+    new Uint8Array(base64UrlDecode(spki)),
     { name: TOKEN_ALGORITHM },
     false,
     ["verify"]
@@ -54,7 +54,7 @@ export async function verifyRunnerToken(
   const verified = await crypto.subtle.verify(
     { name: TOKEN_ALGORITHM },
     publicKey,
-    signatureBytes,
+    new Uint8Array(signatureBytes),
     new TextEncoder().encode(parts.payload)
   );
   if (!verified) {
