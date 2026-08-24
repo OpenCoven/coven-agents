@@ -29,3 +29,7 @@ tsconfig.tsbuildinfo
 .opencoven/
 
 .worktrees/
+
+# Private Beads planning data
+.beads/
+*.beads-private.json

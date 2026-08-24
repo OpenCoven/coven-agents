@@ -4,7 +4,7 @@
 
 **Goal:** Create a private, durable Beads roadmap for `coven-agents` and an idempotent one-way synchronization into private OpenCoven Project #10.
 
-**Architecture:** A private DoltHub-backed Beads database is authoritative. Public TypeScript tooling reads Beads JSON, rejects unsafe content, computes a deterministic reconciliation plan, and uses the `gh project` CLI to upsert private draft items without committing roadmap data. A scheduled/manual workflow runs only from protected `main`.
+**Architecture:** A private DoltHub-backed Beads database is authoritative. Public TypeScript tooling reads Beads JSON, rejects unsafe content, computes a deterministic reconciliation plan, and uses GitHub GraphQL to upsert private draft items without committing roadmap data. The sync takes one paginated Project snapshot, batches creates in groups of 20, batches mutation operations in groups of 40, runs at concurrency 2 with a 100-point rate-limit reserve, and keeps the seed path private by building canonical JSONL in memory and sending it to `bd import - --json` over stdin only. A scheduled/manual workflow runs only from protected `main`.
 
 **Tech Stack:** TypeScript, `tsx`, `node:test`, Zod, Beads CLI 1.2.2, Dolt/DoltHub, GitHub CLI, GitHub Projects v2, GitHub Actions.
 
