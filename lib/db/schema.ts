@@ -7,6 +7,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
@@ -20,6 +21,14 @@ export const user = pgTable("User", {
   isAnonymous: boolean("isAnonymous").notNull().default(false),
   name: text("name"),
   password: varchar("password", { length: 64 }),
+  /**
+   * When this user's subscription lapses. Null means never subscribed.
+   *
+   * A timestamp rather than a boolean because a cancelled subscription runs to
+   * the end of its paid period, which a boolean cannot express. Billing will
+   * set this; until then it is set by `pnpm subscription`.
+   */
+  subscribedUntil: timestamp("subscribedUntil"),
   updatedAt: timestamp("updatedAt").notNull().defaultNow(),
 });
 
@@ -134,3 +143,39 @@ export const stream = pgTable(
 );
 
 export type Stream = InferSelectModel<typeof stream>;
+
+/**
+ * One encrypted credential per tenant per harness.
+ *
+ * Only the ciphertext, its IV and the wrapped data key are stored — the
+ * plaintext never reaches a column. `wrappedKey` is this credential's own data
+ * key sealed under the deployment KEK, so rotating the KEK rewraps small
+ * values instead of re-encrypting every credential, and revoking one tenant is
+ * deleting one row.
+ *
+ * The unique index is load-bearing, not decorative: writes upsert on
+ * (tenant, harnessId), which Postgres can only resolve against a unique
+ * constraint. Without it a re-submitted credential would silently insert a
+ * second row and reads would start returning whichever one came back first.
+ */
+export const tenantCredential = pgTable(
+  "TenantCredential",
+  {
+    ciphertext: text("ciphertext").notNull(),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    harnessId: varchar("harnessId", { length: 32 }).notNull(),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    iv: text("iv").notNull(),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+    wrappedKey: text("wrappedKey").notNull(),
+  },
+  (table) => [
+    uniqueIndex("TenantCredential_tenant_harness_idx").on(
+      table.tenant,
+      table.harnessId
+    ),
+  ]
+);
+
+export type TenantCredential = InferSelectModel<typeof tenantCredential>;

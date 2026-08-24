@@ -163,10 +163,22 @@ function normalizeTimestamp(
   return timestamp.toISOString();
 }
 
+/**
+ * The single place that turns a borrowed tenant credential into the
+ * `additionalSecrets` shape `sanitizeEvidenceText` expects. Every redaction
+ * call site in this file routes through here rather than writing its own
+ * `credential ? [credential] : []`, so there is exactly one place that could
+ * get that check wrong.
+ */
+function credentialSecrets(credential: string | null): Iterable<string> {
+  return credential ? [credential] : [];
+}
+
 function normalizedText(
   value: unknown,
   field: "stderr" | "stdout",
-  diagnostics: string[]
+  diagnostics: string[],
+  credential: string | null
 ): string {
   if (typeof value !== "string") {
     diagnostics.push(
@@ -180,7 +192,7 @@ function normalizedText(
     );
   }
   return truncateUtf8(
-    sanitizeEvidenceText(value),
+    sanitizeEvidenceText(value, credentialSecrets(credential)),
     AGENT_RUNNER_LIMITS.maxEventOutputLength,
     AGENT_RUNNER_LIMITS.maxEventOutputLength
   );
@@ -306,16 +318,17 @@ export function appendEvents(
   };
 }
 
-export function safeRunText(value: string): string {
+export function safeRunText(value: string, credential: string | null): string {
   return truncateUtf8(
-    sanitizeEvidenceText(value),
+    sanitizeEvidenceText(value, credentialSecrets(credential)),
     AGENT_RUNNER_LIMITS.maxEventOutputLength,
     AGENT_RUNNER_LIMITS.maxEventOutputLength
   );
 }
 
 export function normalizeCloudCommandEvidence(
-  results: unknown[]
+  results: unknown[],
+  credential: string | null
 ): NormalizedCloudCommandEvidence {
   const diagnostics: string[] = [];
   const evidence: CommandEvidence[] = [];
@@ -343,12 +356,12 @@ export function normalizeCloudCommandEvidence(
       );
     }
     const stdout = fitCapturedOutput(
-      normalizedText(candidate.stdout, "stdout", diagnostics),
+      normalizedText(candidate.stdout, "stdout", diagnostics, credential),
       remainingBytes
     );
     ({ remainingBytes } = stdout);
     const stderr = fitCapturedOutput(
-      normalizedText(candidate.stderr, "stderr", diagnostics),
+      normalizedText(candidate.stderr, "stderr", diagnostics, credential),
       remainingBytes
     );
     ({ remainingBytes } = stderr);
@@ -373,7 +386,7 @@ export function normalizeCloudCommandEvidence(
     const completedAt = normalizeTimestamp(candidate.timestamp, diagnostics);
     const parsed = commandEvidenceSchema.safeParse({
       command: truncateUtf8(
-        sanitizeEvidenceText(command),
+        sanitizeEvidenceText(command, credentialSecrets(credential)),
         AGENT_RUNNER_LIMITS.maxCommandLength,
         AGENT_RUNNER_LIMITS.maxCommandLength,
         "\n[command truncated by runner]"
@@ -571,6 +584,17 @@ export function finishCloudRunRecord(
   result: {
     commandEvidence?: CommandEvidence[];
     completedAt: string;
+    /**
+     * The tenant credential borrowed for this run, or `null` if none was
+     * resolved (the run failed before resolution, or this is an
+     * interruption recovery with no credential in scope). Required rather
+     * than optional: every call site has to make an explicit decision about
+     * what the run's credential was, so a call site cannot silently disable
+     * redaction by forgetting the argument. Threaded into every evidence
+     * normalization below so a token echoed to stdout, stderr, or a command
+     * line is redacted the same way regardless of which stream carried it.
+     */
+    credential: string | null;
     error?: RunError;
     fileEvidence?: FileEvidence[];
     output: string;
@@ -589,7 +613,10 @@ export function finishCloudRunRecord(
   const fileResults = fileResultsFromEvidence(
     result.fileEvidence ?? record.run.fileEvidence
   );
-  const normalizedCommands = normalizeCloudCommandEvidence(commandResults);
+  const normalizedCommands = normalizeCloudCommandEvidence(
+    commandResults,
+    result.credential
+  );
   const normalizedFiles = normalizeCloudFileEvidence(fileResults);
   const commandEvidence = normalizedCommands.evidence.map((evidence) =>
     commandEvidenceSchema.parse(evidence)
@@ -610,7 +637,8 @@ export function finishCloudRunRecord(
     output: safeRunText(
       diagnostics.length > 0
         ? `${result.output}\n${diagnostics.join("\n")}`
-        : result.output
+        : result.output,
+      result.credential
     ),
     status: result.status,
   });
@@ -688,6 +716,9 @@ export function recoverCloudRunRecord(
 ): CloudRunRecord {
   return finishCloudRunRecord(record, {
     completedAt,
+    // Recovery runs after a durable interruption, with no credential in
+    // scope to have leaked here in the first place.
+    credential: null,
     error: {
       code: "interrupted",
       message: "Cloud run was interrupted before completion.",

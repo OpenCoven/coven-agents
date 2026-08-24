@@ -1,4 +1,4 @@
-import type { HarnessId, RunEvent } from "./schema.js";
+import type { HarnessId, RunEvent } from "./schema";
 
 /**
  * Translates a harness's private event stream into the normalized run

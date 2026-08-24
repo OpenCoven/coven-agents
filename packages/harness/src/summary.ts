@@ -1,4 +1,4 @@
-import type { RunEvent } from "./schema.js";
+import type { RunEvent } from "./schema";
 
 export interface RunSummary {
   /** Files the harness reported creating, editing or deleting. */
