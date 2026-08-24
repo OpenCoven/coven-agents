@@ -67,6 +67,15 @@ function makeProjectFields(
       },
       type: "ProjectV2SingleSelectField",
     },
+    Owner: {
+      id: "field-owner",
+      options: {
+        BunsDev: "owner-bunsdev",
+        Copilot: "owner-copilot",
+        Joint: "owner-joint",
+      },
+      type: "ProjectV2SingleSelectField",
+    },
     Priority: {
       id: "field-priority",
       options: {
@@ -104,6 +113,19 @@ function makeProjectFields(
         "In Progress": "status-in-progress",
         "In review": "status-in-review",
         Todo: "status-todo",
+      },
+      type: "ProjectV2SingleSelectField",
+    },
+    Wave: {
+      id: "field-wave",
+      options: {
+        "0 - Delivered": "wave-delivered",
+        "1 - Now": "wave-now",
+        "2 - Next": "wave-next",
+        "3 - Certify": "wave-certify",
+        "4 - Platform": "wave-platform",
+        "5 - Product data": "wave-product-data",
+        "6 - Operations": "wave-operations",
       },
       type: "ProjectV2SingleSelectField",
     },

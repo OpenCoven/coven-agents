@@ -19,8 +19,10 @@ import {
 import {
   BEAD_TYPES,
   type Bead,
+  OWNERS,
   RUNNERS,
   SIZES,
+  WAVES,
   WORKSTREAMS,
 } from "./beads-project-model";
 import { validateSafeText } from "./beads-project-policy";
@@ -81,14 +83,17 @@ const ITEM_ID_PATTERN = new RegExp(
   `^(?:${EPIC_IDS.map((id) => id.replaceAll(".", "\\.")).join("|")})(?:\\.[1-5])?$`
 );
 const INITIAL_PROJECT_STATUSES = ["Todo", "In Progress", "In review"] as const;
+const SEED_STATUSES = ["open", "in_progress", "closed"] as const;
 
 type MutableSeedDocument = SeedItem[];
 
 export const seedMetadataSchema = z
   .object({
+    owner: z.enum(OWNERS),
     projectStatus: z.enum(INITIAL_PROJECT_STATUSES).optional(),
     runner: z.enum(RUNNERS),
     size: z.enum(SIZES),
+    wave: z.enum(WAVES),
     workstream: z.enum(WORKSTREAMS),
   })
   .strict();
@@ -102,6 +107,7 @@ export const seedItemSchema = z
     metadata: seedMetadataSchema,
     parent: z.string().trim().min(1).optional(),
     priority: z.number().int().min(0).max(2),
+    status: z.enum(SEED_STATUSES).optional(),
     title: z.string().trim().min(1),
     type: z.enum(BEAD_TYPES),
   })
@@ -196,14 +202,18 @@ function formatIdList(ids: readonly string[]): string {
 
 function metadataSignature(metadata: {
   projectStatus?: Bead["metadata"]["projectStatus"];
+  owner: SeedMetadata["owner"];
   runner: SeedMetadata["runner"];
   size: SeedMetadata["size"];
+  wave: SeedMetadata["wave"];
   workstream: SeedMetadata["workstream"];
 }): string {
   return JSON.stringify({
+    owner: metadata.owner,
     projectStatus: metadata.projectStatus ?? null,
     runner: metadata.runner,
     size: metadata.size,
+    wave: metadata.wave,
     workstream: metadata.workstream,
   });
 }
@@ -241,7 +251,7 @@ function canonicalBead(item: SeedItem): Bead {
     metadata: item.metadata,
     ...(item.parent === undefined ? {} : { parent: item.parent }),
     priority: item.priority,
-    status: "open",
+    status: item.status ?? "open",
     title: item.title,
   };
 }

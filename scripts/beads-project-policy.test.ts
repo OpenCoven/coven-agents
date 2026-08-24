@@ -11,8 +11,10 @@ function makeBead(overrides: Partial<Bead> = {}): Bead {
   const { metadata: overrideMetadata, ...rest } = overrides;
 
   const metadata: Bead["metadata"] = {
+    owner: "Copilot",
     runner: "Shared",
     size: "M",
+    wave: "4 - Platform",
     workstream: "Product",
     ...overrideMetadata,
   };
@@ -54,6 +56,8 @@ function expectedBody(
     "## Tracking",
     "",
     `- Bead: \`${beadId}\``,
+    "- Owner: Copilot",
+    "- Wave: 4 - Platform",
     `- Parent: ${parent ? `\`${parent}\`` : "None"}`,
     `- Active dependencies: ${
       activeDependencies.length > 0
@@ -287,6 +291,8 @@ test("projects the security fixture deterministically", () => {
       "## Tracking",
       "",
       "- Bead: `coven-agents-security.1`",
+      "- Owner: Copilot",
+      "- Wave: 4 - Platform",
       "- Parent: `coven-agents-security`",
       "- Active dependencies: `coven-agents-security`",
     ].join("\n")
@@ -380,9 +386,11 @@ test("maps status type and priority fields", () => {
     id: "coven-agents-closed",
     issue_type: "bug",
     metadata: {
+      owner: "Copilot",
       projectStatus: "In review",
       runner: "Local",
       size: "XL",
+      wave: "4 - Platform",
       workstream: "Testing & reliability",
     },
     priority: 2,
@@ -391,9 +399,11 @@ test("maps status type and priority fields", () => {
   const inReview = makeBead({
     id: "coven-agents-review",
     metadata: {
+      owner: "Copilot",
       projectStatus: "In review",
       runner: "Control plane",
       size: "S",
+      wave: "4 - Platform",
       workstream: "Security & privacy",
     },
     priority: 0,
@@ -407,10 +417,12 @@ test("maps status type and priority fields", () => {
     "Bead ID": "coven-agents-closed",
     "Bead Type": "bug",
     Blocked: "No",
+    Owner: "Copilot",
     Priority: "P2",
     Runner: "Local",
     Size: "XL",
     Status: "Done",
+    Wave: "4 - Platform",
     Workstream: "Testing & reliability",
   });
   assert.equal(reviewItem.fields.Status, "In review");
@@ -422,9 +434,11 @@ test("honors metadata In Progress for open beads", () => {
   const bead = makeBead({
     id: "coven-agents-in-progress",
     metadata: {
+      owner: "Copilot",
       projectStatus: "In Progress",
       runner: "Shared",
       size: "M",
+      wave: "4 - Platform",
       workstream: "Product",
     },
     status: "open",
@@ -439,9 +453,11 @@ test("keeps stored in_progress and metadata Todo/default mappings", () => {
   const storedInProgress = makeBead({
     id: "coven-agents-stored-in-progress",
     metadata: {
+      owner: "Copilot",
       projectStatus: "Todo",
       runner: "Shared",
       size: "M",
+      wave: "4 - Platform",
       workstream: "Product",
     },
     status: "in_progress",
@@ -449,9 +465,11 @@ test("keeps stored in_progress and metadata Todo/default mappings", () => {
   const explicitTodo = makeBead({
     id: "coven-agents-explicit-todo",
     metadata: {
+      owner: "Copilot",
       projectStatus: "Todo",
       runner: "Shared",
       size: "M",
+      wave: "4 - Platform",
       workstream: "Product",
     },
   });

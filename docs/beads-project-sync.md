@@ -128,10 +128,12 @@ GitHub reserves `Type`, so the compatible managed field name is `Bead Type`.
 | --- | --- |
 | `Bead ID` | `bead.id` |
 | `Blocked` | `Yes` when the bead is blocked or has any active blocking dependency, else `No` |
+| `Owner` | `bead.metadata.owner`; roadmap assignment (`BunsDev`, `Copilot`, or `Joint`) |
 | `Priority` | `P0` / `P1` / `P2` from Beads priority `0` / `1` / `2` |
 | `Runner` | `bead.metadata.runner` |
 | `Size` | `bead.metadata.size` |
 | `Status` | `Done` for closed beads, `metadata.projectStatus` when it is `In review` or `In Progress`, `In Progress` for stored `in_progress`, otherwise `Todo` |
+| `Wave` | `bead.metadata.wave`; ordered delivery wave from delivered foundations through operations |
 | `Bead Type` | `bead.issue_type` |
 | `Workstream` | `bead.metadata.workstream` |
 

@@ -2,6 +2,16 @@ import { z } from "zod";
 
 export const RUNNERS = ["Cloud", "Local", "Control plane", "Shared"] as const;
 export const SIZES = ["XS", "S", "M", "L", "XL"] as const;
+export const OWNERS = ["BunsDev", "Copilot", "Joint"] as const;
+export const WAVES = [
+  "0 - Delivered",
+  "1 - Now",
+  "2 - Next",
+  "3 - Certify",
+  "4 - Platform",
+  "5 - Product data",
+  "6 - Operations",
+] as const;
 export const WORKSTREAMS = [
   "Product",
   "Contracts & harnesses",
@@ -46,9 +56,11 @@ const dependencySchema = dependencySourceSchema.transform((dependency) => ({
 
 const metadataSchema = z
   .object({
+    owner: z.enum(OWNERS),
     projectStatus: z.enum(PROJECT_STATUSES).optional(),
     runner: z.enum(RUNNERS),
     size: z.enum(SIZES),
+    wave: z.enum(WAVES),
     workstream: z.enum(WORKSTREAMS),
   })
   .strict();
@@ -117,10 +129,12 @@ const canonicalProjectFieldNames: Readonly<Record<string, string>> = {
   "bead id": "Bead ID",
   "bead type": "Bead Type",
   blocked: "Blocked",
+  owner: "Owner",
   priority: "Priority",
   runner: "Runner",
   size: "Size",
   status: "Status",
+  wave: "Wave",
   workstream: "Workstream",
 };
 

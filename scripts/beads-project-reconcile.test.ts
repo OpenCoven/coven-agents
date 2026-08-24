@@ -51,8 +51,10 @@ function makeBead(overrides: Partial<Bead> = {}): Bead {
     id: "coven-agents-test",
     issue_type: "task",
     metadata: {
+      owner: "Copilot",
       runner: "Shared",
       size: "M",
+      wave: "4 - Platform",
       workstream: "Product",
       ...overrideMetadata,
     },
