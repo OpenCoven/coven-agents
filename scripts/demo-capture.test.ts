@@ -4,6 +4,7 @@ import { inspect } from "node:util";
 import {
   AGENT_RUNNER_API_VERSION,
   type RunEvent,
+  type RunnerClaims,
   type RunSnapshot,
 } from "@opencoven/agent-contracts";
 import {
@@ -19,7 +20,17 @@ const CREATED_AT = "2026-08-24T19:03:49.798Z";
 const RUNNER_TOKEN = "runner-control-sensitive";
 const IDENTITY_TOKEN = "runner-identity-sensitive";
 const RECORDING_CREDENTIAL = "recording-credential-sensitive";
-const CONFIGURED_SECRETS = [RUNNER_TOKEN, IDENTITY_TOKEN, RECORDING_CREDENTIAL];
+const SIGNING_KEY = "recorder-signing-key-sensitive";
+const RECORDER_SUBJECT = "demo-recorder";
+const RECORDER_TENANT = "demo-recorder-tenant";
+const CONFIGURED_SECRETS = [
+  RUNNER_TOKEN,
+  IDENTITY_TOKEN,
+  RECORDING_CREDENTIAL,
+  SIGNING_KEY,
+  RECORDER_SUBJECT,
+  RECORDER_TENANT,
+];
 
 const acceptedEvent: RunEvent = {
   id: 1,
@@ -66,6 +77,23 @@ function eventStream(chunks: readonly string[]): ReadableStream<Uint8Array> {
   });
 }
 
+function interruptedEventStream(
+  completePrefix: string
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  let delivered = false;
+  return new ReadableStream({
+    pull(controller) {
+      if (!delivered) {
+        delivered = true;
+        controller.enqueue(encoder.encode(completePrefix));
+        return;
+      }
+      controller.error(new Error("simulated transport interruption"));
+    },
+  });
+}
+
 function sse(...events: readonly RunEvent[]): string {
   return events
     .map(
@@ -93,6 +121,41 @@ function agentResponse(): Response {
       workspace: "/workspace",
     },
   });
+}
+
+function agentDefinition(
+  name: string,
+  id: string = AGENT_ID
+): Record<string, unknown> {
+  return {
+    backend: "cloud",
+    createdAt: CREATED_AT,
+    description: "Temporary demo recording agent",
+    id,
+    instructions: "Restricted.",
+    lastRunAt: null,
+    model: "auto",
+    name,
+    owner: { kind: "tenant", tenantId: "tenant-1" },
+    runtime: "copilot",
+    status: "idle",
+    updatedAt: CREATED_AT,
+    workspace: "/workspace",
+  };
+}
+
+function recordingEnvironment(
+  overrides: Record<string, string | undefined> = {}
+) {
+  return {
+    DEMO_RECORDING_CREDENTIAL: RECORDING_CREDENTIAL,
+    DEMO_RUNNER_SIGNING_KEY: SIGNING_KEY,
+    DEMO_RUNNER_SUBJECT: RECORDER_SUBJECT,
+    DEMO_RUNNER_TENANT: RECORDER_TENANT,
+    DEMO_RUNNER_TOKEN: RUNNER_TOKEN,
+    DEMO_RUNNER_URL: "https://runner.example",
+    ...overrides,
+  };
 }
 
 function assertNoConfiguredSecrets(error: unknown): boolean {
@@ -198,7 +261,9 @@ test("fails closed with the exact missing runner variable names", () => {
         /DEMO_RUNNER_URL.*NEXT_PUBLIC_CLOUD_RUNNER_URL/
       );
       assert.match(error.message, /DEMO_RUNNER_TOKEN/);
-      assert.match(error.message, /DEMO_RUNNER_IDENTITY_TOKEN/);
+      assert.match(error.message, /DEMO_RUNNER_SIGNING_KEY/);
+      assert.match(error.message, /DEMO_RUNNER_SUBJECT/);
+      assert.match(error.message, /DEMO_RUNNER_TENANT/);
       return true;
     }
   );
@@ -206,13 +271,99 @@ test("fails closed with the exact missing runner variable names", () => {
 
 test("uses the public runner URL fallback and a finite default timeout", () => {
   const configuration = readCaptureEnvironment({
-    DEMO_RUNNER_IDENTITY_TOKEN: "identity",
+    DEMO_RUNNER_SIGNING_KEY: SIGNING_KEY,
+    DEMO_RUNNER_SUBJECT: RECORDER_SUBJECT,
+    DEMO_RUNNER_TENANT: RECORDER_TENANT,
     DEMO_RUNNER_TOKEN: "gate",
     NEXT_PUBLIC_CLOUD_RUNNER_URL: "https://runner.example/",
   });
 
   assert.equal(configuration.runnerUrl, "https://runner.example");
   assert.equal(configuration.timeoutMs, 15 * 60 * 1000);
+});
+
+test("mints a fresh validated subscriber identity for every request including cleanup", async () => {
+  const terminalStatus: RunEvent = {
+    id: 2,
+    status: "completed",
+    type: "status",
+  };
+  const authorizations: string[] = [];
+  const mintedClaims: Omit<RunnerClaims, "exp">[] = [];
+  const signingKeys: string[] = [];
+  let mintCount = 0;
+  // biome-ignore lint/suspicious/useAwait: injected fetch matches the native asynchronous fetch contract.
+  const request = async (
+    input: string | URL | Request,
+    init: RequestInit = {}
+  ): Promise<Response> => {
+    const path = new URL(String(input)).pathname;
+    authorizations.push(new Headers(init.headers).get("authorization") ?? "");
+    if (path === "/api/agents" && init.method === "POST") {
+      return agentResponse();
+    }
+    if (path === `/api/agents/${AGENT_ID}/runs`) {
+      return Response.json({
+        apiVersion: AGENT_RUNNER_API_VERSION,
+        run: snapshot("queued"),
+      });
+    }
+    if (path === `/api/runs/${RUN_ID}/events`) {
+      return new Response(sse(acceptedEvent, terminalStatus));
+    }
+    if (path === `/api/runs/${RUN_ID}`) {
+      return Response.json({
+        apiVersion: AGENT_RUNNER_API_VERSION,
+        run: snapshot("completed"),
+      });
+    }
+    if (path === `/api/agents/${AGENT_ID}` && init.method === "DELETE") {
+      return Response.json({ ok: true });
+    }
+    return Response.json({ unexpected: path }, { status: 500 });
+  };
+
+  await captureRun(
+    {
+      repository: "OpenCoven/demo-workspace",
+      task: "Add a parser test.",
+    },
+    {
+      environment: {
+        ...recordingEnvironment(),
+        DEMO_RUNNER_IDENTITY_TOKEN: "legacy-static-token",
+      },
+      mintIdentity: (claims, signingKey) => {
+        mintedClaims.push(claims);
+        signingKeys.push(signingKey);
+        mintCount += 1;
+        return Promise.resolve(`renewed-${mintCount}`);
+      },
+      randomUUID: () => OPERATION_ID,
+      request,
+    }
+  );
+
+  assert.equal(mintCount, 5);
+  assert.deepEqual(authorizations, [
+    "Bearer renewed-1",
+    "Bearer renewed-2",
+    "Bearer renewed-3",
+    "Bearer renewed-4",
+    "Bearer renewed-5",
+  ]);
+  assert.deepEqual(
+    mintedClaims,
+    Array.from({ length: 5 }, () => ({
+      plan: "subscriber",
+      sub: RECORDER_SUBJECT,
+      tenant: RECORDER_TENANT,
+    }))
+  );
+  assert.deepEqual(
+    signingKeys,
+    Array.from({ length: 5 }, () => SIGNING_KEY)
+  );
 });
 
 test("an initial runner error cannot expose configured tokens or credentials", async () => {
@@ -238,18 +389,233 @@ test("an initial runner error cannot expose configured tokens or credentials", a
           task: "Add a parser test.",
         },
         {
-          environment: {
-            DEMO_RECORDING_CREDENTIAL: RECORDING_CREDENTIAL,
-            DEMO_RUNNER_IDENTITY_TOKEN: IDENTITY_TOKEN,
-            DEMO_RUNNER_TOKEN: RUNNER_TOKEN,
-            DEMO_RUNNER_URL: "https://runner.example",
-          },
+          environment: recordingEnvironment(),
+          mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
           request,
         }
       ),
     assertNoConfiguredSecrets
   );
+});
+
+async function captureAfterRecoverableStream(
+  firstStream: ReadableStream<Uint8Array>
+) {
+  const terminalStatus: RunEvent = {
+    id: 2,
+    status: "completed",
+    type: "status",
+  };
+  const cursors: string[] = [];
+  const sleeps: number[] = [];
+  let eventRequests = 0;
+  // biome-ignore lint/suspicious/useAwait: injected fetch matches the native asynchronous fetch contract.
+  const request = async (
+    input: string | URL | Request,
+    init: RequestInit = {}
+  ): Promise<Response> => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/api/agents" && init.method === "POST") {
+      return agentResponse();
+    }
+    if (path === `/api/agents/${AGENT_ID}/runs`) {
+      return Response.json({
+        apiVersion: AGENT_RUNNER_API_VERSION,
+        run: snapshot("queued"),
+      });
+    }
+    if (path === `/api/runs/${RUN_ID}/events`) {
+      eventRequests += 1;
+      cursors.push(new Headers(init.headers).get("last-event-id") ?? "");
+      return eventRequests === 1
+        ? new Response(firstStream)
+        : new Response(sse(acceptedEvent, terminalStatus));
+    }
+    if (path === `/api/runs/${RUN_ID}`) {
+      return Response.json({
+        apiVersion: AGENT_RUNNER_API_VERSION,
+        run: snapshot("completed"),
+      });
+    }
+    if (path === `/api/agents/${AGENT_ID}` && init.method === "DELETE") {
+      return Response.json({ ok: true });
+    }
+    return Response.json({ unexpected: path }, { status: 500 });
+  };
+
+  const captured = await captureRun(
+    {
+      repository: "OpenCoven/demo-workspace",
+      task: "Add a parser test.",
+    },
+    {
+      environment: recordingEnvironment(),
+      mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
+      randomUUID: () => OPERATION_ID,
+      request,
+      sleep: (milliseconds) => {
+        sleeps.push(milliseconds);
+        return Promise.resolve();
+      },
+    }
+  );
+
+  return { captured, cursors, eventRequests, sleeps };
+}
+
+test("reconnects from the last validated event after an SSE transport error", async () => {
+  const { captured, cursors, eventRequests, sleeps } =
+    await captureAfterRecoverableStream(
+      interruptedEventStream(sse(acceptedEvent))
+    );
+
+  assert.equal(eventRequests, 2);
+  assert.deepEqual(cursors, ["0", "1"]);
+  assert.deepEqual(sleeps, [250]);
+  assert.deepEqual(
+    captured.arrivals.map(({ event }) => event.id),
+    [1, 2]
+  );
+});
+
+test("reconnects after a transport error even when a terminal status was validated", async () => {
+  const terminalStatus: RunEvent = {
+    id: 2,
+    status: "completed",
+    type: "status",
+  };
+  const { captured, cursors, eventRequests, sleeps } =
+    await captureAfterRecoverableStream(
+      interruptedEventStream(sse(acceptedEvent, terminalStatus))
+    );
+
+  assert.equal(eventRequests, 2);
+  assert.deepEqual(cursors, ["0", "2"]);
+  assert.deepEqual(sleeps, [250]);
+  assert.deepEqual(
+    captured.arrivals.map(({ event }) => event.id),
+    [1, 2]
+  );
+});
+
+test("reconnects after a truncated SSE frame without accepting the partial event", async () => {
+  const { captured, cursors, eventRequests, sleeps } =
+    await captureAfterRecoverableStream(
+      eventStream([`${sse(acceptedEvent)}data: {"id":2`])
+    );
+
+  assert.equal(eventRequests, 2);
+  assert.deepEqual(cursors, ["0", "1"]);
+  assert.deepEqual(sleeps, [250]);
+  assert.deepEqual(
+    captured.arrivals.map(({ event }) => event.id),
+    [1, 2]
+  );
+});
+
+test("a fully framed malformed SSE event is a hard failure", async () => {
+  let eventRequests = 0;
+  const sleeps: number[] = [];
+  // biome-ignore lint/suspicious/useAwait: injected fetch matches the native asynchronous fetch contract.
+  const request = async (
+    input: string | URL | Request,
+    init: RequestInit = {}
+  ): Promise<Response> => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/api/agents" && init.method === "POST") {
+      return agentResponse();
+    }
+    if (path === `/api/agents/${AGENT_ID}/runs`) {
+      return Response.json({
+        apiVersion: AGENT_RUNNER_API_VERSION,
+        run: snapshot("queued"),
+      });
+    }
+    if (path === `/api/runs/${RUN_ID}/events`) {
+      eventRequests += 1;
+      return new Response(`${sse(acceptedEvent)}data: {"id":2\n\n`);
+    }
+    if (path === `/api/agents/${AGENT_ID}` && init.method === "DELETE") {
+      return Response.json({ ok: true });
+    }
+    return Response.json({ unexpected: path }, { status: 500 });
+  };
+
+  await assert.rejects(
+    () =>
+      captureRun(
+        {
+          repository: "OpenCoven/demo-workspace",
+          task: "Add a parser test.",
+        },
+        {
+          environment: recordingEnvironment(),
+          mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
+          randomUUID: () => OPERATION_ID,
+          request,
+          sleep: (milliseconds) => {
+            sleeps.push(milliseconds);
+            return Promise.resolve();
+          },
+        }
+      ),
+    /not valid JSON/i
+  );
+  assert.equal(eventRequests, 1);
+  assert.deepEqual(sleeps, []);
+});
+
+test("bounds consecutive SSE recovery attempts with exponential backoff", async () => {
+  let eventRequests = 0;
+  const sleeps: number[] = [];
+  // biome-ignore lint/suspicious/useAwait: injected fetch matches the native asynchronous fetch contract.
+  const request = async (
+    input: string | URL | Request,
+    init: RequestInit = {}
+  ): Promise<Response> => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/api/agents" && init.method === "POST") {
+      return agentResponse();
+    }
+    if (path === `/api/agents/${AGENT_ID}/runs`) {
+      return Response.json({
+        apiVersion: AGENT_RUNNER_API_VERSION,
+        run: snapshot("queued"),
+      });
+    }
+    if (path === `/api/runs/${RUN_ID}/events`) {
+      eventRequests += 1;
+      return new Response(interruptedEventStream(""));
+    }
+    if (path === `/api/agents/${AGENT_ID}` && init.method === "DELETE") {
+      return Response.json({ ok: true });
+    }
+    return Response.json({ unexpected: path }, { status: 500 });
+  };
+
+  await assert.rejects(
+    () =>
+      captureRun(
+        {
+          repository: "OpenCoven/demo-workspace",
+          task: "Add a parser test.",
+        },
+        {
+          environment: recordingEnvironment(),
+          mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
+          randomUUID: () => OPERATION_ID,
+          request,
+          sleep: (milliseconds) => {
+            sleeps.push(milliseconds);
+            return Promise.resolve();
+          },
+        }
+      ),
+    /could not be resumed/i
+  );
+  assert.equal(eventRequests, 6);
+  assert.deepEqual(sleeps, [250, 500, 1000, 2000, 4000]);
 });
 
 async function captureTerminalStatus(status: "cancelled" | "failed") {
@@ -299,11 +665,8 @@ async function captureTerminalStatus(status: "cancelled" | "failed") {
       task: "Add a parser test.",
     },
     {
-      environment: {
-        DEMO_RUNNER_IDENTITY_TOKEN: "identity",
-        DEMO_RUNNER_TOKEN: "gate",
-        DEMO_RUNNER_URL: "https://runner.example",
-      },
+      environment: recordingEnvironment({ DEMO_RUNNER_TOKEN: "gate" }),
+      mintIdentity: () => Promise.resolve("identity"),
       randomUUID: () => OPERATION_ID,
       request,
     }
@@ -428,12 +791,12 @@ test("reconnects with a cursor, deduplicates arrivals, and stops at terminal com
       task: "Add a parser test.",
     },
     {
-      environment: {
+      environment: recordingEnvironment({
         DEMO_RECORDING_CREDENTIAL: "tenant-harness-secret",
-        DEMO_RUNNER_IDENTITY_TOKEN: "identity",
         DEMO_RUNNER_TOKEN: "gate",
         DEMO_RUNNER_URL: "https://runner.example/",
-      },
+      }),
+      mintIdentity: () => Promise.resolve("identity"),
       now: () => times.shift() ?? 999,
       randomUUID: () => OPERATION_ID,
       request,
@@ -465,12 +828,14 @@ test("reconnects with a cursor, deduplicates arrivals, and stops at terminal com
     backend?: string;
     instructions?: string;
     model?: string;
+    name?: string;
     runtime?: string;
     workspace?: string;
   };
   assert.equal(createInput.backend, "cloud");
   assert.equal(createInput.runtime, "copilot");
   assert.equal(createInput.model, "auto");
+  assert.equal(createInput.name, `demo-record-${OPERATION_ID}`);
   assert.equal(createInput.workspace, "/workspace");
   assert.match(
     createInput.instructions ?? "",
@@ -534,11 +899,8 @@ test("deletes the temporary agent after a capture failure", async () => {
           task: "Add a parser test.",
         },
         {
-          environment: {
-            DEMO_RUNNER_IDENTITY_TOKEN: "identity",
-            DEMO_RUNNER_TOKEN: "gate",
-            DEMO_RUNNER_URL: "https://runner.example",
-          },
+          environment: recordingEnvironment({ DEMO_RUNNER_TOKEN: "gate" }),
+          mintIdentity: () => Promise.resolve("identity"),
           randomUUID: () => OPERATION_ID,
           request,
         }
@@ -579,11 +941,8 @@ test("retains a valid agent id for cleanup when the create envelope is malformed
           task: "Add a parser test.",
         },
         {
-          environment: {
-            DEMO_RUNNER_IDENTITY_TOKEN: IDENTITY_TOKEN,
-            DEMO_RUNNER_TOKEN: RUNNER_TOKEN,
-            DEMO_RUNNER_URL: "https://runner.example",
-          },
+          environment: recordingEnvironment(),
+          mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
           request,
         }
@@ -633,12 +992,8 @@ test("a malformed create envelope still surfaces cleanup failure without secrets
           task: "Add a parser test.",
         },
         {
-          environment: {
-            DEMO_RECORDING_CREDENTIAL: RECORDING_CREDENTIAL,
-            DEMO_RUNNER_IDENTITY_TOKEN: IDENTITY_TOKEN,
-            DEMO_RUNNER_TOKEN: RUNNER_TOKEN,
-            DEMO_RUNNER_URL: "https://runner.example",
-          },
+          environment: recordingEnvironment(),
+          mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
           request,
         }
@@ -649,6 +1004,156 @@ test("a malformed create envelope still surfaces cleanup failure without secrets
       return assertNoConfiguredSecrets(error);
     }
   );
+});
+
+function captureWithLostCreateResponse(options: {
+  createResponse?: () => Response | Promise<Response>;
+  listResponse: () => Response | Promise<Response>;
+}) {
+  const calls: string[] = [];
+  const request = async (
+    input: string | URL | Request,
+    init: RequestInit = {}
+  ): Promise<Response> => {
+    const path = new URL(String(input)).pathname;
+    calls.push(`${init.method ?? "GET"} ${path}`);
+    if (path === "/api/agents" && init.method === "POST") {
+      if (options.createResponse) {
+        return await options.createResponse();
+      }
+      throw new Error("create response connection lost");
+    }
+    if (path === "/api/agents" && (init.method ?? "GET") === "GET") {
+      return await options.listResponse();
+    }
+    if (path === `/api/agents/${AGENT_ID}` && init.method === "DELETE") {
+      return Response.json({ ok: true });
+    }
+    return Response.json({ unexpected: path }, { status: 500 });
+  };
+
+  const pending = captureRun(
+    {
+      repository: "OpenCoven/demo-workspace",
+      task: "Add a parser test.",
+    },
+    {
+      environment: recordingEnvironment(),
+      mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
+      randomUUID: () => OPERATION_ID,
+      request,
+    }
+  );
+  return { calls, pending };
+}
+
+test("recovers an exact uniquely named agent after the create response is lost and deletes it", async () => {
+  const temporaryName = `demo-record-${OPERATION_ID}`;
+  const { calls, pending } = captureWithLostCreateResponse({
+    listResponse: () =>
+      Response.json({ agents: [agentDefinition(temporaryName)] }),
+  });
+
+  await assert.rejects(pending, /creation response was lost/i);
+  assert.deepEqual(calls, [
+    "POST /api/agents",
+    "GET /api/agents",
+    `DELETE /api/agents/${AGENT_ID}`,
+  ]);
+});
+
+test("recovers and deletes the exact agent when the create response body is lost", async () => {
+  const temporaryName = `demo-record-${OPERATION_ID}`;
+  const encoder = new TextEncoder();
+  const { calls, pending } = captureWithLostCreateResponse({
+    createResponse: () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode('{"agent":'));
+            controller.error(new Error("create response body lost"));
+          },
+        }),
+        { headers: { "content-type": "application/json" } }
+      ),
+    listResponse: () =>
+      Response.json({ agents: [agentDefinition(temporaryName)] }),
+  });
+
+  await assert.rejects(pending, /creation response was lost/i);
+  assert.deepEqual(calls, [
+    "POST /api/agents",
+    "GET /api/agents",
+    `DELETE /api/agents/${AGENT_ID}`,
+  ]);
+});
+
+test("does not delete a fuzzy or missing match after a lost create response", async () => {
+  const { calls, pending } = captureWithLostCreateResponse({
+    listResponse: () =>
+      Response.json({
+        agents: [agentDefinition(`demo-record-${OPERATION_ID}-similar`)],
+      }),
+  });
+
+  await assert.rejects(pending, /potential orphan.*no exact/i);
+  assert.deepEqual(calls, ["POST /api/agents", "GET /api/agents"]);
+});
+
+test("does not delete nonunique exact matches after a lost create response", async () => {
+  const temporaryName = `demo-record-${OPERATION_ID}`;
+  const { calls, pending } = captureWithLostCreateResponse({
+    listResponse: () =>
+      Response.json({
+        agents: [
+          agentDefinition(temporaryName),
+          agentDefinition(
+            temporaryName,
+            "9c1b7d2f-5a6b-4c90-8f1a-0f4e1f4d4a2e"
+          ),
+        ],
+      }),
+  });
+
+  await assert.rejects(pending, /potential orphan.*multiple exact/i);
+  assert.deepEqual(calls, ["POST /api/agents", "GET /api/agents"]);
+});
+
+test("surfaces a safe potential orphan when create recovery listing fails", async () => {
+  const { calls, pending } = captureWithLostCreateResponse({
+    listResponse: () =>
+      Response.json(
+        {
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          error: {
+            code: "list_failed",
+            message: `${RUNNER_TOKEN} ${SIGNING_KEY}`,
+            retryable: true,
+          },
+          requestId: RUN_ID,
+        },
+        { status: 500 }
+      ),
+  });
+
+  await assert.rejects(pending, (error: Error) => {
+    assert.match(error.message, /potential orphan.*recovery listing failed/i);
+    return assertNoConfiguredSecrets(error);
+  });
+  assert.deepEqual(calls, ["POST /api/agents", "GET /api/agents"]);
+});
+
+test("surfaces a potential orphan when the recovery listing payload is malformed", async () => {
+  const { calls, pending } = captureWithLostCreateResponse({
+    listResponse: () =>
+      new Response(`${RUNNER_TOKEN} malformed listing payload`),
+  });
+
+  await assert.rejects(pending, (error: Error) => {
+    assert.match(error.message, /potential orphan.*recovery listing failed/i);
+    return assertNoConfiguredSecrets(error);
+  });
+  assert.deepEqual(calls, ["POST /api/agents", "GET /api/agents"]);
 });
 
 test("surfaces cleanup failure while preserving the primary failure context", async () => {
@@ -711,12 +1216,8 @@ test("surfaces cleanup failure while preserving the primary failure context", as
           task: "Add a parser test.",
         },
         {
-          environment: {
-            DEMO_RECORDING_CREDENTIAL: RECORDING_CREDENTIAL,
-            DEMO_RUNNER_IDENTITY_TOKEN: IDENTITY_TOKEN,
-            DEMO_RUNNER_TOKEN: RUNNER_TOKEN,
-            DEMO_RUNNER_URL: "https://runner.example",
-          },
+          environment: recordingEnvironment(),
+          mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
           request,
         }

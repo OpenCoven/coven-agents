@@ -129,6 +129,74 @@ test("top-level recorder errors redact every configured secret", async () => {
   }
 });
 
+test("redacts every configured recorder secret from captured events and results", async () => {
+  const fixture = dependencies();
+  const runnerToken = "runner-token-sensitive";
+  const signingKey = "signing-key-sensitive";
+  const subject = "recorder-subject-sensitive";
+  const tenant = "recorder-tenant-sensitive";
+  const ephemeralIdentity = "minted-identity-sensitive";
+
+  const code = await runDemoRecorder(
+    ["--name", "parser-test", "--task", "Add a parser test."],
+    {
+      DEMO_RECORDING_CREDENTIAL: credential,
+      DEMO_RUNNER_SIGNING_KEY: signingKey,
+      DEMO_RUNNER_SUBJECT: subject,
+      DEMO_RUNNER_TENANT: tenant,
+      DEMO_RUNNER_TOKEN: runnerToken,
+    },
+    {
+      ...fixture.dependencies,
+      loadCapture: () =>
+        Promise.resolve(async () => ({
+          arrivals: [
+            {
+              event: {
+                id: 1,
+                output: `${runnerToken} ${ephemeralIdentity}`,
+                type: "output" as const,
+              },
+              receivedAt: 100,
+            },
+          ],
+          result: {
+            ...result,
+            output: `${signingKey} ${tenant}`,
+          },
+          secrets: [ephemeralIdentity],
+        })),
+    }
+  );
+
+  assert.equal(code, 0);
+  const written = fixture.writes[0]?.contents ?? "";
+  for (const secret of [
+    runnerToken,
+    signingKey,
+    subject,
+    tenant,
+    ephemeralIdentity,
+  ]) {
+    assert.equal(written.includes(secret), false);
+  }
+});
+
+test("revalidates after redaction and refuses an invalid structural field", async () => {
+  const fixture = dependencies();
+  const structuralCredential = "parser-test";
+
+  const code = await runDemoRecorder(
+    ["--name", structuralCredential, "--task", "Add a parser test."],
+    { DEMO_RECORDING_CREDENTIAL: structuralCredential },
+    fixture.dependencies
+  );
+
+  assert.equal(code, 1);
+  assert.equal(fixture.writes.length, 0);
+  assert.match(fixture.errors.join(""), /schema validation/i);
+});
+
 test("captures, validates, redacts, and writes a pretty transcript", async () => {
   const fixture = dependencies();
 

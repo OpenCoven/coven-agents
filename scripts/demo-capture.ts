@@ -1,37 +1,48 @@
 import {
   agentEnvelopeSchema,
   agentIdSchema,
+  agentsEnvelopeSchema,
   createAgentInputSchema,
   okEnvelopeSchema,
   type RunEvent,
+  type RunnerClaims,
   type RunResult,
   runErrorEnvelopeSchema,
   runEventSchema,
+  runnerClaimsSchema,
   runSnapshotEnvelopeSchema,
   runSnapshotToResult,
   sanitizeEvidenceText,
   startRunInputSchema,
 } from "@opencoven/agent-contracts";
+import { mintRunnerToken } from "@/lib/agents/runner-token";
 import type { ArrivedEvent } from "@/lib/demo/offsets";
 import { DEMO_REPOSITORY } from "@/lib/demo/recordable";
+import { demoRecordingSecrets } from "@/lib/demo/recording-secrets";
 
 const DEFAULT_RECORDING_TIMEOUT_MS = 15 * 60 * 1000;
 const CLEANUP_TIMEOUT_MS = 10_000;
+const MAX_SSE_RECOVERY_ATTEMPTS = 5;
+const SSE_RETRY_BASE_MS = 250;
+const SSE_RETRY_MAX_MS = 4000;
 const DEMO_REPOSITORY_URL = "https://github.com/OpenCoven/demo-workspace.git";
 const DEMO_WORKSPACE = "/workspace";
 const DEMO_REPOSITORY_WORKSPACE = "/workspace/repo";
+const recorderClaimsSchema = runnerClaimsSchema.omit({ exp: true });
 
 type Environment = Readonly<Record<string, string | undefined>>;
 type FetchLike = (
   input: string | URL | Request,
   init?: RequestInit
 ) => Promise<Response>;
+type Sleep = (milliseconds: number, signal: AbortSignal) => Promise<void>;
 
 export type CaptureEnvironment = {
-  identityToken: string;
+  identityClaims: Omit<RunnerClaims, "exp">;
   runnerToken: string;
   runnerUrl: string;
   secrets: string[];
+  signingKey: string;
   timeoutMs: number;
 };
 
@@ -43,21 +54,54 @@ export type CaptureRunOptions = {
 export type CapturedRun = {
   arrivals: ArrivedEvent[];
   result: RunResult;
+  secrets: string[];
 };
 
 export type CaptureDependencies = {
   environment?: Environment;
+  mintIdentity?: IdentityMinter;
   now?: () => number;
   randomUUID?: () => string;
   request?: FetchLike;
+  sleep?: Sleep;
 };
 
 type RunnerConnection = {
-  identityToken: string;
+  identityToken: () => Promise<string>;
   request: FetchLike;
   runnerToken: string;
   runnerUrl: string;
+  secrets: string[];
 };
+
+type IdentityMinter = (
+  claims: Omit<RunnerClaims, "exp">,
+  signingKey: string
+) => Promise<string>;
+
+class RetryableSseError extends Error {
+  readonly terminalObserved: boolean;
+
+  constructor(
+    message: string,
+    terminalObserved: boolean,
+    options?: ErrorOptions
+  ) {
+    super(message, options);
+    this.name = "RetryableSseError";
+    this.terminalObserved = terminalObserved;
+  }
+}
+
+class RunnerTransportError extends Error {
+  constructor(method: string, path: string, options?: ErrorOptions) {
+    super(
+      `Runner request ${method} ${path} failed before receiving a response.`,
+      options
+    );
+    this.name = "RunnerTransportError";
+  }
+}
 
 function nonblank(value: string | undefined): value is string {
   return Boolean(value?.trim());
@@ -69,7 +113,9 @@ export function readCaptureEnvironment(
   const runnerUrl =
     environment.DEMO_RUNNER_URL ?? environment.NEXT_PUBLIC_CLOUD_RUNNER_URL;
   const runnerToken = environment.DEMO_RUNNER_TOKEN;
-  const identityToken = environment.DEMO_RUNNER_IDENTITY_TOKEN;
+  const signingKey = environment.DEMO_RUNNER_SIGNING_KEY;
+  const subject = environment.DEMO_RUNNER_SUBJECT;
+  const tenant = environment.DEMO_RUNNER_TENANT;
   const missing: string[] = [];
   if (!nonblank(runnerUrl)) {
     missing.push("DEMO_RUNNER_URL or NEXT_PUBLIC_CLOUD_RUNNER_URL");
@@ -77,13 +123,21 @@ export function readCaptureEnvironment(
   if (!nonblank(runnerToken)) {
     missing.push("DEMO_RUNNER_TOKEN");
   }
-  if (!nonblank(identityToken)) {
-    missing.push("DEMO_RUNNER_IDENTITY_TOKEN");
+  if (!nonblank(signingKey)) {
+    missing.push("DEMO_RUNNER_SIGNING_KEY");
+  }
+  if (!nonblank(subject)) {
+    missing.push("DEMO_RUNNER_SUBJECT");
+  }
+  if (!nonblank(tenant)) {
+    missing.push("DEMO_RUNNER_TENANT");
   }
   if (
     !nonblank(runnerUrl) ||
     !nonblank(runnerToken) ||
-    !nonblank(identityToken)
+    !nonblank(signingKey) ||
+    !nonblank(subject) ||
+    !nonblank(tenant)
   ) {
     throw new Error(
       `Missing required environment variables: ${missing.join(", ")}.`
@@ -101,15 +155,23 @@ export function readCaptureEnvironment(
     );
   }
 
+  const claims = recorderClaimsSchema.safeParse({
+    plan: "subscriber",
+    sub: subject,
+    tenant,
+  });
+  if (!claims.success) {
+    throw new Error(
+      "DEMO_RUNNER_SUBJECT and DEMO_RUNNER_TENANT must satisfy runner identity constraints."
+    );
+  }
+
   return {
-    identityToken,
+    identityClaims: claims.data,
     runnerToken,
     runnerUrl: runnerUrl.trim().replace(/\/+$/, ""),
-    secrets: [
-      runnerToken,
-      identityToken,
-      environment.DEMO_RECORDING_CREDENTIAL ?? "",
-    ].filter(nonblank),
+    secrets: demoRecordingSecrets(environment),
+    signingKey,
     timeoutMs,
   };
 }
@@ -118,6 +180,26 @@ function abortError(signal: AbortSignal): Error {
   return signal.reason instanceof Error
     ? signal.reason
     : new Error("Demo recording was aborted.");
+}
+
+function sleepWithAbort(
+  milliseconds: number,
+  signal: AbortSignal
+): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(abortError(signal));
+  }
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    function onAbort() {
+      clearTimeout(timeout);
+      reject(abortError(signal));
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function errorMessage(error: unknown): string {
@@ -161,13 +243,26 @@ async function fetchRunner(
   signal: AbortSignal
 ): Promise<Response> {
   const method = init.method ?? "GET";
+  let identityToken: string;
+  try {
+    identityToken = await connection.identityToken();
+  } catch (error) {
+    throw new Error(
+      `Runner identity could not be minted for ${method} ${path}.`,
+      { cause: error }
+    );
+  }
+  if (nonblank(identityToken) && !connection.secrets.includes(identityToken)) {
+    connection.secrets.push(identityToken);
+  }
+
   let response: Response;
   try {
     response = await connection.request(`${connection.runnerUrl}${path}`, {
       ...init,
       headers: {
         accept: "application/json",
-        authorization: `Bearer ${connection.identityToken}`,
+        authorization: `Bearer ${identityToken}`,
         "x-runner-token": connection.runnerToken,
         ...(init.body ? { "content-type": "application/json" } : {}),
         ...init.headers,
@@ -178,10 +273,8 @@ async function fetchRunner(
     if (signal.aborted) {
       throw abortError(signal);
     }
-    throw new Error(
-      `Runner request ${method} ${path} failed before receiving a response.`,
-      { cause: error }
-    );
+    // biome-ignore lint/style/useErrorCause: RunnerTransportError forwards this cause through its constructor.
+    throw new RunnerTransportError(method, path, { cause: error });
   }
 
   if (!response.ok) {
@@ -282,8 +375,22 @@ export async function readRunEventStream(
       if (signal?.aborted) {
         throw abortError(signal);
       }
-      // biome-ignore lint/performance/noAwaitInLoops: SSE chunks must be consumed in order.
-      const { done, value } = await reader.read();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: SSE chunks must be consumed in order.
+        chunk = await reader.read();
+      } catch (error) {
+        if (signal?.aborted) {
+          throw new Error(abortError(signal).message, { cause: error });
+        }
+        // biome-ignore lint/style/useErrorCause: RetryableSseError forwards this cause through its constructor.
+        throw new RetryableSseError(
+          "Run event stream transport was interrupted.",
+          terminal,
+          { cause: error }
+        );
+      }
+      const { done, value } = chunk;
       if (done) {
         break;
       }
@@ -299,10 +406,12 @@ export async function readRunEventStream(
       throw abortError(signal);
     }
     buffer += decoder.decode();
-    if (buffer) {
-      consumeLine(buffer);
+    if (buffer.length > 0 || dataLines.length > 0) {
+      throw new RetryableSseError(
+        "Run event stream ended with an incomplete frame.",
+        terminal
+      );
     }
-    dispatch();
     return terminal;
   } finally {
     signal?.removeEventListener("abort", cancelOnAbort);
@@ -316,6 +425,7 @@ async function createTemporaryAgent(
   retainAgentId: (agentId: string) => void,
   signal: AbortSignal
 ): Promise<string> {
+  const temporaryName = `demo-record-${operationId}`;
   const input = createAgentInputSchema.parse({
     backend: "cloud",
     description: "Temporary agent for recording a demo transcript.",
@@ -325,17 +435,48 @@ async function createTemporaryAgent(
       "Complete the requested task and verify the result with appropriate tests or checks before reporting.",
     ].join(" "),
     model: "auto",
-    name: `demo-record-${operationId.slice(0, 8)}`,
+    name: temporaryName,
     runtime: "copilot",
     workspace: DEMO_WORKSPACE,
   });
-  const response = await fetchRunner(
-    connection,
-    "/api/agents",
-    { body: JSON.stringify(input), method: "POST" },
-    signal
-  );
-  const envelope = await readJson(response, "agent creation");
+  let response: Response;
+  try {
+    response = await fetchRunner(
+      connection,
+      "/api/agents",
+      { body: JSON.stringify(input), method: "POST" },
+      signal
+    );
+  } catch (error) {
+    if (!(error instanceof RunnerTransportError)) {
+      throw error;
+    }
+    const recoveredId = await recoverAmbiguousCreate(
+      connection,
+      temporaryName,
+      signal
+    );
+    retainAgentId(recoveredId);
+    throw new Error(
+      "Agent creation response was lost; recovered the exact temporary agent for cleanup.",
+      { cause: error }
+    );
+  }
+  let envelope: unknown;
+  try {
+    envelope = await readJson(response, "agent creation");
+  } catch (error) {
+    const recoveredId = await recoverAmbiguousCreate(
+      connection,
+      temporaryName,
+      signal
+    );
+    retainAgentId(recoveredId);
+    throw new Error(
+      "Agent creation response was lost; recovered the exact temporary agent for cleanup.",
+      { cause: error }
+    );
+  }
   const candidateId = agentIdFromEnvelope(envelope);
   if (candidateId) {
     retainAgentId(candidateId);
@@ -347,6 +488,44 @@ async function createTemporaryAgent(
     });
   }
   return parsed.data.agent.id;
+}
+
+async function recoverAmbiguousCreate(
+  connection: RunnerConnection,
+  temporaryName: string,
+  signal: AbortSignal
+): Promise<string> {
+  let envelope: unknown;
+  try {
+    const response = await fetchRunner(connection, "/api/agents", {}, signal);
+    envelope = await readJson(response, "ambiguous agent creation recovery");
+  } catch (error) {
+    throw new Error(
+      "Potential orphan: agent creation response was lost and recovery listing failed.",
+      { cause: error }
+    );
+  }
+
+  const parsed = agentsEnvelopeSchema.safeParse(envelope);
+  if (!parsed.success) {
+    throw new Error(
+      "Potential orphan: agent creation response was lost and recovery listing failed."
+    );
+  }
+  const matches = parsed.data.agents.filter(
+    (agent) => agent.name === temporaryName
+  );
+  if (matches.length === 0) {
+    throw new Error(
+      "Potential orphan: agent creation response was lost and no exact temporary name match was found."
+    );
+  }
+  if (matches.length !== 1) {
+    throw new Error(
+      "Potential orphan: agent creation response was lost and multiple exact temporary name matches were found; cleanup was refused."
+    );
+  }
+  return matches[0].id;
 }
 
 async function startRun(
@@ -378,14 +557,18 @@ async function collectArrivals(
   connection: RunnerConnection,
   runId: string,
   now: () => number,
+  sleep: Sleep,
   signal: AbortSignal
 ): Promise<ArrivedEvent[]> {
   const arrivals: ArrivedEvent[] = [];
   const seen = new Set<number>();
   let cursor = 0;
   let terminal = false;
+  let terminalObservedDuringRecovery = false;
+  let recoveryAttempts = 0;
 
   while (!terminal) {
+    const cursorBeforeRequest = cursor;
     // biome-ignore lint/performance/noAwaitInLoops: reconnects are sequential and advance one SSE cursor.
     const response = await fetchRunner(
       connection,
@@ -401,22 +584,47 @@ async function collectArrivals(
     if (!response.body) {
       throw new Error("Runner returned an empty run event stream.");
     }
-    terminal = await readRunEventStream(
-      response.body,
-      (event) => {
-        const arrival = { event, receivedAt: now() };
-        if (seen.has(event.id)) {
-          return;
-        }
-        if (event.id <= cursor) {
-          throw new Error("Run event ids did not increase monotonically.");
-        }
-        seen.add(event.id);
-        cursor = event.id;
-        arrivals.push(arrival);
-      },
-      signal
-    );
+    try {
+      const responseTerminal = await readRunEventStream(
+        response.body,
+        (event) => {
+          const arrival = { event, receivedAt: now() };
+          if (seen.has(event.id)) {
+            return;
+          }
+          if (event.id <= cursor) {
+            throw new Error("Run event ids did not increase monotonically.");
+          }
+          seen.add(event.id);
+          cursor = event.id;
+          arrivals.push(arrival);
+        },
+        signal
+      );
+      terminal = responseTerminal || terminalObservedDuringRecovery;
+      terminalObservedDuringRecovery = false;
+      recoveryAttempts = 0;
+    } catch (error) {
+      if (!(error instanceof RetryableSseError)) {
+        throw error;
+      }
+      terminalObservedDuringRecovery ||= error.terminalObserved;
+      if (cursor > cursorBeforeRequest) {
+        recoveryAttempts = 0;
+      }
+      recoveryAttempts += 1;
+      if (recoveryAttempts > MAX_SSE_RECOVERY_ATTEMPTS) {
+        throw new Error(
+          "Run event stream could not be resumed after bounded retries.",
+          { cause: error }
+        );
+      }
+      const delay = Math.min(
+        SSE_RETRY_BASE_MS * 2 ** (recoveryAttempts - 1),
+        SSE_RETRY_MAX_MS
+      );
+      await sleep(delay, signal);
+    }
   }
   return arrivals;
 }
@@ -488,13 +696,17 @@ export async function captureRun(
   const configuration = readCaptureEnvironment(
     dependencies.environment ?? process.env
   );
+  const mintIdentity = dependencies.mintIdentity ?? mintRunnerToken;
   const connection: RunnerConnection = {
-    identityToken: configuration.identityToken,
+    identityToken: () =>
+      mintIdentity(configuration.identityClaims, configuration.signingKey),
     request: dependencies.request ?? globalThis.fetch,
     runnerToken: configuration.runnerToken,
     runnerUrl: configuration.runnerUrl,
+    secrets: configuration.secrets,
   };
   const now = dependencies.now ?? Date.now;
+  const sleep = dependencies.sleep ?? sleepWithAbort;
   const randomUUID = dependencies.randomUUID ?? crypto.randomUUID;
   const controller = new AbortController();
   const timeout = setTimeout(
@@ -531,10 +743,11 @@ export async function captureRun(
       connection,
       runId,
       now,
+      sleep,
       controller.signal
     );
     const result = await fetchResult(connection, runId, controller.signal);
-    captured = { arrivals, result };
+    captured = { arrivals, result, secrets: connection.secrets };
   } catch (error) {
     primaryError = controller.signal.aborted
       ? abortError(controller.signal)

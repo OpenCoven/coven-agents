@@ -10,6 +10,7 @@ import {
 } from "@opencoven/agent-contracts";
 import { type ArrivedEvent, toOffsets } from "@/lib/demo/offsets";
 import { assertRecordable, DEMO_REPOSITORY } from "@/lib/demo/recordable";
+import { demoRecordingSecrets } from "@/lib/demo/recording-secrets";
 import { assertNoSecrets, redactTranscript } from "@/lib/demo/redact";
 
 export const USAGE =
@@ -18,6 +19,7 @@ export const USAGE =
 type Capture = (options: { repository: string; task: string }) => Promise<{
   arrivals: ArrivedEvent[];
   result: RunResult;
+  secrets?: string[];
 }>;
 
 export type RecorderDependencies = {
@@ -90,11 +92,7 @@ export async function runDemoRecorder(
   const allowFailure = arguments_.includes("--allow-failure");
   const repository = environment.DEMO_REPOSITORY ?? DEMO_REPOSITORY;
   const credential = environment.DEMO_RECORDING_CREDENTIAL ?? "";
-  const secrets = [
-    credential,
-    environment.DEMO_RUNNER_TOKEN ?? "",
-    environment.DEMO_RUNNER_IDENTITY_TOKEN ?? "",
-  ].filter(Boolean);
+  let secrets = demoRecordingSecrets(environment);
 
   try {
     assertRecordable({
@@ -107,6 +105,7 @@ export async function runDemoRecorder(
 
     const capture = await dependencies.loadCapture();
     const captured = await capture({ repository, task });
+    secrets = [...new Set([...secrets, ...(captured.secrets ?? [])])];
 
     assertRecordable({
       allowFailure,
@@ -123,15 +122,16 @@ export async function runDemoRecorder(
       captured.arrivals,
       captured.result
     );
-    const redacted = redactTranscript(transcript, [credential]);
-    assertNoSecrets(redacted, [credential]);
+    const redacted = redactTranscript(transcript, secrets);
+    assertNoSecrets(redacted, secrets);
+    const publishable = demoTranscriptSchema.parse(redacted);
 
     const target = join(
       dependencies.cwd(),
       "lib/demo/fixtures",
       `${name}.json`
     );
-    dependencies.writeFile(target, `${JSON.stringify(redacted, null, 2)}\n`);
+    dependencies.writeFile(target, `${JSON.stringify(publishable, null, 2)}\n`);
     dependencies.stdout(`Wrote ${target}\n`);
     return 0;
   } catch (error) {
