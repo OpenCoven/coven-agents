@@ -22,7 +22,7 @@ export type ReconciliationPlan = {
 };
 
 const MALFORMED_MARKER_ERROR = "Malformed managed bead marker";
-const MANAGED_MARKER_NAMESPACE_PATTERN = /<!--\s*coven-agents-bead-sync/i;
+const MANAGED_MARKER_NAMESPACE = "coven-agents-bead-sync";
 const MANAGED_MARKER_PATTERN =
   /^<!-- coven-agents-bead-sync:v1 id=(coven-agents-[a-z0-9.-]+) -->$/;
 
@@ -41,13 +41,19 @@ function compareStrings(left: string, right: string): number {
 export function parseManagedBeadId(body: string): string | null {
   const line = firstLine(body);
 
-  if (!MANAGED_MARKER_NAMESPACE_PATTERN.test(body)) {
+  if (!line.toLowerCase().includes(MANAGED_MARKER_NAMESPACE)) {
     return null;
   }
 
   const match = line.match(MANAGED_MARKER_PATTERN);
 
   if (!match) {
+    throw malformedMarkerError();
+  }
+
+  if (
+    body.slice(line.length).toLowerCase().includes(MANAGED_MARKER_NAMESPACE)
+  ) {
     throw malformedMarkerError();
   }
 

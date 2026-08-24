@@ -261,6 +261,35 @@ test("parses exact markers, returns null without prefix, and rejects malformed m
   );
 });
 
+test("ignores later namespace mentions in unmanaged notes", () => {
+  assert.equal(
+    parseManagedBeadId(
+      [
+        "Unmanaged note",
+        "",
+        'Quoted marker: "<!-- coven-agents-bead-sync:v1 id=coven-agents-quoted -->"',
+      ].join("\n")
+    ),
+    null
+  );
+});
+
+test("rejects later namespace markers after a valid leading marker", () => {
+  assert.throws(
+    () =>
+      parseManagedBeadId(
+        [
+          "<!-- coven-agents-bead-sync:v1 id=coven-agents-leading -->",
+          "",
+          "Later body",
+          "",
+          "<!-- coven-agents-bead-sync:v2 id=coven-agents-later -->",
+        ].join("\n")
+      ),
+    /Malformed managed bead marker/
+  );
+});
+
 test("rejects malformed namespace markers before planning creates", () => {
   assert.throws(
     () =>
