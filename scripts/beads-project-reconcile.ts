@@ -25,6 +25,7 @@ const MALFORMED_MARKER_ERROR = "Malformed managed bead marker";
 const MANAGED_MARKER_NAMESPACE = "coven-agents-bead-sync";
 const MANAGED_MARKER_PATTERN =
   /^<!-- coven-agents-bead-sync:v1 id=(coven-agents-[a-z0-9.-]+) -->$/;
+const MANAGED_MARKER_COMMENT_PATTERN = /<!--\s*coven-agents-bead-sync(?:\b|:)/i;
 
 function firstLine(value: string): string {
   return value.split(/\r?\n/, 1)[0] ?? "";
@@ -51,9 +52,7 @@ export function parseManagedBeadId(body: string): string | null {
     throw malformedMarkerError();
   }
 
-  if (
-    body.slice(line.length).toLowerCase().includes(MANAGED_MARKER_NAMESPACE)
-  ) {
+  if (MANAGED_MARKER_COMMENT_PATTERN.test(body.slice(line.length))) {
     throw malformedMarkerError();
   }
 

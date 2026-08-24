@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ProjectItem } from "./beads-project-model";
+import type { Bead, ProjectItem } from "./beads-project-model";
 import type { DesiredProjectItem } from "./beads-project-policy";
-import { MARKER_PREFIX } from "./beads-project-policy";
+import { MARKER_PREFIX, projectBead } from "./beads-project-policy";
 import {
   parseManagedBeadId,
   planReconciliation,
@@ -38,6 +38,28 @@ function existingItem(
     fields: overrides.fields ?? { Runner: "Shared" },
     id: overrides.id ?? `${beadId}-item`,
     ...overrides,
+  };
+}
+
+function makeBead(overrides: Partial<Bead> = {}): Bead {
+  const { metadata: overrideMetadata, ...rest } = overrides;
+
+  return {
+    acceptance_criteria: "Acceptance criteria.",
+    dependencies: [],
+    description: "Description.",
+    id: "coven-agents-test",
+    issue_type: "task",
+    metadata: {
+      runner: "Shared",
+      size: "M",
+      workstream: "Product",
+      ...overrideMetadata,
+    },
+    priority: 1,
+    status: "open",
+    title: "Test bead",
+    ...rest,
   };
 }
 
@@ -225,6 +247,41 @@ test("keeps unmanaged items untouched and reports orphaned managed items", () =>
     orphaned: ["coven-agents-orphan"],
     unchanged: 1,
     unmanaged: 1,
+  });
+});
+
+test("treats namespace prose as ordinary text in a round trip", () => {
+  const desired = projectBead(
+    makeBead({
+      acceptance_criteria:
+        "The description and acceptance criteria may mention coven-agents-bead-sync as prose.",
+      description: "Document coven-agents-bead-sync in the roadmap prose only.",
+      id: "coven-agents-prose",
+      title: "Keep namespace prose allowed",
+    }),
+    new Map()
+  );
+
+  const plan = planReconciliation(
+    [desired],
+    [
+      existingItem("coven-agents-prose", {
+        content: {
+          body: desired.body,
+          title: desired.title,
+          type: "Note",
+        },
+        fields: desired.fields,
+        id: "prose-item",
+      }),
+    ]
+  );
+
+  assert.deepEqual(plan, {
+    actions: [],
+    orphaned: [],
+    unchanged: 1,
+    unmanaged: 0,
   });
 });
 
