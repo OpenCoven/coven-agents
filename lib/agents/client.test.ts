@@ -323,3 +323,43 @@ test("a run starts without crypto.randomUUID", async () => {
     });
   }
 });
+
+test("with an identity minter, the two tokens travel on separate headers", async () => {
+  // Identity and authorization are different questions. The runner token
+  // proves the caller may reach the deployment; the minted claim says which
+  // tenant they are. Collapsing them onto one header is what let every caller
+  // share a tenant.
+  let seen = new Headers();
+  const request: typeof globalThis.fetch = (_input, init) => {
+    seen = new Headers(init?.headers);
+    return Promise.resolve(Response.json({ agents: [] }));
+  };
+
+  const client = new RunnerClient(
+    { endpoint: "https://runner.test", token: "deployment-gate" },
+    request,
+    { mintIdentity: () => Promise.resolve("minted-identity") }
+  );
+  await client.listAgents();
+
+  assert.equal(seen.get("authorization"), "Bearer minted-identity");
+  assert.equal(seen.get("x-runner-token"), "deployment-gate");
+});
+
+test("without a minter the single token stays on authorization", async () => {
+  // The local runner has no tenancy and must keep working unchanged.
+  let seen = new Headers();
+  const request: typeof globalThis.fetch = (_input, init) => {
+    seen = new Headers(init?.headers);
+    return Promise.resolve(Response.json({ agents: [] }));
+  };
+
+  const client = new RunnerClient(
+    { endpoint: "https://local.test", token: "local-token" },
+    request
+  );
+  await client.listAgents();
+
+  assert.equal(seen.get("authorization"), "Bearer local-token");
+  assert.equal(seen.get("x-runner-token"), null);
+});
