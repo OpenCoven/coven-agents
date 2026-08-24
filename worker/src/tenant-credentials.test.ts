@@ -15,6 +15,7 @@ test("a stored credential is returned", async () => {
     {
       endpoint: "https://app.test",
       fetchImpl: respondWith(200, { credential: "ghp_abc" }),
+      identityToken: "identity",
       serviceToken: "svc",
     }
   );
@@ -28,6 +29,7 @@ test("a tenant with no credential yields null, not an error", async () => {
     {
       endpoint: "https://app.test",
       fetchImpl: respondWith(404, { error: "no_credential" }),
+      identityToken: "identity",
       serviceToken: "svc",
     }
   );
@@ -47,6 +49,7 @@ test("an unreachable app fails closed rather than returning null", async () => {
       {
         endpoint: "https://app.test",
         fetchImpl: () => Promise.reject(new Error("network down")),
+        identityToken: "identity",
         serviceToken: "svc",
       }
     )
@@ -61,6 +64,7 @@ test("a non-404 error status throws rather than yielding null", async () => {
       {
         endpoint: "https://app.test",
         fetchImpl: respondWith(500, { error: "boom" }),
+        identityToken: "identity",
         serviceToken: "svc",
       }
     )
@@ -76,6 +80,7 @@ test("an unauthorized service token throws rather than yielding null", async () 
       {
         endpoint: "https://app.test",
         fetchImpl: respondWith(401, { error: "unauthorized" }),
+        identityToken: "identity",
         serviceToken: "svc",
       }
     )
@@ -97,6 +102,7 @@ test("the service token is sent and the request names one tenant and harness", a
           new Response(JSON.stringify({ credential: "x" }), { status: 200 })
         );
       },
+      identityToken: "identity",
       serviceToken: "svc",
     }
   );
@@ -121,6 +127,7 @@ test("a 200 with no usable credential throws rather than yielding null", async (
       {
         endpoint: "https://app.test",
         fetchImpl: respondWith(200, {}),
+        identityToken: "identity",
         serviceToken: "svc",
       }
     )

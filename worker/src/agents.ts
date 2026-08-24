@@ -188,7 +188,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
    * for this run and handed to the harness under its documented environment
    * variable name.
    */
-  async execute(input: unknown): Promise<RunResult> {
+  async execute(input: unknown, identityToken: string): Promise<RunResult> {
     const { task } = runAgentInputSchema.parse(input);
     const definition = this.requireDefinition();
 
@@ -239,7 +239,9 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       throw new AlreadyRunningError();
     }
 
-    return toRunResult(await this.driveHarness(definition, plan.record, task));
+    return toRunResult(
+      await this.driveHarness(definition, plan.record, task, identityToken)
+    );
   }
 
   /**
@@ -253,7 +255,8 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
    * merely "not signed in".
    */
   private async resolveTenantCredential(
-    definition: AgentDefinition
+    definition: AgentDefinition,
+    identityToken: string
   ): Promise<string | null> {
     const { APP_ORIGIN, RUNNER_SERVICE_TOKEN } = this.env;
     if (!APP_ORIGIN || !RUNNER_SERVICE_TOKEN) {
@@ -266,6 +269,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       {
         endpoint: APP_ORIGIN,
         fetchImpl: fetch,
+        identityToken,
         serviceToken: RUNNER_SERVICE_TOKEN,
       }
     );
@@ -288,7 +292,8 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
   private async driveHarness(
     definition: AgentDefinition,
     planned: CloudRunRecord,
-    task: string
+    task: string,
+    identityToken: string
   ): Promise<CloudRunRecord> {
     const startedAt = new Date().toISOString();
     let record = appendEvents(
@@ -320,7 +325,10 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     // worse, silently skip redaction.
     let credential: string | null = null;
     try {
-      credential = await this.resolveTenantCredential(definition);
+      credential = await this.resolveTenantCredential(
+        definition,
+        identityToken
+      );
       const run = await runHarnessInSandbox({
         credential: { credential },
         instructions: `${definition.instructions}
@@ -414,7 +422,16 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    * than starting a second one, and reusing it for a different task is a
    * conflict. The fiber is keyed on the run id so `stop` can find it.
    */
-  async start(input: unknown): Promise<{ created: boolean; run: RunSnapshot }> {
+  /**
+   * `identityToken` is the signed claim the caller presented. It is carried
+   * through to the credential fetch so the app can bind the request to a
+   * tenant rather than trusting one named in a request body. The fiber starts
+   * immediately, well inside the token's lifetime.
+   */
+  async start(
+    input: unknown,
+    identityToken: string
+  ): Promise<{ created: boolean; run: RunSnapshot }> {
     const { operationId, task } = startRunInputSchema.parse(input);
     const definition = this.requireDefinition();
     validateCloudWorkspace(definition);
@@ -449,7 +466,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       this.startFiber(
         fiberKey,
         async () => {
-          await this.driveHarness(definition, record, task);
+          await this.driveHarness(definition, record, task, identityToken);
         },
         // Keyed on the fiber key rather than the operation id: `stop` cancels
         // by run, and a run is what a caller can name.

@@ -71,7 +71,10 @@ export type CloudRunnerAgent = {
   ) => Awaitable<RunEventStreamSnapshot | null>;
   getRun: (runId: string) => Awaitable<RunSnapshot | null>;
   snapshot: () => Awaitable<AgentDefinition | null>;
-  start: (input: unknown) => Awaitable<{
+  start: (
+    input: unknown,
+    identityToken: string
+  ) => Awaitable<{
     created: boolean;
     run: RunSnapshot;
   }>;
@@ -386,7 +389,10 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             return json({ ok: true }, {}, cors);
           }
           if (action === "runs" && request.method === "POST") {
-            const started = await agent.start(await readJson(request));
+            const started = await agent.start(
+              await readJson(request),
+              authorization.slice(7)
+            );
             await directory.registerRun(started.run.id, id);
             return json(
               {

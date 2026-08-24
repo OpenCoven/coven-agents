@@ -27,6 +27,15 @@ export type CredentialRequest = {
 export type CredentialTransport = {
   endpoint: string;
   fetchImpl: (url: string, init: RequestInit) => Promise<Response>;
+  /**
+   * The signed identity claim this run was started with, forwarded on.
+   *
+   * The service token proves the worker may reach the endpoint; it does not
+   * say which tenant it is acting for. Without this the app had to trust the
+   * tenant named in the body, which made one shared token a master key over
+   * every tenant's credential.
+   */
+  identityToken: string;
   serviceToken: string;
 };
 
@@ -44,6 +53,7 @@ export async function fetchTenantCredential(
         tenant: request.tenant,
       }),
       headers: {
+        authorization: `Bearer ${transport.identityToken}`,
         "content-type": "application/json",
         "x-service-token": transport.serviceToken,
       },
