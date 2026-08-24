@@ -123,7 +123,15 @@ async function reap(confirmed: boolean): Promise<number> {
       // biome-ignore lint/performance/noAwaitInLoops: sequential by design, see above.
       await runCmd("git", ["worktree", "remove", row.state.path]);
       if (row.state.branch !== null) {
-        await runCmd("git", ["branch", "-d", row.state.branch]);
+        // `-D`, not `-d`. This repository squash-merges, and a squash leaves
+        // no ancestry, so `-d` refuses every branch it is asked to delete
+        // here — the worktree went and the branch was orphaned, and reap
+        // reported failure after doing most of the work.
+        //
+        // Dropping `-d`'s check loses nothing: `isReapable` already required
+        // `gh` to confirm a merged PR whose head is this branch's tip, which
+        // is the evidence `-d` is unable to find.
+        await runCmd("git", ["branch", "-D", row.state.branch]);
       }
       console.log(`Removed ${label}`);
       removedCount += 1;
