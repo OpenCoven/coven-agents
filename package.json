@@ -27,9 +27,9 @@
     "*": "corepack pnpm run fix --"
   },
   "dependencies": {
-    "@ai-sdk/otel": "^1.0.70",
+    "@ai-sdk/otel": "^1.0.71",
     "@ai-sdk/provider": "^4.0.7",
-    "@ai-sdk/react": "4.0.73",
+    "@ai-sdk/react": "4.0.74",
     "@codemirror/lang-python": "^6.2.1",
     "@codemirror/state": "^6.7.1",
     "@codemirror/theme-one-dark": "^6.1.3",
@@ -44,9 +44,9 @@
     "@streamdown/mermaid": "^1.0.2",
     "@vercel/analytics": "^2.0.1",
     "@vercel/blob": "^0.24.1",
-    "@vercel/functions": "^3.9.3",
+    "@vercel/functions": "^3.9.5",
     "@vercel/otel": "^1.12.0",
-    "ai": "7.0.70",
+    "ai": "7.0.71",
     "bcrypt-ts": "^8.0.1",
     "botid": "^1.5.11",
     "class-variance-authority": "^0.7.1",
