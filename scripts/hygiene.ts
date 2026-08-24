@@ -2,6 +2,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+  isPreservedOnMain,
   isReapable,
   type ReapVerdict,
   type WorktreeState,
@@ -21,9 +22,16 @@ export function isAtRisk(state: WorktreeState): boolean {
   if (state.isPrimary) {
     return false;
   }
-  return (
-    state.dirtyCount > 0 || !state.existsOnOrigin || state.unpushedCommits > 0
-  );
+  if (state.dirtyCount > 0) {
+    return true;
+  }
+  // A merged branch whose remote was deleted has no remote ref and no pushed
+  // commits, yet the work is on main. Reporting it as at risk told the user to
+  // push commits that had already shipped.
+  if (isPreservedOnMain(state)) {
+    return false;
+  }
+  return !state.existsOnOrigin || state.unpushedCommits > 0;
 }
 
 export function describe(row: Row): string {
