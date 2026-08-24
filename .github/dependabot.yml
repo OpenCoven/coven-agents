@@ -46,6 +46,21 @@ updates:
       - dependency-name: shiki
         update-types:
           - version-update:semver-major
+      # Declined 2026-08-24 as #31. `motion` is the successor package to
+      # `framer-motion` and its majors are already ignored above, so taking
+      # framer-motion 13 would split one animation library across two majors
+      # permanently. Remove both entries together, after the eight
+      # framer-motion imports are migrated to motion/react.
+      - dependency-name: framer-motion
+        update-types:
+          - version-update:semver-major
+      # Declined 2026-08-24 as #32. It typechecks and tests clean; the problem
+      # is that CI runs Node 24 while these types describe Node 26, so a
+      # Node-26-only API would pass typecheck and fail at runtime. Remove this
+      # and take the bump in the same change that moves CI to Node 26.
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
     commit-message:
       prefix: "chore(deps)"
 
