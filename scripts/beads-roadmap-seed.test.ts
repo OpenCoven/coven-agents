@@ -1,0 +1,589 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { Bead } from "./beads-project-model";
+import {
+  EPIC_DEFINITIONS,
+  parseSeedJson,
+  runSeed,
+  type SeedDocument,
+  type SeedItem,
+  seedItemSchema,
+  seedSchema,
+} from "./beads-roadmap-seed";
+
+const config = {
+  repositoryRoot:
+    "/Users/buns/Documents/GitHub/OpenCoven/coven-agents/.worktrees/chore-beads-project-board",
+  workspace: "/private/beads",
+};
+
+const externalSeedPath = "/private/coven-agents-roadmap.private.json";
+
+type CommandCall = {
+  args: string[];
+  command: string;
+};
+
+function makeValidSeed(): SeedDocument {
+  const items: SeedItem[] = [];
+
+  EPIC_DEFINITIONS.forEach(({ id, workstream }, epicIndex) => {
+    items.push({
+      acceptanceCriteria:
+        "The epic has a measurable outcome, clear scope, and approved review checkpoints.",
+      dependsOn: [],
+      description:
+        "Coordinate this roadmap area with clear milestones and explicit boundaries. Track progress with measurable outcomes that stay safe for private planning use.",
+      id,
+      metadata: {
+        projectStatus: "Todo",
+        runner: epicIndex % 2 === 0 ? "Shared" : "Control plane",
+        size: "L",
+        workstream,
+      },
+      priority: 1,
+      title: `Plan ${workstream} roadmap`,
+      type: "epic",
+    });
+
+    const childPrefix = id;
+    const previousEpic = EPIC_DEFINITIONS[epicIndex - 1];
+    const twoBackEpic = EPIC_DEFINITIONS[epicIndex - 2];
+
+    items.push(
+      {
+        acceptanceCriteria:
+          "The capability works in the target runner and has a repeatable verification path.",
+        dependsOn: [],
+        description:
+          "Deliver the first scoped capability for this workstream with an explicit success signal. Keep the initial slice ready to start without blocking dependencies.",
+        id: `${childPrefix}.1`,
+        metadata: {
+          projectStatus: "Todo",
+          runner: "Shared",
+          size: "M",
+          workstream,
+        },
+        parent: id,
+        priority: 0,
+        title: `Deliver ${workstream} milestone 1`,
+        type: "feature",
+      },
+      {
+        acceptanceCriteria:
+          "The follow-on task depends only on validated earlier work and can be demoed independently.",
+        dependsOn: [
+          `${childPrefix}.1`,
+          ...(previousEpic ? [`${previousEpic.id}.1`] : []),
+        ],
+        description:
+          "Sequence the second milestone after the first verified capability. Reuse one earlier cross-epic dependency where coordination is required.",
+        id: `${childPrefix}.2`,
+        metadata: {
+          projectStatus: "In Progress",
+          runner: "Cloud",
+          size: "S",
+          workstream,
+        },
+        parent: id,
+        priority: 1,
+        title: `Deliver ${workstream} milestone 2`,
+        type: "task",
+      },
+      {
+        acceptanceCriteria:
+          "The task closes with observable evidence and leaves the workstream ready for the next increment.",
+        dependsOn: [
+          `${childPrefix}.2`,
+          ...(twoBackEpic ? [`${twoBackEpic.id}.2`] : []),
+        ],
+        description:
+          "Complete the third milestone after the second and any required reused capability. Keep the dependency chain forward-only to preserve an acyclic roadmap.",
+        id: `${childPrefix}.3`,
+        metadata: {
+          runner: "Local",
+          size: "M",
+          workstream,
+        },
+        parent: id,
+        priority: 1,
+        title: `Deliver ${workstream} milestone 3`,
+        type: "task",
+      },
+      {
+        acceptanceCriteria:
+          "The bug fix removes the known failure mode and includes a reproducible verification path.",
+        dependsOn: [`${childPrefix}.1`],
+        description:
+          "Address a known reliability gap after the first milestone is present. Keep the work independently verifiable within the same workstream.",
+        id: `${childPrefix}.4`,
+        metadata: {
+          projectStatus: "Todo",
+          runner: "Local",
+          size: "S",
+          workstream,
+        },
+        parent: id,
+        priority: 2,
+        title: `Stabilize ${workstream} milestone 4`,
+        type: "bug",
+      },
+      {
+        acceptanceCriteria:
+          "The closing milestone integrates earlier work and proves the workstream is ready for handoff.",
+        dependsOn: [
+          `${childPrefix}.3`,
+          ...(previousEpic ? [`${previousEpic.id}.4`] : []),
+        ],
+        description:
+          "Finish the fifth milestone after the third milestone and one earlier cross-epic prerequisite. Keep the finish criteria explicit enough for a private seed review.",
+        id: `${childPrefix}.5`,
+        metadata: {
+          projectStatus: "In review",
+          runner: "Cloud",
+          size: "M",
+          workstream,
+        },
+        parent: id,
+        priority: 2,
+        title: `Complete ${workstream} milestone 5`,
+        type: "feature",
+      }
+    );
+  });
+
+  return items;
+}
+
+function makeCurrentBead(item: SeedItem): Bead {
+  return {
+    acceptance_criteria: item.acceptanceCriteria,
+    dependencies: [
+      ...(item.parent
+        ? [
+            {
+              depends_on_id: item.parent,
+              issue_id: item.id,
+              type: "parent-child",
+            },
+          ]
+        : []),
+      ...item.dependsOn.map((dependsOnId) => ({
+        depends_on_id: dependsOnId,
+        issue_id: item.id,
+        type: "blocks",
+      })),
+    ],
+    description: item.description,
+    id: item.id,
+    issue_type: item.type,
+    metadata: item.metadata,
+    parent: item.parent,
+    priority: item.priority,
+    status: "open",
+    title: item.title,
+  };
+}
+
+function makeRunner(
+  currentBeads: Bead[],
+  finalCycles: unknown[] = []
+): {
+  calls: CommandCall[];
+  runCommand: (command: string, args: string[]) => Promise<string>;
+} {
+  const calls: CommandCall[] = [];
+
+  return {
+    calls,
+    runCommand: (command, args) => {
+      calls.push({ args, command });
+
+      if (
+        command === "bd" &&
+        args.join(" ") ===
+          `-C ${config.workspace} --readonly list --all --limit 0 --json`
+      ) {
+        return Promise.resolve(JSON.stringify(currentBeads));
+      }
+
+      if (
+        command === "bd" &&
+        args.join(" ") === `-C ${config.workspace} dep cycles --json`
+      ) {
+        return Promise.resolve(JSON.stringify(finalCycles));
+      }
+
+      return Promise.resolve("");
+    },
+  };
+}
+
+function writeNothing(_line: string): void {
+  // Intentionally silent in tests.
+}
+
+test("exports strict schemas and parses a valid roadmap seed", () => {
+  const seed = makeValidSeed();
+
+  assert.ok(seedItemSchema);
+  assert.ok(seedSchema);
+  assert.equal(parseSeedJson(JSON.stringify(seed)).length, 60);
+});
+
+test("rejects a seed with anything other than 60 records", () => {
+  const seed = makeValidSeed().slice(0, 59);
+
+  assert.throws(
+    () => parseSeedJson(JSON.stringify(seed)),
+    /exactly 60 records/i
+  );
+});
+
+test("rejects a seed with anything other than 10 epics", () => {
+  const seed = makeValidSeed();
+  seed[0] = {
+    ...seed[0],
+    type: "task",
+  };
+
+  assert.throws(() => parseSeedJson(JSON.stringify(seed)), /exactly 10 epics/i);
+});
+
+test("rejects an epic without exactly five direct children", () => {
+  const seed = makeValidSeed();
+  const movedChildIndex = seed.findIndex(
+    (item) => item.id === "coven-agents-product.5"
+  );
+
+  seed[movedChildIndex] = {
+    ...seed[movedChildIndex],
+    parent: undefined,
+  };
+
+  assert.throws(
+    () => parseSeedJson(JSON.stringify(seed)),
+    /five direct children/i
+  );
+});
+
+test("rejects duplicate IDs and invalid hierarchy IDs", () => {
+  const duplicateSeed = makeValidSeed();
+  const lastSeedItem = duplicateSeed.at(-1);
+
+  assert.ok(lastSeedItem);
+  duplicateSeed[duplicateSeed.length - 1] = {
+    ...lastSeedItem,
+    id: "coven-agents-product.1",
+    parent: "coven-agents-product",
+  };
+
+  assert.throws(
+    () => parseSeedJson(JSON.stringify(duplicateSeed)),
+    /duplicate seed id/i
+  );
+
+  const invalidIdSeed = makeValidSeed();
+  invalidIdSeed[1] = {
+    ...invalidIdSeed[1],
+    id: "coven-agents-product.6",
+  };
+
+  assert.throws(
+    () => parseSeedJson(JSON.stringify(invalidIdSeed)),
+    /invalid seed id/i
+  );
+});
+
+test("rejects missing parents, missing dependencies, and self dependencies", () => {
+  const missingParentSeed = makeValidSeed();
+  missingParentSeed[1] = {
+    ...missingParentSeed[1],
+    parent: "coven-agents-missing",
+  };
+
+  assert.throws(
+    () => parseSeedJson(JSON.stringify(missingParentSeed)),
+    /missing parent/i
+  );
+
+  const missingDependencySeed = makeValidSeed();
+  const dependencyIndex = missingDependencySeed.findIndex(
+    (item) => item.id === "coven-agents-cloud.2"
+  );
+  missingDependencySeed[dependencyIndex] = {
+    ...missingDependencySeed[dependencyIndex],
+    dependsOn: ["coven-agents-missing"],
+  };
+
+  assert.throws(
+    () => parseSeedJson(JSON.stringify(missingDependencySeed)),
+    /missing dependency/i
+  );
+
+  const selfDependencySeed = makeValidSeed();
+  const selfDependencyIndex = selfDependencySeed.findIndex(
+    (item) => item.id === "coven-agents-cloud.2"
+  );
+  selfDependencySeed[selfDependencyIndex] = {
+    ...selfDependencySeed[selfDependencyIndex],
+    dependsOn: ["coven-agents-cloud.2"],
+  };
+
+  assert.throws(
+    () => parseSeedJson(JSON.stringify(selfDependencySeed)),
+    /self-dependency/i
+  );
+});
+
+test("rejects dependency cycles and unsafe private content", () => {
+  const cycleSeed = makeValidSeed();
+  const secondIndex = cycleSeed.findIndex(
+    (item) => item.id === "coven-agents-product.2"
+  );
+  const thirdIndex = cycleSeed.findIndex(
+    (item) => item.id === "coven-agents-product.3"
+  );
+  cycleSeed[secondIndex] = {
+    ...cycleSeed[secondIndex],
+    dependsOn: ["coven-agents-product.3"],
+  };
+  cycleSeed[thirdIndex] = {
+    ...cycleSeed[thirdIndex],
+    dependsOn: ["coven-agents-product.2"],
+  };
+
+  assert.throws(() => parseSeedJson(JSON.stringify(cycleSeed)), /cycle/i);
+
+  const unsafeSeed = makeValidSeed();
+  unsafeSeed[1] = {
+    ...unsafeSeed[1],
+    description: "Authorization: hidden-value",
+  };
+
+  assert.throws(() => parseSeedJson(JSON.stringify(unsafeSeed)), /unsafe/i);
+  assert.doesNotMatch(
+    (() => {
+      try {
+        parseSeedJson(JSON.stringify(unsafeSeed));
+        return "";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    })(),
+    /hidden-value/
+  );
+});
+
+test("rejects invalid P0, cross-epic, and ready thresholds", () => {
+  const p0Seed = makeValidSeed();
+  for (const item of p0Seed) {
+    if (
+      item.parent &&
+      Number.parseInt(item.id.split(".").at(-1) ?? "0", 10) <= 2
+    ) {
+      item.priority = 0;
+    }
+  }
+
+  assert.throws(() => parseSeedJson(JSON.stringify(p0Seed)), /p0/i);
+
+  const crossEpicSeed = makeValidSeed();
+  for (const item of crossEpicSeed) {
+    const parentId = item.parent;
+
+    if (parentId) {
+      item.dependsOn = item.dependsOn.filter((dependsOn) =>
+        dependsOn.startsWith(parentId)
+      );
+    }
+  }
+
+  assert.throws(
+    () => parseSeedJson(JSON.stringify(crossEpicSeed)),
+    /cross-epic/i
+  );
+
+  const readySeed = makeValidSeed();
+  for (const item of readySeed) {
+    if (item.parent && item.dependsOn.length === 0) {
+      item.dependsOn = [item.parent];
+    }
+  }
+
+  assert.throws(() => parseSeedJson(JSON.stringify(readySeed)), /ready/i);
+});
+
+test("preview prints IDs and counts only and performs no writes", async () => {
+  const seed = makeValidSeed();
+  const output: string[] = [];
+  const { calls, runCommand } = makeRunner([]);
+
+  await runSeed(["preview", externalSeedPath], config, {
+    readFile: async () => JSON.stringify(seed),
+    runCommand,
+    write: (line) => {
+      output.push(line);
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.command, "bd");
+  assert.match(output.join("\n"), /records: 60/);
+  assert.match(output.join("\n"), /create count: 60/);
+  assert.match(output.join("\n"), /exact count: 0/);
+  assert.match(output.join("\n"), /coven-agents-product/);
+  assert.doesNotMatch(output.join("\n"), /Plan Product roadmap/);
+  assert.doesNotMatch(output.join("\n"), /clear milestones/);
+  assert.doesNotMatch(output.join("\n"), /measurable outcome/);
+});
+
+test("apply is an exact idempotent no-op when every bead already matches", async () => {
+  const seed = makeValidSeed();
+  const { calls, runCommand } = makeRunner(seed.map(makeCurrentBead));
+
+  await runSeed(["apply", externalSeedPath], config, {
+    readFile: async () => JSON.stringify(seed),
+    runCommand,
+    write: writeNothing,
+  });
+
+  assert.deepEqual(
+    calls.map((call) => call.args.join(" ")),
+    [
+      `-C ${config.workspace} --readonly list --all --limit 0 --json`,
+      `-C ${config.workspace} dep cycles --json`,
+    ]
+  );
+});
+
+test("apply fails before writes when an existing bead differs", async () => {
+  const seed = makeValidSeed();
+  const current = seed.map(makeCurrentBead);
+  current[0] = {
+    ...current[0],
+    title: "Existing private title that must stay hidden",
+  };
+  const { calls, runCommand } = makeRunner(current);
+
+  await assert.rejects(
+    () =>
+      runSeed(["apply", externalSeedPath], config, {
+        readFile: async () => JSON.stringify(seed),
+        runCommand,
+        write: writeNothing,
+      }),
+    /differs/i
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0]?.args.join(" "),
+    `-C ${config.workspace} --readonly list --all --limit 0 --json`
+  );
+  await assert.rejects(
+    () =>
+      runSeed(["apply", externalSeedPath], config, {
+        readFile: async () => JSON.stringify(seed),
+        runCommand,
+        write: writeNothing,
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      !error.message.includes("Existing private title that must stay hidden")
+  );
+});
+
+test("apply creates epics first, then children, then dependency edges in sorted order", async () => {
+  const seed = makeValidSeed();
+  const { calls, runCommand } = makeRunner([]);
+
+  await runSeed(["apply", externalSeedPath], config, {
+    readFile: async () => JSON.stringify(seed),
+    runCommand,
+    write: writeNothing,
+  });
+
+  const createCalls = calls.filter((call) => call.args[2] === "create");
+  const depCalls = calls.filter(
+    (call) => call.args[2] === "dep" && call.args[3] === "add"
+  );
+
+  assert.equal(createCalls.length, 60);
+  assert.equal(depCalls.length > 0, true);
+
+  const createdIds = createCalls.map((call) => {
+    const idIndex = call.args.indexOf("--id");
+    return call.args[idIndex + 1];
+  });
+  const epicIds = EPIC_DEFINITIONS.map((definition) => definition.id).sort();
+  const childIds = seed
+    .filter((item) => item.parent)
+    .map((item) => item.id)
+    .sort();
+
+  assert.deepEqual(createdIds.slice(0, 10), epicIds);
+  assert.deepEqual(createdIds.slice(10), childIds);
+
+  const firstDependencyCallIndex = calls.findIndex(
+    (call) => call.args[2] === "dep" && call.args[3] === "add"
+  );
+  const lastCreateCallIndex = calls.findLastIndex(
+    (call) => call.args[2] === "create"
+  );
+
+  assert.equal(firstDependencyCallIndex > lastCreateCallIndex, true);
+
+  const dependencyPairs = depCalls.map((call) => ({
+    blocker: call.args[5],
+    child: call.args[4],
+  }));
+  const sortedPairs = [...dependencyPairs].sort(
+    (left, right) =>
+      left.child.localeCompare(right.child) ||
+      left.blocker.localeCompare(right.blocker)
+  );
+
+  assert.deepEqual(dependencyPairs, sortedPairs);
+});
+
+test("apply rejects a non-empty final dependency cycle check", async () => {
+  const seed = makeValidSeed();
+  const { runCommand } = makeRunner([], [["coven-agents-product.2"]]);
+
+  await assert.rejects(
+    () =>
+      runSeed(["apply", externalSeedPath], config, {
+        readFile: async () => JSON.stringify(seed),
+        runCommand,
+        write: writeNothing,
+      }),
+    /cycle/i
+  );
+});
+
+test("rejects invalid and in-repository seed paths", async () => {
+  const deps = {
+    readFile: async () => JSON.stringify(makeValidSeed()),
+    runCommand: async () => JSON.stringify([]),
+    write: writeNothing,
+  };
+
+  await assert.rejects(() => runSeed(["preview"], config, deps), /usage/i);
+  await assert.rejects(
+    () => runSeed(["preview", "relative.json"], config, deps),
+    /absolute/i
+  );
+  await assert.rejects(
+    () =>
+      runSeed(
+        [
+          "preview",
+          `${config.repositoryRoot}/.gitignored/private-roadmap.json`,
+        ],
+        config,
+        deps
+      ),
+    /outside the repository root/i
+  );
+});

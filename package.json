@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "beads:seed": "tsx scripts/beads-roadmap-seed.ts",
+    "beads:sync": "tsx scripts/beads-project-sync.ts",
     "build": "next build",
     "check": "ultracite check",
     "db:check": "drizzle-kit check",
