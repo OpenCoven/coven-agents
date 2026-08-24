@@ -52,6 +52,16 @@ pnpm hygiene reap     # dry run
 pnpm hygiene reap --yes
 ```
 
-`reap` only removes worktrees that are clean, pushed, on origin, and confirmed
-merged by `gh`. It refuses everything else. If it refuses something you expect
-it to remove, the branch is not actually merged — check the PR, do not force it.
+`reap` only removes worktrees with no uncommitted files whose work is provably
+somewhere other than your machine. That means either the branch is on origin
+with nothing unpushed, or `gh` confirms a merged PR whose head is the commit
+this worktree still points at. It refuses everything else. If it refuses
+something you expect it to remove, the branch is not actually merged — check
+the PR, do not force it.
+
+The second case is the normal one after a merge. The hygiene workflow deletes
+the remote branch within seconds, and squashing rewrites the SHA, so a merged
+branch has no remote ref and its commits look unpushed. That is not lost work
+and `reap` will clear it. Commit anything *after* the merge, though, and the
+tip no longer matches what `gh` merged — `reap` protects it and `pnpm hygiene`
+reports it AT RISK until you push it.

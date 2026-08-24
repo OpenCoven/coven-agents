@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { describe } from "./hygiene";
+import { describe, isAtRisk } from "./hygiene";
 import { isReapable } from "./hygiene-core";
 import { collectState, parseWorktreeList } from "./hygiene-git";
 
@@ -67,7 +67,10 @@ test("a clean, pushed, merged worktree is reported reapable", async () => {
     sh(["worktree", "add", "-b", "feat/done", join(root, "wt-done")], clone);
     sh(["push", "-u", "origin", "feat/done"], join(root, "wt-done"));
 
-    const states = await collectState(async () => true, clone);
+    const states = await collectState(
+      async () => ({ headSha: null, merged: true }),
+      clone
+    );
     const target = states.find((s) => s.branch === "feat/done");
 
     assert.ok(target, "feat/done worktree must be discovered");
@@ -90,7 +93,10 @@ test("an unpushed branch is never reapable", async () => {
     sh(["add", "."], wt);
     sh(["commit", "-m", "unpushed work"], wt);
 
-    const states = await collectState(async () => true, clone);
+    const states = await collectState(
+      async () => ({ headSha: null, merged: true }),
+      clone
+    );
     const target = states.find((s) => s.branch === "feat/unpushed");
 
     assert.ok(target);
@@ -114,7 +120,10 @@ test("a dirty worktree is never reapable", async () => {
     sh(["push", "-u", "origin", "feat/dirty"], wt);
     writeFileSync(join(wt, "scratch.txt"), "uncommitted\n");
 
-    const states = await collectState(async () => true, clone);
+    const states = await collectState(
+      async () => ({ headSha: null, merged: true }),
+      clone
+    );
     const target = states.find((s) => s.branch === "feat/dirty");
 
     assert.ok(target);
@@ -129,7 +138,10 @@ test("the primary checkout is never reapable", async () => {
   const { clone, root } = makeSandbox();
 
   try {
-    const states = await collectState(async () => true, clone);
+    const states = await collectState(
+      async () => ({ headSha: null, merged: true }),
+      clone
+    );
     const primary = states.find((s) => s.isPrimary);
 
     assert.ok(primary, "primary worktree must be discovered");
@@ -148,7 +160,10 @@ test("status detail for the primary worktree reads 'current checkout', not reap 
   const { clone, root } = makeSandbox();
 
   try {
-    const states = await collectState(async () => true, clone);
+    const states = await collectState(
+      async () => ({ headSha: null, merged: true }),
+      clone
+    );
     const primary = states.find((s) => s.isPrimary);
     assert.ok(primary, "primary worktree must be discovered");
 
@@ -158,6 +173,88 @@ test("status detail for the primary worktree reads 'current checkout', not reap 
     assert.ok(line.includes("current checkout"));
     assert.ok(!line.includes("primary worktree"));
     assert.ok(!line.includes("not merged into main"));
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test("a merged worktree survives the remote branch being deleted", async () => {
+  // Reproduces the sequence that broke reaping in practice: merge a PR, let
+  // the hygiene workflow delete the remote branch, and the local commits are
+  // suddenly unreachable from every remote ref.
+  const { clone, root } = makeSandbox();
+
+  try {
+    const wt = join(root, "wt-merged");
+    sh(["worktree", "add", "-b", "feat/merged", wt], clone);
+    writeFileSync(join(wt, "shipped.txt"), "shipped\n");
+    sh(["add", "."], wt);
+    sh(["commit", "-m", "work that later merges"], wt);
+    sh(["push", "-u", "origin", "feat/merged"], wt);
+
+    const headSha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: wt,
+      encoding: "utf8",
+    }).trim();
+
+    // The server plane deletes the branch once the PR merges.
+    sh(["push", "origin", "--delete", "feat/merged"], wt);
+
+    const states = await collectState(
+      async () => ({ headSha, merged: true }),
+      clone
+    );
+    const target = states.find((s) => s.branch === "feat/merged");
+
+    assert.ok(target, "feat/merged worktree must be discovered");
+    assert.equal(target.existsOnOrigin, false, "remote branch is gone");
+    assert.ok(target.unpushedCommits > 0, "commits unreachable from remotes");
+    assert.equal(target.headSha, headSha);
+
+    assert.equal(
+      isReapable(target).safe,
+      true,
+      `merged worktree must be reapable, got: ${isReapable(target).reasons.join(", ")}`
+    );
+    assert.equal(isAtRisk(target), false, "merged work is not at risk");
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test("a commit made after the merge is protected, not reaped", async () => {
+  const { clone, root } = makeSandbox();
+
+  try {
+    const wt = join(root, "wt-after");
+    sh(["worktree", "add", "-b", "feat/after", wt], clone);
+    writeFileSync(join(wt, "shipped.txt"), "shipped\n");
+    sh(["add", "."], wt);
+    sh(["commit", "-m", "work that later merges"], wt);
+    sh(["push", "-u", "origin", "feat/after"], wt);
+
+    const mergedSha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: wt,
+      encoding: "utf8",
+    }).trim();
+
+    sh(["push", "origin", "--delete", "feat/after"], wt);
+
+    // New work committed after the PR merged. It exists only here.
+    writeFileSync(join(wt, "later.txt"), "not yet shipped\n");
+    sh(["add", "."], wt);
+    sh(["commit", "-m", "work added after the merge"], wt);
+
+    const states = await collectState(
+      async () => ({ headSha: mergedSha, merged: true }),
+      clone
+    );
+    const target = states.find((s) => s.branch === "feat/after");
+
+    assert.ok(target);
+    assert.notEqual(target.headSha, mergedSha, "tip moved past the merge");
+    assert.equal(isReapable(target).safe, false, "later work must be kept");
+    assert.equal(isAtRisk(target), true, "later work is genuinely at risk");
   } finally {
     rmSync(root, { force: true, recursive: true });
   }

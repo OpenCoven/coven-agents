@@ -80,11 +80,21 @@ async function countUnpushed(path: string, branch: string): Promise<number> {
   return Number.isNaN(parsed) ? 1 : parsed;
 }
 
+export type MergeResult = {
+  /** Head SHA the merged PR carried, so a later commit can be told apart. */
+  headSha: string | null;
+  merged: boolean;
+};
+
 /**
  * Merge state comes from `gh`, never from local refs. The server plane is the
  * source of truth for what is merged; the local plane only ever asks.
+ *
+ * `headRefOid` matters as much as the merged flag: once the remote branch is
+ * deleted it is the only remaining proof that a local commit already reached
+ * main.
  */
-export async function isMergedViaGh(branch: string): Promise<boolean> {
+export async function isMergedViaGh(branch: string): Promise<MergeResult> {
   try {
     const { stdout } = await run("gh", [
       "pr",
@@ -94,18 +104,29 @@ export async function isMergedViaGh(branch: string): Promise<boolean> {
       "--head",
       branch,
       "--json",
-      "number",
+      "headRefOid,number",
       "--limit",
       "1",
     ]);
-    const parsed = JSON.parse(stdout) as { number: number }[];
-    return parsed.length > 0;
+    const parsed = JSON.parse(stdout) as {
+      headRefOid?: string;
+      number: number;
+    }[];
+    const pr = parsed.at(0);
+    if (pr === undefined) {
+      return { headSha: null, merged: false };
+    }
+    return { headSha: pr.headRefOid ?? null, merged: true };
   } catch {
-    return false;
+    return { headSha: null, merged: false };
   }
 }
 
-export type MergeChecker = (branch: string) => Promise<boolean>;
+export type MergeChecker = (branch: string) => Promise<MergeResult>;
+
+async function readHeadSha(path: string): Promise<string | null> {
+  return await tryGit(["rev-parse", "HEAD"], path);
+}
 
 /**
  * `checkMerged` is injectable so integration tests can exercise real git
@@ -127,29 +148,34 @@ export async function collectState(
           branch: null,
           dirtyCount: await countDirty(wt.path),
           existsOnOrigin: false,
+          headSha: await readHeadSha(wt.path),
           isLocked: wt.isLocked,
           isPrimary: wt.isPrimary,
+          mergedHeadSha: null,
           mergedIntoMain: false,
           path: wt.path,
           unpushedCommits: 0,
         };
       }
 
-      const [dirtyCount, onOrigin, unpushedCommits, mergedIntoMain] =
+      const [dirtyCount, onOrigin, unpushedCommits, merge, headSha] =
         await Promise.all([
           countDirty(wt.path),
           existsOnOrigin(wt.branch, cwd),
           countUnpushed(wt.path, wt.branch),
           checkMerged(wt.branch),
+          readHeadSha(wt.path),
         ]);
 
       return {
         branch: wt.branch,
         dirtyCount,
         existsOnOrigin: onOrigin,
+        headSha,
         isLocked: wt.isLocked,
         isPrimary: wt.isPrimary,
-        mergedIntoMain,
+        mergedHeadSha: merge.headSha,
+        mergedIntoMain: merge.merged,
         path: wt.path,
         unpushedCommits,
       };
