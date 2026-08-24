@@ -21,7 +21,7 @@ import {
   runSnapshotSchema,
   runStatusSchema,
   startRunInputSchema,
-} from "./index.js";
+} from "./index";
 
 const contractFixture = JSON.parse(
   readFileSync(

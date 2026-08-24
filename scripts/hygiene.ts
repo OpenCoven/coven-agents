@@ -2,6 +2,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+  branchDeleteFlag,
   isPreservedOnMain,
   isReapable,
   type ReapVerdict,
@@ -123,7 +124,12 @@ async function reap(confirmed: boolean): Promise<number> {
       // biome-ignore lint/performance/noAwaitInLoops: sequential by design, see above.
       await runCmd("git", ["worktree", "remove", row.state.path]);
       if (row.state.branch !== null) {
-        await runCmd("git", ["branch", "-d", row.state.branch]);
+        // Flag choice is a safety decision, so it lives with the predicate.
+        await runCmd("git", [
+          "branch",
+          branchDeleteFlag(row.state),
+          row.state.branch,
+        ]);
       }
       console.log(`Removed ${label}`);
       removedCount += 1;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sanitizeEvidenceText } from "./index.js";
+import { sanitizeEvidenceText } from "./index";
 
 test("redacts authorization, credential assignments, and provider keys while preserving useful evidence", () => {
   const input = [
