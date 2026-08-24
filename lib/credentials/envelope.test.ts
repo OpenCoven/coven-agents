@@ -59,3 +59,18 @@ test("tampering with the ciphertext is detected", async () => {
     )
   );
 });
+
+test("every credential gets a fresh initialisation vector", async () => {
+  // A fixed IV is survivable only while every credential also has its own
+  // data key: AES-GCM fails catastrophically when key AND IV repeat together.
+  // Pinning it here means a later change that shares a DEK cannot quietly
+  // turn a static IV into a key-recovery bug.
+  const kek = await generateKek();
+
+  const sealed = await Promise.all(
+    Array.from({ length: 20 }, () => encryptCredential("same-value", kek))
+  );
+  const ivs = new Set(sealed.map((entry) => entry.iv));
+
+  assert.equal(ivs.size, 20, "initialisation vectors must not repeat");
+});

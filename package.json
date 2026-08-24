@@ -20,7 +20,7 @@
     "prepare": "husky",
     "start": "next start",
     "test": "export PLAYWRIGHT=True && pnpm exec playwright test",
-    "test:unit": "tsx --test scripts/*.test.ts && tsx --test lib/agents/*.test.ts && pnpm --filter @opencoven/agent-contracts test && pnpm --filter @opencoven/harness test && pnpm --filter @opencoven/local-runner test && pnpm --filter @opencoven/cloud-runner test",
+    "test:unit": "tsx --test scripts/*.test.ts && tsx --conditions=react-server --test lib/agents/*.test.ts lib/credentials/*.test.ts lib/db/*.test.ts && pnpm --filter @opencoven/agent-contracts test && pnpm --filter @opencoven/harness test && pnpm --filter @opencoven/local-runner test && pnpm --filter @opencoven/cloud-runner test",
     "typecheck": "tsc --noEmit && pnpm -r typecheck"
   },
   "lint-staged": {
