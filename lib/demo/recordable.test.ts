@@ -69,4 +69,14 @@ test("allowing failure does not bypass repository or backend checks", () => {
       }),
     /refus.*demo-workspace/i
   );
+  assert.throws(
+    () =>
+      assertRecordable({
+        ...validOptions,
+        allowFailure: true,
+        backend: "local",
+        status: "failed",
+      }),
+    /cloud/i
+  );
 });
