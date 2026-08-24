@@ -36,6 +36,9 @@ type FetchLike = (
   init?: RequestInit
 ) => Promise<Response>;
 type Sleep = (milliseconds: number, signal: AbortSignal) => Promise<void>;
+type FetchRunnerOptions = {
+  ambiguousOnAbort?: boolean;
+};
 
 export type CaptureEnvironment = {
   identityClaims: Omit<RunnerClaims, "exp">;
@@ -100,6 +103,13 @@ class RunnerTransportError extends Error {
       options
     );
     this.name = "RunnerTransportError";
+  }
+}
+
+class PotentialOrphanError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "PotentialOrphanError";
   }
 }
 
@@ -240,7 +250,8 @@ async function fetchRunner(
   connection: RunnerConnection,
   path: string,
   init: RequestInit,
-  signal: AbortSignal
+  signal: AbortSignal,
+  options: FetchRunnerOptions = {}
 ): Promise<Response> {
   const method = init.method ?? "GET";
   let identityToken: string;
@@ -270,7 +281,7 @@ async function fetchRunner(
       signal,
     });
   } catch (error) {
-    if (signal.aborted) {
+    if (signal.aborted && !options.ambiguousOnAbort) {
       throw abortError(signal);
     }
     // biome-ignore lint/style/useErrorCause: RunnerTransportError forwards this cause through its constructor.
@@ -445,16 +456,16 @@ async function createTemporaryAgent(
       connection,
       "/api/agents",
       { body: JSON.stringify(input), method: "POST" },
-      signal
+      signal,
+      { ambiguousOnAbort: true }
     );
   } catch (error) {
     if (!(error instanceof RunnerTransportError)) {
       throw error;
     }
-    const recoveredId = await recoverAmbiguousCreate(
+    const recoveredId = await recoverAmbiguousCreateForCleanup(
       connection,
-      temporaryName,
-      signal
+      temporaryName
     );
     retainAgentId(recoveredId);
     throw new Error(
@@ -466,10 +477,9 @@ async function createTemporaryAgent(
   try {
     envelope = await readJson(response, "agent creation");
   } catch (error) {
-    const recoveredId = await recoverAmbiguousCreate(
+    const recoveredId = await recoverAmbiguousCreateForCleanup(
       connection,
-      temporaryName,
-      signal
+      temporaryName
     );
     retainAgentId(recoveredId);
     throw new Error(
@@ -490,6 +500,29 @@ async function createTemporaryAgent(
   return parsed.data.agent.id;
 }
 
+async function recoverAmbiguousCreateForCleanup(
+  connection: RunnerConnection,
+  temporaryName: string
+): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () =>
+      controller.abort(
+        new Error("Temporary agent recovery exceeded its timeout.")
+      ),
+    CLEANUP_TIMEOUT_MS
+  );
+  try {
+    return await recoverAmbiguousCreate(
+      connection,
+      temporaryName,
+      controller.signal
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function recoverAmbiguousCreate(
   connection: RunnerConnection,
   temporaryName: string,
@@ -500,7 +533,7 @@ async function recoverAmbiguousCreate(
     const response = await fetchRunner(connection, "/api/agents", {}, signal);
     envelope = await readJson(response, "ambiguous agent creation recovery");
   } catch (error) {
-    throw new Error(
+    throw new PotentialOrphanError(
       "Potential orphan: agent creation response was lost and recovery listing failed.",
       { cause: error }
     );
@@ -508,7 +541,7 @@ async function recoverAmbiguousCreate(
 
   const parsed = agentsEnvelopeSchema.safeParse(envelope);
   if (!parsed.success) {
-    throw new Error(
+    throw new PotentialOrphanError(
       "Potential orphan: agent creation response was lost and recovery listing failed."
     );
   }
@@ -516,12 +549,12 @@ async function recoverAmbiguousCreate(
     (agent) => agent.name === temporaryName
   );
   if (matches.length === 0) {
-    throw new Error(
+    throw new PotentialOrphanError(
       "Potential orphan: agent creation response was lost and no exact temporary name match was found."
     );
   }
   if (matches.length !== 1) {
-    throw new Error(
+    throw new PotentialOrphanError(
       "Potential orphan: agent creation response was lost and multiple exact temporary name matches were found; cleanup was refused."
     );
   }
@@ -756,9 +789,12 @@ export async function captureRun(
     const result = await fetchResult(connection, runId, controller.signal);
     captured = { arrivals, result, secrets: connection.secrets };
   } catch (error) {
-    primaryError = controller.signal.aborted
-      ? abortError(controller.signal)
-      : error;
+    primaryError =
+      error instanceof PotentialOrphanError
+        ? error
+        : controller.signal.aborted
+          ? abortError(controller.signal)
+          : error;
   } finally {
     clearTimeout(timeout);
   }

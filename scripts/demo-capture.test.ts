@@ -1178,6 +1178,168 @@ test("surfaces a potential orphan when the recovery listing payload is malformed
   assert.deepEqual(calls, ["POST /api/agents", "GET /api/agents"]);
 });
 
+function captureWithTimedOutCreate(options: {
+  listResponse: () => Response | Promise<Response>;
+}) {
+  const authorizations: string[] = [];
+  const calls: { method: string; path: string; signalAborted: boolean }[] = [];
+  let committed = false;
+  let mintCount = 0;
+  const request = async (
+    input: string | URL | Request,
+    init: RequestInit = {}
+  ): Promise<Response> => {
+    const path = new URL(String(input)).pathname;
+    const method = init.method ?? "GET";
+    const { signal } = init;
+    calls.push({
+      method,
+      path,
+      signalAborted: signal?.aborted ?? false,
+    });
+    authorizations.push(new Headers(init.headers).get("authorization") ?? "");
+
+    if (path === "/api/agents" && method === "POST") {
+      committed = true;
+      return await new Promise<Response>((_resolve, reject) => {
+        const fail = () =>
+          reject(
+            new Error(
+              `${RUNNER_TOKEN} ${IDENTITY_TOKEN} ${RECORDING_CREDENTIAL}`
+            )
+          );
+        if (signal?.aborted) {
+          fail();
+          return;
+        }
+        signal?.addEventListener("abort", fail, { once: true });
+      });
+    }
+    if (path === "/api/agents" && method === "GET") {
+      assert.equal(committed, true);
+      return await options.listResponse();
+    }
+    if (path === `/api/agents/${AGENT_ID}` && method === "DELETE") {
+      return Response.json({ ok: true });
+    }
+    return Response.json({ unexpected: path }, { status: 500 });
+  };
+
+  const pending = captureRun(
+    {
+      repository: "OpenCoven/demo-workspace",
+      task: "Add a parser test.",
+    },
+    {
+      environment: recordingEnvironment({
+        DEMO_RECORDING_TIMEOUT_MS: "1",
+      }),
+      mintIdentity: () => {
+        mintCount += 1;
+        return Promise.resolve(`${IDENTITY_TOKEN}-${mintCount}`);
+      },
+      randomUUID: () => OPERATION_ID,
+      request,
+    }
+  );
+
+  return { authorizations, calls, pending };
+}
+
+test("recovers and deletes an exact agent after create commits then times out", async () => {
+  const temporaryName = `demo-record-${OPERATION_ID}`;
+  const { authorizations, calls, pending } = captureWithTimedOutCreate({
+    listResponse: () =>
+      Response.json({ agents: [agentDefinition(temporaryName)] }),
+  });
+
+  await assert.rejects(pending, (error: Error) => {
+    assert.match(error.message, /timed out/i);
+    return assertNoConfiguredSecrets(error);
+  });
+  assert.deepEqual(calls, [
+    { method: "POST", path: "/api/agents", signalAborted: false },
+    { method: "GET", path: "/api/agents", signalAborted: false },
+    {
+      method: "DELETE",
+      path: `/api/agents/${AGENT_ID}`,
+      signalAborted: false,
+    },
+  ]);
+  assert.deepEqual(authorizations, [
+    `Bearer ${IDENTITY_TOKEN}-1`,
+    `Bearer ${IDENTITY_TOKEN}-2`,
+    `Bearer ${IDENTITY_TOKEN}-3`,
+  ]);
+});
+
+test("surfaces a safe potential orphan when timed-out create has no exact match", async () => {
+  const { calls, pending } = captureWithTimedOutCreate({
+    listResponse: () => Response.json({ agents: [] }),
+  });
+
+  await assert.rejects(pending, (error: Error) => {
+    assert.match(error.message, /potential orphan.*no exact/i);
+    return assertNoConfiguredSecrets(error);
+  });
+  assert.deepEqual(calls, [
+    { method: "POST", path: "/api/agents", signalAborted: false },
+    { method: "GET", path: "/api/agents", signalAborted: false },
+  ]);
+});
+
+test("surfaces a safe potential orphan when timed-out create has multiple exact matches", async () => {
+  const temporaryName = `demo-record-${OPERATION_ID}`;
+  const { calls, pending } = captureWithTimedOutCreate({
+    listResponse: () =>
+      Response.json({
+        agents: [
+          agentDefinition(temporaryName),
+          agentDefinition(
+            temporaryName,
+            "9c1b7d2f-5a6b-4c90-8f1a-0f4e1f4d4a2e"
+          ),
+        ],
+      }),
+  });
+
+  await assert.rejects(pending, (error: Error) => {
+    assert.match(error.message, /potential orphan.*multiple exact/i);
+    return assertNoConfiguredSecrets(error);
+  });
+  assert.deepEqual(calls, [
+    { method: "POST", path: "/api/agents", signalAborted: false },
+    { method: "GET", path: "/api/agents", signalAborted: false },
+  ]);
+});
+
+test("surfaces a safe potential orphan when timed-out create recovery fails", async () => {
+  const { calls, pending } = captureWithTimedOutCreate({
+    listResponse: () =>
+      Response.json(
+        {
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          error: {
+            code: "list_failed",
+            message: `${RUNNER_TOKEN} ${IDENTITY_TOKEN} ${SIGNING_KEY}`,
+            retryable: true,
+          },
+          requestId: RUN_ID,
+        },
+        { status: 500 }
+      ),
+  });
+
+  await assert.rejects(pending, (error: Error) => {
+    assert.match(error.message, /potential orphan.*recovery listing failed/i);
+    return assertNoConfiguredSecrets(error);
+  });
+  assert.deepEqual(calls, [
+    { method: "POST", path: "/api/agents", signalAborted: false },
+    { method: "GET", path: "/api/agents", signalAborted: false },
+  ]);
+});
+
 test("surfaces cleanup failure while preserving the primary failure context", async () => {
   // biome-ignore lint/suspicious/useAwait: injected fetch matches the native asynchronous fetch contract.
   const request = async (
