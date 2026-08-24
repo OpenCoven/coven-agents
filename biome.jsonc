@@ -30,6 +30,19 @@
         "noUnnecessaryConditions": "off"
       },
       "style": {
+        // The demo/subscriber database ban is a type, and a type is only as
+        // strong as the absence of a way around it. Importing the raw handle
+        // bypasses `databaseFor(session: SubscriberSession)` entirely, so the
+        // import itself has to be blocked. Exempted below: the
+        // service-to-service credential route, which has no session to gate on.
+        "noRestrictedImports": {
+          "level": "error",
+          "options": {
+            "paths": {
+              "@/lib/db/queries": { "importNames": ["db"] }
+            }
+          }
+        },
         "noMagicNumbers": "off",
         "noNestedTernary": "off",
         "useConsistentTypeDefinitions": "off"
@@ -53,5 +66,17 @@
         "useTopLevelRegex": "off"
       }
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["app/api/internal/credential/route.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": "off"
+          }
+        }
+      }
+    }
+  ]
 }

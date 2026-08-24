@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { toSession } from "@/lib/session";
+import { isSubscriber, toSession } from "@/lib/session";
 import { databaseFor } from "./access";
 
 test("a subscriber session yields a database handle", () => {
   const session = toSession({ id: "user-1", type: "subscriber" });
 
-  assert.ok(databaseFor(session as never));
+  // Narrowed rather than cast: `as never` would sidestep the very
+  // compile-time guarantee this module exists to provide, so the call would
+  // typecheck for the wrong reason.
+  assert.ok(isSubscriber(session));
+  if (isSubscriber(session)) {
+    assert.ok(databaseFor(session));
+  }
 });
 
 test("a demo session is refused at runtime as well as at compile time", () => {

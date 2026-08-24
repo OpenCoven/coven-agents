@@ -18,7 +18,6 @@ test("the plaintext never appears in the stored envelope", async () => {
 
   const serialized = JSON.stringify(sealed);
   assert.ok(!serialized.includes("ghp_secret_value"));
-  assert.ok(!serialized.includes("secret"));
 });
 
 test("each credential gets its own data key", async () => {

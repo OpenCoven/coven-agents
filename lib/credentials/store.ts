@@ -34,6 +34,16 @@ export function credentialWhere(tenant: string, harnessId: string) {
  * exactly one credential for the duration of one run.
  */
 
+/**
+ * The imported KEK, cached against the raw value it came from.
+ *
+ * Importing on every call re-decodes and re-imports a deployment-static key on
+ * a hot path. Keying the cache on the raw value rather than caching
+ * unconditionally means a rotated KEK is picked up instead of served stale —
+ * the same reason the worker keys its verify-key cache on the SPKI string.
+ */
+let kekCache: { imported: Promise<CryptoKey>; raw: string } | null = null;
+
 function kek(): Promise<CryptoKey> {
   const raw = process.env.CREDENTIAL_KEK;
   if (!raw) {
@@ -42,7 +52,12 @@ function kek(): Promise<CryptoKey> {
         "key-encryption key — there is no default to fall back to."
     );
   }
-  return importKek(raw);
+  if (kekCache?.raw === raw) {
+    return kekCache.imported;
+  }
+  const imported = importKek(raw);
+  kekCache = { imported, raw };
+  return imported;
 }
 
 export async function putCredential(

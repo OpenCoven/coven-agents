@@ -41,7 +41,18 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  const body = await request.json();
+  // A malformed body is a deterministic 400, not an unhandled throw surfacing
+  // as a 500. The caller is the worker, and it can only tell "I asked wrongly"
+  // from "the app is broken" if those are different statuses.
+  let body: { harnessId?: unknown; tenant?: unknown } | null;
+  try {
+    body = (await request.json()) as {
+      harnessId?: unknown;
+      tenant?: unknown;
+    } | null;
+  } catch {
+    return Response.json({ error: "invalid_request" }, { status: 400 });
+  }
   const { tenant, harnessId } = body ?? {};
 
   if (typeof tenant !== "string" || typeof harnessId !== "string") {
