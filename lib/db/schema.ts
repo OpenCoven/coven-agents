@@ -21,6 +21,14 @@ export const user = pgTable("User", {
   isAnonymous: boolean("isAnonymous").notNull().default(false),
   name: text("name"),
   password: varchar("password", { length: 64 }),
+  /**
+   * When this user's subscription lapses. Null means never subscribed.
+   *
+   * A timestamp rather than a boolean because a cancelled subscription runs to
+   * the end of its paid period, which a boolean cannot express. Billing will
+   * set this; until then it is set by `pnpm subscription`.
+   */
+  subscribedUntil: timestamp("subscribedUntil"),
   updatedAt: timestamp("updatedAt").notNull().defaultNow(),
 });
 

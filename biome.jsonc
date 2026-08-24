@@ -69,7 +69,14 @@
   },
   "overrides": [
     {
-      "includes": ["app/api/internal/credential/route.ts"],
+      // Both of these reach the database without a session to gate on: the
+      // service-to-service credential route, whose caller is the worker, and
+      // the admin CLI, which has no request at all. Each exemption is a hole
+      // in the rule, so they are listed individually rather than by glob.
+      "includes": [
+        "app/api/internal/credential/route.ts",
+        "scripts/subscription.ts"
+      ],
       "linter": {
         "rules": {
           "style": {
