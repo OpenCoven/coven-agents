@@ -6,6 +6,7 @@ import {
   type AgentDefinition,
   commandEvidenceSchema,
   fileEvidenceSchema,
+  sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
 import {
   cloudFiberKey,
@@ -40,31 +41,34 @@ const agent: AgentDefinition = {
 
 test("normalizes oversized cloud command evidence through the strict contract schema", () => {
   const secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
-  const normalized = normalizeCloudCommandEvidence([
-    {
-      command: `deploy --api-key header-api-key ${secret}`,
-      exitCode: 0,
-      stderr: "Authorization: Bearer bearer-command-value",
-      stdout:
-        "preflight complete\nSERVICE_TOKEN=service-token-value\npostflight complete",
-      timestamp: "2026-08-20T20:00:00.000Z",
-    },
-    {
-      command: "x".repeat(AGENT_RUNNER_LIMITS.maxCommandLength + 50),
-      exitCode: 1.5,
-      stderr: "y".repeat(AGENT_RUNNER_LIMITS.maxEventOutputLength + 20),
-      stdout: "z".repeat(AGENT_RUNNER_LIMITS.maxEventOutputLength + 20),
-      timestamp: "not-a-date",
-    },
-    { command: null, stdout: 42 },
-    ...Array.from({ length: 11 }, () => ({
-      command: "capture output",
-      exitCode: 0,
-      stderr: "e".repeat(AGENT_RUNNER_LIMITS.maxEventOutputLength),
-      stdout: "o".repeat(AGENT_RUNNER_LIMITS.maxEventOutputLength),
-      timestamp: "2026-08-20T20:00:01.000Z",
-    })),
-  ]);
+  const normalized = normalizeCloudCommandEvidence(
+    [
+      {
+        command: `deploy --api-key header-api-key ${secret}`,
+        exitCode: 0,
+        stderr: "Authorization: Bearer bearer-command-value",
+        stdout:
+          "preflight complete\nSERVICE_TOKEN=service-token-value\npostflight complete",
+        timestamp: "2026-08-20T20:00:00.000Z",
+      },
+      {
+        command: "x".repeat(AGENT_RUNNER_LIMITS.maxCommandLength + 50),
+        exitCode: 1.5,
+        stderr: "y".repeat(AGENT_RUNNER_LIMITS.maxEventOutputLength + 20),
+        stdout: "z".repeat(AGENT_RUNNER_LIMITS.maxEventOutputLength + 20),
+        timestamp: "not-a-date",
+      },
+      { command: null, stdout: 42 },
+      ...Array.from({ length: 11 }, () => ({
+        command: "capture output",
+        exitCode: 0,
+        stderr: "e".repeat(AGENT_RUNNER_LIMITS.maxEventOutputLength),
+        stdout: "o".repeat(AGENT_RUNNER_LIMITS.maxEventOutputLength),
+        timestamp: "2026-08-20T20:00:01.000Z",
+      })),
+    ],
+    null
+  );
 
   assert.equal(normalized.outputExceeded, true);
   assert.ok(normalized.diagnostics.length > 0);
@@ -250,6 +254,7 @@ test("sanitizes cloud evidence again before finalized state and events are store
       },
     ],
     completedAt: "2026-08-20T20:02:00.000Z",
+    credential: null,
     fileEvidence: [
       {
         occurredAt: "2026-08-20T20:02:00.000Z",
@@ -285,6 +290,7 @@ test("retains the newest bounded cloud command and file evidence before storage"
       stdout: `stdout-${index}`,
     })),
     completedAt: "2026-08-20T20:02:00.000Z",
+    credential: null,
     fileEvidence: Array.from({ length: expectedLimit + 1 }, (_, index) => ({
       operation: "modify" as const,
       path: `src/file-${index}.ts`,
@@ -297,4 +303,128 @@ test("retains the newest bounded cloud command and file evidence before storage"
   assert.equal(finished.run.fileEvidence.length, expectedLimit);
   assert.equal(finished.run.commandEvidence[0]?.command, "command-1");
   assert.equal(finished.run.fileEvidence[0]?.path, "src/file-1.ts");
+});
+
+/**
+ * These three tenant-credential shapes are deliberately unlike anything
+ * `sanitizeEvidenceText`'s built-in patterns already catch (no `Bearer `,
+ * no `Authorization:`, no `KEY=value`, no recognized provider prefix like
+ * `ghp_`, no `--token`-style CLI flag). If a test here passed only because a
+ * pre-existing pattern happened to also match the fixture text, it would
+ * stay green even after the tenant-credential threading was removed — which
+ * is exactly the false confidence this task warned against. Each fixture is
+ * checked against `sanitizeEvidenceText` with no additional secrets so a
+ * fixture that starts colliding with a future pattern fails loudly here
+ * instead of silently validating nothing.
+ */
+function assertOnlyCredentialThreadingCouldRedact(
+  text: string,
+  credential: string
+): void {
+  assert.ok(
+    sanitizeEvidenceText(text).includes(credential),
+    "fixture must not already be redacted by a built-in pattern"
+  );
+}
+
+test("a harness that echoes its own credential does not leak it into evidence", () => {
+  // The realistic failure: a CLI printing its auth header in a debug line.
+  // Everything it writes to stdout and stderr is captured and persisted.
+  const credential = "tnt-7f2c9ae04d81b6f3c58a221e0d94b7ac";
+  const output = `startup: echoing runtime token ${credential} for diagnostics`;
+  assertOnlyCredentialThreadingCouldRedact(output, credential);
+
+  const record = createQueuedRun(
+    agentId,
+    "0f6f31ae-7b6c-49c9-bc82-0f2cbf56cc4d",
+    "Inspect the sandbox.",
+    "3a3f2c72-9b1b-47f7-8c83-28d5f94bf4ce",
+    "2026-08-20T20:01:00.000Z"
+  );
+  const finished = finishCloudRunRecord(record, {
+    commandEvidence: [
+      {
+        command: "coven-cli run",
+        exitCode: 0,
+        stderr: "",
+        stdout: output,
+      },
+    ],
+    completedAt: "2026-08-20T20:02:00.000Z",
+    credential,
+    output,
+    status: "completed",
+  });
+  const persisted = JSON.stringify(finished);
+
+  assert.equal(persisted.includes(credential), false);
+  assert.ok(persisted.includes("startup: echoing runtime token"));
+});
+
+test("a credential echoed to stderr is redacted too", () => {
+  // stderr is captured the same way stdout is.
+  const credential = "tnt-b83e5f0a1c476dd9284fa61b9e0c7d35";
+  const stderrLine = `startup: echoing runtime token ${credential} for diagnostics`;
+  assertOnlyCredentialThreadingCouldRedact(stderrLine, credential);
+
+  const record = createQueuedRun(
+    agentId,
+    "0f6f31ae-7b6c-49c9-bc82-0f2cbf56cc4d",
+    "Inspect the sandbox.",
+    "3a3f2c72-9b1b-47f7-8c83-28d5f94bf4ce",
+    "2026-08-20T20:01:00.000Z"
+  );
+  const finished = finishCloudRunRecord(record, {
+    commandEvidence: [
+      {
+        command: "coven-cli run",
+        exitCode: 1,
+        stderr: stderrLine,
+        stdout: "",
+      },
+    ],
+    completedAt: "2026-08-20T20:02:00.000Z",
+    credential,
+    output: "The harness produced no output.",
+    status: "failed",
+  });
+  const persisted = JSON.stringify(finished);
+
+  assert.equal(persisted.includes(credential), false);
+  assert.ok(persisted.includes("startup: echoing runtime token"));
+});
+
+test("a credential appearing in a command line is redacted", () => {
+  // The third call site. A token passed as an argument is leaked as surely as
+  // one printed to a stream. Passed positionally, not through a `--token`
+  // style flag, so the built-in CLI-option pattern cannot be what redacts it.
+  const credential = "tnt-2ac4d19f7e356b0812fc9a5e6d3b71ce";
+  const command = `coven-cli exec --workspace /workspace ${credential}`;
+  assertOnlyCredentialThreadingCouldRedact(command, credential);
+
+  const record = createQueuedRun(
+    agentId,
+    "0f6f31ae-7b6c-49c9-bc82-0f2cbf56cc4d",
+    "Inspect the sandbox.",
+    "3a3f2c72-9b1b-47f7-8c83-28d5f94bf4ce",
+    "2026-08-20T20:01:00.000Z"
+  );
+  const finished = finishCloudRunRecord(record, {
+    commandEvidence: [
+      {
+        command,
+        exitCode: 0,
+        stderr: "",
+        stdout: "",
+      },
+    ],
+    completedAt: "2026-08-20T20:02:00.000Z",
+    credential,
+    output: "completed",
+    status: "completed",
+  });
+  const persisted = JSON.stringify(finished);
+
+  assert.equal(persisted.includes(credential), false);
+  assert.ok(persisted.includes("coven-cli exec --workspace /workspace"));
 });

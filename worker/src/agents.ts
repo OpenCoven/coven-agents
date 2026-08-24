@@ -302,8 +302,15 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     this.persistRun(record);
     this.updateDefinition({ status: "running", updatedAt: startedAt });
 
+    // Declared outside the try block, not `const` inside it: the catch
+    // block below also hands its outcome to `finishCloudRunRecord`, and if
+    // resolution itself throws (or something later throws with the
+    // credential already in hand) that path needs the same value in scope
+    // to redact with — never an unset variable that would either crash or,
+    // worse, silently skip redaction.
+    let credential: string | null = null;
     try {
-      const credential = await this.resolveTenantCredential(definition);
+      credential = await this.resolveTenantCredential(definition);
       const run = await runHarnessInSandbox({
         credential: { credential },
         instructions: `${definition.instructions}
@@ -347,6 +354,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       record = finishCloudRunRecord(record, {
         commandEvidence,
         completedAt,
+        credential,
         fileEvidence,
         output:
           run.summary.output ||
@@ -365,6 +373,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       const completedAt = new Date().toISOString();
       record = finishCloudRunRecord(record, {
         completedAt,
+        credential,
         error: {
           code:
             error instanceof HarnessError ? "harness_failed" : "internal_error",
@@ -462,6 +471,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     await this.cancelFiberByKey(cloudFiberKey(runId), "Cancelled by operator.");
     const cancelled = finishCloudRunRecord(record, {
       completedAt: new Date().toISOString(),
+      // Cancellation is an operator action outside `driveHarness`, so no
+      // credential is in scope here — the static message below carries none,
+      // and the run's already-persisted evidence was redacted when it was
+      // first captured.
+      credential: null,
       output: "Run cancelled by operator request.",
       status: "cancelled",
     });
