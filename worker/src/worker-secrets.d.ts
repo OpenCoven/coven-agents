@@ -18,4 +18,5 @@ interface Env {
   COPILOT_GITHUB_TOKEN?: string;
   GH_TOKEN?: string;
   GITHUB_TOKEN?: string;
+  RUNNER_VERIFY_KEY?: string;
 }

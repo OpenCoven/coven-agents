@@ -1,25 +1,92 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AgentDefinition } from "@opencoven/agent-contracts";
+import type { AgentDefinition, RunnerClaims } from "@opencoven/agent-contracts";
+import {
+  base64UrlEncode,
+  TOKEN_LIFETIME_SECONDS,
+} from "@opencoven/agent-contracts";
 import {
   type CloudRunnerAgent,
   type CloudRunnerDirectory,
   createCloudRunner,
 } from "./routes";
-import { UNOWNED_TENANT } from "./tenant";
 
 const TOKEN = "test-token";
 const MINE = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
 const THEIRS = "9c1b7d2f-5a6b-4c90-8f1a-0f4e1f4d4a2e";
+const CALLER_TENANT = "tenant-under-test";
 /** A run owned by another tenant. */
 const RUN_ID = "11111111-2222-4333-8444-555555555555";
 /** A run owned by the caller, so the negative tests have a control. */
 const MY_RUN_ID = "22222222-3333-4444-8555-666666666666";
 
-const environment = {
+async function keyPair(): Promise<CryptoKeyPair> {
+  return (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+    "sign",
+    "verify",
+  ])) as CryptoKeyPair;
+}
+
+async function mint(
+  privateKey: CryptoKey,
+  claims: RunnerClaims
+): Promise<string> {
+  const payload = base64UrlEncode(
+    new TextEncoder().encode(JSON.stringify(claims))
+  );
+  const signature = await crypto.subtle.sign(
+    { name: "Ed25519" },
+    privateKey,
+    new TextEncoder().encode(payload)
+  );
+  return `${payload}.${base64UrlEncode(new Uint8Array(signature))}`;
+}
+
+/**
+ * Key generation and signing are async, so the suite's keypair and minted
+ * token are built lazily behind a cached promise rather than at module load
+ * (top-level await is unavailable here) or freshly per call (which would
+ * make every test mint against a different key/token pair).
+ */
+let suiteKeyPair: Promise<CryptoKeyPair> | null = null;
+function getKeyPair(): Promise<CryptoKeyPair> {
+  if (!suiteKeyPair) {
+    suiteKeyPair = keyPair();
+  }
+  return suiteKeyPair;
+}
+
+let suiteToken: Promise<string> | null = null;
+function identityToken(): Promise<string> {
+  if (!suiteToken) {
+    suiteToken = getKeyPair().then((pair) =>
+      mint(pair.privateKey, {
+        exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+        plan: "subscriber",
+        sub: "user-1",
+        tenant: CALLER_TENANT,
+      })
+    );
+  }
+  return suiteToken;
+}
+
+let suiteVerifyKey: Promise<string> | null = null;
+function verifyKeySpki(): Promise<string> {
+  if (!suiteVerifyKey) {
+    suiteVerifyKey = getKeyPair().then(async (pair) => {
+      const exported = await crypto.subtle.exportKey("spki", pair.publicKey);
+      return base64UrlEncode(new Uint8Array(exported));
+    });
+  }
+  return suiteVerifyKey;
+}
+
+const environmentPromise = verifyKeySpki().then((spki) => ({
   AGENT_CONTROL_TOKEN: TOKEN,
   ALLOWED_ORIGIN: "*",
-};
+  RUNNER_VERIFY_KEY: spki,
+}));
 
 function definition(id: string, tenantId: string): AgentDefinition {
   return {
@@ -39,11 +106,12 @@ function definition(id: string, tenantId: string): AgentDefinition {
 }
 
 /**
- * `THEIRS` is owned by a tenant the caller is not. The caller always resolves
- * to UNOWNED_TENANT today, so `MINE` is reachable and `THEIRS` must not be.
+ * `THEIRS` is owned by a tenant the caller is not. The caller's tenant comes
+ * from the verified identity claim minted above (`CALLER_TENANT`), so `MINE`
+ * is reachable and `THEIRS` must not be.
  */
 const agents = new Map<string, AgentDefinition>([
-  [MINE, definition(MINE, UNOWNED_TENANT)],
+  [MINE, definition(MINE, CALLER_TENANT)],
   [THEIRS, definition(THEIRS, "someone_else")],
 ]);
 
@@ -108,10 +176,17 @@ function runner() {
   });
 }
 
-function call(path: string, method = "GET"): Promise<Response> {
+async function call(path: string, method = "GET"): Promise<Response> {
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
   return runner().fetch(
     new Request(`https://runner.test${path}`, {
-      headers: { authorization: `Bearer ${TOKEN}` },
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
       method,
     }),
     environment as never
@@ -207,6 +282,10 @@ test("a client-supplied owner is rejected at the route, not just the schema", as
   // Guards the invariant end to end: ownership is stamped from the caller, and
   // createAgentInputSchema staying .strict() is what stops a submitted claim
   // from being silently accepted if the spread order ever changes.
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
   const response = await runner().fetch(
     new Request("https://runner.test/api/agents", {
       body: JSON.stringify({
@@ -218,8 +297,9 @@ test("a client-supplied owner is rejected at the route, not just the schema", as
         runtime: "copilot",
       }),
       headers: {
-        authorization: `Bearer ${TOKEN}`,
+        authorization: `Bearer ${token}`,
         "content-type": "application/json",
+        "x-runner-token": TOKEN,
       },
       method: "POST",
     }),
@@ -231,4 +311,60 @@ test("a client-supplied owner is rejected at the route, not just the schema", as
     ((await response.json()) as { error: { code: string } }).error.code,
     "invalid_request"
   );
+});
+
+test("the caller tenant comes from the verified claim, not the runner token", async () => {
+  // The whole point of the change: two callers presenting the same deployment
+  // gate but different identities must not see the same agents.
+  const response = await call("/api/agents");
+
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as { agents: AgentDefinition[] };
+  assert.deepEqual(
+    body.agents.map((agent) => agent.id),
+    [MINE]
+  );
+});
+
+test("a valid runner token without an identity is refused", async () => {
+  const environment = await environmentPromise;
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      headers: { "x-runner-token": TOKEN },
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 401);
+});
+
+test("a valid identity without the deployment gate is refused", async () => {
+  const environment = await environmentPromise;
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      headers: { authorization: `Bearer ${await identityToken()}` },
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 401);
+});
+
+test("a worker with no verify key refuses rather than assuming a tenant", async () => {
+  // A misconfigured deployment must fail closed. Without this the request
+  // reaches the key import with nothing to import, and the failure mode
+  // depends on what happens to throw first — which is not a security
+  // guarantee, it is an accident.
+  const environment = await environmentPromise;
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      headers: {
+        authorization: `Bearer ${await identityToken()}`,
+        "x-runner-token": TOKEN,
+      },
+    }),
+    { ...environment, RUNNER_VERIFY_KEY: undefined } as never
+  );
+
+  assert.equal(response.status, 401);
 });
