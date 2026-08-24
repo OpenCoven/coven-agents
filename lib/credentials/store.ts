@@ -7,6 +7,21 @@ import type { SubscriberSession } from "@/lib/session";
 import { decryptCredential, encryptCredential, importKek } from "./envelope";
 
 /**
+ * Scopes a credential lookup to exactly one tenant AND one harness.
+ *
+ * Extracted so the scoping can be asserted without a database. Dropping the
+ * harness condition is invisible to an outcome-based test — the query still
+ * returns a row, just the wrong one — and handing a tenant's Copilot token to
+ * a Codex run is a credential leak inside the tenant rather than a crash.
+ */
+export function credentialWhere(tenant: string, harnessId: string) {
+  return and(
+    eq(tenantCredential.tenant, tenant),
+    eq(tenantCredential.harnessId, harnessId)
+  );
+}
+
+/**
  * Tenant credential storage: the app is sole custodian of plaintext
  * credentials at rest. Every credential is sealed with `encryptCredential`
  * before it touches a row, and unsealed only for the duration of a single
@@ -66,12 +81,7 @@ export async function readCredentialForTenant(
   const rows = await db
     .select()
     .from(tenantCredential)
-    .where(
-      and(
-        eq(tenantCredential.tenant, tenant),
-        eq(tenantCredential.harnessId, harnessId)
-      )
-    )
+    .where(credentialWhere(tenant, harnessId))
     .limit(1);
 
   const [row] = rows;
