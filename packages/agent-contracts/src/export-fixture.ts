@@ -13,7 +13,7 @@ import type {
   RunEventType,
   RunSnapshotEnvelope,
   RunStatus,
-} from "./index.js";
+} from "./index";
 import {
   AGENT_RUNNER_API_VERSION,
   AGENT_RUNNER_CAPABILITIES,
@@ -31,7 +31,7 @@ import {
   agentRunnerStatusesSchema,
   runErrorEnvelopeSchema,
   runSnapshotEnvelopeSchema,
-} from "./index.js";
+} from "./index";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const fixtureDirectory = resolve(root, "packages/agent-contracts/fixtures");
