@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let a demo visitor watch a real recorded agent run replay at its original cadence, without the app reaching a credential, a database, or the worker.
+**Goal:** Let a demo visitor watch a real recorded agent run replay at its original cadence, without the app reaching a credential, a database, the worker, or an auth endpoint.
 
-**Architecture:** A recorder captures a real run against a public demo repository, redacts it, converts absolute timestamps to relative offsets, and writes a JSON fixture. A client-side player replays that fixture through the same components a live run drives. The replay path makes no network request at all.
+**Architecture:** A recorder drives a real run through the cloud worker, records each stream event with the time it arrived, redacts every string, and writes a JSON fixture. A client-side player replays it. The demo route is gated on `IS_DEMO` and mounts no session provider.
 
 **Tech Stack:** Zod, Next.js 16, React 19, `tsx --test` with `node:test`, biome/ultracite.
 
@@ -12,20 +12,47 @@
 
 ---
 
-## Decisions this plan locks in
+## Revision note
 
-**Fixtures live in the app, not the contracts package.** `packages/agent-contracts/fixtures/` holds the *contract* fixture, whose job is API verification. Demo transcripts are content. Putting them in `lib/demo/fixtures/` means the player imports them directly with no package `exports` plumbing, and the `lib/**/*.test.ts` glob picks up their validation test without anyone remembering to wire it in.
+The first draft of this plan was reviewed and had thirteen defects, three of
+them design-level. It was rewritten rather than patched, because several
+corrections are the reason the current design looks the way it does.
 
-**The schema lives in `agent-contracts` and gains a `harness` dependency.** A transcript nests both `runEventSchema` (harness) and `runResultSchema` (agent-contracts). Verified before choosing: neither package currently imports the other, so this creates no cycle.
+**There are two different `runEventSchema`s.** `@opencoven/harness` exports one
+discriminated on `kind`; `@opencoven/agent-contracts` exports another
+discriminated on `type`. The first draft nested the harness one, which the
+client never sees — the worker streams the contracts shape. Using the contracts
+event also removes the need for a `harness` dependency, and with it the
+circular import the first draft introduced.
 
-**Every recorder refusal is a pure function.** The recorder itself performs a real agent run and cannot be unit tested. Its refusals are the part that matters and are extracted so they can be.
+**Contracts events carry `at` as optional.** Offsets cannot be derived from
+event timestamps at all. The recorder observes arrival time instead, which is
+monotonic by construction — removing the ordering bug the first draft had,
+where clamping against the origin rather than the previous offset let
+`5s, 10s, 3s` produce `[0, 5000, 0]`. Its test used two events, so it passed.
+
+**The local runner spawns the CLI with `env: process.env`**
+(`local-runner/src/index.ts:129`). Recording through it lets unrelated host
+credentials reach stdout even though the repository is public, defeating the
+spec's central safety argument. The recorder uses the cloud worker only.
+
+**`app/layout.tsx` mounts `SessionProvider`**, which fetches a session on every
+route. The first draft claimed the replay path makes no network request; that
+was false as designed. The provider moves into the route groups that use it.
+
+**Redaction was field-by-field** and missed tool summaries, error messages,
+file paths and the task text — after which the credential check refused the
+whole recording rather than redacting it, failing valid runs. It is now a
+generic walk over every string.
 
 ## Shapes this plan depends on
 
-Verified against the code before writing, because getting these wrong makes
-every test in the plan fail for the wrong reason:
+Verified against the source, because the first draft asserted five field names
+that do not exist:
 
 ```ts
+// @opencoven/agent-contracts
+runEventSchema = discriminatedUnion("type", [...])   // at?: datetime, id
 runResultSchema = {
   agentId: string().uuid()
   commandResults: { command?, exitCode?, stderr?, stdout?, timestamp? }[]
@@ -38,110 +65,60 @@ runResultSchema = {
 }
 ```
 
-Note `status` is `"completed"`, not `"succeeded"`, and every field inside a
-command result is optional. Tests below use these two constants:
-
-```ts
-const AGENT_ID = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
-const RUN_ID = "11111111-2222-4333-8444-555555555555";
-```
-
-They are declared inline in each test file below, so every block is
-copy-pasteable as written.
+`status` is `"completed"`, not `"succeeded"`. Every field inside a command
+result and a file operation is optional.
 
 ## File structure
 
 | File | Responsibility |
 | --- | --- |
-| `packages/agent-contracts/src/demo-transcript.ts` (create) | `demoTranscriptSchema`, `DemoTranscript`, `toOffsets`. The format both sides agree on. |
-| `packages/agent-contracts/package.json` (modify) | Add `@opencoven/harness` dependency. |
-| `lib/demo/fixtures/` (create) | Committed transcripts. Content, not contract. |
-| `lib/demo/fixtures.test.ts` (create) | Validates every committed fixture and asserts none contains a credential. |
-| `lib/demo/recordable.ts` (create) | `assertRecordable` — the refusals, as a pure function. |
-| `lib/demo/redact.ts` (create) | `redactTranscript` — sanitises a captured transcript. |
-| `lib/demo/player.ts` (create) | `planPlayback` — offsets to delays, with gap capping and speed. |
-| `scripts/demo-record.ts` (create) | The recorder CLI. Orchestration only; every decision it makes lives in a tested module. |
-| `app/demo/page.tsx` (create) | The demo route. Loads a fixture, renders the player, shows an empty state when there is none. |
+| `packages/agent-contracts/src/index.ts` (modify) | `demoTranscriptSchema`, defined beside the schemas it composes. Not a new module: importing the barrel from a module the barrel re-exports is a cycle. |
+| `lib/demo/offsets.ts` (create) | `toOffsets` — arrival times to monotonic offsets. |
+| `lib/demo/recordable.ts` (create) | `assertRecordable` — the refusals. |
+| `lib/demo/redact.ts` (create) | `redactTranscript`, `assertNoSecrets` — a generic walk over every string. |
+| `lib/demo/player.ts` (create) | `planPlayback` — offsets to delays, gap capping and speed. |
+| `lib/demo/load.ts` (create) | `loadTranscript` — parse or null, never throw. |
+| `lib/demo/fixtures/` (create) | Committed transcripts. |
+| `lib/demo/fixtures.test.ts` (create) | Validates every committed fixture over the real directory. |
+| `scripts/demo-record.ts` (create) | The recorder CLI. Orchestration only. |
+| `app/demo/page.tsx` (create) | The demo route, gated on `IS_DEMO`. |
+| `app/layout.tsx` (modify) | Remove `SessionProvider`. |
+| `app/(chat)/layout.tsx`, `app/(auth)/layout.tsx` (modify) | Mount it where sessions are used. |
 
 ---
 
 ### Task 1: The transcript format
 
 **Files:**
-- Create: `packages/agent-contracts/src/demo-transcript.ts`
-- Create: `packages/agent-contracts/src/demo-transcript.test.ts`
 - Modify: `packages/agent-contracts/src/index.ts`
-- Modify: `packages/agent-contracts/package.json`
+- Create: `packages/agent-contracts/src/demo-transcript.test.ts`
 
-- [ ] **Step 1: Add the harness dependency**
-
-In `packages/agent-contracts/package.json`, add to `dependencies`:
-
-```json
-    "@opencoven/harness": "workspace:*"
-```
-
-Then run `corepack pnpm install`.
-
-This is safe: neither package imports the other today, so there is no cycle.
-
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 1: Write the failing test**
 
 Create `packages/agent-contracts/src/demo-transcript.test.ts`:
 
 ```ts
 import assert from "node:assert/strict";
 import test from "node:test";
-import { demoTranscriptSchema, toOffsets } from "./demo-transcript";
+import { demoTranscriptSchema } from "./index";
 
 const AGENT_ID = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
 const RUN_ID = "11111111-2222-4333-8444-555555555555";
+const EVENT_ID = "22222222-3333-4444-8555-666666666666";
 
-const EVENT = {
-  at: "2026-08-24T12:00:00.000Z",
-  harness: "copilot",
-  kind: "started",
-  runId: "run-1",
-} as const;
-
-test("offsets are measured from the first event", () => {
-  const events = [
-    { ...EVENT, at: "2026-08-24T12:00:00.000Z" },
-    { ...EVENT, at: "2026-08-24T12:00:02.500Z" },
-    { ...EVENT, at: "2026-08-24T12:00:03.000Z" },
-  ];
-
-  const offsets = toOffsets(events);
-
-  assert.deepEqual(
-    offsets.map((entry) => entry.offsetMs),
-    [0, 2500, 3000]
-  );
-});
-
-test("an empty event list produces no offsets", () => {
-  assert.deepEqual(toOffsets([]), []);
-});
-
-test("offsets never go backwards even if timestamps do", () => {
-  // A harness that emits slightly out of order must not produce a negative
-  // delay, which would make the player fire events instantly and out of
-  // sequence.
-  const events = [
-    { ...EVENT, at: "2026-08-24T12:00:05.000Z" },
-    { ...EVENT, at: "2026-08-24T12:00:01.000Z" },
-  ];
-
-  const offsets = toOffsets(events);
-
-  assert.equal(offsets[0]?.offsetMs, 0);
-  assert.ok((offsets[1]?.offsetMs ?? -1) >= 0);
-});
-
-test("a transcript missing a required field is rejected", () => {
-  const valid = {
-    events: [{ event: EVENT, offsetMs: 0 }],
-    harness: "copilot",
+function transcript(overrides: Record<string, unknown> = {}) {
+  return {
+    events: [
+      {
+        event: {
+          id: EVENT_ID,
+          operationId: RUN_ID,
+          runId: RUN_ID,
+          type: "accepted",
+        },
+        offsetMs: 0,
+      },
+    ],
     name: "add-test",
     recordedAt: "2026-08-24T12:00:00.000Z",
     result: {
@@ -155,13 +132,19 @@ test("a transcript missing a required field is rejected", () => {
       status: "completed",
     },
     task: "add a test",
+    ...overrides,
   };
+}
 
-  assert.ok(demoTranscriptSchema.safeParse(valid).success);
+test("a well-formed transcript parses", () => {
+  assert.ok(demoTranscriptSchema.safeParse(transcript()).success);
+});
 
-  for (const missing of ["name", "task", "harness", "events", "result"]) {
-    const broken: Record<string, unknown> = { ...valid };
+test("a missing required field is rejected", () => {
+  for (const missing of ["name", "task", "events", "result", "recordedAt"]) {
+    const broken: Record<string, unknown> = transcript();
     delete broken[missing];
+
     assert.equal(
       demoTranscriptSchema.safeParse(broken).success,
       false,
@@ -170,134 +153,262 @@ test("a transcript missing a required field is rejected", () => {
   }
 });
 
-test("an event that is not a real RunEvent is rejected", () => {
-  // The drift alarm. If the product changes what a run emits, a committed
-  // transcript stops validating and CI fails, rather than the demo quietly
-  // showing something the product no longer does.
-  const transcript = {
-    events: [{ event: { kind: "invented-kind" }, offsetMs: 0 }],
-    harness: "copilot",
-    name: "add-test",
-    recordedAt: "2026-08-24T12:00:00.000Z",
-    result: {
-      agentId: AGENT_ID,
-      commandResults: [],
-      completedAt: "2026-08-24T12:01:00.000Z",
-      fileOperations: [],
-      id: RUN_ID,
-      output: "Added a test.",
-      startedAt: "2026-08-24T12:00:00.000Z",
-      status: "completed",
-    },
-    task: "add a test",
-  };
+test("recordedAt must be a real timestamp", () => {
+  // Documented as supporting staleness checks. A bare string() would accept
+  // "yesterday" and make that impossible.
+  for (const recordedAt of ["", "yesterday", "2026-13-45"]) {
+    assert.equal(
+      demoTranscriptSchema.safeParse(transcript({ recordedAt })).success,
+      false,
+      `${JSON.stringify(recordedAt)} must be rejected`
+    );
+  }
+});
 
-  assert.equal(demoTranscriptSchema.safeParse(transcript).success, false);
+test("an event that is not a real RunEvent is rejected", () => {
+  // The drift alarm. If the product changes what a run emits, committed
+  // transcripts stop validating and CI fails, rather than the demo quietly
+  // showing behaviour that no longer exists.
+  const broken = transcript({
+    events: [{ event: { type: "invented-kind" }, offsetMs: 0 }],
+  });
+
+  assert.equal(demoTranscriptSchema.safeParse(broken).success, false);
+});
+
+test("a name must be a slug, because it must match its filename", () => {
+  for (const name of ["Add Test", "add_test", "../escape", ""]) {
+    assert.equal(
+      demoTranscriptSchema.safeParse(transcript({ name })).success,
+      false,
+      `${JSON.stringify(name)} must be rejected`
+    );
+  }
+});
+
+test("a negative offset is rejected", () => {
+  const broken = transcript({
+    events: [
+      {
+        event: {
+          id: EVENT_ID,
+          operationId: RUN_ID,
+          runId: RUN_ID,
+          type: "accepted",
+        },
+        offsetMs: -1,
+      },
+    ],
+  });
+
+  assert.equal(demoTranscriptSchema.safeParse(broken).success, false);
 });
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [ ] **Step 2: Run the test to verify it fails**
 
 Run: `corepack pnpm --filter @opencoven/agent-contracts exec tsx --test src/demo-transcript.test.ts`
-Expected: FAIL with `Cannot find module './demo-transcript'`
+Expected: FAIL — `demoTranscriptSchema` is not exported.
 
-- [ ] **Step 4: Write the implementation**
+- [ ] **Step 3: Add the schema**
 
-Create `packages/agent-contracts/src/demo-transcript.ts`:
+In `packages/agent-contracts/src/index.ts`, after `runResultSchema`:
 
 ```ts
-import { harnessIdSchema, type RunEvent, runEventSchema } from "@opencoven/harness";
-import { z } from "zod";
-import { runResultSchema } from "./index";
-
 /**
  * A recorded run, committed as a fixture and replayed to demo visitors.
  *
- * The nested `event` keeps the real `runEventSchema` on purpose. If the
- * product changes what a run emits, every committed transcript stops
- * validating and CI fails — rather than the demo quietly continuing to show
- * behaviour that no longer exists.
+ * Defined here rather than in its own module on purpose: it composes
+ * `runEventSchema` and `runResultSchema`, and a separate module importing this
+ * barrel — which would then re-export that module — is a circular import that
+ * evaluates the transcript schema before the schemas it is built from.
+ *
+ * The nested `event` keeps the real `runEventSchema`. If the product changes
+ * what a run emits, every committed transcript stops validating and CI fails,
+ * rather than the demo continuing to show something that no longer happens.
  */
 export const demoTranscriptSchema = z
   .object({
     events: z
-      .array(z.object({ event: runEventSchema, offsetMs: z.number().min(0) }))
+      .array(
+        z
+          .object({ event: runEventSchema, offsetMs: z.number().int().min(0) })
+          .strict()
+      )
       .min(1),
-    harness: harnessIdSchema,
     name: z
       .string()
       .min(1)
       .max(64)
-      .regex(/^[a-z0-9-]+$/, "a name is a slug and matches its filename"),
-    recordedAt: z.string(),
+      .regex(/^[a-z0-9-]+$/, "a name is a slug and must match its filename"),
+    recordedAt: datetimeSchema,
     result: runResultSchema,
     task: z.string().min(1),
   })
   .strict();
 
 export type DemoTranscript = z.infer<typeof demoTranscriptSchema>;
-
-/**
- * Converts absolute timestamps to offsets from the first event.
- *
- * Committed absolute timestamps would date the demo for no benefit, and the
- * player needs deltas anyway. Clamped at zero because a harness that emits
- * slightly out of order would otherwise produce a negative delay, and the
- * player would fire those events instantly and out of sequence.
- */
-export function toOffsets(
-  events: RunEvent[]
-): { event: RunEvent; offsetMs: number }[] {
-  const [first] = events;
-  if (!first) {
-    return [];
-  }
-  const origin = Date.parse(first.at);
-
-  return events.map((event) => ({
-    event,
-    offsetMs: Math.max(0, Date.parse(event.at) - origin),
-  }));
-}
 ```
 
-- [ ] **Step 5: Export it**
-
-Add to `packages/agent-contracts/src/index.ts`, keeping the file's alphabetical export ordering:
-
-```ts
-export {
-  type DemoTranscript,
-  demoTranscriptSchema,
-  toOffsets,
-} from "./demo-transcript";
-```
-
-- [ ] **Step 6: Run the tests to verify they pass**
+- [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `corepack pnpm --filter @opencoven/agent-contracts exec tsx --test src/demo-transcript.test.ts`
-Expected: PASS, 5 tests
+Expected: PASS, 6 tests
 
-- [ ] **Step 7: Mutation-test the drift alarm**
+- [ ] **Step 5: Mutation-test the drift alarm**
 
 Change `event: runEventSchema` to `event: z.unknown()`.
 
-Run the same command. Expected: FAIL on "an event that is not a real RunEvent is rejected".
+Run. Expected: FAIL on "an event that is not a real RunEvent is rejected".
 
 Restore. Re-run. Expected: PASS.
 
-If that mutation does **not** fail, the drift alarm does not exist and the rest of this plan rests on nothing. Stop and report.
+If it does not fail, the drift alarm does not exist and the rest of this plan
+rests on nothing. Stop and report.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add packages/agent-contracts/src/demo-transcript.ts packages/agent-contracts/src/demo-transcript.test.ts packages/agent-contracts/src/index.ts packages/agent-contracts/package.json pnpm-lock.yaml
+git add packages/agent-contracts/src/index.ts packages/agent-contracts/src/demo-transcript.test.ts
 git commit -S -m "feat(contracts): add the demo transcript format"
 ```
 
 ---
 
-### Task 2: The recorder's refusals
+### Task 2: Monotonic offsets from arrival time
+
+**Files:**
+- Create: `lib/demo/offsets.ts`
+- Create: `lib/demo/offsets.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `lib/demo/offsets.test.ts`:
+
+```ts
+import assert from "node:assert/strict";
+import test from "node:test";
+import { toOffsets } from "./offsets";
+
+const EVENT = { id: "e", type: "status" } as const;
+
+test("offsets are measured from the first arrival", () => {
+  const offsets = toOffsets([
+    { event: EVENT, receivedAt: 1000 },
+    { event: EVENT, receivedAt: 3500 },
+    { event: EVENT, receivedAt: 4000 },
+  ]);
+
+  assert.deepEqual(
+    offsets.map((entry) => entry.offsetMs),
+    [0, 2500, 3000]
+  );
+});
+
+test("an empty list produces no offsets", () => {
+  assert.deepEqual(toOffsets([]), []);
+});
+
+test("offsets never decrease, even across three out-of-order arrivals", () => {
+  // The first version clamped each value against the origin rather than the
+  // previous offset, so 5s, 10s, 3s produced [0, 5000, 0] and the player would
+  // fire the third event instantly and out of sequence. Two events could not
+  // expose that; three can.
+  const offsets = toOffsets([
+    { event: EVENT, receivedAt: 5000 },
+    { event: EVENT, receivedAt: 10_000 },
+    { event: EVENT, receivedAt: 3000 },
+  ]).map((entry) => entry.offsetMs);
+
+  assert.deepEqual(offsets, [0, 5000, 5000]);
+
+  for (let index = 1; index < offsets.length; index += 1) {
+    assert.ok(
+      (offsets[index] ?? 0) >= (offsets[index - 1] ?? 0),
+      "offsets must be monotonic"
+    );
+  }
+});
+
+test("offsets are integers", () => {
+  const offsets = toOffsets([
+    { event: EVENT, receivedAt: 0 },
+    { event: EVENT, receivedAt: 10.7 },
+  ]);
+
+  assert.equal(Number.isInteger(offsets[1]?.offsetMs), true);
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `corepack pnpm exec tsx --conditions=react-server --test lib/demo/offsets.test.ts`
+Expected: FAIL with `Cannot find module './offsets'`
+
+- [ ] **Step 3: Write the implementation**
+
+Create `lib/demo/offsets.ts`:
+
+```ts
+import type { RunEvent } from "@opencoven/agent-contracts";
+
+export type ArrivedEvent = { event: RunEvent; receivedAt: number };
+
+/**
+ * Converts arrival times into offsets from the first event.
+ *
+ * Arrival time rather than the event's own `at`, because that field is
+ * optional on a contracts event and a recorder cannot depend on it. Observed
+ * arrival is also what a replay should reproduce: the cadence a client saw.
+ *
+ * Clamped against the *previous* offset, not the origin. Clamping against the
+ * origin leaves the sequence non-monotonic — 5s, 10s, 3s yields [0, 5000, 0] —
+ * and the player would fire that third event immediately and out of order.
+ */
+export function toOffsets(
+  arrivals: ArrivedEvent[]
+): { event: RunEvent; offsetMs: number }[] {
+  const [first] = arrivals;
+  if (!first) {
+    return [];
+  }
+
+  let previous = 0;
+  return arrivals.map((arrival) => {
+    const offsetMs = Math.max(
+      previous,
+      Math.round(arrival.receivedAt - first.receivedAt)
+    );
+    previous = offsetMs;
+    return { event: arrival.event, offsetMs };
+  });
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `corepack pnpm exec tsx --conditions=react-server --test lib/demo/offsets.test.ts`
+Expected: PASS, 4 tests
+
+- [ ] **Step 5: Mutation-test monotonicity**
+
+Drop the `previous` term, leaving `Math.round(arrival.receivedAt - first.receivedAt)`.
+
+Run. Expected: FAIL on "offsets never decrease, even across three out-of-order arrivals".
+
+Restore and confirm green. This mutation is the exact bug the first draft
+shipped, so if it does not fail, the test is not doing its job.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add lib/demo/offsets.ts lib/demo/offsets.test.ts
+git commit -S -m "feat(demo): derive monotonic offsets from arrival time"
+```
+
+---
+
+### Task 3: The recorder's refusals
 
 **Files:**
 - Create: `lib/demo/recordable.ts`
@@ -314,18 +425,20 @@ import { assertRecordable, DEMO_REPOSITORY } from "./recordable";
 
 const ok = {
   allowFailure: false,
+  backend: "cloud" as const,
+  credential: "ghp_recording_credential",
   repository: DEMO_REPOSITORY,
   status: "completed" as const,
 };
 
-test("recording against the demo repository is allowed", () => {
+test("recording the demo repository through the cloud worker is allowed", () => {
   assert.doesNotThrow(() => assertRecordable(ok));
 });
 
-test("recording against any other repository is refused", () => {
-  // A refusal, not a warning. Recording against a private repo publishes its
-  // contents permanently, and a rule that can be skipped under time pressure
-  // is the one that will be.
+test("any other repository is refused", () => {
+  // A refusal, not a warning. A committed transcript is published
+  // permanently, and a rule that can be skipped under time pressure is the one
+  // that gets skipped.
   for (const repository of [
     "OpenCoven/coven-agents",
     "someone/private-thing",
@@ -340,6 +453,21 @@ test("recording against any other repository is refused", () => {
   }
 });
 
+test("the local runner is refused", () => {
+  // local-runner spawns the CLI with `env: process.env`, so unrelated host
+  // credentials can reach stdout even when the repository is public. That
+  // defeats the reason recording against a public repository is safe at all.
+  assert.throws(() => assertRecordable({ ...ok, backend: "local" }), /cloud/i);
+});
+
+test("a run with no credential is refused", () => {
+  // Redaction can only remove a secret it was given. Recording without knowing
+  // which credential was used leaves nothing to check for afterwards.
+  for (const credential of ["", "   "]) {
+    assert.throws(() => assertRecordable({ ...ok, credential }), /credential/i);
+  }
+});
+
 test("a failed run is refused unless explicitly allowed", () => {
   assert.throws(
     () => assertRecordable({ ...ok, status: "failed" }),
@@ -351,12 +479,13 @@ test("a failed run is refused unless explicitly allowed", () => {
   );
 });
 
-test("the repository check is not bypassed by allowFailure", () => {
-  // Two independent refusals. Opting into one must not opt out of the other.
+test("opting into one refusal does not opt out of the others", () => {
   assert.throws(
     () =>
       assertRecordable({
+        ...ok,
         allowFailure: true,
+        backend: "local",
         repository: "someone/private-thing",
         status: "failed",
       }),
@@ -386,6 +515,8 @@ export const DEMO_REPOSITORY = "OpenCoven/demo-workspace";
 
 export type RecordableOptions = {
   allowFailure: boolean;
+  backend: "cloud" | "local";
+  credential: string;
   repository: string;
   status: "completed" | "failed";
 };
@@ -393,13 +524,27 @@ export type RecordableOptions = {
 /**
  * Throws unless this run may be committed as a demo transcript.
  *
- * Extracted from the recorder because the recorder performs a real agent run
- * and cannot be unit tested, while these decisions are the part that matters.
+ * Extracted from the recorder because the recorder drives a real run and
+ * cannot be unit tested, while these decisions are the part that matters.
+ * Checks are ordered most-consequential first, and none short-circuits
+ * another.
  */
 export function assertRecordable(options: RecordableOptions): void {
   if (options.repository !== DEMO_REPOSITORY) {
     throw new Error(
       `Demo recordings may only be made against ${DEMO_REPOSITORY}. Refusing to record ${options.repository || "an unnamed repository"}: a committed transcript is published permanently.`
+    );
+  }
+
+  if (options.backend !== "cloud") {
+    throw new Error(
+      "Demo recordings must run through the cloud worker. The local runner spawns the harness with the host environment, so unrelated credentials can reach captured output even when the repository is public."
+    );
+  }
+
+  if (!options.credential.trim()) {
+    throw new Error(
+      "Refusing to record without a known credential. Redaction can only remove a secret it was given, so an unknown one cannot be checked for afterwards."
     );
   }
 
@@ -414,15 +559,20 @@ export function assertRecordable(options: RecordableOptions): void {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `corepack pnpm exec tsx --conditions=react-server --test lib/demo/recordable.test.ts`
-Expected: PASS, 4 tests
+Expected: PASS, 6 tests
 
-- [ ] **Step 5: Mutation-test both refusals**
+- [ ] **Step 5: Mutation-test each refusal**
 
-Change the repository check to `if (false)`. Run. Expected: FAIL on "recording against any other repository is refused" and "the repository check is not bypassed by allowFailure". Restore.
+Replace each condition with `if (false)` in turn:
 
-Change the failure check to `if (false)`. Run. Expected: FAIL on "a failed run is refused unless explicitly allowed". Restore.
+| Mutation | Must fail |
+| --- | --- |
+| repository check | "any other repository is refused" and "opting into one refusal does not opt out of the others" |
+| backend check | "the local runner is refused" |
+| credential check | "a run with no credential is refused" |
+| failure check | "a failed run is refused unless explicitly allowed" |
 
-Confirm both restore green. Report if either mutation does not fail.
+Restore after each. Report any that does not fail.
 
 - [ ] **Step 6: Commit**
 
@@ -433,7 +583,7 @@ git commit -S -m "feat(demo): refuse recordings that must not be published"
 
 ---
 
-### Task 3: Transcript redaction
+### Task 4: Redaction across every string
 
 **Files:**
 - Create: `lib/demo/redact.ts`
@@ -446,49 +596,43 @@ Create `lib/demo/redact.test.ts`:
 ```ts
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertNoCredential, redactTranscript } from "./redact";
+import { assertNoSecrets, redactTranscript } from "./redact";
 
 const AGENT_ID = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
 const RUN_ID = "11111111-2222-4333-8444-555555555555";
-
 const CREDENTIAL = "ghp_recording_credential_value";
 
 function transcript(text: string) {
   return {
     events: [
-      {
-        event: {
-          at: "2026-08-24T12:00:00.000Z",
-          kind: "message" as const,
-          model: null,
-          text,
-        },
-        offsetMs: 0,
-      },
+      { event: { command: text, id: "e1", type: "command" as const }, offsetMs: 0 },
     ],
-    harness: "copilot" as const,
     name: "add-test",
     recordedAt: "2026-08-24T12:00:00.000Z",
     result: {
       agentId: AGENT_ID,
-      commandResults: [],
+      commandResults: [
+        { command: text, exitCode: 0, stderr: text, stdout: text },
+      ],
       completedAt: "2026-08-24T12:01:00.000Z",
-      fileOperations: [],
+      fileOperations: [{ operation: "modify", path: text }],
       id: RUN_ID,
-      output: "Added a test.",
+      output: text,
       startedAt: "2026-08-24T12:00:00.000Z",
       status: "completed" as const,
     },
-    task: "add a test",
+    task: text,
   };
 }
 
-test("the recording credential is removed from every field", () => {
-  // Events, stdout, stderr and the summary are all captured and committed. A
-  // credential surviving in any one of them is published permanently.
+test("the credential is removed from every string, wherever it sits", () => {
+  // The first version redacted only event variants with a `text` field, so
+  // command text, file paths, tool summaries and the task itself kept it — and
+  // the credential check then refused the whole recording rather than
+  // redacting it, failing valid runs.
   const redacted = redactTranscript(
     transcript(`debug: token ${CREDENTIAL} in use`),
-    CREDENTIAL
+    [CREDENTIAL]
   );
 
   const serialized = JSON.stringify(redacted);
@@ -496,27 +640,43 @@ test("the recording credential is removed from every field", () => {
   assert.ok(serialized.includes("debug: token"), "context must survive");
 });
 
-test("assertNoCredential throws when a credential survives", () => {
-  // The belt-and-braces check on the one secret certainly present. Cheap, and
-  // the exact failure that would matter most.
+test("file paths are redacted too", () => {
+  const redacted = redactTranscript(transcript(`/tmp/${CREDENTIAL}/x.ts`), [
+    CREDENTIAL,
+  ]);
+
+  assert.ok(
+    !JSON.stringify(redacted.result.fileOperations).includes(CREDENTIAL)
+  );
+});
+
+test("non-string values are left untouched", () => {
+  const redacted = redactTranscript(transcript("clean"), [CREDENTIAL]);
+
+  assert.equal(redacted.result.commandResults[0]?.exitCode, 0);
+  assert.equal(redacted.events[0]?.offsetMs, 0);
+  assert.equal(redacted.result.status, "completed");
+});
+
+test("assertNoSecrets throws when a known secret survives", () => {
   assert.throws(
-    () => assertNoCredential(transcript(`leak ${CREDENTIAL}`), CREDENTIAL),
-    /credential/i
+    () => assertNoSecrets(transcript(`leak ${CREDENTIAL}`), [CREDENTIAL]),
+    /secret/i
   );
 });
 
-test("assertNoCredential passes a clean transcript", () => {
-  assert.doesNotThrow(() =>
-    assertNoCredential(transcript("nothing sensitive here"), CREDENTIAL)
+test("assertNoSecrets throws when the sanitiser still finds something", () => {
+  // Reuses sanitizeEvidenceText as the detector rather than a second regex. A
+  // hand-rolled list drifts from the real one — one missing github_pat_, xox,
+  // AKIA or glpat- would report "no tokens" while one sits in the file.
+  assert.throws(
+    () => assertNoSecrets(transcript("Authorization: Bearer abcdef123456"), []),
+    /sanitiser/i
   );
 });
 
-test("an empty credential is not treated as a match", () => {
-  // Searching for "" matches everything. Guarding it means an unconfigured
-  // credential cannot make the check pass vacuously OR fail spuriously.
-  assert.doesNotThrow(() =>
-    assertNoCredential(transcript("anything at all"), "")
-  );
+test("assertNoSecrets passes a clean transcript", () => {
+  assert.doesNotThrow(() => assertNoSecrets(transcript("nothing here"), []));
 });
 ```
 
@@ -536,61 +696,64 @@ import {
 } from "@opencoven/agent-contracts";
 
 /**
- * Sanitises a captured transcript before it is committed.
+ * Walks a value and sanitises every string it contains.
  *
- * The primary safety property is that recordings are made against a public
- * repository, so a redaction miss leaks nothing that was not already public.
- * This is defence in depth against the one secret certainly present and
- * genuinely dangerous: the credential used to perform the recording.
+ * Generic rather than field-by-field, because a field-by-field version misses
+ * whatever is added later — the first version missed tool summaries, error
+ * messages, file paths and the task text, and the credential check then
+ * refused those recordings instead of cleaning them.
  */
+function redactDeep<T>(value: T, secrets: string[]): T {
+  if (typeof value === "string") {
+    return sanitizeEvidenceText(value, secrets) as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactDeep(entry, secrets)) as T;
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        redactDeep(entry, secrets),
+      ])
+    ) as T;
+  }
+  return value;
+}
+
 export function redactTranscript(
   transcript: DemoTranscript,
-  credential: string
+  secrets: string[]
 ): DemoTranscript {
-  const secrets = credential ? [credential] : [];
-  const clean = (value: string) => sanitizeEvidenceText(value, secrets);
-
-  return {
-    ...transcript,
-    events: transcript.events.map((entry) => ({
-      ...entry,
-      event:
-        "text" in entry.event
-          ? { ...entry.event, text: clean(entry.event.text) }
-          : entry.event,
-    })),
-    result: {
-      ...transcript.result,
-      commandResults: transcript.result.commandResults.map((entry) => ({
-        ...entry,
-        // Every field here is optional in the schema, so each is guarded
-        // rather than assumed present.
-        command: entry.command === undefined ? undefined : clean(entry.command),
-        stderr: entry.stderr === undefined ? undefined : clean(entry.stderr),
-        stdout: entry.stdout === undefined ? undefined : clean(entry.stdout),
-      })),
-      output: clean(transcript.result.output),
-    },
-  };
+  return redactDeep(transcript, secrets.filter(Boolean));
 }
 
 /**
- * Throws if the credential survives anywhere in the serialized transcript.
+ * Throws if anything sensitive survives.
  *
- * Deliberately a whole-document string search rather than a field-by-field
- * check: a field added later would silently escape a field-by-field version,
- * and this is the check that must not have gaps.
+ * Two checks. The first is exact: a known secret must not appear anywhere in
+ * the serialized document. The second reuses `sanitizeEvidenceText` as the
+ * detector — if sanitising the serialized transcript changes it, something the
+ * sanitiser recognises is still present. Reusing it rather than writing a
+ * second pattern list means this check cannot drift from the real one.
  */
-export function assertNoCredential(
+export function assertNoSecrets(
   transcript: DemoTranscript,
-  credential: string
+  secrets: string[]
 ): void {
-  if (!credential) {
-    return;
+  const serialized = JSON.stringify(transcript);
+
+  for (const secret of secrets.filter(Boolean)) {
+    if (serialized.includes(secret)) {
+      throw new Error(
+        "A known secret survived redaction. Refusing to write a transcript that would publish it."
+      );
+    }
   }
-  if (JSON.stringify(transcript).includes(credential)) {
+
+  if (sanitizeEvidenceText(serialized) !== serialized) {
     throw new Error(
-      "The recording credential survived redaction. Refusing to write a transcript that would publish it."
+      "The sanitiser still finds something in this transcript. Refusing to write it."
     );
   }
 }
@@ -599,24 +762,26 @@ export function assertNoCredential(
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `corepack pnpm exec tsx --conditions=react-server --test lib/demo/redact.test.ts`
-Expected: PASS, 4 tests
+Expected: PASS, 6 tests
 
-- [ ] **Step 5: Mutation-test the guard**
+- [ ] **Step 5: Mutation-test both guards**
 
-Change `assertNoCredential`'s body to `return;` unconditionally.
+Make `redactDeep` return strings unchanged. Run. Expected: FAIL on the first two tests. Restore.
 
-Run. Expected: FAIL on "assertNoCredential throws when a credential survives". Restore and confirm green.
+Make `assertNoSecrets` return immediately. Run. Expected: FAIL on both `assertNoSecrets throws` tests. Restore.
+
+Remove only the sanitiser check, keeping the exact-match loop. Run. Expected: FAIL on "assertNoSecrets throws when the sanitiser still finds something". Restore.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add lib/demo/redact.ts lib/demo/redact.test.ts
-git commit -S -m "feat(demo): redact a captured transcript and refuse to publish a credential"
+git commit -S -m "feat(demo): redact every string and refuse to publish a secret"
 ```
 
 ---
 
-### Task 4: Playback timing
+### Task 5: Playback timing
 
 **Files:**
 - Create: `lib/demo/player.ts`
@@ -631,12 +796,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DEMO_SPEED, MAX_GAP_MS, planPlayback } from "./player";
 
-const EVENT = {
-  at: "2026-08-24T12:00:00.000Z",
-  harness: "copilot" as const,
-  kind: "started" as const,
-  runId: "run-1",
-};
+const EVENT = { id: "e", type: "status" } as const;
 
 function entries(...offsets: number[]) {
   return offsets.map((offsetMs) => ({ event: EVENT, offsetMs }));
@@ -652,8 +812,8 @@ test("delays are the gaps between offsets, not the offsets", () => {
 });
 
 test("a long pause is capped", () => {
-  // A real run waits minutes while a harness thinks. Replaying that
-  // faithfully means a visitor staring at a spinner.
+  // A real run waits minutes while a harness thinks. Replaying that faithfully
+  // means a visitor staring at a spinner.
   const plan = planPlayback(entries(0, 120_000));
 
   assert.equal(plan[1]?.delayMs, MAX_GAP_MS);
@@ -661,14 +821,10 @@ test("a long pause is capped", () => {
 
 test("relative rhythm survives capping", () => {
   // A tool call that took noticeably longer than its neighbours should still
-  // look that way. That texture is what makes a replay read as real work
-  // rather than an animation.
+  // look that way. That texture is what makes a replay read as real work.
   const plan = planPlayback(entries(0, 100, 900));
 
-  assert.ok(
-    (plan[2]?.delayMs ?? 0) > (plan[1]?.delayMs ?? 0),
-    "the longer gap must remain the longer gap"
-  );
+  assert.ok((plan[2]?.delayMs ?? 0) > (plan[1]?.delayMs ?? 0));
 });
 
 test("speed scales every delay together", () => {
@@ -678,7 +834,7 @@ test("speed scales every delay together", () => {
 });
 
 test("a speed of zero or less is refused rather than freezing the demo", () => {
-  for (const speed of [0, -1]) {
+  for (const speed of [0, -1, Number.NaN]) {
     assert.throws(() => planPlayback(entries(0, 400), { speed }), /speed/i);
   }
 });
@@ -700,10 +856,10 @@ Create `lib/demo/player.ts`:
 ```ts
 import type { DemoTranscript } from "@opencoven/agent-contracts";
 
-/** Longer pauses convey nothing to a visitor watching a replay. */
+/** Longer pauses convey nothing to someone watching a replay. */
 export const MAX_GAP_MS = 1500;
 
-/** Unmodified playback. One constant so relative rhythm is preserved. */
+/** Unmodified playback. One constant, so relative rhythm is preserved. */
 export const DEMO_SPEED = 1;
 
 export type PlaybackStep = {
@@ -715,8 +871,7 @@ export type PlaybackStep = {
  * Turns recorded offsets into the delays a player waits between events.
  *
  * Both transforms live here rather than in the fixture, so the committed
- * recording stays a faithful record of what actually happened and only its
- * presentation is adjusted.
+ * recording stays a faithful record and only its presentation is adjusted.
  */
 export function planPlayback(
   entries: DemoTranscript["events"],
@@ -750,8 +905,6 @@ Change `Math.min(Math.max(gap, 0), MAX_GAP_MS)` to `Math.max(gap, 0)`. Run. Expe
 
 Change `/ speed` to `/ 1`. Run. Expected: FAIL on "speed scales every delay together". Restore.
 
-Confirm green after each. Report if either does not fail.
-
 - [ ] **Step 6: Commit**
 
 ```bash
@@ -761,17 +914,19 @@ git commit -S -m "feat(demo): plan replay timing with gap capping and speed"
 
 ---
 
-### Task 5: Fixture validation over the real directory
+### Task 6: Fixture directory and validation
 
 **Files:**
 - Create: `lib/demo/fixtures/.gitkeep`
 - Create: `lib/demo/fixtures.test.ts`
 
+This must precede Task 7: the recorder writes into this directory, and without
+it `writeFileSync` fails.
+
 - [ ] **Step 1: Create the directory**
 
 ```bash
-mkdir -p lib/demo/fixtures
-touch lib/demo/fixtures/.gitkeep
+mkdir -p lib/demo/fixtures && touch lib/demo/fixtures/.gitkeep
 ```
 
 - [ ] **Step 2: Write the test**
@@ -783,55 +938,54 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { demoTranscriptSchema } from "@opencoven/agent-contracts";
+import {
+  demoTranscriptSchema,
+  sanitizeEvidenceText,
+} from "@opencoven/agent-contracts";
 
 const FIXTURE_DIR = join(process.cwd(), "lib/demo/fixtures");
 
-function fixtureFiles(): string[] {
-  return readdirSync(FIXTURE_DIR).filter((name) => name.endsWith(".json"));
+function fixtures(): { name: string; raw: string }[] {
+  return readdirSync(FIXTURE_DIR)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => ({
+      name,
+      raw: readFileSync(join(FIXTURE_DIR, name), "utf8"),
+    }));
 }
 
 test("every committed transcript validates against the schema", () => {
   // Runs over the real directory rather than a sample, so a transcript added
-  // later is covered without anyone remembering to wire it in. This is also
-  // the drift alarm: if the product changes what a run emits, committed
-  // fixtures stop validating here.
-  for (const file of fixtureFiles()) {
-    const parsed = demoTranscriptSchema.safeParse(
-      JSON.parse(readFileSync(join(FIXTURE_DIR, file), "utf8"))
-    );
+  // later is covered without anyone remembering. Also the drift alarm: if the
+  // product changes what a run emits, committed fixtures stop validating here.
+  for (const { name, raw } of fixtures()) {
+    const parsed = demoTranscriptSchema.safeParse(JSON.parse(raw));
 
     assert.ok(
       parsed.success,
-      `${file} is not a valid transcript: ${parsed.success ? "" : parsed.error.message}`
+      `${name} is not a valid transcript: ${parsed.success ? "" : parsed.error.message}`
     );
   }
 });
 
 test("a transcript's name matches its filename", () => {
-  // A mismatch means the route loads one thing and the UI labels it another.
-  for (const file of fixtureFiles()) {
-    const parsed = demoTranscriptSchema.parse(
-      JSON.parse(readFileSync(join(FIXTURE_DIR, file), "utf8"))
+  for (const { name, raw } of fixtures()) {
+    assert.equal(
+      `${demoTranscriptSchema.parse(JSON.parse(raw)).name}.json`,
+      name
     );
-
-    assert.equal(`${parsed.name}.json`, file);
   }
 });
 
-test("no committed transcript contains anything shaped like a token", () => {
-  // Recordings are made against a public repository, so this is defence in
-  // depth rather than the primary guarantee. It costs nothing and the failure
-  // it catches is permanent.
-  const suspicious = /\b(gh[pousr]_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9]{16,})\b/;
-
-  for (const file of fixtureFiles()) {
-    const raw = readFileSync(join(FIXTURE_DIR, file), "utf8");
-
+test("the sanitiser finds nothing in any committed transcript", () => {
+  // Reuses the real sanitiser rather than a second pattern list, which would
+  // drift: one missing github_pat_, xox, AKIA or glpat- would report "no
+  // tokens" while one sits in the file.
+  for (const { name, raw } of fixtures()) {
     assert.equal(
-      suspicious.test(raw),
-      false,
-      `${file} contains something shaped like a credential`
+      sanitizeEvidenceText(raw),
+      raw,
+      `${name} contains something the sanitiser recognises`
     );
   }
 });
@@ -840,21 +994,23 @@ test("no committed transcript contains anything shaped like a token", () => {
 - [ ] **Step 3: Run the tests**
 
 Run: `corepack pnpm exec tsx --conditions=react-server --test lib/demo/fixtures.test.ts`
-Expected: PASS, 3 tests. They pass vacuously with no fixtures — that is correct, and Task 6 makes them meaningful.
+Expected: PASS, 3 tests. They pass vacuously with no fixtures; Step 4 makes that meaningful.
 
-- [ ] **Step 4: Prove the guard is real**
-
-Write a deliberately bad fixture:
+- [ ] **Step 4: Prove each guard is real**
 
 ```bash
-cat > lib/demo/fixtures/bad.json <<'JSON'
-{ "name": "bad", "task": "t", "harness": "copilot", "recordedAt": "2026-08-24T12:00:00.000Z", "events": [], "result": {} }
-JSON
+printf '{"name":"bad"}' > lib/demo/fixtures/bad.json
+corepack pnpm exec tsx --conditions=react-server --test lib/demo/fixtures.test.ts
 ```
 
-Run the same command. Expected: FAIL on "every committed transcript validates against the schema".
+Expected: FAIL on schema validation.
 
-Then replace its contents with a token-shaped string inside an otherwise valid transcript and confirm the third test fails.
+```bash
+printf '{"x":"Authorization: Bearer abcdef123456"}' > lib/demo/fixtures/bad.json
+corepack pnpm exec tsx --conditions=react-server --test lib/demo/fixtures.test.ts
+```
+
+Expected: FAIL on the sanitiser test as well as schema validation.
 
 ```bash
 rm lib/demo/fixtures/bad.json
@@ -871,11 +1027,13 @@ git commit -S -m "test(demo): validate every committed transcript"
 
 ---
 
-### Task 6: The recorder CLI
+### Task 7: The recorder CLI
 
 **Files:**
 - Create: `scripts/demo-record.ts`
 - Modify: `package.json`
+
+Depends on Tasks 1, 2, 3, 4 and 6.
 
 - [ ] **Step 1: Write the recorder**
 
@@ -885,22 +1043,19 @@ Create `scripts/demo-record.ts`:
 #!/usr/bin/env tsx
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  demoTranscriptSchema,
-  toOffsets,
-} from "@opencoven/agent-contracts";
-import { assertNoCredential, redactTranscript } from "@/lib/demo/redact";
+import { demoTranscriptSchema } from "@opencoven/agent-contracts";
+import { toOffsets } from "@/lib/demo/offsets";
 import { assertRecordable, DEMO_REPOSITORY } from "@/lib/demo/recordable";
+import { assertNoSecrets, redactTranscript } from "@/lib/demo/redact";
 
 /**
  * Records a real agent run as a demo transcript.
  *
- * Orchestration only. Every decision it makes — what may be recorded, what
- * must be redacted, whether a credential survived — lives in a tested module,
- * because this file performs a real run and cannot be unit tested.
+ * Orchestration only. Every decision — what may be recorded, what must be
+ * redacted, whether a secret survived — lives in a tested module, because this
+ * file drives a real run and cannot be unit tested.
  *
  *   pnpm demo:record --name add-test --task "add a test for the parser"
- *   pnpm demo:record --name broken --task "..." --allow-failure
  */
 
 function arg(flag: string): string | undefined {
@@ -913,7 +1068,7 @@ async function main(): Promise<number> {
   const task = arg("--task");
   const allowFailure = process.argv.includes("--allow-failure");
   const repository = process.env.DEMO_REPOSITORY ?? DEMO_REPOSITORY;
-  const credential = process.env.COPILOT_GITHUB_TOKEN ?? "";
+  const credential = process.env.DEMO_RECORDING_CREDENTIAL ?? "";
 
   if (!(name && task)) {
     process.stderr.write(
@@ -922,26 +1077,38 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  // Refused before the run starts, so a forbidden recording never happens at
-  // all rather than being discarded afterwards.
-  assertRecordable({ allowFailure, repository, status: "completed" });
+  // Refused before anything runs, so a forbidden recording never happens at
+  // all rather than being discarded afterwards. `status` is optimistic here
+  // and re-checked against the real outcome below.
+  assertRecordable({
+    allowFailure,
+    backend: "cloud",
+    credential,
+    repository,
+    status: "completed",
+  });
 
   const { captureRun } = await import("./demo-capture");
   const captured = await captureRun({ credential, repository, task });
 
-  assertRecordable({ allowFailure, repository, status: captured.result.status });
+  assertRecordable({
+    allowFailure,
+    backend: "cloud",
+    credential,
+    repository,
+    status: captured.result.status,
+  });
 
   const transcript = demoTranscriptSchema.parse({
-    events: toOffsets(captured.events),
-    harness: captured.harness,
+    events: toOffsets(captured.arrivals),
     name,
     recordedAt: new Date().toISOString(),
     result: captured.result,
     task,
   });
 
-  const redacted = redactTranscript(transcript, credential);
-  assertNoCredential(redacted, credential);
+  const redacted = redactTranscript(transcript, [credential]);
+  assertNoSecrets(redacted, [credential]);
 
   const target = join(process.cwd(), "lib/demo/fixtures", `${name}.json`);
   writeFileSync(target, `${JSON.stringify(redacted, null, 2)}\n`);
@@ -965,15 +1132,19 @@ In `package.json`, beside `"subscription"`:
     "demo:record": "tsx --env-file-if-exists=.env.local --conditions=react-server scripts/demo-record.ts",
 ```
 
-- [ ] **Step 3: Verify the refusal happens before any run**
+- [ ] **Step 3: Verify each refusal fires before any run**
 
 ```bash
-DEMO_REPOSITORY=someone/private corepack pnpm demo:record --name x --task "y"
+DEMO_REPOSITORY=someone/private DEMO_RECORDING_CREDENTIAL=x corepack pnpm demo:record --name x --task y
 ```
 
-Expected: exits non-zero with a message naming `OpenCoven/demo-workspace`, and **no run is attempted**. Confirm by checking that no network call was made — the refusal is the first thing after argument parsing.
+Expected: non-zero exit, a message naming `OpenCoven/demo-workspace`, no run attempted.
 
-- [ ] **Step 4: Verify usage output**
+```bash
+corepack pnpm demo:record --name x --task y
+```
+
+Expected: refused for a missing credential.
 
 ```bash
 corepack pnpm demo:record
@@ -981,23 +1152,86 @@ corepack pnpm demo:record
 
 Expected: the usage line, exit code 2.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add scripts/demo-record.ts package.json
 git commit -S -m "feat(demo): record a real run as a transcript"
 ```
 
-**Note:** `./demo-capture` is the module that performs the actual run against the worker. It is deliberately not specified here — it depends on how you choose to drive a run from a script (direct worker call with a minted token, or reusing `RunnerClient`). Write it as a thin module exposing `captureRun({ credential, repository, task })` returning `{ events, harness, result }`, and record its shape in a follow-up commit. Everything the safety of this feature depends on is already tested above and does not change with that choice.
+**`./demo-capture` is deliberately unspecified.** It drives one run through the
+cloud worker and returns `{ arrivals: ArrivedEvent[]; result: RunResult }`,
+stamping `receivedAt` as each stream event arrives. Left to implementation
+because it depends on how the worker's event stream is consumed from a script,
+and because nothing this feature's safety rests on lives in it —
+`assertRecordable`, `redactTranscript` and `assertNoSecrets` all run on its
+output. Note `RunnerClient` alone is insufficient: it exposes only a final
+`RunResult`, with no per-event stream.
 
 ---
 
-### Task 7: The demo route
+### Task 8: Move SessionProvider out of the root layout
 
 **Files:**
-- Create: `app/demo/page.tsx`
+- Modify: `app/layout.tsx`
+- Modify: `app/(chat)/layout.tsx`
+- Modify: `app/(auth)/layout.tsx`
+
+`SessionProvider` sits in the root layout, which wraps every route and
+initiates a client session fetch. A demo page under it makes an auth network
+request even though the page itself calls nothing — contradicting the property
+this feature is built on.
+
+- [ ] **Step 1: Remove it from the root layout**
+
+In `app/layout.tsx`, delete the `SessionProvider` import and unwrap its
+children, leaving:
+
+```tsx
+          <TooltipProvider>{children}</TooltipProvider>
+```
+
+- [ ] **Step 2: Add it to each route group that uses a session**
+
+In both `app/(chat)/layout.tsx` and `app/(auth)/layout.tsx`:
+
+```tsx
+import { SessionProvider } from "next-auth/react";
+
+// …wrapping whatever the layout already returns:
+<SessionProvider
+  basePath={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/auth`}
+>
+  {/* existing content */}
+</SessionProvider>
+```
+
+- [ ] **Step 3: Verify sessions still work**
+
+```bash
+corepack pnpm build
+PORT=3103 corepack pnpm dev > /tmp/demo-auth.log 2>&1 &
+until curl -s -o /dev/null http://localhost:3103/ping; do sleep 1; done
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3103/login
+```
+
+Expected: build passes, `/login` returns 200. Kill the dev server.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add app/layout.tsx "app/(chat)/layout.tsx" "app/(auth)/layout.tsx"
+git commit -S -m "refactor(app): mount SessionProvider only where a session is used"
+```
+
+---
+
+### Task 9: The demo route
+
+**Files:**
 - Create: `lib/demo/load.ts`
 - Create: `lib/demo/load.test.ts`
+- Create: `app/demo/page.tsx`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1011,47 +1245,41 @@ import { loadTranscript } from "./load";
 const AGENT_ID = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
 const RUN_ID = "11111111-2222-4333-8444-555555555555";
 
-test("an unparseable transcript yields null rather than throwing", () => {
+const VALID = JSON.stringify({
+  events: [
+    {
+      event: { id: "e1", operationId: RUN_ID, runId: RUN_ID, type: "accepted" },
+      offsetMs: 0,
+    },
+  ],
+  name: "add-test",
+  recordedAt: "2026-08-24T12:00:00.000Z",
+  result: {
+    agentId: AGENT_ID,
+    commandResults: [],
+    completedAt: "2026-08-24T12:01:00.000Z",
+    fileOperations: [],
+    id: RUN_ID,
+    output: "Added a test.",
+    startedAt: "2026-08-24T12:00:00.000Z",
+    status: "completed",
+  },
+  task: "add a test",
+});
+
+test("unparseable input yields null rather than throwing", () => {
   // The route renders an empty state when there is nothing to play. It must
-  // never fall through to attempting a live run, which is what a thrown error
-  // handled higher up could turn into.
+  // never throw into an error boundary a reader could mistake for the demo
+  // being broken rather than absent.
   assert.equal(loadTranscript("{ not json"), null);
 });
 
-test("a transcript failing schema validation yields null", () => {
+test("input failing schema validation yields null", () => {
   assert.equal(loadTranscript(JSON.stringify({ name: "x" })), null);
 });
 
 test("a valid transcript is returned parsed", () => {
-  const valid = {
-    events: [
-      {
-        event: {
-          at: "2026-08-24T12:00:00.000Z",
-          harness: "copilot",
-          kind: "started",
-          runId: "run-1",
-        },
-        offsetMs: 0,
-      },
-    ],
-    harness: "copilot",
-    name: "add-test",
-    recordedAt: "2026-08-24T12:00:00.000Z",
-    result: {
-      agentId: AGENT_ID,
-      commandResults: [],
-      completedAt: "2026-08-24T12:01:00.000Z",
-      fileOperations: [],
-      id: RUN_ID,
-      output: "Added a test.",
-      startedAt: "2026-08-24T12:00:00.000Z",
-      status: "completed",
-    },
-    task: "add a test",
-  };
-
-  assert.equal(loadTranscript(JSON.stringify(valid))?.name, "add-test");
+  assert.equal(loadTranscript(VALID)?.name, "add-test");
 });
 ```
 
@@ -1073,10 +1301,8 @@ import {
 /**
  * Parses a committed transcript, returning null rather than throwing.
  *
- * The route renders an explanatory empty state when there is nothing to play.
- * It must never fall through to attempting a live run — a demo visitor has no
- * credential by construction, so that would be a confusing failure instead of
- * a clear absence.
+ * A demo visitor has no credential by construction, so falling through to a
+ * live run would produce a confusing failure instead of a clear absence.
  */
 export function loadTranscript(raw: string): DemoTranscript | null {
   try {
@@ -1093,24 +1319,30 @@ export function loadTranscript(raw: string): DemoTranscript | null {
 Run: `corepack pnpm exec tsx --conditions=react-server --test lib/demo/load.test.ts`
 Expected: PASS, 3 tests
 
-- [ ] **Step 5: Write the route**
+- [ ] **Step 5: Write the route, gated on IS_DEMO**
 
 Create `app/demo/page.tsx`:
 
 ```tsx
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { notFound } from "next/navigation";
 import { loadTranscript } from "@/lib/demo/load";
 
 /**
  * The demo route.
  *
- * The transcript is read at build time and handed to a client player. This
- * page makes no worker request and no database call: a demo visitor cannot
- * reach the credential path even if the worker's authorization were later got
- * wrong, because nothing is asked of the worker at all.
+ * Gated on `IS_DEMO`: without it this is a public route on the default
+ * deployment, which the rollout promises it is not.
+ *
+ * Makes no worker request and no database call, and — since SessionProvider
+ * moved into the route groups that need it — no auth request either.
  */
 export default function DemoPage() {
+  if (process.env.IS_DEMO !== "1") {
+    notFound();
+  }
+
   const dir = join(process.cwd(), "lib/demo/fixtures");
   const [file] = readdirSync(dir).filter((name) => name.endsWith(".json"));
 
@@ -1141,34 +1373,43 @@ export default function DemoPage() {
 }
 ```
 
-- [ ] **Step 6: Verify the route builds and renders the empty state**
+- [ ] **Step 6: Verify both build modes**
 
 ```bash
 corepack pnpm build
+PORT=3104 corepack pnpm dev > /tmp/demo-off.log 2>&1 &
+until curl -s -o /dev/null http://localhost:3104/ping; do sleep 1; done
+curl -s -o /dev/null -w 'IS_DEMO unset: %{http_code}\n' http://localhost:3104/demo
+kill %1
 ```
 
-Expected: PASS, with `/demo` listed in the route output.
+Expected: `404`. The demo is not public on the default deployment.
 
 ```bash
-PORT=3102 corepack pnpm dev > /tmp/demo.log 2>&1 &
-until curl -s -o /dev/null http://localhost:3102/ping; do sleep 1; done
-curl -s http://localhost:3102/demo | grep -c "Demo unavailable"
+IS_DEMO=1 PORT=3105 corepack pnpm dev > /tmp/demo-on.log 2>&1 &
+until curl -s -o /dev/null http://localhost:3105/ping; do sleep 1; done
+curl -s http://localhost:3105/demo/demo | grep -c "Demo unavailable"
+kill %1
 ```
 
-Expected: `1` — the empty state, because no fixture is committed yet. Kill the dev server afterwards.
+Expected: `1`. Note the doubled path — `next.config.ts` sets `basePath` to
+`/demo` when `IS_DEMO=1`, so `app/demo` is served at `/demo/demo`.
+
+**Decide before shipping** whether the demo deployment keeps that base path. If
+it does, move this page so it lands on the base-path root; if it does not, drop
+the `basePath` branch in `next.config.ts`. Record the choice here rather than
+leaving both. Do not ship `/demo/demo`.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add lib/demo/load.ts lib/demo/load.test.ts app/demo/page.tsx
-git commit -S -m "feat(demo): serve a recorded transcript with an empty state fallback"
+git commit -S -m "feat(demo): serve a recorded transcript behind IS_DEMO"
 ```
 
 ---
 
-### Task 8: Full verification
-
-**Files:** none created.
+### Task 10: Full verification
 
 - [ ] **Step 1: Run the whole gate**
 
@@ -1179,15 +1420,17 @@ corepack pnpm test:unit
 corepack pnpm build
 ```
 
-Expected: all pass. `test:unit` should include every `lib/demo/*.test.ts` file automatically via the `lib/**/*.test.ts` glob — confirm the count rose rather than assuming it.
+Expected: all pass, test count risen by roughly 28.
 
-- [ ] **Step 2: Confirm the new tests actually run in CI**
+- [ ] **Step 2: Confirm the new tests run in CI**
 
-Break one assertion in `lib/demo/player.test.ts`, run `corepack pnpm test:unit`, and confirm it fails. Restore.
+Break one assertion in `lib/demo/offsets.test.ts`, run `corepack pnpm test:unit`, confirm it fails, restore.
 
-A test CI never runs is worse than no test. This has been the single most repeated defect in this codebase, so verify it rather than trusting the glob.
+The `lib/**/*.test.ts` glob should pick these up, but a test CI never runs is
+the single most repeated defect in this codebase — five occurrences so far.
+Verify rather than trusting the glob.
 
-- [ ] **Step 3: Commit nothing, open the PR**
+- [ ] **Step 3: Push and open the PR**
 
 ```bash
 corepack pnpm hygiene
@@ -1198,23 +1441,25 @@ git push -u origin <branch>
 
 ## Self-review against the spec
 
-**Spec coverage**
-
 | Spec requirement | Task |
 | --- | --- |
-| Transcript format with offsets, not timestamps | 1 |
-| Nested real `runEventSchema` as a drift alarm | 1, 5 |
-| Recording refused outside the demo repository | 2, 6 |
-| Failed run refused unless explicitly allowed | 2 |
-| Redaction with the recording credential | 3 |
-| Refuse to write a transcript containing the credential | 3 |
-| Gap capping and speed, applied in the player | 4 |
-| Relative rhythm preserved | 4 |
-| Every committed fixture validated over the real directory | 5 |
-| The recorder CLI | 6 |
-| Empty state, never falling through to a live run | 7 |
-| Replay makes no worker or database call | 7 |
+| Transcript format with offsets, not timestamps | 1, 2 |
+| Nested real event schema as a drift alarm | 1, 6 |
+| Recording refused outside the demo repository | 3, 7 |
+| Failed run refused unless explicitly allowed | 3 |
+| Redaction with the recording credential | 4 |
+| Refuse to write a transcript containing a secret | 4 |
+| Gap capping and speed, applied in the player | 5 |
+| Relative rhythm preserved | 5 |
+| Every committed fixture validated over the real directory | 6 |
+| The recorder CLI | 7 |
+| Replay makes no worker, database or auth request | 8, 9 |
+| Empty state, never falling through to a live run | 9 |
+| Behind `IS_DEMO`, default deployment untouched | 9 |
 
-**Not covered, and deliberately so:** the player *component* — the React piece that consumes `planPlayback` and renders events over time — is not specified. Task 7 renders the transcript's task and a placeholder rather than the streaming UI. That is a UI-shaped decision better made against a real recorded transcript than guessed at now, and every safety property is already established without it. Task 6 similarly leaves `demo-capture` unspecified for the same reason.
+**Not covered, deliberately:** the React player component that consumes
+`planPlayback`, and `demo-capture`. Both are better decided against a real
+recorded transcript, and every safety property is established without them.
 
-**Ordering constraint:** Task 1 must precede everything, since every other task imports the schema. Tasks 2–5 are independent of each other. Task 6 needs 1, 2 and 3. Task 7 needs 1.
+**Ordering:** Task 1 first — everything imports the schema. Tasks 2–6 are
+independent. Task 7 needs 1, 2, 3, 4 and 6. Task 9 needs 1 and 8.
