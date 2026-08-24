@@ -59,7 +59,7 @@ test("the signature verifies against the matching public key", async () => {
   const verified = await crypto.subtle.verify(
     { name: "Ed25519" },
     publicKey,
-    base64UrlDecode(parts.signature),
+    new Uint8Array(base64UrlDecode(parts.signature)),
     new TextEncoder().encode(parts.payload)
   );
 
@@ -80,7 +80,7 @@ test("a token minted by one key does not verify against another", async () => {
   const verified = await crypto.subtle.verify(
     { name: "Ed25519" },
     other.publicKey,
-    base64UrlDecode(parts.signature),
+    new Uint8Array(base64UrlDecode(parts.signature)),
     new TextEncoder().encode(parts.payload)
   );
 
