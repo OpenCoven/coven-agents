@@ -34,6 +34,7 @@ import {
   validateCloudWorkspace,
 } from "./run-state";
 import { sandboxKey, tenantOf } from "./tenant";
+import { fetchTenantCredential } from "./tenant-credentials";
 
 type DirectoryState = {
   agents: AgentDefinition[];
@@ -180,8 +181,9 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
   /**
    * Executes the mission by driving an already-signed-in coding CLI inside the
    * sandbox. The Worker never calls a model provider, so no provider API key
-   * exists in this path — only the harness's own credential, which the harness
-   * itself reads from its documented environment variable.
+   * exists in this path — only the tenant's own harness credential, borrowed
+   * for this run and handed to the harness under its documented environment
+   * variable name.
    */
   async execute(input: unknown): Promise<RunResult> {
     const { task } = runAgentInputSchema.parse(input);
@@ -238,6 +240,35 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
   }
 
   /**
+   * Borrows the tenant's own harness credential for the duration of this run.
+   *
+   * The worker holds no key material of its own — it asks the Next app, the
+   * sole custodian, over an internal service call. `APP_ORIGIN` and
+   * `RUNNER_SERVICE_TOKEN` missing is a deployment misconfiguration, not an
+   * absent credential, so it fails closed with a thrown error rather than
+   * quietly resolving to null and letting `requireHarness` report it as
+   * merely "not signed in".
+   */
+  private resolveTenantCredential(
+    definition: AgentDefinition
+  ): Promise<string | null> {
+    const { APP_ORIGIN, RUNNER_SERVICE_TOKEN } = this.env;
+    if (!APP_ORIGIN || !RUNNER_SERVICE_TOKEN) {
+      throw new Error(
+        "APP_ORIGIN and RUNNER_SERVICE_TOKEN must be configured to fetch a tenant credential."
+      );
+    }
+    return fetchTenantCredential(
+      { harnessId: definition.runtime, tenant: tenantOf(definition) },
+      {
+        endpoint: APP_ORIGIN,
+        fetchImpl: fetch,
+        serviceToken: RUNNER_SERVICE_TOKEN,
+      }
+    );
+  }
+
+  /**
    * Drives the harness for one planned run and records the outcome.
    *
    * Shared by `execute`, which awaits it, and `start`, which runs it inside a
@@ -272,8 +303,9 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     this.updateDefinition({ status: "running", updatedAt: startedAt });
 
     try {
+      const credential = await this.resolveTenantCredential(definition);
       const run = await runHarnessInSandbox({
-        env: this.env,
+        credential: { credential },
         instructions: `${definition.instructions}
 
 You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work only inside the sandbox, verify the result, and include exact evidence in your final response.`,
