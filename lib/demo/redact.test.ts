@@ -198,6 +198,18 @@ test("assertNoSecrets rejects an exact surviving credential", () => {
   assert.throws(() => assertNoSecrets(createTranscript(SECRET), [SECRET]));
 });
 
+test("assertNoSecrets rejects a surviving credential containing a quote", () => {
+  const secret = 'credential-"quoted"';
+
+  assert.throws(() => assertNoSecrets(createTranscript(secret), [secret]));
+});
+
+test("assertNoSecrets rejects a surviving credential containing a newline", () => {
+  const secret = "credential-line-one\ncredential-line-two";
+
+  assert.throws(() => assertNoSecrets(createTranscript(secret), [secret]));
+});
+
 test("assertNoSecrets rejects credentials recognized by the sanitizer", () => {
   const transcript = createTranscript();
   transcript.task = "Call API with Authorization: Bearer visible-token";

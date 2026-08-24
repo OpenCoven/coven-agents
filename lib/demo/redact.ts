@@ -3,6 +3,19 @@ import {
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
 
+function containsSecret(value: unknown, secrets: readonly string[]): boolean {
+  if (typeof value === "string") {
+    return secrets.some((secret) => value.includes(secret));
+  }
+  if (Array.isArray(value)) {
+    return value.some((item) => containsSecret(item, secrets));
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.values(value).some((item) => containsSecret(item, secrets));
+  }
+  return false;
+}
+
 export function redactDeep<T>(value: T, secrets: readonly string[]): T {
   if (typeof value === "string") {
     return sanitizeEvidenceText(value, secrets) as T;
@@ -33,12 +46,11 @@ export function assertNoSecrets(
   transcript: DemoTranscript,
   secrets: Iterable<string>
 ): void {
-  const serialized = JSON.stringify(transcript);
-  for (const secret of secrets) {
-    if (secret && serialized.includes(secret)) {
-      throw new Error("Demo transcript contains a provided secret.");
-    }
+  const nonemptySecrets = Array.from(secrets).filter(Boolean);
+  if (containsSecret(transcript, nonemptySecrets)) {
+    throw new Error("Demo transcript contains a provided secret.");
   }
+  const serialized = JSON.stringify(transcript);
   if (sanitizeEvidenceText(serialized) !== serialized) {
     throw new Error("Demo transcript contains sanitizer-recognized evidence.");
   }
