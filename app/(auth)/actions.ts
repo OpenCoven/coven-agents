@@ -1,10 +1,11 @@
 "use server";
 
+import { compare } from "bcrypt-ts";
 import { z } from "zod";
+import { passwordChangeDecision } from "@/lib/auth/password-change";
+import { createUser, getUser, updateUserPassword } from "@/lib/db/queries";
 
-import { createUser, getUser } from "@/lib/db/queries";
-
-import { signIn } from "./auth";
+import { auth, signIn } from "./auth";
 
 const authFormSchema = z.object({
   email: z.email(),
@@ -79,6 +80,71 @@ export const register = async (
       return { status: "invalid_data" };
     }
 
+    return { status: "failed" };
+  }
+};
+
+export type ChangePasswordActionState = {
+  status:
+    | "idle"
+    | "in_progress"
+    | "success"
+    | "mismatch"
+    | "too_short"
+    | "unauthorized"
+    | "unchanged"
+    | "wrong_password"
+    | "failed";
+};
+
+/**
+ * Changes the signed-in user's password.
+ *
+ * The decision lives in `passwordChangeDecision` rather than here, because it
+ * governs who keeps control of an account and a server action is unreachable
+ * from a unit test. This function does the parts that need the world: read the
+ * session, compare the stored hash, write the new one.
+ *
+ * The current password is required even though the caller is already signed
+ * in, so that a stolen session cookie is not by itself enough to seize the
+ * account permanently.
+ */
+export const changePassword = async (
+  _: ChangePasswordActionState,
+  formData: FormData
+): Promise<ChangePasswordActionState> => {
+  try {
+    const session = await auth();
+    const email = session?.user?.email ?? null;
+
+    const current = String(formData.get("currentPassword") ?? "");
+    const next = String(formData.get("newPassword") ?? "");
+    const confirmation = String(formData.get("confirmPassword") ?? "");
+
+    const [row] = email ? await getUser(email) : [];
+
+    const currentMatches = Boolean(
+      row?.password && (await compare(current, row.password))
+    );
+
+    const decision = passwordChangeDecision({
+      confirmation,
+      currentMatches,
+      next,
+      nextEqualsCurrent: Boolean(
+        row?.password && (await compare(next, row.password))
+      ),
+      signedIn: Boolean(email && row),
+    });
+
+    if (decision.kind !== "allowed") {
+      return { status: decision.kind } as ChangePasswordActionState;
+    }
+
+    await updateUserPassword(email as string, next);
+
+    return { status: "success" };
+  } catch {
     return { status: "failed" };
   }
 };
