@@ -25,7 +25,7 @@ test("a signed-in non-subscriber is still forbidden", () => {
   // The write goes to the owner's database, which is subscriber-only. This is
   // the rule that keeps a free account from storing rows there.
   const decision = decideCredentialWrite(
-    toSession({ id: "user-2", type: "regular" }),
+    toSession({ id: "user-2", type: "demo" }),
     body
   );
 

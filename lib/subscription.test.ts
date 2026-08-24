@@ -12,7 +12,7 @@ function at(offsetMs: number): Date {
 test("a user with no subscription is not a subscriber", () => {
   assert.equal(isSubscribedAt({}, NOW), false);
   assert.equal(isSubscribedAt({ subscribedUntil: null }, NOW), false);
-  assert.equal(userTypeFor({}, NOW), "regular");
+  assert.equal(userTypeFor({}, NOW), "demo");
 });
 
 test("a live subscription makes a subscriber", () => {
@@ -26,7 +26,7 @@ test("an expired subscription does not", () => {
   const user = { subscribedUntil: at(-60_000) };
 
   assert.equal(isSubscribedAt(user, NOW), false);
-  assert.equal(userTypeFor(user, NOW), "regular");
+  assert.equal(userTypeFor(user, NOW), "demo");
 });
 
 test("a subscription expiring exactly now has expired", () => {
@@ -35,7 +35,7 @@ test("a subscription expiring exactly now has expired", () => {
   const user = { subscribedUntil: NOW };
 
   assert.equal(isSubscribedAt(user, NOW), false);
-  assert.equal(userTypeFor(user, NOW), "regular");
+  assert.equal(userTypeFor(user, NOW), "demo");
 });
 
 test("only a live subscription reaches a subscriber session", () => {

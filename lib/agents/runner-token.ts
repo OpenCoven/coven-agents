@@ -57,9 +57,9 @@ export async function mintRunnerToken(
  * it lived in the route.
  *
  * `plan` goes through `isSubscriber` rather than comparing `type` directly:
- * `UserType` is currently `"guest" | "regular"`, so a comparison against
- * `"subscriber"` would not typecheck, and `toSession` is fail-closed, so until
- * billing exists nobody resolves to subscriber.
+ * `toSession` is fail-closed, so until billing exists nobody resolves to
+ * subscriber, and routing through it here means this function inherits that
+ * guarantee instead of re-deciding it.
  *
  * `tenant` comes from the stable user id, NOT from `toSession`. A demo session
  * mints a fresh `demo:<uuid>` on every call — correct for an anonymous cookie

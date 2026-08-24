@@ -28,12 +28,12 @@ export function isSubscribedAt(
  * The session type a stored user resolves to.
  *
  * Fail-closed by construction: anything that is not a live subscription is
- * `regular`, and `toSession` only grants a subscriber session for the exact
+ * `demo`, and `toSession` only grants a subscriber session for the exact
  * string `"subscriber"`.
  */
 export function userTypeFor(
   user: { subscribedUntil?: Date | null },
   now: Date
-): "regular" | "subscriber" {
-  return isSubscribedAt(user, now) ? "subscriber" : "regular";
+): "demo" | "subscriber" {
+  return isSubscribedAt(user, now) ? "subscriber" : "demo";
 }
