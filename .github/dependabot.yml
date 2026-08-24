@@ -39,6 +39,13 @@ updates:
       - dependency-name: lint-staged
         update-types:
           - version-update:semver-major
+      # Declined 2026-08-24 as #22. Not our code: bumping shiki to 4 splits the
+      # tree, because @streamdown/code resolves shiki 4 while streamdown still
+      # resolves shiki 3, and their HighlightOptions are then structurally
+      # incompatible. Remove this entry when streamdown supports shiki 4.
+      - dependency-name: shiki
+        update-types:
+          - version-update:semver-major
     commit-message:
       prefix: "chore(deps)"
 
