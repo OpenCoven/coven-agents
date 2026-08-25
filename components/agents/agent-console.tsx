@@ -38,7 +38,10 @@ import {
   connectionMessage,
 } from "@/lib/agents/connection-status";
 import { createIdentityMinter } from "@/lib/agents/identity";
-import { provisionConnection } from "@/lib/agents/provision";
+import {
+  fetchHasCredential,
+  provisionConnection,
+} from "@/lib/agents/provision";
 import { cn } from "@/lib/utils";
 
 const CLOUD_ENDPOINT =
@@ -111,6 +114,14 @@ export function AgentConsole() {
    */
   const [cloudStatus, setCloudStatus] =
     useState<ConnectionStatusKind>("unavailable");
+  /**
+   * Whether this tenant has stored a harness credential.
+   *
+   * The console can be perfectly connected and still fail every run for want
+   * of one, and the error arrives only after the agent is created and started
+   * -- long after the point where it could have been prevented.
+   */
+  const [hasCredential, setHasCredential] = useState<boolean | null>(null);
 
   const connection = connections[backend];
   /**
@@ -172,6 +183,14 @@ export function AgentConsole() {
      * "Runner request failed (404)" against the app's own origin.
      */
     let cancelled = false;
+
+    fetchHasCredential()
+      .then((has) => {
+        if (!cancelled && has !== null) {
+          setHasCredential(has);
+        }
+      })
+      .catch(() => undefined);
 
     provisionConnection()
       .then((status) => {
@@ -384,11 +403,11 @@ export function AgentConsole() {
             <EmptyState
               action={() => setShowConnection(true)}
               icon={Server}
-              text={
-                backend === "cloud" && cloudStatus !== "provisioned"
-                  ? connectionMessage(cloudStatus)
-                  : "Connect a runner to create and control agents."
-              }
+              text={emptyStateText({
+                backend,
+                cloudStatus,
+                hasCredential,
+              })}
             />
           )}
         </aside>
@@ -478,6 +497,28 @@ function StatusDot({ status }: { status: AgentDefinition["status"] }) {
       )}
     />
   );
+}
+
+/**
+ * What the sidebar should say when there is nothing to show.
+ *
+ * Ordered by what blocks first: no connection beats no credential, because
+ * fixing the credential would not help while the runner is unreachable.
+ */
+function emptyStateText(input: {
+  backend: Backend;
+  cloudStatus: ConnectionStatusKind;
+  hasCredential: boolean | null;
+}): string {
+  if (input.backend === "cloud" && input.cloudStatus !== "provisioned") {
+    return connectionMessage(input.cloudStatus);
+  }
+
+  if (input.hasCredential === false) {
+    return "Add a harness credential in Account settings before creating an agent.";
+  }
+
+  return "Connect a runner to create and control agents.";
 }
 
 function EmptyState({

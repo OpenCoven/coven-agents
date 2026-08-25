@@ -9,6 +9,7 @@ import {
 } from "@/app/(auth)/actions";
 import { DeleteAllChats } from "@/components/account/delete-all-chats";
 import { HarnessCredentials } from "@/components/account/harness-credentials";
+import { UsageMeter } from "@/components/account/usage-meter";
 import { AccountMenu } from "@/components/agents/account-menu";
 import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
@@ -122,6 +123,8 @@ export default function Page() {
           </Button>
         </form>
       </div>
+
+      <UsageMeter />
 
       <HarnessCredentials />
 

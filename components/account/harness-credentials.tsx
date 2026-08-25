@@ -1,5 +1,6 @@
 "use client";
 
+import { HARNESS_SPECS } from "@opencoven/harness";
 import { Check, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "@/components/chat/toast";
@@ -19,15 +20,30 @@ import { Label } from "@/components/ui/label";
  * this shows "Configured" rather than a masked secret: a status check has no
  * business putting the credential back on the wire.
  */
-const HARNESSES = [
-  {
-    help: "Fine-grained PAT with Copilot Requests, or an OAuth token from the Copilot CLI. Classic ghp_ tokens are not supported.",
-    id: "copilot",
-    label: "GitHub Copilot",
-  },
-  { help: "An Anthropic API key.", id: "claude", label: "Claude Code" },
-  { help: "An OpenAI API key.", id: "codex", label: "Codex" },
-] as const;
+/**
+ * Only harnesses a run can actually use.
+ *
+ * Derived from the registry rather than listed here, because offering a slot
+ * for an unsupported harness stores a credential that looks like a working
+ * setup and behaves like a missing one -- the worker refuses the run with
+ * `harness_unsupported` long after the person thought they were done. Codex
+ * and Claude Code are present in the registry but not yet supported, so they
+ * are deliberately absent from this form.
+ */
+const GUIDANCE: Record<string, string> = {
+  claude: "A Claude Code OAuth token.",
+  codex: "An OpenAI API key.",
+  copilot:
+    "A fine-grained PAT with the Copilot Requests permission, or an OAuth token from the Copilot CLI. Classic ghp_ tokens are not supported.",
+};
+
+const HARNESSES = HARNESS_SPECS.filter((spec) => spec.supported).map(
+  (spec) => ({
+    help: GUIDANCE[spec.id] ?? "",
+    id: spec.id as string,
+    label: spec.label,
+  })
+);
 
 export function HarnessCredentials() {
   const [configured, setConfigured] = useState<string[]>([]);
