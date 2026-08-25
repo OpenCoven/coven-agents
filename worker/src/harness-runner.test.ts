@@ -196,3 +196,68 @@ test("a sandbox image without the CLI names the fix instead of failing opaquely"
       error.message.includes("@github/copilot")
   );
 });
+
+/**
+ * The deadline exists because the SDK's own `{ timeout }` option is typed and
+ * never read — the compiled runtime contains no reference to it. These tests
+ * pin the behaviour that replaced it, with a sandbox whose exec never
+ * resolves, which is exactly what a wedged CLI looks like from the Worker.
+ */
+test("a hanging exec fails the run instead of wedging the agent", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const never = new Promise<never>(() => undefined);
+  const sandbox = { exec: () => never } as unknown as Parameters<
+    typeof runHarnessInSandbox
+  >[0]["sandbox"];
+
+  const run = runHarnessInSandbox({
+    credential: { credential: "token-under-test" },
+    instructions: "instructions",
+    model: "auto",
+    runtime: "copilot",
+    sandbox,
+    task: "task",
+  });
+  // Attached before time advances, or the rejection is unhandled for a tick.
+  const outcome = run.then(
+    () => null,
+    (rejection: unknown) => rejection
+  );
+
+  t.mock.timers.tick(200_000);
+
+  const error = (await outcome) as { code?: string; message?: string };
+  assert.equal(error?.code, "harness_timeout");
+  assert.match(String(error?.message), /exceeded/);
+});
+
+test("a probe timeout does not claim the harness is missing", async (t) => {
+  // `harness_missing` tells the operator to edit the Dockerfile and redeploy.
+  // For a timeout that advice is wrong and costs a rebuild before anyone
+  // questions it, so the timeout must surface under its own name.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const sandbox = {
+    exec: () => new Promise<never>(() => undefined),
+  } as unknown as Parameters<typeof runHarnessInSandbox>[0]["sandbox"];
+
+  const run = runHarnessInSandbox({
+    credential: { credential: "token-under-test" },
+    instructions: "instructions",
+    model: "auto",
+    runtime: "copilot",
+    sandbox,
+    task: "task",
+  });
+  const outcome = run.then(
+    () => null,
+    (rejection: unknown) => rejection
+  );
+
+  t.mock.timers.tick(200_000);
+
+  const error = (await outcome) as { code?: string };
+  assert.notEqual(error?.code, "harness_missing");
+  assert.equal(error?.code, "harness_timeout");
+});

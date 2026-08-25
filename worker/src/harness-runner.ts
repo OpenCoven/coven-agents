@@ -17,9 +17,54 @@ import {
 
 const DEFAULT_WORKSPACE = "/workspace";
 const RUN_TIMEOUT_MS = 900_000;
-const PROBE_TIMEOUT_MS = 20_000;
+/**
+ * Generous, and deliberately so. The first `copilot --version` on a cold
+ * container was measured at 100 seconds — container start plus a Node CLI's
+ * first launch — and a probe timeout below that fails every healthy first run.
+ * The old value of 20s only looked safe because it was never enforced.
+ */
+const PROBE_TIMEOUT_MS = 180_000;
 
 type SandboxLike = Pick<Sandbox, "exec">;
+
+/**
+ * Enforces a deadline the SDK does not.
+ *
+ * `sandbox.exec` accepts `{ timeout }` in its types and never reads it — the
+ * compiled runtime contains no reference to the option. Every timeout this
+ * file passed was decorative, which is how one wedged `copilot --version`
+ * held an agent's active-run slot for half an hour and every run after it was
+ * refused: nothing bounded the exec, and nothing behind it did either.
+ *
+ * A race does not kill the process in the container — the container keeps it
+ * until the sandbox is destroyed. What it does is bound the *run*: the throw
+ * marks it failed, releases the active slot, and tells the client something
+ * true instead of streaming silence.
+ */
+async function withDeadline<T>(
+  work: Promise<T>,
+  ms: number,
+  label: string
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(
+            new HarnessError(
+              `\`${label}\` exceeded ${Math.round(ms / 1000)}s inside the sandbox. The container may still be executing it; the run is failed so the agent is not wedged behind it.`,
+              "harness_timeout"
+            )
+          );
+        }, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export type HarnessCredential = {
   /** The tenant's credential, or null when they have configured none. */
@@ -122,9 +167,12 @@ async function probeInstalled(
   spec: HarnessSpec
 ): Promise<{ installed: boolean; version: string | null }> {
   try {
-    const result = await sandbox.exec(
-      `${spec.command} ${spec.versionArgs.join(" ")}`,
-      { timeout: PROBE_TIMEOUT_MS }
+    const result = await withDeadline(
+      sandbox.exec(`${spec.command} ${spec.versionArgs.join(" ")}`, {
+        timeout: PROBE_TIMEOUT_MS,
+      }),
+      PROBE_TIMEOUT_MS,
+      `${spec.command} --version`
     );
     if (!result.success) {
       return { installed: false, version: null };
@@ -133,7 +181,17 @@ async function probeInstalled(
       installed: true,
       version: result.stdout.trim().split("\n")[0]?.trim() || null,
     };
-  } catch {
+  } catch (error) {
+    /**
+     * A timeout is not "not installed". Folding it into `installed: false`
+     * makes the caller throw `harness_missing`, whose message tells the
+     * operator to add the package to the Dockerfile — advice that is wrong and
+     * costs a rebuild before anyone questions it. The deadline names the real
+     * condition, so it propagates.
+     */
+    if (error instanceof HarnessError && error.code === "harness_timeout") {
+      throw error;
+    }
     return { installed: false, version: null };
   }
 }
@@ -186,7 +244,11 @@ export async function runHarnessInSandbox(options: {
     );
   }
 
-  await options.sandbox.exec(`mkdir -p ${cwd}`, { timeout: PROBE_TIMEOUT_MS });
+  await withDeadline(
+    options.sandbox.exec(`mkdir -p ${cwd}`, { timeout: PROBE_TIMEOUT_MS }),
+    PROBE_TIMEOUT_MS,
+    "mkdir"
+  );
 
   const invocation = buildInvocation({
     cwd,
@@ -198,20 +260,25 @@ export async function runHarnessInSandbox(options: {
   });
   const command = toShellCommand(invocation);
 
-  const result = await options.sandbox.exec(command, {
-    cwd,
-    env: {
-      [auth.name]: auth.value,
-      // The harness is the only thing that talks to a model. Blanking provider
-      // keys makes that structural rather than a convention: even if one leaks
-      // into the container environment, a run cannot quietly consume it.
-      ANTHROPIC_API_KEY: "",
-      CI: "true",
-      HOME: cwd,
-      OPENAI_API_KEY: "",
-    },
-    timeout: RUN_TIMEOUT_MS,
-  });
+  const result = await withDeadline(
+    options.sandbox.exec(command, {
+      cwd,
+      env: {
+        [auth.name]: auth.value,
+        // The harness is the only thing that talks to a model. Blanking
+        // provider keys makes that structural rather than a convention: even
+        // if one leaks into the container environment, a run cannot quietly
+        // consume it.
+        ANTHROPIC_API_KEY: "",
+        CI: "true",
+        HOME: cwd,
+        OPENAI_API_KEY: "",
+      },
+      timeout: RUN_TIMEOUT_MS,
+    }),
+    RUN_TIMEOUT_MS,
+    spec.command
+  );
 
   const at = new Date().toISOString();
   const events = parseHarnessStream(spec.id, result.stdout, at);
