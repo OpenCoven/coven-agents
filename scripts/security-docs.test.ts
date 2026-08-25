@@ -26,12 +26,10 @@ test("the execution threat model covers every required security surface", () => 
   }
 
   for (const reference of [
-    "local-runner/src/index.ts",
     "worker/src/routes.ts",
     "packages/agent-contracts/src/evidence.ts",
     "lib/credentials/store.ts",
     "coven-agents-cloud.4",
-    "coven-agents-local.2",
     "coven-agents-security.3",
   ]) {
     assert.match(threatModel, new RegExp(reference.replaceAll(".", "\\.")));

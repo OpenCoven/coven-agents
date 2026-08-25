@@ -15,12 +15,9 @@ before expanding product state or adding an OpenCoven dependency.
 Wave 1 results and the dependency-ordered next priorities are recorded in the
 [Wave 1 delivery report](docs/roadmap/wave-1-delivery.md).
 
-The same browser UI can connect to:
-
-- **Cloud runner:** Cloudflare Workers + Agents SDK + Sandbox SDK. Every agent
-  receives persistent Durable Object state and a stable isolated container.
-- **Local runner:** a loopback-only Node service that launches GitHub Copilot
-  CLI, Codex CLI, or Claude Code in their explicit no-approval modes.
+Agents run on the cloud runner: Cloudflare Workers + Agents SDK + Sandbox SDK.
+Every agent receives persistent Durable Object state and a stable isolated
+container.
 
 ## Security model
 
@@ -33,11 +30,7 @@ handling.
 
 **Execution**
 
-- Cloud agents execute in per-agent Cloudflare sandboxes.
-- The local runner binds to `127.0.0.1` and limits workspaces to
-  `OPENCOVEN_LOCAL_ROOT`.
-- Local CLI processes inherit the operating-system permissions of the runner.
-  Run it only on a machine and workspace you trust.
+- Every agent executes in its own per-agent Cloudflare sandbox container.
 
 **Two tokens, two jobs.** Reaching the worker at all and being someone are
 deliberately separate. `X-Runner-Token` is a coarse deployment gate and no
@@ -94,30 +87,7 @@ pnpm dev
 
 Open <http://localhost:3000/agents>.
 
-## Run the local backend
-
-Generate a token and start the loopback service:
-
-```bash
-export OPENCOVEN_LOCAL_TOKEN="$(openssl rand -hex 32)"
-export OPENCOVEN_LOCAL_ROOT="$HOME/Documents/GitHub"
-pnpm dev:local-runner
-```
-
-The local runner listens on `http://127.0.0.1:7331`. Enter the same token in the
-control plane's **Connect** panel.
-
-Optional variables:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `OPENCOVEN_LOCAL_PORT` | `7331` | Loopback port |
-| `OPENCOVEN_LOCAL_ROOT` | current directory | Maximum workspace boundary |
-| `OPENCOVEN_AGENT_STORE` | `.opencoven/agents.json` | Private agent registry |
-| `OPENCOVEN_RUN_TIMEOUT_MS` | `900000` | Per-run timeout |
-| `OPENCOVEN_ALLOWED_ORIGIN` | `http://localhost:3000` | Browser origin |
-
-## Run the cloud backend
+## Run the runner
 
 Create `worker/.dev.vars`:
 
@@ -197,9 +167,9 @@ vocabulary. The control plane is never a model client, so it needs no provider
 credential.
 
 - `packages/harness` is the single definition of the CLI subset, the JSONL event
-  normalizer, and the run summarizer. The local runner and the sandbox both call
-  it, so the two backends cannot drift.
-- The cloud backend runs the harness inside the per-agent Cloudflare sandbox
+  normalizer, and the run summarizer. The sandbox calls it, so normalization
+  cannot drift from the contract.
+- The runner runs the harness inside the per-agent Cloudflare sandbox
   container. `worker/Dockerfile` installs `@github/copilot`, and
   `worker/wrangler.jsonc` builds the container from that Dockerfile.
 - `GET /api/harnesses` probes the sandbox and reports which harnesses are
@@ -222,7 +192,6 @@ pnpm test:unit
 pnpm typecheck
 pnpm --filter @opencoven/agent-contracts typecheck
 pnpm --filter @opencoven/harness typecheck
-pnpm --filter @opencoven/local-runner typecheck
 pnpm --filter @opencoven/cloud-runner typecheck
 pnpm build
 ```

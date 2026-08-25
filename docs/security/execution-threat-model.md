@@ -2,8 +2,8 @@
 
 - Status: living document
 - Owner: Security & privacy workstream
-- Applies to: control plane, shared contracts, cloud runner, local runner, demo
-  publication, and operator credentials
+- Applies to: control plane, shared contracts, cloud runner, demo publication,
+  and operator credentials
 
 ## Scope and security goals
 
@@ -18,7 +18,6 @@ This model covers:
 - the Next.js control plane and its database;
 - the shared contracts and evidence normalization package;
 - the Cloudflare Worker, Durable Objects, and sandbox containers;
-- the loopback local runner and the host processes it launches;
 - operator, deployment, tenant, and harness credentials;
 - committed demo evidence and source-control boundaries.
 
@@ -44,7 +43,7 @@ Out of scope:
 - preventing an authorized harness from changing files inside its granted
   workspace;
 - treating natural-language prompts as trusted instructions;
-- operating-system isolation for the current local runner.
+- operating-system isolation beyond the per-agent sandbox container.
 
 ## Actors and assumptions
 
@@ -92,9 +91,6 @@ Assumptions:
    returns it for that run.
 7. The Worker injects the credential into one harness process in one sandbox.
    Normalized, redacted evidence returns through the shared contract.
-8. The local runner is a separate trusted-host path. It accepts a loopback
-   bearer token, resolves an initial working directory under the configured
-   root, and launches the locally authenticated harness with host permissions.
 
 ## Assets
 
@@ -106,10 +102,8 @@ Assumptions:
 | Worker service token | Gates the internal credential endpoint | Control plane and Worker |
 | Credential KEK | Decrypts tenant credential data keys | Control plane only |
 | Tenant harness credential | Acts as the tenant at a coding provider | Encrypted database row; in-memory run scope |
-| Local runner token | Controls a trusted-host execution service | Local operator and browser session |
 | Tenant identity and entitlement | Determines persistence and execution authority | Control plane |
 | Agent definitions and run evidence | May contain private repository or task context | Tenant-scoped storage and UI |
-| Local workspace and host account | Local harness inherits access to both | Local operator |
 | Demo fixtures | Publicly rendered execution evidence | Repository |
 | Roadmap and source history | Can disclose private details or committed credentials | Private repository and private Beads store |
 
@@ -156,22 +150,7 @@ tenant-scoped listing and ownership checks.
 Container isolation exists, but a declared outbound network policy does not.
 Cloud egress is therefore a residual risk tracked by `coven-agents-cloud.4`.
 
-### B7. Browser to local runner
-
-`local-runner/src/index.ts` binds only to `127.0.0.1`, requires a bearer token,
-uses a single configured browser origin, compares the token in constant time,
-and bounds request bodies. Any process running as the same local user may still
-attempt loopback access and is inside the host trust boundary.
-
-### B8. Local runner to host
-
-`local-runner/src/runtime.ts` keeps the initial working directory under
-`OPENCOVEN_LOCAL_ROOT`, but the spawned CLI inherits the runner's environment
-and operating-system permissions. It can access paths outside that root after
-start if the host account can. This is trusted-host mode, not a sandbox.
-Optional isolated execution is tracked by `coven-agents-local.2`.
-
-### B9. Evidence to storage, UI, demo, and Git
+### B7. Evidence to storage, UI, demo, and Git
 
 `packages/agent-contracts/src/evidence.ts` removes recognized credentials,
 sensitive assignments, headers, and explicit run-local secrets. The demo
@@ -190,15 +169,13 @@ tracked Git content without printing matched values.
 | T5 | Credential storage is copied or read at rest. | Per-credential AES-GCM data keys are wrapped by `CREDENTIAL_KEK`; the KEK is required and not stored in rows. The Worker stores no harness credential between runs. | Database plus KEK compromise defeats encryption. Rotation and rewrapping need an operator procedure. |
 | T6 | Crafted tenant identifiers collide and share a cloud sandbox. | `worker/src/tenant.ts` rejects ambiguous identifiers and centralizes sandbox-key derivation. `worker/src/tenant.test.ts` covers collisions, missing owners, and create/delete consistency. | New owner kinds must preserve the exhaustive mapping and tests. |
 | T7 | A cloud harness escapes its intended filesystem or exfiltrates over the network. | Each agent runs in a Cloudflare sandbox keyed by tenant and agent. No operator harness credential is available as fallback. | Outbound policy is not yet declared or enforced. Complete `coven-agents-cloud.4`; expand readiness checks in `coven-agents-cloud.5`. |
-| T8 | A local mission accesses host files, processes, environment values, or credentials beyond its requested repository. | Loopback binding, token authentication, origin restriction, and initial workspace resolution reduce accidental exposure. README and this model disclose inherited host authority. | This is expected in trusted-host mode. Add optional isolation and required-isolation refusal through `coven-agents-local.2`. |
-| T9 | A malicious website drives the local runner. | The runner permits one configured origin, requires an authorization token, and stores connection data in browser session storage rather than persistent local storage. | A malicious local process or browser compromise is within the host boundary. Operators must rotate the local token after suspected exposure. |
-| T10 | A run exhausts memory, disk, processes, containers, or paid capacity. | Local requests, output, and runtime are capped in `local-runner/src/index.ts`. Cloud runs are idempotent per operation, one active run per agent is enforced, and the credential boundary enforces the monthly cap before lending a credential. | Platform-wide queueing and fairness remain in `coven-agents-cloud.3`; local process ownership remains in `coven-agents-local.1`. |
-| T11 | Harness output leaks credentials or private paths into UI, storage, logs, or demos. | Shared redaction lives in `packages/agent-contracts/src/evidence.ts`; cloud normalization and demo publication tests exercise direct and encoded values; errors use static or sanitized messages. | Redaction is pattern-based and the current local runner returns raw buffered output. Complete shared end-to-end coverage in `coven-agents-security.3`. |
-| T12 | A crafted request, event, or stored record bypasses validation or causes unsafe replay. | Shared Zod contracts bound lengths, enums, event ordering, and strict object shapes. Routes distinguish invalid requests from internal failures. Demo fixtures are schema-validated before load. | Cross-backend conformance remains in `coven-agents-testing.1`; unknown historical schema migration remains a future data concern. |
-| T13 | Prompt injection persuades an authorized harness to perform destructive work. | Authorization, workspace selection, tenant isolation, and execution limits still apply; cloud damage is contained to the sandbox and tenant-accessible services. | Prompt injection is not preventable by prompt text. Local runs must use disposable or trusted workspaces, and operators remain responsible for granted credentials. |
-| T14 | Run or agent data persists longer than expected or survives a crash ambiguously. | Current stores are bounded by their implementations, and cloud lifecycle state records terminal transitions. | Formal in-flight journals, durable history, retention, and recovery are tracked by `coven-agents-data.1`, `coven-agents-data.2`, `coven-agents-data.3`, and `coven-agents-local.5`. |
-| T15 | A committed secret or private transcript enters source history. | `.husky/pre-commit` runs `scripts/secret-scan.ts`; CI has a tracked-file scan; findings omit values. Demo recording is cloud-only, repository-restricted, redacted, schema-validated, and checked in raw and canonical forms. | Hooks can be bypassed locally. Recurring scanning and triage remain in `coven-agents-security.4`; protected-path approval remains in `coven-agents-dx.4`. |
-| T16 | A dependency, workflow action, or source change compromises the execution path. | The lockfile is frozen in CI, GitHub Actions are commit-pinned, Dependabot is configured, and local lint/type/test/build gates are required before merge. | Consolidated dependency, workflow, and source scanning is tracked by `coven-agents-security.4`. |
+| T8 | A run exhausts memory, disk, processes, containers, or paid capacity. | Cloud runs are idempotent per operation, one active run per agent is enforced, and the credential boundary enforces the monthly cap before lending a credential. | Platform-wide queueing and fairness remain in `coven-agents-cloud.3`. |
+| T9 | Harness output leaks credentials or private paths into UI, storage, logs, or demos. | Shared redaction lives in `packages/agent-contracts/src/evidence.ts`; cloud normalization and demo publication tests exercise direct and encoded values; errors use static or sanitized messages. | Redaction is pattern-based. Complete shared end-to-end coverage in `coven-agents-security.3`. |
+| T10 | A crafted request, event, or stored record bypasses validation or causes unsafe replay. | Shared Zod contracts bound lengths, enums, event ordering, and strict object shapes. Routes distinguish invalid requests from internal failures. Demo fixtures are schema-validated before load. | Cross-backend conformance remains in `coven-agents-testing.1`; unknown historical schema migration remains a future data concern. |
+| T11 | Prompt injection persuades an authorized harness to perform destructive work. | Authorization, workspace selection, tenant isolation, and execution limits still apply; cloud damage is contained to the sandbox and tenant-accessible services. | Prompt injection is not preventable by prompt text. Local runs must use disposable or trusted workspaces, and operators remain responsible for granted credentials. |
+| T12 | Run or agent data persists longer than expected or survives a crash ambiguously. | Current stores are bounded by their implementations, and cloud lifecycle state records terminal transitions. | Formal in-flight journals, durable history, retention, and recovery are tracked by `coven-agents-data.1`, `coven-agents-data.2`, `coven-agents-data.3`. |
+| T13 | A committed secret or private transcript enters source history. | `.husky/pre-commit` runs `scripts/secret-scan.ts`; CI has a tracked-file scan; findings omit values. Demo recording is cloud-only, repository-restricted, redacted, schema-validated, and checked in raw and canonical forms. | Hooks can be bypassed locally. Recurring scanning and triage remain in `coven-agents-security.4`; protected-path approval remains in `coven-agents-dx.4`. |
+| T14 | A dependency, workflow action, or source change compromises the execution path. | The lockfile is frozen in CI, GitHub Actions are commit-pinned, Dependabot is configured, and local lint/type/test/build gates are required before merge. | Consolidated dependency, workflow, and source scanning is tracked by `coven-agents-security.4`. |
 
 ## Incident and recovery expectations
 
@@ -213,8 +190,7 @@ new work rather than fall back to shared authority.
 | Control or service-token compromise | Rotate the affected token on both sides of its boundary. The control token grants deployment reach but not tenant identity; the service token grants endpoint reach but not tenant selection. | Re-run `lib/agents/connection-access.test.ts` and `app/api/internal/credential/*.test.ts`; verify empty and previous tokens fail. |
 | Tenant harness-credential compromise | Revoke at the harness provider, stop affected runs, destroy or recycle affected sandboxes, and replace the encrypted tenant/harness row through `lib/credentials/store.ts`. | Verify the old credential no longer works and cross-tenant tests still pass without recording the credential value. |
 | Suspected cross-tenant cloud access | Suspend affected execution, preserve sanitized ownership and operation identifiers, stop the run, and destroy the implicated sandbox. Do not expose another tenant's record while notifying users. | Reproduce with `worker/src/routes.test.ts` and `worker/src/tenant.test.ts`; repair ownership before restoring service. |
-| Local-runner or host compromise | Stop the loopback service, rotate its token, revoke provider credentials available to the host, and investigate the host as compromised. Workspace-root checks are not a containment boundary. | Restore only on a trusted host. Optional isolation remains `coven-agents-local.2`; crash reconciliation remains `coven-agents-local.5`. |
-| Resource-exhaustion or orphaned execution | Refuse new work, stop bounded runs, and prefer explicit busy or recovery states over silently starting duplicates. | Cloud fairness is completed through `coven-agents-cloud.3`; process ownership and recovery through `coven-agents-local.1` and `coven-agents-local.5`. |
+| Resource-exhaustion or orphaned execution | Refuse new work, stop bounded runs, and prefer explicit busy or recovery states over silently starting duplicates. | Cloud fairness is completed through `coven-agents-cloud.3`. |
 | Evidence-redaction failure | Stop publication or persistence of the affected evidence, revoke any exposed credential, sanitize already published artifacts, and add the missed shape as a regression. | Run shared evidence, demo fixture, and recorder tests. End-to-end redaction remains `coven-agents-security.3`. |
 
 ## Verification and review
@@ -228,7 +204,6 @@ run the narrow tests for the affected boundary plus the repository gates.
 | Database and credential custody | `lib/db/access.test.ts`, `lib/credentials/envelope.test.ts`, `lib/credentials/authorize.test.ts`, `app/api/internal/credential/*.test.ts` |
 | Cloud identity and tenancy | `lib/agents/runner-token.test.ts`, `worker/src/routes.test.ts`, `worker/src/tenant.test.ts`, `worker/src/tenant-credentials.test.ts` |
 | Cloud execution and evidence | `worker/src/harness-runner.test.ts`, `worker/src/run-state.test.ts`, `worker/src/agents.test.ts` |
-| Local execution | `local-runner/src/runtime.test.ts`, `local-runner/src/store.test.ts`, local-runner package tests |
 | Shared contracts and redaction | `packages/agent-contracts/src/*.test.ts`, especially evidence-safety and demo-transcript tests |
 | Demo publication | `scripts/demo-record.test.ts`, `scripts/demo-capture.test.ts`, `lib/demo/fixtures.test.ts` |
 | Source-control boundary | `scripts/secret-scan.test.ts`, `pnpm secret:scan`, `pnpm secret:scan:all` |

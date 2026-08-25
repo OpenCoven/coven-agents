@@ -35,7 +35,13 @@ export const agentRunnerApiVersionSchema = z.literal(AGENT_RUNNER_API_VERSION);
 const boundedString = (max: number) => z.string().trim().min(1).max(max);
 const datetimeSchema = z.string().datetime();
 
-export const backendSchema = z.enum(["cloud", "local"]);
+/**
+ * Cloud only. The local runner is gone: it had no tenancy, authenticated
+ * with a shared access token rather than a per-tenant identity, and the
+ * cloud worker already refused every agent that named it. Keeping the
+ * enum open would let a client mint a definition nothing can execute.
+ */
+export const backendSchema = z.enum(["cloud"]);
 export const runtimeSchema = z.enum(["cloud", "codex", "claude", "copilot"]);
 export const agentStatusSchema = z.enum(["idle", "running", "error"]);
 export const agentIdSchema = z.string().uuid();
