@@ -5,6 +5,7 @@ import {
   agentIdSchema,
   createAgentInputSchema,
   type RunSnapshot,
+  sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
 import { isRunnableHarness, SUPPORTED_HARNESS_IDS } from "@opencoven/harness";
 import {
@@ -151,7 +152,32 @@ function fail(error: unknown, cors: Headers): Response {
       cors
     );
   }
-  console.error("Cloud runner request failed.");
+  /**
+   * The fallback, and the only place an unrecognised failure is ever seen.
+   *
+   * This used to log the sentence and drop the error, so every unhandled throw
+   * in the worker produced one indistinguishable line. That is what made four
+   * separate defects each take a round of guesswork to find: the run reached
+   * the worker, returned 500, and the log said nothing about why. An error
+   * handler that destroys the error is worse than no handler, because it looks
+   * like the failure was accounted for.
+   *
+   * Sanitised, because a thrown error can carry a credential in its message —
+   * a failed fetch stringifies its request, and a harness token travels in an
+   * Authorization header. `sanitizeEvidenceText` is the same redaction the run
+   * evidence goes through before it is persisted.
+   */
+  const detail =
+    error instanceof Error
+      ? {
+          message: sanitizeEvidenceText(error.message),
+          name: error.name,
+          stack: error.stack ? sanitizeEvidenceText(error.stack) : undefined,
+        }
+      : { message: sanitizeEvidenceText(String(error)), name: "UnknownError" };
+
+  console.error("Cloud runner request failed.", detail);
+
   return json(
     errorEnvelope("internal_error", "Runner request failed.", true),
     { status: 500 },

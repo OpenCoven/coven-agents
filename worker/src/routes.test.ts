@@ -401,3 +401,105 @@ test("a demo claim cannot start a run", async () => {
 
   assert.equal(response.status, 403);
 });
+
+/**
+ * The fallback handler is the only place an unrecognised failure is ever seen,
+ * so what it logs is the whole diagnosis.
+ *
+ * It used to log a bare sentence and drop the error, which made every unhandled
+ * throw in the worker produce one indistinguishable line — a run reached the
+ * worker, returned 500, and the log said nothing about why. This asserts the
+ * error survives into the log, because the defect it caused is invisible to any
+ * test of the response: the 500 was always correct.
+ */
+test("an unrecognised failure is logged with the error, not just a sentence", async () => {
+  const boom = new Error("sandbox refused the container");
+  boom.name = "SandboxError";
+
+  const logged: unknown[][] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => {
+    logged.push(args);
+  };
+
+  let response: Response;
+  try {
+    response = await failingRunner(boom);
+  } finally {
+    console.error = original;
+  }
+
+  assert.equal(response.status, 500);
+
+  const entry = logged.find(
+    (args) => args[0] === "Cloud runner request failed."
+  );
+  assert.ok(entry, "the fallback must log under its known message");
+
+  const detail = entry?.[1] as { message: string; name: string };
+  assert.equal(detail.name, "SandboxError");
+  assert.equal(detail.message, "sandbox refused the container");
+});
+
+test("a credential in a thrown message does not reach the log", async () => {
+  // A failed fetch stringifies its request, and a harness token travels in an
+  // Authorization header. Logging the error verbatim would put it in the log.
+  const leak = new Error(
+    "fetch failed: authorization: Bearer ghp_notarealtoken"
+  );
+
+  const logged: unknown[][] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => {
+    logged.push(args);
+  };
+
+  try {
+    await failingRunner(leak);
+  } finally {
+    console.error = original;
+  }
+
+  const entry = logged.find(
+    (args) => args[0] === "Cloud runner request failed."
+  );
+  const detail = entry?.[1] as { message: string };
+  assert.ok(
+    !detail.message.includes("ghp_notarealtoken"),
+    `the token survived redaction: ${detail.message}`
+  );
+});
+
+/**
+ * A runner whose directory throws something the route does not recognise, so
+ * the request falls through to the catch-all rather than to a typed branch.
+ */
+async function failingRunner(error: Error): Promise<Response> {
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+
+  const directory: CloudRunnerDirectory = {
+    list: () => {
+      throw error;
+    },
+    lookupRun: () => MINE,
+    registerRun: () => undefined,
+    remove: () => undefined,
+    upsert: (value) => value,
+  };
+
+  return createCloudRunner({
+    getDirectory: () => directory,
+    getYoloAgent: () => ({}) as unknown as CloudRunnerAgent,
+  }).fetch(
+    new Request("https://runner.test/api/agents", {
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+    }),
+    environment as never
+  );
+}
