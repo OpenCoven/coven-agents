@@ -83,11 +83,11 @@ export function HarnessCredentials() {
   }, []);
 
   const save = useCallback(
-    async (harnessId: string) => {
+    async (harnessId: string): Promise<boolean> => {
       const credential = values[harnessId]?.trim();
 
       if (!credential) {
-        return;
+        return false;
       }
 
       setBusy(harnessId);
@@ -109,7 +109,7 @@ export function HarnessCredentials() {
             description: body.message ?? "That token was rejected.",
             type: "error",
           });
-          return;
+          return false;
         }
 
         if (!response.ok) {
@@ -121,11 +121,13 @@ export function HarnessCredentials() {
         setValues((current) => ({ ...current, [harnessId]: "" }));
         toast({ description: "Credential stored.", type: "success" });
         await refresh();
+        return true;
       } catch {
         toast({
           description: "Could not store the credential.",
           type: "error",
         });
+        return false;
       } finally {
         setBusy(null);
       }
@@ -211,9 +213,21 @@ function HarnessRow({
   harness: { help: string; id: string; label: string };
   onChange: (harnessId: string, next: string) => void;
   onRemove: (harnessId: string) => void;
-  onSave: (harnessId: string) => void;
+  onSave: (harnessId: string) => Promise<boolean>;
   value: string;
 }) {
+  /**
+   * A connected harness shows one affordance, not four.
+   *
+   * Connected, this row used to offer a "Reconnect" button, a "replace stored
+   * credential" field, a Save, and a Remove all at once -- four routes to the
+   * same single stored value, with nothing to say which one was meant. The
+   * credential is already working, so the common case is doing nothing; the
+   * ways to change it are worth one click.
+   */
+  const [replacing, setReplacing] = useState(false);
+  const showEditor = !configured || replacing;
+
   // Bound here rather than at the call site so the parent passes stable
   // references and every row does not re-render when one changes.
   const handleChange = useCallback(
@@ -223,11 +237,32 @@ function HarnessRow({
     [harness.id, onChange]
   );
   const handleSave = useCallback(() => {
-    onSave(harness.id);
+    // Closed only on success. A rejected token keeps the editor open with the
+    // typed value intact, which is the only state from which it can be fixed.
+    onSave(harness.id)
+      .then((stored) => {
+        if (stored) {
+          setReplacing(false);
+        }
+      })
+      .catch(() => undefined);
   }, [harness.id, onSave]);
   const handleRemove = useCallback(() => {
     onRemove(harness.id);
   }, [harness.id, onRemove]);
+  const handleConnected = useCallback(() => {
+    // Device flow succeeded, so the editor has done its job and closes with
+    // the same gesture a successful paste uses.
+    setReplacing(false);
+    onConnected();
+  }, [onConnected]);
+  const stopReplacing = useCallback(() => {
+    setReplacing(false);
+    onChange(harness.id, "");
+  }, [harness.id, onChange]);
+  const startReplacing = useCallback(() => {
+    setReplacing(true);
+  }, []);
 
   return (
     <div className="flex flex-col gap-2">
@@ -242,14 +277,46 @@ function HarnessRow({
         {configured ? (
           <span className="flex items-center gap-1 text-[11px] text-[var(--oc-accent)]">
             <Check className="size-3" />
-            Configured
+            Connected
           </span>
         ) : null}
       </div>
 
-      {harness.id === "copilot" ? (
+      {configured && !replacing ? (
+        <div className="flex items-center justify-between gap-3 rounded-[8px] border border-border bg-secondary/40 px-4 py-3">
+          <p className="text-[13px] text-muted-foreground">
+            Agents run with this credential.
+          </p>
+          <div className="flex gap-2">
+            <Button
+              className="h-9 rounded-[8px] text-[13px]"
+              disabled={busy}
+              onClick={startReplacing}
+              type="button"
+              variant="outline"
+            >
+              Replace
+            </Button>
+            <Button
+              aria-label={`Remove ${harness.label} credential`}
+              className="h-9 rounded-[8px]"
+              disabled={busy}
+              onClick={handleRemove}
+              type="button"
+              variant="outline"
+            >
+              <Trash2 className="size-4" />
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {showEditor && harness.id === "copilot" ? (
         <>
-          <ConnectCopilot configured={configured} onConnected={onConnected} />
+          <ConnectCopilot
+            configured={configured}
+            onConnected={handleConnected}
+          />
           <div className="flex items-center gap-3 py-1">
             <span className="h-px flex-1 bg-border" />
             <span className="text-[11px] text-muted-foreground">
@@ -260,42 +327,47 @@ function HarnessRow({
         </>
       ) : null}
 
-      <div className="flex gap-2">
-        <Input
-          autoComplete="off"
-          className="h-10 flex-1 rounded-[8px] border-border bg-secondary text-sm"
-          disabled={busy}
-          id={`cred-${harness.id}`}
-          onChange={handleChange}
-          placeholder={configured ? "Replace stored credential" : "Paste token"}
-          type="password"
-          value={value}
-        />
-
-        <Button
-          className="h-10 rounded-[8px] text-[13px]"
-          disabled={busy || !value.trim()}
-          onClick={handleSave}
-          type="button"
-        >
-          Save
-        </Button>
-
-        {configured ? (
-          <Button
-            aria-label={`Remove ${harness.label} credential`}
-            className="h-10 rounded-[8px]"
+      {showEditor ? (
+        <div className="flex gap-2">
+          <Input
+            autoComplete="off"
+            className="h-10 flex-1 rounded-[8px] border-border bg-secondary text-sm"
             disabled={busy}
-            onClick={handleRemove}
-            type="button"
-            variant="outline"
-          >
-            <Trash2 className="size-4" />
-          </Button>
-        ) : null}
-      </div>
+            id={`cred-${harness.id}`}
+            onChange={handleChange}
+            placeholder={
+              configured ? "Replace stored credential" : "Paste token"
+            }
+            type="password"
+            value={value}
+          />
 
-      <p className="text-[12px] text-muted-foreground">{harness.help}</p>
+          <Button
+            className="h-10 rounded-[8px] text-[13px]"
+            disabled={busy || !value.trim()}
+            onClick={handleSave}
+            type="button"
+          >
+            Save
+          </Button>
+
+          {replacing ? (
+            <Button
+              className="h-10 rounded-[8px] text-[13px]"
+              disabled={busy}
+              onClick={stopReplacing}
+              type="button"
+              variant="ghost"
+            >
+              Cancel
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {showEditor ? (
+        <p className="text-[12px] text-muted-foreground">{harness.help}</p>
+      ) : null}
     </div>
   );
 }

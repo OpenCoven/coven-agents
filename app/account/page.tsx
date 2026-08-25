@@ -1,9 +1,16 @@
 "use client";
 
-import { ArrowLeftIcon, Database, Gauge, KeyRound } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  Database,
+  Gauge,
+  KeyRound,
+  UserCircle,
+} from "lucide-react";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { useCallback, useState } from "react";
+import { AvatarSettings } from "@/components/account/avatar-settings";
 import { DeleteAllChats } from "@/components/account/delete-all-chats";
 import { HarnessCredentials } from "@/components/account/harness-credentials";
 import { UsageMeter } from "@/components/account/usage-meter";
@@ -26,6 +33,7 @@ import { cn } from "@/lib/utils";
  */
 const TABS = [
   { icon: KeyRound, id: "copilot", label: "Copilot" },
+  { icon: UserCircle, id: "profile", label: "Profile" },
   { icon: Gauge, id: "usage", label: "Usage" },
   { icon: Database, id: "data", label: "Data" },
 ] as const;
@@ -78,6 +86,7 @@ export default function Page() {
             section cannot push the page into a second scrollbar. */}
           <section className="min-w-0 flex-1 overflow-y-auto px-8 py-6">
             {tab === "copilot" ? <HarnessCredentials /> : null}
+            {tab === "profile" ? <AvatarSettings /> : null}
             {tab === "usage" ? <UsageMeter /> : null}
             {tab === "data" ? <DeleteAllChats /> : null}
           </section>
