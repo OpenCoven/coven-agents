@@ -269,7 +269,12 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       { harnessId: definition.runtime, runId, tenant: tenantOf(definition) },
       {
         endpoint: APP_ORIGIN,
-        fetchImpl: fetch,
+        // Wrapped, never passed bare. A Workers built-in detached from its
+        // receiver throws "Illegal invocation: function called with incorrect
+        // `this` reference" the moment it is called -- which surfaced as a
+        // failed run with zero commands and zero file operations, because the
+        // credential fetch died before the sandbox ever started.
+        fetchImpl: (input, init) => fetch(input, init),
         identityToken,
         serviceToken: RUNNER_SERVICE_TOKEN,
       }
