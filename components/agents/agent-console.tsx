@@ -150,6 +150,39 @@ export function AgentConsole() {
       cloud: loadStoredConnection("cloud"),
       local: loadStoredConnection("local"),
     });
+
+    /**
+     * Ask the server for the cloud connection so nobody has to paste a
+     * deployment token by hand. The server's value always wins: a stored one
+     * is stale the moment the token is rotated, and a stale token surfaces
+     * only as "Runner token was rejected" with nothing pointing at the cause.
+     *
+     * Failure is silent on purpose — a demo session gets 403 and an
+     * unconfigured deployment 503, and in both cases the manual connection
+     * dialog is still there as the fallback.
+     */
+    let cancelled = false;
+
+    fetch("/api/runner-connection")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((provided: { endpoint?: string; token?: string } | null) => {
+        if (cancelled || !provided?.token) {
+          return;
+        }
+
+        setConnections((current) => ({
+          ...current,
+          cloud: {
+            endpoint: provided.endpoint || current.cloud.endpoint,
+            token: provided.token as string,
+          },
+        }));
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
