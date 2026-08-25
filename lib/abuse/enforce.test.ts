@@ -3,9 +3,12 @@ import test from "node:test";
 import {
   abuseAdmissionResponse,
   createAbusePolicyEnforcer,
+  createRedisStoreProvider,
   enforceAbusePolicy,
 } from "./enforce";
-import type { AbuseStore } from "./store";
+import type { AbuseStore, RedisEvalExecutor } from "./store";
+
+const FIXED_SECRET = "fixed-test-abuse-key-secret";
 
 test("missing IPs share one unknown bucket", async () => {
   const store = new RecordingStore();
@@ -119,6 +122,173 @@ test("production store configuration and consume outages fail closed", async () 
   );
 });
 
+test("rejected Redis connects destroy cached state and retry with bounded client options", async () => {
+  const firstClient = new FakeRedisClient({
+    connect: () => Promise.reject(new Error("connect failed")),
+  });
+  const secondClient = new FakeRedisClient();
+  const clients = [firstClient, secondClient];
+  const clientOptions: unknown[] = [];
+  const provider = createRedisStoreProvider({
+    connectTimeoutMs: 25,
+    createClient: (options) => {
+      clientOptions.push(options);
+      const client = clients.shift();
+      assert.ok(client);
+      return client;
+    },
+    getConfiguration: () => ({
+      keySecret: FIXED_SECRET,
+      redisUrl: "redis://localhost:6379",
+    }),
+  });
+  const enforcer = createAbusePolicyEnforcer({
+    getStore: provider,
+    isProduction: true,
+  });
+
+  assert.deepEqual(
+    await enforcer({
+      ip: "203.0.113.4",
+      route: "model_list",
+    }),
+    { kind: "unavailable", responseStatus: 503 }
+  );
+  assert.equal(firstClient.destroyCalls, 1);
+
+  assert.deepEqual(
+    await enforcer({
+      ip: "203.0.113.4",
+      route: "model_list",
+    }),
+    { kind: "allowed" }
+  );
+  assert.equal(secondClient.connectCalls, 1);
+  assert.equal(clientOptions.length, 2);
+  assert.deepEqual(clientOptions[0], {
+    disableOfflineQueue: true,
+    socket: {
+      connectTimeout: 25,
+      reconnectStrategy: false,
+    },
+    url: "redis://localhost:6379",
+  });
+});
+
+test("never-resolving Redis connects return unavailable through an injected timeout", async () => {
+  const timers = fakeTimers();
+  const client = new FakeRedisClient({
+    connect: () => new Promise(() => undefined),
+  });
+  const provider = createRedisStoreProvider({
+    connectTimeoutMs: 25,
+    createClient: () => client,
+    getConfiguration: () => ({
+      keySecret: FIXED_SECRET,
+      redisUrl: "redis://localhost:6379",
+    }),
+    timers: timers.api,
+  });
+  const enforcer = createAbusePolicyEnforcer({
+    getStore: provider,
+    isProduction: true,
+  });
+
+  const admission = enforcer({
+    ip: "203.0.113.4",
+    route: "model_list",
+  });
+
+  assert.deepEqual(timers.pendingDelays(), [25]);
+  timers.runNext();
+  assert.deepEqual(await admission, {
+    kind: "unavailable",
+    responseStatus: 503,
+  });
+  assert.equal(client.destroyCalls, 1);
+});
+
+test("never-resolving consumes return unavailable through an injected timeout", async () => {
+  const timers = fakeTimers();
+  const client = new FakeRedisClient({
+    eval: () => new Promise(() => undefined),
+  });
+  const provider = createRedisStoreProvider({
+    commandTimeoutMs: 25,
+    createClient: () => client,
+    getConfiguration: () => ({
+      keySecret: FIXED_SECRET,
+      redisUrl: "redis://localhost:6379",
+    }),
+    timers: timers.api,
+  });
+  const enforcer = createAbusePolicyEnforcer({
+    consumeTimeoutMs: 50,
+    getStore: provider,
+    isProduction: true,
+    timers: timers.api,
+  });
+
+  const admission = enforcer({
+    ip: "203.0.113.4",
+    route: "model_list",
+  });
+
+  await flushMicrotasks();
+  assert.deepEqual(timers.pendingDelays(), [25, 25, 50]);
+  timers.runNext();
+  assert.deepEqual(await admission, {
+    kind: "unavailable",
+    responseStatus: 503,
+  });
+  assert.equal(client.destroyCalls, 1);
+
+  timers.runNext();
+  await flushMicrotasks();
+  assert.deepEqual(timers.pendingDelays(), []);
+});
+
+test("rejected Redis commands destroy cached state before reconnecting", async () => {
+  const firstClient = new FakeRedisClient({
+    eval: () => Promise.reject(new Error("eval failed")),
+  });
+  const secondClient = new FakeRedisClient();
+  const clients = [firstClient, secondClient];
+  const provider = createRedisStoreProvider({
+    createClient: () => {
+      const client = clients.shift();
+      assert.ok(client);
+      return client;
+    },
+    getConfiguration: () => ({
+      keySecret: FIXED_SECRET,
+      redisUrl: "redis://localhost:6379",
+    }),
+  });
+  const enforcer = createAbusePolicyEnforcer({
+    getStore: provider,
+    isProduction: true,
+  });
+
+  assert.deepEqual(
+    await enforcer({
+      ip: "203.0.113.4",
+      route: "model_list",
+    }),
+    { kind: "unavailable", responseStatus: 503 }
+  );
+  assert.equal(firstClient.destroyCalls, 1);
+
+  assert.deepEqual(
+    await enforcer({
+      ip: "203.0.113.4",
+      route: "model_list",
+    }),
+    { kind: "allowed" }
+  );
+  assert.equal(secondClient.connectCalls, 1);
+});
+
 test("development without configured Redis explicitly allows requests", async () => {
   let storeRequests = 0;
   const developmentEnforcer = createAbusePolicyEnforcer({
@@ -211,5 +381,93 @@ class RecordingStore implements AbuseStore {
   ): ReturnType<AbuseStore["consume"]> {
     this.calls.push([key, limit, windowSeconds]);
     return Promise.resolve(this.result(key));
+  }
+}
+
+type Timer = {
+  callback: () => void;
+  cancelled: boolean;
+  delayMs: number;
+};
+
+function fakeTimers() {
+  const queue: Timer[] = [];
+
+  return {
+    api: {
+      clearTimeout(timer: unknown) {
+        (timer as Timer).cancelled = true;
+      },
+      setTimeout(callback: () => void, delayMs: number) {
+        const timer = { callback, cancelled: false, delayMs };
+        queue.push(timer);
+        return timer;
+      },
+    },
+    pendingDelays() {
+      return queue
+        .filter((timer) => !timer.cancelled)
+        .map((timer) => timer.delayMs);
+    },
+    runNext() {
+      const timer = queue.find((candidate) => !candidate.cancelled);
+      assert.ok(timer, "expected a pending timer");
+      timer.cancelled = true;
+      timer.callback();
+    },
+  };
+}
+
+function flushMicrotasks(remaining = 8): Promise<void> {
+  if (remaining === 0) {
+    return Promise.resolve();
+  }
+  return Promise.resolve().then(() => flushMicrotasks(remaining - 1));
+}
+
+class FakeRedisClient implements RedisEvalExecutor {
+  connectCalls = 0;
+  destroyCalls = 0;
+  isReady = false;
+  private readonly connectResult: () => Promise<unknown>;
+  private readonly evalResult: () => Promise<unknown>;
+
+  constructor(
+    options: {
+      connect?: () => Promise<unknown>;
+      eval?: () => Promise<unknown>;
+    } = {}
+  ) {
+    this.connectResult =
+      options.connect ??
+      (() => {
+        this.isReady = true;
+        return Promise.resolve();
+      });
+    this.evalResult = options.eval ?? (() => Promise.resolve([1, 60_000]));
+  }
+
+  connect(): Promise<unknown> {
+    this.connectCalls += 1;
+    return this.connectResult().then((result) => {
+      this.isReady = true;
+      return result;
+    });
+  }
+
+  destroy(): void {
+    this.destroyCalls += 1;
+    this.isReady = false;
+  }
+
+  eval(
+    _script: string,
+    _options: { arguments: string[]; keys: string[] }
+  ): Promise<unknown> {
+    return this.evalResult();
+  }
+
+  onError(_listener: (error: unknown) => void): void {
+    // Tests intentionally swallow the same error event the production adapter does.
   }
 }

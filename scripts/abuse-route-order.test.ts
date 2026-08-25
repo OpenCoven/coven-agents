@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import ts from "typescript";
 
 const repositoryRoot = new URL("../", import.meta.url);
 
@@ -214,6 +215,7 @@ test("resource-bearing handlers admit after identity and before expensive work",
   for (const expectation of protectedHandlers) {
     const source = read(expectation.file);
     const implementation = expectation.implementation ?? expectation.handler;
+    const handlerBlock = exportedFunctionBlock(source, expectation.handler);
     const block = functionBlock(source, implementation);
     const admissionIndex = block.indexOf("enforceAbusePolicy({");
 
@@ -228,7 +230,7 @@ test("resource-bearing handlers admit after identity and before expensive work",
       `${expectation.file} must use the platform IP helper`
     );
     assert.ok(
-      exportedHandlerUses(source, expectation.handler, implementation),
+      exportedHandlerUses(handlerBlock, expectation.handler, implementation),
       `${expectation.file} ${expectation.handler} must use ${implementation}`
     );
     assert.ok(
@@ -240,12 +242,20 @@ test("resource-bearing handlers admit after identity and before expensive work",
       `${expectation.file} ${expectation.handler} must use ${expectation.policy}`
     );
     assert.ok(
+      block.indexOf(expectation.identityMarker) >= 0,
+      `${expectation.file} ${expectation.handler} must establish identity`
+    );
+    assert.ok(
       block.indexOf(expectation.identityMarker) < admissionIndex,
       `${expectation.file} ${expectation.handler} must establish identity first`
     );
 
     for (const marker of expectation.markers) {
       const markerIndex = block.indexOf(marker);
+      assert.ok(
+        markerIndex >= 0,
+        `${expectation.file} ${expectation.handler} must include ${marker}`
+      );
       assert.ok(
         markerIndex > admissionIndex,
         `${expectation.file} ${expectation.handler} must admit before ${marker}`
@@ -258,6 +268,46 @@ test("deferred auth, webhook, and internal lending routes stay untouched", () =>
   for (const file of excludedRoutes) {
     assert.doesNotMatch(read(file), /enforceAbusePolicy/);
   }
+});
+
+test("handler extraction does not include markers from a later handler", () => {
+  const source = `
+export async function POST(request: Request) {
+  const admission = await enforceAbusePolicy({ route: "credential_write" });
+  return Response.json(admission);
+}
+
+export const GET = async (request: Request) => {
+  const access = await authorizeSubscriberAccess(await auth());
+  return Response.json({ access, request });
+};
+`;
+
+  assert.doesNotMatch(
+    functionBlock(source, "POST"),
+    /authorizeSubscriberAccess\(/
+  );
+});
+
+test("handler wiring cannot be satisfied by a later handler", () => {
+  const source = `
+export function POST(request: Request) {
+  return Response.json({ request });
+}
+
+export function PATCH(request: Request) {
+  return writeDocument(request);
+}
+`;
+
+  assert.equal(
+    exportedHandlerUses(
+      exportedFunctionBlock(source, "POST"),
+      "POST",
+      "writeDocument"
+    ),
+    false
+  );
 });
 
 function route(
@@ -275,28 +325,50 @@ function read(path: string): string {
 }
 
 function functionBlock(source: string, name: string): string {
-  const start = source.search(
-    new RegExp(`(?:export\\s+)?(?:async\\s+)?function ${name}\\s*\\(`)
-  );
-  assert.ok(start >= 0, `missing function ${name}`);
+  return declaredFunctionBlock(source, name, false);
+}
 
-  const rest = source.slice(start);
-  const nextExport = rest.slice(1).search(/\nexport (?:async )?function /);
-  return nextExport >= 0 ? rest.slice(0, nextExport + 1) : rest;
+function exportedFunctionBlock(source: string, name: string): string {
+  return declaredFunctionBlock(source, name, true);
+}
+
+function declaredFunctionBlock(
+  source: string,
+  name: string,
+  exported: boolean
+): string {
+  const sourceFile = ts.createSourceFile(
+    "route.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+  const declaration = sourceFile.statements.find(
+    (statement): statement is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(statement) &&
+      statement.name?.text === name &&
+      (!exported ||
+        statement.modifiers?.some(
+          (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword
+        ) === true)
+  );
+
+  assert.ok(
+    declaration,
+    `missing ${exported ? "exported " : ""}function ${name}`
+  );
+  return declaration.getText(sourceFile);
 }
 
 function exportedHandlerUses(
-  source: string,
+  handlerBlock: string,
   handler: string,
   implementation: string
 ): boolean {
   if (handler === implementation) {
-    return new RegExp(`export (?:async )?function ${handler}\\s*\\(`).test(
-      source
-    );
+    return true;
   }
 
-  return new RegExp(
-    `export (?:async )?function ${handler}\\s*\\([^)]*\\)\\s*\\{[\\s\\S]*?${implementation}\\(request\\)`
-  ).test(source);
+  return handlerBlock.includes(`${implementation}(request)`);
 }

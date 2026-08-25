@@ -1,8 +1,12 @@
-import { createClient } from "redis";
+import { createClient, type RedisClientOptions } from "redis";
 import { requireAbuseKeySecret } from "./config";
 import { abusePolicyFor } from "./policy";
 import { type AbuseStore, RedisAbuseStore } from "./store";
 import type { AbuseRoute, AbuseSubject } from "./types";
+
+const DEFAULT_CONNECT_TIMEOUT_MS = 1000;
+const DEFAULT_CONSUME_TIMEOUT_MS = 1000;
+const DEFAULT_COMMAND_TIMEOUT_MS = 750;
 
 export type AbuseAdmission =
   | { kind: "allowed" }
@@ -22,49 +26,158 @@ type StoreProvider = () =>
   | undefined
   | Promise<AbuseStore | undefined>;
 
-let redisClient: { readonly isReady: boolean } | null = null;
-let redisConnection: Promise<unknown> | null = null;
-let redisStore: AbuseStore | null = null;
+export type TimeoutTimers = {
+  clearTimeout: (timer: unknown) => void;
+  setTimeout: (callback: () => void, delayMs: number) => unknown;
+};
 
-async function getDefaultStore(): Promise<AbuseStore | undefined> {
-  const redisUrl = process.env.REDIS_URL;
-  const keySecret = requireAbuseKeySecret(
-    redisUrl,
-    process.env.ABUSE_KEY_SECRET
+export type RedisAdmissionClient = {
+  readonly isReady: boolean;
+  connect: () => Promise<unknown>;
+  destroy: () => void;
+  eval: (
+    script: string,
+    options: { arguments: string[]; keys: string[] }
+  ) => Promise<unknown>;
+  onError: (listener: (error: unknown) => void) => void;
+};
+
+type RedisStoreProviderOptions = {
+  commandTimeoutMs?: number;
+  connectTimeoutMs?: number;
+  createClient?: (options: RedisClientOptions) => RedisAdmissionClient;
+  getConfiguration?: () => {
+    keySecret: string | undefined;
+    redisUrl: string | undefined;
+  };
+  timers?: TimeoutTimers;
+};
+
+const SYSTEM_TIMERS: TimeoutTimers = {
+  clearTimeout: (timer) =>
+    globalThis.clearTimeout(timer as ReturnType<typeof setTimeout>),
+  setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+};
+
+export function createRedisStoreProvider(
+  options: RedisStoreProviderOptions = {}
+): StoreProvider {
+  const commandTimeoutMs = positiveTimeout(
+    options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+    "Redis command timeout"
   );
-  if (!(redisUrl && keySecret)) {
-    return undefined;
+  const connectTimeoutMs = positiveTimeout(
+    options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+    "Redis connect timeout"
+  );
+  const createRedisClient =
+    options.createClient ?? createDefaultRedisAdmissionClient;
+  const getConfiguration =
+    options.getConfiguration ??
+    (() => ({
+      keySecret: process.env.ABUSE_KEY_SECRET,
+      redisUrl: process.env.REDIS_URL,
+    }));
+  const timers = options.timers ?? SYSTEM_TIMERS;
+
+  let redisClient: RedisAdmissionClient | null = null;
+  let redisConnection: Promise<unknown> | null = null;
+  let redisStore: AbuseStore | null = null;
+
+  function resetClient(client: RedisAdmissionClient): void {
+    if (redisClient !== client) {
+      return;
+    }
+
+    redisClient = null;
+    redisConnection = null;
+    redisStore = null;
+    try {
+      client.destroy();
+    } catch {
+      // The state is already reset, so a transport cleanup error is non-actionable.
+    }
   }
 
-  if (!redisClient) {
-    const nextClient = createClient({ url: redisUrl });
-    nextClient.on("error", () => undefined);
+  return async () => {
+    const { keySecret: configuredKeySecret, redisUrl } = getConfiguration();
+    const keySecret = requireAbuseKeySecret(redisUrl, configuredKeySecret);
+    if (!(redisUrl && keySecret)) {
+      return;
+    }
 
-    redisClient = nextClient;
-    redisStore = new RedisAbuseStore(
-      {
-        eval: (script, options) => nextClient.eval(script, options),
-      },
-      keySecret
-    );
-    redisConnection = nextClient.connect().catch((error: unknown) => {
-      if (redisClient === nextClient) {
-        redisClient = null;
-        redisConnection = null;
-        redisStore = null;
+    if (!redisClient) {
+      const nextClient = createRedisClient({
+        disableOfflineQueue: true,
+        socket: {
+          connectTimeout: connectTimeoutMs,
+          reconnectStrategy: false,
+        },
+        url: redisUrl,
+      });
+      nextClient.onError(() => undefined);
+
+      redisClient = nextClient;
+      redisStore = new RedisAbuseStore(
+        {
+          eval: async (script, evalOptions) => {
+            try {
+              return await withTimeout(
+                Promise.resolve().then(() =>
+                  nextClient.eval(script, evalOptions)
+                ),
+                commandTimeoutMs,
+                timers,
+                "Redis abuse command timed out."
+              );
+            } catch (error) {
+              resetClient(nextClient);
+              throw error;
+            }
+          },
+        },
+        keySecret
+      );
+
+      const connection = withTimeout(
+        Promise.resolve().then(() => nextClient.connect()),
+        connectTimeoutMs,
+        timers,
+        "Redis abuse connection timed out."
+      ).catch((error: unknown) => {
+        resetClient(nextClient);
+        throw error;
+      });
+      redisConnection = connection;
+    }
+
+    const connection = redisConnection;
+    const client = redisClient;
+    await connection;
+
+    if (!(client?.isReady && redisClient === client && redisStore)) {
+      if (client) {
+        resetClient(client);
       }
-      throw error;
-    });
-  }
+      throw new Error("Redis abuse connection is unavailable.");
+    }
 
-  await redisConnection;
-  return redisClient?.isReady ? (redisStore ?? undefined) : undefined;
+    return redisStore;
+  };
 }
 
 export function createAbusePolicyEnforcer(input: {
+  consumeTimeoutMs?: number;
   getStore: StoreProvider;
   isProduction: boolean;
+  timers?: TimeoutTimers;
 }): (request: AbuseEnforcementInput) => Promise<AbuseAdmission> {
+  const consumeTimeoutMs = positiveTimeout(
+    input.consumeTimeoutMs ?? DEFAULT_CONSUME_TIMEOUT_MS,
+    "Abuse consume timeout"
+  );
+  const timers = input.timers ?? SYSTEM_TIMERS;
+
   return async (request) => {
     const policy = abusePolicyFor(request.route);
     const subjects = deriveSubjects(policy.subjects, request);
@@ -92,14 +205,19 @@ export function createAbusePolicyEnforcer(input: {
           ["sustained", policy.sustained],
         ] as const;
         // biome-ignore lint/performance/noAwaitInLoops: stop before consuming later subjects after denial
-        const results = await Promise.all(
-          windows.map(([windowName, window]) =>
-            store.consume(
-              `${request.route}:${windowName}:${subject.kind}:${subject.value}`,
-              window.limit,
-              window.windowSeconds
+        const results = await withTimeout(
+          Promise.all(
+            windows.map(([windowName, window]) =>
+              store.consume(
+                `${request.route}:${windowName}:${subject.kind}:${subject.value}`,
+                window.limit,
+                window.windowSeconds
+              )
             )
-          )
+          ),
+          consumeTimeoutMs,
+          timers,
+          "Abuse budget consumption timed out."
         );
         const denials = results.filter((result) => !result.allowed);
 
@@ -120,6 +238,8 @@ export function createAbusePolicyEnforcer(input: {
     return { kind: "allowed" };
   };
 }
+
+const getDefaultStore = createRedisStoreProvider();
 
 const defaultEnforcer = createAbusePolicyEnforcer({
   getStore: getDefaultStore,
@@ -183,4 +303,54 @@ function deriveSubjects(
   }
 
   return subjects;
+}
+
+function createDefaultRedisAdmissionClient(
+  options: RedisClientOptions
+): RedisAdmissionClient {
+  const client = createClient(options);
+
+  return {
+    connect: () => client.connect(),
+    destroy: () => client.destroy(),
+    eval: (script, evalOptions) => client.eval(script, evalOptions),
+    get isReady() {
+      return client.isReady;
+    },
+    onError: (listener) => {
+      client.on("error", listener);
+    },
+  };
+}
+
+function positiveTimeout(value: number, label: string): number {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    throw new TypeError(`${label} must be a finite positive integer.`);
+  }
+  return value;
+}
+
+function withTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  timers: TimeoutTimers,
+  message: string
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = timers.setTimeout(
+      () => reject(new Error(message)),
+      timeoutMs
+    );
+
+    operation.then(
+      (value) => {
+        timers.clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        timers.clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 }
