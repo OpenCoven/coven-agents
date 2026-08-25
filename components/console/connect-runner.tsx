@@ -150,6 +150,12 @@ export function ConnectRunner({
           <label style={{ display: "flex", flexDirection: "column", gap: 7 }}>
             <Eyebrow>Runner token</Eyebrow>
             <input
+              // Off because this is a *deployment* token, not a personal one.
+              // A bare password field invites the browser to save it into
+              // someone's password manager and autofill it elsewhere, which
+              // spreads a shared secret across machines that were never meant
+              // to hold it -- and makes rotation something you cannot finish.
+              autoComplete="off"
               onChange={(event) => setToken(event.target.value)}
               style={inputStyle}
               type="password"
