@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { PROJECT_STATUSES } from "./beads-project-model";
 import {
   extractRoadmapSummary,
   ROADMAP_STATUS_END,
@@ -197,6 +198,19 @@ test("rejects every arithmetic summary imbalance", () => {
     topBlockedOverflow,
     waveBlockedOverflow,
   ]) {
+    assertSummaryRejected(value);
+  }
+});
+
+test("rejects top-level status totals that differ from wave totals", () => {
+  for (const [index, status] of PROJECT_STATUSES.entries()) {
+    const value = summary();
+    const otherStatus = PROJECT_STATUSES[(index + 1) % PROJECT_STATUSES.length];
+
+    assert.ok(otherStatus);
+    value.byStatus[status] += 1;
+    value.byStatus[otherStatus] -= 1;
+
     assertSummaryRejected(value);
   }
 });

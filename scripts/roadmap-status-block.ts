@@ -116,6 +116,20 @@ function validateRoadmapSummary(summary: RoadmapSummary): RoadmapSummary {
     waveBlockedTotal += waveSummary.blockedCount;
   }
 
+  for (const status of PROJECT_STATUSES) {
+    let waveStatusTotal = 0;
+
+    for (const wave of WAVES) {
+      waveStatusTotal += summary.byWave[wave].byStatus[status];
+    }
+
+    if (summary.byStatus[status] !== waveStatusTotal) {
+      throw new Error(
+        `Roadmap ${status} count does not equal the total across waves`
+      );
+    }
+  }
+
   if (waveTotal !== summary.totalCount) {
     throw new Error("Roadmap wave totals do not equal the total count");
   }
