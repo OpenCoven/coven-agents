@@ -6,7 +6,7 @@
     "account": "tsx --env-file-if-exists=.env.local --conditions=react-server scripts/account.ts",
     "beads:seed": "tsx scripts/beads-roadmap-seed.ts",
     "beads:sync": "tsx scripts/beads-project-sync.ts",
-    "build": "tsx lib/db/migrate.ts && next build",
+    "build": "pnpm validate:runtime && tsx lib/db/migrate.ts && next build",
     "check": "ultracite check",
     "db:check": "drizzle-kit check",
     "db:generate": "drizzle-kit generate",
@@ -24,11 +24,12 @@
     "secret:scan": "tsx scripts/secret-scan.ts --staged",
     "secret:scan:all": "tsx scripts/secret-scan.ts --tracked",
     "secret:scan:history": "tsx scripts/secret-scan.ts --history",
-    "start": "next start",
+    "start": "pnpm validate:runtime && next start",
     "subscription": "tsx --env-file-if-exists=.env.local --conditions=react-server scripts/subscription.ts",
     "test": "export PLAYWRIGHT=True && pnpm exec playwright test",
     "test:unit": "tsx --test scripts/*.test.ts && tsx --conditions=react-server --test 'lib/**/*.test.ts' 'app/**/*.test.ts' && pnpm --filter @opencoven/agent-contracts test && pnpm --filter @opencoven/harness test && pnpm --filter @opencoven/cloud-runner test",
-    "typecheck": "tsc --noEmit && pnpm -r typecheck"
+    "typecheck": "tsc --noEmit && pnpm -r typecheck",
+    "validate:runtime": "tsx scripts/validate-runtime-config.ts"
   },
   "lint-staged": {
     "*": "corepack pnpm run fix --"
