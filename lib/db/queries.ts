@@ -61,6 +61,40 @@ export async function updateUserPassword(email: string, password: string) {
   }
 }
 
+/**
+ * Finds the account for a federated sign-in, creating it on first use.
+ *
+ * OAuth accounts carry no password: `User.password` is nullable, and
+ * `authorize` already refuses any row without one, so a GitHub-only account
+ * cannot be signed into with the credentials form.
+ *
+ * Matching is by email because that is what identifies a person across both
+ * providers -- signing in with GitHub adopts an existing password account
+ * rather than creating a duplicate. The caller must only ever pass an address
+ * the provider has *verified*; see `selectPrimaryEmail`.
+ */
+export async function findOrCreateFederatedUser(email: string): Promise<User> {
+  try {
+    const [existing] = await db
+      .select()
+      .from(user)
+      .where(eq(user.email, email));
+
+    if (existing) {
+      return existing;
+    }
+
+    const [created] = await db
+      .insert(user)
+      .values({ email, emailVerified: true })
+      .returning();
+
+    return created;
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
 export async function createUser(email: string, password: string) {
   const hashedPassword = generateHashedPassword(password);
 
