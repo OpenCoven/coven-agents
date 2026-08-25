@@ -29,11 +29,35 @@ export class HttpError extends Error {
   }
 }
 
+/**
+ * Request headers the browser client is permitted to send.
+ *
+ * Kept as data so a test can compare it against what the client actually
+ * sets, instead of the two drifting silently until a browser refuses.
+ */
+export const CLIENT_HEADERS = [
+  "authorization",
+  "content-type",
+  "last-event-id",
+  "x-runner-token",
+] as const;
+
 export function corsHeaders(request: Request, allowedOrigin: string): Headers {
   const origin = request.headers.get("origin");
   const headers = new Headers({
-    "access-control-allow-headers":
-      "authorization, content-type, last-event-id",
+    /**
+     * Every header the browser client sends, or the request never leaves it.
+     *
+     * `x-runner-token` was missed when identity moved to `Authorization` and
+     * the deployment gate moved here. A header absent from this list makes
+     * the browser fail the preflight and report `TypeError: Failed to fetch`
+     * -- a message that names neither the header nor CORS, and which no
+     * server-side test can reproduce because CORS exists only in a browser.
+     *
+     * `CLIENT_HEADERS` is asserted against the client in a test rather than
+     * kept in step by hand.
+     */
+    "access-control-allow-headers": CLIENT_HEADERS.join(", "),
     "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
     "access-control-max-age": "86400",
     vary: "Origin",
