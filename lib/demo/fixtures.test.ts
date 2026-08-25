@@ -67,6 +67,13 @@ function assertFixtureSanitized(filename: string, raw: string) {
   );
 }
 
+test("the demo publishes at least one replay fixture", async () => {
+  assert.ok(
+    (await readFixtures()).length > 0,
+    "the demo must not ship with an empty fixture directory"
+  );
+});
+
 test("every demo fixture is a valid transcript", async () => {
   for (const { filename, raw } of await readFixtures()) {
     assert.doesNotThrow(
