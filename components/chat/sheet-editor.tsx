@@ -10,6 +10,7 @@ import {
   DataGrid,
   renderTextEditor,
 } from "react-data-grid";
+import { trimGrid } from "@/lib/editor/csv-grid";
 import { cn } from "@/lib/utils";
 
 import "react-data-grid/lib/styles.css";
@@ -109,7 +110,12 @@ const PureSpreadsheetEditor = ({ content, saveContent }: SheetEditorProps) => {
       columns.slice(1).map((col) => String(row[col.key] ?? ""))
     );
 
-    const newCsvContent = generateCsv(updatedData);
+    // Trimmed before serialising. The 26x50 grid is padding for the view, so
+    // that there is always a spare cell to type into; writing it back made
+    // every save of `a,b,c` store twenty-three trailing commas and fifty empty
+    // lines, and the next save re-committed them. What is stored is what a
+    // version diff is taken against, so the padding has to stop here.
+    const newCsvContent = generateCsv(trimGrid(updatedData));
     saveContent(newCsvContent, true);
   };
 
