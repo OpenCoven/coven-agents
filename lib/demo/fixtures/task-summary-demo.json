@@ -1,0 +1,200 @@
+{
+  "events": [
+    {
+      "event": {
+        "id": 1,
+        "operationId": "fcd94bc9-d557-4bdd-93fa-ab1814764ba0",
+        "runId": "1d866c35-a83b-4f12-ae61-ce56c6d74c41",
+        "type": "accepted"
+      },
+      "offsetMs": 0
+    },
+    {
+      "event": {
+        "at": "2026-08-25T12:00:00.400Z",
+        "id": 2,
+        "status": "running",
+        "type": "status"
+      },
+      "offsetMs": 400
+    },
+    {
+      "event": {
+        "at": "2026-08-25T12:00:01.100Z",
+        "id": 3,
+        "output": "Inspecting the task formatter and its focused test coverage.",
+        "type": "output"
+      },
+      "offsetMs": 1100
+    },
+    {
+      "event": {
+        "at": "2026-08-25T12:00:02.300Z",
+        "evidence": {
+          "command": "pnpm test:unit -- format-task",
+          "completedAt": "2026-08-25T12:00:02.300Z",
+          "exitCode": 0,
+          "startedAt": "2026-08-25T12:00:01.500Z",
+          "stderr": "",
+          "stdout": "Tests: 12 passed, 0 failed"
+        },
+        "id": 4,
+        "type": "command"
+      },
+      "offsetMs": 2300
+    },
+    {
+      "event": {
+        "at": "2026-08-25T12:00:03.000Z",
+        "evidence": {
+          "byteLength": 486,
+          "occurredAt": "2026-08-25T12:00:03.000Z",
+          "operation": "create",
+          "path": "src/lib/format-task.ts"
+        },
+        "id": 5,
+        "type": "file"
+      },
+      "offsetMs": 3000
+    },
+    {
+      "event": {
+        "at": "2026-08-25T12:00:03.600Z",
+        "evidence": {
+          "byteLength": 914,
+          "occurredAt": "2026-08-25T12:00:03.600Z",
+          "operation": "modify",
+          "path": "src/lib/format-task.test.ts"
+        },
+        "id": 6,
+        "type": "file"
+      },
+      "offsetMs": 3600
+    },
+    {
+      "event": {
+        "at": "2026-08-25T12:00:04.200Z",
+        "id": 7,
+        "output": "Added empty-input handling and concise task-summary coverage.",
+        "type": "output"
+      },
+      "offsetMs": 4200
+    },
+    {
+      "event": {
+        "at": "2026-08-25T12:00:05.500Z",
+        "evidence": {
+          "command": "pnpm test:unit -- format-task",
+          "completedAt": "2026-08-25T12:00:05.500Z",
+          "exitCode": 0,
+          "startedAt": "2026-08-25T12:00:04.600Z",
+          "stderr": "",
+          "stdout": "Tests: 14 passed, 0 failed"
+        },
+        "id": 8,
+        "type": "command"
+      },
+      "offsetMs": 5500
+    },
+    {
+      "event": {
+        "at": "2026-08-25T12:00:06.100Z",
+        "id": 9,
+        "output": "Implementation and focused verification are complete.",
+        "type": "output"
+      },
+      "offsetMs": 6100
+    },
+    {
+      "event": {
+        "at": "2026-08-25T12:00:06.500Z",
+        "id": 10,
+        "run": {
+          "agentId": "c8ff2f76-9f28-469a-939d-5ad7d8a982ea",
+          "apiVersion": "1.0",
+          "commandEvidence": [
+            {
+              "command": "pnpm test:unit -- format-task",
+              "completedAt": "2026-08-25T12:00:02.300Z",
+              "exitCode": 0,
+              "startedAt": "2026-08-25T12:00:01.500Z",
+              "stderr": "",
+              "stdout": "Tests: 12 passed, 0 failed"
+            },
+            {
+              "command": "pnpm test:unit -- format-task",
+              "completedAt": "2026-08-25T12:00:05.500Z",
+              "exitCode": 0,
+              "startedAt": "2026-08-25T12:00:04.600Z",
+              "stderr": "",
+              "stdout": "Tests: 14 passed, 0 failed"
+            }
+          ],
+          "completedAt": "2026-08-25T12:00:06.500Z",
+          "createdAt": "2026-08-25T12:00:00.000Z",
+          "fileEvidence": [
+            {
+              "byteLength": 486,
+              "occurredAt": "2026-08-25T12:00:03.000Z",
+              "operation": "create",
+              "path": "src/lib/format-task.ts"
+            },
+            {
+              "byteLength": 914,
+              "occurredAt": "2026-08-25T12:00:03.600Z",
+              "operation": "modify",
+              "path": "src/lib/format-task.test.ts"
+            }
+          ],
+          "id": "1d866c35-a83b-4f12-ae61-ce56c6d74c41",
+          "operationId": "fcd94bc9-d557-4bdd-93fa-ab1814764ba0",
+          "output": "Implemented task-summary formatting with empty-input handling and focused tests. All 14 unit tests pass.",
+          "startedAt": "2026-08-25T12:00:00.400Z",
+          "status": "completed",
+          "task": "Add a small task-summary formatter, cover edge cases, and verify the focused unit suite."
+        },
+        "type": "completed"
+      },
+      "offsetMs": 6500
+    }
+  ],
+  "name": "task-summary-demo",
+  "recordedAt": "2026-08-25T12:00:06.500Z",
+  "result": {
+    "agentId": "c8ff2f76-9f28-469a-939d-5ad7d8a982ea",
+    "commandResults": [
+      {
+        "command": "pnpm test:unit -- format-task",
+        "exitCode": 0,
+        "stderr": "",
+        "stdout": "Tests: 12 passed, 0 failed",
+        "timestamp": "2026-08-25T12:00:02.300Z"
+      },
+      {
+        "command": "pnpm test:unit -- format-task",
+        "exitCode": 0,
+        "stderr": "",
+        "stdout": "Tests: 14 passed, 0 failed",
+        "timestamp": "2026-08-25T12:00:05.500Z"
+      }
+    ],
+    "completedAt": "2026-08-25T12:00:06.500Z",
+    "fileOperations": [
+      {
+        "operation": "create",
+        "path": "src/lib/format-task.ts",
+        "timestamp": "2026-08-25T12:00:03.000Z"
+      },
+      {
+        "operation": "modify",
+        "path": "src/lib/format-task.test.ts",
+        "timestamp": "2026-08-25T12:00:03.600Z"
+      }
+    ],
+    "id": "1d866c35-a83b-4f12-ae61-ce56c6d74c41",
+    "output": "Implemented task-summary formatting with empty-input handling and focused tests. All 14 unit tests pass.",
+    "startedAt": "2026-08-25T12:00:00.400Z",
+    "status": "completed"
+  },
+  "task": "Add a small task-summary formatter, cover edge cases, and verify the focused unit suite."
+}

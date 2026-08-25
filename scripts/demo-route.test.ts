@@ -46,7 +46,7 @@ test("the client player plans the transcript before scheduling playback", () => 
   );
   assert.match(replayPlayer, /planPlayback\(transcript\.events\)/);
   assert.match(replayPlayer, /schedulePlayback\(/);
-  assert.match(replayPlayer, /Replay recorded run/);
+  assert.match(replayPlayer, /Replay demo run/);
 });
 
 test("the replay button shows a high-contrast keyboard focus ring", () => {
@@ -54,7 +54,7 @@ test("the replay button shows a high-contrast keyboard focus ring", () => {
 
   assert.match(
     replayPlayer,
-    /aria-label="Replay recorded run"[\s\S]*?className="[^"]*focus-visible:border-white\s+focus-visible:ring-\[3px\]\s+focus-visible:ring-white\/70/
+    /aria-label="Replay demo run"[\s\S]*?className="[^"]*focus-visible:border-white\s+focus-visible:ring-\[3px\]\s+focus-visible:ring-white\/70/
   );
 });
 
@@ -64,6 +64,18 @@ test("the demo uses the purple brand palette", () => {
   assert.match(sources, /rgba\(147,134,208,0\.2\)/);
   assert.match(sources, /violet-300/);
   assert.doesNotMatch(sources, /emerald-/);
+});
+
+test("curated demo data is not described as a live recording", () => {
+  const demoRoot = read(demoRootUrl);
+
+  assert.match(demoRoot, /Curated agent demo/);
+  assert.match(demoRoot, /Safe demo replay/);
+  assert.match(
+    demoRoot,
+    /deterministic example built from sanitized demo evidence/
+  );
+  assert.doesNotMatch(demoRoot, /Recorded agent run|Recorded replay/);
 });
 
 test("the demo offers GitHub account creation without starting live resources", () => {

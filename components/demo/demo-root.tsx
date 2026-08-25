@@ -10,7 +10,7 @@ import type { resolveDemoView } from "@/lib/demo/root";
 
 type DemoView = ReturnType<typeof resolveDemoView>;
 
-function formatRecordedAt(value: string) {
+function formatPreparedAt(value: string) {
   return new Intl.DateTimeFormat("en", {
     dateStyle: "medium",
     timeStyle: "short",
@@ -31,7 +31,7 @@ function DemoFrame({ children }: { children: React.ReactNode }) {
             <div>
               <div className="font-semibold tracking-[-0.02em]">OpenCoven</div>
               <div className="font-mono text-[10px] text-violet-200/60 uppercase tracking-[0.22em]">
-                Recorded agent run
+                Curated agent demo
               </div>
             </div>
           </div>
@@ -65,7 +65,7 @@ function DemoUnavailable({
           className="border-violet-300/20 bg-violet-300/10 text-violet-100"
           variant="outline"
         >
-          Recorded replay
+          Safe demo replay
         </Badge>
         <h1
           className="mt-5 text-2xl font-semibold tracking-[-0.03em]"
@@ -83,8 +83,8 @@ function DemoUnavailable({
   );
 }
 
-function RecordedRun({ transcript }: { transcript: DemoTranscript }) {
-  const recordedAt = formatRecordedAt(transcript.recordedAt);
+function CuratedRun({ transcript }: { transcript: DemoTranscript }) {
+  const preparedAt = formatPreparedAt(transcript.recordedAt);
 
   return (
     <DemoFrame>
@@ -93,7 +93,7 @@ function RecordedRun({ transcript }: { transcript: DemoTranscript }) {
           className="border-violet-300/20 bg-violet-300/10 text-violet-200"
           variant="outline"
         >
-          Recorded replay
+          Safe demo replay
         </Badge>
         <h1
           className="mt-5 max-w-3xl text-balance text-3xl font-semibold tracking-[-0.04em] sm:text-4xl"
@@ -102,13 +102,13 @@ function RecordedRun({ transcript }: { transcript: DemoTranscript }) {
           {sanitizeEvidenceText(transcript.task)}
         </h1>
         <p className="mt-4 max-w-2xl text-sm text-white/60 sm:text-base">
-          This is a recorded agent run replayed from committed evidence. It
+          This is a deterministic example built from sanitized demo evidence. It
           makes no live runner, authentication, or database request.
         </p>
         <div className="mt-5 flex items-center gap-2 font-mono text-violet-100/55 text-xs">
           <Clock3 aria-hidden="true" className="size-3.5" />
-          <span>Recorded</span>
-          <time dateTime={transcript.recordedAt}>{recordedAt} UTC</time>
+          <span>Prepared</span>
+          <time dateTime={transcript.recordedAt}>{preparedAt} UTC</time>
         </div>
       </section>
       <div className="mt-9">
@@ -120,7 +120,7 @@ function RecordedRun({ transcript }: { transcript: DemoTranscript }) {
 
 export function DemoRoot({ view }: { view: DemoView }) {
   return view.kind === "replay" ? (
-    <RecordedRun transcript={view.transcript} />
+    <CuratedRun transcript={view.transcript} />
   ) : (
     <DemoUnavailable {...view} />
   );
