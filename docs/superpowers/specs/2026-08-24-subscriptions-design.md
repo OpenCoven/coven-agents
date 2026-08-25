@@ -77,9 +77,14 @@ MONTHLY_RUN_CAP     runs included per billing period
 GRACE_PERIOD_DAYS   days of access after a failed payment (3)
 ```
 
-The price and the cap are commercial decisions and are not proposed here. They
-belong in configuration, not scattered through code, because the cap is quoted
-to the user in three places and they must not be able to disagree.
+The price and the cap are settled: **$25 per month, 750 runs per billing
+period** — about 25 a day, roughly $1.70 of raw container cost at the
+worst-case sandbox profile, so margin survives payment fees. They still belong
+in configuration rather than scattered through code, because the cap is quoted
+in three places and two of them would otherwise be able to lie. Launch carries
+no add-ons; the first, if demand appears, is a prepaid 250-run pack at $10
+expiring with the billing period, chosen over metered overage because it cannot
+produce a surprise bill.
 
 ## Architecture
 
