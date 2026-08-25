@@ -3,9 +3,10 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getProviders, useSession } from "next-auth/react";
-import { useActionState, useEffect, useState } from "react";
+import { Suspense, useActionState, useEffect, useState } from "react";
 
 import { AuthForm } from "@/components/chat/auth-form";
+import { BetaNotice } from "@/components/chat/beta-notice";
 import { GithubSignIn } from "@/components/chat/github-sign-in";
 import { SubmitButton } from "@/components/chat/submit-button";
 import { toast } from "@/components/chat/toast";
@@ -69,6 +70,9 @@ export default function Page() {
 
   return (
     <>
+      <Suspense fallback={null}>
+        <BetaNotice />
+      </Suspense>
       <h1 className="text-2xl font-semibold tracking-tight">Welcome back</h1>
       <p className="text-sm text-muted-foreground">
         Sign in to your account to continue
