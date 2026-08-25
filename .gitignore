@@ -33,3 +33,16 @@ tsconfig.tsbuildinfo
 # Private Beads planning data
 .beads/
 *.beads-private.json
+
+# Every env file, whatever it is called. The named rules above cover the
+# conventional ones; this catches `.env.production`, `.env.staging` and
+# anything else someone invents, because the cost of missing one is a
+# committed secret.
+#
+# `.env.example` is the deliberate exception: it carries variable names and no
+# values, and it is what tells a new checkout which variables to set. It is
+# already tracked, so the rule above does not hide it today -- gitignore does
+# not apply to tracked files -- but it would be skipped the moment anyone
+# removed and re-added it, which is exactly when nobody is looking.
+.env*
+!.env.example
