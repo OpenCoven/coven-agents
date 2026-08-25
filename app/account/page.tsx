@@ -7,6 +7,7 @@ import {
   type ChangePasswordActionState,
   changePassword,
 } from "@/app/(auth)/actions";
+import { DeleteAllChats } from "@/components/account/delete-all-chats";
 import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -113,6 +114,8 @@ export default function Page() {
           </Button>
         </form>
       </div>
+
+      <DeleteAllChats />
     </div>
   );
 }
