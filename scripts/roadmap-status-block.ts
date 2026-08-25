@@ -11,6 +11,8 @@ export const ROADMAP_STATUS_END = "<!-- coven-agents-roadmap-status:v1:end -->";
 
 const ROADMAP_STATUS_DATA_PREFIX = "<!-- coven-agents-roadmap-status-data:v1 ";
 const HIDDEN_RECORD_END = " -->";
+const REFRESHED_AT_PREFIX = "_Last refreshed: ";
+const REFRESHED_AT_SUFFIX = " from private Project #10._";
 const refreshedAtSchema = z.iso.datetime({ offset: true });
 
 type MarkerRange = {
@@ -163,7 +165,7 @@ export function renderRoadmapStatusBlock(
   return [
     ROADMAP_STATUS_START,
     `${ROADMAP_STATUS_DATA_PREFIX}${JSON.stringify(parsedSummary)}${HIDDEN_RECORD_END}`,
-    `_Refreshed: ${parsedRefreshedAt} · Total: ${parsedSummary.totalCount} · Blocked: ${parsedSummary.blockedCount}_`,
+    `${REFRESHED_AT_PREFIX}${parsedRefreshedAt}${REFRESHED_AT_SUFFIX}`,
     "",
     "| Wave | Total | Done | In Progress | In review | Todo | Blocked |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -179,22 +181,44 @@ export function renderRoadmapStatusBlock(
 
 export function extractRoadmapSummary(source: string): RoadmapSummary {
   const statusBlock = findStatusBlock(source);
+  const statusBlockEnd = statusBlock.end + ROADMAP_STATUS_END.length;
+  const normalizedStatusBlock = source
+    .slice(statusBlock.start, statusBlockEnd)
+    .replaceAll("\r\n", "\n");
+  const refreshedAtLines = normalizedStatusBlock
+    .split("\n")
+    .filter((line) => line.startsWith(REFRESHED_AT_PREFIX));
   const records = sourceLines(source).filter(
     (line) =>
       line.content.startsWith(ROADMAP_STATUS_DATA_PREFIX) &&
       line.content.endsWith(HIDDEN_RECORD_END)
   );
 
+  if (refreshedAtLines.length !== 1) {
+    throw new Error("Expected exactly one roadmap refreshed timestamp");
+  }
+
   if (records.length !== 1) {
     throw new Error("Expected exactly one roadmap status data record");
   }
 
+  const [refreshedAtLine] = refreshedAtLines;
   const [recordLine] = records;
 
-  if (recordLine === undefined) {
+  if (refreshedAtLine === undefined || recordLine === undefined) {
     throw new Error("Roadmap status data record is missing");
   }
 
+  if (!refreshedAtLine.endsWith(REFRESHED_AT_SUFFIX)) {
+    throw new Error("Roadmap refreshed timestamp is malformed");
+  }
+
+  const refreshedAt = refreshedAtSchema.parse(
+    refreshedAtLine.slice(
+      REFRESHED_AT_PREFIX.length,
+      -REFRESHED_AT_SUFFIX.length
+    )
+  );
   const record = recordLine.content;
   const statusBlockStart = statusBlock.start + ROADMAP_STATUS_START.length;
 
@@ -204,10 +228,19 @@ export function extractRoadmapSummary(source: string): RoadmapSummary {
 
   const jsonStart = ROADMAP_STATUS_DATA_PREFIX.length;
   const jsonEnd = record.length - HIDDEN_RECORD_END.length;
-
-  return validateRoadmapSummary(
+  const summary = validateRoadmapSummary(
     roadmapSummarySchema.parse(JSON.parse(record.slice(jsonStart, jsonEnd)))
   );
+  const rendered = renderRoadmapStatusBlock(summary, refreshedAt);
+  const canonicalStatusBlock = rendered.endsWith("\n")
+    ? rendered.slice(0, -1)
+    : rendered;
+
+  if (normalizedStatusBlock !== canonicalStatusBlock) {
+    throw new Error("Roadmap status block does not match its canonical render");
+  }
+
+  return summary;
 }
 
 export function replaceRoadmapStatusBlock(

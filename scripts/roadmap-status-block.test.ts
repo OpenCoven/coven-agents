@@ -118,7 +118,7 @@ test("renders a deterministic exact roadmap status snapshot", () => {
     renderRoadmapStatusBlock(summary(), REFRESHED_AT),
     `${START}
 ${DATA_PREFIX}{"blockedCount":3,"byStatus":{"Todo":4,"In Progress":3,"In review":2,"Done":1},"byWave":{"0 - Delivered":{"blockedCount":0,"byStatus":{"Todo":0,"In Progress":0,"In review":0,"Done":1},"total":1},"1 - Now":{"blockedCount":2,"byStatus":{"Todo":1,"In Progress":1,"In review":1,"Done":0},"total":3},"2 - Next":{"blockedCount":1,"byStatus":{"Todo":1,"In Progress":1,"In review":0,"Done":0},"total":2},"3 - Certify":{"blockedCount":0,"byStatus":{"Todo":0,"In Progress":0,"In review":1,"Done":0},"total":1},"4 - Platform":{"blockedCount":0,"byStatus":{"Todo":1,"In Progress":0,"In review":0,"Done":0},"total":1},"5 - Product data":{"blockedCount":0,"byStatus":{"Todo":0,"In Progress":1,"In review":0,"Done":0},"total":1},"6 - Operations":{"blockedCount":0,"byStatus":{"Todo":1,"In Progress":0,"In review":0,"Done":0},"total":1}},"totalCount":10} -->
-_Refreshed: ${REFRESHED_AT} · Total: 10 · Blocked: 3_
+_Last refreshed: ${REFRESHED_AT} from private Project #10._
 
 | Wave | Total | Done | In Progress | In review | Todo | Blocked |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -223,6 +223,82 @@ test("extracts the rendered roadmap summary round-trip", () => {
       `authored prefix\n${renderRoadmapStatusBlock(expected, REFRESHED_AT)}authored suffix`
     ),
     expected
+  );
+});
+
+test("rejects visible table count or label tampering", () => {
+  const rendered = renderRoadmapStatusBlock(summary(), REFRESHED_AT);
+
+  for (const source of [
+    rendered.replace(
+      "| 1 - Now | 3 | 0 | 1 | 1 | 1 | 2 |",
+      "| 1 - Now | 4 | 0 | 1 | 1 | 1 | 2 |"
+    ),
+    rendered.replace("| Todo | 4 |", "| Todo | 5 |"),
+    rendered.replace("| Project status | Total |", "| Status | Count |"),
+  ]) {
+    assert.throws(() => extractRoadmapSummary(source));
+  }
+});
+
+test("rejects timestamp line tampering and malformed timestamps", () => {
+  const rendered = renderRoadmapStatusBlock(summary(), REFRESHED_AT);
+  const timestampLine = `_Last refreshed: ${REFRESHED_AT} from private Project #10._`;
+
+  for (const source of [
+    rendered.replace(
+      timestampLine,
+      `_Refreshed: ${REFRESHED_AT} from private Project #10._`
+    ),
+    rendered.replace(
+      timestampLine,
+      "_Last refreshed: 2026-08-25 from private Project #10._"
+    ),
+    rendered.replace(
+      timestampLine,
+      `_Last refreshed: ${REFRESHED_AT} from private Project #10. (edited)_`
+    ),
+  ]) {
+    assert.throws(() => extractRoadmapSummary(source));
+  }
+});
+
+test("rejects extra arbitrary or private content inside the status block", () => {
+  const rendered = renderRoadmapStatusBlock(summary(), REFRESHED_AT);
+
+  for (const extraLine of [
+    "Arbitrary roadmap note",
+    "Private item coven-agents-product.123",
+  ]) {
+    assert.throws(() =>
+      extractRoadmapSummary(rendered.replace(END, `${extraLine}\n${END}`))
+    );
+  }
+});
+
+test("rejects missing canonical blank lines", () => {
+  const rendered = renderRoadmapStatusBlock(summary(), REFRESHED_AT);
+  const timestampLine = `_Last refreshed: ${REFRESHED_AT} from private Project #10._`;
+
+  assert.throws(() =>
+    extractRoadmapSummary(
+      rendered.replace(`${timestampLine}\n\n`, `${timestampLine}\n`)
+    )
+  );
+});
+
+test("rejects missing or reordered table rows", () => {
+  const rendered = renderRoadmapStatusBlock(summary(), REFRESHED_AT);
+  const firstRow = "| 0 - Delivered | 1 | 1 | 0 | 0 | 0 | 0 |";
+  const secondRow = "| 1 - Now | 3 | 0 | 1 | 1 | 1 | 2 |";
+
+  assert.throws(() =>
+    extractRoadmapSummary(rendered.replace(`${firstRow}\n`, ""))
+  );
+  assert.throws(() =>
+    extractRoadmapSummary(
+      rendered.replace(`${firstRow}\n${secondRow}`, `${secondRow}\n${firstRow}`)
+    )
   );
 });
 
