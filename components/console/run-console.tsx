@@ -28,6 +28,7 @@ import {
 } from "@/components/console/primitives";
 import { ThreadBlockView } from "@/components/console/run-thread";
 import { RuntimeInspector } from "@/components/console/runtime-inspector";
+import { Settings } from "@/components/console/settings";
 import { StepsTimeline } from "@/components/console/steps-timeline";
 import {
   hairline,
@@ -114,7 +115,7 @@ const CONNECTION_LABELS: Record<ConnectionStatusKind, string> = {
   unconfigured: "not configured",
 };
 
-type View = "composer" | "create" | "thread";
+type View = "composer" | "create" | "settings" | "thread";
 
 /**
  * The run console.
@@ -661,12 +662,10 @@ export function RunConsole() {
       },
       {
         group: "action",
-        hint: "account settings",
+        hint: "credentials, usage, data",
         id: "account",
-        label: "Open account and credentials",
-        run: () => {
-          window.location.href = "/account";
-        },
+        label: "Open settings",
+        run: () => setView("settings"),
       },
     ];
 
@@ -832,25 +831,29 @@ export function RunConsole() {
           >
             {connectionLabel}
           </button>
-          <a
+          <button
             aria-label="Account and settings"
-            href="/account"
+            className="oc-tint"
+            onClick={() => setView("settings")}
             style={{
               ...well(false, 26),
               borderRadius: "var(--radius-control)",
-              textDecoration: "none",
+              cursor: "pointer",
             }}
             title={who}
+            type="button"
           >
             {accountGlyph}
-          </a>
+          </button>
         </div>
       </header>
 
       <div
         style={{ display: "flex", flex: 1, minHeight: 0, position: "relative" }}
       >
-        {view === "create" ? (
+        {view === "settings" ? (
+          <Settings account={account} onClose={() => setView("composer")} />
+        ) : view === "create" ? (
           <CreateAgent
             busy={busy}
             onCancel={() => setView("composer")}
@@ -866,9 +869,7 @@ export function RunConsole() {
               now={now}
               onCreateAgent={() => setView("create")}
               onNewRun={openComposer}
-              onOpenAccount={() => {
-                window.location.href = "/account";
-              }}
+              onOpenAccount={() => setView("settings")}
               onSelectAgent={openComposer}
               onSelectRun={openRun}
               onToggle={() => setRailCollapsed((value) => !value)}
