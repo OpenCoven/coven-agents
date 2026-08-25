@@ -379,7 +379,7 @@ export async function runRoadmapStatus(
 
   if (mode === "preview") {
     dependencies.stdout(
-      `roadmap status: changed\n${JSON.stringify(nextSummary)}\n`
+      `roadmap status: changed (${currentSummary.totalCount} -> ${nextSummary.totalCount} managed, ${currentSummary.blockedCount} -> ${nextSummary.blockedCount} blocked)\n`
     );
     return 0;
   }

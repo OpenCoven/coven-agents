@@ -169,6 +169,7 @@ test("changed preview prints aggregate counts without sensitive data", async () 
       status: "Done",
       wave: "0 - Delivered",
     }),
+    item("coven-agents-product.private-id"),
   ];
   const stdout: string[] = [];
   let nowCalls = 0;
@@ -176,7 +177,7 @@ test("changed preview prints aggregate counts without sensitive data", async () 
 
   const code = await runRoadmapStatus(
     ["preview"],
-    config(),
+    config(2),
     dependencies(roadmapSource(current), next, {
       now: () => {
         nowCalls += 1;
@@ -194,11 +195,11 @@ test("changed preview prints aggregate counts without sensitive data", async () 
   const output = stdout.join("");
 
   assert.equal(code, 0);
-  assert.match(output, /roadmap status: changed/);
-  assert.match(output, /"totalCount":1/);
-  assert.match(output, /"blockedCount":1/);
-  assert.match(output, /"Done":1/);
-  assert.doesNotMatch(output, /coven-agents-product|987654/);
+  assert.equal(
+    output,
+    "roadmap status: changed (1 -> 2 managed, 0 -> 1 blocked)\n"
+  );
+  assert.doesNotMatch(output, /coven-agents-product|987654|private-id/);
   assert.doesNotMatch(output, /private|title|body|description/i);
   assert.doesNotMatch(output, /2026-|refreshed|timestamp/i);
   assert.equal(nowCalls, 0);
