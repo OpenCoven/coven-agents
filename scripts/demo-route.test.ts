@@ -5,6 +5,11 @@ import test from "node:test";
 const rootPageUrl = new URL("../app/page.tsx", import.meta.url);
 const chatRootPageUrl = new URL("../app/(chat)/page.tsx", import.meta.url);
 const nestedDemoPageUrl = new URL("../app/demo/page.tsx", import.meta.url);
+const loginPageUrl = new URL("../app/(auth)/login/page.tsx", import.meta.url);
+const githubSignInUrl = new URL(
+  "../components/chat/github-sign-in.tsx",
+  import.meta.url
+);
 const demoRootUrl = new URL(
   "../components/demo/demo-root.tsx",
   import.meta.url
@@ -59,6 +64,20 @@ test("the demo uses the purple brand palette", () => {
   assert.match(sources, /rgba\(147,134,208,0\.2\)/);
   assert.match(sources, /violet-300/);
   assert.doesNotMatch(sources, /emerald-/);
+});
+
+test("the demo offers GitHub account creation without starting live resources", () => {
+  const demoRoot = read(demoRootUrl);
+  const githubSignIn = read(githubSignInUrl);
+  const loginPage = read(loginPageUrl);
+
+  assert.match(demoRoot, /href="\/login"[\s\S]*?prefetch=\{false\}/);
+  assert.match(demoRoot, /Create demo account/);
+  assert.match(loginPage, /New accounts start in demo mode/);
+  assert.match(loginPage, /never starts an agent, sandbox, or run/);
+  assert.match(loginPage, /<GithubSignIn callbackUrl="\/"\s*\/>/);
+  assert.doesNotMatch(loginPage, /callbackUrl="\/agents"/);
+  assert.doesNotMatch(githubSignIn, />or</);
 });
 
 test("the demo route tree has no live service or network dependency", () => {

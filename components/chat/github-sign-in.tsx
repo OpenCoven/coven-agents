@@ -7,9 +7,8 @@ import { Button } from "@/components/ui/button";
 /**
  * One-click sign-in.
  *
- * Rendered only when the deployment has GitHub credentials configured, so a
- * deployment without them shows the password form alone rather than a button
- * that leads to a provider error.
+ * GitHub is the only provider. On first use the verified GitHub email creates
+ * the local account; later sign-ins return to that same account.
  */
 export function GithubSignIn({ callbackUrl = "/" }: { callbackUrl?: string }) {
   const [pending, setPending] = useState(false);
@@ -38,12 +37,6 @@ export function GithubSignIn({ callbackUrl = "/" }: { callbackUrl?: string }) {
         </svg>
         {pending ? "Redirecting…" : "Continue with GitHub"}
       </Button>
-
-      <div className="flex items-center gap-3">
-        <span className="h-px flex-1 bg-border" />
-        <span className="text-[13px] text-muted-foreground">or</span>
-        <span className="h-px flex-1 bg-border" />
-      </div>
     </div>
   );
 }
