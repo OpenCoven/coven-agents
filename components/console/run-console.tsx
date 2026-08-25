@@ -326,46 +326,85 @@ export function RunConsole() {
     const controller = new AbortController();
     let cancelled = false;
 
+    /**
+     * A loop, not a single pass retriggered through state.
+     *
+     * The worker closes an idle stream after sixty seconds, and the first
+     * version of this effect handled that by re-reading the snapshot and
+     * calling `setStreamingRunId(streamingRunId)` — the same value, which
+     * React treats as no change, so the effect never re-ran and the stream
+     * never reopened. A quiet minute mid-run left the console permanently
+     * blind to a run that was still executing; the first real cloud run
+     * demonstrated it live. Looping inside the effect makes the reconnect a
+     * fact of control flow instead of a hope about state identity.
+     *
+     * The cursor is re-read from `runsRef` each pass, so a reconnect resumes
+     * after the last applied event rather than replaying from the start.
+     */
+    const RECONNECT_DELAY_MS = 1000;
+
     const follow = async () => {
-      try {
-        await client.streamRunEvents(streamingRunId, {
-          lastEventId: start.lastEventId,
-          onEvent: (event) => {
-            if (!cancelled) {
-              applyEvent(streamingRunId, event);
-            }
-          },
-          signal: controller.signal,
-        });
-      } catch (error) {
-        if (!(cancelled || controller.signal.aborted)) {
+      while (!cancelled) {
+        const cursor =
+          runsRef.current.find((run) => run.snapshot.id === streamingRunId)
+            ?.lastEventId ?? 0;
+
+        try {
+          // biome-ignore lint/performance/noAwaitInLoops: each stream must end before the snapshot re-read that decides whether to open the next one.
+          await client.streamRunEvents(streamingRunId, {
+            lastEventId: cursor,
+            onEvent: (event) => {
+              if (!cancelled) {
+                applyEvent(streamingRunId, event);
+              }
+            },
+            signal: controller.signal,
+          });
+        } catch (error) {
+          if (cancelled || controller.signal.aborted) {
+            return;
+          }
           toast.error(
             error instanceof Error
               ? error.message
               : "Lost the run's event stream."
           );
         }
-      }
 
-      if (cancelled) {
-        return;
-      }
-
-      // The worker closes an idle stream as well as a finished one, so the
-      // close is not an outcome. Re-read the snapshot and let its status say.
-      try {
-        const snapshot = await client.getRun(streamingRunId, controller.signal);
         if (cancelled) {
           return;
         }
-        setRuns((current) =>
-          current.map((run) =>
-            run.snapshot.id === streamingRunId ? { ...run, snapshot } : run
-          )
-        );
-        setStreamingRunId(isTerminal(snapshot.status) ? null : streamingRunId);
-      } catch {
-        setStreamingRunId(null);
+
+        // The worker closes an idle stream as well as a finished one, so the
+        // close is not an outcome. Re-read the snapshot and let its status
+        // decide whether to reconnect.
+        try {
+          const snapshot = await client.getRun(
+            streamingRunId,
+            controller.signal
+          );
+          if (cancelled) {
+            return;
+          }
+          setRuns((current) =>
+            current.map((run) =>
+              run.snapshot.id === streamingRunId ? { ...run, snapshot } : run
+            )
+          );
+          if (isTerminal(snapshot.status)) {
+            setStreamingRunId(null);
+            return;
+          }
+        } catch {
+          setStreamingRunId(null);
+          return;
+        }
+
+        // A pause before reconnecting, so a stream the worker closes
+        // immediately cannot turn this loop into a request-per-tick hammer.
+        await new Promise((resolve) => {
+          setTimeout(resolve, RECONNECT_DELAY_MS);
+        });
       }
     };
 
