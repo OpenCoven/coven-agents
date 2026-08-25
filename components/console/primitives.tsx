@@ -188,6 +188,60 @@ export function Caret({
   );
 }
 
+/**
+ * The account's picture.
+ *
+ * `avatarFor` returns the stored image when there is one and a seeded
+ * identicon otherwise, so a signed-in account always has a face rather than an
+ * initial derived from its email. Signed out there is no account to depict, so
+ * the brand mark stands in — an initial taken from a fallback sentence is how
+ * the rail ended up labelled "N" for "not signed in".
+ */
+export function AccountAvatar({
+  size = 26,
+  src,
+}: {
+  size?: number;
+  src: string | null;
+}) {
+  if (!src) {
+    return (
+      <span
+        aria-hidden="true"
+        style={{
+          alignItems: "center",
+          color: "var(--text-muted)",
+          display: "grid",
+          fontSize: Math.round(size * 0.45),
+          height: size,
+          justifyContent: "center",
+          placeItems: "center",
+          width: size,
+        }}
+      >
+        ◆
+      </span>
+    );
+  }
+
+  return (
+    // biome-ignore lint/performance/noImgElement: a generated avatar is a data URI, which the image optimizer cannot process.
+    <img
+      alt=""
+      height={size}
+      src={src}
+      style={{
+        borderRadius: "inherit",
+        display: "block",
+        height: size,
+        objectFit: "cover",
+        width: size,
+      }}
+      width={size}
+    />
+  );
+}
+
 /** The spinner the console uses wherever something is genuinely in flight. */
 export function Spinner({ size = 14 }: { size?: number }) {
   return (

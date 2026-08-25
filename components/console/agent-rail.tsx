@@ -5,7 +5,12 @@
 import type { AgentDefinition } from "@opencoven/agent-contracts";
 import { Check, ChevronsUpDown, PanelLeft, Plus } from "lucide-react";
 import { useState } from "react";
-import { Caret, StatusDot, statusTone } from "@/components/console/primitives";
+import {
+  AccountAvatar,
+  Caret,
+  StatusDot,
+  statusTone,
+} from "@/components/console/primitives";
 import {
   hairline,
   tabular,
@@ -30,8 +35,8 @@ const MINI_WIDTH = 58;
 type RailProps = {
   agents: AgentDefinition[];
   collapsed: boolean;
-  /** The initial for the signed-in account, or a mark when nobody is. */
-  glyph: string;
+  /** The signed-in account's picture, or null when nobody is. */
+  avatarSrc: string | null;
   onCreateAgent: () => void;
   onNewRun: (agentId: string) => void;
   onOpenAccount: () => void;
@@ -67,7 +72,7 @@ function AgentGlyph({
 
 function MiniRail({
   agents,
-  glyph,
+  avatarSrc,
   onOpenAccount,
   onSelectAgent,
   onToggle,
@@ -76,7 +81,7 @@ function MiniRail({
 }: Pick<
   RailProps,
   | "agents"
-  | "glyph"
+  | "avatarSrc"
   | "onOpenAccount"
   | "onSelectAgent"
   | "onToggle"
@@ -194,7 +199,7 @@ function MiniRail({
         title={who}
         type="button"
       >
-        {glyph}
+        <AccountAvatar size={26} src={avatarSrc} />
       </button>
     </aside>
   );
@@ -753,7 +758,7 @@ export function AgentRail(props: RailProps) {
             borderRadius: "var(--radius-pill)",
           }}
         >
-          {props.glyph}
+          <AccountAvatar size={28} src={props.avatarSrc} />
         </span>
         <span
           style={{

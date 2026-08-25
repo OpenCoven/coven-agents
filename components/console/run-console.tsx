@@ -9,6 +9,7 @@ import type {
   RunSnapshot,
 } from "@opencoven/agent-contracts";
 import { MoreHorizontal, Search } from "lucide-react";
+import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
@@ -22,6 +23,7 @@ import { Composer } from "@/components/console/composer";
 import { ConnectRunner } from "@/components/console/connect-runner";
 import { CreateAgent } from "@/components/console/create-agent";
 import {
+  AccountAvatar,
   Btn,
   Eyebrow,
   LifecycleBadge,
@@ -51,6 +53,7 @@ import {
   fetchHasCredential,
   provisionConnection,
 } from "@/lib/agents/provision";
+import { avatarFor } from "@/lib/avatar";
 import { isTerminal, projectRun } from "@/lib/console/blocks";
 import { formatDuration, glyphFor, spanBetween } from "@/lib/console/format";
 import type { ConsoleRun } from "@/lib/console/types";
@@ -136,7 +139,16 @@ export function RunConsole() {
    */
   const account = session.data?.user?.email ?? null;
   const who = account ?? "not signed in";
-  const accountGlyph = account ? glyphFor(account) : "◆";
+  /**
+   * The account's picture, or null when nobody is signed in.
+   *
+   * Seeded by the user id rather than the email, so the identicon does not
+   * change when someone changes their address.
+   */
+  const accountId = session.data?.user?.id ?? null;
+  const avatarSrc = accountId
+    ? avatarFor({ id: accountId, image: session.data?.user?.image })
+    : null;
 
   const [connection, setConnection] =
     useState<RunnerConnection>(EMPTY_CONNECTION);
@@ -766,11 +778,30 @@ export function RunConsole() {
             minWidth: 0,
           }}
         >
-          <span style={{ color: "var(--accent-presence)", fontSize: 13 }}>
-            ◆
-          </span>
-          <span style={type_.title}>OpenCoven</span>
-          <Eyebrow style={{ color: "var(--text-muted)" }}>Runs</Eyebrow>
+          {/* The brand is the way home. It was the one mark on the screen that
+              looked like a logo and did nothing when clicked. */}
+          <Link
+            aria-label="OpenCoven home"
+            className="oc-tint"
+            href="/"
+            style={{
+              alignItems: "center",
+              borderRadius: "var(--radius-control)",
+              color: "inherit",
+              display: "flex",
+              gap: 9,
+              margin: "0 -6px",
+              padding: "5px 6px",
+              textDecoration: "none",
+            }}
+            title="OpenCoven home"
+          >
+            <span style={{ color: "var(--accent-presence)", fontSize: 13 }}>
+              ◆
+            </span>
+            <span style={type_.title}>OpenCoven</span>
+            <Eyebrow style={{ color: "var(--text-muted)" }}>Runs</Eyebrow>
+          </Link>
         </div>
 
         <button
@@ -851,7 +882,7 @@ export function RunConsole() {
             title={who}
             type="button"
           >
-            {accountGlyph}
+            <AccountAvatar size={24} src={avatarSrc} />
           </button>
         </div>
       </header>
@@ -874,8 +905,8 @@ export function RunConsole() {
           <>
             <AgentRail
               agents={agents}
+              avatarSrc={avatarSrc}
               collapsed={railCollapsed}
-              glyph={accountGlyph}
               now={now}
               onCreateAgent={() => setView("create")}
               onNewRun={openComposer}
