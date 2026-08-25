@@ -19,10 +19,7 @@ export default function AuthLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div
-      className="relative flex min-h-dvh w-full flex-col items-center justify-center bg-background px-6 py-12"
-      data-brand="opencoven"
-    >
+    <div className="relative flex min-h-dvh w-full flex-col items-center justify-center bg-background px-6 py-12">
       {/* A single soft accent wash, matching the library's restraint with
           colour: one accent, used sparingly, never as a gradient field. */}
       <div
