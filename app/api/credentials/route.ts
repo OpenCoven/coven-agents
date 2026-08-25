@@ -5,6 +5,11 @@ import {
   listCredentialHarnesses,
   putCredential,
 } from "@/lib/credentials/store";
+import {
+  blocksSave,
+  checkCopilotToken,
+  checkMessage,
+} from "@/lib/credentials/validate";
 import { isSubscriber, toSession } from "@/lib/session";
 
 /**
@@ -88,11 +93,24 @@ export async function POST(request: Request) {
     return respond(decision);
   }
 
-  await putCredential(
-    decision.session,
-    decision.harnessId,
-    String(body.credential)
-  );
+  const credential = String(body.credential);
+
+  // Checked before storing, against the same endpoint the harness checks
+  // entitlement against, so a token that passes here is one the run will
+  // accept. Without this the first sign of a wrong token is a failed run,
+  // long after the person believed they were set up.
+  if (decision.harnessId === "copilot") {
+    const check = await checkCopilotToken(credential);
+
+    if (blocksSave(check)) {
+      return Response.json(
+        { error: check, message: checkMessage(check) },
+        { status: 422 }
+      );
+    }
+  }
+
+  await putCredential(decision.session, decision.harnessId, credential);
 
   // Deliberately no echo of what was stored. A write confirmation that
   // returned the credential would put it back on the wire for no reason.
