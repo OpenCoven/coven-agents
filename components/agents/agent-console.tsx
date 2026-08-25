@@ -33,6 +33,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { RunnerClient, type RunnerConnection } from "@/lib/agents/client";
+import {
+  type ConnectionStatusKind,
+  connectionMessage,
+  readConnectionResponse,
+} from "@/lib/agents/connection-status";
 import { createIdentityMinter } from "@/lib/agents/identity";
 import { cn } from "@/lib/utils";
 
@@ -100,6 +105,12 @@ export function AgentConsole() {
   const [running, setRunning] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [showConnection, setShowConnection] = useState(false);
+  /**
+   * Why the cloud runner is or is not connected. Shown to the user instead of
+   * letting a doomed request explain itself with the wrong error.
+   */
+  const [cloudStatus, setCloudStatus] =
+    useState<ConnectionStatusKind>("unavailable");
 
   const connection = connections[backend];
   /**
@@ -154,31 +165,43 @@ export function AgentConsole() {
     /**
      * Ask the server for the cloud connection so nobody has to paste a
      * deployment token by hand. The server's value always wins: a stored one
-     * is stale the moment the token is rotated, and a stale token surfaces
-     * only as "Runner token was rejected" with nothing pointing at the cause.
+     * is stale the moment the token is rotated.
      *
-     * Failure is silent on purpose — a demo session gets 403 and an
-     * unconfigured deployment 503, and in both cases the manual connection
-     * dialog is still there as the fallback.
+     * A refusal is recorded rather than swallowed. Falling back to a stored
+     * endpoint silently is what turned "you have no subscription" into
+     * "Runner request failed (404)" against the app's own origin.
      */
     let cancelled = false;
 
-    fetch("/api/runner-connection")
-      .then((response) => (response.ok ? response.json() : null))
-      .then((provided: { endpoint?: string; token?: string } | null) => {
-        if (cancelled || !provided?.token) {
+    const provision = async () => {
+      try {
+        const response = await fetch("/api/runner-connection");
+        const body = (await response.json().catch(() => null)) as Record<
+          string,
+          unknown
+        > | null;
+        const status = readConnectionResponse(response.status, body);
+
+        if (cancelled) {
           return;
         }
 
-        setConnections((current) => ({
-          ...current,
-          cloud: {
-            endpoint: provided.endpoint || current.cloud.endpoint,
-            token: provided.token as string,
-          },
-        }));
-      })
-      .catch(() => undefined);
+        setCloudStatus(status.kind);
+
+        if (status.kind === "provisioned") {
+          setConnections((current) => ({
+            ...current,
+            cloud: { endpoint: status.endpoint, token: status.token },
+          }));
+        }
+      } catch {
+        if (!cancelled) {
+          setCloudStatus("unavailable");
+        }
+      }
+    };
+
+    provision();
 
     return () => {
       cancelled = true;
@@ -370,7 +393,11 @@ export function AgentConsole() {
             <EmptyState
               action={() => setShowConnection(true)}
               icon={Server}
-              text="Connect a runner to create and control agents."
+              text={
+                backend === "cloud" && cloudStatus !== "provisioned"
+                  ? connectionMessage(cloudStatus)
+                  : "Connect a runner to create and control agents."
+              }
             />
           )}
         </aside>
