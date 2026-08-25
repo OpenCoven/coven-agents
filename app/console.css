@@ -1,0 +1,281 @@
+/* ============================================================
+   OpenCoven run console — token contract.
+
+   Dark-first, lavender-inked, oklch hue 285/292. Elevation is a
+   lightness step up the same hue, never a shadow alone.
+
+   Scoped to `.oc-console` rather than `:root` on purpose. The rest
+   of the app is a light-first shadcn surface whose `--background`,
+   `--primary` and `--border` mean something else; redefining those
+   globally would repaint chat and auth as a side effect of styling
+   the console.
+   ============================================================ */
+.oc-console {
+  /* elevation ramp */
+  --bg-desk: oklch(0.078 0.004 285);
+  --bg-panel: oklch(0.108 0.004 285);
+  --bg-sunken: oklch(0.12 0.004 285);
+  --bg-base: oklch(0.14 0.005 285);
+  --bg-raised: oklch(0.18 0.005 285);
+  --bg-elevated: oklch(0.22 0.006 285);
+  --bg-hover: oklch(0.25 0.007 285);
+  --code-surface: oklch(0.104 0.004 285);
+
+  /* ink — three deliberate tiers, each AA on --bg-base and lighter */
+  --ink: oklch(0.965 0.003 285);
+  --text-primary: oklch(0.965 0.003 285);
+  --text-secondary: oklch(0.8 0.004 285);
+  --text-muted: oklch(0.68 0.004 285);
+  --text-faint: oklch(0.56 0.004 285);
+
+  /* borders */
+  --border-hairline: color-mix(in oklch, var(--ink) 15%, transparent);
+  --border-strong: color-mix(in oklch, var(--ink) 30%, transparent);
+
+  /* accent — presence, not call-to-action */
+  --accent-presence: #9386d0;
+  --accent-ink: oklch(0.135 0.005 285);
+
+  /* semantic state */
+  --color-success: oklch(0.78 0.14 158);
+  --color-warning: oklch(0.83 0.13 78);
+  --color-danger: oklch(0.74 0.18 24);
+  --fill-success: color-mix(in oklch, var(--color-success) 13%, transparent);
+  --fill-warning: color-mix(in oklch, var(--color-warning) 13%, transparent);
+  --fill-danger: color-mix(in oklch, var(--color-danger) 13%, transparent);
+  --fill-info: color-mix(in oklch, var(--accent-presence) 15%, transparent);
+  --danger-bg: color-mix(in oklch, var(--color-danger) 12%, transparent);
+  --danger-border: color-mix(
+    in oklch,
+    var(--color-danger) 38%,
+    var(--border-hairline)
+  );
+  --danger-text: oklch(0.83 0.09 24);
+
+  /* radius */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-control: 8px;
+  --radius-card: 12px;
+  --radius-panel: 16px;
+  --radius-pill: 999px;
+
+  /* type ladder — 13px body baseline, density is a feature */
+  --font-ui: var(--font-inter), system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, Menlo, monospace;
+  --font-serif: var(--font-eb-garamond), Georgia, serif;
+
+  /* shadow */
+  --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.3);
+  --shadow-md: 0 4px 12px -2px oklch(0 0 0 / 0.4);
+  --shadow-lg: 0 16px 48px -8px oklch(0 0 0 / 0.55);
+
+  /* motion */
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --duration-slow: 260ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0.2, 1);
+  --ease-decelerate: cubic-bezier(0, 0, 0.2, 1);
+
+  --ring-focus: oklch(0.78 0.115 292);
+  --h-xs: 24px;
+  --h-sm: 28px;
+  --h-md: 32px;
+  --h-lg: 36px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  color: var(--text-primary);
+
+  background: var(--bg-base);
+}
+
+.oc-console *,
+.oc-console *::before,
+.oc-console *::after {
+  box-sizing: border-box;
+  border-color: var(--border-hairline);
+}
+
+/* globals.css strips the focus ring off every button and input. Inside the
+   console that would leave keyboard navigation with nothing to follow, so
+   the ring is put back rather than the global rule being relaxed. */
+.oc-console :focus-visible {
+  outline: 2px solid var(--ring-focus);
+  outline-offset: 2px;
+}
+
+.oc-console button {
+  font: inherit;
+  color: inherit;
+}
+
+.oc-console textarea::placeholder,
+.oc-console input::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
+}
+
+.oc-console [aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
+/* Hover tint shared by the quiet chrome buttons. */
+.oc-tint {
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    background var(--duration-fast) var(--ease-standard);
+}
+
+.oc-tint:hover {
+  background: var(--bg-raised);
+  border-color: var(--border-strong);
+}
+
+.oc-row:hover {
+  background: var(--bg-hover);
+}
+
+.oc-strip:hover {
+  background: var(--bg-raised);
+}
+
+.oc-newagent:hover {
+  background: color-mix(in oklch, var(--accent-presence) 16%, transparent);
+  border-color: color-mix(in oklch, var(--accent-presence) 70%, transparent);
+}
+
+/* Pseudo-element spine — the one thing an inline style cannot express.
+   Depth carries meaning here: the run hangs off a timeline, the premise and
+   the conclusion sit above the plane, and raw output is cut into it. */
+.oc-thread {
+  position: relative;
+}
+
+.oc-thread::before {
+  position: absolute;
+  top: 12px;
+  bottom: 20px;
+  left: 0;
+  width: 1px;
+  content: "";
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    var(--border-hairline) 6%,
+    var(--border-hairline) 94%,
+    transparent
+  );
+}
+
+.oc-well {
+  box-shadow: inset 0 2px 8px -3px oklch(0 0 0 / 0.55);
+}
+
+.oc-lift {
+  box-shadow: var(--shadow-md);
+}
+
+/* Row-scoped reveal: the affordance appears on hover or keyboard focus, so
+   it is reachable without a pointer rather than merely invisible. */
+.oc-reveal {
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.oc-rowscope:hover .oc-reveal,
+.oc-rowscope:focus-within .oc-reveal {
+  opacity: 1;
+}
+
+.oc-scroll {
+  scrollbar-color: color-mix(in oklch, var(--ink) 14%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+.oc-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.oc-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--ink) 14%, transparent);
+  border-radius: 999px;
+}
+
+.oc-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@keyframes oc-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes oc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes oc-caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes oc-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.oc-block {
+  animation: oc-in var(--duration-slow) var(--ease-decelerate) both;
+}
+
+.oc-shim {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklch, var(--ink) 7%, transparent),
+    transparent
+  );
+  background-size: 200% 100%;
+  animation: oc-shimmer 1.8s linear infinite;
+}
+
+.oc-caret {
+  animation: oc-caret 1s steps(1) infinite;
+}
+
+.oc-spin {
+  animation: oc-spin 700ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oc-console * {
+    transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+  }
+
+  .oc-shim {
+    opacity: 0.65;
+    animation: none;
+  }
+}

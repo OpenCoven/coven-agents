@@ -1,5 +1,5 @@
-import { AgentConsole } from "@/components/agents/agent-console";
+import { RunConsole } from "@/components/console/run-console";
 
 export default function AgentsPage() {
-  return <AgentConsole />;
+  return <RunConsole />;
 }
