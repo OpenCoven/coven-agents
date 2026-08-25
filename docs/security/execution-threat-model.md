@@ -168,6 +168,57 @@ recorder redacts before schema validation, and `lib/demo/fixtures.test.ts`
 checks both raw and canonical JSON. `scripts/secret-scan.ts` scans staged and
 tracked Git content without printing matched values.
 
+## Abuse-control policy maxima
+
+`lib/abuse/policy.ts` is the reviewed source of truth for the initial request
+maxima below. These declarations define the shared contract only; later
+admission and storage tasks enforce them. Every currently declared policy fails
+closed, including cost-bearing and resource-bearing routes.
+
+Emergency configuration may lower these limits but must never raise them above
+the code maxima. Raising a maximum or changing a subject, body ceiling, window,
+or failure mode requires a reviewed code change, shadow telemetry showing the
+expected rejection and false-positive rates, and an explicit rollback review
+with thresholds chosen before enforcement.
+
+| Route | Subjects | Body bytes | Burst | Sustained | Failure |
+| --- | --- | ---: | ---: | ---: | --- |
+| `auth_start` | IP | 0 | 5 / 60 s | 20 / 1 h | closed |
+| `auth_callback` | IP | 16,384 | 10 / 60 s | 40 / 1 h | closed |
+| `chat` | IP, user | 64,000 | 4 / 60 s | 60 / 1 h | closed |
+| `document_read` | IP, user | 0 | 60 / 60 s | 600 / 1 h | closed |
+| `document_write` | IP, user | 262,144 | 20 / 60 s | 100 / 1 h | closed |
+| `document_delete` | IP, user | 0 | 5 / 60 s | 20 / 1 h | closed |
+| `history_read` | IP, user | 0 | 60 / 60 s | 600 / 1 h | closed |
+| `history_delete` | IP, user | 0 | 5 / 60 s | 20 / 1 h | closed |
+| `messages_read` | IP, user | 0 | 60 / 60 s | 600 / 1 h | closed |
+| `suggestions_read` | IP, user | 0 | 60 / 60 s | 600 / 1 h | closed |
+| `vote_read` | IP, user | 0 | 60 / 60 s | 600 / 1 h | closed |
+| `vote_write` | IP, user | 8,192 | 20 / 60 s | 100 / 1 h | closed |
+| `upload` | IP, user | 5,250,000 | 2 / 60 s | 20 / 1 h | closed |
+| `checkout` | IP, user | 8,192 | 2 / 5 min | 3 / 1 h | closed |
+| `avatar_read` | IP, user | 0 | 60 / 60 s | 600 / 1 h | closed |
+| `avatar_write` | IP, user | 8,192 | 10 / 60 s | 40 / 1 h | closed |
+| `credential_list` | IP, user | 0 | 30 / 60 s | 200 / 1 h | closed |
+| `credential_write` | IP, user | 16,384 | 10 / 60 s | 40 / 1 h | closed |
+| `credential_delete` | IP, user | 8,192 | 10 / 60 s | 40 / 1 h | closed |
+| `credential_device_start` | IP, user | 0 | 2 / 5 min | 5 / 1 h | closed |
+| `credential_device_poll` | IP, user | 8,192 | 12 / 60 s | 60 / 1 h | closed |
+| `runner_connection` | IP, user | 0 | 10 / 60 s | 60 / 1 h | closed |
+| `runner_token` | IP, user | 0 | 10 / 60 s | 60 / 1 h | closed |
+| `usage_read` | IP, user | 0 | 60 / 60 s | 600 / 1 h | closed |
+| `analytics_read` | IP, user | 0 | 20 / 60 s | 100 / 1 h | closed |
+| `model_list` | IP | 0 | 120 / 60 s | 1,200 / 1 h | closed |
+| `stripe_webhook` | IP | 262,144 | 60 / 60 s | 600 / 1 h | closed |
+| `run_start` | IP, tenant | 64,000 | 5 / 60 s | 25 / 1 day | closed |
+| `internal_credential` | IP, tenant | 8,192 | 10 / 60 s | 60 / 1 h | closed |
+
+The repeated low-cost read, standard write, sensitive credential, destructive
+write, and webhook values are named shared classes in code so later tuning
+cannot leave equivalent surfaces with accidental object-level drift. Route
+entries still state their subject set, body ceiling, and selected reviewed
+class explicitly.
+
 ## Threat register
 
 | ID | Threat and impact | Current controls and verification | Residual risk or follow-up |
