@@ -3,6 +3,7 @@
 import { HARNESS_SPECS } from "@opencoven/harness";
 import { Check, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { ConnectCopilot } from "@/components/account/connect-copilot";
 import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -69,9 +70,13 @@ export function HarnessCredentials() {
     setConfigured(body.harnessIds ?? []);
   }, []);
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     refresh().catch(() => undefined);
   }, [refresh]);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
 
   const change = useCallback((harnessId: string, next: string) => {
     setValues((current) => ({ ...current, [harnessId]: next }));
@@ -179,6 +184,7 @@ export function HarnessCredentials() {
             harness={harness}
             key={harness.id}
             onChange={change}
+            onConnected={reload}
             onRemove={remove}
             onSave={save}
             value={values[harness.id] ?? ""}
@@ -194,12 +200,14 @@ function HarnessRow({
   configured,
   harness,
   onChange,
+  onConnected,
   onRemove,
   onSave,
   value,
 }: {
   busy: boolean;
   configured: boolean;
+  onConnected: () => void;
   harness: { help: string; id: string; label: string };
   onChange: (harnessId: string, next: string) => void;
   onRemove: (harnessId: string) => void;
@@ -238,6 +246,19 @@ function HarnessRow({
           </span>
         ) : null}
       </div>
+
+      {harness.id === "copilot" ? (
+        <>
+          <ConnectCopilot configured={configured} onConnected={onConnected} />
+          <div className="flex items-center gap-3 py-1">
+            <span className="h-px flex-1 bg-border" />
+            <span className="text-[11px] text-muted-foreground">
+              or paste a token
+            </span>
+            <span className="h-px flex-1 bg-border" />
+          </div>
+        </>
+      ) : null}
 
       <div className="flex gap-2">
         <Input
