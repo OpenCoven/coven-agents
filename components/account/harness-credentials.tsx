@@ -94,6 +94,19 @@ export function HarnessCredentials() {
           method: "POST",
         });
 
+        if (response.status === 422) {
+          // A rejected token is the person's to fix, so it is shown verbatim
+          // rather than folded into a generic failure. The typed value is
+          // deliberately kept so they can see and correct it.
+          const body = (await response.json()) as { message?: string };
+
+          toast({
+            description: body.message ?? "That token was rejected.",
+            type: "error",
+          });
+          return;
+        }
+
         if (!response.ok) {
           throw new Error(String(response.status));
         }
