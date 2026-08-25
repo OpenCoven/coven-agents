@@ -4,7 +4,6 @@
 
 import type {
   AgentDefinition,
-  Backend,
   CreateAgentInput,
   RunResult,
   Runtime,
@@ -13,8 +12,6 @@ import {
   Bot,
   CheckCircle2,
   ChevronRight,
-  Cloud,
-  Cpu,
   LoaderCircle,
   Play,
   Plus,
@@ -53,14 +50,10 @@ import { cn } from "@/lib/utils";
 
 const CLOUD_ENDPOINT =
   process.env.NEXT_PUBLIC_CLOUD_RUNNER_URL ?? "http://127.0.0.1:8787";
-const LOCAL_ENDPOINT =
-  process.env.NEXT_PUBLIC_LOCAL_RUNNER_URL ?? "http://127.0.0.1:7331";
 
-type Connections = Record<Backend, RunnerConnection>;
-
-const EMPTY_CONNECTIONS: Connections = {
-  cloud: { endpoint: CLOUD_ENDPOINT, token: "" },
-  local: { endpoint: LOCAL_ENDPOINT, token: "" },
+const EMPTY_CONNECTION: RunnerConnection = {
+  endpoint: CLOUD_ENDPOINT,
+  token: "",
 };
 
 const DEFAULT_INSTRUCTIONS =
@@ -78,15 +71,12 @@ function formatDate(value: string | null) {
   }).format(new Date(value));
 }
 
-function connectionKey(backend: Backend) {
-  return `opencoven-runner-${backend}`;
-}
+const CONNECTION_KEY = "opencoven-runner-cloud";
 
-function loadStoredConnection(backend: Backend): RunnerConnection {
-  const fallback = EMPTY_CONNECTIONS[backend];
-  const stored = window.sessionStorage.getItem(connectionKey(backend));
+function loadStoredConnection(): RunnerConnection {
+  const stored = window.sessionStorage.getItem(CONNECTION_KEY);
   if (!stored) {
-    return fallback;
+    return EMPTY_CONNECTION;
   }
   try {
     const parsed = JSON.parse(stored) as Partial<RunnerConnection>;
@@ -94,19 +84,18 @@ function loadStoredConnection(backend: Backend): RunnerConnection {
       endpoint:
         typeof parsed.endpoint === "string"
           ? parsed.endpoint
-          : fallback.endpoint,
+          : EMPTY_CONNECTION.endpoint,
       token: typeof parsed.token === "string" ? parsed.token : "",
     };
   } catch {
-    window.sessionStorage.removeItem(connectionKey(backend));
-    return fallback;
+    window.sessionStorage.removeItem(CONNECTION_KEY);
+    return EMPTY_CONNECTION;
   }
 }
 
 export function AgentConsole() {
-  const [backend, setBackend] = useState<Backend>("cloud");
-  const [connections, setConnections] =
-    useState<Connections>(EMPTY_CONNECTIONS);
+  const [connection, setConnection] =
+    useState<RunnerConnection>(EMPTY_CONNECTION);
   const [agents, setAgents] = useState<AgentDefinition[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [task, setTask] = useState("");
@@ -130,23 +119,14 @@ export function AgentConsole() {
    */
   const [hasCredential, setHasCredential] = useState<boolean | null>(null);
 
-  const connection = connections[backend];
   /**
    * One minter for the whole console, so the 15-minute token is shared across
    * reconnects rather than re-minted per render.
-   *
-   * Cloud only. The local runner has no tenancy and still authenticates with a
-   * single token on `Authorization`.
    */
   const mintIdentity = useMemo(() => createIdentityMinter(), []);
   const client = useMemo(
-    () =>
-      new RunnerClient(
-        connection,
-        undefined,
-        backend === "cloud" ? { mintIdentity } : {}
-      ),
-    [backend, connection, mintIdentity]
+    () => new RunnerClient(connection, undefined, { mintIdentity }),
+    [connection, mintIdentity]
   );
   const selected = agents.find((agent) => agent.id === selectedId) ?? null;
 
@@ -175,10 +155,7 @@ export function AgentConsole() {
   }, [client, connection.token]);
 
   useEffect(() => {
-    setConnections({
-      cloud: loadStoredConnection("cloud"),
-      local: loadStoredConnection("local"),
-    });
+    setConnection(loadStoredConnection());
 
     /**
      * Ask the server for the cloud connection so nobody has to paste a
@@ -208,10 +185,7 @@ export function AgentConsole() {
         setCloudStatus(status.kind);
 
         if (status.kind === "provisioned") {
-          setConnections((current) => ({
-            ...current,
-            cloud: { endpoint: status.endpoint, token: status.token },
-          }));
+          setConnection({ endpoint: status.endpoint, token: status.token });
         }
       })
       .catch(() => {
@@ -231,21 +205,13 @@ export function AgentConsole() {
   }, [refresh]);
 
   function updateConnection(patch: Partial<RunnerConnection>) {
-    setConnections((current) => ({
-      ...current,
-      [backend]: { ...current[backend], ...patch },
-    }));
+    setConnection((current) => ({ ...current, ...patch }));
   }
 
   function saveConnection() {
-    window.sessionStorage.setItem(
-      connectionKey(backend),
-      JSON.stringify(connection)
-    );
+    window.sessionStorage.setItem(CONNECTION_KEY, JSON.stringify(connection));
     setShowConnection(false);
-    toast.success(
-      `${backend === "cloud" ? "Cloud" : "Local"} runner connected.`
-    );
+    toast.success("Runner connected.");
     refresh().catch(() => undefined);
   }
 
@@ -315,13 +281,13 @@ export function AgentConsole() {
         (previous, template) =>
           previous.then(async () => {
             const agent = await client.createAgent({
-              backend,
+              backend: "cloud",
               description: template.blurb,
               instructions: template.instructions,
               model: "auto",
               name: memberName(formation, template),
               runtime: "copilot",
-              workspace: backend === "cloud" ? "/workspace" : "",
+              workspace: "/workspace",
             });
 
             setAgents((current) => [...current, agent]);
@@ -414,7 +380,6 @@ export function AgentConsole() {
             </span>
           </div>
           <div className="flex items-center gap-2">
-            <BackendSwitch backend={backend} onChange={setBackend} />
             <Button
               className="border-white/10 bg-white/5 text-white hover:bg-white/10"
               onClick={() => setShowConnection((value) => !value)}
@@ -435,7 +400,7 @@ export function AgentConsole() {
             <div>
               <p className="font-medium text-sm">Agents</p>
               <p className="text-[var(--oc-text-3)] text-xs">
-                {agents.length} on {backend}
+                {agents.length} {agents.length === 1 ? "agent" : "agents"}
               </p>
             </div>
             <Button
@@ -491,11 +456,7 @@ export function AgentConsole() {
             <EmptyState
               action={() => setShowConnection(true)}
               icon={Server}
-              text={emptyStateText({
-                backend,
-                cloudStatus,
-                hasCredential,
-              })}
+              text={emptyStateText({ cloudStatus, hasCredential })}
             />
           )}
         </aside>
@@ -503,7 +464,6 @@ export function AgentConsole() {
         <section className="flex min-h-0 min-w-0 flex-col overflow-y-auto">
           {showConnection ? (
             <ConnectionPanel
-              backend={backend}
               connection={connection}
               onCancel={() => setShowConnection(false)}
               onChange={updateConnection}
@@ -511,7 +471,6 @@ export function AgentConsole() {
             />
           ) : showCreate ? (
             <CreateAgentPanel
-              backend={backend}
               loading={loading}
               onCancel={() => setShowCreate(false)}
               onCreate={createAgent}
@@ -530,7 +489,6 @@ export function AgentConsole() {
             />
           ) : (
             <WelcomePanel
-              backend={backend}
               connected={Boolean(connection.token)}
               loading={loading}
               onConnect={() => setShowConnection(true)}
@@ -541,38 +499,6 @@ export function AgentConsole() {
         </section>
       </div>
     </main>
-  );
-}
-
-function BackendSwitch({
-  backend,
-  onChange,
-}: {
-  backend: Backend;
-  onChange: (backend: Backend) => void;
-}) {
-  return (
-    <div className="flex rounded-xl border border-white/8 bg-black/30 p-1">
-      {(["cloud", "local"] as const).map((value) => {
-        const Icon = value === "cloud" ? Cloud : Cpu;
-        return (
-          <button
-            className={cn(
-              "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 font-medium text-xs capitalize transition",
-              backend === value
-                ? "bg-white/10 text-[var(--oc-accent)]"
-                : "text-white/40 hover:text-white/70"
-            )}
-            key={value}
-            onClick={() => onChange(value)}
-            type="button"
-          >
-            <Icon className="size-3.5" />
-            {value}
-          </button>
-        );
-      })}
-    </div>
   );
 }
 
@@ -596,11 +522,10 @@ function StatusDot({ status }: { status: AgentDefinition["status"] }) {
  * fixing the credential would not help while the runner is unreachable.
  */
 function emptyStateText(input: {
-  backend: Backend;
   cloudStatus: ConnectionStatusKind;
   hasCredential: boolean | null;
 }): string {
-  if (input.backend === "cloud" && input.cloudStatus !== "provisioned") {
+  if (input.cloudStatus !== "provisioned") {
     return connectionMessage(input.cloudStatus);
   }
 
@@ -654,14 +579,12 @@ function Panel({
 }
 
 function WelcomePanel({
-  backend,
   connected,
   loading,
   onConnect,
   onCreate,
   onRefresh,
 }: {
-  backend: Backend;
   connected: boolean;
   loading: boolean;
   onConnect: () => void;
@@ -672,7 +595,7 @@ function WelcomePanel({
     <Panel className="flex h-full min-h-0 items-center justify-center p-12 text-center">
       <div className="max-w-xl">
         <p className="mb-4 font-medium text-[11px] text-[var(--oc-text-3)] uppercase tracking-[0.14em]">
-          Local-cloud hybrid
+          Cloud sandboxes
         </p>
         <h1 className="text-balance font-semibold text-[28px] tracking-[-0.03em] md:text-[32px]">
           Autonomous agents,
@@ -680,8 +603,8 @@ function WelcomePanel({
           bounded by infrastructure.
         </h1>
         <p className="mx-auto mt-4 max-w-md text-pretty text-[14px] text-[var(--oc-text-3)] leading-relaxed">
-          Create zero-approval coding agents in disposable cloud sandboxes or
-          connect the same control plane to a trusted local CLI runner.
+          Create zero-approval coding agents that run in disposable cloud
+          sandboxes, each one isolated in its own container.
         </p>
         <div className="mt-7 flex flex-wrap justify-center gap-3">
           <Button
@@ -693,7 +616,7 @@ function WelcomePanel({
             ) : (
               <Server className="size-4" />
             )}
-            {connected ? "Forge an agent" : `Connect ${backend} runner`}
+            {connected ? "Forge an agent" : "Connect runner"}
           </Button>
           {connected ? (
             <Button
@@ -713,13 +636,11 @@ function WelcomePanel({
 }
 
 function ConnectionPanel({
-  backend,
   connection,
   onCancel,
   onChange,
   onSave,
 }: {
-  backend: Backend;
   connection: RunnerConnection;
   onCancel: () => void;
   onChange: (patch: Partial<RunnerConnection>) => void;
@@ -729,7 +650,7 @@ function ConnectionPanel({
     <Panel className="mx-auto max-w-2xl overflow-hidden">
       <div className="border-white/8 border-b px-6 py-5">
         <p className="font-mono text-[var(--oc-text-3)] text-xs uppercase tracking-[0.2em]">
-          {backend} control plane
+          Cloud control plane
         </p>
         <h2 className="mt-1 font-semibold text-2xl tracking-tight">
           Connect runner
@@ -740,11 +661,11 @@ function ConnectionPanel({
           <Input
             className="border-white/10 bg-black/30"
             onChange={(event) => onChange({ endpoint: event.target.value })}
-            placeholder={backend === "cloud" ? CLOUD_ENDPOINT : LOCAL_ENDPOINT}
+            placeholder={CLOUD_ENDPOINT}
             value={connection.endpoint}
           />
         </Field>
-        <Field label={backend === "cloud" ? "Runner token" : "Access token"}>
+        <Field label="Runner token">
           <Input
             autoComplete="off"
             className="border-white/10 bg-black/30 font-mono"
@@ -753,19 +674,16 @@ function ConnectionPanel({
             type="password"
             value={connection.token}
           />
-          {backend === "cloud" ? (
-            <p className="mt-2 text-white/40 text-xs leading-relaxed">
-              Grants access to the deployment. Who you are is proved separately
-              by a short-lived token minted from your signed-in session, so this
-              no longer identifies you and sharing it does not share your
-              agents.
-            </p>
-          ) : null}
+          <p className="mt-2 text-white/40 text-xs leading-relaxed">
+            Grants access to the deployment. Who you are is proved separately by
+            a short-lived token minted from your signed-in session, so this no
+            longer identifies you and sharing it does not share your agents.
+          </p>
         </Field>
         <div className="flex gap-3 rounded-xl border border-amber-300/15 bg-amber-300/5 p-4 text-amber-100/60 text-xs leading-relaxed">
           <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-300" />
           Tokens are held in session storage and cleared when the browser
-          session ends. Local runners bind to loopback by default.
+          session ends.
         </div>
       </div>
       <div className="flex justify-end gap-2 border-white/8 border-t px-6 py-4">
@@ -838,13 +756,11 @@ function FormationCard({
 }
 
 function CreateAgentPanel({
-  backend,
   loading,
   onCancel,
   onCreate,
   onCreateFormation,
 }: {
-  backend: Backend;
   loading: boolean;
   onCancel: () => void;
   onCreate: (input: CreateAgentInput) => Promise<void>;
@@ -853,10 +769,9 @@ function CreateAgentPanel({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState(DEFAULT_INSTRUCTIONS);
-  // Both backends now run a harness: the cloud backend runs it inside a
-  // per-agent sandbox container, the local backend runs it on this machine.
-  // Neither holds a model provider API key, so there is no provider runtime to
-  // pick and `auto` lets the signed-in harness choose its own model.
+  // The harness runs inside a per-agent sandbox container and holds no model
+  // provider API key, so there is no provider runtime to pick: `auto` lets the
+  // signed-in harness choose its own model.
   const [runtime, setRuntime] = useState<Runtime>("copilot");
   const [model, setModel] = useState("auto");
   const applyTemplateFields = useCallback(
@@ -868,15 +783,13 @@ function CreateAgentPanel({
     []
   );
 
-  const [workspace, setWorkspace] = useState(
-    backend === "cloud" ? "/workspace" : ""
-  );
+  const [workspace, setWorkspace] = useState("/workspace");
 
   return (
     <Panel className="mx-auto max-w-3xl overflow-hidden">
       <div className="border-white/8 border-b px-6 py-5">
         <p className="font-mono text-[var(--oc-text-3)] text-xs uppercase tracking-[0.2em]">
-          New {backend} familiar
+          New familiar
         </p>
         <div className="mt-5 flex flex-col gap-4">
           <div className="flex flex-col gap-2">
@@ -923,7 +836,7 @@ function CreateAgentPanel({
         onSubmit={(event) => {
           event.preventDefault();
           onCreate({
-            backend,
+            backend: "cloud",
             description,
             instructions,
             model,
@@ -982,9 +895,7 @@ function CreateAgentPanel({
               <Input
                 className="border-white/10 bg-black/30 font-mono"
                 onChange={(event) => setWorkspace(event.target.value)}
-                placeholder={
-                  backend === "cloud" ? "/workspace" : "/path/to/project"
-                }
+                placeholder="/workspace"
                 value={workspace}
               />
             </Field>
@@ -1003,9 +914,8 @@ function CreateAgentPanel({
           <div className="md:col-span-2 flex gap-3 rounded-xl border border-rose-300/15 bg-rose-300/5 p-4 text-rose-100/60 text-xs leading-relaxed">
             <ShieldAlert className="mt-0.5 size-4 shrink-0 text-rose-300" />
             YOLO mode removes interactive tool approvals. Runs are driven by
-            your signed-in coding CLI, never by a model provider API key. Cloud
-            runs stay inside their per-agent container; local runs inherit the
-            operating-system access of the local runner process.
+            your signed-in coding CLI, never by a model provider API key, and
+            stay inside their own per-agent container.
           </div>
         </div>
         <div className="flex justify-end gap-2 border-white/8 border-t px-6 py-4">
@@ -1160,7 +1070,6 @@ function AgentWorkspace({
             Runtime
           </p>
           <dl className="mt-4 space-y-4 text-sm">
-            <Detail label="Backend" value={agent.backend} />
             <Detail label="Harness" value={agent.runtime} />
             <Detail label="Model" value={agent.model} />
             <Detail

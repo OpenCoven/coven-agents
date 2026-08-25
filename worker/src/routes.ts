@@ -310,13 +310,6 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
           }
           if (request.method === "POST") {
             const input = createAgentInputSchema.parse(await readJson(request));
-            if (input.backend !== "cloud") {
-              throw new HttpError(
-                "Cloud runner only accepts cloud agents.",
-                400,
-                "backend_mismatch"
-              );
-            }
             assertRunnableHarness(input.runtime);
             const now = new Date().toISOString();
             const definition: AgentDefinition = {
@@ -360,13 +353,6 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
           }
           if (!action && request.method === "PUT") {
             const input = createAgentInputSchema.parse(await readJson(request));
-            if (input.backend !== "cloud") {
-              throw new HttpError(
-                "Cloud runner only accepts cloud agents.",
-                400,
-                "backend_mismatch"
-              );
-            }
             assertRunnableHarness(input.runtime);
             const configured = await agent.configure({
               ...input,

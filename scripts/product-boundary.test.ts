@@ -10,7 +10,6 @@ const adrUrl = new URL(
 const readmeUrl = new URL("README.md", repositoryRoot);
 const manifestPaths = [
   "package.json",
-  "local-runner/package.json",
   "packages/agent-contracts/package.json",
   "packages/harness/package.json",
   "worker/package.json",

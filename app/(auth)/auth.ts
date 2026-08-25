@@ -41,7 +41,22 @@ export const {
 } = NextAuth({
   ...authConfig,
   callbacks: {
-    async jwt({ token, user, account }) {
+    async jwt({ token, user, account, trigger, session: updated }) {
+      /**
+       * A changed avatar reaches the token here rather than by re-reading the
+       * user row on every request. Only the picture is accepted from the
+       * client: `id`, `type`, and `subscribedUntil` decide who may write to
+       * the owner's database, and taking any of those from a caller-supplied
+       * payload would let the browser grant itself a subscription.
+       */
+      if (trigger === "update") {
+        const image = (updated as { image?: unknown } | undefined)?.image;
+
+        token.picture = typeof image === "string" && image ? image : null;
+
+        return refreshTokenType(token, new Date());
+      }
+
       /**
        * A GitHub sign-in has to be mapped onto a local `User` row before it
        * means anything: the tenant is derived from that row's id, and
@@ -64,6 +79,10 @@ export const {
         const row = await findOrCreateFederatedUser(email);
         token.email = row.email;
         token.id = row.id;
+        // Carried on the token so the account menu can render the stored
+        // avatar without a database read on every request. `update()` from
+        // the settings form is what keeps it current between sign-ins.
+        token.picture = row.image ?? null;
         token.subscribedUntil = row.subscribedUntil?.toISOString() ?? null;
 
         return refreshTokenType(token, new Date());
@@ -85,6 +104,7 @@ export const {
       if (session.user) {
         session.user.id = token.id;
         session.user.type = token.type;
+        session.user.image = token.picture ?? null;
       }
 
       return session;
