@@ -1,6 +1,6 @@
 "use client";
 
-import { LogOut, Settings, User } from "lucide-react";
+import { LogIn, LogOut, Settings, User } from "lucide-react";
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { useCallback, useState } from "react";
@@ -12,6 +12,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { sessionMenu } from "@/lib/auth/session-menu";
 
 /**
  * The signed-in account control.
@@ -29,13 +30,27 @@ export function AccountMenu() {
 
   const leave = useCallback(() => {
     setPending(true);
-    signOut({ callbackUrl: "/login" });
+    signOut({ callbackUrl: "/login", redirect: true });
   }, []);
 
   const email = session?.user?.email;
+  const menu = sessionMenu({ email });
 
-  if (!email) {
-    return null;
+  // A signed-out visitor is offered sign IN rather than nothing, so the
+  // control is in the same place whatever the session state.
+  if (!menu.signedIn) {
+    return (
+      <Button
+        asChild
+        className="h-9 rounded-[8px] text-[13px]"
+        variant="outline"
+      >
+        <Link href={menu.destination}>
+          <LogIn className="size-4" />
+          Sign in
+        </Link>
+      </Button>
+    );
   }
 
   return (
@@ -69,7 +84,7 @@ export function AccountMenu() {
 
         <DropdownMenuItem disabled={pending} onSelect={leave}>
           <LogOut className="size-4" />
-          {pending ? "Signing out…" : "Sign out"}
+          {pending ? "Signing out…" : menu.label}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

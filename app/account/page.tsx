@@ -8,6 +8,7 @@ import {
   changePassword,
 } from "@/app/(auth)/actions";
 import { DeleteAllChats } from "@/components/account/delete-all-chats";
+import { AccountMenu } from "@/components/agents/account-menu";
 import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -54,13 +55,19 @@ export default function Page() {
 
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-[420px] flex-col justify-center gap-6 px-6 py-12">
-      <Link
-        className="flex w-fit items-center gap-1.5 text-[13px] text-muted-foreground transition-colors hover:text-foreground"
-        href="/agents"
-      >
-        <ArrowLeftIcon className="size-3.5" />
-        Back
-      </Link>
+      <div className="flex items-center justify-between">
+        <Link
+          className="flex w-fit items-center gap-1.5 text-[13px] text-muted-foreground transition-colors hover:text-foreground"
+          href="/agents"
+        >
+          <ArrowLeftIcon className="size-3.5" />
+          Back
+        </Link>
+
+        {/* Sign-out was reachable from the console and the chat but not from
+            the settings page itself, which is where a person goes looking. */}
+        <AccountMenu />
+      </div>
       <div className="flex flex-col gap-6 rounded-[var(--radius)] border border-border bg-card p-8">
         <div className="flex flex-col gap-1">
           <h1 className="font-semibold text-2xl tracking-tight">Account</h1>
