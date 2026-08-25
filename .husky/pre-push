@@ -1,52 +1,101 @@
 #!/bin/sh
 # Blocks pushes containing unsigned commits or secrets.
 # Mirrors the global rule: every commit must land Verified on GitHub.
+#
+# Git names what is being pushed on stdin, one line per ref:
+#
+#   <local ref> <local sha> <remote ref> <remote sha>
+#
+# This hook used to ignore that and derive everything from the checkout
+# instead -- the branch warning from `HEAD`, the commit range from
+# `@{u}..HEAD`. Both are the same mistake: `@{u}` is HEAD's upstream, not the
+# upstream of the ref being pushed. `git push origin some-branch` from a
+# checkout sitting on main therefore validated main's commits and let the
+# pushed branch through unchecked, and a branch deletion -- which introduces
+# no commits at all -- scanned whatever happened to be ahead of the checkout.
+#
+# The remote name and URL arrive as arguments; the refs arrive on stdin.
 
-branch="$(git rev-parse --abbrev-ref HEAD)"
+remote="$1"
 
-if [ "$branch" = "main" ]; then
-  echo "WARNING: pushing directly to main."
-fi
+ZERO='0000000000000000000000000000000000000000'
+status=0
 
-# Commits about to be pushed. Falls back to origin/main for a new branch
-# with no upstream yet.
-if git rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
-  range='@{u}..HEAD'
-else
-  range='origin/main..HEAD'
-fi
+check_ref() {
+  local_sha="$1"
+  remote_ref="$2"
+  remote_sha="$3"
 
-# %G? is not a boolean. Block only on a real problem:
-#   N  no signature at all
-#   B  bad signature
-# Everything else means a signature exists. In particular E means "signature
-# present but the public key is unavailable locally", which is what every
-# GitHub-signed bot commit looks like on a developer machine — dependabot
-# commits are signed by GitHub's key, which is not in anyone's keyring. Treating
-# E as unsigned blocked pushing any branch built on a bot commit, and no amount
-# of re-signing could fix it because those commits are not ours to rewrite.
-bad="$(git log "$range" --pretty='%H %G? %an' 2>/dev/null \
-        | awk '$2 == "N" || $2 == "B" {print}')"
+  # A deletion pushes no objects. There is nothing to sign-check or scan, and
+  # the old hook's range was meaningless here.
+  if [ "$local_sha" = "$ZERO" ]; then
+    return 0
+  fi
 
-if [ -n "$bad" ]; then
-  echo ""
-  echo "BLOCKED: the following commits are unsigned or have a bad signature:"
-  echo "$bad"
-  echo ""
-  echo "Sign them before pushing (git rebase --exec 'git commit --amend --no-edit -S')."
-  exit 1
-fi
+  case "$remote_ref" in
+    refs/heads/main) echo "WARNING: pushing directly to main." ;;
+  esac
 
-# The pre-commit scan can be skipped with --no-verify, and a secret committed
-# and then deleted in a later commit is invisible to a net diff while still
-# being pushed. This scans the objects the push actually introduces, which is
-# the last point where a value can be kept off the remote at all -- once it is
-# pushed, rotation is the only remedy, not deletion.
-if ! corepack pnpm exec tsx scripts/secret-scan.ts --range "$range"; then
-  echo ""
-  echo "BLOCKED: the commits being pushed contain a credential."
-  echo "Rotate anything real, remove it from the commits, then push again."
-  exit 1
-fi
+  if [ "$remote_sha" = "$ZERO" ]; then
+    # A branch the remote has never seen. `origin/main..` is a deliberate
+    # over-approximation: it can include commits already pushed on some other
+    # branch, which only costs time, but it cannot miss a commit this push
+    # introduces. Anchored to the pushed sha rather than to HEAD, so pushing a
+    # branch that is not checked out scans that branch.
+    range="origin/main..$local_sha"
+  else
+    range="$remote_sha..$local_sha"
+  fi
 
-exit 0
+  # %G? is not a boolean. Block only on a real problem:
+  #   N  no signature at all
+  #   B  bad signature
+  # Everything else means a signature exists. In particular E means "signature
+  # present but the public key is unavailable locally", which is what every
+  # GitHub-signed bot commit looks like on a developer machine -- dependabot
+  # commits are signed by GitHub's key, which is not in anyone's keyring.
+  # Treating E as unsigned blocked pushing any branch built on a bot commit,
+  # and no amount of re-signing could fix it because those commits are not ours
+  # to rewrite.
+  bad="$(git log "$range" --pretty='%H %G? %an' 2>/dev/null \
+          | awk '$2 == "N" || $2 == "B" {print}')"
+
+  if [ -n "$bad" ]; then
+    echo ""
+    echo "BLOCKED: $remote_ref would receive unsigned or badly signed commits:"
+    echo "$bad"
+    echo ""
+    echo "Sign them before pushing (git rebase --exec 'git commit --amend --no-edit -S')."
+    return 1
+  fi
+
+  # The pre-commit scan can be skipped with --no-verify, and a secret committed
+  # and then deleted in a later commit is invisible to a net diff while still
+  # being pushed. This scans the objects the push actually introduces, which is
+  # the last point where a value can be kept off the remote at all -- once it is
+  # pushed, rotation is the only remedy, not deletion.
+  if ! corepack pnpm exec tsx scripts/secret-scan.ts --range "$range"; then
+    echo ""
+    echo "BLOCKED: the commits being pushed to $remote_ref contain a credential."
+    echo "Rotate anything real, remove it from the commits, then push again."
+    return 1
+  fi
+
+  return 0
+}
+
+while read -r _local_ref local_sha remote_ref remote_sha; do
+  # A blank trailing line is normal; there is no ref to check on it.
+  [ -n "$local_sha" ] || continue
+
+  if ! check_ref "$local_sha" "$remote_ref" "$remote_sha"; then
+    status=1
+  fi
+done
+
+# `remote` is read only to keep the argument documented and to fail loudly if a
+# future edit needs it; referencing it here costs nothing and keeps `sh -u`
+# honest.
+: "${remote:=origin}"
+
+exit "$status"
