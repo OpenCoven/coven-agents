@@ -11,7 +11,6 @@ import type {
 } from "@opencoven/agent-contracts";
 import {
   Bot,
-  Box,
   CheckCircle2,
   ChevronRight,
   Cloud,
@@ -29,6 +28,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Toaster, toast } from "sonner";
+import { AccountMenu } from "@/components/agents/account-menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -302,19 +302,18 @@ export function AgentConsole() {
   return (
     <main className="min-h-dvh bg-[var(--oc-bg)] text-[var(--oc-text)]">
       <Toaster position="top-center" theme="dark" />
-      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_65%_-20%,var(--oc-accent-soft),transparent_38%),linear-gradient(rgba(255,255,255,0.018)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.018)_1px,transparent_1px)] bg-[size:auto,42px_42px,42px_42px]" />
-      <header className="relative border-white/8 border-b bg-black/20 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-[1500px] items-center justify-between gap-4 px-5 py-4 lg:px-8">
+      <header className="relative border-[var(--oc-line-soft)] border-b">
+        <div className="mx-auto flex max-w-[1200px] items-center justify-between gap-4 px-6 py-5 lg:px-10">
           <div className="flex items-center gap-3">
-            <div className="grid size-9 place-items-center rounded-xl border border-[var(--oc-accent-line)] bg-[var(--oc-accent-soft)] text-[var(--oc-accent)]">
-              <Sparkles className="size-4" />
-            </div>
-            <div>
-              <div className="font-semibold tracking-[-0.02em]">OpenCoven</div>
-              <div className="font-mono text-[10px] text-[var(--oc-text-3)] uppercase tracking-[0.22em]">
-                Agent foundry
-              </div>
-            </div>
+            <span className="text-[15px] text-[var(--oc-accent)] leading-none">
+              ◆
+            </span>
+            <span className="font-medium text-[13px] tracking-[-0.01em]">
+              OpenCoven
+            </span>
+            <span className="text-[11px] text-[var(--oc-text-3)] uppercase tracking-[0.14em]">
+              Agents
+            </span>
           </div>
           <div className="flex items-center gap-2">
             <BackendSwitch backend={backend} onChange={setBackend} />
@@ -327,11 +326,12 @@ export function AgentConsole() {
               <Settings2 className="size-4" />
               Connect
             </Button>
+            <AccountMenu />
           </div>
         </div>
       </header>
 
-      <div className="relative mx-auto grid max-w-[1500px] gap-5 px-5 py-5 lg:grid-cols-[300px_minmax(0,1fr)] lg:px-8">
+      <div className="relative mx-auto grid max-w-[1200px] gap-8 px-6 py-10 lg:grid-cols-[260px_minmax(0,1fr)] lg:px-10">
         <aside className="rounded-2xl border border-white/8 bg-white/[0.025] p-3 shadow-2xl shadow-black/20">
           <div className="flex items-center justify-between px-2 py-2">
             <div>
@@ -547,24 +547,21 @@ function WelcomePanel({
   onRefresh: () => void;
 }) {
   return (
-    <Panel className="flex min-h-[620px] items-center justify-center p-8 text-center">
-      <div className="max-w-2xl">
-        <div className="mx-auto mb-6 grid size-16 place-items-center rounded-2xl border border-[var(--oc-accent-line)] bg-[var(--oc-accent-soft)] text-[var(--oc-accent)]">
-          <Box className="size-7" />
-        </div>
-        <p className="mb-3 font-mono text-[var(--oc-text-2)] text-xs uppercase tracking-[0.24em]">
+    <Panel className="flex min-h-[520px] items-center justify-center p-12 text-center">
+      <div className="max-w-xl">
+        <p className="mb-4 font-medium text-[11px] text-[var(--oc-text-3)] uppercase tracking-[0.14em]">
           Local-cloud hybrid
         </p>
-        <h1 className="text-balance font-semibold text-4xl tracking-[-0.045em] md:text-5xl">
+        <h1 className="text-balance font-semibold text-[28px] tracking-[-0.03em] md:text-[32px]">
           Autonomous agents,
           <br />
           bounded by infrastructure.
         </h1>
-        <p className="mx-auto mt-5 max-w-xl text-pretty text-base text-white/45 leading-relaxed">
+        <p className="mx-auto mt-4 max-w-md text-pretty text-[14px] text-[var(--oc-text-3)] leading-relaxed">
           Create zero-approval coding agents in disposable cloud sandboxes or
           connect the same control plane to a trusted local CLI runner.
         </p>
-        <div className="mt-8 flex flex-wrap justify-center gap-3">
+        <div className="mt-7 flex flex-wrap justify-center gap-3">
           <Button
             className="bg-[var(--oc-accent)] text-[var(--oc-accent-ink)] hover:bg-[var(--oc-accent)]"
             onClick={connected ? onCreate : onConnect}
