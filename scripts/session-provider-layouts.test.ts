@@ -18,6 +18,10 @@ const agentsLayout = readFileSync(
   new URL("../app/agents/layout.tsx", import.meta.url),
   "utf8"
 );
+const accountLayout = readFileSync(
+  new URL("../app/account/layout.tsx", import.meta.url),
+  "utf8"
+);
 
 const providerImport = 'import { SessionProvider } from "next-auth/react";';
 const providerOpeningTag =
@@ -50,4 +54,16 @@ test("agents layout mounts SessionProvider with the configured auth base path", 
   );
   assert.match(agentsLayout, providerOpeningTag);
   assert.match(agentsLayout, /<\/SessionProvider>/);
+});
+
+test("account layout mounts SessionProvider and stays outside the chat group", () => {
+  // Living in (chat) meant inheriting a layout that renders <ChatShell />
+  // unconditionally, so the settings form appeared stacked beneath an entire
+  // chat interface -- and inherited whatever that shell fetches.
+  assert.match(
+    accountLayout,
+    new RegExp(providerImport.replace(/[{}]/g, "\\$&"))
+  );
+  assert.match(accountLayout, providerOpeningTag);
+  assert.match(accountLayout, /<\/SessionProvider>/);
 });
