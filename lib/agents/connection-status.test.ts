@@ -1,0 +1,112 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { connectionMessage, readConnectionResponse } from "./connection-status";
+
+const PROVISIONED = {
+  endpoint: "https://runner.example.workers.dev",
+  token: "gate-token",
+};
+
+test("a served connection is provisioned", () => {
+  const status = readConnectionResponse(200, PROVISIONED);
+
+  assert.equal(status.kind, "provisioned");
+  if (status.kind === "provisioned") {
+    assert.equal(status.endpoint, PROVISIONED.endpoint);
+    assert.equal(status.token, PROVISIONED.token);
+  }
+});
+
+test("403 is reported as needing a subscription, not as a failure", () => {
+  // The defect this fixes: a demo session was refused the connection, the
+  // console silently fell back to a stored endpoint pointing at the app, and
+  // the user saw "Runner request failed (404)" -- which says nothing true.
+  assert.equal(
+    readConnectionResponse(403, { error: "subscription_required" }).kind,
+    "subscription_required"
+  );
+});
+
+test("401 is reported as signed out", () => {
+  assert.equal(
+    readConnectionResponse(401, { error: "unauthorized" }).kind,
+    "signed_out"
+  );
+});
+
+test("503 is reported as an unconfigured deployment", () => {
+  assert.equal(
+    readConnectionResponse(503, { error: "runner_unconfigured" }).kind,
+    "unconfigured"
+  );
+});
+
+test("a 200 with no token is not treated as provisioned", () => {
+  // Applying an empty token would send `x-runner-token: ""`, which a worker
+  // with no AGENT_CONTROL_TOKEN of its own would accept -- the deployment gate
+  // silently ceasing to exist.
+  for (const body of [
+    { endpoint: PROVISIONED.endpoint },
+    { endpoint: PROVISIONED.endpoint, token: "" },
+    null,
+  ]) {
+    assert.equal(
+      readConnectionResponse(200, body).kind,
+      "unavailable",
+      `${JSON.stringify(body)} must not provision`
+    );
+  }
+});
+
+test("a 200 with no endpoint is not treated as provisioned", () => {
+  // An empty endpoint makes the client build a same-origin URL, which is
+  // exactly how a runner call became a 404 against the app itself.
+  assert.equal(
+    readConnectionResponse(200, { endpoint: "", token: "gate-token" }).kind,
+    "unavailable"
+  );
+});
+
+test("a non-200 carrying a valid-looking body still does not provision", () => {
+  // Only a 200 provisions. An error response can still carry a body -- a proxy
+  // error page, a cached payload, a gateway that rewrites the status -- and
+  // trusting the body over the status would hand out a connection the server
+  // never agreed to serve.
+  for (const status of [500, 502, 418, 302]) {
+    assert.equal(
+      readConnectionResponse(status, PROVISIONED).kind,
+      "unavailable",
+      `${status} must not provision`
+    );
+  }
+});
+
+test("an unexpected status is unavailable rather than assumed fine", () => {
+  assert.equal(readConnectionResponse(500, null).kind, "unavailable");
+  assert.equal(readConnectionResponse(418, null).kind, "unavailable");
+});
+
+test("every status has a message that names the cause", () => {
+  const kinds = [
+    "signed_out",
+    "subscription_required",
+    "unavailable",
+    "unconfigured",
+  ] as const;
+
+  for (const kind of kinds) {
+    const message = connectionMessage(kind);
+
+    assert.ok(message.length > 0, `${kind} needs a message`);
+    // The whole point is that the user learns the cause, so a generic
+    // "something went wrong" is a regression.
+    assert.ok(
+      !/^(error|failed|something went wrong)/i.test(message),
+      `${kind} message must name the cause, got: ${message}`
+    );
+  }
+});
+
+test("the subscription message says what to do", () => {
+  assert.match(connectionMessage("subscription_required"), /subscription/i);
+});
