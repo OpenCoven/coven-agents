@@ -15,6 +15,7 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "db:up": "drizzle-kit up",
+    "demo:record": "tsx --env-file-if-exists=.env.local --conditions=react-server scripts/demo-record.ts",
     "dev": "next dev --turbo",
     "dev:cloud": "pnpm --filter @opencoven/cloud-runner dev",
     "dev:local-runner": "pnpm --filter @opencoven/local-runner dev",
