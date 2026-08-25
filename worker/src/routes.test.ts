@@ -503,3 +503,19 @@ async function failingRunner(error: Error): Promise<Response> {
     environment as never
   );
 }
+
+test("a DO-thrown AlreadyRunningError still maps to 409, not the 500 catch-all", async () => {
+  // The YoloAgent throws inside a Durable Object, and the RPC boundary
+  // preserves an error's name and message but strips its prototype chain —
+  // `instanceof AlreadyRunningError` is false for every real production
+  // throw. This error is deliberately a plain Error wearing the name, which
+  // is exactly what arrives across the boundary.
+  const crossed = new Error("An agent already has an active run.");
+  crossed.name = "AlreadyRunningError";
+
+  const response = await failingRunner(crossed);
+  assert.equal(response.status, 409);
+
+  const body = (await response.json()) as { error: { code: string } };
+  assert.equal(body.error.code, "already_running");
+});

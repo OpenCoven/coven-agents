@@ -123,7 +123,20 @@ function fail(error: unknown, cors: Headers): Response {
       cors
     );
   }
-  if (error instanceof OperationConflictError) {
+  /**
+   * Matched by name as well as prototype, like the ZodError branch below and
+   * for the same reason: these are thrown inside the YoloAgent Durable Object,
+   * and the RPC boundary preserves an error's name and message but strips its
+   * prototype chain. `instanceof` was therefore false for every DO-thrown
+   * instance, and a run refused because one was already active fell through to
+   * the 500 catch-all — the client saw a retryable `internal_error` instead of
+   * the 409 that names the actual condition, and retrying was guaranteed to
+   * hit the same wall.
+   */
+  if (
+    error instanceof OperationConflictError ||
+    (error instanceof Error && error.name === "OperationConflictError")
+  ) {
     return json(
       errorEnvelope(
         "operation_conflict",
@@ -134,7 +147,10 @@ function fail(error: unknown, cors: Headers): Response {
       cors
     );
   }
-  if (error instanceof AlreadyRunningError) {
+  if (
+    error instanceof AlreadyRunningError ||
+    (error instanceof Error && error.name === "AlreadyRunningError")
+  ) {
     return json(
       errorEnvelope(
         "already_running",
