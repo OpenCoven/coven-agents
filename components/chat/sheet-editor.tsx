@@ -3,7 +3,7 @@
 import { useTheme } from "next-themes";
 import { parse, unparse } from "papaparse";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import DataGrid, { textEditor } from "react-data-grid";
+import DataGrid, { renderTextEditor } from "react-data-grid";
 import { cn } from "@/lib/utils";
 
 import "react-data-grid/lib/styles.css";
@@ -64,7 +64,7 @@ const PureSpreadsheetEditor = ({ content, saveContent }: SheetEditorProps) => {
       }),
       key: i.toString(),
       name: String.fromCharCode(65 + i),
-      renderEditCell: textEditor,
+      renderEditCell: renderTextEditor,
       width: 120,
     }));
 
