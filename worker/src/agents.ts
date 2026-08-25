@@ -345,7 +345,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         runtime: definition.runtime,
         sandbox: getSandbox(
           this.env.Sandbox,
-          sandboxKey(tenantOf(definition), definition.id)
+          await sandboxKey(tenantOf(definition), definition.id)
         ),
         task,
         workspace: definition.workspace,
@@ -565,7 +565,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (definition) {
       await getSandbox(
         this.env.Sandbox,
-        sandboxKey(tenantOf(definition), definition.id)
+        await sandboxKey(tenantOf(definition), definition.id)
       ).destroy();
     }
     this.setState(this.initialState);
