@@ -309,10 +309,14 @@ export function AgentConsole() {
     }
   }
 
+  // A fixed-height shell rather than a growing page. The console is an
+  // application surface, so it fills the viewport and each panel scrolls on
+  // its own; growing left the content at the top with the rest of the screen
+  // black.
   return (
-    <main className="min-h-dvh bg-[var(--oc-bg)] text-[var(--oc-text)]">
+    <main className="flex h-dvh flex-col overflow-hidden bg-[var(--oc-bg)] text-[var(--oc-text)]">
       <Toaster position="top-center" theme="dark" />
-      <header className="relative border-[var(--oc-line-soft)] border-b">
+      <header className="relative shrink-0 border-[var(--oc-line-soft)] border-b">
         <div className="mx-auto flex max-w-[1200px] items-center justify-between gap-4 px-6 py-5 lg:px-10">
           <div className="flex items-center gap-3">
             <span className="text-[15px] text-[var(--oc-accent)] leading-none">
@@ -341,8 +345,8 @@ export function AgentConsole() {
         </div>
       </header>
 
-      <div className="relative mx-auto grid max-w-[1200px] gap-8 px-6 py-10 lg:grid-cols-[260px_minmax(0,1fr)] lg:px-10">
-        <aside className="rounded-2xl border border-white/8 bg-white/[0.025] p-3 shadow-2xl shadow-black/20">
+      <div className="relative mx-auto grid min-h-0 w-full max-w-[1200px] flex-1 gap-6 px-6 py-6 lg:grid-cols-[260px_minmax(0,1fr)] lg:px-10">
+        <aside className="flex min-h-0 flex-col overflow-y-auto rounded-2xl border border-white/8 bg-white/[0.025] p-3 shadow-2xl shadow-black/20">
           <div className="flex items-center justify-between px-2 py-2">
             <div>
               <p className="font-medium text-sm">Agents</p>
@@ -412,7 +416,7 @@ export function AgentConsole() {
           )}
         </aside>
 
-        <section className="min-w-0">
+        <section className="flex min-h-0 min-w-0 flex-col overflow-y-auto">
           {showConnection ? (
             <ConnectionPanel
               backend={backend}
@@ -579,7 +583,7 @@ function WelcomePanel({
   onRefresh: () => void;
 }) {
   return (
-    <Panel className="flex min-h-[520px] items-center justify-center p-12 text-center">
+    <Panel className="flex h-full min-h-0 items-center justify-center p-12 text-center">
       <div className="max-w-xl">
         <p className="mb-4 font-medium text-[11px] text-[var(--oc-text-3)] uppercase tracking-[0.14em]">
           Local-cloud hybrid
