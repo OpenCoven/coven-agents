@@ -12,25 +12,42 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 
-export const user = pgTable("User", {
-  createdAt: timestamp("createdAt").notNull().defaultNow(),
-  email: varchar("email", { length: 64 }).notNull(),
-  emailVerified: boolean("emailVerified").notNull().default(false),
-  id: uuid("id").primaryKey().notNull().defaultRandom(),
-  image: text("image"),
-  isAnonymous: boolean("isAnonymous").notNull().default(false),
-  name: text("name"),
-  password: varchar("password", { length: 64 }),
-  /**
-   * When this user's subscription lapses. Null means never subscribed.
-   *
-   * A timestamp rather than a boolean because a cancelled subscription runs to
-   * the end of its paid period, which a boolean cannot express. Billing will
-   * set this; until then it is set by `pnpm subscription`.
-   */
-  subscribedUntil: timestamp("subscribedUntil"),
-  updatedAt: timestamp("updatedAt").notNull().defaultNow(),
-});
+export const user = pgTable(
+  "User",
+  {
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    email: varchar("email", { length: 64 }).notNull(),
+    emailVerified: boolean("emailVerified").notNull().default(false),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    image: text("image"),
+    isAnonymous: boolean("isAnonymous").notNull().default(false),
+    name: text("name"),
+    password: varchar("password", { length: 64 }),
+    /**
+     * The Stripe Customer this user owns, created at first checkout and reused
+     * afterwards. Unique: one Customer belongs to one user.
+     *
+     * This does NOT forbid a second subscription -- a cancel-then-resubscribe
+     * reuses the same Customer, so a constraint here would reject exactly the
+     * returning customer worth not breaking. "At most one active subscription"
+     * is asked of Stripe instead.
+     */
+    stripeCustomerId: varchar("stripeCustomerId", { length: 64 }),
+    stripeSubscriptionId: varchar("stripeSubscriptionId", { length: 64 }),
+    /**
+     * When this user's subscription lapses. Null means never subscribed.
+     *
+     * A timestamp rather than a boolean because a cancelled subscription runs to
+     * the end of its paid period, which a boolean cannot express. Billing will
+     * set this; until then it is set by `pnpm subscription`.
+     */
+    subscribedUntil: timestamp("subscribedUntil"),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("User_stripeCustomerId_idx").on(table.stripeCustomerId),
+  ]
+);
 
 export type User = InferSelectModel<typeof user>;
 
@@ -179,3 +196,40 @@ export const tenantCredential = pgTable(
 );
 
 export type TenantCredential = InferSelectModel<typeof tenantCredential>;
+
+/**
+ * One row per counted run.
+ *
+ * The unique index is the counter's correctness, not an optimisation. The
+ * worker may fetch a credential more than once for one run -- a retried start,
+ * a resumed stream -- and counting per fetch would bill a customer for the
+ * runner's internal behaviour.
+ */
+export const runUsage = pgTable(
+  "RunUsage",
+  {
+    countedAt: timestamp("countedAt").notNull().defaultNow(),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    runId: varchar("runId", { length: 64 }).notNull(),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("RunUsage_tenant_run_idx").on(table.tenant, table.runId),
+  ]
+);
+
+export type RunUsage = InferSelectModel<typeof runUsage>;
+
+/**
+ * Stripe event ids already processed.
+ *
+ * Stripe retries delivery, so a replayed `invoice.paid` would otherwise extend
+ * a subscription twice. The primary key is the event id: inserting IS the
+ * idempotency check, rather than a lookup that races a second delivery.
+ */
+export const stripeEvent = pgTable("StripeEvent", {
+  id: varchar("id", { length: 64 }).primaryKey().notNull(),
+  processedAt: timestamp("processedAt").notNull().defaultNow(),
+});
+
+export type StripeEvent = InferSelectModel<typeof stripeEvent>;
