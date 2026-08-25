@@ -3,7 +3,13 @@
 import { useTheme } from "next-themes";
 import { parse, unparse } from "papaparse";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import DataGrid, { renderTextEditor } from "react-data-grid";
+// Named, not default: react-data-grid dropped its default export in
+// 7.0.0-beta.61 and `DataGrid` is now exported alongside everything else.
+import {
+  type CellMouseArgs,
+  DataGrid,
+  renderTextEditor,
+} from "react-data-grid";
 import { cn } from "@/lib/utils";
 
 import "react-data-grid/lib/styles.css";
@@ -107,13 +113,17 @@ const PureSpreadsheetEditor = ({ content, saveContent }: SheetEditorProps) => {
     saveContent(newCsvContent, true);
   };
 
+  /**
+   * Typed with the library's own `CellMouseArgs` rather than a hand-written
+   * shape. The previous structural type named `selectCell`, which 7.0.0-beta.61
+   * renamed to `setActivePosition` -- and a hand-rolled type turns every such
+   * rename into a puzzle at the call site instead of an error pointing at the
+   * member that moved.
+   */
   const handleCellClick = useCallback(
-    (args: {
-      column: { key: string };
-      selectCell: (enableEditor?: boolean) => void;
-    }) => {
+    (args: CellMouseArgs<Record<string, string | number>>) => {
       if (args.column.key !== "rowNumber") {
-        args.selectCell(true);
+        args.setActivePosition(true);
       }
     },
     []
