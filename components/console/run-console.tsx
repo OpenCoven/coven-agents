@@ -13,6 +13,7 @@ import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { AgentRail } from "@/components/console/agent-rail";
+import { Analytics } from "@/components/console/analytics";
 import {
   CommandPalette,
   type PaletteItem,
@@ -115,7 +116,7 @@ const CONNECTION_LABELS: Record<ConnectionStatusKind, string> = {
   unconfigured: "not configured",
 };
 
-type View = "composer" | "create" | "settings" | "thread";
+type View = "analytics" | "composer" | "create" | "settings" | "thread";
 
 /**
  * The run console.
@@ -662,6 +663,13 @@ export function RunConsole() {
       },
       {
         group: "action",
+        hint: "runs per day",
+        id: "analytics",
+        label: "Open evidence analytics",
+        run: () => setView("analytics"),
+      },
+      {
+        group: "action",
         hint: "credentials, usage, data",
         id: "account",
         label: "Open settings",
@@ -851,7 +859,9 @@ export function RunConsole() {
       <div
         style={{ display: "flex", flex: 1, minHeight: 0, position: "relative" }}
       >
-        {view === "settings" ? (
+        {view === "analytics" ? (
+          <Analytics onClose={() => setView("composer")} />
+        ) : view === "settings" ? (
           <Settings account={account} onClose={() => setView("composer")} />
         ) : view === "create" ? (
           <CreateAgent
@@ -1325,6 +1335,7 @@ export function RunConsole() {
                     .getElementById(`block-${blockId}`)
                     ?.scrollIntoView({ behavior: "smooth", block: "center" });
                 }}
+                onOpenAnalytics={() => setView("analytics")}
                 onToggle={() => setTimelineCollapsed((value) => !value)}
                 running={running}
                 selectedBlockId={null}

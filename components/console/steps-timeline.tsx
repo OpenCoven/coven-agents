@@ -36,6 +36,7 @@ const TONE_GUTTER: Record<Step["tone"], string> = {
 export function StepsTimeline({
   collapsed,
   elapsed,
+  onOpenAnalytics,
   onJump,
   onToggle,
   running,
@@ -45,6 +46,7 @@ export function StepsTimeline({
   collapsed: boolean;
   elapsed: string;
   onJump: (blockId: string) => void;
+  onOpenAnalytics: () => void;
   onToggle: () => void;
   running: boolean;
   selectedBlockId: string | null;
@@ -329,16 +331,25 @@ export function StepsTimeline({
         ) : null}
       </div>
 
-      <div
+      <button
+        aria-label="Wall clock — open evidence analytics"
+        className="oc-strip"
+        onClick={onOpenAnalytics}
         style={{
           background: "var(--bg-sunken)",
+          border: 0,
           borderTop: hairline,
+          cursor: "pointer",
           display: "flex",
           flex: "none",
           flexDirection: "column",
           gap: 6,
           padding: "10px 13px",
+          textAlign: "left",
+          width: "100%",
         }}
+        title="Open evidence analytics"
+        type="button"
       >
         <div
           style={{
@@ -385,7 +396,7 @@ export function StepsTimeline({
             }}
           />
         </div>
-      </div>
+      </button>
     </aside>
   );
 }

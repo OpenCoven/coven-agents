@@ -16,6 +16,8 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import type { ArtifactKind } from "@/components/chat/artifact";
 import type { VisibilityType } from "@/components/chat/visibility-selector";
+import type { DayCount } from "../billing/history";
+import { fillDays, runsByDay } from "../billing/history";
 import { countRun, usageFor } from "../billing/usage";
 import { ChatbotError } from "../errors";
 import {
@@ -166,6 +168,15 @@ export async function countRunsInPeriod(
   since: Date
 ): Promise<number> {
   return await usageFor(db, tenant, since);
+}
+
+/** Run volume per day for a tenant, oldest first, gaps filled with zeroes. */
+export async function runHistory(
+  tenant: string,
+  since: Date,
+  through: Date
+): Promise<DayCount[]> {
+  return fillDays(await runsByDay(db, tenant, since), since, through);
 }
 
 /** Records a run against a tenant, ignoring a repeat of the same run id. */
