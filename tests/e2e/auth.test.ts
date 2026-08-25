@@ -1,37 +1,25 @@
 import { expect, test } from "@playwright/test";
 
 test.describe("Authentication Pages", () => {
-  test("login page renders correctly", async ({ page }) => {
+  test("login offers GitHub-only demo account creation", async ({ page }) => {
     await page.goto("/login");
     await expect(
-      page.getByRole("heading", { name: "Welcome back" })
+      page.getByRole("heading", { name: "Create or access your account" })
     ).toBeVisible();
-    await expect(page.getByLabel("Email")).toBeVisible();
-    await expect(page.getByLabel("Password")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Sign up" })).toBeVisible();
-  });
-
-  test("register page renders correctly", async ({ page }) => {
-    await page.goto("/register");
     await expect(
-      page.getByRole("heading", { name: "Create account" })
+      page.getByText(
+        "New accounts start in demo mode, and signing in never starts an agent, sandbox, or run."
+      )
     ).toBeVisible();
-    await expect(page.getByLabel("Email")).toBeVisible();
-    await expect(page.getByLabel("Password")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Sign up" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Sign in" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Continue with GitHub" })
+    ).toBeVisible();
+    await expect(page.getByLabel("Email")).toHaveCount(0);
+    await expect(page.getByLabel("Password")).toHaveCount(0);
   });
 
-  test("can navigate from login to register", async ({ page }) => {
-    await page.goto("/login");
-    await page.getByRole("link", { name: "Sign up" }).click();
-    await expect(page).toHaveURL("/register");
-  });
-
-  test("can navigate from register to login", async ({ page }) => {
+  test("register redirects to GitHub account creation", async ({ page }) => {
     await page.goto("/register");
-    await page.getByRole("link", { name: "Sign in" }).click();
     await expect(page).toHaveURL("/login");
   });
 });

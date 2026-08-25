@@ -3,6 +3,7 @@ import {
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
 import { Clock3, ShieldCheck, Sparkles } from "lucide-react";
+import Link from "next/link";
 import { ReplayPlayer } from "@/components/demo/replay-player";
 import { Badge } from "@/components/ui/badge";
 import type { resolveDemoView } from "@/lib/demo/root";
@@ -22,16 +23,25 @@ function DemoFrame({ children }: { children: React.ReactNode }) {
     <main className="relative min-h-dvh overflow-hidden bg-[#08060d] text-[#f3f0fa]">
       <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_65%_-20%,rgba(147,134,208,0.2),transparent_38%),linear-gradient(rgba(255,255,255,0.018)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.018)_1px,transparent_1px)] bg-[size:auto,42px_42px,42px_42px]" />
       <header className="relative border-white/8 border-b bg-black/20 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-5xl items-center gap-3 px-5 py-4 sm:px-8">
-          <div className="grid size-9 place-items-center rounded-xl border border-violet-300/25 bg-violet-300/10 text-violet-300">
-            <Sparkles aria-hidden="true" className="size-4" />
-          </div>
-          <div>
-            <div className="font-semibold tracking-[-0.02em]">OpenCoven</div>
-            <div className="font-mono text-[10px] text-violet-200/60 uppercase tracking-[0.22em]">
-              Recorded agent run
+        <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-5 py-4 sm:px-8">
+          <div className="flex items-center gap-3">
+            <div className="grid size-9 place-items-center rounded-xl border border-violet-300/25 bg-violet-300/10 text-violet-300">
+              <Sparkles aria-hidden="true" className="size-4" />
+            </div>
+            <div>
+              <div className="font-semibold tracking-[-0.02em]">OpenCoven</div>
+              <div className="font-mono text-[10px] text-violet-200/60 uppercase tracking-[0.22em]">
+                Recorded agent run
+              </div>
             </div>
           </div>
+          <Link
+            className="rounded-lg border border-violet-300/25 bg-violet-300/10 px-3 py-2 font-medium text-violet-100 text-xs transition-colors hover:border-violet-200/45 hover:bg-violet-300/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-200/70"
+            href="/login"
+            prefetch={false}
+          >
+            Create demo account
+          </Link>
         </div>
       </header>
       <div className="relative mx-auto max-w-5xl px-5 py-12 sm:px-8 sm:py-16">
