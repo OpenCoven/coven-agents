@@ -1,6 +1,7 @@
 "use client";
 
 import { ChevronUp } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { User } from "next-auth";
 import { signOut, useSession } from "next-auth/react";
@@ -53,8 +54,10 @@ export function SidebarUserNav({ user }: { user: User }) {
     if (isGuest) {
       router.push("/login");
     } else {
+      // Straight to /login. "/" redirects to the console, which the beta
+      // gate redirects to /login anyway -- three hops for the same page.
       signOut({
-        redirectTo: "/",
+        redirectTo: "/login",
       });
     }
   }, [isGuest, router, status]);
@@ -99,6 +102,11 @@ export function SidebarUserNav({ user }: { user: User }) {
             data-testid="user-nav-menu"
             side="top"
           >
+            {isGuest ? null : (
+              <DropdownMenuItem asChild className="cursor-pointer text-[13px]">
+                <Link href="/account">Account settings</Link>
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem
               className="cursor-pointer text-[13px]"
               data-testid="user-nav-item-theme"
@@ -113,7 +121,7 @@ export function SidebarUserNav({ user }: { user: User }) {
                 onClick={handleAuthClick}
                 type="button"
               >
-                {isGuest ? "Login to your account" : "Sign out"}
+                {isGuest ? "Sign in" : "Sign out"}
               </button>
             </DropdownMenuItem>
           </DropdownMenuContent>
