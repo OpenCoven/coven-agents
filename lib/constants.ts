@@ -12,9 +12,17 @@ export const guestRegex = /^guest-\d+$/;
 
 export const DUMMY_PASSWORD = generateDummyPassword();
 
+/**
+ * Opening prompts.
+ *
+ * The upstream template's four were a Next.js question, a Dijkstra exercise,
+ * a Silicon Valley essay and a weather lookup -- a general-purpose chatbot
+ * demo. This product runs coding agents against a workspace, so the prompts
+ * describe that instead.
+ */
 export const suggestions = [
-  "What are the advantages of using Next.js?",
-  "Write code to demonstrate Dijkstra's algorithm",
-  "Help me write an essay about Silicon Valley",
-  "What is the weather in San Francisco?",
+  "Audit this workspace and list what looks unsafe",
+  "Add a failing test for the bug I just described, then fix it",
+  "Explain how the credential flow works end to end",
+  "Find the slowest part of the build and tell me why",
 ];
