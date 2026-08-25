@@ -12,6 +12,9 @@ runtime registry. Review the accepted
 [Product authority boundary](docs/architecture/adr-001-product-authority-boundary.md)
 before expanding product state or adding an OpenCoven dependency.
 
+Wave 1 results and the dependency-ordered next priorities are recorded in the
+[Wave 1 delivery report](docs/roadmap/wave-1-delivery.md).
+
 The same browser UI can connect to:
 
 - **Cloud runner:** Cloudflare Workers + Agents SDK + Sandbox SDK. Every agent
