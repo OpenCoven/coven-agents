@@ -16,6 +16,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import type { ArtifactKind } from "@/components/chat/artifact";
 import type { VisibilityType } from "@/components/chat/visibility-selector";
+import { countRun, usageFor } from "../billing/usage";
 import { ChatbotError } from "../errors";
 import {
   type Chat,
@@ -25,6 +26,7 @@ import {
   message,
   type Suggestion,
   stream,
+  stripeEvent,
   suggestion,
   type User,
   user,
@@ -93,6 +95,104 @@ export async function findOrCreateFederatedUser(email: string): Promise<User> {
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
   }
+}
+
+/**
+ * Billing reads and writes.
+ *
+ * These live here rather than in the route handlers because `db` is
+ * deliberately restricted to this module. Billing cannot go through
+ * `databaseFor`: that function takes a `SubscriberSession`, and the entire
+ * point of checkout is that the caller is *not* subscribed yet. Adding three
+ * more names to the lint exemption list would have punched three more holes in
+ * a rule whose comment says each one is a hole.
+ */
+export async function findUserById(id: string): Promise<User | null> {
+  try {
+    const [row] = await db.select().from(user).where(eq(user.id, id)).limit(1);
+    return row ?? null;
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
+export async function findUserByStripeCustomerId(
+  customerId: string
+): Promise<User | null> {
+  try {
+    const [row] = await db
+      .select()
+      .from(user)
+      .where(eq(user.stripeCustomerId, customerId))
+      .limit(1);
+    return row ?? null;
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
+export async function attachStripeCustomer(userId: string, customerId: string) {
+  try {
+    return await db
+      .update(user)
+      .set({ stripeCustomerId: customerId })
+      .where(eq(user.id, userId));
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
+export async function applySubscriptionUpdate(input: {
+  customerId: string;
+  subscribedUntil: Date;
+  userId: string;
+}) {
+  try {
+    return await db
+      .update(user)
+      .set({
+        stripeCustomerId: input.customerId,
+        subscribedUntil: input.subscribedUntil,
+      })
+      .where(eq(user.id, input.userId));
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
+/**
+ * Records a Stripe event id, returning false if it was already processed.
+ *
+ * The insert IS the idempotency check. A lookup-then-write would race a
+ * concurrent redelivery of the same event, and Stripe retries routinely.
+ */
+export async function claimStripeEvent(eventId: string): Promise<boolean> {
+  try {
+    const claimed = await db
+      .insert(stripeEvent)
+      .values({ id: eventId })
+      .onConflictDoNothing()
+      .returning({ id: stripeEvent.id });
+    return claimed.length > 0;
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
+/** Runs counted for a tenant since the start of the current period. */
+export async function countRunsInPeriod(
+  tenant: string,
+  since: Date
+): Promise<number> {
+  return await usageFor(db, tenant, since);
+}
+
+/** Records a run against a tenant, ignoring a repeat of the same run id. */
+export async function recordRun(
+  tenant: string,
+  runId: string
+): Promise<boolean> {
+  return await countRun(db, tenant, runId);
 }
 
 export async function createUser(email: string, password: string) {

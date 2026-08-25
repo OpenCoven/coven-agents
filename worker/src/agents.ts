@@ -256,7 +256,8 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
    */
   private async resolveTenantCredential(
     definition: AgentDefinition,
-    identityToken: string
+    identityToken: string,
+    runId: string
   ): Promise<string | null> {
     const { APP_ORIGIN, RUNNER_SERVICE_TOKEN } = this.env;
     if (!APP_ORIGIN || !RUNNER_SERVICE_TOKEN) {
@@ -265,7 +266,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       );
     }
     const fetched = await fetchTenantCredential(
-      { harnessId: definition.runtime, tenant: tenantOf(definition) },
+      { harnessId: definition.runtime, runId, tenant: tenantOf(definition) },
       {
         endpoint: APP_ORIGIN,
         fetchImpl: fetch,
@@ -327,7 +328,8 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     try {
       credential = await this.resolveTenantCredential(
         definition,
-        identityToken
+        identityToken,
+        planned.run.id
       );
       const run = await runHarnessInSandbox({
         credential: { credential },
