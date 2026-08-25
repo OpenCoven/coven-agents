@@ -14,16 +14,43 @@ The same browser UI can connect to:
 
 ## Security model
 
-“YOLO” means tool approvals are disabled. It does **not** mean cloud tasks escape
+"YOLO" means tool approvals are disabled. It does **not** mean cloud tasks escape
 their container.
 
+**Execution**
+
 - Cloud agents execute in per-agent Cloudflare sandboxes.
-- The Worker API and local runner require bearer tokens.
 - The local runner binds to `127.0.0.1` and limits workspaces to
   `OPENCOVEN_LOCAL_ROOT`.
 - Local CLI processes inherit the operating-system permissions of the runner.
   Run it only on a machine and workspace you trust.
-- Browser tokens are stored in session storage, not persistent local storage.
+
+**Two tokens, two jobs.** Reaching the worker at all and being someone are
+deliberately separate. `X-Runner-Token` is a coarse deployment gate and no
+tenant is ever derived from it. Identity travels on `Authorization` as an
+Ed25519-signed claim the worker can verify but not mint, so it can trust the
+`tenant` inside without being able to forge one. Signatures are raw Ed25519
+rather than JWT: there is no `alg` field, so there is no `alg:none` or
+HS256-for-RS256 confusion to get wrong.
+
+**Credentials belong to tenants.** The operator's credentials are never lent
+out. Each tenant supplies their own harness credential; it is stored under
+envelope encryption (a per-credential AES-GCM data key wrapped by
+`CREDENTIAL_KEK`), fetched for the duration of one run, and redacted from run
+evidence. The worker holds no key material of its own.
+
+**The database is subscriber-only.** `databaseFor` accepts a
+`SubscriberSession` and nothing else, so a demo code path that tries to reach
+the database fails to compile rather than being caught in review.
+
+**Sessions.** A signed-out visitor gets a stateless demo session — an httpOnly
+cookie, no database row. Subscription state is recomputed from
+`subscribedUntil` on every token callback, so access ends when payment does
+rather than when the token happens to expire.
+
+**Browser storage.** Runner connection details live in session storage, not
+persistent local storage, and the console is served its connection by the app
+rather than asking a human to paste a token.
 
 ## Install
 
@@ -76,16 +103,28 @@ Create `worker/.dev.vars`:
 
 ```dotenv
 AGENT_CONTROL_TOKEN=replace-with-a-long-random-token
-COPILOT_GITHUB_TOKEN=replace-with-a-github-token-that-has-copilot-access
+RUNNER_VERIFY_KEY=replace-with-the-base64url-ed25519-public-key
+RUNNER_SERVICE_TOKEN=replace-with-a-long-random-token
+APP_ORIGIN=http://localhost:3000
 ```
 
-`COPILOT_GITHUB_TOKEN` is a *harness* credential, not a model provider key.
-Coven Agents never holds an `OPENAI_API_KEY` or any other provider key: it
-drives a signed-in coding CLI inside the sandbox, and that CLI authenticates
-itself. Accepted values are a fine-grained PAT with the "Copilot Requests"
-permission, or an OAuth token from the Copilot CLI or `gh` app. Classic `ghp_`
-tokens are not supported. `GH_TOKEN` and `GITHUB_TOKEN` are also honoured, in
-that order of precedence.
+**The worker holds no harness credential.** It used to read
+`COPILOT_GITHUB_TOKEN` from its own environment, which meant every tenant ran
+on the operator's GitHub access. That is gone: `requireHarness` never consults
+`env`, and the only source of a harness credential is the tenant's own,
+encrypted per-tenant and fetched over an internal call for the duration of a
+single run. Setting `COPILOT_GITHUB_TOKEN` on the worker now does nothing.
+
+Each tenant supplies their own credential through the console, which is stored
+under envelope encryption — a per-credential AES-GCM data key wrapped by
+`CREDENTIAL_KEK`. Accepted values for a Copilot harness are a fine-grained PAT
+with the "Copilot Requests" permission, or an OAuth token from the Copilot CLI
+or `gh` app. Classic `ghp_` tokens are not supported.
+
+`RUNNER_SERVICE_TOKEN` and `APP_ORIGIN` are how the worker asks the app for
+that credential. Both must be set, and the service token must match the app's.
+Missing either throws rather than running uncredentialed, because a silent
+fallback is how a run would quietly use the wrong identity.
 
 Then:
 
@@ -100,7 +139,9 @@ For deployment, set the secrets without committing them:
 ```bash
 cd worker
 pnpm wrangler secret put AGENT_CONTROL_TOKEN
-pnpm wrangler secret put COPILOT_GITHUB_TOKEN
+pnpm wrangler secret put RUNNER_VERIFY_KEY
+pnpm wrangler secret put RUNNER_SERVICE_TOKEN
+pnpm wrangler secret put APP_ORIGIN
 pnpm deploy
 ```
 
@@ -123,7 +164,7 @@ deployment smoke test:
 
 ```bash
 curl -s -X POST \
-  -H "authorization: Bearer $AGENT_CONTROL_TOKEN" \
+  -H "x-runner-token: $AGENT_CONTROL_TOKEN" \
   https://<your-worker>.workers.dev/api/diagnostics/sandbox
 # {"exitCode":0,"ok":true,"output":"coven-agents"}
 ```
