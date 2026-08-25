@@ -55,10 +55,10 @@ test("summarizes status, wave, and blocked counts deterministically", () => {
     "In review": 1,
     Todo: 1,
   });
-  assert.equal(summary.blocked, 2);
-  assert.equal(summary.total, 4);
+  assert.equal(summary.blockedCount, 2);
+  assert.equal(summary.totalCount, 4);
   assert.deepEqual(summary.byWave["1 - Now"], {
-    blocked: 2,
+    blockedCount: 2,
     byStatus: {
       Done: 0,
       "In Progress": 1,
@@ -68,7 +68,7 @@ test("summarizes status, wave, and blocked counts deterministically", () => {
     total: 2,
   });
   assert.deepEqual(summary.byWave["4 - Platform"], {
-    blocked: 0,
+    blockedCount: 0,
     byStatus: {
       Done: 0,
       "In Progress": 0,
@@ -127,7 +127,7 @@ test("retains zero-valued status and wave buckets", () => {
     }
 
     assert.deepEqual(summary.byWave[wave], {
-      blocked: 0,
+      blockedCount: 0,
       byStatus: {
         Done: 0,
         "In Progress": 0,
@@ -143,8 +143,8 @@ test("compares summaries structurally", () => {
   const left = summarizeRoadmap([item("coven-agents-product.1")], 1);
   const equal = structuredClone(left);
   const different = structuredClone(left);
-  different.byWave["1 - Now"].blocked = 1;
-  different.blocked = 1;
+  different.byWave["1 - Now"].blockedCount = 1;
+  different.blockedCount = 1;
 
   assert.equal(sameRoadmapSummary(left, equal), true);
   assert.equal(sameRoadmapSummary(left, different), false);

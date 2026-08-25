@@ -19,16 +19,16 @@ export type RoadmapProjectItem = {
 };
 
 export type WaveSummary = {
-  blocked: number;
+  blockedCount: number;
   byStatus: Record<ProjectStatus, number>;
   total: number;
 };
 
 export type RoadmapSummary = {
-  blocked: number;
+  blockedCount: number;
   byStatus: Record<ProjectStatus, number>;
   byWave: Record<RoadmapWave, WaveSummary>;
-  total: number;
+  totalCount: number;
 };
 
 const countSchema = z.number().int().nonnegative();
@@ -41,7 +41,7 @@ const statusCountsSchema = z.object(statusCountsShape).strict();
 
 const waveSummarySchema = z
   .object({
-    blocked: countSchema,
+    blockedCount: countSchema,
     byStatus: statusCountsSchema,
     total: countSchema,
   })
@@ -53,10 +53,10 @@ const waveSummariesShape = Object.fromEntries(
 
 export const roadmapSummarySchema = z
   .object({
-    blocked: countSchema,
+    blockedCount: countSchema,
     byStatus: statusCountsSchema,
     byWave: z.object(waveSummariesShape).strict(),
-    total: countSchema,
+    totalCount: countSchema,
   })
   .strict();
 
@@ -80,7 +80,7 @@ function emptyWaveSummaries(): Record<RoadmapWave, WaveSummary> {
     WAVES.map((wave) => [
       wave,
       {
-        blocked: 0,
+        blockedCount: 0,
         byStatus: emptyStatusCounts(),
         total: 0,
       },
@@ -99,10 +99,10 @@ export function summarizeRoadmap(
   }
 
   const summary: RoadmapSummary = {
-    blocked: 0,
+    blockedCount: 0,
     byStatus: emptyStatusCounts(),
     byWave: emptyWaveSummaries(),
-    total: items.length,
+    totalCount: items.length,
   };
   const beadIds = new Set<string>();
 
@@ -123,8 +123,8 @@ export function summarizeRoadmap(
     summary.byWave[item.wave].total += 1;
 
     if (item.blocked === "Yes") {
-      summary.blocked += 1;
-      summary.byWave[item.wave].blocked += 1;
+      summary.blockedCount += 1;
+      summary.byWave[item.wave].blockedCount += 1;
     }
   }
 
@@ -135,7 +135,10 @@ export function sameRoadmapSummary(
   left: RoadmapSummary,
   right: RoadmapSummary
 ): boolean {
-  if (left.total !== right.total || left.blocked !== right.blocked) {
+  if (
+    left.totalCount !== right.totalCount ||
+    left.blockedCount !== right.blockedCount
+  ) {
     return false;
   }
 
@@ -151,7 +154,7 @@ export function sameRoadmapSummary(
 
     if (
       leftWave.total !== rightWave.total ||
-      leftWave.blocked !== rightWave.blocked
+      leftWave.blockedCount !== rightWave.blockedCount
     ) {
       return false;
     }
