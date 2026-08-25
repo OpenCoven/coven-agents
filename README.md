@@ -17,6 +17,10 @@ The same browser UI can connect to:
 "YOLO" means tool approvals are disabled. It does **not** mean cloud tasks escape
 their container.
 
+Review the living [Execution threat model](docs/security/execution-threat-model.md)
+before changing identity, credentials, tenancy, runner boundaries, or evidence
+handling.
+
 **Execution**
 
 - Cloud agents execute in per-agent Cloudflare sandboxes.
