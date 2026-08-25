@@ -22,7 +22,7 @@ export function GithubSignIn({ callbackUrl = "/" }: { callbackUrl?: string }) {
   return (
     <div className="flex flex-col gap-4">
       <Button
-        className="w-full"
+        className="h-10 w-full rounded-[8px] border-border bg-secondary font-semibold text-[13px] hover:border-[var(--oc-text-3)]"
         disabled={pending}
         onClick={start}
         type="button"
