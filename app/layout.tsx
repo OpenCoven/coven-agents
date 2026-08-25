@@ -56,6 +56,12 @@ export default function RootLayout({
   return (
     <html
       className={`${geist.variable} ${geistMono.variable}`}
+      /**
+       * The OpenCoven palette, applied once at the root so every surface --
+       * console, chat, auth -- inherits it. The theme provider puts `.dark`
+       * on this same element, which is what the dark token block pairs with.
+       */
+      data-brand="opencoven"
       lang="en"
       suppressHydrationWarning
     >
