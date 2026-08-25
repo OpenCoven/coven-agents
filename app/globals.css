@@ -498,3 +498,76 @@ textarea:focus-visible {
 [data-testid="artifact"] {
   isolation: isolate;
 }
+
+/*
+ * OpenCoven brand surface.
+ *
+ * Values are lifted verbatim from the canonical component library
+ * (OpenCoven/ui, `index.html` `:root` and `[data-theme="light"]`) rather than
+ * re-derived, so the two cannot drift apart by eye.
+ *
+ * Applied by mapping the brand tokens onto the shadcn variables the existing
+ * components already consume, so Button, Input and Label inherit the palette
+ * instead of being restyled one at a time. Scoped to `[data-brand="opencoven"]`
+ * so adopting it elsewhere is opt-in rather than a repaint of the whole app.
+ */
+[data-brand="opencoven"] {
+  --oc-bg: #f5f4f8;
+  --oc-panel: #ffffff;
+  --oc-rail: #eeedf3;
+  --oc-line: #d8d6e0;
+  --oc-line-soft: #e4e2ea;
+  --oc-text: #1c1b21;
+  --oc-text-2: #4d4a57;
+  --oc-text-3: #8a8694;
+  --oc-accent: #6b5bbf;
+  --oc-accent-ink: #ffffff;
+  --oc-accent-soft: rgba(107, 91, 191, 0.11);
+  --oc-accent-line: rgba(107, 91, 191, 0.38);
+  --oc-shadow-2: 0 8px 28px rgba(28, 27, 33, 0.1);
+
+  --background: var(--oc-bg);
+  --foreground: var(--oc-text);
+  --card: var(--oc-panel);
+  --card-foreground: var(--oc-text);
+  --popover: var(--oc-panel);
+  --popover-foreground: var(--oc-text);
+  --primary: var(--oc-accent);
+  --primary-foreground: var(--oc-accent-ink);
+  --secondary: var(--oc-rail);
+  --secondary-foreground: var(--oc-text-2);
+  --muted: var(--oc-rail);
+  --muted-foreground: var(--oc-text-3);
+  --accent: var(--oc-accent-soft);
+  --accent-foreground: var(--oc-accent);
+  --border: var(--oc-line);
+  --input: var(--oc-line);
+  --ring: var(--oc-accent-line);
+  --sidebar: var(--oc-rail);
+  --sidebar-foreground: var(--oc-text-2);
+  --sidebar-border: var(--oc-line-soft);
+
+  /* --r-3 in the library. */
+  --radius: 12px;
+}
+
+.dark [data-brand="opencoven"],
+[data-brand="opencoven"].dark {
+  --oc-bg: #0b0b0d;
+  --oc-panel: #131315;
+  --oc-rail: #0e0e10;
+  --oc-raised: #1a1a1e;
+  --oc-line: #2a2930;
+  --oc-line-soft: #222127;
+  --oc-text: #f1eff4;
+  --oc-text-2: #b8b4c0;
+  --oc-text-3: #7d7883;
+  --oc-accent: #9386d0;
+  --oc-accent-ink: #0b0b0d;
+  --oc-accent-soft: rgba(147, 134, 208, 0.14);
+  --oc-accent-line: rgba(147, 134, 208, 0.42);
+  --oc-shadow-2: 0 8px 28px rgba(0, 0, 0, 0.45);
+
+  --secondary: var(--oc-raised);
+  --muted: var(--oc-raised);
+}

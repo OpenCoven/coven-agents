@@ -2,8 +2,10 @@ import { compare } from "bcrypt-ts";
 import NextAuth, { type DefaultSession } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
 import Credentials from "next-auth/providers/credentials";
+import GitHub from "next-auth/providers/github";
+import { fetchGithubEmail } from "@/lib/auth/github-email-fetch";
 import { DUMMY_PASSWORD } from "@/lib/constants";
-import { getUser } from "@/lib/db/queries";
+import { findOrCreateFederatedUser, getUser } from "@/lib/db/queries";
 import { refreshTokenType } from "@/lib/session-claims";
 import { userTypeFor } from "@/lib/subscription";
 import { authConfig } from "./auth.config";
@@ -43,7 +45,34 @@ export const {
 } = NextAuth({
   ...authConfig,
   callbacks: {
-    jwt({ token, user }) {
+    async jwt({ token, user, account }) {
+      /**
+       * A GitHub sign-in has to be mapped onto a local `User` row before it
+       * means anything: the tenant is derived from that row's id, and
+       * `subscribedUntil` lives on it. Without this the session would carry a
+       * GitHub numeric id that owns no data and matches no subscription.
+       *
+       * The address comes from GitHub's verified-emails API rather than the
+       * profile, because the profile address is self-asserted. Authorization
+       * keys on email here, so an unverified one would let a stranger claim
+       * an account by typing its address into a fresh GitHub profile.
+       */
+      if (account?.provider === "github") {
+        const email = await fetchGithubEmail(account.access_token);
+
+        if (!email) {
+          // No verified address: refuse rather than invent an identity.
+          return token;
+        }
+
+        const row = await findOrCreateFederatedUser(email);
+        token.email = row.email;
+        token.id = row.id;
+        token.subscribedUntil = row.subscribedUntil?.toISOString() ?? null;
+
+        return refreshTokenType(token, new Date());
+      }
+
       if (user) {
         token.id = user.id as string;
         // The date, not the derived type, is what gets carried. `type` used to
@@ -66,6 +95,22 @@ export const {
     },
   },
   providers: [
+    /**
+     * Present only when configured, so a deployment without GitHub
+     * credentials keeps working on the password form instead of failing to
+     * construct the auth config at boot.
+     */
+    ...(process.env.AUTH_GITHUB_ID && process.env.AUTH_GITHUB_SECRET
+      ? [
+          GitHub({
+            authorization: {
+              // Identity only. No repository scope is requested: agents
+              // authenticate with credentials the tenant supplies separately.
+              params: { scope: "read:user user:email" },
+            },
+          }),
+        ]
+      : []),
     Credentials({
       async authorize(credentials) {
         const email = String(credentials.email ?? "");

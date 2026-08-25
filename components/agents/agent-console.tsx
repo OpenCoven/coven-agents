@@ -33,6 +33,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { RunnerClient, type RunnerConnection } from "@/lib/agents/client";
+import {
+  type ConnectionStatusKind,
+  connectionMessage,
+  readConnectionResponse,
+} from "@/lib/agents/connection-status";
 import { createIdentityMinter } from "@/lib/agents/identity";
 import { cn } from "@/lib/utils";
 
@@ -100,6 +105,12 @@ export function AgentConsole() {
   const [running, setRunning] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [showConnection, setShowConnection] = useState(false);
+  /**
+   * Why the cloud runner is or is not connected. Shown to the user instead of
+   * letting a doomed request explain itself with the wrong error.
+   */
+  const [cloudStatus, setCloudStatus] =
+    useState<ConnectionStatusKind>("unavailable");
 
   const connection = connections[backend];
   /**
@@ -154,31 +165,43 @@ export function AgentConsole() {
     /**
      * Ask the server for the cloud connection so nobody has to paste a
      * deployment token by hand. The server's value always wins: a stored one
-     * is stale the moment the token is rotated, and a stale token surfaces
-     * only as "Runner token was rejected" with nothing pointing at the cause.
+     * is stale the moment the token is rotated.
      *
-     * Failure is silent on purpose — a demo session gets 403 and an
-     * unconfigured deployment 503, and in both cases the manual connection
-     * dialog is still there as the fallback.
+     * A refusal is recorded rather than swallowed. Falling back to a stored
+     * endpoint silently is what turned "you have no subscription" into
+     * "Runner request failed (404)" against the app's own origin.
      */
     let cancelled = false;
 
-    fetch("/api/runner-connection")
-      .then((response) => (response.ok ? response.json() : null))
-      .then((provided: { endpoint?: string; token?: string } | null) => {
-        if (cancelled || !provided?.token) {
+    const provision = async () => {
+      try {
+        const response = await fetch("/api/runner-connection");
+        const body = (await response.json().catch(() => null)) as Record<
+          string,
+          unknown
+        > | null;
+        const status = readConnectionResponse(response.status, body);
+
+        if (cancelled) {
           return;
         }
 
-        setConnections((current) => ({
-          ...current,
-          cloud: {
-            endpoint: provided.endpoint || current.cloud.endpoint,
-            token: provided.token as string,
-          },
-        }));
-      })
-      .catch(() => undefined);
+        setCloudStatus(status.kind);
+
+        if (status.kind === "provisioned") {
+          setConnections((current) => ({
+            ...current,
+            cloud: { endpoint: status.endpoint, token: status.token },
+          }));
+        }
+      } catch {
+        if (!cancelled) {
+          setCloudStatus("unavailable");
+        }
+      }
+    };
+
+    provision();
 
     return () => {
       cancelled = true;
@@ -277,18 +300,18 @@ export function AgentConsole() {
   }
 
   return (
-    <main className="min-h-dvh bg-[#050807] text-[#edf8f4]">
+    <main className="min-h-dvh bg-[var(--oc-bg)] text-[var(--oc-text)]">
       <Toaster position="top-center" theme="dark" />
-      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_65%_-20%,rgba(56,189,148,0.14),transparent_38%),linear-gradient(rgba(255,255,255,0.018)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.018)_1px,transparent_1px)] bg-[size:auto,42px_42px,42px_42px]" />
+      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_65%_-20%,var(--oc-accent-soft),transparent_38%),linear-gradient(rgba(255,255,255,0.018)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.018)_1px,transparent_1px)] bg-[size:auto,42px_42px,42px_42px]" />
       <header className="relative border-white/8 border-b bg-black/20 backdrop-blur-xl">
         <div className="mx-auto flex max-w-[1500px] items-center justify-between gap-4 px-5 py-4 lg:px-8">
           <div className="flex items-center gap-3">
-            <div className="grid size-9 place-items-center rounded-xl border border-emerald-300/20 bg-emerald-300/10 text-emerald-300">
+            <div className="grid size-9 place-items-center rounded-xl border border-[var(--oc-accent-line)] bg-[var(--oc-accent-soft)] text-[var(--oc-accent)]">
               <Sparkles className="size-4" />
             </div>
             <div>
               <div className="font-semibold tracking-[-0.02em]">OpenCoven</div>
-              <div className="font-mono text-[10px] text-emerald-200/55 uppercase tracking-[0.22em]">
+              <div className="font-mono text-[10px] text-[var(--oc-text-3)] uppercase tracking-[0.22em]">
                 Agent foundry
               </div>
             </div>
@@ -313,12 +336,12 @@ export function AgentConsole() {
           <div className="flex items-center justify-between px-2 py-2">
             <div>
               <p className="font-medium text-sm">Agents</p>
-              <p className="text-emerald-100/40 text-xs">
+              <p className="text-[var(--oc-text-3)] text-xs">
                 {agents.length} on {backend}
               </p>
             </div>
             <Button
-              className="size-8 bg-emerald-300 text-emerald-950 hover:bg-emerald-200"
+              className="size-8 bg-[var(--oc-accent)] text-[var(--oc-accent-ink)] hover:bg-[var(--oc-accent)]"
               disabled={!connection.token}
               onClick={() => setShowCreate(true)}
               size="icon"
@@ -342,7 +365,7 @@ export function AgentConsole() {
                     className={cn(
                       "group flex w-full items-center gap-3 rounded-xl border px-3 py-3 text-left transition",
                       selectedId === agent.id
-                        ? "border-emerald-300/20 bg-emerald-300/8"
+                        ? "border-[var(--oc-accent-line)] bg-[var(--oc-accent-soft)]"
                         : "border-transparent hover:border-white/8 hover:bg-white/[0.035]"
                     )}
                     key={agent.id}
@@ -370,7 +393,11 @@ export function AgentConsole() {
             <EmptyState
               action={() => setShowConnection(true)}
               icon={Server}
-              text="Connect a runner to create and control agents."
+              text={
+                backend === "cloud" && cloudStatus !== "provisioned"
+                  ? connectionMessage(cloudStatus)
+                  : "Connect a runner to create and control agents."
+              }
             />
           )}
         </aside>
@@ -433,7 +460,7 @@ function BackendSwitch({
             className={cn(
               "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 font-medium text-xs capitalize transition",
               backend === value
-                ? "bg-white/10 text-emerald-200"
+                ? "bg-white/10 text-[var(--oc-accent)]"
                 : "text-white/40 hover:text-white/70"
             )}
             key={value}
@@ -454,7 +481,7 @@ function StatusDot({ status }: { status: AgentDefinition["status"] }) {
     <span
       className={cn(
         "size-2 rounded-full shadow-[0_0_12px_currentColor]",
-        status === "idle" && "bg-emerald-300 text-emerald-300",
+        status === "idle" && "bg-[var(--oc-accent)] text-[var(--oc-accent)]",
         status === "running" && "animate-pulse bg-amber-300 text-amber-300",
         status === "error" && "bg-rose-400 text-rose-400"
       )}
@@ -477,7 +504,7 @@ function EmptyState({
       onClick={action}
       type="button"
     >
-      <Icon className="mb-3 size-5 text-emerald-300/60" />
+      <Icon className="mb-3 size-5 text-[var(--oc-text-3)]" />
       <span className="max-w-48 text-white/40 text-xs leading-relaxed">
         {text}
       </span>
@@ -495,7 +522,7 @@ function Panel({
   return (
     <div
       className={cn(
-        "rounded-2xl border border-white/8 bg-[#0a0e0c]/90 shadow-2xl shadow-black/20",
+        "rounded-2xl border border-white/8 bg-[var(--oc-panel)]/90 shadow-2xl shadow-black/20",
         className
       )}
     >
@@ -522,10 +549,10 @@ function WelcomePanel({
   return (
     <Panel className="flex min-h-[620px] items-center justify-center p-8 text-center">
       <div className="max-w-2xl">
-        <div className="mx-auto mb-6 grid size-16 place-items-center rounded-2xl border border-emerald-300/20 bg-emerald-300/8 text-emerald-200">
+        <div className="mx-auto mb-6 grid size-16 place-items-center rounded-2xl border border-[var(--oc-accent-line)] bg-[var(--oc-accent-soft)] text-[var(--oc-accent)]">
           <Box className="size-7" />
         </div>
-        <p className="mb-3 font-mono text-emerald-300/70 text-xs uppercase tracking-[0.24em]">
+        <p className="mb-3 font-mono text-[var(--oc-text-2)] text-xs uppercase tracking-[0.24em]">
           Local-cloud hybrid
         </p>
         <h1 className="text-balance font-semibold text-4xl tracking-[-0.045em] md:text-5xl">
@@ -539,7 +566,7 @@ function WelcomePanel({
         </p>
         <div className="mt-8 flex flex-wrap justify-center gap-3">
           <Button
-            className="bg-emerald-300 text-emerald-950 hover:bg-emerald-200"
+            className="bg-[var(--oc-accent)] text-[var(--oc-accent-ink)] hover:bg-[var(--oc-accent)]"
             onClick={connected ? onCreate : onConnect}
           >
             {connected ? (
@@ -582,7 +609,7 @@ function ConnectionPanel({
   return (
     <Panel className="mx-auto max-w-2xl overflow-hidden">
       <div className="border-white/8 border-b px-6 py-5">
-        <p className="font-mono text-emerald-300/60 text-xs uppercase tracking-[0.2em]">
+        <p className="font-mono text-[var(--oc-text-3)] text-xs uppercase tracking-[0.2em]">
           {backend} control plane
         </p>
         <h2 className="mt-1 font-semibold text-2xl tracking-tight">
@@ -627,7 +654,7 @@ function ConnectionPanel({
           Cancel
         </Button>
         <Button
-          className="bg-emerald-300 text-emerald-950 hover:bg-emerald-200"
+          className="bg-[var(--oc-accent)] text-[var(--oc-accent-ink)] hover:bg-[var(--oc-accent)]"
           disabled={!connection.endpoint || !connection.token}
           onClick={onSave}
         >
@@ -665,7 +692,7 @@ function CreateAgentPanel({
   return (
     <Panel className="mx-auto max-w-3xl overflow-hidden">
       <div className="border-white/8 border-b px-6 py-5">
-        <p className="font-mono text-emerald-300/60 text-xs uppercase tracking-[0.2em]">
+        <p className="font-mono text-[var(--oc-text-3)] text-xs uppercase tracking-[0.2em]">
           New {backend} familiar
         </p>
         <h2 className="mt-1 font-semibold text-2xl tracking-tight">
@@ -766,7 +793,7 @@ function CreateAgentPanel({
             Cancel
           </Button>
           <Button
-            className="bg-emerald-300 text-emerald-950 hover:bg-emerald-200"
+            className="bg-[var(--oc-accent)] text-[var(--oc-accent-ink)] hover:bg-[var(--oc-accent)]"
             disabled={loading || !name.trim() || !instructions.trim()}
             type="submit"
           >
@@ -805,7 +832,7 @@ function AgentWorkspace({
       <Panel className="overflow-hidden">
         <div className="flex flex-wrap items-start justify-between gap-4 border-white/8 border-b px-6 py-5">
           <div className="flex items-start gap-4">
-            <div className="grid size-11 place-items-center rounded-xl border border-emerald-300/20 bg-emerald-300/8 text-emerald-200">
+            <div className="grid size-11 place-items-center rounded-xl border border-[var(--oc-accent-line)] bg-[var(--oc-accent-soft)] text-[var(--oc-accent)]">
               <Bot className="size-5" />
             </div>
             <div>
@@ -835,7 +862,7 @@ function AgentWorkspace({
         <div className="p-6">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <TerminalSquare className="size-4 text-emerald-300" />
+              <TerminalSquare className="size-4 text-[var(--oc-accent)]" />
               <h3 className="font-medium text-sm">Mission</h3>
             </div>
             <span className="font-mono text-[10px] text-white/30 uppercase tracking-wider">
@@ -852,7 +879,7 @@ function AgentWorkspace({
           />
           <div className="mt-3 flex justify-end">
             <Button
-              className="bg-emerald-300 text-emerald-950 hover:bg-emerald-200"
+              className="bg-[var(--oc-accent)] text-[var(--oc-accent-ink)] hover:bg-[var(--oc-accent)]"
               disabled={running || !task.trim()}
               onClick={onRun}
             >
@@ -868,7 +895,7 @@ function AgentWorkspace({
 
         <div className="border-white/8 border-t bg-black/20 p-6">
           <div className="mb-3 flex items-center gap-2">
-            <CheckCircle2 className="size-4 text-emerald-300" />
+            <CheckCircle2 className="size-4 text-[var(--oc-accent)]" />
             <h3 className="font-medium text-sm">Latest result</h3>
           </div>
           {lastRun ? (
@@ -878,7 +905,7 @@ function AgentWorkspace({
                   className={cn(
                     "rounded-full px-2 py-1",
                     lastRun.status === "completed"
-                      ? "bg-emerald-300/10 text-emerald-200"
+                      ? "bg-[var(--oc-accent-soft)] text-[var(--oc-accent)]"
                       : "bg-rose-300/10 text-rose-200"
                   )}
                 >
@@ -891,7 +918,7 @@ function AgentWorkspace({
                   {lastRun.fileOperations.length} file ops
                 </span>
               </div>
-              <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap rounded-xl border border-white/8 bg-black/40 p-4 font-mono text-emerald-50/70 text-xs leading-relaxed">
+              <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap rounded-xl border border-white/8 bg-black/40 p-4 font-mono text-[var(--oc-text-2)] text-xs leading-relaxed">
                 {lastRun.output || "(Agent returned no final message.)"}
               </pre>
             </div>
@@ -905,7 +932,7 @@ function AgentWorkspace({
 
       <div className="space-y-5">
         <Panel className="p-5">
-          <p className="font-mono text-emerald-300/55 text-[10px] uppercase tracking-[0.2em]">
+          <p className="font-mono text-[var(--oc-text-3)] text-[10px] uppercase tracking-[0.2em]">
             Runtime
           </p>
           <dl className="mt-4 space-y-4 text-sm">
@@ -920,7 +947,7 @@ function AgentWorkspace({
           </dl>
         </Panel>
         <Panel className="p-5">
-          <p className="font-mono text-emerald-300/55 text-[10px] uppercase tracking-[0.2em]">
+          <p className="font-mono text-[var(--oc-text-3)] text-[10px] uppercase tracking-[0.2em]">
             Operating contract
           </p>
           <p className="mt-4 max-h-64 overflow-auto whitespace-pre-wrap text-white/45 text-xs leading-relaxed">
@@ -951,7 +978,7 @@ function Detail({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-start justify-between gap-4 border-white/6 border-b pb-3 last:border-0 last:pb-0">
       <dt className="text-white/35">{label}</dt>
-      <dd className="break-all text-right font-mono text-emerald-50/65 text-xs capitalize">
+      <dd className="break-all text-right font-mono text-[var(--oc-text-2)] text-xs capitalize">
         {value}
       </dd>
     </div>
