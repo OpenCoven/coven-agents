@@ -57,13 +57,9 @@ export default function Page() {
         </div>
       </header>
 
-      <div className="flex flex-1 overflow-hidden px-6 py-8">
-        {/* `m-auto` centres the block when the panel is short, so a two-field
-            section sits in the optical centre instead of clinging to the top
-            with a void beneath it. `max-h-full` keeps a tall one from
-            overflowing the page rather than its own panel. */}
-        <div className="m-auto flex max-h-full w-full max-w-[760px] gap-8">
-          <nav className="flex w-[150px] shrink-0 flex-col gap-1">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <div className="flex min-h-0 w-full">
+          <nav className="flex w-[200px] shrink-0 flex-col gap-1 border-border border-r px-4 py-6">
             <p className="px-3 pb-2 font-medium text-[11px] text-muted-foreground uppercase tracking-[0.14em]">
               Settings
             </p>
@@ -80,7 +76,7 @@ export default function Page() {
 
           {/* Only the panel scrolls, so the navigation never moves and a tall
             section cannot push the page into a second scrollbar. */}
-          <section className="min-w-0 flex-1 overflow-y-auto pr-1">
+          <section className="min-w-0 flex-1 overflow-y-auto px-8 py-6">
             {tab === "copilot" ? <HarnessCredentials /> : null}
             {tab === "usage" ? <UsageMeter /> : null}
             {tab === "data" ? <DeleteAllChats /> : null}

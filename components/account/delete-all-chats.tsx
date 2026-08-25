@@ -68,7 +68,7 @@ export function DeleteAllChats() {
 
   return (
     <>
-      <div className="flex flex-col gap-4 rounded-[var(--radius)] border border-destructive/30 bg-card p-8">
+      <div className="flex max-w-[720px] flex-col gap-4 rounded-[var(--radius)] border border-destructive/30 p-6">
         <div className="flex flex-col gap-1">
           <h2 className="font-semibold text-[15px]">Delete all chats</h2>
           <p className="text-[13px] text-muted-foreground">

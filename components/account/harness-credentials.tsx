@@ -163,7 +163,7 @@ export function HarnessCredentials() {
   );
 
   return (
-    <div className="flex flex-col gap-6 rounded-[var(--radius)] border border-border bg-card p-8">
+    <div className="flex max-w-[720px] flex-col gap-6">
       <div className="flex flex-col gap-1">
         <h2 className="font-semibold text-[15px]">Harness credentials</h2>
         <p className="text-[13px] text-muted-foreground">
