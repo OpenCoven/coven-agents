@@ -18,7 +18,7 @@ export function SubmitButton({
   return (
     <Button
       aria-disabled={pending || isSuccessful}
-      className="relative"
+      className="relative h-10 w-full rounded-[8px] font-semibold text-[13px]"
       disabled={pending || isSuccessful}
       type={pending ? "button" : "submit"}
     >
