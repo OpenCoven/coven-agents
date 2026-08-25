@@ -40,6 +40,7 @@ const agent: AgentDefinition = {
 };
 
 test("normalizes oversized cloud command evidence through the strict contract schema", () => {
+  // secret-scan: allow-next-line -- synthetic OpenAI redaction fixture
   const secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
   const normalized = normalizeCloudCommandEvidence(
     [
@@ -91,6 +92,7 @@ test("normalizes oversized cloud command evidence through the strict contract sc
 });
 
 test("normalizes cloud file evidence with a safe operation, bounded path, and bounded diagnostic", () => {
+  // secret-scan: allow-next-line -- synthetic GitHub path fixture
   const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD";
   const normalized = normalizeCloudFileEvidence([
     {
@@ -241,6 +243,7 @@ test("sanitizes cloud evidence again before finalized state and events are store
   const secrets = [
     "final-bearer-value",
     "final-access-value",
+    // secret-scan: allow-next-line -- synthetic stored-output fixture
     "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD",
   ];
   const finished = finishCloudRunRecord(record, {
@@ -259,6 +262,7 @@ test("sanitizes cloud evidence again before finalized state and events are store
       {
         occurredAt: "2026-08-20T20:02:00.000Z",
         operation: "modify",
+        // secret-scan: allow-next-line -- synthetic stored-path fixture
         path: "/workspace/ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD",
       },
     ],

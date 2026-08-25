@@ -8,6 +8,7 @@ import {
 } from "@opencoven/agent-contracts";
 
 const fixturesDirectory = path.join(import.meta.dirname, "fixtures");
+// secret-scan: allow-next-line -- synthetic escaped-credential fixture
 const PROVIDER_CREDENTIAL = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
 const validTranscript = {
   events: [

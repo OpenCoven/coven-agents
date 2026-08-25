@@ -11,9 +11,12 @@ test("redacts authorization, credential assignments, and provider keys while pre
     "export DATABASE_PASSWORD='database-password-value'",
     '{"client_secret":"client-secret-value"}',
     "curl --private-key private-key-value --token cli-token-value",
+    // secret-scan: allow-next-line -- synthetic OpenAI redaction fixture
     "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+    // secret-scan: allow-next-line -- synthetic GitHub redaction fixture
     "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD",
     ["xoxb", "123456789012", "abcdefghijklmnopqrstuvwxyz"].join("-"),
+    // secret-scan: allow-next-line -- synthetic AWS redaction fixture
     "AKIA1234567890ABCDEF",
     "postflight: focused tests passed",
   ].join("\n");
@@ -28,9 +31,12 @@ test("redacts authorization, credential assignments, and provider keys while pre
     "client-secret-value",
     "private-key-value",
     "cli-token-value",
+    // secret-scan: allow-next-line -- synthetic OpenAI assertion fixture
     "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+    // secret-scan: allow-next-line -- synthetic GitHub assertion fixture
     "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD",
     ["xoxb", "123456789012", "abcdefghijklmnopqrstuvwxyz"].join("-"),
+    // secret-scan: allow-next-line -- synthetic AWS assertion fixture
     "AKIA1234567890ABCDEF",
   ]) {
     assert.equal(sanitized.includes(secret), false, `leaked ${secret}`);

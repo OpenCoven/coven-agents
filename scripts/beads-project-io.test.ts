@@ -458,6 +458,7 @@ test("the default runner does not echo command arguments on failure", async () =
     () =>
       runCommand("false", [
         "private acceptance text",
+        // secret-scan: allow-next-line -- synthetic command-redaction fixture
         "github_pat_1234567890abcdefghijklmnopqrstuvwxyz",
       ]),
     (error: unknown) => {
@@ -477,6 +478,7 @@ test("the stdin runner does not echo arguments or input on failure", async () =>
         "false",
         [
           "private roadmap title",
+          // secret-scan: allow-next-line -- synthetic stdin-redaction fixture
           "github_pat_1234567890abcdefghijklmnopqrstuvwxyz",
         ],
         [
@@ -742,6 +744,7 @@ test("fails content updates without a DraftIssue content id before mutation", as
 
 test("fails safely before mutations when the remaining GraphQL budget is too low", async () => {
   const privateBody = "private acceptance text";
+  // secret-scan: allow-next-line -- synthetic rate-limit fixture
   const token = "github_pat_1234567890abcdefghijklmnopqrstuvwxyz";
   const calls: GraphqlCall[] = [];
   const run: GraphqlRunner = (query, variables) => {
@@ -791,6 +794,7 @@ test("fails safely before mutations when the remaining GraphQL budget is too low
 
 test("fails safely when GitHub GraphQL returns errors", async () => {
   const privateBody = "private acceptance text";
+  // secret-scan: allow-next-line -- synthetic GraphQL error fixture
   const token = "github_pat_1234567890abcdefghijklmnopqrstuvwxyz";
   const run: GraphqlRunner = () =>
     resolved({
@@ -915,6 +919,7 @@ test("stops before the next mutation group when the remaining budget reaches the
 test("reports mixed create success and error as rerun-only recovery", async () => {
   const calls: GraphqlCall[] = [];
   const privateBody = "private acceptance text";
+  // secret-scan: allow-next-line -- synthetic reconciliation fixture
   const token = "github_pat_1234567890abcdefghijklmnopqrstuvwxyz";
   const plan: ReconciliationPlan = {
     actions: [
@@ -1003,6 +1008,7 @@ test("reports mixed create success and error as rerun-only recovery", async () =
 test("reports mixed content and field update results without leaking sensitive content", async () => {
   const calls: GraphqlCall[] = [];
   const privateBody = "private acceptance text";
+  // secret-scan: allow-next-line -- synthetic partial-mutation fixture
   const token = "github_pat_1234567890abcdefghijklmnopqrstuvwxyz";
   const action: ReconciliationPlan["actions"][number] = {
     changedFields: ["Runner"],
