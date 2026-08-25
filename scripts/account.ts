@@ -1,9 +1,7 @@
 #!/usr/bin/env tsx
-import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { createUser, db } from "@/lib/db/queries";
+import { db, findOrCreateFederatedUser } from "@/lib/db/queries";
 import { user } from "@/lib/db/schema";
-import { generateHashedPassword } from "@/lib/db/utils";
 
 /**
  * Creates an account or resets its password from the command line.
@@ -13,10 +11,7 @@ import { generateHashedPassword } from "@/lib/db/utils";
  * recovering one whose password is lost — there is no email delivery here, so
  * a forgotten password is otherwise unrecoverable.
  *
- *   pnpm account create you@example.com               # generates a password
- *   pnpm account create you@example.com hunter2000
- *   pnpm account password you@example.com             # generates a new one
- *   pnpm account password you@example.com hunter2000
+ *   pnpm account create you@example.com
  *   pnpm account show you@example.com
  *
  * Point it at whichever database you mean:
@@ -26,12 +21,6 @@ import { generateHashedPassword } from "@/lib/db/utils";
  * An inline variable wins over `.env.local`, which is what makes it safe to
  * run against production from a checkout configured for local development.
  */
-
-const GENERATED_BYTES = 12;
-
-function generatePassword(): string {
-  return `coven-${randomBytes(GENERATED_BYTES).toString("base64url")}`;
-}
 
 async function findUser(email: string) {
   const [row] = await db.select().from(user).where(eq(user.email, email));
@@ -57,33 +46,21 @@ function describeTarget(): string {
   }
 }
 
-async function create(email: string, supplied?: string) {
+async function create(email: string) {
   if (await findUser(email)) {
-    process.stdout.write(`${email} already exists. Use: account password\n`);
+    process.stdout.write(`${email} already exists.\n`);
     process.exitCode = 1;
     return;
   }
 
-  const password = supplied ?? generatePassword();
-  await createUser(email, password);
+  // Passwordless: sign-in is GitHub-only, so a password on a new row could
+  // never be used. The row is created the same way a first GitHub sign-in
+  // creates one, and that sign-in will adopt it by email.
+  await findOrCreateFederatedUser(email);
 
-  process.stdout.write(`Created ${email}\n  password: ${password}\n`);
-}
-
-async function setPassword(email: string, supplied?: string) {
-  if (!(await findUser(email))) {
-    process.stdout.write(`No user with email ${email}.\n`);
-    process.exitCode = 1;
-    return;
-  }
-
-  const password = supplied ?? generatePassword();
-  await db
-    .update(user)
-    .set({ password: generateHashedPassword(password) })
-    .where(eq(user.email, email));
-
-  process.stdout.write(`Updated ${email}\n  password: ${password}\n`);
+  process.stdout.write(
+    `Created ${email}\n  Sign in with GitHub using this address.\n`
+  );
 }
 
 async function show(email: string) {
@@ -103,13 +80,12 @@ async function show(email: string) {
 }
 
 async function main() {
-  const [command, email, password] = process.argv.slice(2);
+  const [command, email] = process.argv.slice(2);
 
   if (!(command && email)) {
     process.stdout.write(
       "Usage:\n" +
-        "  pnpm account create <email> [password]\n" +
-        "  pnpm account password <email> [password]\n" +
+        "  pnpm account create <email>\n" +
         "  pnpm account show <email>\n"
     );
     process.exitCode = 1;
@@ -120,10 +96,7 @@ async function main() {
 
   switch (command) {
     case "create":
-      await create(email, password);
-      break;
-    case "password":
-      await setPassword(email, password);
+      await create(email);
       break;
     case "show":
       await show(email);
