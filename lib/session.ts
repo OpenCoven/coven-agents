@@ -24,8 +24,48 @@ export type SubscriberSession = {
 };
 export type Session = DemoSession | SubscriberSession;
 
+/**
+ * A tenant id is a sandbox key component, so it must satisfy
+ * `worker/src/tenant.ts`'s `/^[A-Za-z0-9_]{1,64}$/`. The previous
+ * `user:${uuid}` form satisfied neither half — `:` and the uuid's `-` are both
+ * rejected — so every cloud run died at `sandboxKey` before the sandbox
+ * started.
+ *
+ * The worker deliberately refuses to sanitize what it is handed, because
+ * rewriting `a-b` to `a_b` would let one tenant forge another's key. Mapping an
+ * external identifier onto a safe internal one is therefore this module's job,
+ * and the mapping has to be injective: two tenants that collide share a
+ * container, and so share a workspace and every file in it.
+ *
+ * Both forms below are a fixed prefix plus exactly 32 hex characters. Fixed
+ * width is what makes them unambiguous — with a variable-length body, `u_` +
+ * `a` + `b` and `u_` + `ab` would be the same string. The prefixes then keep
+ * demo visitors and subscribers in separate spaces even if a uuid repeated.
+ */
+const CANONICAL_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isCanonicalUuid(value: string): boolean {
+  return CANONICAL_UUID.test(value);
+}
+
+function packUuid(uuid: string): string {
+  return uuid.replaceAll("-", "").toLowerCase();
+}
+
+/**
+ * Throws rather than encoding an unexpected id. `User.id` is a uuid column, so
+ * a non-uuid here is a programming error, and the safe responses to one are to
+ * fail or to hash — not to invent an encoding whose collision behaviour nobody
+ * has reasoned about. Failing is louder.
+ */
 export function tenantForUser(userId: string): string {
-  return `user:${userId}`;
+  if (!isCanonicalUuid(userId)) {
+    throw new Error(
+      `User id must be a uuid to derive a tenant; got ${JSON.stringify(userId)}.`
+    );
+  }
+  return `u_${packUuid(userId)}`;
 }
 
 export const DEMO_COOKIE_NAME = "coven-demo";
@@ -42,7 +82,13 @@ export const DEMO_COOKIE_NAME = "coven-demo";
  */
 export function demoTenant(demoId?: string | null): string {
   const trimmed = demoId?.trim();
-  return `demo:${trimmed || crypto.randomUUID()}`;
+  // Anything that is not a uuid we minted is treated as no cookie at all. The
+  // value arrives from a request header, so accepting it verbatim would let a
+  // visitor choose their own tenant id; `proxy.ts` replaces a rejected cookie
+  // so the next request is stable again.
+  const id =
+    trimmed && isCanonicalUuid(trimmed) ? trimmed : crypto.randomUUID();
+  return `d_${packUuid(id)}`;
 }
 
 export function toSession(

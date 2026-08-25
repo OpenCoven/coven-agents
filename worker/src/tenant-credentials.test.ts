@@ -158,7 +158,7 @@ test("a credential that is only whitespace is no credential", () => {
 const REQUEST = {
   harnessId: "copilot",
   runId: "run-1",
-  tenant: "user:acme",
+  tenant: "u_acme",
 } as const;
 
 const TRANSPORT = {
@@ -232,6 +232,6 @@ test("the run id is sent, or the app cannot count the run", async () => {
   assert.deepEqual(sent, {
     harnessId: "copilot",
     runId: "run-1",
-    tenant: "user:acme",
+    tenant: "u_acme",
   });
 });

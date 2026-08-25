@@ -6,7 +6,10 @@ import { decideCredentialWrite } from "./authorize";
 const body = { credential: "ghp_token", harnessId: "copilot" };
 
 function subscriber() {
-  return toSession({ id: "user-1", type: "subscriber" });
+  return toSession({
+    id: "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+    type: "subscriber",
+  });
 }
 
 test("an anonymous caller is unauthorized", () => {
@@ -25,7 +28,7 @@ test("a signed-in non-subscriber is still forbidden", () => {
   // The write goes to the owner's database, which is subscriber-only. This is
   // the rule that keeps a free account from storing rows there.
   const decision = decideCredentialWrite(
-    toSession({ id: "user-2", type: "demo" }),
+    toSession({ id: "9c858901-8a57-4791-81fe-4c455b099bc9", type: "demo" }),
     body
   );
 

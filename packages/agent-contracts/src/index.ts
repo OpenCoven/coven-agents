@@ -12,6 +12,7 @@ export {
   base64UrlEncode,
   runnerClaimsSchema,
   splitToken,
+  TENANT_ID_PATTERN,
   TOKEN_ALGORITHM,
   TOKEN_LIFETIME_SECONDS,
 } from "./identity";

@@ -22,7 +22,7 @@ const IDENTITY_TOKEN = "runner-identity-sensitive";
 const RECORDING_CREDENTIAL = "recording-credential-sensitive";
 const SIGNING_KEY = "recorder-signing-key-sensitive";
 const RECORDER_SUBJECT = "demo-recorder";
-const RECORDER_TENANT = "demo-recorder-tenant";
+const RECORDER_TENANT = "demo_recorder_tenant";
 const CONFIGURED_SECRETS = [
   RUNNER_TOKEN,
   IDENTITY_TOKEN,

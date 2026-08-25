@@ -14,7 +14,7 @@ import {
 const TOKEN = "test-token";
 const MINE = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
 const THEIRS = "9c1b7d2f-5a6b-4c90-8f1a-0f4e1f4d4a2e";
-const CALLER_TENANT = "tenant-under-test";
+const CALLER_TENANT = "tenant_under_test";
 /** A run owned by another tenant. */
 const RUN_ID = "11111111-2222-4333-8444-555555555555";
 /** A run owned by the caller, so the negative tests have a control. */

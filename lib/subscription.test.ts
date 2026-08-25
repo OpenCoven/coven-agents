@@ -42,11 +42,11 @@ test("only a live subscription reaches a subscriber session", () => {
   // The end-to-end property: this is what decides whether a caller may write
   // to the owner's database.
   const live = toSession({
-    id: "user-1",
+    id: "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
     type: userTypeFor({ subscribedUntil: at(60_000) }, NOW),
   });
   const lapsed = toSession({
-    id: "user-1",
+    id: "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
     type: userTypeFor({ subscribedUntil: at(-1) }, NOW),
   });
 

@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
 import { betaVerdict, isAllowedIdentity, readBetaGate } from "./lib/beta";
 import { guestRegex, isDevelopmentEnvironment } from "./lib/constants";
-import { DEMO_COOKIE_NAME } from "./lib/session";
+import { DEMO_COOKIE_NAME, isCanonicalUuid } from "./lib/session";
 
 /**
  * Identifies an anonymous visitor across requests, with no database row
@@ -60,7 +60,13 @@ export async function proxy(request: NextRequest) {
     // a real `User` row for every anonymous request.
     const response = NextResponse.next();
 
-    if (!request.cookies.has(DEMO_COOKIE_NAME)) {
+    // Replaced when absent *or* unusable. `demoTenant` ignores a value that is
+    // not a uuid it minted, so leaving a stale one in place would hand the
+    // visitor a freshly random tenant on every request -- each page would still
+    // render while their own state silently failed to follow them.
+    const demoId = request.cookies.get(DEMO_COOKIE_NAME)?.value;
+
+    if (!(demoId && isCanonicalUuid(demoId))) {
       response.cookies.set(DEMO_COOKIE_NAME, crypto.randomUUID(), {
         httpOnly: true,
         path: "/",

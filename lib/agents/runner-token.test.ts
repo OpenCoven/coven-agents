@@ -50,7 +50,11 @@ test("the signature verifies against the matching public key", async () => {
   const { pkcs8, publicKey } = await signingKey();
 
   const token = await mintRunnerToken(
-    { plan: "demo", sub: "user-2", tenant: "user:user-2" },
+    {
+      plan: "demo",
+      sub: "user-2",
+      tenant: "d_9c8589018a57479181fe4c455b099bc9",
+    },
     pkcs8
   );
   const parts = splitToken(token);
@@ -108,7 +112,10 @@ test("a signed-in user is not granted a subscriber plan by default", () => {
   // owner's database to every visitor. While this lived inline in the route
   // handler it was unreachable by any test, and that mutation passed.
   for (const type of ["guest", "regular", "demo", "", "SUBSCRIBER"]) {
-    const claims = claimsForUser({ id: "user-1", type });
+    const claims = claimsForUser({
+      id: "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+      type,
+    });
 
     assert.equal(
       claims.plan,
@@ -118,7 +125,10 @@ test("a signed-in user is not granted a subscriber plan by default", () => {
   }
 
   assert.equal(
-    claimsForUser({ id: "u", type: "subscriber" }).plan,
+    claimsForUser({
+      id: "9c858901-8a57-4791-81fe-4c455b099bc9",
+      type: "subscriber",
+    }).plan,
     "subscriber"
   );
 });
@@ -126,10 +136,16 @@ test("a signed-in user is not granted a subscriber plan by default", () => {
 test("claims carry a stable tenant derived from the user id", () => {
   // Not `toSession().tenant`: that mints a fresh demo tenant per call, so a
   // user's agents would vanish between mints.
-  const first = claimsForUser({ id: "user-9", type: "guest" });
-  const second = claimsForUser({ id: "user-9", type: "guest" });
+  const first = claimsForUser({
+    id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+    type: "guest",
+  });
+  const second = claimsForUser({
+    id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+    type: "guest",
+  });
 
   assert.equal(first.tenant, second.tenant);
-  assert.equal(first.tenant, "user:user-9");
-  assert.equal(first.sub, "user-9");
+  assert.equal(first.tenant, "u_6ba7b8109dad11d180b400c04fd430c8");
+  assert.equal(first.sub, "6ba7b810-9dad-11d1-80b4-00c04fd430c8");
 });
