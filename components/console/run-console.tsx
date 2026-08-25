@@ -99,6 +99,21 @@ function statusMessage(kind: ConnectionStatusKind): string {
     : connectionMessage(kind);
 }
 
+/**
+ * The word the header pill wears.
+ *
+ * Written out rather than rendering the status kind directly: those are
+ * protocol identifiers, and `SIGNED_OUT` in a pill is an implementation detail
+ * leaking into the one place that is supposed to explain the state.
+ */
+const CONNECTION_LABELS: Record<ConnectionStatusKind, string> = {
+  provisioned: "connected",
+  signed_out: "signed out",
+  subscription_required: "no subscription",
+  unavailable: "unreachable",
+  unconfigured: "not configured",
+};
+
 type View = "composer" | "create" | "thread";
 
 /**
@@ -110,7 +125,16 @@ type View = "composer" | "create" | "thread";
  */
 export function RunConsole() {
   const session = useSession();
-  const who = session.data?.user?.email ?? "signed in";
+  /**
+   * Who the console attributes a mission to.
+   *
+   * Null when nobody is signed in, and the surface says so. The earlier
+   * fallback was the string "signed in", which the rail then rendered as if it
+   * were an account name — directly contradicting the header pill next to it.
+   */
+  const account = session.data?.user?.email ?? null;
+  const who = account ?? "not signed in";
+  const accountGlyph = account ? glyphFor(account) : "◆";
 
   const [connection, setConnection] =
     useState<RunnerConnection>(EMPTY_CONNECTION);
@@ -696,7 +720,9 @@ export function RunConsole() {
 
   const agentRuns = runs.filter((run) => run.agentId === selectedAgentId);
 
-  const connectionLabel: string = connection.token ? "connected" : cloudStatus;
+  const connectionLabel = connection.token
+    ? CONNECTION_LABELS.provisioned
+    : CONNECTION_LABELS[cloudStatus];
 
   /* ---------------------------------------------------------------- render */
 
@@ -816,7 +842,7 @@ export function RunConsole() {
             }}
             title={who}
           >
-            {glyphFor(who)}
+            {accountGlyph}
           </a>
         </div>
       </header>
@@ -836,6 +862,7 @@ export function RunConsole() {
             <AgentRail
               agents={agents}
               collapsed={railCollapsed}
+              glyph={accountGlyph}
               now={now}
               onCreateAgent={() => setView("create")}
               onNewRun={openComposer}

@@ -30,6 +30,8 @@ const MINI_WIDTH = 58;
 type RailProps = {
   agents: AgentDefinition[];
   collapsed: boolean;
+  /** The initial for the signed-in account, or a mark when nobody is. */
+  glyph: string;
   onCreateAgent: () => void;
   onNewRun: (agentId: string) => void;
   onOpenAccount: () => void;
@@ -65,6 +67,7 @@ function AgentGlyph({
 
 function MiniRail({
   agents,
+  glyph,
   onOpenAccount,
   onSelectAgent,
   onToggle,
@@ -73,6 +76,7 @@ function MiniRail({
 }: Pick<
   RailProps,
   | "agents"
+  | "glyph"
   | "onOpenAccount"
   | "onSelectAgent"
   | "onToggle"
@@ -190,7 +194,7 @@ function MiniRail({
         title={who}
         type="button"
       >
-        {glyphFor(who)}
+        {glyph}
       </button>
     </aside>
   );
@@ -749,7 +753,7 @@ export function AgentRail(props: RailProps) {
             borderRadius: "var(--radius-pill)",
           }}
         >
-          {glyphFor(props.who)}
+          {props.glyph}
         </span>
         <span
           style={{
