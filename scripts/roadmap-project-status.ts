@@ -291,11 +291,7 @@ function parseProjectItem(
   item: ProjectItemNode
 ): RoadmapProjectItem | undefined {
   if (item.beadId === null) {
-    if (item.status === null && item.wave === null && item.blocked === null) {
-      return undefined;
-    }
-
-    throw new Error(`Project item ${item.id} contains partial unmanaged data`);
+    return undefined;
   }
 
   if (item.status === null || item.wave === null || item.blocked === null) {

@@ -330,25 +330,22 @@ test("skips a fully empty unmanaged item", async () => {
   ]);
 });
 
-test("rejects partial unmanaged field data", async () => {
+test("skips an unmanaged item with populated managed fields", async () => {
   const run: GraphqlRunner = () =>
     Promise.resolve(
       pageResponse({
         nodes: [
           projectItem("partial-unmanaged", {
             beadId: null,
-            blocked: null,
+            blocked: "No",
             status: "Todo",
-            wave: null,
+            wave: "1 - Now",
           }),
         ],
       })
     );
 
-  await assert.rejects(
-    () => loadRoadmapProjectItems("OpenCoven", 17, run),
-    /partial unmanaged data/i
-  );
+  assert.deepEqual(await loadRoadmapProjectItems("OpenCoven", 17, run), []);
 });
 
 test("rejects a managed item missing a required value", async () => {
