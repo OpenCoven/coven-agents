@@ -28,6 +28,11 @@ Review the living [Execution threat model](docs/security/execution-threat-model.
 before changing identity, credentials, tenancy, runner boundaries, or evidence
 handling.
 
+When something has already gone wrong, follow
+[Security incident response](docs/security/incident-response.md). It has a
+rotation runbook for every credential in the system, and the order matters:
+rotate first, investigate second.
+
 **Execution**
 
 - Every agent executes in its own per-agent Cloudflare sandbox container.

@@ -10,7 +10,8 @@ export type SecretFinding = {
   path: string;
 };
 
-type ScanMode = "staged" | "tracked";
+type ScanMode = "staged" | "tracked" | "history";
+type ScanRequest = { cwd?: string; mode: ScanMode; range?: string };
 
 const SECRET_PATTERNS: ReadonlyArray<{
   category: string;
@@ -66,10 +67,125 @@ const SECRET_PATTERNS: ReadonlyArray<{
   },
 ];
 
+/**
+ * Every pattern above keys on a vendor prefix, which is exactly why none of
+ * them can see this project's own secrets: `AUTH_SECRET`, `CREDENTIAL_KEK`,
+ * `RUNNER_SIGNING_KEY`, and `AGENT_CONTROL_TOKEN` are raw base64 or hex with
+ * no marker at all. The most damaging values in the repository were the ones
+ * the scanner was structurally unable to detect.
+ *
+ * These rules key on the *name* instead. Matched generically rather than from
+ * a list, so a secret added next year is covered without anyone remembering to
+ * extend this.
+ */
+const SENSITIVE_NAME =
+  /\b([A-Z][A-Z\d]*(?:_[A-Z\d]+)*_(?:SECRET|TOKEN|PASSWORD|PASSWD|KEY|KEK|CREDENTIAL)|PGPASSWORD|AUTH_SECRET)\s*[=:]\s*["'`]?([^\s"'`,;]+)/u;
+
+/**
+ * A connection string carries its password inline, so the usual advice to keep
+ * "the password" out of a file misses it entirely.
+ */
+const CREDENTIALED_URL =
+  /\b(?:postgres|postgresql|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqps?)::?\/\/[^\s:@/]+:([^\s@/]+)@/u;
+
+/**
+ * Values that mean "fill this in". `.env.example` uses `****`, and refusing to
+ * distinguish these would make the scanner cry wolf on the one file whose job
+ * is to name every secret.
+ */
+const PLACEHOLDER =
+  /^(?:\*+|x+|\.+|-+|_+|<.*>|\$\{.*\}|%.*%|(?:replace|your|my|the|some|example|sample|placeholder|changeme|change-me|dummy|fake|test|todo|tbd|none|null|undefined|redacted|hidden|secret|password|token|key)\b.*)$/iu;
+
+/** Below this, a value cannot hold enough entropy to be a real credential. */
+const MIN_SECRET_LENGTH = 16;
+/** A real random value uses most of its alphabet; `aaaaaaaaaaaaaaaa` does not. */
+const MIN_DISTINCT_CHARACTERS = 8;
+
+/**
+ * Words joined by `-` or `_`: `runner-control-sensitive`, `access-key-value`,
+ * `opencoven-runner-cloud`. Every false positive this rule produced on the
+ * existing repository had exactly this shape -- test fixtures and identifiers,
+ * all of them deliberately fake.
+ *
+ * A generated credential is base64, hex, or a vendor-prefixed blob, and does
+ * not come out looking like English. The gap is a passphrase-style secret
+ * ("correct-horse-battery-staple"), which this would wave through; nothing in
+ * this system issues one, and the vendor patterns above are unaffected either
+ * way.
+ */
+const WORD_SHAPED = /^[a-z]+(?:[-_][a-z]+)+$/u;
+
+export function looksLikeRealSecret(value: string): boolean {
+  if (value.length < MIN_SECRET_LENGTH || PLACEHOLDER.test(value)) {
+    return false;
+  }
+
+  if (WORD_SHAPED.test(value)) {
+    return false;
+  }
+
+  // An interpolation or a lookup is a reference to a secret, not a copy of one.
+  if (/process\.env|import\.meta\.env|\$\(|`\$\{/u.test(value)) {
+    return false;
+  }
+
+  /**
+   * So is a bare identifier: `DEMO_RECORDING_CREDENTIAL: recordingCredential`
+   * names a variable, it does not embed a value.
+   *
+   * Distinguished by having no digit. A generated credential is base64, hex,
+   * or url-safe random, and the chance that 16 or more such characters contain
+   * no digit at all is negligible -- whereas an identifier almost never does.
+   */
+  if (/^[A-Za-z_$][A-Za-z_$]*$/u.test(value)) {
+    return false;
+  }
+
+  return new Set(value).size >= MIN_DISTINCT_CHARACTERS;
+}
+
+/**
+ * Dotenv files hold real values by definition, so the safe rule is that none
+ * of them is ever committed. `.gitignore` already lists most, but it covers
+ * `.env.production.local` and not `.env.production`, and `git add -f` ignores
+ * it regardless -- a rule enforced only by `.gitignore` is a rule anyone can
+ * step around without noticing.
+ */
+const DOTENV_PATH =
+  /(?:^|\/)(?:\.env(?:\.[^/]*)?|[^/]*\.env|\.dev\.vars(?:\.[^/]*)?)$/u;
+const DOTENV_ALLOWED =
+  /(?:^|\/)(?:\.env|\.dev\.vars)\.(?:example|sample|template|defaults)$/u;
+
+export function isForbiddenDotenvPath(path: string): boolean {
+  return DOTENV_PATH.test(path) && !DOTENV_ALLOWED.test(path);
+}
+
 const ALLOW_NEXT_LINE = /secret-scan:\s*allow-next-line\s+--\s+\S.*$/u;
 
 function containsSecret(value: string): boolean {
   return SECRET_PATTERNS.some(({ pattern }) => pattern.test(value));
+}
+
+/**
+ * The name-based and URL-based findings for one line.
+ *
+ * Separate from `SECRET_PATTERNS` because both need to inspect the captured
+ * value before deciding, and a bare `RegExp.test` cannot.
+ */
+function namedFindings(line: string): string[] {
+  const found: string[] = [];
+
+  const assignment = SENSITIVE_NAME.exec(line);
+  if (assignment && looksLikeRealSecret(assignment[2])) {
+    found.push(`value assigned to ${assignment[1]}`);
+  }
+
+  const url = CREDENTIALED_URL.exec(line);
+  if (url && looksLikeRealSecret(url[1])) {
+    found.push("connection string with an inline password");
+  }
+
+  return found;
 }
 
 function sanitizePath(path: string): string {
@@ -87,6 +203,10 @@ function git(cwd: string, args: string[], encoding?: BufferEncoding) {
     cwd,
     encoding,
     maxBuffer: MAX_FILE_BYTES + 1024,
+    // Git's own stderr is suppressed: this walks objects speculatively, and an
+    // inherited stream turns every expected miss into console noise that hides
+    // the findings underneath it.
+    stdio: ["ignore", "pipe", "ignore"],
   });
 }
 
@@ -97,6 +217,99 @@ function candidatePaths(cwd: string, mode: ScanMode): string[] {
       : ["ls-files", "-z"];
   const output = git(cwd, args, "utf8") as string;
   return output.split("\0").filter(Boolean);
+}
+
+/**
+ * Every blob ever committed on any branch, deduplicated, with its path.
+ *
+ * `--tracked` answers "is a secret in the tree now", which is the wrong
+ * question after a leak: the damaging case is a value committed and then
+ * removed, still reachable in history and still pushed. Rotation is always the
+ * first response, but knowing whether something was ever committed is what
+ * decides whether history has to be rewritten too.
+ *
+ * Types come from one `--batch-check` pass rather than a `cat-file` per
+ * object. `rev-list --objects` yields trees and commits alongside blobs, and
+ * asking for each one's type separately meant a process per object.
+ */
+function historyBlobs(
+  cwd: string,
+  selector: readonly string[]
+): Array<{ path: string; sha: string }> {
+  const sizes = git(
+    cwd,
+    [
+      "cat-file",
+      "--batch-all-objects",
+      "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+    ],
+    "utf8"
+  ) as string;
+
+  const scannable = new Set<string>();
+  for (const line of sizes.split("\n")) {
+    const [sha, type, size] = line.split(" ");
+    if (type === "blob" && Number(size) <= MAX_FILE_BYTES) {
+      scannable.add(sha);
+    }
+  }
+
+  const named = git(
+    cwd,
+    ["rev-list", "--objects", ...selector],
+    "utf8"
+  ) as string;
+  const seen = new Set<string>();
+  const blobs: Array<{ path: string; sha: string }> = [];
+
+  for (const line of named.split("\n")) {
+    const space = line.indexOf(" ");
+    if (space === -1) {
+      continue;
+    }
+    const sha = line.slice(0, space);
+    const path = line.slice(space + 1);
+    if (!(path && scannable.has(sha)) || seen.has(sha)) {
+      continue;
+    }
+    seen.add(sha);
+    blobs.push({ path, sha });
+  }
+
+  return blobs;
+}
+
+function scanHistory(
+  cwd: string,
+  selector: readonly string[]
+): SecretFinding[] {
+  const findings: SecretFinding[] = [];
+
+  for (const { path, sha } of historyBlobs(cwd, selector)) {
+    if (isForbiddenDotenvPath(path)) {
+      findings.push({
+        category: "dotenv file present in history",
+        line: 1,
+        path,
+      });
+      continue;
+    }
+
+    let content: Buffer;
+    try {
+      content = git(cwd, ["cat-file", "blob", sha]) as Buffer;
+    } catch {
+      continue;
+    }
+
+    if (content.includes(0)) {
+      continue;
+    }
+
+    findings.push(...scanText(path, content.toString("utf8")));
+  }
+
+  return findings;
 }
 
 function stagedSize(cwd: string, path: string): number {
@@ -128,6 +341,9 @@ export function scanText(path: string, text: string): SecretFinding[] {
         findings.push({ category, line: index + 1, path });
       }
     }
+    for (const category of namedFindings(line)) {
+      findings.push({ category, line: index + 1, path });
+    }
   }
   return findings;
 }
@@ -135,10 +351,18 @@ export function scanText(path: string, text: string): SecretFinding[] {
 export function scanRepository({
   cwd = process.cwd(),
   mode,
-}: {
-  cwd?: string;
-  mode: ScanMode;
-}): SecretFinding[] {
+  range,
+}: ScanRequest): SecretFinding[] {
+  if (mode === "history") {
+    /**
+     * A range scans only the objects the push introduces, which is both fast
+     * enough for a hook and stricter than a net diff: a secret committed and
+     * then deleted in a later commit never appears in `base..head` as a change,
+     * but the blob is still there and is still about to be pushed.
+     */
+    return scanHistory(cwd, range ? [range] : ["--all"]);
+  }
+
   const findings: SecretFinding[] = [];
   let totalBytes = 0;
 
@@ -146,6 +370,15 @@ export function scanRepository({
     if (containsSecret(path)) {
       findings.push({
         category: "secret-shaped filename",
+        line: 1,
+        path,
+      });
+      continue;
+    }
+
+    if (isForbiddenDotenvPath(path)) {
+      findings.push({
+        category: "dotenv file must never be committed",
         line: 1,
         path,
       });
@@ -195,16 +428,30 @@ export function renderFindings(findings: readonly SecretFinding[]): string {
 
 function main() {
   const [, , flag] = process.argv;
-  const mode =
-    flag === "--staged" ? "staged" : flag === "--tracked" ? "tracked" : null;
+  const modes: Record<string, ScanMode> = {
+    "--history": "history",
+    "--range": "history",
+    "--staged": "staged",
+    "--tracked": "tracked",
+  };
+  const mode = flag ? modes[flag] : undefined;
+  const range = flag === "--range" ? process.argv[3] : undefined;
+
+  if (flag === "--range" && !range) {
+    process.stderr.write("Usage: secret-scan.ts --range <rev-range>\n");
+    process.exitCode = 2;
+    return;
+  }
   if (!mode) {
-    process.stderr.write("Usage: secret-scan.ts --staged|--tracked\n");
+    process.stderr.write(
+      "Usage: secret-scan.ts --staged|--tracked|--history|--range <rev-range>\n"
+    );
     process.exitCode = 2;
     return;
   }
 
   try {
-    const findings = scanRepository({ mode });
+    const findings = scanRepository({ mode, range });
     if (findings.length > 0) {
       process.stderr.write(`${renderFindings(findings)}\n`);
       process.exitCode = 1;

@@ -2,6 +2,8 @@
 
 - Status: living document
 - Owner: Security & privacy workstream
+- Companion to: [Security incident response](incident-response.md), which
+  covers what to do once one of these threats has occurred
 - Applies to: control plane, shared contracts, cloud runner, demo publication,
   and operator credentials
 

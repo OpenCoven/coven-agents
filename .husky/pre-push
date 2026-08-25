@@ -1,5 +1,5 @@
 #!/bin/sh
-# Blocks pushes containing unsigned commits.
+# Blocks pushes containing unsigned commits or secrets.
 # Mirrors the global rule: every commit must land Verified on GitHub.
 
 branch="$(git rev-parse --abbrev-ref HEAD)"
@@ -34,6 +34,18 @@ if [ -n "$bad" ]; then
   echo "$bad"
   echo ""
   echo "Sign them before pushing (git rebase --exec 'git commit --amend --no-edit -S')."
+  exit 1
+fi
+
+# The pre-commit scan can be skipped with --no-verify, and a secret committed
+# and then deleted in a later commit is invisible to a net diff while still
+# being pushed. This scans the objects the push actually introduces, which is
+# the last point where a value can be kept off the remote at all -- once it is
+# pushed, rotation is the only remedy, not deletion.
+if ! corepack pnpm exec tsx scripts/secret-scan.ts --range "$range"; then
+  echo ""
+  echo "BLOCKED: the commits being pushed contain a credential."
+  echo "Rotate anything real, remove it from the commits, then push again."
   exit 1
 fi
 
