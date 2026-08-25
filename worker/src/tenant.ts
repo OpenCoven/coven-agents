@@ -1,12 +1,10 @@
-import type { AgentOwner } from "@opencoven/agent-contracts";
+import { type AgentOwner, TENANT_ID_PATTERN } from "@opencoven/agent-contracts";
 
 /**
  * Sandbox keys are a tenant boundary, not a naming convention. Two accounts
  * whose keys collide share a container, and therefore share a workspace and
  * every file in it, so the key must be derived in exactly one place.
  */
-
-const TENANT_ID_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
 
 /**
  * Records created before ownership existed still have to resolve to some

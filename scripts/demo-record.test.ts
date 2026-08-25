@@ -134,7 +134,7 @@ test("redacts every configured recorder secret from captured events and results"
   const runnerToken = "runner-token-sensitive";
   const signingKey = "signing-key-sensitive";
   const subject = "recorder-subject-sensitive";
-  const tenant = "recorder-tenant-sensitive";
+  const tenant = "recorder_tenant_sensitive";
   const ephemeralIdentity = "minted-identity-sensitive";
 
   const code = await runDemoRecorder(

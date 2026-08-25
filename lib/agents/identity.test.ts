@@ -8,7 +8,7 @@ function tokenExpiringIn(seconds: number): string {
     exp: Math.floor(Date.now() / 1000) + seconds,
     plan: "demo",
     sub: "user-1",
-    tenant: "user:user-1",
+    tenant: "u_3f2504e04f8911d39a0c0305e82c3301",
   };
   const payload = base64UrlEncode(
     new TextEncoder().encode(JSON.stringify(claims))
