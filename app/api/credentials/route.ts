@@ -1,4 +1,9 @@
+import { ipAddress } from "@vercel/functions";
 import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { decideCredentialWrite } from "@/lib/credentials/authorize";
@@ -51,10 +56,19 @@ function respond(decision: { kind: string; reason?: string }) {
  * to replace or remove it; it never needs the value back, and returning one
  * would put a secret on the wire for a status check.
  */
-export async function GET() {
+export async function GET(request: Request) {
   const access = await authorizeSubscriberAccess(await auth());
   if (access.kind !== "allowed") {
     return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "credential_list",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   return Response.json(
@@ -67,6 +81,15 @@ export async function POST(request: Request) {
   const access = await authorizeSubscriberAccess(await auth());
   if (access.kind !== "allowed") {
     return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "credential_write",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   let body: { credential?: unknown; harnessId?: unknown };
@@ -112,6 +135,15 @@ export async function DELETE(request: Request) {
   const access = await authorizeSubscriberAccess(await auth());
   if (access.kind !== "allowed") {
     return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "credential_delete",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   let body: { harnessId?: unknown };

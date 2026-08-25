@@ -12,6 +12,10 @@ import { checkBotId } from "botid/server";
 import { after } from "next/server";
 import { createResumableStreamContext } from "resumable-stream";
 import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
 import { entitlementsByPlan } from "@/lib/ai/entitlements";
 import {
   allowedModelIds,
@@ -43,7 +47,6 @@ import {
 } from "@/lib/db/queries";
 import type { DBMessage } from "@/lib/db/schema";
 import { ChatbotError } from "@/lib/errors";
-import { checkIpRateLimit } from "@/lib/ratelimit";
 import type { ChatMessage, WaitingStatusData } from "@/lib/types";
 import { convertToUIMessages, generateUUID } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
@@ -88,6 +91,15 @@ export async function POST(request: Request) {
   }
   const { userId } = access;
 
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "chat",
+    userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
+  }
+
   let requestBody: PostRequestBody;
 
   try {
@@ -104,8 +116,6 @@ export async function POST(request: Request) {
     const chatModel = allowedModelIds.has(selectedChatModel)
       ? selectedChatModel
       : DEFAULT_CHAT_MODEL;
-
-    await checkIpRateLimit(ipAddress(request));
 
     const messageCount = await getMessageCountByUserId({
       differenceInHours: 1,
@@ -461,6 +471,15 @@ export async function DELETE(request: Request) {
   const access = await authorizeSubscriberAccess(session);
   if (access.kind !== "allowed") {
     return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "chat_delete",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   const chat = await getChatById({ id });

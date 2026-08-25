@@ -1,5 +1,10 @@
+import { ipAddress } from "@vercel/functions";
 import { eq } from "drizzle-orm";
 import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { avatarFor, isStorableAvatarUrl } from "@/lib/avatar";
@@ -28,7 +33,7 @@ async function resolveAccount() {
   };
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   const account = await resolveAccount();
 
   if (!account) {
@@ -36,6 +41,19 @@ export async function GET() {
   }
 
   const access = await authorizeSubscriberAccess(account.authSession);
+  if (access.kind === "unauthorized") {
+    return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "avatar_read",
+    userId: account.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
+  }
+
   if (access.kind === "subscription_required") {
     // Guest access never reads stored account data. The generated avatar needs
     // only the already-authenticated account id.
@@ -78,6 +96,15 @@ export async function PUT(request: Request) {
   const access = await authorizeSubscriberAccess(account.authSession);
   if (access.kind !== "allowed") {
     return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "avatar_write",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   const body = (await request.json().catch(() => null)) as {

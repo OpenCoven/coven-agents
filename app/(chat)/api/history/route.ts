@@ -1,5 +1,10 @@
+import { ipAddress } from "@vercel/functions";
 import type { NextRequest } from "next/server";
 import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { deleteAllChatsByUserId, getChatsByUserId } from "@/lib/db/queries";
@@ -28,6 +33,15 @@ export async function GET(request: NextRequest) {
     return subscriberAccessResponse(access);
   }
 
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "history_read",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
+  }
+
   const chats = await getChatsByUserId({
     endingBefore,
     id: access.userId,
@@ -38,11 +52,20 @@ export async function GET(request: NextRequest) {
   return Response.json(chats);
 }
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
   const session = await auth();
   const access = await authorizeSubscriberAccess(session);
   if (access.kind !== "allowed") {
     return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "history_delete",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   const result = await deleteAllChatsByUserId({ userId: access.userId });
