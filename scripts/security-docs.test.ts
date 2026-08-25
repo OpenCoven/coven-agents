@@ -104,6 +104,20 @@ test("the runbooks state the two facts that break a rotation", () => {
    */
   assert.match(runbooks, /NEXT_PUBLIC_\*` must never be Sensitive/);
   assert.match(runbooks, /--no-sensitive/);
+
+  /**
+   * Both directions of the visibility flag, because `vercel env add` gets it
+   * wrong either way when it is omitted: a server-side secret lands readable,
+   * and a public variable is refused. Learned by rotating for real.
+   */
+  assert.match(runbooks, /`--sensitive` is required, not decorative/);
+
+  // Setting a variable does not change the running deployment. A rotation that
+  // skips this looks complete and has not taken effect.
+  assert.match(runbooks, /A redeploy is what makes the new value live/);
+
+  // A copied network trace carries every request header, including the token.
+  assert.match(runbooks, /copied network trace is a credential disclosure/);
 });
 
 test("the README points to the incident runbooks", () => {
