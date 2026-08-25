@@ -145,3 +145,19 @@ test("identity matching ignores case and space", () => {
 test("a disabled gate admits everyone", () => {
   assert.equal(isAllowedIdentity(readBetaGate({}), null), true);
 });
+
+test("the Stripe webhook is exempt from the gate", () => {
+  // Not cosmetic: Stripe does not follow redirects when delivering a webhook,
+  // so a gated endpoint turns every event into a delivery failure and paid
+  // subscriptions silently stop being recorded. The route authenticates by
+  // signature, which is stronger than the gate it skips.
+  assert.equal(isBetaExempt("/api/stripe/webhook"), true);
+  assert.equal(
+    betaVerdict(readBetaGate(ON), "/api/stripe/webhook", null),
+    "allow"
+  );
+});
+
+test("a lookalike stripe path is not exempt", () => {
+  assert.equal(isBetaExempt("/api/stripeish"), false);
+});

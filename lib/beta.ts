@@ -7,11 +7,23 @@
  * is not a hole — that route authenticates itself, and more strictly than this
  * gate does.
  *
+ * `/api/stripe` is exempt for the same reason and is not optional: Stripe does
+ * not follow redirects when delivering a webhook, so a gated endpoint turns
+ * every event into a delivery failure and subscriptions silently stop being
+ * recorded. That route authenticates by signature, which is stronger than the
+ * gate it is skipping.
+ *
  * `/login`, `/api/auth` and `/ping` keep the gate escapable and the health
  * check honest. `/register` is deliberately absent: an open registration route
  * hands a stranger the very account the gate exists to withhold.
  */
-const EXEMPT_PREFIXES = ["/api/auth", "/api/internal", "/login", "/ping"];
+const EXEMPT_PREFIXES = [
+  "/api/auth",
+  "/api/internal",
+  "/api/stripe",
+  "/login",
+  "/ping",
+];
 
 export type BetaGate = {
   allowlist: string[];
