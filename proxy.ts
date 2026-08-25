@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
-import { betaVerdict, readBetaGate } from "./lib/beta";
+import { betaVerdict, isAllowedIdentity, readBetaGate } from "./lib/beta";
 import { guestRegex, isDevelopmentEnvironment } from "./lib/constants";
 import { DEMO_COOKIE_NAME } from "./lib/session";
 
@@ -41,14 +41,16 @@ export async function proxy(request: NextRequest) {
     BETA_MODE: process.env.BETA_MODE,
   });
 
+  // Refused visitors are sent to sign in rather than shown a bare 403. The
+  // marker is what lets the page say "Closed beta" instead of implying the
+  // credentials were wrong.
+  const invited = isAllowedIdentity(gate, token?.email);
+
   if (betaVerdict(gate, pathname, token?.email) === "deny") {
-    return new Response(
-      "Closed beta. Sign in at /login with an invited account.",
-      {
-        headers: { "content-type": "text/plain; charset=utf-8" },
-        status: 403,
-      }
-    );
+    const login = new URL(`${base}/login`, request.url);
+    login.searchParams.set("beta", "1");
+
+    return NextResponse.redirect(login);
   }
 
   if (!token) {
@@ -72,7 +74,15 @@ export async function proxy(request: NextRequest) {
 
   const isGuest = guestRegex.test(token?.email ?? "");
 
-  if (token && !isGuest && ["/login", "/register"].includes(pathname)) {
+  // `invited` is load-bearing here. Without it a signed-in stranger is refused
+  // at `/`, redirected to `/login`, bounced back to `/` for being signed in,
+  // and loops forever.
+  if (
+    token &&
+    !isGuest &&
+    invited &&
+    ["/login", "/register"].includes(pathname)
+  ) {
     return NextResponse.redirect(new URL(`${base}/`, request.url));
   }
 

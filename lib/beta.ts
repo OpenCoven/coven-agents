@@ -56,6 +56,31 @@ export function isBetaExempt(pathname: string): boolean {
 }
 
 /**
+ * Whether this identity is admitted at all, independent of the path.
+ *
+ * Separate from `betaVerdict` because the proxy needs both questions and they
+ * are not the same one. "May this request proceed?" is true for `/login` even
+ * when the person is not invited — otherwise the gate would be inescapable.
+ * "Is this person invited?" is what decides whether signing in should bounce
+ * them onward.
+ *
+ * Conflating the two is a redirect loop: a signed-in stranger is refused at
+ * `/`, sent to `/login`, bounced back to `/` for being signed in, and so on.
+ */
+export function isAllowedIdentity(
+  gate: BetaGate,
+  email: string | null | undefined
+): boolean {
+  if (!gate.enabled) {
+    return true;
+  }
+
+  return (
+    Boolean(email) && gate.allowlist.includes(normalizeEmail(email as string))
+  );
+}
+
+/**
  * Whether this request may proceed while the beta is closed.
  *
  * An enabled gate with an empty allowlist denies everyone. That is the whole

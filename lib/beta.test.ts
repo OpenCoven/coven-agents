@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { betaVerdict, isBetaExempt, readBetaGate } from "./beta";
+import {
+  betaVerdict,
+  isAllowedIdentity,
+  isBetaExempt,
+  readBetaGate,
+} from "./beta";
 
 const ON = { BETA_ALLOWLIST: "me@example.com", BETA_MODE: "on" };
 
@@ -112,4 +117,31 @@ test("a disabled gate allows everything", () => {
 
   assert.equal(betaVerdict(gate, "/", null), "allow");
   assert.equal(betaVerdict(gate, "/register", null), "allow");
+});
+
+test("an invited identity is allowed regardless of path", () => {
+  assert.equal(isAllowedIdentity(readBetaGate(ON), "me@example.com"), true);
+});
+
+test("a stranger is not an allowed identity even on an exempt path", () => {
+  // `betaVerdict` says "allow" for /login so the gate stays escapable. That is
+  // a different question from whether the person is invited, and conflating
+  // them loops: refused at /, sent to /login, bounced back to / for being
+  // signed in, forever.
+  const gate = readBetaGate(ON);
+
+  assert.equal(betaVerdict(gate, "/login", "stranger@example.com"), "allow");
+  assert.equal(isAllowedIdentity(gate, "stranger@example.com"), false);
+});
+
+test("a signed-out visitor is not an allowed identity", () => {
+  assert.equal(isAllowedIdentity(readBetaGate(ON), null), false);
+});
+
+test("identity matching ignores case and space", () => {
+  assert.equal(isAllowedIdentity(readBetaGate(ON), " ME@Example.COM "), true);
+});
+
+test("a disabled gate admits everyone", () => {
+  assert.equal(isAllowedIdentity(readBetaGate({}), null), true);
 });
