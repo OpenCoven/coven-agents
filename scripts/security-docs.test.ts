@@ -95,6 +95,15 @@ test("the runbooks state the two facts that break a rotation", () => {
   // Rotating the KEK is not recoverable, so the consequence has to be stated
   // where someone will read it before running the command, not after.
   assert.match(runbooks, /destroys access to every stored credential/);
+
+  /**
+   * Marking a public variable Sensitive protects nothing -- the value is in
+   * every browser's bundle -- while making it unreadable to the people
+   * entitled to see it, so changing its visibility means deleting the only
+   * copy anyone could still read.
+   */
+  assert.match(runbooks, /NEXT_PUBLIC_\*` must never be Sensitive/);
+  assert.match(runbooks, /--no-sensitive/);
 });
 
 test("the README points to the incident runbooks", () => {

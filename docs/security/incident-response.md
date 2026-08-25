@@ -58,14 +58,58 @@ Everything that grants something, where it lives, and what it costs to rotate.
 | `STRIPE_WEBHOOK_SECRET` | Vercel | Forging subscription events | Missed events until updated |
 | Tenant harness credential | Encrypted DB row | Acting as that tenant on GitHub | Theirs to rotate, not ours |
 
-Two properties worth internalising before an incident rather than during one:
+Three properties worth internalising before an incident rather than during one:
 
 - **Vercel Sensitive variables are write-only.** `vercel env pull` and the API
-  both withhold the value. You cannot read a secret to check whether it
-  matches; you can only set a new one. Plan rotations around that.
+  both withhold the value, returning the literal string `[SENSITIVE]`, and the
+  dashboard hides it too. Nobody can read it back — not the CLI, not you. You
+  cannot check whether a secret matches; you can only set a new one. Plan
+  rotations around that.
 - **`vercel redeploy` reuses the existing build.** A `NEXT_PUBLIC_*` value is
   inlined at build time, so changing one requires a fresh push, not a
   redeploy. Server-side variables are picked up by a redeploy.
+- **Never mark a `NEXT_PUBLIC_*` variable Sensitive.** It buys nothing and
+  costs recovery. See below.
+
+### `NEXT_PUBLIC_*` must never be Sensitive
+
+The two properties above combine into a trap.
+
+A `NEXT_PUBLIC_*` value is inlined into the client bundle, so it is served to
+every browser that loads the page. Marking it Sensitive therefore protects
+nothing: the value is public by construction, and the label only hides it from
+the people who are entitled to see it.
+
+What the label *does* do is make the value unrecoverable. It cannot be read
+from the CLI, the API, or the dashboard, so the only way to change its
+visibility is to delete and re-add it — and the delete destroys the one copy
+anybody could still read.
+
+This happened to `NEXT_PUBLIC_CLOUD_RUNNER_URL`, which was Sensitive on Preview
+and Non-sensitive on Production. Aligning them meant deleting a value nobody
+could read first. It was reconstructible only because `wrangler.jsonc` defines
+exactly one worker and no other subdomain resolves, so there was exactly one
+value it could have been. A variable without that property would simply have
+been lost.
+
+Vercel now rejects the combination outright:
+
+> Environment variables with a public framework prefix (NEXT_PUBLIC) cannot use
+> secret visibility on Production or Preview.
+
+Anything still marked that way predates the rule. If you find one:
+
+1. Work out the correct value from a source other than Vercel — the code
+   default, the deployed resource, another environment — **before** deleting.
+2. `vercel env rm <NAME> <environment> --yes`
+3. `printf '%s' "<value>" | vercel env add <NAME> <environment> --no-sensitive`
+
+The `--no-sensitive` flag is required; the add is rejected without it.
+
+If a value turns out to be genuinely unrecoverable, that is the signal it
+should never have carried the `NEXT_PUBLIC_` prefix. Rename it to a
+server-side variable and read it through an API route instead of leaving a
+secret in every visitor's browser.
 
 ## First fifteen minutes
 
