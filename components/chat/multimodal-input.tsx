@@ -777,7 +777,7 @@ function ModelSelectorOption({
         <div className="w-full cursor-not-allowed">{option}</div>
       </TooltipTrigger>
       <TooltipContent side="right" sideOffset={8}>
-        This model is not available in the demo.
+        This model needs an active subscription.
       </TooltipContent>
     </Tooltip>
   );

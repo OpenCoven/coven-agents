@@ -22,8 +22,8 @@ export default function Page() {
         Create or access your account
       </h1>
       <p className="text-muted-foreground text-sm">
-        Continue with GitHub. New accounts start in demo mode, and signing in
-        never starts an agent, sandbox, or run.
+        Continue with GitHub. New accounts start with guest access, and signing
+        in never starts an agent, sandbox, or run.
       </p>
 
       <div className="pt-2">

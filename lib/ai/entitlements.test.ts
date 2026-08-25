@@ -16,5 +16,6 @@ test("a demo plan cannot run a harness", () => {
   // it is the entitlement a paywall would be built on, and it must not
   // default open.
   assert.equal(entitlementsByPlan.demo.canRunHarness, false);
+  assert.equal(entitlementsByPlan.demo.maxMessagesPerHour, 0);
   assert.equal(entitlementsByPlan.subscriber.canRunHarness, true);
 });

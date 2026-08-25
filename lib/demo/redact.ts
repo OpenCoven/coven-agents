@@ -48,10 +48,10 @@ export function assertNoSecrets(
 ): void {
   const nonemptySecrets = Array.from(secrets).filter(Boolean);
   if (containsSecret(transcript, nonemptySecrets)) {
-    throw new Error("Demo transcript contains a provided secret.");
+    throw new Error("Guest transcript contains a provided secret.");
   }
   const serialized = JSON.stringify(transcript);
   if (sanitizeEvidenceText(serialized) !== serialized) {
-    throw new Error("Demo transcript contains sanitizer-recognized evidence.");
+    throw new Error("Guest transcript contains sanitizer-recognized evidence.");
   }
 }

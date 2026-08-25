@@ -1,9 +1,10 @@
 import { eq } from "drizzle-orm";
 import { auth } from "@/app/(auth)/auth";
+import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
+import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { avatarFor, isStorableAvatarUrl } from "@/lib/avatar";
 import { databaseFor } from "@/lib/db/access";
 import { user as userTable } from "@/lib/db/schema";
-import { isSubscriber, toSession } from "@/lib/session";
 
 /**
  * The account's avatar.
@@ -22,7 +23,7 @@ async function resolveAccount() {
   }
 
   return {
-    session: toSession({ id: session.user.id, type: session.user.type }),
+    authSession: session,
     userId: session.user.id,
   };
 }
@@ -34,16 +35,20 @@ export async function GET() {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  if (!isSubscriber(account.session)) {
-    // A demo visitor has no row to read, but they still get a picture: the
-    // generated one needs nothing but the id.
+  const access = await authorizeSubscriberAccess(account.authSession);
+  if (access.kind === "subscription_required") {
+    // Guest access never reads stored account data. The generated avatar needs
+    // only the already-authenticated account id.
     return Response.json({
       avatar: avatarFor({ id: account.userId }),
       custom: false,
     });
   }
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
+  }
 
-  const rows = await databaseFor(account.session)
+  const rows = await databaseFor(access.session)
     .select({ image: userTable.image })
     .from(userTable)
     .where(eq(userTable.id, account.userId))
@@ -70,14 +75,9 @@ export async function PUT(request: Request) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  if (!isSubscriber(account.session)) {
-    return Response.json(
-      {
-        error: "subscription_required",
-        message: "Setting an avatar needs an active subscription.",
-      },
-      { status: 403 }
-    );
+  const access = await authorizeSubscriberAccess(account.authSession);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
   }
 
   const body = (await request.json().catch(() => null)) as {
@@ -103,7 +103,7 @@ export async function PUT(request: Request) {
 
   const image = trimmed || null;
 
-  await databaseFor(account.session)
+  await databaseFor(access.session)
     .update(userTable)
     .set({ image })
     .where(eq(userTable.id, account.userId));

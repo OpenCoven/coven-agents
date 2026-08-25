@@ -4,7 +4,7 @@
 - Owner: Security & privacy workstream
 - Companion to: [Security incident response](incident-response.md), which
   covers what to do once one of these threats has occurred
-- Applies to: control plane, shared contracts, cloud runner, demo publication,
+- Applies to: control plane, shared contracts, cloud runner, guest publication,
   and operator credentials
 
 ## Scope and security goals
@@ -21,13 +21,13 @@ This model covers:
 - the shared contracts and evidence normalization package;
 - the Cloudflare Worker, Durable Objects, and sandbox containers;
 - operator, deployment, tenant, and harness credentials;
-- committed demo evidence and source-control boundaries.
+- committed guest-preview evidence and source-control boundaries.
 
 Security goals:
 
 1. A caller cannot act as another tenant or access another tenant's agent,
    sandbox, credential, run, or database state.
-2. Demo and unsubscribed identities cannot obtain subscriber execution or
+2. Guest and unsubscribed identities cannot obtain subscriber execution or
    persistence authority.
 3. Harness credentials remain under tenant ownership, are encrypted at rest,
    and are exposed only to the intended run.
@@ -52,7 +52,7 @@ Out of scope:
 Relevant actors:
 
 - an unauthenticated internet client probing public routes;
-- an authenticated demo user with no execution entitlement;
+- an authenticated guest account with no execution entitlement;
 - a subscriber acting within their own tenant;
 - a malicious tenant attempting cross-tenant access or resource exhaustion;
 - a compromised browser, extension, local process, or website;
@@ -106,7 +106,7 @@ Assumptions:
 | Tenant harness credential | Acts as the tenant at a coding provider | Encrypted database row; in-memory run scope |
 | Tenant identity and entitlement | Determines persistence and execution authority | Control plane |
 | Agent definitions and run evidence | May contain private repository or task context | Tenant-scoped storage and UI |
-| Demo fixtures | Publicly rendered execution evidence | Repository |
+| Guest replay fixtures | Publicly rendered execution evidence | Repository |
 | Roadmap and source history | Can disclose private details or committed credentials | Private repository and private Beads store |
 
 ## Trust boundaries
@@ -116,7 +116,8 @@ Assumptions:
 The browser is untrusted input. GitHub authentication establishes a user, but
 subscriber authority is recomputed from server-owned subscription state.
 `lib/session.ts`, `lib/db/access.ts`, and `lib/agents/connection-access.ts`
-separate demo, subscriber, database, and runner-connection authority.
+separate guest (internally `demo`), subscriber, database, and runner-connection
+authority.
 
 ### B2. Browser to cloud runner
 
@@ -134,11 +135,18 @@ requires the subscriber plan. A body/claim mismatch is refused.
 
 ### B4. Control plane database and credential custody
 
-Browser-facing database access requires a `SubscriberSession` through
-`lib/db/access.ts`. Tenant credentials are scoped by tenant and harness and
-sealed before storage in `lib/credentials/store.ts`; the KEK has no default.
-The internal credential route is the documented service-to-service exception
-and replaces the session gate with service and signed-identity checks.
+Browser-facing product-data access requires subscriber authority. New paths use
+a `SubscriberSession` through `lib/db/access.ts`; legacy chat paths call the
+same fail-closed subscriber gate before their query helpers. Guest claims are
+rejected without a subscription lookup; subscriber-claiming sessions are
+revalidated against current server-owned subscription state, so revocation
+does not wait for token expiry. Narrow account, usage-status, and checkout
+paths are documented guest exceptions and expose no chat, document,
+credential, agent, or run data. Tenant credentials are scoped by tenant and
+harness and sealed before storage in `lib/credentials/store.ts`; the KEK has no
+default. The internal credential route is the documented service-to-service
+exception and replaces the session gate with service and signed-identity
+checks.
 
 ### B5. Worker to Durable Objects and sandboxes
 
@@ -152,10 +160,10 @@ tenant-scoped listing and ownership checks.
 Container isolation exists, but a declared outbound network policy does not.
 Cloud egress is therefore a residual risk tracked by `coven-agents-cloud.4`.
 
-### B7. Evidence to storage, UI, demo, and Git
+### B7. Evidence to storage, UI, guest preview, and Git
 
 `packages/agent-contracts/src/evidence.ts` removes recognized credentials,
-sensitive assignments, headers, and explicit run-local secrets. The demo
+sensitive assignments, headers, and explicit run-local secrets. The guest
 recorder redacts before schema validation, and `lib/demo/fixtures.test.ts`
 checks both raw and canonical JSON. `scripts/secret-scan.ts` scans staged and
 tracked Git content without printing matched values.
@@ -166,17 +174,17 @@ tracked Git content without printing matched values.
 | --- | --- | --- | --- |
 | T1 | A forged cloud identity reads or mutates another tenant's agents or runs. | Ed25519 claims are minted only in `lib/agents/runner-token.ts`; verification and tenant-scoped routes are in `worker/src/routes.ts`. Cross-tenant read, run, stream, stop, and delete refusals are covered by `worker/src/routes.test.ts`. | Signing-key compromise remains critical. Rotation and deployment procedure must keep the private key control-plane-only. |
 | T2 | The shared cloud control token becomes a master tenant credential. | The token only gates deployment access. Tenant identity comes from the signed claim; the internal credential endpoint independently verifies that claim. | Browser compromise can use the current user's authority until session and runner claims expire. |
-| T3 | A demo, lapsed, forged, or unknown entitlement gains subscriber persistence or execution. | `lib/session.ts` fails closed to demo; `lib/db/access.ts` requires `SubscriberSession`; `lib/agents/connection-access.ts` refuses the runner gate; the internal credential binding requires `plan === "subscriber"`. | The complete provider-ingestion state machine and adversarial transition coverage remain tracked by `coven-agents-security.2`. |
+| T3 | A guest, lapsed, forged, or unknown entitlement gains subscriber persistence or execution. | `lib/session.ts` fails closed to internal plan `demo`; `lib/auth/subscriber-access.ts` gates model and persistent routes; `lib/db/access.ts` requires `SubscriberSession`; runner connection and identity routes refuse guest accounts; the Worker and internal credential binding require `plan === "subscriber"`. | The complete provider-ingestion state machine and adversarial transition coverage remain tracked by `coven-agents-security.2`. |
 | T4 | A tenant or harness receives another tenant's credential. | `lib/credentials/store.ts` scopes by tenant plus harness. The internal endpoint binds tenant to a verified claim, refuses mismatch, and lends one credential for one run. Isolation and binding tests cover cross-tenant and cross-harness cases. | Plaintext exists in control-plane and Worker memory during a run. Process compromise during that window can expose it. |
 | T5 | Credential storage is copied or read at rest. | Per-credential AES-GCM data keys are wrapped by `CREDENTIAL_KEK`; the KEK is required and not stored in rows. The Worker stores no harness credential between runs. | Database plus KEK compromise defeats encryption. Rotation and rewrapping need an operator procedure. |
 | T6 | Crafted tenant identifiers collide and share a cloud sandbox. | `worker/src/tenant.ts` rejects ambiguous identifiers and centralizes sandbox-key derivation. `worker/src/tenant.test.ts` covers collisions, missing owners, and create/delete consistency. | New owner kinds must preserve the exhaustive mapping and tests. |
 | T7 | A cloud harness escapes its intended filesystem or exfiltrates over the network. | Each agent runs in a Cloudflare sandbox keyed by tenant and agent. No operator harness credential is available as fallback. | Outbound policy is not yet declared or enforced. Complete `coven-agents-cloud.4`; expand readiness checks in `coven-agents-cloud.5`. |
 | T8 | A run exhausts memory, disk, processes, containers, or paid capacity. | Cloud runs are idempotent per operation, one active run per agent is enforced, and the credential boundary enforces the monthly cap before lending a credential. | Platform-wide queueing and fairness remain in `coven-agents-cloud.3`. |
-| T9 | Harness output leaks credentials or private paths into UI, storage, logs, or demos. | Shared redaction lives in `packages/agent-contracts/src/evidence.ts`; cloud normalization and demo publication tests exercise direct and encoded values; errors use static or sanitized messages. | Redaction is pattern-based. Complete shared end-to-end coverage in `coven-agents-security.3`. |
-| T10 | A crafted request, event, or stored record bypasses validation or causes unsafe replay. | Shared Zod contracts bound lengths, enums, event ordering, and strict object shapes. Routes distinguish invalid requests from internal failures. Demo fixtures are schema-validated before load. | Cross-backend conformance remains in `coven-agents-testing.1`; unknown historical schema migration remains a future data concern. |
+| T9 | Harness output leaks credentials or private paths into UI, storage, logs, or guest previews. | Shared redaction lives in `packages/agent-contracts/src/evidence.ts`; cloud normalization and guest publication tests exercise direct and encoded values; errors use static or sanitized messages. | Redaction is pattern-based. Complete shared end-to-end coverage in `coven-agents-security.3`. |
+| T10 | A crafted request, event, or stored record bypasses validation or causes unsafe replay. | Shared Zod contracts bound lengths, enums, event ordering, and strict object shapes. Routes distinguish invalid requests from internal failures. Guest fixtures are schema-validated before load. | Cross-backend conformance remains in `coven-agents-testing.1`; unknown historical schema migration remains a future data concern. |
 | T11 | Prompt injection persuades an authorized harness to perform destructive work. | Authorization, workspace selection, tenant isolation, and execution limits still apply; cloud damage is contained to the sandbox and tenant-accessible services. | Prompt injection is not preventable by prompt text. Local runs must use disposable or trusted workspaces, and operators remain responsible for granted credentials. |
 | T12 | Run or agent data persists longer than expected or survives a crash ambiguously. | Current stores are bounded by their implementations, and cloud lifecycle state records terminal transitions. | Formal in-flight journals, durable history, retention, and recovery are tracked by `coven-agents-data.1`, `coven-agents-data.2`, `coven-agents-data.3`. |
-| T13 | A committed secret or private transcript enters source history. | `.husky/pre-commit` runs `scripts/secret-scan.ts`; CI has a tracked-file scan; findings omit values. Demo recording is cloud-only, repository-restricted, redacted, schema-validated, and checked in raw and canonical forms. | Hooks can be bypassed locally. Recurring scanning and triage remain in `coven-agents-security.4`; protected-path approval remains in `coven-agents-dx.4`. |
+| T13 | A committed secret or private transcript enters source history. | `.husky/pre-commit` runs `scripts/secret-scan.ts`; CI has a tracked-file scan; findings omit values. Guest recording is cloud-only, repository-restricted, redacted, schema-validated, and checked in raw and canonical forms. | Hooks can be bypassed locally. Recurring scanning and triage remain in `coven-agents-security.4`; protected-path approval remains in `coven-agents-dx.4`. |
 | T14 | A dependency, workflow action, or source change compromises the execution path. | The lockfile is frozen in CI, GitHub Actions are commit-pinned, Dependabot is configured, and local lint/type/test/build gates are required before merge. | Consolidated dependency, workflow, and source scanning is tracked by `coven-agents-security.4`. |
 
 ## Incident and recovery expectations
@@ -193,7 +201,7 @@ new work rather than fall back to shared authority.
 | Tenant harness-credential compromise | Revoke at the harness provider, stop affected runs, destroy or recycle affected sandboxes, and replace the encrypted tenant/harness row through `lib/credentials/store.ts`. | Verify the old credential no longer works and cross-tenant tests still pass without recording the credential value. |
 | Suspected cross-tenant cloud access | Suspend affected execution, preserve sanitized ownership and operation identifiers, stop the run, and destroy the implicated sandbox. Do not expose another tenant's record while notifying users. | Reproduce with `worker/src/routes.test.ts` and `worker/src/tenant.test.ts`; repair ownership before restoring service. |
 | Resource-exhaustion or orphaned execution | Refuse new work, stop bounded runs, and prefer explicit busy or recovery states over silently starting duplicates. | Cloud fairness is completed through `coven-agents-cloud.3`. |
-| Evidence-redaction failure | Stop publication or persistence of the affected evidence, revoke any exposed credential, sanitize already published artifacts, and add the missed shape as a regression. | Run shared evidence, demo fixture, and recorder tests. End-to-end redaction remains `coven-agents-security.3`. |
+| Evidence-redaction failure | Stop publication or persistence of the affected evidence, revoke any exposed credential, sanitize already published artifacts, and add the missed shape as a regression. | Run shared evidence, guest fixture, and recorder tests. End-to-end redaction remains `coven-agents-security.3`. |
 
 ## Verification and review
 
@@ -206,8 +214,8 @@ run the narrow tests for the affected boundary plus the repository gates.
 | Database and credential custody | `lib/db/access.test.ts`, `lib/credentials/envelope.test.ts`, `lib/credentials/authorize.test.ts`, `app/api/internal/credential/*.test.ts` |
 | Cloud identity and tenancy | `lib/agents/runner-token.test.ts`, `worker/src/routes.test.ts`, `worker/src/tenant.test.ts`, `worker/src/tenant-credentials.test.ts` |
 | Cloud execution and evidence | `worker/src/harness-runner.test.ts`, `worker/src/run-state.test.ts`, `worker/src/agents.test.ts` |
-| Shared contracts and redaction | `packages/agent-contracts/src/*.test.ts`, especially evidence-safety and demo-transcript tests |
-| Demo publication | `scripts/demo-record.test.ts`, `scripts/demo-capture.test.ts`, `lib/demo/fixtures.test.ts` |
+| Shared contracts and redaction | `packages/agent-contracts/src/*.test.ts`, especially evidence-safety and guest-transcript compatibility tests |
+| Guest publication | `scripts/demo-record.test.ts`, `scripts/demo-capture.test.ts`, `lib/demo/fixtures.test.ts` |
 | Source-control boundary | `scripts/secret-scan.test.ts`, `pnpm secret:scan`, `pnpm secret:scan:all` |
 
 Repository gates:
@@ -227,7 +235,7 @@ Review this document when any of the following changes:
 - credential storage, service authentication, or key rotation;
 - tenant, owner, sandbox, workspace, or process-lifecycle logic;
 - network policy, CORS, public routes, or deployment topology;
-- evidence schemas, persistence, retention, export, or demo publication;
+- evidence schemas, persistence, retention, export, or guest publication;
 - local execution isolation or cloud container capabilities;
 - a new harness, provider credential shape, or secret source;
 - a security incident invalidates an assumption recorded here.

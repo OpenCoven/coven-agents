@@ -78,8 +78,8 @@ export function AccountMenu() {
       <DropdownMenuContent align="end" className="w-56">
         <div className="px-2 py-1.5">
           <p className="truncate font-medium text-[13px]">{email}</p>
-          <p className="text-[11px] text-muted-foreground capitalize">
-            {session?.user?.type ?? "demo"}
+          <p className="text-[11px] text-muted-foreground">
+            {session?.user?.type === "subscriber" ? "Subscriber" : "Guest"}
           </p>
         </div>
 

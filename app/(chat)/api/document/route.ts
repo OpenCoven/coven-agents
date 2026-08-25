@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { auth } from "@/app/(auth)/auth";
 import type { ArtifactKind } from "@/components/chat/artifact";
+import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
+import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import {
   deleteDocumentsByIdAfterTimestamp,
   getDocumentsById,
@@ -28,9 +30,9 @@ export async function GET(request: Request) {
   }
 
   const session = await auth();
-
-  if (!session?.user) {
-    return new ChatbotError("unauthorized:document").toResponse();
+  const access = await authorizeSubscriberAccess(session);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
   }
 
   const documents = await getDocumentsById({ id });
@@ -41,7 +43,7 @@ export async function GET(request: Request) {
     return new ChatbotError("not_found:document").toResponse();
   }
 
-  if (document.userId !== session.user.id) {
+  if (document.userId !== access.userId) {
     return new ChatbotError("forbidden:document").toResponse();
   }
 
@@ -60,9 +62,9 @@ export async function POST(request: Request) {
   }
 
   const session = await auth();
-
-  if (!session?.user) {
-    return new ChatbotError("not_found:document").toResponse();
+  const access = await authorizeSubscriberAccess(session);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
   }
 
   let content: string;
@@ -86,7 +88,7 @@ export async function POST(request: Request) {
   if (documents.length > 0) {
     const [doc] = documents;
 
-    if (doc.userId !== session.user.id) {
+    if (doc.userId !== access.userId) {
       return new ChatbotError("forbidden:document").toResponse();
     }
   }
@@ -101,7 +103,7 @@ export async function POST(request: Request) {
     id,
     kind,
     title,
-    userId: session.user.id,
+    userId: access.userId,
   });
 
   return Response.json(document, { status: 200 });
@@ -127,16 +129,16 @@ export async function DELETE(request: Request) {
   }
 
   const session = await auth();
-
-  if (!session?.user) {
-    return new ChatbotError("unauthorized:document").toResponse();
+  const access = await authorizeSubscriberAccess(session);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
   }
 
   const documents = await getDocumentsById({ id });
 
   const [document] = documents;
 
-  if (document.userId !== session.user.id) {
+  if (document.userId !== access.userId) {
     return new ChatbotError("forbidden:document").toResponse();
   }
 

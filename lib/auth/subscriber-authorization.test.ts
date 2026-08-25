@@ -1,0 +1,56 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { revalidateSubscriberAccess } from "./subscriber-authorization";
+
+const NOW = new Date("2026-08-25T12:00:00.000Z");
+const USER_ID = "9c858901-8a57-4791-81fe-4c455b099bc9";
+
+test("guest accounts fail before subscription storage is read", async () => {
+  let lookups = 0;
+  const decision = await revalidateSubscriberAccess(
+    { user: { id: USER_ID, type: "demo" } },
+    () => {
+      lookups += 1;
+      return Promise.resolve({
+        subscribedUntil: new Date(NOW.getTime() + 60_000),
+      });
+    },
+    NOW
+  );
+
+  assert.deepEqual(decision, { kind: "subscription_required" });
+  assert.equal(lookups, 0);
+});
+
+test("active server-owned subscription authority is allowed", async () => {
+  const decision = await revalidateSubscriberAccess(
+    { user: { id: USER_ID, type: "subscriber" } },
+    () =>
+      Promise.resolve({
+        subscribedUntil: new Date(NOW.getTime() + 60_000),
+      }),
+    NOW
+  );
+
+  assert.equal(decision.kind, "allowed");
+});
+
+test("a revoked subscriber token fails closed immediately", async () => {
+  const decision = await revalidateSubscriberAccess(
+    { user: { id: USER_ID, type: "subscriber" } },
+    () => Promise.resolve({ subscribedUntil: null }),
+    NOW
+  );
+
+  assert.deepEqual(decision, { kind: "subscription_required" });
+});
+
+test("a missing subscriber row fails closed", async () => {
+  const decision = await revalidateSubscriberAccess(
+    { user: { id: USER_ID, type: "subscriber" } },
+    () => Promise.resolve(null),
+    NOW
+  );
+
+  assert.deepEqual(decision, { kind: "subscription_required" });
+});

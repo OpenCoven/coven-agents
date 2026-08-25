@@ -56,7 +56,7 @@ export function HarnessCredentials() {
     const response = await fetch("/api/credentials");
 
     if (response.status === 403) {
-      // A demo session cannot store one, and saying so beats a form that
+      // A guest account cannot store one, and saying so beats a form that
       // fails on submit.
       setLocked(true);
       return;

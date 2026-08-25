@@ -46,7 +46,7 @@ test("the client player plans the transcript before scheduling playback", () => 
   );
   assert.match(replayPlayer, /planPlayback\(transcript\.events\)/);
   assert.match(replayPlayer, /schedulePlayback\(/);
-  assert.match(replayPlayer, /Replay demo run/);
+  assert.match(replayPlayer, /Replay guest run/);
 });
 
 test("the replay button shows a high-contrast keyboard focus ring", () => {
@@ -54,7 +54,7 @@ test("the replay button shows a high-contrast keyboard focus ring", () => {
 
   assert.match(
     replayPlayer,
-    /aria-label="Replay demo run"[\s\S]*?className="[^"]*focus-visible:border-white\s+focus-visible:ring-\[3px\]\s+focus-visible:ring-white\/70/
+    /aria-label="Replay guest run"[\s\S]*?className="[^"]*focus-visible:border-white\s+focus-visible:ring-\[3px\]\s+focus-visible:ring-white\/70/
   );
 });
 
@@ -66,26 +66,23 @@ test("the demo uses the purple brand palette", () => {
   assert.doesNotMatch(sources, /emerald-/);
 });
 
-test("curated demo data is not described as a live recording", () => {
+test("curated guest data is not described as a live recording", () => {
   const demoRoot = read(demoRootUrl);
 
-  assert.match(demoRoot, /Curated agent demo/);
-  assert.match(demoRoot, /Safe demo replay/);
-  assert.match(
-    demoRoot,
-    /deterministic example built from sanitized demo evidence/
-  );
+  assert.match(demoRoot, /Curated guest preview/);
+  assert.match(demoRoot, /Safe guest replay/);
+  assert.match(demoRoot, /deterministic example built from sanitized evidence/);
   assert.doesNotMatch(demoRoot, /Recorded agent run|Recorded replay/);
 });
 
-test("the demo offers GitHub account creation without starting live resources", () => {
+test("the guest preview offers account creation without starting live resources", () => {
   const demoRoot = read(demoRootUrl);
   const githubSignIn = read(githubSignInUrl);
   const loginPage = read(loginPageUrl);
 
   assert.match(demoRoot, /href="\/login"[\s\S]*?prefetch=\{false\}/);
-  assert.match(demoRoot, /Create demo account/);
-  assert.match(loginPage, /New accounts start in demo mode/);
+  assert.match(demoRoot, /Create guest account/);
+  assert.match(loginPage, /New accounts start with guest access/);
   assert.match(loginPage, /never starts an agent, sandbox, or run/);
   assert.match(loginPage, /<GithubSignIn callbackUrl="\/"\s*\/>/);
   assert.doesNotMatch(loginPage, /callbackUrl="\/agents"/);
