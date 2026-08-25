@@ -29,7 +29,7 @@ export async function mintRunnerToken(
 
   const key = await crypto.subtle.importKey(
     "pkcs8",
-    base64UrlDecode(privateKeyPkcs8),
+    new Uint8Array(base64UrlDecode(privateKeyPkcs8)),
     { name: TOKEN_ALGORITHM },
     false,
     ["sign"]

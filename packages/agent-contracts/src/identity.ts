@@ -63,7 +63,7 @@ export function base64UrlEncode(bytes: Uint8Array): string {
  * returns null. A caller decoding the signature or payload segment of an
  * attacker-supplied token must handle that throw itself.
  */
-export function base64UrlDecode(value: string): Uint8Array {
+export function base64UrlDecode(value: string): Uint8Array<ArrayBuffer> {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/");
   const remainder = padded.length % 4;
   const withPadding =
