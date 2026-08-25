@@ -99,6 +99,17 @@ function summary(): RoadmapSummary {
   };
 }
 
+function sourceWithSummary(value: RoadmapSummary): string {
+  return `${START}
+${DATA_PREFIX}${JSON.stringify(value)} -->
+${END}`;
+}
+
+function assertSummaryRejected(value: RoadmapSummary): void {
+  assert.throws(() => renderRoadmapStatusBlock(value, REFRESHED_AT));
+  assert.throws(() => extractRoadmapSummary(sourceWithSummary(value)));
+}
+
 test("renders a deterministic exact roadmap status snapshot", () => {
   assert.equal(ROADMAP_STATUS_START, START);
   assert.equal(ROADMAP_STATUS_END, END);
@@ -157,6 +168,39 @@ test("rejects invalid summaries and non-ISO refreshed timestamps", () => {
   }
 });
 
+test("rejects every arithmetic summary imbalance", () => {
+  const topStatusMismatch = summary();
+  topStatusMismatch.byStatus.Todo += 1;
+
+  const waveTotalMismatch = summary();
+  waveTotalMismatch.byWave["6 - Operations"].byStatus.Todo += 1;
+  waveTotalMismatch.byWave["6 - Operations"].total += 1;
+
+  const waveBlockedMismatch = summary();
+  waveBlockedMismatch.byWave["3 - Certify"].blockedCount += 1;
+
+  const waveStatusMismatch = summary();
+  waveStatusMismatch.byWave["6 - Operations"].byStatus.Todo += 1;
+
+  const topBlockedOverflow = summary();
+  topBlockedOverflow.blockedCount = topBlockedOverflow.totalCount + 1;
+
+  const waveBlockedOverflow = summary();
+  waveBlockedOverflow.byWave["0 - Delivered"].blockedCount = 2;
+  waveBlockedOverflow.blockedCount = 5;
+
+  for (const value of [
+    topStatusMismatch,
+    waveTotalMismatch,
+    waveBlockedMismatch,
+    waveStatusMismatch,
+    topBlockedOverflow,
+    waveBlockedOverflow,
+  ]) {
+    assertSummaryRejected(value);
+  }
+});
+
 test("extracts the rendered roadmap summary round-trip", () => {
   const expected = summary();
 
@@ -207,6 +251,50 @@ test("rejects hidden records with leading or trailing line junk", () => {
   );
 });
 
+test("ignores marker and data substrings embedded in authored lines", () => {
+  const expected = summary();
+  const rendered = renderRoadmapStatusBlock(expected, REFRESHED_AT).trimEnd();
+  const prefix = `Authored ${START} inline
+Authored ${DATA_PREFIX}inline`;
+  const suffix = `Authored ${END} inline`;
+  const source = `${prefix}
+${rendered}
+${suffix}`;
+
+  assert.deepEqual(extractRoadmapSummary(source), expected);
+
+  const replacement = renderRoadmapStatusBlock(
+    expected,
+    "2026-08-26T02:00:00-05:00"
+  ).trimEnd();
+
+  assert.equal(
+    replaceRoadmapStatusBlock(source, replacement),
+    `${prefix}
+${replacement}
+${suffix}`
+  );
+});
+
+test("rejects markers with leading or trailing line junk", () => {
+  const record = `${DATA_PREFIX}${JSON.stringify(summary())} -->`;
+
+  for (const source of [
+    `leading ${START}\n${record}\n${END}`,
+    `${START} trailing\n${record}\n${END}`,
+    `${START}\n${record}\nleading ${END}`,
+    `${START}\n${record}\n${END} trailing`,
+  ]) {
+    assert.throws(() => extractRoadmapSummary(source));
+    assert.throws(() =>
+      replaceRoadmapStatusBlock(
+        source,
+        renderRoadmapStatusBlock(summary(), REFRESHED_AT)
+      )
+    );
+  }
+});
+
 test("rejects missing or duplicate hidden data records", () => {
   const rendered = renderRoadmapStatusBlock(summary(), REFRESHED_AT);
   const recordStart = rendered.indexOf(DATA_PREFIX);
@@ -246,10 +334,11 @@ test("rejects malformed hidden JSON and strict schema violations", () => {
 
 test("replaces only the marked block and preserves authored bytes", () => {
   const prefix = "Title \t\r\n  authored prefix\t\r\n";
-  const suffix = " \tAUTHORED suffix\r\n";
+  const suffix = "\r\n \tAUTHORED suffix\r\n";
   const oldBlock = renderRoadmapStatusBlock(summary(), REFRESHED_AT).trimEnd();
   const nextSummary = summary();
   nextSummary.blockedCount = 4;
+  nextSummary.byWave["3 - Certify"].blockedCount = 1;
   const replacement = renderRoadmapStatusBlock(
     nextSummary,
     "2026-08-26T02:00:00-05:00"
@@ -259,6 +348,28 @@ test("replaces only the marked block and preserves authored bytes", () => {
     `${prefix}${oldBlock}${suffix}`,
     `${replacement}\n\n`
   );
+
+  assert.equal(result, `${prefix}${replacement.trimEnd()}${suffix}`);
+  assert.equal(result.slice(0, prefix.length), prefix);
+  assert.equal(result.slice(-suffix.length), suffix);
+});
+
+test("extracts CRLF canonical source and preserves surrounding CRLF bytes", () => {
+  const expected = summary();
+  const oldBlock = renderRoadmapStatusBlock(expected, REFRESHED_AT)
+    .trimEnd()
+    .replaceAll("\n", "\r\n");
+  const prefix = "Authored prefix\r\n";
+  const suffix = "\r\nAuthored suffix\r\n";
+  const source = `${prefix}${oldBlock}${suffix}`;
+
+  assert.deepEqual(extractRoadmapSummary(source), expected);
+
+  const replacement = renderRoadmapStatusBlock(
+    expected,
+    "2026-08-26T02:00:00-05:00"
+  ).trimEnd();
+  const result = replaceRoadmapStatusBlock(source, replacement);
 
   assert.equal(result, `${prefix}${replacement}${suffix}`);
   assert.equal(result.slice(0, prefix.length), prefix);

@@ -18,47 +18,124 @@ type MarkerRange = {
   start: number;
 };
 
-function findAll(source: string, marker: string): number[] {
-  const positions: number[] = [];
-  let offset = 0;
+type SourceLine = {
+  content: string;
+  end: number;
+  start: number;
+};
 
-  while (offset <= source.length - marker.length) {
-    const position = source.indexOf(marker, offset);
+function sourceLines(source: string): SourceLine[] {
+  const lines: SourceLine[] = [];
+  let start = 0;
 
-    if (position === -1) {
+  while (start <= source.length) {
+    const lineFeed = source.indexOf("\n", start);
+
+    if (lineFeed === -1) {
+      lines.push({
+        content: source.slice(start),
+        end: source.length,
+        start,
+      });
       break;
     }
 
-    positions.push(position);
-    offset = position + marker.length;
+    const end =
+      lineFeed > start && source[lineFeed - 1] === "\r"
+        ? lineFeed - 1
+        : lineFeed;
+
+    lines.push({
+      content: source.slice(start, end),
+      end,
+      start,
+    });
+    start = lineFeed + 1;
   }
 
-  return positions;
+  return lines;
 }
 
 function findStatusBlock(source: string): MarkerRange {
-  const starts = findAll(source, ROADMAP_STATUS_START);
-  const ends = findAll(source, ROADMAP_STATUS_END);
+  const lines = sourceLines(source);
+  const starts = lines.filter((line) => line.content === ROADMAP_STATUS_START);
+  const ends = lines.filter((line) => line.content === ROADMAP_STATUS_END);
 
   if (starts.length !== 1 || ends.length !== 1) {
     throw new Error("Expected exactly one roadmap status marker pair");
   }
 
-  const [start] = starts;
-  const [end] = ends;
+  const [startLine] = starts;
+  const [endLine] = ends;
 
-  if (start === undefined || end === undefined || start >= end) {
+  if (
+    startLine === undefined ||
+    endLine === undefined ||
+    startLine.start >= endLine.start
+  ) {
     throw new Error("Roadmap status markers are not correctly ordered");
   }
 
-  return { end, start };
+  return { end: endLine.start, start: startLine.start };
+}
+
+function sumStatuses(summary: RoadmapSummary["byStatus"]): number {
+  let total = 0;
+
+  for (const status of PROJECT_STATUSES) {
+    total += summary[status];
+  }
+
+  return total;
+}
+
+function validateRoadmapSummary(summary: RoadmapSummary): RoadmapSummary {
+  if (sumStatuses(summary.byStatus) !== summary.totalCount) {
+    throw new Error("Roadmap status counts do not equal the total count");
+  }
+
+  if (summary.blockedCount > summary.totalCount) {
+    throw new Error("Roadmap blocked count exceeds the total count");
+  }
+
+  let waveTotal = 0;
+  let waveBlockedTotal = 0;
+
+  for (const wave of WAVES) {
+    const waveSummary = summary.byWave[wave];
+
+    if (sumStatuses(waveSummary.byStatus) !== waveSummary.total) {
+      throw new Error(`Roadmap status counts do not equal total for ${wave}`);
+    }
+
+    if (waveSummary.blockedCount > waveSummary.total) {
+      throw new Error(`Roadmap blocked count exceeds total for ${wave}`);
+    }
+
+    waveTotal += waveSummary.total;
+    waveBlockedTotal += waveSummary.blockedCount;
+  }
+
+  if (waveTotal !== summary.totalCount) {
+    throw new Error("Roadmap wave totals do not equal the total count");
+  }
+
+  if (waveBlockedTotal !== summary.blockedCount) {
+    throw new Error(
+      "Roadmap wave blocked counts do not equal the blocked count"
+    );
+  }
+
+  return summary;
 }
 
 export function renderRoadmapStatusBlock(
   summary: RoadmapSummary,
   refreshedAt: string
 ): string {
-  const parsedSummary = roadmapSummarySchema.parse(summary);
+  const parsedSummary = validateRoadmapSummary(
+    roadmapSummarySchema.parse(summary)
+  );
   const parsedRefreshedAt = refreshedAtSchema.parse(refreshedAt);
   const waveRows = WAVES.map((wave) => {
     const waveSummary = parsedSummary.byWave[wave];
@@ -88,46 +165,34 @@ export function renderRoadmapStatusBlock(
 
 export function extractRoadmapSummary(source: string): RoadmapSummary {
   const statusBlock = findStatusBlock(source);
-  const records = findAll(source, ROADMAP_STATUS_DATA_PREFIX);
+  const records = sourceLines(source).filter(
+    (line) =>
+      line.content.startsWith(ROADMAP_STATUS_DATA_PREFIX) &&
+      line.content.endsWith(HIDDEN_RECORD_END)
+  );
 
   if (records.length !== 1) {
     throw new Error("Expected exactly one roadmap status data record");
   }
 
-  const [recordStart] = records;
+  const [recordLine] = records;
 
-  if (recordStart === undefined) {
+  if (recordLine === undefined) {
     throw new Error("Roadmap status data record is missing");
   }
 
-  const lineStart =
-    Math.max(
-      source.lastIndexOf("\n", recordStart - 1),
-      source.lastIndexOf("\r", recordStart - 1)
-    ) + 1;
-  const nextLineFeed = source.indexOf("\n", recordStart);
-  const nextCarriageReturn = source.indexOf("\r", recordStart);
-  const lineEnd = Math.min(
-    nextLineFeed === -1 ? source.length : nextLineFeed,
-    nextCarriageReturn === -1 ? source.length : nextCarriageReturn
-  );
-  const record = source.slice(lineStart, lineEnd);
+  const record = recordLine.content;
   const statusBlockStart = statusBlock.start + ROADMAP_STATUS_START.length;
 
-  if (
-    recordStart !== lineStart ||
-    lineStart < statusBlockStart ||
-    lineEnd > statusBlock.end ||
-    !record.endsWith(HIDDEN_RECORD_END)
-  ) {
+  if (recordLine.start < statusBlockStart || recordLine.end > statusBlock.end) {
     throw new Error("Roadmap status data record is malformed");
   }
 
   const jsonStart = ROADMAP_STATUS_DATA_PREFIX.length;
   const jsonEnd = record.length - HIDDEN_RECORD_END.length;
 
-  return roadmapSummarySchema.parse(
-    JSON.parse(record.slice(jsonStart, jsonEnd))
+  return validateRoadmapSummary(
+    roadmapSummarySchema.parse(JSON.parse(record.slice(jsonStart, jsonEnd)))
   );
 }
 
@@ -137,7 +202,7 @@ export function replaceRoadmapStatusBlock(
 ): string {
   const sourceRange = findStatusBlock(source);
   const replacementWithoutTrailingNewlines = replacement.replace(
-    /[\r\n]+$/u,
+    /(?:\r\n|\n)+$/u,
     ""
   );
   const replacementRange = findStatusBlock(replacementWithoutTrailingNewlines);
@@ -153,10 +218,8 @@ export function replaceRoadmapStatusBlock(
   }
 
   extractRoadmapSummary(replacementWithoutTrailingNewlines);
-
   const sourceEnd = sourceRange.end + ROADMAP_STATUS_END.length;
   const suffix = source.slice(sourceEnd);
-  const replacementSeparator = /^[\r\n]/u.test(suffix) ? "" : "\n";
 
-  return `${source.slice(0, sourceRange.start)}${replacementWithoutTrailingNewlines}${replacementSeparator}${suffix}`;
+  return `${source.slice(0, sourceRange.start)}${replacementWithoutTrailingNewlines}${suffix}`;
 }
