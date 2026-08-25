@@ -17,6 +17,6 @@ export function resolveDemoView(transcript: DemoTranscript | null) {
     description:
       "No recorded run is available to replay. No live run was started.",
     kind: "unavailable",
-    title: "Demo unavailable",
+    title: "Guest preview unavailable",
   } as const;
 }

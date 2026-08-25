@@ -31,7 +31,7 @@ function DemoFrame({ children }: { children: React.ReactNode }) {
             <div>
               <div className="font-semibold tracking-[-0.02em]">OpenCoven</div>
               <div className="font-mono text-[10px] text-violet-200/60 uppercase tracking-[0.22em]">
-                Curated agent demo
+                Curated guest preview
               </div>
             </div>
           </div>
@@ -40,7 +40,7 @@ function DemoFrame({ children }: { children: React.ReactNode }) {
             href="/login"
             prefetch={false}
           >
-            Create demo account
+            Create guest account
           </Link>
         </div>
       </header>
@@ -65,7 +65,7 @@ function DemoUnavailable({
           className="border-violet-300/20 bg-violet-300/10 text-violet-100"
           variant="outline"
         >
-          Safe demo replay
+          Safe guest replay
         </Badge>
         <h1
           className="mt-5 text-2xl font-semibold tracking-[-0.03em]"
@@ -93,7 +93,7 @@ function CuratedRun({ transcript }: { transcript: DemoTranscript }) {
           className="border-violet-300/20 bg-violet-300/10 text-violet-200"
           variant="outline"
         >
-          Safe demo replay
+          Safe guest replay
         </Badge>
         <h1
           className="mt-5 max-w-3xl text-balance text-3xl font-semibold tracking-[-0.04em] sm:text-4xl"
@@ -102,7 +102,7 @@ function CuratedRun({ transcript }: { transcript: DemoTranscript }) {
           {sanitizeEvidenceText(transcript.task)}
         </h1>
         <p className="mt-4 max-w-2xl text-sm text-white/60 sm:text-base">
-          This is a deterministic example built from sanitized demo evidence. It
+          This is a deterministic example built from sanitized evidence. It
           makes no live runner, authentication, or database request.
         </p>
         <div className="mt-5 flex items-center gap-2 font-mono text-violet-100/55 text-xs">

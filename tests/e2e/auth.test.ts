@@ -1,14 +1,14 @@
 import { expect, test } from "@playwright/test";
 
 test.describe("Authentication Pages", () => {
-  test("login offers GitHub-only demo account creation", async ({ page }) => {
+  test("login offers GitHub-only guest account creation", async ({ page }) => {
     await page.goto("/login");
     await expect(
       page.getByRole("heading", { name: "Create or access your account" })
     ).toBeVisible();
     await expect(
       page.getByText(
-        "New accounts start in demo mode, and signing in never starts an agent, sandbox, or run."
+        "New accounts start with guest access, and signing in never starts an agent, sandbox, or run."
       )
     ).toBeVisible();
     await expect(

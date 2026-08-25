@@ -18,6 +18,6 @@ test("demo mode without a valid fixture renders a clear empty state", () => {
     description:
       "No recorded run is available to replay. No live run was started.",
     kind: "unavailable",
-    title: "Demo unavailable",
+    title: "Guest preview unavailable",
   });
 });

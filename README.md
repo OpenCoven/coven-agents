@@ -28,6 +28,11 @@ Review the living [Execution threat model](docs/security/execution-threat-model.
 before changing identity, credentials, tenancy, runner boundaries, or evidence
 handling.
 
+Review the [Guest access and safety
+boundary](docs/security/guest-access.md) before changing public replay,
+account creation, subscription gates, or any route that can consume or persist
+resources.
+
 When something has already gone wrong, follow
 [Security incident response](docs/security/incident-response.md). It has a
 rotation runbook for every credential in the system, and the order matters:
@@ -51,14 +56,21 @@ envelope encryption (a per-credential AES-GCM data key wrapped by
 `CREDENTIAL_KEK`), fetched for the duration of one run, and redacted from run
 evidence. The worker holds no key material of its own.
 
-**The database is subscriber-only.** `databaseFor` accepts a
-`SubscriberSession` and nothing else, so a demo code path that tries to reach
-the database fails to compile rather than being caught in review.
+**Product data is subscriber-gated.** New browser-facing product data access
+uses `databaseFor`, which accepts a `SubscriberSession` and nothing else.
+Legacy chat routes apply the same fail-closed subscriber decision before their
+query helpers run. Narrow identity, usage-status, and checkout paths are
+documented guest exceptions; they do not grant access to chats, documents,
+credentials, agents, or runs.
 
-**Sessions.** A signed-out visitor gets a stateless demo session — an httpOnly
-cookie, no database row. Subscription state is recomputed from
-`subscribedUntil` on every token callback, so access ends when payment does
-rather than when the token happens to expire.
+**Guest sessions.** A signed-out visitor gets a stateless guest session — an
+httpOnly cookie, no database row. A GitHub sign-in creates or adopts one account
+row but still grants no model, credential, runner, sandbox, run, upload, or
+persistent chat access. Subscription state is recomputed from `subscribedUntil`
+on every token callback, and subscriber-claiming sessions are revalidated
+against the current database value before resource access. Guests are rejected
+without that lookup; expiry or revocation cannot wait for the browser token to
+expire. The internal compatibility label remains `demo`.
 
 **Browser storage.** Runner connection details live in session storage, not
 persistent local storage, and the console is served its connection by the app

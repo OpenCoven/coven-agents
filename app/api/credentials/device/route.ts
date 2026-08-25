@@ -1,13 +1,14 @@
 import "server-only";
 
 import { auth } from "@/app/(auth)/auth";
+import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
+import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import {
   exchangeDeviceCode,
   startDeviceFlow,
 } from "@/lib/credentials/github-device";
 import { serializeCredential } from "@/lib/credentials/shape";
 import { putCredential } from "@/lib/credentials/store";
-import { isSubscriber, toSession } from "@/lib/session";
 
 /**
  * Connects Copilot without the tenant ever seeing a token.
@@ -20,30 +21,14 @@ import { isSubscriber, toSession } from "@/lib/session";
  * hold it client-side for the same reason. What is never returned is the
  * access or refresh token: those go straight into encrypted storage.
  */
-async function subscriberSession() {
-  const session = await auth();
-
-  if (!session?.user?.id) {
-    return null;
-  }
-
-  const resolved = toSession({
-    id: session.user.id,
-    type: session.user.type,
-  });
-
-  return isSubscriber(resolved) ? resolved : null;
-}
-
 function clientId(): string | null {
   return process.env.AUTH_GITHUB_ID ?? null;
 }
 
 export async function POST() {
-  const session = await subscriberSession();
-
-  if (!session) {
-    return Response.json({ error: "subscription_required" }, { status: 403 });
+  const access = await authorizeSubscriberAccess(await auth());
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
   }
 
   const id = clientId();
@@ -64,10 +49,9 @@ export async function POST() {
 }
 
 export async function PUT(request: Request) {
-  const session = await subscriberSession();
-
-  if (!session) {
-    return Response.json({ error: "subscription_required" }, { status: 403 });
+  const access = await authorizeSubscriberAccess(await auth());
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
   }
 
   const id = clientId();
@@ -94,7 +78,7 @@ export async function PUT(request: Request) {
   }
 
   await putCredential(
-    session,
+    access.session,
     "copilot",
     serializeCredential(result.credential)
   );

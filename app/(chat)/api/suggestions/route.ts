@@ -1,4 +1,6 @@
 import { auth } from "@/app/(auth)/auth";
+import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
+import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { getSuggestionsByDocumentId } from "@/lib/db/queries";
 import { ChatbotError } from "@/lib/errors";
 
@@ -14,9 +16,9 @@ export async function GET(request: Request) {
   }
 
   const session = await auth();
-
-  if (!session?.user) {
-    return new ChatbotError("unauthorized:suggestions").toResponse();
+  const access = await authorizeSubscriberAccess(session);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
   }
 
   const suggestions = await getSuggestionsByDocumentId({
@@ -29,7 +31,7 @@ export async function GET(request: Request) {
     return Response.json([], { status: 200 });
   }
 
-  if (suggestion.userId !== session.user.id) {
+  if (suggestion.userId !== access.userId) {
     return new ChatbotError("forbidden:api").toResponse();
   }
 

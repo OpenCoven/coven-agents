@@ -1,4 +1,6 @@
 import { auth } from "@/app/(auth)/auth";
+import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
+import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { decideCredentialWrite } from "@/lib/credentials/authorize";
 import {
   deleteCredential,
@@ -10,7 +12,6 @@ import {
   checkCopilotToken,
   checkMessage,
 } from "@/lib/credentials/validate";
-import { isSubscriber, toSession } from "@/lib/session";
 
 /**
  * Where a tenant supplies their own harness credential.
@@ -23,14 +24,6 @@ import { isSubscriber, toSession } from "@/lib/session";
  * here, because logic inside a route handler cannot be unit tested and this is
  * the decision that says who may write to the owner's database.
  */
-async function resolveSession() {
-  const session = await auth();
-  if (!session?.user?.id) {
-    return null;
-  }
-  return toSession({ id: session.user.id, type: session.user.type });
-}
-
 function respond(decision: { kind: string; reason?: string }) {
   if (decision.kind === "unauthorized") {
     return Response.json({ error: "unauthorized" }, { status: 401 });
@@ -59,24 +52,22 @@ function respond(decision: { kind: string; reason?: string }) {
  * would put a secret on the wire for a status check.
  */
 export async function GET() {
-  const session = await resolveSession();
-
-  if (!session) {
-    return Response.json({ error: "unauthorized" }, { status: 401 });
-  }
-
-  if (!isSubscriber(session)) {
-    return Response.json({ error: "subscription_required" }, { status: 403 });
+  const access = await authorizeSubscriberAccess(await auth());
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
   }
 
   return Response.json(
-    { harnessIds: await listCredentialHarnesses(session) },
+    { harnessIds: await listCredentialHarnesses(access.session) },
     { headers: { "cache-control": "no-store" } }
   );
 }
 
 export async function POST(request: Request) {
-  const session = await resolveSession();
+  const access = await authorizeSubscriberAccess(await auth());
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
+  }
 
   let body: { credential?: unknown; harnessId?: unknown };
   try {
@@ -88,7 +79,7 @@ export async function POST(request: Request) {
     return Response.json({ error: "invalid_request" }, { status: 400 });
   }
 
-  const decision = decideCredentialWrite(session, body);
+  const decision = decideCredentialWrite(access.session, body);
   if (decision.kind !== "allowed") {
     return respond(decision);
   }
@@ -118,7 +109,10 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const session = await resolveSession();
+  const access = await authorizeSubscriberAccess(await auth());
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
+  }
 
   let body: { harnessId?: unknown };
   try {
@@ -130,7 +124,7 @@ export async function DELETE(request: Request) {
   // A delete needs the same subscription check as a write: both reach the
   // owner's database. `credential` is supplied only to satisfy the shared
   // decision, which has nothing to validate on a removal.
-  const decision = decideCredentialWrite(session, {
+  const decision = decideCredentialWrite(access.session, {
     credential: "placeholder-not-stored",
     harnessId: body.harnessId,
   });
