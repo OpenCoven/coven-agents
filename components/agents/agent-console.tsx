@@ -12,6 +12,8 @@ import {
   Bot,
   CheckCircle2,
   ChevronRight,
+  Eye,
+  EyeOff,
   LoaderCircle,
   Play,
   Plus,
@@ -646,6 +648,11 @@ function ConnectionPanel({
   onChange: (patch: Partial<RunnerConnection>) => void;
   onSave: () => void;
 }) {
+  // Defaults closed on every mount rather than remembering the last choice:
+  // the point is that opening this panel while sharing a screen does not put
+  // the deployment's address on the recording.
+  const [revealed, setRevealed] = useState(false);
+
   return (
     <Panel className="mx-auto max-w-2xl overflow-hidden">
       <div className="border-white/8 border-b px-6 py-5">
@@ -658,12 +665,37 @@ function ConnectionPanel({
       </div>
       <div className="space-y-5 p-6">
         <Field label="Runner endpoint">
-          <Input
-            className="border-white/10 bg-black/30"
-            onChange={(event) => onChange({ endpoint: event.target.value })}
-            placeholder={CLOUD_ENDPOINT}
-            value={connection.endpoint}
-          />
+          <div className="relative">
+            <Input
+              className={cn(
+                "border-white/10 bg-black/30 pr-10 transition",
+                revealed ? "" : "select-none blur-[5px]"
+              )}
+              onChange={(event) => onChange({ endpoint: event.target.value })}
+              placeholder={CLOUD_ENDPOINT}
+              value={connection.endpoint}
+            />
+            <button
+              aria-label={
+                revealed ? "Hide runner endpoint" : "Reveal runner endpoint"
+              }
+              className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-white/40 transition hover:text-white/80"
+              onClick={() => setRevealed((value) => !value)}
+              type="button"
+            >
+              {revealed ? (
+                <EyeOff className="size-4" />
+              ) : (
+                <Eye className="size-4" />
+              )}
+            </button>
+          </div>
+          <p className="mt-2 text-white/40 text-xs leading-relaxed">
+            Hidden by default so it does not end up in a screenshot or a screen
+            share. It is not a secret -- the browser needs it to reach the
+            runner, and every request is refused without the token below and an
+            identity minted from your session.
+          </p>
         </Field>
         <Field label="Runner token">
           <Input
