@@ -1,4 +1,7 @@
 import { createHmac } from "node:crypto";
+import { requireNonemptyAbuseKeySecret } from "./config";
+
+export { requireAbuseKeySecret } from "./config";
 
 const REDIS_KEY_PREFIX = "coven:abuse:v1:";
 
@@ -7,8 +10,8 @@ local count = redis.call("INCR", KEYS[1])
 if count == 1 then
   redis.call("EXPIRE", KEYS[1], ARGV[1])
 end
-local ttl = redis.call("TTL", KEYS[1])
-return { count, ttl }
+local pttlMs = redis.call("PTTL", KEYS[1])
+return { count, pttlMs }
 `.trim();
 
 export type AbuseBudgetResult = {
@@ -39,7 +42,7 @@ export class RedisAbuseStore implements AbuseStore {
 
   constructor(executor: RedisEvalExecutor, keySecret: string) {
     this.executor = executor;
-    this.keySecret = requireNonemptySecret(keySecret);
+    this.keySecret = requireNonemptyAbuseKeySecret(keySecret);
   }
 
   async consume(
@@ -56,9 +59,9 @@ export class RedisAbuseStore implements AbuseStore {
       arguments: [String(windowSeconds)],
       keys: [`${REDIS_KEY_PREFIX}${digest}`],
     });
-    const [count, ttl] = parseRedisReply(reply);
+    const [count, pttlMs] = parseRedisReply(reply);
 
-    return budgetResult(count, limit, ttl);
+    return budgetResult(count, limit, Math.max(1, Math.ceil(pttlMs / 1000)));
   }
 }
 
@@ -102,17 +105,6 @@ export class MemoryAbuseStore implements AbuseStore {
   }
 }
 
-export function requireAbuseKeySecret(
-  redisUrl: string | undefined,
-  keySecret: string | undefined
-): string | undefined {
-  if (!redisUrl?.trim()) {
-    return undefined;
-  }
-
-  return requireNonemptySecret(keySecret);
-}
-
 function budgetResult(
   count: number,
   limit: number,
@@ -130,29 +122,19 @@ function parseRedisReply(reply: unknown): [number, number] {
     throw new Error("Invalid Redis abuse budget reply.");
   }
 
-  const [count, ttl] = reply;
+  const [count, pttlMs] = reply;
   if (
     typeof count !== "number" ||
     !Number.isInteger(count) ||
     count < 1 ||
-    typeof ttl !== "number" ||
-    !Number.isInteger(ttl) ||
-    ttl < 0
+    typeof pttlMs !== "number" ||
+    !Number.isInteger(pttlMs) ||
+    pttlMs <= 0
   ) {
     throw new Error("Invalid Redis abuse budget reply.");
   }
 
-  return [count, ttl];
-}
-
-function requireNonemptySecret(keySecret: string | undefined): string {
-  if (typeof keySecret !== "string" || !keySecret.trim()) {
-    throw new Error(
-      "ABUSE_KEY_SECRET is required when REDIS_URL is configured."
-    );
-  }
-
-  return keySecret;
+  return [count, pttlMs];
 }
 
 function validateConsumeInput(

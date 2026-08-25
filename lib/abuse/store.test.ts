@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import test from "node:test";
+import { requireAbuseKeySecret } from "./config";
 import {
   MemoryAbuseStore,
   RedisAbuseStore,
   type RedisEvalExecutor,
-  requireAbuseKeySecret,
 } from "./store";
 
 const FIXED_SECRET = "fixed-test-abuse-key-secret";
@@ -88,8 +88,8 @@ test("100 parallel memory calls allow exactly the configured limit", async () =>
   assert.equal(results.filter((result) => !result.allowed).length, 83);
 });
 
-test("Redis consumption uses one atomic script call and returns count plus TTL metadata", async () => {
-  const executor = new RecordingExecutor([4, 42]);
+test("Redis consumption uses one atomic script call and returns count plus PTTL metadata", async () => {
+  const executor = new RecordingExecutor([4, 42_000]);
   const store = new RedisAbuseStore(executor, FIXED_SECRET);
 
   assert.deepEqual(await store.consume("chat:ip:203.0.113.8", 10, 60), {
@@ -104,12 +104,12 @@ test("Redis consumption uses one atomic script call and returns count plus TTL m
   assert.match(call.script, /redis\.call\("INCR", KEYS\[1\]\)/);
   assert.match(call.script, /if count == 1 then/);
   assert.match(call.script, /redis\.call\("EXPIRE", KEYS\[1\], ARGV\[1\]\)/);
-  assert.match(call.script, /redis\.call\("TTL", KEYS\[1\]\)/);
-  assert.match(call.script, /return \{ count, ttl \}/);
+  assert.match(call.script, /redis\.call\("PTTL", KEYS\[1\]\)/);
+  assert.match(call.script, /return \{ count, pttlMs \}/);
 });
 
 test("Redis keys are deterministic fixed-width pseudonyms without raw subjects", async () => {
-  const executor = new RecordingExecutor([1, 60]);
+  const executor = new RecordingExecutor([1, 60_000]);
   const store = new RedisAbuseStore(executor, FIXED_SECRET);
   const rawSubject = "chat:ip:203.0.113.8";
 
@@ -131,7 +131,7 @@ test("Redis keys are deterministic fixed-width pseudonyms without raw subjects",
 
 test("Redis consumption denies counts above the configured limit", async () => {
   const store = new RedisAbuseStore(
-    new RecordingExecutor([11, 37]),
+    new RecordingExecutor([11, 37_000]),
     FIXED_SECRET
   );
 
@@ -142,8 +142,21 @@ test("Redis consumption denies counts above the configured limit", async () => {
   });
 });
 
+test("Redis consumption rounds a live subsecond TTL up to one second", async () => {
+  const store = new RedisAbuseStore(
+    new RecordingExecutor([11, 250]),
+    FIXED_SECRET
+  );
+
+  assert.deepEqual(await store.consume("chat:ip:a", 10, 60), {
+    allowed: false,
+    remaining: 0,
+    retryAfterSeconds: 1,
+  });
+});
+
 test("invalid arguments fail before Redis evaluation", async () => {
-  const executor = new RecordingExecutor([1, 60]);
+  const executor = new RecordingExecutor([1, 60_000]);
   const store = new RedisAbuseStore(executor, FIXED_SECRET);
   const calls = [
     () => store.consume("", 1, 1),
@@ -178,6 +191,7 @@ test("invalid Redis count and TTL replies fail explicitly", async () => {
     [1.5, 60],
     [Number.NaN, 60],
     ["1", 60],
+    [1, 0],
     [1, -1],
     [1, -2],
     [1, 1.5],

@@ -1,10 +1,7 @@
 import { createClient } from "redis";
 
-import {
-  type AbuseStore,
-  RedisAbuseStore,
-  requireAbuseKeySecret,
-} from "@/lib/abuse/store";
+import { requireAbuseKeySecret } from "@/lib/abuse/config";
+import { type AbuseStore, RedisAbuseStore } from "@/lib/abuse/store";
 import { isProductionEnvironment } from "@/lib/constants";
 import { ChatbotError } from "@/lib/errors";
 
