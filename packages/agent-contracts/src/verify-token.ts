@@ -54,7 +54,12 @@ export async function verifyRunnerToken(
   const verified = await crypto.subtle.verify(
     { name: TOKEN_ALGORITHM },
     publicKey,
-    signatureBytes,
+    // Re-wrapped rather than passed straight through. TypeScript 7 types a
+    // `Uint8Array` by its backing buffer, and `base64UrlDecode` yields
+    // `Uint8Array<ArrayBufferLike>` -- which `BufferSource` does not accept,
+    // because `ArrayBufferLike` admits a `SharedArrayBuffer`. The copy pins it
+    // to a plain `ArrayBuffer`.
+    new Uint8Array(signatureBytes),
     new TextEncoder().encode(parts.payload)
   );
   if (!verified) {
