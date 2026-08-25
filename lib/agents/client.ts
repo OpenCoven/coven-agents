@@ -164,6 +164,25 @@ export class RunnerClient {
     return agentsEnvelopeSchema.parse(await response.json()).agents;
   }
 
+  /**
+   * Replaces an agent's definition.
+   *
+   * The worker carries `owner`, `createdAt` and `lastRunAt` forward from the
+   * stored definition, so a caller cannot move an agent between tenants or
+   * rewrite its history by sending different values.
+   */
+  async updateAgent(
+    id: string,
+    input: CreateAgentInput
+  ): Promise<AgentDefinition> {
+    const response = await this.fetch(`/api/agents/${encodeURIComponent(id)}`, {
+      body: JSON.stringify(input),
+      method: "PUT",
+    });
+
+    return agentEnvelopeSchema.parse(await response.json()).agent;
+  }
+
   async createAgent(input: CreateAgentInput): Promise<AgentDefinition> {
     const response = await this.fetch("/api/agents", {
       body: JSON.stringify(input),

@@ -29,6 +29,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { AccountMenu } from "@/components/agents/account-menu";
+import { RenameAgent } from "@/components/agents/rename-agent";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -37,6 +38,12 @@ import {
   type ConnectionStatusKind,
   connectionMessage,
 } from "@/lib/agents/connection-status";
+import {
+  FORMATIONS,
+  type Formation,
+  memberName,
+  TEMPLATES,
+} from "@/lib/agents/formations";
 import { createIdentityMinter } from "@/lib/agents/identity";
 import {
   fetchHasCredential,
@@ -288,6 +295,83 @@ export function AgentConsole() {
     }
   }
 
+  /**
+   * Creates every member of a formation.
+   *
+   * Sequential rather than parallel: each create is a durable-object write,
+   * and a burst of them races the directory. Sequential also means a failure
+   * halfway leaves the agents already created -- which is the right outcome,
+   * since they are independently useful.
+   */
+  async function createFormation(formation: Formation) {
+    setLoading(true);
+    let created = 0;
+
+    try {
+      // Sequential on purpose: each create is a durable-object write, and a
+      // burst of them races the directory. Chained rather than looped so the
+      // ordering is in the data flow instead of an awaited loop.
+      await formation.members.reduce(
+        (previous, template) =>
+          previous.then(async () => {
+            const agent = await client.createAgent({
+              backend,
+              description: template.blurb,
+              instructions: template.instructions,
+              model: "auto",
+              name: memberName(formation, template),
+              runtime: "copilot",
+              workspace: backend === "cloud" ? "/workspace" : "",
+            });
+
+            setAgents((current) => [...current, agent]);
+            setSelectedId(agent.id);
+            created += 1;
+          }),
+        Promise.resolve()
+      );
+
+      toast.success(`${formation.name}: ${created} agents created.`);
+      setShowCreate(false);
+    } catch (error) {
+      toast.error(
+        created > 0
+          ? `Created ${created} of ${formation.members.length}. ${
+              error instanceof Error ? error.message : ""
+            }`.trim()
+          : error instanceof Error
+            ? error.message
+            : "Could not create agents."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function renameSelected(next: string) {
+    if (!selected) {
+      return;
+    }
+
+    // The endpoint takes a whole definition, so the current one is sent with
+    // only the name replaced. Owner and timestamps are carried forward by the
+    // worker from stored state, not from this body.
+    const updated = await client.updateAgent(selected.id, {
+      backend: selected.backend,
+      description: selected.description,
+      instructions: selected.instructions,
+      model: selected.model,
+      name: next,
+      runtime: selected.runtime,
+      workspace: selected.workspace,
+    });
+
+    setAgents((current) =>
+      current.map((agent) => (agent.id === updated.id ? updated : agent))
+    );
+    toast.success(`Renamed to ${updated.name}.`);
+  }
+
   async function deleteSelected() {
     if (!selected) {
       return;
@@ -431,12 +515,14 @@ export function AgentConsole() {
               loading={loading}
               onCancel={() => setShowCreate(false)}
               onCreate={createAgent}
+              onCreateFormation={createFormation}
             />
           ) : selected ? (
             <AgentWorkspace
               agent={selected}
               lastRun={lastRun}
               onDelete={deleteSelected}
+              onRename={renameSelected}
               onRun={runSelected}
               running={running}
               setTask={setTask}
@@ -698,16 +784,71 @@ function ConnectionPanel({
   );
 }
 
+function TemplateChip({
+  onApply,
+  template,
+}: {
+  onApply: (template: (typeof TEMPLATES)[number]) => void;
+  template: (typeof TEMPLATES)[number];
+}) {
+  const apply = useCallback(() => {
+    onApply(template);
+  }, [onApply, template]);
+
+  return (
+    <button
+      className="rounded-[8px] border border-white/10 px-3 py-1.5 text-[13px] text-white/70 transition-colors hover:border-[var(--oc-accent-line)] hover:text-white"
+      onClick={apply}
+      type="button"
+    >
+      {template.name}
+    </button>
+  );
+}
+
+function FormationCard({
+  disabled,
+  formation,
+  onCreate,
+}: {
+  disabled: boolean;
+  formation: Formation;
+  onCreate: (formation: Formation) => Promise<void>;
+}) {
+  const create = useCallback(() => {
+    onCreate(formation);
+  }, [formation, onCreate]);
+
+  return (
+    <button
+      className="flex flex-col gap-1 rounded-[8px] border border-white/10 px-3 py-2 text-left transition-colors hover:border-[var(--oc-accent-line)] disabled:opacity-50"
+      disabled={disabled}
+      onClick={create}
+      type="button"
+    >
+      <span className="text-[13px] text-white/85">
+        {formation.name}
+        <span className="ml-2 text-[11px] text-[var(--oc-text-3)]">
+          {formation.members.length} agents, run separately
+        </span>
+      </span>
+      <span className="text-[12px] text-white/40">{formation.blurb}</span>
+    </button>
+  );
+}
+
 function CreateAgentPanel({
   backend,
   loading,
   onCancel,
   onCreate,
+  onCreateFormation,
 }: {
   backend: Backend;
   loading: boolean;
   onCancel: () => void;
   onCreate: (input: CreateAgentInput) => Promise<void>;
+  onCreateFormation: (formation: Formation) => Promise<void>;
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -718,6 +859,15 @@ function CreateAgentPanel({
   // pick and `auto` lets the signed-in harness choose its own model.
   const [runtime, setRuntime] = useState<Runtime>("copilot");
   const [model, setModel] = useState("auto");
+  const applyTemplateFields = useCallback(
+    (entry: (typeof TEMPLATES)[number]) => {
+      setName(entry.name);
+      setDescription(entry.blurb);
+      setInstructions(entry.instructions);
+    },
+    []
+  );
+
   const [workspace, setWorkspace] = useState(
     backend === "cloud" ? "/workspace" : ""
   );
@@ -728,6 +878,43 @@ function CreateAgentPanel({
         <p className="font-mono text-[var(--oc-text-3)] text-xs uppercase tracking-[0.2em]">
           New {backend} familiar
         </p>
+        <div className="mt-5 flex flex-col gap-4">
+          <div className="flex flex-col gap-2">
+            <p className="text-[11px] text-[var(--oc-text-3)] uppercase tracking-[0.14em]">
+              Start from a role
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {TEMPLATES.map((entry) => (
+                <TemplateChip
+                  key={entry.id}
+                  onApply={applyTemplateFields}
+                  template={entry}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <p className="text-[11px] text-[var(--oc-text-3)] uppercase tracking-[0.14em]">
+              Or create a crew
+            </p>
+            {/* Members do not coordinate -- nothing in this system hands one
+                agent's output to another. A crew is a complementary set you
+                dispatch individually, and the copy says so rather than
+                implying a pipeline. */}
+            <div className="flex flex-col gap-2">
+              {FORMATIONS.map((formation) => (
+                <FormationCard
+                  disabled={loading}
+                  formation={formation}
+                  key={formation.id}
+                  onCreate={onCreateFormation}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+
         <h2 className="mt-1 font-semibold text-2xl tracking-tight">
           Forge agent
         </h2>
@@ -847,6 +1034,7 @@ function AgentWorkspace({
   agent,
   lastRun,
   onDelete,
+  onRename,
   onRun,
   running,
   setTask,
@@ -855,6 +1043,7 @@ function AgentWorkspace({
   agent: AgentDefinition;
   lastRun: RunResult | null;
   onDelete: () => void;
+  onRename: (next: string) => Promise<void>;
   onRun: () => void;
   running: boolean;
   setTask: (task: string) => void;
@@ -870,9 +1059,11 @@ function AgentWorkspace({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="font-semibold text-2xl tracking-tight">
-                  {agent.name}
-                </h2>
+                <RenameAgent
+                  disabled={running}
+                  name={agent.name}
+                  onRename={onRename}
+                />
                 <StatusDot status={agent.status} />
               </div>
               <p className="mt-1 text-sm text-white/40">
