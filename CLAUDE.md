@@ -73,9 +73,11 @@ That is not lost work and `reap` will clear it.
 With Actions disabled the hygiene workflow no longer deletes merged remote
 branches, so they accumulate on origin. `git branch --merged` will not find
 them either — squash-merge leaves no ancestry — so prune by asking GitHub for
-each branch's PR state rather than trusting git. Commit anything *after* the merge, though, and the
-tip no longer matches what `gh` merged — `reap` protects it and `pnpm hygiene`
-reports it AT RISK until you push it.
+each branch's PR state rather than trusting git.
+
+Commit anything *after* the merge, though, and the tip no longer matches what
+`gh` merged — `reap` protects it and `pnpm hygiene` reports it AT RISK until
+you push it.
 
 <!-- BEGIN:nextjs-agent-rules -->
 

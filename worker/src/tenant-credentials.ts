@@ -21,8 +21,34 @@
 
 export type CredentialRequest = {
   harnessId: string;
+  runId: string;
   tenant: string;
 };
+
+/**
+ * The tenant is out of included runs.
+ *
+ * A distinct type because the caller must tell this from an outage: one is the
+ * customer's to resolve and carries a reset date, the other is ours and must
+ * not be reported as "you have run out".
+ */
+export class CapReachedError extends Error {
+  readonly cap: number;
+  readonly resetsAt: string | null;
+  readonly used: number;
+
+  constructor(cap: number, used: number, resetsAt: string | null) {
+    super(
+      `Run cap reached: ${used} of ${cap} used${
+        resetsAt ? `, resets ${resetsAt}` : ""
+      }.`
+    );
+    this.cap = cap;
+    this.name = "CapReachedError";
+    this.resetsAt = resetsAt;
+    this.used = used;
+  }
+}
 
 export type CredentialTransport = {
   endpoint: string;
@@ -50,6 +76,7 @@ export async function fetchTenantCredential(
     {
       body: JSON.stringify({
         harnessId: request.harnessId,
+        runId: request.runId,
         tenant: request.tenant,
       }),
       headers: {
@@ -63,6 +90,23 @@ export async function fetchTenantCredential(
 
   if (response.status === 404) {
     return null;
+  }
+
+  // Parsed before the general failure, because the body carries the only
+  // numbers that can explain the refusal. Discarding it here is what turned
+  // "you are out of runs" into a bare status code.
+  if (response.status === 429) {
+    const body = (await response.json().catch(() => null)) as {
+      cap?: unknown;
+      resetsAt?: unknown;
+      used?: unknown;
+    } | null;
+
+    throw new CapReachedError(
+      typeof body?.cap === "number" ? body.cap : 0,
+      typeof body?.used === "number" ? body.used : 0,
+      typeof body?.resetsAt === "string" ? body.resetsAt : null
+    );
   }
 
   if (!response.ok) {

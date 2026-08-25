@@ -7,9 +7,14 @@ import "server-only";
 // access happens. This is the one place in the codebase permitted to import
 // `db` directly.
 import { importVerifyKey, verifyRunnerToken } from "@opencoven/agent-contracts";
+import { eq } from "drizzle-orm";
+import { periodStart } from "@/lib/billing/period";
+import { countRun, usageFor } from "@/lib/billing/usage";
 import { readCredentialForTenant } from "@/lib/credentials/store";
 import { db } from "@/lib/db/queries";
+import { user } from "@/lib/db/schema";
 import { resolveBoundTenant } from "./binding";
+import { capVerdict } from "./cap";
 
 /**
  * There is deliberately no session-authenticated path in this module. A
@@ -91,6 +96,46 @@ export async function POST(request: Request): Promise<Response> {
   if (!tenant) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
+
+  const { runId } = (body ?? {}) as { runId?: unknown };
+
+  if (typeof runId !== "string" || !runId) {
+    return Response.json({ error: "invalid_request" }, { status: 400 });
+  }
+
+  // The cap is enforced here because this is the moment the credential is
+  // lent — the one point every run must pass through, and the only one where
+  // refusing costs nothing already spent.
+  const [owner] = await db
+    .select()
+    .from(user)
+    .where(eq(user.id, claims?.sub ?? ""))
+    .limit(1);
+
+  const resetsAt = owner?.subscribedUntil ?? null;
+  const since = periodStart(resetsAt);
+
+  const verdict = capVerdict({
+    resetsAt,
+    used: since ? await usageFor(db, tenant, since) : 0,
+  });
+
+  if (verdict.kind === "refused") {
+    return Response.json(
+      {
+        cap: verdict.cap,
+        error: "cap_reached",
+        resetsAt: verdict.resetsAt,
+        used: verdict.used,
+      },
+      { status: 429 }
+    );
+  }
+
+  // Counted before the credential is handed over, so a run that starts is a
+  // run that was paid for. Counting afterwards would let a crash between the
+  // two produce free runs.
+  await countRun(db, tenant, runId);
 
   const credential = await readCredentialForTenant(tenant, harnessId, db);
 
