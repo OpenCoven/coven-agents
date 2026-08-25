@@ -11,13 +11,14 @@ const SENSITIVE_WRITE = rateClass(10, 60, 40, 3600);
 const DESTRUCTIVE_WRITE = rateClass(5, 60, 20, 3600);
 const WEBHOOK_WRITE = rateClass(60, 60, 600, 3600);
 
-const POLICIES = {
+const POLICIES = Object.freeze({
   analytics_read: closedPolicy(["ip", "user"], 0, EXPENSIVE_READ),
   auth_callback: closedPolicy(["ip"], 16_384, rateClass(10, 60, 40, 3600)),
   auth_start: closedPolicy(["ip"], 0, rateClass(5, 60, 20, 3600)),
   avatar_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   avatar_write: closedPolicy(["ip", "user"], 8192, SENSITIVE_WRITE),
   chat: closedPolicy(["ip", "user"], 64_000, rateClass(4, 60, 60, 3600)),
+  chat_delete: closedPolicy(["ip", "user"], 0, DESTRUCTIVE_WRITE),
   checkout: closedPolicy(["ip", "user"], 8192, rateClass(2, 300, 3, 3600)),
   credential_delete: closedPolicy(["ip", "user"], 8192, SENSITIVE_WRITE),
   credential_device_poll: closedPolicy(
@@ -61,14 +62,16 @@ const POLICIES = {
   usage_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   vote_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   vote_write: closedPolicy(["ip", "user"], 8192, STANDARD_WRITE),
-} satisfies Record<AbuseRoute, AbusePolicy>;
+} satisfies Record<AbuseRoute, AbusePolicy>);
 
-export function abusePolicyFor(route: AbuseRoute): AbusePolicy {
-  if (!Object.hasOwn(POLICIES, route)) {
-    throw new Error(`No abuse policy for ${JSON.stringify(route)}.`);
+export function abusePolicyFor(route: unknown): AbusePolicy {
+  if (typeof route !== "string" || !Object.hasOwn(POLICIES, route)) {
+    const renderedRoute =
+      typeof route === "string" ? JSON.stringify(route) : `<${typeof route}>`;
+    throw new Error(`No abuse policy for ${renderedRoute}.`);
   }
 
-  return POLICIES[route];
+  return POLICIES[route as AbuseRoute];
 }
 
 function rateClass(
@@ -77,16 +80,16 @@ function rateClass(
   sustainedLimit: number,
   sustainedWindowSeconds: number
 ): RateClass {
-  return {
-    burst: {
+  return Object.freeze({
+    burst: Object.freeze({
       limit: burstLimit,
       windowSeconds: burstWindowSeconds,
-    },
-    sustained: {
+    }),
+    sustained: Object.freeze({
       limit: sustainedLimit,
       windowSeconds: sustainedWindowSeconds,
-    },
-  };
+    }),
+  });
 }
 
 function closedPolicy(
@@ -94,11 +97,11 @@ function closedPolicy(
   bodyBytes: number,
   rates: RateClass
 ): AbusePolicy {
-  return {
+  return Object.freeze({
     bodyBytes,
-    burst: { ...rates.burst },
+    burst: Object.freeze({ ...rates.burst }),
     failureMode: "closed",
-    subjects,
-    sustained: { ...rates.sustained },
-  };
+    subjects: Object.freeze([...subjects]),
+    sustained: Object.freeze({ ...rates.sustained }),
+  });
 }

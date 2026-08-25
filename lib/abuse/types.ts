@@ -1,7 +1,8 @@
-export const ABUSE_ROUTES = [
+export const ABUSE_ROUTES = Object.freeze([
   "auth_start",
   "auth_callback",
   "chat",
+  "chat_delete",
   "document_read",
   "document_write",
   "document_delete",
@@ -28,22 +29,21 @@ export const ABUSE_ROUTES = [
   "stripe_webhook",
   "run_start",
   "internal_credential",
-] as const;
+] as const);
 
 export type AbuseRoute = (typeof ABUSE_ROUTES)[number];
 
 export type AbuseSubject = "ip" | "tenant" | "user";
 
-export type AbusePolicy = {
+export type AbuseRateWindow = Readonly<{
+  limit: number;
+  windowSeconds: number;
+}>;
+
+export type AbusePolicy = Readonly<{
   bodyBytes: number;
-  burst: {
-    limit: number;
-    windowSeconds: number;
-  };
+  burst: AbuseRateWindow;
   failureMode: "closed" | "open";
-  sustained: {
-    limit: number;
-    windowSeconds: number;
-  };
+  sustained: AbuseRateWindow;
   subjects: readonly AbuseSubject[];
-};
+}>;

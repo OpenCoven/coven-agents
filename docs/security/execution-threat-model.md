@@ -186,6 +186,7 @@ with thresholds chosen before enforcement.
 | `auth_start` | IP | 0 | 5 / 60 s | 20 / 1 h | closed |
 | `auth_callback` | IP | 16,384 | 10 / 60 s | 40 / 1 h | closed |
 | `chat` | IP, user | 64,000 | 4 / 60 s | 60 / 1 h | closed |
+| `chat_delete` | IP, user | 0 | 5 / 60 s | 20 / 1 h | closed |
 | `document_read` | IP, user | 0 | 60 / 60 s | 600 / 1 h | closed |
 | `document_write` | IP, user | 262,144 | 20 / 60 s | 100 / 1 h | closed |
 | `document_delete` | IP, user | 0 | 5 / 60 s | 20 / 1 h | closed |
