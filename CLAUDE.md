@@ -23,7 +23,14 @@ pnpm hygiene          # no AT RISK worktrees
 pnpm check            # lint
 pnpm typecheck        # types
 pnpm test:unit        # unit tests
+pnpm build            # the app actually builds
 ```
+
+**GitHub Actions is disabled for this repository and the repo is private.**
+That is deliberate pre-release cost control, not a breakage — do not diagnose
+the absent checks as a regression or re-add required status checks while it is
+off. It also means the list above is the *only* gate: nothing remote will
+catch a break, so run all five before every merge, not just before a PR.
 
 ## Commits must be signed
 
@@ -59,10 +66,14 @@ this worktree still points at. It refuses everything else. If it refuses
 something you expect it to remove, the branch is not actually merged — check
 the PR, do not force it.
 
-The second case is the normal one after a merge. The hygiene workflow deletes
-the remote branch within seconds, and squashing rewrites the SHA, so a merged
-branch has no remote ref and its commits look unpushed. That is not lost work
-and `reap` will clear it. Commit anything *after* the merge, though, and the
+The second case is the normal one after a merge. Squashing rewrites the SHA,
+so a merged branch's commits look unpushed even though the work is on `main`.
+That is not lost work and `reap` will clear it.
+
+With Actions disabled the hygiene workflow no longer deletes merged remote
+branches, so they accumulate on origin. `git branch --merged` will not find
+them either — squash-merge leaves no ancestry — so prune by asking GitHub for
+each branch's PR state rather than trusting git. Commit anything *after* the merge, though, and the
 tip no longer matches what `gh` merged — `reap` protects it and `pnpm hygiene`
 reports it AT RISK until you push it.
 
