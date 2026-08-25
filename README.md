@@ -52,6 +52,12 @@ rather than when the token happens to expire.
 persistent local storage, and the console is served its connection by the app
 rather than asking a human to paste a token.
 
+**Commit scanning.** The pre-commit hook scans staged Git content for recognized
+credential shapes before formatting runs. Findings identify only the file,
+line, and credential category; matching values are never printed. Use
+`pnpm secret:scan:all` to scan every tracked file. Synthetic security fixtures
+must use a reviewed `secret-scan: allow-next-line -- <reason>` marker.
+
 ## Install
 
 Requirements:

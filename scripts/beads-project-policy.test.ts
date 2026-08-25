@@ -98,6 +98,7 @@ test("rejects sensitive content categories", () => {
   expectUnsafe("description", "xoxb-1234567890", /provider token/i);
   expectUnsafe(
     "description",
+    // secret-scan: allow-next-line -- synthetic privacy-policy fixture
     "github_pat_1234567890abcdefghijklmnopqrstuvwxyz",
     /github token/i
   );
@@ -106,6 +107,7 @@ test("rejects sensitive content categories", () => {
   expectUnsafe("description", "Authorization: ******", /authorization header/i);
   expectUnsafe(
     "acceptance",
+    // secret-scan: allow-next-line -- synthetic private-key fixture
     "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
     /pem private key/i
   );
