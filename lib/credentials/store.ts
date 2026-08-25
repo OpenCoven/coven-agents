@@ -118,6 +118,27 @@ export async function readCredentialForTenant(
  * row. Revocation is a row deletion rather than a key rotation precisely
  * because each credential has its own data key.
  */
+/**
+ * Which harnesses this tenant has a credential stored for.
+ *
+ * Returns ids only. The credential itself is never read here and has no
+ * business leaving the server for a UI that only needs to say "configured" --
+ * a status endpoint that returned the secret would put it back on the wire for
+ * no reason, which is the same rule `putCredential` follows on write.
+ */
+export async function listCredentialHarnesses(
+  session: SubscriberSession
+): Promise<string[]> {
+  const db = databaseFor(session);
+
+  const rows = await db
+    .select({ harnessId: tenantCredential.harnessId })
+    .from(tenantCredential)
+    .where(eq(tenantCredential.tenant, session.tenant));
+
+  return rows.map((row) => row.harnessId).sort();
+}
+
 export async function deleteCredential(
   session: SubscriberSession,
   harnessId: string

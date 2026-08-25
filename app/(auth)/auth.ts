@@ -1,13 +1,9 @@
-import { compare } from "bcrypt-ts";
 import NextAuth, { type DefaultSession } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
-import Credentials from "next-auth/providers/credentials";
 import GitHub from "next-auth/providers/github";
 import { fetchGithubEmail } from "@/lib/auth/github-email-fetch";
-import { DUMMY_PASSWORD } from "@/lib/constants";
-import { findOrCreateFederatedUser, getUser } from "@/lib/db/queries";
+import { findOrCreateFederatedUser } from "@/lib/db/queries";
 import { refreshTokenType } from "@/lib/session-claims";
-import { userTypeFor } from "@/lib/subscription";
 import { authConfig } from "./auth.config";
 
 export type UserType = "demo" | "subscriber";
@@ -96,53 +92,21 @@ export const {
   },
   providers: [
     /**
-     * Present only when configured, so a deployment without GitHub
-     * credentials keeps working on the password form instead of failing to
-     * construct the auth config at boot.
+     * The only way in.
+     *
+     * The password provider is gone: there is no mail delivery here, so a
+     * forgotten password was unrecoverable, and maintaining two paths meant
+     * two sets of rules about who may sign in. GitHub is also what tenants
+     * already have -- they bring a Copilot or Claude credential regardless.
+     *
+     * This makes AUTH_GITHUB_ID and AUTH_GITHUB_SECRET required rather than
+     * optional: without them no one can sign in at all.
      */
-    ...(process.env.AUTH_GITHUB_ID && process.env.AUTH_GITHUB_SECRET
-      ? [
-          GitHub({
-            authorization: {
-              // Identity only. No repository scope is requested: agents
-              // authenticate with credentials the tenant supplies separately.
-              params: { scope: "read:user user:email" },
-            },
-          }),
-        ]
-      : []),
-    Credentials({
-      async authorize(credentials) {
-        const email = String(credentials.email ?? "");
-        const password = String(credentials.password ?? "");
-        const users = await getUser(email);
-
-        if (users.length === 0) {
-          await compare(password, DUMMY_PASSWORD);
-          return null;
-        }
-
-        const [user] = users;
-
-        if (!user.password) {
-          await compare(password, DUMMY_PASSWORD);
-          return null;
-        }
-
-        const passwordsMatch = await compare(password, user.password);
-
-        if (!passwordsMatch) {
-          return null;
-        }
-
-        // The type is derived from the stored row, not hardcoded. This is the
-        // decision that says who may reach the owner's database, so it lives
-        // in a tested pure function rather than inline here.
-        return { ...user, type: userTypeFor(user, new Date()) };
-      },
-      credentials: {
-        email: { label: "Email", type: "email" },
-        password: { label: "Password", type: "password" },
+    GitHub({
+      authorization: {
+        // Identity only. No repository scope is requested; agents
+        // authenticate with credentials the tenant supplies separately.
+        params: { scope: "read:user user:email" },
       },
     }),
   ],

@@ -1,7 +1,11 @@
 import { auth } from "@/app/(auth)/auth";
 import { decideCredentialWrite } from "@/lib/credentials/authorize";
-import { deleteCredential, putCredential } from "@/lib/credentials/store";
-import { toSession } from "@/lib/session";
+import {
+  deleteCredential,
+  listCredentialHarnesses,
+  putCredential,
+} from "@/lib/credentials/store";
+import { isSubscriber, toSession } from "@/lib/session";
 
 /**
  * Where a tenant supplies their own harness credential.
@@ -39,6 +43,30 @@ function respond(decision: { kind: string; reason?: string }) {
   return Response.json(
     { error: decision.reason ?? "invalid_request" },
     { status: 400 }
+  );
+}
+
+/**
+ * Which harnesses this tenant has configured.
+ *
+ * Ids only, never the credential. The UI needs to say "configured" and offer
+ * to replace or remove it; it never needs the value back, and returning one
+ * would put a secret on the wire for a status check.
+ */
+export async function GET() {
+  const session = await resolveSession();
+
+  if (!session) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
+
+  if (!isSubscriber(session)) {
+    return Response.json({ error: "subscription_required" }, { status: 403 });
+  }
+
+  return Response.json(
+    { harnessIds: await listCredentialHarnesses(session) },
+    { headers: { "cache-control": "no-store" } }
   );
 }
 

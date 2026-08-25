@@ -36,9 +36,9 @@ import { RunnerClient, type RunnerConnection } from "@/lib/agents/client";
 import {
   type ConnectionStatusKind,
   connectionMessage,
-  readConnectionResponse,
 } from "@/lib/agents/connection-status";
 import { createIdentityMinter } from "@/lib/agents/identity";
+import { provisionConnection } from "@/lib/agents/provision";
 import { cn } from "@/lib/utils";
 
 const CLOUD_ENDPOINT =
@@ -173,15 +173,8 @@ export function AgentConsole() {
      */
     let cancelled = false;
 
-    const provision = async () => {
-      try {
-        const response = await fetch("/api/runner-connection");
-        const body = (await response.json().catch(() => null)) as Record<
-          string,
-          unknown
-        > | null;
-        const status = readConnectionResponse(response.status, body);
-
+    provisionConnection()
+      .then((status) => {
         if (cancelled) {
           return;
         }
@@ -194,14 +187,12 @@ export function AgentConsole() {
             cloud: { endpoint: status.endpoint, token: status.token },
           }));
         }
-      } catch {
+      })
+      .catch(() => {
         if (!cancelled) {
           setCloudStatus("unavailable");
         }
-      }
-    };
-
-    provision();
+      });
 
     return () => {
       cancelled = true;
