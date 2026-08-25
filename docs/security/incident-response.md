@@ -58,7 +58,7 @@ Everything that grants something, where it lives, and what it costs to rotate.
 | `STRIPE_WEBHOOK_SECRET` | Vercel | Forging subscription events | Missed events until updated |
 | Tenant harness credential | Encrypted DB row | Acting as that tenant on GitHub | Theirs to rotate, not ours |
 
-Three properties worth internalising before an incident rather than during one:
+Four properties worth internalising before an incident rather than during one:
 
 - **Vercel Sensitive variables are write-only.** `vercel env pull` and the API
   both withhold the value, returning the literal string `[SENSITIVE]`, and the
@@ -70,6 +70,10 @@ Three properties worth internalising before an incident rather than during one:
   redeploy. Server-side variables are picked up by a redeploy.
 - **Never mark a `NEXT_PUBLIC_*` variable Sensitive.** It buys nothing and
   costs recovery. See below.
+- **Visibility is never the default.** `vercel env add` needs `--sensitive` for
+  a server-side secret and `--no-sensitive` for a public one, and gets it wrong
+  in both directions if you omit it: a secret lands readable, and a public
+  variable is refused outright. Pass the flag every time.
 
 ### `NEXT_PUBLIC_*` must never be Sensitive
 
@@ -140,8 +144,17 @@ NEW="$(openssl rand -hex 32)"
 cd worker && printf '%s' "$NEW" | npx wrangler secret put AGENT_CONTROL_TOKEN
 
 cd .. && npx vercel env rm AGENT_CONTROL_TOKEN production --yes
+
+# `--sensitive` is required, not decorative. Without it the value lands
+# readable, and a secret you can read back from the CLI is one that will be
+# read back into a terminal, a log, or a screen share.
 printf '%s' "$NEW" | npx vercel env add AGENT_CONTROL_TOKEN production --sensitive
-npx vercel redeploy "$(npx vercel ls --yes | head -1)"
+
+# A redeploy is what makes the new value live: setting it changes the stored
+# variable, not the running deployment. `vercel ls` is newest-first, so the
+# first line is the deployment currently serving production.
+LATEST="$(npx vercel ls --yes | head -1)"
+npx vercel redeploy "$LATEST"
 ```
 
 **What breaks.** Runs started between the two updates fail with a 401. Seconds,
@@ -373,4 +386,17 @@ a cheap rehearsal:
   Doing it deliberately once proves the runbook, the ordering, and the
   verification step, at the cost of a few seconds of failed runs.
 
-A runbook that has never been executed is a guess.
+`AGENT_CONTROL_TOKEN` has been rotated for real, against a live disclosure: the
+token was pasted into a chat transcript inside a copied network trace. The
+ordering held, the app stayed up, and the verification step returned the 401 it
+promised. Two gaps surfaced only by running it -- the `--sensitive` flag and the
+redeploy step -- and both are now written above.
+
+That is the argument for rehearsing the rest. A runbook that has never been
+executed is a guess, and the parts that are wrong are exactly the parts nobody
+thought to write down.
+
+**A copied network trace is a credential disclosure.** Browser devtools'
+"copy as fetch" and HAR exports include every request header, which means the
+runner token and session cookies travel with them. Treat pasting one -- into a
+chat, an issue, a bug report -- as an S2 and rotate.
