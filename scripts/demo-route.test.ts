@@ -53,6 +53,14 @@ test("the replay button shows a high-contrast keyboard focus ring", () => {
   );
 });
 
+test("the demo uses the purple brand palette", () => {
+  const sources = [read(demoRootUrl), read(replayPlayerUrl)].join("\n");
+
+  assert.match(sources, /rgba\(147,134,208,0\.2\)/);
+  assert.match(sources, /violet-300/);
+  assert.doesNotMatch(sources, /emerald-/);
+});
+
 test("the demo route tree has no live service or network dependency", () => {
   const sources = [read(rootPageUrl), read(demoRootUrl), read(replayPlayerUrl)];
   const forbidden = [
