@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { provisionConnection, resetProvisionCache } from "./provision";
+import {
+  fetchHasCredential,
+  provisionConnection,
+  resetCredentialCache,
+  resetProvisionCache,
+} from "./provision";
 
 const OK = () =>
   Promise.resolve(
@@ -87,4 +92,36 @@ test("a refusal IS cached, because it will not change on retry", async () => {
   await provisionConnection(refused);
 
   assert.equal(calls, 1);
+});
+
+test("the credential check is also fetched once", async () => {
+  // Shipping an uncached fetch next to a cached one would reintroduce the
+  // request spam the connection cache exists to remove.
+  resetCredentialCache();
+  let calls = 0;
+  const counted = () => {
+    calls += 1;
+    return Promise.resolve(
+      new Response(JSON.stringify({ harnessIds: ["copilot"] }), { status: 200 })
+    );
+  };
+
+  assert.equal(await fetchHasCredential(counted), true);
+  assert.equal(await fetchHasCredential(counted), true);
+  assert.equal(calls, 1);
+});
+
+test("an unreadable credential answer is not cached", async () => {
+  // Caching a failure would permanently claim the tenant has no credential,
+  // nagging someone who does.
+  resetCredentialCache();
+  let calls = 0;
+  const failing = () => {
+    calls += 1;
+    return Promise.resolve(new Response("nope", { status: 500 }));
+  };
+
+  assert.equal(await fetchHasCredential(failing), null);
+  assert.equal(await fetchHasCredential(failing), null);
+  assert.equal(calls, 2);
 });
