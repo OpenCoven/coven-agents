@@ -330,3 +330,54 @@ test("a range scan sees a secret that a later commit deleted", () => {
     "the deleted blob is still in the range being pushed"
   );
 });
+
+test("a range scan never stats the whole repository", () => {
+  /**
+   * The defect this guards. `historyBlobs` used to stat every object with
+   * `--batch-all-objects` and only then narrow to the range, so a one-commit
+   * pre-push scan did the same full-repository walk as a full history audit:
+   * 3,424 objects to answer a question about 7.
+   *
+   * Asserted by reading the source, because the bug was invisible from the
+   * outside -- it reported exactly the right findings, just after doing
+   * unbounded work to get them. No test of behaviour could have caught it.
+   */
+  const source = readFileSync(
+    path.join(import.meta.dirname, "secret-scan.ts"),
+    "utf8"
+  );
+
+  assert.doesNotMatch(
+    source,
+    /"--batch-all-objects"/,
+    "the object walk must be driven by the range, not the whole repository"
+  );
+  assert.match(source, /"rev-list", "--objects", \.\.\.selector/);
+});
+
+test("a range scan ignores a secret that lives outside the range", () => {
+  // The other half of scoping: narrow enough to be fast, and still correct
+  // about which commits it is answering for.
+  const cwd = repository();
+  writeFileSync(path.join(cwd, "old.txt"), `token = "${githubToken()}"\n`);
+  git(cwd, ["add", "old.txt"]);
+  git(cwd, ["commit", "--no-gpg-sign", "-m", "a secret, long ago"]);
+  const base = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd,
+    encoding: "utf8",
+  }).trim();
+
+  writeFileSync(path.join(cwd, "new.txt"), "nothing to see\n");
+  git(cwd, ["add", "new.txt"]);
+  git(cwd, ["commit", "--no-gpg-sign", "-m", "an innocent commit"]);
+
+  assert.equal(
+    scanRepository({ cwd, mode: "history", range: `${base}..HEAD` }).length,
+    0,
+    "a commit outside the range is not this push's problem"
+  );
+  assert.ok(
+    scanRepository({ cwd, mode: "history" }).length > 0,
+    "the full audit still sees it"
+  );
+});

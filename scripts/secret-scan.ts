@@ -198,15 +198,23 @@ function sanitizePath(path: string): string {
   }).join("");
 }
 
-function git(cwd: string, args: string[], encoding?: BufferEncoding) {
+function git(
+  cwd: string,
+  args: string[],
+  encoding?: BufferEncoding,
+  input?: string
+) {
   return execFileSync("git", args, {
     cwd,
     encoding,
-    maxBuffer: MAX_FILE_BYTES + 1024,
+    input,
+    // Sized for an object listing, not a file. The previous 1 MB ceiling was
+    // chosen for reading one blob and silently applied to the listings too.
+    maxBuffer: MAX_TOTAL_BYTES,
     // Git's own stderr is suppressed: this walks objects speculatively, and an
     // inherited stream turns every expected miss into console noise that hides
     // the findings underneath it.
-    stdio: ["ignore", "pipe", "ignore"],
+    stdio: input === undefined ? ["ignore", "pipe", "ignore"] : undefined,
   });
 }
 
@@ -236,32 +244,20 @@ function historyBlobs(
   cwd: string,
   selector: readonly string[]
 ): Array<{ path: string; sha: string }> {
-  const sizes = git(
-    cwd,
-    [
-      "cat-file",
-      "--batch-all-objects",
-      "--batch-check=%(objectname) %(objecttype) %(objectsize)",
-    ],
-    "utf8"
-  ) as string;
-
-  const scannable = new Set<string>();
-  for (const line of sizes.split("\n")) {
-    const [sha, type, size] = line.split(" ");
-    if (type === "blob" && Number(size) <= MAX_FILE_BYTES) {
-      scannable.add(sha);
-    }
-  }
-
+  // The range decides what is looked at, and it decides it FIRST.
+  //
+  // This used to stat every object in the repository and only then narrow to
+  // the range, so a one-commit pre-push scan did the same full-repository walk
+  // as a full history audit. It reported the right findings and took long
+  // enough that pushes piled up behind it -- a hook slow enough to resent is a
+  // hook people skip, and this one was slow enough to look hung.
   const named = git(
     cwd,
     ["rev-list", "--objects", ...selector],
     "utf8"
   ) as string;
-  const seen = new Set<string>();
-  const blobs: Array<{ path: string; sha: string }> = [];
 
+  const pathBySha = new Map<string, string>();
   for (const line of named.split("\n")) {
     const space = line.indexOf(" ");
     if (space === -1) {
@@ -269,11 +265,36 @@ function historyBlobs(
     }
     const sha = line.slice(0, space);
     const path = line.slice(space + 1);
-    if (!(path && scannable.has(sha)) || seen.has(sha)) {
+    // `rev-list --objects` emits commits and trees too. A line with no path is
+    // one of those; the type check below drops whatever else slips through.
+    if (path && !pathBySha.has(sha)) {
+      pathBySha.set(sha, path);
+    }
+  }
+
+  if (pathBySha.size === 0) {
+    return [];
+  }
+
+  // One `cat-file` for the candidates, fed over stdin: one process for the
+  // whole range rather than one per object, and nothing outside the range.
+  const checked = git(
+    cwd,
+    ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+    "utf8",
+    `${Array.from(pathBySha.keys()).join("\n")}\n`
+  ) as string;
+
+  const blobs: Array<{ path: string; sha: string }> = [];
+  for (const line of checked.split("\n")) {
+    const [sha, type, size] = line.split(" ");
+    if (type !== "blob" || Number(size) > MAX_FILE_BYTES) {
       continue;
     }
-    seen.add(sha);
-    blobs.push({ path, sha });
+    const path = pathBySha.get(sha);
+    if (path) {
+      blobs.push({ path, sha });
+    }
   }
 
   return blobs;
