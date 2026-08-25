@@ -1,134 +1,126 @@
 "use client";
 
-import { ArrowLeftIcon } from "lucide-react";
+import { ArrowLeftIcon, Database, Gauge, KeyRound } from "lucide-react";
 import Link from "next/link";
-import { useActionState, useEffect } from "react";
-import {
-  type ChangePasswordActionState,
-  changePassword,
-} from "@/app/(auth)/actions";
+import { useSession } from "next-auth/react";
+import { useCallback, useState } from "react";
 import { DeleteAllChats } from "@/components/account/delete-all-chats";
 import { HarnessCredentials } from "@/components/account/harness-credentials";
 import { UsageMeter } from "@/components/account/usage-meter";
 import { AccountMenu } from "@/components/agents/account-menu";
-import { toast } from "@/components/chat/toast";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
 
-const MESSAGES: Record<
-  string,
-  { description: string; type: "error" | "success" }
-> = {
-  failed: { description: "Could not update your password.", type: "error" },
-  mismatch: {
-    description: "The two new passwords do not match.",
-    type: "error",
-  },
-  success: { description: "Password updated.", type: "success" },
-  too_short: {
-    description: "Use at least 6 characters.",
-    type: "error",
-  },
-  unauthorized: { description: "Sign in first.", type: "error" },
-  unchanged: {
-    description: "That is already your password. Choose a different one.",
-    type: "error",
-  },
-  wrong_password: {
-    description: "Current password is incorrect.",
-    type: "error",
-  },
-};
+/**
+ * Account settings.
+ *
+ * Tabbed rather than a single column of stacked cards. Stacked, the page ran
+ * well past the fold and the thing most people come here for -- connecting
+ * Copilot -- sat third, below a password form that could not work.
+ *
+ * That password form is gone. Sign-in is GitHub-only, so no account has a
+ * password to change; the form was the first thing on the page and implied
+ * otherwise.
+ *
+ * The panel scrolls on its own rather than the page, so the navigation stays
+ * put and nothing reflows when a section is taller than the viewport.
+ */
+const TABS = [
+  { icon: KeyRound, id: "copilot", label: "Copilot" },
+  { icon: Gauge, id: "usage", label: "Usage" },
+  { icon: Database, id: "data", label: "Data" },
+] as const;
+
+type TabId = (typeof TABS)[number]["id"];
 
 export default function Page() {
-  const [state, formAction] = useActionState<
-    ChangePasswordActionState,
-    FormData
-  >(changePassword, { status: "idle" });
-
-  useEffect(() => {
-    const message = MESSAGES[state.status];
-
-    if (message) {
-      toast(message);
-    }
-  }, [state.status]);
+  const [tab, setTab] = useState<TabId>("copilot");
+  const { data: session } = useSession();
 
   return (
-    <div className="mx-auto flex min-h-dvh w-full max-w-[420px] flex-col justify-center gap-6 px-6 py-12">
-      <div className="flex items-center justify-between">
+    <div className="flex h-dvh w-full flex-col overflow-hidden bg-background">
+      <header className="flex shrink-0 items-center justify-between gap-4 border-border border-b px-6 py-4">
         <Link
-          className="flex w-fit items-center gap-1.5 text-[13px] text-muted-foreground transition-colors hover:text-foreground"
+          className="flex items-center gap-1.5 text-[13px] text-muted-foreground transition-colors hover:text-foreground"
           href="/agents"
         >
           <ArrowLeftIcon className="size-3.5" />
           Back
         </Link>
 
-        {/* Sign-out was reachable from the console and the chat but not from
-            the settings page itself, which is where a person goes looking. */}
-        <AccountMenu />
-      </div>
-      <div className="flex flex-col gap-6 rounded-[var(--radius)] border border-border bg-card p-8">
-        <div className="flex flex-col gap-1">
-          <h1 className="font-semibold text-2xl tracking-tight">Account</h1>
-          <p className="text-muted-foreground text-sm">
-            Change your password. If you signed in with a temporary one, replace
-            it here.
-          </p>
+        <div className="flex items-center gap-3">
+          {session?.user?.email ? (
+            <span className="hidden truncate text-[13px] text-muted-foreground sm:block">
+              {session.user.email}
+            </span>
+          ) : null}
+          <AccountMenu />
         </div>
+      </header>
 
-        <form action={formAction} className="flex flex-col gap-4">
-          <div className="flex flex-col gap-2">
-            <Label htmlFor="currentPassword">Current password</Label>
-            <Input
-              autoComplete="current-password"
-              id="currentPassword"
-              name="currentPassword"
-              required
-              type="password"
-            />
-          </div>
+      <div className="flex flex-1 overflow-hidden px-6 py-8">
+        {/* `m-auto` centres the block when the panel is short, so a two-field
+            section sits in the optical centre instead of clinging to the top
+            with a void beneath it. `max-h-full` keeps a tall one from
+            overflowing the page rather than its own panel. */}
+        <div className="m-auto flex max-h-full w-full max-w-[760px] gap-8">
+          <nav className="flex w-[150px] shrink-0 flex-col gap-1">
+            <p className="px-3 pb-2 font-medium text-[11px] text-muted-foreground uppercase tracking-[0.14em]">
+              Settings
+            </p>
 
-          <div className="flex flex-col gap-2">
-            <Label htmlFor="newPassword">New password</Label>
-            <Input
-              autoComplete="new-password"
-              id="newPassword"
-              minLength={6}
-              name="newPassword"
-              required
-              type="password"
-            />
-          </div>
+            {TABS.map((entry) => (
+              <TabButton
+                active={tab === entry.id}
+                key={entry.id}
+                onSelect={setTab}
+                tab={entry}
+              />
+            ))}
+          </nav>
 
-          <div className="flex flex-col gap-2">
-            <Label htmlFor="confirmPassword">Confirm new password</Label>
-            <Input
-              autoComplete="new-password"
-              id="confirmPassword"
-              minLength={6}
-              name="confirmPassword"
-              required
-              type="password"
-            />
-          </div>
-
-          <Button
-            className="h-10 w-full rounded-[8px] font-semibold text-[13px]"
-            type="submit"
-          >
-            Update password
-          </Button>
-        </form>
+          {/* Only the panel scrolls, so the navigation never moves and a tall
+            section cannot push the page into a second scrollbar. */}
+          <section className="min-w-0 flex-1 overflow-y-auto pr-1">
+            {tab === "copilot" ? <HarnessCredentials /> : null}
+            {tab === "usage" ? <UsageMeter /> : null}
+            {tab === "data" ? <DeleteAllChats /> : null}
+          </section>
+        </div>
       </div>
-
-      <UsageMeter />
-
-      <HarnessCredentials />
-
-      <DeleteAllChats />
     </div>
+  );
+}
+
+function TabButton({
+  active,
+  onSelect,
+  tab,
+}: {
+  active: boolean;
+  onSelect: (id: TabId) => void;
+  tab: (typeof TABS)[number];
+}) {
+  const Icon = tab.icon;
+
+  // Bound here so the parent passes a stable reference and every tab does not
+  // re-render when one is selected.
+  const select = useCallback(() => {
+    onSelect(tab.id);
+  }, [onSelect, tab.id]);
+
+  return (
+    <button
+      className={cn(
+        "flex items-center gap-2.5 rounded-[8px] px-3 py-2 text-left text-[13px] transition-colors",
+        active
+          ? "bg-[var(--oc-accent-soft)] font-medium text-[var(--oc-accent)]"
+          : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+      )}
+      onClick={select}
+      type="button"
+    >
+      <Icon className="size-4 shrink-0" />
+      {tab.label}
+    </button>
   );
 }
