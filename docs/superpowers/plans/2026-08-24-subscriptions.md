@@ -44,16 +44,30 @@ endpoint and before a run starts. The cap is the only new gate.
 ## Constants set at launch
 
 ```
-STRIPE_PRICE_ID       env, the price checkout uses
+STRIPE_PRICE_ID       env, the $25/month recurring price
 STRIPE_SECRET_KEY     env
 STRIPE_WEBHOOK_SECRET env
-MONTHLY_RUN_CAP       lib/billing/limits.ts
+MONTHLY_RUN_CAP  750   lib/billing/limits.ts
 GRACE_PERIOD_DAYS     lib/billing/limits.ts (3)
 ```
 
-`MONTHLY_RUN_CAP` is a commercial decision. Task 2 puts a value in one file so
-the pricing page, the usage endpoint and the enforcement point cannot disagree;
-choosing the number is not this plan's job.
+**Decided:** `$25/month`, `MONTHLY_RUN_CAP = 750` runs per billing period —
+about 25 a day. At the worst-case sandbox profile 750 fully-utilised runs are
+roughly $1.70 of raw container cost, so the margin survives payment fees while
+the cap is high enough that a daily user never thinks about it.
+
+`STRIPE_PRICE_ID` is whatever price object the $25 recurring product gets in
+Stripe; it is env, not code.
+
+Task 2 still puts the cap in one file, because the pricing page, the usage
+endpoint and the enforcement point must not be able to disagree.
+
+**No launch add-ons.** One portable plan, one cap, bring your own Copilot /
+Claude / Codex credential. The first add-on, if usage justifies one, should be
+a prepaid 250-run pack at $10 that expires with the billing period — it keeps
+the margin and, unlike metered overage, cannot produce a surprise bill.
+Priority execution, extra concurrency, retention, teams and metered billing all
+wait for evidence of demand.
 
 ## File structure
 
@@ -227,7 +241,7 @@ Create `lib/billing/limits.ts`:
  *
  * The value is a commercial decision. Change it here.
  */
-export const MONTHLY_RUN_CAP = 200;
+export const MONTHLY_RUN_CAP = 750;
 
 /**
  * Days of access granted after a failed *renewal*, once.
@@ -685,7 +699,7 @@ test("under the cap is allowed", () => {
 
 test("at the cap is refused", () => {
   // The boundary has to fall one way. At the cap means the included runs are
-  // spent, which is what "200 runs included" says.
+  // spent, which is what "750 runs included" says.
   const verdict = capVerdict({ resetsAt: RESETS, used: MONTHLY_RUN_CAP });
 
   assert.equal(verdict.kind, "refused");
