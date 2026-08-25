@@ -1,9 +1,16 @@
 # Coven Agents
 
-**Coven Agents** is a local-cloud hybrid control plane for creating and
-running autonomous coding agents. It is derived from
+**Coven Agents** is a local-cloud hybrid product control plane for creating
+bounded execution profiles and running coding missions. It is derived from
 [BunsDev/chatbot](https://github.com/BunsDev/chatbot) and keeps that template's
 Next.js, React, Tailwind, and shadcn/ui foundation.
+
+It owns product accounts, subscriptions, runner access, cloud credential
+custody, and evidence for its own runs. It does not own canonical OpenCoven
+familiar identity, protected memory, authority, durable orchestration, or the
+runtime registry. Review the accepted
+[Product authority boundary](docs/architecture/adr-001-product-authority-boundary.md)
+before expanding product state or adding an OpenCoven dependency.
 
 The same browser UI can connect to:
 
