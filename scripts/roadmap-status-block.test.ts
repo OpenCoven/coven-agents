@@ -168,35 +168,78 @@ test("extracts the rendered roadmap summary round-trip", () => {
   );
 });
 
+test("rejects hidden records without exactly one ordered marker pair", () => {
+  const record = `${DATA_PREFIX}${JSON.stringify(summary())} -->`;
+
+  for (const source of [
+    record,
+    `${START}\n${record}`,
+    `${record}\n${END}`,
+    `${END}\n${record}\n${START}`,
+    `${START}\n${START}\n${record}\n${END}\n${END}`,
+  ]) {
+    assert.throws(() => extractRoadmapSummary(source));
+  }
+});
+
+test("rejects hidden records outside the marked block", () => {
+  const record = `${DATA_PREFIX}${JSON.stringify(summary())} -->`;
+
+  assert.throws(() =>
+    extractRoadmapSummary(`${record}\n${START}\nauthored\n${END}`)
+  );
+  assert.throws(() =>
+    extractRoadmapSummary(`${START}\nauthored\n${END}\n${record}`)
+  );
+  assert.throws(() =>
+    extractRoadmapSummary(`${record}\n${START}\n${record}\n${END}`)
+  );
+});
+
+test("rejects hidden records with leading or trailing line junk", () => {
+  const record = `${DATA_PREFIX}${JSON.stringify(summary())} -->`;
+
+  assert.throws(() =>
+    extractRoadmapSummary(`${START}\nleading ${record}\n${END}`)
+  );
+  assert.throws(() =>
+    extractRoadmapSummary(`${START}\n${record} trailing\n${END}`)
+  );
+});
+
 test("rejects missing or duplicate hidden data records", () => {
   const rendered = renderRoadmapStatusBlock(summary(), REFRESHED_AT);
   const recordStart = rendered.indexOf(DATA_PREFIX);
   const recordEnd = rendered.indexOf(" -->", recordStart) + " -->".length;
   const record = rendered.slice(recordStart, recordEnd);
 
-  assert.throws(() => extractRoadmapSummary("no hidden record"));
+  assert.throws(() => extractRoadmapSummary(`${START}\n${END}`));
   assert.throws(() => extractRoadmapSummary(rendered.replace(record, "")));
-  assert.throws(() => extractRoadmapSummary(`${rendered}${record}`));
+  assert.throws(() =>
+    extractRoadmapSummary(rendered.replace(record, `${record}\n${record}`))
+  );
 });
 
 test("rejects malformed hidden JSON and strict schema violations", () => {
   assert.throws(() =>
-    extractRoadmapSummary(`${DATA_PREFIX}{"blockedCount": -->`)
-  );
-  assert.throws(() =>
     extractRoadmapSummary(
-      `${DATA_PREFIX}${JSON.stringify({
-        ...summary(),
-        unexpected: true,
-      })} -->`
+      `${START}\n${DATA_PREFIX}{"blockedCount": -->\n${END}`
     )
   );
   assert.throws(() =>
     extractRoadmapSummary(
-      `${DATA_PREFIX}${JSON.stringify({
+      `${START}\n${DATA_PREFIX}${JSON.stringify({
+        ...summary(),
+        unexpected: true,
+      })} -->\n${END}`
+    )
+  );
+  assert.throws(() =>
+    extractRoadmapSummary(
+      `${START}\n${DATA_PREFIX}${JSON.stringify({
         ...summary(),
         totalCount: "10",
-      })} -->`
+      })} -->\n${END}`
     )
   );
 });
@@ -220,6 +263,40 @@ test("replaces only the marked block and preserves authored bytes", () => {
   assert.equal(result, `${prefix}${replacement}${suffix}`);
   assert.equal(result.slice(0, prefix.length), prefix);
   assert.equal(result.slice(-suffix.length), suffix);
+});
+
+test("preserves an existing newline after the end marker", () => {
+  const oldBlock = renderRoadmapStatusBlock(summary(), REFRESHED_AT).trimEnd();
+  const replacement = renderRoadmapStatusBlock(
+    summary(),
+    "2026-08-26T02:00:00-05:00"
+  );
+  const suffix = "\r\nAuthored suffix\n";
+
+  const result = replaceRoadmapStatusBlock(
+    `Authored prefix\n${oldBlock}${suffix}`,
+    replacement
+  );
+
+  assert.equal(result, `Authored prefix\n${replacement.trimEnd()}${suffix}`);
+});
+
+test("repeated replacement does not accumulate blank lines", () => {
+  const oldBlock = renderRoadmapStatusBlock(summary(), REFRESHED_AT).trimEnd();
+  const replacement = renderRoadmapStatusBlock(
+    summary(),
+    "2026-08-26T02:00:00-05:00"
+  );
+  const source = `Authored prefix\n${oldBlock}\nAuthored suffix\n`;
+
+  const once = replaceRoadmapStatusBlock(source, replacement);
+  const twice = replaceRoadmapStatusBlock(once, replacement);
+
+  assert.equal(twice, once);
+  assert.equal(
+    once,
+    `Authored prefix\n${replacement.trimEnd()}\nAuthored suffix\n`
+  );
 });
 
 test("rejects source text with missing markers", () => {
@@ -259,7 +336,7 @@ test("rejects nested source markers", () => {
 });
 
 test("rejects replacements without one exact marker pair", () => {
-  const source = `${START}\nold\n${END}`;
+  const source = renderRoadmapStatusBlock(summary(), REFRESHED_AT).trimEnd();
 
   for (const replacement of [
     "",
@@ -269,6 +346,20 @@ test("rejects replacements without one exact marker pair", () => {
     `prefix\n${START}\n${END}`,
     `${START}\n${END}\nsuffix`,
     `${START}\n${START}\n${END}\n${END}`,
+  ]) {
+    assert.throws(() => replaceRoadmapStatusBlock(source, replacement));
+  }
+});
+
+test("rejects replacements without one canonical hidden data record", () => {
+  const source = renderRoadmapStatusBlock(summary(), REFRESHED_AT).trimEnd();
+  const record = `${DATA_PREFIX}${JSON.stringify(summary())} -->`;
+
+  for (const replacement of [
+    `${START}\n${END}`,
+    `${START}\nleading ${record}\n${END}`,
+    `${START}\n${record} trailing\n${END}`,
+    `${START}\n${DATA_PREFIX}{}\n${END}`,
   ]) {
     assert.throws(() => replaceRoadmapStatusBlock(source, replacement));
   }

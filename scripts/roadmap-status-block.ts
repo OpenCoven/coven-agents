@@ -87,6 +87,7 @@ export function renderRoadmapStatusBlock(
 }
 
 export function extractRoadmapSummary(source: string): RoadmapSummary {
+  const statusBlock = findStatusBlock(source);
   const records = findAll(source, ROADMAP_STATUS_DATA_PREFIX);
 
   if (records.length !== 1) {
@@ -99,15 +100,34 @@ export function extractRoadmapSummary(source: string): RoadmapSummary {
     throw new Error("Roadmap status data record is missing");
   }
 
-  const jsonStart = recordStart + ROADMAP_STATUS_DATA_PREFIX.length;
-  const recordEnd = source.indexOf(HIDDEN_RECORD_END, jsonStart);
+  const lineStart =
+    Math.max(
+      source.lastIndexOf("\n", recordStart - 1),
+      source.lastIndexOf("\r", recordStart - 1)
+    ) + 1;
+  const nextLineFeed = source.indexOf("\n", recordStart);
+  const nextCarriageReturn = source.indexOf("\r", recordStart);
+  const lineEnd = Math.min(
+    nextLineFeed === -1 ? source.length : nextLineFeed,
+    nextCarriageReturn === -1 ? source.length : nextCarriageReturn
+  );
+  const record = source.slice(lineStart, lineEnd);
+  const statusBlockStart = statusBlock.start + ROADMAP_STATUS_START.length;
 
-  if (recordEnd === -1) {
+  if (
+    recordStart !== lineStart ||
+    lineStart < statusBlockStart ||
+    lineEnd > statusBlock.end ||
+    !record.endsWith(HIDDEN_RECORD_END)
+  ) {
     throw new Error("Roadmap status data record is malformed");
   }
 
+  const jsonStart = ROADMAP_STATUS_DATA_PREFIX.length;
+  const jsonEnd = record.length - HIDDEN_RECORD_END.length;
+
   return roadmapSummarySchema.parse(
-    JSON.parse(source.slice(jsonStart, recordEnd))
+    JSON.parse(record.slice(jsonStart, jsonEnd))
   );
 }
 
@@ -132,8 +152,11 @@ export function replaceRoadmapStatusBlock(
     );
   }
 
-  const normalizedReplacement = `${replacementWithoutTrailingNewlines}\n`;
-  const sourceEnd = sourceRange.end + ROADMAP_STATUS_END.length;
+  extractRoadmapSummary(replacementWithoutTrailingNewlines);
 
-  return `${source.slice(0, sourceRange.start)}${normalizedReplacement}${source.slice(sourceEnd)}`;
+  const sourceEnd = sourceRange.end + ROADMAP_STATUS_END.length;
+  const suffix = source.slice(sourceEnd);
+  const replacementSeparator = /^[\r\n]/u.test(suffix) ? "" : "\n";
+
+  return `${source.slice(0, sourceRange.start)}${replacementWithoutTrailingNewlines}${replacementSeparator}${suffix}`;
 }
