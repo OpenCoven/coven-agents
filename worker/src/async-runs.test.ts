@@ -14,7 +14,11 @@ import {
   setSandboxDestroyError,
   setSandboxExec,
 } from "../test-support/cloudflare-sandbox";
-import { AgentDirectory, YoloAgent } from "./agents";
+import {
+  AgentDirectory,
+  PENDING_ADMISSION_TIMEOUT_MS,
+  YoloAgent,
+} from "./agents";
 import { HarnessError } from "./harness-runner";
 import {
   AgentBusyError,
@@ -116,6 +120,153 @@ test("public run-start surfaces are admission-gated", () => {
   assert.deepEqual(startSurfaces, ["enqueue", "startAdmitted"]);
   assert.equal("execute" in yolo, false);
   assert.equal("start" in yolo, false);
+});
+
+test("an orphaned enqueue is durably cleaned after its preparation deadline", async () => {
+  resetDestroyedSandboxes();
+  const scheduled: { id: string; payload: unknown }[] = [];
+  const yolo = new (class extends YoloAgent {
+    schedule<T = string>(
+      _when: Date | number | string,
+      callback: keyof this,
+      scheduledPayload?: T
+    ): Promise<{
+      id: string;
+      callback: string;
+      payload: T;
+      type: "scheduled";
+      time: number;
+    }> {
+      const result = {
+        callback: String(callback),
+        id: "pending-admission-1",
+        payload: scheduledPayload as T,
+        time: Date.now(),
+        type: "scheduled" as const,
+      };
+      scheduled.push({ id: result.id, payload: scheduledPayload });
+      return Promise.resolve(result);
+    }
+
+    cancelSchedule(): Promise<boolean> {
+      return Promise.resolve(true);
+    }
+  })(undefined as never, {} as never);
+  yolo.configure(definition());
+
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Recover the crash gap." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a31",
+    "crash-gap-hash",
+    "identity"
+  );
+  assert.equal(queued.created, true);
+  assert.equal(scheduled.length, 1);
+  const state = Reflect.get(yolo, "state") as {
+    runs: CloudRunRecord[];
+  };
+  const record = state.runs.find(
+    (candidate) => candidate.run.id === queued.run.id
+  );
+  assert.ok(
+    Number.isFinite(record?.pendingAdmission?.deadlineAt) &&
+      (record?.pendingAdmission?.deadlineAt ?? 0) <=
+        Date.now() + PENDING_ADMISSION_TIMEOUT_MS
+  );
+
+  const expiredState = Reflect.get(yolo, "state") as {
+    runs: CloudRunRecord[];
+  };
+  yolo.setState({
+    ...expiredState,
+    runs: expiredState.runs.map((candidate) =>
+      candidate.run.id === queued.run.id
+        ? {
+            ...candidate,
+            pendingAdmission: {
+              ...candidate.pendingAdmission,
+              deadlineAt: Date.now() - 1,
+            },
+          }
+        : candidate
+    ),
+  } as never);
+  const orphanPayload = scheduled[0]?.payload as {
+    generation: number;
+    runId: string;
+    token: string;
+  };
+  assert.equal(
+    await yolo.expirePendingAdmission(orphanPayload, {
+      id: "pending-admission-1",
+    }),
+    true
+  );
+  assert.equal(yolo.getRun(queued.run.id), null);
+  assert.deepEqual(destroyedSandboxes(), []);
+});
+
+test("admission confirmation atomically wins the orphan timeout and rejects foreign data", async () => {
+  const cancelled: string[] = [];
+  const yolo = new (class extends YoloAgent {
+    schedule<T = string>(
+      _when: Date | number | string,
+      callback: keyof this,
+      payload?: T
+    ): Promise<{
+      id: string;
+      callback: string;
+      payload: T;
+      type: "scheduled";
+      time: number;
+    }> {
+      return Promise.resolve({
+        callback: String(callback),
+        id: "pending-admission-2",
+        payload: payload as T,
+        time: Date.now(),
+        type: "scheduled",
+      });
+    }
+
+    cancelSchedule(id: string): Promise<boolean> {
+      cancelled.push(id);
+      return Promise.resolve(true);
+    }
+  })(undefined as never, {} as never);
+  yolo.configure(definition());
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Attach safely." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a32",
+    "attach-hash",
+    "identity"
+  );
+
+  assert.equal(
+    await yolo.confirmAdmission(queued.run.id, OP_B, "wrong-hash"),
+    false
+  );
+  assert.equal(
+    await yolo.confirmAdmission(queued.run.id, OP_A, "attach-hash"),
+    true
+  );
+  assert.deepEqual(cancelled, ["pending-admission-2"]);
+  const state = Reflect.get(yolo, "state") as {
+    runs: CloudRunRecord[];
+  };
+  assert.equal(
+    state.runs.find((candidate) => candidate.run.id === queued.run.id)
+      ?.pendingAdmission,
+    undefined
+  );
+  assert.equal(
+    await yolo.expirePendingAdmission(
+      { generation: 1, runId: queued.run.id, token: "stale" },
+      { id: "pending-admission-2" }
+    ),
+    true
+  );
+  assert.notEqual(yolo.getRun(queued.run.id), null);
 });
 
 test("a direct startAdmitted RPC without an active admission is rejected", async () => {
@@ -1560,7 +1711,7 @@ test("decommission keeps terminal cleanup durable when admission release fails",
   assert.deepEqual(pending.decommission?.admissionReleases[queued.run.id], {
     dispatchToken: "1:decommission-durable",
   });
-  assert.equal(pending.decommission?.retryScheduleId, "decommission-retry-1");
+  assert.equal(pending.decommission?.retryScheduleId, "decommission-retry-2");
   assert.equal(releaseAttempts, 1);
 
   await yolo.retryDecommission();
@@ -1573,7 +1724,7 @@ test("decommission keeps terminal cleanup durable when admission release fails",
   assert.equal(yolo.snapshot(), null);
   assert.deepEqual(completed.runs, []);
   assert.equal(releaseAttempts, 2);
-  assert.equal(scheduleAttempts, 1);
+  assert.equal(scheduleAttempts, 2);
 
   assert.equal(
     yolo.fenceAdmitted(queued.run.id, "4:stale-after-decommission"),
@@ -2893,4 +3044,70 @@ test("removing an agent drops its runs from the index", () => {
 
   assert.equal(index.lookupRun(OP_A), null);
   assert.equal(index.list("acct_1").length, 0);
+});
+
+test("run mappings retain active runs and only the newest terminal history", () => {
+  const index = directory();
+  const activeRun = "active-run";
+  index.registerRun(activeRun, AGENT_ID, "active");
+
+  for (let sequence = 1; sequence <= 1000; sequence += 1) {
+    index.registerRun(`terminal-run-${sequence}`, AGENT_ID, "terminal");
+  }
+
+  const state = Reflect.get(index, "state") as {
+    runs?: Record<string, string>;
+  };
+  assert.equal(Object.keys(state.runs ?? {}).length, 21);
+  assert.equal(index.lookupRun(activeRun), AGENT_ID);
+  assert.equal(index.lookupRun("terminal-run-1000"), AGENT_ID);
+  assert.equal(index.lookupRun("terminal-run-1"), null);
+});
+
+test("legacy run mappings migrate to durable registration sequence metadata", () => {
+  const index = directory();
+  const state = Reflect.get(index, "state") as {
+    agents: AgentDefinition[];
+    pendingUnregisters?: Record<string, string>;
+    runs?: Record<string, string>;
+  };
+  index.setState({
+    ...state,
+    nextRunRegistrationSequence: undefined,
+    runRegistrations: undefined,
+    runs: {
+      "legacy-run-a": AGENT_ID,
+      "legacy-run-b": "other-agent",
+    },
+  } as never);
+
+  assert.equal(index.lookupRun("legacy-run-a"), AGENT_ID);
+  const migrated = Reflect.get(index, "state") as {
+    nextRunRegistrationSequence?: number;
+    runRegistrations?: Record<
+      string,
+      { agentId: string; sequence: number; status: string }
+    >;
+  };
+  assert.equal(migrated.runRegistrations?.["legacy-run-a"]?.sequence, 1);
+  assert.equal(migrated.runRegistrations?.["legacy-run-b"]?.sequence, 2);
+  assert.equal(migrated.nextRunRegistrationSequence, 3);
+});
+
+test("removing an agent preserves unrelated pending cleanup and run ordering", () => {
+  const index = directory();
+  index.registerRun(OP_A, AGENT_ID, "terminal");
+  index.registerRun("unrelated-run", "other-agent", "terminal");
+  index.enqueueRunMappingCleanup("pending-a", "other-agent");
+
+  index.remove(AGENT_ID);
+
+  const state = Reflect.get(index, "state") as {
+    pendingUnregisters?: Record<string, string>;
+    runs?: Record<string, string>;
+    runRegistrations?: Record<string, unknown>;
+  };
+  assert.equal(state.pendingUnregisters?.["pending-a"], "other-agent");
+  assert.equal(state.runs?.["unrelated-run"], "other-agent");
+  assert.ok(state.runRegistrations?.["unrelated-run"]);
 });

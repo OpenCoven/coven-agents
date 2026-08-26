@@ -38,6 +38,7 @@ import {
   finishCloudRunRecord,
   isTerminal,
   liveCloudRunEvent,
+  MAX_TERMINAL_RUNS_PER_AGENT,
   nextEventId,
   OperationConflictError,
   planCloudRunStart,
@@ -59,7 +60,21 @@ type DirectoryState = {
    * it belongs to, so the mapping has to live somewhere both can reach.
    */
   runs?: Record<string, string>;
+  runRegistrations?: Record<string, RunRegistration>;
+  nextRunRegistrationSequence?: number;
   pendingUnregisters?: Record<string, string>;
+};
+
+type RunRegistration = {
+  agentId: string;
+  sequence: number;
+  status: "active" | "queued" | "terminal";
+};
+
+type DirectoryRunMappings = {
+  nextSequence: number;
+  registrations: Record<string, RunRegistration>;
+  runs: Record<string, string>;
 };
 
 type AdmissionFence = {
@@ -125,8 +140,15 @@ type AgentLifecycle = YoloAgentState["lifecycle"];
 
 const WARM_FIBER_KEY = "warm";
 const CLEANUP_RETRY_DELAY_MS = 5000;
+export const PENDING_ADMISSION_TIMEOUT_MS = 30_000;
 const MAX_LEGACY_ADMISSION_FENCE_TOKENS = 32;
 const MAX_ADMISSION_FENCE_TOMBSTONES = 128;
+
+type PendingAdmissionSchedulePayload = {
+  generation: number;
+  runId: string;
+  token: string;
+};
 
 function dispatchGeneration(dispatchToken: string): number | undefined {
   const prefix = dispatchToken.match(/^([1-9]\d*):/u)?.[1];
@@ -234,7 +256,9 @@ export function toRunResult(record: CloudRunRecord): RunResult {
 export class AgentDirectory extends Agent<Env, DirectoryState> {
   initialState: DirectoryState = {
     agents: [],
+    nextRunRegistrationSequence: 1,
     pendingUnregisters: {},
+    runRegistrations: {},
     runs: {},
   };
 
@@ -260,41 +284,99 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
   }
 
   remove(agentId: string): void {
-    // Drops the agent's run index with it. Leaving entries behind would let a
-    // stale run id resolve to an agent that no longer exists, and the run
-    // route would then address an empty Durable Object rather than 404.
+    const mappings = this.migrateRunMappings();
     const runs = Object.fromEntries(
-      Object.entries(this.state.runs ?? {}).filter(
+      Object.entries(mappings.runs).filter(([, owner]) => owner !== agentId)
+    );
+    const registrations = Object.fromEntries(
+      Object.entries(mappings.registrations).filter(
+        ([, registration]) => registration.agentId !== agentId
+      )
+    );
+    const pendingUnregisters = Object.fromEntries(
+      Object.entries(this.state.pendingUnregisters ?? {}).filter(
         ([, owner]) => owner !== agentId
       )
     );
+    const pruned = this.pruneRunMappings(runs, registrations);
     this.setState({
+      ...this.state,
       agents: this.state.agents.filter((agent) => agent.id !== agentId),
-      runs,
+      nextRunRegistrationSequence: mappings.nextSequence,
+      pendingUnregisters,
+      runRegistrations: pruned.registrations,
+      runs: pruned.runs,
     });
   }
 
-  registerRun(runId: string, agentId: string): boolean {
-    const runs = this.state.runs ?? {};
+  registerRun(
+    runId: string,
+    agentId: string,
+    status: RunRegistration["status"] = "active"
+  ): boolean {
+    const mappings = this.migrateRunMappings();
+    const { runs } = mappings;
     if (Object.hasOwn(runs, runId)) {
       return false;
     }
+    const registrations = {
+      ...mappings.registrations,
+      [runId]: {
+        agentId,
+        sequence: mappings.nextSequence,
+        status,
+      },
+    };
+    const pruned = this.pruneRunMappings(runs, registrations);
     this.setState({
       ...this.state,
-      runs: { ...runs, [runId]: agentId },
+      nextRunRegistrationSequence: mappings.nextSequence + 1,
+      runRegistrations: pruned.registrations,
+      runs: { ...pruned.runs, [runId]: agentId },
     });
     return true;
   }
 
   unregisterRun(runId: string, agentId: string): boolean {
     this.drainPendingUnregisters();
-    const runs = this.state.runs ?? {};
+    const mappings = this.migrateRunMappings();
+    const { runs } = mappings;
     if (!Object.hasOwn(runs, runId) || runs[runId] !== agentId) {
       return false;
     }
     const remaining = { ...runs };
     delete remaining[runId];
-    this.setState({ ...this.state, runs: remaining });
+    const registrations = { ...mappings.registrations };
+    delete registrations[runId];
+    const pruned = this.pruneRunMappings(remaining, registrations);
+    this.setState({
+      ...this.state,
+      runRegistrations: pruned.registrations,
+      runs: pruned.runs,
+    });
+    return true;
+  }
+
+  markRunStatus(
+    runId: string,
+    agentId: string,
+    status: RunRegistration["status"]
+  ): boolean {
+    const mappings = this.migrateRunMappings();
+    const current = mappings.registrations[runId];
+    if (!current || current.agentId !== agentId) {
+      return false;
+    }
+    const registrations = {
+      ...mappings.registrations,
+      [runId]: { ...current, status },
+    };
+    const pruned = this.pruneRunMappings(mappings.runs, registrations);
+    this.setState({
+      ...this.state,
+      runRegistrations: pruned.registrations,
+      runs: pruned.runs,
+    });
     return true;
   }
 
@@ -303,11 +385,12 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
     // Own-property check: a run id of "constructor" or "__proto__" would
     // otherwise resolve to something off Object.prototype and be treated as an
     // agent id.
-    const runs = this.state.runs ?? {};
+    const { runs } = this.migrateRunMappings();
     return Object.hasOwn(runs, runId) ? (runs[runId] ?? null) : null;
   }
 
   enqueueRunMappingCleanup(runId: string, agentId: string): void {
+    this.migrateRunMappings();
     this.setState({
       ...this.state,
       pendingUnregisters: {
@@ -323,15 +406,136 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
     if (entries.length === 0) {
       return;
     }
-    const runs = { ...(this.state.runs ?? {}) };
+    const mappings = this.migrateRunMappings();
+    const runs = { ...mappings.runs };
+    const registrations = { ...mappings.registrations };
     const remaining = { ...pending };
     for (const [runId, agentId] of entries) {
       if (runs[runId] === agentId) {
         delete runs[runId];
+        delete registrations[runId];
       }
       delete remaining[runId];
     }
-    this.setState({ ...this.state, pendingUnregisters: remaining, runs });
+    this.setState({
+      ...this.state,
+      pendingUnregisters: remaining,
+      runRegistrations: registrations,
+      runs,
+    });
+  }
+
+  private migrateRunMappings(): DirectoryRunMappings {
+    const legacyRuns = { ...(this.state.runs ?? {}) };
+    const existing = this.state.runRegistrations ?? {};
+    const registrations: Record<string, RunRegistration> = {};
+    let nextSequence = 1;
+    let changed = this.state.runRegistrations === undefined;
+
+    for (const [runId, agentId] of Object.entries(legacyRuns)) {
+      const candidate = existing[runId];
+      const sequence =
+        candidate &&
+        candidate.agentId === agentId &&
+        Number.isSafeInteger(candidate.sequence) &&
+        candidate.sequence > 0
+          ? candidate.sequence
+          : nextSequence;
+      const status =
+        candidate?.agentId === agentId &&
+        (candidate.status === "active" ||
+          candidate.status === "queued" ||
+          candidate.status === "terminal")
+          ? candidate.status
+          : "terminal";
+      registrations[runId] = { agentId, sequence, status };
+      nextSequence = Math.max(nextSequence, sequence + 1);
+      if (
+        !candidate ||
+        candidate.agentId !== agentId ||
+        candidate.sequence !== sequence ||
+        candidate.status !== status
+      ) {
+        changed = true;
+      }
+    }
+
+    for (const [runId, candidate] of Object.entries(existing)) {
+      if (Object.hasOwn(registrations, runId)) {
+        continue;
+      }
+      if (
+        !candidate.agentId ||
+        !Number.isSafeInteger(candidate.sequence) ||
+        candidate.sequence <= 0
+      ) {
+        changed = true;
+        continue;
+      }
+      registrations[runId] = { ...candidate };
+      legacyRuns[runId] = candidate.agentId;
+      nextSequence = Math.max(nextSequence, candidate.sequence + 1);
+      changed = true;
+    }
+
+    const storedNext = this.state.nextRunRegistrationSequence;
+    if (
+      storedNext === undefined ||
+      !Number.isSafeInteger(storedNext) ||
+      storedNext < nextSequence
+    ) {
+      changed = true;
+    } else {
+      nextSequence = storedNext;
+    }
+
+    if (changed || this.state.nextRunRegistrationSequence === undefined) {
+      this.setState({
+        ...this.state,
+        nextRunRegistrationSequence: nextSequence,
+        runRegistrations: registrations,
+        runs: legacyRuns,
+      });
+    }
+    return { nextSequence, registrations, runs: legacyRuns };
+  }
+
+  private pruneRunMappings(
+    runs: Record<string, string>,
+    registrations: Record<string, RunRegistration>
+  ): DirectoryRunMappings {
+    const keep = new Set<string>();
+    const byAgent = new Map<string, [string, RunRegistration][]>();
+    for (const [runId, registration] of Object.entries(registrations)) {
+      const entries = byAgent.get(registration.agentId) ?? [];
+      entries.push([runId, registration]);
+      byAgent.set(registration.agentId, entries);
+    }
+    for (const entries of byAgent.values()) {
+      const ordered = entries.sort(
+        (left, right) => right[1].sequence - left[1].sequence
+      );
+      const active = ordered.find(
+        ([, registration]) => registration.status === "active"
+      );
+      if (active) {
+        keep.add(active[0]);
+      }
+      for (const [runId] of ordered
+        .filter(([candidate]) => candidate !== active?.[0])
+        .slice(0, MAX_TERMINAL_RUNS_PER_AGENT)) {
+        keep.add(runId);
+      }
+    }
+    return {
+      nextSequence: this.state.nextRunRegistrationSequence ?? 1,
+      registrations: Object.fromEntries(
+        Object.entries(registrations).filter(([runId]) => keep.has(runId))
+      ),
+      runs: Object.fromEntries(
+        Object.entries(runs).filter(([runId]) => keep.has(runId))
+      ),
+    };
   }
 
   harnesses(): Promise<HarnessStatus[]> {
@@ -540,6 +744,41 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       return false;
     }
     return await admission.validateDispatch(runId, dispatchToken);
+  }
+
+  private async markDirectoryRunStatus(
+    runId: string,
+    status: "active" | "terminal"
+  ): Promise<void> {
+    const namespace = (
+      this.env as unknown as {
+        AgentDirectory?: {
+          getByName: (name: string) => {
+            markRunStatus?: (
+              mappingRunId: string,
+              agentId: string,
+              mappingStatus: "active" | "queued" | "terminal"
+            ) => Promise<boolean> | boolean;
+          };
+        };
+      }
+    ).AgentDirectory;
+    try {
+      const directory = namespace?.getByName("default");
+      const markRunStatus = directory?.markRunStatus;
+      if (typeof markRunStatus !== "function") {
+        return;
+      }
+      await markRunStatus.call(
+        directory,
+        runId,
+        this.requireDefinition().id,
+        status
+      );
+    } catch {
+      // Run history remains available through the agent when the index is
+      // temporarily unavailable; a later status transition can repair it.
+    }
   }
 
   private currentRunOr(
@@ -1536,7 +1775,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    * token in this agent's durable state until they are dispatched; the global
    * admission object stores only the pseudonymous tenant hash.
    */
-  enqueue(
+  async enqueue(
     input: unknown,
     runId: string,
     requestHash: string,
@@ -1562,10 +1801,27 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       throw new OperationConflictError();
     }
     if (plan.kind === "existing") {
+      if (
+        plan.record.run.status === "queued" &&
+        !plan.record.admissionConfirmedAt
+      ) {
+        if (!plan.record.pendingAdmission) {
+          const pendingAdmission = this.newPendingAdmission();
+          this.persistRun({
+            ...plan.record,
+            pendingAdmission,
+          });
+        }
+        await this.schedulePendingAdmission(plan.record.run.id);
+      }
       return Promise.resolve({ created: false, run: plan.record.run });
     }
 
-    this.persistRun(plan.record);
+    const pendingAdmission = this.newPendingAdmission();
+    this.persistRun({
+      ...plan.record,
+      pendingAdmission,
+    });
     this.setState({
       ...this.state,
       identityTokens: {
@@ -1573,7 +1829,240 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         [runId]: identityToken,
       },
     });
-    return Promise.resolve({ created: true, run: plan.record.run });
+    await this.schedulePendingAdmission(runId);
+    return { created: true, run: plan.record.run };
+  }
+
+  private newPendingAdmission(): NonNullable<
+    CloudRunRecord["pendingAdmission"]
+  > {
+    return {
+      deadlineAt: Date.now() + PENDING_ADMISSION_TIMEOUT_MS,
+      scheduleGeneration: 1,
+      scheduleToken: crypto.randomUUID(),
+    };
+  }
+
+  private async schedulePendingAdmission(runId: string): Promise<void> {
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    const pending = current?.pendingAdmission;
+    if (!current || !pending || current.run.status !== "queued") {
+      return;
+    }
+    const { schedule } = this as unknown as {
+      schedule?: (
+        when: Date,
+        callback: string,
+        payload?: PendingAdmissionSchedulePayload,
+        options?: { idempotent?: boolean }
+      ) => Promise<{ id: string }>;
+    };
+    if (!schedule || pending.scheduleId !== undefined) {
+      return;
+    }
+    const generation = pending.scheduleGeneration ?? 1;
+    const token = pending.scheduleToken ?? crypto.randomUUID();
+    if (
+      pending.scheduleGeneration !== generation ||
+      pending.scheduleToken !== token
+    ) {
+      const updated = {
+        ...current,
+        pendingAdmission: {
+          ...pending,
+          scheduleGeneration: generation,
+          scheduleToken: token,
+        },
+      };
+      this.persistRun(updated);
+    }
+    try {
+      const scheduled = await schedule.call(
+        this,
+        new Date(pending.deadlineAt),
+        "expirePendingAdmission",
+        { generation, runId, token },
+        { idempotent: false }
+      );
+      const latest = this.state.runs.find(
+        (candidate) => candidate.run.id === runId
+      );
+      if (
+        !latest?.pendingAdmission ||
+        latest.pendingAdmission.scheduleGeneration !== generation ||
+        latest.pendingAdmission.scheduleToken !== token ||
+        latest.run.status !== "queued"
+      ) {
+        await this.cancelPendingAdmissionSchedule(scheduled.id);
+        return;
+      }
+      this.persistRun({
+        ...latest,
+        pendingAdmission: {
+          ...latest.pendingAdmission,
+          scheduleId: scheduled.id,
+        },
+      });
+    } catch {
+      // The durable deadline remains on the run. A retry request or a later
+      // lifecycle callback can schedule it again.
+    }
+  }
+
+  async confirmAdmission(
+    runId: string,
+    operationId: string,
+    requestHash: string
+  ): Promise<boolean> {
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (
+      !current ||
+      isTerminal(current.run.status) ||
+      current.run.operationId !== operationId ||
+      current.operationHash !== requestHash ||
+      current.run.agentId !== this.requireDefinition().id
+    ) {
+      return false;
+    }
+    const pending = current.pendingAdmission;
+    if (!pending && current.admissionConfirmedAt) {
+      return true;
+    }
+    this.persistRun({
+      ...current,
+      admissionConfirmedAt:
+        current.admissionConfirmedAt ?? new Date().toISOString(),
+      pendingAdmission: undefined,
+    });
+    if (pending?.scheduleId) {
+      await this.cancelPendingAdmissionSchedule(pending.scheduleId);
+    }
+    return true;
+  }
+
+  async expirePendingAdmission(
+    payload?: PendingAdmissionSchedulePayload,
+    schedule?: { id?: string }
+  ): Promise<boolean> {
+    let current = this.state.runs.find(
+      (candidate) => candidate.run.id === payload?.runId
+    );
+    if (!current && payload?.runId) {
+      return true;
+    }
+    if (!current) {
+      current = this.state.runs.find((candidate) => candidate.pendingAdmission);
+    }
+    const pending = current?.pendingAdmission;
+    if (!current || !pending || isTerminal(current.run.status)) {
+      return true;
+    }
+    if (
+      payload &&
+      (pending.scheduleGeneration !== payload.generation ||
+        pending.scheduleToken !== payload.token ||
+        (schedule?.id !== undefined && pending.scheduleId !== schedule.id))
+    ) {
+      return true;
+    }
+    if (pending.scheduleId && schedule?.id === pending.scheduleId) {
+      this.persistRun({
+        ...current,
+        pendingAdmission: {
+          ...pending,
+          scheduleId: undefined,
+        },
+      });
+      current = this.state.runs.find(
+        (candidate) => candidate.run.id === current?.run.id
+      );
+    }
+    if (!current?.pendingAdmission) {
+      return true;
+    }
+    if (current.pendingAdmission.deadlineAt > Date.now()) {
+      await this.schedulePendingAdmission(current.run.id);
+      return true;
+    }
+
+    let admissionRecord: {
+      agentId: string;
+      operationId: string;
+      requestHash: string;
+      runId: string;
+      state: "queued" | "active" | "terminal";
+    } | null = null;
+    try {
+      const runAdmission = (
+        this.env as unknown as {
+          RunAdmission?: {
+            getByName: (name: string) => {
+              getRecord?: (
+                admissionRunId: string
+              ) => Promise<typeof admissionRecord>;
+            };
+          };
+        }
+      ).RunAdmission;
+      const admission = runAdmission?.getByName("deployment");
+      const getRecord = admission?.getRecord;
+      admissionRecord = getRecord
+        ? await getRecord.call(admission, current.run.id)
+        : null;
+    } catch {
+      await this.schedulePendingAdmission(current.run.id);
+      return false;
+    }
+    if (
+      admissionRecord &&
+      admissionRecord.state !== "terminal" &&
+      admissionRecord.agentId === current.run.agentId &&
+      admissionRecord.operationId === current.run.operationId &&
+      admissionRecord.requestHash === current.operationHash &&
+      admissionRecord.runId === current.run.id
+    ) {
+      return await this.confirmAdmission(
+        current.run.id,
+        current.run.operationId,
+        current.operationHash
+      );
+    }
+
+    const latest = this.state.runs.find(
+      (candidate) => candidate.run.id === current?.run.id
+    );
+    if (
+      latest?.run.status === "queued" &&
+      latest.pendingAdmission &&
+      !latest.dispatchToken &&
+      !this.state.admissionTokens?.[latest.run.id] &&
+      !this.state.dispatchClaims?.[latest.run.id]
+    ) {
+      const discarded = this.discardRun(latest.run.id);
+      if (discarded && pending.scheduleId) {
+        await this.cancelPendingAdmissionSchedule(pending.scheduleId);
+      }
+      return discarded;
+    }
+    return true;
+  }
+
+  private async cancelPendingAdmissionSchedule(id: string): Promise<void> {
+    const { cancelSchedule } = this as unknown as {
+      cancelSchedule?: (scheduleId: string) => Promise<boolean>;
+    };
+    if (!cancelSchedule) {
+      return;
+    }
+    try {
+      await cancelSchedule.call(this, id);
+    } catch {
+      // The state fence is authoritative even if platform cancellation fails.
+    }
   }
 
   /**
@@ -1586,6 +2075,19 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       return false;
     }
     if (!(await this.dispatchIsAdmitted(runId, dispatchToken))) {
+      return false;
+    }
+    const admittedRecord = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (
+      admittedRecord &&
+      !(await this.confirmAdmission(
+        runId,
+        admittedRecord.run.operationId,
+        admittedRecord.operationHash
+      ))
+    ) {
       return false;
     }
     const definition = this.requireActiveDefinition();
@@ -1658,6 +2160,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       dispatchToken ? { ...record, dispatchToken } : record
     );
     const token = claimed.dispatchToken;
+    await this.markDirectoryRunStatus(runId, "active");
     try {
       const receipt = await this.startFiber(
         cloudFiberKey(runId),
@@ -3131,6 +3634,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       )
     );
     this.setState({ ...this.state, identityTokens });
+    await this.markDirectoryRunStatus(runId, "terminal");
     const release = (async () => {
       let confirmed = false;
       try {

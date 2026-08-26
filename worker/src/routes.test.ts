@@ -1271,11 +1271,12 @@ test("a stale local duplicate cannot release a different run with the same opera
   assert.equal(directoryLookups, 0);
 });
 
-test("an orphan queued duplicate cannot bypass admission", async () => {
+test("an orphan queued duplicate resumes admission with its existing run", async () => {
   const operationId = "77777777-8888-4999-9000-111111111111";
   const runId = "88888888-9999-4000-8111-222222222222";
   const run = queuedRun(MINE, runId, operationId);
   let lookedUp = 0;
+  let admittedRunId = "";
   const agent: CloudRunnerAgent = {
     configure: (value: AgentDefinition) => value,
     decommission: () => undefined,
@@ -1297,8 +1298,9 @@ test("an orphan queued duplicate cannot bypass admission", async () => {
   ]);
   const response = await createCloudRunner({
     getAdmission: () => ({
-      admit: () => {
-        throw new Error("admit must not create a second record");
+      admit: (input: { runId: string }) => {
+        admittedRunId = input.runId;
+        return { kind: "queued" as const, position: 1, runId };
       },
       getByOperationId: () => {
         lookedUp += 1;
@@ -1327,8 +1329,9 @@ test("an orphan queued duplicate cannot bypass admission", async () => {
     { ...environment, RUN_ADMISSION_MODE: "queue" } as never
   );
 
-  assert.equal(response.status, 409);
+  assert.equal(response.status, 202);
   assert.equal(lookedUp, 1);
+  assert.equal(admittedRunId, runId);
 });
 
 test("reject mode refuses an unhealthy admission object without bypassing it", async () => {
@@ -1637,6 +1640,7 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
   const admittedRunIds: string[] = [];
   let registerAttempts = 0;
   let released = false;
+  const mappings = new Map<string, string>();
   const runs = new Map<string, RunSnapshot>();
   const agent: CloudRunnerAgent = {
     configure: (value: AgentDefinition) => value,
@@ -1671,11 +1675,21 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
       calls.push(`register:${runId}`);
       registerAttempts += 1;
       if (registerAttempts === 1) {
+        mappings.set(runId, MINE);
         throw new Error("directory unavailable");
       }
+      mappings.set(runId, MINE);
+      return true;
     },
     remove: () => undefined,
-    unregisterRun: () => undefined,
+    unregisterRun: (runId, agentId) => {
+      calls.push(`unregister:${runId}`);
+      if (mappings.get(runId) !== agentId) {
+        return false;
+      }
+      mappings.delete(runId);
+      return true;
+    },
     upsert: (value) => value,
   };
   const admission = {
@@ -1721,12 +1735,14 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
   assert.equal(released, true);
   const [firstRunId] = admittedRunIds;
   assert.match(firstRunId ?? "", /^[0-9a-f-]{36}$/);
-  assert.deepEqual(calls.slice(0, 4), [
+  assert.deepEqual(calls.slice(0, 5), [
     `admit:${firstRunId}`,
     `register:${firstRunId}`,
+    `unregister:${firstRunId}`,
     `stop:${firstRunId}`,
     `discard:${firstRunId}`,
   ]);
+  assert.equal(mappings.has(firstRunId), false);
 
   const second = await runnerInstance.fetch(
     new Request(`https://runner.test/api/agents/${MINE}/runs`, {

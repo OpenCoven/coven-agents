@@ -38,6 +38,13 @@ export type CloudRunRecord = {
   dispatchToken?: string;
   events: RunEvent[];
   operationHash: string;
+  admissionConfirmedAt?: string;
+  pendingAdmission?: {
+    deadlineAt: number;
+    scheduleGeneration?: number;
+    scheduleId?: string;
+    scheduleToken?: string;
+  };
   run: RunSnapshot;
 };
 

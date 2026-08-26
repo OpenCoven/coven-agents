@@ -864,11 +864,7 @@ export class RunAdmission extends DurableObject<Env> {
       throw error;
     }
     this.ctx.waitUntil(this.dispatchAvailable(limits));
-    const current = this.findByRunId(input.runId);
-    if (!current) {
-      throw new AdmissionConfigurationError("Admission record disappeared.");
-    }
-    return this.decisionForStoredRecord(current, limits);
+    return result.decision;
   }
 
   private terminalizeFailedAdmission(
@@ -1772,33 +1768,6 @@ export class RunAdmission extends DurableObject<Env> {
     return this.dispatchTokenMatches(record.runId, dispatchToken)
       ? dispatchToken
       : undefined;
-  }
-
-  private decisionForStoredRecord(
-    record: AdmissionRecord,
-    limits: AdmissionLimits
-  ): AdmissionDecision {
-    if (record.state === "active") {
-      return { kind: "active", runId: record.runId };
-    }
-    if (record.state === "queued") {
-      const position =
-        this.readStoredRecords()
-          .filter(
-            (candidate) =>
-              candidate.state === "queued" &&
-              candidate.tenantHash === record.tenantHash
-          )
-          .sort(compareQueueOrder)
-          .findIndex((candidate) => candidate.runId === record.runId) + 1;
-      return { kind: "queued", position, runId: record.runId };
-    }
-    if (limits.tenantQueuedRuns < 0) {
-      throw new AdmissionConfigurationError("Invalid admission limits.");
-    }
-    throw new AdmissionConfigurationError(
-      "A terminal admission record cannot produce a new decision."
-    );
   }
 
   private readStoredRecords(): StoredAdmissionRecord[] {

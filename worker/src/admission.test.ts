@@ -463,6 +463,7 @@ type SqlInput = null | number | bigint | string | NodeJS.ArrayBufferView;
 type AdmissionHarnessOptions = {
   beforeInitialize?: (database: DatabaseSync) => void;
   failCleanupInsert?: boolean;
+  onSetAlarm?: (database: DatabaseSync) => void;
   setAlarmFailure?: { error: Error | null };
 };
 
@@ -521,6 +522,7 @@ function runAdmissionHarness(
           return Promise.reject(options.setAlarmFailure.error);
         }
         alarm = scheduled;
+        options.onSetAlarm?.(database);
         return Promise.resolve();
       },
       sql,
@@ -563,6 +565,29 @@ function runAdmissionHarness(
     transactionSyncCalls: () => transactionSyncCalls,
   };
 }
+
+test("admit returns its accepted decision when immediate dispatch completes during alarm setup", async () => {
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "completed" }),
+      startAdmitted: () => Promise.resolve(true),
+      stop: () => Promise.resolve(null),
+    }),
+    {},
+    {
+      onSetAlarm: (database) => {
+        database.exec(
+          "UPDATE admission_records SET state = 'terminal' WHERE run_id = 'run-91'"
+        );
+      },
+    }
+  );
+
+  assert.deepEqual(await harness.admission.admit(request(91)), {
+    kind: "active",
+    runId: "run-91",
+  });
+});
 
 function seedAdmissionRecord(
   harness: ReturnType<typeof runAdmissionHarness>,

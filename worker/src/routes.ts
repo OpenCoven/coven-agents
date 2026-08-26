@@ -90,7 +90,8 @@ export type CloudRunnerDirectory = {
   list: (tenantId: string) => Awaitable<AgentDefinition[]>;
   registerRun: (
     runId: string,
-    agentId: string
+    agentId: string,
+    status?: "active" | "queued" | "terminal"
   ) => Awaitable<boolean | undefined>;
   unregisterRun: (
     runId: string,
@@ -107,6 +108,11 @@ export type CloudRunnerDirectory = {
 
 export type CloudRunnerAgent = {
   configure: (definition: AgentDefinition) => Awaitable<AgentDefinition>;
+  confirmAdmission?: (
+    runId: string,
+    operationId: string,
+    requestHash: string
+  ) => Awaitable<boolean>;
   discardRun: (runId: string) => Awaitable<boolean | undefined>;
   decommission: () => Awaitable<void>;
   enqueue: (
@@ -745,7 +751,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             const input = startRunInputSchema.parse(await readJson(request));
             const runAdmissionMode = admissionMode(environment);
             const requestHash = await hashOperation(id, input.task);
-            const runId = crypto.randomUUID();
+            let runId: string = crypto.randomUUID();
             let prepared: Awaited<ReturnType<CloudRunnerAgent["enqueue"]>>;
             try {
               prepared = await agent.enqueue(
@@ -758,6 +764,8 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               await cleanupRun(agent, runId, id);
               throw error;
             }
+            let existingAdmission: CloudRunnerAdmission | null = null;
+            let admissionRecord: AdmissionRecord | null = null;
             if (!prepared.created) {
               if (isTerminal(prepared.run.status)) {
                 let terminalAdmission: CloudRunnerAdmission;
@@ -833,8 +841,6 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                   cors
                 );
               }
-              let existingAdmission: CloudRunnerAdmission | null = null;
-              let admissionRecord: AdmissionRecord | null = null;
               try {
                 existingAdmission = dependencies.getAdmission
                   ? await dependencies.getAdmission(environment)
@@ -845,61 +851,74 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               } catch {
                 return busyResponse("global_busy", cors);
               }
-              if (!existingAdmission || !admissionRecord) {
+              if (existingAdmission && admissionRecord) {
+                const tenantHash = await tenantAdmissionHash(
+                  environment.EDGE_ABUSE_KEY_SECRET,
+                  callerTenant
+                );
+                if (
+                  !matchesLocalAdmission(admissionRecord, {
+                    agentId: id,
+                    operationId: input.operationId,
+                    requestHash,
+                    runId: prepared.run.id,
+                    tenantHash,
+                  })
+                ) {
+                  throw new OperationConflictError();
+                }
+                const originalAgentId = await directory.lookupRun(
+                  admissionRecord.runId
+                );
+                if (originalAgentId !== null && originalAgentId !== id) {
+                  throw new OperationConflictError();
+                }
+                const originalAgent = originalAgentId
+                  ? await yoloAgent(originalAgentId)
+                  : agent;
+                const original = await originalAgent.getRun(
+                  admissionRecord.runId
+                );
+                if (!original) {
+                  return busyResponse("global_busy", cors);
+                }
+                if (
+                  !matchesLocalRun(original, {
+                    agentId: id,
+                    id: prepared.run.id,
+                    operationId: input.operationId,
+                  }) ||
+                  (await hashOperation(original.agentId, original.task)) !==
+                    requestHash
+                ) {
+                  throw new OperationConflictError();
+                }
+                if (isTerminal(original.status)) {
+                  await existingAdmission.release(admissionRecord.runId);
+                } else if (originalAgent.confirmAdmission) {
+                  const confirmed = await originalAgent.confirmAdmission(
+                    original.id,
+                    original.operationId,
+                    requestHash
+                  );
+                  if (!confirmed) {
+                    await existingAdmission.release(admissionRecord.runId);
+                    return busyResponse("global_busy", cors);
+                  }
+                }
+                return json(
+                  {
+                    apiVersion: AGENT_RUNNER_API_VERSION,
+                    run: original,
+                  },
+                  { status: 202 },
+                  cors
+                );
+              }
+              if (prepared.run.status !== "queued") {
                 return busyResponse("global_busy", cors);
               }
-              const tenantHash = await tenantAdmissionHash(
-                environment.EDGE_ABUSE_KEY_SECRET,
-                callerTenant
-              );
-              if (
-                !matchesLocalAdmission(admissionRecord, {
-                  agentId: id,
-                  operationId: input.operationId,
-                  requestHash,
-                  runId: prepared.run.id,
-                  tenantHash,
-                })
-              ) {
-                throw new OperationConflictError();
-              }
-              const originalAgentId = await directory.lookupRun(
-                admissionRecord.runId
-              );
-              if (originalAgentId !== null && originalAgentId !== id) {
-                throw new OperationConflictError();
-              }
-              const originalAgent = originalAgentId
-                ? await yoloAgent(originalAgentId)
-                : agent;
-              const original = await originalAgent.getRun(
-                admissionRecord.runId
-              );
-              if (!original) {
-                return busyResponse("global_busy", cors);
-              }
-              if (
-                !matchesLocalRun(original, {
-                  agentId: id,
-                  id: prepared.run.id,
-                  operationId: input.operationId,
-                }) ||
-                (await hashOperation(original.agentId, original.task)) !==
-                  requestHash
-              ) {
-                throw new OperationConflictError();
-              }
-              if (isTerminal(original.status)) {
-                await existingAdmission.release(admissionRecord.runId);
-              }
-              return json(
-                {
-                  apiVersion: AGENT_RUNNER_API_VERSION,
-                  run: original,
-                },
-                { status: 202 },
-                cors
-              );
+              runId = prepared.run.id;
             }
             if (!dependencies.getAdmission) {
               await cleanupRun(agent, runId, id);
@@ -907,14 +926,18 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             }
 
             let admission: CloudRunnerAdmission;
-            try {
-              admission = await dependencies.getAdmission(environment);
-            } catch (error) {
-              await cleanupRun(agent, runId, id);
-              if (runAdmissionMode === "reject") {
-                return busyResponse("global_busy", cors);
+            if (existingAdmission) {
+              admission = existingAdmission;
+            } else {
+              try {
+                admission = await dependencies.getAdmission(environment);
+              } catch (error) {
+                await cleanupRun(agent, runId, id);
+                if (runAdmissionMode === "reject") {
+                  return busyResponse("global_busy", cors);
+                }
+                throw error;
               }
-              throw error;
             }
 
             let decision: AdmissionDecision;
@@ -954,14 +977,16 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               return busyResponse(decision.reason, cors);
             }
             if (decision.kind === "duplicate") {
-              const cleanupError = await cleanupRun(
-                agent,
-                runId,
-                id,
-                admission
-              );
-              if (cleanupError) {
-                throw cleanupError;
+              if (prepared.created) {
+                const cleanupError = await cleanupRun(
+                  agent,
+                  runId,
+                  id,
+                  admission
+                );
+                if (cleanupError) {
+                  throw cleanupError;
+                }
               }
               let duplicateAdmission: AdmissionRecord | null = null;
               try {
@@ -1014,6 +1039,16 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               }
               if (isTerminal(original.status)) {
                 await admission.release(duplicateAdmission.runId);
+              } else if (originalAgent.confirmAdmission) {
+                const confirmed = await originalAgent.confirmAdmission(
+                  original.id,
+                  original.operationId,
+                  requestHash
+                );
+                if (!confirmed) {
+                  await admission.release(duplicateAdmission.runId);
+                  return busyResponse("global_busy", cors);
+                }
               }
               return json(
                 { apiVersion: AGENT_RUNNER_API_VERSION, run: original },
@@ -1034,10 +1069,19 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               return busyResponse("global_busy", cors);
             }
 
-            let mappingCreated = false;
             try {
-              mappingCreated =
-                (await directory.registerRun(runId, id)) !== false;
+              if (agent.confirmAdmission) {
+                const confirmed = await agent.confirmAdmission(
+                  runId,
+                  input.operationId,
+                  requestHash
+                );
+                if (!confirmed) {
+                  await cleanupRun(agent, runId, id, admission, true);
+                  return busyResponse("global_busy", cors);
+                }
+              }
+              await directory.registerRun(runId, id, decision.kind);
               const admittedRun = await agent.getRun(runId);
               if (!admittedRun) {
                 throw new Error("Admitted run disappeared after registration.");
@@ -1051,16 +1095,20 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 cors
               );
             } catch (error) {
-              if (mappingCreated) {
-                try {
-                  await directory.unregisterRun(runId, id);
-                } catch {
-                  if (directory.enqueueRunMappingCleanup) {
-                    try {
-                      await directory.enqueueRunMappingCleanup(runId, id);
-                    } catch {
-                      // Preserve the original request failure.
-                    }
+              try {
+                const unregistered = await directory.unregisterRun(runId, id);
+                if (
+                  unregistered === false &&
+                  directory.enqueueRunMappingCleanup
+                ) {
+                  await directory.enqueueRunMappingCleanup(runId, id);
+                }
+              } catch {
+                if (directory.enqueueRunMappingCleanup) {
+                  try {
+                    await directory.enqueueRunMappingCleanup(runId, id);
+                  } catch {
+                    // Preserve the original request failure.
                   }
                 }
               }
