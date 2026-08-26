@@ -54,12 +54,15 @@ function roadmapSource(items: readonly RoadmapProjectItem[]): string {
   return `# Public roadmap\n\nAuthored prefix.\n\n${block}\n\nAuthored suffix.\n`;
 }
 
-function config(expectedCount = 1): RoadmapStatusConfig {
+function config(
+  expectedCount = 1,
+  roadmapPath = "/repo/ROADMAP.md"
+): RoadmapStatusConfig {
   return {
     expectedCount,
     owner: "OpenCoven",
     projectNumber: 10,
-    roadmapPath: "/repo/ROADMAP.md",
+    roadmapPath,
   };
 }
 
@@ -197,13 +200,65 @@ test("changed preview prints aggregate counts without sensitive data", async () 
   assert.equal(code, 0);
   assert.equal(
     output,
-    "roadmap status: changed (1 -> 2 managed, 0 -> 1 blocked)\n"
+    "roadmap status: changed (managed 1 -> 2; blocked 0 -> 1; status Done 0 -> 1; wave 0 - Delivered: total 0 -> 1, Done 0 -> 1, blocked 0 -> 1)\n"
   );
   assert.doesNotMatch(output, /coven-agents-product|987654|private-id/);
   assert.doesNotMatch(output, /private|title|body|description/i);
   assert.doesNotMatch(output, /2026-|refreshed|timestamp/i);
   assert.equal(nowCalls, 0);
   assert.equal(writeCalls, 0);
+});
+
+test("changed preview identifies status-only aggregate drift", async () => {
+  const current = [item("coven-agents-product.1")];
+  const next = [
+    item("coven-agents-product.1", {
+      status: "In Progress",
+    }),
+  ];
+  const stdout: string[] = [];
+
+  const code = await runRoadmapStatus(
+    ["preview"],
+    config(),
+    dependencies(roadmapSource(current), next, {
+      stdout: (text) => {
+        stdout.push(text);
+      },
+    })
+  );
+
+  assert.equal(code, 0);
+  assert.equal(
+    stdout.join(""),
+    "roadmap status: changed (status Todo 1 -> 0; status In Progress 0 -> 1; wave 1 - Now: Todo 1 -> 0, In Progress 0 -> 1)\n"
+  );
+});
+
+test("changed preview identifies wave-only aggregate drift", async () => {
+  const current = [item("coven-agents-product.1")];
+  const next = [
+    item("coven-agents-product.1", {
+      wave: "2 - Next",
+    }),
+  ];
+  const stdout: string[] = [];
+
+  const code = await runRoadmapStatus(
+    ["preview"],
+    config(),
+    dependencies(roadmapSource(current), next, {
+      stdout: (text) => {
+        stdout.push(text);
+      },
+    })
+  );
+
+  assert.equal(code, 0);
+  assert.equal(
+    stdout.join(""),
+    "roadmap status: changed (wave 1 - Now: total 1 -> 0, Todo 1 -> 0; wave 2 - Next: total 0 -> 1, Todo 0 -> 1)\n"
+  );
 });
 
 test("changed check reports the exact stale message without writing", async () => {
@@ -251,7 +306,11 @@ test("changed apply replaces one marked block with one fresh timestamp", async (
   ];
   const source = roadmapSource(current);
   const stdout: string[] = [];
-  const writes: Array<{ contents: string; path: string }> = [];
+  const writes: Array<{
+    contents: string;
+    expectedSource: string;
+    path: string;
+  }> = [];
   let nowCalls = 0;
 
   const code = await runRoadmapStatus(
@@ -265,8 +324,8 @@ test("changed apply replaces one marked block with one fresh timestamp", async (
       stdout: (text) => {
         stdout.push(text);
       },
-      writeAtomic: (path, contents) => {
-        writes.push({ contents, path });
+      writeAtomic: (path, expectedSource, contents) => {
+        writes.push({ contents, expectedSource, path });
         return Promise.resolve();
       },
     })
@@ -277,6 +336,7 @@ test("changed apply replaces one marked block with one fresh timestamp", async (
   assert.equal(nowCalls, 1);
   assert.equal(writes.length, 1);
   assert.equal(writes[0]?.path, config().roadmapPath);
+  assert.equal(writes[0]?.expectedSource, source);
   assert.match(writes[0]?.contents ?? "", new RegExp(NEW_TIMESTAMP, "u"));
   assert.equal(
     (writes[0]?.contents.match(new RegExp(ROADMAP_STATUS_START, "gu")) ?? [])
@@ -350,6 +410,55 @@ test("execute catches loader, reader, and writer failures without leakage", asyn
       assert.doesNotMatch(output, new RegExp(scenario.secret, "u"));
     })
   );
+});
+
+test("execute preserves a concurrent authored edit and fails safely", async () => {
+  await withTestDirectory(async (directory) => {
+    const path = join(directory, "ROADMAP.md");
+    const current = [item("coven-agents-product.1")];
+    const next = [
+      item("coven-agents-product.1", {
+        status: "Done",
+        wave: "0 - Delivered",
+      }),
+    ];
+    const source = roadmapSource(current);
+    const concurrentSource = source.replace(
+      "Authored suffix.",
+      "Concurrent authored suffix."
+    );
+    const stderr: string[] = [];
+    const stdout: string[] = [];
+    await writeFile(path, source, "utf8");
+
+    const code = await executeRoadmapStatus(
+      ["apply"],
+      config(1, path),
+      dependencies(source, next, {
+        readFile: async (candidate) => {
+          const initialSource = await readFile(candidate, "utf8");
+          await writeFile(candidate, concurrentSource, "utf8");
+          return initialSource;
+        },
+        stderr: (text) => {
+          stderr.push(text);
+        },
+        stdout: (text) => {
+          stdout.push(text);
+        },
+        writeAtomic: writeFileAtomic,
+      })
+    );
+
+    assert.equal(code, 1);
+    assert.equal(
+      stderr.join(""),
+      "Roadmap status filesystem operation failed.\n"
+    );
+    assert.equal(stdout.join(""), "");
+    assert.equal(await readFile(path, "utf8"), concurrentSource);
+    assert.deepEqual(await readdir(directory), ["ROADMAP.md"]);
+  });
 });
 
 test("execute reports an unexpected inventory count safely", async () => {
@@ -429,6 +538,7 @@ function atomicOperations(
     openExclusive: async (path) => fileHandle(await open(path, "wx")),
     pid: 4242,
     randomUUID: () => "test-random-uuid",
+    readFile: (path) => readFile(path, "utf8"),
     rename,
     unlink,
     ...overrides,
@@ -452,7 +562,33 @@ test("default atomic writer replaces the file without leaving a temp file", asyn
     const path = join(directory, "ROADMAP.md");
     await writeFile(path, "original", "utf8");
 
-    await writeFileAtomic(path, "updated");
+    await writeFileAtomic(path, "original", "updated");
+
+    assert.equal(await readFile(path, "utf8"), "updated");
+    assert.deepEqual(await readdir(directory), ["ROADMAP.md"]);
+  });
+});
+
+test("atomic writer respects lock contention and cleans up its lock", async () => {
+  await withTestDirectory(async (directory) => {
+    const path = join(directory, "ROADMAP.md");
+    const lockPath = join(directory, ".ROADMAP.md.lock");
+    await writeFile(path, "original", "utf8");
+    await writeFile(lockPath, "held", "utf8");
+
+    await assert.rejects(
+      () => writeFileAtomic(path, "original", "updated"),
+      (error: NodeJS.ErrnoException) => error.code === "EEXIST"
+    );
+
+    assert.equal(await readFile(path, "utf8"), "original");
+    assert.deepEqual((await readdir(directory)).sort(), [
+      ".ROADMAP.md.lock",
+      "ROADMAP.md",
+    ]);
+
+    await unlink(lockPath);
+    await writeFileAtomic(path, "original", "updated");
 
     assert.equal(await readFile(path, "utf8"), "updated");
     assert.deepEqual(await readdir(directory), ["ROADMAP.md"]);
@@ -469,6 +605,7 @@ test("atomic writer cleans up and preserves the original on write failure", asyn
       () =>
         writeFileAtomic(
           path,
+          "original",
           "updated",
           atomicOperations({
             openExclusive: async (candidate) => {
@@ -501,6 +638,7 @@ test("atomic writer cleans up and preserves the original on fsync failure", asyn
       () =>
         writeFileAtomic(
           path,
+          "original",
           "updated",
           atomicOperations({
             openExclusive: async (candidate) => {
@@ -530,6 +668,7 @@ test("atomic writer cleans up and preserves the original on rename failure", asy
       () =>
         writeFileAtomic(
           path,
+          "original",
           "updated",
           atomicOperations({
             rename: () => Promise.reject(new Error("private rename failure")),

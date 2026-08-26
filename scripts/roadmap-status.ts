@@ -10,6 +10,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { PROJECT_STATUSES, WAVES } from "./beads-project-model";
 import { loadRoadmapProjectItems } from "./roadmap-project-status";
 import {
   extractRoadmapSummary,
@@ -19,6 +20,7 @@ import {
 import {
   ROADMAP_EXPECTED_ITEM_COUNT,
   type RoadmapProjectItem,
+  type RoadmapSummary,
   sameRoadmapSummary,
   summarizeRoadmap,
 } from "./roadmap-status-model";
@@ -39,7 +41,11 @@ export type RoadmapStatusDependencies = {
   readFile: (path: string) => Promise<string>;
   stderr: (text: string) => void;
   stdout: (text: string) => void;
-  writeAtomic: (path: string, contents: string) => Promise<void>;
+  writeAtomic: (
+    path: string,
+    expectedSource: string,
+    contents: string
+  ) => Promise<void>;
 };
 
 type AtomicFileHandle = {
@@ -58,6 +64,7 @@ export type AtomicWriteOperations = {
   openExclusive: (path: string) => Promise<AtomicFileHandle>;
   pid: number;
   randomUUID: () => string;
+  readFile: (path: string) => Promise<string>;
   rename: (from: string, to: string) => Promise<void>;
   unlink: (path: string) => Promise<void>;
 };
@@ -103,6 +110,7 @@ const defaultAtomicWriteOperations: AtomicWriteOperations = {
   },
   pid: process.pid,
   randomUUID,
+  readFile: (path) => fsReadFile(path, "utf8"),
   rename: fsRename,
   unlink: fsUnlink,
 };
@@ -136,12 +144,11 @@ function isUnsupportedDirectorySync(error: unknown): boolean {
   );
 }
 
-async function cleanupTemporaryFile(
+async function cleanupCreatedFile(
   path: string,
   handle: AtomicFileHandle | undefined,
-  operations: AtomicWriteOperations,
-  failure: unknown
-): Promise<never> {
+  operations: AtomicWriteOperations
+): Promise<unknown[]> {
   const cleanupFailures: unknown[] = [];
 
   if (handle !== undefined) {
@@ -160,14 +167,7 @@ async function cleanupTemporaryFile(
     }
   }
 
-  if (cleanupFailures.length > 0) {
-    throw new AggregateError(
-      [failure, ...cleanupFailures],
-      "Atomic write failed and cleanup was incomplete"
-    );
-  }
-
-  throw failure;
+  return cleanupFailures;
 }
 
 async function syncDirectory(
@@ -199,35 +199,76 @@ async function syncDirectory(
 
 export async function writeFileAtomic(
   path: string,
+  expectedSource: string,
   contents: string,
   operations: AtomicWriteOperations = defaultAtomicWriteOperations
 ): Promise<void> {
   const directory = dirname(path);
+  const lockPath = join(directory, `.${basename(path)}.lock`);
   const temporaryPath = join(
     directory,
     `.${basename(path)}.${operations.pid}.${operations.randomUUID()}.tmp`
   );
-  let created = false;
-  let handle: AtomicFileHandle | undefined;
+  let failure: unknown;
+  let lockCreated = false;
+  let lockHandle: AtomicFileHandle | undefined;
+  let temporaryCreated = false;
+  let temporaryHandle: AtomicFileHandle | undefined;
 
   try {
-    handle = await operations.openExclusive(temporaryPath);
-    created = true;
-    await handle.writeFile(contents);
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await operations.rename(temporaryPath, path);
-    created = false;
-  } catch (error) {
-    if (created) {
-      await cleanupTemporaryFile(temporaryPath, handle, operations, error);
+    lockHandle = await operations.openExclusive(lockPath);
+    lockCreated = true;
+
+    const currentSource = await operations.readFile(path);
+
+    if (currentSource !== expectedSource) {
+      throw new Error("ROADMAP.md changed after status refresh began");
     }
 
-    throw error;
+    temporaryHandle = await operations.openExclusive(temporaryPath);
+    temporaryCreated = true;
+    await temporaryHandle.writeFile(contents);
+    await temporaryHandle.sync();
+    await temporaryHandle.close();
+    temporaryHandle = undefined;
+    await operations.rename(temporaryPath, path);
+    temporaryCreated = false;
+    await syncDirectory(directory, operations);
+  } catch (error) {
+    failure = error;
   }
 
-  await syncDirectory(directory, operations);
+  const cleanupFailures: unknown[] = [];
+
+  if (temporaryCreated) {
+    cleanupFailures.push(
+      ...(await cleanupCreatedFile(temporaryPath, temporaryHandle, operations))
+    );
+  }
+
+  if (lockCreated) {
+    cleanupFailures.push(
+      ...(await cleanupCreatedFile(lockPath, lockHandle, operations))
+    );
+  }
+
+  if (failure !== undefined) {
+    if (cleanupFailures.length > 0) {
+      throw new AggregateError(
+        [failure, ...cleanupFailures],
+        "Atomic write failed and cleanup was incomplete"
+      );
+    }
+
+    throw failure;
+  }
+
+  if (cleanupFailures.length > 0) {
+    throw new AggregateError(
+      cleanupFailures,
+      "Atomic write cleanup was incomplete"
+    );
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -325,14 +366,103 @@ async function loadItems(
 
 async function writeUpdatedRoadmap(
   path: string,
+  expectedSource: string,
   contents: string,
   writeAtomic: RoadmapStatusDependencies["writeAtomic"]
 ): Promise<void> {
   try {
-    await writeAtomic(path, contents);
+    await writeAtomic(path, expectedSource, contents);
   } catch (error) {
     throw new RoadmapStatusOperationError("filesystem", { cause: error });
   }
+}
+
+function formatCountChange(
+  label: string,
+  current: number,
+  next: number
+): string | undefined {
+  return current === next ? undefined : `${label} ${current} -> ${next}`;
+}
+
+function formatRoadmapSummaryDiff(
+  current: RoadmapSummary,
+  next: RoadmapSummary
+): string {
+  const changes: string[] = [];
+  const managedChange = formatCountChange(
+    "managed",
+    current.totalCount,
+    next.totalCount
+  );
+  const blockedChange = formatCountChange(
+    "blocked",
+    current.blockedCount,
+    next.blockedCount
+  );
+
+  if (managedChange !== undefined) {
+    changes.push(managedChange);
+  }
+
+  if (blockedChange !== undefined) {
+    changes.push(blockedChange);
+  }
+
+  for (const status of PROJECT_STATUSES) {
+    const statusChange = formatCountChange(
+      `status ${status}`,
+      current.byStatus[status],
+      next.byStatus[status]
+    );
+
+    if (statusChange !== undefined) {
+      changes.push(statusChange);
+    }
+  }
+
+  for (const wave of WAVES) {
+    const waveChanges: string[] = [];
+    const currentWave = current.byWave[wave];
+    const nextWave = next.byWave[wave];
+    const totalChange = formatCountChange(
+      "total",
+      currentWave.total,
+      nextWave.total
+    );
+
+    if (totalChange !== undefined) {
+      waveChanges.push(totalChange);
+    }
+
+    for (const status of PROJECT_STATUSES) {
+      const statusChange = formatCountChange(
+        status,
+        currentWave.byStatus[status],
+        nextWave.byStatus[status]
+      );
+
+      if (statusChange !== undefined) {
+        waveChanges.push(statusChange);
+      }
+    }
+
+    const waveBlockedChange = formatCountChange(
+      "blocked",
+      currentWave.blockedCount,
+      nextWave.blockedCount
+    );
+
+    if (waveBlockedChange !== undefined) {
+      waveChanges.push(waveBlockedChange);
+    }
+
+    if (waveChanges.length > 0) {
+      changes.push(`wave ${wave}: ${waveChanges.join(", ")}`);
+    }
+  }
+
+  return `roadmap status: changed (${changes.join("; ")})\n`;
 }
 
 function isMode(
@@ -378,9 +508,7 @@ export async function runRoadmapStatus(
   }
 
   if (mode === "preview") {
-    dependencies.stdout(
-      `roadmap status: changed (${currentSummary.totalCount} -> ${nextSummary.totalCount} managed, ${currentSummary.blockedCount} -> ${nextSummary.blockedCount} blocked)\n`
-    );
+    dependencies.stdout(formatRoadmapSummaryDiff(currentSummary, nextSummary));
     return 0;
   }
 
@@ -396,6 +524,7 @@ export async function runRoadmapStatus(
   const updated = replaceRoadmapStatusBlock(source, replacement);
   await writeUpdatedRoadmap(
     validatedConfig.roadmapPath,
+    source,
     updated,
     dependencies.writeAtomic
   );
