@@ -1,7 +1,21 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import ts from "typescript";
+/**
+ * The TS5 alias, not the toolchain's TypeScript.
+ *
+ * This guard parses route files with the compiler API, and typescript@7 — the
+ * native port the repo compiles with — ships no JS API at all:
+ * `createSourceFile` is undefined at runtime, and the package's types resolve
+ * to a stub that exports nothing the old API had. The test was written against
+ * 5.x and landed after the 7.0.2 bump, which broke both `pnpm typecheck` and
+ * `pnpm test:unit` on main.
+ *
+ * `typescript5` is `npm:typescript@5.8.2`, pinned as a devDependency purely as
+ * a parser library. The compiler the build uses stays 7; nothing but this file
+ * imports the alias.
+ */
+import ts from "typescript5";
 
 const repositoryRoot = new URL("../", import.meta.url);
 
