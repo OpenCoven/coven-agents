@@ -698,30 +698,81 @@ export class RunAdmission extends DurableObject<Env> {
     await this.ensureAlarm({ throwOnFailure: true });
     const result = this.ctx.storage.transactionSync(() => {
       const existing = this.findByOperationId(input.operationId);
+      if (existing) {
+        if (existing.requestHash !== input.requestHash) {
+          throw new OperationConflictError();
+        }
+        if (existing.state === "terminal") {
+          this.pruneTerminalRecords();
+        }
+        return {
+          decision: {
+            kind: "duplicate",
+            runId: existing.runId,
+            state: existing.state,
+          } as AdmissionDecision,
+          record: null,
+        };
+      }
       const storedRecords = this.readStoredRecords();
       const nextSequence = this.readNextSequence(storedRecords);
       const queue = new AdmissionQueue({
         limits,
         nextSequence,
         records: storedRecords,
+        scheduler: this.readScheduler(),
       });
-      const decision = queue.admitSynchronously(input);
-      if (existing?.state === "terminal") {
-        this.pruneTerminalRecords();
-      }
+      const enqueuedRecord: StoredAdmissionRecord = {
+        ...input,
+        enqueuedAt: new Date(Date.now()).toISOString(),
+        sequence: nextSequence,
+        state: "queued",
+      };
+      const tentativeQueue = new AdmissionQueue({
+        limits,
+        nextSequence: nextSequence + 1,
+        records: [...storedRecords, enqueuedRecord],
+        scheduler: this.readScheduler(),
+      });
+      const immediateCandidate = tentativeQueue.nextDispatchCandidate();
+      const canActivateImmediately = immediateCandidate?.runId === input.runId;
+      const decision = canActivateImmediately
+        ? ({ kind: "active", runId: input.runId } as AdmissionDecision)
+        : queue.admitSynchronously(input);
       if (decision.kind === "refused" || decision.kind === "duplicate") {
         return { decision, record: null };
       }
-      const record = queue
-        .records()
-        .find((candidate) => candidate.runId === input.runId);
-      if (!record) {
-        throw new AdmissionConfigurationError(
-          "Admission record was not created."
-        );
+      const record: StoredAdmissionRecord = canActivateImmediately
+        ? {
+            ...enqueuedRecord,
+            state: "active",
+          }
+        : {
+            ...enqueuedRecord,
+            state: "queued",
+          };
+      if (
+        !canActivateImmediately &&
+        storedRecords.filter(
+          (candidate) =>
+            candidate.state === "queued" &&
+            candidate.tenantHash === input.tenantHash
+        ).length >= limits.tenantQueuedRuns
+      ) {
+        return {
+          decision: {
+            kind: "refused",
+            reason: "tenant_queue_full",
+          } as AdmissionDecision,
+          record: null,
+        };
       }
-      this.writeRecord({ ...record, sequence: nextSequence });
+      this.writeRecord(record);
       this.writeMetaValue(NEXT_SEQUENCE_META_KEY, String(nextSequence + 1));
+      if (canActivateImmediately) {
+        this.writeScheduler(tentativeQueue.scheduler());
+        this.markDispatchPending(record.runId);
+      }
       return { decision, record };
     });
     if (result.decision.kind === "refused") {
@@ -1295,6 +1346,31 @@ export class RunAdmission extends DurableObject<Env> {
   private claimNextCandidate(
     limits: AdmissionLimits
   ): StoredAdmissionRecord | undefined {
+    const [pending] = this.ctx.storage.sql
+      .exec<AdmissionRow>(
+        `
+          SELECT agent_id, dispatch_token, enqueued_at, operation_id,
+                 request_hash, run_id, queue_sequence, state,
+                 terminalized_at, tenant_hash
+          FROM admission_records
+          WHERE state = 'active'
+            AND dispatch_started_at = 'pending'
+            AND dispatch_lease_until > ?
+          ORDER BY queue_sequence
+          LIMIT 1
+        `,
+        new Date(Date.now()).toISOString()
+      )
+      .toArray()
+      .map(rowToStoredRecord);
+    if (pending) {
+      const { dispatchToken } = pending;
+      if (!dispatchToken) {
+        return;
+      }
+      this.claimDispatchLease(pending.runId, dispatchToken);
+      return { ...pending, dispatchToken };
+    }
     const queue = new AdmissionQueue({
       limits,
       records: this.readStoredRecords(),
@@ -1304,19 +1380,7 @@ export class RunAdmission extends DurableObject<Env> {
     if (!candidate) {
       return;
     }
-    const startedAt = new Date(Date.now()).toISOString();
-    const generation = this.readNextDispatchGeneration();
-    this.writeMetaValue(
-      NEXT_DISPATCH_GENERATION_META_KEY,
-      String(generation + 1)
-    );
-    const dispatchToken = `${generation}:${crypto.randomUUID()}`;
-    this.updateDispatchLease(
-      candidate.runId,
-      startedAt,
-      new Date(Date.now() + DISPATCH_LEASE_MS).toISOString(),
-      dispatchToken
-    );
+    const dispatchToken = this.claimDispatchLease(candidate.runId);
     this.writeScheduler(queue.scheduler());
     return { ...candidate, dispatchToken };
   }
@@ -1568,6 +1632,45 @@ export class RunAdmission extends DurableObject<Env> {
       dispatchToken,
       runId
     );
+  }
+
+  private markDispatchPending(runId: string): void {
+    const dispatchToken = this.newDispatchToken();
+    this.ctx.storage.sql.exec(
+      `
+        UPDATE admission_records
+        SET dispatch_started_at = 'pending',
+            dispatch_lease_until = ?,
+            dispatch_token = ?,
+            terminalized_at = NULL
+        WHERE run_id = ?
+          AND state = 'active'
+      `,
+      new Date(Date.now() + DISPATCH_LEASE_MS).toISOString(),
+      dispatchToken,
+      runId
+    );
+  }
+
+  private claimDispatchLease(runId: string, token?: string): string {
+    const startedAt = new Date(Date.now()).toISOString();
+    const dispatchToken = token ?? this.newDispatchToken();
+    this.updateDispatchLease(
+      runId,
+      startedAt,
+      new Date(Date.now() + DISPATCH_LEASE_MS).toISOString(),
+      dispatchToken
+    );
+    return dispatchToken;
+  }
+
+  private newDispatchToken(): string {
+    const generation = this.readNextDispatchGeneration();
+    this.writeMetaValue(
+      NEXT_DISPATCH_GENERATION_META_KEY,
+      String(generation + 1)
+    );
+    return `${generation}:${crypto.randomUUID()}`;
   }
 
   private clearDispatchLease(runId: string, dispatchToken?: string): void {

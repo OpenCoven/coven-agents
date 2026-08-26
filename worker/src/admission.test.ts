@@ -377,6 +377,30 @@ function runAdmissionHarness(
   };
 }
 
+function seedAdmissionRecord(
+  harness: ReturnType<typeof runAdmissionHarness>,
+  record: AdmissionRecord,
+  sequence: number
+): void {
+  harness.sql.exec(
+    `
+      INSERT INTO admission_records
+        (agent_id, enqueued_at, operation_id, request_hash, run_id,
+         queue_sequence, state, tenant_hash, dispatch_started_at,
+         dispatch_lease_until, dispatch_token, terminalized_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
+    `,
+    record.agentId,
+    record.enqueuedAt,
+    record.operationId,
+    record.requestHash,
+    record.runId,
+    sequence,
+    record.state,
+    record.tenantHash
+  );
+}
+
 test("alarm reconciliation does not requeue a nonexpired dispatch lease", async () => {
   let now = Date.parse("2026-08-26T00:00:00.000Z");
   const originalNow = Date.now;
@@ -855,6 +879,173 @@ test("zero queue capacity admits immediately when an active slot is free", async
   const decision = await harness.admission.admit(request(62));
 
   assert.equal(decision.kind, "active");
+  await Promise.all(harness.background);
+});
+
+test("zero queue capacity refuses when deployment capacity is full", async () => {
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "running" }),
+      startAdmitted: () => Promise.resolve(true),
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "0",
+    }
+  );
+  await harness.admission.getRecord("initialize");
+  seedAdmissionRecord(harness, activeRecord(1), 1);
+
+  assert.deepEqual(await harness.admission.admit(request(2, TENANT_B)), {
+    kind: "refused",
+    reason: "global_busy",
+  });
+});
+
+test("a full deployment refuses even when the tenant queue is at its cap", async () => {
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.resolve(false),
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+    }
+  );
+  await harness.admission.getRecord("initialize");
+  seedAdmissionRecord(harness, activeRecord(1), 1);
+  for (let index = 2; index <= 11; index += 1) {
+    seedAdmissionRecord(
+      harness,
+      {
+        ...request(index),
+        enqueuedAt: new Date(Date.now() - (12 - index) * 1000).toISOString(),
+        state: "queued",
+      },
+      index
+    );
+  }
+
+  assert.deepEqual(await harness.admission.admit(request(12)), {
+    kind: "refused",
+    reason: "global_busy",
+  });
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_records WHERE state = 'queued' AND tenant_hash = ?",
+          TENANT_A
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    10
+  );
+});
+
+test("fairness applies the queue cap instead of bypassing a waiting tenant", async () => {
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.resolve(true),
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "2",
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "2",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+    }
+  );
+  await harness.admission.getRecord("initialize");
+  seedAdmissionRecord(harness, activeRecord(1, TENANT_A), 1);
+  for (let index = 2; index <= 11; index += 1) {
+    seedAdmissionRecord(
+      harness,
+      {
+        ...request(index, TENANT_A),
+        enqueuedAt: new Date(Date.now() - (12 - index) * 1000).toISOString(),
+        state: "queued",
+      },
+      index
+    );
+  }
+
+  assert.deepEqual(await harness.admission.admit(request(12, TENANT_A)), {
+    kind: "refused",
+    reason: "tenant_queue_full",
+  });
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_records WHERE state = 'queued'"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    10
+  );
+});
+
+test("a delayed dispatch cannot create a transient eleventh queued record", async () => {
+  let resolveDispatch!: (accepted: boolean) => void;
+  const dispatch = new Promise<boolean>((resolve) => {
+    resolveDispatch = resolve;
+  });
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => dispatch,
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+    }
+  );
+
+  assert.deepEqual(await harness.admission.admit(request(400)), {
+    kind: "active",
+    runId: "run-400",
+  });
+  for (let index = 401; index <= 410; index += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: Build the full bounded queue deterministically.
+    assert.deepEqual(await harness.admission.admit(request(index)), {
+      kind: "queued",
+      position: index - 400,
+      runId: `run-${index}`,
+    });
+  }
+
+  const refusals = await Promise.all(
+    Array.from({ length: 8 }, (_unused, index) =>
+      harness.admission.admit(request(500 + index))
+    )
+  );
+  assert.equal(
+    refusals.filter(
+      (decision) =>
+        decision.kind === "refused" && decision.reason === "tenant_queue_full"
+    ).length,
+    8
+  );
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_records WHERE state = 'queued' AND tenant_hash = ?",
+          TENANT_A
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    10
+  );
+
+  resolveDispatch(true);
   await Promise.all(harness.background);
 });
 
