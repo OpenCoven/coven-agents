@@ -623,15 +623,19 @@ export class RunAdmission extends DurableObject<Env> {
     await this.initialized;
     const now = Date.now();
     for (const record of this.readRecords()) {
-      if (record.state !== "active") {
-        continue;
+      if (record.state === "active") {
+        // Reconciliation is serialized with the Durable Object state.
+        // biome-ignore lint/performance/noAwaitInLoops: reconciliation is intentionally sequential
+        await this.reconcileActive(
+          record,
+          now - Date.parse(record.enqueuedAt) >= QUEUED_TTL_MS
+        );
+      } else if (record.state === "queued") {
+        // A queued run can become terminal when its agent is stopped before
+        // dispatch. Reconcile it on the regular alarm cadence so a failed
+        // release callback cannot occupy queue capacity until TTL expiry.
+        await this.reconcileQueued(record);
       }
-      // Reconciliation is serialized with the Durable Object state.
-      // biome-ignore lint/performance/noAwaitInLoops: reconciliation is intentionally sequential
-      await this.reconcileActive(
-        record,
-        now - Date.parse(record.enqueuedAt) >= QUEUED_TTL_MS
-      );
     }
     const expired = this.readRecords().filter(
       (record) =>
@@ -784,6 +788,24 @@ export class RunAdmission extends DurableObject<Env> {
       }
     } catch {
       // Keep the active record and retry after its dispatch lease.
+    }
+  }
+
+  private async reconcileQueued(record: AdmissionRecord): Promise<void> {
+    try {
+      const run = await this.env.YoloAgent.getByName(record.agentId).getRun(
+        record.runId
+      );
+      const current = this.findByRunId(record.runId);
+      if (current?.state !== "queued") {
+        return;
+      }
+      if (!run || isTerminal(run.status)) {
+        this.updateState(record.runId, "terminal");
+        this.clearDispatchLease(record.runId);
+      }
+    } catch {
+      // Keep the queued record and retry on the next alarm.
     }
   }
 

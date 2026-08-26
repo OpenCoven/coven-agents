@@ -151,6 +151,65 @@ test("missing admitted identity does not consume the agent slot", async () => {
   assert.equal(yolo.getRun(queued.run.id)?.status, "queued");
 });
 
+test("a fiber start failure closes an admitted run and releases its claim", async () => {
+  resetFiberLog();
+  fiberControl.runFibers = false;
+  let failNext = true;
+  const released: string[] = [];
+  const yolo = new (class extends YoloAgent {
+    override startFiber(
+      name: string,
+      fn: Parameters<YoloAgent["startFiber"]>[1],
+      options?: Parameters<YoloAgent["startFiber"]>[2]
+    ): ReturnType<YoloAgent["startFiber"]> {
+      if (failNext) {
+        failNext = false;
+        return Promise.reject(new Error("fiber unavailable"));
+      }
+      return super.startFiber(name, fn, options);
+    }
+  })(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string) => {
+            released.push(runId);
+            return Promise.resolve(true);
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+
+  const first = await yolo.enqueue(
+    { operationId: OP_A, task: "First admitted run." },
+    "6f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c93",
+    "hash-fiber-failure",
+    "identity"
+  );
+
+  await assert.rejects(
+    () => yolo.startAdmitted(first.run.id),
+    /fiber unavailable/
+  );
+
+  const failed = yolo.getRun(first.run.id);
+  assert.equal(failed?.status, "failed");
+  assert.ok(failed?.completedAt);
+  assert.deepEqual(released, [first.run.id]);
+
+  const second = await yolo.enqueue(
+    { operationId: OP_B, task: "Second admitted run." },
+    "7f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c94",
+    "hash-fiber-recovery",
+    "identity"
+  );
+  assert.equal(await yolo.startAdmitted(second.run.id), true);
+  assert.equal(yolo.getRun(second.run.id)?.status, "running");
+});
+
 test("stop cancels the fiber and closes the record", async () => {
   const yolo = agent();
   const started = await yolo.start(

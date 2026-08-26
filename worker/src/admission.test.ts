@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import type { AgentDefinition } from "@opencoven/agent-contracts";
 import {
   AdmissionQueue,
   type AdmissionRecord,
@@ -9,6 +10,7 @@ import {
   RunAdmission,
   tenantAdmissionHash,
 } from "./admission";
+import { YoloAgent } from "./agents";
 import { OperationConflictError, planCloudRunStart } from "./run-state";
 
 const TENANT_A = "v1:tenant-a";
@@ -308,7 +310,8 @@ function runAdmissionHarness(
     getRun: (runId: string) => unknown;
     startAdmitted: (runId: string) => Promise<boolean>;
     stop: (runId: string) => Promise<unknown>;
-  }
+  },
+  environment: Record<string, string> = {}
 ) {
   const database = new DatabaseSync(":memory:");
   let alarm: number | null = null;
@@ -348,6 +351,7 @@ function runAdmissionHarness(
     ctx as never,
     {
       YoloAgent: { getByName: () => getAgent() },
+      ...environment,
     } as never
   );
   return {
@@ -358,6 +362,23 @@ function runAdmissionHarness(
       alarm = value;
     },
     sql,
+  };
+}
+
+function yoloDefinition(): AgentDefinition {
+  return {
+    backend: "cloud",
+    createdAt: "2026-08-20T12:00:00.000Z",
+    description: "",
+    id: "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90",
+    instructions: "Do the thing.",
+    lastRunAt: null,
+    model: "auto",
+    name: "Cody",
+    owner: { kind: "tenant", tenantId: "acct_1" },
+    runtime: "copilot",
+    status: "idle",
+    updatedAt: "2026-08-20T12:00:00.000Z",
   };
 }
 
@@ -390,6 +411,84 @@ test("admission returns an immediate active decision without waiting for dispatc
 
   resolveDispatch(true);
   await Promise.all(harness.background);
+});
+
+test("alarm reconciles a queued cancellation after its release callback fails", async () => {
+  const originalNow = Date.now;
+  Date.now = () => Date.parse("2026-08-26T00:00:00.000Z");
+  let admission!: RunAdmission;
+  let releaseAttempts = 0;
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string) => {
+            releaseAttempts += 1;
+            if (releaseAttempts === 1) {
+              return Promise.reject(new Error("admission unavailable"));
+            }
+            return admission.release(runId);
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(yoloDefinition());
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: (runId) => yolo.getRun(runId),
+      startAdmitted: (runId) => yolo.startAdmitted(runId),
+      stop: (runId) => yolo.stop(runId),
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "0",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    }
+  );
+  ({ admission } = harness);
+
+  try {
+    const queuedRequest = {
+      ...request(39),
+      operationId: "88888888-9999-4000-8111-222222222222",
+      runId: "99999999-aaaa-4111-8222-333333333333",
+    };
+    await yolo.enqueue(
+      { operationId: queuedRequest.operationId, task: "Queued work." },
+      queuedRequest.runId,
+      queuedRequest.requestHash,
+      "identity"
+    );
+    const queued = await admission.admit(queuedRequest);
+    assert.deepEqual(queued, {
+      kind: "queued",
+      position: 1,
+      runId: queuedRequest.runId,
+    });
+
+    const stopped = await yolo.stop(queuedRequest.runId);
+    assert.equal(stopped?.status, "cancelled");
+    assert.equal(releaseAttempts, 1);
+    assert.equal(
+      (await admission.getRecord(queuedRequest.runId))?.state,
+      "queued"
+    );
+
+    await admission.alarm();
+
+    assert.equal(
+      (await admission.getRecord(queuedRequest.runId))?.state,
+      "terminal"
+    );
+    assert.deepEqual(await admission.admit(request(40)), {
+      kind: "queued",
+      position: 1,
+      runId: "run-40",
+    });
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test("alarm keeps its earlier cadence instead of postponing expiry", async () => {

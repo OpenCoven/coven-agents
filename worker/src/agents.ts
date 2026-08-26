@@ -611,22 +611,28 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
     const definition = this.requireDefinition();
     const claimed = this.claimRunStart(record);
-    await this.startFiber(
-      cloudFiberKey(runId),
-      async () => {
-        try {
-          await this.driveHarness(
-            definition,
-            claimed,
-            claimed.run.task,
-            identityToken
-          );
-        } finally {
-          await this.reportAdmissionTerminal(runId);
-        }
-      },
-      { idempotencyKey: cloudFiberKey(runId) }
-    );
+    try {
+      await this.startFiber(
+        cloudFiberKey(runId),
+        async () => {
+          try {
+            await this.driveHarness(
+              definition,
+              claimed,
+              claimed.run.task,
+              identityToken
+            );
+          } finally {
+            await this.reportAdmissionTerminal(runId);
+          }
+        },
+        { idempotencyKey: cloudFiberKey(runId) }
+      );
+    } catch (error) {
+      await this.failRunAfterDispatchError(runId, error);
+      await this.reportAdmissionTerminal(runId);
+      throw error;
+    }
     // A duplicate fiber receipt still represents a successful admission: the
     // atomic run claim above already proved this run owns the agent slot.
     return true;
@@ -674,6 +680,39 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     this.persistRun(claimed);
     this.updateDefinition({ status: "running", updatedAt: startedAt });
     return claimed;
+  }
+
+  private failRunAfterDispatchError(runId: string, error: unknown): void {
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (!current || isTerminal(current.run.status)) {
+      return;
+    }
+    const completedAt = new Date().toISOString();
+    const failed = finishCloudRunRecord(current, {
+      completedAt,
+      credential: null,
+      error: {
+        code: "internal_error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Cloud run fiber could not be started.",
+        retryable: false,
+      },
+      output:
+        error instanceof Error
+          ? error.message
+          : "Cloud run fiber could not be started.",
+      status: "failed",
+    });
+    this.persistRun(failed);
+    this.updateDefinition({
+      lastRunAt: completedAt,
+      status: "error",
+      updatedAt: completedAt,
+    });
   }
 
   /** Removes a prepared run when admission refuses it before dispatch. */
