@@ -23,7 +23,15 @@ export default function Page() {
       </h1>
       <p className="text-muted-foreground text-sm">
         Continue with GitHub. New accounts start with guest access, and signing
-        in never starts an agent, sandbox, or run.
+        in never starts an agent or a run. For subscribers, we begin warming the
+        sandbox so the first mission starts fast.
+      </p>
+      {/* The boundary, stated where a stranger first meets the product. One
+          line, every claim true: runs execute in Cloudflare's sandbox
+          containers and the container is the blast radius. */}
+      <p className="font-mono text-[11px] text-muted-foreground/70">
+        Agents run in isolated Cloudflare sandboxes — filesystem and network end
+        with the container.
       </p>
 
       <div className="pt-2">

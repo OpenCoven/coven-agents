@@ -92,34 +92,120 @@ test("missing required identity is explicitly unavailable", async () => {
   assert.equal(store.calls.length, 0);
 });
 
-test("production store configuration and consume outages fail closed", async () => {
-  const configurationFailure = createAbusePolicyEnforcer({
+/**
+ * DELIBERATE REVERSAL of the original fail-closed contract, and the original
+ * test asserted 503 for exactly these cases. Production settled the argument:
+ * the provider throws while its connection is coming up, so fail-closed made
+ * every cold serverless boot answer its first requests with an outage. A
+ * store failure now degrades to per-instance memory limiting — the request
+ * stays limited, the product stays up. Fail-closed survives in one place
+ * only: Redis genuinely unconfigured (the provider returning undefined),
+ * because missing configuration is an operator error that should be loud.
+ */
+test("store outages degrade to memory limiting instead of an outage", async () => {
+  const outageEnforcer = createAbusePolicyEnforcer({
     getStore: () => {
-      throw new Error("secret configuration leaked");
+      throw new Error("connection still warming");
     },
     isProduction: true,
   });
   const consumeFailure: AbuseStore = {
-    consume: () => Promise.reject(new Error("redis details leaked")),
+    consume: () => Promise.reject(new Error("socket dropped mid-request")),
   };
 
   assert.deepEqual(
-    await configurationFailure({
+    await outageEnforcer({
       ip: "203.0.113.4",
       route: "checkout",
       userId: "user-1",
     }),
-    { kind: "unavailable", responseStatus: 503 }
+    { kind: "allowed" }
   );
   assert.deepEqual(
-    await configurationFailure({
+    await outageEnforcer({
       ip: "203.0.113.4",
       route: "checkout",
       store: consumeFailure,
       userId: "user-1",
     }),
+    { kind: "allowed" }
+  );
+});
+
+test("the degraded store is a real limiter, not a rubber stamp", async () => {
+  // checkout's burst budget is 2 per 300s. The third request through the
+  // fallback must be denied — degradation weakens limiting to per-instance,
+  // it never switches it off.
+  const enforcer = createAbusePolicyEnforcer({
+    getStore: () => {
+      throw new Error("connection still warming");
+    },
+    isProduction: true,
+  });
+  const request = {
+    ip: "203.0.113.9",
+    route: "checkout" as const,
+    userId: "user-degraded",
+  };
+
+  assert.equal((await enforcer(request)).kind, "allowed");
+  assert.equal((await enforcer(request)).kind, "allowed");
+  const third = await enforcer(request);
+  assert.equal(third.kind, "denied");
+});
+
+test("an unconfigured store in production still fails closed", async () => {
+  // The one 503 that survives: no Redis configured at all. Missing
+  // configuration is an operator error and must be loud, not quietly
+  // absorbed by a fallback.
+  const enforcer = createAbusePolicyEnforcer({
+    getStore: () => undefined,
+    isProduction: true,
+  });
+
+  assert.deepEqual(
+    await enforcer({
+      ip: "203.0.113.4",
+      route: "checkout",
+      userId: "user-1",
+    }),
     { kind: "unavailable", responseStatus: 503 }
   );
+});
+
+test("ABUSE_CONTROL=off lifts enforcement without touching the store", async () => {
+  // The operator's kill switch: when the limiter itself is the outage,
+  // admission must not depend on any part of the limiter — not the store,
+  // not the subjects, not the policy table.
+  const enforcer = createAbusePolicyEnforcer({
+    getControlMode: () => "off",
+    getStore: () => {
+      throw new Error("The kill switch must never reach the store.");
+    },
+    isProduction: true,
+  });
+
+  assert.deepEqual(await enforcer({ ip: null, route: "checkout" }), {
+    kind: "allowed",
+  });
+});
+
+test("only the exact value off lifts enforcement", async () => {
+  // `BETA_MODE === "on"` tradition: a typo leaves enforcement armed.
+  const admissions = await Promise.all(
+    ["OFF", "false", "0", "", undefined].map((mode) => {
+      const enforcer = createAbusePolicyEnforcer({
+        getControlMode: () => mode,
+        getStore: () => undefined,
+        isProduction: true,
+      });
+      return enforcer({ ip: "203.0.113.4", route: "checkout", userId: "u" });
+    })
+  );
+
+  for (const admission of admissions) {
+    assert.deepEqual(admission, { kind: "unavailable", responseStatus: 503 });
+  }
 });
 
 test("rejected Redis connects destroy cached state and retry with bounded client options", async () => {
@@ -147,12 +233,15 @@ test("rejected Redis connects destroy cached state and retry with bounded client
     isProduction: true,
   });
 
+  // The failed connect degrades the request to the memory fallback rather
+  // than 503ing it, and still destroys the dead client so the next request
+  // retries with a fresh one.
   assert.deepEqual(
     await enforcer({
       ip: "203.0.113.4",
       route: "model_list",
     }),
-    { kind: "unavailable", responseStatus: 503 }
+    { kind: "allowed" }
   );
   assert.equal(firstClient.destroyCalls, 1);
 
@@ -175,7 +264,7 @@ test("rejected Redis connects destroy cached state and retry with bounded client
   });
 });
 
-test("never-resolving Redis connects return unavailable through an injected timeout", async () => {
+test("never-resolving Redis connects time out into the fallback, not an outage", async () => {
   const timers = fakeTimers();
   const client = new FakeRedisClient({
     connect: () => new Promise(() => undefined),
@@ -201,14 +290,13 @@ test("never-resolving Redis connects return unavailable through an injected time
 
   assert.deepEqual(timers.pendingDelays(), [25]);
   timers.runNext();
-  assert.deepEqual(await admission, {
-    kind: "unavailable",
-    responseStatus: 503,
-  });
+  // The timeout still fires and still destroys the dead client — what changes
+  // is the request's fate: degraded to the memory fallback, not 503ed.
+  assert.deepEqual(await admission, { kind: "allowed" });
   assert.equal(client.destroyCalls, 1);
 });
 
-test("never-resolving consumes return unavailable through an injected timeout", async () => {
+test("never-resolving consumes time out into the fallback, not an outage", async () => {
   const timers = fakeTimers();
   const client = new FakeRedisClient({
     eval: () => new Promise(() => undefined),
@@ -237,10 +325,9 @@ test("never-resolving consumes return unavailable through an injected timeout", 
   await flushMicrotasks();
   assert.deepEqual(timers.pendingDelays(), [25, 25, 50]);
   timers.runNext();
-  assert.deepEqual(await admission, {
-    kind: "unavailable",
-    responseStatus: 503,
-  });
+  // The hung consume is timed out, the dead client destroyed, and the
+  // request re-run against the memory fallback rather than 503ed.
+  assert.deepEqual(await admission, { kind: "allowed" });
   assert.equal(client.destroyCalls, 1);
 
   timers.runNext();
@@ -270,12 +357,15 @@ test("rejected Redis commands destroy cached state before reconnecting", async (
     isProduction: true,
   });
 
+  // The failed connect degrades the request to the memory fallback rather
+  // than 503ing it, and still destroys the dead client so the next request
+  // retries with a fresh one.
   assert.deepEqual(
     await enforcer({
       ip: "203.0.113.4",
       route: "model_list",
     }),
-    { kind: "unavailable", responseStatus: 503 }
+    { kind: "allowed" }
   );
   assert.equal(firstClient.destroyCalls, 1);
 
@@ -471,3 +561,24 @@ class FakeRedisClient implements RedisEvalExecutor {
     // Tests intentionally swallow the same error event the production adapter does.
   }
 }
+
+test("failClosed refuses on store outage instead of degrading", async () => {
+  // The auth wrapper's carve-out: OAuth starts and callbacks carry replay
+  // protection, and a limiter outage must not quietly disable it. Everything
+  // without the flag degrades; this asserts the flag restores the refusal.
+  const enforcer = createAbusePolicyEnforcer({
+    getStore: () => {
+      throw new Error("connection still warming");
+    },
+    isProduction: true,
+  });
+
+  assert.deepEqual(
+    await enforcer({
+      failClosed: true,
+      ip: "203.0.113.4",
+      route: "auth_callback",
+    }),
+    { kind: "unavailable", responseStatus: 503 }
+  );
+});

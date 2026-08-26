@@ -44,6 +44,24 @@ test("a failed renewal extends by the grace window", () => {
   );
 });
 
+test("a failed renewal preserves the paid billing-period start", () => {
+  const input = {
+    billingReason: "subscription_cycle",
+    current: PAID_UNTIL,
+    currentPeriodStart: new Date("2026-08-20T12:00:00.000Z"),
+    periodEnd: null,
+    type: "invoice.payment_failed",
+  };
+  const update = subscriptionUpdate(input);
+
+  assert.deepEqual(update, {
+    billingPeriodStart: input.currentPeriodStart,
+    subscribedUntil: new Date(
+      PAID_UNTIL.getTime() + GRACE_PERIOD_DAYS * 86_400_000
+    ),
+  });
+});
+
 test("a failed FIRST payment changes nothing", () => {
   // Would otherwise grant a subscriber session -- database writes and
   // credential storage -- to someone who has never paid.

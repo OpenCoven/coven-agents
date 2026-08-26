@@ -1,6 +1,8 @@
+import { after } from "next/server";
 import NextAuth, { type DefaultSession } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
 import GitHub from "next-auth/providers/github";
+import { prewarmTenantSandbox } from "@/lib/agents/prewarm.server";
 import { fetchGithubEmail } from "@/lib/auth/github-email-fetch";
 import { findOrCreateFederatedUser } from "@/lib/db/queries";
 import { refreshTokenType } from "@/lib/session-claims";
@@ -84,6 +86,22 @@ export const {
         // the settings form is what keeps it current between sign-ins.
         token.picture = row.image ?? null;
         token.subscribedUntil = row.subscribedUntil?.toISOString() ?? null;
+
+        // Post-response, best-effort, subscribers only: begin booting the
+        // sandbox of their most recently run agent so the first mission
+        // skips the cold start. `prewarmTenantSandbox` swallows every
+        // failure — sign-in must never inherit the warmer's problems — and
+        // `after` keeps it off the response's critical path entirely.
+        try {
+          after(() =>
+            prewarmTenantSandbox({
+              id: row.id,
+              subscribedUntil: row.subscribedUntil ?? null,
+            })
+          );
+        } catch {
+          // No request scope for `after` (e.g. under test) — skip the warm.
+        }
 
         return refreshTokenType(token, new Date());
       }

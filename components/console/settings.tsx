@@ -185,13 +185,11 @@ function HarnessCard({
 
 export function Settings({
   account,
-  onClose,
 }: {
   /** The signed-in email, or null. Not a display string — the panel decides
    *  how to render "nobody", so a fallback sentence can never be mistaken for
    *  an account name or have an initial derived from it. */
   account: string | null;
-  onClose: () => void;
 }) {
   const [tab, setTab] = useState<Tab>("harness");
 
@@ -396,10 +394,6 @@ export function Settings({
               {entry.label}
             </button>
           ))}
-          <div style={{ flex: 1 }} />
-          <Btn fullWidth onClick={onClose} variant="ghost">
-            Back to runs
-          </Btn>
         </nav>
 
         <div

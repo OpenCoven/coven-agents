@@ -3,7 +3,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Btn, Eyebrow } from "@/components/console/primitives";
+import { Eyebrow } from "@/components/console/primitives";
 import { hairline, tabular, type as type_ } from "@/components/console/styles";
 import type { DayCount } from "@/lib/billing/history";
 
@@ -201,7 +201,7 @@ function NotRecorded({
   );
 }
 
-export function Analytics({ onClose }: { onClose: () => void }) {
+export function Analytics() {
   const [range, setRange] = useState<Range>(30);
   const [data, setData] = useState<Analytics | null>(null);
   const [refused, setRefused] = useState(false);
@@ -308,9 +308,6 @@ export function Analytics({ onClose }: { onClose: () => void }) {
             </button>
           ))}
         </fieldset>
-        <Btn onClick={onClose} variant="ghost">
-          Back to runs
-        </Btn>
       </div>
 
       <div

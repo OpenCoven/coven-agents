@@ -261,6 +261,38 @@ export function RunConsole() {
           ? current
           : (next[0]?.id ?? null)
       );
+
+      // The runner remembers a bounded history per agent; without this a
+      // reload shows an empty session list while the runs still exist. Each
+      // agent's listing fails soft — a runner without the route (or one
+      // agent's directory hiccup) costs history, never the console.
+      const discovered = (
+        await Promise.all(
+          next.map((agent) =>
+            client.listRuns(agent.id).then(
+              (snapshots) =>
+                snapshots.map((snapshot) => ({ agentId: agent.id, snapshot })),
+              () => []
+            )
+          )
+        )
+      ).flat();
+      setRuns((current) => {
+        const known = new Set(current.map((run) => run.snapshot.id));
+        return [
+          ...current,
+          ...discovered
+            .filter((run) => !known.has(run.snapshot.id))
+            .map((run) => ({ ...run, events: [], lastEventId: 0 })),
+        ];
+      });
+      // A run that survived the refresh mid-flight resumes streaming; its
+      // events replay from the start, so the transcript rebuilds itself.
+      const live = discovered.find((run) => !isTerminal(run.snapshot.status))
+        ?.snapshot.id;
+      if (live) {
+        setStreamingRunId((current) => current ?? live);
+      }
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not reach the runner."
@@ -416,6 +448,33 @@ export function RunConsole() {
       controller.abort();
     };
   }, [applyEvent, client, streamingRunId]);
+
+  /**
+   * Backfills the transcript of a finished run that was hydrated from the
+   * runner's history. Hydration carries only the snapshot; the events still
+   * live on the worker, and for a terminal run its stream replays them all
+   * and closes, which makes it a one-shot transcript fetch. Live runs are
+   * excluded — the streaming effect above owns those.
+   */
+  useEffect(() => {
+    if (
+      !selectedRun ||
+      selectedRun.events.length > 0 ||
+      selectedRun.lastEventId > 0 ||
+      !isTerminal(selectedRun.snapshot.status)
+    ) {
+      return;
+    }
+    const runId = selectedRun.snapshot.id;
+    const controller = new AbortController();
+    client
+      .streamRunEvents(runId, {
+        onEvent: (event) => applyEvent(runId, event),
+        signal: controller.signal,
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [applyEvent, client, selectedRun]);
 
   const running = selectedRun
     ? !isTerminal(selectedRun.snapshot.status)
@@ -818,12 +877,18 @@ export function RunConsole() {
             minWidth: 0,
           }}
         >
-          {/* The brand is the way home. It was the one mark on the screen that
-              looked like a logo and did nothing when clicked. */}
+          {/* The brand is the way back to runs — the one escape hatch every
+              view shares, which is why the views carry no back buttons of
+              their own. The href keeps middle-click and copy-link honest;
+              a plain click stays in the console instead of reloading it. */}
           <Link
-            aria-label="OpenCoven home"
+            aria-label="Back to runs"
             className="oc-tint"
             href="/"
+            onClick={(event) => {
+              event.preventDefault();
+              setView("composer");
+            }}
             style={{
               alignItems: "center",
               borderRadius: "var(--radius-control)",
@@ -834,7 +899,7 @@ export function RunConsole() {
               padding: "5px 6px",
               textDecoration: "none",
             }}
-            title="OpenCoven home"
+            title="Back to runs"
           >
             <span style={{ color: "var(--accent-presence)", fontSize: 13 }}>
               ◆
@@ -931,9 +996,9 @@ export function RunConsole() {
         style={{ display: "flex", flex: 1, minHeight: 0, position: "relative" }}
       >
         {view === "analytics" ? (
-          <Analytics onClose={() => setView("composer")} />
+          <Analytics />
         ) : view === "settings" ? (
-          <Settings account={account} onClose={() => setView("composer")} />
+          <Settings account={account} />
         ) : view === "create" ? (
           <CreateAgent
             busy={busy}
@@ -1337,9 +1402,6 @@ export function RunConsole() {
                                 {projection.nowDoing}
                               </span>
                               <div style={{ flex: 1 }} />
-                              <span style={pill("warning")}>
-                                Approvals disabled
-                              </span>
                               <Btn onClick={stopRun} variant="danger-ghost">
                                 Stop run
                               </Btn>
@@ -1569,7 +1631,7 @@ function EmptyConsole({
         </h1>
         <p style={{ ...type_.body, margin: "0 auto", maxWidth: "44ch" }}>
           {blocked ??
-            "Forge an execution profile, then give it a mission and the evidence you would accept."}
+            "Forge an execution profile, hand it a mission, and read the receipt it proves itself with."}
         </p>
         <div
           style={{
@@ -1588,6 +1650,68 @@ function EmptyConsole({
             Forge an agent
           </Btn>
         </div>
+
+        {/* The boundary, published. One quiet line — every claim in it is
+            load-bearing and true: runs execute in Cloudflare's sandbox
+            containers, the container is the blast radius, and the credential
+            is fetched for one run and redacted from evidence. Naming
+            Cloudflare is deliberate; the isolation is their product, and
+            saying so borrows exactly as much trust as it should. */}
+        <div
+          style={{
+            alignItems: "center",
+            display: "flex",
+            gap: 8,
+            justifyContent: "center",
+            marginTop: 26,
+          }}
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              background: "var(--color-success)",
+              borderRadius: 999,
+              height: 5,
+              width: 5,
+            }}
+          />
+          <span
+            style={{
+              color: "var(--text-faint)",
+              font: "400 11px/1.6 var(--font-mono)",
+            }}
+          >
+            isolated Cloudflare sandbox per run · nothing reaches your machine
+          </span>
+        </div>
+        <details style={{ marginTop: 10 }}>
+          <summary
+            style={{
+              color: "var(--text-faint)",
+              cursor: "pointer",
+              display: "inline-block",
+              font: "500 10px/1 var(--font-mono)",
+              letterSpacing: "0.1em",
+              listStyle: "none",
+              textTransform: "uppercase",
+            }}
+          >
+            How a run is bounded
+          </summary>
+          <p
+            style={{
+              ...type_.body,
+              font: "400 12px/1.7 var(--font-ui)",
+              margin: "10px auto 0",
+              maxWidth: "46ch",
+            }}
+          >
+            Every run gets its own Cloudflare sandbox container. Filesystem and
+            network end with it. Your harness credential is envelope-encrypted,
+            fetched for the duration of one run, and redacted from the evidence.
+            When the run closes, the receipt is what remains.
+          </p>
+        </details>
       </div>
     </div>
   );

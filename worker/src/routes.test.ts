@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AgentDefinition, RunnerClaims } from "@opencoven/agent-contracts";
 import {
+  AGENT_RUNNER_API_VERSION,
+  type AgentDefinition,
   base64UrlEncode,
+  type RunnerClaims,
   TOKEN_LIFETIME_SECONDS,
 } from "@opencoven/agent-contracts";
 import {
@@ -19,6 +21,22 @@ const CALLER_TENANT = "tenant_under_test";
 const RUN_ID = "11111111-2222-4333-8444-555555555555";
 /** A run owned by the caller, so the negative tests have a control. */
 const MY_RUN_ID = "22222222-3333-4444-8555-666666666666";
+
+class RecordingLimiter {
+  readonly keys: string[] = [];
+  private readonly result: { success: boolean } | Error;
+
+  constructor(result: { success: boolean } | Error = { success: true }) {
+    this.result = result;
+  }
+
+  limit(input: { key: string }): Promise<{ success: boolean }> {
+    this.keys.push(input.key);
+    return this.result instanceof Error
+      ? Promise.reject(this.result)
+      : Promise.resolve(this.result);
+  }
+}
 
 async function keyPair(): Promise<CryptoKeyPair> {
   return (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
@@ -85,7 +103,11 @@ function verifyKeySpki(): Promise<string> {
 const environmentPromise = verifyKeySpki().then((spki) => ({
   AGENT_CONTROL_TOKEN: TOKEN,
   ALLOWED_ORIGIN: "*",
+  EDGE_ABUSE_KEY_SECRET: "test-edge-abuse-secret",
+  EDGE_REQUEST_LIMITER: new RecordingLimiter(),
   RUNNER_VERIFY_KEY: spki,
+  TENANT_MUTATION_LIMITER: new RecordingLimiter(),
+  TENANT_RUN_LIMITER: new RecordingLimiter(),
 }));
 
 function definition(id: string, tenantId: string): AgentDefinition {
@@ -117,10 +139,12 @@ const agents = new Map<string, AgentDefinition>([
 
 let decommissioned: string[] = [];
 let stopped: string[] = [];
+let warmed: string[] = [];
 
 function runner() {
   decommissioned = [];
   stopped = [];
+  warmed = [];
 
   const directory: CloudRunnerDirectory = {
     list: (tenantId) =>
@@ -160,6 +184,22 @@ function runner() {
         status: "completed",
         task: "Fix the tests.",
       }),
+      listRuns: () => [
+        {
+          agentId,
+          apiVersion: "2026-08-01",
+          commandEvidence: [],
+          completedAt: "2026-08-20T12:00:05.000Z",
+          createdAt: "2026-08-20T12:00:00.000Z",
+          fileEvidence: [],
+          id: agentId === MINE ? MY_RUN_ID : RUN_ID,
+          operationId: MINE,
+          output: "done",
+          startedAt: "2026-08-20T12:00:01.000Z",
+          status: "completed",
+          task: "Fix the tests.",
+        },
+      ],
       snapshot: () => agents.get(agentId) ?? null,
       start: () => {
         throw new Error("start must not be reached for another tenant");
@@ -167,6 +207,13 @@ function runner() {
       stop: (runId: string) => {
         stopped.push(runId);
         return null;
+      },
+      warm: () => {
+        warmed.push(agentId);
+        return {
+          status: "provisioning",
+          updatedAt: "2026-08-20T12:00:00.000Z",
+        };
       },
     }) as unknown as CloudRunnerAgent;
 
@@ -192,6 +239,159 @@ async function call(path: string, method = "GET"): Promise<Response> {
     environment as never
   );
 }
+
+test("source floods are refused before deployment-token verification", async () => {
+  const environment = await environmentPromise;
+  const edge = new RecordingLimiter({ success: false });
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      headers: { "cf-connecting-ip": "203.0.113.10" },
+    }),
+    { ...environment, EDGE_REQUEST_LIMITER: edge } as never
+  );
+
+  assert.equal(response.status, 429);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("retry-after"), "60");
+  const body = (await response.json()) as {
+    apiVersion: string;
+    error: { code: string; message: string; retryable: boolean };
+    requestId: string;
+  };
+  assert.deepEqual(
+    { apiVersion: body.apiVersion, error: body.error },
+    {
+      apiVersion: AGENT_RUNNER_API_VERSION,
+      error: {
+        code: "rate_limited",
+        message: "Too many requests. Try again later.",
+        retryable: true,
+      },
+    }
+  );
+  assert.equal(typeof body.requestId, "string");
+  assert.equal(edge.keys.length, 1);
+});
+
+test("missing Cloudflare IP metadata consumes the shared source bucket", async () => {
+  const environment = await environmentPromise;
+  const edge = new RecordingLimiter();
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents"),
+    { ...environment, EDGE_REQUEST_LIMITER: edge } as never
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(edge.keys.length, 1);
+});
+
+test("tenant mutations are refused after identity verification and before body parsing", async () => {
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const mutation = new RecordingLimiter({ success: false });
+  const run = new RecordingLimiter();
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      body: "not-json",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "cf-connecting-ip": "203.0.113.11",
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    {
+      ...environment,
+      TENANT_MUTATION_LIMITER: mutation,
+      TENANT_RUN_LIMITER: run,
+    } as never
+  );
+
+  assert.equal(response.status, 429);
+  assert.equal(mutation.keys.length, 1);
+  assert.equal(run.keys.length, 0);
+});
+
+test("paid run starts use the stricter tenant run limiter before body parsing", async () => {
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const mutation = new RecordingLimiter();
+  const run = new RecordingLimiter({ success: false });
+  const response = await runner().fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: "not-json",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "cf-connecting-ip": "203.0.113.12",
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    {
+      ...environment,
+      TENANT_MUTATION_LIMITER: mutation,
+      TENANT_RUN_LIMITER: run,
+    } as never
+  );
+
+  assert.equal(response.status, 429);
+  assert.equal(mutation.keys.length, 0);
+  assert.equal(run.keys.length, 1);
+});
+
+test("tenant reads consume no mutation or run capacity", async () => {
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const mutation = new RecordingLimiter();
+  const run = new RecordingLimiter();
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      headers: {
+        authorization: `Bearer ${token}`,
+        "cf-connecting-ip": "203.0.113.13",
+        "x-runner-token": TOKEN,
+      },
+    }),
+    {
+      ...environment,
+      TENANT_MUTATION_LIMITER: mutation,
+      TENANT_RUN_LIMITER: run,
+    } as never
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(mutation.keys.length, 0);
+  assert.equal(run.keys.length, 0);
+});
+
+test("limiter outages fail closed without revealing the failed scope", async () => {
+  const environment = await environmentPromise;
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      headers: { "cf-connecting-ip": "203.0.113.14" },
+    }),
+    {
+      ...environment,
+      EDGE_REQUEST_LIMITER: new RecordingLimiter(new Error("binding down")),
+    } as never
+  );
+
+  assert.equal(response.status, 503);
+  const body = (await response.json()) as {
+    error: { code: string; message: string };
+  };
+  assert.deepEqual(body.error, {
+    code: "abuse_control_unavailable",
+    message: "Please try again later.",
+    retryable: true,
+  });
+});
 
 test("a listing only contains the caller's own agents", async () => {
   const response = await call("/api/agents");
@@ -225,6 +425,23 @@ test("another tenant's agent cannot be deleted", async () => {
 
   assert.equal(response.status, 404);
   assert.deepEqual(decommissioned, [], "decommission must not be reached");
+});
+
+test("an agent's retained runs are listable", async () => {
+  const response = await call(`/api/agents/${MINE}/runs`);
+
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as { runs: { id: string }[] };
+  assert.deepEqual(
+    body.runs.map((run) => run.id),
+    [MY_RUN_ID]
+  );
+});
+
+test("another tenant's run history is not listable", async () => {
+  const response = await call(`/api/agents/${THEIRS}/runs`);
+
+  assert.equal(response.status, 404);
 });
 
 test("another tenant's agent cannot be run", async () => {
@@ -518,4 +735,118 @@ test("a DO-thrown AlreadyRunningError still maps to 409, not the 500 catch-all",
 
   const body = (await response.json()) as { error: { code: string } };
   assert.equal(body.error.code, "already_running");
+});
+
+test("creating an agent triggers its warm-up for a subscriber", async () => {
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      body: JSON.stringify({
+        backend: "cloud",
+        instructions: "Do the thing.",
+        model: "auto",
+        name: "Warmed",
+        runtime: "copilot",
+      }),
+      headers: {
+        authorization: `Bearer ${await identityToken()}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    (await environmentPromise) as never
+  );
+
+  assert.equal(response.status, 201);
+  assert.equal(warmed.length, 1);
+});
+
+test("a demo claim creates without warming", async () => {
+  // Creation is allowed — the profile is configuration — but a demo tenant
+  // cannot run, so booting a container for one would spend capacity on
+  // nothing.
+  const pair = await getKeyPair();
+  const demoToken = await mint(pair.privateKey, {
+    exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    plan: "demo",
+    sub: "user-1",
+    tenant: CALLER_TENANT,
+  });
+
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      body: JSON.stringify({
+        backend: "cloud",
+        instructions: "Do the thing.",
+        model: "auto",
+        name: "Cold",
+        runtime: "copilot",
+      }),
+      headers: {
+        authorization: `Bearer ${demoToken}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    (await environmentPromise) as never
+  );
+
+  assert.equal(response.status, 201);
+  assert.deepEqual(warmed, []);
+});
+
+test("tenant prewarm boots the most recently used agent", async () => {
+  const response = await call("/api/tenant/prewarm", "POST");
+
+  assert.equal(response.status, 202);
+  const body = (await response.json()) as { agentId: string };
+  assert.equal(body.agentId, MINE);
+  assert.deepEqual(warmed, [MINE]);
+});
+
+test("tenant prewarm with no agents warms nothing", async () => {
+  const pair = await getKeyPair();
+  const token = await mint(pair.privateKey, {
+    exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    plan: "subscriber",
+    sub: "user-2",
+    tenant: "t_no_agents",
+  });
+
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/tenant/prewarm", {
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    (await environmentPromise) as never
+  );
+
+  assert.equal(response.status, 204);
+  assert.deepEqual(warmed, []);
+});
+
+test("a demo claim cannot prewarm", async () => {
+  const pair = await getKeyPair();
+  const demoToken = await mint(pair.privateKey, {
+    exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    plan: "demo",
+    sub: "user-1",
+    tenant: CALLER_TENANT,
+  });
+
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/tenant/prewarm", {
+      headers: {
+        authorization: `Bearer ${demoToken}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    (await environmentPromise) as never
+  );
+
+  assert.equal(response.status, 403);
+  assert.deepEqual(warmed, []);
 });

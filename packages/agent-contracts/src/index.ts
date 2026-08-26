@@ -202,6 +202,23 @@ export const createAgentInputSchema = z
  * durable state. Agents created before the provider-key runtime was retired
  * still parse; they simply cannot be recreated.
  */
+/**
+ * The sandbox's readiness for this agent's next run.
+ *
+ * `provisioning` means a warm-up is booting the container; `ready` means the
+ * probe answered and the next run skips the cold start; `failed` is advisory
+ * — a run started against a failed warm simply pays the cold start it would
+ * have paid anyway. Optional on the definition because agents configured
+ * before warming existed have no recorded state, which is `not_started`.
+ */
+export const warmStateSchema = z
+  .object({
+    status: z.enum(["not_started", "provisioning", "ready", "failed"]),
+    updatedAt: datetimeSchema,
+  })
+  .strict();
+export type WarmState = z.infer<typeof warmStateSchema>;
+
 export const agentDefinitionSchema = z
   .object({
     ...agentDefinitionInputShape,
@@ -210,6 +227,7 @@ export const agentDefinitionSchema = z
     lastRunAt: datetimeSchema.nullable(),
     status: agentStatusSchema,
     updatedAt: datetimeSchema,
+    warm: warmStateSchema.optional(),
   })
   .strict();
 
@@ -387,6 +405,13 @@ export const runEventsEnvelopeSchema = z
   .object({
     apiVersion: agentRunnerApiVersionSchema,
     events: runEventsSchema,
+  })
+  .strict();
+
+export const runListEnvelopeSchema = z
+  .object({
+    apiVersion: agentRunnerApiVersionSchema,
+    runs: z.array(runSnapshotSchema),
   })
   .strict();
 

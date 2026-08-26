@@ -1,7 +1,7 @@
 import { createClient, type RedisClientOptions } from "redis";
 import { requireAbuseKeySecret } from "./config";
 import { abusePolicyFor } from "./policy";
-import { type AbuseStore, RedisAbuseStore } from "./store";
+import { type AbuseStore, MemoryAbuseStore, RedisAbuseStore } from "./store";
 import type { AbuseRoute, AbuseSubject } from "./types";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 1000;
@@ -14,6 +14,15 @@ export type AbuseAdmission =
   | { kind: "unavailable"; responseStatus: 503 };
 
 export type AbuseEnforcementInput = {
+  /**
+   * Refuse with 503 on a store failure instead of degrading to the memory
+   * fallback. The auth wrapper sets this for OAuth starts and callbacks:
+   * those flows carry replay protection, and serving them under a limiter
+   * outage would let an outage disable the very control the limiter exists
+   * to provide. Product routes leave it unset — for them, a limiter blip
+   * degrades the limiter, never the product.
+   */
+  failClosed?: boolean;
   ip: string | null;
   route: AbuseRoute;
   store?: AbuseStore;
@@ -168,6 +177,7 @@ export function createRedisStoreProvider(
 
 export function createAbusePolicyEnforcer(input: {
   consumeTimeoutMs?: number;
+  getControlMode?: () => string | undefined;
   getStore: StoreProvider;
   isProduction: boolean;
   timers?: TimeoutTimers;
@@ -176,9 +186,45 @@ export function createAbusePolicyEnforcer(input: {
     input.consumeTimeoutMs ?? DEFAULT_CONSUME_TIMEOUT_MS,
     "Abuse consume timeout"
   );
+  const getControlMode =
+    input.getControlMode ?? (() => process.env.ABUSE_CONTROL);
   const timers = input.timers ?? SYSTEM_TIMERS;
+  let liftWarned = false;
+
+  /**
+   * The store used while Redis is configured but not answering.
+   *
+   * Process-local, so its budgets are per-instance and reset on cold start —
+   * degraded limiting, not none. The provider throws while its connection is
+   * still coming up, on connect timeout, and on a dropped socket; treating
+   * each of those as a 503 turned the limiter's own availability into the
+   * product's, and every cold serverless boot answered its first requests
+   * with an outage. A blip in the limiter degrades the limiter, never the
+   * product.
+   *
+   * Deliberately NOT used when the provider returns `undefined`: that means
+   * Redis is unconfigured, and production failing closed on missing
+   * configuration is a decision this fallback must not quietly reverse.
+   */
+  const fallbackStore = new MemoryAbuseStore();
 
   return async (request) => {
+    /**
+     * The operator's kill switch. `ABUSE_CONTROL=off` — exact match, in the
+     * `BETA_MODE === "on"` tradition, so a typo leaves enforcement on rather
+     * than off — admits everything without touching the store. It exists for
+     * the night the limiter itself is the outage; it is loud in the logs for
+     * the same reason, because a lifted limit that nobody remembers is an
+     * unprotected deployment.
+     */
+    if (getControlMode() === "off") {
+      if (!liftWarned) {
+        liftWarned = true;
+        console.warn("Abuse control lifted by ABUSE_CONTROL=off.");
+      }
+      return { kind: "allowed" };
+    }
+
     const policy = abusePolicyFor(request.route);
     const subjects = deriveSubjects(policy.subjects, request);
     if (!subjects) {
@@ -188,14 +234,35 @@ export function createAbusePolicyEnforcer(input: {
     let store: AbuseStore | undefined;
     try {
       store = request.store ?? (await input.getStore());
-    } catch {
-      return { kind: "unavailable", responseStatus: 503 };
+    } catch (error) {
+      // Name only — a store error's message can carry the Redis URL, and the
+      // URL carries a password. The name is enough to distinguish a connect
+      // timeout from a refused socket, which is the diagnosis this log
+      // exists for; tonight's sign-in outage was undiagnosable because this
+      // catch was empty.
+      console.error("Abuse store unavailable.", {
+        name: error instanceof Error ? error.name : typeof error,
+        stage: "provider",
+      });
+      if (request.failClosed) {
+        return { kind: "unavailable", responseStatus: 503 };
+      }
+      store = fallbackStore;
     }
 
     if (!store) {
-      return input.isProduction
-        ? { kind: "unavailable", responseStatus: 503 }
-        : { kind: "allowed" };
+      if (input.isProduction) {
+        // This refusal used to be silent, which made tonight's sign-in
+        // outage look like every other 503 in this file. Booleans only:
+        // which variable is absent is diagnostic, its value is a secret.
+        console.error("Abuse store unconfigured in production.", {
+          hasKeySecret: Boolean(process.env.ABUSE_KEY_SECRET),
+          hasRedisUrl: Boolean(process.env.REDIS_URL),
+          route: request.route,
+        });
+        return { kind: "unavailable", responseStatus: 503 };
+      }
+      return { kind: "allowed" };
     }
 
     for (const subject of subjects) {
@@ -230,8 +297,49 @@ export function createAbusePolicyEnforcer(input: {
             ),
           };
         }
-      } catch {
-        return { kind: "unavailable", responseStatus: 503 };
+      } catch (error) {
+        console.error("Abuse store unavailable.", {
+          name: error instanceof Error ? error.name : typeof error,
+          stage: "consume",
+        });
+        if (request.failClosed) {
+          return { kind: "unavailable", responseStatus: 503 };
+        }
+        /**
+         * The consume threw mid-request — a socket that dropped after the
+         * store was handed out looks exactly like one that never connected.
+         * Re-run this subject's windows against the memory fallback rather
+         * than 503ing: the request stays limited, per-instance, and the
+         * product stays up. Only the fallback itself failing reaches 503,
+         * and the memory store has no I/O to fail on.
+         */
+        try {
+          const windows = [
+            ["burst", policy.burst],
+            ["sustained", policy.sustained],
+          ] as const;
+          const results = await Promise.all(
+            windows.map(([, window]) =>
+              fallbackStore.consume(
+                `${request.route}:${window.windowSeconds}:${subject.kind}:${subject.value}`,
+                window.limit,
+                window.windowSeconds
+              )
+            )
+          );
+          const denials = results.filter((result) => !result.allowed);
+          if (denials.length > 0) {
+            return {
+              kind: "denied",
+              responseStatus: 429,
+              retryAfterSeconds: Math.max(
+                ...denials.map((result) => result.retryAfterSeconds)
+              ),
+            };
+          }
+        } catch {
+          return { kind: "unavailable", responseStatus: 503 };
+        }
       }
     }
 

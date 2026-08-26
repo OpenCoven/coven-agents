@@ -145,11 +145,17 @@ For deployment, set the secrets without committing them:
 ```bash
 cd worker
 pnpm wrangler secret put AGENT_CONTROL_TOKEN
+pnpm wrangler secret put EDGE_ABUSE_KEY_SECRET
 pnpm wrangler secret put RUNNER_VERIFY_KEY
 pnpm wrangler secret put RUNNER_SERVICE_TOKEN
 pnpm wrangler secret put APP_ORIGIN
 pnpm deploy
 ```
+
+`EDGE_ABUSE_KEY_SECRET` must be a long random value unique to the Worker
+deployment. It HMAC-pseudonymizes source IP and tenant rate-limit keys; if it
+is absent, the Worker fails closed with `503` before serving non-preflight
+requests.
 
 Update `ALLOWED_ORIGIN` in `worker/wrangler.jsonc` to the deployed web origin and
 set `NEXT_PUBLIC_CLOUD_RUNNER_URL` on the web deployment.

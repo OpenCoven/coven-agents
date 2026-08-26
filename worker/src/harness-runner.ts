@@ -18,12 +18,21 @@ import {
 const DEFAULT_WORKSPACE = "/workspace";
 const RUN_TIMEOUT_MS = 900_000;
 /**
- * Generous, and deliberately so. The first `copilot --version` on a cold
- * container was measured at 100 seconds — container start plus a Node CLI's
- * first launch — and a probe timeout below that fails every healthy first run.
- * The old value of 20s only looked safe because it was never enforced.
+ * Generous, and deliberately so. The deadline clock starts when the worker
+ * awaits the exec, and that await covers the container's cold boot as well
+ * as the command: a fully cold run was observed to fail at 180s while the
+ * sandbox went on to log the exec itself succeeding in 110s — boot plus a
+ * Node CLI's first launch had already spent the budget before the command
+ * finished. Five minutes bounds the truly wedged case (the old unenforced
+ * 20s once hid a half-hour zombie) without failing healthy cold starts.
+ *
+ * Exported for the deadline tests, which advance mocked time relative to this
+ * value. They previously hardcoded a tick that outran the old 180s deadline;
+ * raising it to 300s left the tick short, the timer never fired, and the whole
+ * worker suite hung on a never-resolving promise instead of failing. Deriving
+ * the tick from the constant keeps the next change to it honest.
  */
-const PROBE_TIMEOUT_MS = 180_000;
+export const PROBE_TIMEOUT_MS = 300_000;
 
 type SandboxLike = Pick<Sandbox, "exec">;
 
@@ -196,6 +205,50 @@ async function probeInstalled(
   }
 }
 
+const WARM_RETRY_DELAY_MS = 30_000;
+
+/**
+ * Boots the container ahead of a run by running the harness's version probe.
+ *
+ * The harness CLIs are baked into the image, so there is nothing to install;
+ * the cost this pays down is the container boot plus the CLI's first launch
+ * — the same ~110s the first probe of a cold run would otherwise spend while
+ * the user watches. One retry after a pause covers a boot that lost a race
+ * with placement; after that the answer is honest and a run simply pays the
+ * cold start it would have paid without warming.
+ *
+ * Never throws: warming is an optimization and a failed optimization must
+ * degrade to today's behaviour, not to a failed anything.
+ */
+export async function warmSandbox(
+  sandbox: SandboxLike,
+  runtime: string,
+  wait: (ms: number) => Promise<void> = (ms) =>
+    new Promise((resolve) => setTimeout(resolve, ms))
+): Promise<{ ready: boolean; version: string | null }> {
+  const spec = harnessSpec(runtime);
+  if (!spec) {
+    return { ready: false, version: null };
+  }
+
+  const attempt = async () => {
+    try {
+      return await probeInstalled(sandbox, spec);
+    } catch {
+      // A warm-up timeout is not a run timeout — nobody is waiting on it.
+      return { installed: false, version: null };
+    }
+  };
+
+  const first = await attempt();
+  if (first.installed) {
+    return { ready: true, version: first.version };
+  }
+  await wait(WARM_RETRY_DELAY_MS);
+  const second = await attempt();
+  return { ready: second.installed, version: second.version };
+}
+
 export function listCloudHarnesses(
   sandbox: SandboxLike
 ): Promise<HarnessStatus[]> {
@@ -228,6 +281,14 @@ export async function runHarnessInSandbox(options: {
   credential: HarnessCredential;
   instructions: string;
   model: string;
+  /**
+   * Called for each harness event as it streams out of the container, so a
+   * caller can surface progress while the run is still going. The events a
+   * run RETURNS remain the authoritative record; this callback is the live
+   * view of the same stream, not a second source of truth. Text arrives
+   * unredacted here — the caller owns redaction before anything persists.
+   */
+  onEvent?: (event: RunEvent) => void;
   runtime: string;
   sandbox: SandboxLike;
   task: string;
@@ -260,6 +321,27 @@ export async function runHarnessInSandbox(options: {
   });
   const command = toShellCommand(invocation);
 
+  /**
+   * The exec streams instead of buffering. Before this, stdout was parsed
+   * only after the CLI exited, so the thread showed nothing between
+   * "running" and the outcome — a fifteen-minute run was indistinguishable
+   * from a wedged one. `onOutput` is present in the SDK's compiled runtime
+   * (verified, unlike `timeout`), and the assembler holds partial lines so
+   * a JSON object split across chunks still parses.
+   */
+  const assembler = new LineAssembler();
+  const streamed: RunEvent[] = [];
+  const emit = (line: string) => {
+    for (const event of normalizeEvent(
+      spec.id as never,
+      line,
+      new Date().toISOString()
+    )) {
+      streamed.push(event);
+      options.onEvent?.(event);
+    }
+  };
+
   const result = await withDeadline(
     options.sandbox.exec(command, {
       cwd,
@@ -274,14 +356,32 @@ export async function runHarnessInSandbox(options: {
         HOME: cwd,
         OPENAI_API_KEY: "",
       },
+      onOutput: (source, data) => {
+        if (source !== "stdout") {
+          return;
+        }
+        for (const line of assembler.push(data)) {
+          emit(line);
+        }
+      },
+      stream: true,
       timeout: RUN_TIMEOUT_MS,
     }),
     RUN_TIMEOUT_MS,
     spec.command
   );
 
+  for (const line of assembler.flush()) {
+    emit(line);
+  }
+
   const at = new Date().toISOString();
-  const events = parseHarnessStream(spec.id, result.stdout, at);
+  // A runtime that ignored the streaming callbacks still produced stdout —
+  // parse it rather than reporting an empty run.
+  const events =
+    streamed.length > 0
+      ? streamed
+      : parseHarnessStream(spec.id, result.stdout, at);
   const summary = summarizeRun(events);
 
   return {

@@ -6,8 +6,14 @@ import {
   createAgentInputSchema,
   type RunSnapshot,
   sanitizeEvidenceText,
+  type WarmState,
 } from "@opencoven/agent-contracts";
 import { isRunnableHarness, SUPPORTED_HARNESS_IDS } from "@opencoven/harness";
+import {
+  enforceWorkerEdgeLimit,
+  type WorkerAbuseDecision,
+  workerRouteClass,
+} from "./abuse.js";
 import {
   corsHeaders,
   errorEnvelope,
@@ -32,6 +38,10 @@ export type CloudRunnerEnvironment = Omit<
   "ALLOWED_ORIGIN"
 > & {
   ALLOWED_ORIGIN: string;
+  EDGE_ABUSE_KEY_SECRET?: string;
+  EDGE_REQUEST_LIMITER: RateLimit;
+  TENANT_MUTATION_LIMITER: RateLimit;
+  TENANT_RUN_LIMITER: RateLimit;
 };
 
 /**
@@ -71,7 +81,9 @@ export type CloudRunnerAgent = {
     lastEventId: number
   ) => Awaitable<RunEventStreamSnapshot | null>;
   getRun: (runId: string) => Awaitable<RunSnapshot | null>;
+  listRuns: () => Awaitable<RunSnapshot[]>;
   snapshot: () => Awaitable<AgentDefinition | null>;
+  warm: () => Awaitable<WarmState>;
   start: (
     input: unknown,
     identityToken: string
@@ -229,6 +241,35 @@ function eventStream(
   return new Response(stream, { headers });
 }
 
+function abuseResponse(
+  decision: WorkerAbuseDecision,
+  cors: Headers
+): Response | null {
+  if (decision.kind === "allowed") {
+    return null;
+  }
+  const headers = new Headers({
+    "cache-control": "no-store",
+  });
+  if (decision.kind === "limited") {
+    headers.set("retry-after", String(decision.retryAfterSeconds));
+    return json(
+      errorEnvelope(
+        "rate_limited",
+        "Too many requests. Try again later.",
+        true
+      ),
+      { headers, status: 429 },
+      cors
+    );
+  }
+  return json(
+    errorEnvelope("abuse_control_unavailable", "Please try again later.", true),
+    { headers, status: 503 },
+    cors
+  );
+}
+
 export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
   dependencies: CloudRunnerDependencies<Environment>
 ): {
@@ -245,6 +286,20 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
       }
 
       const url = new URL(request.url);
+      const routeClass = workerRouteClass(request.method, url.pathname);
+      const sourceAdmission = abuseResponse(
+        await enforceWorkerEdgeLimit({
+          env: environment,
+          ip: request.headers.get("cf-connecting-ip"),
+          routeClass,
+          stage: "source",
+        }),
+        cors
+      );
+      if (sourceAdmission) {
+        return sourceAdmission;
+      }
+
       if (url.pathname === "/api/health" && request.method === "GET") {
         return json(
           {
@@ -310,6 +365,19 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
         );
       }
       const callerTenant = claims.tenant;
+      const tenantAdmission = abuseResponse(
+        await enforceWorkerEdgeLimit({
+          env: environment,
+          ip: request.headers.get("cf-connecting-ip"),
+          routeClass,
+          stage: "tenant",
+          tenant: callerTenant,
+        }),
+        cors
+      );
+      if (tenantAdmission) {
+        return tenantAdmission;
+      }
 
       if (
         url.pathname === "/api/diagnostics/sandbox" &&
@@ -369,8 +437,50 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             const agent = await yoloAgent(definition.id);
             const configured = await agent.configure(definition);
             await directory.upsert(configured);
+            // Creating a profile is a declared intent to run, so the
+            // container starts booting while the user types their first
+            // mission. Subscribers only — a demo tenant cannot run, so
+            // warming for one would spend a container on nothing. A warm
+            // failure never fails the creation it rides on.
+            if (claims.plan === "subscriber") {
+              await Promise.resolve(agent.warm()).catch(() => undefined);
+            }
             return json({ agent: configured }, { status: 201 }, cors);
           }
+        }
+
+        if (
+          url.pathname === "/api/tenant/prewarm" &&
+          request.method === "POST"
+        ) {
+          // Sign-in-time warming for a returning user: boot the sandbox of
+          // the agent they most recently ran. Idempotent — the agent's warm
+          // state single-flights the fiber — and quota-free for the caller:
+          // no run is counted and no credential is fetched.
+          if (claims.plan !== "subscriber") {
+            return json(
+              errorEnvelope(
+                "subscription_required",
+                "Warming needs an active subscription.",
+                false
+              ),
+              { status: 403 },
+              cors
+            );
+          }
+          const owned = await directory.list(callerTenant);
+          const [target] = [...owned].sort(
+            (left, right) =>
+              Date.parse(right.lastRunAt ?? right.updatedAt) -
+              Date.parse(left.lastRunAt ?? left.updatedAt)
+          );
+          if (!target) {
+            return new Response(null, { headers: cors, status: 204 });
+          }
+          const warm = await Promise.resolve(
+            (await yoloAgent(target.id)).warm()
+          ).catch(() => null);
+          return json({ agentId: target.id, warm }, { status: 202 }, cors);
         }
 
         const agentMatch = url.pathname.match(
@@ -409,12 +519,30 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               updatedAt: new Date().toISOString(),
             });
             await directory.upsert(configured);
+            // An edited profile is about to be run — same intent signal as
+            // creation, same warm, same subscriber gate.
+            if (claims.plan === "subscriber") {
+              await Promise.resolve(agent.warm()).catch(() => undefined);
+            }
             return json({ agent: configured }, {}, cors);
           }
           if (!action && request.method === "DELETE") {
             await agent.decommission();
             await directory.remove(id);
             return json({ ok: true }, {}, cors);
+          }
+          if (action === "runs" && request.method === "GET") {
+            // The retained history (terminal runs plus any live one), newest
+            // first. Without this a console refresh forgets every run the
+            // agent still remembers.
+            return json(
+              {
+                apiVersion: AGENT_RUNNER_API_VERSION,
+                runs: await agent.listRuns(),
+              },
+              {},
+              cors
+            );
           }
           if (action === "runs" && request.method === "POST") {
             // The plan is enforced before the run, not only when the
