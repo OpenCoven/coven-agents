@@ -626,6 +626,45 @@ function seedExpiredAdmissionBeforeInitialize(
     );
 }
 
+test("dispatch validation requires the active live admission token", async () => {
+  const harness = runAdmissionHarness(() => ({
+    getRun: () => null,
+    startAdmitted: () => Promise.resolve(false),
+    stop: () => Promise.resolve(null),
+  }));
+  await harness.admission.getRecord("initialize");
+  const record = activeRecord(84);
+  seedAdmissionRecord(harness, record, 1);
+  const dispatchToken = "1:dispatch-validation";
+  const leaseUntil = new Date(Date.now() + 60_000).toISOString();
+  harness.sql.exec(
+    `
+      UPDATE admission_records
+      SET dispatch_started_at = ?, dispatch_lease_until = ?, dispatch_token = ?
+      WHERE run_id = ?
+    `,
+    new Date().toISOString(),
+    leaseUntil,
+    dispatchToken,
+    record.runId
+  );
+
+  assert.equal(
+    await harness.admission.validateDispatch(record.runId, dispatchToken),
+    true
+  );
+  assert.equal(
+    await harness.admission.validateDispatch(record.runId, "2:stale"),
+    false
+  );
+  assert.equal(
+    await harness.admission.validateDispatch("missing-run", dispatchToken),
+    false
+  );
+  const publicRecord = await harness.admission.getRecord(record.runId);
+  assert.equal(publicRecord && "dispatchToken" in publicRecord, false);
+});
+
 test("startup reconciliation runs synchronously in one transaction", async () => {
   const now = Date.parse("2026-08-26T00:00:00.000Z");
   const originalNow = Date.now;
@@ -2019,6 +2058,8 @@ test("a proven agent-busy dispatch is requeued and release dispatches it promptl
             released.push(runId);
             return admission.release(runId, dispatchToken);
           },
+          validateDispatch: (runId: string, dispatchToken: string) =>
+            admission.validateDispatch(runId, dispatchToken),
         }),
       },
     } as never
@@ -2030,7 +2071,7 @@ test("a proven agent-busy dispatch is requeued and release dispatches it promptl
         Promise.resolve(yolo.fenceAdmitted?.(runId, dispatchToken) ?? false),
       getRun: (runId) => yolo.getRun(runId),
       startAdmitted: (runId, dispatchToken) =>
-        yolo.startAdmitted(runId, dispatchToken),
+        yolo.startAdmitted(runId, dispatchToken ?? ""),
       stop: (runId, dispatchToken, reason) =>
         yolo.stop(runId, dispatchToken, reason),
     }),
@@ -2168,7 +2209,8 @@ test("alarm reconciles a queued cancellation after its release callback fails", 
   const harness = runAdmissionHarness(
     () => ({
       getRun: (runId) => yolo.getRun(runId),
-      startAdmitted: (runId) => yolo.startAdmitted(runId),
+      startAdmitted: (runId, dispatchToken) =>
+        yolo.startAdmitted(runId, dispatchToken ?? ""),
       stop: (runId) => yolo.stop(runId),
     }),
     {
@@ -2353,6 +2395,8 @@ test("expired queued work frees capacity without sandbox cleanup", async () => {
         getByName: () => ({
           release: (runId: string, dispatchToken?: string) =>
             admission.release(runId, dispatchToken),
+          validateDispatch: (runId: string, dispatchToken: string) =>
+            admission.validateDispatch(runId, dispatchToken),
         }),
       },
     } as never
@@ -2508,6 +2552,8 @@ test("an absent run is terminalized after fencing without requiring local requeu
         getByName: () => ({
           release: (runId: string, dispatchToken?: string) =>
             admission.release(runId, dispatchToken),
+          validateDispatch: (runId: string, dispatchToken: string) =>
+            admission.validateDispatch(runId, dispatchToken),
         }),
       },
     } as never
@@ -2523,7 +2569,7 @@ test("an absent run is terminalized after fencing without requiring local requeu
         return false;
       },
       startAdmitted: (runId, dispatchToken) =>
-        yolo.startAdmitted(runId, dispatchToken),
+        yolo.startAdmitted(runId, dispatchToken ?? ""),
       stop: (runId, dispatchToken, reason) =>
         yolo.stop(runId, dispatchToken, reason),
     }),
@@ -2598,7 +2644,7 @@ test("an absent run is terminalized after fencing without requiring local requeu
       runId: next.runId,
     });
     assert.equal(
-      await yolo.startAdmitted(missing.runId, oldDispatchToken ?? undefined),
+      await yolo.startAdmitted(missing.runId, oldDispatchToken ?? ""),
       false,
       "a delayed dispatch for the fenced run must be rejected"
     );

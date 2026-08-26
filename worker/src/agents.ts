@@ -7,7 +7,6 @@ import {
   type RunEvent,
   type RunResult,
   type RunSnapshot,
-  runAgentInputSchema,
   runSnapshotToResult,
   startRunInputSchema,
   type WarmState,
@@ -36,9 +35,7 @@ import {
   appendEvents,
   type CloudRunRecord,
   cloudFiberKey,
-  dispatchCloudRun,
   finishCloudRunRecord,
-  hashOperation,
   isTerminal,
   liveCloudRunEvent,
   nextEventId,
@@ -121,6 +118,7 @@ type YoloAgentState = {
   };
   runs: CloudRunRecord[];
   sandbox?: SandboxOwnership;
+  warmFiberKey?: string;
 };
 
 type AgentLifecycle = YoloAgentState["lifecycle"];
@@ -518,6 +516,32 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     return current;
   }
 
+  private async dispatchIsAdmitted(
+    runId: string,
+    dispatchToken: string
+  ): Promise<boolean> {
+    const runAdmission = (
+      this.env as unknown as {
+        RunAdmission?: {
+          getByName: (name: string) => {
+            validateDispatch?: (
+              admissionRunId: string,
+              admissionToken: string
+            ) => Promise<boolean>;
+          };
+        };
+      }
+    ).RunAdmission;
+    if (!runAdmission) {
+      return false;
+    }
+    const admission = runAdmission.getByName("deployment");
+    if (typeof admission.validateDispatch !== "function") {
+      return false;
+    }
+    return await admission.validateDispatch(runId, dispatchToken);
+  }
+
   private currentRunOr(
     runId: string,
     fallback: CloudRunRecord
@@ -569,6 +593,41 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     });
     this.fiberCompletions.set(key, tracked);
     return tracked;
+  }
+
+  private clearWarmFiberKey(key: string): void {
+    if (this.state.warmFiberKey !== key) {
+      return;
+    }
+    const { warmFiberKey: _warmFiberKey, ...rest } = this.state;
+    this.setState(rest);
+  }
+
+  private async rollbackWarmDispatch(
+    definition: AgentDefinition,
+    ownership: {
+      generation: number;
+      owner: string;
+      dispatchToken?: string;
+      runId?: string;
+    },
+    fiberKey: string
+  ): Promise<boolean> {
+    this.clearWarmFiberKey(fiberKey);
+    if (this.state.definition?.id === definition.id) {
+      this.updateDefinition({
+        warm: {
+          status: "failed",
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    }
+    return await this.cleanupOwnedSandbox(
+      definition,
+      ownership,
+      "failed",
+      "The warm-up fiber was not accepted and its sandbox was reclaimed."
+    );
   }
 
   private tryAcquireSandboxOwnership(
@@ -878,9 +937,10 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       throw new AgentBusyError();
     }
     if (current?.owner && !current.runId) {
+      const warmFiberKey = this.state.warmFiberKey ?? WARM_FIBER_KEY;
       try {
         await this.cancelFiberByKey(
-          WARM_FIBER_KEY,
+          warmFiberKey,
           "A run was admitted while warm-up was optional."
         );
       } catch (error) {
@@ -896,7 +956,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       // platform starts it. Yield once for that registration before deciding
       // whether the reserved owner needs direct cleanup.
       await Promise.resolve();
-      const completion = this.fiberCompletions.get(WARM_FIBER_KEY);
+      const completion = this.fiberCompletions.get(warmFiberKey);
       if (completion) {
         await completion.catch(() => undefined);
       }
@@ -1104,79 +1164,6 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
   }
 
   /**
-   * Executes the mission by driving an already-signed-in coding CLI inside the
-   * sandbox. The Worker never calls a model provider, so no provider API key
-   * exists in this path — only the tenant's own harness credential, borrowed
-   * for this run and handed to the harness under its documented environment
-   * variable name.
-   */
-  async execute(input: unknown, identityToken: string): Promise<RunResult> {
-    const { task } = runAgentInputSchema.parse(input);
-    const definition = this.requireActiveDefinition();
-    const lifecycleGeneration = this.currentLifecycle().generation;
-    if (!(await this.repairPendingSandboxCleanup(definition))) {
-      throw new AgentBusyError();
-    }
-    if (!this.lifecycleIsActive(lifecycleGeneration)) {
-      throw new AgentBusyError();
-    }
-
-    // Rejects anything but the /workspace scratch sandbox before a container is
-    // started, so a bad workspace fails as a request error rather than as a
-    // half-executed run.
-    validateCloudWorkspace(definition);
-
-    const createdAt = new Date().toISOString();
-    const runId = crypto.randomUUID();
-    /**
-     * The HTTP route does not carry an operation id yet, so each call gets a
-     * fresh one and nothing deduplicates. The plan is still the right way in:
-     * it is the single place that decides whether a run may start, and it
-     * refuses while another is active. Threading a client-supplied id through
-     * later turns that dedup on without moving the decision.
-     */
-    const operationId = crypto.randomUUID();
-    const plan = planCloudRunStart({
-      agentId: definition.id,
-      createdAt,
-      operationHash: await hashOperation(definition.id, task),
-      operationId,
-      records: this.state.runs,
-      runId,
-      task,
-    });
-
-    if (plan.kind === "already_running") {
-      throw new AlreadyRunningError();
-    }
-    if (plan.kind === "conflict") {
-      throw new OperationConflictError();
-    }
-    if (plan.kind === "existing") {
-      /**
-       * Unreachable while `execute` mints its own operation id, so this can
-       * only be a replay of a run that is already recorded.
-       *
-       * It previously projected the record onto a result unconditionally,
-       * which would have reported a run still in flight as failed — `execute`
-       * promises a finished outcome and has none to give here. A terminal
-       * record is returned; anything else is reported as still running.
-       */
-      if (isTerminal(plan.record.run.status)) {
-        return toRunResult(plan.record);
-      }
-      throw new AlreadyRunningError();
-    }
-
-    if (this.state.sandbox?.owner || this.state.sandbox?.cleanup) {
-      await this.ensureSandboxAvailableForRun(definition, plan.record.run.id);
-    }
-    return toRunResult(
-      await this.driveHarness(definition, plan.record, task, identityToken)
-    );
-  }
-
-  /**
    * Borrows the tenant's own harness credential for the duration of this run.
    *
    * The worker holds no key material of its own — it asks the Next app, the
@@ -1225,9 +1212,9 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
   /**
    * Drives the harness for one planned run and records the outcome.
    *
-   * Shared by `execute`, which awaits it, and `start`, which runs it inside a
-   * fiber. Keeping one body means the synchronous and asynchronous paths cannot
-   * disagree about how evidence is captured or how a failure is recorded.
+   * Called by `startAdmitted`, which runs it inside a fiber. Keeping one body
+   * means the coordinated asynchronous path has one place to record evidence
+   * and outcomes.
    */
   protected async driveHarness(
     definition: AgentDefinition,
@@ -1544,103 +1531,6 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   }
 
   /**
-   * Accepts a run and returns immediately, leaving the harness executing in a
-   * durable fiber.
-   *
-   * `startRunInputSchema` carries an operation id, so unlike `execute` this
-   * path deduplicates: replaying the same id returns the recorded run rather
-   * than starting a second one, and reusing it for a different task is a
-   * conflict. The fiber is keyed on the run id so `stop` can find it.
-   */
-  /**
-   * `identityToken` is the signed claim the caller presented. It is carried
-   * through to the credential fetch so the app can bind the request to a
-   * tenant rather than trusting one named in a request body. The fiber starts
-   * immediately, well inside the token's lifetime.
-   */
-  async start(
-    input: unknown,
-    identityToken: string
-  ): Promise<{ created: boolean; run: RunSnapshot }> {
-    const { operationId, task } = startRunInputSchema.parse(input);
-    const definition = this.requireActiveDefinition();
-    const lifecycleGeneration = this.currentLifecycle().generation;
-    if (!(await this.repairPendingSandboxCleanup(definition))) {
-      throw new AgentBusyError();
-    }
-    if (!this.definitionIsCurrent(definition, lifecycleGeneration)) {
-      throw new AgentDecommissioningError();
-    }
-    validateCloudWorkspace(definition);
-
-    if (this.state.sandbox?.owner || this.state.sandbox?.cleanup) {
-      await this.ensureSandboxAvailableForRun(definition);
-    }
-    if (!this.definitionIsCurrent(definition, lifecycleGeneration)) {
-      throw new AgentDecommissioningError();
-    }
-
-    const operationHash = await hashOperation(definition.id, task);
-    if (!this.definitionIsCurrent(definition, lifecycleGeneration)) {
-      throw new AgentDecommissioningError();
-    }
-    const plan = planCloudRunStart({
-      agentId: definition.id,
-      createdAt: new Date().toISOString(),
-      operationHash,
-      operationId,
-      records: this.state.runs,
-      runId: crypto.randomUUID(),
-      task,
-    });
-
-    if (plan.kind === "already_running") {
-      throw new AlreadyRunningError();
-    }
-    if (plan.kind === "conflict") {
-      throw new OperationConflictError();
-    }
-
-    /**
-     * Recorded before dispatch, not inside the fiber. Answering 202 promises
-     * the run exists, so it has to be readable the instant the caller is told
-     * about it. Persisting only once the fiber begins leaves a window where
-     * `getRun` returns null, `stop` cannot find it, and the concurrency guard
-     * sees no active run and admits a second one.
-     */
-    // `start` predates RunAdmission and has no admission token. Keep a
-    // durable local claim so an accepted fiber is not mistaken for untouched
-    // queue work if its callback has not claimed `running` yet.
-    this.persistRun(plan.record, { dispatchClaim: crypto.randomUUID() });
-
-    return await dispatchCloudRun(plan, (record, fiberKey) =>
-      this.startFiber(
-        fiberKey,
-        async (fiber) =>
-          this.trackFiberCompletion(
-            fiberKey,
-            (async () => {
-              try {
-                await this.driveHarness(
-                  definition,
-                  record,
-                  task,
-                  identityToken,
-                  fiber.signal
-                );
-              } finally {
-                await this.reportAdmissionTerminal(record.run.id);
-              }
-            })()
-          ),
-        // Keyed on the fiber key rather than the operation id: `stop` cancels
-        // by run, and a run is what a caller can name.
-        { idempotencyKey: fiberKey, metadata: { runId: record.run.id } }
-      )
-    );
-  }
-
-  /**
    * Records a run after the admission object has accepted it, but does not
    * create a sandbox or dispatch a fiber. Queued runs keep their identity
    * token in this agent's durable state until they are dispatched; the global
@@ -1691,7 +1581,13 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    * record active before this RPC, and a terminal callback in `finally`
    * releases that capacity even when the harness throws.
    */
-  async startAdmitted(runId: string, dispatchToken?: string): Promise<boolean> {
+  async startAdmitted(runId: string, dispatchToken: string): Promise<boolean> {
+    if (!dispatchToken) {
+      return false;
+    }
+    if (!(await this.dispatchIsAdmitted(runId, dispatchToken))) {
+      return false;
+    }
     const definition = this.requireActiveDefinition();
     const lifecycleGeneration = this.currentLifecycle().generation;
     if (!(await this.repairPendingSandboxCleanup(definition))) {
@@ -2270,11 +2166,19 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     const afterCancel = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
+    if (!afterCancel) {
+      await this.reportAdmissionTerminal(runId, expectedDispatchToken);
+      return null;
+    }
+    if (isTerminal(afterCancel.run.status)) {
+      await this.reportAdmissionTerminal(runId, expectedDispatchToken);
+      return afterCancel.run;
+    }
     if (
       expectedDispatchToken &&
       !this.dispatchTokenMatches(runId, expectedDispatchToken)
     ) {
-      return afterCancel?.run ?? null;
+      return afterCancel.run;
     }
     if (this.state.sandbox?.owner && !this.state.sandbox.runId) {
       await this.ensureSandboxAvailableForRun(definition, runId);
@@ -2575,19 +2479,58 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       updatedAt: new Date(now).toISOString(),
     };
     this.updateDefinition({ warm: provisioning });
+    const warmFiberKey = `${WARM_FIBER_KEY}:${ownership.generation}`;
+    this.setState({ ...this.state, warmFiberKey });
 
     try {
-      await this.startFiber(
-        WARM_FIBER_KEY,
+      const receipt = await this.startFiber(
+        warmFiberKey,
         async (fiber) =>
           this.trackFiberCompletion(
-            WARM_FIBER_KEY,
-            this.driveWarm(definition, ownership, fiber.signal)
+            warmFiberKey,
+            (async () => {
+              try {
+                await this.driveWarm(definition, ownership, fiber.signal);
+              } finally {
+                this.clearWarmFiberKey(warmFiberKey);
+              }
+            })()
           ),
-        { idempotencyKey: WARM_FIBER_KEY }
+        {
+          idempotencyKey: warmFiberKey,
+          metadata: { kind: WARM_FIBER_KEY },
+        }
       );
+      if (!receipt.accepted) {
+        const cleaned = await this.rollbackWarmDispatch(
+          definition,
+          ownership,
+          warmFiberKey
+        );
+        if (!cleaned) {
+          return (
+            this.state.definition?.warm ?? {
+              status: "failed",
+              updatedAt: new Date().toISOString(),
+            }
+          );
+        }
+        return this.state.definition?.warm ?? provisioning;
+      }
     } catch (error) {
-      this.clearSandboxOwnership(ownership);
+      const cleaned = await this.rollbackWarmDispatch(
+        definition,
+        ownership,
+        warmFiberKey
+      );
+      if (!cleaned) {
+        return (
+          this.state.definition?.warm ?? {
+            status: "failed",
+            updatedAt: new Date().toISOString(),
+          }
+        );
+      }
       throw error;
     }
     return provisioning;
@@ -2708,6 +2651,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           runId: current.runId,
         }
       : this.acquireSandboxOwnership();
+    if (this.state.warmFiberKey) {
+      this.clearWarmFiberKey(this.state.warmFiberKey);
+    }
     this.updateDefinition({
       warm: {
         status: "failed",
@@ -2909,6 +2855,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       .map((record) => record.run.id);
     const fiberKeys = new Set([
       WARM_FIBER_KEY,
+      ...(this.state.warmFiberKey ? [this.state.warmFiberKey] : []),
       ...activeRunIds.map((runId) => cloudFiberKey(runId)),
       ...this.fiberCompletions.keys(),
     ]);

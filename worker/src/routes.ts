@@ -123,13 +123,6 @@ export type CloudRunnerAgent = {
   listRuns: () => Awaitable<RunSnapshot[]>;
   snapshot: () => Awaitable<AgentDefinition | null>;
   warm: () => Awaitable<WarmState>;
-  start: (
-    input: unknown,
-    identityToken: string
-  ) => Awaitable<{
-    created: boolean;
-    run: RunSnapshot;
-  }>;
   stop: (
     runId: string,
     dispatchToken?: string

@@ -46,6 +46,17 @@ function definition(): AgentDefinition {
   };
 }
 
+function admissionTestEnv(): Record<string, unknown> {
+  return {
+    RunAdmission: {
+      getByName: () => ({
+        release: () => Promise.resolve(true),
+        validateDispatch: () => Promise.resolve(true),
+      }),
+    },
+  };
+}
+
 /**
  * Fibers are dispatched but not executed. The harness itself is covered
  * elsewhere; what matters here is that a run is accepted, recorded and left
@@ -54,7 +65,10 @@ function definition(): AgentDefinition {
 function agent(): YoloAgent {
   resetFiberLog();
   fiberControl.runFibers = false;
-  const instance = new YoloAgent(undefined as never, {} as never);
+  const instance = new YoloAgent(
+    undefined as never,
+    admissionTestEnv() as never
+  );
   instance.configure(definition());
   return instance;
 }
@@ -71,6 +85,58 @@ function legacyAgent(): YoloAgent {
   return instance;
 }
 
+async function admittedStart(
+  yolo: YoloAgent,
+  input: { operationId: string; task: string },
+  identityToken = "identity",
+  dispatchToken = `1:test-${input.operationId}`
+) {
+  const prepared = await yolo.enqueue(
+    input,
+    crypto.randomUUID(),
+    `${input.operationId}:${input.task}`,
+    identityToken
+  );
+  if (prepared.created) {
+    assert.equal(
+      await yolo.startAdmitted(prepared.run.id, dispatchToken),
+      true
+    );
+  }
+  return { ...prepared, run: yolo.getRun(prepared.run.id) ?? prepared.run };
+}
+
+test("public run-start surfaces are admission-gated", () => {
+  const yolo = agent();
+  const startSurfaces = ["enqueue", "startAdmitted"].filter(
+    (name) =>
+      typeof (yolo as unknown as Record<string, unknown>)[name] === "function"
+  );
+
+  assert.deepEqual(startSurfaces, ["enqueue", "startAdmitted"]);
+  assert.equal("execute" in yolo, false);
+  assert.equal("start" in yolo, false);
+});
+
+test("a direct startAdmitted RPC without an active admission is rejected", async () => {
+  resetFiberLog();
+  const yolo = new YoloAgent(undefined as never, {} as never);
+  yolo.configure(definition());
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Bypass admission." },
+    "9f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c96",
+    "hash-bypass",
+    "identity"
+  );
+
+  assert.equal(
+    await yolo.startAdmitted(queued.run.id, "1:forged-dispatch"),
+    false
+  );
+  assert.equal(yolo.getRun(queued.run.id)?.status, "queued");
+  assert.equal(fiberLog.started.length, 0);
+});
+
 test("legacy pre-Task8 state stays active for lifecycle operations", async () => {
   const configured = legacyAgent().configure({
     ...definition(),
@@ -86,12 +152,13 @@ test("legacy pre-Task8 state stays active for lifecycle operations", async () =>
   );
   assert.equal(enqueued.created, true);
 
-  const started = await legacyAgent().start(
+  const started = await admittedStart(
+    legacyAgent(),
     { operationId: OP_B, task: "Legacy start." },
     "identity"
   );
   assert.equal(started.created, true);
-  assert.equal(started.run.status, "queued");
+  assert.equal(started.run.status, "running");
 
   const warmed = await legacyAgent().warm();
   assert.equal(warmed.status, "provisioning");
@@ -109,16 +176,17 @@ test("legacy state without decommission fields can still be decommissioned safel
   assert.equal(state.lifecycle.status, "decommissioned");
 });
 
-test("start accepts a run, records it queued, and dispatches one fiber", async () => {
+test("admission accepts a run and dispatches one fiber", async () => {
   const yolo = agent();
 
-  const started = await yolo.start(
+  const started = await admittedStart(
+    yolo,
     { operationId: OP_A, task: "Fix tests." },
     "identity"
   );
 
   assert.equal(started.created, true);
-  assert.equal(started.run.status, "queued");
+  assert.equal(started.run.status, "running");
   assert.equal(started.run.task, "Fix tests.");
   assert.equal(fiberLog.started.length, 1);
   assert.equal(
@@ -131,11 +199,13 @@ test("start accepts a run, records it queued, and dispatches one fiber", async (
 test("replaying an operation id returns the same run without a second fiber", async () => {
   const yolo = agent();
 
-  const first = await yolo.start(
+  const first = await admittedStart(
+    yolo,
     { operationId: OP_A, task: "Fix tests." },
     "identity"
   );
-  const second = await yolo.start(
+  const second = await admittedStart(
+    yolo,
     { operationId: OP_A, task: "Fix tests." },
     "identity"
   );
@@ -147,21 +217,38 @@ test("replaying an operation id returns the same run without a second fiber", as
 
 test("reusing an operation id for a different task is a conflict", async () => {
   const yolo = agent();
-  await yolo.start({ operationId: OP_A, task: "Fix tests." }, "identity");
+  await admittedStart(
+    yolo,
+    { operationId: OP_A, task: "Fix tests." },
+    "identity"
+  );
 
   await assert.rejects(
     () =>
-      yolo.start({ operationId: OP_A, task: "Something else." }, "identity"),
+      admittedStart(
+        yolo,
+        { operationId: OP_A, task: "Something else." },
+        "identity"
+      ),
     OperationConflictError
   );
 });
 
 test("a second concurrent run is refused", async () => {
   const yolo = agent();
-  await yolo.start({ operationId: OP_A, task: "Fix tests." }, "identity");
+  await admittedStart(
+    yolo,
+    { operationId: OP_A, task: "Fix tests." },
+    "identity"
+  );
 
   await assert.rejects(
-    () => yolo.start({ operationId: OP_B, task: "Another job." }, "identity"),
+    () =>
+      admittedStart(
+        yolo,
+        { operationId: OP_B, task: "Another job." },
+        "identity"
+      ),
     AlreadyRunningError
   );
 });
@@ -281,13 +368,13 @@ test("a fenced and requeued dispatch cannot resume after sandbox ownership wait"
       idempotencyKey: string,
       _reason?: string
     ): Promise<boolean> {
-      if (idempotencyKey === "warm") {
+      if (idempotencyKey.startsWith("warm")) {
         cancellationStarted();
         return cancellation.then(() => true);
       }
       return Promise.resolve(true);
     }
-  })(undefined as never, {} as never);
+  })(undefined as never, admissionTestEnv() as never);
   yolo.configure(definition());
 
   const queued = await yolo.enqueue(
@@ -407,7 +494,7 @@ test("cancellation during drive sandbox wait clears ownership before the next ru
       idempotencyKey: string,
       reason?: string
     ): Promise<boolean> {
-      if (idempotencyKey === "warm") {
+      if (idempotencyKey.startsWith("warm")) {
         runController.abort(reason);
         warmCancellationStarted();
         return warmCancellation.then(() => true);
@@ -419,6 +506,12 @@ test("cancellation during drive sandbox wait clears ownership before the next ru
     {
       APP_ORIGIN: "https://runner.test",
       RUNNER_SERVICE_TOKEN: "service-token",
+      RunAdmission: {
+        getByName: () => ({
+          release: () => Promise.resolve(true),
+          validateDispatch: () => Promise.resolve(true),
+        }),
+      },
       Sandbox: {},
     } as never
   );
@@ -483,7 +576,7 @@ test("decommission during sandbox ownership wait cannot let the old start mutate
       _reason?: string
     ): Promise<boolean> {
       const firstWarmCancellation =
-        idempotencyKey === "warm" && warmCancellationCalls === 0;
+        idempotencyKey.startsWith("warm") && warmCancellationCalls === 0;
       warmCancellationCalls += 1;
       if (firstWarmCancellation) {
         cancellationStarted();
@@ -491,7 +584,7 @@ test("decommission during sandbox ownership wait cannot let the old start mutate
       }
       return Promise.resolve(true);
     }
-  })(undefined as never, {} as never);
+  })(undefined as never, admissionTestEnv() as never);
   yolo.configure(definition());
 
   const queued = await yolo.enqueue(
@@ -565,8 +658,8 @@ test("legacy start returns a retryable decommission result after sandbox cleanup
       _reason?: string
     ): Promise<boolean> {
       const firstWarmCancellation =
-        idempotencyKey === "warm" && warmCancellationCalls === 0;
-      if (idempotencyKey === "warm") {
+        idempotencyKey.startsWith("warm") && warmCancellationCalls === 0;
+      if (idempotencyKey.startsWith("warm")) {
         warmCancellationCalls += 1;
       }
       if (firstWarmCancellation) {
@@ -575,11 +668,12 @@ test("legacy start returns a retryable decommission result after sandbox cleanup
       }
       return Promise.resolve(true);
     }
-  })(undefined as never, {} as never);
+  })(undefined as never, admissionTestEnv() as never);
   yolo.configure(definition());
   await yolo.warm();
 
-  const starting = yolo.start(
+  const starting = admittedStart(
+    yolo,
     { operationId: OP_A, task: "Legacy cleanup race." },
     "identity"
   );
@@ -598,8 +692,8 @@ test("legacy start returns a retryable decommission result after sandbox cleanup
     ),
   ]);
   assert.equal(decommissionError, null);
-  assert.ok(startError instanceof AgentDecommissioningError);
-  assert.equal(startError?.retryable, true);
+  assert.ok(startError instanceof AgentBusyError);
+  assert.equal(startError?.provenNotStarted, true);
   assert.equal(
     fiberLog.started.some((entry) => entry.key.startsWith("run:")),
     false
@@ -706,7 +800,7 @@ test("missing admitted identity does not consume the agent slot", async () => {
   );
 
   await assert.rejects(
-    () => yolo.startAdmitted(queued.run.id),
+    () => yolo.startAdmitted(queued.run.id, "1:busy"),
     /Queued run identity is unavailable/
   );
 
@@ -739,6 +833,7 @@ test("a fiber start failure closes an admitted run and releases its claim", asyn
             released.push(runId);
             return Promise.resolve(true);
           },
+          validateDispatch: () => Promise.resolve(true),
         }),
       },
     } as never
@@ -753,7 +848,7 @@ test("a fiber start failure closes an admitted run and releases its claim", asyn
   );
 
   await assert.rejects(
-    () => yolo.startAdmitted(first.run.id),
+    () => yolo.startAdmitted(first.run.id, "1:recovery"),
     /fiber unavailable/
   );
 
@@ -768,7 +863,7 @@ test("a fiber start failure closes an admitted run and releases its claim", asyn
     "hash-fiber-recovery",
     "identity"
   );
-  assert.equal(await yolo.startAdmitted(second.run.id), true);
+  assert.equal(await yolo.startAdmitted(second.run.id, "2:recovery"), true);
   assert.equal(yolo.getRun(second.run.id)?.status, "running");
 });
 
@@ -789,7 +884,7 @@ test("an already accepted fiber is not reported as a second admission", async ()
         status: "running",
       });
     }
-  })(undefined as never, {} as never);
+  })(undefined as never, admissionTestEnv() as never);
   yolo.configure(definition());
   const queued = await yolo.enqueue(
     { operationId: OP_A, task: "Already accepted work." },
@@ -798,7 +893,10 @@ test("an already accepted fiber is not reported as a second admission", async ()
     "identity"
   );
 
-  assert.equal(await yolo.startAdmitted(queued.run.id), false);
+  assert.equal(
+    await yolo.startAdmitted(queued.run.id, "1:already-accepted"),
+    false
+  );
   assert.equal(yolo.getRun(queued.run.id)?.status, "running");
   assert.equal(fiberLog.started.length, 0);
 });
@@ -817,6 +915,7 @@ test("a recovered admitted fiber fails once, releases capacity, and permits the 
             released.push(runId);
             return Promise.resolve(true);
           },
+          validateDispatch: () => Promise.resolve(true),
         }),
       },
     } as never
@@ -828,12 +927,12 @@ test("a recovered admitted fiber fails once, releases capacity, and permits the 
     "hash-interrupted",
     "identity"
   );
-  assert.equal(await yolo.startAdmitted(first.run.id), true);
+  assert.equal(await yolo.startAdmitted(first.run.id, "1:recovered"), true);
 
   const recovery = {
     createdAt: Date.parse("2026-08-26T00:00:00.000Z"),
     id: "fiber-interrupted",
-    metadata: { runId: first.run.id },
+    metadata: { dispatchToken: "1:recovered", runId: first.run.id },
     name: `run:${first.run.id}`,
     recoveryReason: "interrupted" as const,
     snapshot: null,
@@ -855,7 +954,7 @@ test("a recovered admitted fiber fails once, releases capacity, and permits the 
     "hash-next",
     "identity"
   );
-  assert.equal(await yolo.startAdmitted(second.run.id), true);
+  assert.equal(await yolo.startAdmitted(second.run.id, "2:recovered"), true);
 });
 
 test("fiber recovery fails closed when sandbox cleanup is unavailable", async () => {
@@ -873,6 +972,7 @@ test("fiber recovery fails closed when sandbox cleanup is unavailable", async ()
             released.push(runId);
             return Promise.resolve(true);
           },
+          validateDispatch: () => Promise.resolve(true),
         }),
       },
     } as never
@@ -884,14 +984,14 @@ test("fiber recovery fails closed when sandbox cleanup is unavailable", async ()
     "hash-interrupted",
     "identity"
   );
-  assert.equal(await yolo.startAdmitted(queued.run.id), true);
+  assert.equal(await yolo.startAdmitted(queued.run.id, "1:recovery"), true);
 
   await assert.rejects(
     () =>
       yolo.onFiberRecovered({
         createdAt: Date.now(),
         id: "fiber-interrupted",
-        metadata: { runId: queued.run.id },
+        metadata: { dispatchToken: "1:recovery", runId: queued.run.id },
         name: `run:${queued.run.id}`,
         recoveryReason: "interrupted",
         snapshot: null,
@@ -919,6 +1019,7 @@ test("cancellation waits for sandbox cleanup before releasing capacity", async (
             released.push(runId);
             return Promise.resolve(true);
           },
+          validateDispatch: () => Promise.resolve(true),
         }),
       },
     } as never
@@ -930,7 +1031,7 @@ test("cancellation waits for sandbox cleanup before releasing capacity", async (
     "hash-cancelled",
     "identity"
   );
-  assert.equal(await yolo.startAdmitted(first.run.id), true);
+  assert.equal(await yolo.startAdmitted(first.run.id, "1:probe-cleanup"), true);
 
   await assert.rejects(() => yolo.stop(first.run.id), /sandbox unavailable/);
   assert.equal(yolo.getRun(first.run.id)?.status, "running");
@@ -1006,6 +1107,7 @@ test("initial probe destroy failure keeps admission active until cleanup succeed
             released.push(runId);
             return Promise.resolve(true);
           },
+          validateDispatch: () => Promise.resolve(true),
         }),
       },
       Sandbox: {},
@@ -1103,6 +1205,7 @@ test("late fiber completion cannot overwrite cancellation or release twice", asy
             released.push(runId);
             return Promise.resolve(true);
           },
+          validateDispatch: () => Promise.resolve(true),
         }),
       },
     } as never
@@ -1114,7 +1217,10 @@ test("late fiber completion cannot overwrite cancellation or release twice", asy
     "hash-race",
     "identity"
   );
-  assert.equal(await yolo.startAdmitted(queued.run.id), true);
+  assert.equal(
+    await yolo.startAdmitted(queued.run.id, "1:terminal-report"),
+    true
+  );
 
   await yolo.stop(queued.run.id);
   assert.equal(yolo.getRun(queued.run.id)?.status, "cancelled");
@@ -1165,6 +1271,12 @@ test("a credential that resolves after stop cannot resurrect sandbox execution",
     {
       APP_ORIGIN: "https://runner.test",
       RUNNER_SERVICE_TOKEN: "service-token",
+      RunAdmission: {
+        getByName: () => ({
+          release: () => Promise.resolve(true),
+          validateDispatch: () => Promise.resolve(true),
+        }),
+      },
       Sandbox: {},
     } as never
   );
@@ -1247,6 +1359,7 @@ test("aborting credential lookup records cancellation and releases admission onc
             released.push(runId);
             return Promise.resolve(true);
           },
+          validateDispatch: () => Promise.resolve(true),
         }),
       },
       Sandbox: {},
@@ -1317,6 +1430,12 @@ test("decommission fences delayed runs before cleanup and reset", async () => {
     {
       APP_ORIGIN: "https://runner.test",
       RUNNER_SERVICE_TOKEN: "service-token",
+      RunAdmission: {
+        getByName: () => ({
+          release: () => Promise.resolve(true),
+          validateDispatch: () => Promise.resolve(true),
+        }),
+      },
       Sandbox: {},
     } as never
   );
@@ -1404,6 +1523,7 @@ test("decommission keeps terminal cleanup durable when admission release fails",
             }
             return Promise.resolve(true);
           },
+          validateDispatch: () => Promise.resolve(true),
         }),
       },
     } as never
@@ -1507,6 +1627,7 @@ test("configure rejects while decommissioning and accepts after completion", asy
             }
             return Promise.resolve(true);
           },
+          validateDispatch: () => Promise.resolve(true),
         }),
       },
     } as never
@@ -1890,7 +2011,7 @@ test("recovered warm ownership retries cleanup before allowing a new warm", asyn
 
   const warming = await yolo.warm();
   assert.equal(warming.status, "provisioning");
-  assert.equal(fiberLog.started.at(-1)?.key, "warm");
+  assert.equal(fiberLog.started.at(-1)?.key, "warm:2");
 });
 
 test("warm does not start while a run is active", async () => {
@@ -1911,6 +2032,111 @@ test("warm does not start while a run is active", async () => {
     fiberLog.started.map((entry) => entry.key),
     [`run:${queued.run.id}`]
   );
+});
+
+test("expired warm-up uses a recyclable fiber key for the next attempt", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  setSandboxExec(() =>
+    Promise.resolve({
+      exitCode: 0,
+      stderr: "",
+      stdout: "copilot 1.0.0\n",
+      success: true,
+    })
+  );
+  fiberControl.runFibers = true;
+  const seenKeys = new Set<string>();
+  const yolo = new (class extends YoloAgent {
+    override startFiber(
+      name: string,
+      fn: Parameters<YoloAgent["startFiber"]>[1],
+      options?: Parameters<YoloAgent["startFiber"]>[2]
+    ): ReturnType<YoloAgent["startFiber"]> {
+      const key = options?.idempotencyKey ?? name;
+      if (seenKeys.has(key)) {
+        return Promise.resolve({
+          accepted: false,
+          createdAt: Date.now(),
+          fiberId: `fiber:${key}`,
+          name,
+          status: "completed",
+        });
+      }
+      seenKeys.add(key);
+      return super.startFiber(name, fn, options);
+    }
+  })(undefined as never, admissionTestEnv() as never);
+  yolo.configure(definition());
+
+  try {
+    assert.equal((await yolo.warm()).status, "provisioning");
+    assert.equal(yolo.snapshot()?.warm?.status, "ready");
+    const state = Reflect.get(yolo, "state") as {
+      definition: AgentDefinition | null;
+      lifecycle: {
+        generation: number;
+        status: "active" | "decommissioning" | "decommissioned";
+      };
+      runs: CloudRunRecord[];
+    };
+    yolo.setState({
+      ...state,
+      definition: {
+        ...state.definition,
+        warm: {
+          status: "ready",
+          updatedAt: "2026-08-20T12:00:00.000Z",
+        },
+      } as AgentDefinition,
+    });
+
+    assert.equal((await yolo.warm()).status, "provisioning");
+    assert.equal(yolo.snapshot()?.warm?.status, "ready");
+    assert.deepEqual(
+      fiberLog.started.map((entry) => entry.key),
+      ["warm:1", "warm:2"]
+    );
+    assert.equal(new Set(fiberLog.started.map((entry) => entry.key)).size, 2);
+  } finally {
+    fiberControl.runFibers = false;
+    setSandboxExec(() =>
+      Promise.reject(new Error("sandbox exec is not configured"))
+    );
+  }
+});
+
+test("warm dispatch rejection rolls back ownership and provisioning", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  const yolo = new (class extends YoloAgent {
+    override startFiber(
+      _name: string,
+      _fn: Parameters<YoloAgent["startFiber"]>[1],
+      _options?: Parameters<YoloAgent["startFiber"]>[2]
+    ): ReturnType<YoloAgent["startFiber"]> {
+      return Promise.resolve({
+        accepted: false,
+        createdAt: Date.now(),
+        fiberId: "fiber:warm-rejected",
+        name: "warm:rejected",
+        status: "completed",
+      });
+    }
+  })(undefined as never, admissionTestEnv() as never);
+  yolo.configure(definition());
+
+  const warming = await yolo.warm();
+
+  assert.equal(warming.status, "failed");
+  assert.equal(yolo.snapshot()?.warm?.status, "failed");
+  assert.equal(destroyedSandboxes().length, 1);
+  const state = Reflect.get(yolo, "state") as {
+    sandbox?: { cleanup?: unknown; owner?: string };
+  };
+  assert.equal(state.sandbox?.owner, undefined);
+  assert.equal(state.sandbox?.cleanup, undefined);
 });
 
 test("a run cancels and cleans a reserved warm before dispatch", async () => {
@@ -1940,7 +2166,7 @@ test("a run cancels and cleans a reserved warm before dispatch", async () => {
 
   assert.deepEqual(
     fiberLog.cancelled.map((entry) => entry.key),
-    ["warm"]
+    ["warm:1"]
   );
   assert.equal(destroyedSandboxes().length, 1);
   const after = Reflect.get(yolo, "state") as {
@@ -1959,7 +2185,7 @@ test("simultaneous warm and run calls never share an ownership generation", asyn
 
   const [warmed, started] = await Promise.allSettled([
     yolo.warm(),
-    yolo.start({ operationId: OP_A, task: "Run now." }, "identity"),
+    admittedStart(yolo, { operationId: OP_A, task: "Run now." }, "identity"),
   ]);
 
   assert.equal(started.status, "fulfilled");
@@ -2120,6 +2346,7 @@ test("a stale admitted fiber callback cannot finish or release a newer token cla
             released.push({ dispatchToken, runId });
             return Promise.resolve(true);
           },
+          validateDispatch: () => Promise.resolve(true),
         }),
       },
     } as never
@@ -2222,7 +2449,7 @@ test("stop cancels the fiber and closes the record", async () => {
     "stop-hash",
     "identity"
   );
-  assert.equal(await yolo.startAdmitted(started.run.id), true);
+  assert.equal(await yolo.startAdmitted(started.run.id, "1:stop"), true);
 
   const stopped = await yolo.stop(started.run.id);
 
@@ -2234,10 +2461,106 @@ test("stop cancels the fiber and closes the record", async () => {
   );
 });
 
+test("stop returns a credential-aborted terminal run after cancellation settles first", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  const originalFetch = globalThis.fetch;
+  let rejectCredential!: (error: unknown) => void;
+  globalThis.fetch = ((_input: string | URL | Request, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      rejectCredential = reject;
+      init?.signal?.addEventListener(
+        "abort",
+        () =>
+          reject(
+            Object.assign(new Error("lookup aborted"), { name: "AbortError" })
+          ),
+        { once: true }
+      );
+    })) as typeof fetch;
+  let runFiber!: Promise<void>;
+  let runController!: AbortController;
+  const released: string[] = [];
+  const yolo = new (class extends YoloAgent {
+    override startFiber(
+      _name: string,
+      fn: Parameters<YoloAgent["startFiber"]>[1]
+    ): ReturnType<YoloAgent["startFiber"]> {
+      runController = new AbortController();
+      runFiber = fn({
+        id: "fiber:stop-after-abort",
+        signal: runController.signal,
+        snapshot: null,
+        stash: () => undefined,
+      });
+      return Promise.resolve({
+        accepted: true,
+        createdAt: Date.now(),
+        fiberId: "fiber:stop-after-abort",
+        name: "run:stop-after-abort",
+        status: "running",
+      });
+    }
+
+    override async cancelFiberByKey(
+      idempotencyKey: string,
+      reason?: string
+    ): Promise<boolean> {
+      assert.match(idempotencyKey, /^run:/);
+      runController.abort(reason);
+      rejectCredential(
+        Object.assign(new Error("lookup aborted"), { name: "AbortError" })
+      );
+      await runFiber;
+      return true;
+    }
+  })(
+    undefined as never,
+    {
+      APP_ORIGIN: "https://runner.test",
+      RUNNER_SERVICE_TOKEN: "service-token",
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string) => {
+            released.push(runId);
+            return Promise.resolve(true);
+          },
+          validateDispatch: () => Promise.resolve(true),
+        }),
+      },
+      Sandbox: {},
+    } as never
+  );
+  yolo.configure(definition());
+
+  try {
+    const queued = await yolo.enqueue(
+      { operationId: OP_A, task: "Stop after credential abort." },
+      "ca2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a21",
+      "stop-after-abort",
+      "identity"
+    );
+    assert.equal(
+      await yolo.startAdmitted(queued.run.id, "1:stop-after-abort"),
+      true
+    );
+
+    const stopped = await yolo.stop(queued.run.id);
+
+    assert.equal(stopped?.status, "cancelled");
+    assert.equal(yolo.getRun(queued.run.id)?.status, "cancelled");
+    assert.deepEqual(released, [queued.run.id]);
+    assert.deepEqual(destroyedSandboxes(), []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("stop cleans up a direct fiber dispatch that has not claimed running yet", async () => {
   resetDestroyedSandboxes();
   const yolo = agent();
-  const started = await yolo.start(
+  const started = await admittedStart(
+    yolo,
     { operationId: OP_A, task: "Direct dispatch." },
     "identity"
   );
@@ -2256,13 +2579,15 @@ test("a cancelled run frees the agent for the next one", async () => {
   // Without closing the record, the run stays "running" forever and every
   // later start is refused as already_running.
   const yolo = agent();
-  const first = await yolo.start(
+  const first = await admittedStart(
+    yolo,
     { operationId: OP_A, task: "Fix tests." },
     "identity"
   );
   await yolo.stop(first.run.id);
 
-  const second = await yolo.start(
+  const second = await admittedStart(
+    yolo,
     { operationId: OP_B, task: "Next job." },
     "identity"
   );
@@ -2283,6 +2608,7 @@ test("cancelling an admitted queued run releases its deployment slot", async () 
             released.push(runId);
             return Promise.resolve(true);
           },
+          validateDispatch: () => Promise.resolve(true),
         }),
       },
     } as never
@@ -2314,6 +2640,7 @@ test("cancelling a queued run preserves an active run and shared sandbox", async
             released.push(runId);
             return Promise.resolve(true);
           },
+          validateDispatch: () => Promise.resolve(true),
         }),
       },
     } as never
@@ -2359,6 +2686,7 @@ test("queued cancellation fences a dispatch that starts after cancellation", asy
             released.push(runId);
             return Promise.resolve(true);
           },
+          validateDispatch: () => Promise.resolve(true),
         }),
       },
     } as never
@@ -2419,6 +2747,7 @@ test("admission terminal reporting does not retain an unbounded run map", async 
       RunAdmission: {
         getByName: () => ({
           release: () => Promise.resolve(true),
+          validateDispatch: () => Promise.resolve(true),
         }),
       },
     } as never
@@ -2456,7 +2785,7 @@ test("stopping a finished run does not rewrite its outcome", async () => {
     "finished-hash",
     "identity"
   );
-  assert.equal(await yolo.startAdmitted(started.run.id), true);
+  assert.equal(await yolo.startAdmitted(started.run.id, "1:finished"), true);
   const cancelled = await yolo.stop(started.run.id);
 
   const again = await yolo.stop(started.run.id);
@@ -2478,7 +2807,8 @@ test("stopping an unknown run reports absence rather than inventing one", async 
 
 test("the event stream returns only events after the cursor", async () => {
   const yolo = agent();
-  const started = await yolo.start(
+  const started = await admittedStart(
+    yolo,
     { operationId: OP_A, task: "Fix tests." },
     "identity"
   );
@@ -2496,7 +2826,8 @@ test("the event stream returns only events after the cursor", async () => {
 
 test("the event stream reports terminal so a subscriber can stop polling", async () => {
   const yolo = agent();
-  const started = await yolo.start(
+  const started = await admittedStart(
+    yolo,
     { operationId: OP_A, task: "Fix tests." },
     "identity"
   );

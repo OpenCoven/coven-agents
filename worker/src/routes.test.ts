@@ -211,9 +211,6 @@ function runner() {
         },
       ],
       snapshot: () => agents.get(agentId) ?? null,
-      start: () => {
-        throw new Error("start must not be reached for another tenant");
-      },
       stop: (runId: string) => {
         stopped.push(runId);
         return null;
@@ -958,9 +955,6 @@ test("run admission happens before dispatch and receives only a tenant hash", as
     getRun: () => run,
     listRuns: () => [run],
     snapshot: () => agents.get(MINE) ?? null,
-    start: () => {
-      throw new Error("legacy start must not be reached");
-    },
     stop: () => run,
     warm: () => ({
       status: "provisioning" as const,
@@ -1042,9 +1036,6 @@ test("a terminal duplicate reconciles stale admission before returning the termi
     getRun: () => terminalRun,
     listRuns: () => [terminalRun],
     snapshot: () => agents.get(MINE) ?? null,
-    start: () => {
-      throw new Error("a terminal duplicate must not dispatch");
-    },
     stop: () => terminalRun,
     warm: () => ({
       status: "provisioning" as const,
@@ -1127,9 +1118,6 @@ test("a cross-tenant duplicate cannot return or release a foreign admission", as
     getRun: () => localRun,
     listRuns: () => [localRun],
     snapshot: () => agents.get(MINE) ?? null,
-    start: () => {
-      throw new Error("a duplicate must not dispatch");
-    },
     stop: () => localRun,
     warm: () => ({
       status: "provisioning" as const,
@@ -1217,9 +1205,6 @@ test("a stale local duplicate cannot release a different run with the same opera
     getRun: () => localRun,
     listRuns: () => [localRun],
     snapshot: () => agents.get(MINE) ?? null,
-    start: () => {
-      throw new Error("a stale duplicate must not dispatch");
-    },
     stop: () => localRun,
     warm: () => ({
       status: "provisioning" as const,
@@ -1300,9 +1285,6 @@ test("an orphan queued duplicate cannot bypass admission", async () => {
     getRun: () => run,
     listRuns: () => [run],
     snapshot: () => agents.get(MINE) ?? null,
-    start: () => {
-      throw new Error("orphan duplicate must not start directly");
-    },
     stop: () => run,
     warm: () => ({
       status: "provisioning" as const,
@@ -1365,9 +1347,6 @@ test("reject mode refuses an unhealthy admission object without bypassing it", a
     getRun: () => run,
     listRuns: () => [run],
     snapshot: () => agents.get(MINE) ?? null,
-    start: () => {
-      throw new Error("legacy start must not be reached");
-    },
     stop: () => run,
     warm: () => ({
       status: "provisioning" as const,
@@ -1429,9 +1408,6 @@ test("reject fallback discards a queued run before releasing admission", async (
     getRun: () => run,
     listRuns: () => [run],
     snapshot: () => agents.get(MINE) ?? null,
-    start: () => {
-      throw new Error("legacy start must not be reached");
-    },
     stop: () => run,
     warm: () => ({
       status: "provisioning" as const,
@@ -1495,9 +1471,6 @@ test("reject fallback stops an execution that wins the discard race before relea
     getRun: () => run,
     listRuns: () => [run],
     snapshot: () => agents.get(MINE) ?? null,
-    start: () => {
-      throw new Error("legacy start must not be reached");
-    },
     stop: () => {
       calls.push("stop");
       return { ...run, status: "cancelled" as const };
@@ -1571,9 +1544,6 @@ test("failed prepare cleanup is durable and capacity is reusable after recovery"
     getRun: (runId) => runs.get(runId) ?? null,
     listRuns: () => [...runs.values()],
     snapshot: () => agents.get(MINE) ?? null,
-    start: () => {
-      throw new Error("legacy start must not be reached");
-    },
     stop: (runId) => {
       calls.push("stop");
       if (!cleanupReady) {
@@ -1685,9 +1655,6 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
     getRun: (runId) => runs.get(runId) ?? null,
     listRuns: () => [...runs.values()],
     snapshot: () => agents.get(MINE) ?? null,
-    start: () => {
-      throw new Error("legacy start must not be reached");
-    },
     stop: (runId) => {
       calls.push(`stop:${runId}`);
       return runs.get(runId) ?? null;
@@ -1805,9 +1772,6 @@ test("a run mapping is unregistered when the admitted run disappears after regis
     },
     listRuns: () => [],
     snapshot: () => agents.get(MINE) ?? null,
-    start: () => {
-      throw new Error("legacy start must not be reached");
-    },
     stop: () => {
       calls.push("stop");
       return null;

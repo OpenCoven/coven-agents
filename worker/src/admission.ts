@@ -64,6 +64,8 @@ const INITIAL_SCHEDULER_STATE: SchedulerState = {
 export type AdmissionDispatch = (record: AdmissionRecord) => Promise<boolean>;
 
 type StoredAdmissionRecord = AdmissionRecord & {
+  dispatchLeaseUntil?: string;
+  dispatchStartedAt?: string;
   dispatchToken?: string;
   sequence: number;
   terminalizedAt?: string;
@@ -298,6 +300,8 @@ export class AdmissionQueue {
   records(): AdmissionRecord[] {
     return this.queueRecords.map(
       ({
+        dispatchLeaseUntil: _dispatchLeaseUntil,
+        dispatchStartedAt: _dispatchStartedAt,
         dispatchToken: _dispatchToken,
         sequence: _sequence,
         terminalizedAt: _terminalizedAt,
@@ -598,6 +602,8 @@ export class AdmissionQueue {
 
 type AdmissionRow = {
   agent_id: string;
+  dispatch_lease_until: string | null;
+  dispatch_started_at: string | null;
   dispatch_token: string | null;
   enqueued_at: string;
   operation_id: string;
@@ -654,6 +660,12 @@ function rowToStoredRecord(row: AdmissionRow): StoredAdmissionRecord {
     sequence: row.queue_sequence,
     state: row.state,
     tenantHash: row.tenant_hash,
+    ...(row.dispatch_lease_until
+      ? { dispatchLeaseUntil: row.dispatch_lease_until }
+      : {}),
+    ...(row.dispatch_started_at
+      ? { dispatchStartedAt: row.dispatch_started_at }
+      : {}),
     ...(row.dispatch_token ? { dispatchToken: row.dispatch_token } : {}),
     ...(row.terminalized_at ? { terminalizedAt: row.terminalized_at } : {}),
   };
@@ -661,6 +673,8 @@ function rowToStoredRecord(row: AdmissionRow): StoredAdmissionRecord {
 
 function publicRecord(record: StoredAdmissionRecord): AdmissionRecord {
   const {
+    dispatchLeaseUntil: _dispatchLeaseUntil,
+    dispatchStartedAt: _dispatchStartedAt,
     dispatchToken: _dispatchToken,
     sequence: _sequence,
     terminalizedAt: _terminalizedAt,
@@ -948,6 +962,24 @@ export class RunAdmission extends DurableObject<Env> {
     return record;
   }
 
+  async validateDispatch(
+    runId: string,
+    dispatchToken: string
+  ): Promise<boolean> {
+    await this.initialized;
+    if (!dispatchToken) {
+      return false;
+    }
+    const record = this.findStoredByRunId(runId);
+    return Boolean(
+      record?.state === "active" &&
+        record.dispatchToken === dispatchToken &&
+        record.dispatchStartedAt &&
+        record.dispatchLeaseUntil &&
+        Date.parse(record.dispatchLeaseUntil) > Date.now()
+    );
+  }
+
   async getByOperationId(operationId: string): Promise<AdmissionRecord | null> {
     await this.initialized;
     const record = this.findByOperationId(operationId);
@@ -1016,8 +1048,11 @@ export class RunAdmission extends DurableObject<Env> {
       }
       let accepted = false;
       try {
-        // Dispatches are serialized to preserve the durable capacity ledger.
-        // biome-ignore lint/performance/noAwaitInLoops: dispatches are intentionally sequential
+        if (!candidate.dispatchToken) {
+          // biome-ignore lint/performance/noAwaitInLoops: dispatches are intentionally sequential
+          await this.reconcileDispatchFailure(candidate, false);
+          return;
+        }
         accepted = await this.env.YoloAgent.getByName(
           candidate.agentId
         ).startAdmitted(candidate.runId, candidate.dispatchToken);
@@ -1786,13 +1821,18 @@ export class RunAdmission extends DurableObject<Env> {
   }
 
   private findByRunId(runId: string): AdmissionRecord | null {
+    const record = this.findStoredByRunId(runId);
+    return record ? publicRecord(record) : null;
+  }
+
+  private findStoredByRunId(runId: string): StoredAdmissionRecord | null {
     const rows = this.ctx.storage.sql
       .exec<AdmissionRow>(
-        "SELECT agent_id, dispatch_token, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, terminalized_at, tenant_hash FROM admission_records WHERE run_id = ?",
+        "SELECT agent_id, dispatch_token, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, terminalized_at, tenant_hash, dispatch_started_at, dispatch_lease_until FROM admission_records WHERE run_id = ?",
         runId
       )
       .toArray();
-    return rows[0] ? publicRecord(rowToStoredRecord(rows[0])) : null;
+    return rows[0] ? rowToStoredRecord(rows[0]) : null;
   }
 
   private writeRecord(record: StoredAdmissionRecord): void {
