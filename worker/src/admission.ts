@@ -755,10 +755,38 @@ export class RunAdmission extends DurableObject<Env> {
     return this.decisionForStoredRecord(current, limits);
   }
 
-  private terminalizeFailedAdmission(record: AdmissionRecord): void {
+  private terminalizeFailedAdmission(
+    record: AdmissionRecord,
+    dispatchToken?: string
+  ): void {
     this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec(
-        `
+      if (dispatchToken) {
+        this.ctx.storage.sql.exec(
+          `
+            UPDATE admission_records
+            SET state = 'terminal',
+                dispatch_started_at = NULL,
+                dispatch_lease_until = NULL,
+                dispatch_token = NULL,
+                terminalized_at = ?
+            WHERE run_id = ?
+              AND operation_id = ?
+              AND request_hash = ?
+              AND state IN ('queued', 'active')
+              AND (
+                dispatch_token = ?
+                OR (dispatch_token IS NULL AND state = 'queued')
+              )
+          `,
+          new Date(Date.now()).toISOString(),
+          record.runId,
+          record.operationId,
+          record.requestHash,
+          dispatchToken
+        );
+      } else {
+        this.ctx.storage.sql.exec(
+          `
           UPDATE admission_records
           SET state = 'terminal',
               dispatch_started_at = NULL,
@@ -769,12 +797,13 @@ export class RunAdmission extends DurableObject<Env> {
             AND operation_id = ?
             AND request_hash = ?
             AND state IN ('queued', 'active')
-        `,
-        new Date(Date.now()).toISOString(),
-        record.runId,
-        record.operationId,
-        record.requestHash
-      );
+          `,
+          new Date(Date.now()).toISOString(),
+          record.runId,
+          record.operationId,
+          record.requestHash
+        );
+      }
       this.pruneTerminalRecords();
     });
   }
@@ -950,7 +979,7 @@ export class RunAdmission extends DurableObject<Env> {
     } catch {
       const afterFailure = this.findByRunId(candidate.runId);
       if (reconciliation === "requeued" && afterFailure?.state === "queued") {
-        this.terminalizeFailedAdmission(candidate);
+        this.terminalizeFailedAdmission(candidate, candidate.dispatchToken);
         try {
           const stopped = await this.env.YoloAgent.getByName(
             candidate.agentId
@@ -1100,7 +1129,7 @@ export class RunAdmission extends DurableObject<Env> {
       (record) => record.state === "queued"
     );
     for (const record of queued) {
-      this.terminalizeFailedAdmission(record);
+      this.terminalizeFailedAdmission(record, record.dispatchToken);
       this.ctx.waitUntil(
         (async () => {
           try {
