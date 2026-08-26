@@ -1,5 +1,6 @@
 export type ConnectionStatus =
   | { endpoint: string; kind: "provisioned"; token: string }
+  | { kind: "rate_limited"; retryAfterSeconds: number }
   | { kind: "signed_out" }
   | { kind: "subscription_required" }
   | { kind: "unavailable" }
@@ -22,9 +23,12 @@ export type ConnectionStatusKind = ConnectionStatus["kind"];
  * makes the client build a same-origin URL, which is precisely how a runner
  * call became a 404 against the app itself.
  */
+const DEFAULT_RETRY_AFTER_SECONDS = 60;
+
 export function readConnectionResponse(
   status: number,
-  body: Readonly<Record<string, unknown>> | null
+  body: Readonly<Record<string, unknown>> | null,
+  retryAfterHeader?: string | null
 ): ConnectionStatus {
   if (status === 401) {
     return { kind: "signed_out" };
@@ -32,8 +36,37 @@ export function readConnectionResponse(
   if (status === 403) {
     return { kind: "subscription_required" };
   }
+  /**
+   * The admission layer's refusal, not the runner's absence.
+   *
+   * Before this branch existed, a 429 fell through to `unavailable` and the
+   * console answered a rate limit with "use Connect to set one manually" — a
+   * prompt for a deployment token that could not have helped, on a refusal
+   * that expires on its own. The one number that makes the state actionable
+   * travels in the `retry-after` header, so it is carried into the status.
+   */
+  if (status === 429) {
+    const parsed = Number(retryAfterHeader);
+    return {
+      kind: "rate_limited",
+      retryAfterSeconds:
+        Number.isFinite(parsed) && parsed > 0
+          ? Math.ceil(parsed)
+          : DEFAULT_RETRY_AFTER_SECONDS,
+    };
+  }
   if (status === 503) {
-    return { kind: "unconfigured" };
+    /**
+     * Two different 503s share this endpoint since the admission layer was
+     * added in front of it. The route's own means "this deployment has no
+     * runner" and is permanent until an operator acts; the admission layer's
+     * means its backing store is having a moment and the right response is to
+     * retry, not to paste a token. Only the route's own body may claim
+     * unconfigured.
+     */
+    return body?.error === "runner_unconfigured"
+      ? { kind: "unconfigured" }
+      : { kind: "unavailable" };
   }
 
   if (status === 200) {
@@ -49,6 +82,8 @@ export function readConnectionResponse(
 }
 
 const MESSAGES: Record<Exclude<ConnectionStatusKind, "provisioned">, string> = {
+  rate_limited:
+    "Rate limited — the connection will be retried automatically. No token is needed.",
   signed_out: "Sign in to connect a cloud runner.",
   subscription_required:
     "A subscription is required to run agents on the cloud runner.",

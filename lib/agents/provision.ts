@@ -36,7 +36,27 @@ export function provisionConnection(
         unknown
       > | null;
 
-      return readConnectionResponse(response.status, body);
+      const status = readConnectionResponse(
+        response.status,
+        body,
+        response.headers.get("retry-after")
+      );
+
+      /**
+       * A rate limit expires on its own, so caching its verdict for the life
+       * of the page turns a sixty-second refusal into "reload the tab". The
+       * cache clears once the window has passed, and the next caller — a
+       * navigation, a retry, a remount — fetches fresh. Capped so a hostile
+       * or absurd retry-after cannot pin the page for hours.
+       */
+      if (status.kind === "rate_limited") {
+        const RETRY_CAP_SECONDS = 600;
+        setTimeout(() => {
+          inFlight = null;
+        }, Math.min(status.retryAfterSeconds, RETRY_CAP_SECONDS) * 1000);
+      }
+
+      return status;
     } catch {
       // Not cached as a permanent failure: a network blip should not leave the
       // console unable to connect for the life of the page.

@@ -113,6 +113,7 @@ function statusMessage(kind: ConnectionStatusKind): string {
  */
 const CONNECTION_LABELS: Record<ConnectionStatusKind, string> = {
   provisioned: "connected",
+  rate_limited: "rate limited",
   signed_out: "signed out",
   subscription_required: "no subscription",
   unavailable: "unreachable",
