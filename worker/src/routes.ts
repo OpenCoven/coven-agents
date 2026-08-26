@@ -144,6 +144,50 @@ export type CloudRunnerDependencies<
   ) => Awaitable<CloudRunnerAgent>;
 };
 
+async function cleanupRun(
+  agent: CloudRunnerAgent,
+  runId: string,
+  admission?: CloudRunnerAdmission,
+  stopFirst = false
+): Promise<unknown | null> {
+  let firstError: unknown | null = null;
+  const remember = (error: unknown) => {
+    if (firstError === null) {
+      firstError = error;
+    }
+  };
+  const attempt = async (action: () => Awaitable<unknown>) => {
+    try {
+      await action();
+      return true;
+    } catch (error) {
+      remember(error);
+      return false;
+    }
+  };
+
+  if (stopFirst) {
+    await attempt(() => agent.stop(runId));
+    await attempt(() => agent.discardRun(runId));
+  } else {
+    const discarded = await attempt(() => agent.discardRun(runId));
+    if (!discarded) {
+      await attempt(() => agent.stop(runId));
+    }
+  }
+  if (admission) {
+    await attempt(() => admission.release(runId));
+  }
+  return firstError;
+}
+
+function isOperationConflict(error: unknown): boolean {
+  return (
+    error instanceof OperationConflictError ||
+    (error instanceof Error && error.name === "OperationConflictError")
+  );
+}
+
 /**
  * The contract permits any harness runtime; this runner can only drive the ones
  * it actually ships. Checked at both create and update, because an update that
@@ -608,12 +652,18 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             const runAdmissionMode = admissionMode(environment);
             const requestHash = await hashOperation(id, input.task);
             const runId = crypto.randomUUID();
-            const prepared = await agent.enqueue(
-              input,
-              runId,
-              requestHash,
-              authorization.slice(7)
-            );
+            let prepared: Awaited<ReturnType<CloudRunnerAgent["enqueue"]>>;
+            try {
+              prepared = await agent.enqueue(
+                input,
+                runId,
+                requestHash,
+                authorization.slice(7)
+              );
+            } catch (error) {
+              await cleanupRun(agent, runId);
+              throw error;
+            }
             if (!prepared.created) {
               if (isTerminal(prepared.run.status)) {
                 return json(
@@ -665,7 +715,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               );
             }
             if (!dependencies.getAdmission) {
-              await agent.discardRun(runId);
+              await cleanupRun(agent, runId);
               throw new Error("Run admission is not configured.");
             }
 
@@ -673,7 +723,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             try {
               admission = await dependencies.getAdmission(environment);
             } catch (error) {
-              await agent.discardRun(runId);
+              await cleanupRun(agent, runId);
               if (runAdmissionMode === "reject") {
                 return busyResponse("global_busy", cors);
               }
@@ -693,19 +743,28 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 ),
               });
             } catch (error) {
-              await agent.discardRun(runId);
-              if (runAdmissionMode === "reject") {
+              await cleanupRun(agent, runId, admission, true);
+              if (
+                runAdmissionMode === "reject" &&
+                !isOperationConflict(error)
+              ) {
                 return busyResponse("global_busy", cors);
               }
               throw error;
             }
 
             if (decision.kind === "refused") {
-              await agent.discardRun(runId);
+              const cleanupError = await cleanupRun(agent, runId);
+              if (cleanupError) {
+                throw cleanupError;
+              }
               return busyResponse(decision.reason, cors);
             }
             if (decision.kind === "duplicate") {
-              await agent.discardRun(runId);
+              const cleanupError = await cleanupRun(agent, runId);
+              if (cleanupError) {
+                throw cleanupError;
+              }
               const originalAgentId = await directory.lookupRun(decision.runId);
               const originalAgent = originalAgentId
                 ? await yoloAgent(originalAgentId)
@@ -724,21 +783,28 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               );
             }
             if (decision.kind === "queued" && runAdmissionMode === "reject") {
-              await admission.release(runId);
-              await agent.discardRun(runId);
+              const cleanupError = await cleanupRun(agent, runId, admission);
+              if (cleanupError) {
+                throw cleanupError;
+              }
               return busyResponse("global_busy", cors);
             }
 
-            await directory.registerRun(runId, id);
-            const admittedRun = await agent.getRun(runId);
-            return json(
-              {
-                apiVersion: AGENT_RUNNER_API_VERSION,
-                run: admittedRun ?? prepared.run,
-              },
-              { status: 202 },
-              cors
-            );
+            try {
+              await directory.registerRun(runId, id);
+              const admittedRun = await agent.getRun(runId);
+              return json(
+                {
+                  apiVersion: AGENT_RUNNER_API_VERSION,
+                  run: admittedRun ?? prepared.run,
+                },
+                { status: 202 },
+                cors
+              );
+            } catch (error) {
+              await cleanupRun(agent, runId, admission, true);
+              throw error;
+            }
           }
         }
 

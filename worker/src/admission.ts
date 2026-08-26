@@ -232,6 +232,20 @@ export class AdmissionQueue {
   }
 
   async admit(input: AdmissionRequest): Promise<AdmissionDecision> {
+    const decision = this.admitSynchronously(input);
+    if (
+      this.dispatchCallback &&
+      decision.kind !== "refused" &&
+      decision.kind !== "duplicate"
+    ) {
+      await this.dispatch();
+    }
+    return decision.kind === "refused" || decision.kind === "duplicate"
+      ? decision
+      : this.decisionFor(input.runId);
+  }
+
+  admitSynchronously(input: AdmissionRequest): AdmissionDecision {
     assertAdmissionRequest(input);
     const existing = this.queueRecords.find(
       (candidate) => candidate.operationId === input.operationId
@@ -263,10 +277,6 @@ export class AdmissionQueue {
       state: "queued",
     };
     this.queueRecords.push(record);
-
-    if (this.dispatchCallback) {
-      await this.dispatch();
-    }
     return this.decisionFor(record.runId);
   }
 
@@ -551,43 +561,79 @@ export class RunAdmission extends DurableObject<Env> {
   async admit(input: AdmissionRequest): Promise<AdmissionDecision> {
     await this.initialized;
     const limits = admissionLimits(this.env);
-    const existing = this.findByOperationId(input.operationId);
-    if (existing) {
-      if (existing.requestHash !== input.requestHash) {
-        throw new OperationConflictError();
+    const result = this.ctx.storage.transactionSync(() => {
+      const existing = this.findByOperationId(input.operationId);
+      const queue = new AdmissionQueue({
+        limits,
+        records: this.readRecords(),
+      });
+      const decision = queue.admitSynchronously(input);
+      if (existing?.state === "terminal") {
+        this.deleteRecord(existing.runId);
       }
-      if (existing.state !== "terminal") {
-        return {
-          kind: "duplicate",
-          runId: existing.runId,
-          state: existing.state,
-        };
+      if (decision.kind === "refused" || decision.kind === "duplicate") {
+        return { decision, record: null };
       }
-      this.deleteRecord(existing.runId);
+      const record = queue
+        .records()
+        .find((candidate) => candidate.runId === input.runId);
+      if (!record) {
+        throw new AdmissionConfigurationError(
+          "Admission record was not created."
+        );
+      }
+      this.writeRecord(record);
+      return { decision, record };
+    });
+    if (result.decision.kind === "refused") {
+      return result.decision;
     }
-
-    const records = this.readRecords();
-    const queue = new AdmissionQueue({ limits, records });
-    const decision = await queue.admit(input);
-    if (decision.kind === "refused") {
-      return decision;
+    if (result.decision.kind === "duplicate") {
+      return result.decision;
     }
-    const created = queue
-      .records()
-      .find((record) => record.runId === input.runId);
+    const created = result.record;
     if (!created) {
       throw new AdmissionConfigurationError(
         "Admission record was not created."
       );
     }
-    this.writeRecord(created);
-    await this.ensureAlarm();
+    try {
+      await this.ensureAlarm();
+    } catch (error) {
+      this.terminalizeFailedAdmission(created);
+      try {
+        await this.env.YoloAgent.getByName(created.agentId).stop(created.runId);
+      } catch {
+        // The terminal record lets the alarm reconcile an unavailable agent.
+      }
+      throw error;
+    }
     this.ctx.waitUntil(this.dispatchAvailable(limits));
     const current = this.findByRunId(input.runId);
     if (!current) {
       throw new AdmissionConfigurationError("Admission record disappeared.");
     }
     return this.decisionForStoredRecord(current, limits);
+  }
+
+  private terminalizeFailedAdmission(record: AdmissionRecord): void {
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        `
+          UPDATE admission_records
+          SET state = 'terminal',
+              dispatch_started_at = NULL,
+              dispatch_lease_until = NULL
+          WHERE run_id = ?
+            AND operation_id = ?
+            AND request_hash = ?
+            AND state IN ('queued', 'active')
+        `,
+        record.runId,
+        record.operationId,
+        record.requestHash
+      );
+    });
   }
 
   async release(runId: string): Promise<boolean> {

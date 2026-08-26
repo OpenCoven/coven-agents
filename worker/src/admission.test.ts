@@ -305,13 +305,18 @@ type SqlRows = {
 };
 type SqlInput = null | number | bigint | string | NodeJS.ArrayBufferView;
 
+type AdmissionHarnessOptions = {
+  setAlarmFailure?: { error: Error | null };
+};
+
 function runAdmissionHarness(
   getAgent: () => {
     getRun: (runId: string) => unknown;
     startAdmitted: (runId: string) => Promise<boolean>;
     stop: (runId: string) => Promise<unknown>;
   },
-  environment: Record<string, string> = {}
+  environment: Record<string, string> = {},
+  options: AdmissionHarnessOptions = {}
 ) {
   const database = new DatabaseSync(":memory:");
   let alarm: number | null = null;
@@ -339,9 +344,14 @@ function runAdmissionHarness(
       },
       getAlarm: async () => alarm,
       setAlarm: (scheduled: number) => {
+        if (options.setAlarmFailure?.error) {
+          return Promise.reject(options.setAlarmFailure.error);
+        }
         alarm = scheduled;
+        return Promise.resolve();
       },
       sql,
+      transactionSync: <T>(callback: () => T) => callback(),
     },
     waitUntil: (promise: Promise<unknown>) => {
       background.push(promise);
@@ -364,6 +374,174 @@ function runAdmissionHarness(
     sql,
   };
 }
+
+test("serializes concurrent admissions against the persistent capacity ledger", async () => {
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.resolve(false),
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "0",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+    }
+  );
+
+  const results = await Promise.allSettled(
+    Array.from({ length: 20 }, (_unused, index) =>
+      harness.admission.admit(request(100 + index))
+    )
+  );
+
+  assert.equal(
+    results.filter(
+      (result) =>
+        result.status === "fulfilled" && result.value.kind === "queued"
+    ).length,
+    10
+  );
+  assert.equal(
+    results.filter(
+      (result) =>
+        result.status === "fulfilled" &&
+        result.value.kind === "refused" &&
+        result.value.reason === "tenant_queue_full"
+    ).length,
+    10
+  );
+  assert.equal(
+    results.filter((result) => result.status === "rejected").length,
+    0,
+    "concurrent admissions must not surface persistence errors"
+  );
+  assert.equal(
+    harness.sql
+      .exec<{ state: string }>(
+        "SELECT state FROM admission_records WHERE state = 'queued'"
+      )
+      .toArray().length,
+    10
+  );
+});
+
+test("concurrent same-operation admissions deduplicate or conflict deterministically", async () => {
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.resolve(false),
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "0",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+    }
+  );
+  const sameOperation = {
+    ...request(200, TENANT_A, "same-request"),
+    operationId: "operation-shared",
+  };
+
+  const sameHash = await Promise.allSettled(
+    Array.from({ length: 20 }, (_unused, index) =>
+      harness.admission.admit({
+        ...sameOperation,
+        runId: `run-shared-${index}`,
+      })
+    )
+  );
+  const fulfilledSameHash = sameHash.filter(
+    (
+      result
+    ): result is PromiseFulfilledResult<
+      Awaited<ReturnType<RunAdmission["admit"]>>
+    > => result.status === "fulfilled"
+  );
+  assert.equal(
+    sameHash.filter((result) => result.status === "rejected").length,
+    0
+  );
+  assert.equal(
+    new Set(
+      fulfilledSameHash
+        .map((result) => result.value)
+        .filter((decision) => decision.kind !== "refused")
+        .map((decision) => decision.runId)
+    ).size,
+    1
+  );
+  assert.equal(
+    fulfilledSameHash.filter((result) => result.value.kind === "duplicate")
+      .length,
+    19
+  );
+
+  const conflicts = await Promise.allSettled(
+    Array.from({ length: 20 }, (_unused, index) =>
+      harness.admission.admit({
+        ...sameOperation,
+        requestHash: `different-${index}`,
+        runId: `run-conflict-${index}`,
+      })
+    )
+  );
+  assert.equal(
+    conflicts.filter(
+      (result) =>
+        result.status === "rejected" &&
+        result.reason instanceof OperationConflictError
+    ).length,
+    20
+  );
+  assert.equal(
+    conflicts.filter((result) => result.status === "fulfilled").length,
+    0
+  );
+});
+
+test("alarm setup failure terminalizes a new admission without dispatching it", async () => {
+  let dispatches = 0;
+  const setAlarmFailure: { error: Error | null } = {
+    error: new Error("alarm unavailable"),
+  };
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => {
+        dispatches += 1;
+        return Promise.resolve(true);
+      },
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "0",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    },
+    { setAlarmFailure }
+  );
+  const first = request(220);
+
+  await assert.rejects(
+    () => harness.admission.admit(first),
+    /alarm unavailable/
+  );
+  assert.equal(
+    (await harness.admission.getRecord(first.runId))?.state,
+    "terminal"
+  );
+  assert.equal(dispatches, 0);
+
+  setAlarmFailure.error = null;
+  const retry = await harness.admission.admit({
+    ...first,
+    runId: "run-retry",
+  });
+  assert.deepEqual(retry, {
+    kind: "queued",
+    position: 1,
+    runId: "run-retry",
+  });
+});
 
 function yoloDefinition(): AgentDefinition {
   return {
