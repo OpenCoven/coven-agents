@@ -22,6 +22,7 @@ overrides:
   sharp: '>=0.35.0'
   undici: '>=5.29.0'
   uuid: '>=11.1.1'
+  '@ai-sdk/provider-utils': ^5.0.30
 
 importers:
 
@@ -371,14 +372,18 @@ packages:
     resolution: {integrity: sha512-ZrnpSvW47rDjWYFym1om/EKXN3sMN+IXyuhdDO2uM4ppXsWANBfYTFel00P5JUnXFDi3FVXIhmB0Xi9FLo5ptw==}
     engines: {node: '>=22'}
 
-  '@ai-sdk/provider-utils@5.0.28':
-    resolution: {integrity: sha512-TnHUyd/rCYQqHg5RuiOaz/hUql6U+kbUaBW0Rp+0N5UhnAInA9CzzV0HXvuAAPwppDsK6fAx9Rd+tRawpJ/3pg==}
+  '@ai-sdk/provider-utils@5.0.30':
+    resolution: {integrity: sha512-9TyxUXolql77ntHIeygLqt7PO1O0HZPB73cJhLG2OsPecSBRIZhNXLxT1T7rlL6Zpm1eDoLMFrMV99kAJ28/Sg==}
     engines: {node: '>=22'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
   '@ai-sdk/provider@4.0.7':
     resolution: {integrity: sha512-6or44XprPzKbr8zkmzosowSE0pxkvJcoojBL+mCZvPUt3kvXp3XSNqeVun9golb1acEfSo6yaEBRT18h2VU+1Q==}
+    engines: {node: '>=22'}
+
+  '@ai-sdk/provider@4.0.8':
+    resolution: {integrity: sha512-aWO7iwhFUGf347tCwNGggggfmZigaSu7TF739IZSrWWABUp7zkb4Cr3fMqvBe5EIS7ABJJu3Cadn0g/zs1G0QQ==}
     engines: {node: '>=22'}
 
   '@ai-sdk/react@4.0.76':
@@ -5524,14 +5529,14 @@ snapshots:
   '@ai-sdk/gateway@4.0.59(zod@4.4.3)':
     dependencies:
       '@ai-sdk/provider': 4.0.7
-      '@ai-sdk/provider-utils': 5.0.28(zod@4.4.3)
+      '@ai-sdk/provider-utils': 5.0.30(zod@4.4.3)
       '@vercel/oidc': 3.2.0
       zod: 4.4.3
 
   '@ai-sdk/mcp@2.0.34(zod@4.4.3)':
     dependencies:
       '@ai-sdk/provider': 4.0.7
-      '@ai-sdk/provider-utils': 5.0.28(zod@4.4.3)
+      '@ai-sdk/provider-utils': 5.0.30(zod@4.4.3)
       pkce-challenge: 5.0.1
       zod: 4.4.3
 
@@ -5543,9 +5548,9 @@ snapshots:
     transitivePeerDependencies:
       - zod
 
-  '@ai-sdk/provider-utils@5.0.28(zod@4.4.3)':
+  '@ai-sdk/provider-utils@5.0.30(zod@4.4.3)':
     dependencies:
-      '@ai-sdk/provider': 4.0.7
+      '@ai-sdk/provider': 4.0.8
       '@standard-schema/spec': 1.1.0
       '@workflow/serde': 4.1.0
       eventsource-parser: 3.1.1
@@ -5556,11 +5561,15 @@ snapshots:
     dependencies:
       json-schema: 0.4.0
 
+  '@ai-sdk/provider@4.0.8':
+    dependencies:
+      json-schema: 0.4.0
+
   '@ai-sdk/react@4.0.76(react@19.2.8)(zod@4.4.3)':
     dependencies:
       '@ai-sdk/mcp': 2.0.34(zod@4.4.3)
       '@ai-sdk/provider': 4.0.7
-      '@ai-sdk/provider-utils': 5.0.28(zod@4.4.3)
+      '@ai-sdk/provider-utils': 5.0.30(zod@4.4.3)
       ai: 7.0.73(zod@4.4.3)
       react: 19.2.8
       swr: 2.5.1(react@19.2.8)
@@ -7886,7 +7895,7 @@ snapshots:
     dependencies:
       '@ai-sdk/gateway': 4.0.59(zod@4.4.3)
       '@ai-sdk/provider': 4.0.7
-      '@ai-sdk/provider-utils': 5.0.28(zod@4.4.3)
+      '@ai-sdk/provider-utils': 5.0.30(zod@4.4.3)
       zod: 4.4.3
 
   ajv-formats@3.0.1(ajv@8.20.0):

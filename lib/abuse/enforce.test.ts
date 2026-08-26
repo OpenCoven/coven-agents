@@ -526,3 +526,24 @@ class FakeRedisClient implements RedisEvalExecutor {
     // Tests intentionally swallow the same error event the production adapter does.
   }
 }
+
+test("failClosed refuses on store outage instead of degrading", async () => {
+  // The auth wrapper's carve-out: OAuth starts and callbacks carry replay
+  // protection, and a limiter outage must not quietly disable it. Everything
+  // without the flag degrades; this asserts the flag restores the refusal.
+  const enforcer = createAbusePolicyEnforcer({
+    getStore: () => {
+      throw new Error("connection still warming");
+    },
+    isProduction: true,
+  });
+
+  assert.deepEqual(
+    await enforcer({
+      failClosed: true,
+      ip: "203.0.113.4",
+      route: "auth_callback",
+    }),
+    { kind: "unavailable", responseStatus: 503 }
+  );
+});

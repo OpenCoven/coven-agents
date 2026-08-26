@@ -16,6 +16,11 @@
  * `/login`, `/api/auth` and `/ping` keep the gate escapable and the health
  * check honest. `/register` is deliberately absent: an open registration route
  * hands a stranger the very account the gate exists to withhold.
+ *
+ * `/security` is public on purpose: it is the outward statement of the
+ * execution boundary, and a security posture only readable by people already
+ * inside the gate persuades nobody. The page is a static distillation — it
+ * names the guarantees, never the internals.
  */
 const EXEMPT_PREFIXES = [
   "/api/auth",
@@ -23,6 +28,7 @@ const EXEMPT_PREFIXES = [
   "/api/stripe",
   "/login",
   "/ping",
+  "/security",
 ];
 
 export type BetaGate = {

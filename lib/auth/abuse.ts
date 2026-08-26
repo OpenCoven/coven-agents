@@ -52,6 +52,10 @@ export function withAuthAbusePolicy<
     );
     if (route) {
       const admission = await enforceAbusePolicy({
+        // Fail closed, deliberately: OAuth starts and callbacks carry replay
+        // protection, and a limiter outage must not disable it. Sign-in
+        // pages and support actions never reach this call at all.
+        failClosed: true,
         ip: ipAddress(request) ?? null,
         route,
         store: options.store,

@@ -14,6 +14,15 @@ export type AbuseAdmission =
   | { kind: "unavailable"; responseStatus: 503 };
 
 export type AbuseEnforcementInput = {
+  /**
+   * Refuse with 503 on a store failure instead of degrading to the memory
+   * fallback. The auth wrapper sets this for OAuth starts and callbacks:
+   * those flows carry replay protection, and serving them under a limiter
+   * outage would let an outage disable the very control the limiter exists
+   * to provide. Product routes leave it unset — for them, a limiter blip
+   * degrades the limiter, never the product.
+   */
+  failClosed?: boolean;
   ip: string | null;
   route: AbuseRoute;
   store?: AbuseStore;
@@ -206,6 +215,9 @@ export function createAbusePolicyEnforcer(input: {
     try {
       store = request.store ?? (await input.getStore());
     } catch {
+      if (request.failClosed) {
+        return { kind: "unavailable", responseStatus: 503 };
+      }
       store = fallbackStore;
     }
 
@@ -248,6 +260,9 @@ export function createAbusePolicyEnforcer(input: {
           };
         }
       } catch {
+        if (request.failClosed) {
+          return { kind: "unavailable", responseStatus: 503 };
+        }
         /**
          * The consume threw mid-request — a socket that dropped after the
          * store was handed out looks exactly like one that never connected.
