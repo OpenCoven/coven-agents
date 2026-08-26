@@ -154,6 +154,31 @@ test("admitSynchronously enforces the queue cap when fairness blocks activation"
   });
 });
 
+test("admitSynchronously preserves global capacity refusal with a full queue", () => {
+  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  const queue = new AdmissionQueue({
+    limits: {
+      deploymentActiveRuns: 1,
+      tenantActiveRuns: 1,
+      tenantQueuedRuns: 10,
+    },
+    now: () => now,
+    records: [
+      activeRecord(1, TENANT_A),
+      ...Array.from({ length: 10 }, (_unused, index) => ({
+        ...request(index + 2, TENANT_A),
+        enqueuedAt: new Date(now + index + 2).toISOString(),
+        state: "queued" as const,
+      })),
+    ],
+  });
+
+  assert.deepEqual(queue.admitSynchronously(request(21, TENANT_A)), {
+    kind: "refused",
+    reason: "global_busy",
+  });
+});
+
 test("admitSynchronously enforces zero queue capacity when activation is blocked", () => {
   const now = Date.parse("2026-08-26T00:00:00.000Z");
   const queue = new AdmissionQueue({
