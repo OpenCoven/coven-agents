@@ -13,6 +13,7 @@ import {
   type CloudRunnerDirectory,
   createCloudRunner,
 } from "./routes";
+import { AgentDecommissioningError } from "./run-state";
 
 const TOKEN = "test-token";
 const MINE = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
@@ -141,6 +142,7 @@ const agents = new Map<string, AgentDefinition>([
 let decommissioned: string[] = [];
 let stopped: string[] = [];
 let warmed: string[] = [];
+let configureFailure: Error | null = null;
 
 function runner() {
   decommissioned = [];
@@ -164,7 +166,12 @@ function runner() {
 
   const getYoloAgent = (_environment: unknown, agentId: string) =>
     ({
-      configure: (value: AgentDefinition) => value,
+      configure: (value: AgentDefinition) => {
+        if (configureFailure) {
+          throw configureFailure;
+        }
+        return value;
+      },
       decommission: () => {
         decommissioned.push(agentId);
       },
@@ -420,6 +427,47 @@ test("the caller's own agent is still reachable", async () => {
   const response = await call(`/api/agents/${MINE}`);
 
   assert.equal(response.status, 200);
+});
+
+test("configure reports a retryable conflict while decommissioning", async () => {
+  configureFailure = new AgentDecommissioningError();
+  try {
+    const [environment, token] = await Promise.all([
+      environmentPromise,
+      identityToken(),
+    ]);
+    const response = await runner().fetch(
+      new Request(`https://runner.test/api/agents/${MINE}`, {
+        body: JSON.stringify({
+          backend: "cloud",
+          description: "",
+          instructions: "Do the thing.",
+          model: "auto",
+          name: "Updated",
+          runtime: "copilot",
+        }),
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "x-runner-token": TOKEN,
+        },
+        method: "PUT",
+      }),
+      environment as never
+    );
+
+    assert.equal(response.status, 409);
+    const body = (await response.json()) as {
+      error: { code: string; retryable: boolean };
+    };
+    assert.deepEqual(body.error, {
+      code: "agent_decommissioning",
+      message: "Agent decommission is still in progress. Try again later.",
+      retryable: true,
+    });
+  } finally {
+    configureFailure = null;
+  }
 });
 
 test("another tenant's agent cannot be deleted", async () => {

@@ -97,6 +97,18 @@ export class AgentBusyError extends AlreadyRunningError {
   }
 }
 
+export class AgentDecommissioningError extends Error {
+  readonly code = "agent_decommissioning";
+  readonly retryable = true;
+
+  constructor(
+    message = "Agent decommission is still in progress. Try again later."
+  ) {
+    super(message);
+    this.name = "AgentDecommissioningError";
+  }
+}
+
 export function isAgentBusyError(error: unknown): boolean {
   if (error instanceof AgentBusyError) {
     return true;

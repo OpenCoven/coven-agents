@@ -34,6 +34,7 @@ import {
 import { importVerifyKey, verifyRunnerToken } from "./identity.js";
 import {
   AgentBusyError,
+  AgentDecommissioningError,
   AlreadyRunningError,
   hashOperation,
   isTerminal,
@@ -137,6 +138,7 @@ export type CloudRunnerAgent = {
 
 export type CloudRunnerAdmission = {
   admit: (input: AdmissionRequest) => Awaitable<AdmissionDecision>;
+  getRecord?: (runId: string) => Awaitable<AdmissionRecord | null>;
   getByOperationId?: (operationId: string) => Awaitable<AdmissionRecord | null>;
   enqueueCleanup?: (agentId: string, runId: string) => Awaitable<void>;
   release: (runId: string, dispatchToken?: string) => Awaitable<boolean>;
@@ -288,6 +290,20 @@ function fail(error: unknown, cors: Headers): Response {
         true
       ),
       { status: 503 },
+      cors
+    );
+  }
+  if (
+    error instanceof AgentDecommissioningError ||
+    (error instanceof Error && error.name === "AgentDecommissioningError")
+  ) {
+    return json(
+      errorEnvelope(
+        "agent_decommissioning",
+        "Agent decommission is still in progress. Try again later.",
+        true
+      ),
+      { status: 409 },
       cors
     );
   }

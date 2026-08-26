@@ -16,6 +16,7 @@ import {
 } from "../test-support/cloudflare-sandbox";
 import { AgentDirectory, YoloAgent } from "./agents";
 import {
+  AgentDecommissioningError,
   AlreadyRunningError,
   type CloudRunRecord,
   finishCloudRunRecord,
@@ -751,6 +752,271 @@ test("decommission fences delayed runs before cleanup and reset", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("decommission keeps terminal cleanup durable when admission release fails", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  let releaseAttempts = 0;
+  let scheduleAttempts = 0;
+  const yolo = new (class extends YoloAgent {
+    schedule<T = string>(
+      _when: Date | number | string,
+      callback: keyof this,
+      payload?: T
+    ): Promise<{
+      id: string;
+      callback: string;
+      payload: T;
+      type: "scheduled";
+      time: number;
+    }> {
+      scheduleAttempts += 1;
+      return Promise.resolve({
+        callback: String(callback),
+        id: `decommission-retry-${scheduleAttempts}`,
+        payload: payload as T,
+        time: Date.now(),
+        type: "scheduled",
+      });
+    }
+
+    cancelSchedule(): Promise<boolean> {
+      return Promise.resolve(true);
+    }
+  })(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          getRecord: () => Promise.resolve(null),
+          release: () => {
+            releaseAttempts += 1;
+            if (releaseAttempts === 1) {
+              return Promise.reject(
+                new Error("release unavailable before apply")
+              );
+            }
+            return Promise.resolve(true);
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Decommission durably." },
+    "ee2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8ca3",
+    "decommission-durable",
+    "identity"
+  );
+  assert.equal(
+    await yolo.startAdmitted(queued.run.id, "1:decommission-durable"),
+    true
+  );
+
+  await assert.rejects(
+    () => yolo.decommission(),
+    (error: unknown) =>
+      error instanceof AgentDecommissioningError && error.retryable === true
+  );
+
+  const pending = Reflect.get(yolo, "state") as {
+    decommission?: {
+      admissionReleases: Record<string, { dispatchToken?: string }>;
+      retryScheduleId?: string;
+    };
+    lifecycle: { status: string };
+    runs: CloudRunRecord[];
+  };
+  assert.equal(pending.lifecycle.status, "decommissioning");
+  assert.equal(pending.runs[0]?.run.status, "cancelled");
+  assert.deepEqual(pending.decommission?.admissionReleases[queued.run.id], {
+    dispatchToken: "1:decommission-durable",
+  });
+  assert.equal(pending.decommission?.retryScheduleId, "decommission-retry-1");
+  assert.equal(releaseAttempts, 1);
+
+  await yolo.retryDecommission();
+
+  const completed = Reflect.get(yolo, "state") as {
+    lifecycle: { status: string };
+    runs: CloudRunRecord[];
+  };
+  assert.equal(completed.lifecycle.status, "decommissioned");
+  assert.equal(yolo.snapshot(), null);
+  assert.deepEqual(completed.runs, []);
+  assert.equal(releaseAttempts, 2);
+  assert.equal(scheduleAttempts, 1);
+
+  assert.equal(
+    yolo.fenceAdmitted(queued.run.id, "4:stale-after-decommission"),
+    true
+  );
+  const fenced = Reflect.get(yolo, "state") as {
+    admissionFences?: Record<string, unknown>;
+  };
+  assert.ok(fenced.admissionFences?.[queued.run.id]);
+});
+
+test("configure rejects while decommissioning and accepts after completion", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  let releaseAttempts = 0;
+  const yolo = new (class extends YoloAgent {
+    schedule<T = string>(
+      _when: Date | number | string,
+      callback: keyof this,
+      payload?: T
+    ): Promise<{
+      id: string;
+      callback: string;
+      payload: T;
+      type: "scheduled";
+      time: number;
+    }> {
+      return Promise.resolve({
+        callback: String(callback),
+        id: "configure-decommission-retry",
+        payload: payload as T,
+        time: Date.now(),
+        type: "scheduled",
+      });
+    }
+
+    cancelSchedule(): Promise<boolean> {
+      return Promise.resolve(true);
+    }
+  })(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          getRecord: () => Promise.resolve(null),
+          release: () => {
+            releaseAttempts += 1;
+            if (releaseAttempts === 1) {
+              return Promise.reject(new Error("release unavailable"));
+            }
+            return Promise.resolve(true);
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Do not resurrect." },
+    "ef2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8ca4",
+    "configure-during-decommission",
+    "identity"
+  );
+  await yolo.startAdmitted(queued.run.id, "1:configure");
+
+  await assert.rejects(() => yolo.decommission(), AgentDecommissioningError);
+  assert.throws(() => yolo.configure(definition()), AgentDecommissioningError);
+  assert.equal(yolo.snapshot()?.name, "Cody");
+
+  await yolo.retryDecommission();
+  const updated = { ...definition(), name: "Reconfigured" };
+  assert.equal(yolo.configure(updated).name, "Reconfigured");
+  assert.equal(yolo.snapshot()?.name, "Reconfigured");
+});
+
+test("consumed cleanup retry schedules rotate before each retry", async () => {
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  let scheduleAttempts = 0;
+  const yolo = new (class extends YoloAgent {
+    schedule<T = string>(
+      _when: Date | number | string,
+      callback: keyof this,
+      payload?: T
+    ): Promise<{
+      id: string;
+      callback: string;
+      payload: T;
+      type: "scheduled";
+      time: number;
+    }> {
+      scheduleAttempts += 1;
+      return Promise.resolve({
+        callback: String(callback),
+        id: `cleanup-retry-${scheduleAttempts}`,
+        payload: payload as T,
+        time: Date.now(),
+        type: "scheduled",
+      });
+    }
+
+    cancelSchedule(): Promise<boolean> {
+      return Promise.resolve(true);
+    }
+  })(undefined as never, { Sandbox: {} } as never);
+  yolo.configure(definition());
+  const state = Reflect.get(yolo, "state") as {
+    definition: AgentDefinition | null;
+    lifecycle: {
+      generation: number;
+      status: "active" | "decommissioning" | "decommissioned";
+    };
+    runs: CloudRunRecord[];
+    sandbox: {
+      cleanup?: {
+        attempts: number;
+        finalStatus: "cancelled" | "failed";
+        generation: number;
+        message: string;
+        nextAttemptAt: number;
+        owner: string;
+      };
+      cleanupRetryScheduleId?: string;
+      generation: number;
+      owner: string;
+    };
+  };
+  yolo.setState({
+    ...state,
+    sandbox: {
+      cleanup: {
+        attempts: 0,
+        finalStatus: "failed",
+        generation: 1,
+        message: "retry cleanup",
+        nextAttemptAt: Date.now() - 1,
+        owner: "warm:retry",
+      },
+      cleanupRetryScheduleId: "cleanup-retry-old",
+      generation: 1,
+      owner: "warm:retry",
+    },
+  });
+
+  setSandboxDestroyError(new Error("cleanup unavailable"));
+  assert.equal(await yolo.repairSandboxCleanup(), false);
+  assert.equal(scheduleAttempts, 1);
+  assert.equal(
+    (Reflect.get(yolo, "state") as typeof state).sandbox.cleanupRetryScheduleId,
+    "cleanup-retry-1"
+  );
+
+  assert.equal(await yolo.repairSandboxCleanup(), false);
+  assert.equal(scheduleAttempts, 2);
+  assert.equal(
+    (Reflect.get(yolo, "state") as typeof state).sandbox.cleanupRetryScheduleId,
+    "cleanup-retry-2"
+  );
+
+  setSandboxDestroyError(null);
+  assert.equal(await yolo.repairSandboxCleanup(), true);
+  assert.equal(scheduleAttempts, 2);
+  assert.equal(
+    (Reflect.get(yolo, "state") as typeof state).sandbox.cleanupRetryScheduleId,
+    undefined
+  );
 });
 
 test("recovered warm ownership retries cleanup before allowing a new warm", async () => {
