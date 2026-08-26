@@ -149,6 +149,25 @@ test("concurrent admitted dispatches claim only one run for an agent", async () 
   );
 });
 
+test("a durable admission fence rejects a delayed token but permits the next claim", async () => {
+  const yolo = agent();
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Fenced work." },
+    "3f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90",
+    "hash-fence",
+    "identity"
+  );
+
+  assert.equal(await yolo.fenceAdmitted(queued.run.id, "1:token-a"), true);
+  assert.equal(await yolo.startAdmitted(queued.run.id, "1:late-a"), false);
+  assert.equal(yolo.getRun(queued.run.id)?.status, "queued");
+  assert.equal(fiberLog.started.length, 0);
+
+  assert.equal(await yolo.startAdmitted(queued.run.id, "2:token-b"), true);
+  assert.equal(yolo.getRun(queued.run.id)?.status, "running");
+  assert.equal(fiberLog.started.length, 1);
+});
+
 test("missing admitted identity does not consume the agent slot", async () => {
   const yolo = agent();
   const queued = await yolo.enqueue(

@@ -63,7 +63,13 @@ type DirectoryState = {
   pendingUnregisters?: Record<string, string>;
 };
 
+type AdmissionFence = {
+  generation?: number;
+  tokens?: string[];
+};
+
 type YoloAgentState = {
+  admissionFences?: Record<string, AdmissionFence | string[]>;
   admissionTokens?: Record<string, string>;
   definition: AgentDefinition | null;
   identityTokens?: Record<string, string>;
@@ -71,6 +77,41 @@ type YoloAgentState = {
 };
 
 const WARM_FIBER_KEY = "warm";
+const MAX_LEGACY_ADMISSION_FENCE_TOKENS = 32;
+
+function dispatchGeneration(dispatchToken: string): number | undefined {
+  const prefix = dispatchToken.match(/^([1-9]\d*):/u)?.[1];
+  if (!prefix) {
+    return;
+  }
+  const generation = Number(prefix);
+  return Number.isSafeInteger(generation) ? generation : undefined;
+}
+
+function normalizeAdmissionFence(
+  fence: AdmissionFence | string[] | undefined
+): AdmissionFence {
+  if (Array.isArray(fence)) {
+    return { tokens: fence };
+  }
+  return fence ?? {};
+}
+
+function rejectsAdmissionToken(
+  fence: AdmissionFence | string[] | undefined,
+  dispatchToken: string
+): boolean {
+  const normalized = normalizeAdmissionFence(fence);
+  const generation = dispatchGeneration(dispatchToken);
+  if (
+    normalized.generation !== undefined &&
+    (generation === undefined || generation <= normalized.generation)
+  ) {
+    return true;
+  }
+  return normalized.tokens?.includes(dispatchToken) ?? false;
+}
+
 /**
  * How long a warmed-but-idle container is kept before it sleeps, and — the
  * same number on purpose — how long a recorded `ready` is trusted before a
@@ -247,6 +288,7 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
 
 export class YoloAgent extends Agent<Env, YoloAgentState> {
   initialState: YoloAgentState = {
+    admissionFences: {},
     admissionTokens: {},
     definition: null,
     identityTokens: {},
@@ -686,6 +728,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
     if (
       dispatchToken &&
+      rejectsAdmissionToken(this.state.admissionFences?.[runId], dispatchToken)
+    ) {
+      return false;
+    }
+    if (
+      dispatchToken &&
       record.run.status !== "queued" &&
       record.dispatchToken !== dispatchToken
     ) {
@@ -757,6 +805,61 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       await this.reportAdmissionTerminal(runId, token);
       throw error;
     }
+    return true;
+  }
+
+  /**
+   * Durably rejects a dispatch that the admission coordinator is about to
+   * requeue. The queued status check and fence write happen in this Agent
+   * Durable Object before the RPC yields, so a start that wins the race makes
+   * this return false and keeps the coordinator's claim active.
+   */
+  fenceAdmitted(runId: string, dispatchToken: string): boolean {
+    if (!dispatchToken) {
+      return false;
+    }
+    const record = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (record?.run.status !== "queued") {
+      return false;
+    }
+    const existing = normalizeAdmissionFence(
+      this.state.admissionFences?.[runId]
+    );
+    const generation = dispatchGeneration(dispatchToken);
+    if (
+      generation !== undefined &&
+      existing.generation !== undefined &&
+      existing.generation >= generation
+    ) {
+      return true;
+    }
+    if (generation === undefined && existing.tokens?.includes(dispatchToken)) {
+      return true;
+    }
+    let nextFence: AdmissionFence;
+    if (generation === undefined) {
+      nextFence = {
+        ...existing,
+        tokens: [
+          ...(existing.tokens ?? []).filter((token) => token !== dispatchToken),
+          dispatchToken,
+        ].slice(-MAX_LEGACY_ADMISSION_FENCE_TOKENS),
+      };
+    } else {
+      nextFence = {
+        ...existing,
+        generation: Math.max(existing.generation ?? 0, generation),
+      };
+    }
+    this.setState({
+      ...this.state,
+      admissionFences: {
+        ...(this.state.admissionFences ?? {}),
+        [runId]: nextFence,
+      },
+    });
     return true;
   }
 
@@ -941,6 +1044,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
     this.setState({
       ...this.state,
+      admissionFences: Object.fromEntries(
+        Object.entries(this.state.admissionFences ?? {}).filter(
+          ([candidate]) => candidate !== runId
+        )
+      ),
       identityTokens: Object.fromEntries(
         Object.entries(this.state.identityTokens ?? {}).filter(
           ([candidate]) => candidate !== runId
@@ -1312,6 +1420,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     const retainedRunIds = new Set(runs.map((candidate) => candidate.run.id));
     this.setState({
       ...this.state,
+      admissionFences: Object.fromEntries(
+        Object.entries(this.state.admissionFences ?? {}).filter(([runId]) =>
+          retainedRunIds.has(runId)
+        )
+      ),
       admissionTokens: Object.fromEntries(
         Object.entries(this.state.admissionTokens ?? {}).filter(([runId]) =>
           retainedRunIds.has(runId)

@@ -560,6 +560,7 @@ const NEXT_WAKE_META_KEY = "next_wake_at";
 const ALARM_FAILURES_META_KEY = "alarm_failure_count";
 const ALARM_UNAVAILABLE_META_KEY = "alarm_unavailable";
 const NEXT_SEQUENCE_META_KEY = "next_sequence";
+const NEXT_DISPATCH_GENERATION_META_KEY = "next_dispatch_generation";
 
 function rowToStoredRecord(row: AdmissionRow): StoredAdmissionRecord {
   if (
@@ -1015,6 +1016,12 @@ export class RunAdmission extends DurableObject<Env> {
         return "terminal";
       }
       if (run.status === "queued") {
+        if (!(await this.fenceDispatch(record))) {
+          return "ambiguous";
+        }
+        if (!this.dispatchTokenMatches(record.runId, record.dispatchToken)) {
+          return "ambiguous";
+        }
         this.requeueRecord(record.runId, record.dispatchToken);
         return "requeued";
       }
@@ -1286,7 +1293,12 @@ export class RunAdmission extends DurableObject<Env> {
       return;
     }
     const startedAt = new Date(Date.now()).toISOString();
-    const dispatchToken = crypto.randomUUID();
+    const generation = this.readNextDispatchGeneration();
+    this.writeMetaValue(
+      NEXT_DISPATCH_GENERATION_META_KEY,
+      String(generation + 1)
+    );
+    const dispatchToken = `${generation}:${crypto.randomUUID()}`;
     this.updateDispatchLease(
       candidate.runId,
       startedAt,
@@ -1321,6 +1333,12 @@ export class RunAdmission extends DurableObject<Env> {
           // An absent run is safe to retry only while this record still has
           // its dispatch claim. Once acceptance was recorded, absence is a
           // lost terminal run and must not be dispatched again.
+          if (!(await this.fenceDispatch(record))) {
+            return "ambiguous";
+          }
+          if (!this.dispatchTokenMatches(record.runId, record.dispatchToken)) {
+            return "ambiguous";
+          }
           this.requeueRecord(record.runId, record.dispatchToken);
           return "requeued";
         }
@@ -1336,6 +1354,12 @@ export class RunAdmission extends DurableObject<Env> {
         return "terminal";
       }
       if (run.status === "queued" && leaseExpired) {
+        if (!(await this.fenceDispatch(record))) {
+          return "ambiguous";
+        }
+        if (!this.dispatchTokenMatches(record.runId, record.dispatchToken)) {
+          return "ambiguous";
+        }
         this.requeueRecord(record.runId, record.dispatchToken);
         return "requeued";
       }
@@ -1361,6 +1385,20 @@ export class RunAdmission extends DurableObject<Env> {
       }
     } catch {
       // Keep the queued record and retry on the next alarm.
+    }
+  }
+
+  private async fenceDispatch(record: StoredAdmissionRecord): Promise<boolean> {
+    if (!record.dispatchToken) {
+      return false;
+    }
+    try {
+      return await this.env.YoloAgent.getByName(record.agentId).fenceAdmitted(
+        record.runId,
+        record.dispatchToken
+      );
+    } catch {
+      return false;
     }
   }
 
@@ -1573,10 +1611,23 @@ export class RunAdmission extends DurableObject<Env> {
         "Run admission scheduler storage is invalid."
       );
     }
+
     return {
       consecutiveDispatches: consecutive,
       lastTenantHash: values.get("last_tenant_hash") ?? null,
     };
+  }
+
+  private readNextDispatchGeneration(): number {
+    const value = Number(
+      this.readMetaValue(NEXT_DISPATCH_GENERATION_META_KEY) ?? "1"
+    );
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw new AdmissionConfigurationError(
+        "Run admission dispatch generation storage is invalid."
+      );
+    }
+    return value;
   }
 
   private writeScheduler(scheduler: SchedulerState): void {

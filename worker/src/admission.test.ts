@@ -312,6 +312,7 @@ type AdmissionHarnessOptions = {
 
 function runAdmissionHarness(
   getAgent: () => {
+    fenceAdmitted?: (runId: string, dispatchToken: string) => Promise<boolean>;
     getRun: (runId: string) => unknown;
     startAdmitted: (runId: string, dispatchToken?: string) => Promise<boolean>;
     stop: (runId: string, dispatchToken?: string) => Promise<unknown>;
@@ -392,6 +393,7 @@ test("alarm reconciliation does not requeue a nonexpired dispatch lease", async 
       resolveSecond = resolve;
     });
     const harness = runAdmissionHarness(() => ({
+      fenceAdmitted: () => Promise.resolve(true),
       getRun: () => ({ status: "queued" }),
       startAdmitted: () => {
         dispatchCalls += 1;
@@ -455,6 +457,7 @@ test("dispatch fencing tokens reach the agent and stale completion cannot releas
   try {
     const dispatchedTokens: string[] = [];
     const harness = runAdmissionHarness(() => ({
+      fenceAdmitted: () => Promise.resolve(true),
       getRun: () => ({ status: "queued" }),
       startAdmitted: (_runId, dispatchToken) => {
         dispatchedTokens.push(dispatchToken ?? "");
@@ -511,6 +514,144 @@ test("dispatch fencing tokens reach the agent and stale completion cannot releas
     assert.equal(await harness.admission.release("run-68", secondToken), true);
   } finally {
     Date.now = fencingOriginalNow;
+  }
+});
+
+test("expired dispatch fencing rejects delayed A before re-dispatching B", async () => {
+  const originalNow = Date.now;
+  let now = Date.parse("2026-08-26T00:00:00.000Z");
+  Date.now = () => now;
+  try {
+    let resolveDelayedA!: (accepted: boolean) => void;
+    const delayedA = new Promise<boolean>((resolve) => {
+      resolveDelayedA = resolve;
+    });
+    const dispatchTokens: string[] = [];
+    const fencedTokens: string[] = [];
+    const accepted: boolean[] = [];
+    let starts = 0;
+    const harness = runAdmissionHarness(
+      () => ({
+        fenceAdmitted: (_runId, dispatchToken) => {
+          fencedTokens.push(dispatchToken);
+          return Promise.resolve(true);
+        },
+        getRun: () => ({ status: "queued" }),
+        startAdmitted: (_runId, dispatchToken) => {
+          dispatchTokens.push(dispatchToken ?? "");
+          if (dispatchTokens.length === 1) {
+            return delayedA.then((result) => {
+              accepted.push(result);
+              return result;
+            });
+          }
+          starts += 1;
+          accepted.push(true);
+          return Promise.resolve(true);
+        },
+        stop: () => Promise.resolve(null),
+      }),
+      {
+        RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+        RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+      }
+    );
+
+    assert.deepEqual(await harness.admission.admit(request(73)), {
+      kind: "active",
+      runId: "run-73",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(await harness.admission.admit(request(74)), {
+      kind: "queued",
+      position: 1,
+      runId: "run-74",
+    });
+
+    now += 61_000;
+    await harness.admission.alarm();
+
+    assert.equal(dispatchTokens.length, 2);
+    assert.ok(dispatchTokens[0]);
+    assert.ok(dispatchTokens[1]);
+    assert.notEqual(dispatchTokens[0], dispatchTokens[1]);
+    assert.ok(
+      Number(dispatchTokens[1]?.split(":", 1)[0]) >
+        Number(dispatchTokens[0]?.split(":", 1)[0]),
+      "each re-dispatch must advance its durable generation"
+    );
+    assert.deepEqual(fencedTokens, [dispatchTokens[0]]);
+    assert.equal(starts, 1, "token B starts exactly once");
+
+    resolveDelayedA(false);
+    await Promise.all(harness.background);
+
+    assert.deepEqual(accepted, [true, false]);
+    assert.equal(
+      (await harness.admission.getRecord("run-73"))?.state,
+      "active"
+    );
+    assert.equal(
+      (await harness.admission.getRecord("run-74"))?.state,
+      "queued"
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("a fence that loses to A starting retains the active claim and does not issue B", async () => {
+  const originalNow = Date.now;
+  let now = Date.parse("2026-08-26T00:00:00.000Z");
+  Date.now = () => now;
+  try {
+    const dispatchTokens: string[] = [];
+    const fencedTokens: string[] = [];
+    const harness = runAdmissionHarness(
+      () => ({
+        fenceAdmitted: (_runId, dispatchToken) => {
+          fencedTokens.push(dispatchToken);
+          return Promise.resolve(false);
+        },
+        getRun: () => ({ status: "queued" }),
+        startAdmitted: (_runId, dispatchToken) => {
+          dispatchTokens.push(dispatchToken ?? "");
+          return Promise.reject(new Error("A started before the fence"));
+        },
+        stop: () => Promise.resolve(null),
+      }),
+      {
+        RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+        RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+      }
+    );
+
+    assert.deepEqual(await harness.admission.admit(request(75)), {
+      kind: "active",
+      runId: "run-75",
+    });
+    await Promise.all(harness.background);
+    assert.deepEqual(await harness.admission.admit(request(76)), {
+      kind: "queued",
+      position: 1,
+      runId: "run-76",
+    });
+
+    now += 61_000;
+    await harness.admission.alarm();
+
+    assert.equal(fencedTokens.length, 1);
+    assert.equal(dispatchTokens.length, 1, "B must not be issued");
+    assert.equal(
+      (await harness.admission.getRecord("run-75"))?.state,
+      "active"
+    );
+    assert.equal(
+      (await harness.admission.getRecord("run-76"))?.state,
+      "queued"
+    );
+  } finally {
+    Date.now = originalNow;
   }
 });
 
@@ -1062,6 +1203,7 @@ test("alarm keeps its earlier cadence instead of postponing expiry", async () =>
 test("expired queued cleanup remains durable through an unavailable agent", async () => {
   let attempts = 0;
   const harness = runAdmissionHarness(() => ({
+    fenceAdmitted: () => Promise.resolve(true),
     getRun: () => ({ status: "queued" }),
     startAdmitted: () => Promise.resolve(false),
     stop: () => {
@@ -1158,6 +1300,7 @@ test("alarm schedules a new cleanup retry after its prior alarm has fired", asyn
   Date.now = () => now;
   try {
     const harness = runAdmissionHarness(() => ({
+      fenceAdmitted: () => Promise.resolve(true),
       getRun: () => ({ status: "queued" }),
       startAdmitted: () => Promise.resolve(false),
       stop: () => Promise.reject(new Error("agent unavailable")),
@@ -1239,6 +1382,7 @@ test("an interrupted dispatch clears its lease before the next alarm", async () 
   Date.now = () => now;
   try {
     const harness = runAdmissionHarness(() => ({
+      fenceAdmitted: () => Promise.resolve(true),
       getRun: () => ({ status: "queued" }),
       startAdmitted: () => {
         attempts += 1;
@@ -1362,6 +1506,7 @@ test("a queued dispatch still expires on its queue deadline", async () => {
   Date.now = () => now;
   try {
     const harness = runAdmissionHarness(() => ({
+      fenceAdmitted: () => Promise.resolve(true),
       getRun: () => ({ status: "queued" }),
       startAdmitted: () => Promise.reject(new Error("dispatch interrupted")),
       stop: () => {
