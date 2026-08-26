@@ -1180,7 +1180,7 @@ test("expired queued cleanup is enqueued even when an obsolete dispatch token re
       1,
       "a failed cancellation must leave a durable cleanup retry"
     );
-    assert.deepEqual(cancellationTokens, ["obsolete-token", undefined]);
+    assert.deepEqual(cancellationTokens, ["obsolete-token", "obsolete-token"]);
 
     harness.sql.exec("UPDATE admission_cleanup_tasks SET next_attempt_at = 0");
     await harness.admission.alarm();
@@ -2352,6 +2352,52 @@ test("expired queued cleanup remains durable through an unavailable agent", asyn
     )[0]?.count,
     0,
     "a terminal agent response clears the cleanup tombstone"
+  );
+});
+
+test("stale cleanup incarnation cannot touch a re-admitted run", async () => {
+  let stopCalls = 0;
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.resolve(false),
+      stop: () => {
+        stopCalls += 1;
+        return Promise.resolve({ status: "cancelled" });
+      },
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "0",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    }
+  );
+
+  await harness.admission.admit(request(33));
+  await harness.admission.enqueueCleanup("agent-a", "run-33");
+  harness.sql.exec(
+    `
+      UPDATE admission_records
+      SET queue_sequence = ?, state = 'queued', dispatch_token = NULL,
+          dispatch_started_at = NULL, dispatch_lease_until = NULL
+      WHERE run_id = ?
+    `,
+    2,
+    "run-33"
+  );
+  harness.sql.exec("UPDATE admission_cleanup_tasks SET next_attempt_at = 0");
+
+  await harness.admission.alarm();
+
+  assert.equal(stopCalls, 0);
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_cleanup_tasks"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    0
   );
 });
 

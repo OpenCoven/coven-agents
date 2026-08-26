@@ -92,10 +92,15 @@ export type CloudRunnerDirectory = {
     runId: string,
     agentId: string,
     status?: "active" | "queued" | "terminal"
-  ) => Awaitable<boolean | undefined>;
+  ) => Awaitable<boolean>;
   unregisterRun: (
     runId: string,
     agentId: string
+  ) => Awaitable<boolean | undefined>;
+  markRunStatus?: (
+    runId: string,
+    agentId: string,
+    status: "active" | "queued" | "terminal"
   ) => Awaitable<boolean | undefined>;
   enqueueRunMappingCleanup?: (
     runId: string,
@@ -229,6 +234,53 @@ function isOperationConflict(error: unknown): boolean {
     error instanceof OperationConflictError ||
     (error instanceof Error && error.name === "OperationConflictError")
   );
+}
+
+function directoryRunStatus(
+  run: RunSnapshot
+): "active" | "queued" | "terminal" {
+  if (isTerminal(run.status)) {
+    return "terminal";
+  }
+  return run.status === "queued" ? "queued" : "active";
+}
+
+async function markDirectoryRunStatus(
+  directory: CloudRunnerDirectory,
+  run: RunSnapshot,
+  agentId: string
+): Promise<void> {
+  if (!directory.markRunStatus) {
+    return;
+  }
+  await directory.markRunStatus(run.id, agentId, directoryRunStatus(run));
+}
+
+async function releaseTerminalAdmission(
+  directory: CloudRunnerDirectory,
+  run: RunSnapshot,
+  agentId: string,
+  admission?: CloudRunnerAdmission
+): Promise<void> {
+  let releaseError: unknown;
+  try {
+    if (admission) {
+      await admission.release(run.id);
+    }
+  } catch (error) {
+    releaseError = error;
+  } finally {
+    try {
+      await markDirectoryRunStatus(directory, run, agentId);
+    } catch {
+      // The terminal run remains authoritative; a later callback can repair
+      // the directory without turning an idempotent terminal response into a
+      // busy error.
+    }
+  }
+  if (releaseError) {
+    throw releaseError;
+  }
 }
 
 /**
@@ -768,21 +820,18 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             let admissionRecord: AdmissionRecord | null = null;
             if (!prepared.created) {
               if (isTerminal(prepared.run.status)) {
-                let terminalAdmission: CloudRunnerAdmission;
+                let terminalAdmission: CloudRunnerAdmission | undefined;
                 let stale: AdmissionRecord | null = null;
                 try {
-                  if (!dependencies.getAdmission) {
-                    throw new AdmissionUnavailableError(
-                      "Run admission is not configured."
-                    );
+                  if (dependencies.getAdmission) {
+                    terminalAdmission =
+                      await dependencies.getAdmission(environment);
+                    stale = terminalAdmission.getByOperationId
+                      ? await terminalAdmission.getByOperationId(
+                          input.operationId
+                        )
+                      : null;
                   }
-                  terminalAdmission =
-                    await dependencies.getAdmission(environment);
-                  stale = terminalAdmission.getByOperationId
-                    ? await terminalAdmission.getByOperationId(
-                        input.operationId
-                      )
-                    : null;
                 } catch (error) {
                   if (
                     error instanceof AdmissionUnavailableError ||
@@ -796,42 +845,41 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                     { cause: error }
                   );
                 }
-                if (!stale) {
-                  return busyResponse("global_busy", cors);
-                }
-                const tenantHash = await tenantAdmissionHash(
-                  environment.EDGE_ABUSE_KEY_SECRET,
-                  callerTenant
-                );
-                if (
-                  !matchesLocalAdmission(stale, {
-                    agentId: id,
-                    operationId: input.operationId,
-                    requestHash,
-                    runId: prepared.run.id,
-                    tenantHash,
-                  })
-                ) {
-                  throw new OperationConflictError();
-                }
-                // A terminal local run can outlive a failed release
-                // callback. Releasing by the validated durable operation
-                // record repairs the matching stale admission only.
-                try {
-                  await terminalAdmission.release(stale.runId);
-                } catch (error) {
-                  if (
-                    error instanceof AdmissionUnavailableError ||
-                    (error instanceof Error &&
-                      error.name === "AdmissionUnavailableError")
-                  ) {
-                    throw error;
-                  }
-                  throw new AdmissionUnavailableError(
-                    "Terminal run admission reconciliation failed.",
-                    { cause: error }
+                if (stale) {
+                  const tenantHash = await tenantAdmissionHash(
+                    environment.EDGE_ABUSE_KEY_SECRET,
+                    callerTenant
                   );
+                  if (
+                    !matchesLocalAdmission(stale, {
+                      agentId: id,
+                      operationId: input.operationId,
+                      requestHash,
+                      runId: prepared.run.id,
+                      tenantHash,
+                    })
+                  ) {
+                    throw new OperationConflictError();
+                  }
+                  if (terminalAdmission) {
+                    try {
+                      await terminalAdmission.release(stale.runId);
+                    } catch (error) {
+                      if (
+                        error instanceof AdmissionUnavailableError ||
+                        (error instanceof Error &&
+                          error.name === "AdmissionUnavailableError")
+                      ) {
+                        throw error;
+                      }
+                      throw new AdmissionUnavailableError(
+                        "Terminal run admission reconciliation failed.",
+                        { cause: error }
+                      );
+                    }
+                  }
                 }
+                await releaseTerminalAdmission(directory, prepared.run, id);
                 return json(
                   {
                     apiVersion: AGENT_RUNNER_API_VERSION,
@@ -893,8 +941,29 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 ) {
                   throw new OperationConflictError();
                 }
+                if (
+                  admissionRecord.state === "terminal" &&
+                  !isTerminal(original.status)
+                ) {
+                  const cleanupError = await cleanupRun(
+                    originalAgent,
+                    original.id,
+                    id,
+                    existingAdmission,
+                    true
+                  );
+                  if (cleanupError) {
+                    throw cleanupError;
+                  }
+                  return busyResponse("global_busy", cors);
+                }
                 if (isTerminal(original.status)) {
-                  await existingAdmission.release(admissionRecord.runId);
+                  await releaseTerminalAdmission(
+                    directory,
+                    original,
+                    id,
+                    existingAdmission
+                  );
                 } else if (originalAgent.confirmAdmission) {
                   const confirmed = await originalAgent.confirmAdmission(
                     original.id,
@@ -902,8 +971,42 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                     requestHash
                   );
                   if (!confirmed) {
+                    const latest = await originalAgent.getRun(original.id);
+                    if (latest && isTerminal(latest.status)) {
+                      await releaseTerminalAdmission(
+                        directory,
+                        latest,
+                        id,
+                        existingAdmission
+                      );
+                      return json(
+                        {
+                          apiVersion: AGENT_RUNNER_API_VERSION,
+                          run: latest,
+                        },
+                        { status: 202 },
+                        cors
+                      );
+                    }
                     await existingAdmission.release(admissionRecord.runId);
                     return busyResponse("global_busy", cors);
+                  }
+                  const latest = await originalAgent.getRun(original.id);
+                  if (latest && isTerminal(latest.status)) {
+                    await releaseTerminalAdmission(
+                      directory,
+                      latest,
+                      id,
+                      existingAdmission
+                    );
+                    return json(
+                      {
+                        apiVersion: AGENT_RUNNER_API_VERSION,
+                        run: latest,
+                      },
+                      { status: 202 },
+                      cors
+                    );
                   }
                 }
                 return json(
@@ -1037,8 +1140,29 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               ) {
                 throw new OperationConflictError();
               }
+              if (
+                duplicateAdmission.state === "terminal" &&
+                !isTerminal(original.status)
+              ) {
+                const cleanupError = await cleanupRun(
+                  originalAgent,
+                  original.id,
+                  id,
+                  admission,
+                  true
+                );
+                if (cleanupError) {
+                  throw cleanupError;
+                }
+                return busyResponse("global_busy", cors);
+              }
               if (isTerminal(original.status)) {
-                await admission.release(duplicateAdmission.runId);
+                await releaseTerminalAdmission(
+                  directory,
+                  original,
+                  id,
+                  admission
+                );
               } else if (originalAgent.confirmAdmission) {
                 const confirmed = await originalAgent.confirmAdmission(
                   original.id,
@@ -1046,8 +1170,42 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                   requestHash
                 );
                 if (!confirmed) {
+                  const latest = await originalAgent.getRun(original.id);
+                  if (latest && isTerminal(latest.status)) {
+                    await releaseTerminalAdmission(
+                      directory,
+                      latest,
+                      id,
+                      admission
+                    );
+                    return json(
+                      {
+                        apiVersion: AGENT_RUNNER_API_VERSION,
+                        run: latest,
+                      },
+                      { status: 202 },
+                      cors
+                    );
+                  }
                   await admission.release(duplicateAdmission.runId);
                   return busyResponse("global_busy", cors);
+                }
+                const latest = await originalAgent.getRun(original.id);
+                if (latest && isTerminal(latest.status)) {
+                  await releaseTerminalAdmission(
+                    directory,
+                    latest,
+                    id,
+                    admission
+                  );
+                  return json(
+                    {
+                      apiVersion: AGENT_RUNNER_API_VERSION,
+                      run: latest,
+                    },
+                    { status: 202 },
+                    cors
+                  );
                 }
               }
               return json(
@@ -1077,19 +1235,58 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                   requestHash
                 );
                 if (!confirmed) {
+                  const terminal = await agent.getRun(runId);
+                  if (terminal && isTerminal(terminal.status)) {
+                    await releaseTerminalAdmission(
+                      directory,
+                      terminal,
+                      id,
+                      admission
+                    );
+                    return json(
+                      {
+                        apiVersion: AGENT_RUNNER_API_VERSION,
+                        run: terminal,
+                      },
+                      { status: 202 },
+                      cors
+                    );
+                  }
                   await cleanupRun(agent, runId, id, admission, true);
                   return busyResponse("global_busy", cors);
                 }
               }
-              await directory.registerRun(runId, id, decision.kind);
+              const beforeRegistration = await agent.getRun(runId);
+              if (!beforeRegistration) {
+                throw new Error(
+                  "Admitted run disappeared before registration."
+                );
+              }
+              const registered = await directory.registerRun(
+                runId,
+                id,
+                directoryRunStatus(beforeRegistration)
+              );
+              if (registered !== true) {
+                throw new Error("Run directory registration was ambiguous.");
+              }
               const admittedRun = await agent.getRun(runId);
               if (!admittedRun) {
                 throw new Error("Admitted run disappeared after registration.");
               }
+              await markDirectoryRunStatus(directory, admittedRun, id);
+              if (isTerminal(admittedRun.status)) {
+                await releaseTerminalAdmission(
+                  directory,
+                  admittedRun,
+                  id,
+                  admission
+                );
+              }
               return json(
                 {
                   apiVersion: AGENT_RUNNER_API_VERSION,
-                  run: admittedRun ?? prepared.run,
+                  run: admittedRun,
                 },
                 { status: 202 },
                 cors

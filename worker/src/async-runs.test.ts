@@ -708,6 +708,41 @@ test("cancellation during drive sandbox wait clears ownership before the next ru
   }
 });
 
+test("queued identity capability survives agent rehydration without plaintext state", async () => {
+  resetFiberLog();
+  fiberControl.runFibers = false;
+  const environment = {
+    ...admissionTestEnv(),
+    RUNNER_SERVICE_TOKEN: "runner-service-secret",
+  };
+  const first = new YoloAgent(undefined as never, environment as never);
+  first.configure(definition());
+  const queued = await first.enqueue(
+    { operationId: OP_A, task: "Recover the queued identity." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a32",
+    "queued-identity-hash",
+    "identity-capability"
+  );
+  const firstState = Reflect.get(first, "state") as {
+    identityCapabilities?: Record<string, { ciphertext: string; iv: string }>;
+    identityTokens?: Record<string, string>;
+  };
+  assert.notEqual(
+    firstState.identityCapabilities?.[queued.run.id]?.ciphertext,
+    "identity-capability"
+  );
+  assert.equal(firstState.identityTokens?.[queued.run.id], undefined);
+
+  const recovered = new YoloAgent(undefined as never, environment as never);
+  recovered.setState(firstState as never);
+  assert.equal(
+    await recovered.startAdmitted(queued.run.id, "1:rehydrated-dispatch"),
+    true
+  );
+  assert.equal(recovered.getRun(queued.run.id)?.status, "running");
+  fiberControl.runFibers = false;
+});
+
 test("decommission during sandbox ownership wait cannot let the old start mutate state", async () => {
   resetFiberLog();
   resetDestroyedSandboxes();
@@ -2855,7 +2890,7 @@ test("queued cancellation fences a dispatch that starts after cancellation", asy
   const [stopped, dispatched] = await Promise.all([stopping, dispatching]);
 
   assert.equal(stopped?.status, "cancelled");
-  assert.equal(dispatched, false);
+  assert.equal(dispatched, true);
   assert.equal(fiberLog.started.length, 0);
   assert.deepEqual(fiberLog.cancelled, []);
   assert.deepEqual(destroyedSandboxes(), []);
@@ -3062,6 +3097,81 @@ test("run mappings retain active runs and only the newest terminal history", () 
   assert.equal(index.lookupRun(activeRun), AGENT_ID);
   assert.equal(index.lookupRun("terminal-run-1000"), AGENT_ID);
   assert.equal(index.lookupRun("terminal-run-1"), null);
+});
+
+test("run mappings retain every queued run regardless of terminal history size", () => {
+  const index = directory();
+
+  for (let sequence = 1; sequence <= 100; sequence += 1) {
+    index.registerRun(`queued-run-${sequence}`, AGENT_ID, "queued");
+  }
+
+  const state = Reflect.get(index, "state") as {
+    runs?: Record<string, string>;
+  };
+  assert.equal(Object.keys(state.runs ?? {}).length, 100);
+  assert.equal(index.lookupRun("queued-run-1"), AGENT_ID);
+  assert.equal(index.lookupRun("queued-run-100"), AGENT_ID);
+});
+
+test("large legacy run state migrates through bounded state with complete lookup", () => {
+  const index = directory();
+  const state = Reflect.get(index, "state") as {
+    agents: AgentDefinition[];
+    pendingUnregisters?: Record<string, string>;
+    runs?: Record<string, string>;
+  };
+  const legacyRuns = Object.fromEntries(
+    Array.from({ length: 1000 }, (_, sequence) => [
+      `legacy-large-${sequence + 1}`,
+      AGENT_ID,
+    ])
+  );
+  index.setState({
+    ...state,
+    nextRunRegistrationSequence: undefined,
+    runRegistrations: undefined,
+    runs: legacyRuns,
+  } as never);
+
+  assert.equal(index.lookupRun("legacy-large-1"), AGENT_ID);
+  const migrated = Reflect.get(index, "state") as {
+    runs?: Record<string, string>;
+    runRegistrations?: Record<string, unknown>;
+  };
+  assert.equal(Object.keys(migrated.runs ?? {}).length, 20);
+  assert.equal(Object.keys(migrated.runRegistrations ?? {}).length, 20);
+  assert.equal(index.unregisterRun("legacy-large-1", AGENT_ID), true);
+  assert.equal(index.lookupRun("legacy-large-1"), null);
+});
+
+test("terminal status received before registration is applied to the mapping", () => {
+  const index = directory();
+
+  assert.equal(
+    index.markRunStatus("pending-terminal", AGENT_ID, "terminal"),
+    true
+  );
+  assert.equal(index.registerRun("pending-terminal", AGENT_ID, "active"), true);
+
+  const state = Reflect.get(index, "state") as {
+    runRegistrations?: Record<string, { status: string }>;
+  };
+  assert.equal(
+    state.runRegistrations?.["pending-terminal"]?.status,
+    "terminal"
+  );
+  assert.equal(
+    index.markRunStatus("pending-terminal", AGENT_ID, "active"),
+    true
+  );
+  const afterStaleUpdate = Reflect.get(index, "state") as {
+    runRegistrations?: Record<string, { status: string }>;
+  };
+  assert.equal(
+    afterStaleUpdate.runRegistrations?.["pending-terminal"]?.status,
+    "terminal"
+  );
 });
 
 test("legacy run mappings migrate to durable registration sequence metadata", () => {

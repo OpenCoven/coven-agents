@@ -752,14 +752,58 @@ export class RunAdmission extends DurableObject<Env> {
       ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS admission_cleanup_tasks (
           agent_id TEXT NOT NULL,
-          run_id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          admission_sequence INTEGER NOT NULL DEFAULT 0,
+          dispatch_token TEXT,
           attempts INTEGER NOT NULL DEFAULT 0,
-          next_attempt_at INTEGER NOT NULL
+          next_attempt_at INTEGER NOT NULL,
+          PRIMARY KEY (run_id, admission_sequence)
         )
       `);
+      const cleanupColumns = ctx.storage.sql
+        .exec<{ name: string }>("PRAGMA table_info(admission_cleanup_tasks)")
+        .toArray()
+        .map((column) => column.name);
+      if (!cleanupColumns.includes("admission_sequence")) {
+        ctx.storage.sql.exec(
+          "ALTER TABLE admission_cleanup_tasks RENAME TO admission_cleanup_tasks_legacy"
+        );
+        ctx.storage.sql.exec(`
+          CREATE TABLE admission_cleanup_tasks (
+            agent_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            admission_sequence INTEGER NOT NULL DEFAULT 0,
+            dispatch_token TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at INTEGER NOT NULL,
+            PRIMARY KEY (run_id, admission_sequence)
+          )
+        `);
+        ctx.storage.sql.exec(`
+          INSERT INTO admission_cleanup_tasks
+            (agent_id, run_id, admission_sequence, dispatch_token, attempts, next_attempt_at)
+          SELECT legacy.agent_id,
+                 legacy.run_id,
+                 COALESCE(
+                   (SELECT queue_sequence
+                    FROM admission_records
+                    WHERE admission_records.run_id = legacy.run_id),
+                   0
+                 ),
+                 NULL,
+                 legacy.attempts,
+                 legacy.next_attempt_at
+          FROM admission_cleanup_tasks_legacy AS legacy
+        `);
+        ctx.storage.sql.exec("DROP TABLE admission_cleanup_tasks_legacy");
+      } else if (!cleanupColumns.includes("dispatch_token")) {
+        ctx.storage.sql.exec(
+          "ALTER TABLE admission_cleanup_tasks ADD COLUMN dispatch_token TEXT"
+        );
+      }
       ctx.storage.sql.exec(`
         CREATE INDEX IF NOT EXISTS admission_cleanup_tasks_due_idx
-        ON admission_cleanup_tasks (next_attempt_at, run_id)
+        ON admission_cleanup_tasks (next_attempt_at, run_id, admission_sequence)
       `);
       ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS admission_meta (
@@ -829,6 +873,7 @@ export class RunAdmission extends DurableObject<Env> {
             state: "queued",
           };
       this.writeRecord(record);
+      this.invalidateOlderCleanupTasks(record.runId, record.sequence);
       this.writeMetaValue(NEXT_SEQUENCE_META_KEY, String(nextSequence + 1));
       if (immediateScheduler !== null) {
         this.writeScheduler(immediateScheduler);
@@ -938,15 +983,19 @@ export class RunAdmission extends DurableObject<Env> {
 
   async enqueueCleanup(agentId: string, runId: string): Promise<void> {
     await this.initialized;
+    const current = this.findStoredByRunId(runId);
     this.enqueueCleanupTask({
       agentId,
       enqueuedAt: new Date().toISOString(),
       operationId: `cleanup:${runId}`,
       requestHash: "cleanup",
       runId,
-      sequence: 0,
-      state: "terminal",
+      sequence: current?.sequence ?? 0,
+      state: current?.state ?? "terminal",
       tenantHash: "cleanup",
+      ...(current?.dispatchToken
+        ? { dispatchToken: current.dispatchToken }
+        : {}),
     });
     await this.ensureAlarm({ throwOnFailure: false });
   }
@@ -1442,7 +1491,7 @@ export class RunAdmission extends DurableObject<Env> {
         record.dispatchToken
       );
       if (this.isTerminalOrAbsent(stopped)) {
-        this.deleteCleanupTask(record.runId);
+        this.deleteCleanupTask(record.runId, record.sequence);
       }
     } catch {
       // The durable cleanup task will retry on a later alarm.
@@ -1459,7 +1508,7 @@ export class RunAdmission extends DurableObject<Env> {
         "Run refused because the tenant queue is full."
       );
       if (this.isTerminalOrAbsent(stopped)) {
-        this.deleteCleanupTask(record.runId);
+        this.deleteCleanupTask(record.runId, record.sequence);
       }
     } catch {
       // The transition transaction already left a durable cleanup task.
@@ -1487,20 +1536,35 @@ export class RunAdmission extends DurableObject<Env> {
   private enqueueCleanupTask(record: StoredAdmissionRecord): void {
     this.ctx.storage.sql.exec(
       `
-        INSERT INTO admission_cleanup_tasks (agent_id, run_id, attempts, next_attempt_at)
-        VALUES (?, ?, 0, ?)
-        ON CONFLICT(run_id) DO NOTHING
+        INSERT INTO admission_cleanup_tasks
+          (agent_id, run_id, admission_sequence, dispatch_token, attempts, next_attempt_at)
+        VALUES (?, ?, ?, ?, 0, ?)
+        ON CONFLICT(run_id, admission_sequence) DO NOTHING
       `,
       record.agentId,
       record.runId,
+      record.sequence,
+      record.dispatchToken ?? null,
       Date.now()
     );
   }
 
-  private deleteCleanupTask(runId: string): void {
+  private invalidateOlderCleanupTasks(
+    runId: string,
+    admissionSequence: number
+  ): void {
     this.ctx.storage.sql.exec(
-      "DELETE FROM admission_cleanup_tasks WHERE run_id = ?",
-      runId
+      "DELETE FROM admission_cleanup_tasks WHERE run_id = ? AND admission_sequence <> ?",
+      runId,
+      admissionSequence
+    );
+  }
+
+  private deleteCleanupTask(runId: string, admissionSequence: number): void {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM admission_cleanup_tasks WHERE run_id = ? AND admission_sequence = ?",
+      runId,
+      admissionSequence
     );
   }
 
@@ -1525,27 +1589,40 @@ export class RunAdmission extends DurableObject<Env> {
   private async retryCleanupTasks(): Promise<void> {
     const tasks = this.ctx.storage.sql
       .exec<{
+        admission_sequence: number;
         agent_id: string;
         attempts: number;
+        dispatch_token: string | null;
         next_attempt_at: number;
         run_id: string;
       }>(
         `
-          SELECT agent_id, attempts, next_attempt_at, run_id
+          SELECT agent_id, admission_sequence, attempts, dispatch_token,
+                 next_attempt_at, run_id
           FROM admission_cleanup_tasks
           WHERE next_attempt_at <= ?
-          ORDER BY next_attempt_at, run_id
+          ORDER BY next_attempt_at, run_id, admission_sequence
           LIMIT ${MAX_CLEANUP_TASKS_PER_ALARM}
         `,
         Date.now()
       )
       .toArray();
     for (const task of tasks) {
+      const current = this.findStoredByRunId(task.run_id);
+      if (
+        !current ||
+        current.agentId !== task.agent_id ||
+        current.sequence !== task.admission_sequence
+      ) {
+        this.deleteCleanupTask(task.run_id, task.admission_sequence);
+        continue;
+      }
       let completed = false;
       try {
         // biome-ignore lint/performance/noAwaitInLoops: Cleanup tasks are deliberately processed sequentially.
         const stopped = await this.env.YoloAgent.getByName(task.agent_id).stop(
-          task.run_id
+          task.run_id,
+          task.dispatch_token ?? undefined
         );
         completed = this.isTerminalOrAbsent(stopped);
       } catch {
@@ -1553,9 +1630,14 @@ export class RunAdmission extends DurableObject<Env> {
       }
       if (completed) {
         try {
-          const released = await this.release(task.run_id);
+          const released = await this.release(
+            task.run_id,
+            task.dispatch_token ?? undefined
+          );
           completed =
             released ||
+            this.findStoredByRunId(task.run_id)?.sequence !==
+              task.admission_sequence ||
             this.findByRunId(task.run_id)?.state === "terminal" ||
             this.findByRunId(task.run_id) === null;
         } catch {
@@ -1563,13 +1645,14 @@ export class RunAdmission extends DurableObject<Env> {
         }
       }
       if (completed) {
-        this.deleteCleanupTask(task.run_id);
+        this.deleteCleanupTask(task.run_id, task.admission_sequence);
       } else {
         this.ctx.storage.sql.exec(
-          "UPDATE admission_cleanup_tasks SET attempts = ?, next_attempt_at = ? WHERE run_id = ?",
+          "UPDATE admission_cleanup_tasks SET attempts = ?, next_attempt_at = ? WHERE run_id = ? AND admission_sequence = ?",
           task.attempts + 1,
           Date.now() + ALARM_REPAIR_RETRY_MS,
-          task.run_id
+          task.run_id,
+          task.admission_sequence
         );
       }
     }

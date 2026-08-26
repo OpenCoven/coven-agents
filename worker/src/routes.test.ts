@@ -159,7 +159,7 @@ function runner() {
     // Resolves to a real owner rather than always the other tenant, so the
     // negative tests cannot pass just because every run route 404s.
     lookupRun: (runId) => (runId === MY_RUN_ID ? MINE : THEIRS),
-    registerRun: () => undefined,
+    registerRun: () => true,
     remove: () => undefined,
     unregisterRun: () => undefined,
     upsert: (value) => value,
@@ -750,7 +750,7 @@ async function failingRunner(error: Error): Promise<Response> {
       throw error;
     },
     lookupRun: () => MINE,
-    registerRun: () => undefined,
+    registerRun: () => true,
     remove: () => undefined,
     unregisterRun: () => undefined,
     upsert: (value) => value,
@@ -971,6 +971,7 @@ test("run admission happens before dispatch and receives only a tenant hash", as
     lookupRun: () => null,
     registerRun: () => {
       calls.push("register");
+      return true;
     },
     remove: () => undefined,
     unregisterRun: () => undefined,
@@ -1076,7 +1077,7 @@ test("a terminal duplicate reconciles stale admission before returning the termi
     getDirectory: () => ({
       list: () => [agents.get(MINE) as AgentDefinition],
       lookupRun: () => MINE,
-      registerRun: () => undefined,
+      registerRun: () => true,
       remove: () => undefined,
       unregisterRun: () => undefined,
       upsert: (value: AgentDefinition) => value,
@@ -1157,7 +1158,7 @@ test("a cross-tenant duplicate cannot return or release a foreign admission", as
         directoryLookups += 1;
         return THEIRS;
       },
-      registerRun: () => undefined,
+      registerRun: () => true,
       remove: () => undefined,
       unregisterRun: () => undefined,
       upsert: (value: AgentDefinition) => value,
@@ -1244,7 +1245,7 @@ test("a stale local duplicate cannot release a different run with the same opera
         directoryLookups += 1;
         return MINE;
       },
-      registerRun: () => undefined,
+      registerRun: () => true,
       remove: () => undefined,
       unregisterRun: () => undefined,
       upsert: (value: AgentDefinition) => value,
@@ -1311,7 +1312,7 @@ test("an orphan queued duplicate resumes admission with its existing run", async
     getDirectory: () => ({
       list: () => [agents.get(MINE) as AgentDefinition],
       lookupRun: () => MINE,
-      registerRun: () => undefined,
+      registerRun: () => true,
       remove: () => undefined,
       unregisterRun: () => undefined,
       upsert: (value: AgentDefinition) => value,
@@ -1371,7 +1372,7 @@ test("reject mode refuses an unhealthy admission object without bypassing it", a
         return storedAgent ? [storedAgent] : [];
       },
       lookupRun: () => null,
-      registerRun: () => undefined,
+      registerRun: () => true,
       remove: () => undefined,
       unregisterRun: () => undefined,
       upsert: (value: AgentDefinition) => value,
@@ -1435,7 +1436,7 @@ test("reject fallback discards a queued run before releasing admission", async (
     getDirectory: () => ({
       list: () => [agents.get(MINE) as AgentDefinition],
       lookupRun: () => null,
-      registerRun: () => undefined,
+      registerRun: () => true,
       remove: () => undefined,
       unregisterRun: () => undefined,
       upsert: (value: AgentDefinition) => value,
@@ -1501,7 +1502,7 @@ test("reject fallback stops an execution that wins the discard race before relea
     getDirectory: () => ({
       list: () => [agents.get(MINE) as AgentDefinition],
       lookupRun: () => null,
-      registerRun: () => undefined,
+      registerRun: () => true,
       remove: () => undefined,
       unregisterRun: () => undefined,
       upsert: (value: AgentDefinition) => value,
@@ -1676,7 +1677,7 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
       registerAttempts += 1;
       if (registerAttempts === 1) {
         mappings.set(runId, MINE);
-        throw new Error("directory unavailable");
+        return false;
       }
       mappings.set(runId, MINE);
       return true;
@@ -1855,7 +1856,6 @@ test("a run mapping is unregistered when the admitted run disappears after regis
 
   assert.equal(response.status, 500);
   assert.deepEqual(calls, [
-    "register",
     "unregister",
     "enqueue-mapping-cleanup",
     "stop",

@@ -8,6 +8,7 @@
  * merely type-checked. Tests that want to observe a queued-but-unfinished run
  * pass `runFibers: false`.
  */
+import { DatabaseSync } from "node:sqlite";
 
 export type FiberRecoveryContext = {
   createdAt: number;
@@ -67,6 +68,7 @@ export class Agent<Environment, State> {
   env: Environment;
   initialState!: State;
   #state: State | undefined;
+  readonly #database = new DatabaseSync(":memory:");
 
   constructor(_state?: unknown, environment?: Environment) {
     this.env = environment as Environment;
@@ -100,6 +102,26 @@ export class Agent<Environment, State> {
 
   setState(state: State): void {
     this.#state = state;
+  }
+
+  sql<T = Record<string, string | number | boolean | null>>(
+    strings: TemplateStringsArray,
+    ...values: (string | number | boolean | null)[]
+  ): T[] {
+    const query = strings.reduce(
+      (result, part, index) =>
+        `${result}${part}${index < values.length ? "?" : ""}`,
+      ""
+    );
+    const statement = this.#database.prepare(query);
+    const inputs = values.map((value) =>
+      typeof value === "boolean" ? Number(value) : value
+    );
+    if (/^\s*(SELECT|PRAGMA)/iu.test(query)) {
+      return statement.all(...inputs) as T[];
+    }
+    statement.run(...inputs);
+    return [];
   }
 
   async startFiber(

@@ -62,13 +62,16 @@ type DirectoryState = {
   runs?: Record<string, string>;
   runRegistrations?: Record<string, RunRegistration>;
   nextRunRegistrationSequence?: number;
+  pendingRunStatuses?: Record<string, RunRegistration>;
   pendingUnregisters?: Record<string, string>;
 };
+
+type RunRegistrationStatus = "active" | "queued" | "terminal" | "unknown";
 
 type RunRegistration = {
   agentId: string;
   sequence: number;
-  status: "active" | "queued" | "terminal";
+  status: RunRegistrationStatus;
 };
 
 type DirectoryRunMappings = {
@@ -126,6 +129,8 @@ type YoloAgentState = {
   decommission?: DecommissionSaga;
   dispatchClaims?: Record<string, string>;
   definition: AgentDefinition | null;
+  identityCapabilities?: Record<string, StoredIdentityCapability>;
+  /** Legacy pre-capability state; migrated on the next queued retry. */
   identityTokens?: Record<string, string>;
   lifecycle: {
     generation: number;
@@ -143,12 +148,35 @@ const CLEANUP_RETRY_DELAY_MS = 5000;
 export const PENDING_ADMISSION_TIMEOUT_MS = 30_000;
 const MAX_LEGACY_ADMISSION_FENCE_TOKENS = 32;
 const MAX_ADMISSION_FENCE_TOMBSTONES = 128;
+const MAX_PENDING_RUN_STATUS_UPDATES = 128;
+const LEGACY_RUN_MIGRATION_BATCH = MAX_TERMINAL_RUNS_PER_AGENT;
+const IDENTITY_CAPABILITY_TTL_MS = 15 * 60 * 1000;
+
+type StoredIdentityCapability = {
+  ciphertext: string;
+  expiresAt: number;
+  iv: string;
+};
 
 type PendingAdmissionSchedulePayload = {
   generation: number;
   runId: string;
   token: string;
 };
+
+function base64Encode(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+function base64Decode(value: string): ArrayBuffer {
+  const binary = atob(value);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0))
+    .buffer as ArrayBuffer;
+}
 
 function dispatchGeneration(dispatchToken: string): number | undefined {
   const prefix = dispatchToken.match(/^([1-9]\d*):/u)?.[1];
@@ -257,6 +285,7 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
   initialState: DirectoryState = {
     agents: [],
     nextRunRegistrationSequence: 1,
+    pendingRunStatuses: {},
     pendingUnregisters: {},
     runRegistrations: {},
     runs: {},
@@ -298,11 +327,21 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
         ([, owner]) => owner !== agentId
       )
     );
+    const pendingRunStatuses = Object.fromEntries(
+      Object.entries(this.state.pendingRunStatuses ?? {}).filter(
+        ([, registration]) => registration.agentId !== agentId
+      )
+    );
     const pruned = this.pruneRunMappings(runs, registrations);
+    this.directorySql(
+      "DELETE FROM agent_directory_legacy_runs WHERE agent_id = ?",
+      [agentId]
+    );
     this.setState({
       ...this.state,
       agents: this.state.agents.filter((agent) => agent.id !== agentId),
       nextRunRegistrationSequence: mappings.nextSequence,
+      pendingRunStatuses,
       pendingUnregisters,
       runRegistrations: pruned.registrations,
       runs: pruned.runs,
@@ -312,25 +351,104 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
   registerRun(
     runId: string,
     agentId: string,
-    status: RunRegistration["status"] = "active"
+    status: Exclude<RunRegistrationStatus, "unknown"> = "active"
   ): boolean {
     const mappings = this.migrateRunMappings();
     const { runs } = mappings;
     if (Object.hasOwn(runs, runId)) {
-      return false;
+      if (runs[runId] !== agentId) {
+        return false;
+      }
+      const pending = this.state.pendingRunStatuses?.[runId];
+      const registration = mappings.registrations[runId];
+      const effectiveStatus =
+        registration?.status !== "terminal" &&
+        pending?.agentId === agentId &&
+        pending.status !== "unknown"
+          ? pending.status
+          : status;
+      const registrations = {
+        ...mappings.registrations,
+        [runId]: {
+          ...mappings.registrations[runId],
+          status: effectiveStatus,
+        },
+      };
+      const pendingRunStatuses = {
+        ...(this.state.pendingRunStatuses ?? {}),
+      };
+      delete pendingRunStatuses[runId];
+      const pruned = this.pruneRunMappings(runs, registrations);
+      this.setState({
+        ...this.state,
+        pendingRunStatuses,
+        runRegistrations: pruned.registrations,
+        runs: pruned.runs,
+      });
+      return true;
     }
+    const legacy = this.readLegacyRun(runId);
+    if (legacy) {
+      if (legacy.agentId !== agentId) {
+        return false;
+      }
+      const pending = this.state.pendingRunStatuses?.[runId];
+      const effectiveStatus =
+        pending?.agentId === agentId && pending.status !== "unknown"
+          ? pending.status
+          : status;
+      const registrations = {
+        ...mappings.registrations,
+        [runId]: {
+          agentId,
+          sequence: legacy.sequence,
+          status: effectiveStatus,
+        },
+      };
+      const projectedRuns = { ...mappings.runs, [runId]: agentId };
+      const pruned = this.pruneRunMappings(projectedRuns, registrations);
+      this.directorySql(
+        "DELETE FROM agent_directory_legacy_runs WHERE run_id = ? AND agent_id = ?",
+        [runId, agentId]
+      );
+      const pendingRunStatuses = {
+        ...(this.state.pendingRunStatuses ?? {}),
+      };
+      delete pendingRunStatuses[runId];
+      this.setState({
+        ...this.state,
+        nextRunRegistrationSequence: Math.max(
+          this.state.nextRunRegistrationSequence ?? 1,
+          legacy.sequence + 1
+        ),
+        pendingRunStatuses,
+        runRegistrations: pruned.registrations,
+        runs: pruned.runs,
+      });
+      return true;
+    }
+    const pending = this.state.pendingRunStatuses?.[runId];
+    const effectiveStatus =
+      pending?.agentId === agentId && pending.status !== "unknown"
+        ? pending.status
+        : status;
     const registrations = {
       ...mappings.registrations,
       [runId]: {
         agentId,
         sequence: mappings.nextSequence,
-        status,
+        status: effectiveStatus,
       },
     };
+    const pendingRunStatuses = {
+      ...(this.state.pendingRunStatuses ?? {}),
+    };
+    delete pendingRunStatuses[runId];
     const pruned = this.pruneRunMappings(runs, registrations);
     this.setState({
       ...this.state,
       nextRunRegistrationSequence: mappings.nextSequence + 1,
+      pendingRunStatuses,
       runRegistrations: pruned.registrations,
       runs: { ...pruned.runs, [runId]: agentId },
     });
@@ -341,39 +459,121 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
     this.drainPendingUnregisters();
     const mappings = this.migrateRunMappings();
     const { runs } = mappings;
-    if (!Object.hasOwn(runs, runId) || runs[runId] !== agentId) {
+    if (Object.hasOwn(runs, runId) && runs[runId] === agentId) {
+      const remaining = { ...runs };
+      delete remaining[runId];
+      const registrations = { ...mappings.registrations };
+      delete registrations[runId];
+      const pruned = this.pruneRunMappings(remaining, registrations);
+      const pendingRunStatuses = {
+        ...(this.state.pendingRunStatuses ?? {}),
+      };
+      delete pendingRunStatuses[runId];
+      this.directorySql(
+        "DELETE FROM agent_directory_legacy_runs WHERE run_id = ? AND agent_id = ?",
+        [runId, agentId]
+      );
+      this.setState({
+        ...this.state,
+        pendingRunStatuses,
+        runRegistrations: pruned.registrations,
+        runs: pruned.runs,
+      });
+      return true;
+    }
+    const legacy = this.readLegacyRun(runId);
+    if (!legacy || legacy.agentId !== agentId) {
       return false;
     }
-    const remaining = { ...runs };
-    delete remaining[runId];
-    const registrations = { ...mappings.registrations };
-    delete registrations[runId];
-    const pruned = this.pruneRunMappings(remaining, registrations);
-    this.setState({
-      ...this.state,
-      runRegistrations: pruned.registrations,
-      runs: pruned.runs,
-    });
+    this.directorySql(
+      "DELETE FROM agent_directory_legacy_runs WHERE run_id = ? AND agent_id = ?",
+      [runId, agentId]
+    );
+    const pendingRunStatuses = {
+      ...(this.state.pendingRunStatuses ?? {}),
+    };
+    delete pendingRunStatuses[runId];
+    this.setState({ ...this.state, pendingRunStatuses });
     return true;
   }
 
   markRunStatus(
     runId: string,
     agentId: string,
-    status: RunRegistration["status"]
+    status: Exclude<RunRegistrationStatus, "unknown">
   ): boolean {
     const mappings = this.migrateRunMappings();
     const current = mappings.registrations[runId];
-    if (!current || current.agentId !== agentId) {
+    if (current && current.agentId !== agentId) {
       return false;
     }
+    if (!current) {
+      const legacy = this.readLegacyRun(runId);
+      if (legacy) {
+        if (legacy.agentId !== agentId) {
+          return false;
+        }
+        const effectiveStatus =
+          legacy.status === "terminal" && status !== "terminal"
+            ? "terminal"
+            : status;
+        const registrations = {
+          ...mappings.registrations,
+          [runId]: {
+            agentId,
+            sequence: legacy.sequence,
+            status: effectiveStatus,
+          },
+        };
+        const runs = { ...mappings.runs, [runId]: agentId };
+        const pruned = this.pruneRunMappings(runs, registrations);
+        this.directorySql(
+          "DELETE FROM agent_directory_legacy_runs WHERE run_id = ? AND agent_id = ?",
+          [runId, agentId]
+        );
+        this.setState({
+          ...this.state,
+          nextRunRegistrationSequence: Math.max(
+            this.state.nextRunRegistrationSequence ?? 1,
+            legacy.sequence + 1
+          ),
+          runRegistrations: pruned.registrations,
+          runs: pruned.runs,
+        });
+        return true;
+      }
+      const pending = this.state.pendingRunStatuses?.[runId];
+      const effectiveStatus =
+        pending?.status === "terminal" && status !== "terminal"
+          ? "terminal"
+          : status;
+      const pendingRunStatuses = this.prunePendingRunStatuses({
+        ...(this.state.pendingRunStatuses ?? {}),
+        [runId]: {
+          agentId,
+          sequence: Number.MAX_SAFE_INTEGER,
+          status: effectiveStatus,
+        },
+      });
+      this.setState({ ...this.state, pendingRunStatuses });
+      return true;
+    }
+    const effectiveStatus =
+      current?.status === "terminal" && status !== "terminal"
+        ? "terminal"
+        : status;
     const registrations = {
       ...mappings.registrations,
-      [runId]: { ...current, status },
+      [runId]: { ...current, status: effectiveStatus },
     };
     const pruned = this.pruneRunMappings(mappings.runs, registrations);
     this.setState({
       ...this.state,
+      pendingRunStatuses: Object.fromEntries(
+        Object.entries(this.state.pendingRunStatuses ?? {}).filter(
+          ([candidate]) => candidate !== runId
+        )
+      ),
       runRegistrations: pruned.registrations,
       runs: pruned.runs,
     });
@@ -386,7 +586,10 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
     // otherwise resolve to something off Object.prototype and be treated as an
     // agent id.
     const { runs } = this.migrateRunMappings();
-    return Object.hasOwn(runs, runId) ? (runs[runId] ?? null) : null;
+    if (Object.hasOwn(runs, runId)) {
+      return runs[runId] ?? null;
+    }
+    return this.readLegacyRun(runId)?.agentId ?? null;
   }
 
   enqueueRunMappingCleanup(runId: string, agentId: string): void {
@@ -415,10 +618,21 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
         delete runs[runId];
         delete registrations[runId];
       }
+      this.directorySql(
+        "DELETE FROM agent_directory_legacy_runs WHERE run_id = ? AND agent_id = ?",
+        [runId, agentId]
+      );
       delete remaining[runId];
+    }
+    const pendingRunStatuses = {
+      ...(this.state.pendingRunStatuses ?? {}),
+    };
+    for (const [runId] of entries) {
+      delete pendingRunStatuses[runId];
     }
     this.setState({
       ...this.state,
+      pendingRunStatuses,
       pendingUnregisters: remaining,
       runRegistrations: registrations,
       runs,
@@ -426,14 +640,28 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
   }
 
   private migrateRunMappings(): DirectoryRunMappings {
+    this.ensureLegacyRunTable();
     const legacyRuns = { ...(this.state.runs ?? {}) };
     const existing = this.state.runRegistrations ?? {};
     const registrations: Record<string, RunRegistration> = {};
     let nextSequence = 1;
     let changed = this.state.runRegistrations === undefined;
+    const migrated: {
+      agentId: string;
+      runId: string;
+      sequence: number;
+    }[] = [];
 
     for (const [runId, agentId] of Object.entries(legacyRuns)) {
       const candidate = existing[runId];
+      const candidateStatus =
+        candidate?.agentId === agentId &&
+        (candidate.status === "active" ||
+          candidate.status === "queued" ||
+          candidate.status === "terminal" ||
+          candidate.status === "unknown")
+          ? candidate.status
+          : undefined;
       const sequence =
         candidate &&
         candidate.agentId === agentId &&
@@ -441,23 +669,55 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
         candidate.sequence > 0
           ? candidate.sequence
           : nextSequence;
-      const status =
-        candidate?.agentId === agentId &&
-        (candidate.status === "active" ||
-          candidate.status === "queued" ||
-          candidate.status === "terminal")
-          ? candidate.status
-          : "terminal";
-      registrations[runId] = { agentId, sequence, status };
+      if (candidateStatus) {
+        registrations[runId] = {
+          agentId,
+          sequence,
+          status: candidateStatus,
+        };
+      } else {
+        migrated.push({ agentId, runId, sequence });
+      }
       nextSequence = Math.max(nextSequence, sequence + 1);
       if (
         !candidate ||
         candidate.agentId !== agentId ||
         candidate.sequence !== sequence ||
-        candidate.status !== status
+        candidate.status !== candidateStatus
       ) {
         changed = true;
       }
+    }
+
+    for (const entry of migrated) {
+      this.writeLegacyRun(entry);
+    }
+    // Keep only a small recent projection in Agent state. The complete legacy
+    // index lives in the Agent's SQLite store so migration cannot create an
+    // unbounded state blob, while lookups still resolve every old run.
+    const recentCounts = new Map<string, number>();
+    const recentLegacyIds = new Set(
+      migrated
+        .sort((left, right) => right.sequence - left.sequence)
+        .filter((entry) => {
+          const count = recentCounts.get(entry.agentId) ?? 0;
+          if (count >= LEGACY_RUN_MIGRATION_BATCH) {
+            return false;
+          }
+          recentCounts.set(entry.agentId, count + 1);
+          return true;
+        })
+        .map((entry) => entry.runId)
+    );
+    for (const entry of migrated) {
+      if (!recentLegacyIds.has(entry.runId)) {
+        continue;
+      }
+      registrations[entry.runId] = {
+        agentId: entry.agentId,
+        sequence: entry.sequence,
+        status: "unknown",
+      };
     }
 
     for (const [runId, candidate] of Object.entries(existing)) {
@@ -489,15 +749,50 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
       nextSequence = storedNext;
     }
 
+    const pruned = this.pruneRunMappings(
+      Object.fromEntries(
+        Object.entries(registrations).map(([runId, registration]) => [
+          runId,
+          registration.agentId,
+        ])
+      ),
+      registrations
+    );
+    if (
+      Object.keys(pruned.registrations).length !==
+      Object.keys(registrations).length
+    ) {
+      changed = true;
+    }
     if (changed || this.state.nextRunRegistrationSequence === undefined) {
+      const projectedRuns = Object.fromEntries(
+        Object.entries(pruned.registrations).map(([runId, registration]) => [
+          runId,
+          registration.agentId,
+        ])
+      );
       this.setState({
         ...this.state,
         nextRunRegistrationSequence: nextSequence,
-        runRegistrations: registrations,
-        runs: legacyRuns,
+        runRegistrations: pruned.registrations,
+        runs: projectedRuns,
       });
+      return {
+        nextSequence,
+        registrations: pruned.registrations,
+        runs: pruned.runs,
+      };
     }
-    return { nextSequence, registrations, runs: legacyRuns };
+    return {
+      nextSequence,
+      registrations,
+      runs: Object.fromEntries(
+        Object.entries(registrations).map(([runId, registration]) => [
+          runId,
+          registration.agentId,
+        ])
+      ),
+    };
   }
 
   private pruneRunMappings(
@@ -515,14 +810,13 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
       const ordered = entries.sort(
         (left, right) => right[1].sequence - left[1].sequence
       );
-      const active = ordered.find(
-        ([, registration]) => registration.status === "active"
-      );
-      if (active) {
-        keep.add(active[0]);
+      for (const [runId] of ordered.filter(
+        ([, candidate]) => candidate.status !== "terminal"
+      )) {
+        keep.add(runId);
       }
       for (const [runId] of ordered
-        .filter(([candidate]) => candidate !== active?.[0])
+        .filter(([, candidate]) => candidate.status === "terminal")
         .slice(0, MAX_TERMINAL_RUNS_PER_AGENT)) {
         keep.add(runId);
       }
@@ -538,6 +832,108 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
     };
   }
 
+  private ensureLegacyRunTable(): void {
+    this.directorySql(`
+      CREATE TABLE IF NOT EXISTS agent_directory_legacy_runs (
+        run_id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('unknown', 'active', 'queued', 'terminal'))
+      )
+    `);
+  }
+
+  private directorySql<T = Record<string, unknown>>(
+    query: string,
+    values: (string | number | null)[] = []
+  ): T[] {
+    const { sql } = this as unknown as {
+      sql?: (
+        strings: TemplateStringsArray,
+        ...values: (string | number | null)[]
+      ) => T[];
+    };
+    if (typeof sql !== "function") {
+      return [];
+    }
+    const parts = query.split("?");
+    const strings = parts as unknown as TemplateStringsArray & {
+      raw: string[];
+    };
+    strings.raw = parts;
+    return sql.call(this, strings, ...values);
+  }
+
+  private writeLegacyRun(entry: {
+    agentId: string;
+    runId: string;
+    sequence: number;
+  }): void {
+    this.directorySql(
+      `
+        INSERT INTO agent_directory_legacy_runs
+          (run_id, agent_id, sequence, status)
+        VALUES (?, ?, ?, 'unknown')
+        ON CONFLICT(run_id) DO UPDATE SET
+          agent_id = excluded.agent_id,
+          sequence = excluded.sequence
+      `,
+      [entry.runId, entry.agentId, entry.sequence]
+    );
+  }
+
+  private readLegacyRun(runId: string): {
+    agentId: string;
+    sequence: number;
+    status: RunRegistrationStatus;
+  } | null {
+    const [row] = this.directorySql<{
+      agent_id: string;
+      sequence: number;
+      status: RunRegistrationStatus;
+    }>(
+      "SELECT agent_id, sequence, status FROM agent_directory_legacy_runs WHERE run_id = ?",
+      [runId]
+    );
+    return row
+      ? {
+          agentId: row.agent_id,
+          sequence: row.sequence,
+          status: row.status,
+        }
+      : null;
+  }
+
+  private prunePendingRunStatuses(
+    statuses: Record<string, RunRegistration>
+  ): Record<string, RunRegistration> {
+    const byAgent = new Map<string, [string, RunRegistration][]>();
+    for (const [runId, registration] of Object.entries(statuses)) {
+      const entries = byAgent.get(registration.agentId) ?? [];
+      entries.push([runId, registration]);
+      byAgent.set(registration.agentId, entries);
+    }
+    const keep = new Set<string>();
+    for (const entries of byAgent.values()) {
+      const ordered = entries.sort(
+        (left, right) => right[1].sequence - left[1].sequence
+      );
+      for (const [runId] of ordered
+        .filter(([, candidate]) => candidate.status !== "terminal")
+        .slice(0, MAX_PENDING_RUN_STATUS_UPDATES)) {
+        keep.add(runId);
+      }
+      for (const [runId] of ordered
+        .filter(([, candidate]) => candidate.status === "terminal")
+        .slice(0, MAX_TERMINAL_RUNS_PER_AGENT)) {
+        keep.add(runId);
+      }
+    }
+    return Object.fromEntries(
+      Object.entries(statuses).filter(([runId]) => keep.has(runId))
+    );
+  }
+
   harnesses(): Promise<HarnessStatus[]> {
     return listCloudHarnesses(
       getSandbox(this.env.Sandbox, "harness-probe", {
@@ -549,11 +945,17 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
 }
 
 export class YoloAgent extends Agent<Env, YoloAgentState> {
+  private readonly ephemeralIdentityTokens = new Map<
+    string,
+    { expiresAt: number; token: string }
+  >();
+
   initialState: YoloAgentState = {
     admissionFences: {},
     admissionTokens: {},
     definition: null,
     dispatchClaims: {},
+    identityCapabilities: {},
     identityTokens: {},
     lifecycle: { generation: 0, status: "active" },
     runs: [],
@@ -748,7 +1150,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
 
   private async markDirectoryRunStatus(
     runId: string,
-    status: "active" | "terminal"
+    status: Exclude<RunRegistrationStatus, "unknown">
   ): Promise<void> {
     const namespace = (
       this.env as unknown as {
@@ -1805,6 +2207,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         plan.record.run.status === "queued" &&
         !plan.record.admissionConfirmedAt
       ) {
+        if (identityToken) {
+          await this.attachIdentityCapability(
+            plan.record.run.id,
+            identityToken
+          );
+        }
         if (!plan.record.pendingAdmission) {
           const pendingAdmission = this.newPendingAdmission();
           this.persistRun({
@@ -1822,15 +2230,147 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       ...plan.record,
       pendingAdmission,
     });
-    this.setState({
-      ...this.state,
-      identityTokens: {
-        ...(this.state.identityTokens ?? {}),
-        [runId]: identityToken,
-      },
-    });
+    if (identityToken) {
+      await this.attachIdentityCapability(runId, identityToken);
+    }
     await this.schedulePendingAdmission(runId);
     return { created: true, run: plan.record.run };
+  }
+
+  private async attachIdentityCapability(
+    runId: string,
+    identityToken: string
+  ): Promise<void> {
+    const secret = (this.env as unknown as { RUNNER_SERVICE_TOKEN?: string })
+      .RUNNER_SERVICE_TOKEN;
+    if (!secret) {
+      // Test/local agents may not have a deployment secret. Keep this
+      // capability only in the live object; durable state must never contain
+      // the bearer token in plaintext.
+      this.ephemeralIdentityTokens.set(runId, {
+        expiresAt: Date.now() + IDENTITY_CAPABILITY_TTL_MS,
+        token: identityToken,
+      });
+      const identityCapabilities = {
+        ...(this.state.identityCapabilities ?? {}),
+      };
+      delete identityCapabilities[runId];
+      const identityTokens = { ...(this.state.identityTokens ?? {}) };
+      delete identityTokens[runId];
+      this.setState({ ...this.state, identityCapabilities, identityTokens });
+      return;
+    }
+    const capability = await this.protectIdentityToken(identityToken);
+    const identityCapabilities = {
+      ...(this.state.identityCapabilities ?? {}),
+      [runId]: capability,
+    };
+    const identityTokens = { ...(this.state.identityTokens ?? {}) };
+    delete identityTokens[runId];
+    this.setState({
+      ...this.state,
+      identityCapabilities,
+      identityTokens,
+    });
+  }
+
+  private async protectIdentityToken(
+    identityToken: string
+  ): Promise<StoredIdentityCapability> {
+    const expiresAt = Date.now() + IDENTITY_CAPABILITY_TTL_MS;
+    const secret = (this.env as unknown as { RUNNER_SERVICE_TOKEN?: string })
+      .RUNNER_SERVICE_TOKEN;
+    if (!secret) {
+      throw new Error("Runner service token is required for durable identity.");
+    }
+    const key = await this.identityCapabilityKey(secret);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encrypted = await crypto.subtle.encrypt(
+      { iv, name: "AES-GCM" },
+      key,
+      new TextEncoder().encode(identityToken)
+    );
+    return {
+      ciphertext: base64Encode(new Uint8Array(encrypted)),
+      expiresAt,
+      iv: base64Encode(iv),
+    };
+  }
+
+  private async readIdentityToken(runId: string): Promise<string | undefined> {
+    const capability = this.state.identityCapabilities?.[runId];
+    if (capability) {
+      if (capability.expiresAt <= Date.now()) {
+        this.removeIdentityCapability(runId);
+        return;
+      }
+      const secret = (this.env as unknown as { RUNNER_SERVICE_TOKEN?: string })
+        .RUNNER_SERVICE_TOKEN;
+      if (!secret || !capability.iv) {
+        this.removeIdentityCapability(runId);
+        return this.readEphemeralIdentityToken(runId);
+      }
+      try {
+        const key = await this.identityCapabilityKey(secret);
+        const decrypted = await crypto.subtle.decrypt(
+          { iv: base64Decode(capability.iv), name: "AES-GCM" },
+          key,
+          base64Decode(capability.ciphertext)
+        );
+        return new TextDecoder().decode(decrypted);
+      } catch {
+        this.removeIdentityCapability(runId);
+        return;
+      }
+    }
+    const legacyToken = this.state.identityTokens?.[runId];
+    if (legacyToken) {
+      const secret = (this.env as unknown as { RUNNER_SERVICE_TOKEN?: string })
+        .RUNNER_SERVICE_TOKEN;
+      if (secret) {
+        await this.attachIdentityCapability(runId, legacyToken);
+        return this.readIdentityToken(runId);
+      }
+      this.removeIdentityCapability(runId);
+    }
+    return this.readEphemeralIdentityToken(runId);
+  }
+
+  private readEphemeralIdentityToken(runId: string): string | undefined {
+    const capability = this.ephemeralIdentityTokens.get(runId);
+    if (!capability) {
+      return;
+    }
+    if (capability.expiresAt <= Date.now()) {
+      this.ephemeralIdentityTokens.delete(runId);
+      return;
+    }
+    return capability.token;
+  }
+
+  private removeIdentityCapability(runId: string): void {
+    this.ephemeralIdentityTokens.delete(runId);
+    const identityCapabilities = {
+      ...(this.state.identityCapabilities ?? {}),
+    };
+    delete identityCapabilities[runId];
+    const identityTokens = { ...(this.state.identityTokens ?? {}) };
+    delete identityTokens[runId];
+    this.setState({ ...this.state, identityCapabilities, identityTokens });
+  }
+
+  private async identityCapabilityKey(secret: string): Promise<CryptoKey> {
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(secret)
+    );
+    return await crypto.subtle.importKey(
+      "raw",
+      digest,
+      { name: "AES-GCM" },
+      false,
+      ["decrypt", "encrypt"]
+    );
   }
 
   private newPendingAdmission(): NonNullable<
@@ -1921,12 +2461,15 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     );
     if (
       !current ||
-      isTerminal(current.run.status) ||
       current.run.operationId !== operationId ||
       current.operationHash !== requestHash ||
       current.run.agentId !== this.requireDefinition().id
     ) {
       return false;
+    }
+    if (isTerminal(current.run.status)) {
+      await this.reportAdmissionTerminal(runId);
+      return true;
     }
     const pending = current.pendingAdmission;
     if (!pending && current.admissionConfirmedAt) {
@@ -2075,20 +2618,34 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       return false;
     }
     if (!(await this.dispatchIsAdmitted(runId, dispatchToken))) {
+      const terminal = this.state.runs.find(
+        (candidate) => candidate.run.id === runId
+      );
+      if (terminal && isTerminal(terminal.run.status)) {
+        await this.reportAdmissionTerminal(runId, dispatchToken);
+        return true;
+      }
       return false;
     }
     const admittedRecord = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
-    if (
-      admittedRecord &&
-      !(await this.confirmAdmission(
+    if (admittedRecord) {
+      const confirmed = await this.confirmAdmission(
         runId,
         admittedRecord.run.operationId,
         admittedRecord.operationHash
-      ))
-    ) {
-      return false;
+      );
+      if (!confirmed) {
+        return false;
+      }
+      const afterConfirmation = this.state.runs.find(
+        (candidate) => candidate.run.id === runId
+      );
+      if (afterConfirmation && isTerminal(afterConfirmation.run.status)) {
+        await this.reportAdmissionTerminal(runId, dispatchToken);
+        return true;
+      }
     }
     const definition = this.requireActiveDefinition();
     const lifecycleGeneration = this.currentLifecycle().generation;
@@ -2120,7 +2677,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     ) {
       return false;
     }
-    const identityToken = this.state.identityTokens?.[runId];
+    const identityToken = await this.readIdentityToken(runId);
     if (!identityToken) {
       throw new Error("Queued run identity is unavailable.");
     }
@@ -2597,6 +3154,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       ),
       dispatchClaims: Object.fromEntries(
         Object.entries(this.state.dispatchClaims ?? {}).filter(
+          ([candidate]) => candidate !== runId
+        )
+      ),
+      identityCapabilities: Object.fromEntries(
+        Object.entries(this.state.identityCapabilities ?? {}).filter(
           ([candidate]) => candidate !== runId
         )
       ),
@@ -3575,6 +4137,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           retainedRunIds.has(runId)
         )
       ),
+      identityCapabilities: Object.fromEntries(
+        Object.entries(this.state.identityCapabilities ?? {}).filter(
+          ([runId]) => retainedRunIds.has(runId)
+        )
+      ),
       identityTokens: Object.fromEntries(
         Object.entries(this.state.identityTokens ?? {}).filter(([runId]) =>
           retainedRunIds.has(runId)
@@ -3633,7 +4200,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         ([candidate]) => candidate !== runId
       )
     );
-    this.setState({ ...this.state, identityTokens });
+    const identityCapabilities = Object.fromEntries(
+      Object.entries(this.state.identityCapabilities ?? {}).filter(
+        ([candidate]) => candidate !== runId
+      )
+    );
+    this.setState({ ...this.state, identityCapabilities, identityTokens });
     await this.markDirectoryRunStatus(runId, "terminal");
     const release = (async () => {
       let confirmed = false;
