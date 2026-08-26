@@ -356,3 +356,75 @@ test("a warm-up swallows the probe timeout a run would propagate", async () => {
   assert.deepEqual(outcome, { ready: false, version: null });
   assert.equal(attempts, 2);
 });
+
+test("a run streams events out while the CLI is still executing", async () => {
+  // The message line is split across two chunks on purpose: the assembler
+  // must hold the partial line, or a JSON object cut at a chunk boundary
+  // is dropped and the live view silently loses events.
+  const message = JSON.stringify({
+    data: { content: "Working on it", model: "gpt-5" },
+    type: "assistant.message",
+  });
+  const result = JSON.stringify({
+    exitCode: 0,
+    sessionId: "s1",
+    type: "result",
+    usage: {},
+  });
+  const seen: string[] = [];
+  const sandbox = {
+    exec(command: string, options?: Record<string, unknown>) {
+      if (command.startsWith("copilot --version")) {
+        return Promise.resolve({
+          command,
+          exitCode: 0,
+          stderr: "",
+          stdout: "GitHub Copilot CLI 1.0.80\n",
+          success: true,
+        });
+      }
+      if (command.startsWith("mkdir")) {
+        return Promise.resolve({
+          command,
+          exitCode: 0,
+          stderr: "",
+          stdout: "",
+          success: true,
+        });
+      }
+      const onOutput = options?.onOutput as (
+        source: string,
+        data: string
+      ) => void;
+      const half = Math.floor(message.length / 2);
+      onOutput("stdout", message.slice(0, half));
+      onOutput("stderr", "noise that must not be parsed as events\n");
+      onOutput("stdout", `${message.slice(half)}\n${result}\n`);
+      // Deliberately empty stdout in the result: everything already
+      // streamed, and the events must come from the stream, not a re-parse.
+      return Promise.resolve({
+        command,
+        exitCode: 0,
+        stderr: "",
+        stdout: "",
+        success: true,
+      });
+    },
+  };
+
+  const run = await runHarnessInSandbox({
+    credential: { credential: "harness-token" },
+    instructions: "Be careful.",
+    model: "auto",
+    onEvent: (event) => {
+      seen.push(event.kind);
+    },
+    runtime: "copilot",
+    sandbox: sandbox as never,
+    task: "Create notes.md",
+  });
+
+  assert.deepEqual(seen, ["message", "usage", "finished"]);
+  assert.equal(run.summary.status, "completed");
+  assert.equal(run.summary.output, "Working on it");
+});

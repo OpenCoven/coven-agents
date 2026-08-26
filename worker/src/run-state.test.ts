@@ -14,6 +14,7 @@ import {
   destroyCloudAgentSandbox,
   dispatchCloudRun,
   finishCloudRunRecord,
+  liveCloudRunEvent,
   normalizeCloudCommandEvidence,
   normalizeCloudFileEvidence,
   planCloudRunStart,
@@ -431,4 +432,123 @@ test("a credential appearing in a command line is redacted", () => {
 
   assert.equal(persisted.includes(credential), false);
   assert.ok(persisted.includes("coven-cli exec --workspace /workspace"));
+});
+
+test("live events carry redacted text, never the credential", () => {
+  const credential = "ghp_live_credential_value_123";
+  const toolNames = new Map<string, string>();
+
+  const message = liveCloudRunEvent(
+    {
+      at: "2026-08-26T00:00:00.000Z",
+      kind: "message",
+      model: "gpt-5",
+      text: `Using token ${credential} to fetch the repo`,
+    },
+    3,
+    credential,
+    toolNames
+  );
+
+  assert.ok(message && message.type === "output");
+  assert.equal(message.id, 3);
+  assert.ok(!message.output.includes(credential));
+  assert.ok(message.output.includes("Using token"));
+});
+
+test("live tool events pair names across start and end", () => {
+  const toolNames = new Map<string, string>();
+
+  const start = liveCloudRunEvent(
+    {
+      at: "2026-08-26T00:00:00.000Z",
+      callId: "call-1",
+      kind: "tool-start",
+      summary: "ls -la",
+      tool: "shell",
+    },
+    1,
+    null,
+    toolNames
+  );
+  const end = liveCloudRunEvent(
+    {
+      at: "2026-08-26T00:00:01.000Z",
+      callId: "call-1",
+      kind: "tool-end",
+      success: false,
+      summary: "permission denied",
+    },
+    2,
+    null,
+    toolNames
+  );
+
+  assert.ok(start && start.type === "output");
+  assert.ok(start.output.includes("shell"));
+  assert.ok(end && end.type === "command");
+  assert.equal(end.evidence.command, "shell");
+  assert.equal(end.evidence.exitCode, 1);
+  assert.equal(end.evidence.stdout, "permission denied");
+});
+
+test("live file events translate operations and drop unknown verbs", () => {
+  const toolNames = new Map<string, string>();
+
+  const edited = liveCloudRunEvent(
+    {
+      at: "2026-08-26T00:00:00.000Z",
+      kind: "file",
+      operation: "edited",
+      path: "/workspace/notes.md",
+    },
+    1,
+    null,
+    toolNames
+  );
+  const unknown = liveCloudRunEvent(
+    {
+      at: "2026-08-26T00:00:00.000Z",
+      kind: "file",
+      operation: "transmogrified",
+      path: "/workspace/notes.md",
+    },
+    2,
+    null,
+    toolNames
+  );
+
+  assert.ok(edited && edited.type === "file");
+  assert.equal(edited.evidence.operation, "modify");
+  assert.equal(edited.evidence.path, "/workspace/notes.md");
+  assert.equal(unknown, null);
+});
+
+test("live token deltas and usage checkpoints are noise, not events", () => {
+  const toolNames = new Map<string, string>();
+
+  assert.equal(
+    liveCloudRunEvent(
+      { at: "2026-08-26T00:00:00.000Z", kind: "delta", text: "W" },
+      1,
+      null,
+      toolNames
+    ),
+    null
+  );
+  assert.equal(
+    liveCloudRunEvent(
+      {
+        at: "2026-08-26T00:00:00.000Z",
+        kind: "usage",
+        linesAdded: 1,
+        linesRemoved: 0,
+        premiumRequests: null,
+      },
+      2,
+      null,
+      toolNames
+    ),
+    null
+  );
 });

@@ -281,6 +281,14 @@ export async function runHarnessInSandbox(options: {
   credential: HarnessCredential;
   instructions: string;
   model: string;
+  /**
+   * Called for each harness event as it streams out of the container, so a
+   * caller can surface progress while the run is still going. The events a
+   * run RETURNS remain the authoritative record; this callback is the live
+   * view of the same stream, not a second source of truth. Text arrives
+   * unredacted here — the caller owns redaction before anything persists.
+   */
+  onEvent?: (event: RunEvent) => void;
   runtime: string;
   sandbox: SandboxLike;
   task: string;
@@ -313,6 +321,27 @@ export async function runHarnessInSandbox(options: {
   });
   const command = toShellCommand(invocation);
 
+  /**
+   * The exec streams instead of buffering. Before this, stdout was parsed
+   * only after the CLI exited, so the thread showed nothing between
+   * "running" and the outcome — a fifteen-minute run was indistinguishable
+   * from a wedged one. `onOutput` is present in the SDK's compiled runtime
+   * (verified, unlike `timeout`), and the assembler holds partial lines so
+   * a JSON object split across chunks still parses.
+   */
+  const assembler = new LineAssembler();
+  const streamed: RunEvent[] = [];
+  const emit = (line: string) => {
+    for (const event of normalizeEvent(
+      spec.id as never,
+      line,
+      new Date().toISOString()
+    )) {
+      streamed.push(event);
+      options.onEvent?.(event);
+    }
+  };
+
   const result = await withDeadline(
     options.sandbox.exec(command, {
       cwd,
@@ -327,14 +356,32 @@ export async function runHarnessInSandbox(options: {
         HOME: cwd,
         OPENAI_API_KEY: "",
       },
+      onOutput: (source, data) => {
+        if (source !== "stdout") {
+          return;
+        }
+        for (const line of assembler.push(data)) {
+          emit(line);
+        }
+      },
+      stream: true,
       timeout: RUN_TIMEOUT_MS,
     }),
     RUN_TIMEOUT_MS,
     spec.command
   );
 
+  for (const line of assembler.flush()) {
+    emit(line);
+  }
+
   const at = new Date().toISOString();
-  const events = parseHarnessStream(spec.id, result.stdout, at);
+  // A runtime that ignored the streaming callbacks still produced stdout —
+  // parse it rather than reporting an empty run.
+  const events =
+    streamed.length > 0
+      ? streamed
+      : parseHarnessStream(spec.id, result.stdout, at);
   const summary = summarizeRun(events);
 
   return {

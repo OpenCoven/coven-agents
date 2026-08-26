@@ -12,7 +12,10 @@ import {
   startRunInputSchema,
   type WarmState,
 } from "@opencoven/agent-contracts";
-import type { HarnessStatus } from "@opencoven/harness";
+import type {
+  HarnessStatus,
+  RunEvent as HarnessStreamEvent,
+} from "@opencoven/harness";
 import { Agent } from "agents";
 import {
   HarnessError,
@@ -29,6 +32,7 @@ import {
   finishCloudRunRecord,
   hashOperation,
   isTerminal,
+  liveCloudRunEvent,
   nextEventId,
   OperationConflictError,
   planCloudRunStart,
@@ -349,12 +353,34 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
         identityToken,
         planned.run.id
       );
+      /**
+       * Streams each harness event into the record as it happens, so the
+       * console shows what the run is doing rather than a spinner. Redaction
+       * happens inside `liveCloudRunEvent` before the event exists; the
+       * incremental persist is what the event stream reads, so a watcher
+       * sees the activity within a poll interval of it occurring.
+       */
+      const toolNames = new Map<string, string>();
+      const onEvent = (streamedEvent: HarnessStreamEvent) => {
+        const mapped = liveCloudRunEvent(
+          streamedEvent,
+          nextEventId(record),
+          credential,
+          toolNames
+        );
+        if (mapped) {
+          record = appendEvents(record, [mapped]);
+          this.persistRun(record);
+        }
+      };
+
       const run = await runHarnessInSandbox({
         credential: { credential },
         instructions: `${definition.instructions}
 
 You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work only inside the sandbox, verify the result, and include exact evidence in your final response.`,
         model: definition.model,
+        onEvent,
         runtime: definition.runtime,
         sandbox: getSandbox(
           this.env.Sandbox,

@@ -15,6 +15,7 @@ import {
   sanitizeEvidencePath,
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
+import type { RunEvent as HarnessStreamEvent } from "@opencoven/harness";
 import { HttpError } from "./http.js";
 
 export const MAX_COMMAND_RESULTS_PER_RUN =
@@ -316,6 +317,89 @@ export function appendEvents(
     ...record,
     events: [...record.events, ...events].slice(-MAX_EVENTS_PER_RUN),
   };
+}
+
+const LIVE_FILE_OPERATIONS: Record<string, FileEvidence["operation"]> = {
+  created: "create",
+  deleted: "delete",
+  edited: "modify",
+};
+
+/**
+ * Translates one streamed harness event into a contract run event, or null
+ * for the kinds that are noise mid-run (token deltas, usage checkpoints).
+ *
+ * This is what makes a run legible while it happens: before it, nothing
+ * reached the record between "running" and the outcome, and a healthy
+ * fifteen-minute run was indistinguishable from a wedged one. Every string
+ * passes through `safeRunText` — the same credential-aware redaction the
+ * final evidence gets — BEFORE the event exists, so an unredacted string
+ * cannot be persisted or streamed by construction.
+ *
+ * `toolNames` carries tool identity across the start/end pair: the harness
+ * names the tool only on `tool-start`, and the caller owns the map so the
+ * pairing survives however many events arrive in between.
+ */
+export function liveCloudRunEvent(
+  event: HarnessStreamEvent,
+  id: number,
+  credential: string | null,
+  toolNames: Map<string, string>
+): RunEvent | null {
+  switch (event.kind) {
+    case "reasoning":
+    case "message": {
+      const output = safeRunText(event.text, credential);
+      return output ? { at: event.at, id, output, type: "output" } : null;
+    }
+    case "tool-start": {
+      toolNames.set(event.callId, event.tool);
+      const detail = event.summary ? ` · ${event.summary}` : "";
+      return {
+        at: event.at,
+        id,
+        output: safeRunText(`→ ${event.tool}${detail}`, credential),
+        type: "output",
+      };
+    }
+    case "tool-end":
+      return {
+        at: event.at,
+        evidence: {
+          command: truncateUtf8(
+            safeRunText(toolNames.get(event.callId) ?? "tool", credential),
+            AGENT_RUNNER_LIMITS.maxCommandLength,
+            AGENT_RUNNER_LIMITS.maxCommandLength
+          ),
+          exitCode: event.success ? 0 : 1,
+          stderr: "",
+          stdout: safeRunText(event.summary, credential),
+        },
+        id,
+        type: "command",
+      };
+    case "file": {
+      const operation = LIVE_FILE_OPERATIONS[event.operation];
+      if (!operation) {
+        return null;
+      }
+      return {
+        at: event.at,
+        evidence: {
+          operation,
+          path: truncateUtf8(
+            sanitizeEvidencePath(event.path),
+            AGENT_RUNNER_LIMITS.maxPathLength,
+            AGENT_RUNNER_LIMITS.maxPathLength
+          ),
+        },
+        id,
+        type: "file",
+      };
+    }
+    default:
+      return null;
+  }
 }
 
 export function safeRunText(value: string, credential: string | null): string {
