@@ -13,6 +13,18 @@ export interface HarnessSpec {
   /** npm package that provides `command`, used to build the container image. */
   readonly installPackage: string;
   readonly label: string;
+  /**
+   * Model ids the pinned CLI accepts for `--model`, with `auto` first.
+   *
+   * `auto` means no flag is passed and the harness chooses. The rest are
+   * passed through verbatim, so this list must mirror what the pinned CLI
+   * version actually accepts — it is maintained alongside `installPackage`'s
+   * pin in worker/Dockerfile, and a stale entry fails a run at the harness
+   * rather than anywhere recoverable. The console offers exactly this list
+   * and nothing free-typed, because a typo here used to be a failed run with
+   * a model error the user had no reason to expect.
+   */
+  readonly models: readonly string[];
   /** Emits structured events rather than only a final blob of text. */
   readonly streams: boolean;
   /** Event translation is implemented, so this harness may actually be run. */
@@ -27,6 +39,7 @@ export const HARNESS_SPECS: readonly HarnessSpec[] = [
     id: "copilot",
     installPackage: "@github/copilot",
     label: "GitHub Copilot CLI",
+    models: ["auto", "claude-sonnet-4.5", "gpt-5", "gpt-5-mini"],
     streams: true,
     supported: true,
     versionArgs: ["--version"],
@@ -37,6 +50,7 @@ export const HARNESS_SPECS: readonly HarnessSpec[] = [
     id: "codex",
     installPackage: "@openai/codex",
     label: "Codex CLI",
+    models: ["auto"],
     streams: false,
     supported: false,
     versionArgs: ["--version"],
@@ -47,6 +61,7 @@ export const HARNESS_SPECS: readonly HarnessSpec[] = [
     id: "claude",
     installPackage: "@anthropic-ai/claude-code",
     label: "Claude Code",
+    models: ["auto"],
     streams: false,
     supported: false,
     versionArgs: ["--version"],

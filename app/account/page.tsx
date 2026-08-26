@@ -47,13 +47,31 @@ export default function Page() {
   return (
     <div className="flex h-dvh w-full flex-col overflow-hidden bg-background">
       <header className="flex shrink-0 items-center justify-between gap-4 border-border border-b px-6 py-4">
-        <Link
-          className="flex items-center gap-1.5 text-[13px] text-muted-foreground transition-colors hover:text-foreground"
-          href="/agents"
-        >
-          <ArrowLeftIcon className="size-3.5" />
-          Back
-        </Link>
+        <div className="flex items-center gap-4">
+          {/* The brand is the way home from every screen, this one included.
+              The console header already works this way; a page where the mark
+              was absent broke the habit the console teaches. `/` rather than
+              `/agents`, so home stays whatever the root route decides it is. */}
+          <Link
+            aria-label="OpenCoven home"
+            className="flex items-center gap-2 transition-opacity hover:opacity-80"
+            href="/"
+          >
+            <span className="text-[13px] text-[var(--oc-accent)] leading-none">
+              ◆
+            </span>
+            <span className="font-medium text-[13px] tracking-[-0.01em]">
+              OpenCoven
+            </span>
+          </Link>
+          <Link
+            className="flex items-center gap-1.5 text-[13px] text-muted-foreground transition-colors hover:text-foreground"
+            href="/agents"
+          >
+            <ArrowLeftIcon className="size-3.5" />
+            Back
+          </Link>
+        </div>
 
         <div className="flex items-center gap-3">
           {session?.user?.email ? (

@@ -490,9 +490,13 @@ export function CreateAgent({
                     label="Harness"
                   >
                     <select
-                      onChange={(event) =>
-                        setRuntime(event.target.value as Runtime)
-                      }
+                      onChange={(event) => {
+                        setRuntime(event.target.value as Runtime);
+                        // The model list is per-harness; carrying a selection
+                        // across harnesses would let a model the new CLI does
+                        // not accept survive into the definition.
+                        setModel(DEFAULT_MODEL);
+                      }}
                       style={inputStyle}
                       value={runtime}
                     >
@@ -503,12 +507,29 @@ export function CreateAgent({
                       ))}
                     </select>
                   </Field>
-                  <Field hint="`auto` lets the harness choose." label="Model">
-                    <input
+                  <Field
+                    hint="Only what the pinned CLI accepts. `auto` lets the harness choose."
+                    label="Model"
+                  >
+                    {/* A select, deliberately not free text. The value is
+                        passed verbatim to the CLI's --model flag, so a typo
+                        was a failed run with a model error nobody had reason
+                        to expect. The options come from the harness spec,
+                        which is maintained beside the CLI version pin. */}
+                    <select
                       onChange={(event) => setModel(event.target.value)}
                       style={inputStyle}
                       value={model}
-                    />
+                    >
+                      {(
+                        RUNNABLE.find((spec) => spec.id === runtime)
+                          ?.models ?? ["auto"]
+                      ).map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
                   </Field>
                 </div>
                 <Field
