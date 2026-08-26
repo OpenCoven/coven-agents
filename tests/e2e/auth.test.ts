@@ -11,9 +11,11 @@ test.describe("Authentication Pages", () => {
         "New accounts start with guest access, and signing in never starts an agent, sandbox, or run."
       )
     ).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "Continue with GitHub" })
-    ).toBeVisible();
+    const githubButton = page.getByRole("button", {
+      name: "Continue with GitHub",
+    });
+    await expect(githubButton).toBeVisible();
+    await expect(githubButton).toBeEnabled();
     await expect(page.getByLabel("Email")).toHaveCount(0);
     await expect(page.getByLabel("Password")).toHaveCount(0);
   });

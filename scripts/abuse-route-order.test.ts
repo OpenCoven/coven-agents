@@ -220,7 +220,6 @@ const protectedHandlers: RouteExpectation[] = [
 ];
 
 const excludedRoutes = [
-  "app/(auth)/api/auth/[...nextauth]/route.ts",
   "app/api/internal/credential/route.ts",
   "app/api/stripe/webhook/route.ts",
 ];
@@ -278,7 +277,7 @@ test("resource-bearing handlers admit after identity and before expensive work",
   }
 });
 
-test("deferred auth, webhook, and internal lending routes stay untouched", () => {
+test("deferred webhook and internal lending routes stay untouched", () => {
   for (const file of excludedRoutes) {
     assert.doesNotMatch(read(file), /enforceAbusePolicy/);
   }
@@ -351,28 +350,93 @@ function declaredFunctionBlock(
   name: string,
   exported: boolean
 ): string {
-  const sourceFile = ts.createSourceFile(
-    "route.ts",
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS
+  const exportPrefix = exported ? "export\\s+" : "(?:export\\s+)?";
+  const declarationPattern = new RegExp(
+    `${exportPrefix}(?:async\\s+)?function\\s+${name}\\s*\\(`
   );
-  const declaration = sourceFile.statements.find(
-    (statement): statement is ts.FunctionDeclaration =>
-      ts.isFunctionDeclaration(statement) &&
-      statement.name?.text === name &&
-      (!exported ||
-        statement.modifiers?.some(
-          (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword
-        ) === true)
-  );
+  const declaration = declarationPattern.exec(source);
 
   assert.ok(
     declaration,
     `missing ${exported ? "exported " : ""}function ${name}`
   );
-  return declaration.getText(sourceFile);
+  const bodyStart = source.indexOf("{", declaration.index);
+  assert.notEqual(bodyStart, -1, `missing function body for ${name}`);
+
+  const bodyEnd = matchingBrace(source, bodyStart);
+  assert.notEqual(bodyEnd, -1, `unterminated function body for ${name}`);
+  return source.slice(declaration.index, bodyEnd + 1);
+}
+
+function matchingBrace(source: string, openingBrace: number): number {
+  let depth = 0;
+  let state:
+    | "block-comment"
+    | "code"
+    | "double-quote"
+    | "line-comment"
+    | "single-quote"
+    | "template" = "code";
+
+  for (let index = openingBrace; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+
+    if (state === "line-comment") {
+      if (character === "\n") {
+        state = "code";
+      }
+      continue;
+    }
+    if (state === "block-comment") {
+      if (character === "*" && next === "/") {
+        state = "code";
+        index += 1;
+      }
+      continue;
+    }
+    if (
+      state === "single-quote" ||
+      state === "double-quote" ||
+      state === "template"
+    ) {
+      if (character === "\\") {
+        index += 1;
+        continue;
+      }
+      if (
+        (state === "single-quote" && character === "'") ||
+        (state === "double-quote" && character === '"') ||
+        (state === "template" && character === "`")
+      ) {
+        state = "code";
+      }
+      continue;
+    }
+
+    if (character === "/" && next === "/") {
+      state = "line-comment";
+      index += 1;
+    } else if (character === "/" && next === "*") {
+      state = "block-comment";
+      index += 1;
+    } else if (character === "'") {
+      state = "single-quote";
+    } else if (character === '"') {
+      state = "double-quote";
+    } else if (character === "`") {
+      state = "template";
+    } else if (character === "{") {
+      depth += 1;
+    } else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+
+  return -1;
 }
 
 function exportedHandlerUses(
