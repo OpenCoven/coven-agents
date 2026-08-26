@@ -1,12 +1,10 @@
-import type { AgentOwner } from "@opencoven/agent-contracts";
+import { type AgentOwner, TENANT_ID_PATTERN } from "@opencoven/agent-contracts";
 
 /**
  * Sandbox keys are a tenant boundary, not a naming convention. Two accounts
  * whose keys collide share a container, and therefore share a workspace and
  * every file in it, so the key must be derived in exactly one place.
  */
-
-const TENANT_ID_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
 
 /**
  * Records created before ownership existed still have to resolve to some
@@ -38,12 +36,78 @@ export function assertTenantId(tenantId: string): string {
 }
 
 /**
+ * The Sandbox SDK rejects an id longer than 63 characters, and concatenating
+ * the parts blew straight past it: `agent-` plus a 34-character tenant plus a
+ * 36-character uuid is 77. Every run failed with "Sandbox ID must be 1-63
+ * characters long" -- after authentication, after the credential was fetched,
+ * with zero commands and zero file operations.
+ *
+ * Truncating would have fit and would have been a tenancy hole: two ids that
+ * share a prefix would share a container, and therefore a workspace and every
+ * file in it. A digest is the only way to hit a fixed width without giving up
+ * the property the key exists for.
+ */
+const SANDBOX_ID_MAX_LENGTH = 63;
+const DIGEST_BASE = 36;
+/** 256 bits in base 36. Fixed so the id cannot vary in width. */
+const DIGEST_LENGTH = 50;
+
+/**
+ * Base 36 keeps the id to `[0-9a-z]`.
+ *
+ * Base 64 would be shorter but introduces `-` and `_`, and these ids become
+ * DNS labels: a leading or trailing `-` is refused outright, and the rest is
+ * not worth the risk to save seven characters.
+ */
+function base36(bytes: Uint8Array): string {
+  let value = 0n;
+
+  for (const byte of bytes) {
+    value = (value << 8n) | BigInt(byte);
+  }
+
+  return value.toString(DIGEST_BASE).padStart(DIGEST_LENGTH, "0");
+}
+
+/**
  * The only supported way to name an agent's sandbox. Creation and destruction
  * both route through it, so `decommission` cannot destroy a different tenant's
  * container by reconstructing the key differently.
+ *
+ * Async because SHA-256 in Workers is. The alternative -- a synchronous
+ * non-cryptographic hash -- would put collision resistance, and with it the
+ * tenant boundary, on a function chosen for convenience.
+ *
+ * The tenant id no longer appears in the container name, which is a small
+ * privacy gain: these ids surface as DNS labels.
  */
-export function sandboxKey(tenantId: string, agentId: string): string {
-  return `agent-${assertTenantId(tenantId)}-${agentId}`;
+export async function sandboxKey(
+  tenantId: string,
+  agentId: string
+): Promise<string> {
+  // Still asserted. The digest would happily absorb an illegal tenant id, and
+  // this is the one place that refuses an identifier nobody mapped.
+  assertTenantId(tenantId);
+
+  // Written as an escape, never as a raw control character: a literal NUL in
+  // a source file is invisible in review and makes the file read as binary to
+  // grep and everything that follows its lead.
+  //
+  // A separator at all because the fields must not run together: without one,
+  // tenant `ab` + agent `c` and tenant `a` + agent `bc` hash the same input.
+  // NUL cannot occur in a tenant id -- the pattern forbids it -- so no pair
+  // can smuggle the separator into a field.
+  const source = new TextEncoder().encode(`${tenantId}\u0000${agentId}`);
+  const digest = await crypto.subtle.digest("SHA-256", source);
+  const key = `agent-${base36(new Uint8Array(digest))}`;
+
+  if (key.length > SANDBOX_ID_MAX_LENGTH) {
+    throw new TenantKeyError(
+      `Sandbox key ${key.length} characters exceeds the ${SANDBOX_ID_MAX_LENGTH}-character limit.`
+    );
+  }
+
+  return key;
 }
 
 /**

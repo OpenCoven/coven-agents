@@ -1,6 +1,6 @@
 "use client";
 
-import { LogIn, LogOut, Settings, User } from "lucide-react";
+import { LogIn, LogOut, Settings } from "lucide-react";
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { useCallback, useState } from "react";
@@ -13,6 +13,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { sessionMenu } from "@/lib/auth/session-menu";
+import { avatarFor } from "@/lib/avatar";
 
 /**
  * The signed-in account control.
@@ -34,6 +35,7 @@ export function AccountMenu() {
   }, []);
 
   const email = session?.user?.email;
+  const userId = session?.user?.id;
   const menu = sessionMenu({ email });
 
   // A signed-out visitor is offered sign IN rather than nothing, so the
@@ -58,18 +60,26 @@ export function AccountMenu() {
       <DropdownMenuTrigger asChild>
         <Button
           aria-label="Account"
-          className="size-9 rounded-full border-border p-0"
+          className="size-9 overflow-hidden rounded-full border-border p-0"
           variant="outline"
         >
-          <User className="size-4" />
+          {/** biome-ignore lint/performance/noImgElement: a generated avatar is a data URI, which the image optimizer cannot process. */}
+          <img
+            alt=""
+            className="size-full object-cover"
+            src={avatarFor({
+              id: userId ?? "",
+              image: session?.user?.image,
+            })}
+          />
         </Button>
       </DropdownMenuTrigger>
 
       <DropdownMenuContent align="end" className="w-56">
         <div className="px-2 py-1.5">
           <p className="truncate font-medium text-[13px]">{email}</p>
-          <p className="text-[11px] text-muted-foreground capitalize">
-            {session?.user?.type ?? "demo"}
+          <p className="text-[11px] text-muted-foreground">
+            {session?.user?.type === "subscriber" ? "Subscriber" : "Guest"}
           </p>
         </div>
 

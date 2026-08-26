@@ -67,7 +67,7 @@ export function UsageMeter() {
     : null;
 
   return (
-    <div className="flex flex-col gap-4 rounded-[var(--radius)] border border-border bg-card p-8">
+    <div className="flex max-w-[720px] flex-col gap-4">
       <div className="flex items-baseline justify-between gap-2">
         <h2 className="font-semibold text-[15px]">Usage</h2>
         <span className="text-[13px] text-muted-foreground">

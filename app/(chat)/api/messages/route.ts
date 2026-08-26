@@ -1,4 +1,11 @@
+import { ipAddress } from "@vercel/functions";
 import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
+import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
+import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { getChatById, getMessagesByChatId } from "@/lib/db/queries";
 import { convertToUIMessages } from "@/lib/utils";
 
@@ -10,8 +17,22 @@ export async function GET(request: Request) {
     return Response.json({ error: "chatId required" }, { status: 400 });
   }
 
-  const [session, chat, messages] = await Promise.all([
-    auth(),
+  const session = await auth();
+  const access = await authorizeSubscriberAccess(session);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "messages_read",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
+  }
+
+  const [chat, messages] = await Promise.all([
     getChatById({ id: chatId }),
     getMessagesByChatId({ id: chatId }),
   ]);
@@ -25,14 +46,11 @@ export async function GET(request: Request) {
     });
   }
 
-  if (
-    chat.visibility === "private" &&
-    (!session?.user || session.user.id !== chat.userId)
-  ) {
+  if (chat.visibility === "private" && access.userId !== chat.userId) {
     return Response.json({ error: "forbidden" }, { status: 403 });
   }
 
-  const isReadonly = !session?.user || session.user.id !== chat.userId;
+  const isReadonly = access.userId !== chat.userId;
 
   return Response.json({
     isReadonly,

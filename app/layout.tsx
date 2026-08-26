@@ -1,5 +1,12 @@
+import { Analytics } from "@vercel/analytics/next";
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import {
+  EB_Garamond,
+  Geist,
+  Geist_Mono,
+  Inter,
+  JetBrains_Mono,
+} from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -25,6 +32,33 @@ const geistMono = Geist_Mono({
   display: "swap",
   subsets: ["latin"],
   variable: "--font-geist-mono",
+});
+
+/**
+ * The run console's three faces: Inter for the interface, JetBrains Mono for
+ * anything the machine produced, EB Garamond for the one question each
+ * composer asks. Declared here because `next/font` has to run at module scope
+ * in a server file; only the console applies them.
+ */
+const inter = Inter({
+  display: "swap",
+  subsets: ["latin"],
+  variable: "--font-inter",
+  weight: ["400", "500", "600"],
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  display: "swap",
+  subsets: ["latin"],
+  variable: "--font-jetbrains-mono",
+  weight: ["400", "500", "600"],
+});
+
+const ebGaramond = EB_Garamond({
+  display: "swap",
+  subsets: ["latin"],
+  variable: "--font-eb-garamond",
+  weight: ["400", "500"],
 });
 
 const LIGHT_THEME_COLOR = "hsl(0 0% 100%)";
@@ -54,7 +88,7 @@ export default function RootLayout({
 }>) {
   return (
     <html
-      className={`${geist.variable} ${geistMono.variable}`}
+      className={`${geist.variable} ${geistMono.variable} ${inter.variable} ${jetbrainsMono.variable} ${ebGaramond.variable}`}
       /**
        * The OpenCoven palette, applied once at the root so every surface --
        * console, chat, auth -- inherits it. The theme provider puts `.dark`
@@ -81,6 +115,7 @@ export default function RootLayout({
         >
           <TooltipProvider>{children}</TooltipProvider>
         </ThemeProvider>
+        <Analytics />
       </body>
     </html>
   );

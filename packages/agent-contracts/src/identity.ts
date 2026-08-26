@@ -18,12 +18,30 @@ export const TOKEN_ALGORITHM = "Ed25519";
  */
 export const TOKEN_LIFETIME_SECONDS = 900;
 
+/**
+ * The one definition of a legal tenant id, shared by the issuer and the
+ * verifier.
+ *
+ * It lives here because both sides already depend on this package, and because
+ * the alternative failed in production: the worker enforced this charset when
+ * deriving a sandbox key while the app minted `user:${uuid}`, and the contract
+ * between them checked only length. Every cloud run was issued a token the
+ * worker would accept and then refuse to build a sandbox from, so the run died
+ * after auth with zero commands and zero file operations.
+ *
+ * The charset is narrow because `-` separates the parts of a sandbox key: if a
+ * tenant id could contain one, tenant `a` with agent `b-c` and tenant `a-b`
+ * with agent `c` would derive the same key, and the two would share a
+ * container.
+ */
+export const TENANT_ID_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
+
 export const runnerClaimsSchema = z
   .object({
     exp: z.number().int().positive(),
     plan: z.enum(["demo", "subscriber"]),
     sub: z.string().min(1).max(128),
-    tenant: z.string().min(1).max(64),
+    tenant: z.string().regex(TENANT_ID_PATTERN),
   })
   .strict();
 
@@ -45,7 +63,7 @@ export function base64UrlEncode(bytes: Uint8Array): string {
  * returns null. A caller decoding the signature or payload segment of an
  * attacker-supplied token must handle that throw itself.
  */
-export function base64UrlDecode(value: string): Uint8Array {
+export function base64UrlDecode(value: string): Uint8Array<ArrayBuffer> {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/");
   const remainder = padded.length % 4;
   const withPadding =

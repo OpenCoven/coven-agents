@@ -1,4 +1,9 @@
+import { ipAddress } from "@vercel/functions";
 import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
 import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
 import { periodStart } from "@/lib/billing/period";
 import { countRunsInPeriod, findUserById } from "@/lib/db/queries";
@@ -11,11 +16,20 @@ import { tenantForUser } from "@/lib/session";
  * the number shown and the number enforced cannot drift. A cap you cannot see
  * is indistinguishable from a bug, and two caps that disagree are worse.
  */
-export async function GET() {
+export async function GET(request: Request) {
   const session = await auth();
 
   if (!session?.user?.id) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "usage_read",
+    userId: session.user.id,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   const owner = await findUserById(session.user.id);

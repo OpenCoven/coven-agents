@@ -17,7 +17,7 @@ export function assertRecordable(options: RecordableOptions): void {
 
   if (options.backend !== "cloud") {
     throw new Error(
-      "Refusing recording: demo recordings must use the cloud backend."
+      "Refusing recording: guest preview recordings must use the cloud backend."
     );
   }
 

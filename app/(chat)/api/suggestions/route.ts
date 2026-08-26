@@ -1,4 +1,11 @@
+import { ipAddress } from "@vercel/functions";
 import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
+import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
+import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { getSuggestionsByDocumentId } from "@/lib/db/queries";
 import { ChatbotError } from "@/lib/errors";
 
@@ -14,9 +21,18 @@ export async function GET(request: Request) {
   }
 
   const session = await auth();
+  const access = await authorizeSubscriberAccess(session);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
+  }
 
-  if (!session?.user) {
-    return new ChatbotError("unauthorized:suggestions").toResponse();
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "suggestions_read",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   const suggestions = await getSuggestionsByDocumentId({
@@ -29,7 +45,7 @@ export async function GET(request: Request) {
     return Response.json([], { status: 200 });
   }
 
-  if (suggestion.userId !== session.user.id) {
+  if (suggestion.userId !== access.userId) {
     return new ChatbotError("forbidden:api").toResponse();
   }
 

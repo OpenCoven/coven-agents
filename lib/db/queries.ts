@@ -16,6 +16,8 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import type { ArtifactKind } from "@/components/chat/artifact";
 import type { VisibilityType } from "@/components/chat/visibility-selector";
+import type { DayCount } from "../billing/history";
+import { fillDays, runsByDay } from "../billing/history";
 import { countRun, usageFor } from "../billing/usage";
 import { ChatbotError } from "../errors";
 import {
@@ -32,7 +34,6 @@ import {
   user,
   vote,
 } from "./schema";
-import { generateHashedPassword } from "./utils";
 
 const client = postgres(process.env.POSTGRES_URL ?? "");
 export const db = drizzle(client);
@@ -40,24 +41,6 @@ export const db = drizzle(client);
 export async function getUser(email: string): Promise<User[]> {
   try {
     return await db.select().from(user).where(eq(user.email, email));
-  } catch (error) {
-    throw new ChatbotError("bad_request:database", { cause: error });
-  }
-}
-
-/**
- * Replaces a user's password hash.
- *
- * Lives here rather than in the server action because `db` is deliberately
- * restricted to this module — the action decides *whether* the change is
- * allowed, this decides *how* it is written.
- */
-export async function updateUserPassword(email: string, password: string) {
-  try {
-    return await db
-      .update(user)
-      .set({ password: generateHashedPassword(password) })
-      .where(eq(user.email, email));
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
   }
@@ -187,24 +170,21 @@ export async function countRunsInPeriod(
   return await usageFor(db, tenant, since);
 }
 
+/** Run volume per day for a tenant, oldest first, gaps filled with zeroes. */
+export async function runHistory(
+  tenant: string,
+  since: Date,
+  through: Date
+): Promise<DayCount[]> {
+  return fillDays(await runsByDay(db, tenant, since), since, through);
+}
+
 /** Records a run against a tenant, ignoring a repeat of the same run id. */
 export async function recordRun(
   tenant: string,
   runId: string
 ): Promise<boolean> {
   return await countRun(db, tenant, runId);
-}
-
-export async function createUser(email: string, password: string) {
-  const hashedPassword = generateHashedPassword(password);
-
-  try {
-    return await db.insert(user).values({ email, password: hashedPassword });
-  } catch (error) {
-    throw new ChatbotError("bad_request:database", {
-      cause: error,
-    });
-  }
 }
 
 export async function saveChat({

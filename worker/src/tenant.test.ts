@@ -18,20 +18,29 @@ function caught(run: () => unknown): unknown {
   return null;
 }
 
-test("two tenants never share a sandbox for the same agent id", () => {
+test("two tenants never share a sandbox for the same agent id", async () => {
   const agentId = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
-  assert.notEqual(sandboxKey("alice", agentId), sandboxKey("bob", agentId));
+  assert.notEqual(
+    await sandboxKey("alice", agentId),
+    await sandboxKey("bob", agentId)
+  );
 });
 
-test("the same tenant and agent always resolve to one key", () => {
+test("the same tenant and agent always resolve to one key", async () => {
   const agentId = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
-  assert.equal(sandboxKey("alice", agentId), sandboxKey("alice", agentId));
+  assert.equal(
+    await sandboxKey("alice", agentId),
+    await sandboxKey("alice", agentId)
+  );
 });
 
-test("a tenant id cannot be crafted to forge another tenant's key", () => {
+test("a tenant id cannot be crafted to forge another tenant's key", async () => {
   // `-` is the separator, so allowing it would make `a` + `b-c` collide with
   // `a-b` + `c`. The rejection is what keeps the encoding unambiguous.
-  const error = caught(() => sandboxKey("alice-bob", "c"));
+  const error = await sandboxKey("alice-bob", "c").then(
+    () => null,
+    (thrown: unknown) => thrown
+  );
   assert.ok(error instanceof TenantKeyError);
   assert.equal(error.code, "invalid_tenant_id");
 });
@@ -71,7 +80,7 @@ test("each owner kind resolves to the tenant that actually isolates it", () => {
   assert.equal(tenantOf({ owner: { kind: "standalone" } }), UNOWNED_TENANT);
 });
 
-test("two familiars in one cave share a tenant but not a sandbox", () => {
+test("two familiars in one cave share a tenant but not a sandbox", async () => {
   const cave = (familiarId: string) =>
     tenantOf({
       owner: {
@@ -83,23 +92,59 @@ test("two familiars in one cave share a tenant but not a sandbox", () => {
     });
   assert.equal(cave("familiar_1"), cave("familiar_2"));
   assert.notEqual(
-    sandboxKey(cave("familiar_1"), "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90"),
-    sandboxKey(cave("familiar_2"), "9c1b7d2f-5a6b-4c90-8f1a-0f4e1f4d4a2e")
+    await sandboxKey(
+      cave("familiar_1"),
+      "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90"
+    ),
+    await sandboxKey(cave("familiar_2"), "9c1b7d2f-5a6b-4c90-8f1a-0f4e1f4d4a2e")
   );
 });
 
-test("a missing owner never collapses onto another tenant", () => {
+test("a sandbox key fits what the Sandbox SDK will accept", async () => {
+  /**
+   * The bug this guards. `sanitizeSandboxId` in @cloudflare/sandbox refuses an
+   * id over 63 characters, and the old `agent-${tenant}-${agentId}` was 77 for
+   * a real tenant: every run failed with "Sandbox ID must be 1-63 characters
+   * long" after authenticating and fetching a credential, reporting zero
+   * commands and zero file operations.
+   *
+   * Asserted against the SDK's rules rather than a number picked here, so the
+   * bound cannot drift from what actually rejects it.
+   */
+  const longest = await sandboxKey(
+    "u_".padEnd(64, "0"),
+    "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90"
+  );
+
+  assert.ok(
+    longest.length <= 63,
+    `sandbox key is ${longest.length} characters; the SDK refuses over 63`
+  );
+  assert.doesNotMatch(longest, /^-|-$/, "a DNS label cannot end in a hyphen");
+  assert.match(longest, /^agent-[0-9a-z]+$/);
+});
+
+test("keys are fixed width, so no two pairs can run together", async () => {
+  // Variable width would make the encoding ambiguous again, which is the whole
+  // reason the old key rejected `-` in a tenant id.
+  const short = await sandboxKey("a", "b");
+  const long = await sandboxKey("a".repeat(64), "b".repeat(200));
+
+  assert.equal(short.length, long.length);
+});
+
+test("a missing owner never collapses onto another tenant", async () => {
   const agentId = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
   assert.notEqual(
-    sandboxKey(tenantOf({ owner: null }), agentId),
-    sandboxKey(
+    await sandboxKey(tenantOf({ owner: null }), agentId),
+    await sandboxKey(
       tenantOf({ owner: { kind: "tenant", tenantId: "alice" } }),
       agentId
     )
   );
 });
 
-test("create and destroy derive the identical key from one definition", () => {
+test("create and destroy derive the identical key from one definition", async () => {
   // The regression this guards: `decommission` previously rebuilt the key by
   // hand, so a change at the create site could silently destroy a different
   // tenant's container.
@@ -107,10 +152,13 @@ test("create and destroy derive the identical key from one definition", () => {
     id: "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90",
     owner: { kind: "tenant" as const, tenantId: "alice" },
   };
-  const created = sandboxKey(tenantOf(definition), definition.id);
-  const destroyed = sandboxKey(tenantOf(definition), definition.id);
+  const created = await sandboxKey(tenantOf(definition), definition.id);
+  const destroyed = await sandboxKey(tenantOf(definition), definition.id);
   assert.equal(created, destroyed);
-  assert.ok(created.includes("alice"));
+  // No longer asserts the tenant appears in the key: it is a digest now, so
+  // the id stays inside the 63-character limit and does not put a tenant
+  // identifier into what becomes a DNS label.
+  assert.doesNotMatch(created, /alice/);
 });
 
 /**

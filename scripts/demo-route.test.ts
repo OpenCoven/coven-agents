@@ -5,6 +5,11 @@ import test from "node:test";
 const rootPageUrl = new URL("../app/page.tsx", import.meta.url);
 const chatRootPageUrl = new URL("../app/(chat)/page.tsx", import.meta.url);
 const nestedDemoPageUrl = new URL("../app/demo/page.tsx", import.meta.url);
+const loginPageUrl = new URL("../app/(auth)/login/page.tsx", import.meta.url);
+const githubSignInUrl = new URL(
+  "../components/chat/github-sign-in.tsx",
+  import.meta.url
+);
 const demoRootUrl = new URL(
   "../components/demo/demo-root.tsx",
   import.meta.url
@@ -41,7 +46,7 @@ test("the client player plans the transcript before scheduling playback", () => 
   );
   assert.match(replayPlayer, /planPlayback\(transcript\.events\)/);
   assert.match(replayPlayer, /schedulePlayback\(/);
-  assert.match(replayPlayer, /Replay recorded run/);
+  assert.match(replayPlayer, /Replay guest run/);
 });
 
 test("the replay button shows a high-contrast keyboard focus ring", () => {
@@ -49,8 +54,39 @@ test("the replay button shows a high-contrast keyboard focus ring", () => {
 
   assert.match(
     replayPlayer,
-    /aria-label="Replay recorded run"[\s\S]*?className="[^"]*focus-visible:border-white\s+focus-visible:ring-\[3px\]\s+focus-visible:ring-white\/70/
+    /aria-label="Replay guest run"[\s\S]*?className="[^"]*focus-visible:border-white\s+focus-visible:ring-\[3px\]\s+focus-visible:ring-white\/70/
   );
+});
+
+test("the demo uses the purple brand palette", () => {
+  const sources = [read(demoRootUrl), read(replayPlayerUrl)].join("\n");
+
+  assert.match(sources, /rgba\(147,134,208,0\.2\)/);
+  assert.match(sources, /violet-300/);
+  assert.doesNotMatch(sources, /emerald-/);
+});
+
+test("curated guest data is not described as a live recording", () => {
+  const demoRoot = read(demoRootUrl);
+
+  assert.match(demoRoot, /Curated guest preview/);
+  assert.match(demoRoot, /Safe guest replay/);
+  assert.match(demoRoot, /deterministic example built from sanitized evidence/);
+  assert.doesNotMatch(demoRoot, /Recorded agent run|Recorded replay/);
+});
+
+test("the guest preview offers account creation without starting live resources", () => {
+  const demoRoot = read(demoRootUrl);
+  const githubSignIn = read(githubSignInUrl);
+  const loginPage = read(loginPageUrl);
+
+  assert.match(demoRoot, /href="\/login"[\s\S]*?prefetch=\{false\}/);
+  assert.match(demoRoot, /Create guest account/);
+  assert.match(loginPage, /New accounts start with guest access/);
+  assert.match(loginPage, /never starts an agent, sandbox, or run/);
+  assert.match(loginPage, /<GithubSignIn callbackUrl="\/"\s*\/>/);
+  assert.doesNotMatch(loginPage, /callbackUrl="\/agents"/);
+  assert.doesNotMatch(githubSignIn, />or</);
 });
 
 test("the demo route tree has no live service or network dependency", () => {

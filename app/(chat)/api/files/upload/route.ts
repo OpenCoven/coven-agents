@@ -1,8 +1,15 @@
 import { put } from "@vercel/blob";
+import { ipAddress } from "@vercel/functions";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
+import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
+import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 
 const FileSchema = z.object({
   file: z
@@ -17,9 +24,18 @@ const FileSchema = z.object({
 
 export async function POST(request: Request) {
   const session = await auth();
+  const access = await authorizeSubscriberAccess(session);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
+  }
 
-  if (!session) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "upload",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   if (request.body === null) {

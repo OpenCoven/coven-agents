@@ -11,7 +11,11 @@ import {
 import { checkBotId } from "botid/server";
 import { after } from "next/server";
 import { createResumableStreamContext } from "resumable-stream";
-import { auth, type UserType } from "@/app/(auth)/auth";
+import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
 import { entitlementsByPlan } from "@/lib/ai/entitlements";
 import {
   allowedModelIds,
@@ -27,6 +31,8 @@ import { editDocument } from "@/lib/ai/tools/edit-document";
 import { getWeather } from "@/lib/ai/tools/get-weather";
 import { requestSuggestions } from "@/lib/ai/tools/request-suggestions";
 import { updateDocument } from "@/lib/ai/tools/update-document";
+import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
+import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { isProductionEnvironment } from "@/lib/constants";
 import {
   createStreamId,
@@ -41,7 +47,6 @@ import {
 } from "@/lib/db/queries";
 import type { DBMessage } from "@/lib/db/schema";
 import { ChatbotError } from "@/lib/errors";
-import { checkIpRateLimit } from "@/lib/ratelimit";
 import type { ChatMessage, WaitingStatusData } from "@/lib/types";
 import { convertToUIMessages, generateUUID } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
@@ -68,6 +73,33 @@ function getStreamContext() {
 export { getStreamContext };
 
 export async function POST(request: Request) {
+  const [botIdResult, session] = await Promise.all([
+    checkBotId().catch(() => null),
+    auth(),
+  ]);
+
+  if (botIdResult?.isBot) {
+    return new ChatbotError("forbidden:api").toResponse();
+  }
+
+  const access = await authorizeSubscriberAccess(session);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
+  }
+  if (!session) {
+    throw new Error("Subscriber access was allowed without an auth session.");
+  }
+  const { userId } = access;
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "chat",
+    userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
+  }
+
   let requestBody: PostRequestBody;
 
   try {
@@ -81,33 +113,16 @@ export async function POST(request: Request) {
     const { id, message, messages, selectedChatModel, selectedVisibilityType } =
       requestBody;
 
-    const [botIdResult, session] = await Promise.all([
-      checkBotId().catch(() => null),
-      auth(),
-    ]);
-
-    if (botIdResult?.isBot) {
-      return new ChatbotError("forbidden:api").toResponse();
-    }
-
-    if (!session?.user) {
-      return new ChatbotError("unauthorized:chat").toResponse();
-    }
-
     const chatModel = allowedModelIds.has(selectedChatModel)
       ? selectedChatModel
       : DEFAULT_CHAT_MODEL;
 
-    await checkIpRateLimit(ipAddress(request));
-
-    const userType: UserType = session.user.type;
-
     const messageCount = await getMessageCountByUserId({
       differenceInHours: 1,
-      id: session.user.id,
+      id: userId,
     });
 
-    if (messageCount > entitlementsByPlan[userType].maxMessagesPerHour) {
+    if (messageCount > entitlementsByPlan.subscriber.maxMessagesPerHour) {
       return new ChatbotError("rate_limit:chat").toResponse();
     }
 
@@ -118,7 +133,7 @@ export async function POST(request: Request) {
     let titlePromise: Promise<string> | null = null;
 
     if (chat) {
-      if (chat.userId !== session.user.id) {
+      if (chat.userId !== userId) {
         return new ChatbotError("forbidden:chat").toResponse();
       }
       messagesFromDb = await getMessagesByChatId({ id });
@@ -126,7 +141,7 @@ export async function POST(request: Request) {
       await saveChat({
         id,
         title: "New chat",
-        userId: session.user.id,
+        userId,
         visibility: selectedVisibilityType,
       });
       titlePromise = generateTitleFromUserMessage({ message });
@@ -453,14 +468,23 @@ export async function DELETE(request: Request) {
   }
 
   const session = await auth();
+  const access = await authorizeSubscriberAccess(session);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
+  }
 
-  if (!session?.user) {
-    return new ChatbotError("unauthorized:chat").toResponse();
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "chat_delete",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   const chat = await getChatById({ id });
 
-  if (chat?.userId !== session.user.id) {
+  if (chat?.userId !== access.userId) {
     return new ChatbotError("forbidden:chat").toResponse();
   }
 

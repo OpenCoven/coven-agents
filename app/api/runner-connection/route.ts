@@ -1,5 +1,12 @@
+import { ipAddress } from "@vercel/functions";
 import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
 import { connectionDecision } from "@/lib/agents/connection-access";
+import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
+import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 
 /**
  * Serves the cloud runner connection to a signed-in subscriber.
@@ -12,14 +19,26 @@ import { connectionDecision } from "@/lib/agents/connection-access";
  * The decision lives in `connectionDecision` because it governs who may reach
  * the owner's worker, and a route handler is unreachable from a unit test.
  */
-export async function GET() {
-  const session = await auth();
+export async function GET(request: Request) {
+  const access = await authorizeSubscriberAccess(await auth());
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "runner_connection",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
+  }
 
   const decision = connectionDecision({
     controlToken: process.env.AGENT_CONTROL_TOKEN,
     endpoint:
       process.env.NEXT_PUBLIC_CLOUD_RUNNER_URL ?? process.env.CLOUD_RUNNER_URL,
-    plan: session?.user?.id ? (session.user.type ?? null) : null,
+    plan: access.session.kind,
   });
 
   switch (decision.kind) {

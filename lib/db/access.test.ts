@@ -4,7 +4,10 @@ import { isSubscriber, toSession } from "@/lib/session";
 import { databaseFor } from "./access";
 
 test("a subscriber session yields a database handle", () => {
-  const session = toSession({ id: "user-1", type: "subscriber" });
+  const session = toSession({
+    id: "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+    type: "subscriber",
+  });
 
   // Narrowed rather than cast: `as never` would sidestep the very
   // compile-time guarantee this module exists to provide, so the call would

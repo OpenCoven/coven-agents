@@ -148,8 +148,8 @@ test("keeps the exported contract values aligned with the fixture", async () => 
 
 test("defaults new and legacy agent definitions to standalone ownership", () => {
   const result = createAgentInputSchema.parse({
-    backend: "local",
-    instructions: "Run locally.",
+    backend: "cloud",
+    instructions: "Run in the cloud.",
     model: "auto",
     name: "Standalone",
     runtime: "copilot",
@@ -178,13 +178,30 @@ test("defaults new and legacy agent definitions to standalone ownership", () => 
   );
 });
 
+test("refuses a local agent, because nothing can execute one", () => {
+  // The local runner is gone. Keeping `local` parseable would let a client
+  // store a definition that no runner will ever pick up: the cloud worker
+  // refused it even while the local runner existed, so it would fail at run
+  // time instead of at creation, after the agent already appeared in the list.
+  assert.equal(
+    createAgentInputSchema.safeParse({
+      backend: "local",
+      instructions: "Run locally.",
+      model: "auto",
+      name: "Orphan",
+      runtime: "copilot",
+    }).success,
+    false
+  );
+});
+
 test("rejects unknown fields on agent definitions", () => {
   const result = agentDefinitionSchema.safeParse({
-    backend: "local",
+    backend: "cloud",
     createdAt: "2026-08-20T19:00:00.000Z",
-    description: "Run locally.",
+    description: "Run in the cloud.",
     id: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
-    instructions: "Run locally.",
+    instructions: "Run in the cloud.",
     lastRunAt: null,
     model: "auto",
     name: "Strict",

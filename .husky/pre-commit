@@ -1,1 +1,2 @@
+corepack pnpm secret:scan
 corepack pnpm exec lint-staged

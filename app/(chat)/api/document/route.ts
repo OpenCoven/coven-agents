@@ -1,6 +1,13 @@
+import { ipAddress } from "@vercel/functions";
 import { z } from "zod";
 import { auth } from "@/app/(auth)/auth";
 import type { ArtifactKind } from "@/components/chat/artifact";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
+import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
+import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import {
   deleteDocumentsByIdAfterTimestamp,
   getDocumentsById,
@@ -28,9 +35,18 @@ export async function GET(request: Request) {
   }
 
   const session = await auth();
+  const access = await authorizeSubscriberAccess(session);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
+  }
 
-  if (!session?.user) {
-    return new ChatbotError("unauthorized:document").toResponse();
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "document_read",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   const documents = await getDocumentsById({ id });
@@ -41,14 +57,14 @@ export async function GET(request: Request) {
     return new ChatbotError("not_found:document").toResponse();
   }
 
-  if (document.userId !== session.user.id) {
+  if (document.userId !== access.userId) {
     return new ChatbotError("forbidden:document").toResponse();
   }
 
   return Response.json(documents, { status: 200 });
 }
 
-export async function POST(request: Request) {
+async function writeDocument(request: Request) {
   const { searchParams } = new URL(request.url);
   const id = searchParams.get("id");
 
@@ -60,9 +76,18 @@ export async function POST(request: Request) {
   }
 
   const session = await auth();
+  const access = await authorizeSubscriberAccess(session);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
+  }
 
-  if (!session?.user) {
-    return new ChatbotError("not_found:document").toResponse();
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "document_write",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   let content: string;
@@ -86,7 +111,7 @@ export async function POST(request: Request) {
   if (documents.length > 0) {
     const [doc] = documents;
 
-    if (doc.userId !== session.user.id) {
+    if (doc.userId !== access.userId) {
       return new ChatbotError("forbidden:document").toResponse();
     }
   }
@@ -101,10 +126,18 @@ export async function POST(request: Request) {
     id,
     kind,
     title,
-    userId: session.user.id,
+    userId: access.userId,
   });
 
   return Response.json(document, { status: 200 });
+}
+
+export function POST(request: Request) {
+  return writeDocument(request);
+}
+
+export function PATCH(request: Request) {
+  return writeDocument(request);
 }
 
 export async function DELETE(request: Request) {
@@ -127,16 +160,25 @@ export async function DELETE(request: Request) {
   }
 
   const session = await auth();
+  const access = await authorizeSubscriberAccess(session);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
+  }
 
-  if (!session?.user) {
-    return new ChatbotError("unauthorized:document").toResponse();
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "document_delete",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   const documents = await getDocumentsById({ id });
 
   const [document] = documents;
 
-  if (document.userId !== session.user.id) {
+  if (document.userId !== access.userId) {
     return new ChatbotError("forbidden:document").toResponse();
   }
 

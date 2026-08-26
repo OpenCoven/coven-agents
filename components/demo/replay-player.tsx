@@ -96,7 +96,7 @@ function EventBody({ event }: { event: RunEvent }) {
       );
     case "file":
       return (
-        <p className="mt-2 break-all font-mono text-emerald-100/65 text-xs">
+        <p className="mt-2 break-all font-mono text-violet-100/70 text-xs">
           {event.evidence.operation} {sanitizeEvidencePath(event.evidence.path)}
           {event.evidence.byteLength === undefined
             ? ""
@@ -159,13 +159,13 @@ function eventPresentation(event: RunEvent) {
       return {
         icon: FileCode2,
         label: "File changed",
-        tone: "text-emerald-300",
+        tone: "text-violet-300",
       };
     case "completed":
       return {
         icon: CheckCircle2,
         label: "Run completed",
-        tone: "text-emerald-300",
+        tone: "text-violet-300",
       };
     case "failed":
       return { icon: CircleX, label: "Run failed", tone: "text-red-300" };
@@ -238,7 +238,7 @@ export function ReplayPlayer({ transcript }: { transcript: DemoTranscript }) {
         </div>
         {isComplete ? (
           <Button
-            aria-label="Replay recorded run"
+            aria-label="Replay guest run"
             className="border-white/10 bg-white/5 text-white hover:bg-white/10 focus-visible:border-white focus-visible:ring-[3px] focus-visible:ring-white/70"
             onClick={restart}
             size="sm"
@@ -248,8 +248,8 @@ export function ReplayPlayer({ transcript }: { transcript: DemoTranscript }) {
             Replay
           </Button>
         ) : (
-          <span className="flex items-center gap-2 text-emerald-200/55 text-xs">
-            <span className="size-1.5 animate-pulse rounded-full bg-emerald-300" />
+          <span className="flex items-center gap-2 text-violet-200/60 text-xs">
+            <span className="size-1.5 animate-pulse rounded-full bg-violet-300" />
             Replaying
           </span>
         )}
@@ -266,7 +266,7 @@ export function ReplayPlayer({ transcript }: { transcript: DemoTranscript }) {
       </ol>
       {isComplete ? (
         <p
-          className="border-white/8 border-t px-5 py-3 text-emerald-200/55 text-xs"
+          className="border-white/8 border-t px-5 py-3 text-violet-200/60 text-xs"
           role="status"
         >
           Recorded run complete.

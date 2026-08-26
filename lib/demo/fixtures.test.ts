@@ -8,6 +8,7 @@ import {
 } from "@opencoven/agent-contracts";
 
 const fixturesDirectory = path.join(import.meta.dirname, "fixtures");
+// secret-scan: allow-next-line -- synthetic escaped-credential fixture
 const PROVIDER_CREDENTIAL = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
 const validTranscript = {
   events: [
@@ -66,6 +67,13 @@ function assertFixtureSanitized(filename: string, raw: string) {
     `${filename} canonical parsed content must not contain sensitive evidence`
   );
 }
+
+test("the demo publishes at least one replay fixture", async () => {
+  assert.ok(
+    (await readFixtures()).length > 0,
+    "the demo must not ship with an empty fixture directory"
+  );
+});
 
 test("every demo fixture is a valid transcript", async () => {
   for (const { filename, raw } of await readFixtures()) {

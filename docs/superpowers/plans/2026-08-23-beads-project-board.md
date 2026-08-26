@@ -340,9 +340,11 @@ function bead(overrides: Partial<Bead> = {}): Bead {
 
 test("rejects common token and credential forms", () => {
   for (const unsafe of [
+    // secret-scan: allow-next-line -- synthetic plan fixture
     "github_pat_1234567890abcdefghijklmnopqrstuvwxyz",
     "Authorization: Bearer abcdefghijklmnop",
     "API_TOKEN=super-secret-value",
+    // secret-scan: allow-next-line -- synthetic plan fixture
     "-----BEGIN PRIVATE KEY-----",
   ]) {
     assert.throws(() => validateSafeText("description", unsafe), /unsafe/i);
@@ -981,6 +983,7 @@ test("the default runner does not echo command arguments on failure", async () =
     () =>
       runCommand("false", [
         "private acceptance text",
+        // secret-scan: allow-next-line -- synthetic plan fixture
         "github_pat_1234567890abcdefghijklmnopqrstuvwxyz",
       ]),
     (error: unknown) => {

@@ -3,7 +3,14 @@
 import { useTheme } from "next-themes";
 import { parse, unparse } from "papaparse";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import DataGrid, { textEditor } from "react-data-grid";
+// Named, not default: react-data-grid dropped its default export in
+// 7.0.0-beta.61 and `DataGrid` is now exported alongside everything else.
+import {
+  type CellMouseArgs,
+  DataGrid,
+  renderTextEditor,
+} from "react-data-grid";
+import { trimGrid } from "@/lib/editor/csv-grid";
 import { cn } from "@/lib/utils";
 
 import "react-data-grid/lib/styles.css";
@@ -64,7 +71,7 @@ const PureSpreadsheetEditor = ({ content, saveContent }: SheetEditorProps) => {
       }),
       key: i.toString(),
       name: String.fromCharCode(65 + i),
-      renderEditCell: textEditor,
+      renderEditCell: renderTextEditor,
       width: 120,
     }));
 
@@ -103,17 +110,26 @@ const PureSpreadsheetEditor = ({ content, saveContent }: SheetEditorProps) => {
       columns.slice(1).map((col) => String(row[col.key] ?? ""))
     );
 
-    const newCsvContent = generateCsv(updatedData);
+    // Trimmed before serialising. The 26x50 grid is padding for the view, so
+    // that there is always a spare cell to type into; writing it back made
+    // every save of `a,b,c` store twenty-three trailing commas and fifty empty
+    // lines, and the next save re-committed them. What is stored is what a
+    // version diff is taken against, so the padding has to stop here.
+    const newCsvContent = generateCsv(trimGrid(updatedData));
     saveContent(newCsvContent, true);
   };
 
+  /**
+   * Typed with the library's own `CellMouseArgs` rather than a hand-written
+   * shape. The previous structural type named `selectCell`, which 7.0.0-beta.61
+   * renamed to `setActivePosition` -- and a hand-rolled type turns every such
+   * rename into a puzzle at the call site instead of an error pointing at the
+   * member that moved.
+   */
   const handleCellClick = useCallback(
-    (args: {
-      column: { key: string };
-      selectCell: (enableEditor?: boolean) => void;
-    }) => {
+    (args: CellMouseArgs<Record<string, string | number>>) => {
       if (args.column.key !== "rowNumber") {
-        args.selectCell(true);
+        args.setActivePosition(true);
       }
     },
     []

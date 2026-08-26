@@ -1,29 +1,46 @@
 # Coven Agents
 
-**Coven Agents** is a local-cloud hybrid control plane for creating and
-running autonomous coding agents. It is derived from
+**Coven Agents** is a local-cloud hybrid product control plane for creating
+bounded execution profiles and running coding missions. It is derived from
 [BunsDev/chatbot](https://github.com/BunsDev/chatbot) and keeps that template's
 Next.js, React, Tailwind, and shadcn/ui foundation.
 
-The same browser UI can connect to:
+It owns product accounts, subscriptions, runner access, cloud credential
+custody, and evidence for its own runs. It does not own canonical OpenCoven
+familiar identity, protected memory, authority, durable orchestration, or the
+runtime registry. Review the accepted
+[Product authority boundary](docs/architecture/adr-001-product-authority-boundary.md)
+before expanding product state or adding an OpenCoven dependency.
 
-- **Cloud runner:** Cloudflare Workers + Agents SDK + Sandbox SDK. Every agent
-  receives persistent Durable Object state and a stable isolated container.
-- **Local runner:** a loopback-only Node service that launches GitHub Copilot
-  CLI, Codex CLI, or Claude Code in their explicit no-approval modes.
+Wave 1 results and the dependency-ordered next priorities are recorded in the
+[Wave 1 delivery report](docs/roadmap/wave-1-delivery.md).
+
+Agents run on the cloud runner: Cloudflare Workers + Agents SDK + Sandbox SDK.
+Every agent receives persistent Durable Object state and a stable isolated
+container.
 
 ## Security model
 
 "YOLO" means tool approvals are disabled. It does **not** mean cloud tasks escape
 their container.
 
+Review the living [Execution threat model](docs/security/execution-threat-model.md)
+before changing identity, credentials, tenancy, runner boundaries, or evidence
+handling.
+
+Review the [Guest access and safety
+boundary](docs/security/guest-access.md) before changing public replay,
+account creation, subscription gates, or any route that can consume or persist
+resources.
+
+When something has already gone wrong, follow
+[Security incident response](docs/security/incident-response.md). It has a
+rotation runbook for every credential in the system, and the order matters:
+rotate first, investigate second.
+
 **Execution**
 
-- Cloud agents execute in per-agent Cloudflare sandboxes.
-- The local runner binds to `127.0.0.1` and limits workspaces to
-  `OPENCOVEN_LOCAL_ROOT`.
-- Local CLI processes inherit the operating-system permissions of the runner.
-  Run it only on a machine and workspace you trust.
+- Every agent executes in its own per-agent Cloudflare sandbox container.
 
 **Two tokens, two jobs.** Reaching the worker at all and being someone are
 deliberately separate. `X-Runner-Token` is a coarse deployment gate and no
@@ -39,18 +56,31 @@ envelope encryption (a per-credential AES-GCM data key wrapped by
 `CREDENTIAL_KEK`), fetched for the duration of one run, and redacted from run
 evidence. The worker holds no key material of its own.
 
-**The database is subscriber-only.** `databaseFor` accepts a
-`SubscriberSession` and nothing else, so a demo code path that tries to reach
-the database fails to compile rather than being caught in review.
+**Product data is subscriber-gated.** New browser-facing product data access
+uses `databaseFor`, which accepts a `SubscriberSession` and nothing else.
+Legacy chat routes apply the same fail-closed subscriber decision before their
+query helpers run. Narrow identity, usage-status, and checkout paths are
+documented guest exceptions; they do not grant access to chats, documents,
+credentials, agents, or runs.
 
-**Sessions.** A signed-out visitor gets a stateless demo session — an httpOnly
-cookie, no database row. Subscription state is recomputed from
-`subscribedUntil` on every token callback, so access ends when payment does
-rather than when the token happens to expire.
+**Guest sessions.** A signed-out visitor gets a stateless guest session — an
+httpOnly cookie, no database row. A GitHub sign-in creates or adopts one account
+row but still grants no model, credential, runner, sandbox, run, upload, or
+persistent chat access. Subscription state is recomputed from `subscribedUntil`
+on every token callback, and subscriber-claiming sessions are revalidated
+against the current database value before resource access. Guests are rejected
+without that lookup; expiry or revocation cannot wait for the browser token to
+expire. The internal compatibility label remains `demo`.
 
 **Browser storage.** Runner connection details live in session storage, not
 persistent local storage, and the console is served its connection by the app
 rather than asking a human to paste a token.
+
+**Commit scanning.** The pre-commit hook scans staged Git content for recognized
+credential shapes before formatting runs. Findings identify only the file,
+line, and credential category; matching values are never printed. Use
+`pnpm secret:scan:all` to scan every tracked file. Synthetic security fixtures
+must use a reviewed `secret-scan: allow-next-line -- <reason>` marker.
 
 ## Install
 
@@ -74,30 +104,7 @@ pnpm dev
 
 Open <http://localhost:3000/agents>.
 
-## Run the local backend
-
-Generate a token and start the loopback service:
-
-```bash
-export OPENCOVEN_LOCAL_TOKEN="$(openssl rand -hex 32)"
-export OPENCOVEN_LOCAL_ROOT="$HOME/Documents/GitHub"
-pnpm dev:local-runner
-```
-
-The local runner listens on `http://127.0.0.1:7331`. Enter the same token in the
-control plane's **Connect** panel.
-
-Optional variables:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `OPENCOVEN_LOCAL_PORT` | `7331` | Loopback port |
-| `OPENCOVEN_LOCAL_ROOT` | current directory | Maximum workspace boundary |
-| `OPENCOVEN_AGENT_STORE` | `.opencoven/agents.json` | Private agent registry |
-| `OPENCOVEN_RUN_TIMEOUT_MS` | `900000` | Per-run timeout |
-| `OPENCOVEN_ALLOWED_ORIGIN` | `http://localhost:3000` | Browser origin |
-
-## Run the cloud backend
+## Run the runner
 
 Create `worker/.dev.vars`:
 
@@ -177,9 +184,9 @@ vocabulary. The control plane is never a model client, so it needs no provider
 credential.
 
 - `packages/harness` is the single definition of the CLI subset, the JSONL event
-  normalizer, and the run summarizer. The local runner and the sandbox both call
-  it, so the two backends cannot drift.
-- The cloud backend runs the harness inside the per-agent Cloudflare sandbox
+  normalizer, and the run summarizer. The sandbox calls it, so normalization
+  cannot drift from the contract.
+- The runner runs the harness inside the per-agent Cloudflare sandbox
   container. `worker/Dockerfile` installs `@github/copilot`, and
   `worker/wrangler.jsonc` builds the container from that Dockerfile.
 - `GET /api/harnesses` probes the sandbox and reports which harnesses are
@@ -202,7 +209,6 @@ pnpm test:unit
 pnpm typecheck
 pnpm --filter @opencoven/agent-contracts typecheck
 pnpm --filter @opencoven/harness typecheck
-pnpm --filter @opencoven/local-runner typecheck
 pnpm --filter @opencoven/cloud-runner typecheck
 pnpm build
 ```

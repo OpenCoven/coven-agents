@@ -1,5 +1,12 @@
+import { ipAddress } from "@vercel/functions";
 import { z } from "zod";
 import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
+import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
+import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { getChatById, getVotesByChatId, voteMessage } from "@/lib/db/queries";
 import { ChatbotError } from "@/lib/errors";
 
@@ -21,9 +28,18 @@ export async function GET(request: Request) {
   }
 
   const session = await auth();
+  const access = await authorizeSubscriberAccess(session);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
+  }
 
-  if (!session?.user) {
-    return new ChatbotError("unauthorized:vote").toResponse();
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "vote_read",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   const chat = await getChatById({ id: chatId });
@@ -32,7 +48,7 @@ export async function GET(request: Request) {
     return new ChatbotError("not_found:chat").toResponse();
   }
 
-  if (chat.userId !== session.user.id) {
+  if (chat.userId !== access.userId) {
     return new ChatbotError("forbidden:vote").toResponse();
   }
 
@@ -42,6 +58,21 @@ export async function GET(request: Request) {
 }
 
 export async function PATCH(request: Request) {
+  const session = await auth();
+  const access = await authorizeSubscriberAccess(session);
+  if (access.kind !== "allowed") {
+    return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "vote_write",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
+  }
+
   let chatId: string;
   let messageId: string;
   let type: "up" | "down";
@@ -55,19 +86,13 @@ export async function PATCH(request: Request) {
     ).toResponse();
   }
 
-  const session = await auth();
-
-  if (!session?.user) {
-    return new ChatbotError("unauthorized:vote").toResponse();
-  }
-
   const chat = await getChatById({ id: chatId });
 
   if (!chat) {
     return new ChatbotError("not_found:vote").toResponse();
   }
 
-  if (chat.userId !== session.user.id) {
+  if (chat.userId !== access.userId) {
     return new ChatbotError("forbidden:vote").toResponse();
   }
 

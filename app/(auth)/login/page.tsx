@@ -18,13 +18,16 @@ export default function Page() {
         <BetaNotice />
       </Suspense>
 
-      <h1 className="font-semibold text-2xl tracking-tight">Welcome</h1>
+      <h1 className="font-semibold text-2xl tracking-tight">
+        Create or access your account
+      </h1>
       <p className="text-muted-foreground text-sm">
-        Sign in to continue to OpenCoven Agents.
+        Continue with GitHub. New accounts start with guest access, and signing
+        in never starts an agent, sandbox, or run.
       </p>
 
       <div className="pt-2">
-        <GithubSignIn callbackUrl="/agents" />
+        <GithubSignIn callbackUrl="/" />
       </div>
     </>
   );

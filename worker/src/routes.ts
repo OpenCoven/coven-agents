@@ -5,6 +5,7 @@ import {
   agentIdSchema,
   createAgentInputSchema,
   type RunSnapshot,
+  sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
 import { isRunnableHarness, SUPPORTED_HARNESS_IDS } from "@opencoven/harness";
 import {
@@ -122,7 +123,20 @@ function fail(error: unknown, cors: Headers): Response {
       cors
     );
   }
-  if (error instanceof OperationConflictError) {
+  /**
+   * Matched by name as well as prototype, like the ZodError branch below and
+   * for the same reason: these are thrown inside the YoloAgent Durable Object,
+   * and the RPC boundary preserves an error's name and message but strips its
+   * prototype chain. `instanceof` was therefore false for every DO-thrown
+   * instance, and a run refused because one was already active fell through to
+   * the 500 catch-all — the client saw a retryable `internal_error` instead of
+   * the 409 that names the actual condition, and retrying was guaranteed to
+   * hit the same wall.
+   */
+  if (
+    error instanceof OperationConflictError ||
+    (error instanceof Error && error.name === "OperationConflictError")
+  ) {
     return json(
       errorEnvelope(
         "operation_conflict",
@@ -133,7 +147,10 @@ function fail(error: unknown, cors: Headers): Response {
       cors
     );
   }
-  if (error instanceof AlreadyRunningError) {
+  if (
+    error instanceof AlreadyRunningError ||
+    (error instanceof Error && error.name === "AlreadyRunningError")
+  ) {
     return json(
       errorEnvelope(
         "already_running",
@@ -151,7 +168,32 @@ function fail(error: unknown, cors: Headers): Response {
       cors
     );
   }
-  console.error("Cloud runner request failed.");
+  /**
+   * The fallback, and the only place an unrecognised failure is ever seen.
+   *
+   * This used to log the sentence and drop the error, so every unhandled throw
+   * in the worker produced one indistinguishable line. That is what made four
+   * separate defects each take a round of guesswork to find: the run reached
+   * the worker, returned 500, and the log said nothing about why. An error
+   * handler that destroys the error is worse than no handler, because it looks
+   * like the failure was accounted for.
+   *
+   * Sanitised, because a thrown error can carry a credential in its message —
+   * a failed fetch stringifies its request, and a harness token travels in an
+   * Authorization header. `sanitizeEvidenceText` is the same redaction the run
+   * evidence goes through before it is persisted.
+   */
+  const detail =
+    error instanceof Error
+      ? {
+          message: sanitizeEvidenceText(error.message),
+          name: error.name,
+          stack: error.stack ? sanitizeEvidenceText(error.stack) : undefined,
+        }
+      : { message: sanitizeEvidenceText(String(error)), name: "UnknownError" };
+
+  console.error("Cloud runner request failed.", detail);
+
   return json(
     errorEnvelope("internal_error", "Runner request failed.", true),
     { status: 500 },
@@ -310,13 +352,6 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
           }
           if (request.method === "POST") {
             const input = createAgentInputSchema.parse(await readJson(request));
-            if (input.backend !== "cloud") {
-              throw new HttpError(
-                "Cloud runner only accepts cloud agents.",
-                400,
-                "backend_mismatch"
-              );
-            }
             assertRunnableHarness(input.runtime);
             const now = new Date().toISOString();
             const definition: AgentDefinition = {
@@ -360,13 +395,6 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
           }
           if (!action && request.method === "PUT") {
             const input = createAgentInputSchema.parse(await readJson(request));
-            if (input.backend !== "cloud") {
-              throw new HttpError(
-                "Cloud runner only accepts cloud agents.",
-                400,
-                "backend_mismatch"
-              );
-            }
             assertRunnableHarness(input.runtime);
             const configured = await agent.configure({
               ...input,

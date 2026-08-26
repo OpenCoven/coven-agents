@@ -5,10 +5,12 @@ import {
   apiErrorSchema,
   type CreateAgentInput,
   okEnvelopeSchema,
+  type RunEvent,
   type RunResult,
   type RunSnapshot,
   runEnvelopeSchema,
   runErrorEnvelopeSchema,
+  runEventSchema,
   runSnapshotEnvelopeSchema,
   runSnapshotToResult,
 } from "@opencoven/agent-contracts";
@@ -123,6 +125,31 @@ function readRunnerError(
   };
 }
 
+/**
+ * Reads one server-sent-event frame into a run event.
+ *
+ * Unparseable frames are dropped rather than thrown, so a comment keep-alive or
+ * a field the contract gains later cannot end a stream that is otherwise fine.
+ */
+function readSseFrame(frame: string): RunEvent | null {
+  const data = frame
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice("data:".length).trim())
+    .join("\n");
+
+  if (!data) {
+    return null;
+  }
+
+  try {
+    const parsed = runEventSchema.safeParse(JSON.parse(data));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
 export class RunnerClient {
   private readonly connection: RunnerConnection;
   private readonly endpoint: string;
@@ -162,6 +189,25 @@ export class RunnerClient {
   async listAgents(signal?: AbortSignal): Promise<AgentDefinition[]> {
     const response = await this.fetch("/api/agents", { signal });
     return agentsEnvelopeSchema.parse(await response.json()).agents;
+  }
+
+  /**
+   * Replaces an agent's definition.
+   *
+   * The worker carries `owner`, `createdAt` and `lastRunAt` forward from the
+   * stored definition, so a caller cannot move an agent between tenants or
+   * rewrite its history by sending different values.
+   */
+  async updateAgent(
+    id: string,
+    input: CreateAgentInput
+  ): Promise<AgentDefinition> {
+    const response = await this.fetch(`/api/agents/${encodeURIComponent(id)}`, {
+      body: JSON.stringify(input),
+      method: "PUT",
+    });
+
+    return agentEnvelopeSchema.parse(await response.json()).agent;
   }
 
   async createAgent(input: CreateAgentInput): Promise<AgentDefinition> {
@@ -258,6 +304,115 @@ export class RunnerClient {
       }
       signal?.addEventListener("abort", onAbort, { once: true });
     });
+  }
+
+  /**
+   * Starts a run and returns as soon as the runner has accepted it.
+   *
+   * `runAgent` waits for an outcome, which is the right shape for a caller that
+   * only wants the result. The console is not that caller: it has a thread to
+   * fill while the run is in flight, and awaiting completion first would leave
+   * the record empty for the whole run and then paint it all at once.
+   */
+  async startRun(agentId: string, task: string): Promise<RunSnapshot> {
+    const response = await this.fetch(
+      `/api/agents/${encodeURIComponent(agentId)}/runs`,
+      {
+        body: JSON.stringify({ operationId: operationId(), task }),
+        method: "POST",
+      }
+    );
+    const body = await response.json();
+
+    const accepted = runSnapshotEnvelopeSchema.safeParse(body);
+    if (accepted.success) {
+      return accepted.data.run;
+    }
+
+    throw new RunnerApiError(
+      "Runner returned an unrecognised run payload.",
+      "unexpected_run_payload",
+      response.status
+    );
+  }
+
+  /** Re-reads one run. Used to reconcile after the event stream ends. */
+  async getRun(runId: string, signal?: AbortSignal): Promise<RunSnapshot> {
+    const response = await this.fetch(
+      `/api/runs/${encodeURIComponent(runId)}`,
+      { signal }
+    );
+    return runSnapshotEnvelopeSchema.parse(await response.json()).run;
+  }
+
+  /**
+   * Follows a run's event stream, calling back for each event in order.
+   *
+   * Read with `fetch` rather than `EventSource` because the runner authenticates
+   * every request with two headers and `EventSource` can set none of them.
+   *
+   * Resolves when the stream closes. The worker closes it on a terminal run and
+   * also on an idle timeout, so a caller that wants to be sure re-reads the
+   * snapshot afterwards instead of treating the close as an outcome.
+   */
+  async streamRunEvents(
+    runId: string,
+    options: {
+      lastEventId?: number;
+      onEvent: (event: RunEvent) => void;
+      signal?: AbortSignal;
+    }
+  ): Promise<void> {
+    const response = await this.fetch(
+      `/api/runs/${encodeURIComponent(runId)}/events`,
+      {
+        headers: {
+          accept: "text/event-stream",
+          ...(options.lastEventId
+            ? { "last-event-id": String(options.lastEventId) }
+            : {}),
+        },
+        signal: options.signal,
+      }
+    );
+
+    const { body } = response;
+    if (!body) {
+      throw new RunnerApiError(
+        "Runner returned no event stream.",
+        "no_event_stream",
+        response.status
+      );
+    }
+
+    const reader = body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = "";
+
+    try {
+      let done = false;
+      while (!done) {
+        // biome-ignore lint/performance/noAwaitInLoops: a stream is read one chunk at a time by definition; the next read cannot be issued before this one resolves.
+        const chunk = await reader.read();
+        if (chunk.done) {
+          done = true;
+          break;
+        }
+        buffer += chunk.value;
+
+        // Frames are separated by a blank line. Anything after the last
+        // separator is a partial frame and stays in the buffer.
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+        for (const frame of frames) {
+          const event = readSseFrame(frame);
+          if (event) {
+            options.onEvent(event);
+          }
+        }
+      }
+    } finally {
+      reader.cancel().catch(() => undefined);
+    }
   }
 
   /** Cancels a run in flight. Cloud runner only; the local runner has no such route. */

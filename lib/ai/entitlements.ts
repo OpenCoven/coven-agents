@@ -16,7 +16,7 @@ export const entitlementsByPlan: Record<Plan, Entitlements> = {
    */
   demo: {
     canRunHarness: false,
-    maxMessagesPerHour: 10,
+    maxMessagesPerHour: 0,
   },
   /**
    * A paying tenant. Kept deliberately modest until billing exists to make it
