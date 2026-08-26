@@ -9,6 +9,11 @@ import {
 } from "@opencoven/agent-contracts";
 import { isRunnableHarness, SUPPORTED_HARNESS_IDS } from "@opencoven/harness";
 import {
+  enforceWorkerEdgeLimit,
+  type WorkerAbuseDecision,
+  workerRouteClass,
+} from "./abuse.js";
+import {
   corsHeaders,
   errorEnvelope,
   HttpError,
@@ -32,6 +37,10 @@ export type CloudRunnerEnvironment = Omit<
   "ALLOWED_ORIGIN"
 > & {
   ALLOWED_ORIGIN: string;
+  EDGE_ABUSE_KEY_SECRET?: string;
+  EDGE_REQUEST_LIMITER: RateLimit;
+  TENANT_MUTATION_LIMITER: RateLimit;
+  TENANT_RUN_LIMITER: RateLimit;
 };
 
 /**
@@ -229,6 +238,35 @@ function eventStream(
   return new Response(stream, { headers });
 }
 
+function abuseResponse(
+  decision: WorkerAbuseDecision,
+  cors: Headers
+): Response | null {
+  if (decision.kind === "allowed") {
+    return null;
+  }
+  const headers = new Headers({
+    "cache-control": "no-store",
+  });
+  if (decision.kind === "limited") {
+    headers.set("retry-after", String(decision.retryAfterSeconds));
+    return json(
+      errorEnvelope(
+        "rate_limited",
+        "Too many requests. Try again later.",
+        true
+      ),
+      { headers, status: 429 },
+      cors
+    );
+  }
+  return json(
+    errorEnvelope("abuse_control_unavailable", "Please try again later.", true),
+    { headers, status: 503 },
+    cors
+  );
+}
+
 export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
   dependencies: CloudRunnerDependencies<Environment>
 ): {
@@ -245,6 +283,20 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
       }
 
       const url = new URL(request.url);
+      const routeClass = workerRouteClass(request.method, url.pathname);
+      const sourceAdmission = abuseResponse(
+        await enforceWorkerEdgeLimit({
+          env: environment,
+          ip: request.headers.get("cf-connecting-ip"),
+          routeClass,
+          stage: "source",
+        }),
+        cors
+      );
+      if (sourceAdmission) {
+        return sourceAdmission;
+      }
+
       if (url.pathname === "/api/health" && request.method === "GET") {
         return json(
           {
@@ -310,6 +362,19 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
         );
       }
       const callerTenant = claims.tenant;
+      const tenantAdmission = abuseResponse(
+        await enforceWorkerEdgeLimit({
+          env: environment,
+          ip: request.headers.get("cf-connecting-ip"),
+          routeClass,
+          stage: "tenant",
+          tenant: callerTenant,
+        }),
+        cors
+      );
+      if (tenantAdmission) {
+        return tenantAdmission;
+      }
 
       if (
         url.pathname === "/api/diagnostics/sandbox" &&

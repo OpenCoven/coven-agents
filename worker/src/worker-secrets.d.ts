@@ -21,6 +21,7 @@ interface Env {
    * refactors, an absent one cannot.
    */
   APP_ORIGIN?: string;
+  EDGE_ABUSE_KEY_SECRET?: string;
   RUNNER_SERVICE_TOKEN?: string;
   RUNNER_VERIFY_KEY?: string;
 }
