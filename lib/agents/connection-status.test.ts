@@ -110,3 +110,47 @@ test("every status has a message that names the cause", () => {
 test("the subscription message says what to do", () => {
   assert.match(connectionMessage("subscription_required"), /subscription/i);
 });
+
+/**
+ * The admission layer sits in front of this endpoint since #108, so its
+ * refusals arrive on the same status codes the route already used for other
+ * meanings. Misreading them is what made the console answer a rate limit by
+ * asking for a deployment token.
+ */
+test("a 429 is rate limiting, not a missing runner", () => {
+  const status = readConnectionResponse(429, { error: "rate_limited" }, "137");
+
+  assert.equal(status.kind, "rate_limited");
+  if (status.kind === "rate_limited") {
+    assert.equal(status.retryAfterSeconds, 137);
+  }
+});
+
+test("a 429 without a usable retry-after still says how long to wait", () => {
+  // The default matters: a rate_limited status with no horizon reads as
+  // permanent, which is the misunderstanding this kind exists to end.
+  const missing = readConnectionResponse(429, null, null);
+  const garbage = readConnectionResponse(429, null, "soon");
+
+  for (const status of [missing, garbage]) {
+    assert.equal(status.kind, "rate_limited");
+    if (status.kind === "rate_limited") {
+      assert.equal(status.retryAfterSeconds, 60);
+    }
+  }
+});
+
+test("only the route's own 503 claims the runner is unconfigured", () => {
+  // "Unconfigured" tells the user to paste a token manually — permanent-state
+  // advice. The admission layer's 503 is a transient store failure wearing
+  // the same status code, and must not trigger that prompt.
+  assert.equal(
+    readConnectionResponse(503, { error: "runner_unconfigured" }).kind,
+    "unconfigured"
+  );
+  assert.equal(
+    readConnectionResponse(503, { error: "rate_limited" }).kind,
+    "unavailable"
+  );
+  assert.equal(readConnectionResponse(503, null).kind, "unavailable");
+});
