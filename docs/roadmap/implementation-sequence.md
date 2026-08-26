@@ -16,12 +16,16 @@ commitments.
   succeeds, repository evidence may be marked implemented or verified, but no
   lane may claim authoritative Beads completion or a reconciled, idempotent
   sync.
-- The tracked runner contract is cloud-only. The IDs
-  `coven-agents-local`, `coven-agents-local.1`,
-  `coven-agents-local.2`, `coven-agents-local.3`,
-  `coven-agents-local.4`, and `coven-agents-local.5` are quarantined from
-  promotion unless canonical planning authority explicitly retires or
-  re-scopes them. They do not authorize reintroducing a local runner.
+- The tracked runner contract and merged product path are cloud-only.
+  `coven-agents-local.1` is assigned to the Runner lifecycle foundation only
+  to make planning ownership explicit. It remains entry-blocked until
+  canonical planning authority explicitly retires or re-scopes it; no
+  allowlist authorizes reintroducing a local runner.
+- The remaining IDs `coven-agents-local`, `coven-agents-local.2`,
+  `coven-agents-local.3`, `coven-agents-local.4`, and
+  `coven-agents-local.5` remain unallocated and quarantined from promotion.
+  In particular, `coven-agents-local.3` is not allowlisted because its
+  prerequisites are not established in this public sequence.
 
 ## Promotion model
 
@@ -195,8 +199,11 @@ binding, and encrypted credential path are on merged main.
   pushed branches, explicit local gates, safe roadmap projections, and scoped
   recovery commands, while operators have repeatable evidence that setup,
   account, and console workflows remain reliable.
-- **Allowed Bead IDs:** `coven-agents-dx.2`,
-  `coven-agents-dx.5`
+- **Allowed Bead IDs:** — (no additional child allocation).
+- **Supporting prerequisite (not owned by this lane):**
+  `coven-agents-dx.2` is owned by Repository integrity and
+  `coven-agents-dx.5` is owned by Planning authority; this lane consumes their
+  Phase 0 exit evidence.
 - **Owner role:** Joint
 - **Predecessor lanes:** Planning authority, Repository integrity, Evidence
   baseline.
@@ -226,11 +233,18 @@ Wave 2 may admit work only after Phase 0 and the relevant Wave 1 lanes exit.
 Project status such as `In Progress` is not sufficient while Beads is
 unavailable.
 
+The acyclic dependency order is Contracts and capabilities, then Runner
+lifecycle foundation. Explainability foundation and Durability may proceed
+independently after lifecycle. Execution safety admits each child only after
+its applicable contract, lifecycle, and explainability foundations exit:
+egress never gates lifecycle, complete output redaction follows structured
+logging, and foundational logging never waits for durability.
+
 ### Contracts and capabilities
 
-- **Entry conditions:** Wave 1 boundaries are stable; supported runner behavior
-  is represented by versioned schemas and fixtures; compatibility policy is
-  reviewable.
+- **Entry conditions:** Product authority and evaluation, Security posture,
+  and Evidence baseline have exited; current runner behavior and compatibility
+  risks are inventoried from merged main.
 - **Public outcome:** Clients and the cloud runner negotiate explicit,
   versioned capabilities and reject unsupported behavior without inventing or
   silently dropping evidence.
@@ -249,88 +263,108 @@ unavailable.
   disable the new capability, and avoid destructive migration until both sides
   pass conformance.
 
-### Execution safety
+### Runner lifecycle foundation
 
-- **Entry conditions:** Identity and product authority are stable; contract
-  boundaries are explicit; the threat model names the affected trust
-  boundaries.
-- **Public outcome:** Subscription transitions fail closed, evidence is
-  sanitized at every supported boundary, and cloud outbound behavior is
-  declared and enforced.
-- **Allowed Bead IDs:** `coven-agents-security.2`,
-  `coven-agents-security.3`, `coven-agents-cloud.4`
+- **Entry conditions:** Contracts and capabilities has exited; Security
+  posture's tenant identity and credential boundaries remain accepted; the
+  cloud-only merged backend is explicit. `coven-agents-local.1` may be admitted
+  only after Planning authority records an explicit retirement or re-scope
+  decision.
+- **Public outcome:** Cloud runs have deterministic sandbox ownership,
+  acceptance, idempotent start, streaming, cancellation, terminal
+  reconciliation, cleanup, and operator recovery without duplicate execution.
+  The local lifecycle item has an authoritative disposition: retirement for
+  the cloud-only product or an explicit re-scope before any local process work.
+- **Allowed Bead IDs:** `coven-agents-cloud.1`,
+  `coven-agents-local.1`
 - **Owner role:** Joint
-- **Predecessor lanes:** Security posture, Contracts and capabilities.
-- **Review checkpoint:** Exercise adversarial entitlement transitions,
-  cross-tenant requests, direct and encoded secret shapes, outbound-policy
-  denials, and incident recovery.
-- **Exit evidence:** Focused tests and production configuration demonstrate
-  fail-closed entitlement, end-to-end redaction, enforced egress, sanitized
-  logs, and updated threat-model residuals.
-- **Rollback/recovery expectation:** Stop run admission or publication at the
-  affected boundary, rotate any exposed credential, restore the prior policy,
-  and resume only after negative tests pass.
-
-### Runner lifecycle
-
-- **Entry conditions:** The cloud-only backend remains explicit; contracts and
-  execution-safety prerequisites pass; no quarantined local ID is admitted.
-- **Public outcome:** Cloud runs have observable acceptance, idempotent start,
-  bounded concurrency, cancellation, terminal reconciliation, cleanup, and
-  operator recovery without duplicate execution.
-- **Allowed Bead IDs:** `coven-agents-cloud.1`
-- **Owner role:** Joint
-- **Predecessor lanes:** Contracts and capabilities, Execution safety.
-- **Review checkpoint:** Test duplicate operations, active-run exclusion,
-  stream reconnect, stop, timeout, sandbox destroy, orphan detection, and
-  tenant isolation.
-- **Exit evidence:** Lifecycle tests and an operator smoke path demonstrate
-  deterministic transitions and cleanup for accepted, running, stopped,
-  failed, and completed runs.
+- **Predecessor lanes:** Contracts and capabilities, Security posture.
+  Planning authority additionally gates admission of
+  `coven-agents-local.1`.
+- **Review checkpoint:** Test cloud duplicate operations, active-run
+  exclusion, stream reconnect, stop, timeout, sandbox destroy, orphan
+  detection, and tenant isolation. Review the canonical scope decision for
+  `coven-agents-local.1`; only if re-scoped, also test process ownership,
+  streaming, cancellation, and crash cleanup.
+- **Exit evidence:** Cloud lifecycle tests and an operator smoke path
+  demonstrate deterministic transitions and cleanup for accepted, running,
+  stopped, failed, and completed runs. Canonical planning records the
+  retirement or explicit re-scope of `coven-agents-local.1`.
 - **Rollback/recovery expectation:** Refuse new starts, reconcile stored run
   state, stop or destroy orphaned sandboxes, and restore admission only after
-  the lifecycle suite passes.
+  the lifecycle suite passes. Return local work to blocked if its scope
+  decision is missing or contradicted.
+
+### Explainability foundation
+
+- **Entry conditions:** Contracts and capabilities defines the event
+  vocabulary; Runner lifecycle foundation exposes stable operation and state
+  transition points.
+- **Public outcome:** Structured, correlated logs explain which bounded
+  operation and lifecycle transition occurred using allowlisted fields rather
+  than raw harness output. Complete cross-boundary output redaction remains an
+  Execution safety successor.
+- **Allowed Bead IDs:** `coven-agents-observability.1`
+- **Owner role:** Copilot
+- **Predecessor lanes:** Contracts and capabilities, Runner lifecycle
+  foundation.
+- **Review checkpoint:** Trace one cloud run across request, identity, Durable
+  Object, sandbox, event stream, usage count, and terminal state; verify
+  correlation, tenant scoping, field allowlists, and omission of raw output.
+- **Exit evidence:** A versioned structured-log schema and focused tests explain
+  success, refusal, failure, cancellation, and recovery with bounded,
+  correlated metadata.
+- **Rollback/recovery expectation:** Disable new log fields or publication,
+  retain only minimum safe incident metadata, and restore the last reviewed
+  schema before resuming telemetry.
 
 ### Durability
 
-- **Entry conditions:** Runner lifecycle transitions are deterministic;
-  identity and contract versions survive restart; journal and shared-record
-  boundaries are explicit.
+- **Entry conditions:** Contracts and capabilities and Runner lifecycle
+  foundation have exited; journal and shared-record candidates are inventoried
+  against their stable versions and transitions.
 - **Public outcome:** Crash-safe journals and shared persistent agent and run
   records survive expected restarts without lost or duplicate transitions.
 - **Allowed Bead IDs:** `coven-agents-data.1`,
   `coven-agents-data.2`
 - **Owner role:** Joint
-- **Predecessor lanes:** Runner lifecycle, Contracts and capabilities,
-  Execution safety.
+- **Predecessor lanes:** Contracts and capabilities, Runner lifecycle
+  foundation.
 - **Review checkpoint:** Inject restart and partial-write failures; verify
-  idempotent journal replay, tenant isolation, and shared-record consistency.
+  idempotent journal replay, tenant isolation, bounded records, and
+  shared-record consistency.
 - **Exit evidence:** Recovery tests cover queued and running work, state replay,
   duplicate suppression, partial writes, and shared persistent records.
 - **Rollback/recovery expectation:** Stop new writes, restore the last
   known-good state, replay only idempotent journal records, and retain an
   auditable recovery result.
 
-### Explainability
+### Execution safety
 
-- **Entry conditions:** Contracts define the event vocabulary; execution safety
-  defines disclosure limits; lifecycle and durability expose stable state.
-- **Public outcome:** Users and operators can explain what ran, under which
-  bounded profile, with which state transition and resource result, without
-  exposing credentials or another tenant's data.
-- **Allowed Bead IDs:** `coven-agents-observability.1`
-- **Owner role:** Copilot
-- **Predecessor lanes:** Contracts and capabilities, Execution safety, Runner
-  lifecycle, Durability.
-- **Review checkpoint:** Trace one run across request, identity, Durable Object,
-  sandbox, event stream, usage count, and terminal state; verify sanitization
-  and tenant scoping at each boundary.
-- **Exit evidence:** Structured, correlated, sanitized evidence explains
-  success, refusal, failure, cancellation, and recovery without raw secret or
-  private-path disclosure.
-- **Rollback/recovery expectation:** Stop persistence or publication of unsafe
-  evidence, sanitize affected records, rotate exposed credentials, and retain
-  only the minimum safe incident metadata.
+- **Entry conditions:** Security posture and Contracts and capabilities have
+  exited for every child. Runner lifecycle foundation must also exit before
+  `coven-agents-cloud.4` or lifecycle-bound redaction work is admitted, and
+  Explainability foundation must exit before `coven-agents-security.3` is
+  admitted.
+- **Public outcome:** Subscriber transitions fail closed, evidence and logs
+  are redacted at every supported boundary, and cloud outbound behavior is
+  declared and enforced.
+- **Allowed Bead IDs:** `coven-agents-security.2`,
+  `coven-agents-security.3`, `coven-agents-cloud.4`
+- **Owner role:** Joint
+- **Predecessor lanes:** Security posture and Contracts and capabilities for
+  all work; Runner lifecycle foundation for `coven-agents-security.3` and
+  `coven-agents-cloud.4`; Explainability foundation for
+  `coven-agents-security.3`.
+- **Review checkpoint:** Exercise adversarial entitlement transitions,
+  cross-tenant requests, direct and encoded secret shapes across output,
+  storage, logs, and errors, outbound-policy denials, and incident recovery.
+- **Exit evidence:** Focused tests and production configuration demonstrate
+  fail-closed subscriber authority, end-to-end redaction, enforced egress,
+  sanitized structured logs, and updated threat-model residuals.
+- **Rollback/recovery expectation:** Stop run admission or publication at the
+  affected boundary, rotate any exposed credential, restore the prior policy,
+  and resume only after negative tests pass.
 
 ## Later outcome envelopes
 
