@@ -83,7 +83,11 @@ test("the guest preview offers account creation without starting live resources"
   assert.match(demoRoot, /href="\/login"[\s\S]*?prefetch=\{false\}/);
   assert.match(demoRoot, /Create guest account/);
   assert.match(loginPage, /New accounts start with guest access/);
-  assert.match(loginPage, /never starts an agent, sandbox, or run/);
+  // The promise was deliberately narrowed when sign-in prewarming shipped:
+  // signing in still never starts an agent or a run, but for subscribers it
+  // now begins booting a sandbox container — and the page must say so.
+  assert.match(loginPage, /never starts an agent or a run/);
+  assert.match(loginPage, /warming\s+the\s+sandbox/);
   assert.match(loginPage, /<GithubSignIn callbackUrl="\/"\s*\/>/);
   assert.doesNotMatch(loginPage, /callbackUrl="\/agents"/);
   assert.doesNotMatch(githubSignIn, />or</);

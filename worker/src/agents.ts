@@ -10,6 +10,7 @@ import {
   runAgentInputSchema,
   runSnapshotToResult,
   startRunInputSchema,
+  type WarmState,
 } from "@opencoven/agent-contracts";
 import type { HarnessStatus } from "@opencoven/harness";
 import { Agent } from "agents";
@@ -17,6 +18,7 @@ import {
   HarnessError,
   listCloudHarnesses,
   runHarnessInSandbox,
+  warmSandbox,
 } from "./harness-runner";
 import {
   AlreadyRunningError,
@@ -53,6 +55,17 @@ type YoloAgentState = {
   definition: AgentDefinition | null;
   runs: CloudRunRecord[];
 };
+
+const WARM_FIBER_KEY = "warm";
+/**
+ * How long a warmed-but-idle container is kept before it sleeps, and — the
+ * same number on purpose — how long a recorded `ready` is trusted before a
+ * new trigger re-probes. The container pool caps at ten lite instances, so
+ * this is the paid-idle window per warmed profile, chosen to cover the gap
+ * between creating a profile and typing its first mission.
+ */
+const WARM_SLEEP_AFTER = "10m";
+const WARM_TRUST_WINDOW_MS = 10 * 60 * 1000;
 
 /**
  * The harness and the contract name file operations differently — the harness
@@ -345,7 +358,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         runtime: definition.runtime,
         sandbox: getSandbox(
           this.env.Sandbox,
-          await sandboxKey(tenantOf(definition), definition.id)
+          await sandboxKey(tenantOf(definition), definition.id),
+          // Chosen rather than inherited: the same idle window the warm-up
+          // uses, so a warmed container and a run container age identically.
+          { sleepAfter: WARM_SLEEP_AFTER }
         ),
         task,
         workspace: definition.workspace,
@@ -560,9 +576,83 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       .map((record) => record.run);
   }
 
+  /**
+   * Boots this agent's sandbox ahead of its next run.
+   *
+   * Fire-and-settle: the caller gets `provisioning` back as soon as the
+   * fiber is spawned, and the fiber records `ready` or `failed` when the
+   * probe answers. Idempotent by fiber key — a second trigger while one is
+   * booting joins it, and a `ready` state younger than the container's idle
+   * window is trusted rather than re-probed, so a burst of triggers cannot
+   * boot anything twice. Warming never touches the credential route: no run
+   * is counted and no credential is ever in scope here.
+   */
+  async warm(): Promise<WarmState> {
+    const definition = this.requireDefinition();
+    const current = definition.warm;
+    const now = Date.now();
+    if (
+      current &&
+      current.status !== "not_started" &&
+      current.status !== "failed" &&
+      now - Date.parse(current.updatedAt) < WARM_TRUST_WINDOW_MS
+    ) {
+      return current;
+    }
+
+    const provisioning: WarmState = {
+      status: "provisioning",
+      updatedAt: new Date(now).toISOString(),
+    };
+    this.updateDefinition({ warm: provisioning });
+
+    await this.startFiber(
+      WARM_FIBER_KEY,
+      async () => {
+        await this.driveWarm(definition);
+      },
+      { idempotencyKey: WARM_FIBER_KEY }
+    );
+    return provisioning;
+  }
+
+  private async driveWarm(definition: AgentDefinition): Promise<void> {
+    const startedAt = Date.now();
+    const outcome = await warmSandbox(
+      getSandbox(
+        this.env.Sandbox,
+        await sandboxKey(tenantOf(definition), definition.id),
+        { sleepAfter: WARM_SLEEP_AFTER }
+      ),
+      definition.runtime
+    );
+    console.log({
+      agentId: definition.id,
+      durationMs: Date.now() - startedAt,
+      event: "sandbox.warm",
+      outcome: outcome.ready ? "ready" : "failed",
+      version: outcome.version,
+    });
+    // The agent may have been decommissioned while the container booted; a
+    // cleared definition must stay cleared rather than be resurrected by a
+    // late warm result.
+    if (this.state.definition?.id === definition.id) {
+      this.updateDefinition({
+        warm: {
+          status: outcome.ready ? "ready" : "failed",
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    }
+  }
+
   async decommission(): Promise<void> {
     const { definition } = this.state;
     if (definition) {
+      await this.cancelFiberByKey(
+        WARM_FIBER_KEY,
+        "Agent decommissioned during warm-up."
+      );
       await getSandbox(
         this.env.Sandbox,
         await sandboxKey(tenantOf(definition), definition.id)
@@ -572,7 +662,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   }
 
   private updateDefinition(
-    patch: Partial<Pick<AgentDefinition, "status" | "updatedAt" | "lastRunAt">>
+    patch: Partial<
+      Pick<AgentDefinition, "status" | "updatedAt" | "lastRunAt" | "warm">
+    >
   ): AgentDefinition {
     const current = this.state.definition;
     if (!current) {

@@ -139,10 +139,12 @@ const agents = new Map<string, AgentDefinition>([
 
 let decommissioned: string[] = [];
 let stopped: string[] = [];
+let warmed: string[] = [];
 
 function runner() {
   decommissioned = [];
   stopped = [];
+  warmed = [];
 
   const directory: CloudRunnerDirectory = {
     list: (tenantId) =>
@@ -205,6 +207,13 @@ function runner() {
       stop: (runId: string) => {
         stopped.push(runId);
         return null;
+      },
+      warm: () => {
+        warmed.push(agentId);
+        return {
+          status: "provisioning",
+          updatedAt: "2026-08-20T12:00:00.000Z",
+        };
       },
     }) as unknown as CloudRunnerAgent;
 
@@ -726,4 +735,118 @@ test("a DO-thrown AlreadyRunningError still maps to 409, not the 500 catch-all",
 
   const body = (await response.json()) as { error: { code: string } };
   assert.equal(body.error.code, "already_running");
+});
+
+test("creating an agent triggers its warm-up for a subscriber", async () => {
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      body: JSON.stringify({
+        backend: "cloud",
+        instructions: "Do the thing.",
+        model: "auto",
+        name: "Warmed",
+        runtime: "copilot",
+      }),
+      headers: {
+        authorization: `Bearer ${await identityToken()}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    (await environmentPromise) as never
+  );
+
+  assert.equal(response.status, 201);
+  assert.equal(warmed.length, 1);
+});
+
+test("a demo claim creates without warming", async () => {
+  // Creation is allowed — the profile is configuration — but a demo tenant
+  // cannot run, so booting a container for one would spend capacity on
+  // nothing.
+  const pair = await getKeyPair();
+  const demoToken = await mint(pair.privateKey, {
+    exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    plan: "demo",
+    sub: "user-1",
+    tenant: CALLER_TENANT,
+  });
+
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      body: JSON.stringify({
+        backend: "cloud",
+        instructions: "Do the thing.",
+        model: "auto",
+        name: "Cold",
+        runtime: "copilot",
+      }),
+      headers: {
+        authorization: `Bearer ${demoToken}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    (await environmentPromise) as never
+  );
+
+  assert.equal(response.status, 201);
+  assert.deepEqual(warmed, []);
+});
+
+test("tenant prewarm boots the most recently used agent", async () => {
+  const response = await call("/api/tenant/prewarm", "POST");
+
+  assert.equal(response.status, 202);
+  const body = (await response.json()) as { agentId: string };
+  assert.equal(body.agentId, MINE);
+  assert.deepEqual(warmed, [MINE]);
+});
+
+test("tenant prewarm with no agents warms nothing", async () => {
+  const pair = await getKeyPair();
+  const token = await mint(pair.privateKey, {
+    exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    plan: "subscriber",
+    sub: "user-2",
+    tenant: "t_no_agents",
+  });
+
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/tenant/prewarm", {
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    (await environmentPromise) as never
+  );
+
+  assert.equal(response.status, 204);
+  assert.deepEqual(warmed, []);
+});
+
+test("a demo claim cannot prewarm", async () => {
+  const pair = await getKeyPair();
+  const demoToken = await mint(pair.privateKey, {
+    exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    plan: "demo",
+    sub: "user-1",
+    tenant: CALLER_TENANT,
+  });
+
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/tenant/prewarm", {
+      headers: {
+        authorization: `Bearer ${demoToken}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    (await environmentPromise) as never
+  );
+
+  assert.equal(response.status, 403);
+  assert.deepEqual(warmed, []);
 });

@@ -206,6 +206,9 @@ test("route classification separates reads, mutations, and paid run starts", asy
     "run"
   );
   assert.equal(workerRouteClass("POST", "/api/diagnostics/sandbox"), "run");
+  // Prewarm boots a container exactly like a run does, so it spends the
+  // run budget, not the cheaper mutation one.
+  assert.equal(workerRouteClass("POST", "/api/tenant/prewarm"), "run");
   assert.equal(
     workerRouteClass(
       "POST",

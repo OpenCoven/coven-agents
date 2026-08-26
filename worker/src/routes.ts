@@ -6,6 +6,7 @@ import {
   createAgentInputSchema,
   type RunSnapshot,
   sanitizeEvidenceText,
+  type WarmState,
 } from "@opencoven/agent-contracts";
 import { isRunnableHarness, SUPPORTED_HARNESS_IDS } from "@opencoven/harness";
 import {
@@ -82,6 +83,7 @@ export type CloudRunnerAgent = {
   getRun: (runId: string) => Awaitable<RunSnapshot | null>;
   listRuns: () => Awaitable<RunSnapshot[]>;
   snapshot: () => Awaitable<AgentDefinition | null>;
+  warm: () => Awaitable<WarmState>;
   start: (
     input: unknown,
     identityToken: string
@@ -435,8 +437,50 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             const agent = await yoloAgent(definition.id);
             const configured = await agent.configure(definition);
             await directory.upsert(configured);
+            // Creating a profile is a declared intent to run, so the
+            // container starts booting while the user types their first
+            // mission. Subscribers only — a demo tenant cannot run, so
+            // warming for one would spend a container on nothing. A warm
+            // failure never fails the creation it rides on.
+            if (claims.plan === "subscriber") {
+              await Promise.resolve(agent.warm()).catch(() => undefined);
+            }
             return json({ agent: configured }, { status: 201 }, cors);
           }
+        }
+
+        if (
+          url.pathname === "/api/tenant/prewarm" &&
+          request.method === "POST"
+        ) {
+          // Sign-in-time warming for a returning user: boot the sandbox of
+          // the agent they most recently ran. Idempotent — the agent's warm
+          // state single-flights the fiber — and quota-free for the caller:
+          // no run is counted and no credential is fetched.
+          if (claims.plan !== "subscriber") {
+            return json(
+              errorEnvelope(
+                "subscription_required",
+                "Warming needs an active subscription.",
+                false
+              ),
+              { status: 403 },
+              cors
+            );
+          }
+          const owned = await directory.list(callerTenant);
+          const [target] = [...owned].sort(
+            (left, right) =>
+              Date.parse(right.lastRunAt ?? right.updatedAt) -
+              Date.parse(left.lastRunAt ?? left.updatedAt)
+          );
+          if (!target) {
+            return new Response(null, { headers: cors, status: 204 });
+          }
+          const warm = await Promise.resolve(
+            (await yoloAgent(target.id)).warm()
+          ).catch(() => null);
+          return json({ agentId: target.id, warm }, { status: 202 }, cors);
         }
 
         const agentMatch = url.pathname.match(
@@ -475,6 +519,11 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               updatedAt: new Date().toISOString(),
             });
             await directory.upsert(configured);
+            // An edited profile is about to be run — same intent signal as
+            // creation, same warm, same subscriber gate.
+            if (claims.plan === "subscriber") {
+              await Promise.resolve(agent.warm()).catch(() => undefined);
+            }
             return json({ agent: configured }, {}, cors);
           }
           if (!action && request.method === "DELETE") {

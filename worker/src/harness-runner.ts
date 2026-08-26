@@ -25,8 +25,14 @@ const RUN_TIMEOUT_MS = 900_000;
  * Node CLI's first launch had already spent the budget before the command
  * finished. Five minutes bounds the truly wedged case (the old unenforced
  * 20s once hid a half-hour zombie) without failing healthy cold starts.
+ *
+ * Exported for the deadline tests, which advance mocked time relative to this
+ * value. They previously hardcoded a tick that outran the old 180s deadline;
+ * raising it to 300s left the tick short, the timer never fired, and the whole
+ * worker suite hung on a never-resolving promise instead of failing. Deriving
+ * the tick from the constant keeps the next change to it honest.
  */
-const PROBE_TIMEOUT_MS = 300_000;
+export const PROBE_TIMEOUT_MS = 300_000;
 
 type SandboxLike = Pick<Sandbox, "exec">;
 
@@ -197,6 +203,50 @@ async function probeInstalled(
     }
     return { installed: false, version: null };
   }
+}
+
+const WARM_RETRY_DELAY_MS = 30_000;
+
+/**
+ * Boots the container ahead of a run by running the harness's version probe.
+ *
+ * The harness CLIs are baked into the image, so there is nothing to install;
+ * the cost this pays down is the container boot plus the CLI's first launch
+ * — the same ~110s the first probe of a cold run would otherwise spend while
+ * the user watches. One retry after a pause covers a boot that lost a race
+ * with placement; after that the answer is honest and a run simply pays the
+ * cold start it would have paid without warming.
+ *
+ * Never throws: warming is an optimization and a failed optimization must
+ * degrade to today's behaviour, not to a failed anything.
+ */
+export async function warmSandbox(
+  sandbox: SandboxLike,
+  runtime: string,
+  wait: (ms: number) => Promise<void> = (ms) =>
+    new Promise((resolve) => setTimeout(resolve, ms))
+): Promise<{ ready: boolean; version: string | null }> {
+  const spec = harnessSpec(runtime);
+  if (!spec) {
+    return { ready: false, version: null };
+  }
+
+  const attempt = async () => {
+    try {
+      return await probeInstalled(sandbox, spec);
+    } catch {
+      // A warm-up timeout is not a run timeout — nobody is waiting on it.
+      return { installed: false, version: null };
+    }
+  };
+
+  const first = await attempt();
+  if (first.installed) {
+    return { ready: true, version: first.version };
+  }
+  await wait(WARM_RETRY_DELAY_MS);
+  const second = await attempt();
+  return { ready: second.installed, version: second.version };
 }
 
 export function listCloudHarnesses(

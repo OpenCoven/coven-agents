@@ -16,6 +16,10 @@ type WorkerAbuseEnvironment = {
 const RETRY_AFTER_SECONDS = 60;
 const RUN_START_PATH = /^\/api\/agents\/[^/]+\/runs\/?$/;
 const SANDBOX_DIAGNOSTIC_PATH = /^\/api\/diagnostics\/sandbox\/?$/;
+// Prewarm boots a container just like a run does, so it spends the run
+// budget rather than the cheaper mutation one — the limiter exists to bound
+// container churn, and this is container churn.
+const PREWARM_PATH = /^\/api\/tenant\/prewarm\/?$/;
 
 export function workerRouteClass(
   method: string,
@@ -24,7 +28,9 @@ export function workerRouteClass(
   const normalizedMethod = method.toUpperCase();
   if (
     normalizedMethod === "POST" &&
-    (RUN_START_PATH.test(pathname) || SANDBOX_DIAGNOSTIC_PATH.test(pathname))
+    (RUN_START_PATH.test(pathname) ||
+      SANDBOX_DIAGNOSTIC_PATH.test(pathname) ||
+      PREWARM_PATH.test(pathname))
   ) {
     return "run";
   }

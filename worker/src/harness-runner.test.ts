@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   HarnessError,
+  PROBE_TIMEOUT_MS,
   parseHarnessStream,
   requireHarness,
   resolveSandboxWorkspace,
   runHarnessInSandbox,
+  warmSandbox,
 } from "./harness-runner";
 
 type Call = { command: string; options?: Record<string, unknown> };
@@ -21,6 +23,8 @@ function caught(run: () => unknown): HarnessError {
   throw new Error("expected the call to throw");
 }
 
+const FAKE_TIMESTAMP = "2026-01-01T00:00:00.000Z";
+
 function fakeSandbox(
   responses: Record<string, { exitCode?: number; stdout?: string }>,
   calls: Call[]
@@ -35,10 +39,12 @@ function fakeSandbox(
       const exitCode = response?.exitCode ?? 0;
       return Promise.resolve({
         command,
+        duration: 0,
         exitCode,
         stderr: "",
         stdout: response?.stdout ?? "",
         success: exitCode === 0,
+        timestamp: FAKE_TIMESTAMP,
       });
     },
   };
@@ -225,7 +231,7 @@ test("a hanging exec fails the run instead of wedging the agent", async (t) => {
     (rejection: unknown) => rejection
   );
 
-  t.mock.timers.tick(200_000);
+  t.mock.timers.tick(PROBE_TIMEOUT_MS + 1);
 
   const error = (await outcome) as { code?: string; message?: string };
   assert.equal(error?.code, "harness_timeout");
@@ -255,9 +261,98 @@ test("a probe timeout does not claim the harness is missing", async (t) => {
     (rejection: unknown) => rejection
   );
 
-  t.mock.timers.tick(200_000);
+  t.mock.timers.tick(PROBE_TIMEOUT_MS + 1);
 
   const error = (await outcome) as { code?: string };
   assert.notEqual(error?.code, "harness_missing");
   assert.equal(error?.code, "harness_timeout");
+});
+
+test("a warm-up reports ready when the probe answers first try", async () => {
+  const calls: Call[] = [];
+  const sandbox = fakeSandbox(
+    { "copilot --version": { stdout: "GitHub Copilot CLI 1.0.80\n" } },
+    calls
+  );
+
+  const outcome = await warmSandbox(sandbox as never, "copilot");
+
+  assert.deepEqual(outcome, {
+    ready: true,
+    version: "GitHub Copilot CLI 1.0.80",
+  });
+  assert.equal(calls.length, 1);
+});
+
+test("a warm-up retries once after a pause, then answers honestly", async () => {
+  const waits: number[] = [];
+  let attempts = 0;
+  const sandbox = {
+    exec() {
+      attempts += 1;
+      return Promise.resolve({
+        command: "copilot --version",
+        duration: 0,
+        exitCode: attempts === 1 ? 1 : 0,
+        stderr: "",
+        stdout: attempts === 1 ? "" : "GitHub Copilot CLI 1.0.80\n",
+        success: attempts !== 1,
+        timestamp: FAKE_TIMESTAMP,
+      });
+    },
+  };
+
+  const outcome = await warmSandbox(sandbox as never, "copilot", (ms) => {
+    waits.push(ms);
+    return Promise.resolve();
+  });
+
+  assert.equal(outcome.ready, true);
+  assert.equal(attempts, 2);
+  assert.deepEqual(waits, [30_000]);
+});
+
+test("a warm-up that never succeeds settles as failed, not thrown", async () => {
+  const calls: Call[] = [];
+  const sandbox = fakeSandbox({ "copilot --version": { exitCode: 1 } }, calls);
+
+  const outcome = await warmSandbox(sandbox as never, "copilot", () =>
+    Promise.resolve()
+  );
+
+  assert.deepEqual(outcome, { ready: false, version: null });
+  assert.equal(calls.length, 2);
+});
+
+test("a warm-up for an unknown runtime touches no sandbox", async () => {
+  const calls: Call[] = [];
+  const sandbox = fakeSandbox({}, calls);
+
+  const outcome = await warmSandbox(sandbox as never, "not-a-harness");
+
+  assert.deepEqual(outcome, { ready: false, version: null });
+  assert.equal(calls.length, 0);
+});
+
+test("a warm-up swallows the probe timeout a run would propagate", async () => {
+  // `probeInstalled` deliberately rethrows deadline errors so a run's
+  // failure names the real condition. A warm-up has no user waiting on it,
+  // so the same timeout degrades to `failed` instead of escaping into the
+  // fiber.
+  let attempts = 0;
+  const sandbox = {
+    exec() {
+      attempts += 1;
+      return Promise.reject(
+        new HarnessError("probe timed out", "harness_timeout")
+      );
+    },
+  };
+
+  const outcome = await warmSandbox(sandbox as never, "copilot", () =>
+    Promise.resolve()
+  );
+
+  assert.deepEqual(outcome, { ready: false, version: null });
+  assert.equal(attempts, 2);
 });
