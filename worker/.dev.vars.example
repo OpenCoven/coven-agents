@@ -1,5 +1,7 @@
 AGENT_CONTROL_TOKEN=replace-with-a-long-random-token
 EDGE_ABUSE_KEY_SECRET=replace-with-a-long-random-secret
-# Harness credential, not a model provider key. A fine-grained PAT with the
-# "Copilot Requests" permission, or an OAuth token from the Copilot CLI or gh app.
-COPILOT_GITHUB_TOKEN=replace-with-a-github-token-that-has-copilot-access
+RUNNER_VERIFY_KEY=replace-with-the-base64url-ed25519-public-key
+RUNNER_SERVICE_TOKEN=replace-with-a-long-random-token
+APP_ORIGIN=http://localhost:3000
+# Harness credentials are tenant-owned and fetched per run. Do not add provider
+# or operator harness tokens to the Worker environment.

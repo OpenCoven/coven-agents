@@ -109,6 +109,7 @@ Create `worker/.dev.vars`:
 
 ```dotenv
 AGENT_CONTROL_TOKEN=replace-with-a-long-random-token
+EDGE_ABUSE_KEY_SECRET=replace-with-a-long-random-secret
 RUNNER_VERIFY_KEY=replace-with-the-base64url-ed25519-public-key
 RUNNER_SERVICE_TOKEN=replace-with-a-long-random-token
 APP_ORIGIN=http://localhost:3000
@@ -174,9 +175,17 @@ sandbox is reused and automatically sleeps after 30 seconds of inactivity,
 which bounds container allocation without keeping it alive. Use it as the
 deployment smoke test:
 
+The diagnostic requires both the deployment gate and a fresh subscriber
+identity claim. Sign in to the app as an active subscriber and obtain that
+claim from the authenticated app's `POST /api/runner-token` route. That route
+is not a public minting endpoint and refuses non-subscribers. Place the returned
+token in `RUNNER_IDENTITY_TOKEN` using the authorized operator's authenticated
+workflow.
+
 ```bash
 curl -s -X POST \
   -H "x-runner-token: $AGENT_CONTROL_TOKEN" \
+  -H "Authorization: Bearer $RUNNER_IDENTITY_TOKEN" \
   https://<your-worker>.workers.dev/api/diagnostics/sandbox
 # {"exitCode":0,"ok":true,"output":"coven-agents"}
 ```

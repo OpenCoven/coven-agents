@@ -7,19 +7,20 @@ executed evidence.
 
 ## Current release disposition
 
-**No-go as of 2026-08-25.**
+**No-go as of 2026-08-26.**
 
 Current blockers are factual and fail closed:
 
-- the authenticated private Beads/DoltHub pull returned `PermissionDenied`, so
-  authoritative P0, dependency, and acceptance state cannot be reconciled;
-- `pnpm hygiene` at `2026-08-25T23:38:25-05:00` reported five worktrees, four
-  secondary worktrees against a soft cap of three, and two `AT RISK` branches:
-  `feat/console-polish` and `feat/console-redesign`. Worktree state is live, so
-  release operators must rerun the command rather than treat these names as a
-  durable inventory;
-- all 60 managed Project items are draft items, so GitHub issue state cannot
-  independently confirm delivery reconciliation;
+- the latest recorded authenticated private Beads/DoltHub pull returned
+  `PermissionDenied`, so authoritative P0, dependency, and acceptance state
+  cannot be reconciled; see [`current-state.md`](current-state.md);
+- `pnpm hygiene` at `2026-08-26T01:00:34-05:00` reported five worktrees, four
+  secondary worktrees against a soft cap of three, and one `AT RISK` branch,
+  `chore/ai-override`. Worktree state is live, so release operators must rerun
+  the command rather than treat that name as a durable inventory;
+- the latest field-only Project query recorded in
+  [`current-state.md`](current-state.md) found all 60 managed items were drafts,
+  so GitHub issue state did not independently confirm delivery reconciliation;
 - required rows in [`verification-matrix.md`](verification-matrix.md) remain
   below `Verified`, and production smoke/rollback is `Blocked`; and
 - no retained, dated production-like end-to-end artifact proves subscriber,
@@ -47,19 +48,22 @@ commit or environment.
 
 ## Environment prerequisites
 
-Check presence and agreement without printing values.
+Check presence and agreement without printing values. App environment
+variables, Worker secret/value bindings, and Cloudflare platform bindings are
+different configuration surfaces and must not be treated as interchangeable.
 
 | Area | Required before release | Current repository reality |
 | --- | --- | --- |
 | Toolchain | Node.js 22 or newer, pnpm 10, frozen dependency install, Git, Docker for Sandbox image work, and authenticated deployment CLIs. | Declared in [`README.md`](../../README.md) and package metadata. |
 | App identity and data | `AUTH_SECRET`, `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET`, `POSTGRES_URL`, and canonical `APP_ORIGIN`. | GitHub is the only sign-in provider; production data requires PostgreSQL. |
-| Abuse controls | `REDIS_URL` and `ABUSE_KEY_SECRET` must both be present in production. | [`scripts/validate-runtime-config.ts`](../../scripts/validate-runtime-config.ts) rejects an incomplete pair, but it is not a complete deployment preflight. |
+| App abuse controls | App environment variables: `ABUSE_KEY_SECRET` is required whenever `REDIS_URL` or `GLOBAL_DAILY_RUN_CAP` is configured. `ABUSE_CONTROL=off` is an emergency kill switch that admits requests without enforcement; normal releases require it unset or not `off`. | [`.env.example`](../../.env.example) and [`lib/abuse/config.ts`](../../lib/abuse/config.ts) define the relationship; the kill switch logs when used. |
 | App-to-runner connection | `NEXT_PUBLIC_CLOUD_RUNNER_URL` or server-side `CLOUD_RUNNER_URL`, plus matching `AGENT_CONTROL_TOKEN`. | The browser receives the connection from the app; the public URL requires a fresh app build when changed. |
 | Runner identity | App `RUNNER_SIGNING_KEY`; app and Worker `RUNNER_VERIFY_KEY`; matching key pair. | Claims fail closed when either side is absent or mismatched. |
 | Credential lending | App and Worker `RUNNER_SERVICE_TOKEN`; app `CREDENTIAL_KEK`; Worker `APP_ORIGIN`. | The Worker has no operator or fallback harness credential. |
 | Billing | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, and canonical `APP_ORIGIN`. | Checkout and webhook return `503` when unconfigured. |
 | Other shipped app paths | `AI_GATEWAY_API_KEY` and `BLOB_READ_WRITE_TOKEN` when chat/model and upload paths remain enabled. | These are app feature dependencies, not runner credentials. |
-| Worker | `AGENT_CONTROL_TOKEN`, `RUNNER_VERIFY_KEY`, `RUNNER_SERVICE_TOKEN`, `APP_ORIGIN`, correct `ALLOWED_ORIGIN`, Durable Object bindings/migration, container image, and Wrangler authentication. | [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc) enables observability and declares the current Worker topology. |
+| Worker service bindings | Runtime bindings for `AGENT_CONTROL_TOKEN`, `RUNNER_VERIFY_KEY`, `RUNNER_SERVICE_TOKEN`, and `APP_ORIGIN`; plain Worker variable `ALLOWED_ORIGIN`; Durable Object/container bindings and migration; container image; and Wrangler authentication. | [`worker/.dev.vars.example`](../../worker/.dev.vars.example), [`worker/src/worker-secrets.d.ts`](../../worker/src/worker-secrets.d.ts), and [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc) define the current topology. |
+| Worker abuse controls | Secret binding `EDGE_ABUSE_KEY_SECRET` plus Cloudflare Rate Limiting bindings `EDGE_REQUEST_LIMITER`, `TENANT_MUTATION_LIMITER`, and `TENANT_RUN_LIMITER`. | The rate limiters are platform bindings declared under `ratelimits` in [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc), not app environment variables or `.dev.vars` entries. |
 | Demo recorder | Recorder variables from [`.env.example`](../../.env.example) only when producing a new owner-approved replay. | Guest playback itself is committed, stateless evidence and needs no recorder secret. |
 | Local execution | — | The local runner was removed in `91f21c8`; the shared contract accepts only `cloud`. Local smoke is not a current release gate. |
 
@@ -94,7 +98,9 @@ Before release:
 An authorized maintainer must complete the authority chain after the candidate
 merge and before release:
 
-1. Pull, review, update, commit, and push the private Beads database.
+1. Follow the local/manual
+   [Beads Project sync operator guide](../beads-project-sync.md): pull, review,
+   update, commit, and push the private Beads database.
 2. Run `pnpm beads:sync preview`, `pnpm beads:sync apply`, a second apply, and a
    final preview.
 3. Require zero creates, updates, and orphans, with all managed items unchanged
@@ -126,15 +132,17 @@ pnpm build
 
 Retain command, commit, environment, timestamp, exit status, and sanitized
 output. The last full snapshot passed check, typecheck, unit tests, and build,
-but hygiene failed; it is not release evidence for a later commit. A tracked
+but it is not release evidence for this candidate. The current hygiene snapshot
+fails, and focused tests plus check/typecheck from a documentation remediation
+do not replace a candidate-specific `pnpm test:unit` and `pnpm build`. A tracked
 secret scan is recommended in addition to, not instead of, the five gates.
 
 ## Required smoke paths
 
 | Path | Required smoke | Evidence required | Current state |
 | --- | --- | --- | --- |
-| Demo | Load the signed-out root, verify no database/runner mutation, exercise play, pause, seek, speed, and completion, and inspect sanitized replay output. | Dated browser trace or recording tied to the candidate and deployment. | Unit-verified; no release-equivalent browser artifact. |
-| Subscriber | Exercise GitHub sign-in, guest refusal, active eligibility, expired/revoked refusal, connection retrieval, and usage display. | Dated trace plus sanitized account-state evidence for allowed and denied cases. | Unit-verified; no production-like OAuth and Stripe transition artifact. |
+| Demo | Build and deploy the app with `IS_DEMO=1`, load the deployment root signed out, let the deterministic replay reach completion, and verify sanitized output with no authentication, database, runner, billing, or persistence activity. | Dated browser trace or recording tied to the candidate and deployment. | Local replay/route tests are verified; no release-equivalent `IS_DEMO=1` artifact. |
+| Subscriber | Exercise a real GitHub OAuth callback and account creation/adoption, guest refusal, active eligibility, expired/revoked refusal, connection retrieval, and usage display. | Dated trace plus sanitized account-state evidence for allowed and denied cases. | Eligibility logic and mocked OAuth start are covered; actual OAuth/account creation is not verified. |
 | Cloud | Run the authenticated deployment diagnostic, create an agent, start and observe a credentialed run, stream/poll to terminal state, cancel a bounded run, delete the agent, and verify tenant/sandbox cleanup. | Dated Worker/app logs, response summary, run identifiers, and cleanup result without credentials or private output. | Local worker tests pass; no live release-equivalent lifecycle artifact. |
 | Local, if supported | Create, run, cancel, and delete through the supported local boundary, including host isolation and cleanup checks. | Dated artifact from the declared supported local environment. | Not applicable: no local runner is tracked and `backend` is cloud-only. |
 
@@ -231,12 +239,12 @@ or guess at database compatibility.
 
 | Decision gate | Go evidence | Automatic no-go | Current status |
 | --- | --- | --- | --- |
-| P0 and dependencies | Authorized Beads query shows no unresolved release-blocking P0 or dependency. | Any unresolved P0, or authority unavailable. | **No-go:** Beads/DoltHub returns `PermissionDenied`; authoritative status is unavailable. |
-| Verification | Every required matrix row is `Verified` or `Certified` for the candidate. | Any required row red or `Blocked`. | **No-go:** conformance, recovery, browser quality, preflight, and production smoke are not `Verified`. |
-| Roadmap freshness | `pnpm roadmap:status check` passes after authoritative reconciliation. | Stale aggregate. | **No-go:** the Project snapshot matched the checked-in aggregate, but Beads freshness cannot be established. |
+| P0 and dependencies | Authorized Beads query shows no unresolved release-blocking P0 or dependency. | Any unresolved P0, or authority unavailable. | **No-go:** the latest recorded pull returned `PermissionDenied`; authoritative current status is unavailable. |
+| Verification | Every required matrix row is `Verified` or `Certified` for the candidate. | Any required row red or `Blocked`. | **No-go:** subscriber sign-in, conformance, recovery, browser quality, preflight, and production smoke are not `Verified`. |
+| Roadmap freshness | `pnpm roadmap:status check` passes after authoritative reconciliation. | Stale aggregate. | **No-go:** the candidate Project check can pass, but Beads freshness cannot be established. |
 | Worktree safety | `pnpm hygiene` exits zero with no `AT RISK` worktree and the secondary count within the soft cap. | Any `AT RISK` worktree or a secondary count above the soft cap. | **No-go:** the timestamped hygiene evidence above reports both conditions. |
-| Beads/Project/issues | A second apply and final preview are a complete no-op, and accepted delivery artifacts agree. | Drift, create/update/orphan work, partial or failed sync, or issue contradiction. | **No-go:** sync cannot run authoritatively and managed Project items are drafts. |
-| Five local gates | All five pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** the latest full snapshot failed hygiene. |
+| Beads/Project/issues | A second apply and final preview are a complete no-op, and accepted delivery artifacts agree. | Drift, create/update/orphan work, partial or failed sync, or issue contradiction. | **No-go:** authoritative sync cannot run; the latest recorded Project query found managed items were drafts. |
+| Five local gates | All five pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** current hygiene fails and no all-five record exists for this candidate. |
 | Database | Staging migration, production backup, migration success, schema verification, and recovery record exist. | Missing backup, skipped/failed migration, or unproved recovery. | **No-go:** no candidate-specific production migration and restore artifact is retained. |
 | Smoke and Stripe | Demo, subscriber, cloud, and webhook evidence pass; local runs only if supported. | Any failed required smoke or missing webhook delivery. | **No-go:** only local/unit evidence is retained. |
 | Isolation | Tenant, credential, identity, and redaction evidence pass in a release-equivalent environment. | Any cross-tenant or secret-boundary failure. | **No-go:** production-like isolation evidence is not retained. |
