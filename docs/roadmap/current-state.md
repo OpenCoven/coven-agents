@@ -99,8 +99,11 @@ closure check.
 | Remote checks are disabled | High | Joint | Evidence baseline | **Current: accepted with partial mitigation.** GitHub Actions remain intentionally off; signed commits plus all local gates are required. The current snapshot still has the hygiene failure above. | A signed, retained local gate record with every required gate green, or an explicit repository decision that re-enables trusted required checks. |
 | Typechecking depends on generated Next types | Medium | Copilot | Evidence baseline | **Current: partially mitigated.** `.next` is ignored while `tsconfig.json` includes generated `.next` type paths. Typecheck and build passed in this populated worktree, but clean-checkout order independence was not proved. | A clean checkout passes the documented gate order, or the scripts explicitly generate required Next types before typecheck. |
 | Production-path E2E is missing | High | Joint | Certify | **Current: open.** Playwright is opt-in, uses a local development server, and is not part of the five executed gates; remote workflows are disabled. | A production-like, credential-safe suite covers authentication, subscription, tenant credential lending, cloud run lifecycle, and recovery with deterministic service boundaries. |
-| Cloud egress and shared-capacity fairness are incomplete | High | Joint | Wave 2 execution safety | **Current: partially mitigated.** Per-agent containers, one active run per agent, idempotent starts, and a monthly cap exist. A declared outbound policy and platform-wide queue fairness do not. | Enforced egress policy, capacity admission and fairness tests, operator visibility, and recovery evidence under exhaustion. |
-| Evidence redaction and run durability are incomplete end to end | High | Joint | Wave 2 durability and explainability | **Current: partially mitigated.** Shared pattern-based redaction, bounded records, and lifecycle state exist. Full boundary coverage, retention, export, deletion, and crash recovery remain incomplete. | Cross-boundary leak tests plus documented, tested retention, deletion, replay, and restart behavior. |
+| Cloud egress and network policy are incomplete | High | Joint | Wave 2 execution safety | **Current: partially mitigated.** Per-agent containers isolate execution, but cloud outbound behavior is not yet declared and enforced. | An enforced outbound policy, deployed denial tests, operator-visible failures, and recovery evidence after a policy violation. |
+| Cloud fairness and concurrency controls are incomplete | High | Joint | Wave 4 platform | **Current: partially mitigated.** One active run per agent, idempotent starts, and a monthly cap exist. Platform-wide capacity admission, queueing, and fairness do not. | Deterministic capacity, concurrency, and fairness tests plus operator visibility and recovery evidence under exhaustion. |
+| Output redaction is incomplete end to end | High | Joint | Wave 2 execution safety | **Current: partially mitigated.** Shared pattern-based redaction exists and selected cloud and guest boundaries use it, but complete boundary coverage is not proved. | Cross-boundary leak tests cover direct and encoded values and prove sanitized display, persistence, logs, and errors. |
+| Crash-safe journaling and shared persistent records are incomplete | High | Joint | Wave 2 durability | **Current: partially mitigated.** Bounded records and lifecycle state exist, but restart and partial-write recovery are not proved end to end. | Restart and partial-write tests prove idempotent journal replay, duplicate suppression, tenant isolation, and shared-record consistency. |
+| Retention and deletion policy are incomplete | High | Joint | Wave 5 product data | **Current: partially mitigated.** Existing stores are bounded by implementation behavior, but explicit tenant-scoped retention, export, deletion, and archive behavior is not complete. | Documented policy and tests prove retention limits, export scope, deletion boundaries, privacy-safe archive movement, and evidence for destructive paths. |
 
 ## Evidence-backed known gaps
 
@@ -114,8 +117,8 @@ closure check.
   Claude Code remain non-runnable in
   [`packages/harness/src/registry.ts`](../../packages/harness/src/registry.ts).
 - The threat model explicitly leaves cloud outbound-network policy,
-  platform-wide fairness, complete evidence redaction, and formal retention and
-  recovery open.
+  platform-wide fairness, complete evidence redaction, crash-safe recovery, and
+  formal retention and deletion open.
 - The E2E workflow documents that the suite is not CI-ready for live
   service-bound paths, and Actions are disabled.
 - The production build emitted a `metadataBase` warning. It did not fail the

@@ -294,24 +294,22 @@ unavailable.
 ### Durability
 
 - **Entry conditions:** Runner lifecycle transitions are deterministic;
-  identity and contract versions survive restart; destructive data operations
-  are gated.
-- **Public outcome:** Agent and run state survives expected restarts without
-  duplication, while retention, export, and deletion behavior is explicit and
-  tenant-scoped.
+  identity and contract versions survive restart; journal and shared-record
+  boundaries are explicit.
+- **Public outcome:** Crash-safe journals and shared persistent agent and run
+  records survive expected restarts without lost or duplicate transitions.
 - **Allowed Bead IDs:** `coven-agents-data.1`,
   `coven-agents-data.2`
 - **Owner role:** Joint
 - **Predecessor lanes:** Runner lifecycle, Contracts and capabilities,
   Execution safety.
 - **Review checkpoint:** Inject restart and partial-write failures; verify
-  idempotent replay, tenant isolation, deletion boundaries, and retained
-  evidence limits.
+  idempotent journal replay, tenant isolation, and shared-record consistency.
 - **Exit evidence:** Recovery tests cover queued and running work, state replay,
-  duplicate suppression, retention bounds, and safe destructive operations.
-- **Rollback/recovery expectation:** Freeze destructive operations, restore the
-  last known-good state, replay only idempotent records, and retain an auditable
-  recovery result.
+  duplicate suppression, partial writes, and shared persistent records.
+- **Rollback/recovery expectation:** Stop new writes, restore the last
+  known-good state, replay only idempotent journal records, and retain an
+  auditable recovery result.
 
 ### Explainability
 
@@ -323,7 +321,7 @@ unavailable.
 - **Allowed Bead IDs:** `coven-agents-observability.1`
 - **Owner role:** Copilot
 - **Predecessor lanes:** Contracts and capabilities, Execution safety, Runner
-  lifecycle.
+  lifecycle, Durability.
 - **Review checkpoint:** Trace one run across request, identity, Durable Object,
   sandbox, event stream, usage count, and terminal state; verify sanitization
   and tenant scoping at each boundary.
@@ -353,8 +351,10 @@ source controls, capability evolution, and operator-visible degradation.
 
 ### Product data
 
-Product data has explicit ownership, retention, export, deletion, analytics,
-and privacy behavior, with tenant-scoped evidence for every destructive path.
+Product data has explicit ownership and privacy behavior.
+`coven-agents-data.3` governs tenant-scoped retention, export, and deletion;
+`coven-agents-data.4` governs privacy-safe archive movement and generated
+interface documentation, with evidence for every destructive path.
 
 ### Operations
 
