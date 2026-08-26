@@ -55,7 +55,7 @@ export async function POST(request: Request) {
   const object = event.data.object as {
     billing_reason?: string | null;
     customer?: string | null;
-    lines?: { data?: { period?: { end?: number } }[] };
+    lines?: { data?: { period?: { end?: number; start?: number } }[] };
   };
 
   const customerId =
@@ -77,16 +77,22 @@ export async function POST(request: Request) {
   }
 
   const periodEndSeconds = object.lines?.data?.[0]?.period?.end;
+  const periodStartSeconds = object.lines?.data?.[0]?.period?.start;
 
   const update = subscriptionUpdate({
     billingReason: object.billing_reason ?? "",
     current: owner.subscribedUntil ?? null,
+    currentPeriodStart: owner.billingPeriodStart ?? null,
     periodEnd: periodEndSeconds ? new Date(periodEndSeconds * 1000) : null,
+    periodStart: periodStartSeconds
+      ? new Date(periodStartSeconds * 1000)
+      : null,
     type: event.type,
   });
 
   if (update) {
     await applySubscriptionUpdate({
+      billingPeriodStart: update.billingPeriodStart,
       customerId,
       subscribedUntil: update.subscribedUntil,
       userId: owner.id,

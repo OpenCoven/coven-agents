@@ -23,6 +23,10 @@ import type {
 } from "../abuse/idempotency";
 import type { DayCount } from "../billing/history";
 import { fillDays, runsByDay } from "../billing/history";
+import {
+  drizzleRunReservationDatabase,
+  reservationUsage,
+} from "../billing/run-reservations";
 import { countRun, usageFor } from "../billing/usage";
 import { ChatbotError } from "../errors";
 import {
@@ -132,6 +136,7 @@ export async function attachStripeCustomer(userId: string, customerId: string) {
 }
 
 export async function applySubscriptionUpdate(input: {
+  billingPeriodStart: Date;
   customerId: string;
   subscribedUntil: Date;
   userId: string;
@@ -140,6 +145,7 @@ export async function applySubscriptionUpdate(input: {
     return await db
       .update(user)
       .set({
+        billingPeriodStart: input.billingPeriodStart,
         stripeCustomerId: input.customerId,
         subscribedUntil: input.subscribedUntil,
       })
@@ -359,6 +365,12 @@ export async function countRunsInPeriod(
   since: Date
 ): Promise<number> {
   return await usageFor(db, tenant, since);
+}
+
+export async function runReservationUsageForTenant(
+  input: Parameters<typeof reservationUsage>[1]
+) {
+  return await reservationUsage(drizzleRunReservationDatabase(db), input);
 }
 
 /** Run volume per day for a tenant, oldest first, gaps filled with zeroes. */

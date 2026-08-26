@@ -200,7 +200,7 @@ const protectedHandlers: RouteExpectation[] = [
     "app/api/usage/route.ts",
     "GET",
     "auth(",
-    ["findUserById(", "countRunsInPeriod("],
+    ["findUserById(", "runReservationUsageForTenant("],
     "usage_read"
   ),
   route(
@@ -283,6 +283,33 @@ test("deferred webhook and internal lending routes stay untouched", () => {
   }
 });
 
+test("internal credential lending reserves before credential decryption", () => {
+  const source = read("app/api/internal/credential/route.ts");
+  const post = exportedFunctionBlock(source, "POST");
+  const lending = functionBlock(source, "lendCredentialWithReservation");
+  const ownerIndex = post.indexOf(".select()");
+  const lendingIndex = post.indexOf("lendCredentialWithReservation(");
+  const reserveIndex = lending.indexOf("dependencies.reserve({");
+  const readIndex = lending.indexOf("dependencies.readCredential(");
+  const consumeIndex = lending.indexOf("dependencies.consume({");
+
+  assert.ok(ownerIndex >= 0, "credential lending must look up the owner");
+  assert.ok(
+    lendingIndex > ownerIndex,
+    "owner lookup must precede budget reservation"
+  );
+  assert.ok(reserveIndex >= 0, "credential lending must reserve capacity");
+  assert.ok(
+    readIndex > reserveIndex,
+    "reservation must precede credential read"
+  );
+  assert.ok(
+    consumeIndex > readIndex,
+    "successful credential retrieval must precede consumption"
+  );
+  assert.match(lending, /releaseAfterLendingFailure/);
+});
+
 test("costly creates claim idempotency before calling their provider", () => {
   for (const [file, providerMarker] of [
     ["app/api/checkout/route.ts", "stripe.subscriptions.list("],
@@ -349,16 +376,10 @@ test("idempotency migration creates the scoped state machine and expiry index", 
   assert.match(migration, /IdempotencyRecord_response_state_check/);
 });
 
-test("latest migration replaces ambiguous responses with tagged envelopes", () => {
-  const journal = JSON.parse(read("lib/db/migrations/meta/_journal.json")) as {
-    entries: { idx: number; tag: string }[];
-  };
-  const latest = journal.entries.at(-1);
-
-  assert.ok(latest);
-  assert.equal(latest.idx, journal.entries.length - 1);
-
-  const migration = read(`lib/db/migrations/${latest.tag}.sql`);
+test("idempotency envelope migration uses tagged responses", () => {
+  const migration = read(
+    "lib/db/migrations/0006_idempotency_response_envelopes.sql"
+  );
   assert.match(
     migration,
     /DELETE FROM "IdempotencyRecord"\s+WHERE "operation" = 'credential_device_start'/
@@ -375,12 +396,44 @@ test("latest migration replaces ambiguous responses with tagged envelopes", () =
   assert.match(migration, /jsonb_typeof\([^)]*"responseJson"\) = 'object'/i);
   assert.match(migration, /"responseStatus" is not null/i);
 
-  const snapshot = read(
-    `lib/db/migrations/meta/${String(latest.idx).padStart(4, "0")}_snapshot.json`
-  );
+  const snapshot = read("lib/db/migrations/meta/0006_snapshot.json");
   assert.match(snapshot, /responseJson.*is not null/is);
   assert.match(snapshot, /jsonb_typeof.*responseJson.*object/is);
   assert.match(snapshot, /responseStatus.*is not null/is);
+});
+
+test("run reservation migration creates pseudonymous atomic budgets", () => {
+  const migration = read("lib/db/migrations/0007_run_reservations.sql");
+
+  assert.match(migration, /CREATE TABLE "RunReservation"/);
+  assert.match(migration, /"runId" varchar\(64\) PRIMARY KEY/);
+  assert.match(migration, /"tenantHash" varchar\(64\) NOT NULL/);
+  assert.doesNotMatch(migration, /"tenant" varchar/);
+  assert.match(
+    migration,
+    /"RunReservation_tenant_day_state_idx".*"tenantHash".*"periodDay".*"state"/s
+  );
+  assert.match(
+    migration,
+    /"RunReservation_day_state_idx".*"periodDay".*"state"/s
+  );
+  assert.match(
+    migration,
+    /"RunReservation_reserved_expiry_idx".*"expiresAt".*WHERE (?:"RunReservation"\.)?"state" = 'reserved'/s
+  );
+  assert.match(migration, /"RunUsage_countedAt_idx".*"countedAt"/s);
+  assert.match(
+    migration,
+    /"RunUsage_tenant_countedAt_idx".*"tenant".*"countedAt"/s
+  );
+  assert.match(migration, /RunReservation_costUnits_positive/);
+  assert.match(migration, /RunReservation_state_timestamps_valid/);
+
+  const snapshot = read("lib/db/migrations/meta/0007_snapshot.json");
+  assert.match(snapshot, /RunReservation_reserved_expiry_idx/);
+  assert.match(snapshot, /RunUsage_countedAt_idx/);
+  assert.match(snapshot, /RunUsage_tenant_countedAt_idx/);
+  assert.match(snapshot, /billingPeriodStart/);
 });
 
 test("database claims and reclaims idempotency records atomically", () => {
