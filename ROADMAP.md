@@ -1,14 +1,6 @@
 # Coven Agents Roadmap
 
-This roadmap is the public strategic spine for Coven Agents. Private
-Beads/DoltHub data is the task-level source of truth for task content,
-acceptance criteria, dependencies, priority, assignment, and status. Private
-OpenCoven Project #10 is a generated view of that authority.
-
-This file contains only approved public outcomes, promotion gates, safe
-aggregate status, and evidence links. It must not contain private task
-descriptions or acceptance criteria. If these sources disagree, reconcile the
-private planning system before refreshing this public view.
+This is the public strategic view of delivery. Private Beads/DoltHub data is the task-level source of truth; OpenCoven Project #10 is its generated private view. This file contains outcomes, gates, aggregate counts, and evidence links. It does not duplicate private task descriptions or acceptance criteria.
 
 ## Current gate: Phase 0 baseline
 
