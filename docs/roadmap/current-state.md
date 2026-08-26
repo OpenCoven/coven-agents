@@ -26,7 +26,7 @@ base and the subsequent main change that was available before this snapshot.
 | GitHub authentication, account, and setup | GitHub is the only sign-in provider. A verified GitHub email is mapped to a local product account; account settings expose Copilot setup, profile, usage, and data controls. Credential setup supports direct validation and GitHub device flow. | `app/(auth)/auth.ts`, [`app/account/page.tsx`](../../app/account/page.tsx), [`components/account/harness-credentials.tsx`](../../components/account/harness-credentials.tsx), [`app/api/credentials/device/route.ts`](../../app/api/credentials/device/route.ts) |
 | Guest demo | The root guest experience is a deterministic replay of committed, schema-validated, sanitized evidence. It does not start a runner or require authentication or database access. | [`components/demo/demo-root.tsx`](../../components/demo/demo-root.tsx), [`components/demo/replay-player.tsx`](../../components/demo/replay-player.tsx), [`lib/demo/fixtures.test.ts`](../../lib/demo/fixtures.test.ts), [guest boundary](../security/guest-access.md) |
 | Shared contracts and harness | Two private workspace packages define Agent Runner v1 schemas, signed tenant claims, bounded evidence, normalized harness events, invocation construction, and run summaries. GitHub Copilot CLI is runnable; Codex CLI and Claude Code are detected but refused because their event translation is not implemented. | [`packages/agent-contracts/src/index.ts`](../../packages/agent-contracts/src/index.ts), [`packages/agent-contracts/contract-descriptor.ts`](../../packages/agent-contracts/contract-descriptor.ts), [`packages/harness/src/registry.ts`](../../packages/harness/src/registry.ts), [`packages/harness/src/invocation.ts`](../../packages/harness/src/invocation.ts) |
-| Current runner reality | The tracked product is cloud-only. The contract accepts only `backend: "cloud"`, the workspace includes `packages/*` and `worker`, the README documents only the cloud runner, and `git ls-files local-runner` returned zero tracked files. Compatibility comments that still describe a local backend are stale references, not an active runner package. | [`packages/agent-contracts/src/index.ts`](../../packages/agent-contracts/src/index.ts), [`pnpm-workspace.yaml`](../../pnpm-workspace.yaml), [`README.md`](../../README.md), [`worker/package.json`](../../worker/package.json) |
+| Current runner reality | The tracked workspace and product code no longer contain a local runner: the contract accepts only `backend: "cloud"`, the workspace includes `packages/*` and `worker`, and `git ls-files local-runner` returned zero tracked files. The README still calls the product a local-cloud hybrid and says that both backends run the harness; that is documentation drift, not evidence of an active local-runner package or a cloud-only README. | [`packages/agent-contracts/src/index.ts`](../../packages/agent-contracts/src/index.ts), [`pnpm-workspace.yaml`](../../pnpm-workspace.yaml), [`README.md`](../../README.md), [`worker/package.json`](../../worker/package.json) |
 | Cloud runner | A Cloudflare Worker uses Durable Objects and per-agent Sandbox containers. It supports tenant-scoped agent storage, asynchronous idempotent run start, event streaming, polling reconciliation, stop, bounded retention, and sandbox cleanup. | [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc), [`worker/src/routes.ts`](../../worker/src/routes.ts), [`worker/src/agents.ts`](../../worker/src/agents.ts), [`worker/src/run-state.ts`](../../worker/src/run-state.ts) |
 | Tenant credentials | Subscriber-owned harness credentials are scoped by tenant and harness, encrypted under a per-credential AES-GCM data key wrapped by a required KEK, and lent to the worker for one run after service and signed-identity checks. The worker has no stored harness credential fallback. | [`lib/credentials/envelope.ts`](../../lib/credentials/envelope.ts), [`lib/credentials/store.ts`](../../lib/credentials/store.ts), [`app/api/internal/credential/route.ts`](../../app/api/internal/credential/route.ts), [`worker/src/tenant-credentials.ts`](../../worker/src/tenant-credentials.ts) |
 | Subscriptions and usage | Stripe Checkout creates or reuses one customer per product account. Signed, deduplicated webhook events update server-owned `subscribedUntil`; session authority is recomputed from that value. Run usage is tenant- and period-scoped, deduplicated by run ID, shown through `/api/usage`, and enforced before a credential is lent. | [`app/api/checkout/route.ts`](../../app/api/checkout/route.ts), [`app/api/stripe/webhook/route.ts`](../../app/api/stripe/webhook/route.ts), [`lib/subscription.ts`](../../lib/subscription.ts), [`lib/billing/usage.ts`](../../lib/billing/usage.ts), [`app/api/usage/route.ts`](../../app/api/usage/route.ts) |
@@ -80,19 +80,20 @@ worktree-only changes outside this task.
 | 5 - Product data | 6 | 0 | 0 | 0 | 6 | 6 |
 | 6 - Operations | 8 | 0 | 0 | 0 | 8 | 7 |
 
-The private Beads workspace returned `PermissionDenied` despite configured
-credentials. Beads is the planning authority, so this snapshot cannot establish
-that the 60 Project items are reconciled to their canonical records, cannot
-verify dependency changes, and cannot claim a current idempotent sync. A
-field-only Project query also found that all 60 managed items are
-`DraftIssue` items rather than linked GitHub issues; issue state cannot provide
-an independent closure check.
+The authenticated planning attempt reached the private authority, but
+**Dolt/DoltHub returned `PermissionDenied`** despite configured credentials.
+Beads is the planning authority, so this snapshot cannot establish that the 60
+Project items are reconciled to their canonical records, cannot verify
+dependency changes, and cannot claim a current idempotent sync. A field-only
+Project query also found that all 60 managed items are `DraftIssue` items
+rather than linked GitHub issues; issue state cannot provide an independent
+closure check.
 
 ## Risk register
 
 | Risk | Severity | Owner role | Blocking gate | Mitigation | Closure evidence |
 | --- | --- | --- | --- | --- | --- |
-| Beads access and sync drift | High | BunsDev | Phase 0 planning authority | **Current: open blocker.** Keep Project and `ROADMAP.md` read-only as projections; do not apply or describe a sync as idempotent while authentication returns `PermissionDenied`. | Successful safe Beads read, authorized reconciliation, matching Project/roadmap aggregates, and a second no-change preview without private output. |
+| Beads access and sync drift | High | BunsDev | Phase 0 planning authority | **Current: open blocker. Dolt/DoltHub returned `PermissionDenied`.** Keep Project and `ROADMAP.md` read-only as projections; do not apply or describe a sync as idempotent until an authenticated Dolt pull succeeds. | Authenticated Dolt pull; private review, update, commit, and push; authorized Project reconciliation; two sync applies; a final preview with 60 unchanged and zero create, update, or orphan; and reconciled shipped GitHub issues, all without private output. |
 | Issue and Project drift | Medium | Joint | Phase 0 planning authority | **Current: open.** All 60 managed Project items are drafts, so no GitHub issue state backs their status. Treat Project fields as a projection only. | Canonical linkage policy is recorded and a field-only check demonstrates that each managed status has an authoritative state source. |
 | Work exists only in another worktree | High | BunsDev | Repository integrity | **Current: open.** Hygiene identified two uncommitted files in `feat/auth-request-hardening`. This roadmap task must not alter or discard them. | `pnpm hygiene` exits 0 with no `AT RISK` worktrees after the owning work is safely committed and pushed or deliberately removed by its owner. |
 | Remote checks are disabled | High | Joint | Evidence baseline | **Current: accepted with partial mitigation.** GitHub Actions remain intentionally off; signed commits plus all local gates are required. The current snapshot still has the hygiene failure above. | A signed, retained local gate record with every required gate green, or an explicit repository decision that re-enables trusted required checks. |
@@ -103,10 +104,12 @@ an independent closure check.
 
 ## Evidence-backed known gaps
 
-- The active execution backend is cloud-only, but some compatibility comments
-  and older security prose still discuss a local runner. The tracked contract
-  and workspace are authoritative; local-roadmap records require canonical
-  retirement or re-scoping before promotion.
+- The tracked workspace and product code expose only the cloud execution
+  backend, but the README still describes a local-cloud hybrid and says both
+  backends run the harness. That documentation drift, plus compatibility
+  comments and older security prose, must not be mistaken for an active local
+  runner; local-roadmap records require canonical retirement or re-scoping
+  before promotion.
 - Only GitHub Copilot CLI has implemented event translation. Codex CLI and
   Claude Code remain non-runnable in
   [`packages/harness/src/registry.ts`](../../packages/harness/src/registry.ts).

@@ -11,8 +11,9 @@ commitments.
 - GitHub Project #10 and [`ROADMAP.md`](../../ROADMAP.md) are safe projections.
   They may expose approved IDs and aggregate fields, but they do not override
   Beads.
-- Current Beads authentication returns `PermissionDenied`. Until access is
-  restored, repository evidence may be marked implemented or verified, but no
+- The current authenticated planning attempt is blocked because
+  **Dolt/DoltHub returned `PermissionDenied`**. Until an authenticated Dolt pull
+  succeeds, repository evidence may be marked implemented or verified, but no
   lane may claim authoritative Beads completion or a reconciled, idempotent
   sync.
 - The tracked runner contract is cloud-only. The IDs
@@ -48,24 +49,32 @@ used to make every later promotion decision.
 ### Planning authority
 
 - **Entry conditions:** Current main and roadmap branch SHAs are known; only
-  approved aggregate fields are queried; Beads authentication can be tested
-  without printing private records.
+  approved aggregate fields are queried; an authenticated Dolt pull from
+  DoltHub succeeds without printing private records. The current entry blocker
+  is explicit: **Dolt/DoltHub returned `PermissionDenied`**.
 - **Public outcome:** One canonical planning source governs item state and
   dependencies, while Project and `ROADMAP.md` remain privacy-safe projections.
 - **Allowed Bead IDs:** `coven-agents-dx.5`
 - **Owner role:** BunsDev
 - **Predecessor lanes:** None.
 - **Review checkpoint:** BunsDev confirms the intended workspace and access;
-  Copilot performs a field-only reconciliation preview and verifies that no
-  private record text enters output or Git.
-- **Exit evidence:** Beads read succeeds; canonical state is reconciled to the
-  60 managed Project records; `pnpm roadmap:status check` passes after refresh;
-  a second safe preview reports no change.
+  the authenticated Dolt workspace is pulled, reviewed, updated, committed,
+  and pushed; Copilot runs `pnpm beads:sync preview`, verifies that no private
+  record text enters output or Git, and reviews the shipped GitHub issues
+  against merged outcomes.
+- **Exit evidence:** The authenticated Dolt pull, private review, update,
+  commit, and push succeed; shipped GitHub issues are reconciled; then
+  `pnpm beads:sync preview`, `pnpm beads:sync apply`, and a second
+  `pnpm beads:sync apply` succeed. A final `pnpm beads:sync preview` reports
+  exactly 60 unchanged, 0 create, 0 update, and 0 orphan; refreshed
+  `ROADMAP.md` passes `pnpm roadmap:status check`.
 - **Rollback/recovery expectation:** Stop all projection writes, revoke or
   repair the failing credential path, and retain the last committed aggregate.
   Never manufacture canonical state from Project fields.
 
-**Current state:** blocked by `PermissionDenied`.
+**Current state:** blocked because **Dolt/DoltHub returned
+`PermissionDenied`**, so the authenticated pull and every dependent
+reconciliation step above remain entry-blocked.
 
 ### Repository integrity
 
@@ -94,7 +103,8 @@ the roadmap worktree itself was clean and pushed at the evidence snapshot.
 
 - **Entry conditions:** Repository integrity is green; dependencies are
   present; commands can run without exposing credentials or private planning
-  content.
+  content; the current-state snapshot and verification matrix are populated
+  with dated evidence for the exact branch state under review.
 - **Public outcome:** Every promotion decision has reproducible local evidence
   for repository hygiene, lint, types, unit behavior, production build, and
   roadmap projection freshness.
@@ -102,11 +112,14 @@ the roadmap worktree itself was clean and pushed at the evidence snapshot.
 - **Owner role:** Copilot
 - **Predecessor lanes:** Repository integrity. Planning authority is also
   required before planning reconciliation.
-- **Review checkpoint:** Read every command's exit status and summary; record
-  warnings and skipped infrastructure instead of collapsing them into a pass.
-- **Exit evidence:** `pnpm hygiene`, `pnpm check`, `pnpm typecheck`,
-  `pnpm test:unit`, `pnpm build`, and `pnpm roadmap:status check` all exit 0
-  from the same current branch state.
+- **Review checkpoint:** Review the dated current-state snapshot and every
+  populated verification-matrix row, read every command's exit status and
+  summary, and record warnings and skipped infrastructure instead of
+  collapsing them into a pass.
+- **Exit evidence:** The dated current-state snapshot and verification matrix
+  identify the same branch state and contain the resulting evidence;
+  `pnpm hygiene`, `pnpm check`, `pnpm typecheck`, `pnpm test:unit`,
+  `pnpm build`, and `pnpm roadmap:status check` all exit 0 from that state.
 - **Rollback/recovery expectation:** Do not promote. Preserve sanitized failure
   evidence, repair the narrow cause, and rerun the complete baseline.
 
@@ -176,27 +189,36 @@ binding, and encrypted credential path are on merged main.
 
 - **Entry conditions:** Repository integrity rules are documented; the branch
   and worktree lifecycle is observable; public roadmap documents contain no
-  private planning text.
+  private planning text; planning sync and the setup, account, and console
+  reliability paths are reviewable with privacy-safe evidence.
 - **Public outcome:** Contributors use signed commits, dedicated worktrees,
   pushed branches, explicit local gates, safe roadmap projections, and scoped
-  recovery commands.
+  recovery commands, while operators have repeatable evidence that setup,
+  account, and console workflows remain reliable.
 - **Allowed Bead IDs:** `coven-agents-dx.2`,
   `coven-agents-dx.5`
 - **Owner role:** Joint
 - **Predecessor lanes:** Planning authority, Repository integrity, Evidence
   baseline.
 - **Review checkpoint:** Verify `CLAUDE.md`, hygiene output, changed-file scope,
-  privacy scans, relative links, commit signature, and remote branch parity.
+  privacy scans, relative links, commit signature, remote branch parity, the
+  idempotent planning-sync evidence, and dated setup, account, and console
+  reliability evidence.
 - **Exit evidence:** Workflow guidance is on merged main, the full local gate
-  set is green, public roadmap documents are nonempty and link-clean, and
-  planning status is reconciled.
+  set is green, public roadmap documents are nonempty and link-clean, planning
+  status is reconciled, and the verification matrix records passing,
+  privacy-safe setup, account, and console reliability evidence for the same
+  branch state.
 - **Rollback/recovery expectation:** Revert incorrect guidance with a signed
   commit, preserve any unmerged worktree, and keep the last known-safe public
   projection.
 
-**Implemented evidence:** signed-commit and worktree hygiene tooling is on
-merged main. The current roadmap documentation remains branch evidence until
-merged and reconciled.
+**Implemented evidence:** signed-commit and worktree hygiene tooling, setup and
+account surfaces, and the cloud console are on merged main. The current
+snapshot records passing unit and build baselines, but planning sync and
+dedicated setup, account, and console reliability evidence remain required
+before this lane can exit; the roadmap documentation remains branch evidence
+until merged and reconciled.
 
 ## Wave 2
 
