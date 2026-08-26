@@ -437,6 +437,29 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       });
       return record;
     } catch (error) {
+      /**
+       * A timed-out exec means the container is suspect, not just the run:
+       * the process that blew the deadline is still in there consuming the
+       * lite instance's CPU, and — observed tonight — every retry then
+       * queues onto the starved container while its probes count as
+       * activity, so the zombie never even idles out. Destroying the
+       * sandbox costs the next run one clean cold start instead of
+       * inheriting a wedged one. Failure to destroy is swallowed: the run
+       * is already failed, and the idle reaper remains the backstop.
+       */
+      if (error instanceof HarnessError && error.code === "harness_timeout") {
+        console.warn({
+          agentId: definition.id,
+          event: "sandbox.reap_after_timeout",
+          runId: planned.run.id,
+        });
+        await getSandbox(
+          this.env.Sandbox,
+          await sandboxKey(tenantOf(definition), definition.id)
+        )
+          .destroy()
+          .catch(() => undefined);
+      }
       const completedAt = new Date().toISOString();
       record = finishCloudRunRecord(record, {
         completedAt,
