@@ -41,6 +41,7 @@ export type CloudRunRecord = {
   admissionConfirmedAt?: string;
   pendingAdmission?: {
     deadlineAt: number;
+    prepareOwner?: string;
     scheduleGeneration?: number;
     scheduleId?: string;
     scheduleToken?: string;

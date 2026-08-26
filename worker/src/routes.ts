@@ -118,14 +118,25 @@ export type CloudRunnerAgent = {
     operationId: string,
     requestHash: string
   ) => Awaitable<boolean>;
-  discardRun: (runId: string) => Awaitable<boolean | undefined>;
+  prepareOwnerMatches?: (
+    runId: string,
+    prepareOwner: string
+  ) => Awaitable<boolean>;
+  discardRun: (
+    runId: string,
+    prepareOwner?: string
+  ) => Awaitable<boolean | undefined>;
   decommission: () => Awaitable<void>;
   enqueue: (
     input: unknown,
     runId: string,
     requestHash: string,
     identityToken: string
-  ) => Awaitable<{ created: boolean; run: RunSnapshot }>;
+  ) => Awaitable<{
+    created: boolean;
+    prepareOwner?: string;
+    run: RunSnapshot;
+  }>;
   getEventStream: (
     runId: string,
     lastEventId: number
@@ -167,13 +178,28 @@ export type CloudRunnerDependencies<
   ) => Awaitable<CloudRunnerAgent>;
 };
 
+type CleanupRunOptions = {
+  admission?: CloudRunnerAdmission;
+  allowUnowned?: boolean;
+  prepareOwner?: string;
+  stopFirst?: boolean;
+};
+
 async function cleanupRun(
   agent: CloudRunnerAgent,
   runId: string,
   agentId: string,
-  admission?: CloudRunnerAdmission,
-  stopFirst = false
+  options: CleanupRunOptions = {}
 ): Promise<unknown | null> {
+  const {
+    admission,
+    allowUnowned = false,
+    prepareOwner,
+    stopFirst = false,
+  } = options;
+  if (!prepareOwner && !allowUnowned) {
+    return null;
+  }
   let firstError: unknown | null = null;
   const remember = (error: unknown) => {
     if (firstError === null) {
@@ -189,24 +215,65 @@ async function cleanupRun(
     }
   };
 
+  if (prepareOwner && agent.prepareOwnerMatches) {
+    try {
+      if (!(await agent.prepareOwnerMatches(runId, prepareOwner))) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
+
   let safeToRelease = false;
   if (stopFirst) {
-    const stopped = await attempt(() => agent.stop(runId));
-    const discarded = await attempt(() => agent.discardRun(runId));
-    safeToRelease =
-      (discarded.ok && discarded.value !== false) ||
-      (stopped.ok &&
+    if (prepareOwner) {
+      const discarded = await attempt(() =>
+        agent.discardRun(runId, prepareOwner)
+      );
+      if (discarded.ok && discarded.value !== false) {
+        safeToRelease = true;
+      } else {
+        if (prepareOwner) {
+          if (!agent.prepareOwnerMatches) {
+            return firstError;
+          }
+          try {
+            if (!(await agent.prepareOwnerMatches(runId, prepareOwner))) {
+              return firstError;
+            }
+          } catch {
+            return firstError;
+          }
+        }
+        const stopped = await attempt(() => agent.stop(runId));
+        safeToRelease =
+          stopped.ok &&
+          (stopped.value === null ||
+            (typeof stopped.value === "object" &&
+              stopped.value !== null &&
+              "status" in stopped.value &&
+              typeof stopped.value.status === "string" &&
+              isTerminal(stopped.value.status as RunSnapshot["status"])));
+      }
+    } else {
+      const stopped = await attempt(() => agent.stop(runId));
+      safeToRelease =
+        stopped.ok &&
         (stopped.value === null ||
           (typeof stopped.value === "object" &&
             stopped.value !== null &&
             "status" in stopped.value &&
             typeof stopped.value.status === "string" &&
-            isTerminal(stopped.value.status as RunSnapshot["status"]))));
+            isTerminal(stopped.value.status as RunSnapshot["status"])));
+    }
   } else {
-    const discarded = await attempt(() => agent.discardRun(runId));
+    const discarded = await attempt(() =>
+      agent.discardRun(runId, prepareOwner)
+    );
     if (discarded.ok && discarded.value !== false) {
       safeToRelease = true;
-    } else {
+    } else if (allowUnowned) {
       const stopped = await attempt(() => agent.stop(runId));
       safeToRelease =
         stopped.ok &&
@@ -949,8 +1016,11 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                     originalAgent,
                     original.id,
                     id,
-                    existingAdmission,
-                    true
+                    {
+                      admission: existingAdmission,
+                      allowUnowned: true,
+                      stopFirst: true,
+                    }
                   );
                   if (cleanupError) {
                     throw cleanupError;
@@ -1024,7 +1094,9 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               runId = prepared.run.id;
             }
             if (!dependencies.getAdmission) {
-              await cleanupRun(agent, runId, id);
+              await cleanupRun(agent, runId, id, {
+                prepareOwner: prepared.prepareOwner,
+              });
               throw new Error("Run admission is not configured.");
             }
 
@@ -1035,7 +1107,9 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               try {
                 admission = await dependencies.getAdmission(environment);
               } catch (error) {
-                await cleanupRun(agent, runId, id);
+                await cleanupRun(agent, runId, id, {
+                  prepareOwner: prepared.prepareOwner,
+                });
                 if (runAdmissionMode === "reject") {
                   return busyResponse("global_busy", cors);
                 }
@@ -1057,7 +1131,11 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 tenantHash,
               });
             } catch (error) {
-              await cleanupRun(agent, runId, id, admission, true);
+              await cleanupRun(agent, runId, id, {
+                admission,
+                prepareOwner: prepared.prepareOwner,
+                stopFirst: true,
+              });
               if (
                 runAdmissionMode === "reject" &&
                 !isOperationConflict(error)
@@ -1068,29 +1146,17 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             }
 
             if (decision.kind === "refused") {
-              const cleanupError = await cleanupRun(
-                agent,
-                runId,
-                id,
-                admission
-              );
+              const cleanupError = await cleanupRun(agent, runId, id, {
+                admission,
+                prepareOwner: prepared.prepareOwner,
+                stopFirst: true,
+              });
               if (cleanupError) {
                 throw cleanupError;
               }
               return busyResponse(decision.reason, cors);
             }
             if (decision.kind === "duplicate") {
-              if (prepared.created) {
-                const cleanupError = await cleanupRun(
-                  agent,
-                  runId,
-                  id,
-                  admission
-                );
-                if (cleanupError) {
-                  throw cleanupError;
-                }
-              }
               let duplicateAdmission: AdmissionRecord | null = null;
               try {
                 duplicateAdmission = admission.getByOperationId
@@ -1148,8 +1214,11 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                   originalAgent,
                   original.id,
                   id,
-                  admission,
-                  true
+                  {
+                    admission,
+                    allowUnowned: true,
+                    stopFirst: true,
+                  }
                 );
                 if (cleanupError) {
                   throw cleanupError;
@@ -1215,12 +1284,11 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               );
             }
             if (decision.kind === "queued" && runAdmissionMode === "reject") {
-              const cleanupError = await cleanupRun(
-                agent,
-                runId,
-                id,
-                admission
-              );
+              const cleanupError = await cleanupRun(agent, runId, id, {
+                admission,
+                prepareOwner: prepared.prepareOwner,
+                stopFirst: true,
+              });
               if (cleanupError) {
                 throw cleanupError;
               }
@@ -1252,7 +1320,11 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                       cors
                     );
                   }
-                  await cleanupRun(agent, runId, id, admission, true);
+                  await cleanupRun(agent, runId, id, {
+                    admission,
+                    prepareOwner: prepared.prepareOwner,
+                    stopFirst: true,
+                  });
                   return busyResponse("global_busy", cors);
                 }
               }
@@ -1309,7 +1381,12 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                   }
                 }
               }
-              await cleanupRun(agent, runId, id, admission, true);
+              await cleanupRun(agent, runId, id, {
+                admission,
+                allowUnowned: true,
+                prepareOwner: prepared.prepareOwner,
+                stopFirst: true,
+              });
               throw error;
             }
           }

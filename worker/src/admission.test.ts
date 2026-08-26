@@ -1840,6 +1840,114 @@ test("terminal admission history is retained for duplicate idempotency but prune
   );
 });
 
+test("failed cleanup pins its terminal admission until retry succeeds", async () => {
+  let cleanupAvailable = false;
+  const pinnedRun = {
+    ...request(600),
+    agentId: "agent-cleanup-retention",
+  };
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.resolve(true),
+      stop: () =>
+        cleanupAvailable
+          ? Promise.resolve(null)
+          : Promise.reject(new Error("agent unavailable")),
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TERMINAL_RETENTION: "3",
+    }
+  );
+
+  assert.deepEqual(await harness.admission.admit(pinnedRun), {
+    kind: "active",
+    runId: pinnedRun.runId,
+  });
+  await Promise.all(harness.background);
+  harness.sql.exec(
+    "UPDATE admission_records SET state = 'queued', enqueued_at = ? WHERE run_id = ?",
+    new Date(Date.now() - 5 * 60 * 1000 - 1).toISOString(),
+    pinnedRun.runId
+  );
+  await harness.admission.alarm();
+
+  for (let index = 0; index < 5; index += 1) {
+    const operation = {
+      ...request(610 + index),
+      agentId: pinnedRun.agentId,
+    };
+    // biome-ignore lint/performance/noAwaitInLoops: Each terminal run advances the retention window.
+    assert.equal((await harness.admission.admit(operation)).kind, "active");
+    await Promise.all(harness.background);
+    await harness.admission.release(operation.runId);
+  }
+
+  assert.equal(
+    (await harness.admission.getRecord(pinnedRun.runId))?.state,
+    "terminal",
+    "a pending cleanup task must pin its admission row beyond retention"
+  );
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = ?",
+          pinnedRun.runId
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    1
+  );
+
+  cleanupAvailable = true;
+  harness.sql.exec(
+    "UPDATE admission_cleanup_tasks SET next_attempt_at = 0 WHERE run_id = ?",
+    pinnedRun.runId
+  );
+  await harness.admission.alarm();
+
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = ?",
+          pinnedRun.runId
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    0,
+    "successful cleanup removes the durable task"
+  );
+  assert.equal(
+    await harness.admission.getRecord(pinnedRun.runId),
+    null,
+    "the formerly pinned terminal row becomes prunable after cleanup"
+  );
+});
+
+test("cleanup tasks retain a missing admission row until a newer incarnation proves them stale", async () => {
+  const harness = runAdmissionHarness(() => ({
+    getRun: () => ({ status: "queued" }),
+    startAdmitted: () => Promise.resolve(false),
+    stop: () => Promise.resolve(null),
+  }));
+  await harness.admission.enqueueCleanup("agent-missing", "run-missing");
+  harness.sql.exec("UPDATE admission_cleanup_tasks SET next_attempt_at = 0");
+
+  await harness.admission.alarm();
+
+  const retained = harness.sql
+    .exec<{ attempts: number }>(
+      "SELECT attempts FROM admission_cleanup_tasks WHERE run_id = ?",
+      "run-missing"
+    )
+    .toArray() as { attempts: number }[];
+  assert.equal(retained.length, 1);
+  assert.equal(retained[0]?.attempts, 1);
+});
+
 test("serializes concurrent admissions against the persistent capacity ledger", async () => {
   const harness = runAdmissionHarness(
     () => ({

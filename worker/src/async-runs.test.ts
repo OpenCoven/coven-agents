@@ -206,6 +206,44 @@ test("an orphaned enqueue is durably cleaned after its preparation deadline", as
   assert.deepEqual(destroyedSandboxes(), []);
 });
 
+test("only the provisional run creator can discard it, and confirmation clears ownership", async () => {
+  const yolo = agent();
+  const prepared = await yolo.enqueue(
+    { operationId: OP_A, task: "Protect the shared preparation." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a32",
+    "prepare-owner-hash",
+    "identity"
+  );
+
+  assert.equal(prepared.created, true);
+  assert.ok(prepared.prepareOwner);
+  assert.equal(
+    yolo.discardRun(prepared.run.id, "not-the-creator"),
+    false,
+    "a duplicate request must not discard the shared provisional run"
+  );
+  assert.ok(yolo.getRun(prepared.run.id));
+
+  assert.equal(
+    await yolo.confirmAdmission(prepared.run.id, OP_A, "prepare-owner-hash"),
+    true
+  );
+  const state = Reflect.get(yolo, "state") as {
+    runs: CloudRunRecord[];
+  };
+  assert.equal(
+    state.runs.find((candidate) => candidate.run.id === prepared.run.id)
+      ?.pendingAdmission,
+    undefined,
+    "admission confirmation must clear the prepare owner"
+  );
+  assert.equal(
+    yolo.discardRun(prepared.run.id, prepared.prepareOwner),
+    false,
+    "a confirmed run is no longer discardable by its creator"
+  );
+});
+
 test("admission confirmation atomically wins the orphan timeout and rejects foreign data", async () => {
   const cancelled: string[] = [];
   const yolo = new (class extends YoloAgent {

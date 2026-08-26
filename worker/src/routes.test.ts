@@ -1103,6 +1103,110 @@ test("a terminal duplicate reconciles stale admission before returning the termi
   });
 });
 
+test("concurrent identical requests reconcile a shared preparation without discarding it", async () => {
+  const operationId = "33333333-cccc-4555-8666-777777777777";
+  const runId = "44444444-dddd-4666-8777-888888888888";
+  const run = queuedRun(MINE, runId, operationId);
+  const requestHash = await hashOperation(MINE, run.task);
+  const tenantHash = await tenantAdmissionHash(
+    "test-edge-abuse-secret",
+    CALLER_TENANT
+  );
+  const calls: string[] = [];
+  let enqueueCount = 0;
+  let admissionStarted = false;
+  let releaseFirstAdmission: (() => void) | undefined;
+  const firstAdmission = new Promise<{
+    kind: "active";
+    runId: string;
+  }>((resolve) => {
+    releaseFirstAdmission = () => resolve({ kind: "active", runId });
+  });
+  const agent: CloudRunnerAgent = {
+    configure: (value: AgentDefinition) => value,
+    decommission: () => undefined,
+    discardRun: () => {
+      calls.push("discard");
+      return false;
+    },
+    enqueue: () => {
+      enqueueCount += 1;
+      return enqueueCount === 1
+        ? { created: true, prepareOwner: "creator", run }
+        : { created: false, run };
+    },
+    getEventStream: () => ({ events: [], terminal: false }),
+    getRun: () => run,
+    listRuns: () => [run],
+    prepareOwnerMatches: () => true,
+    snapshot: () => agents.get(MINE) ?? null,
+    stop: () => null,
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const admission = {
+    admit: () => {
+      admissionStarted = true;
+      return firstAdmission;
+    },
+    getByOperationId: () => ({
+      agentId: MINE,
+      enqueuedAt: run.createdAt,
+      operationId,
+      requestHash,
+      runId,
+      state: "active" as const,
+      tenantHash,
+    }),
+    release: () => {
+      calls.push("release");
+      return true;
+    },
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const runnerInstance = createCloudRunner({
+    getAdmission: () => admission,
+    getDirectory: () => ({
+      list: () => [agents.get(MINE) as AgentDefinition],
+      lookupRun: () => MINE,
+      registerRun: () => true,
+      remove: () => undefined,
+      unregisterRun: () => undefined,
+      upsert: (value: AgentDefinition) => value,
+    }),
+    getYoloAgent: () => agent,
+  });
+  const request = () =>
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: run.task }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    });
+  const responses = Promise.all([
+    runnerInstance.fetch(request(), { ...environment } as never),
+    runnerInstance.fetch(request(), { ...environment } as never),
+  ]);
+  while (!admissionStarted) {
+    // biome-ignore lint/performance/noAwaitInLoops: Wait for the concurrent request to reach admission.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  releaseFirstAdmission?.();
+  const [firstResponse, secondResponse] = await responses;
+
+  assert.equal(firstResponse.status, 202);
+  assert.equal(secondResponse.status, 202);
+  assert.equal(calls.includes("discard"), false);
+  assert.equal(calls.includes("release"), false);
+});
+
 test("a cross-tenant duplicate cannot return or release a foreign admission", async () => {
   const operationId = "99999999-aaaa-4111-8222-333333333333";
   const localRunId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -1346,7 +1450,7 @@ test("reject mode refuses an unhealthy admission object without bypassing it", a
     discardRun: () => {
       discarded = true;
     },
-    enqueue: () => ({ created: true, run }),
+    enqueue: () => ({ created: true, prepareOwner: "prepare-owner", run }),
     getEventStream: () => ({ events: [], terminal: false }),
     getRun: () => run,
     listRuns: () => [run],
@@ -1407,7 +1511,7 @@ test("reject fallback discards a queued run before releasing admission", async (
     discardRun: () => {
       calls.push("discard");
     },
-    enqueue: () => ({ created: true, run }),
+    enqueue: () => ({ created: true, prepareOwner: "prepare-owner", run }),
     getEventStream: () => ({ events: [], terminal: false }),
     getRun: () => run,
     listRuns: () => [run],
@@ -1470,10 +1574,11 @@ test("reject fallback stops an execution that wins the discard race before relea
       calls.push("discard");
       return false;
     },
-    enqueue: () => ({ created: true, run }),
+    enqueue: () => ({ created: true, prepareOwner: "prepare-owner", run }),
     getEventStream: () => ({ events: [], terminal: false }),
     getRun: () => run,
     listRuns: () => [run],
+    prepareOwnerMatches: () => true,
     snapshot: () => agents.get(MINE) ?? null,
     stop: () => {
       calls.push("stop");
@@ -1542,11 +1647,12 @@ test("failed prepare cleanup is durable and capacity is reusable after recovery"
       const { operationId: id } = input as { operationId: string };
       const run = queuedRun(MINE, runId, id);
       runs.set(runId, run);
-      return { created: true, run };
+      return { created: true, prepareOwner: "prepare-owner", run };
     },
     getEventStream: () => ({ events: [], terminal: false }),
     getRun: (runId) => runs.get(runId) ?? null,
     listRuns: () => [...runs.values()],
+    prepareOwnerMatches: () => true,
     snapshot: () => agents.get(MINE) ?? null,
     stop: (runId) => {
       calls.push("stop");
@@ -1648,21 +1754,23 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
     decommission: () => undefined,
     discardRun: (runId) => {
       calls.push(`discard:${runId}`);
-      runs.delete(runId);
+      return false;
     },
     enqueue: (input: unknown, runId: string) => {
       const { operationId } = input as { operationId: string };
       const run = queuedRun(MINE, runId, operationId);
       runs.set(runId, run);
-      return { created: true, run };
+      return { created: true, prepareOwner: "prepare-owner", run };
     },
     getEventStream: () => ({ events: [], terminal: false }),
     getRun: (runId) => runs.get(runId) ?? null,
     listRuns: () => [...runs.values()],
+    prepareOwnerMatches: () => true,
     snapshot: () => agents.get(MINE) ?? null,
     stop: (runId) => {
       calls.push(`stop:${runId}`);
-      return runs.get(runId) ?? null;
+      const run = runs.get(runId);
+      return run ? { ...run, status: "cancelled" as const } : null;
     },
     warm: () => ({
       status: "provisioning" as const,
@@ -1740,8 +1848,8 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
     `admit:${firstRunId}`,
     `register:${firstRunId}`,
     `unregister:${firstRunId}`,
-    `stop:${firstRunId}`,
     `discard:${firstRunId}`,
+    `stop:${firstRunId}`,
   ]);
   assert.equal(mappings.has(firstRunId), false);
 
@@ -1859,7 +1967,6 @@ test("a run mapping is unregistered when the admitted run disappears after regis
     "unregister",
     "enqueue-mapping-cleanup",
     "stop",
-    "discard",
     "release",
   ]);
   assert.equal(mappings.get(runId), undefined);

@@ -1609,12 +1609,28 @@ export class RunAdmission extends DurableObject<Env> {
       .toArray();
     for (const task of tasks) {
       const current = this.findStoredByRunId(task.run_id);
-      if (
-        !current ||
-        current.agentId !== task.agent_id ||
-        current.sequence !== task.admission_sequence
-      ) {
+      if (!current) {
+        this.ctx.storage.sql.exec(
+          "UPDATE admission_cleanup_tasks SET attempts = ?, next_attempt_at = ? WHERE run_id = ? AND admission_sequence = ?",
+          task.attempts + 1,
+          Date.now() + ALARM_REPAIR_RETRY_MS,
+          task.run_id,
+          task.admission_sequence
+        );
+        continue;
+      }
+      if (current.sequence !== task.admission_sequence) {
         this.deleteCleanupTask(task.run_id, task.admission_sequence);
+        continue;
+      }
+      if (current.agentId !== task.agent_id) {
+        this.ctx.storage.sql.exec(
+          "UPDATE admission_cleanup_tasks SET attempts = ?, next_attempt_at = ? WHERE run_id = ? AND admission_sequence = ?",
+          task.attempts + 1,
+          Date.now() + ALARM_REPAIR_RETRY_MS,
+          task.run_id,
+          task.admission_sequence
+        );
         continue;
       }
       let completed = false;
@@ -2019,6 +2035,12 @@ export class RunAdmission extends DurableObject<Env> {
               WHERE state = 'terminal'
             )
             WHERE retention_rank > ?
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM admission_cleanup_tasks AS cleanup
+            WHERE cleanup.run_id = admission_records.run_id
+              AND cleanup.admission_sequence = admission_records.queue_sequence
           )
       `,
       retention

@@ -2182,7 +2182,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     runId: string,
     requestHash: string,
     identityToken: string
-  ): Promise<{ created: boolean; run: RunSnapshot }> {
+  ): Promise<{
+    created: boolean;
+    prepareOwner?: string;
+    run: RunSnapshot;
+  }> {
     const { operationId, task } = startRunInputSchema.parse(input);
     const definition = this.requireActiveDefinition();
     validateCloudWorkspace(definition);
@@ -2225,7 +2229,8 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       return Promise.resolve({ created: false, run: plan.record.run });
     }
 
-    const pendingAdmission = this.newPendingAdmission();
+    const prepareOwner = crypto.randomUUID();
+    const pendingAdmission = this.newPendingAdmission(prepareOwner);
     this.persistRun({
       ...plan.record,
       pendingAdmission,
@@ -2234,7 +2239,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       await this.attachIdentityCapability(runId, identityToken);
     }
     await this.schedulePendingAdmission(runId);
-    return { created: true, run: plan.record.run };
+    return { created: true, prepareOwner, run: plan.record.run };
   }
 
   private async attachIdentityCapability(
@@ -2373,11 +2378,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     );
   }
 
-  private newPendingAdmission(): NonNullable<
-    CloudRunRecord["pendingAdmission"]
-  > {
+  private newPendingAdmission(
+    prepareOwner?: string
+  ): NonNullable<CloudRunRecord["pendingAdmission"]> {
     return {
       deadlineAt: Date.now() + PENDING_ADMISSION_TIMEOUT_MS,
+      ...(prepareOwner ? { prepareOwner } : {}),
       scheduleGeneration: 1,
       scheduleToken: crypto.randomUUID(),
     };
@@ -2585,7 +2591,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       !this.state.admissionTokens?.[latest.run.id] &&
       !this.state.dispatchClaims?.[latest.run.id]
     ) {
-      const discarded = this.discardRun(latest.run.id);
+      const discarded = this.discardRun(
+        latest.run.id,
+        latest.pendingAdmission.prepareOwner
+      );
       if (discarded && pending.scheduleId) {
         await this.cancelPendingAdmissionSchedule(pending.scheduleId);
       }
@@ -3137,12 +3146,25 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
   }
 
+  /** Checks whether this caller still owns the prepared admission. */
+  prepareOwnerMatches(runId: string, prepareOwner: string): boolean {
+    return Boolean(
+      prepareOwner &&
+        this.state.runs.find((candidate) => candidate.run.id === runId)
+          ?.pendingAdmission?.prepareOwner === prepareOwner
+    );
+  }
+
   /** Removes a prepared run when admission refuses it before dispatch. */
-  discardRun(runId: string): boolean {
+  discardRun(runId: string, prepareOwner?: string): boolean {
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
-    if (record?.run.status !== "queued") {
+    if (
+      record?.run.status !== "queued" ||
+      !prepareOwner ||
+      record.pendingAdmission?.prepareOwner !== prepareOwner
+    ) {
       return false;
     }
     this.setState({
