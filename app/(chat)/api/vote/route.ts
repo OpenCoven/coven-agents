@@ -1,5 +1,10 @@
+import { ipAddress } from "@vercel/functions";
 import { z } from "zod";
 import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { getChatById, getVotesByChatId, voteMessage } from "@/lib/db/queries";
@@ -28,6 +33,15 @@ export async function GET(request: Request) {
     return subscriberAccessResponse(access);
   }
 
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "vote_read",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
+  }
+
   const chat = await getChatById({ id: chatId });
 
   if (!chat) {
@@ -48,6 +62,15 @@ export async function PATCH(request: Request) {
   const access = await authorizeSubscriberAccess(session);
   if (access.kind !== "allowed") {
     return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "vote_write",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   let chatId: string;

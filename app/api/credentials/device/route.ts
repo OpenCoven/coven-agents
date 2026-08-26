@@ -1,6 +1,11 @@
 import "server-only";
 
+import { ipAddress } from "@vercel/functions";
 import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import {
@@ -25,10 +30,19 @@ function clientId(): string | null {
   return process.env.AUTH_GITHUB_ID ?? null;
 }
 
-export async function POST() {
+export async function POST(request: Request) {
   const access = await authorizeSubscriberAccess(await auth());
   if (access.kind !== "allowed") {
     return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "credential_device_start",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   const id = clientId();
@@ -52,6 +66,15 @@ export async function PUT(request: Request) {
   const access = await authorizeSubscriberAccess(await auth());
   if (access.kind !== "allowed") {
     return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "credential_device_poll",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   const id = clientId();

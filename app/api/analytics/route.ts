@@ -1,4 +1,9 @@
+import { ipAddress } from "@vercel/functions";
 import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
 import { windowStart } from "@/lib/billing/history";
 import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
 import { runHistory } from "@/lib/db/queries";
@@ -22,6 +27,15 @@ export async function GET(request: Request) {
 
   if (!session?.user?.id) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "analytics_read",
+    userId: session.user.id,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   const requested = Number(new URL(request.url).searchParams.get("days"));

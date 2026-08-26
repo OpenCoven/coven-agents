@@ -1,6 +1,11 @@
+import { ipAddress } from "@vercel/functions";
 import { z } from "zod";
 import { auth } from "@/app/(auth)/auth";
 import type { ArtifactKind } from "@/components/chat/artifact";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import {
@@ -35,6 +40,15 @@ export async function GET(request: Request) {
     return subscriberAccessResponse(access);
   }
 
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "document_read",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
+  }
+
   const documents = await getDocumentsById({ id });
 
   const [document] = documents;
@@ -50,7 +64,7 @@ export async function GET(request: Request) {
   return Response.json(documents, { status: 200 });
 }
 
-export async function POST(request: Request) {
+async function writeDocument(request: Request) {
   const { searchParams } = new URL(request.url);
   const id = searchParams.get("id");
 
@@ -65,6 +79,15 @@ export async function POST(request: Request) {
   const access = await authorizeSubscriberAccess(session);
   if (access.kind !== "allowed") {
     return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "document_write",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   let content: string;
@@ -109,6 +132,14 @@ export async function POST(request: Request) {
   return Response.json(document, { status: 200 });
 }
 
+export function POST(request: Request) {
+  return writeDocument(request);
+}
+
+export function PATCH(request: Request) {
+  return writeDocument(request);
+}
+
 export async function DELETE(request: Request) {
   const { searchParams } = new URL(request.url);
   const id = searchParams.get("id");
@@ -132,6 +163,15 @@ export async function DELETE(request: Request) {
   const access = await authorizeSubscriberAccess(session);
   if (access.kind !== "allowed") {
     return subscriberAccessResponse(access);
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "document_delete",
+    userId: access.userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
   }
 
   const documents = await getDocumentsById({ id });

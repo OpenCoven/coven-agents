@@ -1,6 +1,19 @@
+import { ipAddress } from "@vercel/functions";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
 import { getAllGatewayModels, getCapabilities, isDemo } from "@/lib/ai/models";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "model_list",
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
+  }
+
   const headers = {
     "Cache-Control": "public, max-age=86400, s-maxage=86400",
   };

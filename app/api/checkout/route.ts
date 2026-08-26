@@ -1,5 +1,10 @@
+import { ipAddress } from "@vercel/functions";
 import Stripe from "stripe";
 import { auth } from "@/app/(auth)/auth";
+import {
+  abuseAdmissionResponse,
+  enforceAbusePolicy,
+} from "@/lib/abuse/enforce";
 import { checkoutDecision } from "@/lib/billing/checkout";
 import { attachStripeCustomer, findUserById } from "@/lib/db/queries";
 
@@ -11,9 +16,22 @@ import { attachStripeCustomer, findUserById } from "@/lib/db/queries";
  * user -- since the event that writes `stripeCustomerId` is the same one that
  * would otherwise be needed to look it up.
  */
-export async function POST() {
+export async function POST(request: Request) {
   const session = await auth();
   const userId = session?.user?.id ?? null;
+
+  if (!userId) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
+
+  const admission = await enforceAbusePolicy({
+    ip: ipAddress(request) ?? null,
+    route: "checkout",
+    userId,
+  });
+  if (admission.kind !== "allowed") {
+    return abuseAdmissionResponse(admission);
+  }
 
   const secret = process.env.STRIPE_SECRET_KEY;
   const price = process.env.STRIPE_PRICE_ID;
@@ -24,7 +42,7 @@ export async function POST() {
 
   const stripe = new Stripe(secret);
 
-  const row = userId ? await findUserById(userId) : null;
+  const row = await findUserById(userId);
 
   const active = row?.stripeCustomerId
     ? (
