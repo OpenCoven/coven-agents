@@ -964,6 +964,88 @@ test("run admission happens before dispatch and receives only a tenant hash", as
   );
 });
 
+test("a terminal duplicate reconciles stale admission before returning the terminal run", async () => {
+  const operationId = "33333333-aaaa-4555-8666-777777777777";
+  const runId = "44444444-bbbb-4666-8777-888888888888";
+  const calls: string[] = [];
+  const terminalRun: RunSnapshot = {
+    ...queuedRun(MINE, runId, operationId),
+    completedAt: "2026-08-26T00:00:01.000Z",
+    status: "completed",
+  };
+  const agent: CloudRunnerAgent = {
+    configure: (value: AgentDefinition) => value,
+    decommission: () => undefined,
+    discardRun: () => undefined,
+    enqueue: () => ({ created: false, run: terminalRun }),
+    getEventStream: () => ({ events: [], terminal: true }),
+    getRun: () => terminalRun,
+    listRuns: () => [terminalRun],
+    snapshot: () => agents.get(MINE) ?? null,
+    start: () => {
+      throw new Error("a terminal duplicate must not dispatch");
+    },
+    stop: () => terminalRun,
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const response = await createCloudRunner({
+    getAdmission: () => ({
+      admit: () => {
+        throw new Error("a terminal duplicate must not admit again");
+      },
+      getByOperationId: () => {
+        calls.push("lookup-admission");
+        return {
+          agentId: MINE,
+          enqueuedAt: terminalRun.createdAt,
+          operationId,
+          requestHash: "request-hash",
+          runId,
+          state: "active",
+          tenantHash: "tenant-hash",
+        };
+      },
+      release: (releasedRunId) => {
+        calls.push(`release:${releasedRunId}`);
+        return true;
+      },
+    }),
+    getDirectory: () => ({
+      list: () => [agents.get(MINE) as AgentDefinition],
+      lookupRun: () => MINE,
+      registerRun: () => undefined,
+      remove: () => undefined,
+      unregisterRun: () => undefined,
+      upsert: (value: AgentDefinition) => value,
+    }),
+    getYoloAgent: () => agent,
+  }).fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: terminalRun.task }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 202);
+  assert.deepEqual(calls, ["lookup-admission", `release:${runId}`]);
+  assert.deepEqual((await response.json()) as { run: RunSnapshot }, {
+    apiVersion: AGENT_RUNNER_API_VERSION,
+    run: terminalRun,
+  });
+});
+
 test("an orphan queued duplicate cannot bypass admission", async () => {
   const operationId = "77777777-8888-4999-9000-111111111111";
   const runId = "88888888-9999-4000-8111-222222222222";

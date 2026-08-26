@@ -5,6 +5,7 @@ import type { AgentDefinition } from "@opencoven/agent-contracts";
 import {
   AdmissionQueue,
   type AdmissionRecord,
+  AdmissionUnavailableError,
   admissionLimits,
   admissionMode,
   RunAdmission,
@@ -850,7 +851,7 @@ test("alarm repairs a missed terminal completion callback", async () => {
   );
 });
 
-test("an interrupted dispatch keeps its lease until a queued run is reconciled", async () => {
+test("an interrupted dispatch clears its lease before the next alarm", async () => {
   const originalNow = Date.now;
   let now = Date.parse("2026-08-26T00:00:00.000Z");
   let attempts = 0;
@@ -875,8 +876,8 @@ test("an interrupted dispatch keeps its lease until a queued run is reconciled",
     await Promise.all(harness.background);
     assert.equal(
       (await harness.admission.getRecord("run-34"))?.state,
-      "active",
-      "an interrupted RPC must retain its capacity claim until reconciliation"
+      "queued",
+      "an interrupted RPC must not strand its capacity claim"
     );
 
     now += 61_000;
@@ -947,4 +948,246 @@ test("active admission is retained while the agent reports a genuinely running r
   await harness.admission.alarm();
 
   assert.equal((await harness.admission.getRecord("run-35"))?.state, "active");
+});
+
+test("alarm failure is caught, retained durably, and repaired by a later lifecycle call", async () => {
+  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  const originalNow = Date.now;
+  Date.now = () => now;
+  const setAlarmFailure: { error: Error | null } = { error: null };
+  let dispatches = 0;
+  try {
+    const harness = runAdmissionHarness(
+      () => ({
+        getRun: (runId: string) =>
+          runId === "run-50" ? { status: "running" } : { status: "queued" },
+        startAdmitted: () => {
+          dispatches += 1;
+          return Promise.resolve(true);
+        },
+        stop: () => Promise.resolve(null),
+      }),
+      {
+        RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+        RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+      },
+      { setAlarmFailure }
+    );
+
+    assert.deepEqual(await harness.admission.admit(request(50)), {
+      kind: "active",
+      runId: "run-50",
+    });
+    await Promise.all(harness.background);
+    assert.deepEqual(await harness.admission.admit(request(51)), {
+      kind: "queued",
+      position: 1,
+      runId: "run-51",
+    });
+    await Promise.all(harness.background);
+
+    setAlarmFailure.error = new Error("alarm unavailable");
+    harness.setAlarm(now - 1);
+    await harness.admission.alarm();
+    assert.equal(
+      (await harness.admission.getRecord("run-51"))?.state,
+      "queued"
+    );
+
+    setAlarmFailure.error = null;
+    await harness.admission.release("run-50");
+    await Promise.all(harness.background);
+
+    assert.equal(
+      (await harness.admission.getRecord("run-51"))?.state,
+      "active"
+    );
+    assert.equal(dispatches, 2);
+    assert.equal(harness.alarm(), now + 30_000);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("alarm retry exhaustion closes queued admission and refuses new work", async () => {
+  let stopped = 0;
+  const setAlarmFailure: { error: Error | null } = {
+    error: new Error("alarm permanently unavailable"),
+  };
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.resolve(false),
+      stop: () => {
+        stopped += 1;
+        return Promise.resolve({ status: "cancelled" });
+      },
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "0",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    },
+    { setAlarmFailure }
+  );
+
+  setAlarmFailure.error = null;
+  assert.deepEqual(await harness.admission.admit(request(52)), {
+    kind: "queued",
+    position: 1,
+    runId: "run-52",
+  });
+  await Promise.all(harness.background);
+  setAlarmFailure.error = new Error("alarm permanently unavailable");
+  harness.setAlarm(Date.now() - 1);
+
+  await harness.admission.alarm();
+  await harness.admission.alarm();
+  await harness.admission.alarm();
+
+  assert.equal(
+    (await harness.admission.getRecord("run-52"))?.state,
+    "terminal"
+  );
+  assert.equal(stopped, 1);
+  await assert.rejects(
+    () => harness.admission.admit(request(53)),
+    (error: unknown) =>
+      error instanceof AdmissionUnavailableError &&
+      error.message.includes("alarm permanently unavailable")
+  );
+});
+
+test("dispatch failure clears its lease before alarm failure can leak capacity", async () => {
+  const setAlarmFailure: { error: Error | null } = { error: null };
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: (runId: string) =>
+        runId === "run-55"
+          ? Promise.reject(new Error("dispatch unavailable"))
+          : Promise.resolve(true),
+      stop: () => Promise.resolve({ status: "cancelled" }),
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    },
+    { setAlarmFailure }
+  );
+
+  assert.deepEqual(await harness.admission.admit(request(54)), {
+    kind: "active",
+    runId: "run-54",
+  });
+  await Promise.all(harness.background);
+  assert.deepEqual(await harness.admission.admit(request(55)), {
+    kind: "queued",
+    position: 1,
+    runId: "run-55",
+  });
+  await Promise.all(harness.background);
+
+  setAlarmFailure.error = new Error("alarm unavailable after dispatch");
+  harness.setAlarm(Date.now() - 1);
+  await assert.rejects(
+    () => harness.admission.release("run-54"),
+    /alarm unavailable after dispatch/
+  );
+  await Promise.all(harness.background);
+
+  assert.equal(
+    (await harness.admission.getRecord("run-55"))?.state,
+    "terminal"
+  );
+  const leaseRows = harness.sql
+    .exec<{ dispatch_lease_until: string | null }>(
+      "SELECT dispatch_lease_until FROM admission_records WHERE run_id = ?",
+      "run-55"
+    )
+    .toArray() as { dispatch_lease_until: string | null }[];
+  assert.equal(leaseRows[0]?.dispatch_lease_until, null);
+});
+
+test("same-millisecond admissions use insertion sequence for positions and fairness", () => {
+  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  const queue = new AdmissionQueue({
+    limits: {
+      deploymentActiveRuns: 3,
+      tenantActiveRuns: 1,
+      tenantQueuedRuns: 3,
+    },
+    now: () => now,
+    records: [
+      {
+        ...request(61, TENANT_A),
+        enqueuedAt: new Date(now).toISOString(),
+        state: "queued",
+      },
+      {
+        ...request(62, TENANT_B),
+        enqueuedAt: new Date(now).toISOString(),
+        state: "queued",
+      },
+    ],
+  });
+
+  assert.equal(queue.nextDispatchCandidate()?.runId, "run-61");
+  assert.equal(queue.nextDispatchCandidate()?.runId, "run-62");
+  assert.deepEqual(
+    queue
+      .records()
+      .filter((record) => record.state === "queued")
+      .map((record) => record.runId),
+    []
+  );
+});
+
+test("durable queue sequence keeps same-millisecond positions in insertion order", async () => {
+  const originalNow = Date.now;
+  Date.now = () => Date.parse("2026-08-26T00:00:00.000Z");
+  try {
+    const harness = runAdmissionHarness(
+      () => ({
+        getRun: () => ({ status: "queued" }),
+        startAdmitted: () => Promise.resolve(false),
+        stop: () => Promise.resolve(null),
+      }),
+      {
+        RUN_ADMISSION_TENANT_ACTIVE_MAX: "0",
+        RUN_ADMISSION_TENANT_QUEUE_MAX: "3",
+      }
+    );
+
+    assert.deepEqual(await harness.admission.admit(request(63)), {
+      kind: "queued",
+      position: 1,
+      runId: "run-63",
+    });
+    assert.deepEqual(await harness.admission.admit(request(64)), {
+      kind: "queued",
+      position: 2,
+      runId: "run-64",
+    });
+    assert.deepEqual(await harness.admission.admit(request(65)), {
+      kind: "queued",
+      position: 3,
+      runId: "run-65",
+    });
+
+    const sequenceRows = harness.sql
+      .exec<{ run_id: string; queue_sequence: number }>(
+        "SELECT run_id, queue_sequence FROM admission_records ORDER BY queue_sequence"
+      )
+      .toArray() as { run_id: string; queue_sequence: number }[];
+    assert.deepEqual(
+      sequenceRows.map((row) => row.run_id),
+      ["run-63", "run-64", "run-65"]
+    );
+    assert.deepEqual(
+      sequenceRows.map((row) => row.queue_sequence),
+      [1, 2, 3]
+    );
+  } finally {
+    Date.now = originalNow;
+  }
 });

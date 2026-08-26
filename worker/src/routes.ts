@@ -19,6 +19,7 @@ import {
   type AdmissionDecision,
   type AdmissionRecord,
   type AdmissionRequest,
+  AdmissionUnavailableError,
   admissionMode,
   tenantAdmissionHash,
 } from "./admission.js";
@@ -258,6 +259,20 @@ function fail(error: unknown, cors: Headers): Response {
         false
       ),
       { status: 409 },
+      cors
+    );
+  }
+  if (
+    error instanceof AdmissionUnavailableError ||
+    (error instanceof Error && error.name === "AdmissionUnavailableError")
+  ) {
+    return json(
+      errorEnvelope(
+        "admission_unavailable",
+        "Run admission is temporarily unavailable. Try again later.",
+        true
+      ),
+      { status: 503 },
       cors
     );
   }
@@ -692,6 +707,39 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             }
             if (!prepared.created) {
               if (isTerminal(prepared.run.status)) {
+                let terminalAdmission: CloudRunnerAdmission;
+                try {
+                  if (!dependencies.getAdmission) {
+                    throw new AdmissionUnavailableError(
+                      "Run admission is not configured."
+                    );
+                  }
+                  terminalAdmission =
+                    await dependencies.getAdmission(environment);
+                  const stale = terminalAdmission.getByOperationId
+                    ? await terminalAdmission.getByOperationId(
+                        input.operationId
+                      )
+                    : null;
+                  // A terminal local run can outlive a failed release
+                  // callback. Releasing by the durable operation record first
+                  // repairs both queued and active stale admission.
+                  await terminalAdmission.release(
+                    stale?.runId ?? prepared.run.id
+                  );
+                } catch (error) {
+                  if (
+                    error instanceof AdmissionUnavailableError ||
+                    (error instanceof Error &&
+                      error.name === "AdmissionUnavailableError")
+                  ) {
+                    throw error;
+                  }
+                  throw new AdmissionUnavailableError(
+                    "Terminal run admission reconciliation failed.",
+                    { cause: error }
+                  );
+                }
                 return json(
                   {
                     apiVersion: AGENT_RUNNER_API_VERSION,

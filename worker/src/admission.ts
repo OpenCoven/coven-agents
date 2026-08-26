@@ -36,6 +36,8 @@ export const DEFAULT_ADMISSION_LIMITS: AdmissionLimits = {
 
 const QUEUED_TTL_MS = 5 * 60 * 1000;
 const ALARM_INTERVAL_MS = 30 * 1000;
+const ALARM_REPAIR_RETRY_MS = 5 * 1000;
+const MAX_ALARM_REPAIR_FAILURES = 3;
 const DISPATCH_LEASE_MS = 60 * 1000;
 
 type SchedulerState = {
@@ -50,12 +52,17 @@ const INITIAL_SCHEDULER_STATE: SchedulerState = {
 
 export type AdmissionDispatch = (record: AdmissionRecord) => Promise<boolean>;
 
+type StoredAdmissionRecord = AdmissionRecord & {
+  sequence: number;
+};
+
 export type AdmissionQueueOptions = {
   dispatch?: AdmissionDispatch;
   limits?: Partial<AdmissionLimits>;
   now?: () => number;
-  records?: readonly AdmissionRecord[];
+  records?: readonly (AdmissionRecord | StoredAdmissionRecord)[];
   scheduler?: Partial<SchedulerState>;
+  nextSequence?: number;
 };
 
 function mergeLimits(limits: Partial<AdmissionLimits> = {}): AdmissionLimits {
@@ -74,6 +81,18 @@ export class AdmissionConfigurationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "AdmissionConfigurationError";
+  }
+}
+
+export class AdmissionUnavailableError extends Error {
+  readonly retryable = true;
+
+  constructor(
+    message = "Run admission is temporarily unavailable.",
+    options: ErrorOptions = {}
+  ) {
+    super(message, options);
+    this.name = "AdmissionUnavailableError";
   }
 }
 
@@ -189,8 +208,16 @@ function assertAdmissionRequest(input: AdmissionRequest): void {
   }
 }
 
+function compareQueueOrder(
+  left: Pick<StoredAdmissionRecord, "enqueuedAt" | "sequence">,
+  right: Pick<StoredAdmissionRecord, "enqueuedAt" | "sequence">
+): number {
+  const timestampOrder = left.enqueuedAt.localeCompare(right.enqueuedAt);
+  return timestampOrder === 0 ? left.sequence - right.sequence : timestampOrder;
+}
+
 function queuedPosition(
-  records: readonly AdmissionRecord[],
+  records: readonly StoredAdmissionRecord[],
   tenantHash: string,
   runId: string
 ): number {
@@ -200,7 +227,7 @@ function queuedPosition(
         (record) =>
           record.state === "queued" && record.tenantHash === tenantHash
       )
-      .sort((left, right) => left.enqueuedAt.localeCompare(right.enqueuedAt))
+      .sort(compareQueueOrder)
       .findIndex((record) => record.runId === runId) + 1
   );
 }
@@ -209,14 +236,29 @@ export class AdmissionQueue {
   private readonly dispatchCallback?: AdmissionDispatch;
   private readonly limits: AdmissionLimits;
   private readonly now: () => number;
-  private readonly queueRecords: AdmissionRecord[];
+  private readonly queueRecords: StoredAdmissionRecord[];
+  private nextSequence: number;
   private queueScheduler: SchedulerState;
 
   constructor(options: AdmissionQueueOptions = {}) {
     this.dispatchCallback = options.dispatch;
     this.limits = mergeLimits(options.limits);
     this.now = options.now ?? Date.now;
-    this.queueRecords = (options.records ?? []).map(cloneRecord);
+    this.queueRecords = (options.records ?? []).map((record, index) => {
+      const sequence =
+        "sequence" in record &&
+        Number.isSafeInteger(record.sequence) &&
+        record.sequence > 0
+          ? record.sequence
+          : index + 1;
+      return { ...cloneRecord(record), sequence };
+    });
+    const firstAvailableSequence =
+      Math.max(0, ...this.queueRecords.map((record) => record.sequence)) + 1;
+    this.nextSequence = Math.max(
+      firstAvailableSequence,
+      options.nextSequence ?? firstAvailableSequence
+    );
     this.queueScheduler = {
       ...INITIAL_SCHEDULER_STATE,
       ...options.scheduler,
@@ -224,7 +266,9 @@ export class AdmissionQueue {
   }
 
   records(): AdmissionRecord[] {
-    return this.queueRecords.map(cloneRecord);
+    return this.queueRecords.map(({ sequence: _sequence, ...record }) =>
+      cloneRecord(record)
+    );
   }
 
   scheduler(): SchedulerState {
@@ -276,7 +320,8 @@ export class AdmissionQueue {
       enqueuedAt: new Date(this.now()).toISOString(),
       state: "queued",
     };
-    this.queueRecords.push(record);
+    this.queueRecords.push({ ...record, sequence: this.nextSequence });
+    this.nextSequence += 1;
     return this.decisionFor(record.runId);
   }
 
@@ -357,9 +402,13 @@ export class AdmissionQueue {
     const ordered = tenants.sort((left, right) => {
       const leftHead = this.oldestDispatchableQueued(left);
       const rightHead = this.oldestDispatchableQueued(right);
-      return (leftHead?.enqueuedAt ?? "").localeCompare(
-        rightHead?.enqueuedAt ?? ""
-      );
+      return leftHead && rightHead
+        ? compareQueueOrder(leftHead, rightHead)
+        : leftHead
+          ? -1
+          : rightHead
+            ? 1
+            : 0;
     });
     const waitingForOtherTenant = ordered.some(
       (tenantHash) => tenantHash !== this.queueScheduler.lastTenantHash
@@ -418,7 +467,7 @@ export class AdmissionQueue {
 
   private oldestDispatchableQueued(
     tenantHash: string
-  ): AdmissionRecord | undefined {
+  ): StoredAdmissionRecord | undefined {
     return this.queueRecords
       .filter(
         (record) =>
@@ -426,9 +475,7 @@ export class AdmissionQueue {
           record.tenantHash === tenantHash &&
           !this.isQueueExpired(record)
       )
-      .sort((left, right) =>
-        left.enqueuedAt.localeCompare(right.enqueuedAt)
-      )[0];
+      .sort(compareQueueOrder)[0];
   }
 
   private queuedCount(tenantHash: string): number {
@@ -475,6 +522,7 @@ type AdmissionRow = {
   operation_id: string;
   request_hash: string;
   run_id: string;
+  queue_sequence: number;
   state: string;
   tenant_hash: string;
 };
@@ -484,7 +532,12 @@ type MetaRow = {
   value: string;
 };
 
-function rowToRecord(row: AdmissionRow): AdmissionRecord {
+const NEXT_WAKE_META_KEY = "next_wake_at";
+const ALARM_FAILURES_META_KEY = "alarm_failure_count";
+const ALARM_UNAVAILABLE_META_KEY = "alarm_unavailable";
+const NEXT_SEQUENCE_META_KEY = "next_sequence";
+
+function rowToStoredRecord(row: AdmissionRow): StoredAdmissionRecord {
   if (
     (row.state !== "queued" &&
       row.state !== "active" &&
@@ -494,7 +547,9 @@ function rowToRecord(row: AdmissionRow): AdmissionRecord {
     !row.operation_id ||
     !row.request_hash ||
     !row.run_id ||
-    !row.tenant_hash
+    !row.tenant_hash ||
+    !Number.isSafeInteger(row.queue_sequence) ||
+    row.queue_sequence <= 0
   ) {
     throw new AdmissionConfigurationError(
       "Run admission storage contains an invalid record."
@@ -506,9 +561,15 @@ function rowToRecord(row: AdmissionRow): AdmissionRecord {
     operationId: row.operation_id,
     requestHash: row.request_hash,
     runId: row.run_id,
+    sequence: row.queue_sequence,
     state: row.state,
     tenantHash: row.tenant_hash,
   };
+}
+
+function publicRecord(record: StoredAdmissionRecord): AdmissionRecord {
+  const { sequence: _sequence, ...result } = record;
+  return cloneRecord(result);
 }
 
 export class RunAdmission extends DurableObject<Env> {
@@ -524,6 +585,7 @@ export class RunAdmission extends DurableObject<Env> {
           operation_id TEXT NOT NULL UNIQUE,
           request_hash TEXT NOT NULL,
           run_id TEXT PRIMARY KEY,
+          queue_sequence INTEGER NOT NULL UNIQUE,
           state TEXT NOT NULL CHECK (state IN ('queued', 'active', 'terminal')),
           tenant_hash TEXT NOT NULL,
           dispatch_started_at TEXT,
@@ -544,9 +606,21 @@ export class RunAdmission extends DurableObject<Env> {
           "ALTER TABLE admission_records ADD COLUMN dispatch_lease_until TEXT"
         );
       }
+      if (!columns.includes("queue_sequence")) {
+        ctx.storage.sql.exec(
+          "ALTER TABLE admission_records ADD COLUMN queue_sequence INTEGER"
+        );
+        ctx.storage.sql.exec(
+          "UPDATE admission_records SET queue_sequence = rowid WHERE queue_sequence IS NULL"
+        );
+      }
       ctx.storage.sql.exec(`
-        CREATE INDEX IF NOT EXISTS admission_records_queue_idx
-        ON admission_records (state, tenant_hash, enqueued_at)
+        CREATE INDEX IF NOT EXISTS admission_records_queue_sequence_idx
+        ON admission_records (state, tenant_hash, queue_sequence)
+      `);
+      ctx.storage.sql.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS admission_records_sequence_idx
+        ON admission_records (queue_sequence)
       `);
       ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS admission_meta (
@@ -561,11 +635,15 @@ export class RunAdmission extends DurableObject<Env> {
   async admit(input: AdmissionRequest): Promise<AdmissionDecision> {
     await this.initialized;
     const limits = admissionLimits(this.env);
+    await this.ensureAlarm({ throwOnFailure: true });
     const result = this.ctx.storage.transactionSync(() => {
       const existing = this.findByOperationId(input.operationId);
+      const storedRecords = this.readStoredRecords();
+      const nextSequence = this.readNextSequence(storedRecords);
       const queue = new AdmissionQueue({
         limits,
-        records: this.readRecords(),
+        nextSequence,
+        records: storedRecords,
       });
       const decision = queue.admitSynchronously(input);
       if (existing?.state === "terminal") {
@@ -582,7 +660,8 @@ export class RunAdmission extends DurableObject<Env> {
           "Admission record was not created."
         );
       }
-      this.writeRecord(record);
+      this.writeRecord({ ...record, sequence: nextSequence });
+      this.writeMetaValue(NEXT_SEQUENCE_META_KEY, String(nextSequence + 1));
       return { decision, record };
     });
     if (result.decision.kind === "refused") {
@@ -598,7 +677,7 @@ export class RunAdmission extends DurableObject<Env> {
       );
     }
     try {
-      await this.ensureAlarm();
+      await this.ensureAlarm({ throwOnFailure: true });
     } catch (error) {
       this.terminalizeFailedAdmission(created);
       this.ctx.waitUntil(this.dispatchAvailable(limits));
@@ -646,24 +725,28 @@ export class RunAdmission extends DurableObject<Env> {
     this.updateState(runId, "terminal");
     this.clearDispatchLease(runId);
     this.ctx.waitUntil(this.dispatchAvailable(admissionLimits(this.env)));
-    await this.ensureAlarm();
+    await this.ensureAlarm({ throwOnFailure: true });
     return true;
   }
 
   async getRecord(runId: string): Promise<AdmissionRecord | null> {
     await this.initialized;
-    return this.findByRunId(runId);
+    const record = this.findByRunId(runId);
+    await this.ensureAlarm({ throwOnFailure: false });
+    return record;
   }
 
   async getByOperationId(operationId: string): Promise<AdmissionRecord | null> {
     await this.initialized;
-    return this.findByOperationId(operationId);
+    const record = this.findByOperationId(operationId);
+    await this.ensureAlarm({ throwOnFailure: false });
+    return record;
   }
 
   async dispatch(): Promise<void> {
     await this.initialized;
     this.ctx.waitUntil(this.dispatchAvailable(admissionLimits(this.env)));
-    await this.ensureAlarm();
+    await this.ensureAlarm({ throwOnFailure: true });
   }
 
   async alarm(): Promise<void> {
@@ -713,7 +796,7 @@ export class RunAdmission extends DurableObject<Env> {
       }
     }
     await this.dispatchAvailable(admissionLimits(this.env));
-    await this.ensureAlarm();
+    await this.ensureAlarm({ throwOnFailure: false });
   }
 
   private async dispatchAvailable(limits: AdmissionLimits): Promise<void> {
@@ -730,8 +813,10 @@ export class RunAdmission extends DurableObject<Env> {
           candidate.agentId
         ).startAdmitted(candidate.runId);
       } catch {
-        // Leave the active claim leased. The alarm will inspect the agent
-        // after the lease expires and either requeue it or release it.
+        // Reconcile immediately so a dispatch error never makes capacity
+        // depend on the next alarm. If the alarm cannot be repaired, close
+        // this affected admission rather than leaving accepted work stranded.
+        await this.reconcileDispatchFailure(candidate);
         return;
       }
       const current = this.findByRunId(candidate.runId);
@@ -743,41 +828,165 @@ export class RunAdmission extends DurableObject<Env> {
       }
       // A false response means the agent can tell us whether this run is
       // still queued, terminal, or absent. Do not strand the deployment slot.
-      await this.reconcileActive(current, true);
+      await this.reconcileDispatchFailure(current);
       if (this.findByRunId(candidate.runId)?.state === "queued") {
         return;
       }
     }
   }
 
-  private async ensureAlarm(): Promise<void> {
-    const records = this.readRecords();
+  private async reconcileDispatchFailure(
+    candidate: AdmissionRecord
+  ): Promise<void> {
+    await this.reconcileActive(candidate, true);
+    const current = this.findByRunId(candidate.runId);
+    if (!current || current.state === "terminal") {
+      return;
+    }
+    if (
+      current.state === "active" &&
+      this.dispatchLeaseUntil(candidate.runId) !== null
+    ) {
+      this.updateState(candidate.runId, "queued");
+      this.clearDispatchLease(candidate.runId);
+    }
+    try {
+      await this.ensureAlarm({ throwOnFailure: true });
+    } catch {
+      const afterFailure = this.findByRunId(candidate.runId);
+      if (afterFailure?.state === "queued") {
+        this.terminalizeFailedAdmission(candidate);
+        try {
+          await this.env.YoloAgent.getByName(candidate.agentId).stop(
+            candidate.runId
+          );
+        } catch {
+          // The terminal admission row is the durable capacity decision.
+        }
+      }
+    }
+  }
+
+  private async ensureAlarm(options: {
+    throwOnFailure: boolean;
+  }): Promise<boolean> {
+    const records = this.readStoredRecords();
     const hasWork = records.some(
       (record) => record.state === "queued" || record.state === "active"
     );
-    if (hasWork) {
-      const now = Date.now();
-      const queuedDeadlines = records
-        .filter((record) => record.state === "queued")
-        .map((record) => Date.parse(record.enqueuedAt) + QUEUED_TTL_MS);
-      const dispatchLeases = records
-        .filter((record) => record.state === "active")
-        .map((record) => this.dispatchLeaseUntil(record.runId))
-        .filter((value): value is number => value !== null);
-      const deadlines = [...queuedDeadlines, ...dispatchLeases].filter(
-        (value) => Number.isFinite(value)
-      );
-      const next = Math.min(
-        now + ALARM_INTERVAL_MS,
-        ...deadlines.filter((deadline) => deadline > now)
-      );
+    if (!hasWork) {
+      this.writeMetaValue(NEXT_WAKE_META_KEY, "");
+      try {
+        await this.ctx.storage.deleteAlarm();
+        this.markAlarmHealthy();
+        return true;
+      } catch (error) {
+        return this.handleAlarmFailure(null, error, options.throwOnFailure);
+      }
+    }
+
+    const now = Date.now();
+    const next = this.nextWakeAt(records, now);
+    // The durable deadline is written before touching the platform alarm. A
+    // later RPC can therefore repair a missing alarm without relying on an
+    // uncaught alarm retry.
+    this.writeMetaValue(NEXT_WAKE_META_KEY, String(next));
+    try {
       const current = await this.ctx.storage.getAlarm();
       if (current === null || current <= now || current > next) {
         await this.ctx.storage.setAlarm(next);
       }
-    } else {
-      await this.ctx.storage.deleteAlarm();
+      this.markAlarmHealthy();
+      return true;
+    } catch (error) {
+      return this.handleAlarmFailure(next, error, options.throwOnFailure);
     }
+  }
+
+  private nextWakeAt(
+    records: readonly StoredAdmissionRecord[],
+    now: number
+  ): number {
+    const queuedDeadlines = records
+      .filter((record) => record.state === "queued")
+      .map((record) => Date.parse(record.enqueuedAt) + QUEUED_TTL_MS);
+    const dispatchLeases = records
+      .filter((record) => record.state === "active")
+      .map((record) => this.dispatchLeaseUntil(record.runId))
+      .filter((value): value is number => value !== null);
+    const deadlines = [...queuedDeadlines, ...dispatchLeases].filter(
+      (value) => Number.isFinite(value) && value > now
+    );
+    return Math.min(now + ALARM_INTERVAL_MS, ...deadlines);
+  }
+
+  private async handleAlarmFailure(
+    nextWake: number | null,
+    error: unknown,
+    throwOnFailure: boolean
+  ): Promise<boolean> {
+    const failures = this.readAlarmFailureCount() + 1;
+    this.writeMetaValue(ALARM_FAILURES_META_KEY, String(failures));
+    this.writeMetaValue(
+      ALARM_UNAVAILABLE_META_KEY,
+      failures >= MAX_ALARM_REPAIR_FAILURES ? "1" : "0"
+    );
+
+    let repaired = false;
+    if (nextWake !== null) {
+      const retryAt = Math.min(nextWake, Date.now() + ALARM_REPAIR_RETRY_MS);
+      try {
+        await this.ctx.storage.setAlarm(retryAt);
+        this.writeMetaValue(NEXT_WAKE_META_KEY, String(nextWake));
+        this.markAlarmHealthy();
+        repaired = true;
+      } catch {
+        // One bounded best effort is enough; recursion here would hot-loop
+        // when the platform storage API is permanently unavailable.
+      }
+    }
+
+    if (!repaired && failures >= MAX_ALARM_REPAIR_FAILURES) {
+      this.failClosedQueuedAdmissions();
+    }
+    if (!repaired && throwOnFailure) {
+      const detail = error instanceof Error ? `: ${error.message}` : "";
+      throw new AdmissionUnavailableError(
+        `Run admission alarm is unavailable${detail}`
+      );
+    }
+    return repaired;
+  }
+
+  private failClosedQueuedAdmissions(): void {
+    const queued = this.readStoredRecords().filter(
+      (record) => record.state === "queued"
+    );
+    for (const record of queued) {
+      this.terminalizeFailedAdmission(record);
+      this.ctx.waitUntil(
+        (async () => {
+          try {
+            await this.env.YoloAgent.getByName(record.agentId).stop(
+              record.runId
+            );
+          } catch {
+            // The terminal admission row is the durable capacity decision.
+          }
+        })()
+      );
+    }
+    this.writeMetaValue(NEXT_WAKE_META_KEY, "");
+  }
+
+  private readAlarmFailureCount(): number {
+    const value = Number(this.readMetaValue(ALARM_FAILURES_META_KEY) ?? "0");
+    return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  }
+
+  private markAlarmHealthy(): void {
+    this.writeMetaValue(ALARM_FAILURES_META_KEY, "0");
+    this.writeMetaValue(ALARM_UNAVAILABLE_META_KEY, "0");
   }
 
   private claimNextCandidate(
@@ -785,7 +994,7 @@ export class RunAdmission extends DurableObject<Env> {
   ): AdmissionRecord | undefined {
     const queue = new AdmissionQueue({
       limits,
-      records: this.readRecords(),
+      records: this.readStoredRecords(),
       scheduler: this.readScheduler(),
     });
     const candidate = queue.nextDispatchCandidate();
@@ -865,15 +1074,13 @@ export class RunAdmission extends DurableObject<Env> {
     }
     if (record.state === "queued") {
       const position =
-        this.readRecords()
+        this.readStoredRecords()
           .filter(
             (candidate) =>
               candidate.state === "queued" &&
               candidate.tenantHash === record.tenantHash
           )
-          .sort((left, right) =>
-            left.enqueuedAt.localeCompare(right.enqueuedAt)
-          )
+          .sort(compareQueueOrder)
           .findIndex((candidate) => candidate.runId === record.runId) + 1;
       return { kind: "queued", position, runId: record.runId };
     }
@@ -886,45 +1093,50 @@ export class RunAdmission extends DurableObject<Env> {
   }
 
   private readRecords(): AdmissionRecord[] {
+    return this.readStoredRecords().map(publicRecord);
+  }
+
+  private readStoredRecords(): StoredAdmissionRecord[] {
     return this.ctx.storage.sql
       .exec<AdmissionRow>(
-        "SELECT agent_id, enqueued_at, operation_id, request_hash, run_id, state, tenant_hash FROM admission_records"
+        "SELECT agent_id, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, tenant_hash FROM admission_records ORDER BY queue_sequence"
       )
       .toArray()
-      .map(rowToRecord);
+      .map(rowToStoredRecord);
   }
 
   private findByOperationId(operationId: string): AdmissionRecord | null {
     const rows = this.ctx.storage.sql
       .exec<AdmissionRow>(
-        "SELECT agent_id, enqueued_at, operation_id, request_hash, run_id, state, tenant_hash FROM admission_records WHERE operation_id = ?",
+        "SELECT agent_id, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, tenant_hash FROM admission_records WHERE operation_id = ?",
         operationId
       )
       .toArray();
-    return rows[0] ? rowToRecord(rows[0]) : null;
+    return rows[0] ? publicRecord(rowToStoredRecord(rows[0])) : null;
   }
 
   private findByRunId(runId: string): AdmissionRecord | null {
     const rows = this.ctx.storage.sql
       .exec<AdmissionRow>(
-        "SELECT agent_id, enqueued_at, operation_id, request_hash, run_id, state, tenant_hash FROM admission_records WHERE run_id = ?",
+        "SELECT agent_id, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, tenant_hash FROM admission_records WHERE run_id = ?",
         runId
       )
       .toArray();
-    return rows[0] ? rowToRecord(rows[0]) : null;
+    return rows[0] ? publicRecord(rowToStoredRecord(rows[0])) : null;
   }
 
-  private writeRecord(record: AdmissionRecord): void {
+  private writeRecord(record: StoredAdmissionRecord): void {
     this.ctx.storage.sql.exec(
       `
         INSERT INTO admission_records
-          (agent_id, enqueued_at, operation_id, request_hash, run_id, state, tenant_hash, dispatch_started_at, dispatch_lease_until)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+          (agent_id, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, tenant_hash, dispatch_started_at, dispatch_lease_until)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
         ON CONFLICT(run_id) DO UPDATE SET
           agent_id = excluded.agent_id,
           enqueued_at = excluded.enqueued_at,
           operation_id = excluded.operation_id,
           request_hash = excluded.request_hash,
+          queue_sequence = excluded.queue_sequence,
           state = excluded.state,
           tenant_hash = excluded.tenant_hash,
           dispatch_started_at = NULL,
@@ -935,6 +1147,7 @@ export class RunAdmission extends DurableObject<Env> {
       record.operationId,
       record.requestHash,
       record.runId,
+      record.sequence,
       record.state,
       record.tenantHash
     );
@@ -1018,5 +1231,32 @@ export class RunAdmission extends DurableObject<Env> {
       "INSERT INTO admission_meta (key, value) VALUES ('consecutive_dispatches', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
       String(scheduler.consecutiveDispatches)
     );
+  }
+
+  private readMetaValue(key: string): string | null {
+    const rows = this.ctx.storage.sql
+      .exec<MetaRow>("SELECT key, value FROM admission_meta WHERE key = ?", key)
+      .toArray();
+    return rows[0]?.value ?? null;
+  }
+
+  private writeMetaValue(key: string, value: string): void {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO admission_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      key,
+      value
+    );
+  }
+
+  private readNextSequence(records: readonly StoredAdmissionRecord[]): number {
+    const persisted = Number(this.readMetaValue(NEXT_SEQUENCE_META_KEY) ?? "1");
+    const highest =
+      Math.max(0, ...records.map((record) => record.sequence)) + 1;
+    if (!Number.isSafeInteger(persisted) || persisted < 1) {
+      throw new AdmissionConfigurationError(
+        "Run admission sequence storage is invalid."
+      );
+    }
+    return Math.max(persisted, highest);
   }
 }
