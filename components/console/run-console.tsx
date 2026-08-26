@@ -877,12 +877,18 @@ export function RunConsole() {
             minWidth: 0,
           }}
         >
-          {/* The brand is the way home. It was the one mark on the screen that
-              looked like a logo and did nothing when clicked. */}
+          {/* The brand is the way back to runs — the one escape hatch every
+              view shares, which is why the views carry no back buttons of
+              their own. The href keeps middle-click and copy-link honest;
+              a plain click stays in the console instead of reloading it. */}
           <Link
-            aria-label="OpenCoven home"
+            aria-label="Back to runs"
             className="oc-tint"
             href="/"
+            onClick={(event) => {
+              event.preventDefault();
+              setView("composer");
+            }}
             style={{
               alignItems: "center",
               borderRadius: "var(--radius-control)",
@@ -893,7 +899,7 @@ export function RunConsole() {
               padding: "5px 6px",
               textDecoration: "none",
             }}
-            title="OpenCoven home"
+            title="Back to runs"
           >
             <span style={{ color: "var(--accent-presence)", fontSize: 13 }}>
               ◆
@@ -990,9 +996,9 @@ export function RunConsole() {
         style={{ display: "flex", flex: 1, minHeight: 0, position: "relative" }}
       >
         {view === "analytics" ? (
-          <Analytics onClose={() => setView("composer")} />
+          <Analytics />
         ) : view === "settings" ? (
-          <Settings account={account} onClose={() => setView("composer")} />
+          <Settings account={account} />
         ) : view === "create" ? (
           <CreateAgent
             busy={busy}
