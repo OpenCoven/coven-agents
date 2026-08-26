@@ -5,6 +5,7 @@ import {
   type AgentDefinition,
   base64UrlEncode,
   type RunnerClaims,
+  type RunSnapshot,
   TOKEN_LIFETIME_SECONDS,
 } from "@opencoven/agent-contracts";
 import {
@@ -849,4 +850,176 @@ test("a demo claim cannot prewarm", async () => {
 
   assert.equal(response.status, 403);
   assert.deepEqual(warmed, []);
+});
+
+function queuedRun(
+  agentId: string,
+  runId: string,
+  operationId: string
+): RunSnapshot {
+  return {
+    agentId,
+    apiVersion: AGENT_RUNNER_API_VERSION,
+    commandEvidence: [],
+    completedAt: null,
+    createdAt: "2026-08-26T00:00:00.000Z",
+    fileEvidence: [],
+    id: runId,
+    operationId,
+    output: "",
+    startedAt: null,
+    status: "queued",
+    task: "Run the tests.",
+  };
+}
+
+test("run admission happens before dispatch and receives only a tenant hash", async () => {
+  const operationId = "33333333-4444-4555-8666-777777777777";
+  const runId = "44444444-5555-4666-8777-888888888888";
+  const calls: string[] = [];
+  const admissionRequests: { tenantHash?: string }[] = [];
+  const run = queuedRun(MINE, runId, operationId);
+  const agent: CloudRunnerAgent = {
+    configure: (value: AgentDefinition) => value,
+    decommission: () => undefined,
+    discardRun: () => undefined,
+    enqueue: (
+      _input: unknown,
+      _runId: string,
+      _requestHash: string,
+      _identityToken: string
+    ) => {
+      calls.push("enqueue");
+      return { created: true, run };
+    },
+    getEventStream: () => ({ events: [], terminal: false }),
+    getRun: () => run,
+    listRuns: () => [run],
+    snapshot: () => agents.get(MINE) ?? null,
+    start: () => {
+      throw new Error("legacy start must not be reached");
+    },
+    stop: () => run,
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const directory: CloudRunnerDirectory = {
+    list: (tenantId) =>
+      [...agents.values()].filter(
+        (candidate) =>
+          candidate.owner?.kind === "tenant" &&
+          candidate.owner.tenantId === tenantId
+      ),
+    lookupRun: () => null,
+    registerRun: () => {
+      calls.push("register");
+    },
+    remove: () => undefined,
+    upsert: (value) => value,
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const response = await createCloudRunner({
+    getAdmission: () => ({
+      admit: (input) => {
+        calls.push("admit");
+        admissionRequests.push(input);
+        return {
+          kind: "queued" as const,
+          position: 1,
+          runId,
+        };
+      },
+      release: () => false,
+    }),
+    getDirectory: () => directory,
+    getYoloAgent: () => agent,
+  }).fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: "Run the tests." }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    { ...environment, RUN_ADMISSION_MODE: "queue" } as never
+  );
+
+  assert.equal(response.status, 202);
+  assert.deepEqual(calls, ["enqueue", "admit", "register"]);
+  assert.equal(admissionRequests.length, 1);
+  assert.notEqual(admissionRequests[0]?.tenantHash, CALLER_TENANT);
+  assert.match(admissionRequests[0]?.tenantHash ?? "", /^v1:[0-9a-f]{64}$/);
+  assert.equal(
+    String(admissionRequests[0]?.tenantHash).includes(CALLER_TENANT),
+    false
+  );
+});
+
+test("reject mode refuses an unhealthy admission object without bypassing it", async () => {
+  const operationId = "55555555-6666-4777-8888-999999999999";
+  const runId = "66666666-7777-4888-8999-000000000000";
+  let discarded = false;
+  const run = queuedRun(MINE, runId, operationId);
+  const agent: CloudRunnerAgent = {
+    configure: (value: AgentDefinition) => value,
+    decommission: () => undefined,
+    discardRun: () => {
+      discarded = true;
+    },
+    enqueue: () => ({ created: true, run }),
+    getEventStream: () => ({ events: [], terminal: false }),
+    getRun: () => run,
+    listRuns: () => [run],
+    snapshot: () => agents.get(MINE) ?? null,
+    start: () => {
+      throw new Error("legacy start must not be reached");
+    },
+    stop: () => run,
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const response = await createCloudRunner({
+    getAdmission: () => ({
+      admit: () => Promise.reject(new Error("admission unavailable")),
+      release: () => false,
+    }),
+    getDirectory: () => ({
+      list: () => {
+        const storedAgent = agents.get(MINE);
+        return storedAgent ? [storedAgent] : [];
+      },
+      lookupRun: () => null,
+      registerRun: () => undefined,
+      remove: () => undefined,
+      upsert: (value: AgentDefinition) => value,
+    }),
+    getYoloAgent: () => agent,
+  }).fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: "Run the tests." }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    { ...environment, RUN_ADMISSION_MODE: "reject" } as never
+  );
+
+  assert.equal(response.status, 409);
+  assert.equal(discarded, true);
+  const body = (await response.json()) as { error: { code: string } };
+  assert.equal(body.error.code, "busy");
 });

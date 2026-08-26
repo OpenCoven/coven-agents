@@ -131,6 +131,36 @@ test("a cancelled run frees the agent for the next one", async () => {
   assert.equal(second.created, true);
 });
 
+test("cancelling an admitted queued run releases its deployment slot", async () => {
+  resetFiberLog();
+  fiberControl.runFibers = false;
+  const released: string[] = [];
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string) => {
+            released.push(runId);
+            return Promise.resolve(true);
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Queued work." },
+    "9c1b7d2f-5a6b-4c90-8f1a-0f4e1f4d4a2e",
+    "request-hash",
+    "identity"
+  );
+  await yolo.stop(queued.run.id);
+
+  assert.deepEqual(released, [queued.run.id]);
+});
+
 test("stopping a finished run does not rewrite its outcome", async () => {
   const yolo = agent();
   const started = await yolo.start(

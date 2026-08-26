@@ -60,6 +60,7 @@ type DirectoryState = {
 
 type YoloAgentState = {
   definition: AgentDefinition | null;
+  identityTokens?: Record<string, string>;
   runs: CloudRunRecord[];
 };
 
@@ -189,7 +190,11 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
 }
 
 export class YoloAgent extends Agent<Env, YoloAgentState> {
-  initialState: YoloAgentState = { definition: null, runs: [] };
+  initialState: YoloAgentState = {
+    definition: null,
+    identityTokens: {},
+    runs: [],
+  };
 
   configure(definition: AgentDefinition): AgentDefinition {
     const parsed = agentDefinitionSchema.parse(definition);
@@ -549,13 +554,125 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       this.startFiber(
         fiberKey,
         async () => {
-          await this.driveHarness(definition, record, task, identityToken);
+          try {
+            await this.driveHarness(definition, record, task, identityToken);
+          } finally {
+            await this.reportAdmissionTerminal(record.run.id);
+          }
         },
         // Keyed on the fiber key rather than the operation id: `stop` cancels
         // by run, and a run is what a caller can name.
         { idempotencyKey: fiberKey }
       )
     );
+  }
+
+  /**
+   * Records a run after the admission object has accepted it, but does not
+   * create a sandbox or dispatch a fiber. Queued runs keep their identity
+   * token in this agent's durable state until they are dispatched; the global
+   * admission object stores only the pseudonymous tenant hash.
+   */
+  enqueue(
+    input: unknown,
+    runId: string,
+    requestHash: string,
+    identityToken: string
+  ): Promise<{ created: boolean; run: RunSnapshot }> {
+    const { operationId, task } = startRunInputSchema.parse(input);
+    const definition = this.requireDefinition();
+    validateCloudWorkspace(definition);
+
+    const plan = planCloudRunStart(
+      {
+        agentId: definition.id,
+        createdAt: new Date().toISOString(),
+        operationHash: requestHash,
+        operationId,
+        records: this.state.runs,
+        runId,
+        task,
+      },
+      { allowQueued: true }
+    );
+    if (plan.kind === "conflict") {
+      throw new OperationConflictError();
+    }
+    if (plan.kind === "existing") {
+      return Promise.resolve({ created: false, run: plan.record.run });
+    }
+
+    this.persistRun(plan.record);
+    this.setState({
+      ...this.state,
+      identityTokens: {
+        ...(this.state.identityTokens ?? {}),
+        [runId]: identityToken,
+      },
+    });
+    return Promise.resolve({ created: true, run: plan.record.run });
+  }
+
+  /**
+   * Starts a run selected by RunAdmission. The admission object marks its
+   * record active before this RPC, and a terminal callback in `finally`
+   * releases that capacity even when the harness throws.
+   */
+  async startAdmitted(runId: string): Promise<boolean> {
+    const record = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (!record || isTerminal(record.run.status)) {
+      return false;
+    }
+    const active = this.state.runs.find(
+      (candidate) =>
+        candidate.run.id !== runId && candidate.run.status === "running"
+    );
+    if (active) {
+      throw new AlreadyRunningError();
+    }
+    const identityToken = this.state.identityTokens?.[runId];
+    if (!identityToken) {
+      throw new Error("Queued run identity is unavailable.");
+    }
+    const definition = this.requireDefinition();
+    const receipt = await this.startFiber(
+      cloudFiberKey(runId),
+      async () => {
+        try {
+          await this.driveHarness(
+            definition,
+            record,
+            record.run.task,
+            identityToken
+          );
+        } finally {
+          await this.reportAdmissionTerminal(runId);
+        }
+      },
+      { idempotencyKey: cloudFiberKey(runId) }
+    );
+    return receipt.accepted;
+  }
+
+  /** Removes a prepared run when admission refuses it before dispatch. */
+  discardRun(runId: string): void {
+    const record = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (!record || isTerminal(record.run.status)) {
+      return;
+    }
+    this.setState({
+      ...this.state,
+      identityTokens: Object.fromEntries(
+        Object.entries(this.state.identityTokens ?? {}).filter(
+          ([candidate]) => candidate !== runId
+        )
+      ),
+      runs: this.state.runs.filter((candidate) => candidate.run.id !== runId),
+    });
   }
 
   /**
@@ -590,6 +707,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       status: "cancelled",
     });
     this.persistRun(cancelled);
+    await this.reportAdmissionTerminal(runId);
     this.updateDefinition({
       status: "idle",
       updatedAt: cancelled.run.completedAt ?? new Date().toISOString(),
@@ -832,5 +950,25 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       ...this.state,
       runs: retainCloudRuns([record, ...others]),
     });
+  }
+
+  private async reportAdmissionTerminal(runId: string): Promise<void> {
+    const record = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (!record || !isTerminal(record.run.status)) {
+      return;
+    }
+    const identityTokens = Object.fromEntries(
+      Object.entries(this.state.identityTokens ?? {}).filter(
+        ([candidate]) => candidate !== runId
+      )
+    );
+    this.setState({ ...this.state, identityTokens });
+    try {
+      await this.env.RunAdmission.getByName("deployment").release(runId);
+    } catch {
+      // The admission alarm reconciles an active record if this callback fails.
+    }
   }
 }

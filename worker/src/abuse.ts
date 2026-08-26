@@ -99,7 +99,7 @@ function tenantSubject(value: string | undefined): string | null {
   return normalized && normalized.length <= 256 ? normalized : null;
 }
 
-async function pseudonymousKey(
+export async function pseudonymousKey(
   secret: string,
   subject: string
 ): Promise<string> {

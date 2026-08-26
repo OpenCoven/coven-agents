@@ -1,0 +1,803 @@
+import { DurableObject } from "cloudflare:workers";
+import { pseudonymousKey } from "./abuse";
+import { OperationConflictError } from "./run-state";
+
+export type AdmissionRecord = {
+  agentId: string;
+  enqueuedAt: string;
+  operationId: string;
+  requestHash: string;
+  runId: string;
+  state: "queued" | "active" | "terminal";
+  tenantHash: string;
+};
+
+export type AdmissionDecision =
+  | { kind: "active"; runId: string }
+  | { kind: "queued"; position: number; runId: string }
+  | { kind: "duplicate"; runId: string; state: "queued" | "active" }
+  | { kind: "refused"; reason: "tenant_queue_full" | "global_busy" };
+
+export type AdmissionRequest = Omit<AdmissionRecord, "enqueuedAt" | "state">;
+
+export type AdmissionLimits = {
+  tenantActiveRuns: number;
+  tenantQueuedRuns: number;
+  deploymentActiveRuns: number;
+  consecutiveDispatches: number;
+};
+
+export const DEFAULT_ADMISSION_LIMITS: AdmissionLimits = {
+  consecutiveDispatches: 2,
+  deploymentActiveRuns: 25,
+  tenantActiveRuns: 2,
+  tenantQueuedRuns: 10,
+};
+
+const QUEUED_TTL_MS = 5 * 60 * 1000;
+const ALARM_INTERVAL_MS = 30 * 1000;
+
+type SchedulerState = {
+  consecutiveDispatches: number;
+  lastTenantHash: string | null;
+};
+
+const INITIAL_SCHEDULER_STATE: SchedulerState = {
+  consecutiveDispatches: 0,
+  lastTenantHash: null,
+};
+
+export type AdmissionDispatch = (record: AdmissionRecord) => Promise<boolean>;
+
+export type AdmissionQueueOptions = {
+  dispatch?: AdmissionDispatch;
+  limits?: Partial<AdmissionLimits>;
+  now?: () => number;
+  records?: readonly AdmissionRecord[];
+  scheduler?: Partial<SchedulerState>;
+};
+
+function mergeLimits(limits: Partial<AdmissionLimits> = {}): AdmissionLimits {
+  const merged = { ...DEFAULT_ADMISSION_LIMITS, ...limits };
+  for (const value of Object.values(merged)) {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new AdmissionConfigurationError(
+        "Run admission limits must be non-negative integers."
+      );
+    }
+  }
+  return merged;
+}
+
+export class AdmissionConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AdmissionConfigurationError";
+  }
+}
+
+function configuredLimit(
+  env: AdmissionConfigEnvironment,
+  name: keyof AdmissionConfigEnvironment,
+  fallback: number
+): number {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === "") {
+    return fallback;
+  }
+  if (!/^\d+$/.test(raw.trim())) {
+    throw new AdmissionConfigurationError(
+      `${name} must be a non-negative integer no greater than its hard maximum.`
+    );
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value > fallback) {
+    throw new AdmissionConfigurationError(
+      `${name} must be a non-negative integer no greater than its hard maximum.`
+    );
+  }
+  return value;
+}
+
+type AdmissionConfigEnvironment = {
+  RUN_ADMISSION_CONSECUTIVE_MAX?: string;
+  RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX?: string;
+  RUN_ADMISSION_MODE?: string;
+  RUN_ADMISSION_TENANT_ACTIVE_MAX?: string;
+  RUN_ADMISSION_TENANT_QUEUE_MAX?: string;
+};
+
+export type AdmissionEnvironment = AdmissionConfigEnvironment & {
+  EDGE_ABUSE_KEY_SECRET?: string;
+  YoloAgent: Env["YoloAgent"];
+};
+
+export function admissionLimits(
+  env: AdmissionConfigEnvironment
+): AdmissionLimits {
+  return mergeLimits({
+    consecutiveDispatches: configuredLimit(
+      env,
+      "RUN_ADMISSION_CONSECUTIVE_MAX",
+      DEFAULT_ADMISSION_LIMITS.consecutiveDispatches
+    ),
+    deploymentActiveRuns: configuredLimit(
+      env,
+      "RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX",
+      DEFAULT_ADMISSION_LIMITS.deploymentActiveRuns
+    ),
+    tenantActiveRuns: configuredLimit(
+      env,
+      "RUN_ADMISSION_TENANT_ACTIVE_MAX",
+      DEFAULT_ADMISSION_LIMITS.tenantActiveRuns
+    ),
+    tenantQueuedRuns: configuredLimit(
+      env,
+      "RUN_ADMISSION_TENANT_QUEUE_MAX",
+      DEFAULT_ADMISSION_LIMITS.tenantQueuedRuns
+    ),
+  });
+}
+
+export function admissionMode(
+  env: Pick<AdmissionEnvironment, "RUN_ADMISSION_MODE">
+): "queue" | "reject" {
+  const mode = env.RUN_ADMISSION_MODE?.trim() || "queue";
+  if (mode !== "queue" && mode !== "reject") {
+    throw new AdmissionConfigurationError(
+      "RUN_ADMISSION_MODE must be either queue or reject."
+    );
+  }
+  return mode;
+}
+
+export function tenantAdmissionHash(
+  secret: string | undefined,
+  tenantId: string
+): Promise<string> {
+  const normalized = secret?.trim();
+  if (!normalized) {
+    throw new AdmissionConfigurationError(
+      "EDGE_ABUSE_KEY_SECRET is required for run admission."
+    );
+  }
+  return pseudonymousKey(normalized, `tenant:${tenantId}`);
+}
+
+function cloneRecord(record: AdmissionRecord): AdmissionRecord {
+  return { ...record };
+}
+
+function assertAdmissionRequest(input: AdmissionRequest): void {
+  const fields = [
+    input.agentId,
+    input.operationId,
+    input.requestHash,
+    input.runId,
+    input.tenantHash,
+  ];
+  if (
+    fields.some(
+      (value) =>
+        typeof value !== "string" || value.length === 0 || value.length > 256
+    )
+  ) {
+    throw new AdmissionConfigurationError(
+      "Run admission request contains an invalid identifier."
+    );
+  }
+}
+
+function queuedPosition(
+  records: readonly AdmissionRecord[],
+  tenantHash: string,
+  runId: string
+): number {
+  return (
+    records
+      .filter(
+        (record) =>
+          record.state === "queued" && record.tenantHash === tenantHash
+      )
+      .sort((left, right) => left.enqueuedAt.localeCompare(right.enqueuedAt))
+      .findIndex((record) => record.runId === runId) + 1
+  );
+}
+
+function oldestQueued(
+  records: readonly AdmissionRecord[],
+  tenantHash: string
+): AdmissionRecord | undefined {
+  return records
+    .filter(
+      (record) => record.state === "queued" && record.tenantHash === tenantHash
+    )
+    .sort((left, right) => left.enqueuedAt.localeCompare(right.enqueuedAt))[0];
+}
+
+export class AdmissionQueue {
+  private readonly dispatchCallback?: AdmissionDispatch;
+  private readonly limits: AdmissionLimits;
+  private readonly now: () => number;
+  private readonly queueRecords: AdmissionRecord[];
+  private queueScheduler: SchedulerState;
+
+  constructor(options: AdmissionQueueOptions = {}) {
+    this.dispatchCallback = options.dispatch;
+    this.limits = mergeLimits(options.limits);
+    this.now = options.now ?? Date.now;
+    this.queueRecords = (options.records ?? []).map(cloneRecord);
+    this.queueScheduler = {
+      ...INITIAL_SCHEDULER_STATE,
+      ...options.scheduler,
+    };
+  }
+
+  records(): AdmissionRecord[] {
+    return this.queueRecords.map(cloneRecord);
+  }
+
+  scheduler(): SchedulerState {
+    return { ...this.queueScheduler };
+  }
+
+  async admit(input: AdmissionRequest): Promise<AdmissionDecision> {
+    assertAdmissionRequest(input);
+    const existing = this.queueRecords.find(
+      (candidate) => candidate.operationId === input.operationId
+    );
+    if (existing) {
+      if (existing.requestHash !== input.requestHash) {
+        throw new OperationConflictError();
+      }
+      if (existing.state !== "terminal") {
+        return {
+          kind: "duplicate",
+          runId: existing.runId,
+          state: existing.state,
+        };
+      }
+      this.remove(existing.runId);
+    }
+
+    if (this.activeCount() >= this.limits.deploymentActiveRuns) {
+      return { kind: "refused", reason: "global_busy" };
+    }
+    if (this.queuedCount(input.tenantHash) >= this.limits.tenantQueuedRuns) {
+      return { kind: "refused", reason: "tenant_queue_full" };
+    }
+
+    const record: AdmissionRecord = {
+      ...input,
+      enqueuedAt: new Date(this.now()).toISOString(),
+      state: "queued",
+    };
+    this.queueRecords.push(record);
+
+    if (this.dispatchCallback) {
+      await this.dispatch();
+    }
+    return this.decisionFor(record.runId);
+  }
+
+  async dispatch(): Promise<void> {
+    if (!this.dispatchCallback) {
+      return;
+    }
+    while (this.activeCount() < this.limits.deploymentActiveRuns) {
+      const candidate = this.nextDispatchCandidate();
+      if (!candidate) {
+        return;
+      }
+      let accepted = false;
+      try {
+        // Dispatches are serialized to preserve the durable capacity ledger.
+        // biome-ignore lint/performance/noAwaitInLoops: dispatches are intentionally sequential
+        accepted = await this.dispatchCallback(candidate);
+      } catch {
+        accepted = false;
+      }
+      const current = this.queueRecords.find(
+        (record) => record.runId === candidate.runId
+      );
+      if (!current || current.state === "terminal") {
+        continue;
+      }
+      if (!accepted) {
+        current.state = "queued";
+        return;
+      }
+    }
+  }
+
+  async release(runId: string): Promise<void> {
+    const record = this.queueRecords.find(
+      (candidate) => candidate.runId === runId
+    );
+    if (!record || record.state === "terminal") {
+      return;
+    }
+    record.state = "terminal";
+    await this.dispatch();
+  }
+
+  async expire(now = this.now()): Promise<string[]> {
+    const expired: string[] = [];
+    for (const record of this.queueRecords) {
+      if (
+        record.state === "queued" &&
+        now - Date.parse(record.enqueuedAt) >= QUEUED_TTL_MS
+      ) {
+        record.state = "terminal";
+        expired.push(record.runId);
+      }
+    }
+    await this.dispatch();
+    return expired;
+  }
+
+  nextDispatchCandidate(): AdmissionRecord | undefined {
+    const tenants = [
+      ...new Set(
+        this.queueRecords
+          .filter((record) => record.state === "queued")
+          .map((record) => record.tenantHash)
+      ),
+    ].filter(
+      (tenantHash) =>
+        this.activeCountForTenant(tenantHash) < this.limits.tenantActiveRuns
+    );
+    if (tenants.length === 0) {
+      return;
+    }
+
+    const ordered = tenants.sort((left, right) => {
+      const leftHead = oldestQueued(this.queueRecords, left);
+      const rightHead = oldestQueued(this.queueRecords, right);
+      return (leftHead?.enqueuedAt ?? "").localeCompare(
+        rightHead?.enqueuedAt ?? ""
+      );
+    });
+    const waitingForOtherTenant = ordered.some(
+      (tenantHash) => tenantHash !== this.queueScheduler.lastTenantHash
+    );
+    let eligible = ordered;
+    if (
+      waitingForOtherTenant &&
+      this.queueScheduler.lastTenantHash &&
+      this.queueScheduler.consecutiveDispatches >=
+        this.limits.consecutiveDispatches
+    ) {
+      eligible = ordered.filter(
+        (tenantHash) => tenantHash !== this.queueScheduler.lastTenantHash
+      );
+    }
+
+    const afterLast = this.queueScheduler.lastTenantHash
+      ? eligible.indexOf(this.queueScheduler.lastTenantHash)
+      : -1;
+    const selectedTenant =
+      eligible[(afterLast + 1 + eligible.length) % eligible.length] ??
+      eligible[0];
+    if (!selectedTenant) {
+      return;
+    }
+    const selected = oldestQueued(this.queueRecords, selectedTenant);
+    if (!selected) {
+      return;
+    }
+    selected.state = "active";
+    this.queueScheduler = {
+      consecutiveDispatches:
+        this.queueScheduler.lastTenantHash === selectedTenant
+          ? this.queueScheduler.consecutiveDispatches + 1
+          : 1,
+      lastTenantHash: selectedTenant,
+    };
+    return cloneRecord(selected);
+  }
+
+  private activeCount(): number {
+    return this.queueRecords.filter((record) => record.state === "active")
+      .length;
+  }
+
+  private activeCountForTenant(tenantHash: string): number {
+    return this.queueRecords.filter(
+      (record) => record.state === "active" && record.tenantHash === tenantHash
+    ).length;
+  }
+
+  private queuedCount(tenantHash: string): number {
+    return this.queueRecords.filter(
+      (record) => record.state === "queued" && record.tenantHash === tenantHash
+    ).length;
+  }
+
+  private decisionFor(runId: string): AdmissionDecision {
+    const record = this.queueRecords.find(
+      (candidate) => candidate.runId === runId
+    );
+    if (!record) {
+      throw new AdmissionConfigurationError("Admission record disappeared.");
+    }
+    if (record.state === "active") {
+      return { kind: "active", runId };
+    }
+    if (record.state === "queued") {
+      return {
+        kind: "queued",
+        position: queuedPosition(this.queueRecords, record.tenantHash, runId),
+        runId,
+      };
+    }
+    throw new AdmissionConfigurationError(
+      "A terminal admission record cannot produce a new decision."
+    );
+  }
+
+  private remove(runId: string): void {
+    const index = this.queueRecords.findIndex(
+      (record) => record.runId === runId
+    );
+    if (index >= 0) {
+      this.queueRecords.splice(index, 1);
+    }
+  }
+}
+
+type AdmissionRow = {
+  agent_id: string;
+  enqueued_at: string;
+  operation_id: string;
+  request_hash: string;
+  run_id: string;
+  state: string;
+  tenant_hash: string;
+};
+
+type MetaRow = {
+  key: string;
+  value: string;
+};
+
+function rowToRecord(row: AdmissionRow): AdmissionRecord {
+  if (
+    (row.state !== "queued" &&
+      row.state !== "active" &&
+      row.state !== "terminal") ||
+    !row.agent_id ||
+    !row.enqueued_at ||
+    !row.operation_id ||
+    !row.request_hash ||
+    !row.run_id ||
+    !row.tenant_hash
+  ) {
+    throw new AdmissionConfigurationError(
+      "Run admission storage contains an invalid record."
+    );
+  }
+  return {
+    agentId: row.agent_id,
+    enqueuedAt: row.enqueued_at,
+    operationId: row.operation_id,
+    requestHash: row.request_hash,
+    runId: row.run_id,
+    state: row.state,
+    tenantHash: row.tenant_hash,
+  };
+}
+
+export class RunAdmission extends DurableObject<Env> {
+  private readonly initialized: Promise<void>;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.initialized = ctx.blockConcurrencyWhile(async () => {
+      ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS admission_records (
+          agent_id TEXT NOT NULL,
+          enqueued_at TEXT NOT NULL,
+          operation_id TEXT NOT NULL UNIQUE,
+          request_hash TEXT NOT NULL,
+          run_id TEXT PRIMARY KEY,
+          state TEXT NOT NULL CHECK (state IN ('queued', 'active', 'terminal')),
+          tenant_hash TEXT NOT NULL
+        )
+      `);
+      ctx.storage.sql.exec(`
+        CREATE INDEX IF NOT EXISTS admission_records_queue_idx
+        ON admission_records (state, tenant_hash, enqueued_at)
+      `);
+      ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS admission_meta (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )
+      `);
+      await Promise.resolve();
+    });
+  }
+
+  async admit(input: AdmissionRequest): Promise<AdmissionDecision> {
+    await this.initialized;
+    const limits = admissionLimits(this.env);
+    const existing = this.findByOperationId(input.operationId);
+    if (existing) {
+      if (existing.requestHash !== input.requestHash) {
+        throw new OperationConflictError();
+      }
+      if (existing.state !== "terminal") {
+        return {
+          kind: "duplicate",
+          runId: existing.runId,
+          state: existing.state,
+        };
+      }
+      this.deleteRecord(existing.runId);
+    }
+
+    const records = this.readRecords();
+    const queue = new AdmissionQueue({ limits, records });
+    const decision = await queue.admit(input);
+    if (decision.kind === "refused") {
+      return decision;
+    }
+    const created = queue
+      .records()
+      .find((record) => record.runId === input.runId);
+    if (!created) {
+      throw new AdmissionConfigurationError(
+        "Admission record was not created."
+      );
+    }
+    this.writeRecord(created);
+    await this.dispatchAvailable(limits);
+    await this.ensureAlarm();
+    const current = this.findByRunId(input.runId);
+    if (!current) {
+      throw new AdmissionConfigurationError("Admission record disappeared.");
+    }
+    return this.decisionForStoredRecord(current, limits);
+  }
+
+  async release(runId: string): Promise<boolean> {
+    await this.initialized;
+    const current = this.findByRunId(runId);
+    if (!current || current.state === "terminal") {
+      return false;
+    }
+    this.updateState(runId, "terminal");
+    await this.dispatchAvailable(admissionLimits(this.env));
+    await this.ensureAlarm();
+    return true;
+  }
+
+  async getRecord(runId: string): Promise<AdmissionRecord | null> {
+    await this.initialized;
+    return this.findByRunId(runId);
+  }
+
+  async dispatch(): Promise<void> {
+    await this.initialized;
+    await this.dispatchAvailable(admissionLimits(this.env));
+    await this.ensureAlarm();
+  }
+
+  async alarm(): Promise<void> {
+    await this.initialized;
+    const now = Date.now();
+    const expired = this.readRecords().filter(
+      (record) =>
+        record.state === "queued" &&
+        now - Date.parse(record.enqueuedAt) >= QUEUED_TTL_MS
+    );
+    for (const record of expired) {
+      try {
+        // Each cancellation is reconciled before the admission row is closed.
+        // biome-ignore lint/performance/noAwaitInLoops: cancellations are intentionally sequential
+        await this.env.YoloAgent.getByName(record.agentId).stop(record.runId);
+      } catch {
+        // The terminal state below is authoritative; reconciliation remains
+        // safe if the agent RPC is temporarily unavailable.
+      }
+      const current = this.findByRunId(record.runId);
+      if (current?.state === "queued") {
+        this.updateState(record.runId, "terminal");
+      }
+    }
+
+    for (const record of this.readRecords()) {
+      if (record.state !== "active") {
+        continue;
+      }
+      try {
+        // Reconciliation is serialized with the Durable Object state.
+        // biome-ignore lint/performance/noAwaitInLoops: reconciliation is intentionally sequential
+        const run = await this.env.YoloAgent.getByName(record.agentId).getRun(
+          record.runId
+        );
+        if (run && run.status !== "queued" && run.status !== "running") {
+          const current = this.findByRunId(record.runId);
+          if (current?.state === "active") {
+            this.updateState(record.runId, "terminal");
+          }
+        }
+      } catch {
+        // Keep the active record for the next alarm if reconciliation fails.
+      }
+    }
+    await this.dispatchAvailable(admissionLimits(this.env));
+    await this.ensureAlarm();
+  }
+
+  private async dispatchAvailable(limits: AdmissionLimits): Promise<void> {
+    while (true) {
+      const queue = new AdmissionQueue({
+        limits,
+        records: this.readRecords(),
+        scheduler: this.readScheduler(),
+      });
+      const candidate = queue.nextDispatchCandidate();
+      if (!candidate) {
+        return;
+      }
+      this.updateState(candidate.runId, "active");
+      this.writeScheduler(queue.scheduler());
+      let accepted = false;
+      try {
+        // Dispatches are serialized to preserve the durable capacity ledger.
+        // biome-ignore lint/performance/noAwaitInLoops: dispatches are intentionally sequential
+        accepted = await this.env.YoloAgent.getByName(
+          candidate.agentId
+        ).startAdmitted(candidate.runId);
+      } catch {
+        accepted = false;
+      }
+      const current = this.findByRunId(candidate.runId);
+      if (!current || current.state === "terminal" || accepted) {
+        continue;
+      }
+      this.updateState(candidate.runId, "queued");
+      return;
+    }
+  }
+
+  private async ensureAlarm(): Promise<void> {
+    const hasWork = this.readRecords().some(
+      (record) => record.state === "queued" || record.state === "active"
+    );
+    if (hasWork) {
+      await this.ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
+    } else {
+      await this.ctx.storage.deleteAlarm();
+    }
+  }
+
+  private decisionForStoredRecord(
+    record: AdmissionRecord,
+    limits: AdmissionLimits
+  ): AdmissionDecision {
+    if (record.state === "active") {
+      return { kind: "active", runId: record.runId };
+    }
+    if (record.state === "queued") {
+      const position =
+        this.readRecords()
+          .filter(
+            (candidate) =>
+              candidate.state === "queued" &&
+              candidate.tenantHash === record.tenantHash
+          )
+          .sort((left, right) =>
+            left.enqueuedAt.localeCompare(right.enqueuedAt)
+          )
+          .findIndex((candidate) => candidate.runId === record.runId) + 1;
+      return { kind: "queued", position, runId: record.runId };
+    }
+    if (limits.tenantQueuedRuns < 0) {
+      throw new AdmissionConfigurationError("Invalid admission limits.");
+    }
+    throw new AdmissionConfigurationError(
+      "A terminal admission record cannot produce a new decision."
+    );
+  }
+
+  private readRecords(): AdmissionRecord[] {
+    return this.ctx.storage.sql
+      .exec<AdmissionRow>(
+        "SELECT agent_id, enqueued_at, operation_id, request_hash, run_id, state, tenant_hash FROM admission_records"
+      )
+      .toArray()
+      .map(rowToRecord);
+  }
+
+  private findByOperationId(operationId: string): AdmissionRecord | null {
+    const rows = this.ctx.storage.sql
+      .exec<AdmissionRow>(
+        "SELECT agent_id, enqueued_at, operation_id, request_hash, run_id, state, tenant_hash FROM admission_records WHERE operation_id = ?",
+        operationId
+      )
+      .toArray();
+    return rows[0] ? rowToRecord(rows[0]) : null;
+  }
+
+  private findByRunId(runId: string): AdmissionRecord | null {
+    const rows = this.ctx.storage.sql
+      .exec<AdmissionRow>(
+        "SELECT agent_id, enqueued_at, operation_id, request_hash, run_id, state, tenant_hash FROM admission_records WHERE run_id = ?",
+        runId
+      )
+      .toArray();
+    return rows[0] ? rowToRecord(rows[0]) : null;
+  }
+
+  private writeRecord(record: AdmissionRecord): void {
+    this.ctx.storage.sql.exec(
+      `
+        INSERT INTO admission_records
+          (agent_id, enqueued_at, operation_id, request_hash, run_id, state, tenant_hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(run_id) DO UPDATE SET
+          agent_id = excluded.agent_id,
+          enqueued_at = excluded.enqueued_at,
+          operation_id = excluded.operation_id,
+          request_hash = excluded.request_hash,
+          state = excluded.state,
+          tenant_hash = excluded.tenant_hash
+      `,
+      record.agentId,
+      record.enqueuedAt,
+      record.operationId,
+      record.requestHash,
+      record.runId,
+      record.state,
+      record.tenantHash
+    );
+  }
+
+  private updateState(runId: string, state: AdmissionRecord["state"]): void {
+    this.ctx.storage.sql.exec(
+      "UPDATE admission_records SET state = ? WHERE run_id = ?",
+      state,
+      runId
+    );
+  }
+
+  private deleteRecord(runId: string): void {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM admission_records WHERE run_id = ?",
+      runId
+    );
+  }
+
+  private readScheduler(): SchedulerState {
+    const rows = this.ctx.storage.sql
+      .exec<MetaRow>(
+        "SELECT key, value FROM admission_meta WHERE key IN ('last_tenant_hash', 'consecutive_dispatches')"
+      )
+      .toArray();
+    const values = new Map(rows.map((row) => [row.key, row.value]));
+    const consecutive = Number(values.get("consecutive_dispatches") ?? "0");
+    if (!Number.isInteger(consecutive) || consecutive < 0) {
+      throw new AdmissionConfigurationError(
+        "Run admission scheduler storage is invalid."
+      );
+    }
+    return {
+      consecutiveDispatches: consecutive,
+      lastTenantHash: values.get("last_tenant_hash") ?? null,
+    };
+  }
+
+  private writeScheduler(scheduler: SchedulerState): void {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO admission_meta (key, value) VALUES ('last_tenant_hash', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      scheduler.lastTenantHash ?? ""
+    );
+    this.ctx.storage.sql.exec(
+      "INSERT INTO admission_meta (key, value) VALUES ('consecutive_dispatches', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      String(scheduler.consecutiveDispatches)
+    );
+  }
+}

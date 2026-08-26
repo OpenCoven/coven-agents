@@ -712,7 +712,7 @@ git commit -S -m "feat(billing): reserve run capacity atomically" \
 - Modify: `worker/src/index.ts`
 - Modify: `worker/wrangler.jsonc`
 
-- [ ] **Step 1: Write failing admission tests**
+- [x] **Step 1: Write failing admission tests**
 
 Cover:
 
@@ -724,7 +724,7 @@ Cover:
 - cancelled and timed-out entries release capacity;
 - duplicate `operationId` returns the original queue/run record.
 
-- [ ] **Step 2: Define the admission state machine**
+- [x] **Step 2: Define the admission state machine**
 
 ```ts
 type AdmissionRecord = {
@@ -744,7 +744,7 @@ type AdmissionDecision =
   | { kind: "refused"; reason: "tenant_queue_full" | "global_busy" };
 ```
 
-- [ ] **Step 3: Implement `RunAdmission` as a Durable Object**
+- [x] **Step 3: Implement `RunAdmission` as a Durable Object**
 
 Use one deployment admission object for the global active ceiling and tenant round-robin queue. Keep only pseudonymous tenant hashes in this object. Alarm every 30 seconds while queued work exists; expire queue entries after five minutes.
 
@@ -757,21 +757,21 @@ Initial code maxima:
 
 Environment values may lower these maxima but may not raise them.
 
-- [ ] **Step 4: Integrate with run lifecycle**
+- [x] **Step 4: Integrate with run lifecycle**
 
 `worker/src/routes.ts` requests admission after identity and rate limits but before sandbox creation. `worker/src/agents.ts` reports terminal state in `finally`. A failed completion callback is retried by the admission alarm and must be idempotent.
 
-- [ ] **Step 5: Add operator kill fallback**
+- [x] **Step 5: Add operator kill fallback**
 
 If the queue implementation is unhealthy, `RUN_ADMISSION_MODE=reject` uses the existing immediate `already_running`/busy refusal rather than bypassing admission.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run: `pnpm --filter @opencoven/cloud-runner test`
 
 Expected: PASS with deterministic fairness and capacity-release coverage.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add worker

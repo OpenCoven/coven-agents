@@ -4,6 +4,7 @@ import type { AgentDirectory, YoloAgent } from "./agents";
 import { createCloudRunner } from "./routes";
 
 export { Sandbox } from "@cloudflare/sandbox";
+export { RunAdmission } from "./admission";
 export { AgentDirectory, YoloAgent } from "./agents";
 
 /**
@@ -29,6 +30,8 @@ const runner = createCloudRunner<Env>({
       output: result.stdout,
     };
   },
+  getAdmission: (environment) =>
+    environment.RunAdmission.getByName("deployment"),
   getDirectory: (environment) =>
     getAgentByName<Env, AgentDirectory>(environment.AgentDirectory, "default"),
   getYoloAgent: (environment, agentId) =>

@@ -6,6 +6,7 @@ import {
   createAgentInputSchema,
   type RunSnapshot,
   sanitizeEvidenceText,
+  startRunInputSchema,
   type WarmState,
 } from "@opencoven/agent-contracts";
 import { isRunnableHarness, SUPPORTED_HARNESS_IDS } from "@opencoven/harness";
@@ -15,6 +16,12 @@ import {
   workerRouteClass,
 } from "./abuse.js";
 import {
+  type AdmissionDecision,
+  type AdmissionRequest,
+  admissionMode,
+  tenantAdmissionHash,
+} from "./admission.js";
+import {
   corsHeaders,
   errorEnvelope,
   HttpError,
@@ -23,7 +30,11 @@ import {
   readJson,
 } from "./http.js";
 import { importVerifyKey, verifyRunnerToken } from "./identity.js";
-import { AlreadyRunningError, OperationConflictError } from "./run-state.js";
+import {
+  AlreadyRunningError,
+  hashOperation,
+  OperationConflictError,
+} from "./run-state.js";
 import {
   createRunEventStream,
   type RunEventStreamOptions,
@@ -39,6 +50,11 @@ export type CloudRunnerEnvironment = Omit<
 > & {
   ALLOWED_ORIGIN: string;
   EDGE_ABUSE_KEY_SECRET?: string;
+  RUN_ADMISSION_CONSECUTIVE_MAX?: string;
+  RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX?: string;
+  RUN_ADMISSION_MODE?: string;
+  RUN_ADMISSION_TENANT_ACTIVE_MAX?: string;
+  RUN_ADMISSION_TENANT_QUEUE_MAX?: string;
   EDGE_REQUEST_LIMITER: RateLimit;
   TENANT_MUTATION_LIMITER: RateLimit;
   TENANT_RUN_LIMITER: RateLimit;
@@ -75,7 +91,14 @@ export type CloudRunnerDirectory = {
 
 export type CloudRunnerAgent = {
   configure: (definition: AgentDefinition) => Awaitable<AgentDefinition>;
+  discardRun: (runId: string) => Awaitable<void>;
   decommission: () => Awaitable<void>;
+  enqueue: (
+    input: unknown,
+    runId: string,
+    requestHash: string,
+    identityToken: string
+  ) => Awaitable<{ created: boolean; run: RunSnapshot }>;
   getEventStream: (
     runId: string,
     lastEventId: number
@@ -94,6 +117,11 @@ export type CloudRunnerAgent = {
   stop: (runId: string) => Awaitable<RunSnapshot | null>;
 };
 
+export type CloudRunnerAdmission = {
+  admit: (input: AdmissionRequest) => Awaitable<AdmissionDecision>;
+  release: (runId: string) => Awaitable<boolean>;
+};
+
 export type CloudRunnerDependencies<
   Environment extends CloudRunnerEnvironment,
 > = {
@@ -106,6 +134,7 @@ export type CloudRunnerDependencies<
     output: string;
   }>;
   getDirectory: (environment: Environment) => Awaitable<CloudRunnerDirectory>;
+  getAdmission?: (environment: Environment) => Awaitable<CloudRunnerAdmission>;
   getYoloAgent: (
     environment: Environment,
     agentId: string
@@ -263,11 +292,23 @@ function abuseResponse(
       cors
     );
   }
+
   return json(
     errorEnvelope("abuse_control_unavailable", "Please try again later.", true),
     { headers, status: 503 },
     cors
   );
+}
+
+function busyResponse(
+  reason: "global_busy" | "tenant_queue_full",
+  cors: Headers
+): Response {
+  const message =
+    reason === "tenant_queue_full"
+      ? "This tenant has too much work waiting."
+      : "The cloud runner is busy. Try again later.";
+  return json(errorEnvelope("busy", message, true), { status: 409 }, cors);
 }
 
 export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
@@ -560,15 +601,94 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 cors
               );
             }
-            const started = await agent.start(
-              await readJson(request),
+            const input = startRunInputSchema.parse(await readJson(request));
+            const runAdmissionMode = admissionMode(environment);
+            const requestHash = await hashOperation(id, input.task);
+            const runId = crypto.randomUUID();
+            const prepared = await agent.enqueue(
+              input,
+              runId,
+              requestHash,
               authorization.slice(7)
             );
-            await directory.registerRun(started.run.id, id);
+            if (!prepared.created) {
+              return json(
+                {
+                  apiVersion: AGENT_RUNNER_API_VERSION,
+                  run: prepared.run,
+                },
+                { status: 202 },
+                cors
+              );
+            }
+            if (!dependencies.getAdmission) {
+              await agent.discardRun(runId);
+              throw new Error("Run admission is not configured.");
+            }
+
+            let admission: CloudRunnerAdmission;
+            try {
+              admission = await dependencies.getAdmission(environment);
+            } catch (error) {
+              await agent.discardRun(runId);
+              if (runAdmissionMode === "reject") {
+                return busyResponse("global_busy", cors);
+              }
+              throw error;
+            }
+
+            let decision: AdmissionDecision;
+            try {
+              decision = await admission.admit({
+                agentId: id,
+                operationId: input.operationId,
+                requestHash,
+                runId,
+                tenantHash: await tenantAdmissionHash(
+                  environment.EDGE_ABUSE_KEY_SECRET,
+                  callerTenant
+                ),
+              });
+            } catch (error) {
+              await agent.discardRun(runId);
+              if (runAdmissionMode === "reject") {
+                return busyResponse("global_busy", cors);
+              }
+              throw error;
+            }
+
+            if (decision.kind === "refused") {
+              await agent.discardRun(runId);
+              return busyResponse(decision.reason, cors);
+            }
+            if (decision.kind === "duplicate") {
+              await agent.discardRun(runId);
+              const originalAgentId = await directory.lookupRun(decision.runId);
+              const originalAgent = originalAgentId
+                ? await yoloAgent(originalAgentId)
+                : agent;
+              const original = await originalAgent.getRun(decision.runId);
+              if (!original) {
+                throw new Error("Original admitted run is unavailable.");
+              }
+              return json(
+                { apiVersion: AGENT_RUNNER_API_VERSION, run: original },
+                { status: 202 },
+                cors
+              );
+            }
+            if (decision.kind === "queued" && runAdmissionMode === "reject") {
+              await admission.release(runId);
+              await agent.discardRun(runId);
+              return busyResponse("global_busy", cors);
+            }
+
+            await directory.registerRun(runId, id);
+            const admittedRun = await agent.getRun(runId);
             return json(
               {
                 apiVersion: AGENT_RUNNER_API_VERSION,
-                run: started.run,
+                run: admittedRun ?? prepared.run,
               },
               { status: 202 },
               cors

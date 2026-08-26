@@ -601,15 +601,18 @@ export function cloudFiberKey(runId: string): string {
   return `run:${runId}`;
 }
 
-export function planCloudRunStart(input: {
-  agentId: string;
-  createdAt: string;
-  operationHash: string;
-  operationId: string;
-  records: CloudRunRecord[];
-  runId: string;
-  task: string;
-}): CloudRunStartPlan {
+export function planCloudRunStart(
+  input: {
+    agentId: string;
+    createdAt: string;
+    operationHash: string;
+    operationId: string;
+    records: CloudRunRecord[];
+    runId: string;
+    task: string;
+  },
+  options: { allowQueued?: boolean } = {}
+): CloudRunStartPlan {
   const existing = input.records.find(
     (candidate) => candidate.run.operationId === input.operationId
   );
@@ -623,8 +626,8 @@ export function planCloudRunStart(input: {
       record: existing,
     };
   }
-  const active = input.records.find(
-    (candidate) => !isTerminal(candidate.run.status)
+  const active = input.records.find((candidate) =>
+    options.allowQueued ? false : !isTerminal(candidate.run.status)
   );
   if (active) {
     return { kind: "already_running", record: active };
