@@ -6,10 +6,11 @@ import {
   enforceAbusePolicy,
 } from "@/lib/abuse/enforce";
 import {
+  type IdempotencyResponse,
   idempotencyResultResponse,
   runIdempotentOperation,
-  type StoredIdempotencyResponse,
 } from "@/lib/abuse/idempotency";
+import { plaintextIdempotencyResponseStorage } from "@/lib/abuse/idempotency-response";
 import { checkoutDecision } from "@/lib/billing/checkout";
 import {
   attachStripeCustomer,
@@ -50,7 +51,7 @@ export async function POST(request: Request) {
     ownerId: userId,
     perform: async ({
       providerIdempotencyKey,
-    }): Promise<StoredIdempotencyResponse> => {
+    }): Promise<IdempotencyResponse> => {
       const secret = process.env.STRIPE_SECRET_KEY;
       const price = process.env.STRIPE_PRICE_ID;
 
@@ -109,6 +110,7 @@ export async function POST(request: Request) {
       return { body: { url: checkout.url }, status: 200 };
     },
     request: {},
+    responseStorage: plaintextIdempotencyResponseStorage,
     retentionMs: CHECKOUT_RESULT_RETENTION_MS,
     store: databaseIdempotencyStore,
   });

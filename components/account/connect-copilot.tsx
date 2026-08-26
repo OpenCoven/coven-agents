@@ -4,13 +4,11 @@ import { Check, ExternalLink } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
 import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
-
-type Started = {
-  deviceCode: string;
-  interval: number;
-  userCode: string;
-  verificationUri: string;
-};
+import {
+  createDeviceFlowAttempt,
+  requestDeviceFlowStart,
+  type StartedDeviceFlow,
+} from "@/lib/credentials/device-flow-attempt";
 
 /**
  * One-click Copilot connection.
@@ -30,8 +28,11 @@ export function ConnectCopilot({
   configured: boolean;
   onConnected: () => void;
 }) {
-  const [started, setStarted] = useState<Started | null>(null);
+  const [started, setStarted] = useState<StartedDeviceFlow | null>(null);
   const [busy, setBusy] = useState(false);
+  const [startAttempt] = useState(() =>
+    createDeviceFlowAttempt(() => crypto.randomUUID())
+  );
   const stopped = useRef(false);
 
   /**
@@ -43,7 +44,7 @@ export function ConnectCopilot({
    * continuing at the old rate earns `slow_down` indefinitely.
    */
   const poll = useCallback(
-    (session: Started) => {
+    (session: StartedDeviceFlow) => {
       const deadline = Date.now() + 15 * 60 * 1000;
       let waitMs = session.interval * 1000;
 
@@ -116,16 +117,11 @@ export function ConnectCopilot({
     stopped.current = false;
 
     try {
-      const response = await fetch("/api/credentials/device", {
-        headers: { "idempotency-key": crypto.randomUUID() },
-        method: "POST",
+      const session = await requestDeviceFlowStart({
+        attempt: startAttempt,
+        fetcher: fetch,
       });
 
-      if (!response.ok) {
-        throw new Error(String(response.status));
-      }
-
-      const session = (await response.json()) as Started;
       setStarted(session);
       window.open(session.verificationUri, "_blank", "noopener,noreferrer");
       poll(session);
@@ -137,7 +133,7 @@ export function ConnectCopilot({
     } finally {
       setBusy(false);
     }
-  }, [poll]);
+  }, [poll, startAttempt]);
 
   if (started) {
     return (

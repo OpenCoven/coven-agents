@@ -9,10 +9,11 @@ import {
   enforceAbusePolicy,
 } from "@/lib/abuse/enforce";
 import {
+  type IdempotencyResponse,
   idempotencyResultResponse,
   runIdempotentOperation,
-  type StoredIdempotencyResponse,
 } from "@/lib/abuse/idempotency";
+import { encryptedIdempotencyResponseStorage } from "@/lib/abuse/idempotency-response";
 import { abusePolicyFor } from "@/lib/abuse/policy";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
@@ -20,6 +21,7 @@ import {
   exchangeDeviceCode,
   startDeviceFlow,
 } from "@/lib/credentials/github-device";
+import { credentialKek } from "@/lib/credentials/kek";
 import { serializeCredential } from "@/lib/credentials/shape";
 import { putCredential } from "@/lib/credentials/store";
 import { databaseIdempotencyStore } from "@/lib/db/queries";
@@ -29,6 +31,8 @@ const devicePollSchema = z.object({
 });
 
 const DEVICE_RESULT_RETENTION_MS = 15 * 60_000;
+const deviceStartResponseStorage =
+  encryptedIdempotencyResponseStorage(credentialKek);
 
 /**
  * Connects Copilot without the tenant ever seeing a token.
@@ -64,7 +68,7 @@ export async function POST(request: Request) {
     idempotencyKey: request.headers.get("idempotency-key"),
     operation: "credential_device_start",
     ownerId: access.userId,
-    perform: async (): Promise<StoredIdempotencyResponse> => {
+    perform: async (): Promise<IdempotencyResponse> => {
       const id = clientId();
       if (!id) {
         return {
@@ -79,6 +83,7 @@ export async function POST(request: Request) {
         : { body: { error: "device_flow_failed" }, status: 502 };
     },
     request: {},
+    responseStorage: deviceStartResponseStorage,
     retentionMs: DEVICE_RESULT_RETENTION_MS,
     store: databaseIdempotencyStore,
   });

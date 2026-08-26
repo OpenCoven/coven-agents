@@ -9,6 +9,10 @@ import {
   idempotencyResultResponse,
   runIdempotentOperation,
 } from "./idempotency";
+import type {
+  IdempotencyResponseStorage,
+  StoredIdempotencyResponseEnvelope,
+} from "./idempotency-response";
 
 const KEY = "request-key-1234567890";
 const OWNER = "00000000-0000-4000-8000-000000000001";
@@ -129,6 +133,7 @@ test("an expired record is atomically reclaimed for a new request", async () => 
     replayed: false,
     response: { body: { version: 2 }, status: 202 },
   });
+  assert.deepEqual(store.cleanupDeletedStates, ["completed"]);
 });
 
 test("provider failure releases the claim so the same key can retry", async () => {
@@ -237,6 +242,76 @@ test("parallel claims permit exactly one provider call", async () => {
   await first;
 });
 
+test("response storage encodes on completion and decodes only on replay", async () => {
+  const store = new MemoryIdempotencyStore();
+  let replayCalls = 0;
+  let storeCalls = 0;
+  const responseStorage: IdempotencyResponseStorage = {
+    replay(envelope) {
+      replayCalls += 1;
+      assert.equal(envelope.kind, "encrypted_json");
+      return Promise.resolve({ deviceCode: "device-secret" });
+    },
+    store(body) {
+      storeCalls += 1;
+      assert.deepEqual(body, { deviceCode: "device-secret" });
+      return Promise.resolve(encryptedTestEnvelope());
+    },
+  };
+
+  const first = await run({
+    perform: () =>
+      Promise.resolve({
+        body: { deviceCode: "device-secret" },
+        status: 200,
+      }),
+    request: {},
+    responseStorage,
+    store,
+  });
+  assert.equal(first.kind, "response");
+  assert.equal(storeCalls, 1);
+  assert.equal(replayCalls, 0);
+  assert.equal(store.lastCompletedResponse?.envelope.kind, "encrypted_json");
+
+  const replay = await run({
+    perform: () => Promise.resolve({ body: { impossible: true }, status: 200 }),
+    request: {},
+    responseStorage,
+    store,
+  });
+
+  assert.deepEqual(replay, {
+    kind: "response",
+    replayed: true,
+    response: { body: { deviceCode: "device-secret" }, status: 200 },
+  });
+  assert.equal(storeCalls, 1);
+  assert.equal(replayCalls, 1);
+});
+
+test("cleanup failure fails closed before a claim or provider call", async () => {
+  const store = new MemoryIdempotencyStore();
+  store.cleanupFailure = new Error("cleanup failed");
+  let providerCalls = 0;
+
+  await assert.rejects(
+    run({
+      perform: () => {
+        providerCalls += 1;
+        return Promise.resolve({ body: { ok: true }, status: 200 });
+      },
+      request: {},
+      store,
+    }),
+    /cleanup failed/
+  );
+
+  assert.equal(store.claimCount, 0);
+  assert.equal(providerCalls, 0);
+  assert.equal(store.lastCleanupLimit, 100);
+});
+
 test("raw keys are validated, hashed before storage, and never used as provider keys", async () => {
   const store = new MemoryIdempotencyStore();
   let providerKey = "";
@@ -314,6 +389,7 @@ function run(options: {
   now?: () => Date;
   perform: Parameters<typeof runIdempotentOperation>[0]["perform"];
   request: Parameters<typeof runIdempotentOperation>[0]["request"];
+  responseStorage?: IdempotencyResponseStorage;
   retentionMs?: number;
   store: IdempotencyStore;
 }) {
@@ -324,14 +400,15 @@ function run(options: {
     ownerId: OWNER,
     perform: options.perform,
     request: options.request,
+    responseStorage: options.responseStorage,
     retentionMs: options.retentionMs ?? 60_000,
     store: options.store,
   });
 }
 
 type MemoryRecord = {
-  body: IdempotencyCompleteInput["response"]["body"] | null;
   claimExpiresAt: Date;
+  envelope: StoredIdempotencyResponseEnvelope | null;
   requestHash: string;
   state: "completed" | "in_progress";
   status: number | null;
@@ -339,19 +416,45 @@ type MemoryRecord = {
 };
 
 class MemoryIdempotencyStore implements IdempotencyStore {
+  claimCount = 0;
+  cleanupDeletedStates: MemoryRecord["state"][] = [];
+  cleanupFailure: Error | null = null;
   lastClaim: IdempotencyClaimInput | null = null;
+  lastCleanupLimit: number | null = null;
+  lastCompletedResponse: IdempotencyCompleteInput["response"] | null = null;
   releaseCount = 0;
   private readonly records = new Map<string, MemoryRecord>();
 
+  cleanupExpired(input: { before: Date; limit: number }): Promise<void> {
+    this.lastCleanupLimit = input.limit;
+    if (this.cleanupFailure) {
+      return Promise.reject(this.cleanupFailure);
+    }
+
+    let deleted = 0;
+    for (const [scope, record] of this.records) {
+      if (
+        deleted < input.limit &&
+        record.expiresAt.getTime() <= input.before.getTime()
+      ) {
+        this.cleanupDeletedStates.push(record.state);
+        this.records.delete(scope);
+        deleted += 1;
+      }
+    }
+    return Promise.resolve();
+  }
+
   claim(input: IdempotencyClaimInput): Promise<IdempotencyClaimResult> {
+    this.claimCount += 1;
     this.lastClaim = input;
     const scope = scoped(input);
     const existing = this.records.get(scope);
 
     if (!existing || existing.expiresAt.getTime() <= input.now.getTime()) {
       this.records.set(scope, {
-        body: null,
         claimExpiresAt: input.claimExpiresAt,
+        envelope: null,
         expiresAt: input.claimExpiresAt,
         requestHash: input.requestHash,
         state: "in_progress",
@@ -369,9 +472,14 @@ class MemoryIdempotencyStore implements IdempotencyStore {
     if (existing.state === "in_progress") {
       return Promise.resolve({ kind: "in_progress" });
     }
+    assert.ok(existing.envelope);
+    assert.ok(existing.status);
     return Promise.resolve({
       kind: "completed",
-      response: { body: existing.body, status: existing.status ?? 500 },
+      response: {
+        envelope: existing.envelope,
+        status: existing.status,
+      },
     });
   }
 
@@ -382,10 +490,11 @@ class MemoryIdempotencyStore implements IdempotencyStore {
       record.claimExpiresAt.getTime(),
       input.claim.claimExpiresAt.getTime()
     );
-    record.body = input.response.body;
+    record.envelope = input.response.envelope;
     record.expiresAt = input.expiresAt;
     record.state = "completed";
     record.status = input.response.status;
+    this.lastCompletedResponse = input.response;
     return Promise.resolve();
   }
 
@@ -401,6 +510,17 @@ class MemoryIdempotencyStore implements IdempotencyStore {
     this.releaseCount += 1;
     return Promise.resolve();
   }
+}
+
+function encryptedTestEnvelope(): StoredIdempotencyResponseEnvelope {
+  return {
+    kind: "encrypted_json",
+    payload: {
+      ciphertext: "ciphertext",
+      iv: "iv",
+      wrappedKey: "wrapped-key",
+    },
+  };
 }
 
 function reverseOrderedRequest() {

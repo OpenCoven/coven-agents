@@ -244,7 +244,7 @@ export const databaseIdempotencyStore: IdempotencyStore = {
           return {
             kind: "completed",
             response: {
-              body: existing.responseJson,
+              envelope: existing.responseJson,
               status: existing.responseStatus,
             },
           } as const;
@@ -256,6 +256,22 @@ export const databaseIdempotencyStore: IdempotencyStore = {
       throw new ChatbotError("bad_request:database", { cause: error });
     }
   },
+  async cleanupExpired(input) {
+    try {
+      const expired = db
+        .select({ id: idempotencyRecord.id })
+        .from(idempotencyRecord)
+        .where(lte(idempotencyRecord.expiresAt, input.before))
+        .orderBy(asc(idempotencyRecord.expiresAt))
+        .limit(input.limit);
+
+      await db
+        .delete(idempotencyRecord)
+        .where(inArray(idempotencyRecord.id, expired));
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
 
   async complete(input) {
     try {
@@ -263,7 +279,7 @@ export const databaseIdempotencyStore: IdempotencyStore = {
         .update(idempotencyRecord)
         .set({
           expiresAt: input.expiresAt,
-          responseJson: input.response.body,
+          responseJson: input.response.envelope,
           responseStatus: input.response.status,
           state: "completed",
           updatedAt: input.completedAt,

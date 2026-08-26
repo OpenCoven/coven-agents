@@ -15,7 +15,7 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
-import type { JsonValue } from "../abuse/idempotency";
+import type { StoredIdempotencyResponseEnvelope } from "../abuse/idempotency-response";
 
 export const user = pgTable(
   "User",
@@ -260,7 +260,8 @@ export const idempotencyRecord = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     requestHash: text("requestHash").notNull(),
-    responseJson: jsonb("responseJson").$type<JsonValue>(),
+    responseJson:
+      jsonb("responseJson").$type<StoredIdempotencyResponseEnvelope>(),
     responseStatus: integer("responseStatus"),
     state: varchar("state", {
       enum: ["in_progress", "completed"],
@@ -283,7 +284,7 @@ export const idempotencyRecord = pgTable(
     ),
     check(
       "IdempotencyRecord_response_state_check",
-      sql`(${table.state} = 'in_progress' and ${table.responseJson} is null and ${table.responseStatus} is null) or (${table.state} = 'completed' and ${table.responseJson} is not null and ${table.responseStatus} between 200 and 299)`
+      sql`(${table.state} = 'in_progress' and ${table.responseJson} is null and ${table.responseStatus} is null) or (${table.state} = 'completed' and ${table.responseJson} is not null and jsonb_typeof(${table.responseJson}) = 'object' and ${table.responseJson}->>'kind' in ('plain_json', 'encrypted_json') and ${table.responseStatus} is not null and ${table.responseStatus} between 200 and 299)`
     ),
   ]
 );

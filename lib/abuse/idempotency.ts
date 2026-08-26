@@ -1,18 +1,24 @@
 import { createHash } from "node:crypto";
+import {
+  type IdempotencyResponseStorage,
+  type JsonValue,
+  plaintextIdempotencyResponseStorage,
+  type StoredIdempotencyResponseEnvelope,
+} from "./idempotency-response";
 
 const CLAIM_TTL_MS = 5 * 60_000;
+const CLEANUP_LIMIT = 100;
 const IDEMPOTENCY_KEY_PATTERN = /^[\x20-\x7e]{16,128}$/;
 
-export type JsonValue =
-  | JsonValue[]
-  | boolean
-  | null
-  | number
-  | string
-  | { [key: string]: JsonValue };
+export type { JsonValue } from "./idempotency-response";
+
+export type IdempotencyResponse = {
+  body: JsonValue;
+  status: number;
+};
 
 export type StoredIdempotencyResponse = {
-  body: JsonValue;
+  envelope: StoredIdempotencyResponseEnvelope;
   status: number;
 };
 
@@ -46,6 +52,7 @@ export type IdempotencyReleaseInput = {
 
 export interface IdempotencyStore {
   claim: (input: IdempotencyClaimInput) => Promise<IdempotencyClaimResult>;
+  cleanupExpired: (input: { before: Date; limit: number }) => Promise<void>;
   complete: (input: IdempotencyCompleteInput) => Promise<void>;
   release: (input: IdempotencyReleaseInput) => Promise<void>;
 }
@@ -58,7 +65,7 @@ export type IdempotencyResult =
   | {
       kind: "response";
       replayed: boolean;
-      response: StoredIdempotencyResponse;
+      response: IdempotencyResponse;
     };
 
 export async function runIdempotentOperation(options: {
@@ -68,8 +75,9 @@ export async function runIdempotentOperation(options: {
   ownerId: string;
   perform: (input: {
     providerIdempotencyKey: string;
-  }) => Promise<StoredIdempotencyResponse>;
+  }) => Promise<IdempotencyResponse>;
   request: JsonValue;
+  responseStorage?: IdempotencyResponseStorage;
   retentionMs: number;
   store: IdempotencyStore;
 }): Promise<IdempotencyResult> {
@@ -90,6 +98,10 @@ export async function runIdempotentOperation(options: {
   const keyHash = sha256(options.idempotencyKey);
   const requestHash = sha256(canonicalJson(options.request));
   const claimExpiresAt = new Date(claimedAt.getTime() + CLAIM_TTL_MS);
+  await options.store.cleanupExpired({
+    before: claimedAt,
+    limit: CLEANUP_LIMIT,
+  });
   const claimResult = await options.store.claim({
     claimExpiresAt,
     keyHash,
@@ -100,10 +112,16 @@ export async function runIdempotentOperation(options: {
   });
 
   if (claimResult.kind === "completed") {
+    const body = await (
+      options.responseStorage ?? plaintextIdempotencyResponseStorage
+    ).replay(claimResult.response.envelope, {
+      operation: options.operation,
+      ownerId: options.ownerId,
+    });
     return {
       kind: "response",
       replayed: true,
-      response: claimResult.response,
+      response: { body, status: claimResult.response.status },
     };
   }
   if (claimResult.kind !== "claimed") {
@@ -116,7 +134,7 @@ export async function runIdempotentOperation(options: {
     )
   )}`;
 
-  let response: StoredIdempotencyResponse;
+  let response: IdempotencyResponse;
   try {
     response = await options.perform({ providerIdempotencyKey });
   } catch (error) {
@@ -131,12 +149,23 @@ export async function runIdempotentOperation(options: {
 
   const completedAt = now();
   assertValidDate(completedAt);
-  await options.store.complete({
-    claim: claimResult.claim,
-    completedAt,
-    expiresAt: new Date(completedAt.getTime() + options.retentionMs),
-    response,
-  });
+  try {
+    const envelope = await (
+      options.responseStorage ?? plaintextIdempotencyResponseStorage
+    ).store(response.body, {
+      operation: options.operation,
+      ownerId: options.ownerId,
+    });
+    await options.store.complete({
+      claim: claimResult.claim,
+      completedAt,
+      expiresAt: new Date(completedAt.getTime() + options.retentionMs),
+      response: { envelope, status: response.status },
+    });
+  } catch (error) {
+    await options.store.release({ claim: claimResult.claim });
+    throw error;
+  }
 
   return { kind: "response", replayed: false, response };
 }
