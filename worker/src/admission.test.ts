@@ -3,6 +3,11 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import type { AgentDefinition } from "@opencoven/agent-contracts";
 import {
+  destroyedSandboxes,
+  resetDestroyedSandboxes,
+  setSandboxDestroyError,
+} from "../test-support/cloudflare-sandbox";
+import {
   AdmissionQueue,
   type AdmissionRecord,
   AdmissionUnavailableError,
@@ -2222,6 +2227,96 @@ test("an undispatched queued run expires during a persistent agent outage", asyn
     kind: "active",
     runId: "run-72",
   });
+});
+
+test("expired queued work frees capacity without sandbox cleanup", async () => {
+  resetDestroyedSandboxes();
+  setSandboxDestroyError(new Error("sandbox unavailable"));
+  let admission!: RunAdmission;
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string, dispatchToken?: string) =>
+            admission.release(runId, dispatchToken),
+        }),
+      },
+    } as never
+  );
+  yolo.configure(yoloDefinition());
+  const activeRunId = "active-run";
+  const queuedRunId = "ec2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c9e";
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: (runId) =>
+        runId === activeRunId ? { status: "running" } : yolo.getRun(runId),
+      startAdmitted: (runId) => Promise.resolve(runId === activeRunId),
+      stop: (runId, dispatchToken, reason) =>
+        yolo.stop(runId, dispatchToken, reason),
+    }),
+    {
+      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "2",
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    }
+  );
+  ({ admission } = harness);
+
+  try {
+    const queuedRequest = {
+      ...request(73),
+      agentId: yoloDefinition().id,
+      operationId: "33333333-4444-4555-8666-777777777777",
+      runId: queuedRunId,
+    };
+    await yolo.enqueue(
+      { operationId: queuedRequest.operationId, task: "Expired work." },
+      queuedRequest.runId,
+      queuedRequest.requestHash,
+      "identity"
+    );
+    assert.deepEqual(
+      await admission.admit({
+        ...request(74),
+        agentId: yoloDefinition().id,
+        runId: activeRunId,
+      }),
+      { kind: "active", runId: activeRunId }
+    );
+    await Promise.all(harness.background);
+    assert.deepEqual(await admission.admit(queuedRequest), {
+      kind: "queued",
+      position: 1,
+      runId: queuedRunId,
+    });
+    await Promise.all(harness.background);
+    harness.sql.exec(
+      "UPDATE admission_records SET enqueued_at = ? WHERE run_id = ?",
+      new Date(Date.now() - 5 * 60 * 1000 - 1).toISOString(),
+      queuedRunId
+    );
+
+    await admission.alarm();
+
+    assert.equal((await admission.getRecord(queuedRunId))?.state, "terminal");
+    assert.equal(yolo.getRun(queuedRunId)?.status, "cancelled");
+    assert.deepEqual(destroyedSandboxes(), []);
+    const cleanupTasks = harness.sql
+      .exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM admission_cleanup_tasks"
+      )
+      .toArray() as { count: number }[];
+    assert.equal(cleanupTasks[0]?.count, 0);
+
+    await admission.release(activeRunId);
+    assert.deepEqual(await admission.admit(request(75)), {
+      kind: "active",
+      runId: "run-75",
+    });
+  } finally {
+    setSandboxDestroyError(null);
+  }
 });
 
 test("alarm schedules a new cleanup retry after its prior alarm has fired", async () => {

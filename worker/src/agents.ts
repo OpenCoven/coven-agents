@@ -64,6 +64,7 @@ type DirectoryState = {
 };
 
 type AdmissionFence = {
+  cancelled?: boolean;
   generation?: number;
   tokens?: string[];
 };
@@ -71,6 +72,7 @@ type AdmissionFence = {
 type YoloAgentState = {
   admissionFences?: Record<string, AdmissionFence | string[]>;
   admissionTokens?: Record<string, string>;
+  dispatchClaims?: Record<string, string>;
   definition: AgentDefinition | null;
   identityTokens?: Record<string, string>;
   runs: CloudRunRecord[];
@@ -103,6 +105,9 @@ function rejectsAdmissionToken(
   dispatchToken?: string
 ): boolean {
   const normalized = normalizeAdmissionFence(fence);
+  if (normalized.cancelled) {
+    return true;
+  }
   if (normalized.generation !== undefined && !dispatchToken) {
     return true;
   }
@@ -298,6 +303,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     admissionFences: {},
     admissionTokens: {},
     definition: null,
+    dispatchClaims: {},
     identityTokens: {},
     runs: [],
   };
@@ -650,7 +656,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
      * `getRun` returns null, `stop` cannot find it, and the concurrency guard
      * sees no active run and admits a second one.
      */
-    this.persistRun(plan.record);
+    // `start` predates RunAdmission and has no admission token. Keep a
+    // durable local claim so an accepted fiber is not mistaken for untouched
+    // queue work if its callback has not claimed `running` yet.
+    this.persistRun(plan.record, { dispatchClaim: crypto.randomUUID() });
 
     return await dispatchCloudRun(plan, (record, fiberKey) =>
       this.startFiber(
@@ -919,7 +928,17 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         status: "aborted",
       };
     }
-    await this.destroyAgentSandbox();
+    // A queued cancellation never created a fiber or sandbox. Recovered
+    // fibers from dispatch-claimed work still require the normal cleanup.
+    const cancelledBeforeDispatch =
+      current.run.status === "cancelled" &&
+      current.run.startedAt === null &&
+      !current.dispatchToken &&
+      !this.state.admissionTokens?.[runId] &&
+      !this.state.dispatchClaims?.[runId];
+    if (!cancelledBeforeDispatch) {
+      await this.destroyAgentSandbox();
+    }
     if (isTerminal(current.run.status)) {
       await this.reportAdmissionTerminal(
         runId,
@@ -942,7 +961,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
 
     const recovered = recoverCloudRunRecord(current, new Date().toISOString());
-    if (this.persistRun(recovered)) {
+    if (this.persistRun(recovered, { dispatchClaim: null })) {
       this.updateDefinition({
         lastRunAt: recovered.run.completedAt ?? new Date().toISOString(),
         status: "error",
@@ -1004,7 +1023,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         },
       ]
     );
-    this.persistRun(claimed);
+    this.persistRun(claimed, { dispatchClaim: null });
     this.updateDefinition({ status: "running", updatedAt: startedAt });
     return claimed;
   }
@@ -1041,7 +1060,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           : "Cloud run fiber could not be started.",
       status: "failed",
     });
-    if (this.persistRun(failed)) {
+    if (this.persistRun(failed, { dispatchClaim: null })) {
       this.updateDefinition({
         lastRunAt: completedAt,
         status: "error",
@@ -1062,6 +1081,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       ...this.state,
       admissionFences: Object.fromEntries(
         Object.entries(this.state.admissionFences ?? {}).filter(
+          ([candidate]) => candidate !== runId
+        )
+      ),
+      dispatchClaims: Object.fromEntries(
+        Object.entries(this.state.dispatchClaims ?? {}).filter(
           ([candidate]) => candidate !== runId
         )
       ),
@@ -1106,6 +1130,17 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       return record.run;
     }
 
+    if (this.isTrulyQueued(record)) {
+      const cancelled = this.cancelQueuedRun(record, reason);
+      if (cancelled) {
+        await this.reportAdmissionTerminal(runId, expectedDispatchToken);
+        this.updateDefinitionAfterCancellation(
+          cancelled.run.completedAt ?? new Date().toISOString()
+        );
+        return cancelled.run;
+      }
+    }
+
     await this.cancelFiberByKey(cloudFiberKey(runId), "Cancelled by operator.");
     const afterCancel = this.state.runs.find(
       (candidate) => candidate.run.id === runId
@@ -1143,12 +1178,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       output: reason,
       status: "cancelled",
     });
-    if (this.persistRun(cancelled)) {
+    if (this.persistRun(cancelled, { dispatchClaim: null })) {
       await this.reportAdmissionTerminal(runId, expectedDispatchToken);
-      this.updateDefinition({
-        status: "idle",
-        updatedAt: cancelled.run.completedAt ?? new Date().toISOString(),
-      });
+      this.updateDefinitionAfterCancellation(
+        cancelled.run.completedAt ?? new Date().toISOString()
+      );
       return cancelled.run;
     }
     const latest = this.state.runs.find(
@@ -1159,6 +1193,56 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       return latest.run;
     }
     return null;
+  }
+
+  private isTrulyQueued(record: CloudRunRecord): boolean {
+    return (
+      record.run.status === "queued" &&
+      !record.dispatchToken &&
+      !this.state.admissionTokens?.[record.run.id] &&
+      !this.state.dispatchClaims?.[record.run.id]
+    );
+  }
+
+  private cancelQueuedRun(
+    record: CloudRunRecord,
+    reason: string
+  ): CloudRunRecord | null {
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === record.run.id
+    );
+    if (!current || !this.isTrulyQueued(current)) {
+      return null;
+    }
+
+    const fence = normalizeAdmissionFence(
+      this.state.admissionFences?.[record.run.id]
+    );
+    const cancelled = finishCloudRunRecord(current, {
+      completedAt: new Date().toISOString(),
+      credential: null,
+      output: reason,
+      status: "cancelled",
+    });
+    // Persist the terminal record and its cancellation fence together. A
+    // later dispatch must observe either this terminal state or the old
+    // queued state, never a cancellation without its fence.
+    return this.persistRun(cancelled, {
+      admissionFence: { ...fence, cancelled: true },
+    })
+      ? cancelled
+      : null;
+  }
+
+  private updateDefinitionAfterCancellation(completedAt: string): void {
+    this.updateDefinition({
+      status: this.state.runs.some(
+        (candidate) => candidate.run.status === "running"
+      )
+        ? "running"
+        : "idle",
+      updatedAt: completedAt,
+    });
   }
 
   /**
@@ -1411,7 +1495,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    */
   private persistRun(
     record: CloudRunRecord,
-    options: { allowDispatchTokenReplacement?: boolean } = {}
+    options: {
+      admissionFence?: AdmissionFence;
+      allowDispatchTokenReplacement?: boolean;
+      dispatchClaim?: string | null;
+    } = {}
   ): boolean {
     const current = this.state.runs.find(
       (candidate) => candidate.run.id === record.run.id
@@ -1433,17 +1521,34 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     const others = this.state.runs.filter(
       (candidate) => candidate.run.id !== record.run.id
     );
+    const admissionFences = {
+      ...(this.state.admissionFences ?? {}),
+      ...(options.admissionFence
+        ? { [record.run.id]: options.admissionFence }
+        : {}),
+    };
+    const dispatchClaims = { ...(this.state.dispatchClaims ?? {}) };
+    if (options.dispatchClaim === null) {
+      delete dispatchClaims[record.run.id];
+    } else if (options.dispatchClaim) {
+      dispatchClaims[record.run.id] = options.dispatchClaim;
+    }
     const runs = retainCloudRuns([record, ...others]);
     const retainedRunIds = new Set(runs.map((candidate) => candidate.run.id));
     this.setState({
       ...this.state,
       admissionFences: Object.fromEntries(
-        Object.entries(this.state.admissionFences ?? {}).filter(([runId]) =>
+        Object.entries(admissionFences).filter(([runId]) =>
           retainedRunIds.has(runId)
         )
       ),
       admissionTokens: Object.fromEntries(
         Object.entries(this.state.admissionTokens ?? {}).filter(([runId]) =>
+          retainedRunIds.has(runId)
+        )
+      ),
+      dispatchClaims: Object.fromEntries(
+        Object.entries(dispatchClaims).filter(([runId]) =>
           retainedRunIds.has(runId)
         )
       ),
