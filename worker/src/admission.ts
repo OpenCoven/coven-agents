@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { pseudonymousKey } from "./abuse";
 import {
+  isAgentBusyError,
   isTerminal,
   MAX_TERMINAL_RUNS_PER_AGENT,
   OperationConflictError,
@@ -1011,7 +1012,19 @@ export class RunAdmission extends DurableObject<Env> {
         accepted = await this.env.YoloAgent.getByName(
           candidate.agentId
         ).startAdmitted(candidate.runId, candidate.dispatchToken);
-      } catch {
+      } catch (error) {
+        if (isAgentBusyError(error)) {
+          const reconciliation = this.requeueRecord(
+            candidate,
+            candidate.dispatchToken
+          );
+          if (reconciliation === "refused") {
+            await this.cleanupRejectedAdmission(candidate);
+          }
+          if (reconciliation === "requeued") {
+            return;
+          }
+        }
         // Reconcile immediately so a dispatch error never makes capacity
         // depend on the next alarm. If the alarm cannot be repaired, close
         // this affected admission rather than leaving accepted work stranded.

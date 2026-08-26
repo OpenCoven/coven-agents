@@ -87,6 +87,32 @@ export class AlreadyRunningError extends Error {
   }
 }
 
+export class AgentBusyError extends AlreadyRunningError {
+  readonly code = "agent_busy";
+  readonly provenNotStarted = true;
+
+  constructor() {
+    super();
+    this.name = "AgentBusyError";
+  }
+}
+
+export function isAgentBusyError(error: unknown): boolean {
+  if (error instanceof AgentBusyError) {
+    return true;
+  }
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  if (error.name === "AgentBusyError") {
+    return true;
+  }
+  return (
+    error.name === "AlreadyRunningError" &&
+    (error as Error & { code?: unknown }).code === "agent_busy"
+  );
+}
+
 function byteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }

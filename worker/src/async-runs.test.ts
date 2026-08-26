@@ -127,8 +127,8 @@ test("concurrent admitted dispatches claim only one run for an agent", async () 
   );
 
   const results = await Promise.allSettled([
-    yolo.startAdmitted(first.run.id),
-    yolo.startAdmitted(second.run.id),
+    yolo.startAdmitted(first.run.id, "1:first"),
+    yolo.startAdmitted(second.run.id, "2:second"),
   ]);
 
   assert.equal(
@@ -147,6 +147,66 @@ test("concurrent admitted dispatches claim only one run for an agent", async () 
     1,
     "the losing dispatch must observe the active-run invariant"
   );
+  const state = Reflect.get(yolo, "state") as {
+    admissionTokens?: Record<string, string>;
+    runs: CloudRunRecord[];
+  };
+  const losing = state.runs.find(
+    (candidate) => candidate.run.id === second.run.id
+  );
+  assert.equal(losing?.dispatchToken, undefined);
+  assert.equal(state.admissionTokens?.[second.run.id], undefined);
+});
+
+test("a busy admitted dispatch is proven not started before its token is persisted", async () => {
+  resetDestroyedSandboxes();
+  const yolo = agent();
+  const active = await yolo.enqueue(
+    { operationId: OP_A, task: "Active work." },
+    "3f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90",
+    "hash-active",
+    "identity"
+  );
+  assert.equal(await yolo.startAdmitted(active.run.id, "1:active"), true);
+
+  const queued = await yolo.enqueue(
+    { operationId: OP_B, task: "Queued work." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c91",
+    "hash-queued",
+    "identity"
+  );
+
+  await assert.rejects(
+    () => yolo.startAdmitted(queued.run.id, "2:queued"),
+    (error: unknown) =>
+      error instanceof AlreadyRunningError &&
+      error instanceof Error &&
+      error.name === "AgentBusyError" &&
+      (error as Error & { code?: string; provenNotStarted?: boolean }).code ===
+        "agent_busy" &&
+      (error as Error & { code?: string; provenNotStarted?: boolean })
+        .provenNotStarted === true
+  );
+
+  const state = Reflect.get(yolo, "state") as {
+    admissionFences?: Record<string, unknown>;
+    admissionTokens?: Record<string, string>;
+    dispatchClaims?: Record<string, string>;
+    runs: CloudRunRecord[];
+  };
+  const stillQueued = state.runs.find(
+    (candidate) => candidate.run.id === queued.run.id
+  );
+  assert.equal(stillQueued?.run.status, "queued");
+  assert.equal(stillQueued?.dispatchToken, undefined);
+  assert.equal(state.admissionTokens?.[queued.run.id], undefined);
+  assert.equal(state.dispatchClaims?.[queued.run.id], undefined);
+  assert.equal(state.admissionFences?.[queued.run.id], undefined);
+  assert.deepEqual(destroyedSandboxes(), []);
+
+  const stopped = await yolo.stop(queued.run.id);
+  assert.equal(stopped?.status, "cancelled");
+  assert.deepEqual(destroyedSandboxes(), []);
 });
 
 test("a durable admission fence rejects a delayed token but permits the next claim", async () => {

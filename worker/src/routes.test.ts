@@ -740,6 +740,17 @@ test("a DO-thrown AlreadyRunningError still maps to 409, not the 500 catch-all",
   assert.equal(body.error.code, "already_running");
 });
 
+test("a DO-thrown AgentBusyError still maps to the typed conflict response", async () => {
+  const crossed = new Error("An agent already has an active run.");
+  crossed.name = "AgentBusyError";
+
+  const response = await failingRunner(crossed);
+  assert.equal(response.status, 409);
+
+  const body = (await response.json()) as { error: { code: string } };
+  assert.equal(body.error.code, "already_running");
+});
+
 test("creating an agent triggers its warm-up for a subscriber", async () => {
   const response = await runner().fetch(
     new Request("https://runner.test/api/agents", {

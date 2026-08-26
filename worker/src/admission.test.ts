@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import type { AgentDefinition } from "@opencoven/agent-contracts";
+import { fiberControl, resetFiberLog } from "../test-support/agents";
 import {
   destroyedSandboxes,
   resetDestroyedSandboxes,
@@ -1998,6 +1999,114 @@ function yoloDefinition(): AgentDefinition {
     updatedAt: "2026-08-20T12:00:00.000Z",
   };
 }
+
+test("a proven agent-busy dispatch is requeued and release dispatches it promptly", async () => {
+  resetFiberLog();
+  fiberControl.runFibers = false;
+  resetDestroyedSandboxes();
+  const released: string[] = [];
+  let admission!: RunAdmission;
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string, dispatchToken?: string) => {
+            released.push(runId);
+            return admission.release(runId, dispatchToken);
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(yoloDefinition());
+  const harness = runAdmissionHarness(
+    () => ({
+      fenceAdmitted: (runId, dispatchToken) =>
+        Promise.resolve(yolo.fenceAdmitted?.(runId, dispatchToken) ?? false),
+      getRun: (runId) => yolo.getRun(runId),
+      startAdmitted: (runId, dispatchToken) =>
+        yolo.startAdmitted(runId, dispatchToken),
+      stop: (runId, dispatchToken, reason) =>
+        yolo.stop(runId, dispatchToken, reason),
+    }),
+    {
+      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "2",
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "2",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    }
+  );
+  ({ admission } = harness);
+
+  const settleBackground = async (): Promise<void> => {
+    let settled = 0;
+    while (settled < harness.background.length) {
+      const pending = harness.background.slice(settled);
+      settled = harness.background.length;
+      // biome-ignore lint/performance/noAwaitInLoops: drain newly scheduled lifecycle work in order.
+      await Promise.all(pending);
+    }
+  };
+  const activeRequest = {
+    ...request(81, TENANT_A),
+    agentId: yoloDefinition().id,
+    operationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    runId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee1",
+  };
+  const busyRequest = {
+    ...request(82, TENANT_B),
+    agentId: yoloDefinition().id,
+    operationId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+    runId: "bbbbbbbb-cccc-4ddd-8eee-fffffffffff1",
+  };
+
+  await yolo.enqueue(
+    { operationId: activeRequest.operationId, task: "Active work." },
+    activeRequest.runId,
+    activeRequest.requestHash,
+    "identity"
+  );
+  await yolo.enqueue(
+    { operationId: busyRequest.operationId, task: "Queued work." },
+    busyRequest.runId,
+    busyRequest.requestHash,
+    "identity"
+  );
+
+  assert.deepEqual(await admission.admit(activeRequest), {
+    kind: "active",
+    runId: activeRequest.runId,
+  });
+  await settleBackground();
+  assert.equal(yolo.getRun(activeRequest.runId)?.status, "running");
+
+  assert.deepEqual(await admission.admit(busyRequest), {
+    kind: "active",
+    runId: busyRequest.runId,
+  });
+  await settleBackground();
+
+  const busyAdmission = await admission.getRecord(busyRequest.runId);
+  assert.equal(busyAdmission?.state, "queued");
+  const admissionRow = harness.sql
+    .exec<{ dispatch_token: string | null; state: string }>(
+      "SELECT dispatch_token, state FROM admission_records WHERE run_id = ?",
+      busyRequest.runId
+    )
+    .toArray() as { dispatch_token: string | null; state: string }[];
+  assert.equal(admissionRow[0]?.state, "queued");
+  assert.equal(admissionRow[0]?.dispatch_token, null);
+  assert.equal(yolo.getRun(busyRequest.runId)?.status, "queued");
+  assert.deepEqual(destroyedSandboxes(), []);
+
+  const stoppedActive = await yolo.stop(activeRequest.runId);
+  assert.equal(stoppedActive?.status, "cancelled");
+  await settleBackground();
+
+  assert.equal(yolo.getRun(busyRequest.runId)?.status, "running");
+  assert.equal((await admission.getRecord(busyRequest.runId))?.state, "active");
+  assert.deepEqual(released, [activeRequest.runId]);
+});
 
 test("admission returns an immediate active decision without waiting for dispatch RPC", async () => {
   let resolveDispatch!: (accepted: boolean) => void;

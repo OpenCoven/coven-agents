@@ -30,6 +30,7 @@ import {
   warmSandbox,
 } from "./harness-runner";
 import {
+  AgentBusyError,
   AlreadyRunningError,
   appendEvents,
   type CloudRunRecord,
@@ -760,6 +761,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
     const definition = this.requireDefinition();
     if (dispatchToken) {
+      if (this.hasOtherExecutionClaim(runId)) {
+        throw new AgentBusyError();
+      }
       const tokenized = { ...record, dispatchToken };
       this.persistRun(tokenized, { allowDispatchTokenReplacement: true });
       this.setState({
@@ -769,6 +773,8 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           [runId]: dispatchToken,
         },
       });
+    } else if (this.hasOtherExecutionClaim(runId)) {
+      throw new AgentBusyError();
     }
     const claimed = this.claimRunStart(
       dispatchToken ? { ...record, dispatchToken } : record
@@ -997,13 +1003,8 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (isTerminal(current.run.status)) {
       throw new AlreadyRunningError();
     }
-    const active = this.state.runs.find(
-      (candidate) =>
-        candidate.run.id !== current.run.id &&
-        candidate.run.status === "running"
-    );
-    if (active) {
-      throw new AlreadyRunningError();
+    if (this.hasOtherExecutionClaim(current.run.id)) {
+      throw new AgentBusyError();
     }
     if (current.run.status === "running") {
       return current;
@@ -1201,6 +1202,18 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       !record.dispatchToken &&
       !this.state.admissionTokens?.[record.run.id] &&
       !this.state.dispatchClaims?.[record.run.id]
+    );
+  }
+
+  private hasOtherExecutionClaim(runId: string): boolean {
+    return this.state.runs.some(
+      (candidate) =>
+        candidate.run.id !== runId &&
+        !isTerminal(candidate.run.status) &&
+        (candidate.run.status === "running" ||
+          Boolean(candidate.dispatchToken) ||
+          Boolean(this.state.admissionTokens?.[candidate.run.id]) ||
+          Boolean(this.state.dispatchClaims?.[candidate.run.id]))
     );
   }
 

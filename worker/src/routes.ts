@@ -33,6 +33,7 @@ import {
 } from "./http.js";
 import { importVerifyKey, verifyRunnerToken } from "./identity.js";
 import {
+  AgentBusyError,
   AlreadyRunningError,
   hashOperation,
   isTerminal,
@@ -292,7 +293,9 @@ function fail(error: unknown, cors: Headers): Response {
   }
   if (
     error instanceof AlreadyRunningError ||
-    (error instanceof Error && error.name === "AlreadyRunningError")
+    error instanceof AgentBusyError ||
+    (error instanceof Error &&
+      (error.name === "AlreadyRunningError" || error.name === "AgentBusyError"))
   ) {
     return json(
       errorEnvelope(
