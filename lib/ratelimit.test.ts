@@ -6,6 +6,7 @@ import {
   checkIpRateLimit,
   checkRateLimit,
   createRateLimitChecker,
+  ResilientAbuseStore,
 } from "./ratelimit";
 
 test("the compatibility export keeps the existing IP limiter name", () => {
@@ -111,4 +112,58 @@ test("production store configuration errors fail closed", async () => {
     () => check("203.0.113.8"),
     /ABUSE_KEY_SECRET is required/
   );
+});
+
+/**
+ * The resilient store exists because production answered 503 whenever the
+ * Redis client was configured but not yet connected: node-redis connects
+ * asynchronously and queues commands while it does, so a cold boot's first
+ * requests either saw no store or hung past the enforcement timeout. Both
+ * outcomes turned the limiter's own connection latency into an outage.
+ */
+test("a throwing Redis degrades to memory limiting, not an outage", async () => {
+  const store = new ResilientAbuseStore({
+    consume: () => Promise.reject(new Error("connection lost")),
+  });
+
+  const first = await store.consume("probe:throw", 2, 60);
+  const second = await store.consume("probe:throw", 2, 60);
+  const third = await store.consume("probe:throw", 2, 60);
+
+  assert.equal(first.allowed, true);
+  assert.equal(second.allowed, true);
+  // The fallback is a real limiter, not a rubber stamp: the budget still runs
+  // out.
+  assert.equal(third.allowed, false);
+});
+
+test("a hanging Redis is raced out, because a hang past the enforcement timeout is a 503", async () => {
+  const store = new ResilientAbuseStore(
+    { consume: () => new Promise(() => undefined) },
+    20
+  );
+
+  const result = await store.consume("probe:hang", 5, 60);
+  assert.equal(result.allowed, true);
+});
+
+test("an answering Redis is used, and the fallback is not consulted", async () => {
+  let primaryCalls = 0;
+  const store = new ResilientAbuseStore({
+    consume: () => {
+      primaryCalls += 1;
+      return Promise.resolve({
+        allowed: false,
+        remaining: 0,
+        retryAfterSeconds: 30,
+      });
+    },
+  });
+
+  const result = await store.consume("probe:primary", 5, 60);
+  assert.equal(primaryCalls, 1);
+  // The primary's verdict stands, including a denial — degradation is for
+  // failure, never for an answer someone dislikes.
+  assert.equal(result.allowed, false);
+  assert.equal(result.retryAfterSeconds, 30);
 });
