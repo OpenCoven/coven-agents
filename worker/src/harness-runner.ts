@@ -18,12 +18,15 @@ import {
 const DEFAULT_WORKSPACE = "/workspace";
 const RUN_TIMEOUT_MS = 900_000;
 /**
- * Generous, and deliberately so. The first `copilot --version` on a cold
- * container was measured at 100 seconds — container start plus a Node CLI's
- * first launch — and a probe timeout below that fails every healthy first run.
- * The old value of 20s only looked safe because it was never enforced.
+ * Generous, and deliberately so. The deadline clock starts when the worker
+ * awaits the exec, and that await covers the container's cold boot as well
+ * as the command: a fully cold run was observed to fail at 180s while the
+ * sandbox went on to log the exec itself succeeding in 110s — boot plus a
+ * Node CLI's first launch had already spent the budget before the command
+ * finished. Five minutes bounds the truly wedged case (the old unenforced
+ * 20s once hid a half-hour zombie) without failing healthy cold starts.
  */
-const PROBE_TIMEOUT_MS = 180_000;
+const PROBE_TIMEOUT_MS = 300_000;
 
 type SandboxLike = Pick<Sandbox, "exec">;
 
