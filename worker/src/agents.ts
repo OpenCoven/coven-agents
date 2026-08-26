@@ -466,7 +466,9 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       // still leaves durable work for the alarm/recovery path.
       this.markSandboxCleanup(ownership, finalStatus, message, attempts);
       try {
-        await this.destroyAgentSandbox(definition);
+        await this.destroyAgentSandbox(definition, () =>
+          this.ownsSandbox(ownership)
+        );
         this.clearSandboxOwnership(ownership);
         return true;
       } catch (error) {
@@ -1815,10 +1817,14 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   }
 
   private async destroyAgentSandbox(
-    definition = this.requireDefinition()
+    definition = this.requireDefinition(),
+    owns?: () => boolean
   ): Promise<void> {
     let failure: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (owns && !owns()) {
+        return;
+      }
       try {
         // biome-ignore lint/performance/noAwaitInLoops: Retries must be ordered to bound cleanup.
         await getSandbox(
