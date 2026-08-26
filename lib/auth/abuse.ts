@@ -9,6 +9,7 @@ import type { AbuseRoute } from "@/lib/abuse/types";
 type AuthAbuseRoute = Extract<AbuseRoute, "auth_callback" | "auth_start">;
 
 type AuthAbuseOptions = {
+  basePath?: string;
   store?: AbuseStore;
 };
 
@@ -17,14 +18,16 @@ const AUTH_CALLBACK_PATH = /^\/api\/auth\/callback\/[^/]+\/?$/;
 
 export function authAbuseRoute(
   method: string,
-  pathname: string
+  pathname: string,
+  basePath = ""
 ): AuthAbuseRoute | null {
-  if (method === "POST" && AUTH_SIGNIN_PATH.test(pathname)) {
+  const normalizedPathname = stripBasePath(pathname, basePath);
+  if (method === "POST" && AUTH_SIGNIN_PATH.test(normalizedPathname)) {
     return "auth_start";
   }
   if (
     (method === "GET" || method === "POST") &&
-    AUTH_CALLBACK_PATH.test(pathname)
+    AUTH_CALLBACK_PATH.test(normalizedPathname)
   ) {
     return "auth_callback";
   }
@@ -42,7 +45,11 @@ export function withAuthAbusePolicy<
   options: AuthAbuseOptions = {}
 ): (request: RequestType, ...args: Arguments) => Promise<Response> {
   return async (request, ...args) => {
-    const route = authAbuseRoute(request.method, new URL(request.url).pathname);
+    const route = authAbuseRoute(
+      request.method,
+      new URL(request.url).pathname,
+      options.basePath ?? process.env.NEXT_PUBLIC_BASE_PATH
+    );
     if (route) {
       const admission = await enforceAbusePolicy({
         ip: ipAddress(request) ?? null,
@@ -56,4 +63,16 @@ export function withAuthAbusePolicy<
 
     return handler(request, ...args);
   };
+}
+
+function stripBasePath(pathname: string, basePath: string | undefined): string {
+  if (!basePath || basePath === "/") {
+    return pathname;
+  }
+  const normalizedBasePath = basePath.endsWith("/")
+    ? basePath.slice(0, -1)
+    : basePath;
+  return pathname.startsWith(`${normalizedBasePath}/`)
+    ? pathname.slice(normalizedBasePath.length)
+    : pathname;
 }

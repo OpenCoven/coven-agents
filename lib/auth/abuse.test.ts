@@ -43,6 +43,44 @@ test("classifies only Auth.js OAuth initiation and callback methods", () => {
   }
 });
 
+test("classifies OAuth routes beneath the configured base path", () => {
+  assert.equal(
+    authAbuseRoute("POST", "/demo/api/auth/signin/github", "/demo"),
+    "auth_start"
+  );
+  assert.equal(
+    authAbuseRoute("GET", "/demo/api/auth/callback/github", "/demo"),
+    "auth_callback"
+  );
+  assert.equal(authAbuseRoute("GET", "/demo/api/auth/session", "/demo"), null);
+});
+
+test("the wrapper enforces OAuth limits beneath the configured base path", async () => {
+  const consumedKeys: string[] = [];
+  const store: AbuseStore = {
+    consume(key, limit, windowSeconds) {
+      consumedKeys.push(`${key}:${limit}:${windowSeconds}`);
+      return Promise.resolve({
+        allowed: true,
+        remaining: limit - 1,
+        retryAfterSeconds: windowSeconds,
+      });
+    },
+  };
+  const wrapped = withAuthAbusePolicy(
+    () => new Response(null, { status: 204 }),
+    { basePath: "/demo", store }
+  );
+
+  const response = await wrapped(
+    authRequest("/demo/api/auth/signin/github", "POST")
+  );
+
+  assert.equal(response.status, 204);
+  assert.equal(consumedKeys.length, 2);
+  assert.ok(consumedKeys.every((key) => key.startsWith("auth_start:")));
+});
+
 test("wraps POST starts and callback methods but bypasses GET sign-in and cheap actions", async () => {
   const consumedKeys: string[] = [];
   const store: AbuseStore = {

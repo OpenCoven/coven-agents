@@ -428,6 +428,10 @@ test("database cleanup is bounded, state-agnostic, and awaited before claims", (
     cleanupSource,
     /lte\(idempotencyRecord\.expiresAt, input\.before\)/
   );
+  assert.match(
+    cleanupSource,
+    /\.where\(\s*and\(\s*inArray\(idempotencyRecord\.id, expired\),\s*lte\(idempotencyRecord\.expiresAt, input\.before\)\s*\)\s*\)/
+  );
   assert.match(cleanupSource, /\.limit\(input\.limit\)/);
   assert.doesNotMatch(cleanupSource, /idempotencyRecord\.state/);
 });
@@ -446,7 +450,7 @@ test("Auth.js handlers use method-aware abuse classification", () => {
   );
   assert.match(
     wrapperSource,
-    /authAbuseRoute\(\s*request\.method,\s*new URL\(request\.url\)\.pathname\s*\)/
+    /authAbuseRoute\(\s*request\.method,\s*new URL\(request\.url\)\.pathname,\s*options\.basePath \?\? process\.env\.NEXT_PUBLIC_BASE_PATH\s*\)/
   );
 });
 

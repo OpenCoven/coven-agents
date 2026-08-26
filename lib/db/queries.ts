@@ -267,7 +267,12 @@ export const databaseIdempotencyStore: IdempotencyStore = {
 
       await db
         .delete(idempotencyRecord)
-        .where(inArray(idempotencyRecord.id, expired));
+        .where(
+          and(
+            inArray(idempotencyRecord.id, expired),
+            lte(idempotencyRecord.expiresAt, input.before)
+          )
+        );
     } catch (error) {
       throw new ChatbotError("bad_request:database", { cause: error });
     }
