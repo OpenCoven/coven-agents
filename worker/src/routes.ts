@@ -119,8 +119,9 @@ export type CloudRunnerAgent = {
     runId: string,
     operationId: string,
     requestHash: string,
-    capability?: AdmissionCleanupCapability
+    capability?: AdmissionCleanupCapability | null
   ) => Awaitable<boolean>;
+  ensurePendingAdmissionCleanup?: (runId: string) => Awaitable<boolean>;
   prepareOwnerMatches?: (
     runId: string,
     prepareOwner: string
@@ -302,6 +303,12 @@ async function cleanupRun(
             return firstError;
           }
         }
+        if (prepareOwner && !admissionCapability) {
+          if (agent.ensurePendingAdmissionCleanup) {
+            await attempt(() => agent.ensurePendingAdmissionCleanup?.(runId));
+          }
+          return firstError;
+        }
         if (
           allowUnowned &&
           !prepareOwnerVerified &&
@@ -350,6 +357,11 @@ async function cleanupRun(
     );
     if (discarded.ok && discarded.value !== false) {
       safeToRelease = true;
+    } else if (prepareOwner && !admissionCapability) {
+      if (agent.ensurePendingAdmissionCleanup) {
+        await attempt(() => agent.ensurePendingAdmissionCleanup?.(runId));
+      }
+      return firstError;
     } else if (allowUnowned) {
       if (
         !admissionCapability ||
@@ -1163,7 +1175,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                     original.id,
                     original.operationId,
                     requestHash,
-                    capability ?? undefined
+                    capability
                   );
                   if (!confirmed) {
                     const latest = await originalAgent.getRun(original.id);
@@ -1250,6 +1262,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             try {
               decision = await admission.admit({
                 agentId: id,
+                mode: runAdmissionMode,
                 operationId: input.operationId,
                 requestHash,
                 runId,
@@ -1370,22 +1383,24 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                   admission
                 );
               } else if (originalAgent.confirmAdmission) {
-                const capability = admission.getCleanupCapability
-                  ? await admission.getCleanupCapability(
-                      duplicateAdmission.runId,
-                      {
-                        agentId: duplicateAdmission.agentId,
-                        operationId: duplicateAdmission.operationId,
-                        requestHash: duplicateAdmission.requestHash,
-                        runId: duplicateAdmission.runId,
-                      }
-                    )
-                  : null;
+                const capability =
+                  decision.admissionCapability ??
+                  (admission.getCleanupCapability
+                    ? await admission.getCleanupCapability(
+                        duplicateAdmission.runId,
+                        {
+                          agentId: duplicateAdmission.agentId,
+                          operationId: duplicateAdmission.operationId,
+                          requestHash: duplicateAdmission.requestHash,
+                          runId: duplicateAdmission.runId,
+                        }
+                      )
+                    : null);
                 const confirmed = await originalAgent.confirmAdmission(
                   original.id,
                   original.operationId,
                   requestHash,
-                  capability ?? undefined
+                  capability
                 );
                 if (!confirmed) {
                   const latest = await originalAgent.getRun(original.id);
@@ -1433,33 +1448,31 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               );
             }
             if (decision.kind === "queued" && runAdmissionMode === "reject") {
-              const cleanupError = await cleanupRun(agent, runId, id, {
-                admission,
-                prepareOwner: prepared.prepareOwner,
-                stopFirst: true,
-              });
-              if (cleanupError) {
-                throw cleanupError;
-              }
-              return busyResponse("global_busy", cors);
+              throw new AdmissionUnavailableError(
+                "Reject-mode admission returned queued work."
+              );
             }
 
-            let admissionCapability: AdmissionCleanupCapability | null = null;
+            let admissionCapability: AdmissionCleanupCapability | null =
+              decision.admissionCapability ?? null;
             try {
-              admissionCapability = admission.getCleanupCapability
-                ? await admission.getCleanupCapability(runId, {
+              if (!admissionCapability && admission.getCleanupCapability) {
+                admissionCapability = await admission.getCleanupCapability(
+                  runId,
+                  {
                     agentId: id,
                     operationId: input.operationId,
                     requestHash,
                     runId,
-                  })
-                : null;
+                  }
+                );
+              }
               if (agent.confirmAdmission) {
                 const confirmed = await agent.confirmAdmission(
                   runId,
                   input.operationId,
                   requestHash,
-                  admissionCapability ?? undefined
+                  admissionCapability
                 );
                 if (!confirmed) {
                   const terminal = await agent.getRun(runId);

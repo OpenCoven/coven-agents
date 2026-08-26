@@ -940,7 +940,10 @@ test("run admission happens before dispatch and receives only a tenant hash", as
   const operationId = "33333333-4444-4555-8666-777777777777";
   const runId = "44444444-5555-4666-8777-888888888888";
   const calls: string[] = [];
-  const admissionRequests: { tenantHash?: string }[] = [];
+  const admissionRequests: {
+    mode?: string;
+    tenantHash?: string;
+  }[] = [];
   const run = queuedRun(MINE, runId, operationId);
   const agent: CloudRunnerAgent = {
     configure: (value: AgentDefinition) => value,
@@ -1015,12 +1018,84 @@ test("run admission happens before dispatch and receives only a tenant hash", as
   assert.equal(response.status, 202);
   assert.deepEqual(calls, ["enqueue", "admit", "register"]);
   assert.equal(admissionRequests.length, 1);
+  assert.equal(admissionRequests[0]?.mode, "queue");
   assert.notEqual(admissionRequests[0]?.tenantHash, CALLER_TENANT);
   assert.match(admissionRequests[0]?.tenantHash ?? "", /^v1:[0-9a-f]{64}$/);
   assert.equal(
     String(admissionRequests[0]?.tenantHash).includes(CALLER_TENANT),
     false
   );
+});
+
+test("run admission passes its durable capability directly to confirmation", async () => {
+  const operationId = "33333333-aaaa-4555-8666-777777777777";
+  const runId = "44444444-bbbb-4666-8777-888888888888";
+  const run = queuedRun(MINE, runId, operationId);
+  const capability = {
+    admissionSequence: 7,
+    agentId: MINE,
+    operationId,
+    requestHash: "request-hash",
+    runId,
+  };
+  const confirmedCapabilities: unknown[] = [];
+  const agent: CloudRunnerAgent = {
+    configure: (value: AgentDefinition) => value,
+    confirmAdmission: (_runId, _operationId, _requestHash, received) => {
+      confirmedCapabilities.push(received);
+      return true;
+    },
+    decommission: () => undefined,
+    discardRun: () => undefined,
+    enqueue: () => ({ created: true, run }),
+    getEventStream: () => ({ events: [], terminal: false }),
+    getRun: () => run,
+    listRuns: () => [run],
+    snapshot: () => agents.get(MINE) ?? null,
+    stop: () => run,
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+
+  const response = await createCloudRunner({
+    getAdmission: () => ({
+      admit: () =>
+        ({
+          admissionCapability: capability,
+          kind: "active",
+          runId,
+        }) as never,
+      release: () => false,
+    }),
+    getDirectory: () => ({
+      list: () => [agents.get(MINE) as AgentDefinition],
+      lookupRun: () => null,
+      registerRun: () => true,
+      remove: () => undefined,
+      unregisterRun: () => undefined,
+      upsert: (value: AgentDefinition) => value,
+    }),
+    getYoloAgent: () => agent,
+  }).fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: run.task }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    { ...environment, RUN_ADMISSION_MODE: "queue" } as never
+  );
+
+  assert.equal(response.status, 202);
+  assert.deepEqual(confirmedCapabilities, [capability]);
 });
 
 test("a terminal duplicate reconciles stale admission before returning the terminal run", async () => {
@@ -1504,7 +1579,7 @@ test("reject mode refuses an unhealthy admission object without bypassing it", a
   assert.equal(body.error.code, "busy");
 });
 
-test("reject fallback discards a queued run before releasing admission", async () => {
+test("reject mode does not clean up an unexpected queued decision", async () => {
   const operationId = "77777777-9999-4000-8111-222222222222";
   const runId = "88888888-aaaa-4111-8222-333333333333";
   const calls: string[] = [];
@@ -1562,11 +1637,11 @@ test("reject fallback discards a queued run before releasing admission", async (
     { ...environment, RUN_ADMISSION_MODE: "reject" } as never
   );
 
-  assert.equal(response.status, 500);
-  assert.deepEqual(calls, ["admit", "discard", "release"]);
+  assert.equal(response.status, 503);
+  assert.deepEqual(calls, ["admit"]);
 });
 
-test("reject fallback stops an execution that wins the discard race before release", async () => {
+test("reject mode does not race cleanup for an unexpected queued decision", async () => {
   const operationId = "77777777-aaaa-4000-8111-222222222222";
   const runId = "88888888-bbbb-4111-8222-333333333333";
   const calls: string[] = [];
@@ -1629,11 +1704,11 @@ test("reject fallback stops an execution that wins the discard race before relea
     { ...environment, RUN_ADMISSION_MODE: "reject" } as never
   );
 
-  assert.equal(response.status, 409);
-  assert.deepEqual(calls, ["admit", "discard", "stop", "release"]);
+  assert.equal(response.status, 503);
+  assert.deepEqual(calls, ["admit"]);
 });
 
-test("failed prepare cleanup is durable and capacity is reusable after recovery", async () => {
+test("reject mode does not schedule cleanup for an unexpected queued decision", async () => {
   const operationId = "77777777-cccc-4000-8111-222222222222";
   const calls: string[] = [];
   let occupied = false;
@@ -1722,13 +1797,12 @@ test("failed prepare cleanup is durable and capacity is reusable after recovery"
     }),
     { ...environment, RUN_ADMISSION_MODE: "reject" } as never
   );
-  assert.equal(first.status, 500);
-  assert.ok(retryCleanup, "failed cleanup must leave a durable retry");
+  assert.equal(first.status, 503);
+  assert.equal(retryCleanup, undefined);
+  assert.equal(calls.length, 1);
   assert.match(calls[0] ?? "", /^admit:/);
-  assert.deepEqual(calls.slice(1), ["discard", "stop"]);
 
   cleanupReady = true;
-  await retryCleanup?.();
   const second = await runnerInstance.fetch(
     new Request(`https://runner.test/api/agents/${MINE}/runs`, {
       body: JSON.stringify({
@@ -1743,7 +1817,84 @@ test("failed prepare cleanup is durable and capacity is reusable after recovery"
     }),
     environment as never
   );
-  assert.equal(second.status, 202);
+  assert.equal(second.status, 500);
+});
+
+test("a failed provisional cleanup keeps local owner cleanup armed without admission state", async () => {
+  const operationId = "77777777-dddd-4000-8111-222222222222";
+  const runId = "88888888-dddd-4111-8222-333333333333";
+  const calls: string[] = [];
+  let localCleanupArmed = false;
+  const run = queuedRun(MINE, runId, operationId);
+  const agent = {
+    configure: (value: AgentDefinition) => value,
+    decommission: () => undefined,
+    discardRun: () => {
+      calls.push("discard");
+      return false;
+    },
+    enqueue: () => ({ created: true, prepareOwner: "prepare-owner", run }),
+    ensurePendingAdmissionCleanup: () => {
+      calls.push("ensure-local-cleanup");
+      localCleanupArmed = true;
+      return Promise.resolve(true);
+    },
+    getEventStream: () => ({ events: [], terminal: false }),
+    getRun: () => run,
+    listRuns: () => [run],
+    prepareOwnerMatches: () => true,
+    snapshot: () => agents.get(MINE) ?? null,
+    stop: () => {
+      calls.push("stop");
+      throw new Error("stop must not bypass provisional ownership");
+    },
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  } as CloudRunnerAgent & {
+    ensurePendingAdmissionCleanup: () => Promise<boolean>;
+  };
+  let cleanupEnqueues = 0;
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+
+  const response = await createCloudRunner({
+    getAdmission: () => ({
+      admit: () => Promise.reject(new Error("admission unavailable")),
+      enqueueCleanup: () => {
+        cleanupEnqueues += 1;
+        return Promise.resolve();
+      },
+      release: () => false,
+    }),
+    getDirectory: () => ({
+      list: () => [agents.get(MINE) as AgentDefinition],
+      lookupRun: () => null,
+      registerRun: () => true,
+      remove: () => undefined,
+      unregisterRun: () => undefined,
+      upsert: (value: AgentDefinition) => value,
+    }),
+    getYoloAgent: () => agent,
+  }).fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: run.task }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    { ...environment, RUN_ADMISSION_MODE: "reject" } as never
+  );
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(calls, ["discard", "ensure-local-cleanup"]);
+  assert.equal(localCleanupArmed, true);
+  assert.equal(cleanupEnqueues, 0);
 });
 
 test("registerRun failure stops the run, releases admission, and allows reuse", async () => {

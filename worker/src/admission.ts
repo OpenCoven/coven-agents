@@ -18,17 +18,31 @@ export type AdmissionRecord = {
   tenantHash: string;
 };
 
+export type AdmissionMode = "queue" | "reject";
+
 export type AdmissionDecision =
-  | { kind: "active"; runId: string }
-  | { kind: "queued"; position: number; runId: string }
   | {
+      admissionCapability?: AdmissionCleanupCapability;
+      kind: "active";
+      runId: string;
+    }
+  | {
+      admissionCapability?: AdmissionCleanupCapability;
+      kind: "queued";
+      position: number;
+      runId: string;
+    }
+  | {
+      admissionCapability?: AdmissionCleanupCapability;
       kind: "duplicate";
       runId: string;
       state: "queued" | "active" | "terminal";
     }
   | { kind: "refused"; reason: "tenant_queue_full" | "global_busy" };
 
-export type AdmissionRequest = Omit<AdmissionRecord, "enqueuedAt" | "state">;
+export type AdmissionRequest = Omit<AdmissionRecord, "enqueuedAt" | "state"> & {
+  mode?: AdmissionMode;
+};
 
 export type AdmissionLimits = {
   tenantActiveRuns: number;
@@ -71,6 +85,40 @@ type StoredAdmissionRecord = AdmissionRecord & {
   sequence: number;
   terminalizedAt?: string;
 };
+
+function cleanupCapability(
+  record: Pick<
+    StoredAdmissionRecord,
+    | "agentId"
+    | "operationId"
+    | "requestHash"
+    | "runId"
+    | "sequence"
+    | "dispatchToken"
+  >
+): AdmissionCleanupCapability {
+  return {
+    admissionSequence: record.sequence,
+    agentId: record.agentId,
+    ...(record.dispatchToken ? { dispatchToken: record.dispatchToken } : {}),
+    operationId: record.operationId,
+    requestHash: record.requestHash,
+    runId: record.runId,
+  };
+}
+
+function decisionWithCleanupCapability(
+  decision: AdmissionDecision,
+  capability: AdmissionCleanupCapability,
+  enumerable = true
+): AdmissionDecision {
+  Object.defineProperty(decision, "admissionCapability", {
+    configurable: true,
+    enumerable,
+    value: capability,
+  });
+  return decision;
+}
 
 function matchesCleanupIdentity(
   record: Pick<
@@ -231,6 +279,11 @@ function cloneRecord(record: AdmissionRecord): AdmissionRecord {
   return { ...record };
 }
 
+function recordInput(input: AdmissionRequest): Omit<AdmissionRequest, "mode"> {
+  const { mode: _mode, ...record } = input;
+  return record;
+}
+
 function assertAdmissionRequest(input: AdmissionRequest): void {
   const fields = [
     input.agentId,
@@ -349,6 +402,7 @@ export class AdmissionQueue {
 
   admitSynchronously(input: AdmissionRequest): AdmissionDecision {
     assertAdmissionRequest(input);
+    const normalizedInput = recordInput(input);
     this.expireQueuedRecords(this.now());
     const existing = this.queueRecords.find(
       (candidate) => candidate.operationId === input.operationId
@@ -373,9 +427,12 @@ export class AdmissionQueue {
     ) {
       return { kind: "refused", reason: "tenant_queue_full" };
     }
+    if (input.mode === "reject") {
+      return { kind: "refused", reason: "global_busy" };
+    }
 
     const record: AdmissionRecord = {
-      ...input,
+      ...normalizedInput,
       enqueuedAt: new Date(this.now()).toISOString(),
       state: "queued",
     };
@@ -395,7 +452,7 @@ export class AdmissionQueue {
     assertAdmissionRequest(input);
     const now = this.now();
     const candidate: StoredAdmissionRecord = {
-      ...input,
+      ...recordInput(input),
       enqueuedAt: new Date(now).toISOString(),
       sequence: this.nextSequence,
       state: "queued",
@@ -803,16 +860,13 @@ export class RunAdmission extends DurableObject<Env> {
             (agent_id, run_id, admission_sequence, dispatch_token, attempts, next_attempt_at)
           SELECT legacy.agent_id,
                  legacy.run_id,
-                 COALESCE(
-                   (SELECT queue_sequence
-                    FROM admission_records
-                    WHERE admission_records.run_id = legacy.run_id),
-                   0
-                 ),
+                 admission_records.queue_sequence,
                  NULL,
                  legacy.attempts,
                  legacy.next_attempt_at
           FROM admission_cleanup_tasks_legacy AS legacy
+          JOIN admission_records
+            ON admission_records.run_id = legacy.run_id
         `);
         ctx.storage.sql.exec("DROP TABLE admission_cleanup_tasks_legacy");
       } else if (!cleanupColumns.includes("dispatch_token")) {
@@ -823,6 +877,17 @@ export class RunAdmission extends DurableObject<Env> {
       ctx.storage.sql.exec(`
         CREATE INDEX IF NOT EXISTS admission_cleanup_tasks_due_idx
         ON admission_cleanup_tasks (next_attempt_at, run_id, admission_sequence)
+      `);
+      ctx.storage.sql.exec(`
+        DELETE FROM admission_cleanup_tasks
+        WHERE admission_sequence <= 0
+           OR NOT EXISTS (
+             SELECT 1
+             FROM admission_records
+             WHERE admission_records.run_id = admission_cleanup_tasks.run_id
+               AND admission_records.queue_sequence =
+                 admission_cleanup_tasks.admission_sequence
+           )
       `);
       ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS admission_meta (
@@ -851,12 +916,17 @@ export class RunAdmission extends DurableObject<Env> {
         if (existing.state === "terminal") {
           this.pruneTerminalRecords();
         }
+        const decision = {
+          kind: "duplicate",
+          runId: existing.runId,
+          state: existing.state,
+        } as AdmissionDecision;
         return {
-          decision: {
-            kind: "duplicate",
-            runId: existing.runId,
-            state: existing.state,
-          } as AdmissionDecision,
+          decision: decisionWithCleanupCapability(
+            decision,
+            cleanupCapability(existing),
+            input.mode !== undefined
+          ),
           record: null,
         };
       }
@@ -878,7 +948,22 @@ export class RunAdmission extends DurableObject<Env> {
       const canActivateImmediately = immediateScheduler !== null;
       const decision = canActivateImmediately
         ? ({ kind: "active", runId: input.runId } as AdmissionDecision)
-        : queue.admitSynchronously(input);
+        : input.mode === "reject"
+          ? ({
+              kind: "refused",
+              reason:
+                storedRecords.filter((entry) => entry.state === "active")
+                  .length >= limits.deploymentActiveRuns
+                  ? "global_busy"
+                  : storedRecords.filter(
+                        (entry) =>
+                          entry.state === "queued" &&
+                          entry.tenantHash === input.tenantHash
+                      ).length >= limits.tenantQueuedRuns
+                    ? "tenant_queue_full"
+                    : "global_busy",
+            } as AdmissionDecision)
+          : queue.admitSynchronously(input);
       if (decision.kind === "refused" || decision.kind === "duplicate") {
         return { decision, record: null };
       }
@@ -898,7 +983,14 @@ export class RunAdmission extends DurableObject<Env> {
         this.writeScheduler(immediateScheduler);
         this.markDispatchPending(record.runId);
       }
-      return { decision, record };
+      return {
+        decision: decisionWithCleanupCapability(
+          decision,
+          cleanupCapability(record),
+          input.mode !== undefined
+        ),
+        record,
+      };
     });
     if (result.decision.kind === "refused") {
       this.ctx.waitUntil(this.retryCleanupTasks());
@@ -1018,6 +1110,9 @@ export class RunAdmission extends DurableObject<Env> {
   ): Promise<void> {
     await this.initialized;
     const current = this.findStoredByRunId(runId);
+    if (!current && !capability) {
+      return;
+    }
     this.enqueueCleanupTask({
       agentId: capability?.agentId ?? agentId,
       enqueuedAt: new Date().toISOString(),
@@ -1107,7 +1202,7 @@ export class RunAdmission extends DurableObject<Env> {
     await this.initialized;
     const record = this.findByOperationId(operationId);
     await this.ensureAlarm({ throwOnFailure: false });
-    return record;
+    return record ? publicRecord(record) : null;
   }
 
   async dispatch(): Promise<void> {
@@ -1178,7 +1273,11 @@ export class RunAdmission extends DurableObject<Env> {
         }
         accepted = await this.env.YoloAgent.getByName(
           candidate.agentId
-        ).startAdmitted(candidate.runId, candidate.dispatchToken);
+        ).startAdmitted(
+          candidate.runId,
+          candidate.dispatchToken,
+          cleanupCapability(candidate)
+        );
       } catch (error) {
         if (isAgentBusyError(error)) {
           const fenceToken = await this.fenceDispatch(candidate);
@@ -1710,13 +1809,7 @@ export class RunAdmission extends DurableObject<Env> {
     for (const task of tasks) {
       const current = this.findStoredByRunId(task.run_id);
       if (!current) {
-        this.ctx.storage.sql.exec(
-          "UPDATE admission_cleanup_tasks SET attempts = ?, next_attempt_at = ? WHERE run_id = ? AND admission_sequence = ?",
-          task.attempts + 1,
-          Date.now() + ALARM_REPAIR_RETRY_MS,
-          task.run_id,
-          task.admission_sequence
-        );
+        this.deleteCleanupTask(task.run_id, task.admission_sequence);
         continue;
       }
       if (current.sequence !== task.admission_sequence) {
@@ -1985,14 +2078,14 @@ export class RunAdmission extends DurableObject<Env> {
       .map(rowToStoredRecord);
   }
 
-  private findByOperationId(operationId: string): AdmissionRecord | null {
+  private findByOperationId(operationId: string): StoredAdmissionRecord | null {
     const rows = this.ctx.storage.sql
       .exec<AdmissionRow>(
         "SELECT agent_id, dispatch_token, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, terminalized_at, tenant_hash FROM admission_records WHERE operation_id = ?",
         operationId
       )
       .toArray();
-    return rows[0] ? publicRecord(rowToStoredRecord(rows[0])) : null;
+    return rows[0] ? rowToStoredRecord(rows[0]) : null;
   }
 
   private findByRunId(runId: string): AdmissionRecord | null {

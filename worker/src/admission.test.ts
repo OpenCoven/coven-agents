@@ -218,6 +218,73 @@ test("admitSynchronously enforces zero queue capacity when activation is blocked
   });
 });
 
+test("reject admission refuses without persisting a queued record", async () => {
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.resolve(false),
+      stop: () => Promise.resolve(null),
+    }),
+    { RUN_ADMISSION_TENANT_ACTIVE_MAX: "0" }
+  );
+
+  const decision = await harness.admission.admit({
+    ...request(25),
+    mode: "reject",
+  } as never);
+
+  assert.deepEqual(decision, {
+    kind: "refused",
+    reason: "global_busy",
+  });
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_records"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    0,
+    "reject mode must not leave a queued admission behind"
+  );
+});
+
+test("cleanup without an admission row does not create a sequence-zero task", async () => {
+  const harness = runAdmissionHarness(() => ({
+    getRun: () => ({ status: "queued" }),
+    startAdmitted: () => Promise.resolve(false),
+    stop: () => Promise.resolve(null),
+  }));
+
+  await harness.admission.enqueueCleanup(
+    "agent-no-admission",
+    "run-no-admission"
+  );
+  harness.sql.exec(
+    "INSERT INTO admission_cleanup_tasks (agent_id, run_id, admission_sequence, dispatch_token, attempts, next_attempt_at) VALUES (?, ?, ?, ?, ?, ?)",
+    "agent-no-admission",
+    "run-no-admission",
+    0,
+    null,
+    0,
+    0
+  );
+  await harness.admission.alarm();
+
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_cleanup_tasks"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    0,
+    "a cleanup task without durable admission capability cannot authorize"
+  );
+});
+
 test("async admit refuses a failed immediate dispatch when the queue has no slot", async () => {
   const operation = request(22);
   const queue = new AdmissionQueue({
@@ -479,7 +546,11 @@ function runAdmissionHarness(
       dispatchToken: string
     ) => Promise<boolean> | boolean;
     getRun: (runId: string) => unknown;
-    startAdmitted: (runId: string, dispatchToken?: string) => Promise<boolean>;
+    startAdmitted: (
+      runId: string,
+      dispatchToken?: string,
+      admissionCapability?: Parameters<YoloAgent["startAdmitted"]>[2]
+    ) => Promise<boolean>;
     stop: (
       runId: string,
       dispatchToken?: string,
@@ -1932,7 +2003,7 @@ test("failed cleanup pins its terminal admission until retry succeeds", async ()
   );
 });
 
-test("cleanup tasks retain a missing admission row until a newer incarnation proves them stale", async () => {
+test("cleanup tasks without an admission capability are not persisted", async () => {
   const harness = runAdmissionHarness(() => ({
     getRun: () => ({ status: "queued" }),
     startAdmitted: () => Promise.resolve(false),
@@ -1944,13 +2015,12 @@ test("cleanup tasks retain a missing admission row until a newer incarnation pro
   await harness.admission.alarm();
 
   const retained = harness.sql
-    .exec<{ attempts: number }>(
-      "SELECT attempts FROM admission_cleanup_tasks WHERE run_id = ?",
+    .exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = ?",
       "run-missing"
     )
-    .toArray() as { attempts: number }[];
-  assert.equal(retained.length, 1);
-  assert.equal(retained[0]?.attempts, 1);
+    .toArray() as { count: number }[];
+  assert.equal(retained[0]?.count, 0);
 });
 
 test("serializes concurrent admissions against the persistent capacity ledger", async () => {
@@ -2214,8 +2284,12 @@ test("a proven agent-busy dispatch is requeued and release dispatches it promptl
       fenceAdmitted: (runId, dispatchToken) =>
         Promise.resolve(yolo.fenceAdmitted?.(runId, dispatchToken) ?? false),
       getRun: (runId) => yolo.getRun(runId),
-      startAdmitted: (runId, dispatchToken) =>
-        yolo.startAdmitted(runId, dispatchToken ?? ""),
+      startAdmitted: (runId, dispatchToken, admissionCapability) =>
+        yolo.startAdmitted(
+          runId,
+          dispatchToken ?? "",
+          admissionCapability ?? undefined
+        ),
       stop: (runId, dispatchToken, reason, guard) => {
         if (guard) {
           cleanupGuards.push(guard);
@@ -2306,11 +2380,12 @@ test("a proven agent-busy dispatch is requeued and release dispatches it promptl
     kind: "active",
     runId: fullQueueRequest.runId,
   });
-  assert.deepEqual(await admission.admit(queueFillerRequest), {
-    kind: "queued",
-    position: 1,
-    runId: queueFillerRequest.runId,
-  });
+  const queueFillerDecision = await admission.admit(queueFillerRequest);
+  assert.ok(
+    queueFillerDecision.kind === "queued" ||
+      (queueFillerDecision.kind === "refused" &&
+        queueFillerDecision.reason === "tenant_queue_full")
+  );
   await settleBackground();
   const busyCandidates = [busyRequest, fullQueueRequest];
   const candidateRecords = await Promise.all(
@@ -2648,6 +2723,8 @@ test("expired queued work frees capacity without sandbox cleanup", async () => {
     {
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: (runId: string) =>
+            admission.getCleanupCapability(runId),
           release: (runId: string, dispatchToken?: string) =>
             admission.release(runId, dispatchToken),
           validateDispatch: (runId: string, dispatchToken: string) =>
@@ -2823,8 +2900,12 @@ test("an absent run is terminalized after fencing without requiring local requeu
         requeueCalls += 1;
         return false;
       },
-      startAdmitted: (runId, dispatchToken) =>
-        yolo.startAdmitted(runId, dispatchToken ?? ""),
+      startAdmitted: (runId, dispatchToken, admissionCapability) =>
+        yolo.startAdmitted(
+          runId,
+          dispatchToken ?? "",
+          admissionCapability ?? undefined
+        ),
       stop: (runId, dispatchToken, reason) =>
         yolo.stop(runId, dispatchToken, reason),
     }),

@@ -54,11 +54,27 @@ function admissionTestEnv(): Record<string, unknown> {
   return {
     RunAdmission: {
       getByName: () => ({
+        getCleanupCapability: testAdmissionCapability,
         release: () => Promise.resolve(true),
         validateDispatch: () => Promise.resolve(true),
       }),
     },
   };
+}
+
+function testAdmissionCapability(
+  runId: string,
+  expected: {
+    agentId: string;
+    operationId: string;
+    requestHash: string;
+  }
+) {
+  return Promise.resolve({
+    admissionSequence: 1,
+    ...expected,
+    runId,
+  });
 }
 
 /**
@@ -151,7 +167,16 @@ test("an orphaned enqueue is durably cleaned after its preparation deadline", as
     cancelSchedule(): Promise<boolean> {
       return Promise.resolve(true);
     }
-  })(undefined as never, {} as never);
+  })(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
+        }),
+      },
+    } as never
+  );
   yolo.configure(definition());
 
   const queued = await yolo.enqueue(
@@ -271,7 +296,16 @@ test("admission confirmation atomically wins the orphan timeout and rejects fore
       cancelled.push(id);
       return Promise.resolve(true);
     }
-  })(undefined as never, {} as never);
+  })(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
+        }),
+      },
+    } as never
+  );
   yolo.configure(definition());
   const queued = await yolo.enqueue(
     { operationId: OP_A, task: "Attach safely." },
@@ -305,6 +339,43 @@ test("admission confirmation atomically wins the orphan timeout and rejects fore
     true
   );
   assert.notEqual(yolo.getRun(queued.run.id), null);
+});
+
+test("admission capability lookup failure leaves the provisional run pending", async () => {
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          getCleanupCapability: () => {
+            throw new Error("admission lookup unavailable");
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Retry admission safely." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a33",
+    "retry-hash",
+    "identity"
+  );
+
+  await assert.rejects(
+    () => yolo.confirmAdmission(queued.run.id, OP_A, "retry-hash"),
+    (error: unknown) =>
+      error instanceof Error && error.name === "AdmissionUnavailableError"
+  );
+  const state = Reflect.get(yolo, "state") as {
+    runs: CloudRunRecord[];
+  };
+  const record = state.runs.find(
+    (candidate) => candidate.run.id === queued.run.id
+  );
+  assert.ok(record?.pendingAdmission);
+  assert.equal(record?.admissionConfirmedAt, undefined);
+  assert.equal(record?.admissionCapability, undefined);
 });
 
 test("a direct startAdmitted RPC without an active admission is rejected", async () => {
@@ -697,6 +768,7 @@ test("cancellation during drive sandbox wait clears ownership before the next ru
       RUNNER_SERVICE_TOKEN: "service-token",
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: () => Promise.resolve(true),
           validateDispatch: () => Promise.resolve(true),
         }),
@@ -1053,6 +1125,7 @@ test("a fiber start failure closes an admitted run and releases its claim", asyn
     {
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: (runId: string) => {
             released.push(runId);
             return Promise.resolve(true);
@@ -1135,6 +1208,7 @@ test("a recovered admitted fiber fails once, releases capacity, and permits the 
     {
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: (runId: string) => {
             released.push(runId);
             return Promise.resolve(true);
@@ -1192,6 +1266,7 @@ test("fiber recovery fails closed when sandbox cleanup is unavailable", async ()
     {
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: (runId: string) => {
             released.push(runId);
             return Promise.resolve(true);
@@ -1261,6 +1336,7 @@ test("a post-claim agent-busy error settles the run and releases admission", asy
       RUNNER_SERVICE_TOKEN: "service-token",
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: (runId: string) => {
             released.push(runId);
             return Promise.resolve(true);
@@ -1323,6 +1399,7 @@ test("cancellation waits for sandbox cleanup before releasing capacity", async (
     {
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: (runId: string) => {
             released.push(runId);
             return Promise.resolve(true);
@@ -1411,6 +1488,7 @@ test("initial probe destroy failure keeps admission active until cleanup succeed
       RUNNER_SERVICE_TOKEN: "service-token",
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: (runId: string) => {
             released.push(runId);
             return Promise.resolve(true);
@@ -1509,6 +1587,7 @@ test("late fiber completion cannot overwrite cancellation or release twice", asy
     {
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: (runId: string) => {
             released.push(runId);
             return Promise.resolve(true);
@@ -1581,6 +1660,7 @@ test("a credential that resolves after stop cannot resurrect sandbox execution",
       RUNNER_SERVICE_TOKEN: "service-token",
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: () => Promise.resolve(true),
           validateDispatch: () => Promise.resolve(true),
         }),
@@ -1663,6 +1743,7 @@ test("aborting credential lookup records cancellation and releases admission onc
       RUNNER_SERVICE_TOKEN: "service-token",
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: (runId: string) => {
             released.push(runId);
             return Promise.resolve(true);
@@ -1740,6 +1821,7 @@ test("decommission fences delayed runs before cleanup and reset", async () => {
       RUNNER_SERVICE_TOKEN: "service-token",
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: () => Promise.resolve(true),
           validateDispatch: () => Promise.resolve(true),
         }),
@@ -1821,6 +1903,7 @@ test("decommission keeps terminal cleanup durable when admission release fails",
     {
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           getRecord: () => Promise.resolve(null),
           release: () => {
             releaseAttempts += 1;
@@ -1866,6 +1949,7 @@ test("decommission keeps terminal cleanup durable when admission release fails",
   assert.equal(pending.lifecycle.status, "decommissioning");
   assert.equal(pending.runs[0]?.run.status, "cancelled");
   assert.deepEqual(pending.decommission?.admissionReleases[queued.run.id], {
+    admissionSequence: 1,
     dispatchToken: "1:decommission-durable",
   });
   assert.equal(pending.decommission?.retryScheduleId, "decommission-retry-2");
@@ -1927,6 +2011,7 @@ test("configure rejects while decommissioning and accepts after completion", asy
     {
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           getRecord: () => Promise.resolve(null),
           release: () => {
             releaseAttempts += 1;
@@ -2650,6 +2735,7 @@ test("a stale admitted fiber callback cannot finish or release a newer token cla
     {
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: (runId: string, dispatchToken?: string) => {
             released.push({ dispatchToken, runId });
             return Promise.resolve(true);
@@ -2829,6 +2915,7 @@ test("stop returns a credential-aborted terminal run after cancellation settles 
       RUNNER_SERVICE_TOKEN: "service-token",
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: (runId: string) => {
             released.push(runId);
             return Promise.resolve(true);
@@ -2912,6 +2999,7 @@ test("cancelling an admitted queued run releases its deployment slot", async () 
     {
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: (runId: string) => {
             released.push(runId);
             return Promise.resolve(true);
@@ -2944,6 +3032,7 @@ test("cancelling a queued run preserves an active run and shared sandbox", async
     {
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: (runId: string) => {
             released.push(runId);
             return Promise.resolve(true);
@@ -3054,6 +3143,7 @@ test("admission terminal reporting does not retain an unbounded run map", async 
     {
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
           release: () => Promise.resolve(true),
           validateDispatch: () => Promise.resolve(true),
         }),

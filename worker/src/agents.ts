@@ -20,6 +20,7 @@ import {
   type FiberRecoveryContext,
   type FiberRecoveryResult,
 } from "agents";
+import { AdmissionUnavailableError } from "./admission";
 import {
   HarnessError,
   listCloudHarnesses,
@@ -2462,11 +2463,19 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
   }
 
+  async ensurePendingAdmissionCleanup(runId: string): Promise<boolean> {
+    await this.schedulePendingAdmission(runId);
+    return Boolean(
+      this.state.runs.find((candidate) => candidate.run.id === runId)
+        ?.pendingAdmission
+    );
+  }
+
   async confirmAdmission(
     runId: string,
     operationId: string,
     requestHash: string,
-    admissionCapability?: AdmissionCleanupCapability
+    admissionCapability?: AdmissionCleanupCapability | null
   ): Promise<boolean> {
     const current = this.state.runs.find(
       (candidate) => candidate.run.id === runId
@@ -2492,57 +2501,90 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       await this.reportAdmissionTerminal(runId);
       return true;
     }
+    const pending = current.pendingAdmission;
     let capability: AdmissionCleanupCapability | null | undefined =
-      admissionCapability;
-    if (!capability) {
-      try {
-        const runAdmission = (
-          this.env as unknown as {
-            RunAdmission?: {
-              getByName: (name: string) => {
-                getCleanupCapability?: (
-                  admissionRunId: string,
-                  expected: Pick<
-                    AdmissionCleanupCapability,
-                    "agentId" | "operationId" | "requestHash" | "runId"
-                  >
-                ) => Promise<AdmissionCleanupCapability | null>;
-              };
+      admissionCapability === undefined
+        ? current.admissionCapability
+        : admissionCapability;
+    if (!capability && pending && admissionCapability === undefined) {
+      const runAdmission = (
+        this.env as unknown as {
+          RunAdmission?: {
+            getByName: (name: string) => {
+              getCleanupCapability?: (
+                admissionRunId: string,
+                expected: Pick<
+                  AdmissionCleanupCapability,
+                  "agentId" | "operationId" | "requestHash" | "runId"
+                >
+              ) => Promise<AdmissionCleanupCapability | null>;
             };
-          }
-        ).RunAdmission;
-        const admission = runAdmission?.getByName("deployment");
-        if (admission?.getCleanupCapability) {
-          capability = await admission.getCleanupCapability(runId, {
-            agentId: current.run.agentId,
-            operationId,
-            requestHash,
-            runId,
-          });
+          };
         }
-      } catch {
-        // Admission capability lookup is best effort for legacy callers.
+      ).RunAdmission;
+      const admission = runAdmission?.getByName("deployment");
+      if (!admission?.getCleanupCapability) {
+        throw new AdmissionUnavailableError(
+          "Durable admission capability is unavailable."
+        );
+      }
+      try {
+        capability = await admission.getCleanupCapability(runId, {
+          agentId: current.run.agentId,
+          operationId,
+          requestHash,
+          runId,
+        });
+      } catch (error) {
+        if (
+          error instanceof AdmissionUnavailableError ||
+          (error instanceof Error && error.name === "AdmissionUnavailableError")
+        ) {
+          throw error;
+        }
+        throw new AdmissionUnavailableError(
+          "Admission capability lookup failed.",
+          { cause: error }
+        );
       }
     }
-    const pending = current.pendingAdmission;
+    if (!capability) {
+      throw new AdmissionUnavailableError(
+        "Durable admission capability is unavailable."
+      );
+    }
     if (!pending && current.admissionConfirmedAt) {
+      const mergedCapability = {
+        ...current.admissionCapability,
+        ...capability,
+        ...(capability.dispatchToken === undefined &&
+        current.admissionCapability?.dispatchToken
+          ? { dispatchToken: current.admissionCapability.dispatchToken }
+          : {}),
+      };
       if (
-        capability &&
-        (current.admissionCapability?.admissionSequence !==
-          capability.admissionSequence ||
-          current.admissionCapability?.dispatchToken !==
-            capability.dispatchToken)
+        current.admissionCapability?.admissionSequence !==
+          mergedCapability.admissionSequence ||
+        current.admissionCapability?.dispatchToken !==
+          mergedCapability.dispatchToken
       ) {
         this.persistRun({
           ...current,
-          admissionCapability: capability,
+          admissionCapability: mergedCapability,
         });
       }
       return true;
     }
     this.persistRun({
       ...current,
-      admissionCapability: capability ?? current.admissionCapability,
+      admissionCapability: {
+        ...current.admissionCapability,
+        ...capability,
+        ...(capability.dispatchToken === undefined &&
+        current.admissionCapability?.dispatchToken
+          ? { dispatchToken: current.admissionCapability.dispatchToken }
+          : {}),
+      },
       admissionConfirmedAt:
         current.admissionConfirmedAt ?? new Date().toISOString(),
       pendingAdmission: undefined,
@@ -2605,19 +2647,29 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       runId: string;
       state: "queued" | "active" | "terminal";
     } | null = null;
+    let admission:
+      | {
+          getCleanupCapability?: (
+            admissionRunId: string,
+            expected: Pick<
+              AdmissionCleanupCapability,
+              "agentId" | "operationId" | "requestHash" | "runId"
+            >
+          ) => Promise<AdmissionCleanupCapability | null>;
+          getRecord?: (
+            admissionRunId: string
+          ) => Promise<typeof admissionRecord>;
+        }
+      | undefined;
     try {
       const runAdmission = (
         this.env as unknown as {
           RunAdmission?: {
-            getByName: (name: string) => {
-              getRecord?: (
-                admissionRunId: string
-              ) => Promise<typeof admissionRecord>;
-            };
+            getByName: (name: string) => typeof admission;
           };
         }
       ).RunAdmission;
-      const admission = runAdmission?.getByName("deployment");
+      admission = runAdmission?.getByName("deployment");
       const getRecord = admission?.getRecord;
       admissionRecord = getRecord
         ? await getRecord.call(admission, current.run.id)
@@ -2634,10 +2686,30 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       admissionRecord.requestHash === current.operationHash &&
       admissionRecord.runId === current.run.id
     ) {
+      const admissionSource = admission;
+      let capability: AdmissionCleanupCapability | null = null;
+      try {
+        capability = admissionSource?.getCleanupCapability
+          ? await admissionSource.getCleanupCapability(current.run.id, {
+              agentId: current.run.agentId,
+              operationId: current.run.operationId,
+              requestHash: current.operationHash,
+              runId: current.run.id,
+            })
+          : null;
+      } catch {
+        await this.schedulePendingAdmission(current.run.id);
+        return false;
+      }
+      if (!capability) {
+        await this.schedulePendingAdmission(current.run.id);
+        return false;
+      }
       return await this.confirmAdmission(
         current.run.id,
         current.run.operationId,
-        current.operationHash
+        current.operationHash,
+        capability
       );
     }
 
@@ -2682,7 +2754,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    * record active before this RPC, and a terminal callback in `finally`
    * releases that capacity even when the harness throws.
    */
-  async startAdmitted(runId: string, dispatchToken: string): Promise<boolean> {
+  async startAdmitted(
+    runId: string,
+    dispatchToken: string,
+    admissionCapability?: AdmissionCleanupCapability
+  ): Promise<boolean> {
     if (!dispatchToken) {
       return false;
     }
@@ -2703,7 +2779,8 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       const confirmed = await this.confirmAdmission(
         runId,
         admittedRecord.run.operationId,
-        admittedRecord.operationHash
+        admittedRecord.operationHash,
+        admissionCapability
       );
       if (!confirmed) {
         return false;
