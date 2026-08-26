@@ -119,6 +119,70 @@ test("a tenant queue never exceeds ten waiting records", async () => {
   );
 });
 
+test("admitSynchronously enforces the queue cap when fairness blocks activation", () => {
+  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  const queue = new AdmissionQueue({
+    limits: {
+      consecutiveDispatches: 2,
+      deploymentActiveRuns: 3,
+      tenantActiveRuns: 2,
+      tenantQueuedRuns: 10,
+    },
+    now: () => now,
+    records: [
+      activeRecord(1, TENANT_A),
+      ...Array.from({ length: 10 }, (_unused, index) => ({
+        ...request(index + 2, TENANT_A),
+        enqueuedAt: new Date(now + index + 2).toISOString(),
+        state: "queued" as const,
+      })),
+      {
+        ...request(20, TENANT_B),
+        enqueuedAt: new Date(now + 20).toISOString(),
+        state: "queued",
+      },
+    ],
+    scheduler: {
+      consecutiveDispatches: 2,
+      lastTenantHash: TENANT_A,
+    },
+  });
+
+  assert.deepEqual(queue.admitSynchronously(request(21, TENANT_A)), {
+    kind: "refused",
+    reason: "tenant_queue_full",
+  });
+});
+
+test("admitSynchronously enforces zero queue capacity when activation is blocked", () => {
+  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  const queue = new AdmissionQueue({
+    limits: {
+      deploymentActiveRuns: 2,
+      tenantActiveRuns: 2,
+      tenantQueuedRuns: 0,
+    },
+    now: () => now,
+    records: [
+      activeRecord(1, TENANT_A),
+      {
+        ...request(2, TENANT_B),
+        enqueuedAt: new Date(now + 2).toISOString(),
+        state: "queued",
+      },
+    ],
+    scheduler: {
+      consecutiveDispatches: 2,
+      lastTenantHash: TENANT_A,
+    },
+  });
+
+  assert.deepEqual(queue.admitSynchronously(request(3, TENANT_A)), {
+    kind: "refused",
+    reason: "tenant_queue_full",
+  });
+});
+
 test("deployment active ceiling refuses new work", async () => {
   const queue = new AdmissionQueue({
     records: Array.from({ length: 25 }, (_unused, index) =>
@@ -307,6 +371,8 @@ type SqlRows = {
 type SqlInput = null | number | bigint | string | NodeJS.ArrayBufferView;
 
 type AdmissionHarnessOptions = {
+  beforeInitialize?: (database: DatabaseSync) => void;
+  failCleanupInsert?: boolean;
   setAlarmFailure?: { error: Error | null };
 };
 
@@ -326,12 +392,19 @@ function runAdmissionHarness(
 ) {
   const database = new DatabaseSync(":memory:");
   let alarm: number | null = null;
+  let transactionSyncCalls = 0;
   const background: Promise<unknown>[] = [];
   const sql = {
     exec<T>(
       query: string,
       ...parameters: SqlInput[]
     ): SqlRows & { toArray: () => T[] } {
+      if (
+        options.failCleanupInsert &&
+        /INSERT INTO admission_cleanup_tasks/u.test(query)
+      ) {
+        throw new Error("startup cleanup insertion failed");
+      }
       const statement = database.prepare(query);
       if (/^\s*(SELECT|PRAGMA)/i.test(query)) {
         return {
@@ -357,12 +430,27 @@ function runAdmissionHarness(
         return Promise.resolve();
       },
       sql,
-      transactionSync: <T>(callback: () => T) => callback(),
+      transactionSync: <T>(callback: () => T) => {
+        transactionSyncCalls += 1;
+        database.exec("BEGIN");
+        try {
+          const result = callback();
+          if (result instanceof Promise) {
+            throw new Error("transactionSync callback must be synchronous");
+          }
+          database.exec("COMMIT");
+          return result;
+        } catch (error) {
+          database.exec("ROLLBACK");
+          throw error;
+        }
+      },
     },
     waitUntil: (promise: Promise<unknown>) => {
       background.push(promise);
     },
   };
+  options.beforeInitialize?.(database);
   const admission = new RunAdmission(
     ctx as never,
     {
@@ -378,6 +466,7 @@ function runAdmissionHarness(
       alarm = value;
     },
     sql,
+    transactionSyncCalls: () => transactionSyncCalls,
   };
 }
 
@@ -404,6 +493,139 @@ function seedAdmissionRecord(
     record.tenantHash
   );
 }
+
+function seedExpiredAdmissionBeforeInitialize(
+  database: DatabaseSync,
+  enqueuedAt: string
+): void {
+  database.exec(`
+    CREATE TABLE admission_records (
+      agent_id TEXT NOT NULL,
+      enqueued_at TEXT NOT NULL,
+      operation_id TEXT NOT NULL UNIQUE,
+      request_hash TEXT NOT NULL,
+      run_id TEXT PRIMARY KEY,
+      queue_sequence INTEGER NOT NULL UNIQUE,
+      state TEXT NOT NULL CHECK (state IN ('queued', 'active', 'terminal')),
+      tenant_hash TEXT NOT NULL,
+      dispatch_started_at TEXT,
+      dispatch_lease_until TEXT,
+      dispatch_token TEXT,
+      terminalized_at TEXT
+    )
+  `);
+  database
+    .prepare(`
+      INSERT INTO admission_records
+        (agent_id, enqueued_at, operation_id, request_hash, run_id,
+         queue_sequence, state, tenant_hash)
+      VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)
+    `)
+    .run(
+      "startup-agent",
+      enqueuedAt,
+      "startup-operation",
+      "startup-request",
+      "startup-run",
+      1,
+      TENANT_A
+    );
+}
+
+test("startup reconciliation runs synchronously in one transaction", async () => {
+  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  const originalNow = Date.now;
+  Date.now = () => now;
+  try {
+    const harness = runAdmissionHarness(
+      () => ({
+        getRun: () => ({ status: "queued" }),
+        startAdmitted: () => Promise.resolve(false),
+        stop: () => Promise.resolve(null),
+      }),
+      {},
+      {
+        beforeInitialize: (database) =>
+          seedExpiredAdmissionBeforeInitialize(
+            database,
+            new Date(now - 5 * 60 * 1000 - 1).toISOString()
+          ),
+      }
+    );
+
+    assert.equal(
+      (await harness.admission.getRecord("startup-run"))?.state,
+      "terminal"
+    );
+    assert.equal(harness.transactionSyncCalls(), 1);
+    assert.equal(
+      (
+        harness.sql
+          .exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = ?",
+            "startup-run"
+          )
+          .toArray() as { count: number }[]
+      )[0]?.count,
+      1
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("startup reconciliation rolls back terminalization when cleanup insertion fails", async () => {
+  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  const originalNow = Date.now;
+  Date.now = () => now;
+  try {
+    const harness = runAdmissionHarness(
+      () => ({
+        getRun: () => ({ status: "queued" }),
+        startAdmitted: () => Promise.resolve(false),
+        stop: () => Promise.resolve(null),
+      }),
+      {},
+      {
+        beforeInitialize: (database) =>
+          seedExpiredAdmissionBeforeInitialize(
+            database,
+            new Date(now - 5 * 60 * 1000 - 1).toISOString()
+          ),
+        failCleanupInsert: true,
+      }
+    );
+
+    await assert.rejects(
+      () => harness.admission.getRecord("startup-run"),
+      /startup cleanup insertion failed/
+    );
+    assert.equal(harness.transactionSyncCalls(), 1);
+    assert.equal(
+      (
+        harness.sql
+          .exec<{ state: string }>(
+            "SELECT state FROM admission_records WHERE run_id = ?",
+            "startup-run"
+          )
+          .toArray() as { state: string }[]
+      )[0]?.state,
+      "queued"
+    );
+    assert.equal(
+      (
+        harness.sql
+          .exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM admission_cleanup_tasks"
+          )
+          .toArray() as { count: number }[]
+      )[0]?.count,
+      0
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});
 
 test("alarm reconciliation does not requeue a nonexpired dispatch lease", async () => {
   let now = Date.parse("2026-08-26T00:00:00.000Z");

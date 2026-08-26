@@ -342,11 +342,8 @@ export class AdmissionQueue {
     if (this.activeCount() >= this.limits.deploymentActiveRuns) {
       return { kind: "refused", reason: "global_busy" };
     }
-    const tenantCanStart =
-      this.activeCountForTenant(input.tenantHash) <
-      this.limits.tenantActiveRuns;
     if (
-      !tenantCanStart &&
+      !this.wouldActivateImmediately(input) &&
       this.queuedCount(input.tenantHash) >= this.limits.tenantQueuedRuns
     ) {
       return { kind: "refused", reason: "tenant_queue_full" };
@@ -360,6 +357,34 @@ export class AdmissionQueue {
     this.queueRecords.push({ ...record, sequence: this.nextSequence });
     this.nextSequence += 1;
     return this.decisionFor(record.runId);
+  }
+
+  wouldActivateImmediately(input: AdmissionRequest): boolean {
+    assertAdmissionRequest(input);
+    return this.schedulerForImmediateAdmission(input) !== null;
+  }
+
+  schedulerForImmediateAdmission(
+    input: AdmissionRequest
+  ): SchedulerState | null {
+    assertAdmissionRequest(input);
+    const now = this.now();
+    const candidate: StoredAdmissionRecord = {
+      ...input,
+      enqueuedAt: new Date(now).toISOString(),
+      sequence: this.nextSequence,
+      state: "queued",
+    };
+    const tentativeQueue = new AdmissionQueue({
+      limits: this.limits,
+      nextSequence: this.nextSequence + 1,
+      now: () => now,
+      records: [...this.queueRecords, candidate],
+      scheduler: this.queueScheduler,
+    });
+    return tentativeQueue.nextDispatchCandidate()?.runId === input.runId
+      ? tentativeQueue.scheduler()
+      : null;
   }
 
   async dispatch(): Promise<void> {
@@ -717,7 +742,9 @@ export class RunAdmission extends DurableObject<Env> {
           value TEXT NOT NULL
         )
       `);
-      this.reconcileExpiredQueuedAdmissionsInTransaction(Date.now());
+      ctx.storage.transactionSync(() => {
+        this.reconcileExpiredQueuedAdmissionsInTransaction(Date.now());
+      });
       await Promise.resolve();
     });
   }
@@ -759,14 +786,8 @@ export class RunAdmission extends DurableObject<Env> {
         sequence: nextSequence,
         state: "queued",
       };
-      const tentativeQueue = new AdmissionQueue({
-        limits,
-        nextSequence: nextSequence + 1,
-        records: [...storedRecords, enqueuedRecord],
-        scheduler: this.readScheduler(),
-      });
-      const immediateCandidate = tentativeQueue.nextDispatchCandidate();
-      const canActivateImmediately = immediateCandidate?.runId === input.runId;
+      const immediateScheduler = queue.schedulerForImmediateAdmission(input);
+      const canActivateImmediately = immediateScheduler !== null;
       const decision = canActivateImmediately
         ? ({ kind: "active", runId: input.runId } as AdmissionDecision)
         : queue.admitSynchronously(input);
@@ -782,26 +803,10 @@ export class RunAdmission extends DurableObject<Env> {
             ...enqueuedRecord,
             state: "queued",
           };
-      if (
-        !canActivateImmediately &&
-        storedRecords.filter(
-          (candidate) =>
-            candidate.state === "queued" &&
-            candidate.tenantHash === input.tenantHash
-        ).length >= limits.tenantQueuedRuns
-      ) {
-        return {
-          decision: {
-            kind: "refused",
-            reason: "tenant_queue_full",
-          } as AdmissionDecision,
-          record: null,
-        };
-      }
       this.writeRecord(record);
       this.writeMetaValue(NEXT_SEQUENCE_META_KEY, String(nextSequence + 1));
-      if (canActivateImmediately) {
-        this.writeScheduler(tentativeQueue.scheduler());
+      if (immediateScheduler !== null) {
+        this.writeScheduler(immediateScheduler);
         this.markDispatchPending(record.runId);
       }
       return { decision, record };
