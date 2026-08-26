@@ -428,7 +428,31 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     );
   }
 
+  private definitionIsCurrent(
+    definition: AgentDefinition,
+    lifecycleGeneration: number
+  ): boolean {
+    return (
+      this.lifecycleIsActive(lifecycleGeneration) &&
+      this.state.definition?.id === definition.id &&
+      this.state.definition.updatedAt === definition.updatedAt &&
+      !this.state.decommission
+    );
+  }
+
   private executionIsLive(execution: {
+    generation: number;
+    runId: string;
+    dispatchToken?: string;
+    signal?: AbortSignal;
+  }): boolean {
+    if (execution.signal?.aborted) {
+      return false;
+    }
+    return this.executionRecordIsCurrent(execution);
+  }
+
+  private executionRecordIsCurrent(execution: {
     generation: number;
     runId: string;
     dispatchToken?: string;
@@ -504,6 +528,36 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     );
   }
 
+  private persistExecutionCancellation(
+    execution: {
+      generation: number;
+      runId: string;
+      dispatchToken?: string;
+    },
+    credential: string | null,
+    output = "Run cancelled before execution completed."
+  ): void {
+    if (!this.executionRecordIsCurrent(execution)) {
+      return;
+    }
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === execution.runId
+    );
+    if (current?.run.status !== "running") {
+      return;
+    }
+    const completedAt = new Date().toISOString();
+    const cancelled = finishCloudRunRecord(current, {
+      completedAt,
+      credential,
+      output,
+      status: "cancelled",
+    });
+    if (this.persistRun(cancelled, { dispatchClaim: null })) {
+      this.updateDefinitionAfterCancellation(completedAt);
+    }
+  }
+
   private trackFiberCompletion(
     key: string,
     work: Promise<void>
@@ -519,13 +573,17 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
 
   private tryAcquireSandboxOwnership(
     runId?: string,
-    dispatchToken?: string
+    dispatchToken?: string,
+    canAcquire?: () => boolean
   ): {
     generation: number;
     owner: string;
     dispatchToken?: string;
     runId?: string;
   } | null {
+    if (canAcquire && !canAcquire()) {
+      return null;
+    }
     const current = this.state.sandbox;
     if (current?.owner || current?.cleanup) {
       return null;
@@ -547,6 +605,37 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       ...(dispatchToken ? { dispatchToken } : {}),
       ...(runId ? { runId } : {}),
     };
+  }
+
+  private clearSandboxOwnershipAfterFence(
+    ownership:
+      | {
+          generation: number;
+          owner: string;
+          dispatchToken?: string;
+          runId?: string;
+        }
+      | undefined
+  ): void {
+    if (!ownership) {
+      return;
+    }
+    const current = this.state.sandbox;
+    if (
+      current?.generation !== ownership.generation ||
+      current.owner !== ownership.owner ||
+      current.cleanup?.generation === ownership.generation
+    ) {
+      return;
+    }
+    this.clearSandboxOwnership(ownership);
+  }
+
+  private executionWasCancelled(error: unknown, signal?: AbortSignal): boolean {
+    return (
+      signal?.aborted === true ||
+      (error instanceof Error && error.name === "AbortError")
+    );
   }
 
   private acquireSandboxOwnership(
@@ -1152,6 +1241,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       dispatchToken: planned.dispatchToken,
       generation: lifecycle.generation,
       runId: planned.run.id,
+      signal,
     };
     const current = this.state.runs.find(
       (candidate) => candidate.run.id === planned.run.id
@@ -1190,6 +1280,9 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
         signal
       );
       if (!this.executionIsLive(execution)) {
+        if (signal?.aborted) {
+          this.persistExecutionCancellation(execution, credential);
+        }
         return this.currentRunOr(planned.run.id, record);
       }
       /**
@@ -1214,13 +1307,26 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       };
 
       await this.ensureSandboxAvailableForRun(definition, planned.run.id);
+      if (!this.executionIsLive(execution)) {
+        if (signal?.aborted) {
+          this.persistExecutionCancellation(execution, credential);
+        }
+        return this.currentRunOr(planned.run.id, record);
+      }
       const claimedOwnership = this.tryAcquireSandboxOwnership(
         planned.run.id,
-        planned.dispatchToken
+        planned.dispatchToken,
+        () => this.executionIsLive(execution)
       );
       if (claimedOwnership) {
         ownership = claimedOwnership;
       } else {
+        if (!this.executionIsLive(execution)) {
+          if (signal?.aborted) {
+            this.persistExecutionCancellation(execution, credential);
+          }
+          return this.currentRunOr(planned.run.id, record);
+        }
         const currentSandbox = this.state.sandbox;
         if (currentSandbox?.runId !== planned.run.id || !currentSandbox.owner) {
           throw new AgentBusyError();
@@ -1232,8 +1338,19 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
           runId: currentSandbox.runId,
         };
       }
+      if (!this.executionIsLive(execution)) {
+        this.clearSandboxOwnershipAfterFence(ownership);
+        if (signal?.aborted) {
+          this.persistExecutionCancellation(execution, credential);
+        }
+        return this.currentRunOr(planned.run.id, record);
+      }
       const sandboxName = await sandboxKey(tenantOf(definition), definition.id);
       if (!this.executionIsLive(execution)) {
+        this.clearSandboxOwnershipAfterFence(ownership);
+        if (signal?.aborted) {
+          this.persistExecutionCancellation(execution, credential);
+        }
         return this.currentRunOr(planned.run.id, record);
       }
       const run = await runHarnessInSandbox({
@@ -1270,6 +1387,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       });
 
       if (!this.executionIsLive(execution)) {
+        this.clearSandboxOwnershipAfterFence(ownership);
+        if (signal?.aborted) {
+          this.persistExecutionCancellation(execution, credential);
+        }
         return this.currentRunOr(planned.run.id, record);
       }
       this.clearSandboxOwnership(
@@ -1312,6 +1433,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         status: failed ? "failed" : "completed",
       });
       if (!this.executionIsLive(execution)) {
+        if (signal?.aborted) {
+          this.persistExecutionCancellation(execution, credential);
+        }
         return this.currentRunOr(planned.run.id, record);
       }
       if (this.persistRun(record)) {
@@ -1331,9 +1455,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       if (error instanceof AgentBusyError) {
         throw error;
       }
-      if (!this.executionIsLive(execution)) {
-        return this.currentRunOr(planned.run.id, record);
-      }
+      const cancellation = this.executionWasCancelled(error, signal);
       const cleanupRequired =
         error instanceof HarnessError &&
         (error.code === "harness_timeout" ||
@@ -1359,13 +1481,24 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
             error
           );
         }
+        if (error.code === "sandbox_cleanup_failed") {
+          this.persistExecutionCancellation(execution, credential);
+          return this.currentRunOr(planned.run.id, record);
+        }
         if (!this.executionIsLive(execution)) {
+          this.clearSandboxOwnershipAfterFence(ownership);
           return this.currentRunOr(planned.run.id, record);
         }
       } else if (ownership) {
         this.clearSandboxOwnership(ownership);
       }
+      if (cancellation) {
+        this.clearSandboxOwnershipAfterFence(ownership);
+        this.persistExecutionCancellation(execution, credential);
+        return this.currentRunOr(planned.run.id, record);
+      }
       if (!this.executionIsLive(execution)) {
+        this.clearSandboxOwnershipAfterFence(ownership);
         return this.currentRunOr(planned.run.id, record);
       }
       const completedAt = new Date().toISOString();
@@ -1391,6 +1524,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
             : "failed",
       });
       if (!this.executionIsLive(execution)) {
+        this.clearSandboxOwnershipAfterFence(ownership);
         return this.currentRunOr(planned.run.id, record);
       }
       if (this.persistRun(record)) {
@@ -1434,14 +1568,21 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (!(await this.repairPendingSandboxCleanup(definition))) {
       throw new AgentBusyError();
     }
-    if (!this.lifecycleIsActive(lifecycleGeneration)) {
-      throw new AgentBusyError();
+    if (!this.definitionIsCurrent(definition, lifecycleGeneration)) {
+      throw new AgentDecommissioningError();
     }
     validateCloudWorkspace(definition);
 
+    if (this.state.sandbox?.owner || this.state.sandbox?.cleanup) {
+      await this.ensureSandboxAvailableForRun(definition);
+    }
+    if (!this.definitionIsCurrent(definition, lifecycleGeneration)) {
+      throw new AgentDecommissioningError();
+    }
+
     const operationHash = await hashOperation(definition.id, task);
-    if (!this.lifecycleIsActive(lifecycleGeneration)) {
-      throw new AgentBusyError();
+    if (!this.definitionIsCurrent(definition, lifecycleGeneration)) {
+      throw new AgentDecommissioningError();
     }
     const plan = planCloudRunStart({
       agentId: definition.id,
@@ -1458,10 +1599,6 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
     if (plan.kind === "conflict") {
       throw new OperationConflictError();
-    }
-
-    if (this.state.sandbox?.owner || this.state.sandbox?.cleanup) {
-      await this.ensureSandboxAvailableForRun(definition, plan.record.run.id);
     }
 
     /**
@@ -2153,7 +2290,22 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
             owner: this.state.sandbox.owner,
             runId,
           }
-        : this.acquireSandboxOwnership(runId);
+        : this.tryAcquireSandboxOwnership(runId, expectedDispatchToken, () => {
+            const current = this.state.runs.find(
+              (candidate) => candidate.run.id === runId
+            );
+            return Boolean(
+              current &&
+                !isTerminal(current.run.status) &&
+                (!expectedDispatchToken ||
+                  this.dispatchTokenMatches(runId, expectedDispatchToken)) &&
+                !this.state.sandbox?.owner &&
+                !this.state.sandbox?.cleanup
+            );
+          });
+    if (!ownership) {
+      throw new AgentBusyError();
+    }
     if (
       !(await this.cleanupOwnedSandbox(
         definition,
@@ -2405,7 +2557,15 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       throw new AgentBusyError();
     }
 
-    const ownership = this.tryAcquireSandboxOwnership();
+    const ownership = this.tryAcquireSandboxOwnership(
+      undefined,
+      undefined,
+      () =>
+        this.definitionIsCurrent(definition, lifecycleGeneration) &&
+        !this.state.sandbox?.owner &&
+        !this.state.sandbox?.cleanup &&
+        !this.state.runs.some((record) => !isTerminal(record.run.status))
+    );
     if (!ownership) {
       throw new AgentBusyError();
     }
@@ -2826,6 +2986,18 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         "Agent sandbox cleanup is still pending. Try again later."
       );
     }
+    const currentLifecycle = this.currentLifecycle();
+    if (
+      currentLifecycle.status !== "decommissioning" ||
+      currentLifecycle.generation !== generation ||
+      this.state.definition?.id !== currentDefinition.id
+    ) {
+      if (currentLifecycle.status === "decommissioned") {
+        return;
+      }
+      await this.scheduleDecommissionRetry();
+      throw new AgentDecommissioningError();
+    }
     const current = this.state.sandbox;
     const ownership = current?.owner
       ? {
@@ -2834,7 +3006,20 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           owner: current.owner,
           runId: current.runId,
         }
-      : this.acquireSandboxOwnership();
+      : this.tryAcquireSandboxOwnership(
+          undefined,
+          undefined,
+          () =>
+            this.currentLifecycle().status === "decommissioning" &&
+            this.currentLifecycle().generation === generation &&
+            this.state.definition?.id === currentDefinition.id &&
+            !this.state.sandbox?.owner &&
+            !this.state.sandbox?.cleanup
+        );
+    if (!ownership) {
+      await this.scheduleDecommissionRetry();
+      throw new AgentDecommissioningError();
+    }
     if (
       !(await this.cleanupOwnedSandbox(
         currentDefinition,

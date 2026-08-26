@@ -344,6 +344,126 @@ test("a fenced and requeued dispatch cannot resume after sandbox ownership wait"
   assert.equal(destroyedSandboxes().length, 1);
 });
 
+test("cancellation during drive sandbox wait clears ownership before the next run", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (() =>
+    Promise.resolve(
+      new Response(JSON.stringify({ credential: "secret" }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      })
+    )) as typeof fetch;
+  let releaseWarm!: () => void;
+  const warmCancellation = new Promise<void>((resolve) => {
+    releaseWarm = resolve;
+  });
+  let warmCancellationStarted!: () => void;
+  const warmCancellationReady = new Promise<void>((resolve) => {
+    warmCancellationStarted = resolve;
+  });
+  let injectWarmOwner = true;
+  let runFiber!: Promise<void>;
+  let runController!: AbortController;
+  const yolo = new (class extends YoloAgent {
+    override startFiber(
+      _name: string,
+      fn: Parameters<YoloAgent["startFiber"]>[1]
+    ): ReturnType<YoloAgent["startFiber"]> {
+      runController = new AbortController();
+      if (injectWarmOwner) {
+        const state = Reflect.get(this, "state") as {
+          definition: AgentDefinition | null;
+          lifecycle: {
+            generation: number;
+            status: "active" | "decommissioning" | "decommissioned";
+          };
+          runs: CloudRunRecord[];
+          sandbox?: { generation: number; owner?: string };
+        };
+        this.setState({
+          ...state,
+          sandbox: { generation: 1, owner: "warm:waiting" },
+        });
+      }
+      runFiber = fn({
+        id: "fiber:ownership-wait",
+        signal: runController.signal,
+        snapshot: null,
+        stash: () => undefined,
+      });
+      return Promise.resolve({
+        accepted: true,
+        createdAt: Date.now(),
+        fiberId: "fiber:ownership-wait",
+        name: "run:ownership-wait",
+        status: "running",
+      });
+    }
+
+    override cancelFiberByKey(
+      idempotencyKey: string,
+      reason?: string
+    ): Promise<boolean> {
+      if (idempotencyKey === "warm") {
+        runController.abort(reason);
+        warmCancellationStarted();
+        return warmCancellation.then(() => true);
+      }
+      return Promise.resolve(true);
+    }
+  })(
+    undefined as never,
+    {
+      APP_ORIGIN: "https://runner.test",
+      RUNNER_SERVICE_TOKEN: "service-token",
+      Sandbox: {},
+    } as never
+  );
+  yolo.configure(definition());
+
+  try {
+    const first = await yolo.enqueue(
+      { operationId: OP_A, task: "Cancel while acquiring ownership." },
+      "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c92",
+      "ownership-cancel",
+      "identity"
+    );
+    assert.equal(
+      await yolo.startAdmitted(first.run.id, "1:ownership-cancel"),
+      true
+    );
+    await warmCancellationReady;
+    releaseWarm();
+    await runFiber;
+
+    const afterWait = Reflect.get(yolo, "state") as {
+      sandbox?: { owner?: string };
+    };
+    assert.equal(afterWait.sandbox?.owner, undefined);
+    assert.equal(yolo.getRun(first.run.id)?.status, "cancelled");
+
+    assert.equal((await yolo.stop(first.run.id))?.status, "cancelled");
+    injectWarmOwner = false;
+    const second = await yolo.enqueue(
+      { operationId: OP_B, task: "Proceed after cancellation." },
+      "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c93",
+      "ownership-next",
+      "identity"
+    );
+    assert.equal(
+      await yolo.startAdmitted(second.run.id, "2:ownership-next"),
+      true
+    );
+    await runFiber;
+    assert.equal(yolo.getRun(second.run.id)?.status, "failed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("decommission during sandbox ownership wait cannot let the old start mutate state", async () => {
   resetFiberLog();
   resetDestroyedSandboxes();
@@ -424,6 +544,71 @@ test("decommission during sandbox ownership wait cannot let the old start mutate
   assert.equal(after.lifecycle.status, "decommissioned");
   assert.deepEqual(after.runs, []);
   assert.ok(destroyedSandboxes().length >= 1);
+});
+
+test("legacy start returns a retryable decommission result after sandbox cleanup wait", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  let releaseCancellation!: () => void;
+  const cancellation = new Promise<void>((resolve) => {
+    releaseCancellation = resolve;
+  });
+  let cancellationStarted!: () => void;
+  const cancellationReady = new Promise<void>((resolve) => {
+    cancellationStarted = resolve;
+  });
+  let warmCancellationCalls = 0;
+  const yolo = new (class extends YoloAgent {
+    override cancelFiberByKey(
+      idempotencyKey: string,
+      _reason?: string
+    ): Promise<boolean> {
+      const firstWarmCancellation =
+        idempotencyKey === "warm" && warmCancellationCalls === 0;
+      if (idempotencyKey === "warm") {
+        warmCancellationCalls += 1;
+      }
+      if (firstWarmCancellation) {
+        cancellationStarted();
+        return cancellation.then(() => true);
+      }
+      return Promise.resolve(true);
+    }
+  })(undefined as never, {} as never);
+  yolo.configure(definition());
+  await yolo.warm();
+
+  const starting = yolo.start(
+    { operationId: OP_A, task: "Legacy cleanup race." },
+    "identity"
+  );
+  await cancellationReady;
+  const decommissioning = yolo.decommission();
+  releaseCancellation();
+
+  const [startError, decommissionError] = await Promise.all([
+    starting.then(
+      () => null,
+      (error: unknown) => error
+    ),
+    decommissioning.then(
+      () => null,
+      (error: unknown) => error
+    ),
+  ]);
+  assert.equal(decommissionError, null);
+  assert.ok(startError instanceof AgentDecommissioningError);
+  assert.equal(startError?.retryable, true);
+  assert.equal(
+    fiberLog.started.some((entry) => entry.key.startsWith("run:")),
+    false
+  );
+  assert.equal(yolo.snapshot(), null);
+  assert.deepEqual(
+    (Reflect.get(yolo, "state") as { runs: CloudRunRecord[] }).runs,
+    []
+  );
 });
 
 test("a durable admission fence rejects a delayed token but permits the next claim", async () => {
@@ -1005,6 +1190,93 @@ test("a credential that resolves after stop cannot resurrect sandbox execution",
 
     assert.equal(sandboxGetCount(), getsAfterStop);
     assert.equal(yolo.getRun(queued.run.id)?.status, "cancelled");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("aborting credential lookup records cancellation and releases admission once", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  const originalFetch = globalThis.fetch;
+  let rejectCredential!: (error: unknown) => void;
+  globalThis.fetch = ((_input: string | URL | Request, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      rejectCredential = reject;
+      init?.signal?.addEventListener(
+        "abort",
+        () =>
+          reject(
+            Object.assign(new Error("lookup aborted"), { name: "AbortError" })
+          ),
+        { once: true }
+      );
+    })) as typeof fetch;
+  let runFiber!: Promise<void>;
+  let runController!: AbortController;
+  const released: string[] = [];
+  const yolo = new (class extends YoloAgent {
+    override startFiber(
+      _name: string,
+      fn: Parameters<YoloAgent["startFiber"]>[1]
+    ): ReturnType<YoloAgent["startFiber"]> {
+      runController = new AbortController();
+      runFiber = fn({
+        id: "fiber:credential-abort",
+        signal: runController.signal,
+        snapshot: null,
+        stash: () => undefined,
+      });
+      return Promise.resolve({
+        accepted: true,
+        createdAt: Date.now(),
+        fiberId: "fiber:credential-abort",
+        name: "run:credential-abort",
+        status: "running",
+      });
+    }
+  })(
+    undefined as never,
+    {
+      APP_ORIGIN: "https://runner.test",
+      RUNNER_SERVICE_TOKEN: "service-token",
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string) => {
+            released.push(runId);
+            return Promise.resolve(true);
+          },
+        }),
+      },
+      Sandbox: {},
+    } as never
+  );
+  yolo.configure(definition());
+
+  try {
+    const queued = await yolo.enqueue(
+      { operationId: OP_A, task: "Abort credential lookup." },
+      "df2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8ca5",
+      "credential-abort",
+      "identity"
+    );
+    assert.equal(
+      await yolo.startAdmitted(queued.run.id, "1:credential-abort"),
+      true
+    );
+
+    runController.abort("cancel lookup");
+    rejectCredential(
+      Object.assign(new Error("lookup aborted"), { name: "AbortError" })
+    );
+    await runFiber;
+
+    assert.equal(yolo.getRun(queued.run.id)?.status, "cancelled");
+    assert.equal(yolo.getRun(queued.run.id)?.error, null);
+    assert.deepEqual(released, [queued.run.id]);
+    assert.equal((await yolo.stop(queued.run.id))?.status, "cancelled");
+    assert.deepEqual(released, [queued.run.id]);
   } finally {
     globalThis.fetch = originalFetch;
   }
