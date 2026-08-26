@@ -1,7 +1,7 @@
 import { createClient, type RedisClientOptions } from "redis";
 import { requireAbuseKeySecret } from "./config";
 import { abusePolicyFor } from "./policy";
-import { type AbuseStore, RedisAbuseStore } from "./store";
+import { type AbuseStore, MemoryAbuseStore, RedisAbuseStore } from "./store";
 import type { AbuseRoute, AbuseSubject } from "./types";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 1000;
@@ -178,6 +178,23 @@ export function createAbusePolicyEnforcer(input: {
   );
   const timers = input.timers ?? SYSTEM_TIMERS;
 
+  /**
+   * The store used while Redis is configured but not answering.
+   *
+   * Process-local, so its budgets are per-instance and reset on cold start —
+   * degraded limiting, not none. The provider throws while its connection is
+   * still coming up, on connect timeout, and on a dropped socket; treating
+   * each of those as a 503 turned the limiter's own availability into the
+   * product's, and every cold serverless boot answered its first requests
+   * with an outage. A blip in the limiter degrades the limiter, never the
+   * product.
+   *
+   * Deliberately NOT used when the provider returns `undefined`: that means
+   * Redis is unconfigured, and production failing closed on missing
+   * configuration is a decision this fallback must not quietly reverse.
+   */
+  const fallbackStore = new MemoryAbuseStore();
+
   return async (request) => {
     const policy = abusePolicyFor(request.route);
     const subjects = deriveSubjects(policy.subjects, request);
@@ -189,7 +206,7 @@ export function createAbusePolicyEnforcer(input: {
     try {
       store = request.store ?? (await input.getStore());
     } catch {
-      return { kind: "unavailable", responseStatus: 503 };
+      store = fallbackStore;
     }
 
     if (!store) {
@@ -231,7 +248,41 @@ export function createAbusePolicyEnforcer(input: {
           };
         }
       } catch {
-        return { kind: "unavailable", responseStatus: 503 };
+        /**
+         * The consume threw mid-request — a socket that dropped after the
+         * store was handed out looks exactly like one that never connected.
+         * Re-run this subject's windows against the memory fallback rather
+         * than 503ing: the request stays limited, per-instance, and the
+         * product stays up. Only the fallback itself failing reaches 503,
+         * and the memory store has no I/O to fail on.
+         */
+        try {
+          const windows = [
+            ["burst", policy.burst],
+            ["sustained", policy.sustained],
+          ] as const;
+          const results = await Promise.all(
+            windows.map(([, window]) =>
+              fallbackStore.consume(
+                `${request.route}:${window.windowSeconds}:${subject.kind}:${subject.value}`,
+                window.limit,
+                window.windowSeconds
+              )
+            )
+          );
+          const denials = results.filter((result) => !result.allowed);
+          if (denials.length > 0) {
+            return {
+              kind: "denied",
+              responseStatus: 429,
+              retryAfterSeconds: Math.max(
+                ...denials.map((result) => result.retryAfterSeconds)
+              ),
+            };
+          }
+        } catch {
+          return { kind: "unavailable", responseStatus: 503 };
+        }
       }
     }
 
