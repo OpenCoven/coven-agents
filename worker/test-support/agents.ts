@@ -10,20 +10,38 @@
  */
 
 export type FiberRecoveryContext = {
+  createdAt: number;
+  id: string;
   metadata?: Record<string, unknown> | null;
   name: string;
+  recoveryReason: "interrupted";
   snapshot: unknown | null;
+  status?:
+    | "pending"
+    | "running"
+    | "completed"
+    | "aborted"
+    | "interrupted"
+    | "error";
 };
 
 export type FiberRecoveryResult = {
-  error?: string;
+  error?: unknown;
+  reason?: string;
   snapshot?: unknown;
-  status: "completed" | "error";
+  status: "completed" | "error" | "aborted" | "interrupted";
 };
 
 export type StartedFiber = {
   key: string;
   name: string;
+};
+
+export type FiberContext = {
+  id: string;
+  signal: AbortSignal;
+  snapshot: unknown | null;
+  stash: (data: unknown) => void;
 };
 
 /** Recorded across all instances so a test can assert on dispatch. */
@@ -35,10 +53,15 @@ export const fiberLog: {
 export function resetFiberLog(): void {
   fiberLog.cancelled = [];
   fiberLog.started = [];
+  activeFibers.clear();
 }
 
 /** When false, `startFiber` records the dispatch without running the work. */
 export const fiberControl = { runFibers: true };
+const activeFibers = new Map<
+  string,
+  { controller: AbortController; fiberId: string }
+>();
 
 export class Agent<Environment, State> {
   env: Environment;
@@ -65,7 +88,14 @@ export class Agent<Environment, State> {
 
   cancelFiberByKey(idempotencyKey: string, reason?: string): Promise<boolean> {
     fiberLog.cancelled.push({ key: idempotencyKey, reason });
+    activeFibers.get(idempotencyKey)?.controller.abort(reason);
     return Promise.resolve(true);
+  }
+
+  onFiberRecovered(
+    _context: FiberRecoveryContext
+  ): Promise<undefined | FiberRecoveryResult> {
+    return Promise.resolve(undefined);
   }
 
   setState(state: State): void {
@@ -74,14 +104,41 @@ export class Agent<Environment, State> {
 
   async startFiber(
     name: string,
-    fn: () => Promise<void>,
-    options?: { idempotencyKey?: string }
-  ): Promise<{ accepted: boolean }> {
-    fiberLog.started.push({ key: options?.idempotencyKey ?? "", name });
-    if (fiberControl.runFibers) {
-      await fn();
+    fn: (context: FiberContext) => Promise<void>,
+    options?: {
+      fiberId?: string;
+      idempotencyKey?: string;
+      metadata?: Record<string, unknown>;
+      waitForCompletion?: boolean;
     }
-    return { accepted: true };
+  ): Promise<{
+    accepted: boolean;
+    status: "pending" | "running" | "completed" | "error";
+  }> {
+    const key = options?.idempotencyKey ?? "";
+    if (activeFibers.has(key)) {
+      return { accepted: false, status: "running" };
+    }
+    fiberLog.started.push({ key, name });
+    const controller = new AbortController();
+    const fiberId = `fiber:${key}`;
+    activeFibers.set(key, { controller, fiberId });
+    if (fiberControl.runFibers) {
+      try {
+        await fn({
+          id: fiberId,
+          signal: controller.signal,
+          snapshot: null,
+          stash: () => undefined,
+        });
+      } catch {
+        activeFibers.delete(key);
+        return { accepted: true, status: "error" };
+      }
+      activeFibers.delete(key);
+      return { accepted: true, status: "completed" };
+    }
+    return { accepted: true, status: "running" };
   }
 }
 

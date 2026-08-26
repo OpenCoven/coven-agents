@@ -16,7 +16,11 @@ import type {
   HarnessStatus,
   RunEvent as HarnessStreamEvent,
 } from "@opencoven/harness";
-import { Agent } from "agents";
+import {
+  Agent,
+  type FiberRecoveryContext,
+  type FiberRecoveryResult,
+} from "agents";
 import {
   HarnessError,
   listCloudHarnesses,
@@ -59,6 +63,7 @@ type DirectoryState = {
 };
 
 type YoloAgentState = {
+  admissionReported?: Record<string, true>;
   definition: AgentDefinition | null;
   identityTokens?: Record<string, string>;
   runs: CloudRunRecord[];
@@ -164,11 +169,27 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
     });
   }
 
-  registerRun(runId: string, agentId: string): void {
+  registerRun(runId: string, agentId: string): boolean {
+    const runs = this.state.runs ?? {};
+    if (Object.hasOwn(runs, runId)) {
+      return false;
+    }
     this.setState({
       ...this.state,
-      runs: { ...this.state.runs, [runId]: agentId },
+      runs: { ...runs, [runId]: agentId },
     });
+    return true;
+  }
+
+  unregisterRun(runId: string, agentId: string): boolean {
+    const runs = this.state.runs ?? {};
+    if (!Object.hasOwn(runs, runId) || runs[runId] !== agentId) {
+      return false;
+    }
+    const remaining = { ...runs };
+    delete remaining[runId];
+    this.setState({ ...this.state, runs: remaining });
+    return true;
   }
 
   lookupRun(runId: string): string | null {
@@ -191,10 +212,12 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
 
 export class YoloAgent extends Agent<Env, YoloAgentState> {
   initialState: YoloAgentState = {
+    admissionReported: {},
     definition: null,
     identityTokens: {},
     runs: [],
   };
+  private readonly admissionReleaseInFlight = new Map<string, Promise<void>>();
 
   configure(definition: AgentDefinition): AgentDefinition {
     const parsed = agentDefinitionSchema.parse(definition);
@@ -328,11 +351,12 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
    * fiber. Keeping one body means the synchronous and asynchronous paths cannot
    * disagree about how evidence is captured or how a failure is recorded.
    */
-  private async driveHarness(
+  protected async driveHarness(
     definition: AgentDefinition,
     planned: CloudRunRecord,
     task: string,
-    identityToken: string
+    identityToken: string,
+    signal?: AbortSignal
   ): Promise<CloudRunRecord> {
     let record = this.claimRunStart(planned);
 
@@ -385,6 +409,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           // uses, so a warmed container and a run container age identically.
           { sleepAfter: WARM_SLEEP_AFTER }
         ),
+        signal,
         task,
         workspace: definition.workspace,
       });
@@ -425,13 +450,19 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           "The harness produced no output.",
         status: failed ? "failed" : "completed",
       });
-      this.persistRun(record);
-      this.updateDefinition({
-        lastRunAt: completedAt,
-        status: failed ? "error" : "idle",
-        updatedAt: completedAt,
-      });
-      return record;
+      if (this.persistRun(record)) {
+        this.updateDefinition({
+          lastRunAt: completedAt,
+          status: failed ? "error" : "idle",
+          updatedAt: completedAt,
+        });
+        return record;
+      }
+      return (
+        this.state.runs.find(
+          (candidate) => candidate.run.id === planned.run.id
+        ) ?? record
+      );
     } catch (error) {
       /**
        * A timed-out exec means the container is suspect, not just the run:
@@ -471,13 +502,19 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           error instanceof Error ? error.message : "Agent execution failed.",
         status: "failed",
       });
-      this.persistRun(record);
-      this.updateDefinition({
-        lastRunAt: completedAt,
-        status: "error",
-        updatedAt: completedAt,
-      });
-      return record;
+      if (this.persistRun(record)) {
+        this.updateDefinition({
+          lastRunAt: completedAt,
+          status: "error",
+          updatedAt: completedAt,
+        });
+        return record;
+      }
+      return (
+        this.state.runs.find(
+          (candidate) => candidate.run.id === planned.run.id
+        ) ?? record
+      );
     }
   }
 
@@ -533,16 +570,22 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     return await dispatchCloudRun(plan, (record, fiberKey) =>
       this.startFiber(
         fiberKey,
-        async () => {
+        async (fiber) => {
           try {
-            await this.driveHarness(definition, record, task, identityToken);
+            await this.driveHarness(
+              definition,
+              record,
+              task,
+              identityToken,
+              fiber.signal
+            );
           } finally {
             await this.reportAdmissionTerminal(record.run.id);
           }
         },
         // Keyed on the fiber key rather than the operation id: `stop` cancels
         // by run, and a run is what a caller can name.
-        { idempotencyKey: fiberKey }
+        { idempotencyKey: fiberKey, metadata: { runId: record.run.id } }
       )
     );
   }
@@ -612,30 +655,99 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     const definition = this.requireDefinition();
     const claimed = this.claimRunStart(record);
     try {
-      await this.startFiber(
+      const receipt = await this.startFiber(
         cloudFiberKey(runId),
-        async () => {
+        async (fiber) => {
           try {
             await this.driveHarness(
               definition,
               claimed,
               claimed.run.task,
-              identityToken
+              identityToken,
+              fiber.signal
             );
           } finally {
             await this.reportAdmissionTerminal(runId);
           }
         },
-        { idempotencyKey: cloudFiberKey(runId) }
+        {
+          idempotencyKey: cloudFiberKey(runId),
+          metadata: { runId },
+        }
       );
+      if (!receipt.accepted) {
+        if (receipt.status !== "pending" && receipt.status !== "running") {
+          await this.failRunAfterDispatchError(
+            runId,
+            new Error("An existing cloud run fiber was no longer active.")
+          );
+          await this.reportAdmissionTerminal(runId);
+        }
+        return false;
+      }
     } catch (error) {
       await this.failRunAfterDispatchError(runId, error);
       await this.reportAdmissionTerminal(runId);
       throw error;
     }
-    // A duplicate fiber receipt still represents a successful admission: the
-    // atomic run claim above already proved this run owns the agent slot.
     return true;
+  }
+
+  async onFiberRecovered(
+    context: FiberRecoveryContext
+  ): Promise<undefined | FiberRecoveryResult> {
+    const metadataRunId = context.metadata?.runId;
+    const runId =
+      typeof metadataRunId === "string"
+        ? metadataRunId
+        : context.name.startsWith("run:")
+          ? context.name.slice("run:".length)
+          : null;
+    if (!runId) {
+      const recovered = await super.onFiberRecovered(context);
+      return recovered === undefined ? undefined : recovered;
+    }
+
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (!current) {
+      return {
+        error: "Cloud run record was not retained after fiber recovery.",
+        status: "error",
+      };
+    }
+    if (isTerminal(current.run.status)) {
+      await this.reportAdmissionTerminal(runId);
+      if (current.run.status === "cancelled") {
+        return {
+          reason: "Run was cancelled before recovery.",
+          status: "aborted",
+        };
+      }
+      return current.run.status === "completed"
+        ? { status: "completed" }
+        : {
+            error:
+              current.run.error?.message ??
+              "Cloud run was already failed before fiber recovery.",
+            status: "error",
+          };
+    }
+
+    const recovered = recoverCloudRunRecord(current, new Date().toISOString());
+    if (this.persistRun(recovered)) {
+      this.updateDefinition({
+        lastRunAt: recovered.run.completedAt ?? new Date().toISOString(),
+        status: "error",
+        updatedAt: recovered.run.completedAt ?? new Date().toISOString(),
+      });
+    }
+    await this.reportAdmissionTerminal(runId);
+    return {
+      error: recovered.run.error?.message ?? "Cloud run was interrupted.",
+      status: "error",
+    };
   }
 
   /**
@@ -707,21 +819,22 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           : "Cloud run fiber could not be started.",
       status: "failed",
     });
-    this.persistRun(failed);
-    this.updateDefinition({
-      lastRunAt: completedAt,
-      status: "error",
-      updatedAt: completedAt,
-    });
+    if (this.persistRun(failed)) {
+      this.updateDefinition({
+        lastRunAt: completedAt,
+        status: "error",
+        updatedAt: completedAt,
+      });
+    }
   }
 
   /** Removes a prepared run when admission refuses it before dispatch. */
-  discardRun(runId: string): void {
+  discardRun(runId: string): boolean {
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
-    if (!record || isTerminal(record.run.status)) {
-      return;
+    if (record?.run.status !== "queued") {
+      return false;
     }
     this.setState({
       ...this.state,
@@ -732,6 +845,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       ),
       runs: this.state.runs.filter((candidate) => candidate.run.id !== runId),
     });
+    return true;
   }
 
   /**
@@ -755,7 +869,17 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
 
     await this.cancelFiberByKey(cloudFiberKey(runId), "Cancelled by operator.");
-    const cancelled = finishCloudRunRecord(record, {
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (!current) {
+      return null;
+    }
+    if (isTerminal(current.run.status)) {
+      await this.reportAdmissionTerminal(runId);
+      return current.run;
+    }
+    const cancelled = finishCloudRunRecord(current, {
       completedAt: new Date().toISOString(),
       // Cancellation is an operator action outside `driveHarness`, so no
       // credential is in scope here — the static message below carries none,
@@ -765,13 +889,22 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       output: "Run cancelled by operator request.",
       status: "cancelled",
     });
-    this.persistRun(cancelled);
-    await this.reportAdmissionTerminal(runId);
-    this.updateDefinition({
-      status: "idle",
-      updatedAt: cancelled.run.completedAt ?? new Date().toISOString(),
-    });
-    return cancelled.run;
+    if (this.persistRun(cancelled)) {
+      await this.reportAdmissionTerminal(runId);
+      this.updateDefinition({
+        status: "idle",
+        updatedAt: cancelled.run.completedAt ?? new Date().toISOString(),
+      });
+      return cancelled.run;
+    }
+    const latest = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (latest) {
+      await this.reportAdmissionTerminal(runId);
+      return latest.run;
+    }
+    return null;
   }
 
   /**
@@ -1001,7 +1134,17 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    * front of an unsorted list, so a long-running agent could have dropped a run
    * that was still executing.
    */
-  private persistRun(record: CloudRunRecord): void {
+  private persistRun(record: CloudRunRecord): boolean {
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === record.run.id
+    );
+    if (
+      current &&
+      (isTerminal(current.run.status) ||
+        (current.run.status === "running" && record.run.status === "queued"))
+    ) {
+      return false;
+    }
     const others = this.state.runs.filter(
       (candidate) => candidate.run.id !== record.run.id
     );
@@ -1009,6 +1152,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       ...this.state,
       runs: retainCloudRuns([record, ...others]),
     });
+    return true;
   }
 
   private async reportAdmissionTerminal(runId: string): Promise<void> {
@@ -1018,16 +1162,37 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (!record || !isTerminal(record.run.status)) {
       return;
     }
+    if (this.state.admissionReported?.[runId]) {
+      return;
+    }
+    const inFlight = this.admissionReleaseInFlight.get(runId);
+    if (inFlight) {
+      await inFlight;
+      return;
+    }
     const identityTokens = Object.fromEntries(
       Object.entries(this.state.identityTokens ?? {}).filter(
         ([candidate]) => candidate !== runId
       )
     );
     this.setState({ ...this.state, identityTokens });
-    try {
-      await this.env.RunAdmission.getByName("deployment").release(runId);
-    } catch {
-      // The admission alarm reconciles an active record if this callback fails.
-    }
+    const release = (async () => {
+      try {
+        await this.env.RunAdmission.getByName("deployment").release(runId);
+        this.setState({
+          ...this.state,
+          admissionReported: {
+            ...(this.state.admissionReported ?? {}),
+            [runId]: true,
+          },
+        });
+      } catch {
+        // The admission alarm reconciles an active record if this callback fails.
+      } finally {
+        this.admissionReleaseInFlight.delete(runId);
+      }
+    })();
+    this.admissionReleaseInFlight.set(runId, release);
+    await release;
   }
 }

@@ -35,7 +35,7 @@ const FINISH_GRACE_MS = 15_000;
  */
 export const PROBE_TIMEOUT_MS = 300_000;
 
-type SandboxLike = Pick<Sandbox, "exec">;
+type SandboxLike = Pick<Sandbox, "exec"> & Partial<Pick<Sandbox, "destroy">>;
 
 /**
  * Enforces a deadline the SDK does not.
@@ -73,6 +73,45 @@ async function withDeadline<T>(
     ]);
   } finally {
     clearTimeout(timer);
+  }
+}
+
+async function withCancellation<T>(
+  work: Promise<T>,
+  sandbox: SandboxLike,
+  signal?: AbortSignal
+): Promise<T> {
+  if (!signal) {
+    return work;
+  }
+  const abort = async (): Promise<never> => {
+    await Promise.resolve(sandbox.destroy?.()).catch(() => undefined);
+    throw new HarnessError(
+      "The cloud run was cancelled before the sandbox command completed.",
+      "harness_cancelled"
+    );
+  };
+  if (signal.aborted) {
+    return abort();
+  }
+  let rejectAbort!: (error: HarnessError) => void;
+  const aborted = new Promise<never>((_, reject) => {
+    rejectAbort = reject;
+  });
+  const onAbort = () => {
+    Promise.resolve(sandbox.destroy?.()).catch(() => undefined);
+    rejectAbort(
+      new HarnessError(
+        "The cloud run was cancelled before the sandbox command completed.",
+        "harness_cancelled"
+      )
+    );
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    return await Promise.race([work, aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
   }
 }
 
@@ -174,15 +213,20 @@ export function requireHarness(
 
 async function probeInstalled(
   sandbox: SandboxLike,
-  spec: HarnessSpec
+  spec: HarnessSpec,
+  signal?: AbortSignal
 ): Promise<{ installed: boolean; version: string | null }> {
   try {
-    const result = await withDeadline(
-      sandbox.exec(`${spec.command} ${spec.versionArgs.join(" ")}`, {
-        timeout: PROBE_TIMEOUT_MS,
-      }),
-      PROBE_TIMEOUT_MS,
-      `${spec.command} --version`
+    const result = await withCancellation(
+      withDeadline(
+        sandbox.exec(`${spec.command} ${spec.versionArgs.join(" ")}`, {
+          timeout: PROBE_TIMEOUT_MS,
+        }),
+        PROBE_TIMEOUT_MS,
+        `${spec.command} --version`
+      ),
+      sandbox,
+      signal
     );
     if (!result.success) {
       return { installed: false, version: null };
@@ -199,7 +243,10 @@ async function probeInstalled(
      * costs a rebuild before anyone questions it. The deadline names the real
      * condition, so it propagates.
      */
-    if (error instanceof HarnessError && error.code === "harness_timeout") {
+    if (
+      error instanceof HarnessError &&
+      (error.code === "harness_timeout" || error.code === "harness_cancelled")
+    ) {
       throw error;
     }
     return { installed: false, version: null };
@@ -294,13 +341,14 @@ export async function runHarnessInSandbox(options: {
   finishGraceMs?: number;
   runtime: string;
   sandbox: SandboxLike;
+  signal?: AbortSignal;
   task: string;
   workspace?: string;
 }): Promise<HarnessRun> {
   const { auth, spec } = requireHarness(options.runtime, options.credential);
   const cwd = resolveSandboxWorkspace(options.workspace);
 
-  const probe = await probeInstalled(options.sandbox, spec);
+  const probe = await probeInstalled(options.sandbox, spec, options.signal);
   if (!probe.installed) {
     throw new HarnessError(
       `\`${spec.command}\` is not installed in the sandbox image. Add \`${spec.installPackage}\` to worker/Dockerfile and redeploy.`,
@@ -308,10 +356,14 @@ export async function runHarnessInSandbox(options: {
     );
   }
 
-  await withDeadline(
-    options.sandbox.exec(`mkdir -p ${cwd}`, { timeout: PROBE_TIMEOUT_MS }),
-    PROBE_TIMEOUT_MS,
-    "mkdir"
+  await withCancellation(
+    withDeadline(
+      options.sandbox.exec(`mkdir -p ${cwd}`, { timeout: PROBE_TIMEOUT_MS }),
+      PROBE_TIMEOUT_MS,
+      "mkdir"
+    ),
+    options.sandbox,
+    options.signal
   );
 
   const invocation = buildInvocation({
@@ -404,10 +456,14 @@ export async function runHarnessInSandbox(options: {
 
   let result: Awaited<typeof execution> | null;
   try {
-    result = await withDeadline(
-      Promise.race([execution, finishedEarly]),
-      RUN_TIMEOUT_MS,
-      spec.command
+    result = await withCancellation(
+      withDeadline(
+        Promise.race([execution, finishedEarly]),
+        RUN_TIMEOUT_MS,
+        spec.command
+      ),
+      options.sandbox,
+      options.signal
     );
   } catch (error) {
     /**
@@ -421,7 +477,10 @@ export async function runHarnessInSandbox(options: {
      * bare transport message. Deadline timeouts pass through untouched —
      * that path still reaps, and must keep doing so.
      */
-    if (error instanceof HarnessError && error.code === "harness_timeout") {
+    if (
+      error instanceof HarnessError &&
+      (error.code === "harness_timeout" || error.code === "harness_cancelled")
+    ) {
       throw error;
     }
     if (streamed.some((event) => event.kind === "finished")) {

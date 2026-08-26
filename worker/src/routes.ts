@@ -85,7 +85,14 @@ export type CloudRunnerDirectory = {
    * never be assembled without one. An accidental `list()` is a type error.
    */
   list: (tenantId: string) => Awaitable<AgentDefinition[]>;
-  registerRun: (runId: string, agentId: string) => Awaitable<void>;
+  registerRun: (
+    runId: string,
+    agentId: string
+  ) => Awaitable<boolean | undefined>;
+  unregisterRun: (
+    runId: string,
+    agentId: string
+  ) => Awaitable<boolean | undefined>;
   remove: (agentId: string) => Awaitable<void>;
   upsert: (definition: AgentDefinition) => Awaitable<AgentDefinition>;
   lookupRun: (runId: string) => Awaitable<string | null>;
@@ -93,7 +100,7 @@ export type CloudRunnerDirectory = {
 
 export type CloudRunnerAgent = {
   configure: (definition: AgentDefinition) => Awaitable<AgentDefinition>;
-  discardRun: (runId: string) => Awaitable<void>;
+  discardRun: (runId: string) => Awaitable<boolean | undefined>;
   decommission: () => Awaitable<void>;
   enqueue: (
     input: unknown,
@@ -158,24 +165,43 @@ async function cleanupRun(
   };
   const attempt = async (action: () => Awaitable<unknown>) => {
     try {
-      await action();
-      return true;
+      return { ok: true, value: await action() } as const;
     } catch (error) {
       remember(error);
-      return false;
+      return { ok: false, value: undefined } as const;
     }
   };
 
+  let safeToRelease = false;
   if (stopFirst) {
-    await attempt(() => agent.stop(runId));
-    await attempt(() => agent.discardRun(runId));
+    const stopped = await attempt(() => agent.stop(runId));
+    const discarded = await attempt(() => agent.discardRun(runId));
+    safeToRelease =
+      (discarded.ok && discarded.value !== false) ||
+      (stopped.ok &&
+        (stopped.value === null ||
+          (typeof stopped.value === "object" &&
+            stopped.value !== null &&
+            "status" in stopped.value &&
+            typeof stopped.value.status === "string" &&
+            isTerminal(stopped.value.status as RunSnapshot["status"]))));
   } else {
     const discarded = await attempt(() => agent.discardRun(runId));
-    if (!discarded) {
-      await attempt(() => agent.stop(runId));
+    if (discarded.ok && discarded.value !== false) {
+      safeToRelease = true;
+    } else {
+      const stopped = await attempt(() => agent.stop(runId));
+      safeToRelease =
+        stopped.ok &&
+        (stopped.value === null ||
+          (typeof stopped.value === "object" &&
+            stopped.value !== null &&
+            "status" in stopped.value &&
+            typeof stopped.value.status === "string" &&
+            isTerminal(stopped.value.status as RunSnapshot["status"])));
     }
   }
-  if (admission) {
+  if (admission && safeToRelease) {
     await attempt(() => admission.release(runId));
   }
   return firstError;
@@ -790,9 +816,14 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               return busyResponse("global_busy", cors);
             }
 
+            let mappingCreated = false;
             try {
-              await directory.registerRun(runId, id);
+              mappingCreated =
+                (await directory.registerRun(runId, id)) !== false;
               const admittedRun = await agent.getRun(runId);
+              if (!admittedRun) {
+                throw new Error("Admitted run disappeared after registration.");
+              }
               return json(
                 {
                   apiVersion: AGENT_RUNNER_API_VERSION,
@@ -802,6 +833,14 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 cors
               );
             } catch (error) {
+              if (mappingCreated) {
+                try {
+                  await directory.unregisterRun(runId, id);
+                } catch {
+                  // Preserve the original request failure; a stale mapping
+                  // remains harmlessly ownership-guarded until retried.
+                }
+              }
               await cleanupRun(agent, runId, admission, true);
               throw error;
             }

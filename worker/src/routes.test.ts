@@ -158,6 +158,7 @@ function runner() {
     lookupRun: (runId) => (runId === MY_RUN_ID ? MINE : THEIRS),
     registerRun: () => undefined,
     remove: () => undefined,
+    unregisterRun: () => undefined,
     upsert: (value) => value,
   };
 
@@ -705,6 +706,7 @@ async function failingRunner(error: Error): Promise<Response> {
     lookupRun: () => MINE,
     registerRun: () => undefined,
     remove: () => undefined,
+    unregisterRun: () => undefined,
     upsert: (value) => value,
   };
 
@@ -917,6 +919,7 @@ test("run admission happens before dispatch and receives only a tenant hash", as
       calls.push("register");
     },
     remove: () => undefined,
+    unregisterRun: () => undefined,
     upsert: (value) => value,
   };
   const [environment, token] = await Promise.all([
@@ -1004,6 +1007,7 @@ test("an orphan queued duplicate cannot bypass admission", async () => {
       lookupRun: () => MINE,
       registerRun: () => undefined,
       remove: () => undefined,
+      unregisterRun: () => undefined,
       upsert: (value: AgentDefinition) => value,
     }),
     getYoloAgent: () => agent,
@@ -1065,6 +1069,7 @@ test("reject mode refuses an unhealthy admission object without bypassing it", a
       lookupRun: () => null,
       registerRun: () => undefined,
       remove: () => undefined,
+      unregisterRun: () => undefined,
       upsert: (value: AgentDefinition) => value,
     }),
     getYoloAgent: () => agent,
@@ -1131,6 +1136,7 @@ test("reject fallback discards a queued run before releasing admission", async (
       lookupRun: () => null,
       registerRun: () => undefined,
       remove: () => undefined,
+      unregisterRun: () => undefined,
       upsert: (value: AgentDefinition) => value,
     }),
     getYoloAgent: () => agent,
@@ -1148,6 +1154,75 @@ test("reject fallback discards a queued run before releasing admission", async (
 
   assert.equal(response.status, 500);
   assert.deepEqual(calls, ["admit", "discard", "release"]);
+});
+
+test("reject fallback stops an execution that wins the discard race before release", async () => {
+  const operationId = "77777777-aaaa-4000-8111-222222222222";
+  const runId = "88888888-bbbb-4111-8222-333333333333";
+  const calls: string[] = [];
+  const run = queuedRun(MINE, runId, operationId);
+  const agent: CloudRunnerAgent = {
+    configure: (value: AgentDefinition) => value,
+    decommission: () => undefined,
+    discardRun: () => {
+      calls.push("discard");
+      return false;
+    },
+    enqueue: () => ({ created: true, run }),
+    getEventStream: () => ({ events: [], terminal: false }),
+    getRun: () => run,
+    listRuns: () => [run],
+    snapshot: () => agents.get(MINE) ?? null,
+    start: () => {
+      throw new Error("legacy start must not be reached");
+    },
+    stop: () => {
+      calls.push("stop");
+      return { ...run, status: "cancelled" as const };
+    },
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const response = await createCloudRunner({
+    getAdmission: () => ({
+      admit: () => {
+        calls.push("admit");
+        return { kind: "queued" as const, position: 1, runId };
+      },
+      release: () => {
+        calls.push("release");
+        return true;
+      },
+    }),
+    getDirectory: () => ({
+      list: () => [agents.get(MINE) as AgentDefinition],
+      lookupRun: () => null,
+      registerRun: () => undefined,
+      remove: () => undefined,
+      unregisterRun: () => undefined,
+      upsert: (value: AgentDefinition) => value,
+    }),
+    getYoloAgent: () => agent,
+  }).fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: run.task }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    { ...environment, RUN_ADMISSION_MODE: "reject" } as never
+  );
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(calls, ["admit", "discard", "stop", "release"]);
 });
 
 test("registerRun failure stops the run, releases admission, and allows reuse", async () => {
@@ -1196,6 +1271,7 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
       }
     },
     remove: () => undefined,
+    unregisterRun: () => undefined,
     upsert: (value) => value,
   };
   const admission = {
@@ -1265,4 +1341,103 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
   assert.equal(second.status, 202);
   assert.equal(registerAttempts, 2);
   assert.equal(calls.filter((entry) => entry.startsWith("release:")).length, 1);
+});
+
+test("a run mapping is unregistered when the admitted run disappears after registration", async () => {
+  const calls: string[] = [];
+  const mappings = new Map<string, string>();
+  let runId = "";
+  const agent: CloudRunnerAgent = {
+    configure: (value: AgentDefinition) => value,
+    decommission: () => undefined,
+    discardRun: () => {
+      calls.push("discard");
+      return false;
+    },
+    enqueue: (input: unknown, createdRunId: string) => {
+      runId = createdRunId;
+      const { operationId } = input as { operationId: string };
+      return {
+        created: true,
+        run: queuedRun(MINE, createdRunId, operationId),
+      };
+    },
+    getEventStream: () => ({ events: [], terminal: false }),
+    getRun: () => {
+      throw new Error("run lookup unavailable");
+    },
+    listRuns: () => [],
+    snapshot: () => agents.get(MINE) ?? null,
+    start: () => {
+      throw new Error("legacy start must not be reached");
+    },
+    stop: () => {
+      calls.push("stop");
+      return null;
+    },
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const directory: CloudRunnerDirectory = {
+    list: () => [agents.get(MINE) as AgentDefinition],
+    lookupRun: (candidate) => mappings.get(candidate) ?? null,
+    registerRun: (candidate, agentId) => {
+      calls.push("register");
+      mappings.set(candidate, agentId);
+      return true;
+    },
+    remove: () => undefined,
+    unregisterRun: (candidate, agentId) => {
+      calls.push("unregister");
+      if (mappings.get(candidate) !== agentId) {
+        return false;
+      }
+      mappings.delete(candidate);
+      return true;
+    },
+    upsert: (value) => value,
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const response = await createCloudRunner({
+    getAdmission: () => ({
+      admit: (input: { runId: string }) => ({
+        kind: "active" as const,
+        runId: input.runId,
+      }),
+      release: (candidate) => {
+        calls.push("release");
+        return Boolean(candidate);
+      },
+    }),
+    getDirectory: () => directory,
+    getYoloAgent: () => agent,
+  }).fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({
+        operationId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+        task: "Run the tests.",
+      }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 500);
+  assert.deepEqual(calls, [
+    "register",
+    "unregister",
+    "stop",
+    "discard",
+    "release",
+  ]);
+  assert.equal(mappings.get(runId), undefined);
 });

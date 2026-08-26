@@ -511,7 +511,7 @@ test("a transport drop after the streamed result still completes the run", async
           command,
           exitCode: 0,
           stderr: "",
-          stdout: command.startsWith("copilot")
+          stdout: command.includes("--version")
             ? "GitHub Copilot CLI 1.0.80\n"
             : "",
           success: true,
@@ -580,4 +580,64 @@ test("a transport drop before the result names the condition, not the transport"
       error.message.includes("recorded events") &&
       !error.message.includes("Network connection lost")
   );
+});
+
+test("aborting a run destroys the sandbox and stops the command", async () => {
+  const controller = new AbortController();
+  let mainStarted!: () => void;
+  let resolveExec!: () => void;
+  let destroyed = 0;
+  const sandbox = {
+    destroy() {
+      destroyed += 1;
+      resolveExec();
+      return Promise.resolve();
+    },
+    exec(command: string) {
+      if (command.includes("--version") || command.startsWith("mkdir")) {
+        return Promise.resolve({
+          command,
+          exitCode: 0,
+          stderr: "",
+          stdout: command.includes("--version")
+            ? "GitHub Copilot CLI 1.0.80\n"
+            : "",
+          success: true,
+        });
+      }
+      mainStarted();
+      return new Promise((resolve) => {
+        resolveExec = () =>
+          resolve({
+            command,
+            exitCode: 143,
+            stderr: "terminated",
+            stdout: "",
+            success: false,
+          });
+      });
+    },
+  };
+
+  const run = runHarnessInSandbox({
+    credential: { credential: "harness-token" },
+    instructions: "Be careful.",
+    model: "auto",
+    runtime: "copilot",
+    sandbox: sandbox as never,
+    signal: controller.signal,
+    task: "Stop this run",
+  });
+  await new Promise<void>((resolve) => {
+    mainStarted = resolve;
+  });
+  controller.abort();
+  setTimeout(resolveExec, 50);
+
+  await assert.rejects(
+    run,
+    (error: unknown) =>
+      error instanceof HarnessError && error.code === "harness_cancelled"
+  );
+  assert.equal(destroyed, 1);
 });

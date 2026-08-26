@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentDefinition } from "@opencoven/agent-contracts";
-import { fiberControl, fiberLog, resetFiberLog } from "../test-support/agents";
+import {
+  type FiberContext,
+  fiberControl,
+  fiberLog,
+  resetFiberLog,
+} from "../test-support/agents";
 import { AgentDirectory, YoloAgent } from "./agents";
-import { AlreadyRunningError, OperationConflictError } from "./run-state";
+import {
+  AlreadyRunningError,
+  type CloudRunRecord,
+  finishCloudRunRecord,
+  OperationConflictError,
+} from "./run-state";
 
 const AGENT_ID = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
 const OP_A = "11111111-2222-4333-8444-555555555555";
@@ -210,6 +220,160 @@ test("a fiber start failure closes an admitted run and releases its claim", asyn
   assert.equal(yolo.getRun(second.run.id)?.status, "running");
 });
 
+test("an already accepted fiber is not reported as a second admission", async () => {
+  resetFiberLog();
+  fiberControl.runFibers = false;
+  const yolo = new (class extends YoloAgent {
+    override startFiber(
+      _name: string,
+      _fn: Parameters<YoloAgent["startFiber"]>[1],
+      _options?: Parameters<YoloAgent["startFiber"]>[2]
+    ): ReturnType<YoloAgent["startFiber"]> {
+      return Promise.resolve({
+        accepted: false,
+        createdAt: Date.now(),
+        fiberId: "fiber:already-accepted",
+        name: "run:already-accepted",
+        status: "running",
+      });
+    }
+  })(undefined as never, {} as never);
+  yolo.configure(definition());
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Already accepted work." },
+    "8f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c95",
+    "hash-already-accepted",
+    "identity"
+  );
+
+  assert.equal(await yolo.startAdmitted(queued.run.id), false);
+  assert.equal(yolo.getRun(queued.run.id)?.status, "running");
+  assert.equal(fiberLog.started.length, 0);
+});
+
+test("a recovered admitted fiber fails once, releases capacity, and permits the next run", async () => {
+  resetFiberLog();
+  fiberControl.runFibers = false;
+  const released: string[] = [];
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string) => {
+            released.push(runId);
+            return Promise.resolve(true);
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+  const first = await yolo.enqueue(
+    { operationId: OP_A, task: "Interrupted work." },
+    "af2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c96",
+    "hash-interrupted",
+    "identity"
+  );
+  assert.equal(await yolo.startAdmitted(first.run.id), true);
+
+  const recovery = {
+    createdAt: Date.parse("2026-08-26T00:00:00.000Z"),
+    id: "fiber-interrupted",
+    metadata: { runId: first.run.id },
+    name: `run:${first.run.id}`,
+    recoveryReason: "interrupted" as const,
+    snapshot: null,
+    status: "interrupted" as const,
+  };
+  const result = await yolo.onFiberRecovered(recovery);
+  assert.equal(result?.status, "error");
+  assert.equal(yolo.getRun(first.run.id)?.status, "failed");
+  assert.equal(yolo.snapshot()?.status, "error");
+  assert.deepEqual(released, [first.run.id]);
+
+  await yolo.onFiberRecovered(recovery);
+  assert.deepEqual(released, [first.run.id]);
+
+  const second = await yolo.enqueue(
+    { operationId: OP_B, task: "Next work." },
+    "bf2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c97",
+    "hash-next",
+    "identity"
+  );
+  assert.equal(await yolo.startAdmitted(second.run.id), true);
+});
+
+test("late fiber completion cannot overwrite cancellation or release twice", async () => {
+  resetFiberLog();
+  fiberControl.runFibers = false;
+  const released: string[] = [];
+  let lateFiber: ((context: FiberContext) => Promise<void>) | undefined;
+  const yolo = new (class extends YoloAgent {
+    override startFiber(
+      _name: string,
+      fn: Parameters<YoloAgent["startFiber"]>[1],
+      _options?: Parameters<YoloAgent["startFiber"]>[2]
+    ): ReturnType<YoloAgent["startFiber"]> {
+      lateFiber = fn;
+      return Promise.resolve({
+        accepted: true,
+        createdAt: Date.now(),
+        fiberId: "fiber:late",
+        name: "run:late",
+        status: "running",
+      });
+    }
+
+    protected override driveHarness(
+      _definition: AgentDefinition,
+      planned: CloudRunRecord
+    ): Promise<CloudRunRecord> {
+      return Promise.resolve(
+        finishCloudRunRecord(planned, {
+          completedAt: "2026-08-26T00:00:02.000Z",
+          credential: null,
+          output: "late completion",
+          status: "completed",
+        })
+      );
+    }
+  })(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string) => {
+            released.push(runId);
+            return Promise.resolve(true);
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Race work." },
+    "cf2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c98",
+    "hash-race",
+    "identity"
+  );
+  assert.equal(await yolo.startAdmitted(queued.run.id), true);
+
+  await yolo.stop(queued.run.id);
+  assert.equal(yolo.getRun(queued.run.id)?.status, "cancelled");
+  assert.ok(lateFiber);
+  await lateFiber({
+    id: `fiber:${queued.run.id}`,
+    signal: new AbortController().signal,
+    snapshot: null,
+    stash: () => undefined,
+  });
+
+  assert.equal(yolo.getRun(queued.run.id)?.status, "cancelled");
+  assert.deepEqual(released, [queued.run.id]);
+});
+
 test("stop cancels the fiber and closes the record", async () => {
   const yolo = agent();
   const started = await yolo.start(
@@ -363,6 +527,17 @@ test("a prototype key is not mistaken for a registered run", () => {
 
   assert.equal(index.lookupRun("constructor"), null);
   assert.equal(index.lookupRun("__proto__"), null);
+});
+
+test("unregistering a run is ownership guarded and idempotent", () => {
+  const index = directory();
+  index.registerRun(OP_A, AGENT_ID);
+
+  assert.equal(index.unregisterRun(OP_A, "another-agent"), false);
+  assert.equal(index.lookupRun(OP_A), AGENT_ID);
+  assert.equal(index.unregisterRun(OP_A, AGENT_ID), true);
+  assert.equal(index.unregisterRun(OP_A, AGENT_ID), false);
+  assert.equal(index.lookupRun(OP_A), null);
 });
 
 test("removing an agent drops its runs from the index", () => {
