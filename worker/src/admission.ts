@@ -1,6 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 import { pseudonymousKey } from "./abuse";
-import { isTerminal, OperationConflictError } from "./run-state";
+import {
+  isTerminal,
+  MAX_TERMINAL_RUNS_PER_AGENT,
+  OperationConflictError,
+} from "./run-state";
 
 export type AdmissionRecord = {
   agentId: string;
@@ -43,7 +47,7 @@ const ALARM_INTERVAL_MS = 30 * 1000;
 const ALARM_REPAIR_RETRY_MS = 5 * 1000;
 const MAX_ALARM_REPAIR_FAILURES = 3;
 const DISPATCH_LEASE_MS = 60 * 1000;
-const DEFAULT_TERMINAL_RETENTION = 1000;
+const DEFAULT_TERMINAL_RETENTION = MAX_TERMINAL_RUNS_PER_AGENT;
 const MAX_CLEANUP_TASKS_PER_ALARM = 50;
 
 type SchedulerState = {
@@ -61,6 +65,7 @@ export type AdmissionDispatch = (record: AdmissionRecord) => Promise<boolean>;
 type StoredAdmissionRecord = AdmissionRecord & {
   dispatchToken?: string;
   sequence: number;
+  terminalizedAt?: string;
 };
 
 export type AdmissionQueueOptions = {
@@ -283,8 +288,12 @@ export class AdmissionQueue {
 
   records(): AdmissionRecord[] {
     return this.queueRecords.map(
-      ({ dispatchToken: _dispatchToken, sequence: _sequence, ...record }) =>
-        cloneRecord(record)
+      ({
+        dispatchToken: _dispatchToken,
+        sequence: _sequence,
+        terminalizedAt: _terminalizedAt,
+        ...record
+      }) => cloneRecord(record)
     );
   }
 
@@ -536,6 +545,7 @@ type AdmissionRow = {
   run_id: string;
   queue_sequence: number;
   state: string;
+  terminalized_at: string | null;
   tenant_hash: string;
 };
 
@@ -579,6 +589,7 @@ function rowToStoredRecord(row: AdmissionRow): StoredAdmissionRecord {
     state: row.state,
     tenantHash: row.tenant_hash,
     ...(row.dispatch_token ? { dispatchToken: row.dispatch_token } : {}),
+    ...(row.terminalized_at ? { terminalizedAt: row.terminalized_at } : {}),
   };
 }
 
@@ -586,6 +597,7 @@ function publicRecord(record: StoredAdmissionRecord): AdmissionRecord {
   const {
     dispatchToken: _dispatchToken,
     sequence: _sequence,
+    terminalizedAt: _terminalizedAt,
     ...result
   } = record;
   return cloneRecord(result);
@@ -609,7 +621,8 @@ export class RunAdmission extends DurableObject<Env> {
           tenant_hash TEXT NOT NULL,
           dispatch_started_at TEXT,
           dispatch_lease_until TEXT,
-          dispatch_token TEXT
+          dispatch_token TEXT,
+          terminalized_at TEXT
         )
       `);
       const columns = ctx.storage.sql
@@ -629,6 +642,11 @@ export class RunAdmission extends DurableObject<Env> {
       if (!columns.includes("dispatch_token")) {
         ctx.storage.sql.exec(
           "ALTER TABLE admission_records ADD COLUMN dispatch_token TEXT"
+        );
+      }
+      if (!columns.includes("terminalized_at")) {
+        ctx.storage.sql.exec(
+          "ALTER TABLE admission_records ADD COLUMN terminalized_at TEXT"
         );
       }
       if (!columns.includes("queue_sequence")) {
@@ -744,12 +762,15 @@ export class RunAdmission extends DurableObject<Env> {
           UPDATE admission_records
           SET state = 'terminal',
               dispatch_started_at = NULL,
-              dispatch_lease_until = NULL
+              dispatch_lease_until = NULL,
+              dispatch_token = NULL,
+              terminalized_at = ?
           WHERE run_id = ?
             AND operation_id = ?
             AND request_hash = ?
             AND state IN ('queued', 'active')
         `,
+        new Date(Date.now()).toISOString(),
         record.runId,
         record.operationId,
         record.requestHash
@@ -767,8 +788,7 @@ export class RunAdmission extends DurableObject<Env> {
     if (dispatchToken && !this.dispatchTokenMatches(runId, dispatchToken)) {
       return false;
     }
-    this.updateState(runId, "terminal", dispatchToken);
-    this.clearDispatchLease(runId, dispatchToken);
+    this.terminalizeRecord(runId, dispatchToken);
     this.pruneTerminalRecords();
     this.ctx.waitUntil(this.dispatchAvailable(admissionLimits(this.env)));
     await this.ensureAlarm({ throwOnFailure: true });
@@ -836,31 +856,31 @@ export class RunAdmission extends DurableObject<Env> {
         // Each cancellation is reconciled before the admission row is closed.
         // biome-ignore lint/performance/noAwaitInLoops: cancellations are intentionally sequential
         const stopped = await this.env.YoloAgent.getByName(record.agentId).stop(
-          record.runId
+          record.runId,
+          record.dispatchToken
         );
-        cancellationProven =
-          stopped === null ||
-          (typeof stopped === "object" &&
-            stopped !== null &&
-            "status" in stopped &&
-            typeof stopped.status === "string" &&
-            isTerminal(stopped.status));
+        cancellationProven = this.isTerminalOrAbsent(stopped);
       } catch {
         // Keep the queued record so a later alarm can retry cancellation.
       }
       const current = this.findByRunId(record.runId);
       if (current?.state === "queued" && cancellationProven) {
-        this.updateState(record.runId, "terminal");
+        this.terminalizeRecord(record.runId, record.dispatchToken);
         this.pruneTerminalRecords();
         this.deleteCleanupTask(record.runId);
-      } else if (
-        current?.state === "queued" &&
-        !cancellationProven &&
-        !record.dispatchToken
-      ) {
-        this.updateState(record.runId, "terminal");
-        this.pruneTerminalRecords();
-        this.enqueueCleanupTask(record);
+      } else if (current?.state === "queued" && !cancellationProven) {
+        // The queue tombstone is the durable capacity decision even when the
+        // agent could not be reached. Clear any obsolete dispatch claim before
+        // recording it so cleanup retries cannot be blocked by an old token.
+        this.terminalizeRecord(record.runId, record.dispatchToken);
+        const terminal = this.findByRunId(record.runId);
+        if (terminal?.state === "terminal") {
+          this.pruneTerminalRecords();
+          this.enqueueCleanupTask({
+            ...record,
+            dispatchToken: undefined,
+          });
+        }
       }
     }
     await this.retryCleanupTasks();
@@ -881,7 +901,7 @@ export class RunAdmission extends DurableObject<Env> {
         // biome-ignore lint/performance/noAwaitInLoops: dispatches are intentionally sequential
         accepted = await this.env.YoloAgent.getByName(
           candidate.agentId
-        ).startAdmitted(candidate.runId);
+        ).startAdmitted(candidate.runId, candidate.dispatchToken);
       } catch {
         // Reconcile immediately so a dispatch error never makes capacity
         // depend on the next alarm. If the alarm cannot be repaired, close
@@ -932,11 +952,20 @@ export class RunAdmission extends DurableObject<Env> {
       if (reconciliation === "requeued" && afterFailure?.state === "queued") {
         this.terminalizeFailedAdmission(candidate);
         try {
-          await this.env.YoloAgent.getByName(candidate.agentId).stop(
-            candidate.runId
-          );
+          const stopped = await this.env.YoloAgent.getByName(
+            candidate.agentId
+          ).stop(candidate.runId, candidate.dispatchToken);
+          if (!this.isTerminalOrAbsent(stopped)) {
+            this.enqueueCleanupTask({
+              ...candidate,
+              dispatchToken: undefined,
+            });
+          }
         } catch {
-          // The terminal admission row is the durable capacity decision.
+          this.enqueueCleanupTask({
+            ...candidate,
+            dispatchToken: undefined,
+          });
         }
       }
     }
@@ -953,16 +982,11 @@ export class RunAdmission extends DurableObject<Env> {
         return "ambiguous";
       }
       if (!run || isTerminal(run.status)) {
-        this.updateState(record.runId, "terminal", record.dispatchToken);
-        this.clearDispatchLease(record.runId, record.dispatchToken);
+        this.terminalizeRecord(record.runId, record.dispatchToken);
         return "terminal";
       }
       if (run.status === "queued") {
-        this.updateState(record.runId, "queued", record.dispatchToken);
-        this.clearDispatchLease(record.runId, record.dispatchToken);
-        if (record.dispatchToken) {
-          this.clearDispatchToken(record.runId, record.dispatchToken);
-        }
+        this.requeueRecord(record.runId, record.dispatchToken);
         return "requeued";
       }
       if (run.status === "running") {
@@ -1080,11 +1104,20 @@ export class RunAdmission extends DurableObject<Env> {
       this.ctx.waitUntil(
         (async () => {
           try {
-            await this.env.YoloAgent.getByName(record.agentId).stop(
-              record.runId
-            );
+            const stopped = await this.env.YoloAgent.getByName(
+              record.agentId
+            ).stop(record.runId, record.dispatchToken);
+            if (!this.isTerminalOrAbsent(stopped)) {
+              this.enqueueCleanupTask({
+                ...record,
+                dispatchToken: undefined,
+              });
+            }
           } catch {
-            // The terminal admission row is the durable capacity decision.
+            this.enqueueCleanupTask({
+              ...record,
+              dispatchToken: undefined,
+            });
           }
         })()
       );
@@ -1130,6 +1163,24 @@ export class RunAdmission extends DurableObject<Env> {
     );
   }
 
+  private isTerminalOrAbsent(value: unknown): boolean {
+    if (value === null) {
+      return true;
+    }
+    if (
+      typeof value !== "object" ||
+      !("status" in value) ||
+      typeof value.status !== "string"
+    ) {
+      return false;
+    }
+    return (
+      value.status === "cancelled" ||
+      value.status === "completed" ||
+      value.status === "failed"
+    );
+  }
+
   private async retryCleanupTasks(): Promise<void> {
     const tasks = this.ctx.storage.sql
       .exec<{
@@ -1155,13 +1206,7 @@ export class RunAdmission extends DurableObject<Env> {
         const stopped = await this.env.YoloAgent.getByName(task.agent_id).stop(
           task.run_id
         );
-        completed =
-          stopped === null ||
-          (typeof stopped === "object" &&
-            stopped !== null &&
-            "status" in stopped &&
-            typeof stopped.status === "string" &&
-            isTerminal(stopped.status));
+        completed = this.isTerminalOrAbsent(stopped);
       } catch {
         completed = false;
       }
@@ -1247,15 +1292,10 @@ export class RunAdmission extends DurableObject<Env> {
           // An absent run is safe to retry only while this record still has
           // its dispatch claim. Once acceptance was recorded, absence is a
           // lost terminal run and must not be dispatched again.
-          this.updateState(record.runId, "queued", record.dispatchToken);
-          this.clearDispatchLease(record.runId, record.dispatchToken);
-          if (record.dispatchToken) {
-            this.clearDispatchToken(record.runId, record.dispatchToken);
-          }
+          this.requeueRecord(record.runId, record.dispatchToken);
           return "requeued";
         }
-        this.updateState(record.runId, "terminal", record.dispatchToken);
-        this.pruneTerminalRecords();
+        this.terminalizeRecord(record.runId, record.dispatchToken);
         return "terminal";
       }
       if (run.status === "running") {
@@ -1263,14 +1303,11 @@ export class RunAdmission extends DurableObject<Env> {
         return "running";
       }
       if (isTerminal(run.status)) {
-        this.updateState(record.runId, "terminal", record.dispatchToken);
-        this.clearDispatchLease(record.runId, record.dispatchToken);
-        this.pruneTerminalRecords();
+        this.terminalizeRecord(record.runId, record.dispatchToken);
         return "terminal";
       }
       if (run.status === "queued" && leaseExpired) {
-        this.updateState(record.runId, "queued", record.dispatchToken);
-        this.clearDispatchLease(record.runId, record.dispatchToken);
+        this.requeueRecord(record.runId, record.dispatchToken);
         return "requeued";
       }
       return "ambiguous";
@@ -1291,9 +1328,7 @@ export class RunAdmission extends DurableObject<Env> {
         return;
       }
       if (!run || isTerminal(run.status)) {
-        this.updateState(record.runId, "terminal", record.dispatchToken);
-        this.clearDispatchLease(record.runId, record.dispatchToken);
-        this.pruneTerminalRecords();
+        this.terminalizeRecord(record.runId, record.dispatchToken);
       }
     } catch {
       // Keep the queued record and retry on the next alarm.
@@ -1330,7 +1365,7 @@ export class RunAdmission extends DurableObject<Env> {
   private readStoredRecords(): StoredAdmissionRecord[] {
     return this.ctx.storage.sql
       .exec<AdmissionRow>(
-        "SELECT agent_id, dispatch_token, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, tenant_hash FROM admission_records ORDER BY queue_sequence"
+        "SELECT agent_id, dispatch_token, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, terminalized_at, tenant_hash FROM admission_records ORDER BY queue_sequence"
       )
       .toArray()
       .map(rowToStoredRecord);
@@ -1339,7 +1374,7 @@ export class RunAdmission extends DurableObject<Env> {
   private findByOperationId(operationId: string): AdmissionRecord | null {
     const rows = this.ctx.storage.sql
       .exec<AdmissionRow>(
-        "SELECT agent_id, dispatch_token, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, tenant_hash FROM admission_records WHERE operation_id = ?",
+        "SELECT agent_id, dispatch_token, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, terminalized_at, tenant_hash FROM admission_records WHERE operation_id = ?",
         operationId
       )
       .toArray();
@@ -1349,7 +1384,7 @@ export class RunAdmission extends DurableObject<Env> {
   private findByRunId(runId: string): AdmissionRecord | null {
     const rows = this.ctx.storage.sql
       .exec<AdmissionRow>(
-        "SELECT agent_id, dispatch_token, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, tenant_hash FROM admission_records WHERE run_id = ?",
+        "SELECT agent_id, dispatch_token, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, terminalized_at, tenant_hash FROM admission_records WHERE run_id = ?",
         runId
       )
       .toArray();
@@ -1360,8 +1395,8 @@ export class RunAdmission extends DurableObject<Env> {
     this.ctx.storage.sql.exec(
       `
         INSERT INTO admission_records
-          (agent_id, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, tenant_hash, dispatch_started_at, dispatch_lease_until, dispatch_token)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+          (agent_id, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, tenant_hash, dispatch_started_at, dispatch_lease_until, dispatch_token, terminalized_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
           agent_id = excluded.agent_id,
           enqueued_at = excluded.enqueued_at,
@@ -1372,7 +1407,8 @@ export class RunAdmission extends DurableObject<Env> {
           tenant_hash = excluded.tenant_hash,
           dispatch_started_at = NULL,
           dispatch_lease_until = NULL,
-          dispatch_token = NULL
+          dispatch_token = NULL,
+          terminalized_at = NULL
       `,
       record.agentId,
       record.enqueuedAt,
@@ -1382,20 +1418,28 @@ export class RunAdmission extends DurableObject<Env> {
       record.sequence,
       record.state,
       record.tenantHash,
-      record.dispatchToken ?? null
+      record.dispatchToken ?? null,
+      record.terminalizedAt ?? null
     );
   }
 
-  private updateState(
-    runId: string,
-    state: AdmissionRecord["state"],
-    dispatchToken?: string
-  ): void {
+  private terminalizeRecord(runId: string, dispatchToken?: string): void {
+    const terminalizedAt = new Date(Date.now()).toISOString();
     this.ctx.storage.sql.exec(
       dispatchToken
-        ? "UPDATE admission_records SET state = ? WHERE run_id = ? AND dispatch_token = ?"
-        : "UPDATE admission_records SET state = ? WHERE run_id = ?",
-      state,
+        ? "UPDATE admission_records SET state = 'terminal', dispatch_started_at = NULL, dispatch_lease_until = NULL, dispatch_token = NULL, terminalized_at = ? WHERE run_id = ? AND state IN ('queued', 'active') AND dispatch_token = ?"
+        : "UPDATE admission_records SET state = 'terminal', dispatch_started_at = NULL, dispatch_lease_until = NULL, dispatch_token = NULL, terminalized_at = ? WHERE run_id = ? AND state IN ('queued', 'active')",
+      terminalizedAt,
+      runId,
+      ...(dispatchToken ? [dispatchToken] : [])
+    );
+  }
+
+  private requeueRecord(runId: string, dispatchToken?: string): void {
+    this.ctx.storage.sql.exec(
+      dispatchToken
+        ? "UPDATE admission_records SET state = 'queued', dispatch_started_at = NULL, dispatch_lease_until = NULL, dispatch_token = NULL, terminalized_at = NULL WHERE run_id = ? AND state = 'active' AND dispatch_token = ?"
+        : "UPDATE admission_records SET state = 'queued', dispatch_started_at = NULL, dispatch_lease_until = NULL, dispatch_token = NULL, terminalized_at = NULL WHERE run_id = ? AND state = 'active'",
       runId,
       ...(dispatchToken ? [dispatchToken] : [])
     );
@@ -1408,7 +1452,7 @@ export class RunAdmission extends DurableObject<Env> {
     dispatchToken: string
   ): void {
     this.ctx.storage.sql.exec(
-      "UPDATE admission_records SET state = 'active', dispatch_started_at = ?, dispatch_lease_until = ?, dispatch_token = ? WHERE run_id = ?",
+      "UPDATE admission_records SET state = 'active', dispatch_started_at = ?, dispatch_lease_until = ?, dispatch_token = ?, terminalized_at = NULL WHERE run_id = ?",
       startedAt,
       leaseUntil,
       dispatchToken,
@@ -1426,26 +1470,30 @@ export class RunAdmission extends DurableObject<Env> {
     );
   }
 
-  private clearDispatchToken(runId: string, dispatchToken: string): void {
-    this.ctx.storage.sql.exec(
-      "UPDATE admission_records SET dispatch_token = NULL WHERE run_id = ? AND dispatch_token = ?",
-      runId,
-      dispatchToken
-    );
-  }
-
   private pruneTerminalRecords(): void {
-    const retention = terminalRetention(this.env);
+    const retention = Math.min(
+      terminalRetention(this.env),
+      MAX_TERMINAL_RUNS_PER_AGENT
+    );
     this.ctx.storage.sql.exec(
       `
         DELETE FROM admission_records
         WHERE state = 'terminal'
           AND run_id IN (
             SELECT run_id
-            FROM admission_records
-            WHERE state = 'terminal'
-            ORDER BY queue_sequence DESC
-            LIMIT -1 OFFSET ?
+            FROM (
+              SELECT
+                run_id,
+                ROW_NUMBER() OVER (
+                  PARTITION BY agent_id
+                  ORDER BY
+                    COALESCE(terminalized_at, enqueued_at) DESC,
+                    queue_sequence DESC
+                ) AS retention_rank
+              FROM admission_records
+              WHERE state = 'terminal'
+            )
+            WHERE retention_rank > ?
           )
       `,
       retention

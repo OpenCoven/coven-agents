@@ -684,12 +684,21 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (!record || isTerminal(record.run.status)) {
       return false;
     }
+    if (
+      dispatchToken &&
+      record.run.status !== "queued" &&
+      record.dispatchToken !== dispatchToken
+    ) {
+      return false;
+    }
     const identityToken = this.state.identityTokens?.[runId];
     if (!identityToken) {
       throw new Error("Queued run identity is unavailable.");
     }
     const definition = this.requireDefinition();
     if (dispatchToken) {
+      const tokenized = { ...record, dispatchToken };
+      this.persistRun(tokenized, { allowDispatchTokenReplacement: true });
       this.setState({
         ...this.state,
         admissionTokens: {
@@ -698,7 +707,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         },
       });
     }
-    const claimed = this.claimRunStart(record);
+    const claimed = this.claimRunStart(
+      dispatchToken ? { ...record, dispatchToken } : record
+    );
+    const token = claimed.dispatchToken;
     try {
       const receipt = await this.startFiber(
         cloudFiberKey(runId),
@@ -712,30 +724,37 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
               fiber.signal
             );
           } finally {
-            if (fiber.signal.aborted) {
+            if (
+              fiber.signal.aborted &&
+              this.dispatchTokenMatches(runId, token)
+            ) {
               await this.destroyAgentSandbox(definition);
             }
-            await this.reportAdmissionTerminal(runId, dispatchToken);
+            await this.reportAdmissionTerminal(runId, token);
           }
         },
         {
           idempotencyKey: cloudFiberKey(runId),
-          metadata: { runId },
+          metadata: {
+            runId,
+            ...(token ? { dispatchToken: token } : {}),
+          },
         }
       );
       if (!receipt.accepted) {
         if (receipt.status !== "pending" && receipt.status !== "running") {
           await this.failRunAfterDispatchError(
             runId,
-            new Error("An existing cloud run fiber was no longer active.")
+            new Error("An existing cloud run fiber was no longer active."),
+            token
           );
-          await this.reportAdmissionTerminal(runId, dispatchToken);
+          await this.reportAdmissionTerminal(runId, token);
         }
         return false;
       }
     } catch (error) {
-      await this.failRunAfterDispatchError(runId, error);
-      await this.reportAdmissionTerminal(runId, dispatchToken);
+      await this.failRunAfterDispatchError(runId, error, token);
+      await this.reportAdmissionTerminal(runId, token);
       throw error;
     }
     return true;
@@ -745,6 +764,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     context: FiberRecoveryContext
   ): Promise<undefined | FiberRecoveryResult> {
     const metadataRunId = context.metadata?.runId;
+    const metadataDispatchToken = context.metadata?.dispatchToken;
+    const recoveredDispatchToken =
+      typeof metadataDispatchToken === "string"
+        ? metadataDispatchToken
+        : undefined;
     const runId =
       typeof metadataRunId === "string"
         ? metadataRunId
@@ -765,11 +789,22 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         status: "error",
       };
     }
+    const currentDispatchToken =
+      current.dispatchToken ?? this.state.admissionTokens?.[runId];
+    if (
+      currentDispatchToken &&
+      currentDispatchToken !== recoveredDispatchToken
+    ) {
+      return {
+        reason: "Recovered fiber belongs to an obsolete admission dispatch.",
+        status: "aborted",
+      };
+    }
     await this.destroyAgentSandbox();
     if (isTerminal(current.run.status)) {
       await this.reportAdmissionTerminal(
         runId,
-        this.state.admissionTokens?.[runId]
+        recoveredDispatchToken ?? currentDispatchToken
       );
       if (current.run.status === "cancelled") {
         return {
@@ -797,7 +832,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
     await this.reportAdmissionTerminal(
       runId,
-      this.state.admissionTokens?.[runId]
+      recoveredDispatchToken ?? currentDispatchToken
     );
     return {
       error: recovered.run.error?.message ?? "Cloud run was interrupted.",
@@ -815,6 +850,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       this.state.runs.find(
         (candidate) => candidate.run.id === planned.run.id
       ) ?? planned;
+    if (
+      planned.dispatchToken &&
+      current.dispatchToken !== planned.dispatchToken
+    ) {
+      throw new Error("Cloud run dispatch is obsolete.");
+    }
     if (isTerminal(current.run.status)) {
       throw new AlreadyRunningError();
     }
@@ -849,11 +890,18 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     return claimed;
   }
 
-  private failRunAfterDispatchError(runId: string, error: unknown): void {
+  private failRunAfterDispatchError(
+    runId: string,
+    error: unknown,
+    dispatchToken?: string
+  ): void {
     const current = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
     if (!current || isTerminal(current.run.status)) {
+      return;
+    }
+    if (dispatchToken && current.dispatchToken !== dispatchToken) {
       return;
     }
     const completedAt = new Date().toISOString();
@@ -910,20 +958,39 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    * stops, leaving the record stuck in `running` forever. The record has to be
    * closed here so a caller polling the run sees a terminal state.
    */
-  async stop(runId: string): Promise<RunSnapshot | null> {
+  async stop(
+    runId: string,
+    dispatchToken?: string
+  ): Promise<RunSnapshot | null> {
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
     if (!record) {
       return null;
     }
+    const currentDispatchToken =
+      record.dispatchToken ?? this.state.admissionTokens?.[runId];
+    const expectedDispatchToken = dispatchToken ?? currentDispatchToken;
+    if (dispatchToken && currentDispatchToken !== dispatchToken) {
+      return record.run;
+    }
     if (isTerminal(record.run.status)) {
       // Already finished. Cancelling would be a no-op and rewriting the record
       // would discard the real outcome.
+      await this.reportAdmissionTerminal(runId, expectedDispatchToken);
       return record.run;
     }
 
     await this.cancelFiberByKey(cloudFiberKey(runId), "Cancelled by operator.");
+    const afterCancel = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (
+      expectedDispatchToken &&
+      !this.dispatchTokenMatches(runId, expectedDispatchToken)
+    ) {
+      return afterCancel?.run ?? null;
+    }
     await this.destroyAgentSandbox();
     const current = this.state.runs.find(
       (candidate) => candidate.run.id === runId
@@ -931,11 +998,14 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (!current) {
       return null;
     }
+    if (
+      expectedDispatchToken &&
+      !this.dispatchTokenMatches(runId, expectedDispatchToken)
+    ) {
+      return current.run;
+    }
     if (isTerminal(current.run.status)) {
-      await this.reportAdmissionTerminal(
-        runId,
-        this.state.admissionTokens?.[runId]
-      );
+      await this.reportAdmissionTerminal(runId, expectedDispatchToken);
       return current.run;
     }
     const cancelled = finishCloudRunRecord(current, {
@@ -949,10 +1019,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       status: "cancelled",
     });
     if (this.persistRun(cancelled)) {
-      await this.reportAdmissionTerminal(
-        runId,
-        this.state.admissionTokens?.[runId]
-      );
+      await this.reportAdmissionTerminal(runId, expectedDispatchToken);
       this.updateDefinition({
         status: "idle",
         updatedAt: cancelled.run.completedAt ?? new Date().toISOString(),
@@ -963,10 +1030,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       (candidate) => candidate.run.id === runId
     );
     if (latest) {
-      await this.reportAdmissionTerminal(
-        runId,
-        this.state.admissionTokens?.[runId]
-      );
+      await this.reportAdmissionTerminal(runId, expectedDispatchToken);
       return latest.run;
     }
     return null;
@@ -1220,10 +1284,20 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    * front of an unsorted list, so a long-running agent could have dropped a run
    * that was still executing.
    */
-  private persistRun(record: CloudRunRecord): boolean {
+  private persistRun(
+    record: CloudRunRecord,
+    options: { allowDispatchTokenReplacement?: boolean } = {}
+  ): boolean {
     const current = this.state.runs.find(
       (candidate) => candidate.run.id === record.run.id
     );
+    if (
+      current &&
+      current.dispatchToken !== record.dispatchToken &&
+      !options.allowDispatchTokenReplacement
+    ) {
+      return false;
+    }
     if (
       current &&
       (isTerminal(current.run.status) ||
@@ -1234,11 +1308,40 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     const others = this.state.runs.filter(
       (candidate) => candidate.run.id !== record.run.id
     );
+    const runs = retainCloudRuns([record, ...others]);
+    const retainedRunIds = new Set(runs.map((candidate) => candidate.run.id));
     this.setState({
       ...this.state,
-      runs: retainCloudRuns([record, ...others]),
+      admissionTokens: Object.fromEntries(
+        Object.entries(this.state.admissionTokens ?? {}).filter(([runId]) =>
+          retainedRunIds.has(runId)
+        )
+      ),
+      identityTokens: Object.fromEntries(
+        Object.entries(this.state.identityTokens ?? {}).filter(([runId]) =>
+          retainedRunIds.has(runId)
+        )
+      ),
+      runs,
     });
     return true;
+  }
+
+  private dispatchTokenMatches(
+    runId: string,
+    dispatchToken: string | undefined
+  ): boolean {
+    if (!dispatchToken) {
+      return true;
+    }
+    const record = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    return (
+      record?.dispatchToken === dispatchToken ||
+      (!record?.dispatchToken &&
+        this.state.admissionTokens?.[runId] === dispatchToken)
+    );
   }
 
   private async reportAdmissionTerminal(
@@ -1259,12 +1362,17 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       await inFlight;
       return;
     }
+    const currentDispatchToken =
+      record.dispatchToken ?? this.state.admissionTokens?.[runId];
+    const token = dispatchToken ?? currentDispatchToken;
+    if (currentDispatchToken && currentDispatchToken !== token) {
+      return;
+    }
     const identityTokens = Object.fromEntries(
       Object.entries(this.state.identityTokens ?? {}).filter(
         ([candidate]) => candidate !== runId
       )
     );
-    const token = dispatchToken ?? this.state.admissionTokens?.[runId];
     this.setState({ ...this.state, identityTokens });
     const release = (async () => {
       try {

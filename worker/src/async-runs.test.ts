@@ -465,6 +465,138 @@ test("late fiber completion cannot overwrite cancellation or release twice", asy
   assert.deepEqual(released, [queued.run.id]);
 });
 
+test("a stale admitted fiber callback cannot finish or release a newer token claim", async () => {
+  resetFiberLog();
+  fiberControl.runFibers = false;
+  const released: { runId: string; dispatchToken?: string }[] = [];
+  const fibers: ((context: FiberContext) => Promise<void>)[] = [];
+  const yolo = new (class extends YoloAgent {
+    override startFiber(
+      _name: string,
+      fn: Parameters<YoloAgent["startFiber"]>[1],
+      _options?: Parameters<YoloAgent["startFiber"]>[2]
+    ): ReturnType<YoloAgent["startFiber"]> {
+      fibers.push(fn);
+      return Promise.resolve({
+        accepted: true,
+        createdAt: Date.now(),
+        fiberId: `fiber:${fibers.length}`,
+        name: `run:${fibers.length}`,
+        status: "running",
+      });
+    }
+
+    protected override driveHarness(
+      _definition: AgentDefinition,
+      planned: CloudRunRecord
+    ): Promise<CloudRunRecord> {
+      if (planned.dispatchToken === "token-old") {
+        return Promise.reject(new Error("obsolete"));
+      }
+      return Promise.resolve(
+        finishCloudRunRecord(planned, {
+          completedAt: "2026-08-26T00:00:02.000Z",
+          credential: null,
+          output: "completed",
+          status: "completed",
+        })
+      );
+    }
+  })(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string, dispatchToken?: string) => {
+            released.push({ dispatchToken, runId });
+            return Promise.resolve(true);
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Fenced work." },
+    "df2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c99",
+    "hash-fenced",
+    "identity"
+  );
+  assert.equal(await yolo.startAdmitted(queued.run.id, "token-old"), true);
+
+  const state = Reflect.get(yolo, "state") as {
+    admissionTokens?: Record<string, string>;
+    definition: AgentDefinition | null;
+    identityTokens?: Record<string, string>;
+    runs: CloudRunRecord[];
+  };
+  const current = state.runs.find(
+    (candidate) => candidate.run.id === queued.run.id
+  );
+  assert.ok(current);
+  yolo.setState({
+    ...state,
+    runs: [
+      {
+        ...current,
+        run: { ...current.run, status: "queued" },
+      },
+      ...state.runs.filter((candidate) => candidate.run.id !== queued.run.id),
+    ],
+  });
+
+  assert.equal(await yolo.startAdmitted(queued.run.id, "token-new"), true);
+  assert.equal(fibers.length, 2);
+  await assert.rejects(
+    () =>
+      fibers[0]?.({
+        id: "fiber:old",
+        signal: new AbortController().signal,
+        snapshot: null,
+        stash: () => undefined,
+      }),
+    /obsolete/
+  );
+  assert.deepEqual(released, []);
+  assert.equal(yolo.getRun(queued.run.id)?.status, "running");
+
+  const latestState = Reflect.get(yolo, "state") as {
+    admissionTokens?: Record<string, string>;
+    definition: AgentDefinition | null;
+    identityTokens?: Record<string, string>;
+    runs: CloudRunRecord[];
+  };
+  const latestRecord = latestState.runs.find(
+    (candidate) => candidate.run.id === queued.run.id
+  );
+  assert.ok(latestRecord);
+  const completed = finishCloudRunRecord(latestRecord, {
+    completedAt: "2026-08-26T00:00:03.000Z",
+    credential: null,
+    output: "completed",
+    status: "completed",
+  });
+  yolo.setState({
+    ...latestState,
+    runs: [
+      completed,
+      ...latestState.runs.filter(
+        (candidate) => candidate.run.id !== queued.run.id
+      ),
+    ],
+  });
+  await fibers[1]?.({
+    id: "fiber:new",
+    signal: new AbortController().signal,
+    snapshot: null,
+    stash: () => undefined,
+  });
+  assert.deepEqual(released, [
+    { dispatchToken: "token-new", runId: queued.run.id },
+  ]);
+});
+
 test("stop cancels the fiber and closes the record", async () => {
   const yolo = agent();
   const started = await yolo.start(

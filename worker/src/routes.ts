@@ -128,14 +128,17 @@ export type CloudRunnerAgent = {
     created: boolean;
     run: RunSnapshot;
   }>;
-  stop: (runId: string) => Awaitable<RunSnapshot | null>;
+  stop: (
+    runId: string,
+    dispatchToken?: string
+  ) => Awaitable<RunSnapshot | null>;
 };
 
 export type CloudRunnerAdmission = {
   admit: (input: AdmissionRequest) => Awaitable<AdmissionDecision>;
   getByOperationId?: (operationId: string) => Awaitable<AdmissionRecord | null>;
   enqueueCleanup?: (agentId: string, runId: string) => Awaitable<void>;
-  release: (runId: string) => Awaitable<boolean>;
+  release: (runId: string, dispatchToken?: string) => Awaitable<boolean>;
 };
 
 export type CloudRunnerDependencies<

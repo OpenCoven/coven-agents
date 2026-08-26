@@ -30,6 +30,12 @@ export const MAX_TERMINAL_RUNS_PER_AGENT = 20;
 const OUTPUT_TRUNCATED = "\n[output truncated by runner]";
 
 export type CloudRunRecord = {
+  /**
+   * Admission's fencing token is internal coordination state. It is kept
+   * beside the run so recovered fibers and late callbacks can prove which
+   * dispatch they belong to without exposing it in the public snapshot.
+   */
+  dispatchToken?: string;
   events: RunEvent[];
   operationHash: string;
   run: RunSnapshot;

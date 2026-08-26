@@ -313,8 +313,8 @@ type AdmissionHarnessOptions = {
 function runAdmissionHarness(
   getAgent: () => {
     getRun: (runId: string) => unknown;
-    startAdmitted: (runId: string) => Promise<boolean>;
-    stop: (runId: string) => Promise<unknown>;
+    startAdmitted: (runId: string, dispatchToken?: string) => Promise<boolean>;
+    stop: (runId: string, dispatchToken?: string) => Promise<unknown>;
   },
   environment: Record<string, string> = {},
   options: AdmissionHarnessOptions = {}
@@ -387,6 +387,7 @@ test("alarm reconciliation does not requeue a nonexpired dispatch lease", async 
     const firstDispatch = new Promise<boolean>((resolve) => {
       resolveFirst = resolve;
     });
+
     const secondDispatch = new Promise<boolean>((resolve) => {
       resolveSecond = resolve;
     });
@@ -447,6 +448,191 @@ test("alarm reconciliation does not requeue a nonexpired dispatch lease", async 
   }
 });
 
+test("dispatch fencing tokens reach the agent and stale completion cannot release a newer claim", async () => {
+  const fencingOriginalNow = Date.now;
+  let fencingNow = Date.parse("2026-08-26T00:00:00.000Z");
+  Date.now = () => fencingNow;
+  try {
+    const dispatchedTokens: string[] = [];
+    const harness = runAdmissionHarness(() => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: (_runId, dispatchToken) => {
+        dispatchedTokens.push(dispatchToken ?? "");
+        return Promise.resolve(true);
+      },
+      stop: () => Promise.resolve(null),
+    }));
+
+    assert.deepEqual(await harness.admission.admit(request(68)), {
+      kind: "active",
+      runId: "run-68",
+    });
+    await Promise.all(harness.background);
+
+    const firstToken = (
+      harness.sql
+        .exec<{ dispatch_token: string | null }>(
+          "SELECT dispatch_token FROM admission_records WHERE run_id = ?",
+          "run-68"
+        )
+        .toArray() as { dispatch_token: string | null }[]
+    )[0]?.dispatch_token;
+    assert.ok(firstToken);
+    assert.equal(
+      dispatchedTokens[0],
+      firstToken,
+      "the first dispatch must carry its persisted fencing token"
+    );
+
+    fencingNow += 61_000;
+    await harness.admission.alarm();
+
+    const secondToken = (
+      harness.sql
+        .exec<{ dispatch_token: string | null }>(
+          "SELECT dispatch_token FROM admission_records WHERE run_id = ?",
+          "run-68"
+        )
+        .toArray() as { dispatch_token: string | null }[]
+    )[0]?.dispatch_token;
+    assert.equal(dispatchedTokens.length, 2);
+    assert.ok(secondToken);
+    assert.notEqual(secondToken, firstToken);
+
+    assert.equal(
+      await harness.admission.release("run-68", firstToken),
+      false,
+      "a stale completion must not release the newer admission claim"
+    );
+    assert.equal(
+      (await harness.admission.getRecord("run-68"))?.state,
+      "active"
+    );
+    assert.equal(await harness.admission.release("run-68", secondToken), true);
+  } finally {
+    Date.now = fencingOriginalNow;
+  }
+});
+
+test("expired queued cleanup is enqueued even when an obsolete dispatch token remains", async () => {
+  const cleanupOriginalNow = Date.now;
+  const cleanupNow = Date.parse("2026-08-26T00:00:00.000Z");
+  Date.now = () => cleanupNow;
+  try {
+    let cancellationAttempts = 0;
+    const cancellationTokens: (string | undefined)[] = [];
+    const harness = runAdmissionHarness(
+      () => ({
+        getRun: () => ({ status: "queued" }),
+        startAdmitted: () => Promise.resolve(false),
+        stop: (_runId, dispatchToken) => {
+          cancellationTokens.push(dispatchToken);
+          cancellationAttempts += 1;
+          if (cancellationAttempts < 3) {
+            return Promise.reject(new Error("agent unavailable"));
+          }
+          return Promise.resolve({ status: "cancelled" });
+        },
+      }),
+      {
+        RUN_ADMISSION_TENANT_ACTIVE_MAX: "0",
+        RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+      }
+    );
+
+    await harness.admission.admit(request(69));
+    harness.sql.exec(
+      "UPDATE admission_records SET state = 'queued', dispatch_token = ?, enqueued_at = ? WHERE run_id = ?",
+      "obsolete-token",
+      new Date(cleanupNow - 5 * 60 * 1000 - 1).toISOString(),
+      "run-69"
+    );
+
+    await harness.admission.alarm();
+
+    assert.equal(
+      (await harness.admission.getRecord("run-69"))?.state,
+      "terminal"
+    );
+    assert.equal(
+      (
+        harness.sql
+          .exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = ?",
+            "run-69"
+          )
+          .toArray() as { count: number }[]
+      )[0]?.count,
+      1,
+      "a failed cancellation must leave a durable cleanup retry"
+    );
+    assert.deepEqual(cancellationTokens, ["obsolete-token", undefined]);
+
+    harness.sql.exec("UPDATE admission_cleanup_tasks SET next_attempt_at = 0");
+    await harness.admission.alarm();
+    assert.equal(cancellationAttempts, 3);
+    assert.equal(
+      (
+        harness.sql
+          .exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = ?",
+            "run-69"
+          )
+          .toArray() as { count: number }[]
+      )[0]?.count,
+      0
+    );
+  } finally {
+    Date.now = cleanupOriginalNow;
+  }
+});
+
+test("terminal admission retention matches the agent's per-agent run history", async () => {
+  const sameAgent = "agent-retention";
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.resolve(true),
+      stop: () => Promise.resolve(null),
+    }),
+    { RUN_ADMISSION_TENANT_ACTIVE_MAX: "1" }
+  );
+
+  const first = {
+    ...request(300),
+    agentId: sameAgent,
+  };
+  for (let index = 0; index < 21; index += 1) {
+    const operation = {
+      ...request(300 + index),
+      agentId: sameAgent,
+    };
+    // biome-ignore lint/performance/noAwaitInLoops: Each admission must be terminalized before retention is checked.
+    const decision = await harness.admission.admit(operation);
+    assert.equal(decision.kind, "active");
+    await Promise.all(harness.background);
+    await harness.admission.release(operation.runId);
+  }
+
+  const terminalRows = harness.sql
+    .exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM admission_records WHERE state = 'terminal' AND agent_id = ?",
+      sameAgent
+    )
+    .toArray() as { count: number }[];
+  assert.ok((terminalRows[0]?.count ?? 0) <= 20);
+
+  const replay = await harness.admission.admit({
+    ...first,
+    runId: "run-retention-replay",
+  });
+  assert.notEqual(
+    replay.kind,
+    "duplicate",
+    "a replay after both histories expire must be admitted as fresh work"
+  );
+});
+
 test("zero queue capacity admits immediately when an active slot is free", async () => {
   const harness = runAdmissionHarness(
     () => ({
@@ -480,7 +666,10 @@ test("terminal admission history is retained for duplicate idempotency but prune
   );
 
   for (let index = 0; index < 8; index += 1) {
-    const operation = request(100 + index);
+    const operation = {
+      ...request(100 + index),
+      agentId: "agent-retention-configured",
+    };
     // biome-ignore lint/performance/noAwaitInLoops: Each admission must be retained and pruned in sequence.
     const admitted = await harness.admission.admit(operation);
     assert.equal(admitted.kind, "active");
@@ -490,11 +679,20 @@ test("terminal admission history is retained for duplicate idempotency but prune
 
   const terminalRows = harness.sql
     .exec<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM admission_records WHERE state = 'terminal'"
+      "SELECT COUNT(*) AS count FROM admission_records WHERE state = 'terminal' AND agent_id = ?",
+      "agent-retention-configured"
     )
     .toArray() as { count: number }[];
   assert.ok((terminalRows[0]?.count ?? 0) <= 3);
-  assert.equal((await harness.admission.admit(request(107))).kind, "duplicate");
+  assert.equal(
+    (
+      await harness.admission.admit({
+        ...request(107),
+        agentId: "agent-retention-configured",
+      })
+    ).kind,
+    "duplicate"
+  );
 });
 
 test("serializes concurrent admissions against the persistent capacity ledger", async () => {
@@ -1188,12 +1386,24 @@ test("a queued dispatch still expires on its queue deadline", async () => {
 
     assert.equal(
       (await harness.admission.getRecord("run-37"))?.state,
-      "queued"
+      "terminal",
+      "an expired queued record must become a cleanup tombstone"
     );
     assert.equal(
       cancellations,
-      1,
+      2,
       "an active dispatch whose agent is still queued must enter expiry retry"
+    );
+    assert.equal(
+      (
+        harness.sql
+          .exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = ?",
+            "run-37"
+          )
+          .toArray() as { count: number }[]
+      )[0]?.count,
+      1
     );
   } finally {
     Date.now = originalNow;
