@@ -1084,7 +1084,8 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    */
   async stop(
     runId: string,
-    dispatchToken?: string
+    dispatchToken?: string,
+    reason = "Run cancelled by operator request."
   ): Promise<RunSnapshot | null> {
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
@@ -1139,7 +1140,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       // and the run's already-persisted evidence was redacted when it was
       // first captured.
       credential: null,
-      output: "Run cancelled by operator request.",
+      output: reason,
       status: "cancelled",
     });
     if (this.persistRun(cancelled)) {

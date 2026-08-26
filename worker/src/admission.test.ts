@@ -315,7 +315,11 @@ function runAdmissionHarness(
     fenceAdmitted?: (runId: string, dispatchToken: string) => Promise<boolean>;
     getRun: (runId: string) => unknown;
     startAdmitted: (runId: string, dispatchToken?: string) => Promise<boolean>;
-    stop: (runId: string, dispatchToken?: string) => Promise<unknown>;
+    stop: (
+      runId: string,
+      dispatchToken?: string,
+      reason?: string
+    ) => Promise<unknown>;
   },
   environment: Record<string, string> = {},
   options: AdmissionHarnessOptions = {}
@@ -613,11 +617,11 @@ test("expired dispatch fencing rejects delayed A before re-dispatching B", async
     assert.deepEqual(accepted, [true, false]);
     assert.equal(
       (await harness.admission.getRecord("run-73"))?.state,
-      "active"
+      "terminal"
     );
     assert.equal(
       (await harness.admission.getRecord("run-74"))?.state,
-      "queued"
+      "active"
     );
   } finally {
     Date.now = originalNow;
@@ -1047,6 +1051,370 @@ test("a delayed dispatch cannot create a transient eleventh queued record", asyn
 
   resolveDispatch(true);
   await Promise.all(harness.background);
+});
+
+test("a proven-not-started dispatch is terminalized instead of exceeding the queue cap", async () => {
+  const stopped: string[] = [];
+  const fenced: string[] = [];
+  const harness = runAdmissionHarness(
+    () => ({
+      fenceAdmitted: (runId, token) => {
+        fenced.push(`${runId}:${token}`);
+        return Promise.resolve(true);
+      },
+      getRun: (runId) =>
+        runId === "run-3" ? { status: "queued" } : { status: "running" },
+      startAdmitted: () => Promise.resolve(true),
+      stop: (runId) => {
+        stopped.push(runId);
+        return Promise.resolve({ status: "cancelled" });
+      },
+    }),
+    {
+      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "3",
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "2",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+    }
+  );
+  await harness.admission.getRecord("initialize");
+  seedAdmissionRecord(
+    harness,
+    { ...activeRecord(1), enqueuedAt: new Date(Date.now()).toISOString() },
+    1
+  );
+  seedAdmissionRecord(
+    harness,
+    { ...activeRecord(2), enqueuedAt: new Date(Date.now()).toISOString() },
+    2
+  );
+  seedAdmissionRecord(
+    harness,
+    { ...activeRecord(3), enqueuedAt: new Date(Date.now()).toISOString() },
+    3
+  );
+  for (let index = 4; index <= 13; index += 1) {
+    seedAdmissionRecord(
+      harness,
+      {
+        ...request(index),
+        enqueuedAt: new Date(Date.now()).toISOString(),
+        state: "queued",
+      },
+      index
+    );
+  }
+  harness.sql.exec(
+    `
+      UPDATE admission_records
+      SET state = 'active',
+          dispatch_lease_until = ?,
+          dispatch_token = ?
+      WHERE run_id = ?
+    `,
+    new Date(Date.now() - 1).toISOString(),
+    "dispatch-run-3",
+    "run-3"
+  );
+
+  await harness.admission.alarm();
+  await Promise.all(harness.background);
+
+  assert.deepEqual(fenced.length, 1);
+  assert.deepEqual(stopped, ["run-3"]);
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_records WHERE state = 'queued' AND tenant_hash = ?",
+          TENANT_A
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    10
+  );
+  assert.equal((await harness.admission.getRecord("run-3"))?.state, "terminal");
+});
+
+test("a zero-capacity dispatch failure terminalizes the local run", async () => {
+  const stopped: string[] = [];
+  const stopReasons: string[] = [];
+  const harness = runAdmissionHarness(
+    () => ({
+      fenceAdmitted: () => Promise.resolve(true),
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.resolve(false),
+      stop: (runId, _dispatchToken, reason) => {
+        stopped.push(runId);
+        if (reason) {
+          stopReasons.push(reason);
+        }
+        return Promise.resolve({ status: "cancelled" });
+      },
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "0",
+    }
+  );
+
+  assert.deepEqual(await harness.admission.admit(request(411)), {
+    kind: "active",
+    runId: "run-411",
+  });
+  await Promise.all(harness.background);
+
+  assert.deepEqual(stopped, ["run-411"]);
+  assert.deepEqual(stopReasons, [
+    "Run refused because the tenant queue is full.",
+  ]);
+  assert.equal(
+    (await harness.admission.getRecord("run-411"))?.state,
+    "terminal"
+  );
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_records WHERE state = 'queued'"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    0
+  );
+});
+
+test("concurrent proven-not-started failures each honor their tenant queue cap", async () => {
+  const stopped: string[] = [];
+  const harness = runAdmissionHarness(
+    () => ({
+      fenceAdmitted: () => Promise.resolve(true),
+      getRun: (runId) =>
+        runId === "run-20" || runId === "run-22"
+          ? { status: "running" }
+          : { status: "queued" },
+      startAdmitted: () => Promise.resolve(false),
+      stop: (runId) => {
+        stopped.push(runId);
+        return Promise.resolve({ status: "cancelled" });
+      },
+    }),
+    {
+      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "4",
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "2",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    }
+  );
+  await harness.admission.getRecord("initialize");
+  for (const [index, tenantHash, sequence] of [
+    [20, TENANT_A, 1],
+    [24, TENANT_A, 2],
+    [22, TENANT_B, 4],
+    [25, TENANT_B, 5],
+  ] as const) {
+    seedAdmissionRecord(
+      harness,
+      {
+        ...activeRecord(index, tenantHash),
+        enqueuedAt: new Date(Date.now()).toISOString(),
+      },
+      sequence
+    );
+  }
+  seedAdmissionRecord(
+    harness,
+    {
+      ...request(26, TENANT_A),
+      enqueuedAt: new Date(Date.now()).toISOString(),
+      state: "queued",
+    },
+    3
+  );
+  seedAdmissionRecord(
+    harness,
+    {
+      ...request(27, TENANT_B),
+      enqueuedAt: new Date(Date.now()).toISOString(),
+      state: "queued",
+    },
+    6
+  );
+  harness.sql.exec(
+    `
+      UPDATE admission_records
+      SET dispatch_lease_until = ?, dispatch_token = ?
+      WHERE run_id = ?
+    `,
+    new Date(Date.now() - 1).toISOString(),
+    "dispatch-run-24",
+    "run-24"
+  );
+  harness.sql.exec(
+    `
+      UPDATE admission_records
+      SET dispatch_lease_until = ?, dispatch_token = ?
+      WHERE run_id = ?
+    `,
+    new Date(Date.now() - 1).toISOString(),
+    "dispatch-run-25",
+    "run-25"
+  );
+
+  await Promise.all([harness.admission.alarm(), harness.admission.alarm()]);
+  await Promise.all(harness.background);
+
+  assert.ok(stopped.includes("run-24"));
+  assert.ok(stopped.includes("run-25"));
+  for (const tenantHash of [TENANT_A, TENANT_B]) {
+    assert.equal(
+      (
+        harness.sql
+          .exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM admission_records WHERE state = 'queued' AND tenant_hash = ?",
+            tenantHash
+          )
+          .toArray() as { count: number }[]
+      )[0]?.count,
+      1
+    );
+  }
+});
+
+test("admission reconciles expired queued tombstones before applying a new cap", async () => {
+  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  const originalNow = Date.now;
+  Date.now = () => now;
+  try {
+    const harness = runAdmissionHarness(
+      () => ({
+        getRun: () => ({ status: "queued" }),
+        startAdmitted: () => Promise.resolve(false),
+        stop: () => Promise.reject(new Error("cleanup outage")),
+      }),
+      {
+        RUN_ADMISSION_TENANT_ACTIVE_MAX: "0",
+        RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+      }
+    );
+    await harness.admission.getRecord("initialize");
+    for (let index = 0; index < 10; index += 1) {
+      seedAdmissionRecord(
+        harness,
+        {
+          ...request(430 + index),
+          enqueuedAt: new Date(now - 5 * 60 * 1000 - 1).toISOString(),
+          state: "queued",
+        },
+        index + 1
+      );
+    }
+
+    assert.deepEqual(await harness.admission.admit(request(440)), {
+      kind: "queued",
+      position: 1,
+      runId: "run-440",
+    });
+    await Promise.all(harness.background);
+
+    assert.equal(
+      (
+        harness.sql
+          .exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM admission_records WHERE state = 'queued' AND tenant_hash = ?",
+            TENANT_A
+          )
+          .toArray() as { count: number }[]
+      )[0]?.count,
+      1
+    );
+    assert.equal(
+      (
+        harness.sql
+          .exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM admission_records WHERE state = 'terminal' AND tenant_hash = ?",
+            TENANT_A
+          )
+          .toArray() as { count: number }[]
+      )[0]?.count,
+      10
+    );
+    assert.equal(
+      (
+        harness.sql
+          .exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM admission_cleanup_tasks"
+          )
+          .toArray() as { count: number }[]
+      )[0]?.count,
+      10,
+      "cleanup tombstones remain durable during an agent outage"
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("durable dispatch fairness gives tenant B a slot before tenant A's third turn", async () => {
+  const originalNow = Date.now;
+  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  Date.now = () => now;
+  try {
+    const dispatched: string[] = [];
+    const tenantByRun = new Map<string, string>();
+    const harness = runAdmissionHarness(
+      () => ({
+        getRun: () => ({ status: "queued" }),
+        startAdmitted: (runId) => {
+          dispatched.push(tenantByRun.get(runId) ?? "unknown");
+          return Promise.resolve(true);
+        },
+        stop: () => Promise.resolve(null),
+      }),
+      {
+        RUN_ADMISSION_CONSECUTIVE_MAX: "2",
+        RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "3",
+        RUN_ADMISSION_TENANT_ACTIVE_MAX: "2",
+        RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+      }
+    );
+    await harness.admission.getRecord("initialize");
+    for (const [index, tenantHash, state] of [
+      [450, TENANT_A, "active"],
+      [451, TENANT_A, "active"],
+      [452, TENANT_A, "queued"],
+      [453, TENANT_B, "queued"],
+    ] as const) {
+      const current = request(index, tenantHash);
+      tenantByRun.set(current.runId, tenantHash);
+      seedAdmissionRecord(
+        harness,
+        {
+          ...current,
+          enqueuedAt: new Date(now).toISOString(),
+          state,
+        },
+        index - 449
+      );
+    }
+    harness.sql.exec(
+      "INSERT INTO admission_meta (key, value) VALUES ('last_tenant_hash', ?), ('consecutive_dispatches', '2')",
+      TENANT_A
+    );
+
+    assert.equal(await harness.admission.release("run-450"), true);
+    await Promise.all(harness.background);
+
+    assert.deepEqual(dispatched.slice(0, 2), [TENANT_B, TENANT_A]);
+    assert.equal(
+      (await harness.admission.getRecord("run-453"))?.state,
+      "active"
+    );
+    assert.equal(
+      (await harness.admission.getRecord("run-452"))?.state,
+      "active"
+    );
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test("terminal admission history is retained for duplicate idempotency but pruned", async () => {
