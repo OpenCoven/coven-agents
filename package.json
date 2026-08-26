@@ -22,6 +22,7 @@
     "fix": "ultracite fix",
     "hygiene": "tsx scripts/hygiene.ts",
     "prepare": "husky",
+    "roadmap:status": "tsx scripts/roadmap-status.ts",
     "start": "next start",
     "subscription": "tsx --env-file-if-exists=.env.local --conditions=react-server scripts/subscription.ts",
     "test": "export PLAYWRIGHT=True && pnpm exec playwright test",
