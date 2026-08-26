@@ -96,6 +96,61 @@ test("a second concurrent run is refused", async () => {
   );
 });
 
+test("concurrent admitted dispatches claim only one run for an agent", async () => {
+  const yolo = agent();
+  const first = await yolo.enqueue(
+    { operationId: OP_A, task: "First admitted run." },
+    "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90",
+    "hash-a",
+    "identity"
+  );
+  const second = await yolo.enqueue(
+    { operationId: OP_B, task: "Second admitted run." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c91",
+    "hash-b",
+    "identity"
+  );
+
+  const results = await Promise.allSettled([
+    yolo.startAdmitted(first.run.id),
+    yolo.startAdmitted(second.run.id),
+  ]);
+
+  assert.equal(
+    results.filter(
+      (result) => result.status === "fulfilled" && result.value === true
+    ).length,
+    1,
+    "one dispatch must win the atomic agent claim"
+  );
+  assert.equal(
+    results.filter(
+      (result) =>
+        result.status === "rejected" &&
+        result.reason instanceof AlreadyRunningError
+    ).length,
+    1,
+    "the losing dispatch must observe the active-run invariant"
+  );
+});
+
+test("missing admitted identity does not consume the agent slot", async () => {
+  const yolo = agent();
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Missing identity." },
+    "5f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c92",
+    "hash-missing-identity",
+    ""
+  );
+
+  await assert.rejects(
+    () => yolo.startAdmitted(queued.run.id),
+    /Queued run identity is unavailable/
+  );
+
+  assert.equal(yolo.getRun(queued.run.id)?.status, "queued");
+});
+
 test("stop cancels the fiber and closes the record", async () => {
   const yolo = agent();
   const started = await yolo.start(

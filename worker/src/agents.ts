@@ -334,27 +334,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     task: string,
     identityToken: string
   ): Promise<CloudRunRecord> {
-    const startedAt = new Date().toISOString();
-    let record = appendEvents(
-      {
-        ...planned,
-        run: { ...planned.run, startedAt, status: "running" as const },
-      },
-      [
-        // There is no "started" event in the contract; a transition is reported
-        // as a `status` event carrying the new status. Only `accepted` carries
-        // operationId and runId, and the schema is strict, so adding them here
-        // would fail to parse.
-        {
-          at: startedAt,
-          id: nextEventId(planned),
-          status: "running",
-          type: "status",
-        },
-      ]
-    );
-    this.persistRun(record);
-    this.updateDefinition({ status: "running", updatedAt: startedAt });
+    let record = this.claimRunStart(planned);
 
     // Declared outside the try block, not `const` inside it: the catch
     // block below also hands its outcome to `finishCloudRunRecord`, and if
@@ -625,26 +605,20 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (!record || isTerminal(record.run.status)) {
       return false;
     }
-    const active = this.state.runs.find(
-      (candidate) =>
-        candidate.run.id !== runId && candidate.run.status === "running"
-    );
-    if (active) {
-      throw new AlreadyRunningError();
-    }
     const identityToken = this.state.identityTokens?.[runId];
     if (!identityToken) {
       throw new Error("Queued run identity is unavailable.");
     }
     const definition = this.requireDefinition();
-    const receipt = await this.startFiber(
+    const claimed = this.claimRunStart(record);
+    await this.startFiber(
       cloudFiberKey(runId),
       async () => {
         try {
           await this.driveHarness(
             definition,
-            record,
-            record.run.task,
+            claimed,
+            claimed.run.task,
             identityToken
           );
         } finally {
@@ -653,7 +627,53 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       },
       { idempotencyKey: cloudFiberKey(runId) }
     );
-    return receipt.accepted;
+    // A duplicate fiber receipt still represents a successful admission: the
+    // atomic run claim above already proved this run owns the agent slot.
+    return true;
+  }
+
+  /**
+   * Claims the only agent execution slot before any asynchronous fiber call.
+   * Admission can retry the same RPC, but two different run ids cannot both
+   * observe a free slot while the first fiber is still being accepted.
+   */
+  private claimRunStart(planned: CloudRunRecord): CloudRunRecord {
+    const current =
+      this.state.runs.find(
+        (candidate) => candidate.run.id === planned.run.id
+      ) ?? planned;
+    if (isTerminal(current.run.status)) {
+      throw new AlreadyRunningError();
+    }
+    const active = this.state.runs.find(
+      (candidate) =>
+        candidate.run.id !== current.run.id &&
+        candidate.run.status === "running"
+    );
+    if (active) {
+      throw new AlreadyRunningError();
+    }
+    if (current.run.status === "running") {
+      return current;
+    }
+    const startedAt = new Date().toISOString();
+    const claimed = appendEvents(
+      {
+        ...current,
+        run: { ...current.run, startedAt, status: "running" as const },
+      },
+      [
+        {
+          at: startedAt,
+          id: nextEventId(current),
+          status: "running",
+          type: "status",
+        },
+      ]
+    );
+    this.persistRun(claimed);
+    this.updateDefinition({ status: "running", updatedAt: startedAt });
+    return claimed;
   }
 
   /** Removes a prepared run when admission refuses it before dispatch. */

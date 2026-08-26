@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { pseudonymousKey } from "./abuse";
-import { OperationConflictError } from "./run-state";
+import { isTerminal, OperationConflictError } from "./run-state";
 
 export type AdmissionRecord = {
   agentId: string;
@@ -36,6 +36,7 @@ export const DEFAULT_ADMISSION_LIMITS: AdmissionLimits = {
 
 const QUEUED_TTL_MS = 5 * 60 * 1000;
 const ALARM_INTERVAL_MS = 30 * 1000;
+const DISPATCH_LEASE_MS = 60 * 1000;
 
 type SchedulerState = {
   consecutiveDispatches: number;
@@ -324,10 +325,7 @@ export class AdmissionQueue {
   async expire(now = this.now()): Promise<string[]> {
     const expired: string[] = [];
     for (const record of this.queueRecords) {
-      if (
-        record.state === "queued" &&
-        now - Date.parse(record.enqueuedAt) >= QUEUED_TTL_MS
-      ) {
+      if (record.state === "queued" && this.isQueueExpired(record, now)) {
         record.state = "terminal";
         expired.push(record.runId);
       }
@@ -337,10 +335,16 @@ export class AdmissionQueue {
   }
 
   nextDispatchCandidate(): AdmissionRecord | undefined {
+    if (this.activeCount() >= this.limits.deploymentActiveRuns) {
+      return;
+    }
     const tenants = [
       ...new Set(
         this.queueRecords
-          .filter((record) => record.state === "queued")
+          .filter(
+            (record) =>
+              record.state === "queued" && !this.isQueueExpired(record)
+          )
           .map((record) => record.tenantHash)
       ),
     ].filter(
@@ -406,6 +410,11 @@ export class AdmissionQueue {
     return this.queueRecords.filter(
       (record) => record.state === "active" && record.tenantHash === tenantHash
     ).length;
+  }
+
+  private isQueueExpired(record: AdmissionRecord, now = this.now()): boolean {
+    const enqueuedAt = Date.parse(record.enqueuedAt);
+    return Number.isFinite(enqueuedAt) && now - enqueuedAt >= QUEUED_TTL_MS;
   }
 
   private queuedCount(tenantHash: string): number {
@@ -502,9 +511,25 @@ export class RunAdmission extends DurableObject<Env> {
           request_hash TEXT NOT NULL,
           run_id TEXT PRIMARY KEY,
           state TEXT NOT NULL CHECK (state IN ('queued', 'active', 'terminal')),
-          tenant_hash TEXT NOT NULL
+          tenant_hash TEXT NOT NULL,
+          dispatch_started_at TEXT,
+          dispatch_lease_until TEXT
         )
       `);
+      const columns = ctx.storage.sql
+        .exec<{ name: string }>("PRAGMA table_info(admission_records)")
+        .toArray()
+        .map((column) => column.name);
+      if (!columns.includes("dispatch_started_at")) {
+        ctx.storage.sql.exec(
+          "ALTER TABLE admission_records ADD COLUMN dispatch_started_at TEXT"
+        );
+      }
+      if (!columns.includes("dispatch_lease_until")) {
+        ctx.storage.sql.exec(
+          "ALTER TABLE admission_records ADD COLUMN dispatch_lease_until TEXT"
+        );
+      }
       ctx.storage.sql.exec(`
         CREATE INDEX IF NOT EXISTS admission_records_queue_idx
         ON admission_records (state, tenant_hash, enqueued_at)
@@ -552,8 +577,8 @@ export class RunAdmission extends DurableObject<Env> {
       );
     }
     this.writeRecord(created);
-    await this.dispatchAvailable(limits);
     await this.ensureAlarm();
+    this.ctx.waitUntil(this.dispatchAvailable(limits));
     const current = this.findByRunId(input.runId);
     if (!current) {
       throw new AdmissionConfigurationError("Admission record disappeared.");
@@ -568,8 +593,9 @@ export class RunAdmission extends DurableObject<Env> {
       return false;
     }
     this.updateState(runId, "terminal");
-    await this.dispatchAvailable(admissionLimits(this.env));
+    this.clearDispatchLease(runId);
     await this.ensureAlarm();
+    this.ctx.waitUntil(this.dispatchAvailable(admissionLimits(this.env)));
     return true;
   }
 
@@ -578,53 +604,57 @@ export class RunAdmission extends DurableObject<Env> {
     return this.findByRunId(runId);
   }
 
+  async getByOperationId(operationId: string): Promise<AdmissionRecord | null> {
+    await this.initialized;
+    return this.findByOperationId(operationId);
+  }
+
   async dispatch(): Promise<void> {
     await this.initialized;
-    await this.dispatchAvailable(admissionLimits(this.env));
     await this.ensureAlarm();
+    this.ctx.waitUntil(this.dispatchAvailable(admissionLimits(this.env)));
   }
 
   async alarm(): Promise<void> {
     await this.initialized;
     const now = Date.now();
+    for (const record of this.readRecords()) {
+      if (record.state !== "active") {
+        continue;
+      }
+      // Reconciliation is serialized with the Durable Object state.
+      // biome-ignore lint/performance/noAwaitInLoops: reconciliation is intentionally sequential
+      await this.reconcileActive(
+        record,
+        now - Date.parse(record.enqueuedAt) >= QUEUED_TTL_MS
+      );
+    }
     const expired = this.readRecords().filter(
       (record) =>
         record.state === "queued" &&
         now - Date.parse(record.enqueuedAt) >= QUEUED_TTL_MS
     );
     for (const record of expired) {
+      let cancellationProven = false;
       try {
         // Each cancellation is reconciled before the admission row is closed.
         // biome-ignore lint/performance/noAwaitInLoops: cancellations are intentionally sequential
-        await this.env.YoloAgent.getByName(record.agentId).stop(record.runId);
-      } catch {
-        // The terminal state below is authoritative; reconciliation remains
-        // safe if the agent RPC is temporarily unavailable.
-      }
-      const current = this.findByRunId(record.runId);
-      if (current?.state === "queued") {
-        this.updateState(record.runId, "terminal");
-      }
-    }
-
-    for (const record of this.readRecords()) {
-      if (record.state !== "active") {
-        continue;
-      }
-      try {
-        // Reconciliation is serialized with the Durable Object state.
-        // biome-ignore lint/performance/noAwaitInLoops: reconciliation is intentionally sequential
-        const run = await this.env.YoloAgent.getByName(record.agentId).getRun(
+        const stopped = await this.env.YoloAgent.getByName(record.agentId).stop(
           record.runId
         );
-        if (run && run.status !== "queued" && run.status !== "running") {
-          const current = this.findByRunId(record.runId);
-          if (current?.state === "active") {
-            this.updateState(record.runId, "terminal");
-          }
-        }
+        cancellationProven =
+          stopped === null ||
+          (typeof stopped === "object" &&
+            stopped !== null &&
+            "status" in stopped &&
+            typeof stopped.status === "string" &&
+            isTerminal(stopped.status));
       } catch {
-        // Keep the active record for the next alarm if reconciliation fails.
+        // Keep the queued record so a later alarm can retry cancellation.
+      }
+      const current = this.findByRunId(record.runId);
+      if (current?.state === "queued" && cancellationProven) {
+        this.updateState(record.runId, "terminal");
       }
     }
     await this.dispatchAvailable(admissionLimits(this.env));
@@ -633,17 +663,10 @@ export class RunAdmission extends DurableObject<Env> {
 
   private async dispatchAvailable(limits: AdmissionLimits): Promise<void> {
     while (true) {
-      const queue = new AdmissionQueue({
-        limits,
-        records: this.readRecords(),
-        scheduler: this.readScheduler(),
-      });
-      const candidate = queue.nextDispatchCandidate();
+      const candidate = this.claimNextCandidate(limits);
       if (!candidate) {
         return;
       }
-      this.updateState(candidate.runId, "active");
-      this.writeScheduler(queue.scheduler());
       let accepted = false;
       try {
         // Dispatches are serialized to preserve the durable capacity ledger.
@@ -652,25 +675,111 @@ export class RunAdmission extends DurableObject<Env> {
           candidate.agentId
         ).startAdmitted(candidate.runId);
       } catch {
-        accepted = false;
+        // Leave the active claim leased. The alarm will inspect the agent
+        // after the lease expires and either requeue it or release it.
+        return;
       }
       const current = this.findByRunId(candidate.runId);
       if (!current || current.state === "terminal" || accepted) {
+        if (accepted) {
+          this.clearDispatchLease(candidate.runId);
+        }
         continue;
       }
-      this.updateState(candidate.runId, "queued");
-      return;
+      // A false response means the agent can tell us whether this run is
+      // still queued, terminal, or absent. Do not strand the deployment slot.
+      await this.reconcileActive(current, true);
+      if (this.findByRunId(candidate.runId)?.state === "queued") {
+        return;
+      }
     }
   }
 
   private async ensureAlarm(): Promise<void> {
-    const hasWork = this.readRecords().some(
+    const records = this.readRecords();
+    const hasWork = records.some(
       (record) => record.state === "queued" || record.state === "active"
     );
     if (hasWork) {
-      await this.ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
+      const now = Date.now();
+      const queuedDeadlines = records
+        .filter((record) => record.state === "queued")
+        .map((record) => Date.parse(record.enqueuedAt) + QUEUED_TTL_MS);
+      const dispatchLeases = records
+        .filter((record) => record.state === "active")
+        .map((record) => this.dispatchLeaseUntil(record.runId))
+        .filter((value): value is number => value !== null);
+      const deadlines = [...queuedDeadlines, ...dispatchLeases].filter(
+        (value) => Number.isFinite(value)
+      );
+      const next = Math.min(
+        now + ALARM_INTERVAL_MS,
+        ...deadlines.filter((deadline) => deadline > now)
+      );
+      const current = await this.ctx.storage.getAlarm();
+      if (current === null || current <= now || current > next) {
+        await this.ctx.storage.setAlarm(next);
+      }
     } else {
       await this.ctx.storage.deleteAlarm();
+    }
+  }
+
+  private claimNextCandidate(
+    limits: AdmissionLimits
+  ): AdmissionRecord | undefined {
+    const queue = new AdmissionQueue({
+      limits,
+      records: this.readRecords(),
+      scheduler: this.readScheduler(),
+    });
+    const candidate = queue.nextDispatchCandidate();
+    if (!candidate) {
+      return;
+    }
+    const startedAt = new Date(Date.now()).toISOString();
+    this.updateDispatchLease(
+      candidate.runId,
+      startedAt,
+      new Date(Date.now() + DISPATCH_LEASE_MS).toISOString()
+    );
+    this.writeScheduler(queue.scheduler());
+    return candidate;
+  }
+
+  private async reconcileActive(
+    record: AdmissionRecord,
+    forceQueued = false
+  ): Promise<void> {
+    try {
+      const run = await this.env.YoloAgent.getByName(record.agentId).getRun(
+        record.runId
+      );
+      const current = this.findByRunId(record.runId);
+      if (current?.state !== "active") {
+        return;
+      }
+      if (!run) {
+        this.updateState(record.runId, "terminal");
+        this.clearDispatchLease(record.runId);
+        return;
+      }
+      if (run.status === "running") {
+        this.clearDispatchLease(record.runId);
+        return;
+      }
+      if (isTerminal(run.status)) {
+        this.updateState(record.runId, "terminal");
+        this.clearDispatchLease(record.runId);
+        return;
+      }
+      const leaseUntil = this.dispatchLeaseUntil(record.runId);
+      if (forceQueued || leaseUntil === null || leaseUntil <= Date.now()) {
+        this.updateState(record.runId, "queued");
+        this.clearDispatchLease(record.runId);
+      }
+    } catch {
+      // Keep the active record and retry after its dispatch lease.
     }
   }
 
@@ -736,15 +845,17 @@ export class RunAdmission extends DurableObject<Env> {
     this.ctx.storage.sql.exec(
       `
         INSERT INTO admission_records
-          (agent_id, enqueued_at, operation_id, request_hash, run_id, state, tenant_hash)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+          (agent_id, enqueued_at, operation_id, request_hash, run_id, state, tenant_hash, dispatch_started_at, dispatch_lease_until)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
         ON CONFLICT(run_id) DO UPDATE SET
           agent_id = excluded.agent_id,
           enqueued_at = excluded.enqueued_at,
           operation_id = excluded.operation_id,
           request_hash = excluded.request_hash,
           state = excluded.state,
-          tenant_hash = excluded.tenant_hash
+          tenant_hash = excluded.tenant_hash,
+          dispatch_started_at = NULL,
+          dispatch_lease_until = NULL
       `,
       record.agentId,
       record.enqueuedAt,
@@ -762,6 +873,41 @@ export class RunAdmission extends DurableObject<Env> {
       state,
       runId
     );
+  }
+
+  private updateDispatchLease(
+    runId: string,
+    startedAt: string,
+    leaseUntil: string
+  ): void {
+    this.ctx.storage.sql.exec(
+      "UPDATE admission_records SET state = 'active', dispatch_started_at = ?, dispatch_lease_until = ? WHERE run_id = ?",
+      startedAt,
+      leaseUntil,
+      runId
+    );
+  }
+
+  private clearDispatchLease(runId: string): void {
+    this.ctx.storage.sql.exec(
+      "UPDATE admission_records SET dispatch_started_at = NULL, dispatch_lease_until = NULL WHERE run_id = ?",
+      runId
+    );
+  }
+
+  private dispatchLeaseUntil(runId: string): number | null {
+    const rows = this.ctx.storage.sql
+      .exec<{ dispatch_lease_until: string | null }>(
+        "SELECT dispatch_lease_until FROM admission_records WHERE run_id = ?",
+        runId
+      )
+      .toArray();
+    const value = rows[0]?.dispatch_lease_until;
+    if (!value) {
+      return null;
+    }
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
   private deleteRecord(runId: string): void {

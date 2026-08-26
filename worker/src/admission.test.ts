@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
   AdmissionQueue,
   type AdmissionRecord,
   admissionLimits,
   admissionMode,
+  RunAdmission,
   tenantAdmissionHash,
 } from "./admission";
 import { OperationConflictError, planCloudRunStart } from "./run-state";
@@ -125,6 +127,26 @@ test("deployment active ceiling refuses new work", async () => {
     kind: "refused",
     reason: "global_busy",
   });
+});
+
+test("dispatch candidate selection enforces the deployment active ceiling", () => {
+  const queue = new AdmissionQueue({
+    limits: { deploymentActiveRuns: 1 },
+    records: [
+      activeRecord(1, TENANT_A),
+      {
+        ...request(2, TENANT_B),
+        enqueuedAt: new Date(2).toISOString(),
+        state: "queued",
+      },
+    ],
+  });
+
+  assert.equal(
+    queue.nextDispatchCandidate(),
+    undefined,
+    "a full deployment must not claim another queued record"
+  );
 });
 
 test("round-robin dispatch gives a waiting tenant a slot before a third turn", async () => {
@@ -249,4 +271,335 @@ test("tenant admission hashes are stable and do not expose the tenant id", async
   assert.equal(first, second);
   assert.match(first, /^v1:[0-9a-f]{64}$/);
   assert.equal(first.includes("tenant-a"), false);
+});
+
+type SqlRows = {
+  toArray: () => unknown[];
+};
+type SqlInput = null | number | bigint | string | NodeJS.ArrayBufferView;
+
+function runAdmissionHarness(
+  getAgent: () => {
+    getRun: (runId: string) => unknown;
+    startAdmitted: (runId: string) => Promise<boolean>;
+    stop: (runId: string) => Promise<unknown>;
+  }
+) {
+  const database = new DatabaseSync(":memory:");
+  let alarm: number | null = null;
+  const background: Promise<unknown>[] = [];
+  const sql = {
+    exec<T>(
+      query: string,
+      ...parameters: SqlInput[]
+    ): SqlRows & { toArray: () => T[] } {
+      const statement = database.prepare(query);
+      if (/^\s*(SELECT|PRAGMA)/i.test(query)) {
+        return {
+          toArray: () => statement.all(...parameters) as T[],
+        };
+      }
+      statement.run(...parameters);
+      return { toArray: () => [] as T[] };
+    },
+  };
+  const ctx = {
+    blockConcurrencyWhile: <T>(callback: () => Promise<T>) => callback(),
+    storage: {
+      deleteAlarm: () => {
+        alarm = null;
+      },
+      getAlarm: async () => alarm,
+      setAlarm: (scheduled: number) => {
+        alarm = scheduled;
+      },
+      sql,
+    },
+    waitUntil: (promise: Promise<unknown>) => {
+      background.push(promise);
+    },
+  };
+  const admission = new RunAdmission(
+    ctx as never,
+    {
+      YoloAgent: { getByName: () => getAgent() },
+    } as never
+  );
+  return {
+    admission,
+    alarm: () => alarm,
+    background,
+    setAlarm: (value: number | null) => {
+      alarm = value;
+    },
+    sql,
+  };
+}
+
+test("admission returns an immediate active decision without waiting for dispatch RPC", async () => {
+  let resolveDispatch!: (accepted: boolean) => void;
+  const dispatch = new Promise<boolean>((resolve) => {
+    resolveDispatch = resolve;
+  });
+  const harness = runAdmissionHarness(() => ({
+    getRun: () => null,
+    startAdmitted: () => dispatch,
+    stop: async () => null,
+  }));
+
+  const decision = await Promise.race([
+    harness.admission.admit({
+      ...request(30),
+    }),
+    new Promise<"timed_out">((resolve) =>
+      setTimeout(() => resolve("timed_out"), 50)
+    ),
+  ]);
+
+  assert.notEqual(
+    decision,
+    "timed_out",
+    "the admission request must not be held open by agent dispatch"
+  );
+  assert.deepEqual(decision, { kind: "active", runId: "run-30" });
+
+  resolveDispatch(true);
+  await Promise.all(harness.background);
+});
+
+test("alarm keeps its earlier cadence instead of postponing expiry", async () => {
+  const originalNow = Date.now;
+  let now = Date.parse("2026-08-26T00:00:00.000Z");
+  Date.now = () => now;
+  try {
+    const harness = runAdmissionHarness(() => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: async () => false,
+      stop: async () => null,
+    }));
+    await harness.admission.admit(request(31));
+    const firstAlarm = harness.alarm();
+    assert.equal(firstAlarm, now + 30_000);
+
+    now += 10_000;
+    await harness.admission.dispatch();
+
+    assert.equal(
+      harness.alarm(),
+      firstAlarm,
+      "continuous lifecycle activity must not move an earlier alarm later"
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("failed cancellation leaves an expired queued record for alarm retry", async () => {
+  let attempts = 0;
+  const harness = runAdmissionHarness(() => ({
+    getRun: () => ({ status: "queued" }),
+    startAdmitted: () => Promise.resolve(false),
+    stop: () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return Promise.reject(new Error("agent unavailable"));
+      }
+      return Promise.resolve({ status: "cancelled" });
+    },
+  }));
+  await harness.admission.admit(request(32));
+  harness.sql.exec(
+    "UPDATE admission_records SET enqueued_at = ? WHERE run_id = ?",
+    new Date(Date.now() - 5 * 60 * 1000 - 1).toISOString(),
+    "run-32"
+  );
+
+  await harness.admission.alarm();
+  assert.equal((await harness.admission.getRecord("run-32"))?.state, "queued");
+
+  await harness.admission.alarm();
+  assert.equal(
+    (await harness.admission.getRecord("run-32"))?.state,
+    "terminal"
+  );
+  assert.equal(attempts, 2);
+});
+
+test("alarm schedules a new retry after its prior alarm has fired", async () => {
+  const originalNow = Date.now;
+  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  Date.now = () => now;
+  try {
+    const harness = runAdmissionHarness(() => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.resolve(false),
+      stop: () => Promise.reject(new Error("agent unavailable")),
+    }));
+    await harness.admission.admit(request(36));
+    harness.sql.exec(
+      "UPDATE admission_records SET enqueued_at = ? WHERE run_id = ?",
+      new Date(now - 5 * 60 * 1000 - 1).toISOString(),
+      "run-36"
+    );
+    harness.setAlarm(now - 1);
+
+    await harness.admission.alarm();
+
+    assert.equal(
+      (await harness.admission.getRecord("run-36"))?.state,
+      "queued"
+    );
+    assert.equal(
+      harness.alarm(),
+      now + 30_000,
+      "a fired alarm must be replaced so cancellation can be retried"
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("missing active agent runs are reconciled so capacity is released", async () => {
+  const harness = runAdmissionHarness(() => ({
+    getRun: () => null,
+    startAdmitted: async () => true,
+    stop: async () => null,
+  }));
+  assert.deepEqual(await harness.admission.admit(request(33)), {
+    kind: "active",
+    runId: "run-33",
+  });
+
+  await harness.admission.alarm();
+
+  assert.equal(
+    (await harness.admission.getRecord("run-33"))?.state,
+    "terminal"
+  );
+});
+
+test("alarm repairs a missed terminal completion callback", async () => {
+  let getRunCalls = 0;
+  const harness = runAdmissionHarness(() => ({
+    getRun: () => {
+      getRunCalls += 1;
+      return { status: "completed" };
+    },
+    startAdmitted: () => Promise.resolve(true),
+    stop: () => Promise.resolve(null),
+  }));
+  assert.deepEqual(await harness.admission.admit(request(38)), {
+    kind: "active",
+    runId: "run-38",
+  });
+
+  await harness.admission.alarm();
+
+  assert.equal(
+    (await harness.admission.getRecord("run-38"))?.state,
+    "terminal"
+  );
+  assert.ok(
+    getRunCalls > 0,
+    "alarm must inspect the agent after a missed callback"
+  );
+});
+
+test("an interrupted dispatch keeps its lease until a queued run is reconciled", async () => {
+  const originalNow = Date.now;
+  let now = Date.parse("2026-08-26T00:00:00.000Z");
+  let attempts = 0;
+  Date.now = () => now;
+  try {
+    const harness = runAdmissionHarness(() => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => {
+        attempts += 1;
+        if (attempts === 1) {
+          return Promise.reject(new Error("dispatch interrupted"));
+        }
+        return Promise.resolve(false);
+      },
+      stop: () => Promise.resolve(null),
+    }));
+
+    assert.deepEqual(await harness.admission.admit(request(34)), {
+      kind: "active",
+      runId: "run-34",
+    });
+    await Promise.all(harness.background);
+    assert.equal(
+      (await harness.admission.getRecord("run-34"))?.state,
+      "active",
+      "an interrupted RPC must retain its capacity claim until reconciliation"
+    );
+
+    now += 61_000;
+    await harness.admission.alarm();
+
+    assert.equal(
+      (await harness.admission.getRecord("run-34"))?.state,
+      "queued"
+    );
+    assert.ok(attempts >= 2, "the alarm must retry the interrupted dispatch");
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("a queued dispatch still expires on its queue deadline", async () => {
+  const originalNow = Date.now;
+  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  let cancellations = 0;
+  Date.now = () => now;
+  try {
+    const harness = runAdmissionHarness(() => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.reject(new Error("dispatch interrupted")),
+      stop: () => {
+        cancellations += 1;
+        return Promise.reject(new Error("agent unavailable"));
+      },
+    }));
+    assert.deepEqual(await harness.admission.admit(request(37)), {
+      kind: "active",
+      runId: "run-37",
+    });
+    await Promise.all(harness.background);
+    harness.sql.exec(
+      "UPDATE admission_records SET enqueued_at = ? WHERE run_id = ?",
+      new Date(now - 5 * 60 * 1000 - 1).toISOString(),
+      "run-37"
+    );
+
+    await harness.admission.alarm();
+
+    assert.equal(
+      (await harness.admission.getRecord("run-37"))?.state,
+      "queued"
+    );
+    assert.equal(
+      cancellations,
+      1,
+      "an active dispatch whose agent is still queued must enter expiry retry"
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("active admission is retained while the agent reports a genuinely running run", async () => {
+  const harness = runAdmissionHarness(() => ({
+    getRun: () => ({ status: "running" }),
+    startAdmitted: () => Promise.resolve(true),
+    stop: () => Promise.resolve(null),
+  }));
+  assert.deepEqual(await harness.admission.admit(request(35)), {
+    kind: "active",
+    runId: "run-35",
+  });
+
+  await harness.admission.alarm();
+
+  assert.equal((await harness.admission.getRecord("run-35"))?.state, "active");
 });

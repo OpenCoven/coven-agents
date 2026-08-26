@@ -961,6 +961,68 @@ test("run admission happens before dispatch and receives only a tenant hash", as
   );
 });
 
+test("an orphan queued duplicate cannot bypass admission", async () => {
+  const operationId = "77777777-8888-4999-9000-111111111111";
+  const runId = "88888888-9999-4000-8111-222222222222";
+  const run = queuedRun(MINE, runId, operationId);
+  let lookedUp = 0;
+  const agent: CloudRunnerAgent = {
+    configure: (value: AgentDefinition) => value,
+    decommission: () => undefined,
+    discardRun: () => undefined,
+    enqueue: () => ({ created: false, run }),
+    getEventStream: () => ({ events: [], terminal: false }),
+    getRun: () => run,
+    listRuns: () => [run],
+    snapshot: () => agents.get(MINE) ?? null,
+    start: () => {
+      throw new Error("orphan duplicate must not start directly");
+    },
+    stop: () => run,
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const response = await createCloudRunner({
+    getAdmission: () => ({
+      admit: () => {
+        throw new Error("admit must not create a second record");
+      },
+      getByOperationId: () => {
+        lookedUp += 1;
+        return null;
+      },
+      release: () => false,
+    }),
+    getDirectory: () => ({
+      list: () => [agents.get(MINE) as AgentDefinition],
+      lookupRun: () => MINE,
+      registerRun: () => undefined,
+      remove: () => undefined,
+      upsert: (value: AgentDefinition) => value,
+    }),
+    getYoloAgent: () => agent,
+  }).fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: run.task }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    { ...environment, RUN_ADMISSION_MODE: "queue" } as never
+  );
+
+  assert.equal(response.status, 409);
+  assert.equal(lookedUp, 1);
+});
+
 test("reject mode refuses an unhealthy admission object without bypassing it", async () => {
   const operationId = "55555555-6666-4777-8888-999999999999";
   const runId = "66666666-7777-4888-8999-000000000000";

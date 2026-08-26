@@ -17,6 +17,7 @@ import {
 } from "./abuse.js";
 import {
   type AdmissionDecision,
+  type AdmissionRecord,
   type AdmissionRequest,
   admissionMode,
   tenantAdmissionHash,
@@ -33,6 +34,7 @@ import { importVerifyKey, verifyRunnerToken } from "./identity.js";
 import {
   AlreadyRunningError,
   hashOperation,
+  isTerminal,
   OperationConflictError,
 } from "./run-state.js";
 import {
@@ -119,6 +121,7 @@ export type CloudRunnerAgent = {
 
 export type CloudRunnerAdmission = {
   admit: (input: AdmissionRequest) => Awaitable<AdmissionDecision>;
+  getByOperationId?: (operationId: string) => Awaitable<AdmissionRecord | null>;
   release: (runId: string) => Awaitable<boolean>;
 };
 
@@ -612,10 +615,50 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               authorization.slice(7)
             );
             if (!prepared.created) {
+              if (isTerminal(prepared.run.status)) {
+                return json(
+                  {
+                    apiVersion: AGENT_RUNNER_API_VERSION,
+                    run: prepared.run,
+                  },
+                  { status: 202 },
+                  cors
+                );
+              }
+              let existingAdmission: CloudRunnerAdmission | null = null;
+              let admissionRecord: AdmissionRecord | null = null;
+              try {
+                existingAdmission = dependencies.getAdmission
+                  ? await dependencies.getAdmission(environment)
+                  : null;
+                admissionRecord = existingAdmission?.getByOperationId
+                  ? await existingAdmission.getByOperationId(input.operationId)
+                  : null;
+              } catch {
+                return busyResponse("global_busy", cors);
+              }
+              if (!existingAdmission || !admissionRecord) {
+                return busyResponse("global_busy", cors);
+              }
+              const originalAgentId = await directory.lookupRun(
+                admissionRecord.runId
+              );
+              const originalAgent = originalAgentId
+                ? await yoloAgent(originalAgentId)
+                : agent;
+              const original = await originalAgent.getRun(
+                admissionRecord.runId
+              );
+              if (!original) {
+                return busyResponse("global_busy", cors);
+              }
+              if (isTerminal(original.status)) {
+                await existingAdmission.release(admissionRecord.runId);
+              }
               return json(
                 {
                   apiVersion: AGENT_RUNNER_API_VERSION,
-                  run: prepared.run,
+                  run: original,
                 },
                 { status: 202 },
                 cors
@@ -669,7 +712,10 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 : agent;
               const original = await originalAgent.getRun(decision.runId);
               if (!original) {
-                throw new Error("Original admitted run is unavailable.");
+                return busyResponse("global_busy", cors);
+              }
+              if (isTerminal(original.status)) {
+                await admission.release(decision.runId);
               }
               return json(
                 { apiVersion: AGENT_RUNNER_API_VERSION, run: original },
