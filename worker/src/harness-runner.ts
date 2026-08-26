@@ -16,7 +16,7 @@ import {
 } from "@opencoven/harness";
 
 const DEFAULT_WORKSPACE = "/workspace";
-const RUN_TIMEOUT_MS = 900_000;
+export const RUN_TIMEOUT_MS = 900_000;
 /**
  * Generous, and deliberately so. The deadline clock starts when the worker
  * awaits the exec, and that await covers the container's cold boot as well
