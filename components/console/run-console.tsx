@@ -1569,7 +1569,7 @@ function EmptyConsole({
         </h1>
         <p style={{ ...type_.body, margin: "0 auto", maxWidth: "44ch" }}>
           {blocked ??
-            "Forge an execution profile, then give it a mission and the evidence you would accept."}
+            "Forge an execution profile, hand it a mission, and read the receipt it proves itself with."}
         </p>
         <div
           style={{
@@ -1588,6 +1588,68 @@ function EmptyConsole({
             Forge an agent
           </Btn>
         </div>
+
+        {/* The boundary, published. One quiet line — every claim in it is
+            load-bearing and true: runs execute in Cloudflare's sandbox
+            containers, the container is the blast radius, and the credential
+            is fetched for one run and redacted from evidence. Naming
+            Cloudflare is deliberate; the isolation is their product, and
+            saying so borrows exactly as much trust as it should. */}
+        <div
+          style={{
+            alignItems: "center",
+            display: "flex",
+            gap: 8,
+            justifyContent: "center",
+            marginTop: 26,
+          }}
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              background: "var(--color-success)",
+              borderRadius: 999,
+              height: 5,
+              width: 5,
+            }}
+          />
+          <span
+            style={{
+              color: "var(--text-faint)",
+              font: "400 11px/1.6 var(--font-mono)",
+            }}
+          >
+            isolated Cloudflare sandbox per run · nothing reaches your machine
+          </span>
+        </div>
+        <details style={{ marginTop: 10 }}>
+          <summary
+            style={{
+              color: "var(--text-faint)",
+              cursor: "pointer",
+              display: "inline-block",
+              font: "500 10px/1 var(--font-mono)",
+              letterSpacing: "0.1em",
+              listStyle: "none",
+              textTransform: "uppercase",
+            }}
+          >
+            How a run is bounded
+          </summary>
+          <p
+            style={{
+              ...type_.body,
+              font: "400 12px/1.7 var(--font-ui)",
+              margin: "10px auto 0",
+              maxWidth: "46ch",
+            }}
+          >
+            Every run gets its own Cloudflare sandbox container. Filesystem and
+            network end with it. Your harness credential is envelope-encrypted,
+            fetched for the duration of one run, and redacted from the evidence.
+            When the run closes, the receipt is what remains.
+          </p>
+        </details>
       </div>
     </div>
   );
