@@ -13,8 +13,11 @@ Current blockers are factual and fail closed:
 
 - the authenticated private Beads/DoltHub pull returned `PermissionDenied`, so
   authoritative P0, dependency, and acceptance state cannot be reconciled;
-- a fresh `pnpm hygiene` found two `AT RISK` secondary worktrees,
-  `feat/console-polish` and `feat/run-budget-reservations`;
+- `pnpm hygiene` at `2026-08-25T23:38:25-05:00` reported five worktrees, four
+  secondary worktrees against a soft cap of three, and two `AT RISK` branches:
+  `feat/console-polish` and `feat/console-redesign`. Worktree state is live, so
+  release operators must rerun the command rather than treat these names as a
+  durable inventory;
 - all 60 managed Project items are draft items, so GitHub issue state cannot
   independently confirm delivery reconciliation;
 - required rows in [`verification-matrix.md`](verification-matrix.md) remain
@@ -34,7 +37,8 @@ Stop the release without exception when any of these is true:
 - an unresolved P0 exists or P0 state cannot be read authoritatively;
 - a required verification row is red or `Blocked`;
 - `ROADMAP.md` is stale;
-- any worktree is `AT RISK`; or
+- any worktree is `AT RISK`;
+- the secondary-worktree count exceeds the repository soft cap; or
 - Beads and Project are drifted or cannot be shown to agree.
 
 A required row is **red** when its state is `Not implemented`, `Implemented`,
@@ -101,8 +105,12 @@ merge and before release:
 6. Commit and push any generated roadmap refresh.
 
 These commands are for authorized maintainers with private Beads and Project
-access. Any auth, schema, inventory, privacy, or mutation failure stops the
-release and leaves projections unchanged.
+access. Sync validates source, schema, inventory, and privacy rules before
+beginning writes and is idempotent and retryable, but batched GraphQL apply is
+**not atomic**. A later mutation failure may leave earlier Project mutations
+persisted. Stop the release, repair the cause, and rerun preview and apply until
+the final no-op gate passes. Sync does not delete or archive Project items and
+leaves orphans untouched.
 
 ## Required local gates
 
@@ -226,11 +234,11 @@ or guess at database compatibility.
 | P0 and dependencies | Authorized Beads query shows no unresolved release-blocking P0 or dependency. | Any unresolved P0, or authority unavailable. | **No-go:** Beads/DoltHub returns `PermissionDenied`; authoritative status is unavailable. |
 | Verification | Every required matrix row is `Verified` or `Certified` for the candidate. | Any required row red or `Blocked`. | **No-go:** conformance, recovery, browser quality, preflight, and production smoke are not `Verified`. |
 | Roadmap freshness | `pnpm roadmap:status check` passes after authoritative reconciliation. | Stale aggregate. | **No-go:** the Project snapshot matched the checked-in aggregate, but Beads freshness cannot be established. |
-| Worktree safety | `pnpm hygiene` exits zero with no `AT RISK` worktree. | Any `AT RISK` worktree. | **No-go:** two secondary worktrees are `AT RISK`. |
-| Beads/Project/issues | Final sync preview is unchanged and accepted delivery artifacts agree. | Drift, orphan, failed sync, or issue contradiction. | **No-go:** sync cannot run authoritatively and managed Project items are drafts. |
+| Worktree safety | `pnpm hygiene` exits zero with no `AT RISK` worktree and the secondary count within the soft cap. | Any `AT RISK` worktree or a secondary count above the soft cap. | **No-go:** the timestamped hygiene evidence above reports both conditions. |
+| Beads/Project/issues | A second apply and final preview are a complete no-op, and accepted delivery artifacts agree. | Drift, create/update/orphan work, partial or failed sync, or issue contradiction. | **No-go:** sync cannot run authoritatively and managed Project items are drafts. |
 | Five local gates | All five pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** the latest full snapshot failed hygiene. |
 | Database | Staging migration, production backup, migration success, schema verification, and recovery record exist. | Missing backup, skipped/failed migration, or unproved recovery. | **No-go:** no candidate-specific production migration and restore artifact is retained. |
 | Smoke and Stripe | Demo, subscriber, cloud, and webhook evidence pass; local runs only if supported. | Any failed required smoke or missing webhook delivery. | **No-go:** only local/unit evidence is retained. |
 | Isolation | Tenant, credential, identity, and redaction evidence pass in a release-equivalent environment. | Any cross-tenant or secret-boundary failure. | **No-go:** production-like isolation evidence is not retained. |
 | Observability, rollback, recovery | Diagnostics pass and a dated rollback/recovery rehearsal is retained with named operators. | Blind operation, missing owner, or unproved recovery for affected data. | **No-go:** health/readiness and persisted-run recovery remain incomplete. |
-| Actions policy | All evidence is local and retained while Actions remain intentionally disabled. | Treating an unrun workflow as evidence or re-enabling Actions without separate approval. | **Accepted constraint:** not a go signal; every other gate still applies. |
+| Actions policy | All evidence is local and retained while Actions remain intentionally disabled. If CI is separately restored, refresh the roadmap and replace this evidence policy before counting remote checks. | Treating an unrun workflow as evidence or re-enabling Actions without separate approval. | **Accepted constraint:** not a go signal; every other gate still applies. |

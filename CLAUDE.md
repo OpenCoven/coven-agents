@@ -95,13 +95,19 @@ After a merge, authorized maintainers update and push Beads privately, then run:
 ```bash
 pnpm beads:sync preview
 pnpm beads:sync apply
+pnpm beads:sync apply
+pnpm beads:sync preview
 pnpm roadmap:status apply
 pnpm roadmap:status check
 ```
 
-These commands require authorized private Beads and Project access. They fail
-closed: if authentication, schema, inventory, privacy, preview, or apply fails,
-stop and leave Project, issue state, and the checked-in roadmap unchanged.
+These commands require authorized private Beads and Project access. Sync
+validates source, schema, inventory, and privacy rules before writes and is
+idempotent and retryable, but batched GraphQL apply is **not atomic**. Earlier
+Project mutations may persist if a later mutation fails. Stop downstream issue
+and roadmap reconciliation, repair the cause, and rerun preview/apply until the
+final preview is a no-op. Sync never deletes or archives Project items and
+leaves orphans untouched.
 
 <!-- BEGIN:nextjs-agent-rules -->
 

@@ -63,8 +63,9 @@ An authorized maintainer reconciles in this order:
 
 1. Pull the private Beads authority, record the accepted delivery and dependency
    changes, then commit and push the private database.
-2. Preview and apply the one-way Beads-to-Project projection. Apply again and
-   finish with a preview that reports no create, update, or orphan work.
+2. Preview and apply the one-way Beads-to-Project projection. Apply a second
+   time, then finish with a preview that reports zero creates, updates, and
+   orphans and the full managed inventory unchanged.
 3. Reconcile the delivery issue and merged pull request. Close an issue only
    when the authoritative task is accepted; preserve the pull request as
    evidence.
@@ -74,9 +75,13 @@ An authorized maintainer reconciles in this order:
    changes a capability, procedure, environment, blocker, rollback condition,
    or retained artifact.
 
-The Project, issue, and roadmap steps never run ahead of Beads. Authentication,
-schema, inventory, or write failures stop reconciliation and leave checked-in
-and remote projections unchanged.
+The Project, issue, and roadmap steps never run ahead of Beads. The sync
+validates source, schema, inventory, and privacy rules before beginning writes
+and is idempotent and retryable, but its batched GraphQL apply is **not atomic**.
+A later mutation failure may leave earlier Project mutations persisted. Stop
+downstream issue and roadmap reconciliation, repair the cause, and rerun preview
+and apply until the final no-op gate passes. Sync never deletes or archives
+Project items, and it leaves orphans untouched for review.
 
 ## Roadmap refresh triggers
 
@@ -90,7 +95,8 @@ events:
 - a promotion, demotion, go/no-go, or release decision is being made;
 - verification evidence expires or a touched path invalidates it;
 - `pnpm roadmap:status check` reports a stale aggregate; or
-- unavailable planning authority becomes available again.
+- unavailable planning authority becomes available again; or
+- GitHub Actions or other required CI is separately approved and restored.
 
 Do not hand-edit the generated status block. A current Project projection does
 not prove Beads is current when the private authority cannot be read.
@@ -99,9 +105,15 @@ not prove Beads is current when the private authority cannot be read.
 
 A phase, wave, capability, or release may be promoted only when:
 
-- authoritative task and dependency state is available and reconciled;
+- the authoritative planning workspace is available, current, and backed up;
+- Beads, its generated Project view, and delivered issue state are reconciled;
+- a second Beads-to-Project apply and final preview prove a no-op with zero
+  creates, updates, and orphans and the full managed inventory unchanged;
 - no unresolved P0 or blocking dependency applies;
 - there are no `AT RISK` worktrees;
+- the secondary-worktree count is within the repository soft cap;
+- lockfile-defined dependencies are installed and generated application
+  artifacts are current;
 - all five required local gates pass on the promoted commit;
 - every required verification row is `Verified` or `Certified`;
 - the roadmap aggregate is current;
@@ -112,11 +124,13 @@ A phase, wave, capability, or release may be promoted only when:
 release-equivalent environment. Unit, integration, source inspection, or an
 undated manual claim cannot satisfy that state.
 
-Demote immediately when a required gate regresses, evidence no longer applies
-to the current commit or environment, a required row becomes `Blocked`, a
-rollback occurs, an `AT RISK` worktree appears, the roadmap becomes stale, or
-Beads and Project can no longer be shown to agree. Demotion updates current
-status; it does not rewrite historical evidence.
+Demote immediately when a required gate regresses, the final planning sync is
+not a no-op, the secondary-worktree count exceeds the soft cap, dependencies or
+generated artifacts become stale, evidence no longer applies to the current
+commit or environment, a required row becomes `Blocked`, a rollback occurs, an
+`AT RISK` worktree appears, the roadmap becomes stale, or Beads and Project can
+no longer be shown to agree. Demotion updates current status; it does not
+rewrite historical evidence.
 
 ## Historical specifications
 
@@ -191,6 +205,8 @@ Automation must preview before mutation, fail on ambiguity, and preserve data:
 - no automatic Beads deletion, Project archive, issue closure, branch deletion,
   worktree removal, history rewrite, force push, database rollback, or evidence
   purge;
+- partial Project mutations are recovered by repairing the cause and rerunning
+  the idempotent sync, not by automatic rollback, deletion, or archive;
 - orphaned or conflicting records remain untouched for authorized review;
 - cleanup tools may act only when they prove work is safely merged or pushed;
 - migration, rollback, retention, and deletion actions require a named human
