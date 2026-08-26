@@ -182,6 +182,22 @@ function runner() {
         status: "completed",
         task: "Fix the tests.",
       }),
+      listRuns: () => [
+        {
+          agentId,
+          apiVersion: "2026-08-01",
+          commandEvidence: [],
+          completedAt: "2026-08-20T12:00:05.000Z",
+          createdAt: "2026-08-20T12:00:00.000Z",
+          fileEvidence: [],
+          id: agentId === MINE ? MY_RUN_ID : RUN_ID,
+          operationId: MINE,
+          output: "done",
+          startedAt: "2026-08-20T12:00:01.000Z",
+          status: "completed",
+          task: "Fix the tests.",
+        },
+      ],
       snapshot: () => agents.get(agentId) ?? null,
       start: () => {
         throw new Error("start must not be reached for another tenant");
@@ -400,6 +416,23 @@ test("another tenant's agent cannot be deleted", async () => {
 
   assert.equal(response.status, 404);
   assert.deepEqual(decommissioned, [], "decommission must not be reached");
+});
+
+test("an agent's retained runs are listable", async () => {
+  const response = await call(`/api/agents/${MINE}/runs`);
+
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as { runs: { id: string }[] };
+  assert.deepEqual(
+    body.runs.map((run) => run.id),
+    [MY_RUN_ID]
+  );
+});
+
+test("another tenant's run history is not listable", async () => {
+  const response = await call(`/api/agents/${THEIRS}/runs`);
+
+  assert.equal(response.status, 404);
 });
 
 test("another tenant's agent cannot be run", async () => {

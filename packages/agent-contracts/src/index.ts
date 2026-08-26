@@ -390,6 +390,13 @@ export const runEventsEnvelopeSchema = z
   })
   .strict();
 
+export const runListEnvelopeSchema = z
+  .object({
+    apiVersion: agentRunnerApiVersionSchema,
+    runs: z.array(runSnapshotSchema),
+  })
+  .strict();
+
 export const runErrorEnvelopeSchema = z
   .object({
     apiVersion: agentRunnerApiVersionSchema,

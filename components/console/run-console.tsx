@@ -261,6 +261,38 @@ export function RunConsole() {
           ? current
           : (next[0]?.id ?? null)
       );
+
+      // The runner remembers a bounded history per agent; without this a
+      // reload shows an empty session list while the runs still exist. Each
+      // agent's listing fails soft — a runner without the route (or one
+      // agent's directory hiccup) costs history, never the console.
+      const discovered = (
+        await Promise.all(
+          next.map((agent) =>
+            client.listRuns(agent.id).then(
+              (snapshots) =>
+                snapshots.map((snapshot) => ({ agentId: agent.id, snapshot })),
+              () => []
+            )
+          )
+        )
+      ).flat();
+      setRuns((current) => {
+        const known = new Set(current.map((run) => run.snapshot.id));
+        return [
+          ...current,
+          ...discovered
+            .filter((run) => !known.has(run.snapshot.id))
+            .map((run) => ({ ...run, events: [], lastEventId: 0 })),
+        ];
+      });
+      // A run that survived the refresh mid-flight resumes streaming; its
+      // events replay from the start, so the transcript rebuilds itself.
+      const live = discovered.find((run) => !isTerminal(run.snapshot.status))
+        ?.snapshot.id;
+      if (live) {
+        setStreamingRunId((current) => current ?? live);
+      }
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not reach the runner."
@@ -416,6 +448,33 @@ export function RunConsole() {
       controller.abort();
     };
   }, [applyEvent, client, streamingRunId]);
+
+  /**
+   * Backfills the transcript of a finished run that was hydrated from the
+   * runner's history. Hydration carries only the snapshot; the events still
+   * live on the worker, and for a terminal run its stream replays them all
+   * and closes, which makes it a one-shot transcript fetch. Live runs are
+   * excluded — the streaming effect above owns those.
+   */
+  useEffect(() => {
+    if (
+      !selectedRun ||
+      selectedRun.events.length > 0 ||
+      selectedRun.lastEventId > 0 ||
+      !isTerminal(selectedRun.snapshot.status)
+    ) {
+      return;
+    }
+    const runId = selectedRun.snapshot.id;
+    const controller = new AbortController();
+    client
+      .streamRunEvents(runId, {
+        onEvent: (event) => applyEvent(runId, event),
+        signal: controller.signal,
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [applyEvent, client, selectedRun]);
 
   const running = selectedRun
     ? !isTerminal(selectedRun.snapshot.status)

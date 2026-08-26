@@ -11,6 +11,7 @@ import {
   runEnvelopeSchema,
   runErrorEnvelopeSchema,
   runEventSchema,
+  runListEnvelopeSchema,
   runSnapshotEnvelopeSchema,
   runSnapshotToResult,
 } from "@opencoven/agent-contracts";
@@ -334,6 +335,24 @@ export class RunnerClient {
       "unexpected_run_payload",
       response.status
     );
+  }
+
+  /**
+   * Every run the runner still retains for one agent, newest first.
+   *
+   * The runner keeps a bounded history per agent, so this is the console's
+   * memory across refreshes — without it a reload shows an empty session
+   * list while the runs still exist on the other side.
+   */
+  async listRuns(
+    agentId: string,
+    signal?: AbortSignal
+  ): Promise<RunSnapshot[]> {
+    const response = await this.fetch(
+      `/api/agents/${encodeURIComponent(agentId)}/runs`,
+      { signal }
+    );
+    return runListEnvelopeSchema.parse(await response.json()).runs;
   }
 
   /** Re-reads one run. Used to reconcile after the event stream ends. */

@@ -80,6 +80,7 @@ export type CloudRunnerAgent = {
     lastEventId: number
   ) => Awaitable<RunEventStreamSnapshot | null>;
   getRun: (runId: string) => Awaitable<RunSnapshot | null>;
+  listRuns: () => Awaitable<RunSnapshot[]>;
   snapshot: () => Awaitable<AgentDefinition | null>;
   start: (
     input: unknown,
@@ -480,6 +481,19 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             await agent.decommission();
             await directory.remove(id);
             return json({ ok: true }, {}, cors);
+          }
+          if (action === "runs" && request.method === "GET") {
+            // The retained history (terminal runs plus any live one), newest
+            // first. Without this a console refresh forgets every run the
+            // agent still remembers.
+            return json(
+              {
+                apiVersion: AGENT_RUNNER_API_VERSION,
+                runs: await agent.listRuns(),
+              },
+              {},
+              cors
+            );
           }
           if (action === "runs" && request.method === "POST") {
             // The plan is enforced before the run, not only when the
