@@ -173,6 +173,41 @@ test("an unconfigured store in production still fails closed", async () => {
   );
 });
 
+test("ABUSE_CONTROL=off lifts enforcement without touching the store", async () => {
+  // The operator's kill switch: when the limiter itself is the outage,
+  // admission must not depend on any part of the limiter — not the store,
+  // not the subjects, not the policy table.
+  const enforcer = createAbusePolicyEnforcer({
+    getControlMode: () => "off",
+    getStore: () => {
+      throw new Error("The kill switch must never reach the store.");
+    },
+    isProduction: true,
+  });
+
+  assert.deepEqual(await enforcer({ ip: null, route: "checkout" }), {
+    kind: "allowed",
+  });
+});
+
+test("only the exact value off lifts enforcement", async () => {
+  // `BETA_MODE === "on"` tradition: a typo leaves enforcement armed.
+  const admissions = await Promise.all(
+    ["OFF", "false", "0", "", undefined].map((mode) => {
+      const enforcer = createAbusePolicyEnforcer({
+        getControlMode: () => mode,
+        getStore: () => undefined,
+        isProduction: true,
+      });
+      return enforcer({ ip: "203.0.113.4", route: "checkout", userId: "u" });
+    })
+  );
+
+  for (const admission of admissions) {
+    assert.deepEqual(admission, { kind: "unavailable", responseStatus: 503 });
+  }
+});
+
 test("rejected Redis connects destroy cached state and retry with bounded client options", async () => {
   const firstClient = new FakeRedisClient({
     connect: () => Promise.reject(new Error("connect failed")),

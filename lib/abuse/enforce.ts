@@ -177,6 +177,7 @@ export function createRedisStoreProvider(
 
 export function createAbusePolicyEnforcer(input: {
   consumeTimeoutMs?: number;
+  getControlMode?: () => string | undefined;
   getStore: StoreProvider;
   isProduction: boolean;
   timers?: TimeoutTimers;
@@ -185,7 +186,10 @@ export function createAbusePolicyEnforcer(input: {
     input.consumeTimeoutMs ?? DEFAULT_CONSUME_TIMEOUT_MS,
     "Abuse consume timeout"
   );
+  const getControlMode =
+    input.getControlMode ?? (() => process.env.ABUSE_CONTROL);
   const timers = input.timers ?? SYSTEM_TIMERS;
+  let liftWarned = false;
 
   /**
    * The store used while Redis is configured but not answering.
@@ -205,6 +209,22 @@ export function createAbusePolicyEnforcer(input: {
   const fallbackStore = new MemoryAbuseStore();
 
   return async (request) => {
+    /**
+     * The operator's kill switch. `ABUSE_CONTROL=off` — exact match, in the
+     * `BETA_MODE === "on"` tradition, so a typo leaves enforcement on rather
+     * than off — admits everything without touching the store. It exists for
+     * the night the limiter itself is the outage; it is loud in the logs for
+     * the same reason, because a lifted limit that nobody remembers is an
+     * unprotected deployment.
+     */
+    if (getControlMode() === "off") {
+      if (!liftWarned) {
+        liftWarned = true;
+        console.warn("Abuse control lifted by ABUSE_CONTROL=off.");
+      }
+      return { kind: "allowed" };
+    }
+
     const policy = abusePolicyFor(request.route);
     const subjects = deriveSubjects(policy.subjects, request);
     if (!subjects) {
@@ -231,9 +251,18 @@ export function createAbusePolicyEnforcer(input: {
     }
 
     if (!store) {
-      return input.isProduction
-        ? { kind: "unavailable", responseStatus: 503 }
-        : { kind: "allowed" };
+      if (input.isProduction) {
+        // This refusal used to be silent, which made tonight's sign-in
+        // outage look like every other 503 in this file. Booleans only:
+        // which variable is absent is diagnostic, its value is a secret.
+        console.error("Abuse store unconfigured in production.", {
+          hasKeySecret: Boolean(process.env.ABUSE_KEY_SECRET),
+          hasRedisUrl: Boolean(process.env.REDIS_URL),
+          route: request.route,
+        });
+        return { kind: "unavailable", responseStatus: 503 };
+      }
+      return { kind: "allowed" };
     }
 
     for (const subject of subjects) {
