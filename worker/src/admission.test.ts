@@ -208,6 +208,65 @@ test("admitSynchronously enforces zero queue capacity when activation is blocked
   });
 });
 
+test("async admit refuses a failed immediate dispatch when the queue has no slot", async () => {
+  const operation = request(22);
+  const queue = new AdmissionQueue({
+    dispatch: () => Promise.resolve(false),
+    limits: {
+      tenantQueuedRuns: 0,
+    },
+  });
+
+  assert.deepEqual(await queue.admit(operation), {
+    kind: "refused",
+    reason: "tenant_queue_full",
+  });
+  const records = queue.records();
+  assert.equal(records.length, 1);
+  const [record] = records;
+  assert.ok(record);
+  assert.deepEqual(record, {
+    ...operation,
+    enqueuedAt: record.enqueuedAt,
+    state: "terminal",
+  });
+  assert.deepEqual(await queue.admit(operation), {
+    kind: "duplicate",
+    runId: operation.runId,
+    state: "terminal",
+  });
+});
+
+test("queued positions use the injected clock for expiry", () => {
+  const injectedNow = Date.parse("2026-08-26T00:00:00.000Z");
+  const originalNow = Date.now;
+  Date.now = () => injectedNow + 5 * 60 * 1000 + 1;
+  try {
+    const queue = new AdmissionQueue({
+      limits: {
+        tenantActiveRuns: 0,
+        tenantQueuedRuns: 3,
+      },
+      now: () => injectedNow,
+      records: [
+        {
+          ...request(23),
+          enqueuedAt: new Date(injectedNow - 5 * 60 * 1000 + 1).toISOString(),
+          state: "queued",
+        },
+      ],
+    });
+
+    assert.deepEqual(queue.admitSynchronously(request(24)), {
+      kind: "queued",
+      position: 2,
+      runId: "run-24",
+    });
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test("deployment active ceiling refuses new work", async () => {
   const queue = new AdmissionQueue({
     records: Array.from({ length: 25 }, (_unused, index) =>

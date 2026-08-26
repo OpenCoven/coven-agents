@@ -240,7 +240,8 @@ function compareQueueOrder(
 function queuedPosition(
   records: readonly StoredAdmissionRecord[],
   tenantHash: string,
-  runId: string
+  runId: string,
+  now: number
 ): number {
   return (
     records
@@ -248,7 +249,7 @@ function queuedPosition(
         (record) =>
           record.state === "queued" &&
           record.tenantHash === tenantHash &&
-          !isQueueExpired(record)
+          !isQueueExpired(record, now)
       )
       .sort(compareQueueOrder)
       .findIndex((record) => record.runId === runId) + 1
@@ -575,13 +576,22 @@ export class AdmissionQueue {
     if (record.state === "queued") {
       return {
         kind: "queued",
-        position: queuedPosition(this.queueRecords, record.tenantHash, runId),
+        position: queuedPosition(
+          this.queueRecords,
+          record.tenantHash,
+          runId,
+          this.now()
+        ),
         runId,
       };
     }
-    throw new AdmissionConfigurationError(
-      "A terminal admission record cannot produce a new decision."
-    );
+    return {
+      kind: "refused",
+      reason:
+        this.queuedCount(record.tenantHash) >= this.limits.tenantQueuedRuns
+          ? "tenant_queue_full"
+          : "global_busy",
+    };
   }
 }
 
