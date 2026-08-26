@@ -117,6 +117,7 @@ export function ConnectCopilot({
 
     try {
       const response = await fetch("/api/credentials/device", {
+        headers: { "idempotency-key": crypto.randomUUID() },
         method: "POST",
       });
 

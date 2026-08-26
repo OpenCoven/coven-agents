@@ -4,10 +4,12 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { auth } from "@/app/(auth)/auth";
+import { readBoundedFormData } from "@/lib/abuse/body";
 import {
   abuseAdmissionResponse,
   enforceAbusePolicy,
 } from "@/lib/abuse/enforce";
+import { abusePolicyFor } from "@/lib/abuse/policy";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 
@@ -42,41 +44,48 @@ export async function POST(request: Request) {
     return new Response("Request body is empty", { status: 400 });
   }
 
-  try {
-    const formData = await request.formData();
-    const file = formData.get("file") as Blob;
-
-    if (!file) {
-      return NextResponse.json({ error: "No file uploaded" }, { status: 400 });
-    }
-
-    const validatedFile = FileSchema.safeParse({ file });
-
-    if (!validatedFile.success) {
-      const errorMessage = validatedFile.error.issues
-        .map((error) => error.message)
-        .join(", ");
-
-      return NextResponse.json({ error: errorMessage }, { status: 400 });
-    }
-
-    const filename = (formData.get("file") as File).name;
-    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
-    const fileBuffer = await file.arrayBuffer();
-
-    try {
-      const data = await put(`${safeName}`, fileBuffer, {
-        access: "public",
-      });
-
-      return NextResponse.json(data);
-    } catch {
-      return NextResponse.json({ error: "Upload failed" }, { status: 500 });
-    }
-  } catch {
+  const body = await readBoundedFormData(
+    request,
+    abusePolicyFor("upload").bodyBytes
+  );
+  if (body.kind === "too_large") {
+    return NextResponse.json({ error: "request_too_large" }, { status: 413 });
+  }
+  if (body.kind === "invalid") {
     return NextResponse.json(
       { error: "Failed to process request" },
-      { status: 500 }
+      { status: 400 }
     );
+  }
+
+  const formData = body.value;
+  const file = formData.get("file") as Blob;
+
+  if (!file) {
+    return NextResponse.json({ error: "No file uploaded" }, { status: 400 });
+  }
+
+  const validatedFile = FileSchema.safeParse({ file });
+
+  if (!validatedFile.success) {
+    const errorMessage = validatedFile.error.issues
+      .map((error) => error.message)
+      .join(", ");
+
+    return NextResponse.json({ error: errorMessage }, { status: 400 });
+  }
+
+  const filename = (formData.get("file") as File).name;
+  const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const fileBuffer = await file.arrayBuffer();
+
+  try {
+    const data = await put(`${safeName}`, fileBuffer, {
+      access: "public",
+    });
+
+    return NextResponse.json(data);
+  } catch {
+    return NextResponse.json({ error: "Upload failed" }, { status: 500 });
   }
 }

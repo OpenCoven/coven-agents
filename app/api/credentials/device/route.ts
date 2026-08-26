@@ -1,11 +1,19 @@
 import "server-only";
 
 import { ipAddress } from "@vercel/functions";
+import { z } from "zod";
 import { auth } from "@/app/(auth)/auth";
+import { readBoundedJson } from "@/lib/abuse/body";
 import {
   abuseAdmissionResponse,
   enforceAbusePolicy,
 } from "@/lib/abuse/enforce";
+import {
+  idempotencyResultResponse,
+  runIdempotentOperation,
+  type StoredIdempotencyResponse,
+} from "@/lib/abuse/idempotency";
+import { abusePolicyFor } from "@/lib/abuse/policy";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import {
@@ -14,6 +22,13 @@ import {
 } from "@/lib/credentials/github-device";
 import { serializeCredential } from "@/lib/credentials/shape";
 import { putCredential } from "@/lib/credentials/store";
+import { databaseIdempotencyStore } from "@/lib/db/queries";
+
+const devicePollSchema = z.object({
+  deviceCode: z.string().min(1),
+});
+
+const DEVICE_RESULT_RETENTION_MS = 15 * 60_000;
 
 /**
  * Connects Copilot without the tenant ever seeing a token.
@@ -45,21 +60,30 @@ export async function POST(request: Request) {
     return abuseAdmissionResponse(admission);
   }
 
-  const id = clientId();
+  const result = await runIdempotentOperation({
+    idempotencyKey: request.headers.get("idempotency-key"),
+    operation: "credential_device_start",
+    ownerId: access.userId,
+    perform: async (): Promise<StoredIdempotencyResponse> => {
+      const id = clientId();
+      if (!id) {
+        return {
+          body: { error: "github_unconfigured" },
+          status: 503,
+        };
+      }
 
-  if (!id) {
-    return Response.json({ error: "github_unconfigured" }, { status: 503 });
-  }
-
-  const started = await startDeviceFlow(id);
-
-  if (!started) {
-    return Response.json({ error: "device_flow_failed" }, { status: 502 });
-  }
-
-  return Response.json(started, {
-    headers: { "cache-control": "no-store" },
+      const started = await startDeviceFlow(id);
+      return started
+        ? { body: { ...started }, status: 200 }
+        : { body: { error: "device_flow_failed" }, status: 502 };
+    },
+    request: {},
+    retentionMs: DEVICE_RESULT_RETENTION_MS,
+    store: databaseIdempotencyStore,
   });
+
+  return idempotencyResultResponse(result);
 }
 
 export async function PUT(request: Request) {
@@ -83,16 +107,20 @@ export async function PUT(request: Request) {
     return Response.json({ error: "github_unconfigured" }, { status: 503 });
   }
 
-  const body = (await request.json().catch(() => null)) as {
-    deviceCode?: unknown;
-  } | null;
-
-  if (typeof body?.deviceCode !== "string" || !body.deviceCode) {
+  const body = await readBoundedJson(
+    request,
+    abusePolicyFor("credential_device_poll").bodyBytes,
+    devicePollSchema
+  );
+  if (body.kind === "too_large") {
+    return Response.json({ error: "request_too_large" }, { status: 413 });
+  }
+  if (body.kind === "invalid") {
     return Response.json({ error: "invalid_request" }, { status: 400 });
   }
 
   const result = await exchangeDeviceCode(
-    { clientId: id, deviceCode: body.deviceCode },
+    { clientId: id, deviceCode: body.value.deviceCode },
     Date.now()
   );
 

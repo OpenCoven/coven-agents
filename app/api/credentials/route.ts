@@ -1,9 +1,12 @@
 import { ipAddress } from "@vercel/functions";
+import { z } from "zod";
 import { auth } from "@/app/(auth)/auth";
+import { readBoundedJson } from "@/lib/abuse/body";
 import {
   abuseAdmissionResponse,
   enforceAbusePolicy,
 } from "@/lib/abuse/enforce";
+import { abusePolicyFor } from "@/lib/abuse/policy";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { decideCredentialWrite } from "@/lib/credentials/authorize";
@@ -17,6 +20,19 @@ import {
   checkCopilotToken,
   checkMessage,
 } from "@/lib/credentials/validate";
+
+const credentialWriteSchema = z
+  .object({
+    credential: z.unknown().optional(),
+    harnessId: z.unknown().optional(),
+  })
+  .passthrough();
+
+const credentialDeleteSchema = z
+  .object({
+    harnessId: z.unknown().optional(),
+  })
+  .passthrough();
 
 /**
  * Where a tenant supplies their own harness credential.
@@ -92,22 +108,24 @@ export async function POST(request: Request) {
     return abuseAdmissionResponse(admission);
   }
 
-  let body: { credential?: unknown; harnessId?: unknown };
-  try {
-    body = (await request.json()) as {
-      credential?: unknown;
-      harnessId?: unknown;
-    };
-  } catch {
+  const body = await readBoundedJson(
+    request,
+    abusePolicyFor("credential_write").bodyBytes,
+    credentialWriteSchema
+  );
+  if (body.kind === "too_large") {
+    return Response.json({ error: "request_too_large" }, { status: 413 });
+  }
+  if (body.kind === "invalid") {
     return Response.json({ error: "invalid_request" }, { status: 400 });
   }
 
-  const decision = decideCredentialWrite(access.session, body);
+  const decision = decideCredentialWrite(access.session, body.value);
   if (decision.kind !== "allowed") {
     return respond(decision);
   }
 
-  const credential = String(body.credential);
+  const credential = String(body.value.credential);
 
   // Checked before storing, against the same endpoint the harness checks
   // entitlement against, so a token that passes here is one the run will
@@ -146,10 +164,15 @@ export async function DELETE(request: Request) {
     return abuseAdmissionResponse(admission);
   }
 
-  let body: { harnessId?: unknown };
-  try {
-    body = (await request.json()) as { harnessId?: unknown };
-  } catch {
+  const body = await readBoundedJson(
+    request,
+    abusePolicyFor("credential_delete").bodyBytes,
+    credentialDeleteSchema
+  );
+  if (body.kind === "too_large") {
+    return Response.json({ error: "request_too_large" }, { status: 413 });
+  }
+  if (body.kind === "invalid") {
     return Response.json({ error: "invalid_request" }, { status: 400 });
   }
 
@@ -158,7 +181,7 @@ export async function DELETE(request: Request) {
   // decision, which has nothing to validate on a removal.
   const decision = decideCredentialWrite(access.session, {
     credential: "placeholder-not-stored",
-    harnessId: body.harnessId,
+    harnessId: body.value.harnessId,
   });
   if (decision.kind !== "allowed") {
     return respond(decision);

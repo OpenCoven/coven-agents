@@ -1,8 +1,12 @@
-import type { InferSelectModel } from "drizzle-orm";
+import { type InferSelectModel, sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   foreignKey,
+  index,
+  integer,
   json,
+  jsonb,
   pgTable,
   primaryKey,
   text,
@@ -11,6 +15,7 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
+import type { JsonValue } from "../abuse/idempotency";
 
 export const user = pgTable(
   "User",
@@ -233,3 +238,54 @@ export const stripeEvent = pgTable("StripeEvent", {
 });
 
 export type StripeEvent = InferSelectModel<typeof stripeEvent>;
+
+/**
+ * One durable claim for a costly request.
+ *
+ * The scoped unique index is the concurrency boundary: only one request for
+ * an owner, operation, and hashed browser key may reach its provider. The
+ * expiry is also the claim lease while work is in progress, so a dead process
+ * can be reclaimed without allowing a stale completion to overwrite its
+ * replacement.
+ */
+export const idempotencyRecord = pgTable(
+  "IdempotencyRecord",
+  {
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    expiresAt: timestamp("expiresAt").notNull(),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    keyHash: text("keyHash").notNull(),
+    operation: varchar("operation", { length: 64 }).notNull(),
+    ownerId: uuid("ownerId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    requestHash: text("requestHash").notNull(),
+    responseJson: jsonb("responseJson").$type<JsonValue>(),
+    responseStatus: integer("responseStatus"),
+    state: varchar("state", {
+      enum: ["in_progress", "completed"],
+      length: 16,
+    })
+      .notNull()
+      .default("in_progress"),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("IdempotencyRecord_owner_operation_key_idx").on(
+      table.ownerId,
+      table.operation,
+      table.keyHash
+    ),
+    index("IdempotencyRecord_expiresAt_idx").on(table.expiresAt),
+    check(
+      "IdempotencyRecord_state_check",
+      sql`${table.state} in ('in_progress', 'completed')`
+    ),
+    check(
+      "IdempotencyRecord_response_state_check",
+      sql`(${table.state} = 'in_progress' and ${table.responseJson} is null and ${table.responseStatus} is null) or (${table.state} = 'completed' and ${table.responseJson} is not null and ${table.responseStatus} between 200 and 299)`
+    ),
+  ]
+);
+
+export type IdempotencyRecord = InferSelectModel<typeof idempotencyRecord>;

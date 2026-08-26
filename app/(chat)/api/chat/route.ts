@@ -12,10 +12,12 @@ import { checkBotId } from "botid/server";
 import { after } from "next/server";
 import { createResumableStreamContext } from "resumable-stream";
 import { auth } from "@/app/(auth)/auth";
+import { readBoundedJson } from "@/lib/abuse/body";
 import {
   abuseAdmissionResponse,
   enforceAbusePolicy,
 } from "@/lib/abuse/enforce";
+import { abusePolicyFor } from "@/lib/abuse/policy";
 import { entitlementsByPlan } from "@/lib/ai/entitlements";
 import {
   allowedModelIds,
@@ -100,14 +102,18 @@ export async function POST(request: Request) {
     return abuseAdmissionResponse(admission);
   }
 
-  let requestBody: PostRequestBody;
-
-  try {
-    const json = await request.json();
-    requestBody = postRequestBodySchema.parse(json);
-  } catch {
+  const body = await readBoundedJson(
+    request,
+    abusePolicyFor("chat").bodyBytes,
+    postRequestBodySchema
+  );
+  if (body.kind === "too_large") {
+    return Response.json({ error: "request_too_large" }, { status: 413 });
+  }
+  if (body.kind === "invalid") {
     return new ChatbotError("bad_request:api").toResponse();
   }
+  const requestBody: PostRequestBody = body.value;
 
   try {
     const { id, message, messages, selectedChatModel, selectedVisibilityType } =

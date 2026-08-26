@@ -2,10 +2,12 @@ import { ipAddress } from "@vercel/functions";
 import { z } from "zod";
 import { auth } from "@/app/(auth)/auth";
 import type { ArtifactKind } from "@/components/chat/artifact";
+import { readBoundedJson } from "@/lib/abuse/body";
 import {
   abuseAdmissionResponse,
   enforceAbusePolicy,
 } from "@/lib/abuse/enforce";
+import { abusePolicyFor } from "@/lib/abuse/policy";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import {
@@ -90,21 +92,31 @@ async function writeDocument(request: Request) {
     return abuseAdmissionResponse(admission);
   }
 
-  let content: string;
-  let title: string;
-  let kind: ArtifactKind;
-  let isManualEdit: boolean | undefined;
-
-  try {
-    ({ content, isManualEdit, kind, title } = documentSchema.parse(
-      await request.json()
-    ));
-  } catch {
+  const body = await readBoundedJson(
+    request,
+    abusePolicyFor("document_write").bodyBytes,
+    documentSchema
+  );
+  if (body.kind === "too_large") {
+    return Response.json({ error: "request_too_large" }, { status: 413 });
+  }
+  if (body.kind === "invalid") {
     return new ChatbotError(
       "bad_request:api",
       "Invalid request body."
     ).toResponse();
   }
+  const {
+    content,
+    isManualEdit,
+    kind,
+    title,
+  }: {
+    content: string;
+    isManualEdit?: boolean;
+    kind: ArtifactKind;
+    title: string;
+  } = body.value;
 
   const documents = await getDocumentsById({ id });
 

@@ -33,7 +33,7 @@ const protectedHandlers: RouteExpectation[] = [
     "app/(chat)/api/chat/route.ts",
     "POST",
     "authorizeSubscriberAccess(",
-    ["request.json(", "getMessageCountByUserId("],
+    ["readBoundedJson(", "getMessageCountByUserId("],
     "chat"
   ),
   route(
@@ -47,7 +47,7 @@ const protectedHandlers: RouteExpectation[] = [
     "app/(chat)/api/files/upload/route.ts",
     "POST",
     "authorizeSubscriberAccess(",
-    ["request.formData(", "put("],
+    ["readBoundedFormData(", "put("],
     "upload"
   ),
   route(
@@ -68,7 +68,7 @@ const protectedHandlers: RouteExpectation[] = [
     "app/api/credentials/device/route.ts",
     "PUT",
     "authorizeSubscriberAccess(",
-    ["request.json(", "exchangeDeviceCode("],
+    ["readBoundedJson(", "exchangeDeviceCode("],
     "credential_device_poll"
   ),
   route(
@@ -82,14 +82,14 @@ const protectedHandlers: RouteExpectation[] = [
     "app/api/credentials/route.ts",
     "POST",
     "authorizeSubscriberAccess(",
-    ["request.json(", "checkCopilotToken(", "putCredential("],
+    ["readBoundedJson(", "checkCopilotToken(", "putCredential("],
     "credential_write"
   ),
   route(
     "app/api/credentials/route.ts",
     "DELETE",
     "authorizeSubscriberAccess(",
-    ["request.json(", "deleteCredential("],
+    ["readBoundedJson(", "deleteCredential("],
     "credential_delete"
   ),
   route(
@@ -118,7 +118,7 @@ const protectedHandlers: RouteExpectation[] = [
       "app/(chat)/api/document/route.ts",
       "POST",
       "authorizeSubscriberAccess(",
-      ["request.json(", "getDocumentsById(", "saveDocument("],
+      ["readBoundedJson(", "getDocumentsById(", "saveDocument("],
       "document_write"
     ),
     implementation: "writeDocument",
@@ -128,7 +128,7 @@ const protectedHandlers: RouteExpectation[] = [
       "app/(chat)/api/document/route.ts",
       "PATCH",
       "authorizeSubscriberAccess(",
-      ["request.json(", "getDocumentsById(", "saveDocument("],
+      ["readBoundedJson(", "getDocumentsById(", "saveDocument("],
       "document_write"
     ),
     implementation: "writeDocument",
@@ -179,7 +179,7 @@ const protectedHandlers: RouteExpectation[] = [
     "app/(chat)/api/vote/route.ts",
     "PATCH",
     "authorizeSubscriberAccess(",
-    ["request.json(", "getChatById(", "voteMessage("],
+    ["readBoundedJson(", "getChatById(", "voteMessage("],
     "vote_write"
   ),
   route(
@@ -281,6 +281,80 @@ test("deferred webhook and internal lending routes stay untouched", () => {
   for (const file of excludedRoutes) {
     assert.doesNotMatch(read(file), /enforceAbusePolicy/);
   }
+});
+
+test("costly creates claim idempotency before calling their provider", () => {
+  for (const [file, providerMarker] of [
+    ["app/api/checkout/route.ts", "stripe.subscriptions.list("],
+    ["app/api/credentials/device/route.ts", "startDeviceFlow("],
+  ] as const) {
+    const source = read(file);
+    const block = exportedFunctionBlock(source, "POST");
+    const claimIndex = block.indexOf("runIdempotentOperation({");
+    const providerIndex = block.indexOf(providerMarker);
+
+    assert.ok(claimIndex >= 0, `${file} must claim idempotency`);
+    assert.ok(providerIndex >= 0, `${file} must call ${providerMarker}`);
+    assert.ok(
+      claimIndex < providerIndex,
+      `${file} must claim before ${providerMarker}`
+    );
+  }
+});
+
+test("bounded readers enforce limits before native body parsing", () => {
+  const source = read("lib/abuse/body.ts");
+  const declaredLengthIndex = source.indexOf("declaredContentLength(");
+  const boundedReadIndex = source.indexOf("readBoundedBytes(");
+  const jsonParseIndex = source.indexOf("JSON.parse(");
+  const reconstructedRequestIndex = source.indexOf("new Request(");
+  const formDataIndex = source.indexOf(".formData()");
+
+  assert.ok(declaredLengthIndex >= 0);
+  assert.ok(boundedReadIndex > declaredLengthIndex);
+  assert.ok(jsonParseIndex > boundedReadIndex);
+  assert.ok(reconstructedRequestIndex > boundedReadIndex);
+  assert.ok(formDataIndex > reconstructedRequestIndex);
+  assert.doesNotMatch(source, /request\.json\(\)|request\.formData\(\)/);
+});
+
+test("latest migration creates the scoped idempotency state machine", () => {
+  const journal = JSON.parse(read("lib/db/migrations/meta/_journal.json")) as {
+    entries: { idx: number; tag: string }[];
+  };
+  const latest = journal.entries.at(-1);
+
+  assert.ok(latest);
+  assert.equal(latest.idx, journal.entries.length - 1);
+
+  const migration = read(`lib/db/migrations/${latest.tag}.sql`);
+  assert.match(migration, /CREATE TABLE "IdempotencyRecord"/);
+  assert.match(
+    migration,
+    /"IdempotencyRecord_owner_operation_key_idx".*"ownerId".*"operation".*"keyHash"/s
+  );
+  assert.match(migration, /"IdempotencyRecord_expiresAt_idx"/);
+  assert.match(migration, /IdempotencyRecord_state_check/);
+  assert.match(migration, /IdempotencyRecord_response_state_check/);
+});
+
+test("database claims and reclaims idempotency records atomically", () => {
+  const source = read("lib/db/queries.ts");
+  const storeIndex = source.indexOf(
+    "export const databaseIdempotencyStore: IdempotencyStore"
+  );
+  const storeSource = source.slice(storeIndex);
+
+  assert.ok(storeIndex >= 0);
+  assert.match(storeSource, /\.transaction\(/);
+  assert.match(storeSource, /\.onConflictDoNothing\(/);
+  assert.match(storeSource, /lte\(idempotencyRecord\.expiresAt, input\.now\)/);
+  assert.equal(
+    storeSource.match(
+      /eq\(\s*idempotencyRecord\.expiresAt,\s*input\.claim\.claimExpiresAt\s*\)/g
+    )?.length,
+    2
+  );
 });
 
 test("Auth.js handlers use method-aware abuse classification", () => {
