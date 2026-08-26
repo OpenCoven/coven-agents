@@ -81,8 +81,11 @@ export class OperationConflictError extends Error {
 }
 
 export class AlreadyRunningError extends Error {
-  constructor() {
-    super("An agent already has an active run.");
+  constructor(cause?: unknown) {
+    super(
+      "An agent already has an active run.",
+      cause === undefined ? undefined : { cause }
+    );
     this.name = "AlreadyRunningError";
   }
 }
@@ -91,8 +94,8 @@ export class AgentBusyError extends AlreadyRunningError {
   readonly code = "agent_busy";
   readonly provenNotStarted = true;
 
-  constructor() {
-    super();
+  constructor(cause?: unknown) {
+    super(cause);
     this.name = "AgentBusyError";
   }
 }

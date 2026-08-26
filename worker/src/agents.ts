@@ -472,7 +472,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     return tracked;
   }
 
-  private acquireSandboxOwnership(
+  private tryAcquireSandboxOwnership(
     runId?: string,
     dispatchToken?: string
   ): {
@@ -480,7 +480,11 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     owner: string;
     dispatchToken?: string;
     runId?: string;
-  } {
+  } | null {
+    const current = this.state.sandbox;
+    if (current?.owner || current?.cleanup) {
+      return null;
+    }
     const generation = (this.state.sandbox?.generation ?? 0) + 1;
     const owner = `${runId ?? "warm"}:${crypto.randomUUID()}`;
     this.setState({
@@ -498,6 +502,22 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       ...(dispatchToken ? { dispatchToken } : {}),
       ...(runId ? { runId } : {}),
     };
+  }
+
+  private acquireSandboxOwnership(
+    runId?: string,
+    dispatchToken?: string
+  ): {
+    generation: number;
+    owner: string;
+    dispatchToken?: string;
+    runId?: string;
+  } {
+    const ownership = this.tryAcquireSandboxOwnership(runId, dispatchToken);
+    if (!ownership) {
+      throw new AgentBusyError();
+    }
+    return ownership;
   }
 
   private ownsSandbox(ownership: {
@@ -635,6 +655,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     if (!cleanup) {
       return true;
     }
+
     if (!force && cleanup.nextAttemptAt > Date.now()) {
       return false;
     }
@@ -698,6 +719,88 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       });
     }
     return true;
+  }
+
+  /**
+   * Gives an admitted run priority over the optional warm-up. A warm owner is
+   * cancelled first and its fiber is allowed to settle before the run can
+   * claim the sandbox. If the warm fiber was accepted but has not started yet,
+   * the durable owner is cleaned directly; the generation check in
+   * `cleanupOwnedSandbox` keeps a late warm callback from touching the run.
+   */
+  private async ensureSandboxAvailableForRun(
+    definition: AgentDefinition,
+    runId?: string
+  ): Promise<void> {
+    if (
+      this.state.sandbox?.cleanup &&
+      !(await this.repairPendingSandboxCleanup(definition))
+    ) {
+      throw new AgentBusyError();
+    }
+
+    let current = this.state.sandbox;
+    if (current?.runId && current.runId !== runId) {
+      throw new AgentBusyError();
+    }
+    if (current?.owner && !current.runId) {
+      try {
+        await this.cancelFiberByKey(
+          WARM_FIBER_KEY,
+          "A run was admitted while warm-up was optional."
+        );
+      } catch (error) {
+        console.warn({
+          error,
+          event: "sandbox.warm_cancel_failed",
+        });
+        // biome-ignore lint/style/useErrorCause: AgentBusyError forwards the cancellation failure as its cause.
+        throw new AgentBusyError(error);
+      }
+
+      // The callback normally appears in fiberCompletions as soon as the
+      // platform starts it. Yield once for that registration before deciding
+      // whether the reserved owner needs direct cleanup.
+      await Promise.resolve();
+      const completion = this.fiberCompletions.get(WARM_FIBER_KEY);
+      if (completion) {
+        await completion.catch(() => undefined);
+      }
+    }
+
+    if (
+      this.state.sandbox?.cleanup &&
+      !(await this.repairPendingSandboxCleanup(definition))
+    ) {
+      throw new AgentBusyError();
+    }
+
+    current = this.state.sandbox;
+    if (current?.owner && !current.runId) {
+      const ownership = {
+        dispatchToken: current.dispatchToken,
+        generation: current.generation,
+        owner: current.owner,
+        runId: current.runId,
+      };
+      if (
+        !(await this.cleanupOwnedSandbox(
+          definition,
+          ownership,
+          "failed",
+          "The warm-up was cancelled before the run started."
+        ))
+      ) {
+        throw new AgentBusyError();
+      }
+    }
+
+    if (
+      (this.state.sandbox?.owner && this.state.sandbox.runId !== runId) ||
+      this.state.sandbox?.cleanup
+    ) {
+      throw new AgentBusyError();
+    }
   }
 
   async repairSandboxCleanup(
@@ -931,6 +1034,9 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       throw new AlreadyRunningError();
     }
 
+    if (this.state.sandbox?.owner || this.state.sandbox?.cleanup) {
+      await this.ensureSandboxAvailableForRun(definition, plan.record.run.id);
+    }
     return toRunResult(
       await this.driveHarness(definition, plan.record, task, identityToken)
     );
@@ -1027,6 +1133,8 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       | {
           generation: number;
           owner: string;
+          dispatchToken?: string;
+          runId?: string;
         }
       | undefined;
     try {
@@ -1060,10 +1168,25 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
         }
       };
 
-      ownership = this.acquireSandboxOwnership(
+      await this.ensureSandboxAvailableForRun(definition, planned.run.id);
+      const claimedOwnership = this.tryAcquireSandboxOwnership(
         planned.run.id,
         planned.dispatchToken
       );
+      if (claimedOwnership) {
+        ownership = claimedOwnership;
+      } else {
+        const currentSandbox = this.state.sandbox;
+        if (currentSandbox?.runId !== planned.run.id || !currentSandbox.owner) {
+          throw new AgentBusyError();
+        }
+        ownership = {
+          dispatchToken: currentSandbox.dispatchToken,
+          generation: currentSandbox.generation,
+          owner: currentSandbox.owner,
+          runId: currentSandbox.runId,
+        };
+      }
       const sandboxName = await sandboxKey(tenantOf(definition), definition.id);
       if (!this.executionIsLive(execution)) {
         return this.currentRunOr(planned.run.id, record);
@@ -1160,6 +1283,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         ) ?? record
       );
     } catch (error) {
+      if (error instanceof AgentBusyError) {
+        throw error;
+      }
       if (!this.executionIsLive(execution)) {
         return this.currentRunOr(planned.run.id, record);
       }
@@ -1289,6 +1415,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       throw new OperationConflictError();
     }
 
+    if (this.state.sandbox?.owner || this.state.sandbox?.cleanup) {
+      await this.ensureSandboxAvailableForRun(definition, plan.record.run.id);
+    }
+
     /**
      * Recorded before dispatch, not inside the fiber. Answering 202 promises
      * the run exists, so it has to be readable the instant the caller is told
@@ -1409,6 +1539,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     const identityToken = this.state.identityTokens?.[runId];
     if (!identityToken) {
       throw new Error("Queued run identity is unavailable.");
+    }
+    if (this.state.sandbox?.owner || this.state.sandbox?.cleanup) {
+      await this.ensureSandboxAvailableForRun(definition, runId);
     }
     if (dispatchToken) {
       if (this.hasOtherExecutionClaim(runId)) {
@@ -1679,10 +1812,16 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (!cancelledBeforeDispatch) {
       const { sandbox } = this.state;
       if (
-        sandbox?.runId &&
+        sandbox?.owner &&
         (sandbox.runId !== runId ||
           sandbox.dispatchToken !== recoveredDispatchToken)
       ) {
+        return {
+          reason: "Recovered fiber cannot take ownership of a newer sandbox.",
+          status: "aborted",
+        };
+      }
+      if (sandbox?.cleanup?.runId && sandbox.cleanup.runId !== runId) {
         return {
           reason: "Recovered fiber cannot take ownership of a newer sandbox.",
           status: "aborted",
@@ -1938,6 +2077,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     ) {
       return afterCancel?.run ?? null;
     }
+    if (this.state.sandbox?.owner && !this.state.sandbox.runId) {
+      await this.ensureSandboxAvailableForRun(definition, runId);
+    }
     if (this.state.sandbox?.runId && this.state.sandbox.runId !== runId) {
       throw new AgentBusyError();
     }
@@ -2162,7 +2304,14 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   async warm(): Promise<WarmState> {
     const definition = this.requireActiveDefinition();
     const lifecycleGeneration = this.currentLifecycle().generation;
-    if (!(await this.repairPendingSandboxCleanup(definition))) {
+    const pendingCleanup = this.state.sandbox?.cleanup;
+    if (pendingCleanup?.runId) {
+      throw new AgentBusyError();
+    }
+    if (
+      pendingCleanup &&
+      !(await this.repairPendingSandboxCleanup(definition))
+    ) {
       throw new AgentBusyError();
     }
     if (!this.lifecycleIsActive(lifecycleGeneration)) {
@@ -2178,6 +2327,26 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     ) {
       return current;
     }
+    const { sandbox } = this.state;
+    if (
+      sandbox?.owner &&
+      !sandbox.runId &&
+      current?.status === "provisioning"
+    ) {
+      return current;
+    }
+    if (
+      sandbox?.owner ||
+      sandbox?.cleanup ||
+      this.state.runs.some((record) => !isTerminal(record.run.status))
+    ) {
+      throw new AgentBusyError();
+    }
+
+    const ownership = this.tryAcquireSandboxOwnership();
+    if (!ownership) {
+      throw new AgentBusyError();
+    }
 
     const provisioning: WarmState = {
       status: "provisioning",
@@ -2185,27 +2354,41 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     };
     this.updateDefinition({ warm: provisioning });
 
-    await this.startFiber(
-      WARM_FIBER_KEY,
-      async (fiber) =>
-        this.trackFiberCompletion(
-          WARM_FIBER_KEY,
-          this.driveWarm(definition, fiber.signal)
-        ),
-      { idempotencyKey: WARM_FIBER_KEY }
-    );
+    try {
+      await this.startFiber(
+        WARM_FIBER_KEY,
+        async (fiber) =>
+          this.trackFiberCompletion(
+            WARM_FIBER_KEY,
+            this.driveWarm(definition, ownership, fiber.signal)
+          ),
+        { idempotencyKey: WARM_FIBER_KEY }
+      );
+    } catch (error) {
+      this.clearSandboxOwnership(ownership);
+      throw error;
+    }
     return provisioning;
   }
 
   private async driveWarm(
     definition: AgentDefinition,
+    ownership: {
+      generation: number;
+      owner: string;
+      dispatchToken?: string;
+      runId?: string;
+    },
     signal?: AbortSignal
   ): Promise<void> {
     const startedAt = Date.now();
     const lifecycleGeneration = this.currentLifecycle().generation;
-    const ownership = this.acquireSandboxOwnership();
     const sandboxName = await sandboxKey(tenantOf(definition), definition.id);
-    if (!this.lifecycleIsActive(lifecycleGeneration) || signal?.aborted) {
+    if (
+      !this.lifecycleIsActive(lifecycleGeneration) ||
+      signal?.aborted ||
+      !this.ownsSandbox(ownership)
+    ) {
       return;
     }
     const sandbox = getSandbox(this.env.Sandbox, sandboxName, {
@@ -2238,7 +2421,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       ownsSandbox: () => this.ownsSandbox(ownership),
       signal,
     });
-    if (!this.lifecycleIsActive(lifecycleGeneration)) {
+    if (
+      !this.lifecycleIsActive(lifecycleGeneration) ||
+      !this.ownsSandbox(ownership)
+    ) {
       return;
     }
     if (!this.state.sandbox?.cleanup) {
@@ -2283,6 +2469,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (!this.lifecycleIsActive(lifecycle.generation)) {
       return {
         reason: "Agent is being decommissioned.",
+        status: "aborted",
+      };
+    }
+    if (this.state.runs.some((record) => !isTerminal(record.run.status))) {
+      return {
+        reason: "A run is active; recovered warm-up must yield.",
         status: "aborted",
       };
     }

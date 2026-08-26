@@ -15,7 +15,9 @@ import {
   setSandboxExec,
 } from "../test-support/cloudflare-sandbox";
 import { AgentDirectory, YoloAgent } from "./agents";
+import { HarnessError } from "./harness-runner";
 import {
+  AgentBusyError,
   AgentDecommissioningError,
   AlreadyRunningError,
   type CloudRunRecord,
@@ -591,6 +593,124 @@ test("cancellation waits for sandbox cleanup before releasing capacity", async (
   const cancelled = await yolo.stop(first.run.id);
   assert.equal(cancelled?.status, "cancelled");
   assert.deepEqual(released, [first.run.id]);
+});
+
+test("initial probe destroy failure keeps admission active until cleanup succeeds", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  setSandboxDestroyError(new Error("probe cleanup unavailable"));
+  const originalFetch = globalThis.fetch;
+  let probeStarted!: () => void;
+  const probe = new Promise<void>((resolve) => {
+    probeStarted = resolve;
+  });
+  setSandboxExec(() => {
+    probeStarted();
+    return new Promise<never>(() => undefined);
+  });
+  globalThis.fetch = (() =>
+    Promise.resolve(
+      new Response(JSON.stringify({ credential: "secret" }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      })
+    )) as typeof fetch;
+
+  let runFiber!: Promise<void>;
+  let runController!: AbortController;
+  const released: string[] = [];
+  const yolo = new (class extends YoloAgent {
+    override startFiber(
+      _name: string,
+      fn: Parameters<YoloAgent["startFiber"]>[1]
+    ): ReturnType<YoloAgent["startFiber"]> {
+      runController = new AbortController();
+      runFiber = fn({
+        id: "fiber:probe-cleanup",
+        signal: runController.signal,
+        snapshot: null,
+        stash: () => undefined,
+      });
+      return Promise.resolve({
+        accepted: true,
+        createdAt: Date.now(),
+        fiberId: "fiber:probe-cleanup",
+        name: "run:probe-cleanup",
+        status: "running",
+      });
+    }
+
+    override cancelFiberByKey(
+      _idempotencyKey: string,
+      reason?: string
+    ): Promise<boolean> {
+      runController.abort(reason);
+      return Promise.resolve(true);
+    }
+  })(
+    undefined as never,
+    {
+      APP_ORIGIN: "https://runner.test",
+      RUNNER_SERVICE_TOKEN: "service-token",
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string) => {
+            released.push(runId);
+            return Promise.resolve(true);
+          },
+        }),
+      },
+      Sandbox: {},
+    } as never
+  );
+  yolo.configure(definition());
+
+  try {
+    const first = await yolo.enqueue(
+      { operationId: OP_A, task: "Probe cleanup failure." },
+      "a42a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a31",
+      "probe-cleanup-failure",
+      "identity"
+    );
+    assert.equal(
+      await yolo.startAdmitted(first.run.id, "4:probe-cleanup"),
+      true
+    );
+    await probe;
+    const fiberFailure = runFiber.catch((error) => error);
+
+    await assert.rejects(
+      () => yolo.stop(first.run.id),
+      /probe cleanup unavailable/
+    );
+    await fiberFailure;
+    assert.equal(yolo.getRun(first.run.id)?.status, "running");
+    assert.deepEqual(released, []);
+
+    const next = await yolo.enqueue(
+      { operationId: OP_B, task: "Must wait." },
+      "a52a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a32",
+      "probe-cleanup-next",
+      "identity"
+    );
+    await assert.rejects(
+      () => yolo.startAdmitted(next.run.id, "5:probe-cleanup-next"),
+      AgentBusyError
+    );
+    assert.equal(yolo.getRun(next.run.id)?.status, "queued");
+
+    setSandboxDestroyError(null);
+    const cancelled = await yolo.stop(first.run.id);
+    assert.equal(cancelled?.status, "cancelled");
+    assert.deepEqual(released, [first.run.id]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    setSandboxDestroyError(null);
+    setSandboxExec(() =>
+      Promise.reject(new Error("sandbox exec is not configured"))
+    );
+  }
 });
 
 test("late fiber completion cannot overwrite cancellation or release twice", async () => {
@@ -1337,6 +1457,137 @@ test("recovered warm ownership retries cleanup before allowing a new warm", asyn
   const warming = await yolo.warm();
   assert.equal(warming.status, "provisioning");
   assert.equal(fiberLog.started.at(-1)?.key, "warm");
+});
+
+test("warm does not start while a run is active", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  const yolo = agent();
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Active work." },
+    "a12a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a2e",
+    "active-warm-block",
+    "identity"
+  );
+  assert.equal(await yolo.startAdmitted(queued.run.id, "1:active-warm"), true);
+
+  await assert.rejects(() => yolo.warm(), AgentBusyError);
+  assert.deepEqual(
+    fiberLog.started.map((entry) => entry.key),
+    [`run:${queued.run.id}`]
+  );
+});
+
+test("a run cancels and cleans a reserved warm before dispatch", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  const yolo = agent();
+
+  const warming = await yolo.warm();
+  assert.equal(warming.status, "provisioning");
+  const before = Reflect.get(yolo, "state") as {
+    sandbox?: { generation: number; owner?: string; runId?: string };
+  };
+  assert.ok(before.sandbox?.owner);
+  assert.equal(before.sandbox?.runId, undefined);
+
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Prefer the run." },
+    "a22a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a2f",
+    "warm-before-run",
+    "identity"
+  );
+  assert.equal(
+    await yolo.startAdmitted(queued.run.id, "2:warm-before-run"),
+    true
+  );
+
+  assert.deepEqual(
+    fiberLog.cancelled.map((entry) => entry.key),
+    ["warm"]
+  );
+  assert.equal(destroyedSandboxes().length, 1);
+  const after = Reflect.get(yolo, "state") as {
+    sandbox?: { owner?: string; cleanup?: unknown };
+  };
+  assert.equal(after.sandbox?.owner, undefined);
+  assert.equal(after.sandbox?.cleanup, undefined);
+  assert.equal(yolo.getRun(queued.run.id)?.status, "running");
+});
+
+test("simultaneous warm and run calls never share an ownership generation", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  const yolo = agent();
+
+  const [warmed, started] = await Promise.allSettled([
+    yolo.warm(),
+    yolo.start({ operationId: OP_A, task: "Run now." }, "identity"),
+  ]);
+
+  assert.equal(started.status, "fulfilled");
+  if (warmed.status === "fulfilled") {
+    assert.equal(
+      destroyedSandboxes().length,
+      1,
+      "a warm owner must be cleaned before a simultaneous run"
+    );
+  } else {
+    assert.ok(warmed.reason instanceof AgentBusyError);
+  }
+  const state = Reflect.get(yolo, "state") as {
+    sandbox?: { owner?: string; cleanup?: unknown };
+  };
+  assert.equal(state.sandbox?.owner, undefined);
+  assert.equal(state.sandbox?.cleanup, undefined);
+});
+
+test("a timed-out warm keeps admission blocked until cleanup succeeds", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  setSandboxExec(() =>
+    Promise.reject(new HarnessError("probe timed out", "harness_timeout"))
+  );
+  setSandboxDestroyError(new Error("cleanup unavailable"));
+  const yolo = agent();
+  fiberControl.runFibers = true;
+
+  try {
+    await yolo.warm();
+    const pending = Reflect.get(yolo, "state") as {
+      sandbox?: { cleanup?: unknown };
+    };
+    assert.ok(pending.sandbox?.cleanup);
+
+    const queued = await yolo.enqueue(
+      { operationId: OP_A, task: "Wait for cleanup." },
+      "a32a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a30",
+      "warm-timeout-cleanup",
+      "identity"
+    );
+    await assert.rejects(
+      () => yolo.startAdmitted(queued.run.id, "3:warm-timeout"),
+      AgentBusyError
+    );
+    assert.equal(yolo.getRun(queued.run.id)?.status, "queued");
+
+    setSandboxDestroyError(null);
+    fiberControl.runFibers = false;
+    assert.equal(
+      await yolo.startAdmitted(queued.run.id, "3:warm-timeout"),
+      true
+    );
+    assert.equal(yolo.getRun(queued.run.id)?.status, "running");
+  } finally {
+    setSandboxDestroyError(null);
+    setSandboxExec(() =>
+      Promise.reject(new Error("sandbox exec is not configured"))
+    );
+    fiberControl.runFibers = false;
+  }
 });
 
 test("requeueAdmitted clears a stale local token without losing its fence", async () => {

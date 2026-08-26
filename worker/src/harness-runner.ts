@@ -265,7 +265,9 @@ async function probeInstalled(
      */
     if (
       error instanceof HarnessError &&
-      (error.code === "harness_timeout" || error.code === "harness_cancelled")
+      (error.code === "harness_timeout" ||
+        error.code === "harness_cancelled" ||
+        error.code === "sandbox_cleanup_failed")
     ) {
       throw error;
     }
@@ -434,7 +436,12 @@ export async function runHarnessInSandbox(options: {
   const { auth, spec } = requireHarness(options.runtime, options.credential);
   const cwd = resolveSandboxWorkspace(options.workspace);
 
-  const probe = await probeInstalled(options.sandbox, spec, options.signal);
+  const probe = await probeInstalled(
+    options.sandbox,
+    spec,
+    options.signal,
+    options.destroySandbox
+  );
   if (!probe.installed) {
     throw new HarnessError(
       `\`${spec.command}\` is not installed in the sandbox image. Add \`${spec.installPackage}\` to worker/Dockerfile and redeploy.`,

@@ -775,3 +775,58 @@ test("cancellation does not settle until sandbox destruction completes", async (
   );
   assert.equal(destroyed, 1);
 });
+
+test("initial probe cancellation propagates durable cleanup failure", async () => {
+  const controller = new AbortController();
+  let probeStarted!: () => void;
+  let destroyCalls = 0;
+  let resolveProbe!: () => void;
+  const probe = new Promise<void>((resolve) => {
+    probeStarted = resolve;
+  });
+  const sandbox = {
+    destroy() {
+      throw new Error("sandbox destroy should be owned by the agent");
+    },
+    exec(command: string) {
+      if (!command.includes("--version")) {
+        throw new Error(`unexpected command: ${command}`);
+      }
+      probeStarted();
+      return new Promise((resolve) => {
+        resolveProbe = () =>
+          resolve({
+            command,
+            exitCode: 143,
+            stderr: "terminated",
+            stdout: "",
+            success: false,
+          });
+      });
+    },
+  };
+
+  const run = runHarnessInSandbox({
+    credential: { credential: "harness-token" },
+    destroySandbox: () => {
+      destroyCalls += 1;
+      resolveProbe();
+      throw new Error("durable cleanup failed");
+    },
+    instructions: "Be careful.",
+    model: "auto",
+    runtime: "copilot",
+    sandbox: sandbox as never,
+    signal: controller.signal,
+    task: "Stop this run",
+  });
+  await probe;
+  controller.abort();
+
+  await assert.rejects(
+    run,
+    (error: unknown) =>
+      error instanceof HarnessError && error.code === "sandbox_cleanup_failed"
+  );
+  assert.equal(destroyCalls, 1);
+});
