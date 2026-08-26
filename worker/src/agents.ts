@@ -36,6 +36,7 @@ import {
   nextEventId,
   OperationConflictError,
   planCloudRunStart,
+  recoverCloudRunRecord,
   retainCloudRuns,
   validateCloudWorkspace,
 } from "./run-state";
@@ -693,6 +694,44 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         },
       });
     }
+  }
+
+  /**
+   * Closes the records of fibers a restart killed.
+   *
+   * A worker deploy interrupts every in-flight fiber, and until this hook
+   * existed the run it was driving stayed `running` forever: the console
+   * streamed it endlessly, the active-run guard refused new runs, and
+   * nothing anywhere would ever change either fact. `recoverCloudRunRecord`
+   * was written for exactly this and then never wired to anything — this is
+   * the wiring. An interrupted warm just becomes `failed`; the next trigger
+   * re-warms.
+   */
+  override onFiberRecovered(context: {
+    name: string;
+  }): Promise<{ status: "completed" }> {
+    const completedAt = new Date().toISOString();
+    if (context.name === WARM_FIBER_KEY && this.state.definition) {
+      this.updateDefinition({
+        warm: { status: "failed", updatedAt: completedAt },
+      });
+      return Promise.resolve({ status: "completed" });
+    }
+
+    const record = this.state.runs.find(
+      (candidate) =>
+        cloudFiberKey(candidate.run.id) === context.name &&
+        !isTerminal(candidate.run.status)
+    );
+    if (record) {
+      console.warn({
+        event: "run.recovered_after_interruption",
+        runId: record.run.id,
+      });
+      this.persistRun(recoverCloudRunRecord(record, completedAt));
+      this.updateDefinition({ status: "error", updatedAt: completedAt });
+    }
+    return Promise.resolve({ status: "completed" });
   }
 
   async decommission(): Promise<void> {
