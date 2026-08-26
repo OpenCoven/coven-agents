@@ -84,11 +84,18 @@ type SandboxCleanup = {
 
 type SandboxOwnership = {
   cleanup?: SandboxCleanup;
+  cleanupRetryScheduleGeneration?: number;
   cleanupRetryScheduleId?: string;
+  cleanupRetryScheduleToken?: string;
   generation: number;
   owner?: string;
   dispatchToken?: string;
   runId?: string;
+};
+
+type CleanupRetryPayload = {
+  generation: number;
+  token: string;
 };
 
 type AdmissionReleaseIntent = {
@@ -97,6 +104,7 @@ type AdmissionReleaseIntent = {
 
 type DecommissionSaga = {
   admissionReleases: Record<string, AdmissionReleaseIntent>;
+  lastError?: string;
   retryScheduleId?: string;
 };
 
@@ -357,6 +365,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
   private readonly sandboxCleanupInFlight = new Map<number, Promise<boolean>>();
   private readonly fiberCompletions = new Map<string, Promise<void>>();
   private cleanupRetryScheduleId: string | undefined;
+  private cleanupRetrySchedulePromise: Promise<void> | undefined;
 
   configure(definition: AgentDefinition): AgentDefinition {
     const lifecycle = this.currentLifecycle();
@@ -515,7 +524,16 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     }
     this.setState({
       ...this.state,
-      sandbox: { generation: ownership.generation },
+      sandbox: {
+        cleanupRetryScheduleGeneration:
+          this.state.sandbox?.cleanupRetryScheduleGeneration,
+        cleanupRetryScheduleId:
+          this.state.sandbox?.cleanupRetryScheduleId ??
+          this.cleanupRetryScheduleId,
+        cleanupRetryScheduleToken:
+          this.state.sandbox?.cleanupRetryScheduleToken,
+        generation: ownership.generation,
+      },
     });
   }
 
@@ -546,7 +564,13 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
           owner: ownership.owner,
           runId: ownership.runId,
         },
-        cleanupRetryScheduleId: this.cleanupRetryScheduleId,
+        cleanupRetryScheduleGeneration:
+          this.state.sandbox?.cleanupRetryScheduleGeneration,
+        cleanupRetryScheduleId:
+          this.state.sandbox?.cleanupRetryScheduleId ??
+          this.cleanupRetryScheduleId,
+        cleanupRetryScheduleToken:
+          this.state.sandbox?.cleanupRetryScheduleToken,
         dispatchToken: ownership.dispatchToken,
         generation: ownership.generation,
         owner: ownership.owner,
@@ -676,11 +700,19 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     return true;
   }
 
-  async repairSandboxCleanup(): Promise<boolean> {
-    // A one-shot scheduled callback has been consumed before this method
-    // starts. Clear its durable id first so a failed attempt can schedule a
-    // fresh callback rather than deduplicating onto the already-fired row.
-    this.clearConsumedCleanupRetrySchedule();
+  async repairSandboxCleanup(
+    payload?: CleanupRetryPayload,
+    schedule?: { id?: string }
+  ): Promise<boolean> {
+    const isScheduledCallback = payload !== undefined || schedule !== undefined;
+    if (
+      isScheduledCallback &&
+      !this.consumeCleanupRetrySchedule(payload, schedule?.id)
+    ) {
+      // A stale callback must not repair or reschedule work owned by a newer
+      // retry.
+      return true;
+    }
     const { definition } = this.state;
     const repaired = definition
       ? await this.repairPendingSandboxCleanup(definition, true)
@@ -694,64 +726,99 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     return repaired;
   }
 
-  private async scheduleCleanupRetry(): Promise<void> {
+  private scheduleCleanupRetry(): Promise<void> {
     if (!this.lifecycleIsActive()) {
-      return;
+      return Promise.resolve();
     }
     const existingScheduleId =
-      this.cleanupRetryScheduleId ?? this.state.sandbox?.cleanupRetryScheduleId;
+      this.state.sandbox?.cleanupRetryScheduleId ?? this.cleanupRetryScheduleId;
     if (existingScheduleId !== undefined) {
       this.cleanupRetryScheduleId = existingScheduleId;
-      return;
+      return Promise.resolve();
     }
-    const { schedule } = this as unknown as {
-      schedule?: (
-        when: Date,
-        callback: string,
-        payload?: unknown,
-        options?: { idempotent?: boolean }
-      ) => Promise<{ id: string }>;
-    };
-    if (!schedule) {
-      return;
+    if (this.cleanupRetrySchedulePromise) {
+      return this.cleanupRetrySchedulePromise;
     }
-    try {
-      const scheduled = await schedule.call(
-        this,
-        new Date(Date.now() + CLEANUP_RETRY_DELAY_MS),
-        "repairSandboxCleanup",
-        undefined,
-        { idempotent: false }
-      );
-      if (!this.lifecycleIsActive()) {
-        await this.cancelScheduledCleanup(scheduled.id);
+    const work = (async () => {
+      const { schedule } = this as unknown as {
+        schedule?: (
+          when: Date,
+          callback: string,
+          payload?: unknown,
+          options?: { idempotent?: boolean }
+        ) => Promise<{ id: string }>;
+      };
+      if (!schedule) {
         return;
       }
-      this.cleanupRetryScheduleId = scheduled.id;
       const { sandbox } = this.state;
-      if (sandbox) {
+      const generation = (sandbox?.cleanupRetryScheduleGeneration ?? 0) + 1;
+      const token = crypto.randomUUID();
+      try {
+        const scheduled = await schedule.call(
+          this,
+          new Date(Date.now() + CLEANUP_RETRY_DELAY_MS),
+          "repairSandboxCleanup",
+          { generation, token },
+          { idempotent: false }
+        );
+        if (!this.lifecycleIsActive() || !this.state.sandbox?.cleanup) {
+          await this.cancelScheduledCleanup(scheduled.id);
+          return;
+        }
+        const currentScheduleId =
+          this.state.sandbox.cleanupRetryScheduleId ??
+          this.cleanupRetryScheduleId;
+        if (currentScheduleId !== undefined) {
+          await this.cancelScheduledCleanup(scheduled.id);
+          return;
+        }
+        this.cleanupRetryScheduleId = scheduled.id;
         this.setState({
           ...this.state,
-          sandbox: { ...sandbox, cleanupRetryScheduleId: scheduled.id },
+          sandbox: {
+            ...this.state.sandbox,
+            cleanupRetryScheduleGeneration: generation,
+            cleanupRetryScheduleId: scheduled.id,
+            cleanupRetryScheduleToken: token,
+          },
         });
+      } catch {
+        // Every lifecycle RPC also repairs pending cleanup, so a scheduler
+        // outage cannot turn a retryable cleanup into a permanent block.
       }
-    } catch {
-      // Every lifecycle RPC also repairs pending cleanup, so a scheduler
-      // outage cannot turn a retryable cleanup into a permanent block.
-    }
+    })();
+    const tracked = work.finally(() => {
+      if (this.cleanupRetrySchedulePromise === tracked) {
+        this.cleanupRetrySchedulePromise = undefined;
+      }
+    });
+    this.cleanupRetrySchedulePromise = tracked;
+    return tracked;
   }
 
-  private async cancelScheduledCleanup(id = this.cleanupRetryScheduleId) {
-    const scheduledId = id ?? this.state.sandbox?.cleanupRetryScheduleId;
+  private async cancelScheduledCleanup(id?: string) {
+    const scheduledId =
+      id ??
+      this.state.sandbox?.cleanupRetryScheduleId ??
+      this.cleanupRetryScheduleId;
     if (!scheduledId) {
       return;
     }
-    this.cleanupRetryScheduleId = undefined;
     const { sandbox } = this.state;
-    if (sandbox?.cleanupRetryScheduleId === scheduledId) {
-      const { cleanupRetryScheduleId: _cleanupRetryScheduleId, ...rest } =
-        sandbox;
-      this.setState({ ...this.state, sandbox: rest });
+    const ownsSchedule =
+      this.cleanupRetryScheduleId === scheduledId ||
+      sandbox?.cleanupRetryScheduleId === scheduledId;
+    if (ownsSchedule) {
+      this.cleanupRetryScheduleId = undefined;
+      if (sandbox?.cleanupRetryScheduleId === scheduledId) {
+        const {
+          cleanupRetryScheduleId: _cleanupRetryScheduleId,
+          cleanupRetryScheduleToken: _cleanupRetryScheduleToken,
+          ...rest
+        } = sandbox;
+        this.setState({ ...this.state, sandbox: rest });
+      }
     }
     const { cancelSchedule } = this as unknown as {
       cancelSchedule?: (scheduleId: string) => Promise<boolean>;
@@ -766,19 +833,37 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     }
   }
 
-  private clearConsumedCleanupRetrySchedule(): void {
-    const scheduledId =
-      this.cleanupRetryScheduleId ?? this.state.sandbox?.cleanupRetryScheduleId;
-    if (!scheduledId) {
-      return;
+  private consumeCleanupRetrySchedule(
+    payload: CleanupRetryPayload | undefined,
+    scheduleId: string | undefined
+  ): boolean {
+    const { sandbox } = this.state;
+    const currentId =
+      sandbox?.cleanupRetryScheduleId ?? this.cleanupRetryScheduleId;
+    if (!currentId || (scheduleId !== undefined && currentId !== scheduleId)) {
+      return false;
+    }
+    const payloadMatches =
+      payload?.generation === sandbox?.cleanupRetryScheduleGeneration &&
+      payload?.token === sandbox?.cleanupRetryScheduleToken;
+    const legacyPayloadMatches =
+      payload === undefined && sandbox?.cleanupRetryScheduleToken === undefined;
+    if (!payloadMatches && !legacyPayloadMatches) {
+      return false;
+    }
+    if (scheduleId === undefined && !payloadMatches) {
+      return false;
     }
     this.cleanupRetryScheduleId = undefined;
-    const { sandbox } = this.state;
-    if (sandbox?.cleanupRetryScheduleId === scheduledId) {
-      const { cleanupRetryScheduleId: _cleanupRetryScheduleId, ...rest } =
-        sandbox;
+    if (sandbox?.cleanupRetryScheduleId === currentId) {
+      const {
+        cleanupRetryScheduleId: _cleanupRetryScheduleId,
+        cleanupRetryScheduleToken: _cleanupRetryScheduleToken,
+        ...rest
+      } = sandbox;
       this.setState({ ...this.state, sandbox: rest });
     }
+    return true;
   }
 
   /**
@@ -2413,16 +2498,36 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       ...activeRunIds.map((runId) => cloudFiberKey(runId)),
       ...this.fiberCompletions.keys(),
     ]);
-    await Promise.all(
-      [...fiberKeys].map((fiberKey) =>
-        this.cancelFiberByKey(
+    const cancellationErrors: string[] = [];
+    for (const fiberKey of fiberKeys) {
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: cancellation failures must be persisted before continuing.
+        await this.cancelFiberByKey(
           fiberKey,
           fiberKey === WARM_FIBER_KEY
             ? "Agent decommissioned during warm-up."
             : "Agent decommissioned during run cleanup."
-        )
-      )
-    );
+        );
+      } catch (error) {
+        cancellationErrors.push(
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    }
+    if (cancellationErrors.length > 0) {
+      const detail = cancellationErrors.join("; ");
+      const saga = this.state.decommission;
+      if (saga) {
+        this.setState({
+          ...this.state,
+          decommission: { ...saga, lastError: detail },
+        });
+      }
+      await this.scheduleDecommissionRetry();
+      throw new AgentDecommissioningError(
+        `Agent fiber cancellation is still pending. ${detail}`
+      );
+    }
     while (this.fiberCompletions.size > 0) {
       // biome-ignore lint/performance/noAwaitInLoops: wait for every late fiber before resetting durable state.
       await Promise.allSettled([...this.fiberCompletions.values()]);
