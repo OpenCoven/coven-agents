@@ -1,16 +1,39 @@
 const MISSING_ABUSE_KEY_SECRET =
-  "ABUSE_KEY_SECRET is required when REDIS_URL is configured.";
+  "ABUSE_KEY_SECRET is required when REDIS_URL or GLOBAL_DAILY_RUN_CAP is configured.";
+const INVALID_GLOBAL_DAILY_RUN_CAP =
+  "GLOBAL_DAILY_RUN_CAP must be a positive integer.";
 
 export function validateAbuseConfig(input: {
+  globalDailyRunCap: string | undefined;
   isProduction: boolean;
   keySecret: string | undefined;
   redisUrl: string | undefined;
 }): void {
-  if (!input.isProduction || !input.redisUrl?.trim()) {
+  if (!input.isProduction) {
     return;
   }
 
-  requireNonemptyAbuseKeySecret(input.keySecret);
+  if (input.globalDailyRunCap !== undefined) {
+    globalDailyRunCapFromEnv(input.globalDailyRunCap);
+    requireNonemptyAbuseKeySecret(input.keySecret);
+  } else if (input.redisUrl?.trim()) {
+    requireNonemptyAbuseKeySecret(input.keySecret);
+  }
+}
+
+export function globalDailyRunCapFromEnv(
+  configured: string | undefined
+): number {
+  const value = configured?.trim() ?? "";
+  if (!/^[1-9]\d*$/.test(value)) {
+    throw new Error(INVALID_GLOBAL_DAILY_RUN_CAP);
+  }
+
+  const cap = Number(value);
+  if (!Number.isSafeInteger(cap)) {
+    throw new Error(INVALID_GLOBAL_DAILY_RUN_CAP);
+  }
+  return cap;
 }
 
 export function requireAbuseKeySecret(

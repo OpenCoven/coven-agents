@@ -9,11 +9,17 @@ const validatorPath = fileURLToPath(
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 
 function runValidator(
-  overrides: Partial<Pick<NodeJS.ProcessEnv, "ABUSE_KEY_SECRET" | "REDIS_URL">>
+  overrides: Partial<
+    Pick<
+      NodeJS.ProcessEnv,
+      "ABUSE_KEY_SECRET" | "GLOBAL_DAILY_RUN_CAP" | "REDIS_URL"
+    >
+  >
 ) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     ABUSE_KEY_SECRET: undefined,
+    GLOBAL_DAILY_RUN_CAP: undefined,
     NODE_ENV: "production",
     REDIS_URL: undefined,
   };
@@ -47,6 +53,40 @@ test("accepts production Redis when the abuse key secret is valid", () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, new RegExp(secret));
+});
+
+test("rejects configured run reservations without a nonempty abuse key secret", () => {
+  for (const abuseKeySecret of [undefined, "", "  "]) {
+    const result = runValidator({
+      ABUSE_KEY_SECRET: abuseKeySecret,
+      GLOBAL_DAILY_RUN_CAP: "500",
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /ABUSE_KEY_SECRET is required/);
+  }
+});
+
+test("rejects a malformed global daily run cap", () => {
+  const result = runValidator({
+    ABUSE_KEY_SECRET: "subprocess-test-abuse-key-secret",
+    GLOBAL_DAILY_RUN_CAP: "not-a-number",
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /GLOBAL_DAILY_RUN_CAP must be a positive integer/
+  );
+});
+
+test("accepts valid run reservation configuration without Redis", () => {
+  const result = runValidator({
+    ABUSE_KEY_SECRET: "subprocess-test-abuse-key-secret",
+    GLOBAL_DAILY_RUN_CAP: "500",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("accepts production without Redis", () => {

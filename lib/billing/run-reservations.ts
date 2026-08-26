@@ -19,6 +19,8 @@ import type { databaseFor } from "@/lib/db/access";
 import { type RunReservation, runReservation, runUsage } from "@/lib/db/schema";
 import { MONTHLY_RUN_CAP } from "./limits";
 
+export { globalDailyRunCapFromEnv } from "@/lib/abuse/config";
+
 export const TENANT_DAILY_RUN_CAP = 50;
 export const RUN_RESERVATION_TTL_MS = 5 * 60 * 1000;
 
@@ -437,21 +439,6 @@ export function tenantHashForReservation(
   return createHmac("sha256", requireNonemptyAbuseKeySecret(keySecret))
     .update(tenant)
     .digest("hex");
-}
-
-export function globalDailyRunCapFromEnv(
-  configured: string | undefined
-): number {
-  const value = configured?.trim() ?? "";
-  if (!/^[1-9]\d*$/.test(value)) {
-    throw new Error("GLOBAL_DAILY_RUN_CAP must be a positive integer.");
-  }
-
-  const cap = Number(value);
-  if (!Number.isSafeInteger(cap)) {
-    throw new Error("GLOBAL_DAILY_RUN_CAP must be a positive integer.");
-  }
-  return cap;
 }
 
 function dayKey(now: Date): string {
