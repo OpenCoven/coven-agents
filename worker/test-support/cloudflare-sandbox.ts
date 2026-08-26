@@ -1,4 +1,5 @@
 let destroyed: string[] = [];
+let sandboxGets = 0;
 let lifecycle: string[] = [];
 let destroyError: Error | null = null;
 let execImplementation:
@@ -15,6 +16,7 @@ export function getSandbox(
   ) => Promise<unknown>;
   destroy: () => Promise<void>;
 } {
+  sandboxGets += 1;
   return {
     destroy() {
       destroyed.push(name);
@@ -35,9 +37,14 @@ export function getSandbox(
 
 export function resetDestroyedSandboxes(): void {
   destroyed = [];
+  sandboxGets = 0;
   lifecycle = [];
   destroyError = null;
   execImplementation = null;
+}
+
+export function sandboxGetCount(): number {
+  return sandboxGets;
 }
 
 export function setSandboxDestroyError(error: Error | null): void {

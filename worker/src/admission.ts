@@ -1023,10 +1023,10 @@ export class RunAdmission extends DurableObject<Env> {
         ).startAdmitted(candidate.runId, candidate.dispatchToken);
       } catch (error) {
         if (isAgentBusyError(error)) {
-          const reconciliation = this.requeueRecord(
-            candidate,
-            candidate.dispatchToken
-          );
+          const fenceToken = await this.fenceDispatch(candidate);
+          const reconciliation = fenceToken
+            ? this.requeueRecord(candidate, fenceToken)
+            : "ambiguous";
           if (reconciliation === "refused") {
             await this.cleanupRejectedAdmission(candidate);
           }
@@ -1277,10 +1277,6 @@ export class RunAdmission extends DurableObject<Env> {
   ): Promise<boolean> {
     const failures = this.readAlarmFailureCount() + 1;
     this.writeMetaValue(ALARM_FAILURES_META_KEY, String(failures));
-    this.writeMetaValue(
-      ALARM_UNAVAILABLE_META_KEY,
-      failures >= MAX_ALARM_REPAIR_FAILURES ? "1" : "0"
-    );
 
     let repaired = false;
     if (nextWake !== null) {
@@ -1299,10 +1295,15 @@ export class RunAdmission extends DurableObject<Env> {
     if (!repaired && failures >= MAX_ALARM_REPAIR_FAILURES) {
       await this.failClosedQueuedAdmissions();
     }
+    const outstanding = this.hasOutstandingCoordinatedState();
+    this.writeMetaValue(
+      ALARM_UNAVAILABLE_META_KEY,
+      !repaired && outstanding ? "1" : "0"
+    );
     if (
       !repaired &&
       throwOnFailure &&
-      (failures < MAX_ALARM_REPAIR_FAILURES || this.hasCleanupTasks())
+      (failures < MAX_ALARM_REPAIR_FAILURES || outstanding)
     ) {
       const detail = error instanceof Error ? `: ${error.message}` : "";
       throw new AdmissionUnavailableError(
@@ -1310,6 +1311,15 @@ export class RunAdmission extends DurableObject<Env> {
       );
     }
     return repaired;
+  }
+
+  private hasOutstandingCoordinatedState(): boolean {
+    const records = this.readStoredRecords();
+    return (
+      records.some(
+        (record) => record.state === "queued" || record.state === "active"
+      ) || this.hasCleanupTasks()
+    );
   }
 
   private async failClosedQueuedAdmissions(): Promise<void> {
@@ -1680,10 +1690,25 @@ export class RunAdmission extends DurableObject<Env> {
       return false;
     }
     try {
-      const fenced = await this.env.YoloAgent.getByName(
-        record.agentId
-      ).fenceAdmitted(record.runId, dispatchToken);
-      return fenced ? dispatchToken : false;
+      const agent = this.env.YoloAgent.getByName(record.agentId);
+      const fenced = await agent.fenceAdmitted(record.runId, dispatchToken);
+      if (!fenced) {
+        return false;
+      }
+      const requeue = (
+        agent as unknown as {
+          requeueAdmitted?: (
+            runId: string,
+            token: string
+          ) => Promise<boolean> | boolean;
+        }
+      ).requeueAdmitted;
+      if (!requeue) {
+        return dispatchToken;
+      }
+      return (await requeue.call(agent, record.runId, dispatchToken))
+        ? dispatchToken
+        : false;
     } catch {
       return false;
     }

@@ -10,7 +10,9 @@ import {
 import {
   destroyedSandboxes,
   resetDestroyedSandboxes,
+  sandboxGetCount,
   setSandboxDestroyError,
+  setSandboxExec,
 } from "../test-support/cloudflare-sandbox";
 import { AgentDirectory, YoloAgent } from "./agents";
 import {
@@ -239,6 +241,10 @@ test("an absent run still records a durable fence tombstone", async () => {
   const state = Reflect.get(yolo, "state") as {
     definition: AgentDefinition | null;
     identityTokens?: Record<string, string>;
+    lifecycle: {
+      generation: number;
+      status: "active" | "decommissioning" | "decommissioned";
+    };
     runs: CloudRunRecord[];
   };
   const current = state.runs.find(
@@ -606,6 +612,267 @@ test("late fiber completion cannot overwrite cancellation or release twice", asy
   assert.deepEqual(released, [queued.run.id]);
 });
 
+test("a credential that resolves after stop cannot resurrect sandbox execution", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  const originalFetch = globalThis.fetch;
+  let resolveCredential!: (response: Response) => void;
+  const credential = new Promise<Response>((resolve) => {
+    resolveCredential = resolve;
+  });
+  globalThis.fetch = (() => credential) as typeof fetch;
+  let lateFiber: Promise<void> | undefined;
+  const yolo = new (class extends YoloAgent {
+    override startFiber(
+      _name: string,
+      fn: Parameters<YoloAgent["startFiber"]>[1]
+    ): ReturnType<YoloAgent["startFiber"]> {
+      lateFiber = fn({
+        id: "fiber:delayed-credential",
+        signal: new AbortController().signal,
+        snapshot: null,
+        stash: () => undefined,
+      });
+      return Promise.resolve({
+        accepted: true,
+        createdAt: Date.now(),
+        fiberId: "fiber:delayed-credential",
+        name: "run:delayed-credential",
+        status: "running",
+      });
+    }
+  })(
+    undefined as never,
+    {
+      APP_ORIGIN: "https://runner.test",
+      RUNNER_SERVICE_TOKEN: "service-token",
+      Sandbox: {},
+    } as never
+  );
+  yolo.configure(definition());
+  try {
+    const queued = await yolo.enqueue(
+      { operationId: OP_A, task: "Delayed credential." },
+      "df2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8ca0",
+      "delayed-credential",
+      "identity"
+    );
+    assert.equal(await yolo.startAdmitted(queued.run.id, "1:delayed"), true);
+    await yolo.stop(queued.run.id);
+    const getsAfterStop = sandboxGetCount();
+
+    resolveCredential(
+      new Response(JSON.stringify({ credential: "secret" }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      })
+    );
+    await lateFiber;
+
+    assert.equal(sandboxGetCount(), getsAfterStop);
+    assert.equal(yolo.getRun(queued.run.id)?.status, "cancelled");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decommission fences delayed runs before cleanup and reset", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  const originalFetch = globalThis.fetch;
+  let resolveCredential!: (response: Response) => void;
+  const credential = new Promise<Response>((resolve) => {
+    resolveCredential = resolve;
+  });
+  globalThis.fetch = (() => credential) as typeof fetch;
+  let lateFiber: Promise<void> | undefined;
+  const yolo = new (class extends YoloAgent {
+    override startFiber(
+      _name: string,
+      fn: Parameters<YoloAgent["startFiber"]>[1]
+    ): ReturnType<YoloAgent["startFiber"]> {
+      lateFiber = fn({
+        id: "fiber:decommissioned",
+        signal: new AbortController().signal,
+        snapshot: null,
+        stash: () => undefined,
+      });
+      return Promise.resolve({
+        accepted: true,
+        createdAt: Date.now(),
+        fiberId: "fiber:decommissioned",
+        name: "run:decommissioned",
+        status: "running",
+      });
+    }
+  })(
+    undefined as never,
+    {
+      APP_ORIGIN: "https://runner.test",
+      RUNNER_SERVICE_TOKEN: "service-token",
+      Sandbox: {},
+    } as never
+  );
+  yolo.configure(definition());
+  try {
+    const queued = await yolo.enqueue(
+      { operationId: OP_A, task: "Decommissioned credential." },
+      "ef2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8ca1",
+      "decommissioned-credential",
+      "identity"
+    );
+    assert.equal(
+      await yolo.startAdmitted(queued.run.id, "1:decommission"),
+      true
+    );
+    const decommissioning = yolo.decommission();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    resolveCredential(
+      new Response(JSON.stringify({ credential: "secret" }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      })
+    );
+    await decommissioning;
+    await lateFiber;
+    const getsAfterDecommission = sandboxGetCount();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.equal(sandboxGetCount(), getsAfterDecommission);
+    assert.equal(yolo.snapshot(), null);
+    const state = Reflect.get(yolo, "state") as {
+      lifecycle: { status: string };
+      runs: CloudRunRecord[];
+    };
+    assert.equal(state.lifecycle.status, "decommissioned");
+    assert.deepEqual(state.runs, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("recovered warm ownership retries cleanup before allowing a new warm", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  setSandboxExec(() =>
+    Promise.resolve({ exitCode: 0, stdout: "copilot 1", success: true })
+  );
+  const yolo = agent();
+  const state = Reflect.get(yolo, "state") as {
+    definition: AgentDefinition | null;
+    lifecycle: {
+      generation: number;
+      status: "active" | "decommissioning" | "decommissioned";
+    };
+    runs: CloudRunRecord[];
+    sandbox: { generation: number; owner: string };
+  };
+  yolo.setState({
+    ...state,
+    definition: {
+      ...state.definition,
+      warm: {
+        status: "provisioning",
+        updatedAt: new Date().toISOString(),
+      },
+    } as AgentDefinition,
+    sandbox: { generation: 1, owner: "warm:recovered" },
+  });
+  setSandboxDestroyError(new Error("destroy unavailable"));
+  await assert.rejects(
+    () =>
+      yolo.onFiberRecovered({
+        createdAt: Date.now(),
+        id: "fiber:warm",
+        metadata: { kind: "warm" },
+        name: "warm",
+        recoveryReason: "interrupted",
+        snapshot: null,
+        status: "interrupted",
+      }),
+    /destroy unavailable/
+  );
+  assert.equal(yolo.snapshot()?.warm?.status, "failed");
+  assert.ok(
+    (Reflect.get(yolo, "state") as { sandbox?: { cleanup?: unknown } }).sandbox
+      ?.cleanup
+  );
+
+  setSandboxDestroyError(null);
+  const recovered = await yolo.onFiberRecovered({
+    createdAt: Date.now(),
+    id: "fiber:warm",
+    metadata: { kind: "warm" },
+    name: "warm",
+    recoveryReason: "interrupted",
+    snapshot: null,
+    status: "interrupted",
+  });
+  assert.equal(recovered?.status, "aborted");
+  assert.equal(
+    (Reflect.get(yolo, "state") as { sandbox?: { cleanup?: unknown } }).sandbox
+      ?.cleanup,
+    undefined
+  );
+
+  const warming = await yolo.warm();
+  assert.equal(warming.status, "provisioning");
+  assert.equal(fiberLog.started.at(-1)?.key, "warm");
+});
+
+test("requeueAdmitted clears a stale local token without losing its fence", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  const yolo = agent();
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Requeue stale dispatch." },
+    "ff2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8ca2",
+    "requeue-stale",
+    "identity"
+  );
+  const state = Reflect.get(yolo, "state") as {
+    admissionTokens?: Record<string, string>;
+    definition: AgentDefinition | null;
+    identityTokens?: Record<string, string>;
+    lifecycle: {
+      generation: number;
+      status: "active" | "decommissioning" | "decommissioned";
+    };
+    runs: CloudRunRecord[];
+  };
+  const current = state.runs.find(
+    (candidate) => candidate.run.id === queued.run.id
+  );
+  assert.ok(current);
+  yolo.setState({
+    ...state,
+    admissionTokens: {
+      ...(state.admissionTokens ?? {}),
+      [queued.run.id]: "7:stale",
+    },
+    runs: [
+      { ...current, dispatchToken: "7:stale" },
+      ...state.runs.filter((candidate) => candidate.run.id !== queued.run.id),
+    ],
+  });
+
+  assert.equal(yolo.requeueAdmitted(queued.run.id, "7:stale"), true);
+  const after = Reflect.get(yolo, "state") as {
+    admissionFences?: Record<string, { generation?: number }>;
+    admissionTokens?: Record<string, string>;
+    runs: CloudRunRecord[];
+  };
+  assert.equal(after.runs[0]?.dispatchToken, undefined);
+  assert.equal(after.admissionTokens?.[queued.run.id], undefined);
+  assert.equal(after.admissionFences?.[queued.run.id]?.generation, 7);
+  assert.equal((await yolo.stop(queued.run.id))?.status, "cancelled");
+  assert.deepEqual(destroyedSandboxes(), []);
+});
+
 test("a stale admitted fiber callback cannot finish or release a newer token claim", async () => {
   resetFiberLog();
   fiberControl.runFibers = false;
@@ -670,6 +937,10 @@ test("a stale admitted fiber callback cannot finish or release a newer token cla
     admissionTokens?: Record<string, string>;
     definition: AgentDefinition | null;
     identityTokens?: Record<string, string>;
+    lifecycle: {
+      generation: number;
+      status: "active" | "decommissioning" | "decommissioned";
+    };
     runs: CloudRunRecord[];
   };
   const current = state.runs.find(
@@ -706,6 +977,10 @@ test("a stale admitted fiber callback cannot finish or release a newer token cla
     admissionTokens?: Record<string, string>;
     definition: AgentDefinition | null;
     identityTokens?: Record<string, string>;
+    lifecycle: {
+      generation: number;
+      status: "active" | "decommissioning" | "decommissioned";
+    };
     runs: CloudRunRecord[];
   };
   const latestRecord = latestState.runs.find(

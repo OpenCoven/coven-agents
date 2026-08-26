@@ -469,6 +469,10 @@ type AdmissionHarnessOptions = {
 function runAdmissionHarness(
   getAgent: () => {
     fenceAdmitted?: (runId: string, dispatchToken: string) => Promise<boolean>;
+    requeueAdmitted?: (
+      runId: string,
+      dispatchToken: string
+    ) => Promise<boolean> | boolean;
     getRun: (runId: string) => unknown;
     startAdmitted: (runId: string, dispatchToken?: string) => Promise<boolean>;
     stop: (
@@ -2817,6 +2821,92 @@ test("alarm retry exhaustion closes queued admission and refuses new work", asyn
       error instanceof AdmissionUnavailableError &&
       error.message.includes("alarm permanently unavailable")
   );
+});
+
+test("alarm failure stays fail-closed while an active claim remains", async () => {
+  const setAlarmFailure: { error: Error | null } = { error: null };
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "running" }),
+      startAdmitted: () => Promise.resolve(true),
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    },
+    { setAlarmFailure }
+  );
+
+  assert.deepEqual(await harness.admission.admit(request(57)), {
+    kind: "active",
+    runId: "run-57",
+  });
+  await Promise.all(harness.background);
+
+  setAlarmFailure.error = new Error("alarm unavailable with active claim");
+  harness.setAlarm(Date.now() - 1);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: repeated failures model alarm retries.
+      await harness.admission.alarm();
+    } catch (error) {
+      assert.match(
+        error instanceof Error ? error.message : String(error),
+        /alarm unavailable with active claim/
+      );
+    }
+  }
+
+  await assert.rejects(
+    () => harness.admission.admit(request(58)),
+    (error: unknown) =>
+      error instanceof AdmissionUnavailableError &&
+      error.message.includes("alarm unavailable with active claim")
+  );
+
+  setAlarmFailure.error = null;
+  await harness.admission.release("run-57");
+  assert.deepEqual(await harness.admission.admit(request(59)), {
+    kind: "active",
+    runId: "run-59",
+  });
+});
+
+test("failed local requeue keeps the admission claim active", async () => {
+  const originalNow = Date.now;
+  let now = Date.parse("2026-08-26T00:00:00.000Z");
+  Date.now = () => now;
+  try {
+    let starts = 0;
+    const harness = runAdmissionHarness(() => ({
+      fenceAdmitted: () => Promise.resolve(true),
+      getRun: () => ({ status: "queued" }),
+      requeueAdmitted: () => Promise.resolve(false),
+      startAdmitted: () => {
+        starts += 1;
+        return Promise.resolve(false);
+      },
+      stop: () => Promise.resolve(null),
+    }));
+
+    assert.deepEqual(await harness.admission.admit(request(60)), {
+      kind: "active",
+      runId: "run-60",
+    });
+    await Promise.all(harness.background);
+    now += 61_000;
+    await harness.admission.alarm();
+
+    assert.equal(starts, 1);
+    assert.equal(
+      (await harness.admission.getRecord("run-60"))?.state,
+      "active",
+      "an unconfirmed local requeue must retain its capacity claim"
+    );
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test("alarm exhaustion keeps cleanup wake durable and repairs it without a request", async () => {

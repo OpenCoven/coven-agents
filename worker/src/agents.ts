@@ -95,11 +95,18 @@ type YoloAgentState = {
   dispatchClaims?: Record<string, string>;
   definition: AgentDefinition | null;
   identityTokens?: Record<string, string>;
+  lifecycle: {
+    generation: number;
+    status: "active" | "decommissioning" | "decommissioned";
+  };
   runs: CloudRunRecord[];
   sandbox?: SandboxOwnership;
 };
 
+type AgentLifecycle = YoloAgentState["lifecycle"];
+
 const WARM_FIBER_KEY = "warm";
+const CLEANUP_RETRY_DELAY_MS = 5000;
 const MAX_LEGACY_ADMISSION_FENCE_TOKENS = 32;
 const MAX_ADMISSION_FENCE_TOMBSTONES = 128;
 
@@ -326,16 +333,33 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     definition: null,
     dispatchClaims: {},
     identityTokens: {},
+    lifecycle: { generation: 0, status: "active" },
     runs: [],
     sandbox: { generation: 0 },
   };
   private readonly admissionReleaseInFlight = new Map<string, Promise<void>>();
   private readonly admissionReleaseCompleted = new Set<string>();
   private readonly sandboxCleanupInFlight = new Map<number, Promise<boolean>>();
+  private readonly fiberCompletions = new Map<string, Promise<void>>();
+  private cleanupRetryScheduleId: string | undefined;
 
   configure(definition: AgentDefinition): AgentDefinition {
     const parsed = agentDefinitionSchema.parse(definition);
-    this.setState({ ...this.state, definition: parsed });
+    const lifecycle = this.state.lifecycle ?? {
+      generation: 0,
+      status: "active" as const,
+    };
+    this.setState({
+      ...this.state,
+      definition: parsed,
+      lifecycle: {
+        generation:
+          lifecycle.status === "active"
+            ? lifecycle.generation
+            : lifecycle.generation + 1,
+        status: "active",
+      },
+    });
     return parsed;
   }
 
@@ -349,6 +373,75 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       throw new Error("Agent has not been configured.");
     }
     return definition;
+  }
+
+  private requireActiveDefinition(): AgentDefinition {
+    const definition = this.requireDefinition();
+    if (!this.lifecycleIsActive()) {
+      throw new AgentBusyError();
+    }
+    return definition;
+  }
+
+  private currentLifecycle(): AgentLifecycle {
+    return (
+      this.state.lifecycle ?? {
+        generation: 0,
+        status: "active",
+      }
+    );
+  }
+
+  private lifecycleIsActive(generation?: number): boolean {
+    const { lifecycle } = this.state;
+    return (
+      lifecycle?.status === "active" &&
+      (generation === undefined || lifecycle.generation === generation)
+    );
+  }
+
+  private executionIsLive(execution: {
+    generation: number;
+    runId: string;
+    dispatchToken?: string;
+  }): boolean {
+    if (!this.lifecycleIsActive(execution.generation)) {
+      return false;
+    }
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === execution.runId
+    );
+    if (current?.run.status !== "running") {
+      return false;
+    }
+    return (
+      execution.dispatchToken === undefined ||
+      current.dispatchToken === execution.dispatchToken ||
+      this.state.admissionTokens?.[execution.runId] === execution.dispatchToken
+    );
+  }
+
+  private currentRunOr(
+    runId: string,
+    fallback: CloudRunRecord
+  ): CloudRunRecord {
+    return (
+      this.state.runs.find((candidate) => candidate.run.id === runId) ??
+      fallback
+    );
+  }
+
+  private trackFiberCompletion(
+    key: string,
+    work: Promise<void>
+  ): Promise<void> {
+    const tracked = work.finally(() => {
+      if (this.fiberCompletions.get(key) === tracked) {
+        this.fiberCompletions.delete(key);
+      }
+    });
+    this.fiberCompletions.set(key, tracked);
+    return tracked;
   }
 
   private acquireSandboxOwnership(
@@ -479,6 +572,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
           `${message}${detail}`,
           attempts + 1
         );
+        this.scheduleCleanupRetry().catch(() => undefined);
         return false;
       } finally {
         this.sandboxCleanupInFlight.delete(ownership.generation);
@@ -492,6 +586,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     definition: AgentDefinition,
     force = true
   ): Promise<boolean> {
+    const lifecycle = this.currentLifecycle();
     const cleanup = this.state.sandbox?.cleanup;
     if (!cleanup) {
       return true;
@@ -513,6 +608,12 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     );
     if (!repaired) {
       return false;
+    }
+    if (
+      lifecycle.status !== "active" ||
+      !this.lifecycleIsActive(lifecycle.generation)
+    ) {
+      return true;
     }
     const current = this.state.runs.find(
       (candidate) => candidate.run.id === cleanup.runId
@@ -541,15 +642,89 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
         });
         await this.reportAdmissionTerminal(cleanup.runId as string);
       }
+    } else if (
+      this.state.definition?.warm?.status === "provisioning" &&
+      this.lifecycleIsActive()
+    ) {
+      this.updateDefinition({
+        warm: {
+          status: "failed",
+          updatedAt: new Date().toISOString(),
+        },
+      });
     }
     return true;
   }
 
-  repairSandboxCleanup(): Promise<boolean> {
+  async repairSandboxCleanup(): Promise<boolean> {
     const { definition } = this.state;
-    return definition
-      ? this.repairPendingSandboxCleanup(definition, false)
-      : Promise.resolve(true);
+    const repaired = definition
+      ? await this.repairPendingSandboxCleanup(definition, false)
+      : true;
+    if (repaired) {
+      this.cleanupRetryScheduleId = undefined;
+    }
+    if (!repaired) {
+      this.scheduleCleanupRetry().catch(() => undefined);
+    }
+    return repaired;
+  }
+
+  private async scheduleCleanupRetry(): Promise<void> {
+    if (
+      !this.lifecycleIsActive() ||
+      this.cleanupRetryScheduleId !== undefined
+    ) {
+      return;
+    }
+    const { schedule } = this as unknown as {
+      schedule?: (
+        when: Date,
+        callback: string,
+        payload?: unknown,
+        options?: { idempotent?: boolean }
+      ) => Promise<{ id: string }>;
+    };
+    if (!schedule) {
+      return;
+    }
+    try {
+      const scheduled = await schedule.call(
+        this,
+        new Date(Date.now() + CLEANUP_RETRY_DELAY_MS),
+        "repairSandboxCleanup",
+        undefined,
+        { idempotent: true }
+      );
+      if (!this.lifecycleIsActive()) {
+        await this.cancelScheduledCleanup(scheduled.id);
+        return;
+      }
+      this.cleanupRetryScheduleId = scheduled.id;
+    } catch {
+      // Every lifecycle RPC also repairs pending cleanup, so a scheduler
+      // outage cannot turn a retryable cleanup into a permanent block.
+    }
+  }
+
+  private async cancelScheduledCleanup(id = this.cleanupRetryScheduleId) {
+    if (!id) {
+      return;
+    }
+    if (this.cleanupRetryScheduleId === id) {
+      this.cleanupRetryScheduleId = undefined;
+    }
+    const { cancelSchedule } = this as unknown as {
+      cancelSchedule?: (scheduleId: string) => Promise<boolean>;
+    };
+    if (!cancelSchedule) {
+      return;
+    }
+    try {
+      await cancelSchedule.call(this, id);
+    } catch {
+      // Decommission remains fenced even if platform schedule cancellation fails.
+    }
   }
 
   /**
@@ -561,8 +736,12 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
    */
   async execute(input: unknown, identityToken: string): Promise<RunResult> {
     const { task } = runAgentInputSchema.parse(input);
-    const definition = this.requireDefinition();
+    const definition = this.requireActiveDefinition();
+    const lifecycleGeneration = this.currentLifecycle().generation;
     if (!(await this.repairPendingSandboxCleanup(definition))) {
+      throw new AgentBusyError();
+    }
+    if (!this.lifecycleIsActive(lifecycleGeneration)) {
       throw new AgentBusyError();
     }
 
@@ -631,7 +810,8 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
   private async resolveTenantCredential(
     definition: AgentDefinition,
     identityToken: string,
-    runId: string
+    runId: string,
+    signal?: AbortSignal
   ): Promise<string | null> {
     const { APP_ORIGIN, RUNNER_SERVICE_TOKEN } = this.env;
     if (!APP_ORIGIN || !RUNNER_SERVICE_TOKEN) {
@@ -651,6 +831,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
         fetchImpl: (input, init) => fetch(input, init),
         identityToken,
         serviceToken: RUNNER_SERVICE_TOKEN,
+        signal,
       }
     );
 
@@ -676,6 +857,24 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     identityToken: string,
     signal?: AbortSignal
   ): Promise<CloudRunRecord> {
+    const lifecycle = this.currentLifecycle();
+    const execution = {
+      dispatchToken: planned.dispatchToken,
+      generation: lifecycle.generation,
+      runId: planned.run.id,
+    };
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === planned.run.id
+    );
+    if (
+      lifecycle.status !== "active" ||
+      signal?.aborted ||
+      (current &&
+        current.run.status !== "queued" &&
+        current.run.status !== "running")
+    ) {
+      return current ?? planned;
+    }
     let record = this.claimRunStart(planned);
 
     // Declared outside the try block, not `const` inside it: the catch
@@ -695,8 +894,12 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       credential = await this.resolveTenantCredential(
         definition,
         identityToken,
-        planned.run.id
+        planned.run.id,
+        signal
       );
+      if (!this.executionIsLive(execution)) {
+        return this.currentRunOr(planned.run.id, record);
+      }
       /**
        * Streams each harness event into the record as it happens, so the
        * console shows what the run is doing rather than a spinner. Redaction
@@ -712,7 +915,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
           credential,
           toolNames
         );
-        if (mapped) {
+        if (mapped && this.executionIsLive(execution)) {
           record = appendEvents(record, [mapped]);
           this.persistRun(record);
         }
@@ -722,6 +925,10 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
         planned.run.id,
         planned.dispatchToken
       );
+      const sandboxName = await sandboxKey(tenantOf(definition), definition.id);
+      if (!this.executionIsLive(execution)) {
+        return this.currentRunOr(planned.run.id, record);
+      }
       const run = await runHarnessInSandbox({
         credential: { credential },
         destroySandbox: async () => {
@@ -745,18 +952,19 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         model: definition.model,
         onEvent,
         runtime: definition.runtime,
-        sandbox: getSandbox(
-          this.env.Sandbox,
-          await sandboxKey(tenantOf(definition), definition.id),
+        sandbox: getSandbox(this.env.Sandbox, sandboxName, {
           // Chosen rather than inherited: the same idle window the warm-up
           // uses, so a warmed container and a run container age identically.
-          { sleepAfter: WARM_SLEEP_AFTER }
-        ),
+          sleepAfter: WARM_SLEEP_AFTER,
+        }),
         signal,
         task,
         workspace: definition.workspace,
       });
 
+      if (!this.executionIsLive(execution)) {
+        return this.currentRunOr(planned.run.id, record);
+      }
       this.clearSandboxOwnership(
         ownership as { generation: number; owner: string }
       );
@@ -796,6 +1004,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           "The harness produced no output.",
         status: failed ? "failed" : "completed",
       });
+      if (!this.executionIsLive(execution)) {
+        return this.currentRunOr(planned.run.id, record);
+      }
       if (this.persistRun(record)) {
         this.updateDefinition({
           lastRunAt: completedAt,
@@ -810,6 +1021,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         ) ?? record
       );
     } catch (error) {
+      if (!this.executionIsLive(execution)) {
+        return this.currentRunOr(planned.run.id, record);
+      }
       const cleanupRequired =
         error instanceof HarnessError &&
         (error.code === "harness_timeout" ||
@@ -835,8 +1049,14 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
             error
           );
         }
+        if (!this.executionIsLive(execution)) {
+          return this.currentRunOr(planned.run.id, record);
+        }
       } else if (ownership) {
         this.clearSandboxOwnership(ownership);
+      }
+      if (!this.executionIsLive(execution)) {
+        return this.currentRunOr(planned.run.id, record);
       }
       const completedAt = new Date().toISOString();
       record = finishCloudRunRecord(record, {
@@ -860,6 +1080,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
             ? "cancelled"
             : "failed",
       });
+      if (!this.executionIsLive(execution)) {
+        return this.currentRunOr(planned.run.id, record);
+      }
       if (this.persistRun(record)) {
         this.updateDefinition({
           lastRunAt: completedAt,
@@ -896,16 +1119,24 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     identityToken: string
   ): Promise<{ created: boolean; run: RunSnapshot }> {
     const { operationId, task } = startRunInputSchema.parse(input);
-    const definition = this.requireDefinition();
+    const definition = this.requireActiveDefinition();
+    const lifecycleGeneration = this.currentLifecycle().generation;
     if (!(await this.repairPendingSandboxCleanup(definition))) {
+      throw new AgentBusyError();
+    }
+    if (!this.lifecycleIsActive(lifecycleGeneration)) {
       throw new AgentBusyError();
     }
     validateCloudWorkspace(definition);
 
+    const operationHash = await hashOperation(definition.id, task);
+    if (!this.lifecycleIsActive(lifecycleGeneration)) {
+      throw new AgentBusyError();
+    }
     const plan = planCloudRunStart({
       agentId: definition.id,
       createdAt: new Date().toISOString(),
-      operationHash: await hashOperation(definition.id, task),
+      operationHash,
       operationId,
       records: this.state.runs,
       runId: crypto.randomUUID(),
@@ -934,19 +1165,23 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     return await dispatchCloudRun(plan, (record, fiberKey) =>
       this.startFiber(
         fiberKey,
-        async (fiber) => {
-          try {
-            await this.driveHarness(
-              definition,
-              record,
-              task,
-              identityToken,
-              fiber.signal
-            );
-          } finally {
-            await this.reportAdmissionTerminal(record.run.id);
-          }
-        },
+        async (fiber) =>
+          this.trackFiberCompletion(
+            fiberKey,
+            (async () => {
+              try {
+                await this.driveHarness(
+                  definition,
+                  record,
+                  task,
+                  identityToken,
+                  fiber.signal
+                );
+              } finally {
+                await this.reportAdmissionTerminal(record.run.id);
+              }
+            })()
+          ),
         // Keyed on the fiber key rather than the operation id: `stop` cancels
         // by run, and a run is what a caller can name.
         { idempotencyKey: fiberKey, metadata: { runId: record.run.id } }
@@ -967,7 +1202,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     identityToken: string
   ): Promise<{ created: boolean; run: RunSnapshot }> {
     const { operationId, task } = startRunInputSchema.parse(input);
-    const definition = this.requireDefinition();
+    const definition = this.requireActiveDefinition();
     validateCloudWorkspace(definition);
 
     const plan = planCloudRunStart(
@@ -1006,8 +1241,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    * releases that capacity even when the harness throws.
    */
   async startAdmitted(runId: string, dispatchToken?: string): Promise<boolean> {
-    const definition = this.requireDefinition();
+    const definition = this.requireActiveDefinition();
+    const lifecycleGeneration = this.currentLifecycle().generation;
     if (!(await this.repairPendingSandboxCleanup(definition))) {
+      throw new AgentBusyError();
+    }
+    if (!this.lifecycleIsActive(lifecycleGeneration)) {
       throw new AgentBusyError();
     }
     const record = this.state.runs.find(
@@ -1055,19 +1294,23 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     try {
       const receipt = await this.startFiber(
         cloudFiberKey(runId),
-        async (fiber) => {
-          try {
-            await this.driveHarness(
-              definition,
-              claimed,
-              claimed.run.task,
-              identityToken,
-              fiber.signal
-            );
-          } finally {
-            await this.reportAdmissionTerminal(runId, token);
-          }
-        },
+        async (fiber) =>
+          this.trackFiberCompletion(
+            cloudFiberKey(runId),
+            (async () => {
+              try {
+                await this.driveHarness(
+                  definition,
+                  claimed,
+                  claimed.run.task,
+                  identityToken,
+                  fiber.signal
+                );
+              } finally {
+                await this.reportAdmissionTerminal(runId, token);
+              }
+            })()
+          ),
         {
           idempotencyKey: cloudFiberKey(runId),
           metadata: {
@@ -1102,7 +1345,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    * this return false and keeps the coordinator's claim active.
    */
   fenceAdmitted(runId: string, dispatchToken: string): boolean {
-    if (!dispatchToken) {
+    if (!dispatchToken || !this.lifecycleIsActive()) {
       return false;
     }
     const record = this.state.runs.find(
@@ -1122,6 +1365,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     ) {
       return true;
     }
+
     if (generation === undefined && existing.tokens?.includes(dispatchToken)) {
       return true;
     }
@@ -1150,6 +1394,75 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     return true;
   }
 
+  /**
+   * Atomically fences a stale dispatch and clears the local token that made
+   * the run look claimed. The run must still be queued and unstarted; a
+   * started or terminal run is left untouched so admission keeps its active
+   * ambiguity rather than risking a duplicate execution.
+   */
+  requeueAdmitted(runId: string, dispatchToken: string): boolean {
+    if (!dispatchToken || !this.lifecycleIsActive()) {
+      return false;
+    }
+    const record = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (record?.run.status !== "queued" || record.run.startedAt !== null) {
+      return false;
+    }
+    const localToken =
+      record.dispatchToken ?? this.state.admissionTokens?.[runId];
+    const localClaim = this.state.dispatchClaims?.[runId];
+    if (
+      (localToken && localToken !== dispatchToken) ||
+      (localClaim && localClaim !== dispatchToken)
+    ) {
+      return false;
+    }
+    const existing = normalizeAdmissionFence(
+      this.state.admissionFences?.[runId]
+    );
+    if (existing.cancelled) {
+      return false;
+    }
+    const generation = dispatchGeneration(dispatchToken);
+    const nextFence =
+      generation === undefined
+        ? {
+            ...existing,
+            tokens: [
+              ...(existing.tokens ?? []).filter(
+                (token) => token !== dispatchToken
+              ),
+              dispatchToken,
+            ].slice(-MAX_LEGACY_ADMISSION_FENCE_TOKENS),
+          }
+        : {
+            ...existing,
+            generation: Math.max(existing.generation ?? 0, generation),
+          };
+    const runs = this.state.runs.map((candidate) =>
+      candidate.run.id === runId
+        ? { ...candidate, dispatchToken: undefined }
+        : candidate
+    );
+    const admissionTokens = { ...(this.state.admissionTokens ?? {}) };
+    delete admissionTokens[runId];
+    const dispatchClaims = { ...(this.state.dispatchClaims ?? {}) };
+    delete dispatchClaims[runId];
+    this.setState({
+      ...this.state,
+      admissionFences: this.pruneAdmissionFences({
+        ...(this.state.admissionFences ?? {}),
+        [runId]: nextFence,
+      }),
+      admissionTokens,
+      dispatchClaims,
+      runs,
+    });
+    return true;
+  }
+
   private pruneAdmissionFences(
     fences: Record<string, AdmissionFence | string[]>
   ): Record<string, AdmissionFence | string[]> {
@@ -1163,6 +1476,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   async onFiberRecovered(
     context: FiberRecoveryContext
   ): Promise<undefined | FiberRecoveryResult> {
+    if (
+      context.name === WARM_FIBER_KEY ||
+      context.metadata?.kind === WARM_FIBER_KEY
+    ) {
+      return this.recoverWarmFiber();
+    }
     const metadataRunId = context.metadata?.runId;
     const metadataDispatchToken = context.metadata?.dispatchToken;
     const recoveredDispatchToken =
@@ -1178,6 +1497,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (!runId) {
       const recovered = await super.onFiberRecovered(context);
       return recovered === undefined ? undefined : recovered;
+    }
+    if (!this.lifecycleIsActive()) {
+      return {
+        reason: "Agent is being decommissioned.",
+        status: "aborted",
+      };
     }
 
     const current = this.state.runs.find(
@@ -1263,6 +1588,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
 
     const recovered = recoverCloudRunRecord(current, new Date().toISOString());
+    if (!this.lifecycleIsActive()) {
+      return {
+        reason: "Agent is being decommissioned.",
+        status: "aborted",
+      };
+    }
     if (this.persistRun(recovered, { dispatchClaim: null })) {
       this.updateDefinition({
         lastRunAt: recovered.run.completedAt ?? new Date().toISOString(),
@@ -1686,8 +2017,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    * is counted and no credential is ever in scope here.
    */
   async warm(): Promise<WarmState> {
-    const definition = this.requireDefinition();
+    const definition = this.requireActiveDefinition();
+    const lifecycleGeneration = this.currentLifecycle().generation;
     if (!(await this.repairPendingSandboxCleanup(definition))) {
+      throw new AgentBusyError();
+    }
+    if (!this.lifecycleIsActive(lifecycleGeneration)) {
       throw new AgentBusyError();
     }
     const current = definition.warm;
@@ -1709,9 +2044,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
 
     await this.startFiber(
       WARM_FIBER_KEY,
-      async (fiber) => {
-        await this.driveWarm(definition, fiber.signal);
-      },
+      async (fiber) =>
+        this.trackFiberCompletion(
+          WARM_FIBER_KEY,
+          this.driveWarm(definition, fiber.signal)
+        ),
       { idempotencyKey: WARM_FIBER_KEY }
     );
     return provisioning;
@@ -1722,12 +2059,15 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     signal?: AbortSignal
   ): Promise<void> {
     const startedAt = Date.now();
+    const lifecycleGeneration = this.currentLifecycle().generation;
     const ownership = this.acquireSandboxOwnership();
-    const sandbox = getSandbox(
-      this.env.Sandbox,
-      await sandboxKey(tenantOf(definition), definition.id),
-      { sleepAfter: WARM_SLEEP_AFTER }
-    );
+    const sandboxName = await sandboxKey(tenantOf(definition), definition.id);
+    if (!this.lifecycleIsActive(lifecycleGeneration) || signal?.aborted) {
+      return;
+    }
+    const sandbox = getSandbox(this.env.Sandbox, sandboxName, {
+      sleepAfter: WARM_SLEEP_AFTER,
+    });
     const outcome = await warmSandbox(sandbox, definition.runtime, undefined, {
       destroy: async () => {
         const cleaned = await this.cleanupOwnedSandbox(
@@ -1755,6 +2095,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       ownsSandbox: () => this.ownsSandbox(ownership),
       signal,
     });
+    if (!this.lifecycleIsActive(lifecycleGeneration)) {
+      return;
+    }
     if (!this.state.sandbox?.cleanup) {
       this.clearSandboxOwnership(ownership);
     }
@@ -1778,42 +2121,63 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
   }
 
-  /**
-   * Closes the records of fibers a restart killed.
-   *
-   * A worker deploy interrupts every in-flight fiber, and until this hook
-   * existed the run it was driving stayed `running` forever: the console
-   * streamed it endlessly, the active-run guard refused new runs, and
-   * nothing anywhere would ever change either fact. `recoverCloudRunRecord`
-   * was written for exactly this and then never wired to anything — this is
-   * the wiring. An interrupted warm just becomes `failed`; the next trigger
-   * re-warms.
-   */
-  override onFiberRecovered(context: {
-    name: string;
-  }): Promise<{ status: "completed" }> {
-    const completedAt = new Date().toISOString();
-    if (context.name === WARM_FIBER_KEY && this.state.definition) {
-      this.updateDefinition({
-        warm: { status: "failed", updatedAt: completedAt },
-      });
-      return Promise.resolve({ status: "completed" });
+  private async recoverWarmFiber(): Promise<FiberRecoveryResult> {
+    const { definition } = this.state;
+    const lifecycle = this.currentLifecycle();
+    if (!definition || lifecycle.status !== "active") {
+      return {
+        reason: "Warm fiber belongs to a decommissioned agent.",
+        status: "aborted",
+      };
     }
-
-    const record = this.state.runs.find(
-      (candidate) =>
-        cloudFiberKey(candidate.run.id) === context.name &&
-        !isTerminal(candidate.run.status)
+    const current = this.state.sandbox;
+    if (current?.runId) {
+      return {
+        reason: "Recovered warm fiber cannot take a run sandbox.",
+        status: "aborted",
+      };
+    }
+    if (!this.lifecycleIsActive(lifecycle.generation)) {
+      return {
+        reason: "Agent is being decommissioned.",
+        status: "aborted",
+      };
+    }
+    const ownership = current?.owner
+      ? {
+          dispatchToken: current.dispatchToken,
+          generation: current.generation,
+          owner: current.owner,
+          runId: current.runId,
+        }
+      : this.acquireSandboxOwnership();
+    this.updateDefinition({
+      warm: {
+        status: "failed",
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    const cleaned = await this.cleanupOwnedSandbox(
+      definition,
+      ownership,
+      "failed",
+      "The warm sandbox was recovered after interruption and must be cleaned up."
     );
-    if (record) {
-      console.warn({
-        event: "run.recovered_after_interruption",
-        runId: record.run.id,
-      });
-      this.persistRun(recoverCloudRunRecord(record, completedAt));
-      this.updateDefinition({ status: "error", updatedAt: completedAt });
+    if (!this.lifecycleIsActive(lifecycle.generation)) {
+      return {
+        reason: "Agent is being decommissioned.",
+        status: "aborted",
+      };
     }
-    return Promise.resolve({ status: "completed" });
+    if (!cleaned) {
+      throw new Error(
+        `Warm sandbox cleanup is still unavailable.${this.state.sandbox?.cleanup?.message ? ` ${this.state.sandbox.cleanup.message}` : ""}`
+      );
+    }
+    return {
+      reason: "Recovered warm fiber was cleaned up before retry.",
+      status: "aborted",
+    };
   }
 
   private async destroyAgentSandbox(
@@ -1827,10 +2191,14 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       }
       try {
         // biome-ignore lint/performance/noAwaitInLoops: Retries must be ordered to bound cleanup.
-        await getSandbox(
-          this.env.Sandbox,
-          await sandboxKey(tenantOf(definition), definition.id)
-        ).destroy();
+        const sandboxName = await sandboxKey(
+          tenantOf(definition),
+          definition.id
+        );
+        if (owns && !owns()) {
+          return;
+        }
+        await getSandbox(this.env.Sandbox, sandboxName).destroy();
         return;
       } catch (error) {
         failure = error;
@@ -1842,36 +2210,99 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   }
 
   async decommission(): Promise<void> {
+    const lifecycle = this.currentLifecycle();
     const { definition } = this.state;
-    if (definition) {
-      if (!(await this.repairPendingSandboxCleanup(definition))) {
-        throw new Error("Agent sandbox cleanup is still unavailable.");
-      }
-      await this.cancelFiberByKey(
-        WARM_FIBER_KEY,
-        "Agent decommissioned during warm-up."
-      );
-      const current = this.state.sandbox;
-      const ownership = current?.owner
-        ? {
-            dispatchToken: current.dispatchToken,
-            generation: current.generation,
-            owner: current.owner,
-            runId: current.runId,
-          }
-        : this.acquireSandboxOwnership();
-      if (
-        !(await this.cleanupOwnedSandbox(
-          definition,
-          ownership,
-          "failed",
-          "The agent sandbox was destroyed during decommission."
-        ))
-      ) {
-        throw new Error("Agent sandbox cleanup is still unavailable.");
-      }
+    if (!definition) {
+      this.setState({
+        ...this.initialState,
+        lifecycle: {
+          generation: lifecycle.generation,
+          status: "decommissioned",
+        },
+      });
+      return;
     }
-    this.setState(this.initialState);
+
+    const generation = lifecycle.generation + 1;
+    this.setState({
+      ...this.state,
+      lifecycle: { generation, status: "decommissioning" },
+    });
+    await this.cancelScheduledCleanup();
+
+    const runIds = this.state.runs
+      .filter((record) => !isTerminal(record.run.status))
+      .map((record) => record.run.id);
+    const fiberKeys = new Set([
+      WARM_FIBER_KEY,
+      ...runIds.map((runId) => cloudFiberKey(runId)),
+      ...this.fiberCompletions.keys(),
+    ]);
+    await Promise.all([
+      ...[...fiberKeys].map((fiberKey) =>
+        this.cancelFiberByKey(
+          fiberKey,
+          fiberKey === WARM_FIBER_KEY
+            ? "Agent decommissioned during warm-up."
+            : "Agent decommissioned during run cleanup."
+        )
+      ),
+    ]);
+    while (this.fiberCompletions.size > 0) {
+      // biome-ignore lint/performance/noAwaitInLoops: wait for every late fiber before resetting durable state.
+      await Promise.allSettled([...this.fiberCompletions.values()]);
+    }
+
+    for (const runId of runIds) {
+      const current = this.state.runs.find(
+        (candidate) => candidate.run.id === runId
+      );
+      if (!current || isTerminal(current.run.status)) {
+        continue;
+      }
+      const cancelled = finishCloudRunRecord(current, {
+        completedAt: new Date().toISOString(),
+        credential: null,
+        output: "Run cancelled because the agent was decommissioned.",
+        status: "cancelled",
+      });
+      this.persistRun(cancelled, { dispatchClaim: null });
+    }
+
+    for (const runId of runIds) {
+      // Admission release is idempotent and must happen before the agent
+      // state is reset, while the run's dispatch token is still available.
+      // biome-ignore lint/performance/noAwaitInLoops: releases are coordinated per run.
+      await this.reportAdmissionTerminal(runId);
+    }
+
+    if (!(await this.repairPendingSandboxCleanup(definition))) {
+      throw new Error("Agent sandbox cleanup is still unavailable.");
+    }
+    const current = this.state.sandbox;
+    const ownership = current?.owner
+      ? {
+          dispatchToken: current.dispatchToken,
+          generation: current.generation,
+          owner: current.owner,
+          runId: current.runId,
+        }
+      : this.acquireSandboxOwnership();
+    if (
+      !(await this.cleanupOwnedSandbox(
+        definition,
+        ownership,
+        "failed",
+        "The agent sandbox was destroyed during decommission."
+      ))
+    ) {
+      throw new Error("Agent sandbox cleanup is still unavailable.");
+    }
+    this.cleanupRetryScheduleId = undefined;
+    this.setState({
+      ...this.initialState,
+      lifecycle: { generation, status: "decommissioned" },
+    });
   }
 
   private updateDefinition(
