@@ -36,6 +36,7 @@ const FINISH_GRACE_MS = 15_000;
 export const PROBE_TIMEOUT_MS = 300_000;
 
 type SandboxLike = Pick<Sandbox, "exec"> & Partial<Pick<Sandbox, "destroy">>;
+type SandboxDestroy = () => Promise<void>;
 
 /**
  * Enforces a deadline the SDK does not.
@@ -47,9 +48,8 @@ type SandboxLike = Pick<Sandbox, "exec"> & Partial<Pick<Sandbox, "destroy">>;
  * refused: nothing bounded the exec, and nothing behind it did either.
  *
  * A race does not kill the process in the container — the container keeps it
- * until the sandbox is destroyed. What it does is bound the *run*: the throw
- * marks it failed, releases the active slot, and tells the client something
- * true instead of streaming silence.
+ * until the sandbox is destroyed. The caller therefore owns the cleanup
+ * decision: it must destroy successfully before releasing an active slot.
  */
 async function withDeadline<T>(
   work: Promise<T>,
@@ -79,13 +79,27 @@ async function withDeadline<T>(
 async function withCancellation<T>(
   work: Promise<T>,
   sandbox: SandboxLike,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  destroySandbox?: SandboxDestroy
 ): Promise<T> {
   if (!signal) {
     return work;
   }
   const abort = async (): Promise<never> => {
-    await Promise.resolve(sandbox.destroy?.()).catch(() => undefined);
+    try {
+      await (destroySandbox
+        ? destroySandbox()
+        : Promise.resolve(sandbox.destroy?.()));
+    } catch (error) {
+      // biome-ignore lint/style/useErrorCause: HarnessError stores the cause through its typed constructor.
+      throw new HarnessError(
+        error instanceof Error
+          ? `Sandbox cleanup failed during cancellation: ${error.message}`
+          : "Sandbox cleanup failed during cancellation.",
+        "sandbox_cleanup_failed",
+        { cause: error }
+      );
+    }
     throw new HarnessError(
       "The cloud run was cancelled before the sandbox command completed.",
       "harness_cancelled"
@@ -218,7 +232,8 @@ export function requireHarness(
 async function probeInstalled(
   sandbox: SandboxLike,
   spec: HarnessSpec,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  destroySandbox?: SandboxDestroy
 ): Promise<{ installed: boolean; version: string | null }> {
   try {
     const result = await withCancellation(
@@ -230,7 +245,8 @@ async function probeInstalled(
         `${spec.command} --version`
       ),
       sandbox,
-      signal
+      signal,
+      destroySandbox
     );
     if (!result.success) {
       return { installed: false, version: null };
@@ -276,7 +292,12 @@ export async function warmSandbox(
   sandbox: SandboxLike,
   runtime: string,
   wait: (ms: number) => Promise<void> = (ms) =>
-    new Promise((resolve) => setTimeout(resolve, ms))
+    new Promise((resolve) => setTimeout(resolve, ms)),
+  options: {
+    destroy?: SandboxDestroy;
+    ownsSandbox?: () => boolean;
+    signal?: AbortSignal;
+  } = {}
 ): Promise<{ ready: boolean; version: string | null }> {
   const spec = harnessSpec(runtime);
   if (!spec) {
@@ -284,11 +305,43 @@ export async function warmSandbox(
   }
 
   const attempt = async () => {
+    if (options.signal?.aborted || options.ownsSandbox?.() === false) {
+      return { installed: false, retry: false, version: null };
+    }
     try {
-      return await probeInstalled(sandbox, spec);
-    } catch {
+      const result = await probeInstalled(
+        sandbox,
+        spec,
+        options.signal,
+        options.destroy
+      );
+      return { ...result, retry: !result.installed };
+    } catch (error) {
+      if (
+        error instanceof HarnessError &&
+        (error.code === "harness_cancelled" ||
+          error.code === "sandbox_cleanup_failed")
+      ) {
+        return { installed: false, retry: false, version: null };
+      }
+      if (error instanceof HarnessError && error.code === "harness_timeout") {
+        const destroy = options.destroy ?? sandbox.destroy;
+        if (!destroy) {
+          return { installed: false, retry: false, version: null };
+        }
+        try {
+          if (options.destroy) {
+            await options.destroy();
+          } else {
+            await sandbox.destroy?.();
+          }
+        } catch {
+          return { installed: false, retry: false, version: null };
+        }
+        return { installed: false, retry: true, version: null };
+      }
       // A warm-up timeout is not a run timeout — nobody is waiting on it.
-      return { installed: false, version: null };
+      return { installed: false, retry: true, version: null };
     }
   };
 
@@ -296,7 +349,35 @@ export async function warmSandbox(
   if (first.installed) {
     return { ready: true, version: first.version };
   }
-  await wait(WARM_RETRY_DELAY_MS);
+  if (!first.retry) {
+    return { ready: false, version: null };
+  }
+  if (options.signal?.aborted) {
+    return { ready: false, version: null };
+  }
+  const canRetry = await new Promise<boolean>((resolve) => {
+    if (options.signal?.aborted || options.ownsSandbox?.() === false) {
+      resolve(false);
+      return;
+    }
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      options.signal?.removeEventListener("abort", onAbort);
+      resolve(value);
+    };
+    const onAbort = () => finish(false);
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    wait(WARM_RETRY_DELAY_MS)
+      .then(() => finish(true))
+      .catch(() => finish(false));
+  });
+  if (!canRetry) {
+    return { ready: false, version: null };
+  }
   const second = await attempt();
   return { ready: second.installed, version: second.version };
 }
@@ -345,6 +426,7 @@ export async function runHarnessInSandbox(options: {
   finishGraceMs?: number;
   runtime: string;
   sandbox: SandboxLike;
+  destroySandbox?: SandboxDestroy;
   signal?: AbortSignal;
   task: string;
   workspace?: string;
@@ -367,7 +449,8 @@ export async function runHarnessInSandbox(options: {
       "mkdir"
     ),
     options.sandbox,
-    options.signal
+    options.signal,
+    options.destroySandbox
   );
 
   const invocation = buildInvocation({
@@ -467,7 +550,8 @@ export async function runHarnessInSandbox(options: {
         spec.command
       ),
       options.sandbox,
-      options.signal
+      options.signal,
+      options.destroySandbox
     );
   } catch (error) {
     /**
@@ -483,7 +567,9 @@ export async function runHarnessInSandbox(options: {
      */
     if (
       error instanceof HarnessError &&
-      (error.code === "harness_timeout" || error.code === "harness_cancelled")
+      (error.code === "harness_timeout" ||
+        error.code === "harness_cancelled" ||
+        error.code === "sandbox_cleanup_failed")
     ) {
       throw error;
     }

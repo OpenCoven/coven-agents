@@ -996,7 +996,16 @@ export class RunAdmission extends DurableObject<Env> {
     await this.retryCleanupTasks();
     await this.dispatchAvailable(admissionLimits(this.env));
     this.pruneTerminalRecords();
-    await this.ensureAlarm({ throwOnFailure: false });
+    // A transient platform failure is recoverable on the next alarm, but
+    // once repair is exhausted the exception must escape so the platform can
+    // retry delivery while accepted work remains fail closed.
+    try {
+      await this.ensureAlarm({ throwOnFailure: true });
+    } catch (error) {
+      if (this.readAlarmFailureCount() >= MAX_ALARM_REPAIR_FAILURES) {
+        throw error;
+      }
+    }
   }
 
   private async dispatchAvailable(limits: AdmissionLimits): Promise<void> {
@@ -1288,9 +1297,13 @@ export class RunAdmission extends DurableObject<Env> {
     }
 
     if (!repaired && failures >= MAX_ALARM_REPAIR_FAILURES) {
-      this.failClosedQueuedAdmissions();
+      await this.failClosedQueuedAdmissions();
     }
-    if (!repaired && throwOnFailure) {
+    if (
+      !repaired &&
+      throwOnFailure &&
+      (failures < MAX_ALARM_REPAIR_FAILURES || this.hasCleanupTasks())
+    ) {
       const detail = error instanceof Error ? `: ${error.message}` : "";
       throw new AdmissionUnavailableError(
         `Run admission alarm is unavailable${detail}`
@@ -1299,34 +1312,37 @@ export class RunAdmission extends DurableObject<Env> {
     return repaired;
   }
 
-  private failClosedQueuedAdmissions(): void {
+  private async failClosedQueuedAdmissions(): Promise<void> {
     const queued = this.readStoredRecords().filter(
       (record) => record.state === "queued"
     );
     for (const record of queued) {
       this.terminalizeFailedAdmission(record, record.dispatchToken);
-      this.ctx.waitUntil(
-        (async () => {
-          try {
-            const stopped = await this.env.YoloAgent.getByName(
-              record.agentId
-            ).stop(record.runId, record.dispatchToken);
-            if (!this.isTerminalOrAbsent(stopped)) {
-              this.enqueueCleanupTask({
-                ...record,
-                dispatchToken: undefined,
-              });
-            }
-          } catch {
-            this.enqueueCleanupTask({
-              ...record,
-              dispatchToken: undefined,
-            });
-          }
-        })()
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: fail-closed cleanup must be durable before returning.
+        const stopped = await this.env.YoloAgent.getByName(record.agentId).stop(
+          record.runId,
+          record.dispatchToken
+        );
+        if (!this.isTerminalOrAbsent(stopped)) {
+          this.enqueueCleanupTask({
+            ...record,
+            dispatchToken: undefined,
+          });
+        }
+      } catch {
+        this.enqueueCleanupTask({
+          ...record,
+          dispatchToken: undefined,
+        });
+      }
+    }
+    if (this.hasCleanupTasks()) {
+      this.writeMetaValue(
+        NEXT_WAKE_META_KEY,
+        String(Date.now() + ALARM_REPAIR_RETRY_MS)
       );
     }
-    this.writeMetaValue(NEXT_WAKE_META_KEY, "");
   }
 
   private reconcileExpiredQueuedAdmissions(
@@ -1573,9 +1589,16 @@ export class RunAdmission extends DurableObject<Env> {
     record: StoredAdmissionRecord
   ): Promise<ActiveReconciliation> {
     try {
-      const run = await this.env.YoloAgent.getByName(record.agentId).getRun(
-        record.runId
-      );
+      const agent = this.env.YoloAgent.getByName(record.agentId);
+      const repair = (
+        agent as unknown as {
+          repairSandboxCleanup?: () => Promise<boolean>;
+        }
+      ).repairSandboxCleanup;
+      if (repair && !(await repair.call(agent))) {
+        return "running";
+      }
+      const run = await agent.getRun(record.runId);
       const current = this.findByRunId(record.runId);
       if (current?.state !== "active") {
         return "terminal";

@@ -2819,6 +2819,81 @@ test("alarm retry exhaustion closes queued admission and refuses new work", asyn
   );
 });
 
+test("alarm exhaustion keeps cleanup wake durable and repairs it without a request", async () => {
+  let stopAttempts = 0;
+  const setAlarmFailure: { error: Error | null } = {
+    error: new Error("alarm permanently unavailable"),
+  };
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.resolve(false),
+      stop: () => {
+        stopAttempts += 1;
+        if (stopAttempts < 2) {
+          return Promise.reject(new Error("agent unavailable"));
+        }
+        return Promise.resolve({ status: "cancelled" });
+      },
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "0",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    },
+    { setAlarmFailure }
+  );
+
+  setAlarmFailure.error = null;
+  assert.deepEqual(await harness.admission.admit(request(56)), {
+    kind: "queued",
+    position: 1,
+    runId: "run-56",
+  });
+  await Promise.all(harness.background);
+
+  setAlarmFailure.error = new Error("alarm permanently unavailable");
+  harness.setAlarm(Date.now() - 1);
+  await harness.admission.alarm();
+  await harness.admission.alarm();
+  await assert.rejects(
+    () => harness.admission.alarm(),
+    /alarm permanently unavailable/
+  );
+  await Promise.all(harness.background);
+
+  const wake = harness.sql
+    .exec<{ value: string }>(
+      "SELECT value FROM admission_meta WHERE key = 'next_wake_at'"
+    )
+    .toArray() as { value: string }[];
+  assert.notEqual(wake[0]?.value, "");
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = ?",
+          "run-56"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    1
+  );
+
+  setAlarmFailure.error = null;
+  await harness.admission.alarm();
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = ?",
+          "run-56"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    0
+  );
+});
+
 test("dispatch failure clears its lease before alarm failure can leak capacity", async () => {
   const setAlarmFailure: { error: Error | null } = { error: null };
   const harness = runAdmissionHarness(

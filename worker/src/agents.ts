@@ -70,6 +70,25 @@ type AdmissionFence = {
   tokens?: string[];
 };
 
+type SandboxCleanup = {
+  attempts: number;
+  finalStatus: "cancelled" | "failed";
+  generation: number;
+  message: string;
+  nextAttemptAt: number;
+  owner: string;
+  dispatchToken?: string;
+  runId?: string;
+};
+
+type SandboxOwnership = {
+  cleanup?: SandboxCleanup;
+  generation: number;
+  owner?: string;
+  dispatchToken?: string;
+  runId?: string;
+};
+
 type YoloAgentState = {
   admissionFences?: Record<string, AdmissionFence | string[]>;
   admissionTokens?: Record<string, string>;
@@ -77,6 +96,7 @@ type YoloAgentState = {
   definition: AgentDefinition | null;
   identityTokens?: Record<string, string>;
   runs: CloudRunRecord[];
+  sandbox?: SandboxOwnership;
 };
 
 const WARM_FIBER_KEY = "warm";
@@ -307,9 +327,11 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     dispatchClaims: {},
     identityTokens: {},
     runs: [],
+    sandbox: { generation: 0 },
   };
   private readonly admissionReleaseInFlight = new Map<string, Promise<void>>();
   private readonly admissionReleaseCompleted = new Set<string>();
+  private readonly sandboxCleanupInFlight = new Map<number, Promise<boolean>>();
 
   configure(definition: AgentDefinition): AgentDefinition {
     const parsed = agentDefinitionSchema.parse(definition);
@@ -329,6 +351,205 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     return definition;
   }
 
+  private acquireSandboxOwnership(
+    runId?: string,
+    dispatchToken?: string
+  ): {
+    generation: number;
+    owner: string;
+    dispatchToken?: string;
+    runId?: string;
+  } {
+    const generation = (this.state.sandbox?.generation ?? 0) + 1;
+    const owner = `${runId ?? "warm"}:${crypto.randomUUID()}`;
+    this.setState({
+      ...this.state,
+      sandbox: {
+        generation,
+        owner,
+        ...(dispatchToken ? { dispatchToken } : {}),
+        ...(runId ? { runId } : {}),
+      },
+    });
+    return {
+      generation,
+      owner,
+      ...(dispatchToken ? { dispatchToken } : {}),
+      ...(runId ? { runId } : {}),
+    };
+  }
+
+  private ownsSandbox(ownership: {
+    generation: number;
+    owner: string;
+    dispatchToken?: string;
+    runId?: string;
+  }): boolean {
+    const current = this.state.sandbox;
+    return (
+      current?.generation === ownership.generation &&
+      current.owner === ownership.owner
+    );
+  }
+
+  private clearSandboxOwnership(ownership: {
+    generation: number;
+    owner: string;
+    dispatchToken?: string;
+    runId?: string;
+  }): void {
+    if (!this.ownsSandbox(ownership)) {
+      return;
+    }
+    this.setState({
+      ...this.state,
+      sandbox: { generation: ownership.generation },
+    });
+  }
+
+  private markSandboxCleanup(
+    ownership: {
+      generation: number;
+      owner: string;
+      dispatchToken?: string;
+      runId?: string;
+    },
+    finalStatus: "cancelled" | "failed",
+    message: string,
+    attempts = 0
+  ): void {
+    if (!this.ownsSandbox(ownership)) {
+      return;
+    }
+    this.setState({
+      ...this.state,
+      sandbox: {
+        cleanup: {
+          attempts,
+          dispatchToken: ownership.dispatchToken,
+          finalStatus,
+          generation: ownership.generation,
+          message,
+          nextAttemptAt: Date.now() + 5000,
+          owner: ownership.owner,
+          runId: ownership.runId,
+        },
+        dispatchToken: ownership.dispatchToken,
+        generation: ownership.generation,
+        owner: ownership.owner,
+        runId: ownership.runId,
+      },
+    });
+  }
+
+  private cleanupOwnedSandbox(
+    definition: AgentDefinition,
+    ownership: {
+      generation: number;
+      owner: string;
+      dispatchToken?: string;
+      runId?: string;
+    },
+    finalStatus: "cancelled" | "failed",
+    message: string
+  ): Promise<boolean> {
+    if (!this.ownsSandbox(ownership)) {
+      return Promise.resolve(true);
+    }
+    const existing = this.sandboxCleanupInFlight.get(ownership.generation);
+    if (existing) {
+      return existing;
+    }
+    const cleanup = (async () => {
+      const attempts = this.state.sandbox?.cleanup?.attempts ?? 0;
+      // Record intent before the platform call so a DO restart during destroy
+      // still leaves durable work for the alarm/recovery path.
+      this.markSandboxCleanup(ownership, finalStatus, message, attempts);
+      try {
+        await this.destroyAgentSandbox(definition);
+        this.clearSandboxOwnership(ownership);
+        return true;
+      } catch (error) {
+        const detail = error instanceof Error ? ` ${error.message}` : "";
+        this.markSandboxCleanup(
+          ownership,
+          finalStatus,
+          `${message}${detail}`,
+          attempts + 1
+        );
+        return false;
+      } finally {
+        this.sandboxCleanupInFlight.delete(ownership.generation);
+      }
+    })();
+    this.sandboxCleanupInFlight.set(ownership.generation, cleanup);
+    return cleanup;
+  }
+
+  private async repairPendingSandboxCleanup(
+    definition: AgentDefinition,
+    force = true
+  ): Promise<boolean> {
+    const cleanup = this.state.sandbox?.cleanup;
+    if (!cleanup) {
+      return true;
+    }
+    if (!force && cleanup.nextAttemptAt > Date.now()) {
+      return false;
+    }
+    const ownership = {
+      dispatchToken: cleanup.dispatchToken,
+      generation: cleanup.generation,
+      owner: cleanup.owner,
+      runId: cleanup.runId,
+    };
+    const repaired = await this.cleanupOwnedSandbox(
+      definition,
+      ownership,
+      cleanup.finalStatus,
+      cleanup.message
+    );
+    if (!repaired) {
+      return false;
+    }
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === cleanup.runId
+    );
+    if (current && !isTerminal(current.run.status)) {
+      const completedAt = new Date().toISOString();
+      const finished = finishCloudRunRecord(current, {
+        completedAt,
+        credential: null,
+        error:
+          cleanup.finalStatus === "failed"
+            ? {
+                code: "sandbox_cleanup_failed",
+                message: cleanup.message,
+                retryable: true,
+              }
+            : undefined,
+        output: cleanup.message,
+        status: cleanup.finalStatus,
+      });
+      if (this.persistRun(finished, { dispatchClaim: null })) {
+        this.updateDefinition({
+          lastRunAt: completedAt,
+          status: cleanup.finalStatus === "cancelled" ? "idle" : "error",
+          updatedAt: completedAt,
+        });
+        await this.reportAdmissionTerminal(cleanup.runId as string);
+      }
+    }
+    return true;
+  }
+
+  repairSandboxCleanup(): Promise<boolean> {
+    const { definition } = this.state;
+    return definition
+      ? this.repairPendingSandboxCleanup(definition, false)
+      : Promise.resolve(true);
+  }
+
   /**
    * Executes the mission by driving an already-signed-in coding CLI inside the
    * sandbox. The Worker never calls a model provider, so no provider API key
@@ -339,6 +560,9 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
   async execute(input: unknown, identityToken: string): Promise<RunResult> {
     const { task } = runAgentInputSchema.parse(input);
     const definition = this.requireDefinition();
+    if (!(await this.repairPendingSandboxCleanup(definition))) {
+      throw new AgentBusyError();
+    }
 
     // Rejects anything but the /workspace scratch sandbox before a container is
     // started, so a bad workspace fails as a request error rather than as a
@@ -459,6 +683,12 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     // to redact with — never an unset variable that would either crash or,
     // worse, silently skip redaction.
     let credential: string | null = null;
+    let ownership:
+      | {
+          generation: number;
+          owner: string;
+        }
+      | undefined;
     try {
       credential = await this.resolveTenantCredential(
         definition,
@@ -486,8 +716,27 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
         }
       };
 
+      ownership = this.acquireSandboxOwnership(
+        planned.run.id,
+        planned.dispatchToken
+      );
       const run = await runHarnessInSandbox({
         credential: { credential },
+        destroySandbox: async () => {
+          const cleaned = await this.cleanupOwnedSandbox(
+            definition,
+            ownership as {
+              generation: number;
+              owner: string;
+              runId?: string;
+            },
+            "cancelled",
+            "The sandbox was destroyed while cancelling the cloud run."
+          );
+          if (!cleaned) {
+            throw new Error("Sandbox cleanup is pending and will be retried.");
+          }
+        },
         instructions: `${definition.instructions}
 
 You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work only inside the sandbox, verify the result, and include exact evidence in your final response.`,
@@ -506,6 +755,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         workspace: definition.workspace,
       });
 
+      this.clearSandboxOwnership(
+        ownership as { generation: number; owner: string }
+      );
       const completedAt = new Date().toISOString();
       const failed = run.summary.status === "failed" || run.exitCode !== 0;
       // A harness tool call is {tool, summary, success}, which is not the
@@ -556,28 +808,33 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         ) ?? record
       );
     } catch (error) {
-      /**
-       * A timed-out exec means the container is suspect, not just the run:
-       * the process that blew the deadline is still in there consuming the
-       * lite instance's CPU, and — observed tonight — every retry then
-       * queues onto the starved container while its probes count as
-       * activity, so the zombie never even idles out. Destroying the
-       * sandbox costs the next run one clean cold start instead of
-       * inheriting a wedged one. Failure to destroy is swallowed: the run
-       * is already failed, and the idle reaper remains the backstop.
-       */
-      if (error instanceof HarnessError && error.code === "harness_timeout") {
+      const cleanupRequired =
+        error instanceof HarnessError &&
+        (error.code === "harness_timeout" ||
+          error.code === "sandbox_cleanup_failed");
+      if (cleanupRequired && ownership) {
         console.warn({
           agentId: definition.id,
           event: "sandbox.reap_after_timeout",
           runId: planned.run.id,
         });
-        await getSandbox(
-          this.env.Sandbox,
-          await sandboxKey(tenantOf(definition), definition.id)
-        )
-          .destroy()
-          .catch(() => undefined);
+        const cancelled = error.code === "sandbox_cleanup_failed";
+        const cleaned = await this.cleanupOwnedSandbox(
+          definition,
+          ownership,
+          cancelled ? "cancelled" : "failed",
+          error instanceof Error ? error.message : "Sandbox cleanup required."
+        );
+        if (!cleaned) {
+          // biome-ignore lint/style/useErrorCause: HarnessError stores the cause through its typed constructor.
+          throw new HarnessError(
+            "Sandbox cleanup is pending and the run remains active until it succeeds.",
+            "sandbox_cleanup_pending",
+            error
+          );
+        }
+      } else if (ownership) {
+        this.clearSandboxOwnership(ownership);
       }
       const completedAt = new Date().toISOString();
       record = finishCloudRunRecord(record, {
@@ -588,11 +845,18 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
             error instanceof HarnessError ? "harness_failed" : "internal_error",
           message:
             error instanceof Error ? error.message : "Agent execution failed.",
-          retryable: false,
+          retryable:
+            error instanceof HarnessError &&
+            error.code === "sandbox_cleanup_pending",
         },
         output:
           error instanceof Error ? error.message : "Agent execution failed.",
-        status: "failed",
+        status:
+          error instanceof HarnessError &&
+          (error.code === "harness_cancelled" ||
+            error.code === "sandbox_cleanup_failed")
+            ? "cancelled"
+            : "failed",
       });
       if (this.persistRun(record)) {
         this.updateDefinition({
@@ -631,6 +895,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   ): Promise<{ created: boolean; run: RunSnapshot }> {
     const { operationId, task } = startRunInputSchema.parse(input);
     const definition = this.requireDefinition();
+    if (!(await this.repairPendingSandboxCleanup(definition))) {
+      throw new AgentBusyError();
+    }
     validateCloudWorkspace(definition);
 
     const plan = planCloudRunStart({
@@ -737,6 +1004,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    * releases that capacity even when the harness throws.
    */
   async startAdmitted(runId: string, dispatchToken?: string): Promise<boolean> {
+    const definition = this.requireDefinition();
+    if (!(await this.repairPendingSandboxCleanup(definition))) {
+      throw new AgentBusyError();
+    }
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
@@ -759,7 +1030,6 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (!identityToken) {
       throw new Error("Queued run identity is unavailable.");
     }
-    const definition = this.requireDefinition();
     if (dispatchToken) {
       if (this.hasOtherExecutionClaim(runId)) {
         throw new AgentBusyError();
@@ -793,12 +1063,6 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
               fiber.signal
             );
           } finally {
-            if (
-              fiber.signal.aborted &&
-              this.dispatchTokenMatches(runId, token)
-            ) {
-              await this.destroyAgentSandbox(definition);
-            }
             await this.reportAdmissionTerminal(runId, token);
           }
         },
@@ -943,7 +1207,37 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       !this.state.admissionTokens?.[runId] &&
       !this.state.dispatchClaims?.[runId];
     if (!cancelledBeforeDispatch) {
-      await this.destroyAgentSandbox();
+      const { sandbox } = this.state;
+      if (
+        sandbox?.runId &&
+        (sandbox.runId !== runId ||
+          sandbox.dispatchToken !== recoveredDispatchToken)
+      ) {
+        return {
+          reason: "Recovered fiber cannot take ownership of a newer sandbox.",
+          status: "aborted",
+        };
+      }
+      const ownership =
+        sandbox?.runId === runId && sandbox.owner
+          ? {
+              dispatchToken: sandbox.dispatchToken,
+              generation: sandbox.generation,
+              owner: sandbox.owner,
+              runId,
+            }
+          : this.acquireSandboxOwnership(runId, recoveredDispatchToken);
+      const cleaned = await this.cleanupOwnedSandbox(
+        this.requireDefinition(),
+        ownership,
+        "failed",
+        "The cloud run fiber was interrupted before sandbox cleanup completed."
+      );
+      if (!cleaned) {
+        throw new Error(
+          `Sandbox cleanup is still unavailable.${this.state.sandbox?.cleanup?.message ? ` ${this.state.sandbox.cleanup.message}` : ""}`
+        );
+      }
     }
     if (isTerminal(current.run.status)) {
       await this.reportAdmissionTerminal(
@@ -1002,6 +1296,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
     if (isTerminal(current.run.status)) {
       throw new AlreadyRunningError();
+    }
+    if (this.state.sandbox?.cleanup) {
+      throw new AgentBusyError();
     }
     if (this.hasOtherExecutionClaim(current.run.id)) {
       throw new AgentBusyError();
@@ -1112,6 +1409,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     dispatchToken?: string,
     reason = "Run cancelled by operator request."
   ): Promise<RunSnapshot | null> {
+    const definition = this.requireDefinition();
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
@@ -1142,6 +1440,18 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       }
     }
 
+    if (this.state.sandbox?.cleanup) {
+      if (!(await this.repairPendingSandboxCleanup(definition))) {
+        throw new Error("Sandbox cleanup is still unavailable.");
+      }
+      const repaired = this.state.runs.find(
+        (candidate) => candidate.run.id === runId
+      );
+      if (!repaired || isTerminal(repaired.run.status)) {
+        await this.reportAdmissionTerminal(runId, expectedDispatchToken);
+        return repaired?.run ?? null;
+      }
+    }
     await this.cancelFiberByKey(cloudFiberKey(runId), "Cancelled by operator.");
     const afterCancel = this.state.runs.find(
       (candidate) => candidate.run.id === runId
@@ -1152,7 +1462,30 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     ) {
       return afterCancel?.run ?? null;
     }
-    await this.destroyAgentSandbox();
+    if (this.state.sandbox?.runId && this.state.sandbox.runId !== runId) {
+      throw new AgentBusyError();
+    }
+    const ownership =
+      this.state.sandbox?.runId === runId && this.state.sandbox.owner
+        ? {
+            dispatchToken: this.state.sandbox.dispatchToken,
+            generation: this.state.sandbox.generation,
+            owner: this.state.sandbox.owner,
+            runId,
+          }
+        : this.acquireSandboxOwnership(runId);
+    if (
+      !(await this.cleanupOwnedSandbox(
+        definition,
+        ownership,
+        "cancelled",
+        "The sandbox was destroyed while cancelling the cloud run."
+      ))
+    ) {
+      throw new Error(
+        `Sandbox cleanup is still unavailable.${this.state.sandbox?.cleanup?.message ? ` ${this.state.sandbox.cleanup.message}` : ""}`
+      );
+    }
     const current = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
@@ -1352,6 +1685,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    */
   async warm(): Promise<WarmState> {
     const definition = this.requireDefinition();
+    if (!(await this.repairPendingSandboxCleanup(definition))) {
+      throw new AgentBusyError();
+    }
     const current = definition.warm;
     const now = Date.now();
     if (
@@ -1371,24 +1707,55 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
 
     await this.startFiber(
       WARM_FIBER_KEY,
-      async () => {
-        await this.driveWarm(definition);
+      async (fiber) => {
+        await this.driveWarm(definition, fiber.signal);
       },
       { idempotencyKey: WARM_FIBER_KEY }
     );
     return provisioning;
   }
 
-  private async driveWarm(definition: AgentDefinition): Promise<void> {
+  private async driveWarm(
+    definition: AgentDefinition,
+    signal?: AbortSignal
+  ): Promise<void> {
     const startedAt = Date.now();
-    const outcome = await warmSandbox(
-      getSandbox(
-        this.env.Sandbox,
-        await sandboxKey(tenantOf(definition), definition.id),
-        { sleepAfter: WARM_SLEEP_AFTER }
-      ),
-      definition.runtime
+    const ownership = this.acquireSandboxOwnership();
+    const sandbox = getSandbox(
+      this.env.Sandbox,
+      await sandboxKey(tenantOf(definition), definition.id),
+      { sleepAfter: WARM_SLEEP_AFTER }
     );
+    const outcome = await warmSandbox(sandbox, definition.runtime, undefined, {
+      destroy: async () => {
+        const cleaned = await this.cleanupOwnedSandbox(
+          definition,
+          ownership,
+          "failed",
+          "The warm-up sandbox was destroyed after a probe timeout."
+        );
+        if (!cleaned) {
+          throw new Error("Warm-up sandbox cleanup is pending.");
+        }
+        if (
+          this.state.sandbox?.generation === ownership.generation &&
+          !this.state.sandbox.owner
+        ) {
+          this.setState({
+            ...this.state,
+            sandbox: {
+              generation: ownership.generation,
+              owner: ownership.owner,
+            },
+          });
+        }
+      },
+      ownsSandbox: () => this.ownsSandbox(ownership),
+      signal,
+    });
+    if (!this.state.sandbox?.cleanup) {
+      this.clearSandboxOwnership(ownership);
+    }
     console.log({
       agentId: definition.id,
       durationMs: Date.now() - startedAt,
@@ -1471,14 +1838,32 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   async decommission(): Promise<void> {
     const { definition } = this.state;
     if (definition) {
+      if (!(await this.repairPendingSandboxCleanup(definition))) {
+        throw new Error("Agent sandbox cleanup is still unavailable.");
+      }
       await this.cancelFiberByKey(
         WARM_FIBER_KEY,
         "Agent decommissioned during warm-up."
       );
-      await getSandbox(
-        this.env.Sandbox,
-        await sandboxKey(tenantOf(definition), definition.id)
-      ).destroy();
+      const current = this.state.sandbox;
+      const ownership = current?.owner
+        ? {
+            dispatchToken: current.dispatchToken,
+            generation: current.generation,
+            owner: current.owner,
+            runId: current.runId,
+          }
+        : this.acquireSandboxOwnership();
+      if (
+        !(await this.cleanupOwnedSandbox(
+          definition,
+          ownership,
+          "failed",
+          "The agent sandbox was destroyed during decommission."
+        ))
+      ) {
+        throw new Error("Agent sandbox cleanup is still unavailable.");
+      }
     }
     this.setState(this.initialState);
   }

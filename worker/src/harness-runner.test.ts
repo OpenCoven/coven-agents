@@ -334,7 +334,7 @@ test("a warm-up for an unknown runtime touches no sandbox", async () => {
   assert.equal(calls.length, 0);
 });
 
-test("a warm-up swallows the probe timeout a run would propagate", async () => {
+test("a warm-up with no destroy capability fails closed after a probe timeout", async () => {
   // `probeInstalled` deliberately rethrows deadline errors so a run's
   // failure names the real condition. A warm-up has no user waiting on it,
   // so the same timeout degrades to `failed` instead of escaping into the
@@ -354,7 +354,68 @@ test("a warm-up swallows the probe timeout a run would propagate", async () => {
   );
 
   assert.deepEqual(outcome, { ready: false, version: null });
+  assert.equal(attempts, 1);
+});
+
+test("a warm-up destroys a timed-out sandbox before retrying", async () => {
+  let attempts = 0;
+  let destroys = 0;
+  const sandbox = {
+    destroy() {
+      destroys += 1;
+      return Promise.resolve();
+    },
+    exec() {
+      attempts += 1;
+      if (attempts === 1) {
+        return Promise.reject(
+          new HarnessError("probe timed out", "harness_timeout")
+        );
+      }
+      return Promise.resolve({
+        exitCode: 0,
+        stderr: "",
+        stdout: "GitHub Copilot CLI 1.0.80\n",
+        success: true,
+      });
+    },
+  };
+
+  const outcome = await warmSandbox(sandbox as never, "copilot", () =>
+    Promise.resolve()
+  );
+
+  assert.deepEqual(outcome, {
+    ready: true,
+    version: "GitHub Copilot CLI 1.0.80",
+  });
   assert.equal(attempts, 2);
+  assert.equal(destroys, 1);
+});
+
+test("a warm-up does not retry when timed-out sandbox cleanup fails", async () => {
+  let attempts = 0;
+  let destroys = 0;
+  const sandbox = {
+    destroy() {
+      destroys += 1;
+      return Promise.reject(new Error("sandbox destroy failed"));
+    },
+    exec() {
+      attempts += 1;
+      return Promise.reject(
+        new HarnessError("probe timed out", "harness_timeout")
+      );
+    },
+  };
+
+  const outcome = await warmSandbox(sandbox as never, "copilot", () =>
+    Promise.resolve()
+  );
+
+  assert.deepEqual(outcome, { ready: false, version: null });
+  assert.equal(attempts, 1);
+  assert.equal(destroys, 1);
 });
 
 test("a run streams events out while the CLI is still executing", async () => {
