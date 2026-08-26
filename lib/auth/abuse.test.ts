@@ -273,7 +273,16 @@ test("missing IPs share the existing unknown abuse bucket", async () => {
   assert.equal(handlerCalls, 5);
 });
 
-test("limiter outages block starts and callbacks but not sign-in pages or support actions", async () => {
+/**
+ * SECOND REVERSAL of this contract tonight, recorded in the test that
+ * enforced it. Fail-closed on starts and callbacks 503ed production sign-in
+ * the moment the limiter's store hiccuped — reproduced with a bare curl
+ * against the deployed app. Replay safety lives in the state/PKCE/CSRF
+ * machinery; the limiter is defense-in-depth here, and it now degrades to
+ * per-instance memory limiting on a store failure instead of taking sign-in
+ * down with it.
+ */
+test("limiter outages degrade starts and callbacks instead of blocking sign-in", async () => {
   const outageStore: AbuseStore = {
     consume() {
       return Promise.reject(new Error("Redis unavailable"));
@@ -294,11 +303,8 @@ test("limiter outages block starts and callbacks but not sign-in pages or suppor
   ] as const) {
     // biome-ignore lint/performance/noAwaitInLoops: each response body is asserted before the next request
     const response = await wrapped(authRequest(pathname, method));
-    assert.equal(response.status, 503, `${method} ${pathname}`);
-    assert.deepEqual(await response.json(), {
-      error: "abuse_control_unavailable",
-      message: "Please try again later.",
-    });
+    assert.equal(response.status, 200, `${method} ${pathname}`);
+    assert.deepEqual(await response.json(), { readable: true });
   }
 
   for (const [method, pathname] of [
@@ -315,7 +321,9 @@ test("limiter outages block starts and callbacks but not sign-in pages or suppor
     assert.equal(response.status, 200, `${method} ${pathname}`);
     assert.deepEqual(await response.json(), { readable: true });
   }
-  assert.equal(handlerCalls, 7);
+  // Nine, not seven: the two gated flows above now reach the handler under a
+  // store outage instead of 503ing before it.
+  assert.equal(handlerCalls, 9);
 });
 
 test("returns the original handler response and passes request context unchanged", async () => {

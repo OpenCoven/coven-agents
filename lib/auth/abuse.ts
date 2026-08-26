@@ -52,10 +52,17 @@ export function withAuthAbusePolicy<
     );
     if (route) {
       const admission = await enforceAbusePolicy({
-        // Fail closed, deliberately: OAuth starts and callbacks carry replay
-        // protection, and a limiter outage must not disable it. Sign-in
-        // pages and support actions never reach this call at all.
-        failClosed: true,
+        /**
+         * Degrades on store failure like every other route, and this is the
+         * second reversal of this exact decision in one night, so the record
+         * matters: fail-closed here 503ed production sign-in the moment the
+         * limiter's store hiccuped — reproduced with a bare curl. OAuth
+         * replay safety lives in the state, PKCE, and CSRF machinery, which
+         * none of this touches; the limiter is defense-in-depth on these
+         * routes, and a defense-in-depth layer that takes sign-in down with
+         * its own backing store has its priorities inverted. Degradation
+         * keeps per-instance limits enforced throughout.
+         */
         ip: ipAddress(request) ?? null,
         route,
         store: options.store,

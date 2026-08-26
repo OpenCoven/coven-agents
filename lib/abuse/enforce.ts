@@ -214,7 +214,16 @@ export function createAbusePolicyEnforcer(input: {
     let store: AbuseStore | undefined;
     try {
       store = request.store ?? (await input.getStore());
-    } catch {
+    } catch (error) {
+      // Name only — a store error's message can carry the Redis URL, and the
+      // URL carries a password. The name is enough to distinguish a connect
+      // timeout from a refused socket, which is the diagnosis this log
+      // exists for; tonight's sign-in outage was undiagnosable because this
+      // catch was empty.
+      console.error("Abuse store unavailable.", {
+        name: error instanceof Error ? error.name : typeof error,
+        stage: "provider",
+      });
       if (request.failClosed) {
         return { kind: "unavailable", responseStatus: 503 };
       }
@@ -259,7 +268,11 @@ export function createAbusePolicyEnforcer(input: {
             ),
           };
         }
-      } catch {
+      } catch (error) {
+        console.error("Abuse store unavailable.", {
+          name: error instanceof Error ? error.name : typeof error,
+          stage: "consume",
+        });
         if (request.failClosed) {
           return { kind: "unavailable", responseStatus: 503 };
         }
