@@ -1,10 +1,12 @@
 import { ipAddress } from "@vercel/functions";
 import { z } from "zod";
 import { auth } from "@/app/(auth)/auth";
+import { readBoundedJson } from "@/lib/abuse/body";
 import {
   abuseAdmissionResponse,
   enforceAbusePolicy,
 } from "@/lib/abuse/enforce";
+import { abusePolicyFor } from "@/lib/abuse/policy";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { getChatById, getVotesByChatId, voteMessage } from "@/lib/db/queries";
@@ -73,18 +75,21 @@ export async function PATCH(request: Request) {
     return abuseAdmissionResponse(admission);
   }
 
-  let chatId: string;
-  let messageId: string;
-  let type: "up" | "down";
-
-  try {
-    ({ chatId, messageId, type } = voteSchema.parse(await request.json()));
-  } catch {
+  const body = await readBoundedJson(
+    request,
+    abusePolicyFor("vote_write").bodyBytes,
+    voteSchema
+  );
+  if (body.kind === "too_large") {
+    return Response.json({ error: "request_too_large" }, { status: 413 });
+  }
+  if (body.kind === "invalid") {
     return new ChatbotError(
       "bad_request:api",
       "Parameters chatId, messageId, and type are required."
     ).toResponse();
   }
+  const { chatId, messageId, type } = body.value;
 
   const chat = await getChatById({ id: chatId });
 

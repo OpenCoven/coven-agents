@@ -1,8 +1,10 @@
 "use client";
 
 import { signIn } from "next-auth/react";
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+
+const RETRY_MESSAGE = "We couldn’t start GitHub sign-in. Please try again.";
 
 /**
  * One-click sign-in.
@@ -11,11 +13,53 @@ import { Button } from "@/components/ui/button";
  * the local account; later sign-ins return to that same account.
  */
 export function GithubSignIn({ callbackUrl = "/" }: { callbackUrl?: string }) {
+  const pendingRef = useRef(false);
+  const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
-  const start = useCallback(() => {
+  const start = useCallback(async () => {
+    if (pendingRef.current) {
+      return;
+    }
+
+    pendingRef.current = true;
     setPending(true);
-    signIn("github", { callbackUrl });
+    setError(null);
+
+    const showRetry = () => {
+      pendingRef.current = false;
+      setPending(false);
+      setError(RETRY_MESSAGE);
+    };
+
+    try {
+      const result = await signIn("github", {
+        redirect: false,
+        redirectTo: callbackUrl,
+      });
+
+      if (!(result.ok && result.url)) {
+        showRetry();
+        return;
+      }
+
+      const authorizationUrl = new URL(result.url, window.location.href);
+      const loopsToCurrentPage =
+        authorizationUrl.origin === window.location.origin &&
+        authorizationUrl.pathname === window.location.pathname;
+
+      if (
+        !["http:", "https:"].includes(authorizationUrl.protocol) ||
+        loopsToCurrentPage
+      ) {
+        showRetry();
+        return;
+      }
+
+      window.location.assign(authorizationUrl.href);
+    } catch {
+      showRetry();
+    }
   }, [callbackUrl]);
 
   return (
@@ -37,6 +81,15 @@ export function GithubSignIn({ callbackUrl = "/" }: { callbackUrl?: string }) {
         </svg>
         {pending ? "Redirecting…" : "Continue with GitHub"}
       </Button>
+      {error ? (
+        <p
+          aria-live="assertive"
+          className="text-destructive text-sm"
+          role="alert"
+        >
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }

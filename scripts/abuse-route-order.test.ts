@@ -33,7 +33,7 @@ const protectedHandlers: RouteExpectation[] = [
     "app/(chat)/api/chat/route.ts",
     "POST",
     "authorizeSubscriberAccess(",
-    ["request.json(", "getMessageCountByUserId("],
+    ["readBoundedJson(", "getMessageCountByUserId("],
     "chat"
   ),
   route(
@@ -47,7 +47,7 @@ const protectedHandlers: RouteExpectation[] = [
     "app/(chat)/api/files/upload/route.ts",
     "POST",
     "authorizeSubscriberAccess(",
-    ["request.formData(", "put("],
+    ["readBoundedFormData(", "put("],
     "upload"
   ),
   route(
@@ -68,7 +68,7 @@ const protectedHandlers: RouteExpectation[] = [
     "app/api/credentials/device/route.ts",
     "PUT",
     "authorizeSubscriberAccess(",
-    ["request.json(", "exchangeDeviceCode("],
+    ["readBoundedJson(", "exchangeDeviceCode("],
     "credential_device_poll"
   ),
   route(
@@ -82,14 +82,14 @@ const protectedHandlers: RouteExpectation[] = [
     "app/api/credentials/route.ts",
     "POST",
     "authorizeSubscriberAccess(",
-    ["request.json(", "checkCopilotToken(", "putCredential("],
+    ["readBoundedJson(", "checkCopilotToken(", "putCredential("],
     "credential_write"
   ),
   route(
     "app/api/credentials/route.ts",
     "DELETE",
     "authorizeSubscriberAccess(",
-    ["request.json(", "deleteCredential("],
+    ["readBoundedJson(", "deleteCredential("],
     "credential_delete"
   ),
   route(
@@ -118,7 +118,7 @@ const protectedHandlers: RouteExpectation[] = [
       "app/(chat)/api/document/route.ts",
       "POST",
       "authorizeSubscriberAccess(",
-      ["request.json(", "getDocumentsById(", "saveDocument("],
+      ["readBoundedJson(", "getDocumentsById(", "saveDocument("],
       "document_write"
     ),
     implementation: "writeDocument",
@@ -128,7 +128,7 @@ const protectedHandlers: RouteExpectation[] = [
       "app/(chat)/api/document/route.ts",
       "PATCH",
       "authorizeSubscriberAccess(",
-      ["request.json(", "getDocumentsById(", "saveDocument("],
+      ["readBoundedJson(", "getDocumentsById(", "saveDocument("],
       "document_write"
     ),
     implementation: "writeDocument",
@@ -179,7 +179,7 @@ const protectedHandlers: RouteExpectation[] = [
     "app/(chat)/api/vote/route.ts",
     "PATCH",
     "authorizeSubscriberAccess(",
-    ["request.json(", "getChatById(", "voteMessage("],
+    ["readBoundedJson(", "getChatById(", "voteMessage("],
     "vote_write"
   ),
   route(
@@ -220,7 +220,6 @@ const protectedHandlers: RouteExpectation[] = [
 ];
 
 const excludedRoutes = [
-  "app/(auth)/api/auth/[...nextauth]/route.ts",
   "app/api/internal/credential/route.ts",
   "app/api/stripe/webhook/route.ts",
 ];
@@ -278,10 +277,181 @@ test("resource-bearing handlers admit after identity and before expensive work",
   }
 });
 
-test("deferred auth, webhook, and internal lending routes stay untouched", () => {
+test("deferred webhook and internal lending routes stay untouched", () => {
   for (const file of excludedRoutes) {
     assert.doesNotMatch(read(file), /enforceAbusePolicy/);
   }
+});
+
+test("costly creates claim idempotency before calling their provider", () => {
+  for (const [file, providerMarker] of [
+    ["app/api/checkout/route.ts", "stripe.subscriptions.list("],
+    ["app/api/credentials/device/route.ts", "startDeviceFlow("],
+  ] as const) {
+    const source = read(file);
+    const block = exportedFunctionBlock(source, "POST");
+    const claimIndex = block.indexOf("runIdempotentOperation({");
+    const providerIndex = block.indexOf(providerMarker);
+
+    assert.ok(claimIndex >= 0, `${file} must claim idempotency`);
+    assert.ok(providerIndex >= 0, `${file} must call ${providerMarker}`);
+    assert.ok(
+      claimIndex < providerIndex,
+      `${file} must claim before ${providerMarker}`
+    );
+  }
+});
+
+test("device starts encrypt replay payloads while checkout uses tagged plaintext", () => {
+  const deviceSource = read("app/api/credentials/device/route.ts");
+  const checkoutSource = read("app/api/checkout/route.ts");
+
+  assert.match(
+    deviceSource,
+    /encryptedIdempotencyResponseStorage\(credentialKek\)/
+  );
+  assert.match(
+    functionBlock(deviceSource, "POST"),
+    /responseStorage:\s*deviceStartResponseStorage/
+  );
+  assert.match(
+    functionBlock(checkoutSource, "POST"),
+    /responseStorage:\s*plaintextIdempotencyResponseStorage/
+  );
+});
+
+test("bounded readers enforce limits before native body parsing", () => {
+  const source = read("lib/abuse/body.ts");
+  const declaredLengthIndex = source.indexOf("declaredContentLength(");
+  const boundedReadIndex = source.indexOf("readBoundedBytes(");
+  const jsonParseIndex = source.indexOf("JSON.parse(");
+  const reconstructedRequestIndex = source.indexOf("new Request(");
+  const formDataIndex = source.indexOf(".formData()");
+
+  assert.ok(declaredLengthIndex >= 0);
+  assert.ok(boundedReadIndex > declaredLengthIndex);
+  assert.ok(jsonParseIndex > boundedReadIndex);
+  assert.ok(reconstructedRequestIndex > boundedReadIndex);
+  assert.ok(formDataIndex > reconstructedRequestIndex);
+  assert.doesNotMatch(source, /request\.json\(\)|request\.formData\(\)/);
+});
+
+test("idempotency migration creates the scoped state machine and expiry index", () => {
+  const migration = read("lib/db/migrations/0005_idempotency_records.sql");
+
+  assert.match(migration, /CREATE TABLE "IdempotencyRecord"/);
+  assert.match(
+    migration,
+    /"IdempotencyRecord_owner_operation_key_idx".*"ownerId".*"operation".*"keyHash"/s
+  );
+  assert.match(migration, /"IdempotencyRecord_expiresAt_idx"/);
+  assert.match(migration, /IdempotencyRecord_state_check/);
+  assert.match(migration, /IdempotencyRecord_response_state_check/);
+});
+
+test("latest migration replaces ambiguous responses with tagged envelopes", () => {
+  const journal = JSON.parse(read("lib/db/migrations/meta/_journal.json")) as {
+    entries: { idx: number; tag: string }[];
+  };
+  const latest = journal.entries.at(-1);
+
+  assert.ok(latest);
+  assert.equal(latest.idx, journal.entries.length - 1);
+
+  const migration = read(`lib/db/migrations/${latest.tag}.sql`);
+  assert.match(
+    migration,
+    /DELETE FROM "IdempotencyRecord"\s+WHERE "operation" = 'credential_device_start'/
+  );
+  assert.match(
+    migration,
+    /DELETE FROM "IdempotencyRecord"\s+WHERE "state" = 'completed'\s+AND \("responseJson" IS NULL OR "responseStatus" IS NULL\)/i
+  );
+  assert.match(
+    migration,
+    /jsonb_build_object\('kind', 'plain_json', 'body', "responseJson"\)/
+  );
+  assert.match(migration, /"responseJson" is not null/i);
+  assert.match(migration, /jsonb_typeof\([^)]*"responseJson"\) = 'object'/i);
+  assert.match(migration, /"responseStatus" is not null/i);
+
+  const snapshot = read(
+    `lib/db/migrations/meta/${String(latest.idx).padStart(4, "0")}_snapshot.json`
+  );
+  assert.match(snapshot, /responseJson.*is not null/is);
+  assert.match(snapshot, /jsonb_typeof.*responseJson.*object/is);
+  assert.match(snapshot, /responseStatus.*is not null/is);
+});
+
+test("database claims and reclaims idempotency records atomically", () => {
+  const source = read("lib/db/queries.ts");
+  const storeIndex = source.indexOf(
+    "export const databaseIdempotencyStore: IdempotencyStore"
+  );
+  const storeSource = source.slice(storeIndex);
+
+  assert.ok(storeIndex >= 0);
+  assert.match(storeSource, /\.transaction\(/);
+  assert.match(storeSource, /\.onConflictDoNothing\(/);
+  assert.match(storeSource, /lte\(idempotencyRecord\.expiresAt, input\.now\)/);
+  assert.equal(
+    storeSource.match(
+      /eq\(\s*idempotencyRecord\.expiresAt,\s*input\.claim\.claimExpiresAt\s*\)/g
+    )?.length,
+    2
+  );
+});
+
+test("database cleanup is bounded, state-agnostic, and awaited before claims", () => {
+  const source = read("lib/db/queries.ts");
+  const coreSource = read("lib/abuse/idempotency.ts");
+  const storeIndex = source.indexOf(
+    "export const databaseIdempotencyStore: IdempotencyStore"
+  );
+  const storeSource = source.slice(storeIndex);
+  const cleanupIndex = storeSource.indexOf("async cleanupExpired(input)");
+  const completeIndex = storeSource.indexOf("async complete(input)");
+  const cleanupSource = storeSource.slice(cleanupIndex, completeIndex);
+  const cleanupCallIndex = coreSource.indexOf(
+    "await options.store.cleanupExpired("
+  );
+  const claimCallIndex = coreSource.indexOf(
+    "const claimResult = await options.store.claim("
+  );
+
+  assert.ok(cleanupIndex >= 0);
+  assert.ok(completeIndex > cleanupIndex);
+  assert.ok(cleanupCallIndex >= 0);
+  assert.ok(claimCallIndex > cleanupCallIndex);
+  assert.match(cleanupSource, /\.delete\(idempotencyRecord\)/);
+  assert.match(
+    cleanupSource,
+    /lte\(idempotencyRecord\.expiresAt, input\.before\)/
+  );
+  assert.match(
+    cleanupSource,
+    /\.where\(\s*and\(\s*inArray\(idempotencyRecord\.id, expired\),\s*lte\(idempotencyRecord\.expiresAt, input\.before\)\s*\)\s*\)/
+  );
+  assert.match(cleanupSource, /\.limit\(input\.limit\)/);
+  assert.doesNotMatch(cleanupSource, /idempotencyRecord\.state/);
+});
+
+test("Auth.js handlers use method-aware abuse classification", () => {
+  const routeSource = read("app/(auth)/api/auth/[...nextauth]/route.ts");
+  const wrapperSource = read("lib/auth/abuse.ts");
+
+  assert.match(
+    routeSource,
+    /export const GET = withAuthAbusePolicy\(authGET\)/
+  );
+  assert.match(
+    routeSource,
+    /export const POST = withAuthAbusePolicy\(authPOST\)/
+  );
+  assert.match(
+    wrapperSource,
+    /authAbuseRoute\(\s*request\.method,\s*new URL\(request\.url\)\.pathname,\s*options\.basePath \?\? process\.env\.NEXT_PUBLIC_BASE_PATH\s*\)/
+  );
 });
 
 test("handler extraction does not include markers from a later handler", () => {

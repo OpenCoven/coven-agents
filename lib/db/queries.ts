@@ -10,12 +10,17 @@ import {
   gte,
   inArray,
   lt,
+  lte,
   type SQL,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import type { ArtifactKind } from "@/components/chat/artifact";
 import type { VisibilityType } from "@/components/chat/visibility-selector";
+import type {
+  IdempotencyClaimHandle,
+  IdempotencyStore,
+} from "../abuse/idempotency";
 import type { DayCount } from "../billing/history";
 import { fillDays, runsByDay } from "../billing/history";
 import { countRun, usageFor } from "../billing/usage";
@@ -25,6 +30,7 @@ import {
   chat,
   type DBMessage,
   document,
+  idempotencyRecord,
   message,
   type Suggestion,
   stream,
@@ -160,6 +166,191 @@ export async function claimStripeEvent(eventId: string): Promise<boolean> {
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
   }
+}
+
+export const databaseIdempotencyStore: IdempotencyStore = {
+  async claim(input) {
+    try {
+      return await db.transaction(async (transaction) => {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          // biome-ignore lint/performance/noAwaitInLoops: retries must observe the prior transactional write.
+          const [inserted] = await transaction
+            .insert(idempotencyRecord)
+            .values({
+              createdAt: input.now,
+              expiresAt: input.claimExpiresAt,
+              keyHash: input.keyHash,
+              operation: input.operation,
+              ownerId: input.ownerId,
+              requestHash: input.requestHash,
+              state: "in_progress",
+              updatedAt: input.now,
+            })
+            .onConflictDoNothing()
+            .returning({ id: idempotencyRecord.id });
+
+          if (inserted) {
+            return { claim: claimHandle(input), kind: "claimed" } as const;
+          }
+
+          const [reclaimed] = await transaction
+            .update(idempotencyRecord)
+            .set({
+              expiresAt: input.claimExpiresAt,
+              requestHash: input.requestHash,
+              responseJson: null,
+              responseStatus: null,
+              state: "in_progress",
+              updatedAt: input.now,
+            })
+            .where(
+              and(
+                idempotencyScope(input),
+                lte(idempotencyRecord.expiresAt, input.now)
+              )
+            )
+            .returning({ id: idempotencyRecord.id });
+
+          if (reclaimed) {
+            return { claim: claimHandle(input), kind: "claimed" } as const;
+          }
+
+          const [existing] = await transaction
+            .select({
+              requestHash: idempotencyRecord.requestHash,
+              responseJson: idempotencyRecord.responseJson,
+              responseStatus: idempotencyRecord.responseStatus,
+              state: idempotencyRecord.state,
+            })
+            .from(idempotencyRecord)
+            .where(idempotencyScope(input))
+            .limit(1);
+
+          if (!existing) {
+            continue;
+          }
+          if (existing.requestHash !== input.requestHash) {
+            return { kind: "conflict" } as const;
+          }
+          if (existing.state === "in_progress") {
+            return { kind: "in_progress" } as const;
+          }
+          if (
+            existing.responseJson === null ||
+            existing.responseStatus === null
+          ) {
+            throw new Error("Completed idempotency record has no response.");
+          }
+          return {
+            kind: "completed",
+            response: {
+              envelope: existing.responseJson,
+              status: existing.responseStatus,
+            },
+          } as const;
+        }
+
+        throw new Error("Idempotency claim changed during acquisition.");
+      });
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
+  async cleanupExpired(input) {
+    try {
+      const expired = db
+        .select({ id: idempotencyRecord.id })
+        .from(idempotencyRecord)
+        .where(lte(idempotencyRecord.expiresAt, input.before))
+        .orderBy(asc(idempotencyRecord.expiresAt))
+        .limit(input.limit);
+
+      await db
+        .delete(idempotencyRecord)
+        .where(
+          and(
+            inArray(idempotencyRecord.id, expired),
+            lte(idempotencyRecord.expiresAt, input.before)
+          )
+        );
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
+
+  async complete(input) {
+    try {
+      const completed = await db
+        .update(idempotencyRecord)
+        .set({
+          expiresAt: input.expiresAt,
+          responseJson: input.response.envelope,
+          responseStatus: input.response.status,
+          state: "completed",
+          updatedAt: input.completedAt,
+        })
+        .where(
+          and(
+            idempotencyScope(input.claim),
+            eq(idempotencyRecord.requestHash, input.claim.requestHash),
+            eq(idempotencyRecord.state, "in_progress"),
+            eq(idempotencyRecord.expiresAt, input.claim.claimExpiresAt)
+          )
+        )
+        .returning({ id: idempotencyRecord.id });
+
+      if (completed.length !== 1) {
+        throw new Error("Idempotency claim expired before completion.");
+      }
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
+
+  async release(input) {
+    try {
+      await db
+        .delete(idempotencyRecord)
+        .where(
+          and(
+            idempotencyScope(input.claim),
+            eq(idempotencyRecord.requestHash, input.claim.requestHash),
+            eq(idempotencyRecord.state, "in_progress"),
+            eq(idempotencyRecord.expiresAt, input.claim.claimExpiresAt)
+          )
+        );
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
+};
+
+function idempotencyScope(input: {
+  keyHash: string;
+  operation: string;
+  ownerId: string;
+}) {
+  return and(
+    eq(idempotencyRecord.ownerId, input.ownerId),
+    eq(idempotencyRecord.operation, input.operation),
+    eq(idempotencyRecord.keyHash, input.keyHash)
+  );
+}
+
+function claimHandle(input: {
+  claimExpiresAt: Date;
+  keyHash: string;
+  operation: string;
+  ownerId: string;
+  requestHash: string;
+}): IdempotencyClaimHandle {
+  return {
+    claimExpiresAt: input.claimExpiresAt,
+    keyHash: input.keyHash,
+    operation: input.operation,
+    ownerId: input.ownerId,
+    requestHash: input.requestHash,
+  };
 }
 
 /** Runs counted for a tenant since the start of the current period. */

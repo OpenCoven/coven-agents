@@ -4,8 +4,9 @@ import { and, eq } from "drizzle-orm";
 import { databaseFor } from "@/lib/db/access";
 import { tenantCredential } from "@/lib/db/schema";
 import type { SubscriberSession } from "@/lib/session";
-import { decryptCredential, encryptCredential, importKek } from "./envelope";
+import { decryptCredential, encryptCredential } from "./envelope";
 import { refreshCredential } from "./github-device";
+import { credentialKek } from "./kek";
 import {
   needsRefresh,
   parseStoredCredential,
@@ -41,39 +42,13 @@ export function credentialWhere(tenant: string, harnessId: string) {
  * exactly one credential for the duration of one run.
  */
 
-/**
- * The imported KEK, cached against the raw value it came from.
- *
- * Importing on every call re-decodes and re-imports a deployment-static key on
- * a hot path. Keying the cache on the raw value rather than caching
- * unconditionally means a rotated KEK is picked up instead of served stale —
- * the same reason the worker keys its verify-key cache on the SPKI string.
- */
-let kekCache: { imported: Promise<CryptoKey>; raw: string } | null = null;
-
-function kek(): Promise<CryptoKey> {
-  const raw = process.env.CREDENTIAL_KEK;
-  if (!raw) {
-    throw new Error(
-      "CREDENTIAL_KEK is not set. Refusing to proceed without an explicit " +
-        "key-encryption key — there is no default to fall back to."
-    );
-  }
-  if (kekCache?.raw === raw) {
-    return kekCache.imported;
-  }
-  const imported = importKek(raw);
-  kekCache = { imported, raw };
-  return imported;
-}
-
 export async function putCredential(
   session: SubscriberSession,
   harnessId: string,
   plaintext: string
 ): Promise<void> {
   const db = databaseFor(session);
-  const sealed = await encryptCredential(plaintext, await kek());
+  const sealed = await encryptCredential(plaintext, await credentialKek());
 
   await db
     .insert(tenantCredential)
@@ -113,7 +88,7 @@ export async function readCredentialForTenant(
 
   const raw = await decryptCredential(
     { ciphertext: row.ciphertext, iv: row.iv, wrappedKey: row.wrappedKey },
-    await kek()
+    await credentialKek()
   );
 
   const stored = parseStoredCredential(raw);
@@ -179,7 +154,7 @@ async function persistCredential(
 ): Promise<void> {
   const sealed = await encryptCredential(
     serializeCredential(credential),
-    await kek()
+    await credentialKek()
   );
 
   await db

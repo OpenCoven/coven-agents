@@ -10,8 +10,8 @@ config({
   path: ".env.local",
 });
 
-/* Use process.env.PORT by default and fallback to port 3000 */
-const PORT = process.env.PORT || 3000;
+/* Keep E2E isolated from the app developers commonly run on port 3000. */
+const PORT = process.env.PORT || 3100;
 
 /**
  * Set webServer.url and use.baseURL with the location
@@ -90,8 +90,8 @@ export default defineConfig({
 
   /* Run your local dev server before starting the tests */
   webServer: {
-    command: "pnpm dev",
-    reuseExistingServer: !process.env.CI,
+    command: `pnpm dev --port ${PORT}`,
+    reuseExistingServer: false,
     timeout: 120 * 1000,
     url: `${baseURL}/ping`,
   },
