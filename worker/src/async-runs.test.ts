@@ -378,6 +378,129 @@ test("admission capability lookup failure leaves the provisional run pending", a
   assert.equal(record?.admissionCapability, undefined);
 });
 
+test("stale admission confirmation cannot resurrect a decommissioned run", async () => {
+  let lookupStarted!: () => void;
+  let finishLookup!: (
+    capability: Awaited<ReturnType<typeof testAdmissionCapability>>
+  ) => void;
+  const started = new Promise<void>((resolve) => {
+    lookupStarted = resolve;
+  });
+  const lookup = new Promise<
+    Awaited<ReturnType<typeof testAdmissionCapability>>
+  >((resolve) => {
+    finishLookup = resolve;
+  });
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          getCleanupCapability: () => {
+            lookupStarted();
+            return lookup;
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Do not resurrect me." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c94",
+    "stale-decommission-hash",
+    "identity"
+  );
+
+  const confirmation = yolo.confirmAdmission(
+    queued.run.id,
+    OP_A,
+    "stale-decommission-hash"
+  );
+  await started;
+  const state = Reflect.get(yolo, "state") as Record<string, unknown> & {
+    lifecycle: { generation: number; status: string };
+  };
+  yolo.setState({
+    ...state,
+    definition: null,
+    lifecycle: {
+      generation: state.lifecycle.generation + 1,
+      status: "decommissioned",
+    },
+    runs: [],
+  } as never);
+  finishLookup(
+    await testAdmissionCapability(queued.run.id, {
+      agentId: AGENT_ID,
+      operationId: OP_A,
+      requestHash: "stale-decommission-hash",
+    })
+  );
+
+  assert.equal(await confirmation, false);
+  assert.equal(yolo.getRun(queued.run.id), null);
+});
+
+test("stale admission confirmation cannot resurrect an orphan timed out during lookup", async () => {
+  let lookupStarted!: () => void;
+  let finishLookup!: (
+    capability: Awaited<ReturnType<typeof testAdmissionCapability>>
+  ) => void;
+  const started = new Promise<void>((resolve) => {
+    lookupStarted = resolve;
+  });
+  const lookup = new Promise<
+    Awaited<ReturnType<typeof testAdmissionCapability>>
+  >((resolve) => {
+    finishLookup = resolve;
+  });
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          getCleanupCapability: () => {
+            lookupStarted();
+            return lookup;
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+  const queued = await yolo.enqueue(
+    { operationId: OP_B, task: "Time out while looking up." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c95",
+    "stale-orphan-hash",
+    "identity"
+  );
+
+  const confirmation = yolo.confirmAdmission(
+    queued.run.id,
+    OP_B,
+    "stale-orphan-hash"
+  );
+  await started;
+  const state = Reflect.get(yolo, "state") as {
+    runs: CloudRunRecord[];
+  };
+  yolo.setState({
+    ...state,
+    runs: state.runs.filter((candidate) => candidate.run.id !== queued.run.id),
+  } as never);
+  finishLookup(
+    await testAdmissionCapability(queued.run.id, {
+      agentId: AGENT_ID,
+      operationId: OP_B,
+      requestHash: "stale-orphan-hash",
+    })
+  );
+
+  assert.equal(await confirmation, false);
+  assert.equal(yolo.getRun(queued.run.id), null);
+});
+
 test("a direct startAdmitted RPC without an active admission is rejected", async () => {
   resetFiberLog();
   const yolo = new YoloAgent(undefined as never, {} as never);

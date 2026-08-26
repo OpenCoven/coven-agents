@@ -2187,7 +2187,8 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     input: unknown,
     runId: string,
     requestHash: string,
-    identityToken: string
+    identityToken: string,
+    allowQueued = true
   ): Promise<{
     created: boolean;
     prepareOwner?: string;
@@ -2207,10 +2208,13 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         runId,
         task,
       },
-      { allowQueued: true }
+      { allowQueued }
     );
     if (plan.kind === "conflict") {
       throw new OperationConflictError();
+    }
+    if (plan.kind === "already_running") {
+      return { created: false, run: plan.record.run };
     }
     if (plan.kind === "existing") {
       if (
@@ -2477,34 +2481,36 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     requestHash: string,
     admissionCapability?: AdmissionCleanupCapability | null
   ): Promise<boolean> {
-    const current = this.state.runs.find(
+    const initial = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
+    const lifecycleGeneration = this.currentLifecycle().generation;
     if (
-      !current ||
-      current.run.operationId !== operationId ||
-      current.operationHash !== requestHash ||
-      current.run.agentId !== this.requireDefinition().id
+      !initial ||
+      initial.run.operationId !== operationId ||
+      initial.operationHash !== requestHash ||
+      initial.run.agentId !== this.requireDefinition().id
     ) {
       return false;
     }
     if (
       admissionCapability &&
-      (admissionCapability.agentId !== current.run.agentId ||
-        admissionCapability.runId !== current.run.id ||
+      (admissionCapability.agentId !== initial.run.agentId ||
+        admissionCapability.runId !== initial.run.id ||
         admissionCapability.operationId !== operationId ||
         admissionCapability.requestHash !== requestHash)
     ) {
       return false;
     }
-    if (isTerminal(current.run.status)) {
+    if (isTerminal(initial.run.status)) {
       await this.reportAdmissionTerminal(runId);
       return true;
     }
-    const pending = current.pendingAdmission;
+    const pending = initial.pendingAdmission;
+    const initialStatus = initial.run.status;
     let capability: AdmissionCleanupCapability | null | undefined =
       admissionCapability === undefined
-        ? current.admissionCapability
+        ? initial.admissionCapability
         : admissionCapability;
     if (!capability && pending && admissionCapability === undefined) {
       const runAdmission = (
@@ -2530,7 +2536,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       }
       try {
         capability = await admission.getCleanupCapability(runId, {
-          agentId: current.run.agentId,
+          agentId: initial.run.agentId,
           operationId,
           requestHash,
           runId,
@@ -2548,49 +2554,79 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         );
       }
     }
+    const latestLifecycle = this.currentLifecycle();
+    const latest = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    const latestPending = latest?.pendingAdmission;
+    const pendingStillSame =
+      pending === undefined
+        ? latestPending === undefined
+        : latestPending !== undefined &&
+          latestPending.prepareOwner === pending.prepareOwner &&
+          latestPending.deadlineAt === pending.deadlineAt &&
+          latestPending.scheduleGeneration === pending.scheduleGeneration &&
+          latestPending.scheduleToken === pending.scheduleToken;
+    if (
+      latestLifecycle.status !== "active" ||
+      latestLifecycle.generation !== lifecycleGeneration ||
+      !latest ||
+      latest.run.operationId !== operationId ||
+      latest.operationHash !== requestHash ||
+      latest.run.agentId !== initial.run.agentId ||
+      latest.run.status !== initialStatus ||
+      isTerminal(latest.run.status) ||
+      !pendingStillSame ||
+      (pending !== undefined &&
+        (latest.run.status !== "queued" ||
+          latestPending === undefined ||
+          latestPending.deadlineAt <= Date.now()))
+    ) {
+      return false;
+    }
     if (!capability) {
       throw new AdmissionUnavailableError(
         "Durable admission capability is unavailable."
       );
     }
-    if (!pending && current.admissionConfirmedAt) {
+    if (!pending && latest.admissionConfirmedAt) {
       const mergedCapability = {
-        ...current.admissionCapability,
+        ...latest.admissionCapability,
         ...capability,
         ...(capability.dispatchToken === undefined &&
-        current.admissionCapability?.dispatchToken
-          ? { dispatchToken: current.admissionCapability.dispatchToken }
+        latest.admissionCapability?.dispatchToken
+          ? { dispatchToken: latest.admissionCapability.dispatchToken }
           : {}),
       };
       if (
-        current.admissionCapability?.admissionSequence !==
+        latest.admissionCapability?.admissionSequence !==
           mergedCapability.admissionSequence ||
-        current.admissionCapability?.dispatchToken !==
+        latest.admissionCapability?.dispatchToken !==
           mergedCapability.dispatchToken
       ) {
         this.persistRun({
-          ...current,
+          ...latest,
           admissionCapability: mergedCapability,
         });
       }
       return true;
     }
     this.persistRun({
-      ...current,
+      ...latest,
       admissionCapability: {
-        ...current.admissionCapability,
+        ...latest.admissionCapability,
         ...capability,
         ...(capability.dispatchToken === undefined &&
-        current.admissionCapability?.dispatchToken
-          ? { dispatchToken: current.admissionCapability.dispatchToken }
+        latest.admissionCapability?.dispatchToken
+          ? { dispatchToken: latest.admissionCapability.dispatchToken }
           : {}),
       },
       admissionConfirmedAt:
-        current.admissionConfirmedAt ?? new Date().toISOString(),
+        latest.admissionConfirmedAt ?? new Date().toISOString(),
       pendingAdmission: undefined,
     });
-    if (pending?.scheduleId) {
-      await this.cancelPendingAdmissionSchedule(pending.scheduleId);
+    if (latestPending?.scheduleId) {
+      await this.cancelPendingAdmissionSchedule(latestPending.scheduleId);
     }
     return true;
   }

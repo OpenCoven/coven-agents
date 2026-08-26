@@ -418,6 +418,17 @@ export class AdmissionQueue {
       };
     }
 
+    if (
+      input.mode === "reject" &&
+      this.queueRecords.some(
+        (entry) =>
+          entry.agentId === input.agentId &&
+          entry.state !== "terminal" &&
+          (entry.state === "active" || Boolean(entry.dispatchToken))
+      )
+    ) {
+      return { kind: "refused", reason: "global_busy" };
+    }
     if (this.activeCount() >= this.limits.deploymentActiveRuns) {
       return { kind: "refused", reason: "global_busy" };
     }
@@ -932,6 +943,23 @@ export class RunAdmission extends DurableObject<Env> {
       }
       const storedRecords = this.readStoredRecords();
       const nextSequence = this.readNextSequence(storedRecords);
+      if (
+        input.mode === "reject" &&
+        storedRecords.some(
+          (entry) =>
+            entry.agentId === input.agentId &&
+            entry.state !== "terminal" &&
+            (entry.state === "active" || Boolean(entry.dispatchToken))
+        )
+      ) {
+        return {
+          decision: {
+            kind: "refused",
+            reason: "global_busy",
+          } as AdmissionDecision,
+          record: null,
+        };
+      }
       const queue = new AdmissionQueue({
         limits,
         nextSequence,

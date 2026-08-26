@@ -250,6 +250,55 @@ test("reject admission refuses without persisting a queued record", async () => 
   );
 });
 
+test("reject admission refuses same-agent active contention without dispatching", async () => {
+  let dispatches = 0;
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "running" }),
+      startAdmitted: () => {
+        dispatches += 1;
+        return Promise.resolve(true);
+      },
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "4",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+    }
+  );
+  await harness.admission.getRecord("initialize");
+  seedAdmissionRecord(
+    harness,
+    {
+      ...activeRecord(1),
+      agentId: "shared-agent",
+    },
+    1
+  );
+
+  const decision = await harness.admission.admit({
+    ...request(2),
+    agentId: "shared-agent",
+    mode: "reject",
+  } as never);
+
+  assert.deepEqual(decision, {
+    kind: "refused",
+    reason: "global_busy",
+  });
+  assert.equal(dispatches, 0);
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_records WHERE agent_id = ? AND state = 'queued'"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    0
+  );
+});
+
 test("cleanup without an admission row does not create a sequence-zero task", async () => {
   const harness = runAdmissionHarness(() => ({
     getRun: () => ({ status: "queued" }),

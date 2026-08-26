@@ -1518,6 +1518,244 @@ test("an orphan queued duplicate resumes admission with its existing run", async
   assert.equal(admittedRunId, runId);
 });
 
+test("duplicate retries repair missing directory mappings for every run state", async () => {
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const cases = [
+    {
+      admissionState: "queued" as const,
+      operationId: "11111111-aaaa-4111-8222-333333333331",
+      runId: "22222222-bbbb-4222-8333-444444444441",
+      status: "queued" as const,
+    },
+    {
+      admissionState: "active" as const,
+      operationId: "33333333-cccc-4333-8444-555555555551",
+      runId: "44444444-dddd-4444-8555-666666666661",
+      status: "running" as const,
+    },
+    {
+      admissionState: "terminal" as const,
+      operationId: "55555555-eeee-4555-8666-777777777771",
+      runId: "66666666-ffff-4666-8777-888888888881",
+      status: "completed" as const,
+    },
+  ];
+  const tenantHash = await tenantAdmissionHash(
+    "test-edge-abuse-secret",
+    CALLER_TENANT
+  );
+  const preparedCases = await Promise.all(
+    cases.map(async (candidate) => {
+      const run: RunSnapshot = {
+        ...queuedRun(MINE, candidate.runId, candidate.operationId),
+        completedAt:
+          candidate.status === "completed" ? "2026-08-26T00:00:01.000Z" : null,
+        startedAt:
+          candidate.status === "queued" ? null : "2026-08-26T00:00:00.500Z",
+        status: candidate.status,
+      };
+      return {
+        candidate,
+        requestHash: await hashOperation(MINE, run.task),
+        run,
+      };
+    })
+  );
+
+  const verifyDuplicateCase = async ({
+    candidate,
+    requestHash,
+    run,
+  }: (typeof preparedCases)[number]) => {
+    const { operationId, runId } = candidate;
+    let mappedAgentId: string | null = null;
+    const registeredStatuses: string[] = [];
+    const directory: CloudRunnerDirectory = {
+      list: () => [agents.get(MINE) as AgentDefinition],
+      lookupRun: () => mappedAgentId,
+      markRunStatus: (_runId, agentId, status) => {
+        if (mappedAgentId !== agentId) {
+          return false;
+        }
+        registeredStatuses.push(status);
+        return true;
+      },
+      registerRun: (_runId, agentId, status = "active") => {
+        if (mappedAgentId && mappedAgentId !== agentId) {
+          return false;
+        }
+        mappedAgentId = agentId;
+        registeredStatuses.push(status);
+        return true;
+      },
+      remove: () => undefined,
+      unregisterRun: () => undefined,
+      upsert: (value) => value,
+    };
+    const agent: CloudRunnerAgent = {
+      configure: (value: AgentDefinition) => value,
+      decommission: () => undefined,
+      discardRun: () => undefined,
+      enqueue: () => ({ created: false, run }),
+      getEventStream: () => ({
+        events: [],
+        terminal: candidate.status === "completed",
+      }),
+      getRun: () => run,
+      listRuns: () => [run],
+      snapshot: () => agents.get(MINE) ?? null,
+      stop: () => run,
+      warm: () => ({
+        status: "provisioning" as const,
+        updatedAt: "2026-08-26T00:00:00.000Z",
+      }),
+    };
+    const runnerInstance = createCloudRunner({
+      getAdmission: () => ({
+        admit: () => {
+          throw new Error("a duplicate must not admit again");
+        },
+        getByOperationId: () => ({
+          agentId: MINE,
+          enqueuedAt: run.createdAt,
+          operationId,
+          requestHash,
+          runId,
+          state: candidate.admissionState,
+          tenantHash,
+        }),
+        release: () => true,
+      }),
+      getDirectory: () => directory,
+      getYoloAgent: () => agent,
+    });
+    const post = await runnerInstance.fetch(
+      new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+        body: JSON.stringify({ operationId, task: run.task }),
+        headers: {
+          authorization: `Bearer ${token}`,
+          "x-runner-token": TOKEN,
+        },
+        method: "POST",
+      }),
+      environment as never
+    );
+
+    assert.equal(post.status, 202);
+    assert.equal(mappedAgentId, MINE);
+    assert.equal(
+      registeredStatuses[0],
+      candidate.status === "completed"
+        ? "terminal"
+        : candidate.status === "queued"
+          ? "queued"
+          : "active"
+    );
+
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "x-runner-token": TOKEN,
+    };
+    const get = await runnerInstance.fetch(
+      new Request(`https://runner.test/api/runs/${runId}`, { headers }),
+      environment as never
+    );
+    assert.equal(get.status, 200);
+    const events = await runnerInstance.fetch(
+      new Request(`https://runner.test/api/runs/${runId}/events`, { headers }),
+      environment as never
+    );
+    assert.equal(events.status, 200);
+    const stop = await runnerInstance.fetch(
+      new Request(`https://runner.test/api/runs/${runId}/stop`, {
+        headers,
+        method: "POST",
+      }),
+      environment as never
+    );
+    assert.equal(stop.status, 200);
+  };
+  await Promise.all(preparedCases.map(verifyDuplicateCase));
+});
+
+test("reject mode preflights local contention without creating a provisional run", async () => {
+  const operationId = "77777777-aaaa-4777-8888-999999999991";
+  const activeRun = {
+    ...queuedRun(
+      MINE,
+      "88888888-bbbb-4888-8999-000000000001",
+      "11111111-2222-4333-8444-555555555555"
+    ),
+    startedAt: "2026-08-26T00:00:00.500Z",
+    status: "running" as const,
+  };
+  let allowQueued: boolean | undefined;
+  let admissionCalls = 0;
+  const agent: CloudRunnerAgent = {
+    configure: (value: AgentDefinition) => value,
+    decommission: () => undefined,
+    discardRun: () => undefined,
+    enqueue: (
+      _input,
+      _runId,
+      _requestHash,
+      _identityToken,
+      requestedAllowQueued
+    ) => {
+      allowQueued = requestedAllowQueued;
+      return { created: false, run: activeRun };
+    },
+    getEventStream: () => ({ events: [], terminal: false }),
+    getRun: () => activeRun,
+    listRuns: () => [activeRun],
+    snapshot: () => agents.get(MINE) ?? null,
+    stop: () => activeRun,
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const response = await createCloudRunner({
+    getAdmission: () => ({
+      admit: () => {
+        admissionCalls += 1;
+        return { kind: "refused" as const, reason: "global_busy" as const };
+      },
+      release: () => false,
+    }),
+    getDirectory: () => ({
+      list: () => [agents.get(MINE) as AgentDefinition],
+      lookupRun: () => null,
+      registerRun: () => true,
+      remove: () => undefined,
+      unregisterRun: () => undefined,
+      upsert: (value: AgentDefinition) => value,
+    }),
+    getYoloAgent: () => agent,
+  }).fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: "Another run." }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    { ...environment, RUN_ADMISSION_MODE: "reject" } as never
+  );
+
+  assert.equal(response.status, 409);
+  assert.equal(allowQueued, false);
+  assert.equal(admissionCalls, 0);
+});
+
 test("reject mode refuses an unhealthy admission object without bypassing it", async () => {
   const operationId = "55555555-6666-4777-8888-999999999999";
   const runId = "66666666-7777-4888-8999-000000000000";
