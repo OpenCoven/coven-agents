@@ -376,6 +376,127 @@ function runAdmissionHarness(
   };
 }
 
+test("alarm reconciliation does not requeue a nonexpired dispatch lease", async () => {
+  let now = Date.parse("2026-08-26T00:00:00.000Z");
+  const originalNow = Date.now;
+  Date.now = () => now;
+  try {
+    let dispatchCalls = 0;
+    let resolveFirst!: (accepted: boolean) => void;
+    let resolveSecond!: (accepted: boolean) => void;
+    const firstDispatch = new Promise<boolean>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondDispatch = new Promise<boolean>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const harness = runAdmissionHarness(() => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => {
+        dispatchCalls += 1;
+        return dispatchCalls === 1 ? firstDispatch : secondDispatch;
+      },
+      stop: () => Promise.resolve(null),
+    }));
+
+    await harness.admission.admit(request(61));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    now += 30_000;
+    await harness.admission.alarm();
+
+    const rows = harness.sql
+      .exec<{ state: string; dispatch_lease_until: number | null }>(
+        "SELECT state, dispatch_lease_until FROM admission_records WHERE run_id = ?",
+        "run-61"
+      )
+      .toArray() as { state: string; dispatch_lease_until: number | null }[];
+    assert.equal(dispatchCalls, 1);
+    assert.equal(rows[0]?.state, "active");
+    assert.ok(Date.parse(String(rows[0]?.dispatch_lease_until ?? "")) > now);
+
+    now += 31_000;
+    const alarm = harness.admission.alarm();
+    while (dispatchCalls < 2) {
+      // biome-ignore lint/performance/noAwaitInLoops: This deterministic wait observes alarm dispatch completion.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const secondLease = harness.sql
+      .exec<{ dispatch_lease_until: string | null }>(
+        "SELECT dispatch_lease_until FROM admission_records WHERE run_id = ?",
+        "run-61"
+      )
+      .toArray() as { dispatch_lease_until: string | null }[];
+    assert.ok(Date.parse(String(secondLease[0]?.dispatch_lease_until)) > now);
+    resolveFirst(true);
+    await Promise.all(harness.background);
+    assert.equal(
+      (
+        harness.sql
+          .exec<{ dispatch_lease_until: string | null }>(
+            "SELECT dispatch_lease_until FROM admission_records WHERE run_id = ?",
+            "run-61"
+          )
+          .toArray() as { dispatch_lease_until: string | null }[]
+      )[0]?.dispatch_lease_until,
+      secondLease[0]?.dispatch_lease_until
+    );
+    resolveSecond(true);
+    await alarm;
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("zero queue capacity admits immediately when an active slot is free", async () => {
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.resolve(true),
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "0",
+    }
+  );
+
+  const decision = await harness.admission.admit(request(62));
+
+  assert.equal(decision.kind, "active");
+  await Promise.all(harness.background);
+});
+
+test("terminal admission history is retained for duplicate idempotency but pruned", async () => {
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: () => Promise.resolve(true),
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TERMINAL_RETENTION: "3",
+    }
+  );
+
+  for (let index = 0; index < 8; index += 1) {
+    const operation = request(100 + index);
+    // biome-ignore lint/performance/noAwaitInLoops: Each admission must be retained and pruned in sequence.
+    const admitted = await harness.admission.admit(operation);
+    assert.equal(admitted.kind, "active");
+    await Promise.all(harness.background);
+    await harness.admission.release(operation.runId);
+  }
+
+  const terminalRows = harness.sql
+    .exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM admission_records WHERE state = 'terminal'"
+    )
+    .toArray() as { count: number }[];
+  assert.ok((terminalRows[0]?.count ?? 0) <= 3);
+  assert.equal((await harness.admission.admit(request(107))).kind, "duplicate");
+});
+
 test("serializes concurrent admissions against the persistent capacity ledger", async () => {
   const harness = runAdmissionHarness(
     () => ({
@@ -538,9 +659,9 @@ test("alarm setup failure terminalizes a new admission without dispatching it", 
     runId: "run-retry",
   });
   assert.deepEqual(retry, {
-    kind: "queued",
-    position: 1,
-    runId: "run-retry",
+    kind: "duplicate",
+    runId: first.runId,
+    state: "terminal",
   });
 });
 
@@ -740,7 +861,7 @@ test("alarm keeps its earlier cadence instead of postponing expiry", async () =>
   }
 });
 
-test("failed cancellation leaves an expired queued record for alarm retry", async () => {
+test("expired queued cleanup remains durable through an unavailable agent", async () => {
   let attempts = 0;
   const harness = runAdmissionHarness(() => ({
     getRun: () => ({ status: "queued" }),
@@ -761,17 +882,79 @@ test("failed cancellation leaves an expired queued record for alarm retry", asyn
   );
 
   await harness.admission.alarm();
-  assert.equal((await harness.admission.getRecord("run-32"))?.state, "queued");
-
-  await harness.admission.alarm();
   assert.equal(
     (await harness.admission.getRecord("run-32"))?.state,
     "terminal"
   );
-  assert.equal(attempts, 2);
+  assert.equal(attempts, 2, "the alarm retries cleanup once immediately");
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_cleanup_tasks"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    0,
+    "a terminal agent response clears the cleanup tombstone"
+  );
 });
 
-test("alarm schedules a new retry after its prior alarm has fired", async () => {
+test("an undispatched queued run expires during a persistent agent outage", async () => {
+  let agentAvailable = false;
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: (runId) => Promise.resolve(runId === "run-70"),
+      stop: () =>
+        agentAvailable
+          ? Promise.resolve(null)
+          : Promise.reject(new Error("agent unavailable")),
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    }
+  );
+  await harness.admission.admit(request(70));
+  await Promise.all(harness.background);
+  await harness.admission.admit(request(71));
+  await Promise.all(harness.background);
+  harness.sql.exec(
+    "UPDATE admission_records SET enqueued_at = ? WHERE run_id = ?",
+    new Date(Date.now() - 5 * 60 * 1000 - 1).toISOString(),
+    "run-71"
+  );
+
+  await harness.admission.alarm();
+
+  assert.equal(
+    (await harness.admission.getRecord("run-71"))?.state,
+    "terminal"
+  );
+  const cleanupTasks = harness.sql
+    .exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM admission_cleanup_tasks"
+    )
+    .toArray() as { count: number }[];
+  assert.equal(cleanupTasks[0]?.count, 1);
+  agentAvailable = true;
+  harness.sql.exec("UPDATE admission_cleanup_tasks SET next_attempt_at = 0");
+  await harness.admission.alarm();
+  const remainingTasks = harness.sql
+    .exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM admission_cleanup_tasks"
+    )
+    .toArray() as { count: number }[];
+  assert.equal(remainingTasks[0]?.count, 0);
+  await harness.admission.release("run-70");
+  assert.deepEqual(await harness.admission.admit(request(72)), {
+    kind: "active",
+    runId: "run-72",
+  });
+});
+
+test("alarm schedules a new cleanup retry after its prior alarm has fired", async () => {
   const originalNow = Date.now;
   const now = Date.parse("2026-08-26T00:00:00.000Z");
   Date.now = () => now;
@@ -793,12 +976,12 @@ test("alarm schedules a new retry after its prior alarm has fired", async () => 
 
     assert.equal(
       (await harness.admission.getRecord("run-36"))?.state,
-      "queued"
+      "terminal"
     );
     assert.equal(
       harness.alarm(),
-      now + 30_000,
-      "a fired alarm must be replaced so cancellation can be retried"
+      now + 5000,
+      "a fired alarm must be replaced so cleanup can be retried"
     );
   } finally {
     Date.now = originalNow;
@@ -866,7 +1049,7 @@ test("an interrupted dispatch clears its lease before the next alarm", async () 
         }
         return Promise.resolve(false);
       },
-      stop: () => Promise.resolve(null),
+      stop: () => Promise.reject(new Error("agent unavailable")),
     }));
 
     assert.deepEqual(await harness.admission.admit(request(34)), {
@@ -876,8 +1059,8 @@ test("an interrupted dispatch clears its lease before the next alarm", async () 
     await Promise.all(harness.background);
     assert.equal(
       (await harness.admission.getRecord("run-34"))?.state,
-      "queued",
-      "an interrupted RPC must not strand its capacity claim"
+      "active",
+      "an interrupted RPC retains its lease until it can be fenced"
     );
 
     now += 61_000;
@@ -888,6 +1071,19 @@ test("an interrupted dispatch clears its lease before the next alarm", async () 
       "queued"
     );
     assert.ok(attempts >= 2, "the alarm must retry the interrupted dispatch");
+
+    now += 5 * 60_000 + 1;
+    harness.sql.exec(
+      "UPDATE admission_records SET enqueued_at = ? WHERE run_id = ?",
+      new Date(now - 5 * 60 * 1000 - 1).toISOString(),
+      "run-34"
+    );
+    await harness.admission.alarm();
+    assert.equal(
+      (await harness.admission.getRecord("run-34"))?.state,
+      "terminal",
+      "a requeued run must still expire after its new queue deadline"
+    );
   } finally {
     Date.now = originalNow;
   }
@@ -963,7 +1159,7 @@ test("an ambiguous dispatch stays active until reconciliation proves its outcome
 
 test("a queued dispatch still expires on its queue deadline", async () => {
   const originalNow = Date.now;
-  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  let now = Date.parse("2026-08-26T00:00:00.000Z");
   let cancellations = 0;
   Date.now = () => now;
   try {
@@ -980,6 +1176,8 @@ test("a queued dispatch still expires on its queue deadline", async () => {
       runId: "run-37",
     });
     await Promise.all(harness.background);
+    now += 61_000;
+
     harness.sql.exec(
       "UPDATE admission_records SET enqueued_at = ? WHERE run_id = ?",
       new Date(now - 5 * 60 * 1000 - 1).toISOString(),
@@ -1163,17 +1361,14 @@ test("dispatch failure clears its lease before alarm failure can leak capacity",
   );
   await Promise.all(harness.background);
 
-  assert.equal(
-    (await harness.admission.getRecord("run-55"))?.state,
-    "terminal"
-  );
+  assert.equal((await harness.admission.getRecord("run-55"))?.state, "active");
   const leaseRows = harness.sql
     .exec<{ dispatch_lease_until: string | null }>(
       "SELECT dispatch_lease_until FROM admission_records WHERE run_id = ?",
       "run-55"
     )
     .toArray() as { dispatch_lease_until: string | null }[];
-  assert.equal(leaseRows[0]?.dispatch_lease_until, null);
+  assert.ok(leaseRows[0]?.dispatch_lease_until);
 });
 
 test("same-millisecond admissions use insertion sequence for positions and fairness", () => {

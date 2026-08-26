@@ -7,6 +7,11 @@ import {
   fiberLog,
   resetFiberLog,
 } from "../test-support/agents";
+import {
+  destroyedSandboxes,
+  resetDestroyedSandboxes,
+  setSandboxDestroyError,
+} from "../test-support/cloudflare-sandbox";
 import { AgentDirectory, YoloAgent } from "./agents";
 import {
   AlreadyRunningError,
@@ -253,6 +258,7 @@ test("an already accepted fiber is not reported as a second admission", async ()
 
 test("a recovered admitted fiber fails once, releases capacity, and permits the next run", async () => {
   resetFiberLog();
+  resetDestroyedSandboxes();
   fiberControl.runFibers = false;
   const released: string[] = [];
   const yolo = new YoloAgent(
@@ -288,6 +294,7 @@ test("a recovered admitted fiber fails once, releases capacity, and permits the 
   };
   const result = await yolo.onFiberRecovered(recovery);
   assert.equal(result?.status, "error");
+  assert.equal(destroyedSandboxes().length, 1);
   assert.equal(yolo.getRun(first.run.id)?.status, "failed");
   assert.equal(yolo.snapshot()?.status, "error");
   assert.deepEqual(released, [first.run.id]);
@@ -302,6 +309,90 @@ test("a recovered admitted fiber fails once, releases capacity, and permits the 
     "identity"
   );
   assert.equal(await yolo.startAdmitted(second.run.id), true);
+});
+
+test("fiber recovery fails closed when sandbox cleanup is unavailable", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  setSandboxDestroyError(new Error("sandbox unavailable"));
+  fiberControl.runFibers = false;
+  const released: string[] = [];
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string) => {
+            released.push(runId);
+            return Promise.resolve(true);
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Interrupted work." },
+    "af2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c96",
+    "hash-interrupted",
+    "identity"
+  );
+  assert.equal(await yolo.startAdmitted(queued.run.id), true);
+
+  await assert.rejects(
+    () =>
+      yolo.onFiberRecovered({
+        createdAt: Date.now(),
+        id: "fiber-interrupted",
+        metadata: { runId: queued.run.id },
+        name: `run:${queued.run.id}`,
+        recoveryReason: "interrupted",
+        snapshot: null,
+        status: "interrupted",
+      }),
+    /sandbox unavailable/
+  );
+  assert.equal(yolo.getRun(queued.run.id)?.status, "running");
+  assert.deepEqual(released, []);
+  setSandboxDestroyError(null);
+});
+
+test("cancellation waits for sandbox cleanup before releasing capacity", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  setSandboxDestroyError(new Error("sandbox unavailable"));
+  fiberControl.runFibers = false;
+  const released: string[] = [];
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string) => {
+            released.push(runId);
+            return Promise.resolve(true);
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+  const first = await yolo.enqueue(
+    { operationId: OP_A, task: "Cancelled work." },
+    "cf2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c98",
+    "hash-cancelled",
+    "identity"
+  );
+  assert.equal(await yolo.startAdmitted(first.run.id), true);
+
+  await assert.rejects(() => yolo.stop(first.run.id), /sandbox unavailable/);
+  assert.equal(yolo.getRun(first.run.id)?.status, "running");
+  assert.deepEqual(released, []);
+
+  setSandboxDestroyError(null);
+  const cancelled = await yolo.stop(first.run.id);
+  assert.equal(cancelled?.status, "cancelled");
+  assert.deepEqual(released, [first.run.id]);
 });
 
 test("late fiber completion cannot overwrite cancellation or release twice", async () => {
@@ -437,6 +528,45 @@ test("cancelling an admitted queued run releases its deployment slot", async () 
   await yolo.stop(queued.run.id);
 
   assert.deepEqual(released, [queued.run.id]);
+});
+
+test("admission terminal reporting does not retain an unbounded run map", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          release: () => Promise.resolve(true),
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+
+  for (let index = 0; index < 32; index += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: Each run must be terminalized before the next retention check.
+    const run = await yolo.enqueue(
+      {
+        operationId: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+        task: "Discard this.",
+      },
+      `df2a0f4e-1f4d-4a2e-9c1b-${String(index).padStart(12, "0")}`,
+      `hash-${index}`,
+      "identity"
+    );
+    await yolo.stop(run.run.id);
+  }
+
+  const state = Reflect.get(yolo, "state") as {
+    admissionReported?: Record<string, boolean>;
+  };
+  assert.ok(
+    Object.keys(state.admissionReported ?? {}).length <= 3,
+    "terminal reporting state must be bounded with run retention"
+  );
 });
 
 test("stopping a finished run does not rewrite its outcome", async () => {

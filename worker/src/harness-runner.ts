@@ -98,18 +98,22 @@ async function withCancellation<T>(
   const aborted = new Promise<never>((_, reject) => {
     rejectAbort = reject;
   });
+  let cancellationRequested = false;
+  let cancellation: Promise<never> | undefined;
+  const beginCancellation = () => {
+    cancellation ??= abort();
+    return cancellation;
+  };
   const onAbort = () => {
-    Promise.resolve(sandbox.destroy?.()).catch(() => undefined);
-    rejectAbort(
-      new HarnessError(
-        "The cloud run was cancelled before the sandbox command completed.",
-        "harness_cancelled"
-      )
-    );
+    cancellationRequested = true;
+    beginCancellation().catch(rejectAbort);
   };
   signal.addEventListener("abort", onAbort, { once: true });
   try {
-    return await Promise.race([work, aborted]);
+    const guardedWork = work.then((value) =>
+      cancellationRequested ? beginCancellation() : value
+    );
+    return await Promise.race([guardedWork, aborted]);
   } finally {
     signal.removeEventListener("abort", onAbort);
   }

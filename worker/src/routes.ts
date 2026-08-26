@@ -94,6 +94,10 @@ export type CloudRunnerDirectory = {
     runId: string,
     agentId: string
   ) => Awaitable<boolean | undefined>;
+  enqueueRunMappingCleanup?: (
+    runId: string,
+    agentId: string
+  ) => Awaitable<void>;
   remove: (agentId: string) => Awaitable<void>;
   upsert: (definition: AgentDefinition) => Awaitable<AgentDefinition>;
   lookupRun: (runId: string) => Awaitable<string | null>;
@@ -130,6 +134,7 @@ export type CloudRunnerAgent = {
 export type CloudRunnerAdmission = {
   admit: (input: AdmissionRequest) => Awaitable<AdmissionDecision>;
   getByOperationId?: (operationId: string) => Awaitable<AdmissionRecord | null>;
+  enqueueCleanup?: (agentId: string, runId: string) => Awaitable<void>;
   release: (runId: string) => Awaitable<boolean>;
 };
 
@@ -155,6 +160,7 @@ export type CloudRunnerDependencies<
 async function cleanupRun(
   agent: CloudRunnerAgent,
   runId: string,
+  agentId: string,
   admission?: CloudRunnerAdmission,
   stopFirst = false
 ): Promise<unknown | null> {
@@ -203,7 +209,12 @@ async function cleanupRun(
     }
   }
   if (admission && safeToRelease) {
-    await attempt(() => admission.release(runId));
+    const released = await attempt(() => admission.release(runId));
+    if (!released.ok && admission.enqueueCleanup) {
+      await attempt(() => admission.enqueueCleanup?.(agentId, runId));
+    }
+  } else if (admission?.enqueueCleanup) {
+    await attempt(() => admission.enqueueCleanup?.(agentId, runId));
   }
   return firstError;
 }
@@ -702,7 +713,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 authorization.slice(7)
               );
             } catch (error) {
-              await cleanupRun(agent, runId);
+              await cleanupRun(agent, runId, id);
               throw error;
             }
             if (!prepared.created) {
@@ -789,7 +800,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               );
             }
             if (!dependencies.getAdmission) {
-              await cleanupRun(agent, runId);
+              await cleanupRun(agent, runId, id);
               throw new Error("Run admission is not configured.");
             }
 
@@ -797,7 +808,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             try {
               admission = await dependencies.getAdmission(environment);
             } catch (error) {
-              await cleanupRun(agent, runId);
+              await cleanupRun(agent, runId, id);
               if (runAdmissionMode === "reject") {
                 return busyResponse("global_busy", cors);
               }
@@ -817,7 +828,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 ),
               });
             } catch (error) {
-              await cleanupRun(agent, runId, admission, true);
+              await cleanupRun(agent, runId, id, admission, true);
               if (
                 runAdmissionMode === "reject" &&
                 !isOperationConflict(error)
@@ -828,14 +839,24 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             }
 
             if (decision.kind === "refused") {
-              const cleanupError = await cleanupRun(agent, runId);
+              const cleanupError = await cleanupRun(
+                agent,
+                runId,
+                id,
+                admission
+              );
               if (cleanupError) {
                 throw cleanupError;
               }
               return busyResponse(decision.reason, cors);
             }
             if (decision.kind === "duplicate") {
-              const cleanupError = await cleanupRun(agent, runId);
+              const cleanupError = await cleanupRun(
+                agent,
+                runId,
+                id,
+                admission
+              );
               if (cleanupError) {
                 throw cleanupError;
               }
@@ -857,7 +878,12 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               );
             }
             if (decision.kind === "queued" && runAdmissionMode === "reject") {
-              const cleanupError = await cleanupRun(agent, runId, admission);
+              const cleanupError = await cleanupRun(
+                agent,
+                runId,
+                id,
+                admission
+              );
               if (cleanupError) {
                 throw cleanupError;
               }
@@ -885,11 +911,16 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 try {
                   await directory.unregisterRun(runId, id);
                 } catch {
-                  // Preserve the original request failure; a stale mapping
-                  // remains harmlessly ownership-guarded until retried.
+                  if (directory.enqueueRunMappingCleanup) {
+                    try {
+                      await directory.enqueueRunMappingCleanup(runId, id);
+                    } catch {
+                      // Preserve the original request failure.
+                    }
+                  }
                 }
               }
-              await cleanupRun(agent, runId, admission, true);
+              await cleanupRun(agent, runId, id, admission, true);
               throw error;
             }
           }

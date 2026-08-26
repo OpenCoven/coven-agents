@@ -641,3 +641,76 @@ test("aborting a run destroys the sandbox and stops the command", async () => {
   );
   assert.equal(destroyed, 1);
 });
+
+test("cancellation does not settle until sandbox destruction completes", async () => {
+  const controller = new AbortController();
+  let mainStarted!: () => void;
+  let resolveExec!: () => void;
+  let resolveDestroy!: () => void;
+  let destroyed = 0;
+  const sandbox = {
+    destroy() {
+      destroyed += 1;
+      return new Promise<void>((resolve) => {
+        resolveDestroy = resolve;
+      });
+    },
+    exec(command: string) {
+      if (command.includes("--version") || command.startsWith("mkdir")) {
+        return Promise.resolve({
+          command,
+          exitCode: 0,
+          stderr: "",
+          stdout: command.includes("--version")
+            ? "GitHub Copilot CLI 1.0.80\n"
+            : "",
+          success: true,
+        });
+      }
+      mainStarted();
+      return new Promise((resolve) => {
+        resolveExec = () =>
+          resolve({
+            command,
+            exitCode: 143,
+            stderr: "terminated",
+            stdout: "",
+            success: false,
+          });
+      });
+    },
+  };
+
+  const run = runHarnessInSandbox({
+    credential: { credential: "harness-token" },
+    instructions: "Be careful.",
+    model: "auto",
+    runtime: "copilot",
+    sandbox: sandbox as never,
+    signal: controller.signal,
+    task: "Stop this run",
+  });
+  await new Promise<void>((resolve) => {
+    mainStarted = resolve;
+  });
+  controller.abort();
+  const pending = await Promise.race([
+    run.then(
+      () => "settled",
+      () => "settled"
+    ),
+    new Promise<"pending">((resolve) =>
+      setTimeout(() => resolve("pending"), 0)
+    ),
+  ]);
+  assert.equal(pending, "pending");
+
+  resolveDestroy();
+  resolveExec();
+  await assert.rejects(
+    run,
+    (error: unknown) =>
+      error instanceof HarnessError && error.code === "harness_cancelled"
+  );
+  assert.equal(destroyed, 1);
+});

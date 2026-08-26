@@ -1307,6 +1307,121 @@ test("reject fallback stops an execution that wins the discard race before relea
   assert.deepEqual(calls, ["admit", "discard", "stop", "release"]);
 });
 
+test("failed prepare cleanup is durable and capacity is reusable after recovery", async () => {
+  const operationId = "77777777-cccc-4000-8111-222222222222";
+  const calls: string[] = [];
+  let occupied = false;
+  let cleanupReady = false;
+  let retryCleanup: (() => Promise<void>) | undefined;
+  const runs = new Map<string, RunSnapshot>();
+  const agent: CloudRunnerAgent = {
+    configure: (value: AgentDefinition) => value,
+    decommission: () => undefined,
+    discardRun: () => {
+      calls.push("discard");
+      throw new Error("discard unavailable");
+    },
+    enqueue: (input: unknown, runId: string) => {
+      const { operationId: id } = input as { operationId: string };
+      const run = queuedRun(MINE, runId, id);
+      runs.set(runId, run);
+      return { created: true, run };
+    },
+    getEventStream: () => ({ events: [], terminal: false }),
+    getRun: (runId) => runs.get(runId) ?? null,
+    listRuns: () => [...runs.values()],
+    snapshot: () => agents.get(MINE) ?? null,
+    start: () => {
+      throw new Error("legacy start must not be reached");
+    },
+    stop: (runId) => {
+      calls.push("stop");
+      if (!cleanupReady) {
+        throw new Error("stop unavailable");
+      }
+      const run = runs.get(runId);
+      return run ? { ...run, status: "cancelled" as const } : null;
+    },
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const admission = {
+    admit: (input: { runId: string }) => {
+      calls.push(`admit:${input.runId}`);
+      if (occupied) {
+        return { kind: "refused" as const, reason: "global_busy" as const };
+      }
+      occupied = true;
+      return { kind: "queued" as const, position: 1, runId: input.runId };
+    },
+    enqueueCleanup: (agentId: string, runId: string) => {
+      assert.equal(agentId, MINE);
+      retryCleanup = async () => {
+        await agent.stop(runId);
+        occupied = false;
+      };
+      return Promise.resolve();
+    },
+    release: (runId: string) => {
+      calls.push(`release:${runId}`);
+      occupied = false;
+      return Promise.resolve(true);
+    },
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const runnerInstance = createCloudRunner({
+    getAdmission: () => admission,
+    getDirectory: () => ({
+      list: () => [agents.get(MINE) as AgentDefinition],
+      lookupRun: () => null,
+      registerRun: () => true,
+      remove: () => undefined,
+      unregisterRun: () => undefined,
+      upsert: (value: AgentDefinition) => value,
+    }),
+    getYoloAgent: () => agent,
+  });
+
+  const first = await runnerInstance.fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: "Prepare this." }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    { ...environment, RUN_ADMISSION_MODE: "reject" } as never
+  );
+  assert.equal(first.status, 500);
+  assert.ok(retryCleanup, "failed cleanup must leave a durable retry");
+  assert.match(calls[0] ?? "", /^admit:/);
+  assert.deepEqual(calls.slice(1), ["discard", "stop"]);
+
+  cleanupReady = true;
+  await retryCleanup?.();
+  const second = await runnerInstance.fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({
+        operationId: "88888888-dddd-4000-8111-222222222222",
+        task: "Reuse capacity.",
+      }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    environment as never
+  );
+  assert.equal(second.status, 202);
+});
+
 test("registerRun failure stops the run, releases admission, and allows reuse", async () => {
   const calls: string[] = [];
   const admittedRunIds: string[] = [];
@@ -1463,6 +1578,12 @@ test("a run mapping is unregistered when the admitted run disappears after regis
     }),
   };
   const directory: CloudRunnerDirectory = {
+    enqueueRunMappingCleanup: (candidate, agentId) => {
+      calls.push("enqueue-mapping-cleanup");
+      if (mappings.get(candidate) === agentId) {
+        mappings.delete(candidate);
+      }
+    },
     list: () => [agents.get(MINE) as AgentDefinition],
     lookupRun: (candidate) => mappings.get(candidate) ?? null,
     registerRun: (candidate, agentId) => {
@@ -1476,8 +1597,7 @@ test("a run mapping is unregistered when the admitted run disappears after regis
       if (mappings.get(candidate) !== agentId) {
         return false;
       }
-      mappings.delete(candidate);
-      return true;
+      throw new Error("directory unavailable");
     },
     upsert: (value) => value,
   };
@@ -1517,6 +1637,7 @@ test("a run mapping is unregistered when the admitted run disappears after regis
   assert.deepEqual(calls, [
     "register",
     "unregister",
+    "enqueue-mapping-cleanup",
     "stop",
     "discard",
     "release",

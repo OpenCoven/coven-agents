@@ -60,10 +60,11 @@ type DirectoryState = {
    * it belongs to, so the mapping has to live somewhere both can reach.
    */
   runs?: Record<string, string>;
+  pendingUnregisters?: Record<string, string>;
 };
 
 type YoloAgentState = {
-  admissionReported?: Record<string, true>;
+  admissionTokens?: Record<string, string>;
   definition: AgentDefinition | null;
   identityTokens?: Record<string, string>;
   runs: CloudRunRecord[];
@@ -132,9 +133,14 @@ export function toRunResult(record: CloudRunRecord): RunResult {
 }
 
 export class AgentDirectory extends Agent<Env, DirectoryState> {
-  initialState: DirectoryState = { agents: [], runs: {} };
+  initialState: DirectoryState = {
+    agents: [],
+    pendingUnregisters: {},
+    runs: {},
+  };
 
   list(tenantId: string): AgentDefinition[] {
+    this.drainPendingUnregisters();
     return this.state.agents
       .filter((agent) => tenantOf(agent) === tenantId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -182,6 +188,7 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
   }
 
   unregisterRun(runId: string, agentId: string): boolean {
+    this.drainPendingUnregisters();
     const runs = this.state.runs ?? {};
     if (!Object.hasOwn(runs, runId) || runs[runId] !== agentId) {
       return false;
@@ -193,11 +200,39 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
   }
 
   lookupRun(runId: string): string | null {
+    this.drainPendingUnregisters();
     // Own-property check: a run id of "constructor" or "__proto__" would
     // otherwise resolve to something off Object.prototype and be treated as an
     // agent id.
     const runs = this.state.runs ?? {};
     return Object.hasOwn(runs, runId) ? (runs[runId] ?? null) : null;
+  }
+
+  enqueueRunMappingCleanup(runId: string, agentId: string): void {
+    this.setState({
+      ...this.state,
+      pendingUnregisters: {
+        ...(this.state.pendingUnregisters ?? {}),
+        [runId]: agentId,
+      },
+    });
+  }
+
+  private drainPendingUnregisters(): void {
+    const pending = this.state.pendingUnregisters ?? {};
+    const entries = Object.entries(pending);
+    if (entries.length === 0) {
+      return;
+    }
+    const runs = { ...(this.state.runs ?? {}) };
+    const remaining = { ...pending };
+    for (const [runId, agentId] of entries) {
+      if (runs[runId] === agentId) {
+        delete runs[runId];
+      }
+      delete remaining[runId];
+    }
+    this.setState({ ...this.state, pendingUnregisters: remaining, runs });
   }
 
   harnesses(): Promise<HarnessStatus[]> {
@@ -212,12 +247,13 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
 
 export class YoloAgent extends Agent<Env, YoloAgentState> {
   initialState: YoloAgentState = {
-    admissionReported: {},
+    admissionTokens: {},
     definition: null,
     identityTokens: {},
     runs: [],
   };
   private readonly admissionReleaseInFlight = new Map<string, Promise<void>>();
+  private readonly admissionReleaseCompleted = new Set<string>();
 
   configure(definition: AgentDefinition): AgentDefinition {
     const parsed = agentDefinitionSchema.parse(definition);
@@ -641,7 +677,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    * record active before this RPC, and a terminal callback in `finally`
    * releases that capacity even when the harness throws.
    */
-  async startAdmitted(runId: string): Promise<boolean> {
+  async startAdmitted(runId: string, dispatchToken?: string): Promise<boolean> {
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
@@ -653,6 +689,15 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       throw new Error("Queued run identity is unavailable.");
     }
     const definition = this.requireDefinition();
+    if (dispatchToken) {
+      this.setState({
+        ...this.state,
+        admissionTokens: {
+          ...(this.state.admissionTokens ?? {}),
+          [runId]: dispatchToken,
+        },
+      });
+    }
     const claimed = this.claimRunStart(record);
     try {
       const receipt = await this.startFiber(
@@ -667,7 +712,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
               fiber.signal
             );
           } finally {
-            await this.reportAdmissionTerminal(runId);
+            if (fiber.signal.aborted) {
+              await this.destroyAgentSandbox(definition);
+            }
+            await this.reportAdmissionTerminal(runId, dispatchToken);
           }
         },
         {
@@ -681,13 +729,13 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
             runId,
             new Error("An existing cloud run fiber was no longer active.")
           );
-          await this.reportAdmissionTerminal(runId);
+          await this.reportAdmissionTerminal(runId, dispatchToken);
         }
         return false;
       }
     } catch (error) {
       await this.failRunAfterDispatchError(runId, error);
-      await this.reportAdmissionTerminal(runId);
+      await this.reportAdmissionTerminal(runId, dispatchToken);
       throw error;
     }
     return true;
@@ -717,8 +765,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         status: "error",
       };
     }
+    await this.destroyAgentSandbox();
     if (isTerminal(current.run.status)) {
-      await this.reportAdmissionTerminal(runId);
+      await this.reportAdmissionTerminal(
+        runId,
+        this.state.admissionTokens?.[runId]
+      );
       if (current.run.status === "cancelled") {
         return {
           reason: "Run was cancelled before recovery.",
@@ -743,7 +795,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         updatedAt: recovered.run.completedAt ?? new Date().toISOString(),
       });
     }
-    await this.reportAdmissionTerminal(runId);
+    await this.reportAdmissionTerminal(
+      runId,
+      this.state.admissionTokens?.[runId]
+    );
     return {
       error: recovered.run.error?.message ?? "Cloud run was interrupted.",
       status: "error",
@@ -869,6 +924,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
 
     await this.cancelFiberByKey(cloudFiberKey(runId), "Cancelled by operator.");
+    await this.destroyAgentSandbox();
     const current = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
@@ -876,7 +932,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       return null;
     }
     if (isTerminal(current.run.status)) {
-      await this.reportAdmissionTerminal(runId);
+      await this.reportAdmissionTerminal(
+        runId,
+        this.state.admissionTokens?.[runId]
+      );
       return current.run;
     }
     const cancelled = finishCloudRunRecord(current, {
@@ -890,7 +949,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       status: "cancelled",
     });
     if (this.persistRun(cancelled)) {
-      await this.reportAdmissionTerminal(runId);
+      await this.reportAdmissionTerminal(
+        runId,
+        this.state.admissionTokens?.[runId]
+      );
       this.updateDefinition({
         status: "idle",
         updatedAt: cancelled.run.completedAt ?? new Date().toISOString(),
@@ -901,7 +963,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       (candidate) => candidate.run.id === runId
     );
     if (latest) {
-      await this.reportAdmissionTerminal(runId);
+      await this.reportAdmissionTerminal(
+        runId,
+        this.state.admissionTokens?.[runId]
+      );
       return latest.run;
     }
     return null;
@@ -1096,6 +1161,27 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     return Promise.resolve({ status: "completed" });
   }
 
+  private async destroyAgentSandbox(
+    definition = this.requireDefinition()
+  ): Promise<void> {
+    let failure: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: Retries must be ordered to bound cleanup.
+        await getSandbox(
+          this.env.Sandbox,
+          await sandboxKey(tenantOf(definition), definition.id)
+        ).destroy();
+        return;
+      } catch (error) {
+        failure = error;
+      }
+    }
+    throw failure instanceof Error
+      ? failure
+      : new Error("Agent sandbox cleanup failed.");
+  }
+
   async decommission(): Promise<void> {
     const { definition } = this.state;
     if (definition) {
@@ -1155,14 +1241,17 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     return true;
   }
 
-  private async reportAdmissionTerminal(runId: string): Promise<void> {
+  private async reportAdmissionTerminal(
+    runId: string,
+    dispatchToken?: string
+  ): Promise<void> {
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
     if (!record || !isTerminal(record.run.status)) {
       return;
     }
-    if (this.state.admissionReported?.[runId]) {
+    if (this.admissionReleaseCompleted.has(runId)) {
       return;
     }
     const inFlight = this.admissionReleaseInFlight.get(runId);
@@ -1175,17 +1264,32 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         ([candidate]) => candidate !== runId
       )
     );
+    const token = dispatchToken ?? this.state.admissionTokens?.[runId];
     this.setState({ ...this.state, identityTokens });
     const release = (async () => {
       try {
-        await this.env.RunAdmission.getByName("deployment").release(runId);
-        this.setState({
-          ...this.state,
-          admissionReported: {
-            ...(this.state.admissionReported ?? {}),
-            [runId]: true,
-          },
-        });
+        const released = await this.env.RunAdmission.getByName(
+          "deployment"
+        ).release(runId, token);
+        if (released || !token) {
+          this.admissionReleaseCompleted.add(runId);
+          const retainedRunIds = new Set(
+            this.state.runs.map((candidate) => candidate.run.id)
+          );
+          for (const completedRunId of this.admissionReleaseCompleted) {
+            if (!retainedRunIds.has(completedRunId)) {
+              this.admissionReleaseCompleted.delete(completedRunId);
+            }
+          }
+          this.setState({
+            ...this.state,
+            admissionTokens: Object.fromEntries(
+              Object.entries(this.state.admissionTokens ?? {}).filter(
+                ([candidate]) => candidate !== runId
+              )
+            ),
+          });
+        }
       } catch {
         // The admission alarm reconciles an active record if this callback fails.
       } finally {
