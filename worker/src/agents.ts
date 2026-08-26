@@ -78,6 +78,7 @@ type YoloAgentState = {
 
 const WARM_FIBER_KEY = "warm";
 const MAX_LEGACY_ADMISSION_FENCE_TOKENS = 32;
+const MAX_ADMISSION_FENCE_TOMBSTONES = 128;
 
 function dispatchGeneration(dispatchToken: string): number | undefined {
   const prefix = dispatchToken.match(/^([1-9]\d*):/u)?.[1];
@@ -99,9 +100,15 @@ function normalizeAdmissionFence(
 
 function rejectsAdmissionToken(
   fence: AdmissionFence | string[] | undefined,
-  dispatchToken: string
+  dispatchToken?: string
 ): boolean {
   const normalized = normalizeAdmissionFence(fence);
+  if (normalized.generation !== undefined && !dispatchToken) {
+    return true;
+  }
+  if (!dispatchToken) {
+    return false;
+  }
   const generation = dispatchGeneration(dispatchToken);
   if (
     normalized.generation !== undefined &&
@@ -723,13 +730,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
-    if (!record || isTerminal(record.run.status)) {
-      return false;
-    }
     if (
-      dispatchToken &&
       rejectsAdmissionToken(this.state.admissionFences?.[runId], dispatchToken)
     ) {
+      return false;
+    }
+    if (!record || isTerminal(record.run.status)) {
       return false;
     }
     if (
@@ -821,7 +827,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
-    if (record?.run.status !== "queued") {
+    if (record && record.run.status !== "queued") {
       return false;
     }
     const existing = normalizeAdmissionFence(
@@ -855,12 +861,22 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
     this.setState({
       ...this.state,
-      admissionFences: {
+      admissionFences: this.pruneAdmissionFences({
         ...(this.state.admissionFences ?? {}),
         [runId]: nextFence,
-      },
+      }),
     });
     return true;
+  }
+
+  private pruneAdmissionFences(
+    fences: Record<string, AdmissionFence | string[]>
+  ): Record<string, AdmissionFence | string[]> {
+    const entries = Object.entries(fences);
+    if (entries.length <= MAX_ADMISSION_FENCE_TOMBSTONES) {
+      return fences;
+    }
+    return Object.fromEntries(entries.slice(-MAX_ADMISSION_FENCE_TOMBSTONES));
   }
 
   async onFiberRecovered(

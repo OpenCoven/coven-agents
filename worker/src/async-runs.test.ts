@@ -168,6 +168,68 @@ test("a durable admission fence rejects a delayed token but permits the next cla
   assert.equal(fiberLog.started.length, 1);
 });
 
+test("an absent run still records a durable fence tombstone", async () => {
+  const yolo = agent();
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Missing run." },
+    "3f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90",
+    "hash-absent",
+    "identity"
+  );
+  const state = Reflect.get(yolo, "state") as {
+    definition: AgentDefinition | null;
+    identityTokens?: Record<string, string>;
+    runs: CloudRunRecord[];
+  };
+  const current = state.runs.find(
+    (candidate) => candidate.run.id === queued.run.id
+  );
+  assert.ok(current);
+  yolo.setState({
+    ...state,
+    runs: [],
+  });
+
+  assert.equal(await yolo.fenceAdmitted(queued.run.id, "4:old"), true);
+
+  const fencedState = Reflect.get(yolo, "state") as typeof state;
+  yolo.setState({
+    ...fencedState,
+    runs: [
+      {
+        ...current,
+        run: { ...current.run, status: "queued" },
+      },
+    ],
+  });
+  assert.equal(await yolo.startAdmitted(queued.run.id, "4:late"), false);
+  assert.equal(await yolo.startAdmitted(queued.run.id, "5:new"), true);
+});
+
+test("admission fence tombstones remain bounded", () => {
+  const yolo = agent();
+  const state = Reflect.get(yolo, "state") as {
+    definition: AgentDefinition | null;
+    identityTokens?: Record<string, string>;
+    runs: CloudRunRecord[];
+  };
+
+  for (let index = 0; index < 160; index += 1) {
+    assert.equal(
+      yolo.fenceAdmitted(`absent-${index}`, `${index + 1}:old`),
+      true
+    );
+  }
+
+  const fencedState = Reflect.get(yolo, "state") as typeof state & {
+    admissionFences?: Record<string, unknown>;
+  };
+  assert.ok(
+    Object.keys(fencedState.admissionFences ?? {}).length <= 128,
+    "absent-run fence tombstones must have a hard bound"
+  );
+});
+
 test("missing admitted identity does not consume the agent slot", async () => {
   const yolo = agent();
   const queued = await yolo.enqueue(

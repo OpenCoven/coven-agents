@@ -600,6 +600,71 @@ test("expired dispatch fencing rejects delayed A before re-dispatching B", async
   }
 });
 
+test("an expired tokenless admission gets a compatibility fence before requeue", async () => {
+  const originalNow = Date.now;
+  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  Date.now = () => now;
+  try {
+    const fencedTokens: string[] = [];
+    const dispatchTokens: (string | undefined)[] = [];
+    let dispatches = 0;
+    const harness = runAdmissionHarness(
+      () => ({
+        fenceAdmitted: (_runId, dispatchToken) => {
+          fencedTokens.push(dispatchToken);
+          return Promise.resolve(true);
+        },
+        getRun: () => ({ status: "queued" }),
+        startAdmitted: (_runId, dispatchToken) => {
+          dispatches += 1;
+          dispatchTokens.push(dispatchToken);
+          return Promise.resolve(dispatches === 1);
+        },
+        stop: () => Promise.resolve(null),
+      }),
+      {
+        RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+        RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+      }
+    );
+
+    assert.deepEqual(await harness.admission.admit(request(77)), {
+      kind: "active",
+      runId: "run-77",
+    });
+    await Promise.all(harness.background);
+    harness.sql.exec(
+      `
+        UPDATE admission_records
+        SET dispatch_token = NULL,
+            dispatch_lease_until = ?
+        WHERE run_id = ?
+      `,
+      new Date(now - 1).toISOString(),
+      "run-77"
+    );
+
+    await harness.admission.alarm();
+
+    assert.equal(fencedTokens.length, 2);
+    assert.match(fencedTokens[0] ?? "", /^[2-9]\d*:compat-/u);
+    assert.ok(dispatchTokens[0]);
+    assert.ok(dispatchTokens[1]);
+    assert.notEqual(dispatchTokens[0], dispatchTokens[1]);
+    assert.equal(
+      dispatches,
+      2,
+      "recovery must issue only one replacement dispatch"
+    );
+    assert.equal(
+      (await harness.admission.getRecord("run-77"))?.state,
+      "queued"
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test("a fence that loses to A starting retains the active claim and does not issue B", async () => {
   const originalNow = Date.now;
   let now = Date.parse("2026-08-26T00:00:00.000Z");
@@ -1330,7 +1395,12 @@ test("alarm schedules a new cleanup retry after its prior alarm has fired", asyn
 });
 
 test("missing active agent runs are reconciled so capacity is released", async () => {
+  const fencedTokens: string[] = [];
   const harness = runAdmissionHarness(() => ({
+    fenceAdmitted: (_runId, dispatchToken) => {
+      fencedTokens.push(dispatchToken);
+      return Promise.resolve(true);
+    },
     getRun: () => null,
     startAdmitted: async () => true,
     stop: async () => null,
@@ -1346,6 +1416,8 @@ test("missing active agent runs are reconciled so capacity is released", async (
     (await harness.admission.getRecord("run-33"))?.state,
     "terminal"
   );
+  assert.equal(fencedTokens.length, 1);
+  assert.match(fencedTokens[0] ?? "", /^[1-9]\d*:/u);
 });
 
 test("alarm repairs a missed terminal completion callback", async () => {

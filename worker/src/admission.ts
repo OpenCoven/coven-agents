@@ -1011,18 +1011,30 @@ export class RunAdmission extends DurableObject<Env> {
       if (!this.dispatchTokenMatches(record.runId, record.dispatchToken)) {
         return "ambiguous";
       }
-      if (!run || isTerminal(run.status)) {
+      if (!run) {
+        const fenceToken = await this.fenceDispatch(record);
+        if (
+          !fenceToken ||
+          !this.dispatchTokenMatches(record.runId, fenceToken)
+        ) {
+          return "ambiguous";
+        }
+        this.terminalizeRecord(record.runId, fenceToken);
+        return "terminal";
+      }
+      if (isTerminal(run.status)) {
         this.terminalizeRecord(record.runId, record.dispatchToken);
         return "terminal";
       }
       if (run.status === "queued") {
-        if (!(await this.fenceDispatch(record))) {
+        const fenceToken = await this.fenceDispatch(record);
+        if (!fenceToken) {
           return "ambiguous";
         }
-        if (!this.dispatchTokenMatches(record.runId, record.dispatchToken)) {
+        if (!this.dispatchTokenMatches(record.runId, fenceToken)) {
           return "ambiguous";
         }
-        this.requeueRecord(record.runId, record.dispatchToken);
+        this.requeueRecord(record.runId, fenceToken);
         return "requeued";
       }
       if (run.status === "running") {
@@ -1329,20 +1341,21 @@ export class RunAdmission extends DurableObject<Env> {
         if (!leaseExpired) {
           return "ambiguous";
         }
+        const fenceToken = await this.fenceDispatch(record);
+        if (
+          !fenceToken ||
+          !this.dispatchTokenMatches(record.runId, fenceToken)
+        ) {
+          return "ambiguous";
+        }
         if (leaseUntil !== null) {
           // An absent run is safe to retry only while this record still has
           // its dispatch claim. Once acceptance was recorded, absence is a
           // lost terminal run and must not be dispatched again.
-          if (!(await this.fenceDispatch(record))) {
-            return "ambiguous";
-          }
-          if (!this.dispatchTokenMatches(record.runId, record.dispatchToken)) {
-            return "ambiguous";
-          }
-          this.requeueRecord(record.runId, record.dispatchToken);
+          this.requeueRecord(record.runId, fenceToken);
           return "requeued";
         }
-        this.terminalizeRecord(record.runId, record.dispatchToken);
+        this.terminalizeRecord(record.runId, fenceToken);
         return "terminal";
       }
       if (run.status === "running") {
@@ -1354,13 +1367,14 @@ export class RunAdmission extends DurableObject<Env> {
         return "terminal";
       }
       if (run.status === "queued" && leaseExpired) {
-        if (!(await this.fenceDispatch(record))) {
+        const fenceToken = await this.fenceDispatch(record);
+        if (!fenceToken) {
           return "ambiguous";
         }
-        if (!this.dispatchTokenMatches(record.runId, record.dispatchToken)) {
+        if (!this.dispatchTokenMatches(record.runId, fenceToken)) {
           return "ambiguous";
         }
-        this.requeueRecord(record.runId, record.dispatchToken);
+        this.requeueRecord(record.runId, fenceToken);
         return "requeued";
       }
       return "ambiguous";
@@ -1388,18 +1402,47 @@ export class RunAdmission extends DurableObject<Env> {
     }
   }
 
-  private async fenceDispatch(record: StoredAdmissionRecord): Promise<boolean> {
-    if (!record.dispatchToken) {
+  private async fenceDispatch(
+    record: StoredAdmissionRecord
+  ): Promise<string | false> {
+    const dispatchToken =
+      record.dispatchToken ?? this.createCompatibilityDispatchToken(record);
+    if (!dispatchToken) {
       return false;
     }
     try {
-      return await this.env.YoloAgent.getByName(record.agentId).fenceAdmitted(
-        record.runId,
-        record.dispatchToken
-      );
+      const fenced = await this.env.YoloAgent.getByName(
+        record.agentId
+      ).fenceAdmitted(record.runId, dispatchToken);
+      return fenced ? dispatchToken : false;
     } catch {
       return false;
     }
+  }
+
+  private createCompatibilityDispatchToken(
+    record: StoredAdmissionRecord
+  ): string | undefined {
+    const generation = this.readNextDispatchGeneration();
+    const dispatchToken = `${generation}:compat-${crypto.randomUUID()}`;
+    this.writeMetaValue(
+      NEXT_DISPATCH_GENERATION_META_KEY,
+      String(generation + 1)
+    );
+    this.ctx.storage.sql.exec(
+      `
+        UPDATE admission_records
+        SET dispatch_token = ?
+        WHERE run_id = ?
+          AND state = 'active'
+          AND dispatch_token IS NULL
+      `,
+      dispatchToken,
+      record.runId
+    );
+    return this.dispatchTokenMatches(record.runId, dispatchToken)
+      ? dispatchToken
+      : undefined;
   }
 
   private decisionForStoredRecord(
