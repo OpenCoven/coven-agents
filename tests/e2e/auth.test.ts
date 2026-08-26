@@ -1,6 +1,13 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, type Route, test } from "@playwright/test";
 
 test.describe("Authentication Pages", () => {
+  test.use({
+    storageState: {
+      cookies: [],
+      origins: [],
+    },
+  });
+
   test("login offers GitHub-only guest account creation", async ({ page }) => {
     await page.goto("/login");
     await expect(
@@ -29,13 +36,7 @@ test.describe("Authentication Pages", () => {
       releaseAuthResponse = resolve;
     });
 
-    await mockGitHubAuthSupport(page);
-    await page.route("**/api/auth/signin/github*", async (route) => {
-      if (route.request().method() !== "POST") {
-        await route.continue();
-        return;
-      }
-
+    const authRequests = await mockGitHubAuthSupport(page, async (route) => {
       signInAttempts += 1;
       await authResponseReady;
       await route.fulfill({
@@ -60,6 +61,13 @@ test.describe("Authentication Pages", () => {
 
     await githubButton.click();
     await expect.poll(() => signInAttempts).toBe(1);
+    await expect
+      .poll(() => authRequests)
+      .toEqual([
+        "GET /api/auth/providers",
+        "GET /api/auth/csrf",
+        "POST /api/auth/signin/github?",
+      ]);
     await expect(githubButton).toBeDisabled();
     await githubButton.evaluate((button) =>
       (button as HTMLButtonElement).click()
@@ -89,8 +97,7 @@ test.describe("Authentication Pages", () => {
     const authorizationUrl =
       "https://github.com/login/oauth/authorize?client_id=test-client";
 
-    await mockGitHubAuthSupport(page);
-    await page.route("**/api/auth/signin/github*", async (route) => {
+    const authRequests = await mockGitHubAuthSupport(page, async (route) => {
       await route.fulfill({ json: { url: authorizationUrl } });
     });
     await page.route(authorizationUrl, async (route) => {
@@ -103,6 +110,13 @@ test.describe("Authentication Pages", () => {
     await page.goto("/login");
     await page.getByRole("button", { name: "Continue with GitHub" }).click();
 
+    await expect
+      .poll(() => authRequests)
+      .toEqual([
+        "GET /api/auth/providers",
+        "GET /api/auth/csrf",
+        "POST /api/auth/signin/github?",
+      ]);
     await expect(page).toHaveURL(authorizationUrl);
     await expect(page).toHaveTitle("GitHub authorization");
   });
@@ -113,22 +127,68 @@ test.describe("Authentication Pages", () => {
   });
 });
 
-async function mockGitHubAuthSupport(page: Page) {
-  await page.route("**/api/auth/providers", async (route) => {
-    const { origin } = new URL(route.request().url());
-    await route.fulfill({
-      json: {
-        github: {
-          callbackUrl: `${origin}/api/auth/callback/github`,
-          id: "github",
-          name: "GitHub",
-          signinUrl: `${origin}/api/auth/signin/github`,
-          type: "oauth",
+async function mockGitHubAuthSupport(
+  page: Page,
+  handleSignIn: (route: Route) => Promise<void>
+) {
+  const authRequests: string[] = [];
+
+  await page.route("**/api/auth/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const requestName = `${request.method()} ${url.pathname}`;
+
+    if (requestName === "GET /api/auth/session") {
+      await route.fulfill({
+        body: "null",
+        contentType: "application/json",
+      });
+      return;
+    }
+
+    if (requestName === "GET /api/auth/providers") {
+      authRequests.push(requestName);
+      await route.fulfill({
+        json: {
+          github: {
+            callbackUrl: `${url.origin}/api/auth/callback/github`,
+            id: "github",
+            name: "GitHub",
+            signinUrl: `${url.origin}/api/auth/signin/github`,
+            type: "oauth",
+          },
         },
-      },
-    });
+      });
+      return;
+    }
+
+    if (requestName === "GET /api/auth/csrf") {
+      authRequests.push(requestName);
+      await route.fulfill({ json: { csrfToken: "test-csrf-token" } });
+      return;
+    }
+
+    if (
+      requestName === "POST /api/auth/signin/github" &&
+      request.url().endsWith("/api/auth/signin/github?")
+    ) {
+      authRequests.push(`${requestName}?`);
+      expect(request.headers()["content-type"]).toContain(
+        "application/x-www-form-urlencoded"
+      );
+      expect(request.headers()["x-auth-return-redirect"]).toBe("1");
+      expect(
+        Object.fromEntries(new URLSearchParams(request.postData() ?? ""))
+      ).toEqual({
+        callbackUrl: "/",
+        csrfToken: "test-csrf-token",
+      });
+      await handleSignIn(route);
+      return;
+    }
+
+    throw new Error(`Unexpected NextAuth request: ${request.method()} ${url}`);
   });
-  await page.route("**/api/auth/csrf", async (route) => {
-    await route.fulfill({ json: { csrfToken: "test-csrf-token" } });
-  });
+
+  return authRequests;
 }
