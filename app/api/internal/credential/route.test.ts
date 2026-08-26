@@ -5,6 +5,10 @@ import {
   tenantHashForReservation,
 } from "@/lib/billing/run-reservations";
 import {
+  CapReachedError,
+  fetchTenantCredential,
+} from "@/worker/src/tenant-credentials";
+import {
   authorizeInternalRequest,
   type CredentialLendingDependencies,
   lendCredentialWithReservation,
@@ -90,6 +94,7 @@ function lendingInput(
     globalDailyCap: "500",
     harnessId: "claude",
     keySecret: "fixed-test-abuse-key-secret",
+    now: NOW,
     periodStart: PERIOD_START,
     resetsAt: RESETS_AT,
     runId: "run-1",
@@ -177,25 +182,96 @@ test("tenant cap refusals are stable and do not read a credential", async () => 
     (["tenant_daily_cap", "tenant_monthly_cap"] as const).map(
       async (reason) => {
         const events: string[] = [];
+        const cap = reason === "tenant_daily_cap" ? 50 : 750;
         const response = await lendCredentialWithReservation(
           lendingInput(),
           lendingDependencies(events, {
             reserve: () => {
               events.push("reserve");
-              return Promise.resolve({ kind: "refused", reason });
+              return Promise.resolve({
+                cap,
+                kind: "refused",
+                reason,
+                used: cap,
+              });
             },
           })
         );
 
         assert.equal(response.status, 429);
         assert.deepEqual(await response.json(), {
+          cap,
           error: "cap_reached",
           reason,
-          resetsAt: RESETS_AT.toISOString(),
+          resetsAt:
+            reason === "tenant_daily_cap"
+              ? "2026-08-26T00:00:00.000Z"
+              : RESETS_AT.toISOString(),
+          used: cap,
         });
         assert.deepEqual(events, ["reserve"]);
       }
     )
+  );
+});
+
+test("tenant cap payloads round-trip through the worker contract", async () => {
+  const cases = [
+    {
+      cap: 50,
+      reason: "tenant_daily_cap",
+      resetsAt: "2026-08-26T00:00:00.000Z",
+      used: 50,
+    },
+    {
+      cap: 750,
+      reason: "tenant_monthly_cap",
+      resetsAt: RESETS_AT.toISOString(),
+      used: 750,
+    },
+  ] as const;
+
+  await Promise.all(
+    cases.map(async (expected) => {
+      const events: string[] = [];
+      const input = {
+        ...lendingInput(),
+        now: NOW,
+      };
+
+      await assert.rejects(
+        () =>
+          fetchTenantCredential(
+            { harnessId: "claude", runId: "run-1", tenant: "tenant_acme" },
+            {
+              endpoint: "https://app.test",
+              fetchImpl: () =>
+                lendCredentialWithReservation(
+                  input,
+                  lendingDependencies(events, {
+                    reserve: () => {
+                      events.push("reserve");
+                      return Promise.resolve({
+                        cap: expected.cap,
+                        kind: "refused",
+                        reason: expected.reason,
+                        used: expected.used,
+                      } as never);
+                    },
+                  })
+                ),
+              identityToken: "identity",
+              serviceToken: "service",
+            }
+          ),
+        (error: unknown) =>
+          error instanceof CapReachedError &&
+          error.cap === expected.cap &&
+          error.used === expected.used &&
+          error.resetsAt === expected.resetsAt
+      );
+      assert.deepEqual(events, ["reserve"]);
+    })
   );
 });
 
@@ -216,12 +292,50 @@ test("global refusal exposes no global capacity number", async () => {
 
   assert.equal(response.status, 503);
   const body = await response.json();
-  assert.deepEqual(body, {
-    error: "capacity_unavailable",
-    reason: "global_daily_cap",
-  });
+  assert.deepEqual(body, { error: "capacity_unavailable" });
   assert.doesNotMatch(JSON.stringify(body), /500|globalDailyCap|capacity":/);
   assert.deepEqual(events, ["reserve"]);
+});
+
+test("global admission closure stays generic through the worker contract", async () => {
+  const events: string[] = [];
+  const fetchImpl = () =>
+    lendCredentialWithReservation(
+      { ...lendingInput(), now: NOW },
+      lendingDependencies(events, {
+        reserve: () => {
+          events.push("reserve");
+          return Promise.resolve({
+            kind: "refused",
+            reason: "global_daily_cap",
+          });
+        },
+      })
+    );
+
+  const response = await fetchImpl();
+  const body = await response.json();
+  assert.equal(response.status, 503);
+  assert.deepEqual(body, { error: "capacity_unavailable" });
+  assert.doesNotMatch(
+    JSON.stringify(body),
+    /"(?:cap|reason|used)"|global|500/i
+  );
+
+  await assert.rejects(
+    () =>
+      fetchTenantCredential(
+        { harnessId: "claude", runId: "run-1", tenant: "tenant_acme" },
+        {
+          endpoint: "https://app.test",
+          fetchImpl,
+          identityToken: "identity",
+          serviceToken: "service",
+        }
+      ),
+    (error: unknown) => !(error instanceof CapReachedError)
+  );
+  assert.deepEqual(events, ["reserve", "reserve"]);
 });
 
 test("a missing credential releases the reservation", async () => {

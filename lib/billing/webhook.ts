@@ -1,6 +1,10 @@
 import { graceExtension } from "./grace";
+import { periodStart } from "./period";
 
-export type SubscriptionUpdate = { subscribedUntil: Date } | null;
+export type SubscriptionUpdate = {
+  billingPeriodStart: Date;
+  subscribedUntil: Date;
+} | null;
 
 /**
  * What a Stripe event changes about `subscribedUntil`, if anything.
@@ -16,13 +20,22 @@ export type SubscriptionUpdate = { subscribedUntil: Date } | null;
 export function subscriptionUpdate(input: {
   billingReason: string;
   current: Date | null;
+  currentPeriodStart?: Date | null;
   periodEnd: Date | null;
+  periodStart?: Date | null;
   type: string;
 }): SubscriptionUpdate {
   if (input.type === "invoice.paid") {
     // No date means nothing to grant. Defaulting to "now plus a month" would
     // invent a subscription the invoice never described.
-    return input.periodEnd ? { subscribedUntil: input.periodEnd } : null;
+    const billingPeriodStart =
+      input.periodStart ?? periodStart(input.periodEnd);
+    return input.periodEnd && billingPeriodStart
+      ? {
+          billingPeriodStart,
+          subscribedUntil: input.periodEnd,
+        }
+      : null;
   }
 
   if (input.type === "invoice.payment_failed") {
@@ -36,7 +49,11 @@ export function subscriptionUpdate(input: {
       subscribedUntil: input.current,
     });
 
-    return extended ? { subscribedUntil: extended } : null;
+    const billingPeriodStart =
+      input.currentPeriodStart ?? periodStart(input.current);
+    return extended && billingPeriodStart
+      ? { billingPeriodStart, subscribedUntil: extended }
+      : null;
   }
 
   return null;

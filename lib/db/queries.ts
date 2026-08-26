@@ -136,6 +136,7 @@ export async function attachStripeCustomer(userId: string, customerId: string) {
 }
 
 export async function applySubscriptionUpdate(input: {
+  billingPeriodStart: Date;
   customerId: string;
   subscribedUntil: Date;
   userId: string;
@@ -144,6 +145,7 @@ export async function applySubscriptionUpdate(input: {
     return await db
       .update(user)
       .set({
+        billingPeriodStart: input.billingPeriodStart,
         stripeCustomerId: input.customerId,
         subscribedUntil: input.subscribedUntil,
       })

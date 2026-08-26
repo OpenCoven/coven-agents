@@ -37,7 +37,7 @@ export async function GET(request: Request) {
 
   const owner = await findUserById(session.user.id);
   const resetsAt = owner?.subscribedUntil ?? null;
-  const since = periodStart(resetsAt);
+  const since = periodStart(resetsAt, owner?.billingPeriodStart ?? null);
 
   if (!(resetsAt && since)) {
     return Response.json(

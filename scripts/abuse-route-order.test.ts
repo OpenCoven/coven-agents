@@ -417,8 +417,23 @@ test("run reservation migration creates pseudonymous atomic budgets", () => {
     migration,
     /"RunReservation_day_state_idx".*"periodDay".*"state"/s
   );
+  assert.match(
+    migration,
+    /"RunReservation_reserved_expiry_idx".*"expiresAt".*WHERE (?:"RunReservation"\.)?"state" = 'reserved'/s
+  );
+  assert.match(migration, /"RunUsage_countedAt_idx".*"countedAt"/s);
+  assert.match(
+    migration,
+    /"RunUsage_tenant_countedAt_idx".*"tenant".*"countedAt"/s
+  );
   assert.match(migration, /RunReservation_costUnits_positive/);
   assert.match(migration, /RunReservation_state_timestamps_valid/);
+
+  const snapshot = read("lib/db/migrations/meta/0007_snapshot.json");
+  assert.match(snapshot, /RunReservation_reserved_expiry_idx/);
+  assert.match(snapshot, /RunUsage_countedAt_idx/);
+  assert.match(snapshot, /RunUsage_tenant_countedAt_idx/);
+  assert.match(snapshot, /billingPeriodStart/);
 });
 
 test("database claims and reclaims idempotency records atomically", () => {

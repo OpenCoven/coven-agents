@@ -24,6 +24,8 @@ export const RUN_RESERVATION_TTL_MS = 5 * 60 * 1000;
 
 const SERIALIZABLE = { isolationLevel: "serializable" } as const;
 const SERIALIZATION_RETRIES = 5;
+const ERROR_CAUSE_DEPTH_LIMIT = 5;
+const RETRYABLE_POSTGRES_CODES = new Set(["23505", "40001", "40P01"]);
 
 export type RunReservationRecord = RunReservation;
 export type ReservationCapReason =
@@ -33,7 +35,13 @@ export type ReservationCapReason =
 
 export type ReserveRunResult =
   | { kind: "existing"; reservation: RunReservationRecord }
-  | { kind: "refused"; reason: ReservationCapReason }
+  | {
+      cap: number;
+      kind: "refused";
+      reason: "tenant_daily_cap" | "tenant_monthly_cap";
+      used: number;
+    }
+  | { kind: "refused"; reason: "global_daily_cap" }
   | { kind: "reserved"; reservation: RunReservationRecord };
 
 export interface RunReservationTransaction {
@@ -163,7 +171,8 @@ export function drizzleRunReservationDatabase(
                 .where(
                   and(
                     eq(runReservation.runId, runId),
-                    eq(runReservation.state, "reserved")
+                    eq(runReservation.state, "reserved"),
+                    gt(runReservation.expiresAt, consumedAt)
                   )
                 )
                 .returning();
@@ -266,12 +275,12 @@ export async function reserveRun(
   const tenantHash = tenantHashForReservation(input.tenant, input.keySecret);
 
   return await withSerializableRetry(database, async (tx) => {
+    await tx.releaseExpired(now);
+
     const existing = await tx.findByRunId(input.runId);
     if (existing) {
       return { kind: "existing", reservation: existing };
     }
-
-    await tx.releaseExpired(now);
 
     const tenantDailyUnits = await tx.activeUnits({
       now,
@@ -280,7 +289,12 @@ export async function reserveRun(
       tenantHash,
     });
     if (tenantDailyUnits + costUnits > tenantDailyCap) {
-      return { kind: "refused", reason: "tenant_daily_cap" };
+      return {
+        cap: tenantDailyCap,
+        kind: "refused",
+        reason: "tenant_daily_cap",
+        used: tenantDailyUnits,
+      };
     }
 
     const tenantMonthlyUnits = await tx.activeUnits({
@@ -290,7 +304,12 @@ export async function reserveRun(
       tenantHash,
     });
     if (tenantMonthlyUnits + costUnits > tenantMonthlyCap) {
-      return { kind: "refused", reason: "tenant_monthly_cap" };
+      return {
+        cap: tenantMonthlyCap,
+        kind: "refused",
+        reason: "tenant_monthly_cap",
+        used: tenantMonthlyUnits,
+      };
     }
 
     const globalDailyUnits = await tx.activeUnits({ now, periodDay });
@@ -326,6 +345,7 @@ export async function consumeRunReservation(
 > {
   const consumedAt = input.consumedAt ?? new Date();
   return await withSerializableRetry(database, async (tx) => {
+    await tx.releaseExpired(consumedAt);
     const reservation = await tx.markConsumed(
       input.runId,
       input.tenant,
@@ -458,12 +478,27 @@ async function withSerializableRetry<T>(
 }
 
 function isRetryableTransactionFailure(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error.code === "40001" || error.code === "23505")
-  );
+  const seen = new Set<object>();
+  let current = error;
+
+  for (let depth = 0; depth < ERROR_CAUSE_DEPTH_LIMIT; depth += 1) {
+    if (typeof current !== "object" || current === null || seen.has(current)) {
+      return false;
+    }
+    seen.add(current);
+
+    if (
+      "code" in current &&
+      typeof current.code === "string" &&
+      RETRYABLE_POSTGRES_CODES.has(current.code)
+    ) {
+      return true;
+    }
+
+    current = "cause" in current ? current.cause : undefined;
+  }
+
+  return false;
 }
 
 function validateReservationInput(input: {

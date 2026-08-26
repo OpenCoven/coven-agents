@@ -1,5 +1,5 @@
 {
-  "id": "9f5de2b3-660b-4c68-87d7-41fc584366fc",
+  "id": "d40e1d04-dd73-427d-9418-ea6d48192514",
   "prevId": "55b02008-079d-4d01-896e-771923301391",
   "version": "7",
   "dialect": "postgresql",
@@ -472,6 +472,22 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "RunReservation_reserved_expiry_idx": {
+          "name": "RunReservation_reserved_expiry_idx",
+          "columns": [
+            {
+              "expression": "expiresAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"RunReservation\".\"state\" = 'reserved'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -547,6 +563,42 @@
             }
           ],
           "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunUsage_countedAt_idx": {
+          "name": "RunUsage_countedAt_idx",
+          "columns": [
+            {
+              "expression": "countedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunUsage_tenant_countedAt_idx": {
+          "name": "RunUsage_tenant_countedAt_idx",
+          "columns": [
+            {
+              "expression": "tenant",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "countedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -815,6 +867,12 @@
       "name": "User",
       "schema": "",
       "columns": {
+        "billingPeriodStart": {
+          "name": "billingPeriodStart",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
         "createdAt": {
           "name": "createdAt",
           "type": "timestamp",

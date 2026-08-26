@@ -10,9 +10,20 @@
  * — which would shorten the period and undercount usage. Setting the day to 1
  * before changing the month is what keeps that roll from happening at all.
  */
-export function periodStart(subscribedUntil: Date | null): Date | null {
+export function periodStart(
+  subscribedUntil: Date | null,
+  authoritativeStart?: Date | null
+): Date | null {
   if (!subscribedUntil) {
     return null;
+  }
+
+  if (
+    authoritativeStart &&
+    !Number.isNaN(authoritativeStart.getTime()) &&
+    authoritativeStart < subscribedUntil
+  ) {
+    return new Date(authoritativeStart.getTime());
   }
 
   const start = new Date(subscribedUntil.getTime());

@@ -21,6 +21,7 @@ import type { StoredIdempotencyResponseEnvelope } from "../abuse/idempotency-res
 export const user = pgTable(
   "User",
   {
+    billingPeriodStart: timestamp("billingPeriodStart"),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
     email: varchar("email", { length: 64 }).notNull(),
     emailVerified: boolean("emailVerified").notNull().default(false),
@@ -221,6 +222,8 @@ export const runUsage = pgTable(
   },
   (table) => [
     uniqueIndex("RunUsage_tenant_run_idx").on(table.tenant, table.runId),
+    index("RunUsage_countedAt_idx").on(table.countedAt),
+    index("RunUsage_tenant_countedAt_idx").on(table.tenant, table.countedAt),
   ]
 );
 
@@ -264,6 +267,9 @@ export const runReservation = pgTable(
       table.periodMonth,
       table.state
     ),
+    index("RunReservation_reserved_expiry_idx")
+      .on(table.expiresAt)
+      .where(sql`${table.state} = 'reserved'`),
     check("RunReservation_costUnits_positive", sql`${table.costUnits} > 0`),
     check(
       "RunReservation_state_valid",

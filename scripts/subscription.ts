@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import { eq } from "drizzle-orm";
+import { periodStart } from "@/lib/billing/period";
 import { db } from "@/lib/db/queries";
 import { user } from "@/lib/db/schema";
 import { userTypeFor } from "@/lib/subscription";
@@ -66,7 +67,7 @@ async function main(): Promise<number> {
     const until = new Date(Date.now() + span * DAY_MS);
     await db
       .update(user)
-      .set({ subscribedUntil: until })
+      .set({ billingPeriodStart: periodStart(until), subscribedUntil: until })
       .where(eq(user.id, found.id));
     process.stdout.write(
       `${email}: subscriber until ${until.toISOString()}\nSign out and back in for an existing session to pick this up.\n`
@@ -77,7 +78,7 @@ async function main(): Promise<number> {
   if (command === "revoke") {
     await db
       .update(user)
-      .set({ subscribedUntil: null })
+      .set({ billingPeriodStart: null, subscribedUntil: null })
       .where(eq(user.id, found.id));
     process.stdout.write(`${email}: subscription revoked\n`);
     return 0;

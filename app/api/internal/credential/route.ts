@@ -9,6 +9,7 @@ import "server-only";
 import { importVerifyKey, verifyRunnerToken } from "@opencoven/agent-contracts";
 import { eq } from "drizzle-orm";
 import { requireNonemptyAbuseKeySecret } from "@/lib/abuse/config";
+import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
 import { periodStart } from "@/lib/billing/period";
 import {
   consumeRunReservation,
@@ -67,6 +68,7 @@ export async function lendCredentialWithReservation(
     globalDailyCap: string | undefined;
     harnessId: string;
     keySecret: string | undefined;
+    now?: Date;
     periodStart: Date;
     resetsAt: Date;
     runId: string;
@@ -85,11 +87,13 @@ export async function lendCredentialWithReservation(
     return Response.json({ error: "capacity_unavailable" }, { status: 503 });
   }
 
+  const now = input.now ?? new Date();
   let decision: Awaited<ReturnType<typeof dependencies.reserve>>;
   try {
     decision = await dependencies.reserve({
       globalDailyCap,
       keySecret,
+      now,
       periodStart: input.periodStart,
       runId: input.runId,
       tenant: input.tenant,
@@ -100,20 +104,20 @@ export async function lendCredentialWithReservation(
 
   if (decision.kind === "refused") {
     if (decision.reason === "global_daily_cap") {
-      return Response.json(
-        {
-          error: "capacity_unavailable",
-          reason: decision.reason,
-        },
-        { status: 503 }
-      );
+      return Response.json({ error: "capacity_unavailable" }, { status: 503 });
     }
 
+    const resetsAt =
+      decision.reason === "tenant_daily_cap"
+        ? nextUtcDay(now).toISOString()
+        : input.resetsAt.toISOString();
     return Response.json(
       {
+        cap: decision.cap,
         error: "cap_reached",
         reason: decision.reason,
-        resetsAt: input.resetsAt.toISOString(),
+        resetsAt,
+        used: decision.used,
       },
       { status: 429 }
     );
@@ -161,6 +165,12 @@ export async function lendCredentialWithReservation(
   }
 
   return Response.json({ credential }, { status: 200 });
+}
+
+function nextUtcDay(now: Date): Date {
+  return new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)
+  );
 }
 
 async function releaseAfterLendingFailure(
@@ -251,13 +261,15 @@ export async function POST(request: Request): Promise<Response> {
     .limit(1);
 
   const resetsAt = owner?.subscribedUntil ?? null;
-  const since = periodStart(resetsAt);
+  const since = periodStart(resetsAt, owner?.billingPeriodStart ?? null);
   if (!(resetsAt && since)) {
     return Response.json(
       {
+        cap: MONTHLY_RUN_CAP,
         error: "cap_reached",
         reason: "tenant_monthly_cap",
         resetsAt: null,
+        used: MONTHLY_RUN_CAP,
       },
       { status: 429 }
     );
