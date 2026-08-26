@@ -17,6 +17,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import type { ArtifactKind } from "@/components/chat/artifact";
 import type { VisibilityType } from "@/components/chat/visibility-selector";
+import { adminAccounts, adminOverview } from "@/lib/admin/directory";
 import type {
   IdempotencyClaimHandle,
   IdempotencyStore,
@@ -908,4 +909,13 @@ export async function getStreamIdsByChatId({ chatId }: { chatId: string }) {
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
   }
+}
+
+/** The Warden's fleet overview and account directory, owner-gated upstream. */
+export async function adminDirectory(days: number) {
+  const [overview, accounts] = await Promise.all([
+    adminOverview(db, days),
+    adminAccounts(db, days),
+  ]);
+  return { accounts, overview };
 }
