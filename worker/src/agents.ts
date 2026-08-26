@@ -449,6 +449,51 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     );
   }
 
+  private currentAdmittedStart(
+    runId: string,
+    dispatchToken: string | undefined,
+    lifecycleGeneration: number,
+    definitionId: string
+  ): CloudRunRecord | null {
+    if (
+      !this.lifecycleIsActive(lifecycleGeneration) ||
+      this.state.definition?.id !== definitionId ||
+      this.state.decommission
+    ) {
+      return null;
+    }
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (
+      current?.run.status !== "queued" ||
+      this.state.sandbox?.cleanup ||
+      this.hasOtherExecutionClaim(runId) ||
+      rejectsAdmissionToken(this.state.admissionFences?.[runId], dispatchToken)
+    ) {
+      return null;
+    }
+    return current;
+  }
+
+  private requireCurrentAdmittedStart(
+    runId: string,
+    dispatchToken: string | undefined,
+    lifecycleGeneration: number,
+    definitionId: string
+  ): CloudRunRecord {
+    const current = this.currentAdmittedStart(
+      runId,
+      dispatchToken,
+      lifecycleGeneration,
+      definitionId
+    );
+    if (!current) {
+      throw new AgentBusyError();
+    }
+    return current;
+  }
+
   private currentRunOr(
     runId: string,
     fallback: CloudRunRecord
@@ -1515,10 +1560,14 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (!(await this.repairPendingSandboxCleanup(definition))) {
       throw new AgentBusyError();
     }
-    if (!this.lifecycleIsActive(lifecycleGeneration)) {
+    if (
+      !this.lifecycleIsActive(lifecycleGeneration) ||
+      this.state.definition?.id !== definition.id ||
+      this.state.decommission
+    ) {
       throw new AgentBusyError();
     }
-    const record = this.state.runs.find(
+    let record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
     if (
@@ -1543,10 +1592,19 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (this.state.sandbox?.owner || this.state.sandbox?.cleanup) {
       await this.ensureSandboxAvailableForRun(definition, runId);
     }
+    record = this.requireCurrentAdmittedStart(
+      runId,
+      dispatchToken,
+      lifecycleGeneration,
+      definition.id
+    );
     if (dispatchToken) {
-      if (this.hasOtherExecutionClaim(runId)) {
-        throw new AgentBusyError();
-      }
+      record = this.requireCurrentAdmittedStart(
+        runId,
+        dispatchToken,
+        lifecycleGeneration,
+        definition.id
+      );
       const tokenized = { ...record, dispatchToken };
       this.persistRun(tokenized, { allowDispatchTokenReplacement: true });
       this.setState({
@@ -1556,9 +1614,13 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           [runId]: dispatchToken,
         },
       });
-    } else if (this.hasOtherExecutionClaim(runId)) {
-      throw new AgentBusyError();
     }
+    record = this.requireCurrentAdmittedStart(
+      runId,
+      dispatchToken,
+      lifecycleGeneration,
+      definition.id
+    );
     const claimed = this.claimRunStart(
       dispatchToken ? { ...record, dispatchToken } : record
     );

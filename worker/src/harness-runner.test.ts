@@ -268,6 +268,51 @@ test("a probe timeout does not claim the harness is missing", async (t) => {
   assert.equal(error?.code, "harness_timeout");
 });
 
+test("cancelling a never-resolving probe clears its deadline before cleanup", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const clearTimeout = t.mock.method(globalThis, "clearTimeout");
+  const controller = new AbortController();
+  let resolveProbe!: () => void;
+  const never = new Promise<never>((resolve) => {
+    resolveProbe = () => resolve(undefined as never);
+  });
+  let resolveDestroy!: () => void;
+  const sandbox = {
+    exec: () => never,
+  } as unknown as Parameters<typeof runHarnessInSandbox>[0]["sandbox"];
+
+  const run = runHarnessInSandbox({
+    credential: { credential: "token-under-test" },
+    destroySandbox: () =>
+      new Promise<void>((resolve) => {
+        resolveDestroy = resolve;
+      }),
+    instructions: "instructions",
+    model: "auto",
+    runtime: "copilot",
+    sandbox,
+    signal: controller.signal,
+    task: "task",
+  });
+  const outcome = run.then(
+    () => null,
+    (rejection: unknown) => rejection
+  );
+
+  controller.abort();
+  assert.equal(
+    clearTimeout.mock.callCount(),
+    1,
+    "cancellation must clear the probe deadline synchronously"
+  );
+  resolveDestroy();
+
+  const error = (await outcome) as { code?: string };
+  assert.equal(error?.code, "harness_cancelled");
+  resolveProbe();
+  await Promise.resolve();
+});
+
 test("a warm-up reports ready when the probe answers first try", async () => {
   const calls: Call[] = [];
   const sandbox = fakeSandbox(

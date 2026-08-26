@@ -264,6 +264,168 @@ test("a busy admitted dispatch is proven not started before its token is persist
   assert.deepEqual(destroyedSandboxes(), []);
 });
 
+test("a fenced and requeued dispatch cannot resume after sandbox ownership wait", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  let releaseCancellation!: () => void;
+  const cancellation = new Promise<void>((resolve) => {
+    releaseCancellation = resolve;
+  });
+  let cancellationStarted!: () => void;
+  const cancellationReady = new Promise<void>((resolve) => {
+    cancellationStarted = resolve;
+  });
+  const yolo = new (class extends YoloAgent {
+    override cancelFiberByKey(
+      idempotencyKey: string,
+      _reason?: string
+    ): Promise<boolean> {
+      if (idempotencyKey === "warm") {
+        cancellationStarted();
+        return cancellation.then(() => true);
+      }
+      return Promise.resolve(true);
+    }
+  })(undefined as never, {} as never);
+  yolo.configure(definition());
+
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Fenced while waiting." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90",
+    "hash-fenced-wait",
+    "identity"
+  );
+  const state = Reflect.get(yolo, "state") as {
+    definition: AgentDefinition | null;
+    dispatchClaims?: Record<string, string>;
+    identityTokens?: Record<string, string>;
+    lifecycle: {
+      generation: number;
+      status: "active" | "decommissioning" | "decommissioned";
+    };
+    runs: CloudRunRecord[];
+  };
+  const current = state.runs.find(
+    (candidate) => candidate.run.id === queued.run.id
+  );
+  assert.ok(current);
+  const dispatchToken = "1:fenced-wait";
+  yolo.setState({
+    ...state,
+    sandbox: { generation: 1, owner: "warm:waiting" },
+  } as never);
+
+  const starting = yolo.startAdmitted(queued.run.id, dispatchToken);
+  await cancellationReady;
+
+  assert.equal(yolo.fenceAdmitted(queued.run.id, dispatchToken), true);
+  assert.equal(yolo.requeueAdmitted(queued.run.id, dispatchToken), true);
+  releaseCancellation();
+
+  await assert.rejects(
+    () => starting,
+    (error: unknown) =>
+      error instanceof AgentBusyError && error.provenNotStarted === true
+  );
+  assert.equal(fiberLog.started.length, 0);
+  assert.equal(yolo.getRun(queued.run.id)?.status, "queued");
+  const after = Reflect.get(yolo, "state") as {
+    admissionTokens?: Record<string, string>;
+    dispatchClaims?: Record<string, string>;
+    runs: CloudRunRecord[];
+  };
+  const stillQueued = after.runs.find(
+    (candidate) => candidate.run.id === queued.run.id
+  );
+  assert.equal(stillQueued?.dispatchToken, undefined);
+  assert.equal(after.admissionTokens?.[queued.run.id], undefined);
+  assert.equal(after.dispatchClaims?.[queued.run.id], undefined);
+  assert.equal(destroyedSandboxes().length, 1);
+});
+
+test("decommission during sandbox ownership wait cannot let the old start mutate state", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  let releaseCancellation!: () => void;
+  const cancellation = new Promise<void>((resolve) => {
+    releaseCancellation = resolve;
+  });
+  let cancellationStarted!: () => void;
+  const cancellationReady = new Promise<void>((resolve) => {
+    cancellationStarted = resolve;
+  });
+  let warmCancellationCalls = 0;
+  const yolo = new (class extends YoloAgent {
+    override cancelFiberByKey(
+      idempotencyKey: string,
+      _reason?: string
+    ): Promise<boolean> {
+      const firstWarmCancellation =
+        idempotencyKey === "warm" && warmCancellationCalls === 0;
+      warmCancellationCalls += 1;
+      if (firstWarmCancellation) {
+        cancellationStarted();
+        return cancellation.then(() => true);
+      }
+      return Promise.resolve(true);
+    }
+  })(undefined as never, {} as never);
+  yolo.configure(definition());
+
+  const queued = await yolo.enqueue(
+    { operationId: OP_A, task: "Decommission while waiting." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c91",
+    "hash-decommission-wait",
+    "identity"
+  );
+  const state = Reflect.get(yolo, "state") as {
+    admissionTokens?: Record<string, string>;
+    definition: AgentDefinition | null;
+    runs: CloudRunRecord[];
+  };
+  const current = state.runs.find(
+    (candidate) => candidate.run.id === queued.run.id
+  );
+  assert.ok(current);
+  const dispatchToken = "1:decommission-wait";
+  yolo.setState({
+    ...state,
+    admissionTokens: {
+      ...(state.admissionTokens ?? {}),
+      [queued.run.id]: dispatchToken,
+    },
+    runs: [
+      { ...current, dispatchToken },
+      ...state.runs.filter((candidate) => candidate.run.id !== queued.run.id),
+    ],
+    sandbox: { generation: 1, owner: "warm:waiting" },
+  } as never);
+
+  const starting = yolo.startAdmitted(queued.run.id, dispatchToken);
+  await cancellationReady;
+  const startingOutcome = starting.then(
+    () => null,
+    (error: unknown) => error
+  );
+  const decommissioning = yolo.decommission();
+  releaseCancellation();
+
+  const [startError] = await Promise.all([startingOutcome, decommissioning]);
+  assert.ok(startError instanceof AgentBusyError);
+  assert.equal((startError as AgentBusyError).provenNotStarted, true);
+  assert.equal(fiberLog.started.length, 0);
+  assert.equal(yolo.snapshot(), null);
+  const after = Reflect.get(yolo, "state") as {
+    lifecycle: { status: string };
+    runs: CloudRunRecord[];
+  };
+  assert.equal(after.lifecycle.status, "decommissioned");
+  assert.deepEqual(after.runs, []);
+  assert.ok(destroyedSandboxes().length >= 1);
+});
+
 test("a durable admission fence rejects a delayed token but permits the next claim", async () => {
   const yolo = agent();
   const queued = await yolo.enqueue(

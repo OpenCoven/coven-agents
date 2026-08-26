@@ -51,45 +51,26 @@ type SandboxDestroy = () => Promise<void>;
  * until the sandbox is destroyed. The caller therefore owns the cleanup
  * decision: it must destroy successfully before releasing an active slot.
  */
-async function withDeadline<T>(
+async function withDeadlineAndCancellation<T>(
   work: Promise<T>,
-  ms: number,
-  label: string
+  options: {
+    destroySandbox?: SandboxDestroy;
+    label: string;
+    ms: number;
+    sandbox: SandboxLike;
+    signal?: AbortSignal;
+  }
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          reject(
-            new HarnessError(
-              `\`${label}\` exceeded ${Math.round(ms / 1000)}s inside the sandbox. The container may still be executing it; the run is failed so the agent is not wedged behind it.`,
-              "harness_timeout"
-            )
-          );
-        }, ms);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function withCancellation<T>(
-  work: Promise<T>,
-  sandbox: SandboxLike,
-  signal?: AbortSignal,
-  destroySandbox?: SandboxDestroy
-): Promise<T> {
-  if (!signal) {
-    return work;
-  }
+  let cancellationRequested = false;
+  let cancellation: Promise<never> | undefined;
+  let rejectAbort: (error: unknown) => void = () => undefined;
+  let onAbort: (() => void) | undefined;
   const abort = async (): Promise<never> => {
     try {
-      await (destroySandbox
-        ? destroySandbox()
-        : Promise.resolve(sandbox.destroy?.()));
+      await (options.destroySandbox
+        ? options.destroySandbox()
+        : Promise.resolve(options.sandbox.destroy?.()));
     } catch (error) {
       // biome-ignore lint/style/useErrorCause: HarnessError stores the cause through its typed constructor.
       throw new HarnessError(
@@ -105,31 +86,61 @@ async function withCancellation<T>(
       "harness_cancelled"
     );
   };
-  if (signal.aborted) {
-    return abort();
-  }
-  let rejectAbort!: (error: HarnessError) => void;
-  const aborted = new Promise<never>((_, reject) => {
-    rejectAbort = reject;
-  });
-  let cancellationRequested = false;
-  let cancellation: Promise<never> | undefined;
   const beginCancellation = () => {
     cancellation ??= abort();
     return cancellation;
   };
-  const onAbort = () => {
+  const aborted = options.signal
+    ? new Promise<never>((_, reject) => {
+        rejectAbort = reject;
+      })
+    : undefined;
+  onAbort = () => {
     cancellationRequested = true;
+    // Cancellation has won as soon as the signal fires. Clear the deadline
+    // before awaiting durable sandbox cleanup so a wedged operation cannot
+    // keep a timer handle alive behind the cancellation path.
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
     beginCancellation().catch(rejectAbort);
   };
-  signal.addEventListener("abort", onAbort, { once: true });
   try {
-    const guardedWork = work.then((value) =>
-      cancellationRequested ? beginCancellation() : value
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(
+          new HarnessError(
+            `\`${options.label}\` exceeded ${Math.round(options.ms / 1000)}s inside the sandbox. The container may still be executing it; the run is failed so the agent is not wedged behind it.`,
+            "harness_timeout"
+          )
+        );
+      }, options.ms);
+    });
+    if (options.signal && onAbort) {
+      options.signal.addEventListener("abort", onAbort, { once: true });
+      if (options.signal.aborted) {
+        onAbort();
+      }
+    }
+    const guardedWork = work.then(
+      (value) => (cancellationRequested ? beginCancellation() : value),
+      (error: unknown) =>
+        cancellationRequested ? beginCancellation() : Promise.reject(error)
     );
-    return await Promise.race([guardedWork, aborted]);
+    const candidates: Promise<T | never>[] = [guardedWork, deadline];
+    if (aborted) {
+      candidates.push(aborted);
+    }
+    return await Promise.race(candidates);
   } finally {
-    signal.removeEventListener("abort", onAbort);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+    if (options.signal && onAbort) {
+      options.signal.removeEventListener("abort", onAbort);
+    }
   }
 }
 
@@ -236,17 +247,17 @@ async function probeInstalled(
   destroySandbox?: SandboxDestroy
 ): Promise<{ installed: boolean; version: string | null }> {
   try {
-    const result = await withCancellation(
-      withDeadline(
-        sandbox.exec(`${spec.command} ${spec.versionArgs.join(" ")}`, {
-          timeout: PROBE_TIMEOUT_MS,
-        }),
-        PROBE_TIMEOUT_MS,
-        `${spec.command} --version`
-      ),
-      sandbox,
-      signal,
-      destroySandbox
+    const result = await withDeadlineAndCancellation(
+      sandbox.exec(`${spec.command} ${spec.versionArgs.join(" ")}`, {
+        timeout: PROBE_TIMEOUT_MS,
+      }),
+      {
+        destroySandbox,
+        label: `${spec.command} --version`,
+        ms: PROBE_TIMEOUT_MS,
+        sandbox,
+        signal,
+      }
     );
     if (!result.success) {
       return { installed: false, version: null };
@@ -449,15 +460,15 @@ export async function runHarnessInSandbox(options: {
     );
   }
 
-  await withCancellation(
-    withDeadline(
-      options.sandbox.exec(`mkdir -p ${cwd}`, { timeout: PROBE_TIMEOUT_MS }),
-      PROBE_TIMEOUT_MS,
-      "mkdir"
-    ),
-    options.sandbox,
-    options.signal,
-    options.destroySandbox
+  await withDeadlineAndCancellation(
+    options.sandbox.exec(`mkdir -p ${cwd}`, { timeout: PROBE_TIMEOUT_MS }),
+    {
+      destroySandbox: options.destroySandbox,
+      label: "mkdir",
+      ms: PROBE_TIMEOUT_MS,
+      sandbox: options.sandbox,
+      signal: options.signal,
+    }
   );
 
   const invocation = buildInvocation({
@@ -550,15 +561,17 @@ export async function runHarnessInSandbox(options: {
 
   let result: Awaited<typeof execution> | null;
   try {
-    result = await withCancellation(
-      withDeadline(
-        Promise.race([execution, finishedEarly]),
-        RUN_TIMEOUT_MS,
-        spec.command
+    result = await withDeadlineAndCancellation(
+      Promise.race([execution, finishedEarly]).finally(() =>
+        clearTimeout(graceTimer)
       ),
-      options.sandbox,
-      options.signal,
-      options.destroySandbox
+      {
+        destroySandbox: options.destroySandbox,
+        label: spec.command,
+        ms: RUN_TIMEOUT_MS,
+        sandbox: options.sandbox,
+        signal: options.signal,
+      }
     );
   } catch (error) {
     /**
@@ -593,7 +606,6 @@ export async function runHarnessInSandbox(options: {
   } finally {
     clearTimeout(graceTimer);
   }
-
   for (const line of assembler.flush()) {
     emit(line);
   }
