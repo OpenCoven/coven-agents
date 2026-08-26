@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AgentDefinition, RunnerClaims } from "@opencoven/agent-contracts";
 import {
+  AGENT_RUNNER_API_VERSION,
+  type AgentDefinition,
   base64UrlEncode,
+  type RunnerClaims,
   TOKEN_LIFETIME_SECONDS,
 } from "@opencoven/agent-contracts";
 import {
@@ -19,6 +21,22 @@ const CALLER_TENANT = "tenant_under_test";
 const RUN_ID = "11111111-2222-4333-8444-555555555555";
 /** A run owned by the caller, so the negative tests have a control. */
 const MY_RUN_ID = "22222222-3333-4444-8555-666666666666";
+
+class RecordingLimiter {
+  readonly keys: string[] = [];
+  private readonly result: { success: boolean } | Error;
+
+  constructor(result: { success: boolean } | Error = { success: true }) {
+    this.result = result;
+  }
+
+  limit(input: { key: string }): Promise<{ success: boolean }> {
+    this.keys.push(input.key);
+    return this.result instanceof Error
+      ? Promise.reject(this.result)
+      : Promise.resolve(this.result);
+  }
+}
 
 async function keyPair(): Promise<CryptoKeyPair> {
   return (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
@@ -85,7 +103,11 @@ function verifyKeySpki(): Promise<string> {
 const environmentPromise = verifyKeySpki().then((spki) => ({
   AGENT_CONTROL_TOKEN: TOKEN,
   ALLOWED_ORIGIN: "*",
+  EDGE_ABUSE_KEY_SECRET: "test-edge-abuse-secret",
+  EDGE_REQUEST_LIMITER: new RecordingLimiter(),
   RUNNER_VERIFY_KEY: spki,
+  TENANT_MUTATION_LIMITER: new RecordingLimiter(),
+  TENANT_RUN_LIMITER: new RecordingLimiter(),
 }));
 
 function definition(id: string, tenantId: string): AgentDefinition {
@@ -192,6 +214,159 @@ async function call(path: string, method = "GET"): Promise<Response> {
     environment as never
   );
 }
+
+test("source floods are refused before deployment-token verification", async () => {
+  const environment = await environmentPromise;
+  const edge = new RecordingLimiter({ success: false });
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      headers: { "cf-connecting-ip": "203.0.113.10" },
+    }),
+    { ...environment, EDGE_REQUEST_LIMITER: edge } as never
+  );
+
+  assert.equal(response.status, 429);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("retry-after"), "60");
+  const body = (await response.json()) as {
+    apiVersion: string;
+    error: { code: string; message: string; retryable: boolean };
+    requestId: string;
+  };
+  assert.deepEqual(
+    { apiVersion: body.apiVersion, error: body.error },
+    {
+      apiVersion: AGENT_RUNNER_API_VERSION,
+      error: {
+        code: "rate_limited",
+        message: "Too many requests. Try again later.",
+        retryable: true,
+      },
+    }
+  );
+  assert.equal(typeof body.requestId, "string");
+  assert.equal(edge.keys.length, 1);
+});
+
+test("missing Cloudflare IP metadata consumes the shared source bucket", async () => {
+  const environment = await environmentPromise;
+  const edge = new RecordingLimiter();
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents"),
+    { ...environment, EDGE_REQUEST_LIMITER: edge } as never
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(edge.keys.length, 1);
+});
+
+test("tenant mutations are refused after identity verification and before body parsing", async () => {
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const mutation = new RecordingLimiter({ success: false });
+  const run = new RecordingLimiter();
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      body: "not-json",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "cf-connecting-ip": "203.0.113.11",
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    {
+      ...environment,
+      TENANT_MUTATION_LIMITER: mutation,
+      TENANT_RUN_LIMITER: run,
+    } as never
+  );
+
+  assert.equal(response.status, 429);
+  assert.equal(mutation.keys.length, 1);
+  assert.equal(run.keys.length, 0);
+});
+
+test("paid run starts use the stricter tenant run limiter before body parsing", async () => {
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const mutation = new RecordingLimiter();
+  const run = new RecordingLimiter({ success: false });
+  const response = await runner().fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: "not-json",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "cf-connecting-ip": "203.0.113.12",
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    {
+      ...environment,
+      TENANT_MUTATION_LIMITER: mutation,
+      TENANT_RUN_LIMITER: run,
+    } as never
+  );
+
+  assert.equal(response.status, 429);
+  assert.equal(mutation.keys.length, 0);
+  assert.equal(run.keys.length, 1);
+});
+
+test("tenant reads consume no mutation or run capacity", async () => {
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const mutation = new RecordingLimiter();
+  const run = new RecordingLimiter();
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      headers: {
+        authorization: `Bearer ${token}`,
+        "cf-connecting-ip": "203.0.113.13",
+        "x-runner-token": TOKEN,
+      },
+    }),
+    {
+      ...environment,
+      TENANT_MUTATION_LIMITER: mutation,
+      TENANT_RUN_LIMITER: run,
+    } as never
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(mutation.keys.length, 0);
+  assert.equal(run.keys.length, 0);
+});
+
+test("limiter outages fail closed without revealing the failed scope", async () => {
+  const environment = await environmentPromise;
+  const response = await runner().fetch(
+    new Request("https://runner.test/api/agents", {
+      headers: { "cf-connecting-ip": "203.0.113.14" },
+    }),
+    {
+      ...environment,
+      EDGE_REQUEST_LIMITER: new RecordingLimiter(new Error("binding down")),
+    } as never
+  );
+
+  assert.equal(response.status, 503);
+  const body = (await response.json()) as {
+    error: { code: string; message: string };
+  };
+  assert.deepEqual(body.error, {
+    code: "abuse_control_unavailable",
+    message: "Please try again later.",
+    retryable: true,
+  });
+});
 
 test("a listing only contains the caller's own agents", async () => {
   const response = await call("/api/agents");
