@@ -1,7 +1,7 @@
 # Coven Agents
 
-**Coven Agents** is a local-cloud hybrid product control plane for creating
-bounded execution profiles and running coding missions. It is derived from
+**Coven Agents** is a cloud execution product control plane for creating bounded
+execution profiles and running coding missions. It is derived from
 [BunsDev/chatbot](https://github.com/BunsDev/chatbot) and keeps that template's
 Next.js, React, Tailwind, and shadcn/ui foundation.
 
@@ -89,7 +89,6 @@ Requirements:
 - Node.js 22 or newer
 - pnpm 10
 - Docker for local Cloudflare Sandbox development and deployment
-- At least one supported CLI for local runs (`copilot`, `codex`, or `claude`)
 
 ```bash
 pnpm install
@@ -178,9 +177,10 @@ curl -s -X POST \
 
 ## Harness execution
 
-Both backends run the same way: Coven Agents spawns an already-authenticated
-coding CLI — the *harness* — and translates its event stream into one normalized
-vocabulary. The control plane is never a model client, so it needs no provider
+The current cloud backend spawns an already-authenticated coding CLI — the
+*harness* — and translates its event stream into one normalized vocabulary. The
+previous local runner was removed, and the shared contract now accepts only
+`cloud`. The control plane is never a model client, so it needs no provider
 credential.
 
 - `packages/harness` is the single definition of the CLI subset, the JSONL event
@@ -201,6 +201,22 @@ Agent create, list, and delete work without any credential. Running an agent
 requires the harness credential; without it a run completes with status `failed`
 and a message naming the harness variable to set, rather than erroring the
 request.
+
+## Roadmap and delivery
+
+[`ROADMAP.md`](ROADMAP.md) is the public strategic view. Current-state,
+governance, verification, sequencing, and release evidence live in
+[`docs/roadmap`](docs/roadmap/).
+
+Private Beads/DoltHub data is the task authority. OpenCoven Project #10 is its
+generated private view; the roadmap contains aggregates and outcomes, while
+issues and pull requests remain delivery artifacts.
+
+Check that the generated roadmap snapshot is current:
+
+```bash
+pnpm roadmap:status check
+```
 
 ## Verify
 

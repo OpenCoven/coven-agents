@@ -79,6 +79,30 @@ Commit anything *after* the merge, though, and the tip no longer matches what
 `gh` merged — `reap` protects it and `pnpm hygiene` reports it AT RISK until
 you push it.
 
+## Planning authority
+
+Private Beads/DoltHub is the task-level authority. OpenCoven Project #10 is its
+generated private view; `ROADMAP.md` and `docs/roadmap/` contain public
+aggregates, outcomes, and evidence; issues and pull requests are delivery
+artifacts. A newer projection or artifact never overrides Beads.
+
+Never copy private task titles, descriptions, acceptance criteria, or private
+metadata into tracked files, issues, pull requests, commit messages, command
+output, or logs.
+
+After a merge, authorized maintainers update and push Beads privately, then run:
+
+```bash
+pnpm beads:sync preview
+pnpm beads:sync apply
+pnpm roadmap:status apply
+pnpm roadmap:status check
+```
+
+These commands require authorized private Beads and Project access. They fail
+closed: if authentication, schema, inventory, privacy, preview, or apply fails,
+stop and leave Project, issue state, and the checked-in roadmap unchanged.
+
 <!-- BEGIN:nextjs-agent-rules -->
 
 # This is NOT the Next.js you know
