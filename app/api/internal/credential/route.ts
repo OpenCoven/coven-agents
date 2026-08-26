@@ -8,13 +8,21 @@ import "server-only";
 // `db` directly.
 import { importVerifyKey, verifyRunnerToken } from "@opencoven/agent-contracts";
 import { eq } from "drizzle-orm";
+import { requireNonemptyAbuseKeySecret } from "@/lib/abuse/config";
 import { periodStart } from "@/lib/billing/period";
-import { countRun, usageFor } from "@/lib/billing/usage";
+import {
+  consumeRunReservation,
+  drizzleRunReservationDatabase,
+  globalDailyRunCapFromEnv,
+  type RunReservationRecord,
+  releaseRunReservation,
+  reserveRun,
+  tenantHashForReservation,
+} from "@/lib/billing/run-reservations";
 import { readCredentialForTenant } from "@/lib/credentials/store";
 import { db } from "@/lib/db/queries";
 import { user } from "@/lib/db/schema";
 import { resolveBoundTenant } from "./binding";
-import { capVerdict } from "./cap";
 
 /**
  * There is deliberately no session-authenticated path in this module. A
@@ -41,6 +49,131 @@ export function authorizeInternalRequest(
   return mismatch === 0;
 }
 
+export interface CredentialLendingDependencies {
+  consume: (
+    input: Parameters<typeof consumeRunReservation>[1]
+  ) => ReturnType<typeof consumeRunReservation>;
+  readCredential: (tenant: string, harnessId: string) => Promise<string | null>;
+  release: (
+    input: Parameters<typeof releaseRunReservation>[1]
+  ) => ReturnType<typeof releaseRunReservation>;
+  reserve: (
+    input: Parameters<typeof reserveRun>[1]
+  ) => ReturnType<typeof reserveRun>;
+}
+
+export async function lendCredentialWithReservation(
+  input: {
+    globalDailyCap: string | undefined;
+    harnessId: string;
+    keySecret: string | undefined;
+    periodStart: Date;
+    resetsAt: Date;
+    runId: string;
+    tenant: string;
+  },
+  dependencies: CredentialLendingDependencies
+): Promise<Response> {
+  let globalDailyCap: number;
+  let keySecret: string;
+  let expectedTenantHash: string;
+  try {
+    globalDailyCap = globalDailyRunCapFromEnv(input.globalDailyCap);
+    keySecret = requireNonemptyAbuseKeySecret(input.keySecret);
+    expectedTenantHash = tenantHashForReservation(input.tenant, keySecret);
+  } catch {
+    return Response.json({ error: "capacity_unavailable" }, { status: 503 });
+  }
+
+  let decision: Awaited<ReturnType<typeof dependencies.reserve>>;
+  try {
+    decision = await dependencies.reserve({
+      globalDailyCap,
+      keySecret,
+      periodStart: input.periodStart,
+      runId: input.runId,
+      tenant: input.tenant,
+    });
+  } catch {
+    return Response.json({ error: "capacity_unavailable" }, { status: 503 });
+  }
+
+  if (decision.kind === "refused") {
+    if (decision.reason === "global_daily_cap") {
+      return Response.json(
+        {
+          error: "capacity_unavailable",
+          reason: decision.reason,
+        },
+        { status: 503 }
+      );
+    }
+
+    return Response.json(
+      {
+        error: "cap_reached",
+        reason: decision.reason,
+        resetsAt: input.resetsAt.toISOString(),
+      },
+      { status: 429 }
+    );
+  }
+
+  if (
+    (decision.kind === "existing" &&
+      decision.reservation.state === "released") ||
+    decision.reservation.tenantHash !== expectedTenantHash
+  ) {
+    return Response.json({ error: "reservation_unavailable" }, { status: 409 });
+  }
+
+  let credential: string | null;
+  try {
+    credential = await dependencies.readCredential(
+      input.tenant,
+      input.harnessId
+    );
+  } catch {
+    await releaseAfterLendingFailure(dependencies, input.runId);
+    return Response.json({ error: "credential_unavailable" }, { status: 503 });
+  }
+
+  if (credential === null) {
+    await releaseAfterLendingFailure(dependencies, input.runId);
+    return Response.json({ error: "no_credential" }, { status: 404 });
+  }
+
+  try {
+    const consumed = await dependencies.consume({
+      runId: input.runId,
+      tenant: input.tenant,
+    });
+    if (consumed.kind !== "consumed") {
+      await releaseAfterLendingFailure(dependencies, input.runId);
+      return Response.json(
+        { error: "credential_unavailable" },
+        { status: 503 }
+      );
+    }
+  } catch {
+    await releaseAfterLendingFailure(dependencies, input.runId);
+    return Response.json({ error: "credential_unavailable" }, { status: 503 });
+  }
+
+  return Response.json({ credential }, { status: 200 });
+}
+
+async function releaseAfterLendingFailure(
+  dependencies: Pick<CredentialLendingDependencies, "release">,
+  runId: string
+): Promise<RunReservationRecord | null> {
+  try {
+    return await dependencies.release({ runId });
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(request: Request): Promise<Response> {
   if (
     !authorizeInternalRequest(request, process.env.RUNNER_SERVICE_TOKEN ?? "")
@@ -51,10 +184,15 @@ export async function POST(request: Request): Promise<Response> {
   // A malformed body is a deterministic 400, not an unhandled throw surfacing
   // as a 500. The caller is the worker, and it can only tell "I asked wrongly"
   // from "the app is broken" if those are different statuses.
-  let body: { harnessId?: unknown; tenant?: unknown } | null;
+  let body: {
+    harnessId?: unknown;
+    runId?: unknown;
+    tenant?: unknown;
+  } | null;
   try {
     body = (await request.json()) as {
       harnessId?: unknown;
+      runId?: unknown;
       tenant?: unknown;
     } | null;
   } catch {
@@ -97,7 +235,7 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  const { runId } = (body ?? {}) as { runId?: unknown };
+  const { runId } = body ?? {};
 
   if (typeof runId !== "string" || !runId) {
     return Response.json({ error: "invalid_request" }, { status: 400 });
@@ -114,34 +252,34 @@ export async function POST(request: Request): Promise<Response> {
 
   const resetsAt = owner?.subscribedUntil ?? null;
   const since = periodStart(resetsAt);
-
-  const verdict = capVerdict({
-    resetsAt,
-    used: since ? await usageFor(db, tenant, since) : 0,
-  });
-
-  if (verdict.kind === "refused") {
+  if (!(resetsAt && since)) {
     return Response.json(
       {
-        cap: verdict.cap,
         error: "cap_reached",
-        resetsAt: verdict.resetsAt,
-        used: verdict.used,
+        reason: "tenant_monthly_cap",
+        resetsAt: null,
       },
       { status: 429 }
     );
   }
 
-  // Counted before the credential is handed over, so a run that starts is a
-  // run that was paid for. Counting afterwards would let a crash between the
-  // two produce free runs.
-  await countRun(db, tenant, runId);
-
-  const credential = await readCredentialForTenant(tenant, harnessId, db);
-
-  if (credential === null) {
-    return Response.json({ error: "no_credential" }, { status: 404 });
-  }
-
-  return Response.json({ credential }, { status: 200 });
+  const reservationDatabase = drizzleRunReservationDatabase(db);
+  return await lendCredentialWithReservation(
+    {
+      globalDailyCap: process.env.GLOBAL_DAILY_RUN_CAP,
+      harnessId,
+      keySecret: process.env.ABUSE_KEY_SECRET,
+      periodStart: since,
+      resetsAt,
+      runId,
+      tenant,
+    },
+    {
+      consume: (input) => consumeRunReservation(reservationDatabase, input),
+      readCredential: (boundTenant, boundHarnessId) =>
+        readCredentialForTenant(boundTenant, boundHarnessId, db),
+      release: (input) => releaseRunReservation(reservationDatabase, input),
+      reserve: (input) => reserveRun(reservationDatabase, input),
+    }
+  );
 }

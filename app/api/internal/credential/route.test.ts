@@ -1,6 +1,34 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { authorizeInternalRequest } from "./route";
+import {
+  type RunReservationRecord,
+  tenantHashForReservation,
+} from "@/lib/billing/run-reservations";
+import {
+  authorizeInternalRequest,
+  type CredentialLendingDependencies,
+  lendCredentialWithReservation,
+} from "./route";
+
+const NOW = new Date("2026-08-25T18:00:00.000Z");
+const PERIOD_START = new Date("2026-08-20T12:00:00.000Z");
+const RESETS_AT = new Date("2026-09-20T12:00:00.000Z");
+
+const RESERVATION: RunReservationRecord = {
+  consumedAt: null,
+  costUnits: 1,
+  expiresAt: new Date(NOW.getTime() + 300_000),
+  periodDay: "2026-08-25",
+  periodMonth: PERIOD_START,
+  releasedAt: null,
+  reservedAt: NOW,
+  runId: "run-1",
+  state: "reserved",
+  tenantHash: tenantHashForReservation(
+    "tenant_acme",
+    "fixed-test-abuse-key-secret"
+  ),
+};
 
 function request(headers: Record<string, string> = {}): Request {
   return new Request("https://app.test/api/internal/credential", {
@@ -53,4 +81,226 @@ test("a token of the wrong length is refused without comparing content", () => {
     ),
     false
   );
+});
+
+function lendingInput(
+  overrides: Partial<Parameters<typeof lendCredentialWithReservation>[0]> = {}
+) {
+  return {
+    globalDailyCap: "500",
+    harnessId: "claude",
+    keySecret: "fixed-test-abuse-key-secret",
+    periodStart: PERIOD_START,
+    resetsAt: RESETS_AT,
+    runId: "run-1",
+    tenant: "tenant_acme",
+    ...overrides,
+  };
+}
+
+function lendingDependencies(
+  events: string[],
+  overrides: Partial<CredentialLendingDependencies> = {}
+): CredentialLendingDependencies {
+  return {
+    consume: () => {
+      events.push("consume");
+      return Promise.resolve({
+        kind: "consumed",
+        reservation: RESERVATION,
+      });
+    },
+    readCredential: () => {
+      events.push("read");
+      return Promise.resolve("credential-secret");
+    },
+    release: () => {
+      events.push("release");
+      return Promise.resolve({
+        ...RESERVATION,
+        releasedAt: NOW,
+        state: "released",
+      });
+    },
+    reserve: () => {
+      events.push("reserve");
+      return Promise.resolve({
+        kind: "reserved",
+        reservation: RESERVATION,
+      });
+    },
+    ...overrides,
+  };
+}
+
+test("reservation precedes credential read and consumption follows it", async () => {
+  const events: string[] = [];
+
+  const response = await lendCredentialWithReservation(
+    lendingInput(),
+    lendingDependencies(events)
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { credential: "credential-secret" });
+  assert.deepEqual(events, ["reserve", "read", "consume"]);
+});
+
+test("missing global capacity configuration fails before credential read", async () => {
+  const events: string[] = [];
+
+  const response = await lendCredentialWithReservation(
+    lendingInput({ globalDailyCap: undefined }),
+    lendingDependencies(events)
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: "capacity_unavailable" });
+  assert.deepEqual(events, []);
+});
+
+test("missing HMAC configuration fails before credential read", async () => {
+  const events: string[] = [];
+
+  const response = await lendCredentialWithReservation(
+    lendingInput({ keySecret: undefined }),
+    lendingDependencies(events)
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: "capacity_unavailable" });
+  assert.deepEqual(events, []);
+});
+
+test("tenant cap refusals are stable and do not read a credential", async () => {
+  await Promise.all(
+    (["tenant_daily_cap", "tenant_monthly_cap"] as const).map(
+      async (reason) => {
+        const events: string[] = [];
+        const response = await lendCredentialWithReservation(
+          lendingInput(),
+          lendingDependencies(events, {
+            reserve: () => {
+              events.push("reserve");
+              return Promise.resolve({ kind: "refused", reason });
+            },
+          })
+        );
+
+        assert.equal(response.status, 429);
+        assert.deepEqual(await response.json(), {
+          error: "cap_reached",
+          reason,
+          resetsAt: RESETS_AT.toISOString(),
+        });
+        assert.deepEqual(events, ["reserve"]);
+      }
+    )
+  );
+});
+
+test("global refusal exposes no global capacity number", async () => {
+  const events: string[] = [];
+  const response = await lendCredentialWithReservation(
+    lendingInput(),
+    lendingDependencies(events, {
+      reserve: () => {
+        events.push("reserve");
+        return Promise.resolve({
+          kind: "refused",
+          reason: "global_daily_cap",
+        });
+      },
+    })
+  );
+
+  assert.equal(response.status, 503);
+  const body = await response.json();
+  assert.deepEqual(body, {
+    error: "capacity_unavailable",
+    reason: "global_daily_cap",
+  });
+  assert.doesNotMatch(JSON.stringify(body), /500|globalDailyCap|capacity":/);
+  assert.deepEqual(events, ["reserve"]);
+});
+
+test("a missing credential releases the reservation", async () => {
+  const events: string[] = [];
+  const response = await lendCredentialWithReservation(
+    lendingInput(),
+    lendingDependencies(events, {
+      readCredential: () => {
+        events.push("read");
+        return Promise.resolve(null);
+      },
+    })
+  );
+
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { error: "no_credential" });
+  assert.deepEqual(events, ["reserve", "read", "release"]);
+});
+
+test("a credential read failure releases the reservation and stays bounded", async () => {
+  const events: string[] = [];
+  const response = await lendCredentialWithReservation(
+    lendingInput(),
+    lendingDependencies(events, {
+      readCredential: () => {
+        events.push("read");
+        return Promise.reject(new Error("sensitive decrypt detail"));
+      },
+    })
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    error: "credential_unavailable",
+  });
+  assert.deepEqual(events, ["reserve", "read", "release"]);
+});
+
+test("a failed consumption releases any still-active reservation", async () => {
+  const events: string[] = [];
+  const response = await lendCredentialWithReservation(
+    lendingInput(),
+    lendingDependencies(events, {
+      consume: () => {
+        events.push("consume");
+        return Promise.resolve({ kind: "missing" });
+      },
+    })
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    error: "credential_unavailable",
+  });
+  assert.deepEqual(events, ["reserve", "read", "consume", "release"]);
+});
+
+test("a previously released duplicate never reads a credential", async () => {
+  const events: string[] = [];
+  const response = await lendCredentialWithReservation(
+    lendingInput(),
+    lendingDependencies(events, {
+      reserve: () => {
+        events.push("reserve");
+        return Promise.resolve({
+          kind: "existing",
+          reservation: {
+            ...RESERVATION,
+            releasedAt: NOW,
+            state: "released",
+          },
+        });
+      },
+    })
+  );
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    error: "reservation_unavailable",
+  });
+  assert.deepEqual(events, ["reserve"]);
 });

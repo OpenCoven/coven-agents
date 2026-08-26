@@ -4,17 +4,20 @@ import {
   abuseAdmissionResponse,
   enforceAbusePolicy,
 } from "@/lib/abuse/enforce";
-import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
 import { periodStart } from "@/lib/billing/period";
-import { countRunsInPeriod, findUserById } from "@/lib/db/queries";
+import {
+  globalDailyRunCapFromEnv,
+  TENANT_DAILY_RUN_CAP,
+} from "@/lib/billing/run-reservations";
+import { findUserById, runReservationUsageForTenant } from "@/lib/db/queries";
 import { tenantForUser } from "@/lib/session";
+import { usageResponsePayload } from "./payload";
 
 /**
- * What this user has spent in the current period.
+ * What this user can still admit in the current day and billing period.
  *
- * Reads the same counter and the same constant the enforcement point uses, so
- * the number shown and the number enforced cannot drift. A cap you cannot see
- * is indistinguishable from a bug, and two caps that disagree are worse.
+ * Global state is deliberately reduced to a boolean. Publishing deployment
+ * capacity would turn an operational control into an attacker planning aid.
  */
 export async function GET(request: Request) {
   const session = await auth();
@@ -36,14 +39,36 @@ export async function GET(request: Request) {
   const resetsAt = owner?.subscribedUntil ?? null;
   const since = periodStart(resetsAt);
 
-  return Response.json(
-    {
-      cap: MONTHLY_RUN_CAP,
-      resetsAt: resetsAt?.toISOString() ?? null,
-      used: since
-        ? await countRunsInPeriod(tenantForUser(session.user.id), since)
-        : 0,
-    },
-    { headers: { "cache-control": "no-store" } }
-  );
+  if (!(resetsAt && since)) {
+    return Response.json(
+      usageResponsePayload({
+        globalAdmissionClosed: true,
+        resetsAt,
+        tenantDailyRemaining: 0,
+        tenantMonthlyRemaining: 0,
+      }),
+      { headers: { "cache-control": "no-store" } }
+    );
+  }
+
+  try {
+    const usage = await runReservationUsageForTenant({
+      globalDailyCap: globalDailyRunCapFromEnv(
+        process.env.GLOBAL_DAILY_RUN_CAP
+      ),
+      keySecret: process.env.ABUSE_KEY_SECRET ?? "",
+      periodStart: since,
+      tenant: tenantForUser(session.user.id),
+      tenantDailyCap: TENANT_DAILY_RUN_CAP,
+    });
+
+    return Response.json(usageResponsePayload({ ...usage, resetsAt }), {
+      headers: { "cache-control": "no-store" },
+    });
+  } catch {
+    return Response.json(
+      { error: "capacity_unavailable" },
+      { headers: { "cache-control": "no-store" }, status: 503 }
+    );
+  }
 }

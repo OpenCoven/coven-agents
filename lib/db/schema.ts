@@ -2,6 +2,7 @@ import { type InferSelectModel, sql } from "drizzle-orm";
 import {
   boolean,
   check,
+  date,
   foreignKey,
   index,
   integer,
@@ -224,6 +225,62 @@ export const runUsage = pgTable(
 );
 
 export type RunUsage = InferSelectModel<typeof runUsage>;
+
+/**
+ * One atomic admission claim for a run before a credential is decrypted.
+ *
+ * `tenantHash` is an HMAC pseudonym, never the raw tenant identifier.
+ * `periodMonth` retains the historical name from the budget design, but its
+ * value is the subscriber's billing-period start rather than a calendar month.
+ */
+export const runReservation = pgTable(
+  "RunReservation",
+  {
+    consumedAt: timestamp("consumedAt"),
+    costUnits: integer("costUnits").notNull(),
+    expiresAt: timestamp("expiresAt").notNull(),
+    periodDay: date("periodDay").notNull(),
+    periodMonth: timestamp("periodMonth").notNull(),
+    releasedAt: timestamp("releasedAt"),
+    reservedAt: timestamp("reservedAt").notNull().defaultNow(),
+    runId: varchar("runId", { length: 64 }).primaryKey().notNull(),
+    state: varchar("state", {
+      enum: ["reserved", "consumed", "released"],
+      length: 16,
+    })
+      .notNull()
+      .default("reserved"),
+    tenantHash: varchar("tenantHash", { length: 64 }).notNull(),
+  },
+  (table) => [
+    index("RunReservation_tenant_day_state_idx").on(
+      table.tenantHash,
+      table.periodDay,
+      table.state
+    ),
+    index("RunReservation_day_state_idx").on(table.periodDay, table.state),
+    index("RunReservation_tenant_period_state_idx").on(
+      table.tenantHash,
+      table.periodMonth,
+      table.state
+    ),
+    check("RunReservation_costUnits_positive", sql`${table.costUnits} > 0`),
+    check(
+      "RunReservation_state_valid",
+      sql`${table.state} in ('reserved', 'consumed', 'released')`
+    ),
+    check(
+      "RunReservation_state_timestamps_valid",
+      sql`(${table.state} = 'reserved' and ${table.consumedAt} is null and ${table.releasedAt} is null) or (${table.state} = 'consumed' and ${table.consumedAt} is not null and ${table.releasedAt} is null) or (${table.state} = 'released' and ${table.consumedAt} is null and ${table.releasedAt} is not null)`
+    ),
+    check(
+      "RunReservation_expiry_valid",
+      sql`${table.expiresAt} > ${table.reservedAt}`
+    ),
+  ]
+);
+
+export type RunReservation = InferSelectModel<typeof runReservation>;
 
 /**
  * Stripe event ids already processed.
