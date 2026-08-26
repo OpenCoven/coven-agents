@@ -893,6 +893,74 @@ test("an interrupted dispatch clears its lease before the next alarm", async () 
   }
 });
 
+test("an ambiguous dispatch stays active until reconciliation proves its outcome", async () => {
+  let dispatchAttempts = 0;
+  let reconciliation: "ambiguous" | "running" | "terminal" = "ambiguous";
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: (runId: string) => {
+        if (runId === "run-66") {
+          if (reconciliation === "ambiguous") {
+            throw new Error("agent status unavailable");
+          }
+          return { status: reconciliation };
+        }
+        return { status: "queued" };
+      },
+      startAdmitted: (runId: string) => {
+        dispatchAttempts += 1;
+        if (runId === "run-66" && dispatchAttempts === 1) {
+          throw new Error("accepted remotely before the RPC failed");
+        }
+        return Promise.resolve(true);
+      },
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    }
+  );
+
+  assert.deepEqual(await harness.admission.admit(request(66)), {
+    kind: "active",
+    runId: "run-66",
+  });
+  await Promise.all(harness.background);
+  assert.equal(
+    (await harness.admission.getRecord("run-66"))?.state,
+    "active",
+    "an uncertain start must retain its capacity claim"
+  );
+  assert.equal(dispatchAttempts, 1);
+
+  assert.deepEqual(await harness.admission.admit(request(67)), {
+    kind: "queued",
+    position: 1,
+    runId: "run-67",
+  });
+  await Promise.all(harness.background);
+  assert.equal(
+    dispatchAttempts,
+    1,
+    "an ambiguous start must not be dispatched a second time"
+  );
+  assert.equal((await harness.admission.getRecord("run-67"))?.state, "queued");
+
+  reconciliation = "running";
+  await harness.admission.alarm();
+  assert.equal((await harness.admission.getRecord("run-66"))?.state, "active");
+
+  reconciliation = "terminal";
+  await harness.admission.alarm();
+  assert.equal(
+    (await harness.admission.getRecord("run-66"))?.state,
+    "terminal"
+  );
+  assert.equal((await harness.admission.getRecord("run-67"))?.state, "active");
+  assert.equal(dispatchAttempts, 2);
+});
+
 test("a queued dispatch still expires on its queue deadline", async () => {
   const originalNow = Date.now;
   const now = Date.parse("2026-08-26T00:00:00.000Z");

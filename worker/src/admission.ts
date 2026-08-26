@@ -532,6 +532,8 @@ type MetaRow = {
   value: string;
 };
 
+type ActiveReconciliation = "ambiguous" | "requeued" | "running" | "terminal";
+
 const NEXT_WAKE_META_KEY = "next_wake_at";
 const ALARM_FAILURES_META_KEY = "alarm_failure_count";
 const ALARM_UNAVAILABLE_META_KEY = "alarm_unavailable";
@@ -756,10 +758,7 @@ export class RunAdmission extends DurableObject<Env> {
       if (record.state === "active") {
         // Reconciliation is serialized with the Durable Object state.
         // biome-ignore lint/performance/noAwaitInLoops: reconciliation is intentionally sequential
-        await this.reconcileActive(
-          record,
-          now - Date.parse(record.enqueuedAt) >= QUEUED_TTL_MS
-        );
+        await this.reconcileActive(record);
       } else if (record.state === "queued") {
         // A queued run can become terminal when its agent is stopped before
         // dispatch. Reconcile it on the regular alarm cadence so a failed
@@ -838,23 +837,16 @@ export class RunAdmission extends DurableObject<Env> {
   private async reconcileDispatchFailure(
     candidate: AdmissionRecord
   ): Promise<void> {
-    await this.reconcileActive(candidate, true);
+    const reconciliation = await this.reconcileActive(candidate);
     const current = this.findByRunId(candidate.runId);
     if (!current || current.state === "terminal") {
       return;
-    }
-    if (
-      current.state === "active" &&
-      this.dispatchLeaseUntil(candidate.runId) !== null
-    ) {
-      this.updateState(candidate.runId, "queued");
-      this.clearDispatchLease(candidate.runId);
     }
     try {
       await this.ensureAlarm({ throwOnFailure: true });
     } catch {
       const afterFailure = this.findByRunId(candidate.runId);
-      if (afterFailure?.state === "queued") {
+      if (reconciliation === "requeued" && afterFailure?.state === "queued") {
         this.terminalizeFailedAdmission(candidate);
         try {
           await this.env.YoloAgent.getByName(candidate.agentId).stop(
@@ -1012,38 +1004,48 @@ export class RunAdmission extends DurableObject<Env> {
   }
 
   private async reconcileActive(
-    record: AdmissionRecord,
-    forceQueued = false
-  ): Promise<void> {
+    record: AdmissionRecord
+  ): Promise<ActiveReconciliation> {
     try {
       const run = await this.env.YoloAgent.getByName(record.agentId).getRun(
         record.runId
       );
       const current = this.findByRunId(record.runId);
       if (current?.state !== "active") {
-        return;
+        return "terminal";
       }
+      const leaseUntil = this.dispatchLeaseUntil(record.runId);
       if (!run) {
+        if (leaseUntil !== null) {
+          // An absent run is safe to retry only while this record still has
+          // its dispatch claim. Once acceptance was recorded, absence is a
+          // lost terminal run and must not be dispatched again.
+          this.updateState(record.runId, "queued");
+          this.clearDispatchLease(record.runId);
+          return "requeued";
+        }
         this.updateState(record.runId, "terminal");
-        this.clearDispatchLease(record.runId);
-        return;
+        return "terminal";
       }
       if (run.status === "running") {
         this.clearDispatchLease(record.runId);
-        return;
+        return "running";
       }
       if (isTerminal(run.status)) {
         this.updateState(record.runId, "terminal");
         this.clearDispatchLease(record.runId);
-        return;
+        return "terminal";
       }
-      const leaseUntil = this.dispatchLeaseUntil(record.runId);
-      if (forceQueued || leaseUntil === null || leaseUntil <= Date.now()) {
+      if (run.status === "queued" && leaseUntil !== null) {
         this.updateState(record.runId, "queued");
         this.clearDispatchLease(record.runId);
+        return "requeued";
       }
+      return "ambiguous";
     } catch {
-      // Keep the active record and retry after its dispatch lease.
+      // Keep the active record and retry after its dispatch lease. The start
+      // RPC may have succeeded remotely, so this claim must remain counted.
+      return "ambiguous";
     }
   }
 
