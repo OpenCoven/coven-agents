@@ -543,6 +543,49 @@ test("alarm setup failure terminalizes a new admission without dispatching it", 
   });
 });
 
+test("release dispatches queued work even when alarm setup fails", async () => {
+  const dispatched: string[] = [];
+  const setAlarmFailure: { error: Error | null } = { error: null };
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: (runId) => {
+        dispatched.push(runId);
+        return Promise.resolve(true);
+      },
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    },
+    { setAlarmFailure }
+  );
+
+  assert.deepEqual(await harness.admission.admit(request(221)), {
+    kind: "active",
+    runId: "run-221",
+  });
+  await Promise.all(harness.background);
+  assert.deepEqual(await harness.admission.admit(request(222)), {
+    kind: "queued",
+    position: 1,
+    runId: "run-222",
+  });
+  await Promise.all(harness.background);
+
+  setAlarmFailure.error = new Error("alarm unavailable during release");
+  harness.setAlarm(Date.now() - 1);
+  await assert.rejects(
+    () => harness.admission.release("run-221"),
+    /alarm unavailable during release/
+  );
+  await Promise.all(harness.background);
+
+  assert.deepEqual(dispatched, ["run-221", "run-222"]);
+  assert.equal((await harness.admission.getRecord("run-222"))?.state, "active");
+});
+
 function yoloDefinition(): AgentDefinition {
   return {
     backend: "cloud",

@@ -601,6 +601,7 @@ export class RunAdmission extends DurableObject<Env> {
       await this.ensureAlarm();
     } catch (error) {
       this.terminalizeFailedAdmission(created);
+      this.ctx.waitUntil(this.dispatchAvailable(limits));
       try {
         await this.env.YoloAgent.getByName(created.agentId).stop(created.runId);
       } catch {
@@ -644,8 +645,8 @@ export class RunAdmission extends DurableObject<Env> {
     }
     this.updateState(runId, "terminal");
     this.clearDispatchLease(runId);
-    await this.ensureAlarm();
     this.ctx.waitUntil(this.dispatchAvailable(admissionLimits(this.env)));
+    await this.ensureAlarm();
     return true;
   }
 
@@ -661,8 +662,8 @@ export class RunAdmission extends DurableObject<Env> {
 
   async dispatch(): Promise<void> {
     await this.initialized;
-    await this.ensureAlarm();
     this.ctx.waitUntil(this.dispatchAvailable(admissionLimits(this.env)));
+    await this.ensureAlarm();
   }
 
   async alarm(): Promise<void> {
