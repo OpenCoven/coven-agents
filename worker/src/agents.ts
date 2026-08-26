@@ -421,9 +421,9 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
   }
 
   private lifecycleIsActive(generation?: number): boolean {
-    const { lifecycle } = this.state;
+    const lifecycle = this.currentLifecycle();
     return (
-      lifecycle?.status === "active" &&
+      lifecycle.status === "active" &&
       (generation === undefined || lifecycle.generation === generation)
     );
   }

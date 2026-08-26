@@ -2493,6 +2493,120 @@ test("missing active agent runs are reconciled so capacity is released", async (
   assert.match(fencedTokens[0] ?? "", /^[1-9]\d*:/u);
 });
 
+test("an absent run is terminalized after fencing without requiring local requeue", async () => {
+  const originalNow = Date.now;
+  let now = Date.parse("2026-08-26T00:00:00.000Z");
+  Date.now = () => now;
+  resetFiberLog();
+  fiberControl.runFibers = false;
+  let admission!: RunAdmission;
+  let requeueCalls = 0;
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string, dispatchToken?: string) =>
+            admission.release(runId, dispatchToken),
+        }),
+      },
+    } as never
+  );
+  yolo.configure(yoloDefinition());
+  const harness = runAdmissionHarness(
+    () => ({
+      fenceAdmitted: (runId, dispatchToken) =>
+        Promise.resolve(yolo.fenceAdmitted?.(runId, dispatchToken) ?? false),
+      getRun: (runId) => yolo.getRun(runId),
+      requeueAdmitted: () => {
+        requeueCalls += 1;
+        return false;
+      },
+      startAdmitted: (runId, dispatchToken) =>
+        yolo.startAdmitted(runId, dispatchToken),
+      stop: (runId, dispatchToken, reason) =>
+        yolo.stop(runId, dispatchToken, reason),
+    }),
+    {
+      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    }
+  );
+  ({ admission } = harness);
+
+  try {
+    const missing = {
+      ...request(76),
+      agentId: yoloDefinition().id,
+      operationId: "55555555-aaaa-4666-8777-888888888888",
+      runId: "66666666-bbbb-4777-8888-999999999999",
+    };
+    await yolo.enqueue(
+      { operationId: missing.operationId, task: "Missing work." },
+      missing.runId,
+      missing.requestHash,
+      "identity"
+    );
+    assert.deepEqual(await admission.admit(missing), {
+      kind: "active",
+      runId: missing.runId,
+    });
+    await Promise.all(harness.background);
+
+    const dispatchRows = harness.sql
+      .exec<{ dispatch_token: string | null }>(
+        "SELECT dispatch_token FROM admission_records WHERE run_id = ?",
+        missing.runId
+      )
+      .toArray() as { dispatch_token: string | null }[];
+    const oldDispatchToken = dispatchRows[0]?.dispatch_token;
+    assert.match(oldDispatchToken ?? "", /^[1-9]\d*:/u);
+    assert.equal(yolo.getRun(missing.runId)?.status, "running");
+
+    const state = Reflect.get(yolo, "state") as Record<string, unknown>;
+    yolo.setState({ ...state, runs: [] } as never);
+    now += 61_000;
+    await admission.alarm();
+
+    assert.equal((await admission.getRecord(missing.runId))?.state, "terminal");
+    assert.equal(
+      requeueCalls,
+      0,
+      "an absent run must not depend on requeueAdmitted"
+    );
+    assert.equal(
+      harness.alarm(),
+      null,
+      "cleanup should settle in the same alarm"
+    );
+
+    const next = {
+      ...request(77),
+      agentId: yoloDefinition().id,
+      operationId: "77777777-cccc-4888-8999-000000000000",
+      runId: "88888888-dddd-4999-9000-111111111111",
+    };
+    await yolo.enqueue(
+      { operationId: next.operationId, task: "Next work." },
+      next.runId,
+      next.requestHash,
+      "identity"
+    );
+    assert.deepEqual(await admission.admit(next), {
+      kind: "active",
+      runId: next.runId,
+    });
+    assert.equal(
+      await yolo.startAdmitted(missing.runId, oldDispatchToken ?? undefined),
+      false,
+      "a delayed dispatch for the fenced run must be rejected"
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test("alarm repairs a missed terminal completion callback", async () => {
   let getRunCalls = 0;
   const harness = runAdmissionHarness(() => ({

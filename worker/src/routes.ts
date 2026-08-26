@@ -432,6 +432,33 @@ function busyResponse(
   return json(errorEnvelope("busy", message, true), { status: 409 }, cors);
 }
 
+function matchesLocalAdmission(
+  record: AdmissionRecord,
+  expected: Pick<
+    AdmissionRecord,
+    "agentId" | "operationId" | "requestHash" | "runId" | "tenantHash"
+  >
+): boolean {
+  return (
+    record.agentId === expected.agentId &&
+    record.operationId === expected.operationId &&
+    record.requestHash === expected.requestHash &&
+    record.runId === expected.runId &&
+    record.tenantHash === expected.tenantHash
+  );
+}
+
+function matchesLocalRun(
+  run: RunSnapshot,
+  expected: Pick<RunSnapshot, "agentId" | "id" | "operationId">
+): boolean {
+  return (
+    run.agentId === expected.agentId &&
+    run.id === expected.id &&
+    run.operationId === expected.operationId
+  );
+}
+
 export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
   dependencies: CloudRunnerDependencies<Environment>
 ): {
@@ -741,6 +768,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             if (!prepared.created) {
               if (isTerminal(prepared.run.status)) {
                 let terminalAdmission: CloudRunnerAdmission;
+                let stale: AdmissionRecord | null = null;
                 try {
                   if (!dependencies.getAdmission) {
                     throw new AdmissionUnavailableError(
@@ -749,17 +777,47 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                   }
                   terminalAdmission =
                     await dependencies.getAdmission(environment);
-                  const stale = terminalAdmission.getByOperationId
+                  stale = terminalAdmission.getByOperationId
                     ? await terminalAdmission.getByOperationId(
                         input.operationId
                       )
                     : null;
-                  // A terminal local run can outlive a failed release
-                  // callback. Releasing by the durable operation record first
-                  // repairs both queued and active stale admission.
-                  await terminalAdmission.release(
-                    stale?.runId ?? prepared.run.id
+                } catch (error) {
+                  if (
+                    error instanceof AdmissionUnavailableError ||
+                    (error instanceof Error &&
+                      error.name === "AdmissionUnavailableError")
+                  ) {
+                    throw error;
+                  }
+                  throw new AdmissionUnavailableError(
+                    "Terminal run admission reconciliation failed.",
+                    { cause: error }
                   );
+                }
+                if (!stale) {
+                  return busyResponse("global_busy", cors);
+                }
+                const tenantHash = await tenantAdmissionHash(
+                  environment.EDGE_ABUSE_KEY_SECRET,
+                  callerTenant
+                );
+                if (
+                  !matchesLocalAdmission(stale, {
+                    agentId: id,
+                    operationId: input.operationId,
+                    requestHash,
+                    runId: prepared.run.id,
+                    tenantHash,
+                  })
+                ) {
+                  throw new OperationConflictError();
+                }
+                // A terminal local run can outlive a failed release
+                // callback. Releasing by the validated durable operation
+                // record repairs the matching stale admission only.
+                try {
+                  await terminalAdmission.release(stale.runId);
                 } catch (error) {
                   if (
                     error instanceof AdmissionUnavailableError ||
@@ -797,9 +855,27 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               if (!existingAdmission || !admissionRecord) {
                 return busyResponse("global_busy", cors);
               }
+              const tenantHash = await tenantAdmissionHash(
+                environment.EDGE_ABUSE_KEY_SECRET,
+                callerTenant
+              );
+              if (
+                !matchesLocalAdmission(admissionRecord, {
+                  agentId: id,
+                  operationId: input.operationId,
+                  requestHash,
+                  runId: prepared.run.id,
+                  tenantHash,
+                })
+              ) {
+                throw new OperationConflictError();
+              }
               const originalAgentId = await directory.lookupRun(
                 admissionRecord.runId
               );
+              if (originalAgentId !== null && originalAgentId !== id) {
+                throw new OperationConflictError();
+              }
               const originalAgent = originalAgentId
                 ? await yoloAgent(originalAgentId)
                 : agent;
@@ -808,6 +884,17 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               );
               if (!original) {
                 return busyResponse("global_busy", cors);
+              }
+              if (
+                !matchesLocalRun(original, {
+                  agentId: id,
+                  id: prepared.run.id,
+                  operationId: input.operationId,
+                }) ||
+                (await hashOperation(original.agentId, original.task)) !==
+                  requestHash
+              ) {
+                throw new OperationConflictError();
               }
               if (isTerminal(original.status)) {
                 await existingAdmission.release(admissionRecord.runId);
@@ -838,16 +925,17 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             }
 
             let decision: AdmissionDecision;
+            const tenantHash = await tenantAdmissionHash(
+              environment.EDGE_ABUSE_KEY_SECRET,
+              callerTenant
+            );
             try {
               decision = await admission.admit({
                 agentId: id,
                 operationId: input.operationId,
                 requestHash,
                 runId,
-                tenantHash: await tenantAdmissionHash(
-                  environment.EDGE_ABUSE_KEY_SECRET,
-                  callerTenant
-                ),
+                tenantHash,
               });
             } catch (error) {
               await cleanupRun(agent, runId, id, admission, true);
@@ -882,16 +970,57 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               if (cleanupError) {
                 throw cleanupError;
               }
-              const originalAgentId = await directory.lookupRun(decision.runId);
+              let duplicateAdmission: AdmissionRecord | null = null;
+              try {
+                duplicateAdmission = admission.getByOperationId
+                  ? await admission.getByOperationId(input.operationId)
+                  : null;
+              } catch {
+                return busyResponse("global_busy", cors);
+              }
+              if (
+                !duplicateAdmission ||
+                !matchesLocalAdmission(duplicateAdmission, {
+                  agentId: id,
+                  operationId: input.operationId,
+                  requestHash,
+                  runId: decision.runId,
+                  tenantHash,
+                })
+              ) {
+                throw new OperationConflictError();
+              }
+              const originalAgentId = await directory.lookupRun(
+                duplicateAdmission.runId
+              );
+              if (
+                originalAgentId !== null &&
+                originalAgentId !== duplicateAdmission.agentId
+              ) {
+                throw new OperationConflictError();
+              }
               const originalAgent = originalAgentId
                 ? await yoloAgent(originalAgentId)
                 : agent;
-              const original = await originalAgent.getRun(decision.runId);
+              const original = await originalAgent.getRun(
+                duplicateAdmission.runId
+              );
               if (!original) {
                 return busyResponse("global_busy", cors);
               }
+              if (
+                !matchesLocalRun(original, {
+                  agentId: duplicateAdmission.agentId,
+                  id: duplicateAdmission.runId,
+                  operationId: duplicateAdmission.operationId,
+                }) ||
+                (await hashOperation(original.agentId, original.task)) !==
+                  duplicateAdmission.requestHash
+              ) {
+                throw new OperationConflictError();
+              }
               if (isTerminal(original.status)) {
-                await admission.release(decision.runId);
+                await admission.release(duplicateAdmission.runId);
               }
               return json(
                 { apiVersion: AGENT_RUNNER_API_VERSION, run: original },

@@ -57,6 +57,56 @@ function agent(): YoloAgent {
   return instance;
 }
 
+function legacyAgent(): YoloAgent {
+  const instance = agent();
+  const state = Reflect.get(instance, "state") as Record<string, unknown>;
+  const {
+    decommission: _decommission,
+    lifecycle: _lifecycle,
+    ...legacy
+  } = state;
+  instance.setState(legacy as never);
+  return instance;
+}
+
+test("legacy pre-Task8 state stays active for lifecycle operations", async () => {
+  const configured = legacyAgent().configure({
+    ...definition(),
+    name: "Legacy configured",
+  });
+  assert.equal(configured.name, "Legacy configured");
+
+  const enqueued = await legacyAgent().enqueue(
+    { operationId: OP_A, task: "Legacy enqueue." },
+    "3f2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a2e",
+    "legacy-enqueue",
+    "identity"
+  );
+  assert.equal(enqueued.created, true);
+
+  const started = await legacyAgent().start(
+    { operationId: OP_B, task: "Legacy start." },
+    "identity"
+  );
+  assert.equal(started.created, true);
+  assert.equal(started.run.status, "queued");
+
+  const warmed = await legacyAgent().warm();
+  assert.equal(warmed.status, "provisioning");
+});
+
+test("legacy state without decommission fields can still be decommissioned safely", async () => {
+  const yolo = legacyAgent();
+
+  await yolo.decommission();
+
+  assert.equal(yolo.snapshot(), null);
+  const state = Reflect.get(yolo, "state") as {
+    lifecycle: { status: string };
+  };
+  assert.equal(state.lifecycle.status, "decommissioned");
+});
+
 test("start accepts a run, records it queued, and dispatches one fiber", async () => {
   const yolo = agent();
 

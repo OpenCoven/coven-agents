@@ -1121,7 +1121,7 @@ export class RunAdmission extends DurableObject<Env> {
         return "ambiguous";
       }
       if (!run) {
-        const fenceToken = await this.fenceDispatch(record);
+        const fenceToken = await this.fenceDispatch(record, false);
         if (
           !fenceToken ||
           !this.dispatchTokenMatches(record.runId, fenceToken)
@@ -1129,6 +1129,7 @@ export class RunAdmission extends DurableObject<Env> {
           return "ambiguous";
         }
         this.terminalizeRecord(record.runId, fenceToken);
+        this.enqueueCleanupTask({ ...record, dispatchToken: fenceToken });
         return "terminal";
       }
       if (isTerminal(run.status)) {
@@ -1622,20 +1623,15 @@ export class RunAdmission extends DurableObject<Env> {
         if (!leaseExpired) {
           return "ambiguous";
         }
-        const fenceToken = await this.fenceDispatch(record);
+        const fenceToken = await this.fenceDispatch(record, false);
         if (
           !fenceToken ||
           !this.dispatchTokenMatches(record.runId, fenceToken)
         ) {
           return "ambiguous";
         }
-        if (leaseUntil !== null) {
-          // An absent run is safe to retry only while this record still has
-          // its dispatch claim. Once acceptance was recorded, absence is a
-          // lost terminal run and must not be dispatched again.
-          return this.requeueRecord(record, fenceToken);
-        }
         this.terminalizeRecord(record.runId, fenceToken);
+        this.enqueueCleanupTask({ ...record, dispatchToken: fenceToken });
         return "terminal";
       }
       if (run.status === "running") {
@@ -1682,7 +1678,8 @@ export class RunAdmission extends DurableObject<Env> {
   }
 
   private async fenceDispatch(
-    record: StoredAdmissionRecord
+    record: StoredAdmissionRecord,
+    allowRequeue = true
   ): Promise<string | false> {
     const dispatchToken =
       record.dispatchToken ?? this.createCompatibilityDispatchToken(record);
@@ -1694,6 +1691,9 @@ export class RunAdmission extends DurableObject<Env> {
       const fenced = await agent.fenceAdmitted(record.runId, dispatchToken);
       if (!fenced) {
         return false;
+      }
+      if (!allowRequeue) {
+        return dispatchToken;
       }
       const requeue = (
         agent as unknown as {

@@ -8,12 +8,13 @@ import {
   type RunSnapshot,
   TOKEN_LIFETIME_SECONDS,
 } from "@opencoven/agent-contracts";
+import { tenantAdmissionHash } from "./admission";
 import {
   type CloudRunnerAgent,
   type CloudRunnerDirectory,
   createCloudRunner,
 } from "./routes";
-import { AgentDecommissioningError } from "./run-state";
+import { AgentDecommissioningError, hashOperation } from "./run-state";
 
 const TOKEN = "test-token";
 const MINE = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
@@ -1054,6 +1055,11 @@ test("a terminal duplicate reconciles stale admission before returning the termi
     environmentPromise,
     identityToken(),
   ]);
+  const terminalRequestHash = await hashOperation(MINE, terminalRun.task);
+  const terminalTenantHash = await tenantAdmissionHash(
+    "test-edge-abuse-secret",
+    CALLER_TENANT
+  );
   const response = await createCloudRunner({
     getAdmission: () => ({
       admit: () => {
@@ -1065,10 +1071,10 @@ test("a terminal duplicate reconciles stale admission before returning the termi
           agentId: MINE,
           enqueuedAt: terminalRun.createdAt,
           operationId,
-          requestHash: "request-hash",
+          requestHash: terminalRequestHash,
           runId,
           state: "active",
-          tenantHash: "tenant-hash",
+          tenantHash: terminalTenantHash,
         };
       },
       release: (releasedRunId) => {
@@ -1103,6 +1109,181 @@ test("a terminal duplicate reconciles stale admission before returning the termi
     apiVersion: AGENT_RUNNER_API_VERSION,
     run: terminalRun,
   });
+});
+
+test("a cross-tenant duplicate cannot return or release a foreign admission", async () => {
+  const operationId = "99999999-aaaa-4111-8222-333333333333";
+  const localRunId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const foreignRunId = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+  const localRun = queuedRun(MINE, localRunId, operationId);
+  let releaseCalls = 0;
+  let directoryLookups = 0;
+  const localAgent: CloudRunnerAgent = {
+    configure: (value: AgentDefinition) => value,
+    decommission: () => undefined,
+    discardRun: () => undefined,
+    enqueue: () => ({ created: false, run: localRun }),
+    getEventStream: () => ({ events: [], terminal: false }),
+    getRun: () => localRun,
+    listRuns: () => [localRun],
+    snapshot: () => agents.get(MINE) ?? null,
+    start: () => {
+      throw new Error("a duplicate must not dispatch");
+    },
+    stop: () => localRun,
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const foreignAdmission = {
+    agentId: THEIRS,
+    enqueuedAt: localRun.createdAt,
+    operationId,
+    requestHash: await hashOperation(THEIRS, "Foreign work."),
+    runId: foreignRunId,
+    state: "active" as const,
+    tenantHash: await tenantAdmissionHash(
+      "test-edge-abuse-secret",
+      "someone_else"
+    ),
+  };
+  const response = await createCloudRunner({
+    getAdmission: () => ({
+      admit: () => {
+        throw new Error("a duplicate must not admit again");
+      },
+      getByOperationId: () => foreignAdmission,
+      release: () => {
+        releaseCalls += 1;
+        return true;
+      },
+    }),
+    getDirectory: () => ({
+      list: () => [agents.get(MINE) as AgentDefinition],
+      lookupRun: () => {
+        directoryLookups += 1;
+        return THEIRS;
+      },
+      registerRun: () => undefined,
+      remove: () => undefined,
+      unregisterRun: () => undefined,
+      upsert: (value: AgentDefinition) => value,
+    }),
+    getYoloAgent: (_environment, agentId) => {
+      if (agentId !== MINE) {
+        throw new Error("foreign agent must not be loaded");
+      }
+      return localAgent;
+    },
+  }).fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: localRun.task }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 409);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "operation_conflict"
+  );
+  assert.equal(releaseCalls, 0);
+  assert.equal(directoryLookups, 0);
+});
+
+test("a stale local duplicate cannot release a different run with the same operation id", async () => {
+  const operationId = "cccccccc-dddd-4eee-8fff-000000000000";
+  const localRunId = "dddddddd-eeee-4fff-8000-111111111111";
+  const staleRunId = "eeeeeeee-ffff-4000-8111-222222222222";
+  const localRun = queuedRun(MINE, localRunId, operationId);
+  let releaseCalls = 0;
+  let directoryLookups = 0;
+  const localAgent: CloudRunnerAgent = {
+    configure: (value: AgentDefinition) => value,
+    decommission: () => undefined,
+    discardRun: () => undefined,
+    enqueue: () => ({ created: false, run: localRun }),
+    getEventStream: () => ({ events: [], terminal: false }),
+    getRun: () => localRun,
+    listRuns: () => [localRun],
+    snapshot: () => agents.get(MINE) ?? null,
+    start: () => {
+      throw new Error("a stale duplicate must not dispatch");
+    },
+    stop: () => localRun,
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const staleAdmission = {
+    agentId: MINE,
+    enqueuedAt: localRun.createdAt,
+    operationId,
+    requestHash: await hashOperation(MINE, localRun.task),
+    runId: staleRunId,
+    state: "active" as const,
+    tenantHash: await tenantAdmissionHash(
+      "test-edge-abuse-secret",
+      CALLER_TENANT
+    ),
+  };
+  const response = await createCloudRunner({
+    getAdmission: () => ({
+      admit: () => {
+        throw new Error("a duplicate must not admit again");
+      },
+      getByOperationId: () => staleAdmission,
+      release: () => {
+        releaseCalls += 1;
+        return true;
+      },
+    }),
+    getDirectory: () => ({
+      list: () => [agents.get(MINE) as AgentDefinition],
+      lookupRun: () => {
+        directoryLookups += 1;
+        return MINE;
+      },
+      registerRun: () => undefined,
+      remove: () => undefined,
+      unregisterRun: () => undefined,
+      upsert: (value: AgentDefinition) => value,
+    }),
+    getYoloAgent: () => localAgent,
+  }).fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: localRun.task }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 409);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "operation_conflict"
+  );
+  assert.equal(releaseCalls, 0);
+  assert.equal(directoryLookups, 0);
 });
 
 test("an orphan queued duplicate cannot bypass admission", async () => {
