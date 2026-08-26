@@ -1396,9 +1396,6 @@ export function RunConsole() {
                                 {projection.nowDoing}
                               </span>
                               <div style={{ flex: 1 }} />
-                              <span style={pill("warning")}>
-                                Approvals disabled
-                              </span>
                               <Btn onClick={stopRun} variant="danger-ghost">
                                 Stop run
                               </Btn>

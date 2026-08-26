@@ -6,12 +6,7 @@ import type { AgentDefinition } from "@opencoven/agent-contracts";
 import { Sparkles } from "lucide-react";
 import type { KeyboardEvent } from "react";
 import { Btn, Eyebrow } from "@/components/console/primitives";
-import {
-  hairline,
-  pill,
-  truncate,
-  type as type_,
-} from "@/components/console/styles";
+import { hairline, truncate, type as type_ } from "@/components/console/styles";
 import { formatAge } from "@/lib/console/format";
 import type { ConsoleRun } from "@/lib/console/types";
 
@@ -62,12 +57,6 @@ export function Composer({
     }
   };
 
-  const hint = blocked
-    ? blocked
-    : tooShort
-      ? "Name the outcome and the evidence you would accept."
-      : "Runs without stopping to ask. Everything it does lands in the record.";
-
   return (
     <div
       className="oc-scroll"
@@ -79,13 +68,9 @@ export function Composer({
       }}
     >
       <div style={{ margin: "0 auto", maxWidth: 760 }}>
-        <h2 style={{ ...type_.display, marginBottom: 6 }}>
+        <h2 style={{ ...type_.display, marginBottom: 14 }}>
           What should it prove?
         </h2>
-        <p style={{ ...type_.body, marginBottom: 18, maxWidth: "52ch" }}>
-          The agent inspects, edits, executes, and verifies without stopping to
-          ask. Describe the outcome and the evidence you&rsquo;d accept.
-        </p>
 
         <div
           style={{
@@ -122,72 +107,37 @@ export function Composer({
               alignItems: "center",
               display: "flex",
               flexWrap: "wrap",
-              gap: 6,
-              padding: "0 12px 10px",
-            }}
-          >
-            {[agent.workspace ?? "/workspace", agent.runtime, agent.model].map(
-              (item) => (
-                <span
-                  key={item}
-                  style={{
-                    alignItems: "center",
-                    background: "var(--bg-elevated)",
-                    border: hairline,
-                    borderRadius: "var(--radius-control)",
-                    color: "var(--text-primary)",
-                    display: "inline-flex",
-                    font: "400 11px/1 var(--font-mono)",
-                    gap: 6,
-                    height: 26,
-                    maxWidth: "100%",
-                    padding: "0 9px",
-                    ...truncate,
-                  }}
-                  title="Set on the agent profile, not per run"
-                >
-                  {item}
-                </span>
-              )
-            )}
-          </div>
-
-          <div
-            style={{
-              alignItems: "center",
-              background: "var(--bg-sunken)",
-              borderTop: hairline,
-              display: "flex",
-              flexWrap: "wrap",
               gap: "8px 10px",
-              padding: "10px 12px",
+              padding: "0 12px 12px",
             }}
           >
-            <span style={pill("warning")}>Approvals disabled</span>
             <span
               style={{
-                color: blocked ? "var(--danger-text)" : "var(--text-secondary)",
-                font: "400 11px/1.4 var(--font-ui)",
+                color: "var(--text-muted)",
+                font: "400 11px/1 var(--font-mono)",
+                ...truncate,
               }}
+              title="Set on the agent profile, not per run"
             >
-              {hint}
+              {[agent.runtime, agent.model, agent.workspace ?? "/workspace"]
+                .filter(Boolean)
+                .join(" · ")}
             </span>
             <div style={{ flex: 1 }} />
-            <kbd
-              style={{
-                background: "var(--bg-raised)",
-                border: hairline,
-                borderRadius: 4,
-                color: "var(--text-muted)",
-                font: "500 10px/1 var(--font-mono)",
-                padding: "4px 6px",
-              }}
-            >
-              ⌘↵
-            </kbd>
+            {blocked ? (
+              <span
+                style={{
+                  color: "var(--danger-text)",
+                  font: "400 11px/1.4 var(--font-ui)",
+                }}
+              >
+                {blocked}
+              </span>
+            ) : null}
             <Btn
               disabled={disabled}
               onClick={onStart}
+              title="⌘↵"
               variant={disabled ? "secondary" : "primary"}
             >
               <Sparkles size={13} />
