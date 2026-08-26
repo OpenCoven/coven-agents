@@ -1228,6 +1228,90 @@ test("fiber recovery fails closed when sandbox cleanup is unavailable", async ()
   setSandboxDestroyError(null);
 });
 
+test("a post-claim agent-busy error settles the run and releases admission", async () => {
+  resetFiberLog();
+  fiberControl.runFibers = false;
+  let runFiber!: Promise<void>;
+  let yolo!: YoloAgent;
+  const released: string[] = [];
+  const originalFetch = globalThis.fetch;
+  yolo = new (class extends YoloAgent {
+    override startFiber(
+      _name: string,
+      fn: Parameters<YoloAgent["startFiber"]>[1]
+    ): ReturnType<YoloAgent["startFiber"]> {
+      runFiber = fn({
+        id: "fiber:post-claim-busy",
+        signal: new AbortController().signal,
+        snapshot: null,
+        stash: () => undefined,
+      });
+      return Promise.resolve({
+        accepted: true,
+        createdAt: Date.now(),
+        fiberId: "fiber:post-claim-busy",
+        name: "run:post-claim-busy",
+        status: "running",
+      });
+    }
+  })(
+    undefined as never,
+    {
+      APP_ORIGIN: "https://runner.test",
+      RUNNER_SERVICE_TOKEN: "service-token",
+      RunAdmission: {
+        getByName: () => ({
+          release: (runId: string) => {
+            released.push(runId);
+            return Promise.resolve(true);
+          },
+          validateDispatch: () => Promise.resolve(true),
+        }),
+      },
+      Sandbox: {},
+    } as never
+  );
+  yolo.configure(definition());
+  globalThis.fetch = (() => {
+    const state = Reflect.get(yolo, "state") as {
+      runs: CloudRunRecord[];
+    };
+    yolo.setState({
+      ...state,
+      sandbox: {
+        generation: 1,
+        owner: "run:other",
+        runId: "other-run",
+      },
+    } as never);
+    return Promise.resolve(
+      new Response(JSON.stringify({ credential: "secret" }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      })
+    );
+  }) as typeof fetch;
+
+  try {
+    const queued = await yolo.enqueue(
+      { operationId: OP_A, task: "Busy after claim." },
+      "b42a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a33",
+      "busy-after-claim",
+      "identity"
+    );
+    assert.equal(
+      await yolo.startAdmitted(queued.run.id, "1:busy-after-claim"),
+      true
+    );
+    await runFiber;
+
+    assert.equal(yolo.getRun(queued.run.id)?.status, "failed");
+    assert.deepEqual(released, [queued.run.id]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("cancellation waits for sandbox cleanup before releasing capacity", async () => {
   resetFiberLog();
   resetDestroyedSandboxes();

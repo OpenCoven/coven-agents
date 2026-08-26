@@ -33,6 +33,8 @@ import {
 } from "./http.js";
 import { importVerifyKey, verifyRunnerToken } from "./identity.js";
 import {
+  type AdmissionCleanupCapability,
+  type AdmissionCleanupGuard,
   AgentBusyError,
   AgentDecommissioningError,
   AlreadyRunningError,
@@ -116,7 +118,8 @@ export type CloudRunnerAgent = {
   confirmAdmission?: (
     runId: string,
     operationId: string,
-    requestHash: string
+    requestHash: string,
+    capability?: AdmissionCleanupCapability
   ) => Awaitable<boolean>;
   prepareOwnerMatches?: (
     runId: string,
@@ -147,7 +150,9 @@ export type CloudRunnerAgent = {
   warm: () => Awaitable<WarmState>;
   stop: (
     runId: string,
-    dispatchToken?: string
+    dispatchToken?: string,
+    reason?: string,
+    guard?: AdmissionCleanupGuard
   ) => Awaitable<RunSnapshot | null>;
 };
 
@@ -155,8 +160,26 @@ export type CloudRunnerAdmission = {
   admit: (input: AdmissionRequest) => Awaitable<AdmissionDecision>;
   getRecord?: (runId: string) => Awaitable<AdmissionRecord | null>;
   getByOperationId?: (operationId: string) => Awaitable<AdmissionRecord | null>;
-  enqueueCleanup?: (agentId: string, runId: string) => Awaitable<void>;
-  release: (runId: string, dispatchToken?: string) => Awaitable<boolean>;
+  getCleanupCapability?: (
+    runId: string,
+    expected?: Pick<
+      AdmissionCleanupCapability,
+      "agentId" | "operationId" | "requestHash" | "runId"
+    >
+  ) => Awaitable<AdmissionCleanupCapability | null>;
+  validateCleanup?: (
+    capability: AdmissionCleanupCapability
+  ) => Awaitable<boolean>;
+  enqueueCleanup?: (
+    agentId: string,
+    runId: string,
+    capability?: AdmissionCleanupCapability
+  ) => Awaitable<void>;
+  release: (
+    runId: string,
+    dispatchToken?: string,
+    admissionSequence?: number
+  ) => Awaitable<boolean>;
 };
 
 export type CloudRunnerDependencies<
@@ -179,6 +202,7 @@ export type CloudRunnerDependencies<
 };
 
 type CleanupRunOptions = {
+  admissionCapability?: AdmissionCleanupCapability;
   admission?: CloudRunnerAdmission;
   allowUnowned?: boolean;
   prepareOwner?: string;
@@ -192,6 +216,7 @@ async function cleanupRun(
   options: CleanupRunOptions = {}
 ): Promise<unknown | null> {
   const {
+    admissionCapability,
     admission,
     allowUnowned = false,
     prepareOwner,
@@ -200,7 +225,19 @@ async function cleanupRun(
   if (!prepareOwner && !allowUnowned) {
     return null;
   }
+  if (
+    allowUnowned &&
+    !prepareOwner &&
+    (!admissionCapability ||
+      admissionCapability.agentId !== agentId ||
+      admissionCapability.runId !== runId ||
+      !admission?.validateCleanup ||
+      !(await admission.validateCleanup(admissionCapability)))
+  ) {
+    return null;
+  }
   let firstError: unknown | null = null;
+  let prepareOwnerVerified = false;
   const remember = (error: unknown) => {
     if (firstError === null) {
       firstError = error;
@@ -216,11 +253,24 @@ async function cleanupRun(
   };
 
   if (prepareOwner && agent.prepareOwnerMatches) {
+    let ownerMatches = false;
     try {
-      if (!(await agent.prepareOwnerMatches(runId, prepareOwner))) {
+      ownerMatches = await agent.prepareOwnerMatches(runId, prepareOwner);
+      prepareOwnerVerified = ownerMatches;
+      if (!ownerMatches && !allowUnowned) {
         return null;
       }
     } catch {
+      return null;
+    }
+    if (
+      !ownerMatches &&
+      (!admissionCapability ||
+        admissionCapability.agentId !== agentId ||
+        admissionCapability.runId !== runId ||
+        !admission?.validateCleanup ||
+        !(await admission.validateCleanup(admissionCapability)))
+    ) {
       return null;
     }
   }
@@ -235,18 +285,40 @@ async function cleanupRun(
         safeToRelease = true;
       } else {
         if (prepareOwner) {
-          if (!agent.prepareOwnerMatches) {
-            return firstError;
-          }
-          try {
-            if (!(await agent.prepareOwnerMatches(runId, prepareOwner))) {
-              return firstError;
+          if (agent.prepareOwnerMatches) {
+            try {
+              if (
+                !(await agent.prepareOwnerMatches(runId, prepareOwner)) &&
+                !allowUnowned
+              ) {
+                return firstError;
+              }
+            } catch {
+              if (!allowUnowned) {
+                return firstError;
+              }
             }
-          } catch {
+          } else if (!allowUnowned) {
             return firstError;
           }
         }
-        const stopped = await attempt(() => agent.stop(runId));
+        if (
+          allowUnowned &&
+          !prepareOwnerVerified &&
+          (!admissionCapability ||
+            admissionCapability.agentId !== agentId ||
+            admissionCapability.runId !== runId ||
+            !admission?.validateCleanup ||
+            !(await admission.validateCleanup(admissionCapability)))
+        ) {
+          return firstError;
+        }
+        const guard = admissionCapability
+          ? { ...admissionCapability, queuedOnly: false }
+          : undefined;
+        const stopped = await attempt(() =>
+          agent.stop(runId, undefined, undefined, guard)
+        );
         safeToRelease =
           stopped.ok &&
           (stopped.value === null ||
@@ -257,7 +329,12 @@ async function cleanupRun(
               isTerminal(stopped.value.status as RunSnapshot["status"])));
       }
     } else {
-      const stopped = await attempt(() => agent.stop(runId));
+      const guard = admissionCapability
+        ? { ...admissionCapability, queuedOnly: false }
+        : undefined;
+      const stopped = await attempt(() =>
+        agent.stop(runId, undefined, undefined, guard)
+      );
       safeToRelease =
         stopped.ok &&
         (stopped.value === null ||
@@ -274,7 +351,21 @@ async function cleanupRun(
     if (discarded.ok && discarded.value !== false) {
       safeToRelease = true;
     } else if (allowUnowned) {
-      const stopped = await attempt(() => agent.stop(runId));
+      if (
+        !admissionCapability ||
+        admissionCapability.agentId !== agentId ||
+        admissionCapability.runId !== runId ||
+        !admission?.validateCleanup ||
+        !(await admission.validateCleanup(admissionCapability))
+      ) {
+        return firstError;
+      }
+      const guard = admissionCapability
+        ? { ...admissionCapability, queuedOnly: false }
+        : undefined;
+      const stopped = await attempt(() =>
+        agent.stop(runId, undefined, undefined, guard)
+      );
       safeToRelease =
         stopped.ok &&
         (stopped.value === null ||
@@ -286,12 +377,22 @@ async function cleanupRun(
     }
   }
   if (admission && safeToRelease) {
-    const released = await attempt(() => admission.release(runId));
+    const released = await attempt(() =>
+      admission.release(
+        runId,
+        admissionCapability?.dispatchToken,
+        admissionCapability?.admissionSequence
+      )
+    );
     if (!released.ok && admission.enqueueCleanup) {
-      await attempt(() => admission.enqueueCleanup?.(agentId, runId));
+      await attempt(() =>
+        admission.enqueueCleanup?.(agentId, runId, admissionCapability)
+      );
     }
   } else if (admission?.enqueueCleanup) {
-    await attempt(() => admission.enqueueCleanup?.(agentId, runId));
+    await attempt(() =>
+      admission.enqueueCleanup?.(agentId, runId, admissionCapability)
+    );
   }
   return firstError;
 }
@@ -1012,12 +1113,24 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                   admissionRecord.state === "terminal" &&
                   !isTerminal(original.status)
                 ) {
+                  const capability = existingAdmission.getCleanupCapability
+                    ? await existingAdmission.getCleanupCapability(
+                        admissionRecord.runId,
+                        {
+                          agentId: id,
+                          operationId: input.operationId,
+                          requestHash,
+                          runId: admissionRecord.runId,
+                        }
+                      )
+                    : null;
                   const cleanupError = await cleanupRun(
                     originalAgent,
                     original.id,
                     id,
                     {
                       admission: existingAdmission,
+                      admissionCapability: capability ?? undefined,
                       allowUnowned: true,
                       stopFirst: true,
                     }
@@ -1035,10 +1148,22 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                     existingAdmission
                   );
                 } else if (originalAgent.confirmAdmission) {
+                  const capability = existingAdmission.getCleanupCapability
+                    ? await existingAdmission.getCleanupCapability(
+                        admissionRecord.runId,
+                        {
+                          agentId: admissionRecord.agentId,
+                          operationId: admissionRecord.operationId,
+                          requestHash: admissionRecord.requestHash,
+                          runId: admissionRecord.runId,
+                        }
+                      )
+                    : null;
                   const confirmed = await originalAgent.confirmAdmission(
                     original.id,
                     original.operationId,
-                    requestHash
+                    requestHash,
+                    capability ?? undefined
                   );
                   if (!confirmed) {
                     const latest = await originalAgent.getRun(original.id);
@@ -1210,12 +1335,24 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 duplicateAdmission.state === "terminal" &&
                 !isTerminal(original.status)
               ) {
+                const capability = admission.getCleanupCapability
+                  ? await admission.getCleanupCapability(
+                      duplicateAdmission.runId,
+                      {
+                        agentId: duplicateAdmission.agentId,
+                        operationId: duplicateAdmission.operationId,
+                        requestHash: duplicateAdmission.requestHash,
+                        runId: duplicateAdmission.runId,
+                      }
+                    )
+                  : null;
                 const cleanupError = await cleanupRun(
                   originalAgent,
                   original.id,
                   id,
                   {
                     admission,
+                    admissionCapability: capability ?? undefined,
                     allowUnowned: true,
                     stopFirst: true,
                   }
@@ -1233,10 +1370,22 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                   admission
                 );
               } else if (originalAgent.confirmAdmission) {
+                const capability = admission.getCleanupCapability
+                  ? await admission.getCleanupCapability(
+                      duplicateAdmission.runId,
+                      {
+                        agentId: duplicateAdmission.agentId,
+                        operationId: duplicateAdmission.operationId,
+                        requestHash: duplicateAdmission.requestHash,
+                        runId: duplicateAdmission.runId,
+                      }
+                    )
+                  : null;
                 const confirmed = await originalAgent.confirmAdmission(
                   original.id,
                   original.operationId,
-                  requestHash
+                  requestHash,
+                  capability ?? undefined
                 );
                 if (!confirmed) {
                   const latest = await originalAgent.getRun(original.id);
@@ -1295,12 +1444,22 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               return busyResponse("global_busy", cors);
             }
 
+            let admissionCapability: AdmissionCleanupCapability | null = null;
             try {
+              admissionCapability = admission.getCleanupCapability
+                ? await admission.getCleanupCapability(runId, {
+                    agentId: id,
+                    operationId: input.operationId,
+                    requestHash,
+                    runId,
+                  })
+                : null;
               if (agent.confirmAdmission) {
                 const confirmed = await agent.confirmAdmission(
                   runId,
                   input.operationId,
-                  requestHash
+                  requestHash,
+                  admissionCapability ?? undefined
                 );
                 if (!confirmed) {
                   const terminal = await agent.getRun(runId);
@@ -1322,6 +1481,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                   }
                   await cleanupRun(agent, runId, id, {
                     admission,
+                    admissionCapability: admissionCapability ?? undefined,
                     prepareOwner: prepared.prepareOwner,
                     stopFirst: true,
                   });
@@ -1383,6 +1543,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               }
               await cleanupRun(agent, runId, id, {
                 admission,
+                admissionCapability: admissionCapability ?? undefined,
                 allowUnowned: true,
                 prepareOwner: prepared.prepareOwner,
                 stopFirst: true,

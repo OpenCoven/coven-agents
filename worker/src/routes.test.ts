@@ -14,7 +14,11 @@ import {
   type CloudRunnerDirectory,
   createCloudRunner,
 } from "./routes";
-import { AgentDecommissioningError, hashOperation } from "./run-state";
+import {
+  type AdmissionCleanupGuard,
+  AgentDecommissioningError,
+  hashOperation,
+} from "./run-state";
 
 const TOKEN = "test-token";
 const MINE = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
@@ -1747,10 +1751,16 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
   const admittedRunIds: string[] = [];
   let registerAttempts = 0;
   let released = false;
+  let confirmed = false;
+  let cleanupGuard: AdmissionCleanupGuard | undefined;
   const mappings = new Map<string, string>();
   const runs = new Map<string, RunSnapshot>();
   const agent: CloudRunnerAgent = {
     configure: (value: AgentDefinition) => value,
+    confirmAdmission: () => {
+      confirmed = true;
+      return true;
+    },
     decommission: () => undefined,
     discardRun: (runId) => {
       calls.push(`discard:${runId}`);
@@ -1765,10 +1775,11 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
     getEventStream: () => ({ events: [], terminal: false }),
     getRun: (runId) => runs.get(runId) ?? null,
     listRuns: () => [...runs.values()],
-    prepareOwnerMatches: () => true,
+    prepareOwnerMatches: () => !confirmed,
     snapshot: () => agents.get(MINE) ?? null,
-    stop: (runId) => {
+    stop: (runId, _dispatchToken, _reason, guard) => {
       calls.push(`stop:${runId}`);
+      cleanupGuard = guard;
       const run = runs.get(runId);
       return run ? { ...run, status: "cancelled" as const } : null;
     },
@@ -1810,11 +1821,19 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
         runId: input.runId,
       };
     },
+    getCleanupCapability: (candidate: string) => ({
+      admissionSequence: 1,
+      agentId: MINE,
+      operationId: "99999999-aaaa-4111-8222-333333333333",
+      requestHash: "request-hash",
+      runId: candidate,
+    }),
     release: (runId: string) => {
       calls.push(`release:${runId}`);
       released = true;
       return true;
     },
+    validateCleanup: () => true,
   };
   const [environment, token] = await Promise.all([
     environmentPromise,
@@ -1843,6 +1862,14 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
   assert.equal(first.status, 500);
   assert.equal(released, true);
   const [firstRunId] = admittedRunIds;
+  assert.deepEqual(cleanupGuard, {
+    admissionSequence: 1,
+    agentId: MINE,
+    operationId: "99999999-aaaa-4111-8222-333333333333",
+    queuedOnly: false,
+    requestHash: "request-hash",
+    runId: firstRunId,
+  });
   assert.match(firstRunId ?? "", /^[0-9a-f-]{36}$/);
   assert.deepEqual(calls.slice(0, 5), [
     `admit:${firstRunId}`,
@@ -1940,10 +1967,18 @@ test("a run mapping is unregistered when the admitted run disappears after regis
         kind: "active" as const,
         runId: input.runId,
       }),
+      getCleanupCapability: (candidate: string) => ({
+        admissionSequence: 1,
+        agentId: MINE,
+        operationId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+        requestHash: "request-hash",
+        runId: candidate,
+      }),
       release: (candidate) => {
         calls.push("release");
         return Boolean(candidate);
       },
+      validateCleanup: () => true,
     }),
     getDirectory: () => directory,
     getYoloAgent: () => agent,

@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { pseudonymousKey } from "./abuse";
 import {
+  type AdmissionCleanupCapability,
   isAgentBusyError,
   isTerminal,
   MAX_TERMINAL_RUNS_PER_AGENT,
@@ -70,6 +71,24 @@ type StoredAdmissionRecord = AdmissionRecord & {
   sequence: number;
   terminalizedAt?: string;
 };
+
+function matchesCleanupIdentity(
+  record: Pick<
+    AdmissionRecord,
+    "agentId" | "operationId" | "requestHash" | "runId"
+  >,
+  expected: Pick<
+    AdmissionCleanupCapability,
+    "agentId" | "operationId" | "requestHash" | "runId"
+  >
+): boolean {
+  return (
+    record.agentId === expected.agentId &&
+    record.operationId === expected.operationId &&
+    record.requestHash === expected.requestHash &&
+    record.runId === expected.runId
+  );
+}
 
 export type AdmissionQueueOptions = {
   dispatch?: AdmissionDispatch;
@@ -965,10 +984,21 @@ export class RunAdmission extends DurableObject<Env> {
     });
   }
 
-  async release(runId: string, dispatchToken?: string): Promise<boolean> {
+  async release(
+    runId: string,
+    dispatchToken?: string,
+    admissionSequence?: number
+  ): Promise<boolean> {
     await this.initialized;
     const current = this.findByRunId(runId);
     if (!current || current.state === "terminal") {
+      return false;
+    }
+    const stored = this.findStoredByRunId(runId);
+    if (
+      admissionSequence !== undefined &&
+      stored?.sequence !== admissionSequence
+    ) {
       return false;
     }
     if (dispatchToken && !this.dispatchTokenMatches(runId, dispatchToken)) {
@@ -981,23 +1011,71 @@ export class RunAdmission extends DurableObject<Env> {
     return true;
   }
 
-  async enqueueCleanup(agentId: string, runId: string): Promise<void> {
+  async enqueueCleanup(
+    agentId: string,
+    runId: string,
+    capability?: AdmissionCleanupCapability
+  ): Promise<void> {
     await this.initialized;
     const current = this.findStoredByRunId(runId);
     this.enqueueCleanupTask({
-      agentId,
+      agentId: capability?.agentId ?? agentId,
       enqueuedAt: new Date().toISOString(),
-      operationId: `cleanup:${runId}`,
-      requestHash: "cleanup",
+      operationId: capability?.operationId ?? `cleanup:${runId}`,
+      requestHash: capability?.requestHash ?? "cleanup",
       runId,
-      sequence: current?.sequence ?? 0,
+      sequence: capability?.admissionSequence ?? current?.sequence ?? 0,
       state: current?.state ?? "terminal",
       tenantHash: "cleanup",
-      ...(current?.dispatchToken
-        ? { dispatchToken: current.dispatchToken }
+      ...((capability?.dispatchToken ?? current?.dispatchToken)
+        ? {
+            dispatchToken: capability?.dispatchToken ?? current?.dispatchToken,
+          }
         : {}),
     });
     await this.ensureAlarm({ throwOnFailure: false });
+  }
+
+  async getCleanupCapability(
+    runId: string,
+    expected?: Pick<
+      AdmissionCleanupCapability,
+      "agentId" | "operationId" | "requestHash" | "runId"
+    >
+  ): Promise<AdmissionCleanupCapability | null> {
+    await this.initialized;
+    const current = this.findStoredByRunId(runId);
+    if (!current || (expected && !matchesCleanupIdentity(current, expected))) {
+      return null;
+    }
+    return {
+      admissionSequence: current.sequence,
+      agentId: current.agentId,
+      ...(current.dispatchToken
+        ? { dispatchToken: current.dispatchToken }
+        : {}),
+      operationId: current.operationId,
+      requestHash: current.requestHash,
+      runId: current.runId,
+    };
+  }
+
+  async validateCleanup(
+    capability: AdmissionCleanupCapability
+  ): Promise<boolean> {
+    await this.initialized;
+    const current = this.findStoredByRunId(capability.runId);
+    if (
+      !current ||
+      current.sequence !== capability.admissionSequence ||
+      !matchesCleanupIdentity(current, capability)
+    ) {
+      return false;
+    }
+    if (capability.dispatchToken) {
+      return current.dispatchToken === capability.dispatchToken;
+    }
+    return true;
   }
 
   async getRecord(runId: string): Promise<AdmissionRecord | null> {
@@ -1108,7 +1186,7 @@ export class RunAdmission extends DurableObject<Env> {
             ? this.requeueRecord(candidate, fenceToken)
             : "ambiguous";
           if (reconciliation === "refused") {
-            await this.cleanupRejectedAdmission(candidate);
+            await this.cleanupRejectedAdmission(candidate, true);
           }
           if (reconciliation === "requeued") {
             return;
@@ -1167,11 +1245,9 @@ export class RunAdmission extends DurableObject<Env> {
       if (reconciliation === "requeued" && afterFailure?.state === "queued") {
         this.terminalizeFailedAdmission(candidate, candidate.dispatchToken);
         try {
-          const stopped = await this.env.YoloAgent.getByName(
-            candidate.agentId
-          ).stop(
-            candidate.runId,
-            candidate.dispatchToken,
+          const stopped = await this.stopForCleanup(
+            candidate,
+            !candidate.dispatchToken,
             "Run cancelled because admission reconciliation is unavailable."
           );
           if (!this.isTerminalOrAbsent(stopped)) {
@@ -1258,7 +1334,7 @@ export class RunAdmission extends DurableObject<Env> {
         this.queuedCountForTenant(current.tenantHash) >= limits.tenantQueuedRuns
       ) {
         this.terminalizeRecord(current.runId, dispatchToken);
-        this.enqueueCleanupTask({ ...current, dispatchToken });
+        this.enqueueCleanupTask({ ...current, dispatchToken: undefined });
         return "refused";
       }
 
@@ -1411,10 +1487,7 @@ export class RunAdmission extends DurableObject<Env> {
       this.terminalizeFailedAdmission(record, record.dispatchToken);
       try {
         // biome-ignore lint/performance/noAwaitInLoops: fail-closed cleanup must be durable before returning.
-        const stopped = await this.env.YoloAgent.getByName(record.agentId).stop(
-          record.runId,
-          record.dispatchToken
-        );
+        const stopped = await this.stopForCleanup(record);
         if (!this.isTerminalOrAbsent(stopped)) {
           this.enqueueCleanupTask({
             ...record,
@@ -1486,10 +1559,7 @@ export class RunAdmission extends DurableObject<Env> {
     record: StoredAdmissionRecord
   ): Promise<void> {
     try {
-      const stopped = await this.env.YoloAgent.getByName(record.agentId).stop(
-        record.runId,
-        record.dispatchToken
-      );
+      const stopped = await this.stopForCleanup(record);
       if (this.isTerminalOrAbsent(stopped)) {
         this.deleteCleanupTask(record.runId, record.sequence);
       }
@@ -1499,12 +1569,16 @@ export class RunAdmission extends DurableObject<Env> {
   }
 
   private async cleanupRejectedAdmission(
-    record: StoredAdmissionRecord
+    record: StoredAdmissionRecord,
+    queuedOnly = false
   ): Promise<void> {
+    const cleanupRecord = queuedOnly
+      ? { ...record, dispatchToken: undefined }
+      : record;
     try {
-      const stopped = await this.env.YoloAgent.getByName(record.agentId).stop(
-        record.runId,
-        record.dispatchToken,
+      const stopped = await this.stopForCleanup(
+        cleanupRecord,
+        queuedOnly,
         "Run refused because the tenant queue is full."
       );
       if (this.isTerminalOrAbsent(stopped)) {
@@ -1513,6 +1587,32 @@ export class RunAdmission extends DurableObject<Env> {
     } catch {
       // The transition transaction already left a durable cleanup task.
     }
+  }
+
+  private async stopForCleanup(
+    record: Pick<
+      StoredAdmissionRecord,
+      | "agentId"
+      | "operationId"
+      | "requestHash"
+      | "runId"
+      | "sequence"
+      | "dispatchToken"
+    >,
+    queuedOnly = !record.dispatchToken,
+    reason?: string
+  ): Promise<unknown> {
+    const agent = this.env.YoloAgent.getByName(record.agentId);
+    const guard = {
+      admissionSequence: record.sequence,
+      agentId: record.agentId,
+      ...(record.dispatchToken ? { dispatchToken: record.dispatchToken } : {}),
+      operationId: record.operationId,
+      queuedOnly,
+      requestHash: record.requestHash,
+      runId: record.runId,
+    };
+    return await agent.stop(record.runId, record.dispatchToken, reason, guard);
   }
 
   private hasCleanupTasks(): boolean {
@@ -1636,10 +1736,16 @@ export class RunAdmission extends DurableObject<Env> {
       let completed = false;
       try {
         // biome-ignore lint/performance/noAwaitInLoops: Cleanup tasks are deliberately processed sequentially.
-        const stopped = await this.env.YoloAgent.getByName(task.agent_id).stop(
-          task.run_id,
-          task.dispatch_token ?? undefined
-        );
+        const stopped = await this.stopForCleanup({
+          agentId: task.agent_id,
+          ...(task.dispatch_token
+            ? { dispatchToken: task.dispatch_token }
+            : {}),
+          operationId: current.operationId,
+          requestHash: current.requestHash,
+          runId: task.run_id,
+          sequence: task.admission_sequence,
+        });
         completed = this.isTerminalOrAbsent(stopped);
       } catch {
         completed = false;
@@ -1648,7 +1754,8 @@ export class RunAdmission extends DurableObject<Env> {
         try {
           const released = await this.release(
             task.run_id,
-            task.dispatch_token ?? undefined
+            task.dispatch_token ?? undefined,
+            task.admission_sequence
           );
           completed =
             released ||

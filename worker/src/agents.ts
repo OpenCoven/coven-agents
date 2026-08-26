@@ -29,6 +29,8 @@ import {
   warmSandbox,
 } from "./harness-runner";
 import {
+  type AdmissionCleanupCapability,
+  type AdmissionCleanupGuard,
   AgentBusyError,
   AgentDecommissioningError,
   AlreadyRunningError,
@@ -36,6 +38,7 @@ import {
   type CloudRunRecord,
   cloudFiberKey,
   finishCloudRunRecord,
+  isAgentBusyError,
   isTerminal,
   liveCloudRunEvent,
   MAX_TERMINAL_RUNS_PER_AGENT,
@@ -114,6 +117,7 @@ type CleanupRetryPayload = {
 };
 
 type AdmissionReleaseIntent = {
+  admissionSequence?: number;
   dispatchToken?: string;
 };
 
@@ -1541,6 +1545,8 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
         });
         await this.reportAdmissionTerminal(cleanup.runId as string);
       }
+    } else if (current && isTerminal(current.run.status)) {
+      await this.reportAdmissionTerminal(cleanup.runId as string);
     } else if (
       this.state.definition?.warm?.status === "provisioning" &&
       this.lifecycleIsActive()
@@ -2080,10 +2086,8 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         ) ?? record
       );
     } catch (error) {
-      if (error instanceof AgentBusyError) {
-        throw error;
-      }
-      const cancellation = this.executionWasCancelled(error, signal);
+      const busy = isAgentBusyError(error);
+      const cancellation = !busy && this.executionWasCancelled(error, signal);
       const cleanupRequired =
         error instanceof HarnessError &&
         (error.code === "harness_timeout" ||
@@ -2125,7 +2129,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         this.persistExecutionCancellation(execution, credential);
         return this.currentRunOr(planned.run.id, record);
       }
-      if (!this.executionIsLive(execution)) {
+      if (!busy && !this.executionIsLive(execution)) {
         this.clearSandboxOwnershipAfterFence(ownership);
         return this.currentRunOr(planned.run.id, record);
       }
@@ -2145,13 +2149,14 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         output:
           error instanceof Error ? error.message : "Agent execution failed.",
         status:
-          error instanceof HarnessError &&
-          (error.code === "harness_cancelled" ||
-            error.code === "sandbox_cleanup_failed")
+          cancellation ||
+          (error instanceof HarnessError &&
+            (error.code === "harness_cancelled" ||
+              error.code === "sandbox_cleanup_failed"))
             ? "cancelled"
             : "failed",
       });
-      if (!this.executionIsLive(execution)) {
+      if (!busy && !this.executionIsLive(execution)) {
         this.clearSandboxOwnershipAfterFence(ownership);
         return this.currentRunOr(planned.run.id, record);
       }
@@ -2460,7 +2465,8 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   async confirmAdmission(
     runId: string,
     operationId: string,
-    requestHash: string
+    requestHash: string,
+    admissionCapability?: AdmissionCleanupCapability
   ): Promise<boolean> {
     const current = this.state.runs.find(
       (candidate) => candidate.run.id === runId
@@ -2473,16 +2479,70 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     ) {
       return false;
     }
+    if (
+      admissionCapability &&
+      (admissionCapability.agentId !== current.run.agentId ||
+        admissionCapability.runId !== current.run.id ||
+        admissionCapability.operationId !== operationId ||
+        admissionCapability.requestHash !== requestHash)
+    ) {
+      return false;
+    }
     if (isTerminal(current.run.status)) {
       await this.reportAdmissionTerminal(runId);
       return true;
     }
+    let capability: AdmissionCleanupCapability | null | undefined =
+      admissionCapability;
+    if (!capability) {
+      try {
+        const runAdmission = (
+          this.env as unknown as {
+            RunAdmission?: {
+              getByName: (name: string) => {
+                getCleanupCapability?: (
+                  admissionRunId: string,
+                  expected: Pick<
+                    AdmissionCleanupCapability,
+                    "agentId" | "operationId" | "requestHash" | "runId"
+                  >
+                ) => Promise<AdmissionCleanupCapability | null>;
+              };
+            };
+          }
+        ).RunAdmission;
+        const admission = runAdmission?.getByName("deployment");
+        if (admission?.getCleanupCapability) {
+          capability = await admission.getCleanupCapability(runId, {
+            agentId: current.run.agentId,
+            operationId,
+            requestHash,
+            runId,
+          });
+        }
+      } catch {
+        // Admission capability lookup is best effort for legacy callers.
+      }
+    }
     const pending = current.pendingAdmission;
     if (!pending && current.admissionConfirmedAt) {
+      if (
+        capability &&
+        (current.admissionCapability?.admissionSequence !==
+          capability.admissionSequence ||
+          current.admissionCapability?.dispatchToken !==
+            capability.dispatchToken)
+      ) {
+        this.persistRun({
+          ...current,
+          admissionCapability: capability,
+        });
+      }
       return true;
     }
     this.persistRun({
       ...current,
+      admissionCapability: capability ?? current.admissionCapability,
       admissionConfirmedAt:
         current.admissionConfirmedAt ?? new Date().toISOString(),
       pendingAdmission: undefined,
@@ -3204,7 +3264,8 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   async stop(
     runId: string,
     dispatchToken?: string,
-    reason = "Run cancelled by operator request."
+    reason = "Run cancelled by operator request.",
+    guard?: AdmissionCleanupGuard
   ): Promise<RunSnapshot | null> {
     const definition = this.requireDefinition();
     const record = this.state.runs.find(
@@ -3212,6 +3273,26 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     );
     if (!record) {
       return null;
+    }
+    if (guard) {
+      const capability = record.admissionCapability;
+      if (
+        guard.agentId !== record.run.agentId ||
+        guard.runId !== runId ||
+        guard.admissionSequence !== capability?.admissionSequence ||
+        (guard.dispatchToken !== undefined &&
+          capability?.dispatchToken !== guard.dispatchToken) ||
+        (guard.dispatchToken === undefined &&
+          capability?.dispatchToken !== undefined &&
+          !guard.queuedOnly) ||
+        guard.operationId !== record.run.operationId ||
+        guard.requestHash !== record.operationHash
+      ) {
+        return record.run;
+      }
+      if (guard.queuedOnly && !this.isTrulyQueued(record)) {
+        return record.run;
+      }
     }
     const currentDispatchToken =
       record.dispatchToken ?? this.state.admissionTokens?.[runId];
@@ -3815,7 +3896,14 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       );
       const dispatchToken =
         record?.dispatchToken ?? this.state.admissionTokens?.[runId];
-      admissionReleases[runId] = dispatchToken ? { dispatchToken } : {};
+      admissionReleases[runId] = {
+        ...(record?.admissionCapability?.admissionSequence === undefined
+          ? {}
+          : {
+              admissionSequence: record.admissionCapability.admissionSequence,
+            }),
+        ...(dispatchToken ? { dispatchToken } : {}),
+      };
     }
     return { admissionReleases };
   }
@@ -3997,6 +4085,18 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       this.persistRun(cancelled, { dispatchClaim: null });
     }
 
+    const currentDefinition = this.state.definition;
+    if (!currentDefinition) {
+      await this.scheduleDecommissionRetry();
+      throw new AgentDecommissioningError();
+    }
+    if (!(await this.repairPendingSandboxCleanup(currentDefinition))) {
+      await this.scheduleDecommissionRetry();
+      throw new AgentDecommissioningError(
+        "Agent sandbox cleanup is still pending. Try again later."
+      );
+    }
+
     const releaseRunIds = Object.keys(
       this.state.decommission?.admissionReleases ?? {}
     );
@@ -4009,17 +4109,6 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       }
     }
 
-    const currentDefinition = this.state.definition;
-    if (!currentDefinition) {
-      await this.scheduleDecommissionRetry();
-      throw new AgentDecommissioningError();
-    }
-    if (!(await this.repairPendingSandboxCleanup(currentDefinition))) {
-      await this.scheduleDecommissionRetry();
-      throw new AgentDecommissioningError(
-        "Agent sandbox cleanup is still pending. Try again later."
-      );
-    }
     const currentLifecycle = this.currentLifecycle();
     if (
       currentLifecycle.status !== "decommissioning" ||
@@ -4205,6 +4294,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (this.admissionReleaseCompleted.has(runId)) {
       return true;
     }
+    if (this.state.sandbox?.cleanup) {
+      this.scheduleCleanupRetry().catch(() => undefined);
+      return false;
+    }
     const inFlight = this.admissionReleaseInFlight.get(runId);
     if (inFlight) {
       return await inFlight;
@@ -4214,6 +4307,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       this.state.admissionTokens?.[runId] ??
       intent?.dispatchToken;
     const token = dispatchToken ?? currentDispatchToken;
+    const sequence =
+      record?.admissionCapability?.admissionSequence ??
+      intent?.admissionSequence;
     if (currentDispatchToken && currentDispatchToken !== token) {
       return false;
     }
@@ -4241,7 +4337,8 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
                 } | null>;
                 release: (
                   admissionRunId: string,
-                  admissionToken?: string
+                  admissionToken?: string,
+                  admissionSequence?: number
                 ) => Promise<boolean>;
               };
             };
@@ -4251,7 +4348,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           return true;
         }
         const admission = runAdmission.getByName("deployment");
-        const released = await admission.release(runId, token);
+        const released = await admission.release(runId, token, sequence);
         confirmed = released || !token;
         if (!confirmed && admission.getRecord) {
           const currentAdmission = await admission.getRecord(runId);

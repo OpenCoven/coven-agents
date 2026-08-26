@@ -29,6 +29,19 @@ export const MAX_TERMINAL_RUNS_PER_AGENT = 20;
 
 const OUTPUT_TRUNCATED = "\n[output truncated by runner]";
 
+export type AdmissionCleanupCapability = {
+  admissionSequence: number;
+  agentId: string;
+  dispatchToken?: string;
+  operationId: string;
+  requestHash: string;
+  runId: string;
+};
+
+export type AdmissionCleanupGuard = AdmissionCleanupCapability & {
+  queuedOnly?: boolean;
+};
+
 export type CloudRunRecord = {
   /**
    * Admission's fencing token is internal coordination state. It is kept
@@ -39,6 +52,7 @@ export type CloudRunRecord = {
   events: RunEvent[];
   operationHash: string;
   admissionConfirmedAt?: string;
+  admissionCapability?: AdmissionCleanupCapability;
   pendingAdmission?: {
     deadlineAt: number;
     prepareOwner?: string;

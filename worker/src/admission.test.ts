@@ -18,7 +18,11 @@ import {
   tenantAdmissionHash,
 } from "./admission";
 import { YoloAgent } from "./agents";
-import { OperationConflictError, planCloudRunStart } from "./run-state";
+import {
+  type AdmissionCleanupGuard,
+  OperationConflictError,
+  planCloudRunStart,
+} from "./run-state";
 
 const TENANT_A = "v1:tenant-a";
 const TENANT_B = "v1:tenant-b";
@@ -479,7 +483,8 @@ function runAdmissionHarness(
     stop: (
       runId: string,
       dispatchToken?: string,
-      reason?: string
+      reason?: string,
+      guard?: AdmissionCleanupGuard
     ) => Promise<unknown>;
   },
   environment: Record<string, string> = {},
@@ -2181,16 +2186,22 @@ test("a proven agent-busy dispatch is requeued and release dispatches it promptl
   fiberControl.runFibers = false;
   resetDestroyedSandboxes();
   const released: string[] = [];
+  const cleanupGuards: AdmissionCleanupGuard[] = [];
   let admission!: RunAdmission;
   const yolo = new YoloAgent(
     undefined as never,
     {
       RunAdmission: {
         getByName: () => ({
+          getCleanupCapability: (runId: string) =>
+            admission.getCleanupCapability(runId),
           release: (runId: string, dispatchToken?: string) => {
             released.push(runId);
             return admission.release(runId, dispatchToken);
           },
+          validateCleanup: (
+            capability: Parameters<RunAdmission["validateCleanup"]>[0]
+          ) => admission.validateCleanup(capability),
           validateDispatch: (runId: string, dispatchToken: string) =>
             admission.validateDispatch(runId, dispatchToken),
         }),
@@ -2205,11 +2216,15 @@ test("a proven agent-busy dispatch is requeued and release dispatches it promptl
       getRun: (runId) => yolo.getRun(runId),
       startAdmitted: (runId, dispatchToken) =>
         yolo.startAdmitted(runId, dispatchToken ?? ""),
-      stop: (runId, dispatchToken, reason) =>
-        yolo.stop(runId, dispatchToken, reason),
+      stop: (runId, dispatchToken, reason, guard) => {
+        if (guard) {
+          cleanupGuards.push(guard);
+        }
+        return yolo.stop(runId, dispatchToken, reason, guard);
+      },
     }),
     {
-      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "2",
+      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "4",
       RUN_ADMISSION_TENANT_ACTIVE_MAX: "2",
       RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
     }
@@ -2237,6 +2252,18 @@ test("a proven agent-busy dispatch is requeued and release dispatches it promptl
     operationId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
     runId: "bbbbbbbb-cccc-4ddd-8eee-fffffffffff1",
   };
+  const fullQueueRequest = {
+    ...request(83, TENANT_B),
+    agentId: yoloDefinition().id,
+    operationId: "cccccccc-dddd-4eee-8fff-000000000001",
+    runId: "cccccccc-dddd-4eee-8fff-000000000002",
+  };
+  const queueFillerRequest = {
+    ...request(84, TENANT_B),
+    agentId: yoloDefinition().id,
+    operationId: "dddddddd-eeee-4fff-8000-111111111111",
+    runId: "dddddddd-eeee-4fff-8000-111111111112",
+  };
 
   await yolo.enqueue(
     { operationId: activeRequest.operationId, task: "Active work." },
@@ -2248,6 +2275,18 @@ test("a proven agent-busy dispatch is requeued and release dispatches it promptl
     { operationId: busyRequest.operationId, task: "Queued work." },
     busyRequest.runId,
     busyRequest.requestHash,
+    "identity"
+  );
+  await yolo.enqueue(
+    { operationId: fullQueueRequest.operationId, task: "Queue-full work." },
+    fullQueueRequest.runId,
+    fullQueueRequest.requestHash,
+    "identity"
+  );
+  await yolo.enqueue(
+    { operationId: queueFillerRequest.operationId, task: "Queue filler." },
+    queueFillerRequest.runId,
+    queueFillerRequest.requestHash,
     "identity"
   );
 
@@ -2262,28 +2301,65 @@ test("a proven agent-busy dispatch is requeued and release dispatches it promptl
     kind: "active",
     runId: busyRequest.runId,
   });
-  await settleBackground();
 
-  const busyAdmission = await admission.getRecord(busyRequest.runId);
-  assert.equal(busyAdmission?.state, "queued");
-  const admissionRow = harness.sql
-    .exec<{ dispatch_token: string | null; state: string }>(
-      "SELECT dispatch_token, state FROM admission_records WHERE run_id = ?",
-      busyRequest.runId
+  assert.deepEqual(await admission.admit(fullQueueRequest), {
+    kind: "active",
+    runId: fullQueueRequest.runId,
+  });
+  assert.deepEqual(await admission.admit(queueFillerRequest), {
+    kind: "queued",
+    position: 1,
+    runId: queueFillerRequest.runId,
+  });
+  await settleBackground();
+  const busyCandidates = [busyRequest, fullQueueRequest];
+  const candidateRecords = await Promise.all(
+    busyCandidates.map((candidate) => admission.getRecord(candidate.runId))
+  );
+  const terminalCandidates = busyCandidates.filter(
+    (_, index) => candidateRecords[index]?.state === "terminal"
+  );
+  assert.equal(terminalCandidates.length, 1);
+  const [terminalCandidate] = terminalCandidates;
+  assert.equal(yolo.getRun(terminalCandidate?.runId)?.status, "cancelled");
+  const rejectedCleanupGuard = cleanupGuards.find(
+    (guard) => guard.runId === terminalCandidate?.runId
+  );
+  assert.ok(rejectedCleanupGuard);
+  assert.equal(rejectedCleanupGuard.dispatchToken, undefined);
+  assert.equal(rejectedCleanupGuard.queuedOnly, true);
+  const cleanupCountRows = harness.sql
+    .exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = ?",
+      terminalCandidate?.runId
     )
-    .toArray() as { dispatch_token: string | null; state: string }[];
-  assert.equal(admissionRow[0]?.state, "queued");
-  assert.equal(admissionRow[0]?.dispatch_token, null);
-  assert.equal(yolo.getRun(busyRequest.runId)?.status, "queued");
+    .toArray() as { count: number }[];
+  assert.equal(
+    cleanupCountRows[0]?.count,
+    0,
+    "a rejected requeue cleanup must not retry with its stale token"
+  );
+  const queuedCandidate = busyCandidates.find(
+    (candidate) => candidate.runId !== terminalCandidate?.runId
+  );
+  assert.equal(
+    (await admission.getRecord(queuedCandidate?.runId ?? ""))?.state,
+    "queued"
+  );
+  assert.equal(yolo.getRun(queuedCandidate?.runId ?? "")?.status, "queued");
   assert.deepEqual(destroyedSandboxes(), []);
 
   const stoppedActive = await yolo.stop(activeRequest.runId);
   assert.equal(stoppedActive?.status, "cancelled");
   await settleBackground();
 
-  assert.equal(yolo.getRun(busyRequest.runId)?.status, "running");
-  assert.equal((await admission.getRecord(busyRequest.runId))?.state, "active");
-  assert.deepEqual(released, [activeRequest.runId]);
+  assert.equal(yolo.getRun(queuedCandidate?.runId ?? "")?.status, "running");
+  assert.equal(
+    (await admission.getRecord(queuedCandidate?.runId ?? ""))?.state,
+    "active"
+  );
+  assert.ok(released.includes(terminalCandidate?.runId ?? ""));
+  assert.ok(released.includes(activeRequest.runId));
 });
 
 test("admission returns an immediate active decision without waiting for dispatch RPC", async () => {
