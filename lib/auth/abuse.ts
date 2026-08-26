@@ -15,11 +15,17 @@ type AuthAbuseOptions = {
 const AUTH_SIGNIN_PATH = /^\/api\/auth\/signin(?:\/[^/]+)?\/?$/;
 const AUTH_CALLBACK_PATH = /^\/api\/auth\/callback\/[^/]+\/?$/;
 
-export function authAbuseRoute(pathname: string): AuthAbuseRoute | null {
-  if (AUTH_SIGNIN_PATH.test(pathname)) {
+export function authAbuseRoute(
+  method: string,
+  pathname: string
+): AuthAbuseRoute | null {
+  if (method === "POST" && AUTH_SIGNIN_PATH.test(pathname)) {
     return "auth_start";
   }
-  if (AUTH_CALLBACK_PATH.test(pathname)) {
+  if (
+    (method === "GET" || method === "POST") &&
+    AUTH_CALLBACK_PATH.test(pathname)
+  ) {
     return "auth_callback";
   }
   return null;
@@ -36,7 +42,7 @@ export function withAuthAbusePolicy<
   options: AuthAbuseOptions = {}
 ): (request: RequestType, ...args: Arguments) => Promise<Response> {
   return async (request, ...args) => {
-    const route = authAbuseRoute(new URL(request.url).pathname);
+    const route = authAbuseRoute(request.method, new URL(request.url).pathname);
     if (route) {
       const admission = await enforceAbusePolicy({
         ip: ipAddress(request) ?? null,

@@ -6,33 +6,44 @@ import { authAbuseRoute, withAuthAbusePolicy } from "./abuse";
 
 const TEST_ORIGIN = "https://coven.test";
 
-test("classifies only Auth.js OAuth initiation and callback endpoints", () => {
+test("classifies only Auth.js OAuth initiation and callback methods", () => {
   const cases = [
-    ["/api/auth/signin", "auth_start"],
-    ["/api/auth/signin/", "auth_start"],
-    ["/api/auth/signin/github", "auth_start"],
-    ["/api/auth/signin/github/", "auth_start"],
-    ["/api/auth/callback/github", "auth_callback"],
-    ["/api/auth/callback/github/", "auth_callback"],
-    ["/api/auth/session", null],
-    ["/api/auth/session/", null],
-    ["/api/auth/csrf", null],
-    ["/api/auth/providers", null],
-    ["/api/auth/error", null],
-    ["/api/auth/verify-request", null],
-    ["/api/auth/signout", null],
-    ["/api/auth/signout/github", null],
-    ["/api/auth/callback", null],
-    ["/api/auth/not-signin/github", null],
-    ["/login", null],
+    ["GET", "/api/auth/signin", null],
+    ["GET", "/api/auth/signin/", null],
+    ["GET", "/api/auth/signin/github", null],
+    ["GET", "/api/auth/signin/github/", null],
+    ["POST", "/api/auth/signin", "auth_start"],
+    ["POST", "/api/auth/signin/", "auth_start"],
+    ["POST", "/api/auth/signin/github", "auth_start"],
+    ["POST", "/api/auth/signin/github/", "auth_start"],
+    ["GET", "/api/auth/callback/github", "auth_callback"],
+    ["GET", "/api/auth/callback/github/", "auth_callback"],
+    ["POST", "/api/auth/callback/github", "auth_callback"],
+    ["POST", "/api/auth/callback/github/", "auth_callback"],
+    ["PUT", "/api/auth/callback/github", null],
+    ["GET", "/api/auth/session", null],
+    ["POST", "/api/auth/session/", null],
+    ["GET", "/api/auth/csrf", null],
+    ["GET", "/api/auth/providers", null],
+    ["GET", "/api/auth/error", null],
+    ["GET", "/api/auth/verify-request", null],
+    ["POST", "/api/auth/signout", null],
+    ["GET", "/api/auth/signout/github", null],
+    ["GET", "/api/auth/callback", null],
+    ["POST", "/api/auth/not-signin/github", null],
+    ["GET", "/login", null],
   ] as const;
 
-  for (const [pathname, expected] of cases) {
-    assert.equal(authAbuseRoute(pathname), expected, pathname);
+  for (const [method, pathname, expected] of cases) {
+    assert.equal(
+      authAbuseRoute(method, pathname),
+      expected,
+      `${method} ${pathname}`
+    );
   }
 });
 
-test("wraps Auth.js GET and POST starts and callbacks but bypasses cheap actions", async () => {
+test("wraps POST starts and callback methods but bypasses GET sign-in and cheap actions", async () => {
   const consumedKeys: string[] = [];
   const store: AbuseStore = {
     consume(key, limit, windowSeconds) {
@@ -53,10 +64,13 @@ test("wraps Auth.js GET and POST starts and callbacks but bypasses cheap actions
     { store }
   );
   const cases = [
-    ["GET", "/api/auth/signin", "auth_start"],
+    ["GET", "/api/auth/signin", null],
+    ["GET", "/api/auth/signin/github", null],
+    ["POST", "/api/auth/signin", "auth_start"],
     ["POST", "/api/auth/signin/github", "auth_start"],
     ["GET", "/api/auth/callback/github", "auth_callback"],
     ["POST", "/api/auth/callback/github", "auth_callback"],
+    ["PUT", "/api/auth/callback/github", null],
     ["GET", "/api/auth/session", null],
     ["POST", "/api/auth/session", null],
     ["GET", "/api/auth/providers", null],
@@ -82,6 +96,41 @@ test("wraps Auth.js GET and POST starts and callbacks but bypasses cheap actions
       assert.deepEqual(consumedKeys, [], `${method} ${pathname}`);
     }
   }
+});
+
+test("repeated GET sign-in pages do not consume the store but POST initiation does", async () => {
+  const consumedKeys: string[] = [];
+  const store: AbuseStore = {
+    consume(key, limit, windowSeconds) {
+      consumedKeys.push(`${key}:${limit}:${windowSeconds}`);
+      return Promise.resolve({
+        allowed: true,
+        remaining: limit - 1,
+        retryAfterSeconds: windowSeconds,
+      });
+    },
+  };
+  const wrapped = withAuthAbusePolicy(
+    () => new Response(null, { status: 204 }),
+    { store }
+  );
+
+  for (let attempt = 1; attempt <= 10; attempt += 1) {
+    const pathname =
+      attempt % 2 === 0 ? "/api/auth/signin/github" : "/api/auth/signin";
+    // biome-ignore lint/performance/noAwaitInLoops: repeated requests prove GET pages never consume quota
+    const response = await wrapped(authRequest(pathname, "GET", "203.0.113.9"));
+    assert.equal(response.status, 204, `GET ${pathname} attempt ${attempt}`);
+  }
+  assert.equal(consumedKeys.length, 0);
+
+  const started = await wrapped(
+    authRequest("/api/auth/signin/github", "POST", "203.0.113.9")
+  );
+
+  assert.equal(started.status, 204);
+  assert.equal(consumedKeys.length, 2);
+  assert.ok(consumedKeys.every((key) => key.startsWith("auth_start:")));
 });
 
 test("denies the sixth auth initiation per IP without affecting another IP", async () => {
@@ -186,7 +235,7 @@ test("missing IPs share the existing unknown abuse bucket", async () => {
   assert.equal(handlerCalls, 5);
 });
 
-test("limiter outages block starts and callbacks but not session support reads", async () => {
+test("limiter outages block starts and callbacks but not sign-in pages or support actions", async () => {
   const outageStore: AbuseStore = {
     consume() {
       return Promise.reject(new Error("Redis unavailable"));
@@ -214,17 +263,21 @@ test("limiter outages block starts and callbacks but not session support reads",
     });
   }
 
-  for (const pathname of [
-    "/api/auth/session",
-    "/api/auth/providers",
-    "/api/auth/csrf",
-  ]) {
+  for (const [method, pathname] of [
+    ["GET", "/api/auth/signin"],
+    ["GET", "/api/auth/signin/github"],
+    ["GET", "/api/auth/session"],
+    ["POST", "/api/auth/session"],
+    ["GET", "/api/auth/providers"],
+    ["GET", "/api/auth/csrf"],
+    ["POST", "/api/auth/signout"],
+  ] as const) {
     // biome-ignore lint/performance/noAwaitInLoops: each response body is asserted before the next request
-    const response = await wrapped(authRequest(pathname, "GET"));
-    assert.equal(response.status, 200, pathname);
+    const response = await wrapped(authRequest(pathname, method));
+    assert.equal(response.status, 200, `${method} ${pathname}`);
     assert.deepEqual(await response.json(), { readable: true });
   }
-  assert.equal(handlerCalls, 3);
+  assert.equal(handlerCalls, 7);
 });
 
 test("returns the original handler response and passes request context unchanged", async () => {

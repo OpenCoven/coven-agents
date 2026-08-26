@@ -283,6 +283,24 @@ test("deferred webhook and internal lending routes stay untouched", () => {
   }
 });
 
+test("Auth.js handlers use method-aware abuse classification", () => {
+  const routeSource = read("app/(auth)/api/auth/[...nextauth]/route.ts");
+  const wrapperSource = read("lib/auth/abuse.ts");
+
+  assert.match(
+    routeSource,
+    /export const GET = withAuthAbusePolicy\(authGET\)/
+  );
+  assert.match(
+    routeSource,
+    /export const POST = withAuthAbusePolicy\(authPOST\)/
+  );
+  assert.match(
+    wrapperSource,
+    /authAbuseRoute\(\s*request\.method,\s*new URL\(request\.url\)\.pathname\s*\)/
+  );
+});
+
 test("handler extraction does not include markers from a later handler", () => {
   const source = `
 export async function POST(request: Request) {

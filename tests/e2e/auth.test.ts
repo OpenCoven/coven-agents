@@ -27,17 +27,17 @@ test.describe("Authentication Pages", () => {
     await expect(page.getByLabel("Password")).toHaveCount(0);
   });
 
-  test("rate-limited GitHub sign-in stays on login and offers a retry", async ({
+  test("rate-limited POST GitHub sign-in stays on login and offers a retry", async ({
     page,
   }) => {
     let releaseAuthResponse: (() => void) | undefined;
-    let signInAttempts = 0;
+    let postSignInAttempts = 0;
     const authResponseReady = new Promise<void>((resolve) => {
       releaseAuthResponse = resolve;
     });
 
     const authRequests = await mockGitHubAuthSupport(page, async (route) => {
-      signInAttempts += 1;
+      postSignInAttempts += 1;
       await authResponseReady;
       await route.fulfill({
         body: JSON.stringify({
@@ -60,7 +60,7 @@ test.describe("Authentication Pages", () => {
     });
 
     await githubButton.click();
-    await expect.poll(() => signInAttempts).toBe(1);
+    await expect.poll(() => postSignInAttempts).toBe(1);
     await expect
       .poll(() => authRequests)
       .toEqual([
@@ -72,7 +72,7 @@ test.describe("Authentication Pages", () => {
     await githubButton.evaluate((button) =>
       (button as HTMLButtonElement).click()
     );
-    expect(signInAttempts).toBe(1);
+    expect(postSignInAttempts).toBe(1);
 
     releaseAuthResponse?.();
 
@@ -88,10 +88,10 @@ test.describe("Authentication Pages", () => {
     await expect(
       page.getByText("Too many requests. Try again later.", { exact: true })
     ).toHaveCount(0);
-    expect(signInAttempts).toBe(1);
+    expect(postSignInAttempts).toBe(1);
   });
 
-  test("successful GitHub sign-in follows the authorization URL", async ({
+  test("GET sign-in pages stay harmless before a successful POST start", async ({
     page,
   }) => {
     const authorizationUrl =
@@ -108,11 +108,24 @@ test.describe("Authentication Pages", () => {
     });
 
     await page.goto("/login");
+    await page.evaluate(async () => {
+      const pages = [
+        ["/api/auth/signin", await fetch("/api/auth/signin")],
+        ["/api/auth/signin/github", await fetch("/api/auth/signin/github")],
+      ] as const;
+      for (const [pathname, response] of pages) {
+        if (!response.ok) {
+          throw new Error(`${pathname} returned ${response.status}`);
+        }
+      }
+    });
     await page.getByRole("button", { name: "Continue with GitHub" }).click();
 
     await expect
       .poll(() => authRequests)
       .toEqual([
+        "GET /api/auth/signin",
+        "GET /api/auth/signin/github",
         "GET /api/auth/providers",
         "GET /api/auth/csrf",
         "POST /api/auth/signin/github?",
@@ -142,6 +155,18 @@ async function mockGitHubAuthSupport(
       await route.fulfill({
         body: "null",
         contentType: "application/json",
+      });
+      return;
+    }
+
+    if (
+      requestName === "GET /api/auth/signin" ||
+      requestName === "GET /api/auth/signin/github"
+    ) {
+      authRequests.push(requestName);
+      await route.fulfill({
+        body: "<title>Auth.js sign-in</title>",
+        contentType: "text/html",
       });
       return;
     }
