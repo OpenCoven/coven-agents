@@ -142,7 +142,15 @@ export function StatusDot({
   tone: Tone;
 }) {
   return (
-    <span aria-label={label} role="img" style={dot(tone, size)} title={label} />
+    <span
+      aria-label={label}
+      // In-flight is the one state that is genuinely happening right now —
+      // the only dot that has earned motion. Everything at rest holds still.
+      className={tone === "warning" ? "oc-breathe" : undefined}
+      role="img"
+      style={dot(tone, size)}
+      title={label}
+    />
   );
 }
 

@@ -9,7 +9,6 @@ import { useState } from "react";
 import { Btn, Eyebrow } from "@/components/console/primitives";
 import {
   hairline,
-  pill,
   tabular,
   truncate,
   type as type_,
@@ -74,6 +73,56 @@ function Field({
         </span>
       ) : null}
     </label>
+  );
+}
+
+/**
+ * Secondary context, collapsed until sought.
+ *
+ * These used to be always-open note boxes — three paragraphs of explanation
+ * standing between the person and the action. The information is real, so it
+ * is not deleted; it is behind a one-line disclosure, which is the difference
+ * between an interface that explains itself when asked and one that lectures.
+ */
+function FinePrint({
+  children,
+  label,
+  tone = "muted",
+}: {
+  children: React.ReactNode;
+  label: string;
+  tone?: "muted" | "warning";
+}) {
+  return (
+    <details style={{ marginTop: 14 }}>
+      <summary
+        style={{
+          alignItems: "center",
+          color:
+            tone === "warning" ? "var(--color-warning)" : "var(--text-muted)",
+          cursor: "pointer",
+          display: "flex",
+          font: "500 10px/1 var(--font-mono)",
+          gap: 7,
+          letterSpacing: "0.1em",
+          listStyle: "none",
+          textTransform: "uppercase",
+          width: "fit-content",
+        }}
+      >
+        {label}
+      </summary>
+      <p
+        style={{
+          ...type_.body,
+          font: "400 12px/1.55 var(--font-ui)",
+          marginTop: 8,
+          maxWidth: "62ch",
+        }}
+      >
+        {children}
+      </p>
+    </details>
   );
 }
 
@@ -198,16 +247,6 @@ export function CreateAgent({
           </button>
         ))}
         <div style={{ flex: 1 }} />
-        <p
-          style={{
-            ...type_.body,
-            font: "400 11px/1.55 var(--font-ui)",
-            margin: "0 8px 10px",
-          }}
-        >
-          A profile is a bounded execution contract, not a personality. Nothing
-          here persists between runs.
-        </p>
         <Btn fullWidth onClick={onCancel} variant="secondary">
           Cancel
         </Btn>
@@ -310,30 +349,11 @@ export function CreateAgent({
                   </button>
                 ))}
               </div>
-              <div
-                style={{
-                  alignItems: "flex-start",
-                  background: "var(--bg-raised)",
-                  border: hairline,
-                  borderRadius: "var(--radius-card)",
-                  display: "flex",
-                  gap: 11,
-                  marginTop: 14,
-                  padding: "12px 13px",
-                }}
-              >
-                <span style={pill("muted")}>Note</span>
-                <p
-                  style={{
-                    ...type_.body,
-                    font: "400 12px/1.55 var(--font-ui)",
-                  }}
-                >
-                  Read-only roles are enforced by their contract, not by the
-                  sandbox. Scout and Critic are told to change nothing; the
-                  container would still let them.
-                </p>
-              </div>
+              <FinePrint label="How read-only is enforced">
+                Read-only roles are enforced by their contract, not by the
+                sandbox. Scout and Critic are told to change nothing; the
+                container would still let them.
+              </FinePrint>
             </>
           ) : null}
 
@@ -424,30 +444,12 @@ export function CreateAgent({
                   </div>
                 ))}
               </div>
-              <div
-                style={{
-                  alignItems: "flex-start",
-                  border: "1px dashed var(--border-strong)",
-                  borderRadius: "var(--radius-card)",
-                  display: "flex",
-                  gap: 10,
-                  marginTop: 14,
-                  padding: "11px 13px",
-                }}
-              >
-                <span style={pill("muted")}>Proposed</span>
-                <p
-                  style={{
-                    ...type_.body,
-                    font: "400 12px/1.55 var(--font-ui)",
-                  }}
-                >
-                  Sequenced mode would run a crew in order and pass each
-                  member&rsquo;s evidence to the next. Nothing in the runner
-                  orchestrates handoffs today, so it stays a proposal rather
-                  than a switch you can flip.
-                </p>
-              </div>
+              <FinePrint label="Proposed: sequenced mode">
+                Sequenced mode would run a crew in order and pass each
+                member&rsquo;s evidence to the next. Nothing in the runner
+                orchestrates handoffs today, so it stays a proposal rather than
+                a switch you can flip.
+              </FinePrint>
             </>
           ) : null}
 
@@ -560,34 +562,14 @@ export function CreateAgent({
                 </Field>
               </div>
 
-              <div
-                role="note"
-                style={{
-                  alignItems: "flex-start",
-                  background:
-                    "color-mix(in oklch, var(--color-warning) 8%, transparent)",
-                  border:
-                    "1px solid color-mix(in oklch, var(--color-warning) 30%, var(--border-hairline))",
-                  borderRadius: "var(--radius-card)",
-                  display: "flex",
-                  gap: 11,
-                  marginTop: 16,
-                  padding: "11px 13px",
-                }}
-              >
-                <span style={pill("warning")}>Zero approval</span>
-                <p
-                  style={{
-                    ...type_.body,
-                    font: "400 12px/1.55 var(--font-ui)",
-                    maxWidth: "62ch",
-                  }}
-                >
-                  Tool approvals are off for every profile — this is how
-                  OpenCoven runs, not an error. Runs stay inside their
-                  container.
-                </p>
-              </div>
+              {/* Warning-toned because it is the one fact about a profile
+                  with safety weight, but still a disclosure: the composer
+                  restates it at the moment of running, which is where it
+                  actually matters. */}
+              <FinePrint label="Zero approval" tone="warning">
+                Tool approvals are off for every profile — this is how OpenCoven
+                runs, not an error. Runs stay inside their container.
+              </FinePrint>
 
               <div
                 style={{

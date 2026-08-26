@@ -55,7 +55,10 @@ function agentTone(agent: AgentDefinition) {
   if (agent.status === "running") {
     return "warning" as const;
   }
-  return agent.status === "error" ? ("danger" as const) : ("accent" as const);
+  // Idle is dim, deliberately. The accent is identity — the brand, the
+  // selected row — and an idle agent wearing it read as a third state nobody
+  // could name. A never-run agent is idle, full stop.
+  return agent.status === "error" ? ("danger" as const) : ("muted" as const);
 }
 
 function AgentGlyph({
@@ -616,8 +619,7 @@ export function AgentRail(props: RailProps) {
                         padding: "4px 8px 2px",
                       }}
                     >
-                      Runs you start appear here. The runner keeps the record;
-                      this list is what this session has opened.
+                      No runs this session.
                     </p>
                   ) : (
                     agentRuns.map((run) => (
