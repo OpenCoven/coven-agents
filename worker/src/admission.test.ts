@@ -149,6 +149,31 @@ test("dispatch candidate selection enforces the deployment active ceiling", () =
   );
 });
 
+test("dispatch skips an expired head when a tenant has newer work", () => {
+  const now = Date.parse("2026-08-26T00:00:00.000Z");
+  const queue = new AdmissionQueue({
+    now: () => now,
+    records: [
+      {
+        ...request(3, TENANT_A),
+        enqueuedAt: new Date(now - 5 * 60 * 1000 - 1).toISOString(),
+        state: "queued",
+      },
+      {
+        ...request(4, TENANT_A),
+        enqueuedAt: new Date(now - 1000).toISOString(),
+        state: "queued",
+      },
+    ],
+  });
+
+  assert.equal(
+    queue.nextDispatchCandidate()?.runId,
+    "run-4",
+    "an expired queued record must not block newer dispatchable work"
+  );
+});
+
 test("round-robin dispatch gives a waiting tenant a slot before a third turn", async () => {
   const dispatched: string[] = [];
   const queue = new AdmissionQueue({

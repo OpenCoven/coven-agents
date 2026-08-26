@@ -205,17 +205,6 @@ function queuedPosition(
   );
 }
 
-function oldestQueued(
-  records: readonly AdmissionRecord[],
-  tenantHash: string
-): AdmissionRecord | undefined {
-  return records
-    .filter(
-      (record) => record.state === "queued" && record.tenantHash === tenantHash
-    )
-    .sort((left, right) => left.enqueuedAt.localeCompare(right.enqueuedAt))[0];
-}
-
 export class AdmissionQueue {
   private readonly dispatchCallback?: AdmissionDispatch;
   private readonly limits: AdmissionLimits;
@@ -356,8 +345,8 @@ export class AdmissionQueue {
     }
 
     const ordered = tenants.sort((left, right) => {
-      const leftHead = oldestQueued(this.queueRecords, left);
-      const rightHead = oldestQueued(this.queueRecords, right);
+      const leftHead = this.oldestDispatchableQueued(left);
+      const rightHead = this.oldestDispatchableQueued(right);
       return (leftHead?.enqueuedAt ?? "").localeCompare(
         rightHead?.enqueuedAt ?? ""
       );
@@ -386,7 +375,7 @@ export class AdmissionQueue {
     if (!selectedTenant) {
       return;
     }
-    const selected = oldestQueued(this.queueRecords, selectedTenant);
+    const selected = this.oldestDispatchableQueued(selectedTenant);
     if (!selected) {
       return;
     }
@@ -415,6 +404,21 @@ export class AdmissionQueue {
   private isQueueExpired(record: AdmissionRecord, now = this.now()): boolean {
     const enqueuedAt = Date.parse(record.enqueuedAt);
     return Number.isFinite(enqueuedAt) && now - enqueuedAt >= QUEUED_TTL_MS;
+  }
+
+  private oldestDispatchableQueued(
+    tenantHash: string
+  ): AdmissionRecord | undefined {
+    return this.queueRecords
+      .filter(
+        (record) =>
+          record.state === "queued" &&
+          record.tenantHash === tenantHash &&
+          !this.isQueueExpired(record)
+      )
+      .sort((left, right) =>
+        left.enqueuedAt.localeCompare(right.enqueuedAt)
+      )[0];
   }
 
   private queuedCount(tenantHash: string): number {
