@@ -95,6 +95,29 @@ pnpm install
 cp .env.example .env.local
 ```
 
+Generate the local app's runner identity and credential-encryption values in a
+private terminal, then copy the four assignments into `.env.local`. The two
+random calls deliberately produce separate values; `CREDENTIAL_KEK` is exactly
+32 random bytes encoded as base64url.
+
+```bash
+node --input-type=module -e '
+import { randomBytes, webcrypto } from "node:crypto";
+const pair = await webcrypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+const pkcs8 = await webcrypto.subtle.exportKey("pkcs8", pair.privateKey);
+const spki = await webcrypto.subtle.exportKey("spki", pair.publicKey);
+console.log("RUNNER_SIGNING_KEY=" + Buffer.from(pkcs8).toString("base64url"));
+console.log("RUNNER_VERIFY_KEY=" + Buffer.from(spki).toString("base64url"));
+console.log("RUNNER_SERVICE_TOKEN=" + randomBytes(32).toString("base64url"));
+console.log("CREDENTIAL_KEK=" + randomBytes(32).toString("base64url"));
+'
+```
+
+Do not copy the output into logs, issues, or tracked files.
+`RUNNER_SIGNING_KEY` and `CREDENTIAL_KEK` stay app-only. Copy the same
+`RUNNER_VERIFY_KEY` and `RUNNER_SERVICE_TOKEN` values to the Worker; the public
+key lets it verify app-minted claims without being able to mint one.
+
 ## Run the control plane
 
 ```bash
@@ -110,7 +133,7 @@ Create `worker/.dev.vars`:
 ```dotenv
 AGENT_CONTROL_TOKEN=replace-with-a-long-random-token
 EDGE_ABUSE_KEY_SECRET=replace-with-a-long-random-secret
-RUNNER_VERIFY_KEY=replace-with-the-base64url-ed25519-public-key
+RUNNER_VERIFY_KEY=replace-with-the-base64url-ed25519-spki-public-key
 RUNNER_SERVICE_TOKEN=replace-with-a-long-random-token
 APP_ORIGIN=http://localhost:3000
 ```
@@ -138,8 +161,13 @@ Then:
 ```bash
 docker info
 pnpm --filter @opencoven/cloud-runner types
-pnpm dev:cloud
+pnpm --filter @opencoven/cloud-runner exec wrangler dev \
+  --var ALLOWED_ORIGIN:http://localhost:3000
 ```
+
+The committed Wrangler configuration contains the production
+`ALLOWED_ORIGIN`. The command-line variable is a noncommitted local override;
+do not edit the production origin merely to run localhost.
 
 For deployment, set the secrets without committing them:
 
@@ -158,8 +186,8 @@ deployment. It HMAC-pseudonymizes source IP and tenant rate-limit keys; if it
 is absent, the Worker fails closed with `503` before serving non-preflight
 requests.
 
-Update `ALLOWED_ORIGIN` in `worker/wrangler.jsonc` to the deployed web origin and
-set `NEXT_PUBLIC_CLOUD_RUNNER_URL` on the web deployment.
+Confirm the committed `ALLOWED_ORIGIN` in `worker/wrangler.jsonc` matches the
+deployed web origin and set `NEXT_PUBLIC_CLOUD_RUNNER_URL` on the web deployment.
 
 `AGENT_CONTROL_TOKEN` is read from the `env` binding, not from `process.env`.
 A Worker only exposes `vars` on `process.env`, and only under `nodejs_compat`;

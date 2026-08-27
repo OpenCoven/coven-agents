@@ -190,14 +190,15 @@ This is the closest thing to a master key that does not touch the database.
 every run fails.
 
 ```bash
-# Generate an Ed25519 pair; export the pkcs8 private key and the raw public key
-# base64url-encoded, matching what mintRunnerToken and the worker expect.
+# Generate an Ed25519 pair; export the PKCS8 private key and the SPKI public key
+# base64url-encoded, matching what mintRunnerToken and importVerifyKey expect.
 node --input-type=module -e '
-const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
-const pkcs8 = await crypto.subtle.exportKey("pkcs8", pair.privateKey);
-const raw = await crypto.subtle.exportKey("raw", pair.publicKey);
+const { subtle } = crypto;
+const pair = await subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+const pkcs8 = await subtle.exportKey("pkcs8", pair.privateKey);
+const spki = await subtle.exportKey("spki", pair.publicKey);
 console.log("SIGNING", Buffer.from(pkcs8).toString("base64url"));
-console.log("VERIFY", Buffer.from(raw).toString("base64url"));
+console.log("VERIFY", Buffer.from(spki).toString("base64url"));
 '
 ```
 

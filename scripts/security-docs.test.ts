@@ -120,6 +120,21 @@ test("the runbooks state the two facts that break a rotation", () => {
   assert.match(runbooks, /copied network trace is a credential disclosure/);
 });
 
+test("identity rotation exports PKCS8 private and SPKI public key material", () => {
+  const runbooks = readFileSync(incidentUrl, "utf8");
+
+  assert.match(
+    runbooks,
+    /const pkcs8 = await subtle\.exportKey\("pkcs8", pair\.privateKey\)/
+  );
+  assert.match(
+    runbooks,
+    /const spki = await subtle\.exportKey\("spki", pair\.publicKey\)/
+  );
+  assert.doesNotMatch(runbooks, /exportKey\("raw", pair\.publicKey\)/);
+  assert.match(runbooks, /PKCS8 private key and the SPKI public key/);
+});
+
 test("the README points to the incident runbooks", () => {
   const readme = readFileSync(readmeUrl, "utf8");
 

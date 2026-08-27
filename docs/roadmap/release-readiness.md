@@ -22,7 +22,12 @@ Current blockers are factual and fail closed:
   [`current-state.md`](current-state.md) found all 60 managed items were drafts,
   so GitHub issue state did not independently confirm delivery reconciliation;
 - required rows in [`verification-matrix.md`](verification-matrix.md) remain
-  below `Verified`, and production smoke/rollback is `Blocked`; and
+  below `Verified`, and production smoke/rollback is `Blocked`;
+- the Stripe webhook claims an event before owner lookup and subscription
+  mutation, so a post-claim failure or ignored owner is permanently deduplicated
+  instead of recoverable by provider redelivery;
+- no candidate-specific, approved closed-beta or public-release audience
+  decision is retained; and
 - no retained, dated production-like end-to-end artifact proves subscriber,
   credential, cloud lifecycle, Stripe delivery, rollback, and recovery
   together.
@@ -39,8 +44,12 @@ Stop the release without exception when any of these is true:
 - a required verification row is red or `Blocked`;
 - `ROADMAP.md` is stale;
 - any worktree is `AT RISK`;
-- the secondary-worktree count exceeds the repository soft cap; or
-- Beads and Project are drifted or cannot be shown to agree.
+- the secondary-worktree count exceeds the repository soft cap;
+- Beads and Project are drifted or cannot be shown to agree;
+- Stripe event claim and subscription-state mutation are not atomic and
+  retry-safe; or
+- the candidate lacks an explicit approved release-audience decision and
+  matching beta configuration.
 
 A required row is **red** when its state is `Not implemented`, `Implemented`,
 or `Blocked`, or when its dated evidence no longer applies to the candidate
@@ -61,6 +70,7 @@ different configuration surfaces and must not be treated as interchangeable.
 | Runner identity | App `RUNNER_SIGNING_KEY`; app and Worker `RUNNER_VERIFY_KEY`; matching key pair. | Claims fail closed when either side is absent or mismatched. |
 | Credential lending | App and Worker `RUNNER_SERVICE_TOKEN`; app `CREDENTIAL_KEK`; Worker `APP_ORIGIN`. | The Worker has no operator or fallback harness credential. |
 | Billing | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, and canonical `APP_ORIGIN`. | Checkout and webhook return `503` when unconfigured. |
+| Release audience | Record an explicit candidate decision. Closed beta requires `BETA_MODE=on` and a reviewed, nonempty `BETA_ALLOWLIST`; public release requires separate approval and `BETA_MODE=off`. | An unset/default-off gate is useful for local development but is not approval to publish. Empty beta allowlists fail closed, and public mode must never be inferred from an omitted variable. |
 | Other shipped app paths | `AI_GATEWAY_API_KEY` and `BLOB_READ_WRITE_TOKEN` when chat/model and upload paths remain enabled. | These are app feature dependencies, not runner credentials. |
 | Worker service bindings | Runtime bindings for `AGENT_CONTROL_TOKEN`, `RUNNER_VERIFY_KEY`, `RUNNER_SERVICE_TOKEN`, and `APP_ORIGIN`; plain Worker variable `ALLOWED_ORIGIN`; Durable Object/container bindings and migration; container image; and Wrangler authentication. | [`worker/.dev.vars.example`](../../worker/.dev.vars.example), [`worker/src/worker-secrets.d.ts`](../../worker/src/worker-secrets.d.ts), and [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc) define the current topology. |
 | Worker abuse controls | Secret binding `EDGE_ABUSE_KEY_SECRET` plus Cloudflare Rate Limiting bindings `EDGE_REQUEST_LIMITER`, `TENANT_MUTATION_LIMITER`, and `TENANT_RUN_LIMITER`. | The rate limiters are platform bindings declared under `ratelimits` in [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc), not app environment variables or `.dev.vars` entries. |
@@ -151,22 +161,35 @@ recording the first failure and its disposition.
 
 ## Stripe webhook delivery
 
+**Current implementation blocker:** [`app/api/stripe/webhook/route.ts`](../../app/api/stripe/webhook/route.ts)
+calls `claimStripeEvent` before customer/owner lookup and before
+`applySubscriptionUpdate`. If lookup or mutation fails after the claim, or an
+owner is ignored, the event ID remains claimed. A provider redelivery then
+returns as deduplicated without applying the missing state change. Provider
+redelivery is therefore not a current recovery mechanism.
+
 Before go:
 
-- confirm the deployed endpoint and `STRIPE_WEBHOOK_SECRET` match the intended
-  Stripe environment;
-- deliver a signed paid-invoice event and verify eligibility advances to the
-  event's period end;
-- redeliver the same event and verify idempotent success without a second state
-  change;
-- exercise failed-renewal and expiry behavior without granting a first failed
-  payment; and
-- retain Stripe delivery time, event category, HTTP result, and sanitized
-  account-state change without copying the payload or identifiers into public
-  evidence.
+1. Change the implementation so event claim and subscription-state update are
+   atomic and retry-safe, including post-claim lookup failure, ignored-owner,
+   mutation failure, and concurrent duplicate cases.
+2. Prove a failed processing attempt remains retryable and a completed event
+   remains idempotent.
+3. Confirm the deployed endpoint and `STRIPE_WEBHOOK_SECRET` match the intended
+   Stripe environment.
+4. Deliver a signed paid-invoice event and verify eligibility advances to the
+   event's period end.
+5. Only after the retry-safety fix is deployed and verified, redeliver the same
+   event and verify idempotent success without a second state change.
+6. Exercise failed-renewal and expiry behavior without granting a first failed
+   payment.
+7. Retain Stripe delivery time, event category, HTTP result, and sanitized
+   account-state change without copying the payload or identifiers into public
+   evidence.
 
-Unit coverage exists in [`lib/billing/webhook.test.ts`](../../lib/billing/webhook.test.ts).
-No current production delivery artifact is retained.
+[`lib/billing/webhook.test.ts`](../../lib/billing/webhook.test.ts) covers
+subscription-state decisions, not atomic claim/update recovery. No safe
+recovery implementation or current production delivery artifact is retained.
 
 ## Credential and identity isolation
 
@@ -224,8 +247,11 @@ or guess at database compatibility.
 
 - **PostgreSQL:** prove backup restore before release-affecting migrations;
   retain the restore point until the observation window closes.
-- **Stripe:** rely on signed, deduplicated redelivery; retain provider delivery
-  evidence and replay missed events only through authorized operations.
+- **Stripe:** no safe current recovery path exists for an event that fails or
+  is ignored after its ID is claimed. Release is blocked until claim and state
+  update are made atomic and retry-safe. Only after that code change is
+  deployed and verified may authorized provider redelivery be treated as
+  recovery; do not claim redelivery recovers the current implementation.
 - **Cloud run state:** current code records bounded lifecycle state and marks
   interrupted runs, but crash, restart, and partial-write recovery are not
   verified against real persistence. Do not claim recovery certification.
@@ -240,13 +266,14 @@ or guess at database compatibility.
 | Decision gate | Go evidence | Automatic no-go | Current status |
 | --- | --- | --- | --- |
 | P0 and dependencies | Authorized Beads query shows no unresolved release-blocking P0 or dependency. | Any unresolved P0, or authority unavailable. | **No-go:** the latest recorded pull returned `PermissionDenied`; authoritative current status is unavailable. |
+| Release audience | An approved candidate record names closed beta or public release. Closed beta has `BETA_MODE=on` and a reviewed, nonempty `BETA_ALLOWLIST`; public release has separate approval and `BETA_MODE=off`. | Missing decision, default/unset mode, empty beta allowlist, or public mode without separate approval. | **No-go:** no candidate-specific audience decision is retained; default-off is not approval. |
 | Verification | Every required matrix row is `Verified` or `Certified` for the candidate. | Any required row red or `Blocked`. | **No-go:** subscriber sign-in, conformance, recovery, browser quality, preflight, and production smoke are not `Verified`. |
 | Roadmap freshness | `pnpm roadmap:status check` passes after authoritative reconciliation. | Stale aggregate. | **No-go:** the candidate Project check can pass, but Beads freshness cannot be established. |
 | Worktree safety | `pnpm hygiene` exits zero with no `AT RISK` worktree and the secondary count within the soft cap. | Any `AT RISK` worktree or a secondary count above the soft cap. | **No-go:** the timestamped hygiene evidence above reports both conditions. |
 | Beads/Project/issues | A second apply and final preview are a complete no-op, and accepted delivery artifacts agree. | Drift, create/update/orphan work, partial or failed sync, or issue contradiction. | **No-go:** authoritative sync cannot run; the latest recorded Project query found managed items were drafts. |
 | Five local gates | All five pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** current hygiene fails and no all-five record exists for this candidate. |
 | Database | Staging migration, production backup, migration success, schema verification, and recovery record exist. | Missing backup, skipped/failed migration, or unproved recovery. | **No-go:** no candidate-specific production migration and restore artifact is retained. |
-| Smoke and Stripe | Demo, subscriber, cloud, and webhook evidence pass; local runs only if supported. | Any failed required smoke or missing webhook delivery. | **No-go:** only local/unit evidence is retained. |
+| Smoke and Stripe | Demo, subscriber, cloud, and webhook evidence pass; Stripe claim/update recovery is atomic and retry-safe; local runs only if supported. | Any failed required smoke, missing webhook delivery, or claim-before-state behavior that permanently deduplicates failed processing. | **No-go:** only local/unit evidence is retained, and current Stripe claim/update ordering is not retry-safe. |
 | Isolation | Tenant, credential, identity, and redaction evidence pass in a release-equivalent environment. | Any cross-tenant or secret-boundary failure. | **No-go:** production-like isolation evidence is not retained. |
 | Observability, rollback, recovery | Diagnostics pass and a dated rollback/recovery rehearsal is retained with named operators. | Blind operation, missing owner, or unproved recovery for affected data. | **No-go:** health/readiness and persisted-run recovery remain incomplete. |
 | Actions policy | All evidence is local and retained while Actions remain intentionally disabled. If CI is separately restored, refresh the roadmap and replace this evidence policy before counting remote checks. | Treating an unrun workflow as evidence or re-enabling Actions without separate approval. | **Accepted constraint:** not a go signal; every other gate still applies. |
