@@ -2409,21 +2409,37 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       return;
     }
     if (capability.expiresAt <= Date.now()) {
-      this.ephemeralIdentityTokens.delete(runId);
+      this.removeIdentityCapability(runId);
       return;
     }
     return capability.token;
   }
 
   private removeIdentityCapability(runId: string): void {
-    this.ephemeralIdentityTokens.delete(runId);
+    const hadEphemeral = this.ephemeralIdentityTokens.delete(runId);
     const identityCapabilities = {
       ...(this.state.identityCapabilities ?? {}),
     };
+    const hadCapability = Object.hasOwn(identityCapabilities, runId);
     delete identityCapabilities[runId];
     const identityTokens = { ...(this.state.identityTokens ?? {}) };
+    const hadLegacyToken = Object.hasOwn(identityTokens, runId);
     delete identityTokens[runId];
+    if (!hadEphemeral && !hadCapability && !hadLegacyToken) {
+      return;
+    }
     this.setState({ ...this.state, identityCapabilities, identityTokens });
+  }
+
+  private removeAllIdentityCapabilities(): void {
+    const runIds = new Set([
+      ...Object.keys(this.state.identityCapabilities ?? {}),
+      ...Object.keys(this.state.identityTokens ?? {}),
+      ...this.ephemeralIdentityTokens.keys(),
+    ]);
+    for (const runId of runIds) {
+      this.removeIdentityCapability(runId);
+    }
   }
 
   private async identityCapabilityKey(secret: string): Promise<CryptoKey> {
@@ -3073,6 +3089,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     admissionCapability?: AdmissionCleanupCapability
   ): Promise<boolean> {
     const definition = this.requireActiveDefinition();
+    this.rememberAdmissionCapability(runId, admissionCapability);
     validateCloudWorkspace(definition);
     const lifecycleGeneration = this.currentLifecycle().generation;
     if (!dispatchToken) {
@@ -3206,6 +3223,41 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       identityToken,
       token
     );
+  }
+
+  private rememberAdmissionCapability(
+    runId: string,
+    capability?: AdmissionCleanupCapability
+  ): void {
+    if (!capability) {
+      return;
+    }
+    const record = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (
+      !record ||
+      capability.agentId !== record.run.agentId ||
+      capability.operationId !== record.run.operationId ||
+      capability.requestHash !== record.operationHash ||
+      capability.runId !== runId
+    ) {
+      return;
+    }
+    const mergedCapability = {
+      ...record.admissionCapability,
+      ...capability,
+    };
+    this.persistRun({
+      ...record,
+      admissionCapability: mergedCapability,
+      pendingAdmission: record.pendingAdmission
+        ? {
+            ...record.pendingAdmission,
+            admissionCapability: mergedCapability,
+          }
+        : record.pendingAdmission,
+    });
   }
 
   async ensureAdmittedFiber(
@@ -3763,18 +3815,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           ([candidate]) => candidate !== runId
         )
       ),
-      identityCapabilities: Object.fromEntries(
-        Object.entries(this.state.identityCapabilities ?? {}).filter(
-          ([candidate]) => candidate !== runId
-        )
-      ),
-      identityTokens: Object.fromEntries(
-        Object.entries(this.state.identityTokens ?? {}).filter(
-          ([candidate]) => candidate !== runId
-        )
-      ),
       runs: this.state.runs.filter((candidate) => candidate.run.id !== runId),
     });
+    this.removeIdentityCapability(runId);
     return true;
   }
 
@@ -3787,9 +3830,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       (candidate) => candidate.run.id === runId
     );
     if (!record) {
+      this.removeIdentityCapability(runId);
       return true;
     }
     if (isTerminal(record.run.status)) {
+      this.removeIdentityCapability(runId);
       return true;
     }
     if (record.admissionConfirmedAt) {
@@ -3805,6 +3850,116 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       return "protected";
     }
     return this.discardRun(runId, prepareOwner);
+  }
+
+  /**
+   * Terminalizes a dispatch rejected before its fiber started. Admission keeps
+   * its capacity claim until this exact capability proves that the local run
+   * is terminal or absent, so a failed RPC cannot orphan an execution slot.
+   */
+  rejectAdmitted(
+    runId: string,
+    capability: AdmissionCleanupCapability
+  ): boolean {
+    const record = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (!record) {
+      this.removeIdentityCapability(runId);
+      return true;
+    }
+    if (isTerminal(record.run.status)) {
+      this.removeIdentityCapability(runId);
+      return true;
+    }
+    if (
+      !capability ||
+      !this.lifecycleIsActive() ||
+      capability.agentId !== record.run.agentId ||
+      capability.operationId !== record.run.operationId ||
+      capability.requestHash !== record.operationHash ||
+      capability.runId !== runId ||
+      !capability.dispatchToken
+    ) {
+      return false;
+    }
+    const storedCapability =
+      record.admissionCapability ??
+      record.pendingAdmission?.admissionCapability;
+    if (
+      (storedCapability &&
+        (storedCapability.admissionSequence !== capability.admissionSequence ||
+          storedCapability.dispatchToken !== capability.dispatchToken)) ||
+      rejectsAdmissionToken(
+        this.state.admissionFences?.[runId],
+        capability.dispatchToken
+      )
+    ) {
+      return false;
+    }
+    const localToken =
+      record.dispatchToken ??
+      this.state.admissionTokens?.[runId] ??
+      storedCapability?.dispatchToken;
+    if (localToken && localToken !== capability.dispatchToken) {
+      return false;
+    }
+    const capabilityGeneration = dispatchGeneration(capability.dispatchToken);
+    const localGeneration = localToken
+      ? dispatchGeneration(localToken)
+      : undefined;
+    if (
+      capabilityGeneration !== undefined &&
+      localGeneration !== undefined &&
+      capabilityGeneration !== localGeneration
+    ) {
+      return false;
+    }
+    const intent = this.state.dispatchIntents?.[runId];
+    if (
+      (intent?.dispatchToken &&
+        intent.dispatchToken !== capability.dispatchToken) ||
+      intent?.phase === "fiber_started" ||
+      this.fiberCompletions.has(cloudFiberKey(runId)) ||
+      (record.run.status === "running" && intent?.phase !== "starting") ||
+      (record.run.status !== "queued" &&
+        !(record.run.status === "running" && intent?.phase === "starting")) ||
+      this.state.sandbox?.runId === runId ||
+      this.state.sandbox?.cleanup?.runId === runId
+    ) {
+      return false;
+    }
+    const completedAt = new Date().toISOString();
+    const rejected = finishCloudRunRecord(record, {
+      completedAt,
+      credential: null,
+      error: {
+        code: "internal_error",
+        message: "Cloud run dispatch was rejected before execution.",
+        retryable: false,
+      },
+      output: "Cloud run dispatch was rejected before execution.",
+      status: "failed",
+    });
+    if (
+      !this.persistRun(rejected, {
+        admissionFence: {
+          ...normalizeAdmissionFence(this.state.admissionFences?.[runId]),
+          cancelled: true,
+        },
+        dispatchClaim: null,
+      })
+    ) {
+      return false;
+    }
+    if (this.state.definition) {
+      this.updateDefinition({
+        lastRunAt: completedAt,
+        status: "error",
+        updatedAt: completedAt,
+      });
+    }
+    return true;
   }
 
   /**
@@ -3834,7 +3989,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       capability.requestHash !== record.operationHash ||
       capability.runId !== runId
     ) {
-      return !record || isTerminal(record?.run.status ?? "failed");
+      if (!record || isTerminal(record?.run.status ?? "failed")) {
+        this.removeIdentityCapability(runId);
+        return true;
+      }
+      return false;
     }
     const prepareOwner = record.pendingAdmission?.prepareOwner;
     if (prepareOwner) {
@@ -3852,18 +4011,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           ([candidate]) => candidate !== runId
         )
       ),
-      identityCapabilities: Object.fromEntries(
-        Object.entries(this.state.identityCapabilities ?? {}).filter(
-          ([candidate]) => candidate !== runId
-        )
-      ),
-      identityTokens: Object.fromEntries(
-        Object.entries(this.state.identityTokens ?? {}).filter(
-          ([candidate]) => candidate !== runId
-        )
-      ),
       runs: this.state.runs.filter((candidate) => candidate.run.id !== runId),
     });
+    this.removeIdentityCapability(runId);
     return true;
   }
 
@@ -4137,6 +4287,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     const now = Date.now();
     const completedAt = new Date(now).toISOString();
     let changed = false;
+    const recoveredRunIds: string[] = [];
     const runs = this.state.runs.map((record) => {
       if (
         isTerminal(record.run.status) ||
@@ -4145,6 +4296,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         return record;
       }
       changed = true;
+      recoveredRunIds.push(record.run.id);
       console.warn({
         event: "run.recovered_after_interruption",
         runId: record.run.id,
@@ -4154,6 +4306,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     });
     if (changed) {
       this.setState({ ...this.state, runs });
+      for (const runId of recoveredRunIds) {
+        this.removeIdentityCapability(runId);
+      }
       if (this.state.definition) {
         this.updateDefinition({ status: "error", updatedAt: completedAt });
       }
@@ -4621,6 +4776,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     }
     const { definition } = this.state;
     if (!definition && !this.state.decommission) {
+      this.removeAllIdentityCapabilities();
       this.setState({
         ...this.initialState,
         lifecycle: {
@@ -4777,6 +4933,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       );
     }
     await this.cancelDecommissionRetry();
+    this.removeAllIdentityCapabilities();
     this.setState({
       ...this.initialState,
       lifecycle: { generation, status: "decommissioned" },
@@ -4858,6 +5015,23 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         ? [record, ...others]
         : retainCloudRuns([record, ...others]);
     const retainedRunIds = new Set(runs.map((candidate) => candidate.run.id));
+    const identityCleanupRunIds = new Set(
+      this.state.runs
+        .map((candidate) => candidate.run.id)
+        .filter((runId) => !retainedRunIds.has(runId))
+    );
+    for (const runId of [
+      ...Object.keys(this.state.identityCapabilities ?? {}),
+      ...Object.keys(this.state.identityTokens ?? {}),
+      ...this.ephemeralIdentityTokens.keys(),
+    ]) {
+      if (!retainedRunIds.has(runId)) {
+        identityCleanupRunIds.add(runId);
+      }
+    }
+    if (isTerminal(record.run.status)) {
+      identityCleanupRunIds.add(record.run.id);
+    }
     this.setState({
       ...this.state,
       admissionFences: Object.fromEntries(
@@ -4892,6 +5066,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       ),
       runs,
     });
+    for (const runId of identityCleanupRunIds) {
+      this.removeIdentityCapability(runId);
+    }
     return true;
   }
 
@@ -4921,7 +5098,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
-    if ((!record || !isTerminal(record.run.status)) && !intent) {
+    if (!record && !intent) {
+      this.removeIdentityCapability(runId);
+      return true;
+    }
+    if (record && !isTerminal(record.run.status) && !intent) {
       return true;
     }
     if (this.admissionReleaseCompleted.has(runId)) {
@@ -4948,17 +5129,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (currentDispatchToken && currentDispatchToken !== token) {
       return false;
     }
-    const identityTokens = Object.fromEntries(
-      Object.entries(this.state.identityTokens ?? {}).filter(
-        ([candidate]) => candidate !== runId
-      )
-    );
-    const identityCapabilities = Object.fromEntries(
-      Object.entries(this.state.identityCapabilities ?? {}).filter(
-        ([candidate]) => candidate !== runId
-      )
-    );
-    this.setState({ ...this.state, identityCapabilities, identityTokens });
+    this.removeIdentityCapability(runId);
     await this.markDirectoryRunStatus(runId, "terminal");
     const release = (async () => {
       let confirmed = false;

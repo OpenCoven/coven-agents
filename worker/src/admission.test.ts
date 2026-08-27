@@ -317,7 +317,8 @@ test("persisted reject admissions never requeue after an asynchronous AgentBusy"
       stop: () => Promise.resolve({ status: "cancelled" }),
     }),
     {
-      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "2",
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
       RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
     }
   );
@@ -383,6 +384,88 @@ test("a proven-not-started invalid workspace releases capacity and dispatches ne
     .toArray() as { state: string; dispatch_token: string | null }[];
   assert.equal(first?.state, "terminal");
   assert.equal(first?.dispatch_token, null);
+});
+
+test("a rejected confirmed dispatch retains capacity until exact local cleanup succeeds", async () => {
+  const dispatched: string[] = [];
+  let rejectionAttempts = 0;
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: () => ({ status: "queued" }),
+      rejectAdmitted: () => {
+        rejectionAttempts += 1;
+        return rejectionAttempts > 1;
+      },
+      startAdmitted: (runId: string) => {
+        dispatched.push(runId);
+        if (runId === "run-29") {
+          throw new InvalidWorkspaceError();
+        }
+        return Promise.resolve(true);
+      },
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "2",
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+    }
+  );
+
+  await harness.admission.admit(request(29));
+  await harness.admission.admit(request(30));
+  await Promise.all(harness.background);
+
+  assert.deepEqual(dispatched, ["run-29"]);
+  assert.equal(rejectionAttempts, 1);
+  assert.equal((await harness.admission.getRecord("run-29"))?.state, "active");
+  assert.equal((await harness.admission.getRecord("run-30"))?.state, "queued");
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = ?",
+          "run-29"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    1
+  );
+  assert.deepEqual(await harness.admission.admit(request(29)), {
+    kind: "duplicate",
+    runId: "run-29",
+    state: "active",
+  });
+
+  harness.sql.exec(
+    "UPDATE admission_cleanup_tasks SET next_attempt_at = 0 WHERE run_id = ?",
+    "run-29"
+  );
+  await harness.admission.alarm();
+  await Promise.all(harness.background);
+
+  assert.equal(rejectionAttempts, 2);
+  assert.deepEqual(dispatched, ["run-29", "run-30"]);
+  assert.equal(
+    (await harness.admission.getRecord("run-29"))?.state,
+    "terminal"
+  );
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = ?",
+          "run-29"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    0
+  );
+  assert.deepEqual(await harness.admission.admit(request(29)), {
+    kind: "duplicate",
+    runId: "run-29",
+    state: "terminal",
+  });
 });
 
 test("provisional cleanup waits through its durable grace when admission is absent", async () => {
@@ -1123,6 +1206,10 @@ function runAdmissionHarness(
     requeueAdmitted?: (
       runId: string,
       dispatchToken: string
+    ) => Promise<boolean> | boolean;
+    rejectAdmitted?: (
+      runId: string,
+      capability: AdmissionCleanupCapability
     ) => Promise<boolean> | boolean;
     getRun: (runId: string) => unknown;
     startAdmitted: (
