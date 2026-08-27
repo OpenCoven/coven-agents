@@ -83,6 +83,13 @@ export type Step = {
   blockId: string;
   detail: string;
   duration: string;
+  /**
+   * Up to a handful of body lines behind the one-line detail — command
+   * output, report opening, file paths. The rail shows these by default and
+   * collapses to the single line on demand, so the index can carry real
+   * content without the thread's bulk.
+   */
+  expanded: string[];
   id: string;
   label: string;
   tone: "danger" | "muted" | "running" | "success";
@@ -382,6 +389,16 @@ function evidenceBlock(
   };
 }
 
+const EXPANDED_LINES = 5;
+
+function expandedLines(source: string): string[] {
+  return source
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, EXPANDED_LINES);
+}
+
 function stepFor(block: ThreadBlock): Step | null {
   const duration =
     "durationMs" in block && block.durationMs !== null
@@ -396,6 +413,7 @@ function stepFor(block: ThreadBlock): Step | null {
         blockId: block.id,
         detail: block.detail ?? "",
         duration,
+        expanded: [],
         id: block.id,
         label: block.label,
         tone: block.status === "running" ? "running" : "muted",
@@ -412,20 +430,34 @@ function stepFor(block: ThreadBlock): Step | null {
         blockId: block.id,
         detail: outcome,
         duration,
+        expanded: expandedLines(
+          block.exitCode !== null && block.exitCode !== 0 && block.stderr
+            ? block.stderr
+            : block.stdout || block.stderr
+        ),
         id: block.id,
         label: `Ran ${commandHead(block.command)}`,
         tone: commandExitTone(block.exitCode),
       };
     }
-    case "files":
+    case "files": {
+      const paths = block.files.map((file) => file.path);
       return {
         blockId: block.id,
-        detail: block.files.map((file) => file.path).join(", "),
+        detail: paths.join(", "),
         duration,
+        expanded:
+          paths.length > EXPANDED_LINES
+            ? [
+                ...paths.slice(0, EXPANDED_LINES - 1),
+                `+${paths.length - (EXPANDED_LINES - 1)} more`,
+              ]
+            : paths,
         id: block.id,
         label: block.label,
         tone: "muted",
       };
+    }
     case "text": {
       const lines = block.text
         .trim()
@@ -439,6 +471,7 @@ function stepFor(block: ThreadBlock): Step | null {
         // the rail without either being expanded.
         detail: lines.length > 1 ? `${first} · ${lines.length} lines` : first,
         duration,
+        expanded: lines.slice(0, EXPANDED_LINES),
         id: block.id,
         label: block.live ? "Reporting" : "Reported",
         tone: block.live ? "running" : "muted",
@@ -449,6 +482,7 @@ function stepFor(block: ThreadBlock): Step | null {
         blockId: block.id,
         detail: block.message,
         duration: "—",
+        expanded: expandedLines(block.details ?? ""),
         id: block.id,
         label: "Stopped",
         tone: "danger",
@@ -458,6 +492,7 @@ function stepFor(block: ThreadBlock): Step | null {
         blockId: block.id,
         detail: "receipt written",
         duration: "—",
+        expanded: block.stats.map((stat) => `${stat.label}: ${stat.value}`),
         id: block.id,
         label: "Closed",
         tone: "success",

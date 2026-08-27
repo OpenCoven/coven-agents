@@ -1,4 +1,4 @@
-FROM docker.io/cloudflare/sandbox:0.7.0
+FROM docker.io/cloudflare/sandbox:0.12.7
 
 # Coven Agents drives an already-signed-in coding CLI rather than calling a model
 # provider, so the harness itself must exist in the image. The Worker holds no
