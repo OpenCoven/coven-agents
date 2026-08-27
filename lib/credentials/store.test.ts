@@ -52,11 +52,42 @@ test("credential storage writes the current version and reads the row version", 
   assert.doesNotMatch(coreSource, /server-only/);
   assert.match(source, /ring\.currentVersion/);
   assert.match(source, /kekVersion: sealed\.kekVersion/);
-  assert.match(source, /aadVersion: sealed\.aadVersion/);
+  assert.match(source, /aadVersion: BOUND_AAD_VERSION/);
   assert.match(source, /tenant, harnessId/);
   assert.match(coreSource, /ring\.keyFor\(row\.kekVersion\)/);
   assert.match(coreSource, /aadVersion: row\.aadVersion/);
   assert.match(coreSource, /tenant, harnessId/);
+});
+
+test("AAD defaults preserve legacy inserts while new writers bind version one", () => {
+  const migration = readFileSync(
+    new URL(
+      "../db/migrations/0009_credential_kek_versions.sql",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const schema = readFileSync(
+    new URL("../db/schema.ts", import.meta.url),
+    "utf8"
+  );
+  const source = readFileSync(new URL("./store.ts", import.meta.url), "utf8");
+  const coreSource = readFileSync(
+    new URL("./store-core.ts", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(
+    migration,
+    /ADD COLUMN IF NOT EXISTS "aadVersion" integer DEFAULT 0/i
+  );
+  assert.match(migration, /ALTER COLUMN "aadVersion" SET DEFAULT 0/i);
+  assert.match(
+    schema,
+    /aadVersion: integer\("aadVersion"\)\.notNull\(\)\.default\(0\)/
+  );
+  assert.match(source, /aadVersion: BOUND_AAD_VERSION/);
+  assert.match(coreSource, /aadVersion: BOUND_AAD_VERSION/);
 });
 
 test("credential envelope writes fence stale writers with a fresh revision", () => {
@@ -165,6 +196,10 @@ test("credential AAD migration and trigger fence legacy binding updates", () => 
   assert.match(
     triggerMigration,
     /UPDATE OF "ciphertext", "iv", "wrappedKey", "kekVersion", "aadVersion"/i
+  );
+  assert.match(
+    triggerMigration,
+    /NEW\."envelopeRevision" IS NOT DISTINCT FROM OLD\."envelopeRevision"/i
   );
 });
 

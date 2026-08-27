@@ -20,6 +20,12 @@ ALTER COLUMN "kekVersion" SET NOT NULL;
 ALTER TABLE "TenantCredential"
 ALTER COLUMN "aadVersion" SET NOT NULL;
 --> statement-breakpoint
+-- Keep the legacy default through the rolling deployment. Old writers omit
+-- this column and must continue producing explicit v1 legacy envelopes until
+-- the AAD drain gate has passed.
+ALTER TABLE "TenantCredential"
+ALTER COLUMN "aadVersion" SET DEFAULT 0;
+--> statement-breakpoint
 ALTER TABLE "TenantCredential"
 ALTER COLUMN "kekVersion" DROP DEFAULT;
 --> statement-breakpoint

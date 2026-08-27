@@ -1,7 +1,11 @@
 import { and, eq } from "drizzle-orm";
 import type { databaseFor } from "@/lib/db/access";
 import { tenantCredential } from "@/lib/db/schema";
-import { decryptCredential, encryptCredential } from "./envelope";
+import {
+  BOUND_AAD_VERSION,
+  decryptCredential,
+  encryptCredential,
+} from "./envelope";
 import { refreshCredential } from "./github-device";
 import { credentialKekRingFromEnvironment } from "./key-ring";
 import { credentialWhere } from "./scope";
@@ -146,7 +150,7 @@ async function persistCredential(
   const updated = await db
     .update(tenantCredential)
     .set({
-      aadVersion: sealed.aadVersion,
+      aadVersion: BOUND_AAD_VERSION,
       ciphertext: sealed.ciphertext,
       credentialRevision: crypto.randomUUID(),
       envelopeRevision: crypto.randomUUID(),

@@ -77,12 +77,14 @@ key material is never logged.
 1. Apply the credential revision/AAD migration before changing application
    traffic. It adds non-null `envelopeRevision` and `aadVersion` defaults and
    a database trigger that rejects any ciphertext, IV, wrapped-key, KEK-version,
-   or AAD-version update unless the revision changes. Roll out the new writers, then
-   drain every old writer before allowing credential updates: old writers may
-   still insert rows (the database labels omitted revisions with fresh defaults
-   and those rows remain explicit `kekVersion=v1`, `aadVersion=0`), but an old
-   writer's update fails closed with the revision-trigger error instead of
-   silently writing an unbound envelope under a newer label.
+   or AAD-version update unless the revision changes. New writers explicitly
+   write `aadVersion=1`; the database default remains `0` so pre-change
+   writers can still insert explicit `kekVersion=v1`, `aadVersion=0` legacy
+   rows during the rolling deployment. Roll out the new writers, then drain
+   every old writer before allowing credential updates: an old writer's update
+   fails closed with the revision-trigger error instead of silently writing an
+   unbound envelope under a newer label. Do not remove the `aadVersion=0`
+   default until the legacy drain and AAD retirement gate have both passed.
 2. Deploy the new readers and writers, and keep old readers and writers drained
    before binding legacy rows. Old code cannot read AAD-bound ciphertext.
    Convert legacy rows in resumable batches:
