@@ -1,8 +1,9 @@
 # UI and Functionality Audit — 2026-08-26
 
-This audit records the repository-local evidence for the default agent console
-and the curated guest demo after the `87a23e1` main baseline. It is not a
-production certification or release approval.
+This audit records the repository-local evidence for the default agent console,
+the curated guest demo, and the local Sandbox diagnostic. The original UI
+candidate landed as `d63d40a`; evidence was refreshed on 2026-08-27 against
+`a8c1976`. It is not a production certification or release approval.
 
 ## Scope
 
@@ -14,9 +15,10 @@ production certification or release approval.
 - the public security route;
 - login and registration entry paths;
 - production builds in default and `IS_DEMO=1` modes; and
-- deterministic guest replay in a local production server.
+- deterministic guest replay in a local production server; and
+- an authenticated, Docker-backed local Sandbox diagnostic.
 
-Authenticated subscriber, Stripe, live Cloudflare Sandbox, deployment,
+Real GitHub OAuth subscriber, Stripe, deployed Cloudflare Sandbox, deployment,
 rollback, and recovery paths were not available in this local environment.
 
 ## Findings and remediation
@@ -33,25 +35,27 @@ rollback, and recovery paths were not available in this local environment.
 | Direct signed-out entry to `/account` and `/chat/[id]` mounted protected controls and issued protected requests. | Their layouts rendered before enforcing the session/subscriber boundary. | Added fail-closed entry gates so protected children do not mount; the legacy chat leaf also opts out of instant navigation because its layout owns the UI. | Browser cases assert the gates and absence of protected account/chat requests; subscriber fixtures exercise account and chat controls. |
 | Warden controls and account columns were clipped on a `390 × 844` viewport. | The header could not wrap and the fixed-width table was inside an overflow-hidden container. | Added mobile header wrapping, responsive search/range controls, and an explicit horizontal table scroller. | Authenticated mobile coverage reaches search, tabs, range controls, and the final account column without page overflow. |
 | Signed-out `/admin` returned a streamed 200 status with a not-found UI in production. | The page-level `notFound()` ran after streaming began. | Proxy now returns a pre-render 404 with `no-store`; page and API authorization remain as defense in depth. | Unit and development/production browser coverage assert 404 for both the page and data route. |
+| Local Sandbox startup logged `version_mismatch` between SDK `0.12.7` and container `0.7.0`. | `worker/Dockerfile` pinned an older runtime image independently of `worker/package.json`. | Aligned the base image to `cloudflare/sandbox:0.12.7` and added a contract test tying the image tag to the declared SDK version. | The test failed against `0.7.0`, passes against `0.12.7`, and a rebuilt authenticated diagnostic returns `200` with no version mismatch. |
 
 ## Fresh evidence
 
-Captured from the dirty audit candidate based on
-`87a23e102bf35a8fa172cdcf6d2d7c58f975cab4` at
-`2026-08-26T03:10:44-05:00`.
+Captured from `main` and `origin/main` at
+`a8c197639c599c67132e73b376859dc4d6d48124`, plus the staged documentation
+refresh, at `2026-08-27T02:06:28-05:00`.
 
 | Procedure | Result |
 | --- | --- |
-| `pnpm check` | Passed; 403 files checked with no fixes. |
+| `pnpm check` | Passed; 404 files checked with no fixes or warnings. |
 | `pnpm typecheck` | Passed for the app and all three workspace packages. |
-| `pnpm test:unit` | Passed: 288 + 438 + 38 + 32 + 140 = **936** tests, with zero failures, skips, or todos. |
+| `pnpm test:unit` | Passed: 288 + 438 + 38 + 32 + 151 = **947** tests, with zero failures, skips, or todos. |
 | `PORT=3128 pnpm exec playwright test --reporter=dot` | Passed: **16/16** current authentication, console, account, Warden, chat, and security cases against the development server. |
 | `ADMIN_EMAILS=e2e-admin@example.invalid pnpm build` | Passed; Next.js generated **32/32** static pages with no metadata warning. Database migration was skipped because `POSTGRES_URL` was absent. The placeholder allowlist was an audit fixture only. |
 | `E2E_PRODUCTION=1 PORT=3129 pnpm exec playwright test --reporter=dot` | Passed: the same **16/16** cases against the local production server. |
 | `IS_DEMO=1 pnpm build` | Passed; Next.js generated **32/32** static pages with no metadata warning. Database migration was skipped because `POSTGRES_URL` was absent. |
 | Local demo production browser | `/` resolved to `/demo`; replay reached **10/10** sanitized events, exposed the replay control, and emitted zero browser console errors. |
+| Local Worker/Sandbox diagnostic | Wrangler local mode returned the expected health capabilities, then an ephemeral signed subscriber claim and local-only deployment gate reached `POST /api/diagnostics/sandbox`: **200**, `exitCode: 0`, `ok: true`, output `coven-agents`. The rebuilt `0.12.7` image emitted no `version_mismatch`. |
 | `pnpm roadmap:status check` | Passed: `roadmap status: unchanged`. |
-| `pnpm hygiene` | **Failed:** four worktrees, three secondary, and two unrelated `AT RISK` worktrees: `docs/repository-roadmap` has one unpushed commit; `fix/run-reconcile` is not on origin and is not merged. |
+| `pnpm hygiene` | **Failed:** five worktrees, four secondary, and two unrelated `AT RISK` worktrees: `feat/admission-queue-rebased` has one unpushed commit and is not merged; `fix/process-runner` is not on origin and is not merged. `docs/repository-roadmap` is reapable. |
 
 The `AT RISK` worktrees were not modified by this audit.
 
@@ -59,8 +63,10 @@ The `AT RISK` worktrees were not modified by this audit.
 
 - No real GitHub subscriber session or Stripe eligibility transition was
   exercised.
-- Docker was unavailable, so no live Sandbox create/run/cancel/delete and
-  cleanup lifecycle was exercised.
+- Docker-backed Worker health and the dedicated one-shot Sandbox diagnostic
+  were exercised locally. Full agent create/run/stream/cancel/delete and
+  cleanup with a tenant credential were not exercised against a deployed
+  Cloudflare environment.
 - No production deployment, migration, webhook, tenant-isolation, rollback, or
   recovery rehearsal was performed.
 - Chrome DevTools MCP was unavailable, so no retained Core Web Vitals trace or
