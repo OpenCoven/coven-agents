@@ -152,6 +152,53 @@ export class AgentBusyError extends AlreadyRunningError {
   }
 }
 
+export class InvalidWorkspaceError extends HttpError {
+  readonly provenNotStarted = true;
+
+  constructor() {
+    super(
+      "Cloud agents may only use the /workspace scratch sandbox.",
+      400,
+      "invalid_workspace"
+    );
+    this.name = "HttpError";
+  }
+}
+
+export class DispatchRejectedError extends Error {
+  readonly code = "dispatch_rejected";
+  readonly provenNotStarted = true;
+
+  constructor(cause?: unknown) {
+    super("Cloud run dispatch was rejected.", {
+      ...(cause === undefined ? {} : { cause }),
+    });
+    this.name = "DispatchRejectedError";
+  }
+}
+
+export function isDispatchRejectedError(error: unknown): boolean {
+  if (error instanceof DispatchRejectedError) {
+    return true;
+  }
+  if (error instanceof InvalidWorkspaceError) {
+    return true;
+  }
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const candidate = error as Error & {
+    code?: unknown;
+    provenNotStarted?: unknown;
+  };
+  return (
+    candidate.provenNotStarted === true &&
+    (error.name === "DispatchRejectedError" ||
+      error.name === "InvalidWorkspaceError" ||
+      candidate.code === "invalid_workspace")
+  );
+}
+
 export class AgentDecommissioningError extends Error {
   readonly code = "agent_decommissioning";
   readonly retryable = true;
@@ -362,11 +409,7 @@ export function validateCloudWorkspace(
   ) {
     return "/workspace";
   }
-  throw new HttpError(
-    "Cloud agents may only use the /workspace scratch sandbox.",
-    400,
-    "invalid_workspace"
-  );
+  throw new InvalidWorkspaceError();
 }
 
 export function createQueuedRun(

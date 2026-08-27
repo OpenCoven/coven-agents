@@ -23,6 +23,7 @@ import {
   type AdmissionCleanupCapability,
   type AdmissionCleanupGuard,
   AgentBusyError,
+  InvalidWorkspaceError,
   OperationConflictError,
   planCloudRunStart,
 } from "./run-state";
@@ -339,6 +340,49 @@ test("persisted reject admissions never requeue after an asynchronous AgentBusy"
   assert.equal(record?.no_queue, 1);
   assert.equal(record?.state, "terminal");
   assert.equal(requeues, 0);
+});
+
+test("a proven-not-started invalid workspace releases capacity and dispatches next work", async () => {
+  const dispatched: string[] = [];
+  const discarded: string[] = [];
+  const shellExecutions: string[] = [];
+  const harness = runAdmissionHarness(
+    () => ({
+      discardRejectedRun: (runId: string) => {
+        discarded.push(runId);
+        return true;
+      },
+      getRun: () => ({ status: "queued" }),
+      startAdmitted: (runId: string) => {
+        dispatched.push(runId);
+        if (runId === "run-27") {
+          throw new InvalidWorkspaceError();
+        }
+        shellExecutions.push(runId);
+        return Promise.resolve(true);
+      },
+      stop: () => Promise.resolve(null),
+    }),
+    {
+      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+    }
+  );
+
+  await harness.admission.admit(request(27));
+  await harness.admission.admit(request(28));
+
+  assert.deepEqual(dispatched, ["run-27", "run-28"]);
+  assert.deepEqual(discarded, ["run-27"]);
+  assert.deepEqual(shellExecutions, ["run-28"]);
+  const [first] = harness.sql
+    .exec<{ state: string; dispatch_token: string | null }>(
+      "SELECT state, dispatch_token FROM admission_records WHERE run_id = ?",
+      "run-27"
+    )
+    .toArray() as { state: string; dispatch_token: string | null }[];
+  assert.equal(first?.state, "terminal");
+  assert.equal(first?.dispatch_token, null);
 });
 
 test("provisional cleanup waits through its durable grace when admission is absent", async () => {

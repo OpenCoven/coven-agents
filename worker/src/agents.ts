@@ -3055,6 +3055,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     dispatchToken: string,
     admissionCapability?: AdmissionCleanupCapability
   ): Promise<boolean> {
+    const definition = this.requireActiveDefinition();
+    validateCloudWorkspace(definition);
+    const lifecycleGeneration = this.currentLifecycle().generation;
     if (!dispatchToken) {
       return false;
     }
@@ -3111,9 +3114,6 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         return true;
       }
     }
-    const definition = this.requireActiveDefinition();
-    validateCloudWorkspace(definition);
-    const lifecycleGeneration = this.currentLifecycle().generation;
     if (!(await this.repairPendingSandboxCleanup(definition))) {
       throw new AgentBusyError();
     }
@@ -3244,9 +3244,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     token?: string,
     fiberKey = cloudFiberKey(claimed.run.id)
   ): Promise<boolean> {
-    validateCloudWorkspace(definition);
     const runId = claimed.run.id;
     try {
+      validateCloudWorkspace(this.requireActiveDefinition());
       const receipt = await this.startFiber(
         fiberKey,
         async (fiber) =>
@@ -3788,6 +3788,66 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       return "protected";
     }
     return this.discardRun(runId, prepareOwner);
+  }
+
+  /**
+   * Removes a queued run rejected before admission confirmation. The
+   * coordinator capability supplies the exact request identity because legacy
+   * queued records may not have a prepare owner.
+   */
+  discardRejectedRun(
+    runId: string,
+    capability: AdmissionCleanupCapability
+  ): boolean {
+    const record = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (
+      !record ||
+      isTerminal(record.run.status) ||
+      record.run.status !== "queued" ||
+      record.admissionConfirmedAt ||
+      record.dispatchToken ||
+      record.admissionCapability?.dispatchToken ||
+      record.pendingAdmission?.admissionCapability?.dispatchToken ||
+      this.state.admissionTokens?.[runId] ||
+      this.state.dispatchClaims?.[runId] ||
+      capability.agentId !== record.run.agentId ||
+      capability.operationId !== record.run.operationId ||
+      capability.requestHash !== record.operationHash ||
+      capability.runId !== runId
+    ) {
+      return !record || isTerminal(record?.run.status ?? "failed");
+    }
+    const prepareOwner = record.pendingAdmission?.prepareOwner;
+    if (prepareOwner) {
+      return this.discardRun(runId, prepareOwner);
+    }
+    this.setState({
+      ...this.state,
+      admissionFences: Object.fromEntries(
+        Object.entries(this.state.admissionFences ?? {}).filter(
+          ([candidate]) => candidate !== runId
+        )
+      ),
+      dispatchClaims: Object.fromEntries(
+        Object.entries(this.state.dispatchClaims ?? {}).filter(
+          ([candidate]) => candidate !== runId
+        )
+      ),
+      identityCapabilities: Object.fromEntries(
+        Object.entries(this.state.identityCapabilities ?? {}).filter(
+          ([candidate]) => candidate !== runId
+        )
+      ),
+      identityTokens: Object.fromEntries(
+        Object.entries(this.state.identityTokens ?? {}).filter(
+          ([candidate]) => candidate !== runId
+        )
+      ),
+      runs: this.state.runs.filter((candidate) => candidate.run.id !== runId),
+    });
+    return true;
   }
 
   isAdmissionConfirmed(runId: string, _prepareOwner: string): boolean {

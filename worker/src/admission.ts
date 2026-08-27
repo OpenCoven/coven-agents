@@ -3,6 +3,7 @@ import { pseudonymousKey } from "./abuse";
 import {
   type AdmissionCleanupCapability,
   isAgentBusyError,
+  isDispatchRejectedError,
   isTerminal,
   MAX_TERMINAL_RUNS_PER_AGENT,
   OperationConflictError,
@@ -1558,6 +1559,11 @@ export class RunAdmission extends DurableObject<Env> {
           cleanupCapability(candidate)
         );
       } catch (error) {
+        if (isDispatchRejectedError(error)) {
+          this.terminalizeFailedAdmission(candidate, candidate.dispatchToken);
+          await this.discardRejectedAdmission(candidate);
+          continue;
+        }
         if (isAgentBusyError(error)) {
           const fenceToken = await this.fenceDispatch(
             candidate,
@@ -1981,6 +1987,28 @@ export class RunAdmission extends DurableObject<Env> {
       }
     } catch {
       // The transition transaction already left a durable cleanup task.
+    }
+  }
+
+  private async discardRejectedAdmission(
+    record: StoredAdmissionRecord
+  ): Promise<void> {
+    try {
+      const agent = this.env.YoloAgent.getByName(record.agentId);
+      const discard = (
+        agent as unknown as {
+          discardRejectedRun?: (
+            runId: string,
+            capability: AdmissionCleanupCapability
+          ) => Promise<boolean> | boolean;
+        }
+      ).discardRejectedRun;
+      if (typeof discard === "function") {
+        await discard.call(agent, record.runId, cleanupCapability(record));
+      }
+    } catch {
+      // The admission tombstone has already released capacity. A later
+      // reconciliation can retry local cleanup without reviving this claim.
     }
   }
 

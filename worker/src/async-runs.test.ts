@@ -27,6 +27,7 @@ import {
   type CloudRunRecord,
   cloudFiberKey,
   finishCloudRunRecord,
+  InvalidWorkspaceError,
   OperationConflictError,
 } from "./run-state";
 
@@ -137,6 +138,92 @@ test("public run-start surfaces are admission-gated", () => {
   assert.deepEqual(startSurfaces, ["enqueue", "startAdmitted"]);
   assert.equal("execute" in yolo, false);
   assert.equal("start" in yolo, false);
+});
+
+test("corrupt persisted workspace is rejected before admission confirmation or execution", async () => {
+  resetDestroyedSandboxes();
+  const yolo = agent();
+  const prepared = await yolo.enqueue(
+    { operationId: OP_A, task: "Do not start with corrupt state." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c91",
+    "corrupt-workspace-hash",
+    "identity"
+  );
+  assert.equal(prepared.created, true);
+
+  const state = Reflect.get(yolo, "state") as Record<string, unknown> & {
+    definition: AgentDefinition;
+  };
+  yolo.setState({
+    ...state,
+    definition: { ...state.definition, workspace: "/corrupt" },
+  } as never);
+
+  await assert.rejects(
+    () => yolo.startAdmitted(prepared.run.id, "1:corrupt-workspace"),
+    (error: unknown) =>
+      error instanceof InvalidWorkspaceError && error.provenNotStarted === true
+  );
+
+  const current = yolo.getRun(prepared.run.id);
+  assert.equal(current?.status, "queued");
+  const currentState = Reflect.get(yolo, "state") as {
+    admissionConfirmedAt?: string;
+    admissionTokens?: Record<string, string>;
+    dispatchClaims?: Record<string, string>;
+    runs: CloudRunRecord[];
+  };
+  const record = currentState.runs.find(
+    (candidate) => candidate.run.id === prepared.run.id
+  );
+  assert.equal(record?.admissionConfirmedAt, undefined);
+  assert.equal(currentState.admissionTokens?.[prepared.run.id], undefined);
+  assert.equal(currentState.dispatchClaims?.[prepared.run.id], undefined);
+  assert.equal(record?.dispatchToken, undefined);
+  assert.equal(sandboxGetCount(), 0);
+});
+
+test("workspace corruption after claim fails and releases the admitted run", async () => {
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  let yolo!: YoloAgent;
+  const yoloEnv = {
+    ...admissionTestEnv(),
+    AgentDirectory: {
+      getByName: () => ({
+        markRunStatus: () => {
+          const state = Reflect.get(yolo, "state") as Record<
+            string,
+            unknown
+          > & {
+            definition: AgentDefinition;
+          };
+          yolo.setState({
+            ...state,
+            definition: { ...state.definition, workspace: "/corrupt" },
+          } as never);
+          return true;
+        },
+      }),
+    },
+  };
+  yolo = new YoloAgent(undefined as never, yoloEnv as never);
+  yolo.configure(definition());
+  const prepared = await yolo.enqueue(
+    { operationId: OP_B, task: "Clean up after a late corruption." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c92",
+    "late-corrupt-workspace-hash",
+    "identity"
+  );
+
+  await assert.rejects(
+    () => yolo.startAdmitted(prepared.run.id, "1:late-corrupt-workspace"),
+    (error: unknown) =>
+      error instanceof InvalidWorkspaceError && error.provenNotStarted === true
+  );
+
+  assert.equal(yolo.getRun(prepared.run.id)?.status, "failed");
+  assert.equal(sandboxGetCount(), 0);
 });
 
 test("an orphaned enqueue is durably cleaned after its preparation deadline", async () => {
