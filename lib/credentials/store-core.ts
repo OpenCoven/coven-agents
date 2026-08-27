@@ -59,7 +59,8 @@ export async function readCredentialForTenant(
     stored,
     tenant,
     harnessId,
-    row.envelopeRevision,
+    row.id,
+    row.credentialRevision,
     db
   );
 }
@@ -68,7 +69,8 @@ async function refreshStoredCredential(
   stored: StoredCredential,
   tenant: string,
   harnessId: string,
-  expectedEnvelopeRevision: string,
+  expectedCredentialId: string,
+  expectedCredentialRevision: string,
   db: ReturnType<typeof databaseFor>
 ): Promise<string | null> {
   if (stored.kind !== "oauth") {
@@ -99,7 +101,8 @@ async function refreshStoredCredential(
       .where(
         and(
           credentialWhere(tenant, harnessId),
-          eq(tenantCredential.envelopeRevision, expectedEnvelopeRevision)
+          eq(tenantCredential.id, expectedCredentialId),
+          eq(tenantCredential.credentialRevision, expectedCredentialRevision)
         )
       )
       .returning({ id: tenantCredential.id });
@@ -112,7 +115,8 @@ async function refreshStoredCredential(
   const persisted = await persistCredential(
     tenant,
     harnessId,
-    expectedEnvelopeRevision,
+    expectedCredentialId,
+    expectedCredentialRevision,
     refreshed,
     db
   );
@@ -126,7 +130,8 @@ async function refreshStoredCredential(
 async function persistCredential(
   tenant: string,
   harnessId: string,
-  expectedEnvelopeRevision: string,
+  expectedCredentialId: string,
+  expectedCredentialRevision: string,
   credential: StoredCredential,
   db: ReturnType<typeof databaseFor>
 ): Promise<boolean> {
@@ -143,6 +148,7 @@ async function persistCredential(
     .set({
       aadVersion: sealed.aadVersion,
       ciphertext: sealed.ciphertext,
+      credentialRevision: crypto.randomUUID(),
       envelopeRevision: crypto.randomUUID(),
       iv: sealed.iv,
       kekVersion: sealed.kekVersion,
@@ -152,7 +158,8 @@ async function persistCredential(
     .where(
       and(
         credentialWhere(tenant, harnessId),
-        eq(tenantCredential.envelopeRevision, expectedEnvelopeRevision)
+        eq(tenantCredential.id, expectedCredentialId),
+        eq(tenantCredential.credentialRevision, expectedCredentialRevision)
       )
     )
     .returning({ id: tenantCredential.id });

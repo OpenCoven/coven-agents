@@ -189,6 +189,7 @@ export const tenantCredential = pgTable(
     aadVersion: integer("aadVersion").notNull().default(0),
     ciphertext: text("ciphertext").notNull(),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
+    credentialRevision: uuid("credentialRevision").notNull().defaultRandom(),
     envelopeRevision: uuid("envelopeRevision").notNull().defaultRandom(),
     harnessId: varchar("harnessId", { length: 32 }).notNull(),
     id: uuid("id").primaryKey().notNull().defaultRandom(),

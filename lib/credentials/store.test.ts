@@ -5,9 +5,14 @@ import { base64UrlEncode } from "@opencoven/agent-contracts";
 import { QueryBuilder } from "drizzle-orm/pg-core";
 import type { databaseFor } from "@/lib/db/access";
 import { tenantCredential } from "@/lib/db/schema";
-import { encryptCredential, generateKek } from "./envelope";
+import {
+  decryptCredential,
+  encryptCredential,
+  generateKek,
+  rewrapWrappedKey,
+} from "./envelope";
 import { credentialWhere } from "./scope";
-import { serializeCredential } from "./shape";
+import { parseStoredCredential, serializeCredential } from "./shape";
 import { readCredentialForTenant } from "./store-core";
 
 function sqlFor(tenant: string, harnessId: string) {
@@ -59,9 +64,11 @@ test("credential envelope writes fence stale writers with a fresh revision", () 
 
   assert.match(source, /envelopeRevision:\s*crypto\.randomUUID\(\)/g);
   assert.match(source, /envelopeRevision:\s*crypto\.randomUUID\(\)/g);
+  assert.match(source, /credentialRevision:\s*crypto\.randomUUID\(\)/g);
+  assert.match(source, /credentialRevision:\s*crypto\.randomUUID\(\)/g);
 });
 
-test("the credential revision migration installs an idempotent write fence", () => {
+test("the credential envelope revision migration installs an idempotent write fence", () => {
   const migration = readFileSync(
     new URL(
       "../db/migrations/0010_credential_envelope_revisions.sql",
@@ -102,6 +109,36 @@ test("the credential revision migration installs an idempotent write fence", () 
   assert.match(snapshot, /"kekVersion"[\s\S]*"default": "'v1'"/i);
 });
 
+test("the credential revision migration backfills a non-null logical revision", () => {
+  const migration = readFileSync(
+    new URL("../db/migrations/0011_credential_revisions.sql", import.meta.url),
+    "utf8"
+  );
+  const snapshot = readFileSync(
+    new URL("../db/migrations/meta/0011_snapshot.json", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(
+    migration,
+    /ADD COLUMN IF NOT EXISTS "credentialRevision" uuid/i
+  );
+  assert.match(migration, /SET "credentialRevision" = gen_random_uuid\(\)/i);
+  assert.match(migration, /ALTER COLUMN "credentialRevision" SET DEFAULT/i);
+  assert.match(migration, /ALTER COLUMN "credentialRevision" SET NOT NULL/i);
+  assert.match(migration, /credentialRevision.*IS NOT DISTINCT FROM/i);
+  assert.match(migration, /ciphertext.*IS DISTINCT FROM/i);
+  assert.match(migration, /NEW\."credentialRevision" := gen_random_uuid\(\)/i);
+  assert.match(
+    migration,
+    /current_setting\('coven\.credential_aad_migration', true\)/i
+  );
+  assert.match(
+    snapshot,
+    /"credentialRevision"[\s\S]*"default": "gen_random_uuid\(\)"/i
+  );
+});
+
 test("credential AAD migration and trigger fence legacy binding updates", () => {
   const migration = readFileSync(
     new URL(
@@ -137,11 +174,14 @@ test("OAuth refresh persists only when the row revision still matches", () => {
     "utf8"
   );
 
-  assert.match(source, /row\.envelopeRevision/);
+  assert.match(source, /row\.credentialRevision/);
+  assert.match(source, /eq\(tenantCredential\.id, expectedCredentialId\)/);
   assert.match(
     source,
-    /eq\(tenantCredential\.envelopeRevision, expectedEnvelopeRevision\)/
+    /eq\(\s*tenantCredential\.credentialRevision,\s*expectedCredentialRevision\s*\)/
   );
+  assert.match(source, /credentialRevision: crypto\.randomUUID\(\)/);
+  assert.match(source, /envelopeRevision: crypto\.randomUUID\(\)/);
   assert.match(source, /returning\(\{ id: tenantCredential\.id \}\)/);
   assert.match(source, /authoritative|re-read|reread/i);
 });
@@ -187,6 +227,7 @@ test("OAuth refresh returns the authoritative replacement after a CAS loss", asy
   const staleRow = {
     aadVersion: staleEnvelope.aadVersion,
     ciphertext: staleEnvelope.ciphertext,
+    credentialRevision: "credential-stale",
     envelopeRevision: "revision-stale",
     harnessId: "copilot",
     id: "credential-row",
@@ -199,6 +240,7 @@ test("OAuth refresh returns the authoritative replacement after a CAS loss", asy
     ...staleRow,
     aadVersion: authoritativeEnvelope.aadVersion,
     ciphertext: authoritativeEnvelope.ciphertext,
+    credentialRevision: "credential-authoritative",
     envelopeRevision: "revision-authoritative",
     iv: authoritativeEnvelope.iv,
     wrappedKey: authoritativeEnvelope.wrappedKey,
@@ -256,6 +298,137 @@ test("OAuth refresh returns the authoritative replacement after a CAS loss", asy
       "authoritative-token"
     );
     assert.equal(selectCalls, 2);
+  } finally {
+    globalThis.fetch = previousFetch;
+    for (const [name, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
+});
+
+test("OAuth refresh wins after an envelope-only rewrap and keeps the rotated token", async () => {
+  const oldKey = await generateKek();
+  const currentKey = await generateKek();
+  const oldKeyMaterial = base64UrlEncode(
+    new Uint8Array(await crypto.subtle.exportKey("raw", oldKey))
+  );
+  const currentKeyMaterial = base64UrlEncode(
+    new Uint8Array(await crypto.subtle.exportKey("raw", currentKey))
+  );
+  const previousEnvironment = {
+    AUTH_GITHUB_ID: process.env.AUTH_GITHUB_ID,
+    AUTH_GITHUB_SECRET: process.env.AUTH_GITHUB_SECRET,
+    CREDENTIAL_KEK_CURRENT_VERSION: process.env.CREDENTIAL_KEK_CURRENT_VERSION,
+    CREDENTIAL_KEK_V1: process.env.CREDENTIAL_KEK_V1,
+    CREDENTIAL_KEK_V2: process.env.CREDENTIAL_KEK_V2,
+  };
+  process.env.AUTH_GITHUB_ID = "client";
+  process.env.AUTH_GITHUB_SECRET = "secret";
+  process.env.CREDENTIAL_KEK_CURRENT_VERSION = "v2";
+  process.env.CREDENTIAL_KEK_V1 = oldKeyMaterial;
+  process.env.CREDENTIAL_KEK_V2 = currentKeyMaterial;
+
+  const context = {
+    harnessId: "copilot",
+    kind: "credential" as const,
+    tenant: "acme",
+  };
+  const original = await encryptCredential(
+    serializeCredential({
+      access: "old-access",
+      expiresAt: 0,
+      kind: "oauth",
+      refresh: "old-refresh",
+    }),
+    oldKey,
+    "v1",
+    context
+  );
+  const row = {
+    aadVersion: original.aadVersion,
+    ciphertext: original.ciphertext,
+    credentialRevision: "credential-before",
+    envelopeRevision: "envelope-before",
+    harnessId: "copilot",
+    id: "credential-row",
+    iv: original.iv,
+    kekVersion: "v1",
+    tenant: "acme",
+    wrappedKey: original.wrappedKey,
+  };
+  const db = {
+    select() {
+      return {
+        from() {
+          return {
+            where() {
+              return {
+                limit() {
+                  return Promise.resolve([{ ...row }]);
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+    update() {
+      return {
+        set(values: typeof row) {
+          return {
+            where() {
+              return {
+                returning() {
+                  if (row.credentialRevision !== "credential-before") {
+                    return Promise.resolve([]);
+                  }
+                  Object.assign(row, values);
+                  return Promise.resolve([{ id: row.id }]);
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  } as unknown as ReturnType<typeof databaseFor>;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    row.wrappedKey = await rewrapWrappedKey(row.wrappedKey, oldKey, currentKey);
+    row.kekVersion = "v2";
+    row.envelopeRevision = "envelope-rewrapped";
+    assert.equal(row.credentialRevision, "credential-before");
+    return new Response(
+      JSON.stringify({
+        access_token: "fresh-access",
+        expires_in: 3600,
+        refresh_token: "fresh-refresh",
+      }),
+      { status: 200 }
+    );
+  };
+
+  try {
+    assert.equal(
+      await readCredentialForTenant("acme", "copilot", db),
+      "fresh-access"
+    );
+    assert.equal(row.kekVersion, "v2");
+    assert.equal(row.aadVersion, 1);
+    assert.notEqual(row.credentialRevision, "credential-before");
+    assert.notEqual(row.envelopeRevision, "envelope-rewrapped");
+    const stored = parseStoredCredential(
+      await decryptCredential(row, currentKey, context)
+    );
+    assert.equal(stored?.kind, "oauth");
+    if (stored?.kind === "oauth") {
+      assert.equal(stored.access, "fresh-access");
+      assert.equal(stored.refresh, "fresh-refresh");
+    }
   } finally {
     globalThis.fetch = previousFetch;
     for (const [name, value] of Object.entries(previousEnvironment)) {

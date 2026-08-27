@@ -43,6 +43,7 @@ export async function putCredential(
     .values({
       aadVersion: sealed.aadVersion,
       ciphertext: sealed.ciphertext,
+      credentialRevision: crypto.randomUUID(),
       envelopeRevision: crypto.randomUUID(),
       harnessId,
       iv: sealed.iv,
@@ -54,6 +55,7 @@ export async function putCredential(
       set: {
         aadVersion: sealed.aadVersion,
         ciphertext: sealed.ciphertext,
+        credentialRevision: crypto.randomUUID(),
         envelopeRevision: crypto.randomUUID(),
         iv: sealed.iv,
         kekVersion: sealed.kekVersion,

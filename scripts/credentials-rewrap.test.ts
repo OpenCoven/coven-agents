@@ -10,6 +10,10 @@ import {
 } from "../lib/credentials/envelope";
 import type { CredentialKekRing } from "../lib/credentials/key-ring";
 import {
+  parseStoredCredential,
+  serializeCredential,
+} from "../lib/credentials/shape";
+import {
   bindLegacyAadRows,
   main,
   parseRewrapArguments,
@@ -90,6 +94,7 @@ test("bind-aad decrypts legacy rows, encrypts with tenant AAD, and resumes after
   const row = {
     aadVersion: 0,
     ciphertext: legacy.ciphertext,
+    credentialRevision: "credential-before",
     envelopeRevision: "revision-before",
     harnessId: "copilot",
     id: "opaque-bind-row",
@@ -138,6 +143,7 @@ test("bind-aad decrypts legacy rows, encrypts with tenant AAD, and resumes after
   assert.equal(second.rewrapped, 1);
   assert.equal(second.remaining, 0);
   assert.equal(row.aadVersion, 1);
+  assert.equal(row.credentialRevision, "credential-before");
   assert.equal(
     await decryptCredential(row, kek, {
       harnessId: "copilot",
@@ -182,6 +188,80 @@ test("a concurrent update loses only the CAS and never overwrites newer data", a
   assert.equal(result.skipped, 1);
   assert.equal(row.wrappedKey, "newer-write");
   assert.equal(row.envelopeRevision, "revision-from-newer-writer");
+});
+
+test("a refresh that wins before rewrap CAS keeps its rotated token", async () => {
+  const sourceKek = await generateKek();
+  const targetKek = await generateKek();
+  const context = {
+    harnessId: "copilot",
+    kind: "credential" as const,
+    tenant: "acme",
+  };
+  const original = await encryptCredential(
+    serializeCredential({
+      access: "old-access",
+      expiresAt: 0,
+      kind: "oauth",
+      refresh: "old-refresh",
+    }),
+    sourceKek,
+    "v1",
+    context
+  );
+  const refreshedCredential = {
+    access: "fresh-access",
+    expiresAt: Date.now() + 3_600_000,
+    kind: "oauth" as const,
+    refresh: "fresh-refresh",
+  };
+  const refreshed = await encryptCredential(
+    serializeCredential(refreshedCredential),
+    targetKek,
+    "v2",
+    context
+  );
+  const row = {
+    aadVersion: original.aadVersion,
+    ciphertext: original.ciphertext,
+    credentialRevision: "credential-before",
+    envelopeRevision: "envelope-before",
+    harnessId: "copilot",
+    id: "refresh-winner-row",
+    iv: original.iv,
+    kekVersion: "v1",
+    tenant: "acme",
+    wrappedKey: original.wrappedKey,
+  };
+  const store: RewrapStore = {
+    compareAndSwap() {
+      Object.assign(row, refreshed, {
+        credentialRevision: "credential-after",
+        envelopeRevision: "envelope-after",
+      });
+      return Promise.resolve(false);
+    },
+    listByVersion(version, limit, afterId) {
+      return Promise.resolve(
+        !afterId && version === row.kekVersion ? [row].slice(0, limit) : []
+      );
+    },
+  };
+
+  const result = await rewrapRows(
+    { batch: 100, from: "v1", sourceKek, targetKek, to: "v2" },
+    store,
+    () => undefined
+  );
+
+  assert.equal(result.rewrapped, 0);
+  assert.equal(result.skipped, 1);
+  assert.equal(result.remaining, 0);
+  assert.equal(row.credentialRevision, "credential-after");
+  assert.deepEqual(
+    parseStoredCredential(await decryptCredential(row, targetKek, context)),
+    refreshedCredential
+  );
 });
 
 test("a corrupt wrapped key fails one row without exposing its contents", async () => {
@@ -254,6 +334,14 @@ test("database updates use a transaction and wrapped-key CAS", () => {
   assert.match(source, /envelopeRevision:\s*crypto\.randomUUID\(\)/);
   assert.match(source, /kekVersion: toVersion/);
   assert.match(source, /wrappedKey/);
+  assert.match(
+    source,
+    /set_config\('coven\.credential_aad_migration', 'on', true\)/
+  );
+  assert.match(
+    source,
+    /credentialRevision: tenantCredential\.credentialRevision/
+  );
   assert.match(source, /eq\(tenantCredential\.id, row\.id\)/);
   assert.match(source, /eq\(tenantCredential\.kekVersion, row\.kekVersion\)/);
   assert.match(

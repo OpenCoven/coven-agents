@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, eq, gt } from "drizzle-orm";
+import { and, asc, eq, gt, sql } from "drizzle-orm";
 import {
   decryptStoredIdempotencyResponse,
   parseStoredIdempotencyResponseEnvelope,
@@ -25,6 +25,7 @@ export const MAX_BATCH_SIZE = 1000;
 export type RewrapRow = {
   aadVersion?: number;
   ciphertext?: string;
+  credentialRevision?: string;
   envelopeRevision?: string;
   harnessId?: string;
   id: string;
@@ -643,8 +644,11 @@ async function databaseStore(): Promise<RewrapStore> {
         return false;
       }
       const expectedRevision = row.envelopeRevision;
-      const updated = await db.transaction(async (transaction) =>
-        transaction
+      const updated = await db.transaction(async (transaction) => {
+        await transaction.execute(
+          sql`select set_config('coven.credential_aad_migration', 'on', true)`
+        );
+        return transaction
           .update(tenantCredential)
           .set({
             aadVersion: sealed.aadVersion,
@@ -662,8 +666,8 @@ async function databaseStore(): Promise<RewrapStore> {
               eq(tenantCredential.envelopeRevision, expectedRevision)
             )
           )
-          .returning({ id: tenantCredential.id })
-      );
+          .returning({ id: tenantCredential.id });
+      });
       return updated.length === 1;
     },
     async compareAndSwap(row, expectedWrappedKey, wrappedKey, toVersion) {
@@ -694,6 +698,7 @@ async function databaseStore(): Promise<RewrapStore> {
         .select({
           aadVersion: tenantCredential.aadVersion,
           ciphertext: tenantCredential.ciphertext,
+          credentialRevision: tenantCredential.credentialRevision,
           envelopeRevision: tenantCredential.envelopeRevision,
           harnessId: tenantCredential.harnessId,
           id: tenantCredential.id,
@@ -713,6 +718,7 @@ async function databaseStore(): Promise<RewrapStore> {
         .select({
           aadVersion: tenantCredential.aadVersion,
           ciphertext: tenantCredential.ciphertext,
+          credentialRevision: tenantCredential.credentialRevision,
           envelopeRevision: tenantCredential.envelopeRevision,
           harnessId: tenantCredential.harnessId,
           id: tenantCredential.id,
@@ -737,6 +743,7 @@ async function databaseStore(): Promise<RewrapStore> {
         .select({
           aadVersion: tenantCredential.aadVersion,
           ciphertext: tenantCredential.ciphertext,
+          credentialRevision: tenantCredential.credentialRevision,
           envelopeRevision: tenantCredential.envelopeRevision,
           harnessId: tenantCredential.harnessId,
           id: tenantCredential.id,
