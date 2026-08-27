@@ -287,7 +287,7 @@ Run: `pnpm exec tsx --test lib/abuse/store.test.ts lib/ratelimit.test.ts`
 
 Expected: PASS, including 100 parallel calls allowing exactly the configured limit.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add lib/abuse lib/ratelimit.ts lib/ratelimit.test.ts .env.example
