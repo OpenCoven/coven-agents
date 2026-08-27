@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { encryptCredential, generateKek } from "../lib/credentials/envelope";
+import {
+  decryptCredential,
+  encryptCredential,
+  generateKek,
+  rewrapWrappedKey,
+} from "../lib/credentials/envelope";
 import type { CredentialKekRing } from "../lib/credentials/key-ring";
 import {
   main,
@@ -205,6 +210,105 @@ test("the rewrap CLI returns resume for CAS conflicts and never prints payloads"
   assert.equal(await main(["--from", "v1", "--to", "v2"], dependencies), 2);
   assert.match(output.at(-1) ?? "", /status=resume/);
   assert.doesNotMatch(output.join("\n"), /secret|ciphertext|wrappedKey/i);
+});
+
+test("the rewrap CLI rolls v2 back to v1, resumes after CAS, and verifies before retirement", async () => {
+  const sourceKek = await generateKek();
+  const targetKek = await generateKek();
+  const original = await encryptCredential("rollback-secret", sourceKek, "v1");
+  const v2WrappedKey = await rewrapWrappedKey(
+    original.wrappedKey,
+    sourceKek,
+    targetKek
+  );
+  const row = {
+    id: "opaque-rollback-row",
+    ...original,
+    kekVersion: "v2",
+    wrappedKey: v2WrappedKey,
+  };
+  assert.equal(await decryptCredential(row, targetKek), "rollback-secret");
+  const output: string[] = [];
+  let casCalls = 0;
+  const store: RewrapStore = {
+    compareAndSwap(candidate, expectedWrappedKey, wrappedKey, toVersion) {
+      casCalls += 1;
+      assert.equal(candidate.id, row.id);
+      assert.equal(candidate.kekVersion, "v2");
+      assert.equal(expectedWrappedKey, row.wrappedKey);
+      assert.equal(toVersion, "v1");
+      if (casCalls === 1) {
+        return Promise.resolve(false);
+      }
+      row.wrappedKey = wrappedKey;
+      row.kekVersion = toVersion;
+      return Promise.resolve(true);
+    },
+    listAll(limit, afterId) {
+      return Promise.resolve(afterId ? [] : [row].slice(0, limit));
+    },
+    listByVersion(version, limit, afterId) {
+      return Promise.resolve(
+        afterId || version !== row.kekVersion ? [] : [row].slice(0, limit)
+      );
+    },
+  };
+  const rollbackDependencies = cliDependencies(
+    sourceKek,
+    targetKek,
+    store,
+    output,
+    "v1"
+  );
+
+  assert.equal(
+    await main(
+      ["--from", "v2", "--to", "v1", "--batch", "1"],
+      rollbackDependencies
+    ),
+    2
+  );
+  assert.equal(row.kekVersion, "v2");
+  assert.match(
+    output.at(-1) ?? "",
+    /rewrapped=0 .*skipped=1 .*remaining=1 status=resume/
+  );
+
+  output.length = 0;
+  assert.equal(
+    await main(
+      ["--from", "v2", "--to", "v1", "--batch", "1"],
+      rollbackDependencies
+    ),
+    0
+  );
+  assert.equal(row.kekVersion, "v1");
+  assert.equal(row.wrappedKey, original.wrappedKey);
+  assert.equal(await decryptCredential(row, sourceKek), "rollback-secret");
+  assert.equal(row.ciphertext, original.ciphertext);
+  assert.equal(row.iv, original.iv);
+  assert.match(
+    output.at(-1) ?? "",
+    /rewrapped=1 .*remaining=0 status=complete/
+  );
+
+  output.length = 0;
+  assert.equal(
+    await main(
+      ["verify", "--version", "v2", "--batch", "1"],
+      rollbackDependencies
+    ),
+    0
+  );
+  assert.match(
+    output.at(-1) ?? "",
+    /verify verified=1 .*remaining=0 status=complete/
+  );
+  assert.doesNotMatch(
+    output.join("\n"),
+    /rollback-secret|ciphertext|wrappedKey/i
+  );
+  assert.equal(casCalls, 2);
 });
 
 test("the rewrap CLI returns failure for corrupt rows and preserves privacy", async () => {
@@ -419,11 +523,12 @@ function cliDependencies(
   sourceKek: CryptoKey,
   targetKek: CryptoKey,
   store: RewrapStore,
-  output: string[]
+  output: string[],
+  currentVersion: "v1" | "v2" = "v2"
 ): RewrapCliDependencies {
   const ring: CredentialKekRing = {
-    current: targetKek,
-    currentVersion: "v2",
+    current: currentVersion === "v1" ? sourceKek : targetKek,
+    currentVersion,
     keyFor(version) {
       if (version === "v1") {
         return sourceKek;

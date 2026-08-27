@@ -84,25 +84,39 @@ test("every credential gets a fresh initialisation vector", async () => {
   assert.equal(ivs.size, 20, "initialisation vectors must not repeat");
 });
 
-test("rewrapping preserves the ciphertext and the underlying data key", async () => {
+test("rewrapping and rolling back preserve the ciphertext and underlying data key", async () => {
   const sourceKek = await generateKek();
   const targetKek = await generateKek();
-  const sealed = await encryptCredential("same-secret", sourceKek, "v1");
-  const { ciphertext, iv } = sealed;
+  const original = await encryptCredential("same-secret", sourceKek, "v1");
 
-  const wrappedKey = await rewrapWrappedKey(
-    sealed.wrappedKey,
+  const forwardWrappedKey = await rewrapWrappedKey(
+    original.wrappedKey,
     sourceKek,
     targetKek
   );
-  const opened = await decryptCredential(
-    { ...sealed, kekVersion: "v2", wrappedKey },
-    targetKek
-  );
+  const forward = {
+    ...original,
+    kekVersion: "v2",
+    wrappedKey: forwardWrappedKey,
+  };
+  assert.notEqual(forward.wrappedKey, original.wrappedKey);
+  assert.equal(await decryptCredential(forward, targetKek), "same-secret");
 
-  assert.equal(opened, "same-secret");
-  assert.equal(sealed.ciphertext, ciphertext);
-  assert.equal(sealed.iv, iv);
+  const reverseWrappedKey = await rewrapWrappedKey(
+    forward.wrappedKey,
+    targetKek,
+    sourceKek
+  );
+  const rolledBack = {
+    ...forward,
+    kekVersion: "v1",
+    wrappedKey: reverseWrappedKey,
+  };
+
+  assert.equal(reverseWrappedKey, original.wrappedKey);
+  assert.equal(await decryptCredential(rolledBack, sourceKek), "same-secret");
+  assert.equal(rolledBack.ciphertext, original.ciphertext);
+  assert.equal(rolledBack.iv, original.iv);
 });
 
 test("malformed envelope fields are rejected before WebCrypto", async () => {
