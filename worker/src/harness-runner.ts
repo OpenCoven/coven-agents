@@ -708,7 +708,6 @@ export async function runHarnessInSandbox(options: {
       // biome-ignore lint/performance/noAwaitInLoops: polling is sequential by definition — each wait and read must finish before the next is decided.
       await wait(pollMs);
       try {
-        // biome-ignore lint/performance/noAwaitInLoops: see above.
         if ((await pollOnce()) === "done") {
           return;
         }
