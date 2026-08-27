@@ -1056,13 +1056,6 @@ export class RunAdmission extends DurableObject<Env> {
           record: null,
         };
       }
-      if (input.prepareOwner) {
-        this.ctx.storage.sql.exec(
-          "DELETE FROM admission_cleanup_tasks WHERE run_id = ? AND kind = 'provisional' AND prepare_owner = ?",
-          input.runId,
-          input.prepareOwner
-        );
-      }
       this.pruneTerminalRecords(1);
       if (!this.hasGlobalRetentionCapacity()) {
         return {
@@ -1364,6 +1357,47 @@ export class RunAdmission extends DurableObject<Env> {
       requestHash: current.requestHash,
       runId: current.runId,
     };
+  }
+
+  async confirmPreparedAdmission(
+    runId: string,
+    prepareOwner: string,
+    capability: AdmissionCleanupCapability
+  ): Promise<boolean> {
+    await this.initialized;
+    if (!prepareOwner || !capability) {
+      return false;
+    }
+    return this.ctx.storage.transactionSync(() => {
+      const current = this.findStoredByRunId(runId);
+      if (
+        !current ||
+        current.sequence !== capability.admissionSequence ||
+        !matchesCleanupIdentity(current, {
+          agentId: capability.agentId,
+          operationId: capability.operationId,
+          requestHash: capability.requestHash,
+          runId,
+        }) ||
+        current.dispatchToken !== capability.dispatchToken
+      ) {
+        return false;
+      }
+      this.ctx.storage.sql.exec(
+        `
+          DELETE FROM admission_cleanup_tasks
+          WHERE run_id = ?
+            AND admission_sequence = 0
+            AND kind = 'provisional'
+            AND prepare_owner = ?
+            AND agent_id = ?
+        `,
+        runId,
+        prepareOwner,
+        capability.agentId
+      );
+      return true;
+    });
   }
 
   async validateCleanup(
@@ -2006,7 +2040,7 @@ export class RunAdmission extends DurableObject<Env> {
     admissionSequence: number
   ): void {
     this.ctx.storage.sql.exec(
-      "DELETE FROM admission_cleanup_tasks WHERE run_id = ? AND admission_sequence <> ?",
+      "DELETE FROM admission_cleanup_tasks WHERE run_id = ? AND admission_sequence <> ? AND kind = 'admission'",
       runId,
       admissionSequence
     );
@@ -2072,23 +2106,14 @@ export class RunAdmission extends DurableObject<Env> {
       .toArray();
     for (const task of tasks) {
       if (task.kind === "provisional") {
-        const current = this.findStoredByRunId(task.run_id);
-        if (current) {
-          this.deleteCleanupTask(
-            task.run_id,
-            task.admission_sequence,
-            "provisional"
-          );
-          continue;
-        }
-        let completed = false;
+        let completed: boolean | "protected" = false;
         try {
           const agent = this.env.YoloAgent.getByName(task.agent_id);
           const { discardPreparedRun } = agent as unknown as {
             discardPreparedRun?: (
               runId: string,
               prepareOwner: string
-            ) => Promise<boolean> | boolean;
+            ) => Promise<boolean | "protected"> | boolean | "protected";
           };
           completed = discardPreparedRun
             ? // biome-ignore lint/performance/noAwaitInLoops: Cleanup tasks are deliberately processed sequentially.

@@ -1031,23 +1031,33 @@ test("run admission passes its durable capability directly to confirmation", asy
   const operationId = "33333333-aaaa-4555-8666-777777777777";
   const runId = "44444444-bbbb-4666-8777-888888888888";
   const run = queuedRun(MINE, runId, operationId);
-  const capability = {
+  let admittedRunId = "";
+  const capability = () => ({
     admissionSequence: 7,
     agentId: MINE,
     operationId,
     requestHash: "request-hash",
-    runId,
-  };
+    runId: admittedRunId,
+  });
   const confirmedCapabilities: unknown[] = [];
+  const calls: string[] = [];
   const agent: CloudRunnerAgent = {
     configure: (value: AgentDefinition) => value,
     confirmAdmission: (_runId, _operationId, _requestHash, received) => {
+      calls.push("agent-confirm");
       confirmedCapabilities.push(received);
       return { kind: "confirmed" };
     },
     decommission: () => undefined,
     discardRun: () => undefined,
-    enqueue: () => ({ created: true, run }),
+    enqueue: (_input, requestedRunId) => {
+      admittedRunId = requestedRunId;
+      return {
+        created: true,
+        prepareOwner: "prepare-owner-route",
+        run: { ...run, id: requestedRunId },
+      };
+    },
     getEventStream: () => ({ events: [], terminal: false }),
     getRun: () => run,
     listRuns: () => [run],
@@ -1067,16 +1077,30 @@ test("run admission passes its durable capability directly to confirmation", asy
     getAdmission: () => ({
       admit: () =>
         ({
-          admissionCapability: capability,
+          admissionCapability: capability(),
           kind: "active",
-          runId,
+          runId: admittedRunId,
         }) as never,
+      confirmPreparedAdmission: (
+        confirmedRunId,
+        prepareOwner,
+        receivedCapability
+      ) => {
+        calls.push("coordinator-confirm");
+        assert.equal(confirmedRunId, admittedRunId);
+        assert.equal(prepareOwner, "prepare-owner-route");
+        assert.deepEqual(receivedCapability, capability());
+        return true;
+      },
       release: () => false,
     }),
     getDirectory: () => ({
       list: () => [agents.get(MINE) as AgentDefinition],
       lookupRun: () => null,
-      registerRun: () => true,
+      registerRun: () => {
+        calls.push("register");
+        return true;
+      },
       remove: () => undefined,
       unregisterRun: () => undefined,
       upsert: (value: AgentDefinition) => value,
@@ -1095,7 +1119,8 @@ test("run admission passes its durable capability directly to confirmation", asy
   );
 
   assert.equal(response.status, 202);
-  assert.deepEqual(confirmedCapabilities, [capability]);
+  assert.deepEqual(confirmedCapabilities, [capability()]);
+  assert.deepEqual(calls, ["agent-confirm", "coordinator-confirm", "register"]);
 });
 
 test("a terminal duplicate reconciles stale admission before returning the terminal run", async () => {

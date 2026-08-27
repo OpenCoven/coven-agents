@@ -3717,12 +3717,18 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   }
 
   /** Idempotently removes only the queued preparation owned by this nonce. */
-  discardPreparedRun(runId: string, prepareOwner: string): boolean {
+  discardPreparedRun(
+    runId: string,
+    prepareOwner: string
+  ): boolean | "protected" {
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
     if (!record) {
       return true;
+    }
+    if (record.admissionConfirmedAt || !record.pendingAdmission) {
+      return "protected";
     }
     if (
       record.run.status !== "queued" ||

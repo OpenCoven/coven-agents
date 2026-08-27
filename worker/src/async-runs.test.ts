@@ -232,6 +232,34 @@ test("an orphaned enqueue is durably cleaned after its preparation deadline", as
   assert.deepEqual(destroyedSandboxes(), []);
 });
 
+test("a stale provisional cleanup cannot discard an agent-confirmed run", async () => {
+  const yolo = agent();
+  const runId = "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a33";
+  const requestHash = "confirmed-before-cleanup-hash";
+  const prepared = await yolo.enqueue(
+    { operationId: OP_A, task: "Keep the confirmed run." },
+    runId,
+    requestHash,
+    "identity"
+  );
+  assert.equal(prepared.created, true);
+  assert.ok(prepared.prepareOwner);
+
+  const confirmation = await yolo.confirmAdmission(runId, OP_A, requestHash, {
+    admissionSequence: 1,
+    agentId: AGENT_ID,
+    operationId: OP_A,
+    requestHash,
+    runId,
+  });
+  assert.deepEqual(confirmation, { kind: "confirmed" });
+  assert.equal(
+    yolo.discardPreparedRun(runId, prepared.prepareOwner ?? ""),
+    "protected"
+  );
+  assert.equal(yolo.getRun(runId)?.id, runId);
+});
+
 test("a pending-admission schedule failure registers coordinator-owned provisional cleanup", async () => {
   let provisional: unknown[] | undefined;
   const yolo = new (class extends YoloAgent {

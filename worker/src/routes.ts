@@ -137,7 +137,7 @@ export type CloudRunnerAgent = {
   discardPreparedRun?: (
     runId: string,
     prepareOwner: string
-  ) => Awaitable<boolean>;
+  ) => Awaitable<boolean | "protected">;
   decommission: () => Awaitable<void>;
   enqueue: (
     input: unknown,
@@ -193,6 +193,11 @@ export type CloudRunnerAdmission = {
     operationId?: string,
     requestHash?: string
   ) => Awaitable<void>;
+  confirmPreparedAdmission?: (
+    runId: string,
+    prepareOwner: string,
+    capability: AdmissionCleanupCapability
+  ) => Awaitable<boolean>;
   release: (
     runId: string,
     dispatchToken?: string,
@@ -1765,6 +1770,8 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
             let admissionCapability: AdmissionCleanupCapability | null =
               decision.admissionCapability ?? null;
             let registrationSequence: number | undefined;
+            let agentAdmissionConfirmed = false;
+            let coordinatorAdmissionConfirmed = false;
             try {
               if (admission.getCleanupCapability) {
                 admissionCapability = await admission.getCleanupCapability(
@@ -1818,6 +1825,27 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                     });
                   }
                   return busyResponse("global_busy", cors);
+                }
+                agentAdmissionConfirmed = true;
+                if (
+                  prepared.prepareOwner &&
+                  admissionCapability &&
+                  admission.confirmPreparedAdmission
+                ) {
+                  const coordinatorConfirmed =
+                    await admission.confirmPreparedAdmission(
+                      runId,
+                      prepared.prepareOwner,
+                      admissionCapability
+                    );
+                  if (!coordinatorConfirmed) {
+                    throw new AdmissionUnavailableError(
+                      "Prepared admission confirmation failed."
+                    );
+                  }
+                  coordinatorAdmissionConfirmed = true;
+                } else {
+                  coordinatorAdmissionConfirmed = true;
                 }
               }
               const beforeRegistration = await agent.getRun(runId);
@@ -1914,13 +1942,15 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                   // Preserve the original registration failure.
                 }
               }
-              await cleanupRun(agent, runId, id, {
-                admission,
-                admissionCapability: cleanupCapability ?? undefined,
-                allowUnowned: true,
-                prepareOwner: prepared.prepareOwner,
-                stopFirst: true,
-              });
+              if (!agentAdmissionConfirmed || coordinatorAdmissionConfirmed) {
+                await cleanupRun(agent, runId, id, {
+                  admission,
+                  admissionCapability: cleanupCapability ?? undefined,
+                  allowUnowned: true,
+                  prepareOwner: prepared.prepareOwner,
+                  stopFirst: true,
+                });
+              }
               throw error;
             }
           }

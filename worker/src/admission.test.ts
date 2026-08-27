@@ -20,6 +20,7 @@ import {
 } from "./admission";
 import { YoloAgent } from "./agents";
 import {
+  type AdmissionCleanupCapability,
   type AdmissionCleanupGuard,
   AgentBusyError,
   OperationConflictError,
@@ -370,7 +371,50 @@ test("provisional cleanup is alarmed and idempotently discarded without an admis
   assert.equal(provisionalTasks[0]?.count, 0);
 });
 
-test("successful admission invalidates its matching provisional cleanup task", async () => {
+test("provisional cleanup discards an admitted run that was never agent-confirmed", async () => {
+  let discarded = 0;
+  const harness = runAdmissionHarness(() => ({
+    discardPreparedRun: () => {
+      discarded += 1;
+      return true;
+    },
+    getRun: () => ({ status: "queued" }),
+    startAdmitted: () => Promise.resolve(false),
+    stop: () => Promise.resolve(null),
+  }));
+  await harness.admission.enqueueProvisionalCleanup(
+    "agent-unconfirmed",
+    "run-unconfirmed",
+    "prepare-owner-unconfirmed",
+    "operation-unconfirmed",
+    "hash-unconfirmed"
+  );
+  seedAdmissionRecord(
+    harness,
+    {
+      agentId: "agent-unconfirmed",
+      enqueuedAt: new Date().toISOString(),
+      operationId: "operation-unconfirmed",
+      requestHash: "hash-unconfirmed",
+      runId: "run-unconfirmed",
+      state: "active",
+      tenantHash: TENANT_A,
+    },
+    1
+  );
+
+  await harness.admission.alarm();
+
+  assert.equal(discarded, 1);
+  const remaining = harness.sql
+    .exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = 'run-unconfirmed'"
+    )
+    .toArray() as { count: number }[];
+  assert.equal(remaining[0]?.count, 0);
+});
+
+test("successful admission retains provisional cleanup until prepared run confirmation", async () => {
   const harness = runAdmissionHarness(() => ({
     getRun: () => ({ status: "running" }),
     startAdmitted: () => Promise.resolve(true),
@@ -382,19 +426,75 @@ test("successful admission invalidates its matching provisional cleanup task", a
     "prepare-owner-27"
   );
 
-  assert.deepEqual(
-    await harness.admission.admit({
-      ...request(27),
-      prepareOwner: "prepare-owner-27",
-    } as never),
-    { kind: "active", runId: "run-27" }
-  );
+  const decision = await harness.admission.admit({
+    ...request(27),
+    prepareOwner: "prepare-owner-27",
+  } as never);
+  assert.deepEqual(decision, { kind: "active", runId: "run-27" });
   const matchingTasks = harness.sql
     .exec<{ count: number }>(
       "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = 'run-27'"
     )
     .toArray() as { count: number }[];
-  assert.equal(matchingTasks[0]?.count, 0);
+  assert.equal(matchingTasks[0]?.count, 1);
+  assert.ok(decision.admissionCapability);
+  assert.equal(
+    await harness.admission.confirmPreparedAdmission(
+      "run-27",
+      "prepare-owner-27",
+      decision.admissionCapability as AdmissionCleanupCapability
+    ),
+    true
+  );
+  const confirmedTasks = harness.sql
+    .exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = 'run-27'"
+    )
+    .toArray() as { count: number }[];
+  assert.equal(confirmedTasks[0]?.count, 0);
+});
+
+test("provisional cleanup protects an agent-confirmed run before coordinator confirmation", async () => {
+  let discarded = 0;
+  const harness = runAdmissionHarness(() => ({
+    discardPreparedRun: () => {
+      discarded += 1;
+      return "protected" as const;
+    },
+    getRun: () => ({ status: "queued" }),
+    startAdmitted: () => Promise.resolve(false),
+    stop: () => Promise.resolve(null),
+  }));
+  await harness.admission.enqueueProvisionalCleanup(
+    "agent-protected",
+    "run-protected",
+    "prepare-owner-protected",
+    "operation-protected",
+    "hash-protected"
+  );
+  seedAdmissionRecord(
+    harness,
+    {
+      agentId: "agent-protected",
+      enqueuedAt: new Date().toISOString(),
+      operationId: "operation-protected",
+      requestHash: "hash-protected",
+      runId: "run-protected",
+      state: "active",
+      tenantHash: TENANT_A,
+    },
+    1
+  );
+
+  await harness.admission.alarm();
+
+  assert.equal(discarded, 1);
+  const remaining = harness.sql
+    .exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = 'run-protected'"
+    )
+    .toArray() as { count: number }[];
+  assert.equal(remaining[0]?.count, 0);
 });
 
 test("cleanup without an admission row does not create a sequence-zero task", async () => {
@@ -873,6 +973,10 @@ type AdmissionHarnessOptions = {
 
 function runAdmissionHarness(
   getAgent: () => {
+    discardPreparedRun?: (
+      runId: string,
+      prepareOwner: string
+    ) => Promise<boolean | "protected"> | boolean | "protected";
     fenceAdmitted?: (runId: string, dispatchToken: string) => Promise<boolean>;
     requeueAdmitted?: (
       runId: string,
