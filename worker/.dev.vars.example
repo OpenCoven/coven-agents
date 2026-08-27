@@ -1,5 +1,9 @@
 AGENT_CONTROL_TOKEN=replace-with-a-long-random-token
 EDGE_ABUSE_KEY_SECRET=replace-with-a-long-random-secret
+RUNNER_VERIFY_KEY_ID=key-local
+RUNNER_VERIFY_KEY=replace-with-the-base64url-ed25519-public-key
+RUNNER_SERVICE_TOKEN=local-harness-service-token
+APP_ORIGIN=http://127.0.0.1:9797
 # Harness credential, not a model provider key. A fine-grained PAT with the
 # "Copilot Requests" permission, or an OAuth token from the Copilot CLI or gh app.
 COPILOT_GITHUB_TOKEN=replace-with-a-github-token-that-has-copilot-access

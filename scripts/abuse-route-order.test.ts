@@ -463,8 +463,26 @@ test("session revocation increments in the database update", () => {
   const revoke = source.slice(start, start + 1000);
 
   assert.match(revoke, /\.update\(user\)/);
+  assert.match(source, /function emailMatches\(normalizedEmail: string\)/);
+  assert.match(
+    source,
+    /lower\(\$\{user\.email\}\) = lower\(\$\{normalizedEmail\}\)/
+  );
+  assert.match(revoke, /count\(\*\).*emailMatches\(normalizedEmail\)/s);
   assert.match(revoke, /authVersion\} \+ 1/);
   assert.match(revoke, /\.returning\(\{ authVersion: user\.authVersion/);
+});
+
+test("federated account creation stores canonical lowercase email", () => {
+  const source = read("lib/db/queries.ts");
+  const start = source.indexOf(
+    "export async function findOrCreateFederatedUser"
+  );
+  assert.ok(start >= 0);
+  const federated = source.slice(start, start + 1200);
+
+  assert.match(federated, /normalizeEmail\(email\)/);
+  assert.match(federated, /values\(\{ email: normalizedEmail/);
 });
 
 test("database claims and reclaims idempotency records atomically", () => {

@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { eq } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import {
   db,
   findOrCreateFederatedUser,
@@ -28,7 +28,12 @@ import { formatRevocationOutput } from "./account-output";
  */
 
 async function findUser(email: string) {
-  const [row] = await db.select().from(user).where(eq(user.email, email));
+  const normalizedEmail = email.trim().toLowerCase();
+  const [row] = await db
+    .select()
+    .from(user)
+    .where(sql`lower(${user.email}) = lower(${normalizedEmail})`)
+    .limit(1);
 
   return row ?? null;
 }

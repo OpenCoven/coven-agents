@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { periodStart } from "@/lib/billing/period";
 import { db } from "@/lib/db/queries";
 import { user } from "@/lib/db/schema";
@@ -26,10 +26,11 @@ const DAY_MS = 86_400_000;
 const DEFAULT_DAYS = 365;
 
 async function findUser(email: string) {
+  const normalizedEmail = email.trim().toLowerCase();
   const [row] = await db
     .select()
     .from(user)
-    .where(eq(user.email, email))
+    .where(sql`lower(${user.email}) = lower(${normalizedEmail})`)
     .limit(1);
   return row ?? null;
 }

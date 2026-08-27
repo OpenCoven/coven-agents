@@ -21,15 +21,14 @@ const RUNNER_TOKEN = "runner-control-sensitive";
 const IDENTITY_TOKEN = "runner-identity-sensitive";
 const RECORDING_CREDENTIAL = "recording-credential-sensitive";
 const SIGNING_KEY = "recorder-signing-key-sensitive";
-const RECORDER_SUBJECT = "demo-recorder";
-const RECORDER_TENANT = "demo_recorder_tenant";
+const RECORDER_EMAIL = "Recorder@example.com";
+const RECORDER_ID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 const CONFIGURED_SECRETS = [
   RUNNER_TOKEN,
   IDENTITY_TOKEN,
   RECORDING_CREDENTIAL,
   SIGNING_KEY,
-  RECORDER_SUBJECT,
-  RECORDER_TENANT,
+  RECORDER_EMAIL,
 ];
 
 const acceptedEvent: RunEvent = {
@@ -148,15 +147,25 @@ function recordingEnvironment(
   overrides: Record<string, string | undefined> = {}
 ) {
   return {
+    DEMO_RECORDER_ACCOUNT_EMAIL: RECORDER_EMAIL,
     DEMO_RECORDING_CREDENTIAL: RECORDING_CREDENTIAL,
     DEMO_RUNNER_SIGNING_KEY: SIGNING_KEY,
-    DEMO_RUNNER_SUBJECT: RECORDER_SUBJECT,
-    DEMO_RUNNER_TENANT: RECORDER_TENANT,
+    DEMO_RUNNER_SIGNING_KEY_ID: "recorder-current",
     DEMO_RUNNER_TOKEN: RUNNER_TOKEN,
     DEMO_RUNNER_URL: "https://runner.example",
     ...overrides,
   };
 }
+
+const recorderLookup = {
+  findRecorderUser: async () => ({
+    authVersion: 7,
+    email: RECORDER_EMAIL.toLowerCase(),
+    emailVerified: true,
+    id: RECORDER_ID,
+    subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+  }),
+};
 
 function assertNoConfiguredSecrets(error: unknown): boolean {
   const rendered = `${String(error)}\n${inspect(error, { depth: 10 })}`;
@@ -262,8 +271,8 @@ test("fails closed with the exact missing runner variable names", () => {
       );
       assert.match(error.message, /DEMO_RUNNER_TOKEN/);
       assert.match(error.message, /DEMO_RUNNER_SIGNING_KEY/);
-      assert.match(error.message, /DEMO_RUNNER_SUBJECT/);
-      assert.match(error.message, /DEMO_RUNNER_TENANT/);
+      assert.match(error.message, /DEMO_RUNNER_SIGNING_KEY_ID/);
+      assert.match(error.message, /DEMO_RECORDER_ACCOUNT_EMAIL/);
       return true;
     }
   );
@@ -271,15 +280,82 @@ test("fails closed with the exact missing runner variable names", () => {
 
 test("uses the public runner URL fallback and a finite default timeout", () => {
   const configuration = readCaptureEnvironment({
+    DEMO_RECORDER_ACCOUNT_EMAIL: RECORDER_EMAIL,
     DEMO_RUNNER_SIGNING_KEY: SIGNING_KEY,
-    DEMO_RUNNER_SUBJECT: RECORDER_SUBJECT,
-    DEMO_RUNNER_TENANT: RECORDER_TENANT,
+    DEMO_RUNNER_SIGNING_KEY_ID: "recorder-current",
     DEMO_RUNNER_TOKEN: "gate",
     NEXT_PUBLIC_CLOUD_RUNNER_URL: "https://runner.example/",
   });
 
   assert.equal(configuration.runnerUrl, "https://runner.example");
+  assert.equal(configuration.accountEmail, RECORDER_EMAIL);
   assert.equal(configuration.timeoutMs, 15 * 60 * 1000);
+});
+
+test("recorder identity comes from the verified account authority", async () => {
+  const minted: Omit<RunnerClaims, "exp" | "kid">[] = [];
+
+  await assert.rejects(
+    () =>
+      captureRun(
+        { repository: "OpenCoven/demo-workspace", task: "Add a parser test." },
+        {
+          ...recorderLookup,
+          environment: recordingEnvironment(),
+          findRecorderUser: async () => ({
+            authVersion: 12,
+            email: RECORDER_EMAIL.toLowerCase(),
+            emailVerified: true,
+            id: RECORDER_ID,
+            subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+          }),
+          mintIdentity: (claims) => {
+            minted.push(claims);
+            return Promise.resolve(IDENTITY_TOKEN);
+          },
+          randomUUID: () => OPERATION_ID,
+          request: async () => Response.json({}, { status: 500 }),
+        }
+      ),
+    /runner request/i
+  );
+
+  assert.deepEqual(minted[0], {
+    authVersion: 12,
+    plan: "subscriber",
+    sub: RECORDER_ID,
+    tenant: "u_6ba7b8109dad11d180b400c04fd430c8",
+  });
+});
+
+test("recorder refuses an account that is not currently subscribed", async () => {
+  let requests = 0;
+
+  await assert.rejects(
+    () =>
+      captureRun(
+        { repository: "OpenCoven/demo-workspace", task: "Add a parser test." },
+        {
+          ...recorderLookup,
+          environment: recordingEnvironment(),
+          findRecorderUser: async () => ({
+            authVersion: 12,
+            email: RECORDER_EMAIL.toLowerCase(),
+            emailVerified: true,
+            id: RECORDER_ID,
+            subscribedUntil: null,
+          }),
+          mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
+          request: () => {
+            requests += 1;
+            return Promise.resolve(Response.json({}));
+          },
+        }
+      ),
+    /subscription/i
+  );
+
+  assert.equal(requests, 0);
 });
 
 test("mints a fresh validated subscriber identity for every request including cleanup", async () => {
@@ -332,10 +408,18 @@ test("mints a fresh validated subscriber identity for every request including cl
       task: "Add a parser test.",
     },
     {
+      ...recorderLookup,
       environment: {
         ...recordingEnvironment(),
         DEMO_RUNNER_IDENTITY_TOKEN: "legacy-static-token",
       },
+      findRecorderUser: async () => ({
+        authVersion: 7,
+        email: RECORDER_EMAIL.toLowerCase(),
+        emailVerified: true,
+        id: RECORDER_ID,
+        subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+      }),
       mintIdentity: (claims, signingKey) => {
         mintedClaims.push(claims);
         signingKeys.push(signingKey);
@@ -358,10 +442,10 @@ test("mints a fresh validated subscriber identity for every request including cl
   assert.deepEqual(
     mintedClaims,
     Array.from({ length: 5 }, () => ({
-      authVersion: 0,
+      authVersion: 7,
       plan: "subscriber",
-      sub: RECORDER_SUBJECT,
-      tenant: RECORDER_TENANT,
+      sub: RECORDER_ID,
+      tenant: "u_6ba7b8109dad11d180b400c04fd430c8",
     }))
   );
   assert.deepEqual(
@@ -393,6 +477,7 @@ test("an initial runner error cannot expose configured tokens or credentials", a
           task: "Add a parser test.",
         },
         {
+          ...recorderLookup,
           environment: recordingEnvironment(),
           mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
@@ -460,6 +545,7 @@ async function captureAfterRecoverableStream(
       task: "Add a parser test.",
     },
     {
+      ...recorderLookup,
       environment: recordingEnvironment(),
       mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
       randomUUID: () => OPERATION_ID,
@@ -576,6 +662,7 @@ test("a fully framed malformed SSE event is a hard failure", async () => {
           task: "Add a parser test.",
         },
         {
+          ...recorderLookup,
           environment: recordingEnvironment(),
           mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
@@ -628,6 +715,7 @@ test("bounds consecutive SSE recovery attempts with exponential backoff", async 
           task: "Add a parser test.",
         },
         {
+          ...recorderLookup,
           environment: recordingEnvironment(),
           mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
@@ -691,6 +779,7 @@ async function captureTerminalStatus(status: "cancelled" | "failed") {
       task: "Add a parser test.",
     },
     {
+      ...recorderLookup,
       environment: recordingEnvironment({ DEMO_RUNNER_TOKEN: "gate" }),
       mintIdentity: () => Promise.resolve("identity"),
       randomUUID: () => OPERATION_ID,
@@ -817,6 +906,7 @@ test("reconnects with a cursor, deduplicates arrivals, and stops at terminal com
       task: "Add a parser test.",
     },
     {
+      ...recorderLookup,
       environment: recordingEnvironment({
         DEMO_RECORDING_CREDENTIAL: "tenant-harness-secret",
         DEMO_RUNNER_TOKEN: "gate",
@@ -925,6 +1015,7 @@ test("deletes the temporary agent after a capture failure", async () => {
           task: "Add a parser test.",
         },
         {
+          ...recorderLookup,
           environment: recordingEnvironment({ DEMO_RUNNER_TOKEN: "gate" }),
           mintIdentity: () => Promise.resolve("identity"),
           randomUUID: () => OPERATION_ID,
@@ -967,6 +1058,7 @@ test("retains a valid agent id for cleanup when the create envelope is malformed
           task: "Add a parser test.",
         },
         {
+          ...recorderLookup,
           environment: recordingEnvironment(),
           mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
@@ -1018,6 +1110,7 @@ test("a malformed create envelope still surfaces cleanup failure without secrets
           task: "Add a parser test.",
         },
         {
+          ...recorderLookup,
           environment: recordingEnvironment(),
           mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
@@ -1064,6 +1157,7 @@ function captureWithLostCreateResponse(options: {
       task: "Add a parser test.",
     },
     {
+      ...recorderLookup,
       environment: recordingEnvironment(),
       mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
       randomUUID: () => OPERATION_ID,
@@ -1235,6 +1329,7 @@ function captureWithTimedOutCreate(options: {
       task: "Add a parser test.",
     },
     {
+      ...recorderLookup,
       environment: recordingEnvironment({
         DEMO_RECORDING_TIMEOUT_MS: "1",
       }),
@@ -1404,6 +1499,7 @@ test("surfaces cleanup failure while preserving the primary failure context", as
           task: "Add a parser test.",
         },
         {
+          ...recorderLookup,
           environment: recordingEnvironment(),
           mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,

@@ -153,7 +153,10 @@ let warmed: string[] = [];
 let authorityDirectoryLookups = 0;
 let configureFailure: Error | null = null;
 
-function runner(authority: RunnerAuthorityResult = { kind: "allowed" }) {
+function runner(
+  authority: RunnerAuthorityResult = { kind: "allowed" },
+  useDefaultAuthority = false
+) {
   decommissioned = [];
   stopped = [];
   warmed = [];
@@ -185,6 +188,23 @@ function runner(authority: RunnerAuthorityResult = { kind: "allowed" }) {
       decommission: () => {
         decommissioned.push(agentId);
       },
+      enqueue: (_input: unknown, runId: string) => ({
+        created: false,
+        run: {
+          agentId: MINE,
+          apiVersion: "2026-08-01",
+          commandEvidence: [],
+          completedAt: "2026-08-20T12:00:05.000Z",
+          createdAt: "2026-08-20T12:00:00.000Z",
+          fileEvidence: [],
+          id: runId,
+          operationId: MINE,
+          output: "done",
+          startedAt: "2026-08-20T12:00:01.000Z",
+          status: "completed",
+          task: "Do the thing.",
+        },
+      }),
       getEventStream: () => ({ events: [], terminal: false }),
       // Returns a real run rather than null. With null the route 404s because
       // the run is missing, so the test would pass whether or not ownership is
@@ -234,7 +254,7 @@ function runner(authority: RunnerAuthorityResult = { kind: "allowed" }) {
     }) as unknown as CloudRunnerAgent;
 
   return createCloudRunner({
-    checkAuthority: () => authority,
+    ...(useDefaultAuthority ? {} : { checkAuthority: () => authority }),
     getDirectory: () => {
       authorityDirectoryLookups += 1;
       return directory;
@@ -259,6 +279,111 @@ async function call(path: string, method = "GET"): Promise<Response> {
     environment as never
   );
 }
+
+test("default authority dependency gates health, auth, create, and run while forged identity is denied", async () => {
+  const environment = {
+    ...(await environmentPromise),
+    APP_ORIGIN: "https://app.test",
+    RUNNER_SERVICE_TOKEN: "service-token",
+  };
+  const token = await identityToken();
+  const authorityRequests: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/api/internal/runner-authority") {
+      const body = JSON.parse(String(init?.body)) as { token?: string };
+      authorityRequests.push(body.token ?? "");
+      const authorized =
+        new Headers(init?.headers).get("x-service-token") === "service-token" &&
+        body.token === token;
+      return Promise.resolve(
+        Response.json(
+          authorized ? { allowed: true } : { error: "unauthorized" },
+          { status: authorized ? 200 : 401 }
+        )
+      );
+    }
+    return Promise.reject(new Error(`unexpected fetch: ${url}`));
+  }) as unknown as typeof fetch;
+
+  try {
+    assert.equal(
+      (
+        await runner(undefined, true).fetch(
+          new Request("https://runner.test/api/health"),
+          environment as never
+        )
+      ).status,
+      200
+    );
+
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-runner-token": TOKEN,
+    };
+    const authorized = runner(undefined, true);
+    assert.equal(
+      (
+        await authorized.fetch(
+          new Request("https://runner.test/api/agents", { headers }),
+          environment as never
+        )
+      ).status,
+      200
+    );
+    assert.equal(
+      (
+        await authorized.fetch(
+          new Request("https://runner.test/api/agents", {
+            body: JSON.stringify({
+              backend: "cloud",
+              instructions: "Do the thing.",
+              model: "auto",
+              name: "Created",
+              runtime: "copilot",
+            }),
+            headers,
+            method: "POST",
+          }),
+          environment as never
+        )
+      ).status,
+      201
+    );
+    assert.equal(
+      (
+        await authorized.fetch(
+          new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+            body: JSON.stringify({
+              operationId: "44444444-5555-4666-8777-888888888888",
+              task: "Do the thing.",
+            }),
+            headers,
+            method: "POST",
+          }),
+          environment as never
+        )
+      ).status,
+      202
+    );
+    assert.equal(authorityRequests.length, 3);
+
+    const forged = await authorized.fetch(
+      new Request("https://runner.test/api/agents", {
+        headers: {
+          ...headers,
+          authorization: "Bearer forged.runner.token",
+        },
+      }),
+      environment as never
+    );
+    assert.equal(forged.status, 401);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("source floods are refused before deployment-token verification", async () => {
   const environment = await environmentPromise;

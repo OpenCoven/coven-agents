@@ -18,10 +18,11 @@ import {
   startRunInputSchema,
 } from "@opencoven/agent-contracts";
 import type { RunnerKeyRing } from "@/lib/agents/key-ring";
-import { mintRunnerToken } from "@/lib/agents/runner-token";
+import { claimsForUser, mintRunnerToken } from "@/lib/agents/runner-token";
 import type { ArrivedEvent } from "@/lib/demo/offsets";
 import { DEMO_REPOSITORY } from "@/lib/demo/recordable";
 import { demoRecordingSecrets } from "@/lib/demo/recording-secrets";
+import { userTypeFor } from "@/lib/subscription";
 
 const DEFAULT_RECORDING_TIMEOUT_MS = 15 * 60 * 1000;
 const CLEANUP_TIMEOUT_MS = 10_000;
@@ -44,7 +45,7 @@ type FetchRunnerOptions = {
 };
 
 export type CaptureEnvironment = {
-  identityClaims: Omit<RunnerClaims, "exp" | "kid">;
+  accountEmail: string;
   runnerToken: string;
   runnerUrl: string;
   secrets: string[];
@@ -66,12 +67,24 @@ export type CapturedRun = {
 
 export type CaptureDependencies = {
   environment?: Environment;
+  findRecorderUser?: (email: string) => Promise<{
+    authVersion: number;
+    email: string;
+    emailVerified: boolean;
+    id: string;
+    subscribedUntil: Date | null;
+  } | null>;
   mintIdentity?: IdentityMinter;
   now?: () => number;
   randomUUID?: () => string;
   request?: FetchLike;
   sleep?: Sleep;
 };
+
+async function findRecorderUser(email: string) {
+  const { findVerifiedUserByEmail } = await import("@/lib/db/queries");
+  return findVerifiedUserByEmail(email);
+}
 
 type RunnerConnection = {
   identityToken: () => Promise<string>;
@@ -159,9 +172,8 @@ export function readCaptureEnvironment(
     environment.DEMO_RUNNER_URL ?? environment.NEXT_PUBLIC_CLOUD_RUNNER_URL;
   const runnerToken = environment.DEMO_RUNNER_TOKEN;
   const signingKey = environment.DEMO_RUNNER_SIGNING_KEY;
-  const signingKeyId = environment.DEMO_RUNNER_SIGNING_KEY_ID ?? "legacy";
-  const subject = environment.DEMO_RUNNER_SUBJECT;
-  const tenant = environment.DEMO_RUNNER_TENANT;
+  const signingKeyId = environment.DEMO_RUNNER_SIGNING_KEY_ID;
+  const accountEmail = environment.DEMO_RECORDER_ACCOUNT_EMAIL;
   const missing: string[] = [];
   if (!nonblank(runnerUrl)) {
     missing.push("DEMO_RUNNER_URL or NEXT_PUBLIC_CLOUD_RUNNER_URL");
@@ -172,21 +184,20 @@ export function readCaptureEnvironment(
   if (!nonblank(signingKey)) {
     missing.push("DEMO_RUNNER_SIGNING_KEY");
   }
-  if (!KEY_ID_PATTERN.test(signingKeyId)) {
+  if (!nonblank(signingKeyId)) {
+    missing.push("DEMO_RUNNER_SIGNING_KEY_ID");
+  } else if (!KEY_ID_PATTERN.test(signingKeyId)) {
     throw new Error("DEMO_RUNNER_SIGNING_KEY_ID must be a valid key id.");
   }
-  if (!nonblank(subject)) {
-    missing.push("DEMO_RUNNER_SUBJECT");
-  }
-  if (!nonblank(tenant)) {
-    missing.push("DEMO_RUNNER_TENANT");
+  if (!nonblank(accountEmail)) {
+    missing.push("DEMO_RECORDER_ACCOUNT_EMAIL");
   }
   if (
     !nonblank(runnerUrl) ||
     !nonblank(runnerToken) ||
     !nonblank(signingKey) ||
-    !nonblank(subject) ||
-    !nonblank(tenant)
+    !nonblank(signingKeyId) ||
+    !nonblank(accountEmail)
   ) {
     throw new Error(
       `Missing required environment variables: ${missing.join(", ")}.`
@@ -204,25 +215,13 @@ export function readCaptureEnvironment(
     );
   }
 
-  const claims = recorderClaimsSchema.safeParse({
-    authVersion: 0,
-    plan: "subscriber",
-    sub: subject,
-    tenant,
-  });
-  if (!claims.success) {
-    throw new Error(
-      "DEMO_RUNNER_SUBJECT and DEMO_RUNNER_TENANT must satisfy runner identity constraints."
-    );
-  }
-
   return {
-    identityClaims: claims.data,
+    accountEmail: accountEmail.trim(),
     runnerToken,
     runnerUrl: runnerUrl.trim().replace(/\/+$/, ""),
     secrets: demoRecordingSecrets(environment),
     signingKey,
-    signingKeyId,
+    signingKeyId: signingKeyId.trim(),
     timeoutMs,
   };
 }
@@ -777,6 +776,27 @@ export async function captureRun(
   const configuration = readCaptureEnvironment(
     dependencies.environment ?? process.env
   );
+  const recorderUser = await (
+    dependencies.findRecorderUser ?? findRecorderUser
+  )(configuration.accountEmail);
+  if (!recorderUser?.emailVerified) {
+    throw new Error(
+      "DEMO_RECORDER_ACCOUNT_EMAIL must identify exactly one verified account."
+    );
+  }
+  const recorderType = userTypeFor(recorderUser, new Date());
+  if (recorderType !== "subscriber") {
+    throw new Error(
+      "Demo recording requires an active subscription on the recorder account."
+    );
+  }
+  const identityClaims = recorderClaimsSchema.parse(
+    claimsForUser({
+      authVersion: recorderUser.authVersion,
+      id: recorderUser.id,
+      type: recorderType,
+    })
+  );
   const mintIdentity =
     dependencies.mintIdentity ??
     ((claims, providedSigner) => {
@@ -789,7 +809,7 @@ export async function captureRun(
     ? undefined
     : await currentSigner(configuration.signingKey, configuration.signingKeyId);
   const connection: RunnerConnection = {
-    identityToken: () => mintIdentity(configuration.identityClaims, signer),
+    identityToken: () => mintIdentity(identityClaims, signer),
     request: dependencies.request ?? globalThis.fetch,
     runnerToken: configuration.runnerToken,
     runnerUrl: configuration.runnerUrl,
