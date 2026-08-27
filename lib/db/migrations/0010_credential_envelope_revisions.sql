@@ -24,6 +24,8 @@ BEGIN
       NEW."ciphertext" IS DISTINCT FROM OLD."ciphertext"
       OR NEW."iv" IS DISTINCT FROM OLD."iv"
       OR NEW."wrappedKey" IS DISTINCT FROM OLD."wrappedKey"
+      OR NEW."kekVersion" IS DISTINCT FROM OLD."kekVersion"
+      OR NEW."aadVersion" IS DISTINCT FROM OLD."aadVersion"
     )
     AND NEW."envelopeRevision" IS NOT DISTINCT FROM OLD."envelopeRevision"
   THEN
@@ -39,7 +41,7 @@ DROP TRIGGER IF EXISTS "TenantCredential_envelope_revision_guard"
 ON "TenantCredential";
 --> statement-breakpoint
 CREATE TRIGGER "TenantCredential_envelope_revision_guard"
-BEFORE UPDATE OF "ciphertext", "iv", "wrappedKey"
+BEFORE UPDATE OF "ciphertext", "iv", "wrappedKey", "kekVersion", "aadVersion"
 ON "TenantCredential"
 FOR EACH ROW
 EXECUTE FUNCTION "tenant_credential_envelope_revision_guard"();

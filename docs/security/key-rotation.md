@@ -49,9 +49,11 @@ tokens may still be queued or in flight.
 ## Credential KEK rotation
 
 Credential rows carry the exact KEK version that wrapped their per-credential
-data key. The app encrypts new rows only with
-`CREDENTIAL_KEK_CURRENT_VERSION`; reads never try another version when a row
-names an unknown or unconfigured key.
+data key and an `aadVersion`. Version `0` is the explicit legacy format with
+no AES-GCM associated data; version `1` binds every new credential ciphertext
+to a canonical tenant+harness context. The app encrypts new rows only with
+`CREDENTIAL_KEK_CURRENT_VERSION`; reads use the row's exact KEK and AAD
+versions and never infer or try another format when a row is unknown.
 
 Configure the fixed ring through the secret manager:
 
@@ -72,27 +74,40 @@ key material is never logged.
 
 ### Rotation procedure
 
-1. Apply the credential revision migration before changing application
-   traffic. It adds a non-null `envelopeRevision` default and a database
-   trigger that rejects any ciphertext, IV, or wrapped-key update unless the
-   revision changes. Roll out the new writers, then drain every old writer
-   before allowing credential updates: old writers may still insert rows (the
-   database labels omitted revisions with a fresh default and those rows remain
-   v1), but an old writer's update fails closed with the revision-trigger
-   error instead of silently writing a v1 envelope under a newer label.
-2. Deploy the application with
+1. Apply the credential revision/AAD migration before changing application
+   traffic. It adds non-null `envelopeRevision` and `aadVersion` defaults and
+   a database trigger that rejects any ciphertext, IV, wrapped-key, KEK-version,
+   or AAD-version update unless the revision changes. Roll out the new writers, then
+   drain every old writer before allowing credential updates: old writers may
+   still insert rows (the database labels omitted revisions with fresh defaults
+   and those rows remain explicit `kekVersion=v1`, `aadVersion=0`), but an old
+   writer's update fails closed with the revision-trigger error instead of
+   silently writing an unbound envelope under a newer label.
+2. Deploy the new readers and writers, and keep old readers and writers drained
+   before binding legacy rows. Old code cannot read AAD-bound ciphertext.
+   Convert legacy rows in resumable batches:
+
+   ```bash
+   pnpm credentials:rewrap bind-aad --batch 100
+   ```
+
+   The command decrypts one `aadVersion=0` row in memory, re-encrypts it with
+   the current KEK and canonical tenant+harness AAD, then updates it only when
+   its `envelopeRevision` still matches. It prints only opaque row IDs on
+   failure. Repeat until it exits `0`; exit `2` means resume after a CAS race.
+3. Deploy the application with
    `CREDENTIAL_KEK_CURRENT_VERSION=v1` and the existing secret in
    `CREDENTIAL_KEK_V1`. Keep `CREDENTIAL_KEK` only as the equal legacy alias
    while old rows exist.
-3. Add the new secret as `CREDENTIAL_KEK_V2`, switch
+4. Add the new secret as `CREDENTIAL_KEK_V2`, switch
    `CREDENTIAL_KEK_CURRENT_VERSION=v2`, retain `CREDENTIAL_KEK_V1`, and deploy.
-4. Rewrap resumably. Repeat after interruptions or concurrent updates:
+5. Rewrap resumably. Repeat after interruptions or concurrent updates:
 
    ```bash
    pnpm credentials:rewrap --from v1 --to v2 --batch 100
    ```
 
-5. Check the target without writing:
+6. Check the target without writing:
 
    ```bash
    pnpm credentials:rewrap --from v1 --to v2 --batch 100 --dry-run
@@ -102,7 +117,7 @@ key material is never logged.
    claiming completion of the source migration. It returns `0` when target
    rows are clean and `1` for configuration or corruption.
 
-6. Wait for the bounded device-response retention window to drain, or
+7. Wait for the bounded device-response retention window to drain, or
    rewrap those idempotency envelopes through an equivalent reviewed operator
    procedure. The retirement gate reads unexpired completed
    `IdempotencyRecord` envelopes without exposing their bodies: versioned
@@ -110,23 +125,23 @@ key material is never logged.
    v1, and `plain_json` responses are ignored. A malformed encrypted response
    fails the gate. The normal rewrap command intentionally does not rewrite
    these short-lived rows.
-7. Run the retirement gate in production:
+8. Run the retirement gate in production:
 
    ```bash
    pnpm credentials:rewrap verify --version v1
    ```
 
-   It succeeds only when zero `v1` rows remain: zero `v1` credential rows,
-   zero unexpired encrypted v1 idempotency envelopes, and every
-   current-version credential and idempotency wrapped data key pass read-only
-   unwrapping. It prints counts and opaque row IDs for credential or
+   It succeeds only when zero legacy rows remain: zero `v1` rows (credential
+   rows), zero `aadVersion=0` credential rows, zero unexpired encrypted v1
+   idempotency envelopes, and every current-version credential and idempotency
+   wrapped data key pass read-only unwrapping. It prints counts and opaque row IDs for credential or
    idempotency records only; it never prints tenants, harnesses, credentials,
    response bodies,
    ciphertext, or keys. Exit `0` is a complete gate. Exit `2` means resume
    because v1 rows remain or a compare-and-swap was skipped. Exit `1` means
    configuration or corruption failure. A normal rewrap never claims
    completion when it exits `2`; rerun it until the verify command exits `0`.
-8. After the gate passes, remove the `CREDENTIAL_KEK` compatibility alias.
+9. After the gate passes, remove the `CREDENTIAL_KEK` compatibility alias.
    Retire `CREDENTIAL_KEK_V1` only after the same zero-row and current-key
    verification conditions hold in production. Removing a key before the gate
    makes affected credentials unreadable.
@@ -144,3 +159,9 @@ pnpm credentials:rewrap --from v2 --to v1 --batch 100
 
 Do not remove either key until the rollback is complete and the appropriate
 read-only verification gate passes.
+
+If rollback is required after AAD binding, keep the new readers deployed: they
+read both explicit AAD versions, while old code cannot read version `1`.
+Therefore drain old writers/readers before binding and do not roll back to an
+old application binary after any `aadVersion=1` row exists. A database restore
+or forward re-encryption is required to return to a wholly legacy format.

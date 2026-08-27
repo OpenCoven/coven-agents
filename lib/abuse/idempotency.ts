@@ -115,6 +115,7 @@ export async function runIdempotentOperation(options: {
     const body = await (
       options.responseStorage ?? plaintextIdempotencyResponseStorage
     ).replay(claimResult.response.envelope, {
+      keyHash,
       operation: options.operation,
       ownerId: options.ownerId,
     });
@@ -153,6 +154,7 @@ export async function runIdempotentOperation(options: {
     const envelope = await (
       options.responseStorage ?? plaintextIdempotencyResponseStorage
     ).store(response.body, {
+      keyHash,
       operation: options.operation,
       ownerId: options.ownerId,
     });

@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 import { and, asc, eq, gt } from "drizzle-orm";
 import { parseStoredIdempotencyResponseEnvelope } from "../lib/abuse/idempotency-response";
 import {
+  type CredentialEnvelopeV2,
+  decryptCredential,
+  encryptCredential,
   rewrapWrappedKey,
   unwrapDataKey,
   validateKekVersion,
@@ -17,9 +20,14 @@ export const DEFAULT_BATCH_SIZE = 100;
 export const MAX_BATCH_SIZE = 1000;
 
 export type RewrapRow = {
+  aadVersion?: number;
+  ciphertext?: string;
   envelopeRevision?: string;
+  harnessId?: string;
   id: string;
+  iv?: string;
   kekVersion: string;
+  tenant?: string;
   wrappedKey: string;
 };
 
@@ -30,6 +38,10 @@ export type RewrapIdempotencyRow = {
 };
 
 export type RewrapStore = {
+  bindAndCompareAndSwap?: (
+    row: RewrapRow,
+    sealed: CredentialEnvelopeV2
+  ) => Promise<boolean>;
   compareAndSwap: (
     row: RewrapRow,
     expectedWrappedKey: string,
@@ -38,6 +50,11 @@ export type RewrapStore = {
   ) => Promise<boolean>;
   listByVersion: (
     version: string,
+    limit: number,
+    afterId?: string
+  ) => Promise<RewrapRow[]>;
+  listByAadVersion?: (
+    version: number,
     limit: number,
     afterId?: string
   ) => Promise<RewrapRow[]>;
@@ -57,6 +74,7 @@ export type RewrapArguments = {
 };
 
 export type RewrapResult = {
+  aadRemaining: number;
   failures: number;
   failureIds: string[];
   remaining: number;
@@ -67,6 +85,10 @@ export type RewrapResult = {
 };
 
 export type RewrapStatus = "complete" | "failed" | "resume";
+
+export type BindAadArguments = {
+  batch: number;
+};
 
 export type RewrapCliDependencies = {
   loadRing: () => Promise<CredentialKekRing>;
@@ -97,6 +119,7 @@ export function parseRewrapArguments(argv: string[]): RewrapArguments {
       dryRun = true;
       continue;
     }
+
     if (
       (argument === "--from" ||
         argument === "--to" ||
@@ -133,8 +156,23 @@ export function parseRewrapArguments(argv: string[]): RewrapArguments {
   };
 }
 
+export function parseBindAadArguments(argv: string[]): BindAadArguments {
+  let batch: string | undefined;
+  for (let index = 1; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--batch" && argv[index + 1]) {
+      batch = argv[index + 1];
+      index += 1;
+      continue;
+    }
+    throw new Error("Usage: pnpm credentials:rewrap bind-aad [--batch 100]");
+  }
+  return { batch: parseBatch(batch) };
+}
+
 function result(): RewrapResult {
   return {
+    aadRemaining: 0,
     failureIds: [],
     failures: 0,
     remaining: 0,
@@ -192,19 +230,154 @@ export function rewrapStatus(summary: RewrapResult): RewrapStatus {
   if (summary.failures > 0) {
     return "failed";
   }
-  if (summary.remaining > 0 || summary.skipped > 0) {
+  if (
+    summary.aadRemaining > 0 ||
+    summary.remaining > 0 ||
+    summary.skipped > 0
+  ) {
     return "resume";
   }
   return "complete";
 }
 
 export function rewrapExitCode(
-  summary: Pick<RewrapResult, "failures" | "remaining" | "skipped">
+  summary: Pick<
+    RewrapResult,
+    "aadRemaining" | "failures" | "remaining" | "skipped"
+  >
 ): 0 | 1 | 2 {
   if (summary.failures > 0) {
     return 1;
   }
-  return summary.remaining > 0 || summary.skipped > 0 ? 2 : 0;
+  return summary.aadRemaining > 0 ||
+    summary.remaining > 0 ||
+    summary.skipped > 0
+    ? 2
+    : 0;
+}
+
+async function countRemainingAadVersion(
+  store: RewrapStore,
+  version: number,
+  batch: number
+): Promise<number> {
+  if (!store.listByAadVersion) {
+    return 0;
+  }
+  let count = 0;
+  let afterId: string | undefined;
+  while (true) {
+    // biome-ignore lint/performance/noAwaitInLoops: cursor pagination depends on the prior page
+    const rows = await store.listByAadVersion(version, batch, afterId);
+    if (rows.length === 0) {
+      return count;
+    }
+    count += rows.length;
+    const nextAfterId = rows.at(-1)?.id;
+    if (rows.length < batch || !nextAfterId || nextAfterId === afterId) {
+      return count;
+    }
+    afterId = nextAfterId;
+  }
+}
+
+/**
+ * Converts legacy credential ciphertexts to the bound AAD format. Plaintext
+ * exists only in this function's stack for the duration of one row and is
+ * never included in operator output.
+ */
+export async function bindLegacyAadRows(
+  input: {
+    batch: number;
+    currentKek: CryptoKey;
+    currentVersion: string;
+    keyFor?: (version: string) => CryptoKey;
+  },
+  store: RewrapStore,
+  output: (line: string) => void = () => undefined
+): Promise<RewrapResult> {
+  if (!store.listByAadVersion || !store.bindAndCompareAndSwap) {
+    throw new Error("AAD binding requires a compatible credential store.");
+  }
+  const currentVersion = validateKekVersion(
+    input.currentVersion,
+    "--current-version"
+  );
+  parseBatch(String(input.batch));
+  const summary = result();
+
+  while (true) {
+    // Each page is selected before its CAS updates so an interruption leaves
+    // complete rows and a concurrent writer wins without being overwritten.
+    // biome-ignore lint/performance/noAwaitInLoops: deterministic cursor pagination
+    const rows = await store.listByAadVersion(0, input.batch);
+    if (rows.length === 0) {
+      break;
+    }
+
+    let changedThisBatch = 0;
+    for (const row of rows) {
+      if (
+        row.aadVersion !== 0 ||
+        row.ciphertext === undefined ||
+        row.harnessId === undefined ||
+        row.iv === undefined ||
+        row.envelopeRevision === undefined ||
+        row.tenant === undefined
+      ) {
+        reportFailure(output, summary, row.id);
+        continue;
+      }
+
+      try {
+        const sourceKek =
+          input.keyFor?.(row.kekVersion) ??
+          (row.kekVersion === currentVersion ? input.currentKek : undefined);
+        if (!sourceKek) {
+          throw new Error("source KEK is not configured");
+        }
+        // biome-ignore lint/performance/noAwaitInLoops: deterministic per-row crypto and CAS
+        const plaintext = await decryptCredential(
+          {
+            aadVersion: 0,
+            ciphertext: row.ciphertext,
+            iv: row.iv,
+            kekVersion: row.kekVersion,
+            wrappedKey: row.wrappedKey,
+          },
+          sourceKek
+        );
+        const sealed = await encryptCredential(
+          plaintext,
+          input.currentKek,
+          currentVersion,
+          {
+            harnessId: row.harnessId,
+            kind: "credential",
+            tenant: row.tenant,
+          }
+        );
+        const updated = await store.bindAndCompareAndSwap(row, sealed);
+        if (updated) {
+          summary.rewrapped += 1;
+          changedThisBatch += 1;
+        } else {
+          summary.skipped += 1;
+        }
+      } catch {
+        reportFailure(output, summary, row.id);
+      }
+    }
+
+    if (summary.failures > 0 || changedThisBatch === 0) {
+      break;
+    }
+  }
+
+  summary.remaining = await countRemainingAadVersion(store, 0, input.batch);
+  summary.aadRemaining = summary.remaining;
+  summary.status = rewrapStatus(summary);
+  return summary;
 }
 
 /**
@@ -451,6 +624,34 @@ async function databaseStore(): Promise<RewrapStore> {
   ]);
 
   return {
+    async bindAndCompareAndSwap(row, sealed) {
+      if (row.envelopeRevision === undefined) {
+        return false;
+      }
+      const expectedRevision = row.envelopeRevision;
+      const updated = await db.transaction(async (transaction) =>
+        transaction
+          .update(tenantCredential)
+          .set({
+            aadVersion: sealed.aadVersion,
+            ciphertext: sealed.ciphertext,
+            envelopeRevision: crypto.randomUUID(),
+            iv: sealed.iv,
+            kekVersion: sealed.kekVersion,
+            updatedAt: new Date(),
+            wrappedKey: sealed.wrappedKey,
+          })
+          .where(
+            and(
+              eq(tenantCredential.id, row.id),
+              eq(tenantCredential.aadVersion, 0),
+              eq(tenantCredential.envelopeRevision, expectedRevision)
+            )
+          )
+          .returning({ id: tenantCredential.id })
+      );
+      return updated.length === 1;
+    },
     async compareAndSwap(row, expectedWrappedKey, wrappedKey, toVersion) {
       const updated = await db.transaction(async (transaction) =>
         transaction
@@ -477,9 +678,14 @@ async function databaseStore(): Promise<RewrapStore> {
     async listAll(limit, afterId) {
       const rows = await db
         .select({
+          aadVersion: tenantCredential.aadVersion,
+          ciphertext: tenantCredential.ciphertext,
           envelopeRevision: tenantCredential.envelopeRevision,
+          harnessId: tenantCredential.harnessId,
           id: tenantCredential.id,
+          iv: tenantCredential.iv,
           kekVersion: tenantCredential.kekVersion,
+          tenant: tenantCredential.tenant,
           wrappedKey: tenantCredential.wrappedKey,
         })
         .from(tenantCredential)
@@ -488,12 +694,41 @@ async function databaseStore(): Promise<RewrapStore> {
         .limit(limit);
       return rows;
     },
+    async listByAadVersion(version, limit, afterId) {
+      const rows = await db
+        .select({
+          aadVersion: tenantCredential.aadVersion,
+          ciphertext: tenantCredential.ciphertext,
+          envelopeRevision: tenantCredential.envelopeRevision,
+          harnessId: tenantCredential.harnessId,
+          id: tenantCredential.id,
+          iv: tenantCredential.iv,
+          kekVersion: tenantCredential.kekVersion,
+          tenant: tenantCredential.tenant,
+          wrappedKey: tenantCredential.wrappedKey,
+        })
+        .from(tenantCredential)
+        .where(
+          and(
+            eq(tenantCredential.aadVersion, version),
+            afterId ? gt(tenantCredential.id, afterId) : undefined
+          )
+        )
+        .orderBy(asc(tenantCredential.id))
+        .limit(limit);
+      return rows;
+    },
     async listByVersion(version, limit, afterId) {
       const rows = await db
         .select({
+          aadVersion: tenantCredential.aadVersion,
+          ciphertext: tenantCredential.ciphertext,
           envelopeRevision: tenantCredential.envelopeRevision,
+          harnessId: tenantCredential.harnessId,
           id: tenantCredential.id,
+          iv: tenantCredential.iv,
           kekVersion: tenantCredential.kekVersion,
+          tenant: tenantCredential.tenant,
           wrappedKey: tenantCredential.wrappedKey,
         })
         .from(tenantCredential)
@@ -549,6 +784,22 @@ export async function run(
   const store = await dependencies.loadStore();
   const output = dependencies.stdout;
 
+  if (argv[0] === "bind-aad") {
+    const args = parseBindAadArguments(argv);
+    const summary = await bindLegacyAadRows(
+      {
+        batch: args.batch,
+        currentKek: ring.current,
+        currentVersion: ring.currentVersion,
+        keyFor: (version) => ring.keyFor(version),
+      },
+      store,
+      output
+    );
+    printSummary(output, "bind-aad", summary);
+    return rewrapExitCode(summary);
+  }
+
   if (argv[0] === "verify") {
     let version: string | undefined;
     let batch: string | undefined;
@@ -582,6 +833,7 @@ export async function run(
       output
     );
     summary.remaining = await countRemaining(store, oldVersion, batchSize);
+    summary.aadRemaining = await countRemainingAadVersion(store, 0, batchSize);
     await verifyIdempotencyRows(
       {
         batch: batchSize,

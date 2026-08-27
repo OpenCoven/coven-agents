@@ -204,9 +204,41 @@ function namedFindings(line: string): string[] {
     if (
       credentialKekName !== "CREDENTIAL_KEK_CURRENT_VERSION" &&
       credentialKekName !== assignment?.[1] &&
-      looksLikeRealSecret(credentialKek[3])
+      looksLikeCredentialKek(credentialKek[3])
     ) {
       found.push(`value assigned to ${credentialKekName}`);
+    }
+
+    function looksLikeCredentialKek(value: string): boolean {
+      const normalized = value.trim().replace(/^(['"`])([\s\S]*)\1$/u, "$2");
+      if (!normalized || PLACEHOLDER.test(normalized)) {
+        return false;
+      }
+
+      const decoded = decodeBase64(normalized);
+      if (decoded?.length === 32) {
+        return true;
+      }
+
+      return normalized.length >= 32;
+    }
+
+    function decodeBase64(value: string): Uint8Array | null {
+      if (
+        !/^[A-Za-z0-9+/_-]+={0,2}$/u.test(value) ||
+        /[=]{1,2}(?!$)/u.test(value)
+      ) {
+        return null;
+      }
+      const unpadded = value.replace(/[=]+$/u, "");
+      if (unpadded.length % 4 === 1) {
+        return null;
+      }
+      const standard = unpadded.replace(/-/gu, "+").replace(/_/gu, "/");
+      const padded = standard + "=".repeat((4 - (standard.length % 4)) % 4);
+      const bytes = Buffer.from(padded, "base64");
+      const canonical = bytes.toString("base64").replace(/[=]+$/u, "");
+      return canonical === standard ? new Uint8Array(bytes) : null;
     }
   }
 

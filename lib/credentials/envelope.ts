@@ -24,8 +24,11 @@ const MAX_PLAINTEXT_BYTES = 1_000_000;
 export const KEK_VERSION_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 const BASE64_URL_PATTERN = /^[A-Za-z0-9_-]+$/;
 const BASE64_KEY_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/;
+export const LEGACY_AAD_VERSION = 0;
+export const BOUND_AAD_VERSION = 1;
 
 export type CredentialEnvelopeV2 = {
+  aadVersion: number;
   ciphertext: string;
   iv: string;
   kekVersion: string;
@@ -33,6 +36,19 @@ export type CredentialEnvelopeV2 = {
 };
 
 export type SealedCredential = CredentialEnvelopeV2;
+
+export type EnvelopeAadContext =
+  | {
+      harnessId: string;
+      kind: "credential";
+      tenant: string;
+    }
+  | {
+      keyHash?: string;
+      kind: "idempotency";
+      operation: string;
+      ownerId: string;
+    };
 
 export function validateKekVersion(
   value: unknown,
@@ -65,6 +81,59 @@ function decodeEnvelopeField(
   }
 }
 
+function validateAadVersion(value: unknown): number {
+  if (value !== LEGACY_AAD_VERSION && value !== BOUND_AAD_VERSION) {
+    throw new Error("aadVersion is invalid.");
+  }
+  return value;
+}
+
+function encodeLengthPrefixedAad(
+  context: EnvelopeAadContext
+): Uint8Array<ArrayBuffer> {
+  const fields =
+    context.kind === "credential"
+      ? ["credential", context.tenant, context.harnessId]
+      : [
+          "idempotency",
+          context.ownerId,
+          context.operation,
+          context.keyHash ?? "",
+        ];
+  const encoder = new TextEncoder();
+  const encodedFields = fields.map((field) => encoder.encode(field));
+  const prefix = encoder.encode("opencoven-envelope-aad-v1");
+  const totalLength =
+    prefix.length +
+    encodedFields.reduce((total, field) => total + 4 + field.length, 0);
+  const result = new Uint8Array(totalLength) as Uint8Array<ArrayBuffer>;
+  let offset = 0;
+  result.set(prefix, offset);
+  offset += prefix.length;
+  const view = new DataView(result.buffer);
+  for (const field of encodedFields) {
+    view.setUint32(offset, field.length);
+    offset += 4;
+    result.set(field, offset);
+    offset += field.length;
+  }
+  return result;
+}
+
+function additionalData(
+  aadVersion: number,
+  context: EnvelopeAadContext | undefined
+): Uint8Array<ArrayBuffer> | undefined {
+  validateAadVersion(aadVersion);
+  if (aadVersion === LEGACY_AAD_VERSION) {
+    return undefined;
+  }
+  if (!context) {
+    throw new Error("AAD context is required for this envelope.");
+  }
+  return encodeLengthPrefixedAad(context);
+}
+
 export function decodeKekMaterial(value: unknown): Uint8Array<ArrayBuffer> {
   if (
     typeof value !== "string" ||
@@ -88,10 +157,12 @@ export function decodeKekMaterial(value: unknown): Uint8Array<ArrayBuffer> {
 }
 
 function validateEnvelope(sealed: CredentialEnvelopeV2): {
+  aadVersion: number;
   ciphertext: Uint8Array<ArrayBuffer>;
   iv: Uint8Array<ArrayBuffer>;
   wrappedKey: Uint8Array<ArrayBuffer>;
 } {
+  const aadVersion = validateAadVersion(sealed?.aadVersion);
   validateKekVersion(sealed?.kekVersion);
   const ciphertext = decodeEnvelopeField(sealed?.ciphertext, "ciphertext");
   const iv = decodeEnvelopeField(sealed?.iv, "iv");
@@ -107,7 +178,7 @@ function validateEnvelope(sealed: CredentialEnvelopeV2): {
     throw new Error("wrappedKey is invalid.");
   }
 
-  return { ciphertext, iv, wrappedKey };
+  return { aadVersion, ciphertext, iv, wrappedKey };
 }
 
 /** Generates a fresh key for tests and operator-side key generation. */
@@ -145,7 +216,8 @@ export function importKek(raw: string): Promise<CryptoKey> {
 export async function encryptCredential(
   plaintext: string,
   kek: CryptoKey,
-  kekVersion: string
+  kekVersion: string,
+  context?: EnvelopeAadContext
 ): Promise<CredentialEnvelopeV2> {
   validateKekVersion(kekVersion);
   if (typeof plaintext !== "string") {
@@ -166,8 +238,13 @@ export async function encryptCredential(
   );
 
   const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH_BYTES));
+  const aadVersion = context ? BOUND_AAD_VERSION : LEGACY_AAD_VERSION;
   const ciphertext = await crypto.subtle.encrypt(
-    { iv, name: DEK_ALGORITHM },
+    {
+      additionalData: additionalData(aadVersion, context),
+      iv,
+      name: DEK_ALGORITHM,
+    },
     dek,
     plaintextBytes
   );
@@ -179,6 +256,7 @@ export async function encryptCredential(
   );
 
   return {
+    aadVersion,
     ciphertext: base64UrlEncode(new Uint8Array(ciphertext)),
     iv: base64UrlEncode(iv),
     kekVersion,
@@ -244,12 +322,17 @@ export async function rewrapWrappedKey(
  */
 export async function decryptCredential(
   sealed: CredentialEnvelopeV2,
-  kek: CryptoKey
+  kek: CryptoKey,
+  context?: EnvelopeAadContext
 ): Promise<string> {
-  const { ciphertext, iv } = validateEnvelope(sealed);
+  const { aadVersion, ciphertext, iv } = validateEnvelope(sealed);
   const dek = await unwrapDataKey(sealed.wrappedKey, kek);
   const plaintext = await crypto.subtle.decrypt(
-    { iv, name: DEK_ALGORITHM },
+    {
+      additionalData: additionalData(aadVersion, context),
+      iv,
+      name: DEK_ALGORITHM,
+    },
     dek,
     ciphertext
   );

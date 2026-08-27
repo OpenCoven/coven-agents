@@ -8,7 +8,17 @@ async function main() {
     keySecret: process.env.ABUSE_KEY_SECRET,
     redisUrl: process.env.REDIS_URL,
   });
-  await credentialKekRingFromEnvironment();
+  if (hasCredentialKekConfiguration(process.env)) {
+    await credentialKekRingFromEnvironment();
+  }
+}
+
+function hasCredentialKekConfiguration(
+  environment: NodeJS.ProcessEnv
+): boolean {
+  return Object.keys(environment).some(
+    (name) => name === "CREDENTIAL_KEK" || name.startsWith("CREDENTIAL_KEK_")
+  );
 }
 
 main().catch((error: unknown) => {

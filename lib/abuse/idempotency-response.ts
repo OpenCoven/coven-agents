@@ -1,6 +1,7 @@
 import {
   decryptCredential,
   encryptCredential,
+  LEGACY_AAD_VERSION,
   type SealedCredential,
   validateKekVersion,
 } from "../credentials/envelope";
@@ -12,6 +13,11 @@ const LEGACY_ENCRYPTED_PAYLOAD_KEYS = [
   "wrappedKey",
 ] as const;
 const VERSIONED_ENCRYPTED_PAYLOAD_KEYS = [
+  ...LEGACY_ENCRYPTED_PAYLOAD_KEYS,
+  "aadVersion",
+  "kekVersion",
+] as const;
+const LEGACY_VERSIONED_ENCRYPTED_PAYLOAD_KEYS = [
   ...LEGACY_ENCRYPTED_PAYLOAD_KEYS,
   "kekVersion",
 ] as const;
@@ -35,6 +41,7 @@ export type StoredIdempotencyResponseEnvelope =
     };
 
 export type IdempotencyResponseContext = {
+  keyHash?: string;
   operation: string;
   ownerId: string;
 };
@@ -107,10 +114,21 @@ export function encryptedIdempotencyResponseStorage(
         throw new Error("Invalid encrypted response envelope.");
       }
 
-      const plaintext = await decryptCredential(
-        parsedEnvelope.payload,
-        await kek(parsedEnvelope.payload.kekVersion)
-      );
+      const key = await kek(parsedEnvelope.payload.kekVersion);
+      let plaintext: string;
+      try {
+        plaintext = await decryptCredential(parsedEnvelope.payload, key, {
+          keyHash: context.keyHash,
+          kind: "idempotency",
+          operation: context.operation,
+          ownerId: context.ownerId,
+        });
+      } catch (error) {
+        throw new Error(
+          "Encrypted response does not belong to this idempotency claim.",
+          { cause: error }
+        );
+      }
       const stored = parseEncryptedResponse(plaintext);
       if (
         stored.ownerId !== context.ownerId ||
@@ -133,7 +151,12 @@ export function encryptedIdempotencyResponseStorage(
       const key = await kek(version);
       return {
         kind: "encrypted_json",
-        payload: await encryptCredential(plaintext, key, version),
+        payload: await encryptCredential(plaintext, key, version, {
+          keyHash: context.keyHash,
+          kind: "idempotency",
+          operation: context.operation,
+          ownerId: context.ownerId,
+        }),
       };
     },
   };
@@ -149,9 +172,20 @@ function parseEncryptedPayload(value: unknown): SealedCredential {
       throw new Error("Invalid legacy encrypted response payload.");
     }
     return {
+      aadVersion: LEGACY_AAD_VERSION,
       ciphertext: boundedString(value.ciphertext, "ciphertext"),
       iv: boundedString(value.iv, "iv"),
       kekVersion: "v1",
+      wrappedKey: boundedString(value.wrappedKey, "wrappedKey"),
+    };
+  }
+
+  if (hasOnlyKeys(value, LEGACY_VERSIONED_ENCRYPTED_PAYLOAD_KEYS)) {
+    return {
+      aadVersion: LEGACY_AAD_VERSION,
+      ciphertext: boundedString(value.ciphertext, "ciphertext"),
+      iv: boundedString(value.iv, "iv"),
+      kekVersion: validateKekVersion(value.kekVersion),
       wrappedKey: boundedString(value.wrappedKey, "wrappedKey"),
     };
   }
@@ -160,11 +194,19 @@ function parseEncryptedPayload(value: unknown): SealedCredential {
     throw new Error("Invalid encrypted response payload.");
   }
   return {
+    aadVersion: parseAadVersion(value.aadVersion),
     ciphertext: boundedString(value.ciphertext, "ciphertext"),
     iv: boundedString(value.iv, "iv"),
     kekVersion: validateKekVersion(value.kekVersion),
     wrappedKey: boundedString(value.wrappedKey, "wrappedKey"),
   };
+}
+
+function parseAadVersion(value: unknown): number {
+  if (value !== 0 && value !== 1) {
+    throw new Error("Invalid encrypted response payload.");
+  }
+  return value;
 }
 
 function parseEncryptedResponse(value: string): {

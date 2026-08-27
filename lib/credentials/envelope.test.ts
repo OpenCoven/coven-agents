@@ -13,11 +13,54 @@ import {
 test("a credential round-trips through encrypt and decrypt", async () => {
   const kek = await generateKek();
 
-  const sealed = await encryptCredential("ghp_secret_value", kek, "v1");
-  const opened = await decryptCredential(sealed, kek);
+  const context = {
+    harnessId: "copilot",
+    kind: "credential" as const,
+    tenant: "acme",
+  };
+  const sealed = await encryptCredential(
+    "ghp_secret_value",
+    kek,
+    "v1",
+    context
+  );
+  const opened = await decryptCredential(sealed, kek, context);
 
   assert.equal(opened, "ghp_secret_value");
   assert.equal(sealed.kekVersion, "v1");
+  assert.equal(sealed.aadVersion, 1);
+});
+
+test("credential AAD prevents copying an envelope across tenant or harness", async () => {
+  const kek = await generateKek();
+  const sealed = await encryptCredential("credential", kek, "v1", {
+    harnessId: "copilot",
+    kind: "credential",
+    tenant: "acme",
+  });
+
+  await assert.rejects(() =>
+    decryptCredential(sealed, kek, {
+      harnessId: "copilot",
+      kind: "credential",
+      tenant: "victim",
+    })
+  );
+  await assert.rejects(() =>
+    decryptCredential(sealed, kek, {
+      harnessId: "codex",
+      kind: "credential",
+      tenant: "acme",
+    })
+  );
+});
+
+test("legacy envelopes explicitly use version zero without AAD", async () => {
+  const kek = await generateKek();
+  const sealed = await encryptCredential("legacy", kek, "v1");
+
+  assert.equal(sealed.aadVersion, 0);
+  assert.equal(await decryptCredential(sealed, kek), "legacy");
 });
 
 test("the plaintext never appears in the stored envelope", async () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { generateKek } from "../credentials/envelope";
+import { encryptCredential, generateKek } from "../credentials/envelope";
 import {
   encryptedIdempotencyResponseStorage,
   parseStoredIdempotencyResponseEnvelope,
@@ -62,6 +62,30 @@ test("encrypted responses cannot be replayed for another owner", async () => {
   );
 });
 
+test("encrypted responses bind the idempotency key and route with AAD", async () => {
+  const kek = await generateKek();
+  const storage = encryptedIdempotencyResponseStorage(
+    () => Promise.resolve(kek),
+    () => Promise.resolve("v2")
+  );
+  const stored = await storage.store(
+    { deviceCode: "device-code-sensitive" },
+    {
+      ...CONTEXT,
+      keyHash: "key-hash-a",
+    }
+  );
+
+  assert.equal(stored.kind, "encrypted_json");
+  if (stored.kind !== "encrypted_json") {
+    throw new Error("expected encrypted envelope");
+  }
+  assert.equal(stored.payload.aadVersion, 1);
+  await assert.rejects(
+    storage.replay(stored, { ...CONTEXT, keyHash: "key-hash-b" })
+  );
+});
+
 test("encrypted responses replay with the envelope's KEK after rotation", async () => {
   const oldKek = await generateKek();
   const currentKek = await generateKek();
@@ -88,21 +112,23 @@ test("legacy encrypted envelopes are explicitly migrated to v1 at the boundary",
   const currentKek = await generateKek();
   const keyFor = (version: string) =>
     Promise.resolve(version === "v1" ? oldKek : currentKek);
-  const v1Storage = encryptedIdempotencyResponseStorage(keyFor, () =>
-    Promise.resolve("v1")
+  const versioned = await encryptCredential(
+    JSON.stringify({
+      body: { status: "pending" },
+      operation: CONTEXT.operation,
+      ownerId: CONTEXT.ownerId,
+      version: 1,
+    }),
+    oldKek,
+    "v1"
   );
-  const versioned = await v1Storage.store({ status: "pending" }, CONTEXT);
-  assert.equal(versioned.kind, "encrypted_json");
-  if (versioned.kind !== "encrypted_json") {
-    throw new Error("expected encrypted envelope");
-  }
 
   const legacy = {
     kind: "encrypted_json" as const,
     payload: {
-      ciphertext: versioned.payload.ciphertext,
-      iv: versioned.payload.iv,
-      wrappedKey: versioned.payload.wrappedKey,
+      ciphertext: versioned.ciphertext,
+      iv: versioned.iv,
+      wrappedKey: versioned.wrappedKey,
     },
   };
   const normalized = parseStoredIdempotencyResponseEnvelope(legacy);
@@ -121,20 +147,23 @@ test("legacy encrypted envelopes are explicitly migrated to v1 at the boundary",
 
 test("legacy encrypted envelopes fail closed when v1 is not configured", async () => {
   const oldKek = await generateKek();
-  const versioned = await encryptedIdempotencyResponseStorage(
-    () => Promise.resolve(oldKek),
-    () => Promise.resolve("v1")
-  ).store({ status: "pending" }, CONTEXT);
-  if (versioned.kind !== "encrypted_json") {
-    throw new Error("expected encrypted envelope");
-  }
+  const versioned = await encryptCredential(
+    JSON.stringify({
+      body: { status: "pending" },
+      operation: CONTEXT.operation,
+      ownerId: CONTEXT.ownerId,
+      version: 1,
+    }),
+    oldKek,
+    "v1"
+  );
 
   const legacy = parseStoredIdempotencyResponseEnvelope({
     kind: "encrypted_json",
     payload: {
-      ciphertext: versioned.payload.ciphertext,
-      iv: versioned.payload.iv,
-      wrappedKey: versioned.payload.wrappedKey,
+      ciphertext: versioned.ciphertext,
+      iv: versioned.iv,
+      wrappedKey: versioned.wrappedKey,
     },
   });
   const v2OnlyStorage = encryptedIdempotencyResponseStorage(

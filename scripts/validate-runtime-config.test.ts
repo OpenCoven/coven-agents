@@ -26,8 +26,8 @@ function runValidator(
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     ABUSE_KEY_SECRET: undefined,
-    CREDENTIAL_KEK: TEST_KEK,
-    CREDENTIAL_KEK_CURRENT_VERSION: "v1",
+    CREDENTIAL_KEK: undefined,
+    CREDENTIAL_KEK_CURRENT_VERSION: undefined,
     CREDENTIAL_KEK_V1: undefined,
     CREDENTIAL_KEK_V2: undefined,
     GLOBAL_DAILY_RUN_CAP: undefined,
@@ -106,13 +106,44 @@ test("accepts production without Redis", () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("rejects missing or conflicting credential KEK configuration", () => {
+test("accepts a production build with no credential KEK variables", () => {
+  const result = runValidator({
+    CREDENTIAL_KEK: undefined,
+    CREDENTIAL_KEK_CURRENT_VERSION: undefined,
+    CREDENTIAL_KEK_V1: undefined,
+    CREDENTIAL_KEK_V2: undefined,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("rejects partial credential KEK configuration", () => {
   const missingCurrent = runValidator({
     CREDENTIAL_KEK_CURRENT_VERSION: undefined,
+    CREDENTIAL_KEK_V1: TEST_KEK,
   });
   assert.notEqual(missingCurrent.status, 0);
   assert.match(missingCurrent.stderr, /CREDENTIAL_KEK_CURRENT_VERSION/);
 
+  const missingKey = runValidator({
+    CREDENTIAL_KEK: undefined,
+    CREDENTIAL_KEK_CURRENT_VERSION: "v1",
+    CREDENTIAL_KEK_V1: undefined,
+  });
+  assert.notEqual(missingKey.status, 0);
+  assert.match(missingKey.stderr, /CREDENTIAL_KEK_V1/);
+});
+
+test("accepts valid credential KEK configuration", () => {
+  const result = runValidator({
+    CREDENTIAL_KEK: TEST_KEK,
+    CREDENTIAL_KEK_CURRENT_VERSION: "v1",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("rejects conflicting credential KEK configuration", () => {
   const conflicting = runValidator({
     CREDENTIAL_KEK: TEST_KEK,
     CREDENTIAL_KEK_CURRENT_VERSION: "v1",

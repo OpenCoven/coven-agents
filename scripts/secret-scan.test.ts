@@ -205,6 +205,27 @@ test("versioned credential KEKs are caught in assignments and JSON", () => {
   );
 });
 
+test("credential KEKs catch all-letter base64 keys and suspicious malformed values", () => {
+  const alphabeticKey = "A".repeat(43);
+  const malformedLongValue = `not-a-real-key-${"z".repeat(32)}`;
+
+  for (const source of [
+    `CREDENTIAL_KEK_V1="${alphabeticKey}"`,
+    `{"CREDENTIAL_KEK_V2":"${alphabeticKey}"}`,
+  ]) {
+    const findings = scanText("config.env", source);
+    assert.equal(findings.length, 1, source);
+    assert.match(findings[0].category, /CREDENTIAL_KEK/);
+  }
+
+  const malformedFindings = scanText(
+    ".env",
+    `CREDENTIAL_KEK_V1='${malformedLongValue}'`
+  );
+  assert.equal(malformedFindings.length, 1);
+  assert.match(malformedFindings[0].category, /CREDENTIAL_KEK_V1/);
+});
+
 test("scans every credential KEK key in a JSON line regardless of order", () => {
   for (const source of [
     `{"CREDENTIAL_KEK_CURRENT_VERSION":"v2","CREDENTIAL_KEK_V1":"${RANDOM_BASE64}"}`,

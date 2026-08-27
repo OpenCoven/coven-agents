@@ -10,6 +10,7 @@ import {
 } from "../lib/credentials/envelope";
 import type { CredentialKekRing } from "../lib/credentials/key-ring";
 import {
+  bindLegacyAadRows,
   main,
   parseRewrapArguments,
   type RewrapCliDependencies,
@@ -81,6 +82,71 @@ test("successful batches remain resumable after an interruption", async () => {
   );
   assert.equal(secondRun.rewrapped, 2);
   assert.equal(secondRun.remaining, 0);
+});
+
+test("bind-aad decrypts legacy rows, encrypts with tenant AAD, and resumes after CAS", async () => {
+  const kek = await generateKek();
+  const legacy = await encryptCredential("legacy-secret", kek, "v1");
+  const row = {
+    aadVersion: 0,
+    ciphertext: legacy.ciphertext,
+    envelopeRevision: "revision-before",
+    harnessId: "copilot",
+    id: "opaque-bind-row",
+    iv: legacy.iv,
+    kekVersion: "v1",
+    tenant: "acme",
+    wrappedKey: legacy.wrappedKey,
+  };
+  let casCalls = 0;
+  const store: RewrapStore = {
+    bindAndCompareAndSwap(candidate, sealed) {
+      casCalls += 1;
+      assert.equal(candidate.envelopeRevision, "revision-before");
+      if (casCalls === 1) {
+        return Promise.resolve(false);
+      }
+      Object.assign(candidate, sealed, {
+        aadVersion: sealed.aadVersion,
+        envelopeRevision: "revision-after",
+      });
+      return Promise.resolve(true);
+    },
+    compareAndSwap: async () => false,
+    listByAadVersion(version, limit, afterId) {
+      return Promise.resolve(
+        afterId || version !== row.aadVersion ? [] : [row].slice(0, limit)
+      );
+    },
+    listByVersion: async () => [],
+  };
+
+  const first = await bindLegacyAadRows(
+    { batch: 1, currentKek: kek, currentVersion: "v1" },
+    store,
+    () => undefined
+  );
+  assert.equal(first.skipped, 1);
+  assert.equal(first.remaining, 1);
+  assert.equal(row.aadVersion, 0);
+
+  const second = await bindLegacyAadRows(
+    { batch: 1, currentKek: kek, currentVersion: "v1" },
+    store,
+    () => undefined
+  );
+  assert.equal(second.rewrapped, 1);
+  assert.equal(second.remaining, 0);
+  assert.equal(row.aadVersion, 1);
+  assert.equal(
+    await decryptCredential(row, kek, {
+      harnessId: "copilot",
+      kind: "credential",
+      tenant: "acme",
+    }),
+    "legacy-secret"
+  );
+  assert.equal(casCalls, 2);
 });
 
 test("a concurrent update loses only the CAS and never overwrites newer data", async () => {
@@ -602,25 +668,22 @@ test("legacy encrypted idempotency responses block the v1 retirement gate", asyn
   const sourceKek = await generateKek();
   const targetKek = await generateKek();
   const current = await encryptCredential("current", targetKek, "v2");
-  const versioned = await encryptedIdempotencyResponseStorage(
-    () => Promise.resolve(sourceKek),
-    () => Promise.resolve("v1")
-  ).store(
-    { status: "legacy" },
-    {
+  const versioned = await encryptCredential(
+    JSON.stringify({
+      body: { status: "legacy" },
       operation: "credential_device_start",
       ownerId: "opaque-owner",
-    }
+      version: 1,
+    }),
+    sourceKek,
+    "v1"
   );
-  if (versioned.kind !== "encrypted_json") {
-    throw new Error("expected encrypted envelope");
-  }
   const legacy = {
     kind: "encrypted_json" as const,
     payload: {
-      ciphertext: versioned.payload.ciphertext,
-      iv: versioned.payload.iv,
-      wrappedKey: versioned.payload.wrappedKey,
+      ciphertext: versioned.ciphertext,
+      iv: versioned.iv,
+      wrappedKey: versioned.wrappedKey,
     },
   };
   const store: RewrapStore = {

@@ -186,6 +186,7 @@ export type Stream = InferSelectModel<typeof stream>;
 export const tenantCredential = pgTable(
   "TenantCredential",
   {
+    aadVersion: integer("aadVersion").notNull().default(0),
     ciphertext: text("ciphertext").notNull(),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
     envelopeRevision: uuid("envelopeRevision").notNull().defaultRandom(),
@@ -205,6 +206,10 @@ export const tenantCredential = pgTable(
     check(
       "TenantCredential_kekVersion_valid",
       sql`${table.kekVersion} ~ '^[A-Za-z0-9_-]{1,32}$'`
+    ),
+    check(
+      "TenantCredential_aadVersion_valid",
+      sql`${table.aadVersion} in (0, 1)`
     ),
   ]
 );

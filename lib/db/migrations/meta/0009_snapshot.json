@@ -781,6 +781,13 @@
       "name": "TenantCredential",
       "schema": "",
       "columns": {
+        "aadVersion": {
+          "name": "aadVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
         "ciphertext": {
           "name": "ciphertext",
           "type": "text",
@@ -870,6 +877,10 @@
         "TenantCredential_kekVersion_valid": {
           "name": "TenantCredential_kekVersion_valid",
           "value": "\"TenantCredential\".\"kekVersion\" ~ '^[A-Za-z0-9_-]{1,32}$'"
+        },
+        "TenantCredential_aadVersion_valid": {
+          "name": "TenantCredential_aadVersion_valid",
+          "value": "\"TenantCredential\".\"aadVersion\" IN (0, 1)"
         }
       },
       "isRLSEnabled": false
