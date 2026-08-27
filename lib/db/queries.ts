@@ -12,6 +12,7 @@ import {
   lt,
   lte,
   type SQL,
+  sql,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -104,6 +105,26 @@ export async function findOrCreateFederatedUser(email: string): Promise<User> {
 export async function findUserById(id: string): Promise<User | null> {
   try {
     const [row] = await db.select().from(user).where(eq(user.id, id)).limit(1);
+    return row ?? null;
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
+/**
+ * Atomically advances the account's session authority. PostgreSQL evaluates
+ * the increment while holding the row lock, so concurrent operators cannot
+ * overwrite one another's revocation.
+ */
+export async function revokeSessionsByEmail(
+  email: string
+): Promise<{ authVersion: number; id: string } | null> {
+  try {
+    const [row] = await db
+      .update(user)
+      .set({ authVersion: sql`${user.authVersion} + 1` })
+      .where(eq(user.email, email))
+      .returning({ authVersion: user.authVersion, id: user.id });
     return row ?? null;
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });

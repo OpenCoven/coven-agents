@@ -5,7 +5,9 @@ import { createIdentityMinter, IDENTITY_REFRESH_MARGIN_MS } from "./identity";
 
 function tokenExpiringIn(seconds: number): string {
   const claims = {
+    authVersion: 0,
     exp: Math.floor(Date.now() / 1000) + seconds,
+    kid: "legacy",
     plan: "demo",
     sub: "user-1",
     tenant: "u_3f2504e04f8911d39a0c0305e82c3301",

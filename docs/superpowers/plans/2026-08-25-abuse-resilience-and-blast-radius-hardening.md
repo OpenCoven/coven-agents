@@ -793,13 +793,17 @@ git commit -S -m "feat(worker): bound and fairly schedule cloud runs" \
 - Modify: `packages/agent-contracts/src/verify-token.ts`
 - Modify: `worker/src/routes.ts`
 - Modify: `app/api/internal/credential/route.ts`
-- Add: `lib/db/migrations/0007_identity_versions.sql`
+- Modify: `scripts/account.ts`
+- Modify: `README.md`
+- Modify: `docs/security/incident-response.md`
+- Add: `docs/security/key-rotation.md`
+- Add: `lib/db/migrations/0008_identity_versions.sql`
 
-- [ ] **Step 1: Write failing session-revocation tests**
+- [x] **Step 1: Write failing session-revocation tests**
 
 Add `authVersion` to the user row and JWT. Assert a server-side increment denies an existing token immediately, while an unchanged version remains valid.
 
-- [ ] **Step 2: Implement session version checks**
+- [x] **Step 2: Implement session version checks**
 
 ```ts
 export type SessionAuthority = {
@@ -822,11 +826,11 @@ pnpm account revoke-sessions <email>
 
 The command increments `authVersion` and prints only the account ID and new version.
 
-- [ ] **Step 3: Write failing runner key-ring tests**
+- [x] **Step 3: Write failing runner key-ring tests**
 
 Cover current-key minting, current and previous verification, unknown `kid`, retired key refusal, and the existing 15-minute expiry.
 
-- [ ] **Step 4: Add `kid` and dual verification**
+- [x] **Step 4: Add `kid` and dual verification**
 
 ```ts
 export type RunnerKeyRing = {
@@ -837,7 +841,7 @@ export type RunnerKeyRing = {
 
 Claims include `kid`. Mint only with `current`. Worker and internal credential verification accept `current` and an unexpired `previous`.
 
-- [ ] **Step 5: Add rotation configuration**
+- [x] **Step 5: Add rotation configuration**
 
 Document:
 
@@ -848,7 +852,7 @@ Document:
 
 Never overwrite one unversioned signing key in place.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run:
 
@@ -878,9 +882,9 @@ git commit -S -m "feat(security): version sessions and runner keys" \
 - Modify: `lib/credentials/store.ts`
 - Create: `scripts/credentials-rewrap.ts`
 - Create: `scripts/credentials-rewrap.test.ts`
-- Add: `lib/db/migrations/0008_credential_kek_versions.sql`
+- Add: `lib/db/migrations/0009_credential_kek_versions.sql`
 - Modify: `docs/security/incident-response.md`
-- Create: `docs/security/key-rotation.md`
+- Modify: `docs/security/key-rotation.md`
 
 - [ ] **Step 1: Write failing envelope-version tests**
 
@@ -954,7 +958,7 @@ git commit -S -m "feat(security): add resumable credential key rotation" \
 - Modify: `app/api/internal/credential/binding.ts`
 - Modify: `app/api/internal/credential/route.ts`
 - Modify: `worker/src/agents.ts`
-- Add: `lib/db/migrations/0009_credential_leases.sql`
+- Add: `lib/db/migrations/0010_credential_leases.sql`
 
 - [ ] **Step 1: Write failing lease tests**
 

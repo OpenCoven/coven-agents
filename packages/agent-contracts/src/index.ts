@@ -10,10 +10,16 @@ export type { RunnerClaims } from "./identity";
 export {
   base64UrlDecode,
   base64UrlEncode,
+  KEY_ID_PATTERN,
+  MAX_AUTH_VERSION,
+  MAX_RUNNER_PAYLOAD_BYTES,
+  MAX_RUNNER_TOKEN_BYTES,
+  MAX_RUNNER_TOKEN_SEGMENT_BYTES,
   runnerClaimsSchema,
   splitToken,
   TENANT_ID_PATTERN,
   TOKEN_ALGORITHM,
+  TOKEN_CLOCK_SKEW_SECONDS,
   TOKEN_LIFETIME_SECONDS,
 } from "./identity";
 
@@ -594,4 +600,12 @@ export type RunEventType = z.infer<typeof runEventTypeSchema>;
 export type RunEventsEnvelope = z.infer<typeof runEventsEnvelopeSchema>;
 export type RunSnapshotEnvelope = z.infer<typeof runSnapshotEnvelopeSchema>;
 
-export { importVerifyKey, verifyRunnerToken } from "./verify-token";
+export type {
+  RunnerVerificationKeyConfig,
+  RunnerVerificationKeyRing,
+} from "./verify-token";
+export {
+  importVerifyKey,
+  importVerifyKeyRing,
+  verifyRunnerToken,
+} from "./verify-token";

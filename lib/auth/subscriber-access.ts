@@ -1,7 +1,9 @@
 import { isSubscriber, type SubscriberSession, toSession } from "@/lib/session";
+import { validAuthVersion } from "./session-revocation";
 
 export type SessionLike = {
   user?: {
+    authVersion?: number | null;
     id?: string | null;
     type?: string | null;
   } | null;
@@ -9,6 +11,7 @@ export type SessionLike = {
 
 export type SubscriberAccessDecision =
   | {
+      authVersion: number;
       kind: "allowed";
       session: SubscriberSession;
       userId: string;
@@ -24,15 +27,25 @@ export function decideSubscriberAccess(
     return { kind: "unauthorized" };
   }
 
-  const productSession = toSession({
-    id: userId,
-    type: session.user?.type ?? "",
-  });
+  let productSession: ReturnType<typeof toSession>;
+  try {
+    productSession = toSession({
+      id: userId,
+      type: session.user?.type ?? "",
+    });
+  } catch {
+    return { kind: "unauthorized" };
+  }
   if (!isSubscriber(productSession)) {
     return { kind: "subscription_required" };
   }
 
-  return { kind: "allowed", session: productSession, userId };
+  const authVersion = session.user?.authVersion;
+  if (!validAuthVersion(authVersion)) {
+    return { kind: "unauthorized" };
+  }
+
+  return { authVersion, kind: "allowed", session: productSession, userId };
 }
 
 export function subscriberAccessResponse(

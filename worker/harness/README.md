@@ -21,6 +21,7 @@ Create `worker/.dev.vars` (gitignored):
 ```
 AGENT_CONTROL_TOKEN=local-harness-control-token
 EDGE_ABUSE_KEY_SECRET=local-harness-edge-secret
+RUNNER_VERIFY_KEY_ID=key-local
 RUNNER_VERIFY_KEY=<contents of harness/verify-key.txt>
 RUNNER_SERVICE_TOKEN=local-harness-service-token
 APP_ORIGIN=http://127.0.0.1:9797

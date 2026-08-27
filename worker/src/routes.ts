@@ -4,6 +4,8 @@ import {
   type AgentDefinition,
   agentIdSchema,
   createAgentInputSchema,
+  importVerifyKeyRing,
+  type RunnerVerificationKeyRing,
   type RunSnapshot,
   sanitizeEvidenceText,
   startRunInputSchema,
@@ -32,7 +34,7 @@ import {
   json,
   readJson,
 } from "./http.js";
-import { importVerifyKey, verifyRunnerToken } from "./identity.js";
+import { verifyRunnerToken } from "./identity.js";
 import {
   type AdmissionCleanupCapability,
   type AdmissionCleanupGuard,
@@ -55,7 +57,16 @@ import { tenantOf } from "./tenant.js";
 type Awaitable<T> = T | Promise<T>;
 
 export type CloudRunnerEnvironment = Omit<
-  Pick<Env, "AGENT_CONTROL_TOKEN" | "ALLOWED_ORIGIN" | "RUNNER_VERIFY_KEY">,
+  Pick<
+    Env,
+    | "AGENT_CONTROL_TOKEN"
+    | "ALLOWED_ORIGIN"
+    | "RUNNER_VERIFY_KEY"
+    | "RUNNER_VERIFY_KEY_ID"
+    | "RUNNER_VERIFY_PREVIOUS_KEY_ID"
+    | "RUNNER_VERIFY_PREVIOUS_KEY"
+    | "RUNNER_VERIFY_PREVIOUS_RETIRE_AT"
+  >,
   "ALLOWED_ORIGIN"
 > & {
   ALLOWED_ORIGIN: string;
@@ -76,15 +87,32 @@ export type CloudRunnerEnvironment = Omit<
  * rotated key must be picked up immediately, not served stale until a
  * redeploy.
  */
-let verifyKeyCache: { key: CryptoKey; spki: string } | null = null;
+let verifyKeyCache: {
+  configKey: string;
+  ring: RunnerVerificationKeyRing;
+} | null = null;
 
-async function getVerifyKey(spki: string): Promise<CryptoKey> {
-  if (verifyKeyCache?.spki === spki) {
-    return verifyKeyCache.key;
+async function getVerifyKeyRing(
+  environment: CloudRunnerEnvironment
+): Promise<RunnerVerificationKeyRing> {
+  const currentPublicKey = environment.RUNNER_VERIFY_KEY;
+  if (!currentPublicKey) {
+    throw new Error("Runner verify key is not configured.");
   }
-  const key = await importVerifyKey(spki);
-  verifyKeyCache = { key, spki };
-  return key;
+  const config = {
+    currentId: environment.RUNNER_VERIFY_KEY_ID ?? "legacy",
+    currentPublicKey,
+    previousId: environment.RUNNER_VERIFY_PREVIOUS_KEY_ID,
+    previousPublicKey: environment.RUNNER_VERIFY_PREVIOUS_KEY,
+    previousRetireAt: environment.RUNNER_VERIFY_PREVIOUS_RETIRE_AT,
+  };
+  const configKey = JSON.stringify(config);
+  if (verifyKeyCache?.configKey === configKey) {
+    return verifyKeyCache.ring;
+  }
+  const ring = await importVerifyKeyRing(config);
+  verifyKeyCache = { configKey, ring };
+  return ring;
 }
 
 export type CloudRunnerDirectory = {
@@ -1076,9 +1104,19 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
           cors
         );
       }
+      let verifyKeyRing: RunnerVerificationKeyRing;
+      try {
+        verifyKeyRing = await getVerifyKeyRing(environment);
+      } catch {
+        return json(
+          errorEnvelope("unauthorized", "Identity cannot be verified.", false),
+          { status: 401 },
+          cors
+        );
+      }
       const claims = await verifyRunnerToken(
         authorization.slice(7),
-        await getVerifyKey(environment.RUNNER_VERIFY_KEY)
+        verifyKeyRing
       );
       if (!claims) {
         return json(

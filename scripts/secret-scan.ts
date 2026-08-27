@@ -140,6 +140,11 @@ export function looksLikeRealSecret(value: string): boolean {
   if (/^[A-Za-z_$][A-Za-z_$]*$/u.test(value)) {
     return false;
   }
+  if (
+    /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+$/u.test(value)
+  ) {
+    return false;
+  }
 
   return new Set(value).size >= MIN_DISTINCT_CHARACTERS;
 }

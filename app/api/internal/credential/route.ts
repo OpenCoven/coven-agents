@@ -6,9 +6,14 @@ import "server-only";
 // verified in `authorizeInternalRequest` below, checked before any database
 // access happens. This is the one place in the codebase permitted to import
 // `db` directly.
-import { importVerifyKey, verifyRunnerToken } from "@opencoven/agent-contracts";
+import {
+  type RunnerVerificationKeyRing,
+  verifyRunnerToken,
+} from "@opencoven/agent-contracts";
 import { eq } from "drizzle-orm";
 import { requireNonemptyAbuseKeySecret } from "@/lib/abuse/config";
+import { runnerVerificationKeyRingFromEnvironment } from "@/lib/agents/key-ring";
+import { sessionAuthorityMatches } from "@/lib/auth/session-revocation";
 import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
 import { periodStart } from "@/lib/billing/period";
 import {
@@ -219,17 +224,16 @@ export async function POST(request: Request): Promise<Response> {
   // straight from the body. That made one shared token a master key over every
   // tenant's credential. Identity now comes from the signed claim the worker
   // was handed when the run started, forwarded on.
-  const verifyKey = process.env.RUNNER_VERIFY_KEY;
-  if (!verifyKey) {
+  let verifyKeyRing: RunnerVerificationKeyRing;
+  try {
+    verifyKeyRing = await runnerVerificationKeyRingFromEnvironment();
+  } catch {
     return Response.json({ error: "identity_unavailable" }, { status: 503 });
   }
 
   const authorization = request.headers.get("authorization");
   const claims = authorization?.startsWith("Bearer ")
-    ? await verifyRunnerToken(
-        authorization.slice(7),
-        await importVerifyKey(verifyKey)
-      )
+    ? await verifyRunnerToken(authorization.slice(7), verifyKeyRing)
     : null;
 
   let tenant: string | null;
@@ -244,6 +248,9 @@ export async function POST(request: Request): Promise<Response> {
   if (!tenant) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
+  if (!claims) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
 
   const { runId } = body ?? {};
 
@@ -254,11 +261,27 @@ export async function POST(request: Request): Promise<Response> {
   // The cap is enforced here because this is the moment the credential is
   // lent — the one point every run must pass through, and the only one where
   // refusing costs nothing already spent.
-  const [owner] = await db
-    .select()
-    .from(user)
-    .where(eq(user.id, claims?.sub ?? ""))
-    .limit(1);
+  let owner: typeof user.$inferSelect | undefined;
+  try {
+    [owner] = await db
+      .select()
+      .from(user)
+      .where(eq(user.id, claims.sub))
+      .limit(1);
+  } catch {
+    return Response.json({ error: "identity_unavailable" }, { status: 503 });
+  }
+
+  if (
+    !owner ||
+    !sessionAuthorityMatches({
+      database: owner,
+      now: new Date(),
+      tokenAuthVersion: claims.authVersion,
+    })
+  ) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
 
   const resetsAt = owner?.subscribedUntil ?? null;
   const since = periodStart(resetsAt, owner?.billingPeriodStart ?? null);

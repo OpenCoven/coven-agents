@@ -1,6 +1,10 @@
 #!/usr/bin/env tsx
 import { eq } from "drizzle-orm";
-import { db, findOrCreateFederatedUser } from "@/lib/db/queries";
+import {
+  db,
+  findOrCreateFederatedUser,
+  revokeSessionsByEmail,
+} from "@/lib/db/queries";
 import { user } from "@/lib/db/schema";
 
 /**
@@ -79,6 +83,23 @@ async function show(email: string) {
   );
 }
 
+async function revokeSessions(email: string) {
+  const normalizedEmail = email.trim().toLowerCase();
+  const row = normalizedEmail
+    ? await revokeSessionsByEmail(normalizedEmail)
+    : null;
+  if (!row) {
+    process.stderr.write("No matching account.\n");
+    process.exitCode = 1;
+    return;
+  }
+
+  // Deliberately no email, database target, or other account data.
+  process.stdout.write(
+    `account_id: ${row.id}\nauth_version: ${row.authVersion}\n`
+  );
+}
+
 async function main() {
   const [command, email] = process.argv.slice(2);
 
@@ -86,20 +107,24 @@ async function main() {
     process.stdout.write(
       "Usage:\n" +
         "  pnpm account create <email>\n" +
-        "  pnpm account show <email>\n"
+        "  pnpm account show <email>\n" +
+        "  pnpm account revoke-sessions <email>\n"
     );
     process.exitCode = 1;
     return;
   }
 
-  process.stdout.write(`database: ${describeTarget()}\n`);
-
   switch (command) {
     case "create":
+      process.stdout.write(`database: ${describeTarget()}\n`);
       await create(email);
       break;
     case "show":
+      process.stdout.write(`database: ${describeTarget()}\n`);
       await show(email);
+      break;
+    case "revoke-sessions":
+      await revokeSessions(email);
       break;
     default:
       process.stdout.write(`Unknown command: ${command}\n`);
@@ -108,8 +133,8 @@ async function main() {
 }
 
 main()
-  .catch((error) => {
-    process.stderr.write(`${error}\n`);
+  .catch(() => {
+    process.stderr.write("Account command failed.\n");
     process.exitCode = 1;
   })
   .finally(() => process.exit(process.exitCode ?? 0));

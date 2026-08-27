@@ -440,6 +440,30 @@ test("run reservation migration creates pseudonymous atomic budgets", () => {
   assert.match(snapshot, /billingPeriodStart/);
 });
 
+test("identity version migration adds a non-null zero default", () => {
+  const migration = read("lib/db/migrations/0008_identity_versions.sql");
+  assert.match(
+    migration,
+    /ALTER TABLE "User" ADD COLUMN "authVersion" integer DEFAULT 0 NOT NULL/i
+  );
+
+  const snapshot = read("lib/db/migrations/meta/0008_snapshot.json");
+  assert.match(snapshot, /"authVersion"/);
+  assert.match(snapshot, /"default": 0/);
+  assert.match(snapshot, /"notNull": true/);
+});
+
+test("session revocation increments in the database update", () => {
+  const source = read("lib/db/queries.ts");
+  const start = source.indexOf("export async function revokeSessionsByEmail");
+  assert.ok(start >= 0);
+  const revoke = source.slice(start, start + 1000);
+
+  assert.match(revoke, /\.update\(user\)/);
+  assert.match(revoke, /authVersion\} \+ 1/);
+  assert.match(revoke, /\.returning\(\{ authVersion: user\.authVersion/);
+});
+
 test("database claims and reclaims idempotency records atomically", () => {
   const source = read("lib/db/queries.ts");
   const storeIndex = source.indexOf(

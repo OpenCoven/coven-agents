@@ -50,7 +50,7 @@ Everything that grants something, where it lives, and what it costs to rotate.
 | `CREDENTIAL_KEK` | Vercel | Decryption of every stored tenant credential | **Every tenant must reconnect** |
 | `POSTGRES_URL` and the `PG*` family | Vercel (Neon integration) | Full read/write on all tenant data | Brief downtime |
 | `AUTH_SECRET` | Vercel | Forging any signed-in session | Everyone is signed out |
-| `RUNNER_SIGNING_KEY` / `RUNNER_VERIFY_KEY` | Vercel / Vercel + worker | Minting an identity for any tenant | ≤15 min of failed runs |
+| `RUNNER_SIGNING_KEY_ID`, `RUNNER_SIGNING_KEY`, `RUNNER_SIGNING_PUBLIC_KEY`, and Worker `RUNNER_VERIFY_*` ring | Vercel / Vercel + worker | Minting an identity for any tenant | ≤15 min of failed runs |
 | `AGENT_CONTROL_TOKEN` | Vercel + worker | Reaching the worker at all | Seconds of failed runs |
 | `RUNNER_SERVICE_TOKEN` | Vercel + worker | Calling the internal credential endpoint | Seconds of failed runs |
 | `AUTH_GITHUB_SECRET` | Vercel | Impersonating our OAuth app | Sign-in breaks until updated |
@@ -180,14 +180,17 @@ order, same reason.
 
 **Verify.** `/api/internal/credential` returns 401 for the old value.
 
-### `RUNNER_SIGNING_KEY` and `RUNNER_VERIFY_KEY` — the identity pair
+### Runner signing and verification key ring
 
 **Grants.** The signing key mints an identity claiming to be *any* tenant.
 This is the closest thing to a master key that does not touch the database.
 
-**They are a pair and must change together.** The worker verifies with
-`RUNNER_VERIFY_KEY`; the app signs with `RUNNER_SIGNING_KEY`. A mismatch means
-every run fails.
+**The current ID and key pair must change together. The Worker verifies with
+`RUNNER_VERIFY_KEY_ID`/`RUNNER_VERIFY_KEY`; the app signs with
+`RUNNER_SIGNING_KEY_ID`/`RUNNER_SIGNING_KEY`. A mismatch means every run
+fails. Keep the old public key configured as `RUNNER_VERIFY_PREVIOUS_KEY` until
+15 minutes plus clock skew have elapsed; never overwrite an unversioned key in
+place.
 
 ```bash
 # Generate an Ed25519 pair; export the pkcs8 private key and the raw public key
@@ -201,8 +204,10 @@ console.log("VERIFY", Buffer.from(raw).toString("base64url"));
 '
 ```
 
-Set `RUNNER_VERIFY_KEY` on the worker and in Vercel, and `RUNNER_SIGNING_KEY`
-in Vercel, then redeploy both.
+Set the Worker current/previous public-key ring through Wrangler and the app's
+current signing ring through Vercel, then redeploy both. The complete procedure
+and rollback are in [Runner key rotation](key-rotation.md). Never log key
+material.
 
 **What breaks.** Identity tokens live 15 minutes (`TOKEN_LIFETIME_SECONDS`), so
 in-flight runs fail until they are re-minted. There is no revocation list —

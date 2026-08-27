@@ -207,6 +207,7 @@ test("placeholders and references are not mistaken for secrets", () => {
     // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal text is the input under test.
     "${SOME_VAR}",
     "process.env.AUTH_SECRET",
+    "keys.currentPrivateKey",
     "recordingCredential",
     "RECORDING_CREDENTIAL",
     "runner-control-sensitive",

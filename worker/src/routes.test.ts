@@ -86,7 +86,9 @@ function identityToken(): Promise<string> {
   if (!suiteToken) {
     suiteToken = getKeyPair().then((pair) =>
       mint(pair.privateKey, {
+        authVersion: 0,
         exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+        kid: "legacy",
         plan: "subscriber",
         sub: "user-1",
         tenant: CALLER_TENANT,
@@ -645,7 +647,9 @@ test("a demo claim cannot start a run", async () => {
   // missing credential, or succeeds outright on one still stored.
   const pair = await getKeyPair();
   const demoToken = await mint(pair.privateKey, {
+    authVersion: 0,
     exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    kid: "legacy",
     plan: "demo",
     sub: "user-1",
     tenant: CALLER_TENANT,
@@ -830,7 +834,9 @@ test("a demo claim creates without warming", async () => {
   // nothing.
   const pair = await getKeyPair();
   const demoToken = await mint(pair.privateKey, {
+    authVersion: 0,
     exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    kid: "legacy",
     plan: "demo",
     sub: "user-1",
     tenant: CALLER_TENANT,
@@ -870,7 +876,9 @@ test("tenant prewarm boots the most recently used agent", async () => {
 test("tenant prewarm with no agents warms nothing", async () => {
   const pair = await getKeyPair();
   const token = await mint(pair.privateKey, {
+    authVersion: 0,
     exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    kid: "legacy",
     plan: "subscriber",
     sub: "user-2",
     tenant: "t_no_agents",
@@ -894,7 +902,9 @@ test("tenant prewarm with no agents warms nothing", async () => {
 test("a demo claim cannot prewarm", async () => {
   const pair = await getKeyPair();
   const demoToken = await mint(pair.privateKey, {
+    authVersion: 0,
     exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    kid: "legacy",
     plan: "demo",
     sub: "user-1",
     tenant: CALLER_TENANT,

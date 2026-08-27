@@ -104,7 +104,9 @@ test("a forged identity cannot name a tenant", async () => {
   ])) as CryptoKeyPair;
 
   const claims: RunnerClaims = {
+    authVersion: 0,
     exp: Math.floor(Date.now() / 1000) + 900,
+    kid: "legacy",
     plan: "subscriber",
     sub: "attacker",
     tenant: "victim",
@@ -138,7 +140,9 @@ test("a valid claim for one tenant never reads as another", async () => {
   ])) as CryptoKeyPair;
 
   const claims: RunnerClaims = {
+    authVersion: 0,
     exp: Math.floor(Date.now() / 1000) + 900,
+    kid: "legacy",
     plan: "subscriber",
     sub: "user-1",
     tenant: "acme",

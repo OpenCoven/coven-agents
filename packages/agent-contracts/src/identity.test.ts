@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   base64UrlDecode,
   base64UrlEncode,
+  MAX_RUNNER_TOKEN_BYTES,
+  MAX_RUNNER_TOKEN_SEGMENT_BYTES,
   runnerClaimsSchema,
   splitToken,
 } from "./identity";
@@ -18,7 +20,9 @@ test("base64url round-trips bytes without padding", () => {
 
 test("claims reject anything the worker must not trust", () => {
   const valid = {
+    authVersion: 0,
     exp: 1_800_000_000,
+    kid: "key-2026-08",
     plan: "subscriber",
     sub: "user-1",
     tenant: "acme",
@@ -30,6 +34,8 @@ test("claims reject anything the worker must not trust", () => {
     { ...valid, tenant: "" },
     { ...valid, exp: -1 },
     { ...valid, extra: "smuggled" },
+    { ...valid, kid: "" },
+    { ...valid, authVersion: -1 },
   ]) {
     assert.throws(
       () => runnerClaimsSchema.parse(bad),
@@ -55,9 +61,22 @@ test("a token with an empty segment is refused", () => {
   assert.equal(splitToken("."), null);
 });
 
+test("token and segment sizes are bounded before decoding", () => {
+  assert.equal(
+    splitToken(`${"a".repeat(MAX_RUNNER_TOKEN_SEGMENT_BYTES + 1)}.signature`),
+    null
+  );
+  assert.equal(
+    splitToken(`${"a".repeat(MAX_RUNNER_TOKEN_BYTES)}.signature`),
+    null
+  );
+});
+
 test("claims bound the fields the worker trusts for isolation", () => {
   const valid = {
+    authVersion: 0,
     exp: 1_800_000_000,
+    kid: "key-2026-08",
     plan: "subscriber",
     sub: "user-1",
     tenant: "acme",

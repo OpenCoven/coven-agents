@@ -289,7 +289,7 @@ test("mints a fresh validated subscriber identity for every request including cl
     type: "status",
   };
   const authorizations: string[] = [];
-  const mintedClaims: Omit<RunnerClaims, "exp">[] = [];
+  const mintedClaims: Omit<RunnerClaims, "exp" | "kid">[] = [];
   const signingKeys: string[] = [];
   let mintCount = 0;
   // biome-ignore lint/suspicious/useAwait: injected fetch matches the native asynchronous fetch contract.
@@ -355,6 +355,7 @@ test("mints a fresh validated subscriber identity for every request including cl
   assert.deepEqual(
     mintedClaims,
     Array.from({ length: 5 }, () => ({
+      authVersion: 0,
       plan: "subscriber",
       sub: RECORDER_SUBJECT,
       tenant: RECORDER_TENANT,

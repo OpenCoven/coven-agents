@@ -8,6 +8,9 @@
     "enabled": true,
     "head_sampling_rate": 1
   },
+  // Public runner verification keys and service secrets are supplied through
+  // Wrangler secrets/.dev.vars; never commit them here. Keep the current key
+  // and, during rotation, one unexpired previous key.
   "ratelimits": [
     {
       "name": "EDGE_REQUEST_LIMITER",

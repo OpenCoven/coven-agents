@@ -3,6 +3,7 @@ import {
   agentIdSchema,
   agentsEnvelopeSchema,
   createAgentInputSchema,
+  KEY_ID_PATTERN,
   okEnvelopeSchema,
   type RunEvent,
   type RunnerClaims,
@@ -28,7 +29,7 @@ const SSE_RETRY_MAX_MS = 4000;
 const DEMO_REPOSITORY_URL = "https://github.com/OpenCoven/demo-workspace.git";
 const DEMO_WORKSPACE = "/workspace";
 const DEMO_REPOSITORY_WORKSPACE = "/workspace/repo";
-const recorderClaimsSchema = runnerClaimsSchema.omit({ exp: true });
+const recorderClaimsSchema = runnerClaimsSchema.omit({ exp: true, kid: true });
 
 type Environment = Readonly<Record<string, string | undefined>>;
 type FetchLike = (
@@ -41,10 +42,11 @@ type FetchRunnerOptions = {
 };
 
 export type CaptureEnvironment = {
-  identityClaims: Omit<RunnerClaims, "exp">;
+  identityClaims: Omit<RunnerClaims, "exp" | "kid">;
   runnerToken: string;
   runnerUrl: string;
   secrets: string[];
+  signingKeyId: string;
   signingKey: string;
   timeoutMs: number;
 };
@@ -78,8 +80,9 @@ type RunnerConnection = {
 };
 
 type IdentityMinter = (
-  claims: Omit<RunnerClaims, "exp">,
-  signingKey: string
+  claims: Omit<RunnerClaims, "exp" | "kid">,
+  signingKey: string,
+  legacyKeyId?: string
 ) => Promise<string>;
 
 class RetryableSseError extends Error {
@@ -124,6 +127,7 @@ export function readCaptureEnvironment(
     environment.DEMO_RUNNER_URL ?? environment.NEXT_PUBLIC_CLOUD_RUNNER_URL;
   const runnerToken = environment.DEMO_RUNNER_TOKEN;
   const signingKey = environment.DEMO_RUNNER_SIGNING_KEY;
+  const signingKeyId = environment.DEMO_RUNNER_SIGNING_KEY_ID ?? "legacy";
   const subject = environment.DEMO_RUNNER_SUBJECT;
   const tenant = environment.DEMO_RUNNER_TENANT;
   const missing: string[] = [];
@@ -135,6 +139,9 @@ export function readCaptureEnvironment(
   }
   if (!nonblank(signingKey)) {
     missing.push("DEMO_RUNNER_SIGNING_KEY");
+  }
+  if (!KEY_ID_PATTERN.test(signingKeyId)) {
+    throw new Error("DEMO_RUNNER_SIGNING_KEY_ID must be a valid key id.");
   }
   if (!nonblank(subject)) {
     missing.push("DEMO_RUNNER_SUBJECT");
@@ -166,6 +173,7 @@ export function readCaptureEnvironment(
   }
 
   const claims = recorderClaimsSchema.safeParse({
+    authVersion: 0,
     plan: "subscriber",
     sub: subject,
     tenant,
@@ -182,6 +190,7 @@ export function readCaptureEnvironment(
     runnerUrl: runnerUrl.trim().replace(/\/+$/, ""),
     secrets: demoRecordingSecrets(environment),
     signingKey,
+    signingKeyId,
     timeoutMs,
   };
 }
@@ -739,7 +748,11 @@ export async function captureRun(
   const mintIdentity = dependencies.mintIdentity ?? mintRunnerToken;
   const connection: RunnerConnection = {
     identityToken: () =>
-      mintIdentity(configuration.identityClaims, configuration.signingKey),
+      mintIdentity(
+        configuration.identityClaims,
+        configuration.signingKey,
+        configuration.signingKeyId
+      ),
     request: dependencies.request ?? globalThis.fetch,
     runnerToken: configuration.runnerToken,
     runnerUrl: configuration.runnerUrl,

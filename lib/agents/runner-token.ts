@@ -1,12 +1,14 @@
 import {
   base64UrlDecode,
   base64UrlEncode,
+  KEY_ID_PATTERN,
   type RunnerClaims,
   runnerClaimsSchema,
   TOKEN_ALGORITHM,
   TOKEN_LIFETIME_SECONDS,
 } from "@opencoven/agent-contracts";
 import { isSubscriber, tenantForUser, toSession } from "@/lib/session";
+import type { RunnerKeyRing } from "./key-ring";
 
 /**
  * The ONLY place a runner identity token can be minted. This function lives
@@ -19,21 +21,31 @@ import { isSubscriber, tenantForUser, toSession } from "@/lib/session";
  * tenant.
  */
 export async function mintRunnerToken(
-  input: Omit<RunnerClaims, "exp">,
-  privateKeyPkcs8: string
+  input: Omit<RunnerClaims, "exp" | "kid">,
+  signingKey: string | Pick<RunnerKeyRing, "current">,
+  legacyKeyId = "legacy"
 ): Promise<string> {
+  const keyId =
+    typeof signingKey === "string" ? legacyKeyId : signingKey.current.id;
+  if (!KEY_ID_PATTERN.test(keyId)) {
+    throw new Error("Runner signing key id is invalid.");
+  }
   const claims = runnerClaimsSchema.parse({
     ...input,
     exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    kid: keyId,
   });
 
-  const key = await crypto.subtle.importKey(
-    "pkcs8",
-    new Uint8Array(base64UrlDecode(privateKeyPkcs8)),
-    { name: TOKEN_ALGORITHM },
-    false,
-    ["sign"]
-  );
+  const key =
+    typeof signingKey === "string"
+      ? await crypto.subtle.importKey(
+          "pkcs8",
+          new Uint8Array(base64UrlDecode(signingKey)),
+          { name: TOKEN_ALGORITHM },
+          false,
+          ["sign"]
+        )
+      : signingKey.current.privateKey;
 
   const payload = base64UrlEncode(
     new TextEncoder().encode(JSON.stringify(claims))
@@ -67,10 +79,12 @@ export async function mintRunnerToken(
  * tenant that changed per mint would make their own agents disappear.
  */
 export function claimsForUser(user: {
+  authVersion: number;
   id: string;
   type: string;
-}): Omit<RunnerClaims, "exp"> {
+}): Omit<RunnerClaims, "exp" | "kid"> {
   return {
+    authVersion: user.authVersion,
     plan: isSubscriber(toSession(user)) ? "subscriber" : "demo",
     sub: user.id,
     tenant: tenantForUser(user.id),

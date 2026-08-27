@@ -28,6 +28,9 @@ Review the living [Execution threat model](docs/security/execution-threat-model.
 before changing identity, credentials, tenancy, runner boundaries, or evidence
 handling.
 
+Runner key configuration and rollback are documented in the
+[runner key rotation runbook](docs/security/key-rotation.md).
+
 Review the [Guest access and safety
 boundary](docs/security/guest-access.md) before changing public replay,
 account creation, subscription gates, or any route that can consume or persist
@@ -67,8 +70,8 @@ credentials, agents, or runs.
 httpOnly cookie, no database row. A GitHub sign-in creates or adopts one account
 row but still grants no model, credential, runner, sandbox, run, upload, or
 persistent chat access. Subscription state is recomputed from `subscribedUntil`
-on every token callback, and subscriber-claiming sessions are revalidated
-against the current database value before resource access. Guests are rejected
+on every token callback, and every signed-in session is revalidated against the
+current database `authVersion` before resource access. Guests are rejected
 without that lookup; expiry or revocation cannot wait for the browser token to
 expire. The internal compatibility label remains `demo`.
 
@@ -111,16 +114,38 @@ page and API requests return a non-cacheable `404`. Configure the same allowlist
 for production build and runtime because the proxy participates in the build;
 do not expose the route as general account administration.
 
+To invalidate all existing sessions for an account, run
+`pnpm account revoke-sessions <email>`. It atomically advances the account
+version and prints only the account ID and new version; an unknown address is a
+nonzero failure.
+
 ## Run the runner
 
 Create `worker/.dev.vars`:
 
 ```dotenv
 AGENT_CONTROL_TOKEN=replace-with-a-long-random-token
+RUNNER_VERIFY_KEY_ID=key-2026-08
 RUNNER_VERIFY_KEY=replace-with-the-base64url-ed25519-public-key
+# Optional during rotation; retire only after token expiry plus skew.
+RUNNER_VERIFY_PREVIOUS_KEY_ID=key-2026-07
+RUNNER_VERIFY_PREVIOUS_KEY=replace-with-the-old-base64url-ed25519-public-key
+RUNNER_VERIFY_PREVIOUS_RETIRE_AT=2026-08-27T00:15:00.000Z
 RUNNER_SERVICE_TOKEN=replace-with-a-long-random-token
 APP_ORIGIN=http://localhost:3000
 ```
+
+The app uses the matching versioned signing configuration:
+`RUNNER_SIGNING_KEY_ID`, `RUNNER_SIGNING_KEY`, and
+`RUNNER_SIGNING_PUBLIC_KEY`. New tokens are minted only with the current key;
+the Worker accepts the current key and an unexpired previous public key.
+Deploy rotation in this order: add the new Worker current key while retaining
+the old key as previous, switch the app signing key, wait 15 minutes plus
+clock skew, then remove the old key. Roll back by switching the app signer
+back while retaining both verification keys until the original expiry window
+has elapsed. Never log or commit key material; use Vercel and Wrangler
+secrets. The legacy `RUNNER_VERIFY_KEY`/`RUNNER_SIGNING_KEY` pair remains
+supported only as an explicit migration compatibility path.
 
 **The worker holds no harness credential.** It used to read
 `COPILOT_GITHUB_TOKEN` from its own environment, which meant every tenant ran
@@ -155,6 +180,10 @@ cd worker
 pnpm wrangler secret put AGENT_CONTROL_TOKEN
 pnpm wrangler secret put EDGE_ABUSE_KEY_SECRET
 pnpm wrangler secret put RUNNER_VERIFY_KEY
+pnpm wrangler secret put RUNNER_VERIFY_KEY_ID
+pnpm wrangler secret put RUNNER_VERIFY_PREVIOUS_KEY_ID
+pnpm wrangler secret put RUNNER_VERIFY_PREVIOUS_KEY
+pnpm wrangler secret put RUNNER_VERIFY_PREVIOUS_RETIRE_AT
 pnpm wrangler secret put RUNNER_SERVICE_TOKEN
 pnpm wrangler secret put APP_ORIGIN
 pnpm deploy

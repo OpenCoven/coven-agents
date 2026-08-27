@@ -17,6 +17,13 @@ export const TOKEN_ALGORITHM = "Ed25519";
  * enough that "wait it out" is an acceptable incident response.
  */
 export const TOKEN_LIFETIME_SECONDS = 900;
+/** No implicit clock skew: expiry and key retirement use the same UTC clock. */
+export const TOKEN_CLOCK_SKEW_SECONDS = 0;
+export const MAX_RUNNER_TOKEN_BYTES = 8192;
+export const MAX_RUNNER_TOKEN_SEGMENT_BYTES = 6144;
+export const MAX_RUNNER_PAYLOAD_BYTES = 4096;
+export const MAX_AUTH_VERSION = 2_147_483_647;
+export const KEY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /**
  * The one definition of a legal tenant id, shared by the issuer and the
@@ -38,7 +45,9 @@ export const TENANT_ID_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
 
 export const runnerClaimsSchema = z
   .object({
+    authVersion: z.number().int().nonnegative().max(MAX_AUTH_VERSION),
     exp: z.number().int().positive(),
+    kid: z.string().regex(KEY_ID_PATTERN),
     plan: z.enum(["demo", "subscriber"]),
     sub: z.string().min(1).max(128),
     tenant: z.string().regex(TENANT_ID_PATTERN),
@@ -83,12 +92,26 @@ export function base64UrlDecode(value: string): Uint8Array<ArrayBuffer> {
 export function splitToken(
   token: string
 ): { payload: string; signature: string } | null {
+  if (
+    typeof token !== "string" ||
+    token.length === 0 ||
+    token.length > MAX_RUNNER_TOKEN_BYTES
+  ) {
+    return null;
+  }
   const segments = token.split(".");
   if (segments.length !== 2) {
     return null;
   }
   const [payload, signature] = segments;
-  if (payload.length === 0 || signature.length === 0) {
+  if (
+    payload.length === 0 ||
+    signature.length === 0 ||
+    payload.length > MAX_RUNNER_TOKEN_SEGMENT_BYTES ||
+    signature.length > MAX_RUNNER_TOKEN_SEGMENT_BYTES ||
+    !/^[A-Za-z0-9_-]+$/.test(payload) ||
+    !/^[A-Za-z0-9_-]+$/.test(signature)
+  ) {
     return null;
   }
   return { payload, signature };

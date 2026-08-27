@@ -11,6 +11,10 @@ const incidentUrl = new URL(
   "../docs/security/incident-response.md",
   import.meta.url
 );
+const keyRotationUrl = new URL(
+  "../docs/security/key-rotation.md",
+  import.meta.url
+);
 
 test("the execution threat model covers every required security surface", () => {
   assert.equal(existsSync(threatModelUrl), true);
@@ -127,4 +131,20 @@ test("the README points to the incident runbooks", () => {
     readme,
     /\[Security incident response\]\(docs\/security\/incident-response\.md\)/
   );
+});
+
+test("the runner key runbook documents bounded rotation and rollback", () => {
+  assert.equal(existsSync(keyRotationUrl), true);
+  const runbook = readFileSync(keyRotationUrl, "utf8");
+
+  for (const marker of [
+    "RUNNER_SIGNING_KEY_ID",
+    "RUNNER_VERIFY_KEY_ID",
+    "RUNNER_VERIFY_PREVIOUS_RETIRE_AT",
+    "15 minutes plus",
+    "Rollback",
+    "never commit or log",
+  ]) {
+    assert.match(runbook, new RegExp(marker.replaceAll("*", "\\*")));
+  }
 });
