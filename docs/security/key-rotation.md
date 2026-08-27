@@ -89,9 +89,10 @@ key material is never logged.
    have both passed.
 2. After every old reader and writer has drained, set
    `CREDENTIAL_AAD_WRITES_ENABLED=true` and deploy. New credential writes and
-   OAuth refreshes now produce `aadVersion=1`. Old code cannot read AAD-bound
-   ciphertext, so do not open this gate before the drain is verified. Then
-   bind legacy rows in resumable batches:
+   OAuth refreshes and encrypted idempotency responses now produce
+   `aadVersion=1`. Old code cannot read AAD-bound ciphertext, so do not open
+   this gate before the drain is verified. Then bind legacy credential rows in
+   resumable batches:
 
    ```bash
    pnpm credentials:rewrap bind-aad --batch 100

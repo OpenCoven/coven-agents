@@ -63,27 +63,65 @@ test("encrypted responses cannot be replayed for another owner", async () => {
 });
 
 test("encrypted responses bind the idempotency key and route with AAD", async () => {
+  const previous = process.env.CREDENTIAL_AAD_WRITES_ENABLED;
+  process.env.CREDENTIAL_AAD_WRITES_ENABLED = "true";
   const kek = await generateKek();
   const storage = encryptedIdempotencyResponseStorage(
     () => Promise.resolve(kek),
     () => Promise.resolve("v2")
   );
-  const stored = await storage.store(
-    { deviceCode: "device-code-sensitive" },
-    {
-      ...CONTEXT,
-      keyHash: "key-hash-a",
+  try {
+    const stored = await storage.store(
+      { deviceCode: "device-code-sensitive" },
+      {
+        ...CONTEXT,
+        keyHash: "key-hash-a",
+      }
+    );
+
+    assert.equal(stored.kind, "encrypted_json");
+    if (stored.kind !== "encrypted_json") {
+      throw new Error("expected encrypted envelope");
     }
+    assert.equal(stored.payload.aadVersion, 1);
+    await assert.rejects(
+      storage.replay(stored, { ...CONTEXT, keyHash: "key-hash-b" })
+    );
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CREDENTIAL_AAD_WRITES_ENABLED;
+    } else {
+      process.env.CREDENTIAL_AAD_WRITES_ENABLED = previous;
+    }
+  }
+});
+
+test("encrypted response writes remain legacy-compatible until the AAD gate opens", async () => {
+  const previous = process.env.CREDENTIAL_AAD_WRITES_ENABLED;
+  delete process.env.CREDENTIAL_AAD_WRITES_ENABLED;
+  const kek = await generateKek();
+  const storage = encryptedIdempotencyResponseStorage(
+    () => Promise.resolve(kek),
+    () => Promise.resolve("v1")
   );
 
-  assert.equal(stored.kind, "encrypted_json");
-  if (stored.kind !== "encrypted_json") {
-    throw new Error("expected encrypted envelope");
+  try {
+    const stored = await storage.store({ status: "pending" }, CONTEXT);
+    assert.equal(stored.kind, "encrypted_json");
+    if (stored.kind !== "encrypted_json") {
+      throw new Error("expected encrypted envelope");
+    }
+    assert.equal(stored.payload.aadVersion, 0);
+    assert.deepEqual(await storage.replay(stored, CONTEXT), {
+      status: "pending",
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CREDENTIAL_AAD_WRITES_ENABLED;
+    } else {
+      process.env.CREDENTIAL_AAD_WRITES_ENABLED = previous;
+    }
   }
-  assert.equal(stored.payload.aadVersion, 1);
-  await assert.rejects(
-    storage.replay(stored, { ...CONTEXT, keyHash: "key-hash-b" })
-  );
 });
 
 test("encrypted responses replay with the envelope's KEK after rotation", async () => {

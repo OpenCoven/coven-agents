@@ -1,3 +1,4 @@
+import { envelopeAadContextForWrite } from "../credentials/aad-policy";
 import {
   decryptCredential,
   encryptCredential,
@@ -163,12 +164,17 @@ export function encryptedIdempotencyResponseStorage(
       const key = await kek(version);
       return {
         kind: "encrypted_json",
-        payload: await encryptCredential(plaintext, key, version, {
-          keyHash: context.keyHash,
-          kind: "idempotency",
-          operation: context.operation,
-          ownerId: context.ownerId,
-        }),
+        payload: await encryptCredential(
+          plaintext,
+          key,
+          version,
+          envelopeAadContextForWrite({
+            keyHash: context.keyHash,
+            kind: "idempotency",
+            operation: context.operation,
+            ownerId: context.ownerId,
+          })
+        ),
       };
     },
   };
