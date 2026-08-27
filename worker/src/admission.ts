@@ -1967,13 +1967,38 @@ export class RunAdmission extends DurableObject<Env> {
       if (repair && !(await repair.call(agent))) {
         return "running";
       }
-      const run = await agent.getRun(record.runId);
+      let run = await agent.getRun(record.runId);
       const current = this.findByRunId(record.runId);
       if (current?.state !== "active") {
         return "terminal";
       }
       if (!this.dispatchTokenMatches(record.runId, record.dispatchToken)) {
         return "ambiguous";
+      }
+      const ensureFiber = (
+        agent as unknown as {
+          ensureAdmittedFiber?: (
+            runId: string,
+            dispatchToken: string,
+            capability: AdmissionCleanupCapability
+          ) => Promise<boolean>;
+        }
+      ).ensureAdmittedFiber;
+      if (ensureFiber && record.dispatchToken) {
+        const ensured = await ensureFiber.call(
+          agent,
+          record.runId,
+          record.dispatchToken,
+          cleanupCapability(record)
+        );
+        if (ensured) {
+          run = await agent.getRun(record.runId);
+        } else {
+          run = await agent.getRun(record.runId);
+          if (!run || !isTerminal(run.status)) {
+            return "ambiguous";
+          }
+        }
       }
       const leaseUntil = this.dispatchLeaseUntil(record.runId);
       const leaseExpired = leaseUntil === null || leaseUntil <= Date.now();

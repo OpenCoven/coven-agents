@@ -25,6 +25,7 @@ import {
   AgentDecommissioningError,
   AlreadyRunningError,
   type CloudRunRecord,
+  cloudFiberKey,
   finishCloudRunRecord,
   OperationConflictError,
 } from "./run-state";
@@ -231,6 +232,89 @@ test("an orphaned enqueue is durably cleaned after its preparation deadline", as
   assert.deepEqual(destroyedSandboxes(), []);
 });
 
+test("an expired accepted admission releases its exact capability before discard", async () => {
+  resetFiberLog();
+  fiberControl.runFibers = false;
+  const released: unknown[] = [];
+  const runId = "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a30";
+  const capability = {
+    admissionSequence: 19,
+    agentId: AGENT_ID,
+    dispatchToken: "19:expired",
+    operationId: OP_A,
+    requestHash: "expired-capability-hash",
+    runId,
+  };
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          getRecord: () =>
+            Promise.resolve({
+              agentId: AGENT_ID,
+              operationId: OP_A,
+              requestHash: capability.requestHash,
+              runId,
+              state: "active" as const,
+            }),
+          release: (
+            releasedRunId: string,
+            dispatchToken?: string,
+            admissionSequence?: number
+          ) => {
+            released.push({
+              admissionSequence,
+              dispatchToken,
+              runId: releasedRunId,
+            });
+            return Promise.resolve(true);
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+  const prepared = await yolo.enqueue(
+    { operationId: OP_A, task: "Expire accepted provisional work." },
+    runId,
+    capability.requestHash,
+    "identity"
+  );
+  const state = Reflect.get(yolo, "state") as { runs: CloudRunRecord[] };
+  yolo.setState({
+    ...state,
+    runs: state.runs.map((candidate) =>
+      candidate.run.id === runId
+        ? {
+            ...candidate,
+            admissionCapability: capability,
+            pendingAdmission: {
+              ...candidate.pendingAdmission,
+              admissionCapability: capability,
+              deadlineAt: Date.now() - 1,
+            },
+          }
+        : candidate
+    ),
+  } as never);
+
+  assert.equal(await yolo.expirePendingAdmission(), true);
+  assert.deepEqual(released, [
+    {
+      admissionSequence: capability.admissionSequence,
+      dispatchToken: capability.dispatchToken,
+      runId,
+    },
+  ]);
+  assert.equal(yolo.getRun(runId), null);
+  assert.equal(
+    (await yolo.confirmAdmission(runId, OP_A, capability.requestHash)).kind,
+    "nonterminal"
+  );
+  assert.equal(prepared.created, true);
+});
+
 test("only the provisional run creator can discard it, and confirmation clears ownership", async () => {
   const yolo = agent();
   const prepared = await yolo.enqueue(
@@ -249,9 +333,9 @@ test("only the provisional run creator can discard it, and confirmation clears o
   );
   assert.ok(yolo.getRun(prepared.run.id));
 
-  assert.equal(
+  assert.deepEqual(
     await yolo.confirmAdmission(prepared.run.id, OP_A, "prepare-owner-hash"),
-    true
+    { kind: "confirmed" }
   );
   const state = Reflect.get(yolo, "state") as {
     runs: CloudRunRecord[];
@@ -314,13 +398,13 @@ test("admission confirmation atomically wins the orphan timeout and rejects fore
     "identity"
   );
 
-  assert.equal(
+  assert.deepEqual(
     await yolo.confirmAdmission(queued.run.id, OP_B, "wrong-hash"),
-    false
+    { kind: "nonterminal" }
   );
-  assert.equal(
+  assert.deepEqual(
     await yolo.confirmAdmission(queued.run.id, OP_A, "attach-hash"),
-    true
+    { kind: "confirmed" }
   );
   assert.deepEqual(cancelled, ["pending-admission-2"]);
   const state = Reflect.get(yolo, "state") as {
@@ -438,7 +522,7 @@ test("stale admission confirmation cannot resurrect a decommissioned run", async
     })
   );
 
-  assert.equal(await confirmation, false);
+  assert.deepEqual(await confirmation, { kind: "lifecycle_pending" });
   assert.equal(yolo.getRun(queued.run.id), null);
 });
 
@@ -497,7 +581,7 @@ test("stale admission confirmation cannot resurrect an orphan timed out during l
     })
   );
 
-  assert.equal(await confirmation, false);
+  assert.equal((await confirmation).kind, "stale_provisional");
   assert.equal(yolo.getRun(queued.run.id), null);
 });
 
@@ -1319,6 +1403,87 @@ test("an already accepted fiber is not reported as a second admission", async ()
   );
   assert.equal(yolo.getRun(queued.run.id)?.status, "running");
   assert.equal(fiberLog.started.length, 0);
+});
+
+test("a persisted starting intent recovers the same fiber exactly once", async () => {
+  resetFiberLog();
+  fiberControl.runFibers = false;
+  const environment = {
+    ...admissionTestEnv(),
+    RUNNER_SERVICE_TOKEN: "runner-secret",
+  };
+  const first = new YoloAgent(undefined as never, environment as never);
+  first.configure(definition());
+  const prepared = await first.enqueue(
+    { operationId: OP_A, task: "Recover before fiber acceptance." },
+    "8f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c96",
+    "hash-dispatch-intent",
+    "identity"
+  );
+  const record = first.getRun(prepared.run.id);
+  assert.ok(record);
+  const { claimRunStart } = first as unknown as {
+    claimRunStart: (planned: CloudRunRecord) => CloudRunRecord;
+  };
+  const firstState = Reflect.get(first, "state") as {
+    runs: CloudRunRecord[];
+  };
+  const tokenized = firstState.runs.map((candidate) =>
+    candidate.run.id === prepared.run.id
+      ? { ...candidate, dispatchToken: "1:dispatch-intent" }
+      : candidate
+  );
+  first.setState({ ...firstState, runs: tokenized } as never);
+  claimRunStart.call(
+    first,
+    tokenized.find(
+      (candidate) => candidate.run.id === prepared.run.id
+    ) as CloudRunRecord
+  );
+  const persisted = structuredClone(
+    Reflect.get(first, "state") as Record<string, unknown>
+  );
+  const recovered = new YoloAgent(undefined as never, environment as never);
+  recovered.setState(persisted as never);
+  const recoveredState = Reflect.get(recovered, "state") as {
+    dispatchIntents?: Record<
+      string,
+      { fiberKey: string; phase: string; dispatchToken?: string }
+    >;
+  };
+  assert.deepEqual(recoveredState.dispatchIntents?.[prepared.run.id], {
+    dispatchToken: "1:dispatch-intent",
+    fiberKey: cloudFiberKey(prepared.run.id),
+    phase: "starting",
+  });
+
+  assert.equal(
+    await recovered.ensureAdmittedFiber(prepared.run.id, "1:dispatch-intent"),
+    true
+  );
+  assert.deepEqual(fiberLog.started, [
+    {
+      key: cloudFiberKey(prepared.run.id),
+      name: cloudFiberKey(prepared.run.id),
+    },
+  ]);
+  assert.equal(
+    (
+      Reflect.get(recovered, "state") as {
+        dispatchIntents: Record<string, { phase: string }>;
+      }
+    ).dispatchIntents[prepared.run.id]?.phase,
+    "fiber_started"
+  );
+  assert.equal(
+    await recovered.ensureAdmittedFiber(prepared.run.id, "1:dispatch-intent"),
+    true
+  );
+  assert.equal(
+    fiberLog.started.filter(({ key }) => key === cloudFiberKey(prepared.run.id))
+      .length,
+    1
+  );
 });
 
 test("a recovered admitted fiber fails once, releases capacity, and permits the next run", async () => {
@@ -3404,6 +3569,26 @@ test("unregistering a run is ownership guarded and idempotent", () => {
   assert.equal(index.lookupRun(OP_A), null);
 });
 
+test("a stale pending unregister cannot delete a newer registration", () => {
+  const index = directory();
+  index.registerRun(OP_A, AGENT_ID);
+  const firstSequence = index.getRunRegistrationSequence(OP_A, AGENT_ID);
+  assert.ok(firstSequence);
+
+  index.enqueueRunMappingCleanup(OP_A, AGENT_ID, firstSequence);
+  index.registerRun(OP_A, AGENT_ID);
+  const secondSequence = index.getRunRegistrationSequence(OP_A, AGENT_ID);
+  assert.ok(secondSequence);
+  assert.notEqual(secondSequence, firstSequence);
+
+  index.enqueueRunMappingCleanup(OP_A, AGENT_ID, firstSequence);
+  index.list("acct_1");
+
+  assert.equal(index.lookupRun(OP_A), AGENT_ID);
+  assert.equal(index.unregisterRun(OP_A, AGENT_ID, firstSequence), false);
+  assert.equal(index.unregisterRun(OP_A, AGENT_ID, secondSequence), true);
+});
+
 test("removing an agent drops its runs from the index", () => {
   // A leftover entry would resolve a stale run id to an agent that no longer
   // exists, and the run route would address an empty Durable Object.
@@ -3548,11 +3733,17 @@ test("removing an agent preserves unrelated pending cleanup and run ordering", (
   index.remove(AGENT_ID);
 
   const state = Reflect.get(index, "state") as {
-    pendingUnregisters?: Record<string, string>;
+    pendingUnregisters?: Record<
+      string,
+      string | { agentId: string; expectedSequence?: number }
+    >;
     runs?: Record<string, string>;
     runRegistrations?: Record<string, unknown>;
   };
-  assert.equal(state.pendingUnregisters?.["pending-a"], "other-agent");
+  assert.deepEqual(state.pendingUnregisters?.["pending-a"], {
+    agentId: "other-agent",
+    expectedSequence: 0,
+  });
   assert.equal(state.runs?.["unrelated-run"], "other-agent");
   assert.ok(state.runRegistrations?.["unrelated-run"]);
 });

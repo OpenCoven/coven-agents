@@ -42,6 +42,29 @@ export type AdmissionCleanupGuard = AdmissionCleanupCapability & {
   queuedOnly?: boolean;
 };
 
+export type AdmissionConfirmationOutcome =
+  | { kind: "confirmed" }
+  | {
+      admissionCapability?: AdmissionCleanupCapability;
+      kind: "stale_provisional";
+      prepareOwner?: string;
+    }
+  | { kind: "lifecycle_pending" }
+  | { kind: "nonterminal" }
+  | { kind: "terminal" }
+  | {
+      admissionCapability?: AdmissionCleanupCapability;
+      kind: "expired";
+      prepareOwner?: string;
+    };
+
+export type AdmissionDispatchIntent = {
+  admissionSequence?: number;
+  fiberKey: string;
+  phase: "starting" | "fiber_started";
+  dispatchToken?: string;
+};
+
 export type CloudRunRecord = {
   /**
    * Admission's fencing token is internal coordination state. It is kept
@@ -54,7 +77,9 @@ export type CloudRunRecord = {
   admissionConfirmedAt?: string;
   admissionCapability?: AdmissionCleanupCapability;
   pendingAdmission?: {
+    admissionCapability?: AdmissionCleanupCapability;
     deadlineAt: number;
+    expiryClaim?: string;
     prepareOwner?: string;
     scheduleGeneration?: number;
     scheduleId?: string;

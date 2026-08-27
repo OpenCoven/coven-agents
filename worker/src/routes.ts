@@ -35,6 +35,7 @@ import { importVerifyKey, verifyRunnerToken } from "./identity.js";
 import {
   type AdmissionCleanupCapability,
   type AdmissionCleanupGuard,
+  type AdmissionConfirmationOutcome,
   AgentBusyError,
   AgentDecommissioningError,
   AlreadyRunningError,
@@ -97,8 +98,13 @@ export type CloudRunnerDirectory = {
   ) => Awaitable<boolean>;
   unregisterRun: (
     runId: string,
-    agentId: string
+    agentId: string,
+    expectedSequence?: number
   ) => Awaitable<boolean | undefined>;
+  getRunRegistrationSequence?: (
+    runId: string,
+    agentId: string
+  ) => Awaitable<number | undefined>;
   markRunStatus?: (
     runId: string,
     agentId: string,
@@ -106,7 +112,8 @@ export type CloudRunnerDirectory = {
   ) => Awaitable<boolean | undefined>;
   enqueueRunMappingCleanup?: (
     runId: string,
-    agentId: string
+    agentId: string,
+    expectedSequence?: number
   ) => Awaitable<void>;
   remove: (agentId: string) => Awaitable<void>;
   upsert: (definition: AgentDefinition) => Awaitable<AgentDefinition>;
@@ -120,7 +127,7 @@ export type CloudRunnerAgent = {
     operationId: string,
     requestHash: string,
     capability?: AdmissionCleanupCapability | null
-  ) => Awaitable<boolean>;
+  ) => Awaitable<AdmissionConfirmationOutcome>;
   ensurePendingAdmissionCleanup?: (runId: string) => Awaitable<boolean>;
   prepareOwnerMatches?: (
     runId: string,
@@ -390,14 +397,47 @@ async function cleanupRun(
     }
   }
   if (admission && safeToRelease) {
-    const released = await attempt(() =>
-      admission.release(
-        runId,
-        admissionCapability?.dispatchToken,
-        admissionCapability?.admissionSequence
-      )
-    );
-    if (!released.ok && admission.enqueueCleanup) {
+    let exactCapability = admissionCapability;
+    if (
+      !exactCapability &&
+      admission.getRecord &&
+      admission.getCleanupCapability
+    ) {
+      const recordResult = await attempt(() => admission.getRecord?.(runId));
+      const record =
+        recordResult.ok && recordResult.value
+          ? (recordResult.value as AdmissionRecord)
+          : null;
+      if (record && record.agentId === agentId) {
+        const capability = await attempt(() =>
+          admission.getCleanupCapability?.(runId, {
+            agentId: record.agentId,
+            operationId: record.operationId,
+            requestHash: record.requestHash,
+            runId: record.runId,
+          })
+        );
+        if (capability.ok) {
+          exactCapability =
+            (capability.value as AdmissionCleanupCapability | null) ??
+            undefined;
+        }
+      }
+    }
+    if (exactCapability) {
+      const released = await attempt(() =>
+        admission.release(
+          runId,
+          exactCapability?.dispatchToken,
+          exactCapability?.admissionSequence
+        )
+      );
+      if (!released.ok && admission.enqueueCleanup) {
+        await attempt(() =>
+          admission.enqueueCleanup?.(agentId, runId, exactCapability)
+        );
+      }
+    } else if (admission.enqueueCleanup) {
       await attempt(() =>
         admission.enqueueCleanup?.(agentId, runId, admissionCapability)
       );
@@ -444,17 +484,30 @@ async function markDirectoryRunStatus(
 async function compensateDirectoryRunMapping(
   directory: CloudRunnerDirectory,
   runId: string,
-  agentId: string
+  agentId: string,
+  expectedSequence?: number
 ): Promise<void> {
   try {
-    const unregistered = await directory.unregisterRun(runId, agentId);
+    const unregistered = await directory.unregisterRun(
+      runId,
+      agentId,
+      expectedSequence
+    );
     if (unregistered === false && directory.enqueueRunMappingCleanup) {
-      await directory.enqueueRunMappingCleanup(runId, agentId);
+      await directory.enqueueRunMappingCleanup(
+        runId,
+        agentId,
+        expectedSequence
+      );
     }
   } catch {
     if (directory.enqueueRunMappingCleanup) {
       try {
-        await directory.enqueueRunMappingCleanup(runId, agentId);
+        await directory.enqueueRunMappingCleanup(
+          runId,
+          agentId,
+          expectedSequence
+        );
       } catch {
         // Preserve the original registration failure.
       }
@@ -467,6 +520,7 @@ async function registerExistingRunMapping(
   run: RunSnapshot,
   agentId: string
 ): Promise<void> {
+  let expectedSequence: number | undefined;
   try {
     const registered = await directory.registerRun(
       run.id,
@@ -476,11 +530,19 @@ async function registerExistingRunMapping(
     if (registered !== true) {
       throw new Error("Run directory registration was ambiguous.");
     }
+    expectedSequence = directory.getRunRegistrationSequence
+      ? await directory.getRunRegistrationSequence(run.id, agentId)
+      : undefined;
     if ((await markDirectoryRunStatus(directory, run, agentId)) === false) {
       throw new Error("Run directory status update was ambiguous.");
     }
   } catch (error) {
-    await compensateDirectoryRunMapping(directory, run.id, agentId);
+    await compensateDirectoryRunMapping(
+      directory,
+      run.id,
+      agentId,
+      expectedSequence
+    );
     throw error;
   }
 }
@@ -489,12 +551,46 @@ async function releaseTerminalAdmission(
   directory: CloudRunnerDirectory,
   run: RunSnapshot,
   agentId: string,
-  admission?: CloudRunnerAdmission
+  admission?: CloudRunnerAdmission,
+  admissionCapability?: AdmissionCleanupCapability
 ): Promise<void> {
   let releaseError: unknown;
   try {
     if (admission) {
-      await admission.release(run.id);
+      let capability = admissionCapability;
+      if (
+        !capability &&
+        admission.getRecord &&
+        admission.getCleanupCapability
+      ) {
+        const record = await admission.getRecord(run.id);
+        if (
+          record &&
+          record.agentId === agentId &&
+          record.operationId === run.operationId &&
+          record.runId === run.id
+        ) {
+          capability =
+            (await admission.getCleanupCapability(run.id, {
+              agentId: record.agentId,
+              operationId: record.operationId,
+              requestHash: record.requestHash,
+              runId: record.runId,
+            })) ?? undefined;
+        }
+      }
+      if (capability) {
+        const released = await admission.release(
+          run.id,
+          capability.dispatchToken,
+          capability.admissionSequence
+        );
+        if (!released && admission.enqueueCleanup) {
+          await admission.enqueueCleanup(agentId, run.id, capability);
+        }
+      } else if (admission.enqueueCleanup) {
+        await admission.enqueueCleanup(agentId, run.id);
+      }
     }
   } catch (error) {
     releaseError = error;
@@ -510,6 +606,38 @@ async function releaseTerminalAdmission(
   if (releaseError) {
     throw releaseError;
   }
+}
+
+async function releaseAdmissionRecord(
+  admission: CloudRunnerAdmission,
+  record: AdmissionRecord,
+  capability?: AdmissionCleanupCapability | null
+): Promise<boolean> {
+  const exact =
+    capability ??
+    (admission.getCleanupCapability
+      ? await admission.getCleanupCapability(record.runId, {
+          agentId: record.agentId,
+          operationId: record.operationId,
+          requestHash: record.requestHash,
+          runId: record.runId,
+        })
+      : null);
+  if (!exact) {
+    if (admission.enqueueCleanup) {
+      await admission.enqueueCleanup(record.agentId, record.runId);
+    }
+    return false;
+  }
+  const released = await admission.release(
+    record.runId,
+    exact.dispatchToken,
+    exact.admissionSequence
+  );
+  if (!released && admission.enqueueCleanup) {
+    await admission.enqueueCleanup(record.agentId, record.runId, exact);
+  }
+  return released;
 }
 
 /**
@@ -1102,7 +1230,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 await registerExistingRunMapping(directory, prepared.run, id);
                 if (terminalAdmission && stale) {
                   try {
-                    await terminalAdmission.release(stale.runId);
+                    await releaseAdmissionRecord(terminalAdmission, stale);
                   } catch (error) {
                     if (
                       error instanceof AdmissionUnavailableError ||
@@ -1230,13 +1358,13 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                         }
                       )
                     : null;
-                  const confirmed = await originalAgent.confirmAdmission(
+                  const confirmation = await originalAgent.confirmAdmission(
                     original.id,
                     original.operationId,
                     requestHash,
                     capability
                   );
-                  if (!confirmed) {
+                  if (confirmation.kind !== "confirmed") {
                     const latest = await originalAgent.getRun(original.id);
                     if (latest && isTerminal(latest.status)) {
                       await registerExistingRunMapping(directory, latest, id);
@@ -1255,7 +1383,28 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                         cors
                       );
                     }
-                    await existingAdmission.release(admissionRecord.runId);
+                    if (
+                      confirmation.kind === "stale_provisional" ||
+                      confirmation.kind === "expired"
+                    ) {
+                      const cleanupError = await cleanupRun(
+                        originalAgent,
+                        original.id,
+                        id,
+                        {
+                          admission: existingAdmission,
+                          admissionCapability:
+                            confirmation.admissionCapability ??
+                            capability ??
+                            undefined,
+                          prepareOwner: confirmation.prepareOwner,
+                          stopFirst: true,
+                        }
+                      );
+                      if (cleanupError) {
+                        throw cleanupError;
+                      }
+                    }
                     return busyResponse("global_busy", cors);
                   }
                   const latest = await originalAgent.getRun(original.id);
@@ -1467,13 +1616,13 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                         }
                       )
                     : null);
-                const confirmed = await originalAgent.confirmAdmission(
+                const confirmation = await originalAgent.confirmAdmission(
                   original.id,
                   original.operationId,
                   requestHash,
                   capability
                 );
-                if (!confirmed) {
+                if (confirmation.kind !== "confirmed") {
                   const latest = await originalAgent.getRun(original.id);
                   if (latest && isTerminal(latest.status)) {
                     await registerExistingRunMapping(
@@ -1496,7 +1645,28 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                       cors
                     );
                   }
-                  await admission.release(duplicateAdmission.runId);
+                  if (
+                    confirmation.kind === "stale_provisional" ||
+                    confirmation.kind === "expired"
+                  ) {
+                    const cleanupError = await cleanupRun(
+                      originalAgent,
+                      original.id,
+                      id,
+                      {
+                        admission,
+                        admissionCapability:
+                          confirmation.admissionCapability ??
+                          capability ??
+                          undefined,
+                        prepareOwner: confirmation.prepareOwner,
+                        stopFirst: true,
+                      }
+                    );
+                    if (cleanupError) {
+                      throw cleanupError;
+                    }
+                  }
                   return busyResponse("global_busy", cors);
                 }
                 const latest = await originalAgent.getRun(original.id);
@@ -1545,6 +1715,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
 
             let admissionCapability: AdmissionCleanupCapability | null =
               decision.admissionCapability ?? null;
+            let registrationSequence: number | undefined;
             try {
               if (!admissionCapability && admission.getCleanupCapability) {
                 admissionCapability = await admission.getCleanupCapability(
@@ -1558,13 +1729,13 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 );
               }
               if (agent.confirmAdmission) {
-                const confirmed = await agent.confirmAdmission(
+                const confirmation = await agent.confirmAdmission(
                   runId,
                   input.operationId,
                   requestHash,
                   admissionCapability
                 );
-                if (!confirmed) {
+                if (confirmation.kind !== "confirmed") {
                   const terminal = await agent.getRun(runId);
                   if (terminal && isTerminal(terminal.status)) {
                     await releaseTerminalAdmission(
@@ -1582,12 +1753,21 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                       cors
                     );
                   }
-                  await cleanupRun(agent, runId, id, {
-                    admission,
-                    admissionCapability: admissionCapability ?? undefined,
-                    prepareOwner: prepared.prepareOwner,
-                    stopFirst: true,
-                  });
+                  if (
+                    confirmation.kind === "stale_provisional" ||
+                    confirmation.kind === "expired"
+                  ) {
+                    await cleanupRun(agent, runId, id, {
+                      admission,
+                      admissionCapability:
+                        confirmation.admissionCapability ??
+                        admissionCapability ??
+                        undefined,
+                      prepareOwner:
+                        confirmation.prepareOwner ?? prepared.prepareOwner,
+                      stopFirst: true,
+                    });
+                  }
                   return busyResponse("global_busy", cors);
                 }
               }
@@ -1605,6 +1785,9 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               if (registered !== true) {
                 throw new Error("Run directory registration was ambiguous.");
               }
+              registrationSequence = directory.getRunRegistrationSequence
+                ? await directory.getRunRegistrationSequence(runId, id)
+                : undefined;
               const admittedRun = await agent.getRun(runId);
               if (!admittedRun) {
                 throw new Error("Admitted run disappeared after registration.");
@@ -1628,17 +1811,29 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               );
             } catch (error) {
               try {
-                const unregistered = await directory.unregisterRun(runId, id);
+                const unregistered = await directory.unregisterRun(
+                  runId,
+                  id,
+                  registrationSequence
+                );
                 if (
                   unregistered === false &&
                   directory.enqueueRunMappingCleanup
                 ) {
-                  await directory.enqueueRunMappingCleanup(runId, id);
+                  await directory.enqueueRunMappingCleanup(
+                    runId,
+                    id,
+                    registrationSequence
+                  );
                 }
               } catch {
                 if (directory.enqueueRunMappingCleanup) {
                   try {
-                    await directory.enqueueRunMappingCleanup(runId, id);
+                    await directory.enqueueRunMappingCleanup(
+                      runId,
+                      id,
+                      registrationSequence
+                    );
                   } catch {
                     // Preserve the original request failure.
                   }

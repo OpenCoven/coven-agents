@@ -32,6 +32,8 @@ import {
 import {
   type AdmissionCleanupCapability,
   type AdmissionCleanupGuard,
+  type AdmissionConfirmationOutcome,
+  type AdmissionDispatchIntent,
   AgentBusyError,
   AgentDecommissioningError,
   AlreadyRunningError,
@@ -67,7 +69,7 @@ type DirectoryState = {
   runRegistrations?: Record<string, RunRegistration>;
   nextRunRegistrationSequence?: number;
   pendingRunStatuses?: Record<string, RunRegistration>;
-  pendingUnregisters?: Record<string, string>;
+  pendingUnregisters?: Record<string, PendingUnregister | string>;
 };
 
 type RunRegistrationStatus = "active" | "queued" | "terminal" | "unknown";
@@ -78,11 +80,22 @@ type RunRegistration = {
   status: RunRegistrationStatus;
 };
 
+type PendingUnregister = {
+  agentId: string;
+  expectedSequence?: number;
+};
+
 type DirectoryRunMappings = {
   nextSequence: number;
   registrations: Record<string, RunRegistration>;
   runs: Record<string, string>;
 };
+
+function normalizePendingUnregister(
+  pending: PendingUnregister | string
+): PendingUnregister {
+  return typeof pending === "string" ? { agentId: pending } : pending;
+}
 
 type AdmissionFence = {
   cancelled?: boolean;
@@ -131,6 +144,7 @@ type DecommissionSaga = {
 type YoloAgentState = {
   admissionFences?: Record<string, AdmissionFence | string[]>;
   admissionTokens?: Record<string, string>;
+  dispatchIntents?: Record<string, AdmissionDispatchIntent>;
   decommission?: DecommissionSaga;
   dispatchClaims?: Record<string, string>;
   definition: AgentDefinition | null;
@@ -329,7 +343,7 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
     );
     const pendingUnregisters = Object.fromEntries(
       Object.entries(this.state.pendingUnregisters ?? {}).filter(
-        ([, owner]) => owner !== agentId
+        ([, pending]) => normalizePendingUnregister(pending).agentId !== agentId
       )
     );
     const pendingRunStatuses = Object.fromEntries(
@@ -375,7 +389,8 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
       const registrations = {
         ...mappings.registrations,
         [runId]: {
-          ...mappings.registrations[runId],
+          agentId,
+          sequence: mappings.nextSequence,
           status: effectiveStatus,
         },
       };
@@ -383,10 +398,16 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
         ...(this.state.pendingRunStatuses ?? {}),
       };
       delete pendingRunStatuses[runId];
+      const pendingUnregisters = {
+        ...(this.state.pendingUnregisters ?? {}),
+      };
+      delete pendingUnregisters[runId];
       const pruned = this.pruneRunMappings(runs, registrations);
       this.setState({
         ...this.state,
+        nextRunRegistrationSequence: mappings.nextSequence + 1,
         pendingRunStatuses,
+        pendingUnregisters,
         runRegistrations: pruned.registrations,
         runs: pruned.runs,
       });
@@ -406,7 +427,7 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
         ...mappings.registrations,
         [runId]: {
           agentId,
-          sequence: legacy.sequence,
+          sequence: mappings.nextSequence,
           status: effectiveStatus,
         },
       };
@@ -420,13 +441,15 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
         ...(this.state.pendingRunStatuses ?? {}),
       };
       delete pendingRunStatuses[runId];
+      const pendingUnregisters = {
+        ...(this.state.pendingUnregisters ?? {}),
+      };
+      delete pendingUnregisters[runId];
       this.setState({
         ...this.state,
-        nextRunRegistrationSequence: Math.max(
-          this.state.nextRunRegistrationSequence ?? 1,
-          legacy.sequence + 1
-        ),
+        nextRunRegistrationSequence: mappings.nextSequence + 1,
         pendingRunStatuses,
+        pendingUnregisters,
         runRegistrations: pruned.registrations,
         runs: pruned.runs,
       });
@@ -449,22 +472,37 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
       ...(this.state.pendingRunStatuses ?? {}),
     };
     delete pendingRunStatuses[runId];
+    const pendingUnregisters = {
+      ...(this.state.pendingUnregisters ?? {}),
+    };
+    delete pendingUnregisters[runId];
     const pruned = this.pruneRunMappings(runs, registrations);
     this.setState({
       ...this.state,
       nextRunRegistrationSequence: mappings.nextSequence + 1,
       pendingRunStatuses,
+      pendingUnregisters,
       runRegistrations: pruned.registrations,
       runs: { ...pruned.runs, [runId]: agentId },
     });
     return true;
   }
 
-  unregisterRun(runId: string, agentId: string): boolean {
-    this.drainPendingUnregisters();
+  unregisterRun(
+    runId: string,
+    agentId: string,
+    expectedSequence?: number
+  ): boolean {
     const mappings = this.migrateRunMappings();
     const { runs } = mappings;
     if (Object.hasOwn(runs, runId) && runs[runId] === agentId) {
+      const registration = mappings.registrations[runId];
+      if (
+        expectedSequence !== undefined &&
+        registration?.sequence !== expectedSequence
+      ) {
+        return false;
+      }
       const remaining = { ...runs };
       delete remaining[runId];
       const registrations = { ...mappings.registrations };
@@ -488,6 +526,12 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
     }
     const legacy = this.readLegacyRun(runId);
     if (!legacy || legacy.agentId !== agentId) {
+      return false;
+    }
+    if (
+      expectedSequence !== undefined &&
+      legacy.sequence !== expectedSequence
+    ) {
       return false;
     }
     this.directorySql(
@@ -597,13 +641,36 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
     return this.readLegacyRun(runId)?.agentId ?? null;
   }
 
-  enqueueRunMappingCleanup(runId: string, agentId: string): void {
-    this.migrateRunMappings();
+  getRunRegistrationSequence(
+    runId: string,
+    agentId: string
+  ): number | undefined {
+    const mappings = this.migrateRunMappings();
+    const registration =
+      mappings.registrations[runId] ?? this.readLegacyRun(runId) ?? undefined;
+    return registration?.agentId === agentId
+      ? registration.sequence
+      : undefined;
+  }
+
+  enqueueRunMappingCleanup(
+    runId: string,
+    agentId: string,
+    expectedSequence?: number
+  ): void {
+    const mappings = this.migrateRunMappings();
+    const legacy = this.readLegacyRun(runId);
+    const current = mappings.registrations[runId] ?? legacy;
     this.setState({
       ...this.state,
       pendingUnregisters: {
         ...(this.state.pendingUnregisters ?? {}),
-        [runId]: agentId,
+        [runId]: {
+          agentId,
+          expectedSequence:
+            expectedSequence ??
+            (current?.agentId === agentId ? current.sequence : 0),
+        },
       },
     });
   }
@@ -618,15 +685,21 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
     const runs = { ...mappings.runs };
     const registrations = { ...mappings.registrations };
     const remaining = { ...pending };
-    for (const [runId, agentId] of entries) {
-      if (runs[runId] === agentId) {
+    for (const [runId, pendingValue] of entries) {
+      const pendingEntry = normalizePendingUnregister(pendingValue);
+      const current = registrations[runId] ?? this.readLegacyRun(runId);
+      const expectedMatches =
+        current?.agentId === pendingEntry.agentId &&
+        (pendingEntry.expectedSequence === undefined ||
+          current.sequence === pendingEntry.expectedSequence);
+      if (runs[runId] === pendingEntry.agentId && expectedMatches) {
         delete runs[runId];
         delete registrations[runId];
+        this.directorySql(
+          "DELETE FROM agent_directory_legacy_runs WHERE run_id = ? AND agent_id = ?",
+          [runId, pendingEntry.agentId]
+        );
       }
-      this.directorySql(
-        "DELETE FROM agent_directory_legacy_runs WHERE run_id = ? AND agent_id = ?",
-        [runId, agentId]
-      );
       delete remaining[runId];
     }
     const pendingRunStatuses = {
@@ -960,6 +1033,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     admissionTokens: {},
     definition: null,
     dispatchClaims: {},
+    dispatchIntents: {},
     identityCapabilities: {},
     identityTokens: {},
     lifecycle: { generation: 0, status: "active" },
@@ -2480,18 +2554,35 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     operationId: string,
     requestHash: string,
     admissionCapability?: AdmissionCleanupCapability | null
-  ): Promise<boolean> {
+  ): Promise<AdmissionConfirmationOutcome> {
     const initial = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
     const lifecycleGeneration = this.currentLifecycle().generation;
+    const initialPending = initial?.pendingAdmission;
+    const initialCapability =
+      admissionCapability ??
+      initial?.admissionCapability ??
+      initialPending?.admissionCapability;
+    const cleanupOutcome = (
+      kind: "expired" | "stale_provisional"
+    ): AdmissionConfirmationOutcome => ({
+      ...(initialCapability ? { admissionCapability: initialCapability } : {}),
+      ...(initialPending?.prepareOwner
+        ? { prepareOwner: initialPending.prepareOwner }
+        : {}),
+      kind,
+    });
+    if (this.currentLifecycle().status !== "active") {
+      return { kind: "lifecycle_pending" };
+    }
     if (
       !initial ||
       initial.run.operationId !== operationId ||
       initial.operationHash !== requestHash ||
-      initial.run.agentId !== this.requireDefinition().id
+      initial.run.agentId !== this.state.definition?.id
     ) {
-      return false;
+      return { kind: "nonterminal" };
     }
     if (
       admissionCapability &&
@@ -2500,19 +2591,45 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         admissionCapability.operationId !== operationId ||
         admissionCapability.requestHash !== requestHash)
     ) {
-      return false;
+      return cleanupOutcome("stale_provisional");
+    }
+    if (admissionCapability) {
+      const mergedCapability = {
+        ...initial.admissionCapability,
+        ...admissionCapability,
+      };
+      this.persistRun({
+        ...initial,
+        admissionCapability: mergedCapability,
+        pendingAdmission: initialPending
+          ? { ...initialPending, admissionCapability: mergedCapability }
+          : initialPending,
+      });
     }
     if (isTerminal(initial.run.status)) {
-      await this.reportAdmissionTerminal(runId);
-      return true;
+      await this.reportAdmissionTerminal(
+        runId,
+        admissionCapability?.dispatchToken,
+        admissionCapability?.admissionSequence
+      );
+      return { kind: "terminal" };
     }
-    const pending = initial.pendingAdmission;
+    const pending =
+      this.state.runs.find((candidate) => candidate.run.id === runId)
+        ?.pendingAdmission ?? initialPending;
     const initialStatus = initial.run.status;
     let capability: AdmissionCleanupCapability | null | undefined =
-      admissionCapability === undefined
-        ? initial.admissionCapability
-        : admissionCapability;
-    if (!capability && pending && admissionCapability === undefined) {
+      admissionCapability ??
+      initial.admissionCapability ??
+      pending?.admissionCapability;
+    if (pending && pending.deadlineAt <= Date.now() && !pending.expiryClaim) {
+      return {
+        ...(capability ? { admissionCapability: capability } : {}),
+        ...(pending.prepareOwner ? { prepareOwner: pending.prepareOwner } : {}),
+        kind: "expired",
+      };
+    }
+    if (!capability && pending) {
       const runAdmission = (
         this.env as unknown as {
           RunAdmission?: {
@@ -2570,19 +2687,47 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (
       latestLifecycle.status !== "active" ||
       latestLifecycle.generation !== lifecycleGeneration ||
-      !latest ||
+      !latest
+    ) {
+      return latestLifecycle.status === "active"
+        ? cleanupOutcome("stale_provisional")
+        : { kind: "lifecycle_pending" };
+    }
+    if (
       latest.run.operationId !== operationId ||
       latest.operationHash !== requestHash ||
       latest.run.agentId !== initial.run.agentId ||
-      latest.run.status !== initialStatus ||
-      isTerminal(latest.run.status) ||
-      !pendingStillSame ||
-      (pending !== undefined &&
-        (latest.run.status !== "queued" ||
-          latestPending === undefined ||
-          latestPending.deadlineAt <= Date.now()))
+      latest.run.status !== initialStatus
     ) {
-      return false;
+      return isTerminal(latest.run.status)
+        ? { kind: "terminal" }
+        : { kind: "nonterminal" };
+    }
+    if (isTerminal(latest.run.status)) {
+      await this.reportAdmissionTerminal(
+        runId,
+        capability?.dispatchToken,
+        capability?.admissionSequence
+      );
+      return { kind: "terminal" };
+    }
+    if (!pendingStillSame) {
+      return cleanupOutcome("stale_provisional");
+    }
+    if (
+      pending !== undefined &&
+      (latest.run.status !== "queued" ||
+        latestPending === undefined ||
+        latestPending.deadlineAt <= Date.now() ||
+        latestPending.expiryClaim)
+    ) {
+      return {
+        ...(capability ? { admissionCapability: capability } : {}),
+        ...(latestPending?.prepareOwner
+          ? { prepareOwner: latestPending.prepareOwner }
+          : {}),
+        kind: "expired",
+      };
     }
     if (!capability) {
       throw new AdmissionUnavailableError(
@@ -2609,7 +2754,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           admissionCapability: mergedCapability,
         });
       }
-      return true;
+      return { kind: "confirmed" };
     }
     this.persistRun({
       ...latest,
@@ -2628,7 +2773,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (latestPending?.scheduleId) {
       await this.cancelPendingAdmissionSchedule(latestPending.scheduleId);
     }
-    return true;
+    return { kind: "confirmed" };
   }
 
   async expirePendingAdmission(
@@ -2676,6 +2821,24 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       return true;
     }
 
+    const expiryClaim = crypto.randomUUID();
+    this.persistRun({
+      ...current,
+      pendingAdmission: {
+        ...current.pendingAdmission,
+        expiryClaim,
+      },
+    });
+    current = this.state.runs.find(
+      (candidate) => candidate.run.id === current?.run.id
+    );
+    if (
+      !current?.pendingAdmission ||
+      current.pendingAdmission.expiryClaim !== expiryClaim
+    ) {
+      return true;
+    }
+
     let admissionRecord: {
       agentId: string;
       operationId: string;
@@ -2683,6 +2846,8 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       runId: string;
       state: "queued" | "active" | "terminal";
     } | null = null;
+    let capability: AdmissionCleanupCapability | null | undefined =
+      current.pendingAdmission.admissionCapability;
     let admission:
       | {
           getCleanupCapability?: (
@@ -2695,6 +2860,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           getRecord?: (
             admissionRunId: string
           ) => Promise<typeof admissionRecord>;
+          release?: (
+            admissionRunId: string,
+            dispatchToken?: string,
+            admissionSequence?: number
+          ) => Promise<boolean>;
         }
       | undefined;
     try {
@@ -2715,6 +2885,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       return false;
     }
     if (
+      !capability &&
       admissionRecord &&
       admissionRecord.state !== "terminal" &&
       admissionRecord.agentId === current.run.agentId &&
@@ -2722,11 +2893,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       admissionRecord.requestHash === current.operationHash &&
       admissionRecord.runId === current.run.id
     ) {
-      const admissionSource = admission;
-      let capability: AdmissionCleanupCapability | null = null;
       try {
-        capability = admissionSource?.getCleanupCapability
-          ? await admissionSource.getCleanupCapability(current.run.id, {
+        capability = admission?.getCleanupCapability
+          ? await admission.getCleanupCapability(current.run.id, {
               agentId: current.run.agentId,
               operationId: current.run.operationId,
               requestHash: current.operationHash,
@@ -2737,16 +2906,62 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         await this.schedulePendingAdmission(current.run.id);
         return false;
       }
-      if (!capability) {
-        await this.schedulePendingAdmission(current.run.id);
-        return false;
-      }
-      return await this.confirmAdmission(
-        current.run.id,
-        current.run.operationId,
-        current.operationHash,
-        capability
+    }
+    if (
+      admission &&
+      admissionRecord &&
+      admissionRecord.state !== "terminal" &&
+      (!capability || !admission.release)
+    ) {
+      await this.schedulePendingAdmission(current.run.id);
+      return false;
+    }
+
+    if (capability) {
+      const latest = this.state.runs.find(
+        (candidate) => candidate.run.id === current?.run.id
       );
+      if (
+        !latest?.pendingAdmission ||
+        latest.pendingAdmission.expiryClaim !== expiryClaim
+      ) {
+        return true;
+      }
+      current = latest;
+      const latestPending = current.pendingAdmission;
+      if (!latestPending) {
+        return true;
+      }
+      this.persistRun({
+        ...current,
+        admissionCapability: {
+          ...current.admissionCapability,
+          ...capability,
+        },
+        pendingAdmission: {
+          ...latestPending,
+          admissionCapability: {
+            ...latestPending.admissionCapability,
+            ...capability,
+          },
+        },
+      });
+      if (admission?.release) {
+        const released = await admission.release(
+          current.run.id,
+          capability.dispatchToken,
+          capability.admissionSequence
+        );
+        if (!released) {
+          const latestAdmission = admission.getRecord
+            ? await admission.getRecord(current.run.id)
+            : null;
+          if (latestAdmission?.state !== "terminal") {
+            await this.schedulePendingAdmission(current.run.id);
+            return false;
+          }
+        }
+      }
     }
 
     const latest = this.state.runs.find(
@@ -2763,10 +2978,26 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         latest.run.id,
         latest.pendingAdmission.prepareOwner
       );
-      if (discarded && pending.scheduleId) {
-        await this.cancelPendingAdmissionSchedule(pending.scheduleId);
+      if (discarded && latest.pendingAdmission.scheduleId) {
+        await this.cancelPendingAdmissionSchedule(
+          latest.pendingAdmission.scheduleId
+        );
       }
       return discarded;
+    }
+    if (capability) {
+      try {
+        const stopped = await this.stop(
+          latest?.run.id ?? current.run.id,
+          capability.dispatchToken,
+          "Run admission expired before confirmation.",
+          { ...capability, queuedOnly: false }
+        );
+        return stopped === null || isTerminal(stopped.status);
+      } catch {
+        await this.schedulePendingAdmission(current.run.id);
+        return false;
+      }
     }
     return true;
   }
@@ -2812,13 +3043,20 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       (candidate) => candidate.run.id === runId
     );
     if (admittedRecord) {
-      const confirmed = await this.confirmAdmission(
+      const confirmation = await this.confirmAdmission(
         runId,
         admittedRecord.run.operationId,
         admittedRecord.operationHash,
         admissionCapability
       );
-      if (!confirmed) {
+      if (confirmation.kind === "terminal") {
+        await this.reportAdmissionTerminal(runId, dispatchToken);
+        return true;
+      }
+      if (confirmation.kind === "expired") {
+        await this.expirePendingAdmission();
+      }
+      if (confirmation.kind !== "confirmed") {
         return false;
       }
       const afterConfirmation = this.state.runs.find(
@@ -2900,12 +3138,73 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     );
     const token = claimed.dispatchToken;
     await this.markDirectoryRunStatus(runId, "active");
+    return await this.startAdmittedFiber(
+      definition,
+      claimed,
+      identityToken,
+      token
+    );
+  }
+
+  async ensureAdmittedFiber(
+    runId: string,
+    dispatchToken: string,
+    _admissionCapability?: AdmissionCleanupCapability
+  ): Promise<boolean> {
+    const intent = this.state.dispatchIntents?.[runId];
+    if (intent?.phase !== "starting") {
+      return true;
+    }
+    if (intent.dispatchToken && intent.dispatchToken !== dispatchToken) {
+      return false;
+    }
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (!current || isTerminal(current.run.status)) {
+      return false;
+    }
+    if (!this.lifecycleIsActive()) {
+      return false;
+    }
+    const definition = this.requireActiveDefinition();
+    const identityToken = await this.readIdentityToken(runId);
+    if (!identityToken) {
+      await this.failRunAfterDispatchError(
+        runId,
+        new Error("Queued run identity is unavailable during fiber recovery."),
+        dispatchToken
+      );
+      await this.reportAdmissionTerminal(runId, dispatchToken);
+      return false;
+    }
+    const tokenized = {
+      ...current,
+      dispatchToken: dispatchToken || current.dispatchToken,
+    };
+    return await this.startAdmittedFiber(
+      definition,
+      tokenized,
+      identityToken,
+      dispatchToken,
+      intent.fiberKey
+    );
+  }
+
+  private async startAdmittedFiber(
+    definition: AgentDefinition,
+    claimed: CloudRunRecord,
+    identityToken: string,
+    token?: string,
+    fiberKey = cloudFiberKey(claimed.run.id)
+  ): Promise<boolean> {
+    const runId = claimed.run.id;
     try {
       const receipt = await this.startFiber(
-        cloudFiberKey(runId),
+        fiberKey,
         async (fiber) =>
           this.trackFiberCompletion(
-            cloudFiberKey(runId),
+            fiberKey,
             (async () => {
               try {
                 await this.driveHarness(
@@ -2921,7 +3220,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
             })()
           ),
         {
-          idempotencyKey: cloudFiberKey(runId),
+          idempotencyKey: fiberKey,
           metadata: {
             runId,
             ...(token ? { dispatchToken: token } : {}),
@@ -2929,22 +3228,55 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         }
       );
       if (!receipt.accepted) {
-        if (receipt.status !== "pending" && receipt.status !== "running") {
-          await this.failRunAfterDispatchError(
-            runId,
-            new Error("An existing cloud run fiber was no longer active."),
-            token
-          );
-          await this.reportAdmissionTerminal(runId, token);
+        if (receipt.status === "pending" || receipt.status === "running") {
+          this.markDispatchFiberStarted(runId, token);
+          return false;
         }
+        await this.failRunAfterDispatchError(
+          runId,
+          new Error("An existing cloud run fiber was no longer active."),
+          token
+        );
+        await this.reportAdmissionTerminal(runId, token);
         return false;
       }
+      this.markDispatchFiberStarted(runId, token);
+      return true;
     } catch (error) {
       await this.failRunAfterDispatchError(runId, error, token);
       await this.reportAdmissionTerminal(runId, token);
       throw error;
     }
-    return true;
+  }
+
+  private markDispatchFiberStarted(
+    runId: string,
+    dispatchToken?: string
+  ): void {
+    const intent = this.state.dispatchIntents?.[runId];
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (
+      intent?.phase !== "starting" ||
+      (intent.dispatchToken &&
+        dispatchToken &&
+        intent.dispatchToken !== dispatchToken) ||
+      !current ||
+      isTerminal(current.run.status)
+    ) {
+      return;
+    }
+    this.setState({
+      ...this.state,
+      dispatchIntents: {
+        ...(this.state.dispatchIntents ?? {}),
+        [runId]: {
+          ...intent,
+          phase: "fiber_started",
+        },
+      },
+    });
   }
 
   /**
@@ -3063,6 +3395,8 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     delete admissionTokens[runId];
     const dispatchClaims = { ...(this.state.dispatchClaims ?? {}) };
     delete dispatchClaims[runId];
+    const dispatchIntents = { ...(this.state.dispatchIntents ?? {}) };
+    delete dispatchIntents[runId];
     this.setState({
       ...this.state,
       admissionFences: this.pruneAdmissionFences({
@@ -3071,6 +3405,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       }),
       admissionTokens,
       dispatchClaims,
+      dispatchIntents,
       runs,
     });
     return true;
@@ -3273,7 +3608,19 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         },
       ]
     );
-    this.persistRun(claimed, { dispatchClaim: null });
+    this.persistRun(claimed, {
+      dispatchClaim: null,
+      dispatchIntent: {
+        ...(planned.admissionCapability?.admissionSequence === undefined
+          ? {}
+          : {
+              admissionSequence: planned.admissionCapability.admissionSequence,
+            }),
+        dispatchToken: planned.dispatchToken,
+        fiberKey: cloudFiberKey(planned.run.id),
+        phase: "starting",
+      },
+    });
     this.updateDefinition({ status: "running", updatedAt: startedAt });
     return claimed;
   }
@@ -4305,6 +4652,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       admissionFence?: AdmissionFence;
       allowDispatchTokenReplacement?: boolean;
       dispatchClaim?: string | null;
+      dispatchIntent?: AdmissionDispatchIntent | null;
     } = {}
   ): boolean {
     const current = this.state.runs.find(
@@ -4339,6 +4687,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     } else if (options.dispatchClaim) {
       dispatchClaims[record.run.id] = options.dispatchClaim;
     }
+    const dispatchIntents = { ...(this.state.dispatchIntents ?? {}) };
+    if (options.dispatchIntent === null || isTerminal(record.run.status)) {
+      delete dispatchIntents[record.run.id];
+    } else if (options.dispatchIntent) {
+      dispatchIntents[record.run.id] = options.dispatchIntent;
+    }
     const runs =
       this.currentLifecycle().status === "decommissioning"
         ? [record, ...others]
@@ -4358,6 +4712,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       ),
       dispatchClaims: Object.fromEntries(
         Object.entries(dispatchClaims).filter(([runId]) =>
+          retainedRunIds.has(runId)
+        )
+      ),
+      dispatchIntents: Object.fromEntries(
+        Object.entries(dispatchIntents).filter(([runId]) =>
           retainedRunIds.has(runId)
         )
       ),
@@ -4395,7 +4754,8 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
 
   private async reportAdmissionTerminal(
     runId: string,
-    dispatchToken?: string
+    dispatchToken?: string,
+    admissionSequence?: number
   ): Promise<boolean> {
     const intent = this.state.decommission?.admissionReleases[runId];
     const record = this.state.runs.find(
@@ -4418,9 +4778,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     const currentDispatchToken =
       record?.dispatchToken ??
       this.state.admissionTokens?.[runId] ??
+      record?.admissionCapability?.dispatchToken ??
       intent?.dispatchToken;
     const token = dispatchToken ?? currentDispatchToken;
     const sequence =
+      admissionSequence ??
       record?.admissionCapability?.admissionSequence ??
       intent?.admissionSequence;
     if (currentDispatchToken && currentDispatchToken !== token) {

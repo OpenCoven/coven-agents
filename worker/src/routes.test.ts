@@ -1043,7 +1043,7 @@ test("run admission passes its durable capability directly to confirmation", asy
     configure: (value: AgentDefinition) => value,
     confirmAdmission: (_runId, _operationId, _requestHash, received) => {
       confirmedCapabilities.push(received);
-      return true;
+      return { kind: "confirmed" };
     },
     decommission: () => undefined,
     discardRun: () => undefined,
@@ -1148,6 +1148,13 @@ test("a terminal duplicate reconciles stale admission before returning the termi
           tenantHash: terminalTenantHash,
         };
       },
+      getCleanupCapability: () => ({
+        admissionSequence: 1,
+        agentId: MINE,
+        operationId,
+        requestHash: terminalRequestHash,
+        runId,
+      }),
       release: (releasedRunId) => {
         calls.push(`release:${releasedRunId}`);
         return true;
@@ -2148,7 +2155,7 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
     configure: (value: AgentDefinition) => value,
     confirmAdmission: () => {
       confirmed = true;
-      return true;
+      return { kind: "confirmed" };
     },
     decommission: () => undefined,
     discardRun: (runId) => {
