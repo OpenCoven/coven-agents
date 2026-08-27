@@ -46,11 +46,20 @@ export const PROBE_TIMEOUT_MS = 300_000;
  */
 export const PROBE_ATTEMPT_TIMEOUT_MS = 150_000;
 
-type SandboxLike = Pick<Sandbox, "exec">;
+/**
+ * `destroy` is optional on both shapes because cancellation is the only
+ * caller that needs it, and most test doubles have no reason to implement
+ * it. A sandbox that cannot be destroyed simply cannot be reaped on
+ * cancellation — the run still fails, it just leaves the container to the
+ * idle reaper.
+ */
+type SandboxLike = Pick<Sandbox, "exec"> & Partial<Pick<Sandbox, "destroy">>;
+type SandboxDestroy = () => Promise<void>;
 type MissionSandbox = Pick<
   Sandbox,
   "exec" | "getProcess" | "getProcessLogs" | "killProcess" | "startProcess"
->;
+> &
+  Partial<Pick<Sandbox, "destroy">>;
 
 /**
  * Enforces a deadline the SDK does not.
@@ -65,29 +74,104 @@ type MissionSandbox = Pick<
  * until the sandbox is destroyed. What it does is bound the *run*: the throw
  * marks it failed, releases the active slot, and tells the client something
  * true instead of streaming silence.
+ *
+ * Cancellation is the one path that does reap the container, and it is
+ * deliberately not the timeout path: a deadline leaves the sandbox alone so
+ * the caller's own retry can decide whether a fresh placement is warranted,
+ * while an aborted run has no such caller left and would otherwise strand a
+ * container nobody is waiting on. With no `signal` supplied this degrades
+ * exactly to a deadline race, which is what every caller that predates
+ * cancellation gets.
  */
-async function withDeadline<T>(
+async function withDeadlineAndCancellation<T>(
   work: Promise<T>,
-  ms: number,
-  label: string
+  options: {
+    destroySandbox?: SandboxDestroy;
+    label: string;
+    ms: number;
+    sandbox: SandboxLike;
+    signal?: AbortSignal;
+  }
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let cancellationRequested = false;
+  let cancellation: Promise<never> | undefined;
+  let rejectAbort: (error: unknown) => void = () => undefined;
+  const abort = async (): Promise<never> => {
+    try {
+      await (options.destroySandbox
+        ? options.destroySandbox()
+        : Promise.resolve(options.sandbox.destroy?.()));
+    } catch (error) {
+      // biome-ignore lint/style/useErrorCause: HarnessError stores the cause through its typed constructor.
+      throw new HarnessError(
+        error instanceof Error
+          ? `Sandbox cleanup failed during cancellation: ${error.message}`
+          : "Sandbox cleanup failed during cancellation.",
+        "sandbox_cleanup_failed",
+        { cause: error }
+      );
+    }
+    throw new HarnessError(
+      "The cloud run was cancelled before the sandbox command completed.",
+      "harness_cancelled"
+    );
+  };
+  const beginCancellation = () => {
+    cancellation ??= abort();
+    return cancellation;
+  };
+  const aborted = options.signal
+    ? new Promise<never>((_, reject) => {
+        rejectAbort = reject;
+      })
+    : undefined;
+  const onAbort = () => {
+    cancellationRequested = true;
+    // Cancellation has won as soon as the signal fires. Clear the deadline
+    // before awaiting durable sandbox cleanup so a wedged operation cannot
+    // keep a timer handle alive behind the cancellation path.
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+    beginCancellation().catch(rejectAbort);
+  };
   try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          reject(
-            new HarnessError(
-              `\`${label}\` exceeded ${Math.round(ms / 1000)}s inside the sandbox. The container may still be executing it; the run is failed so the agent is not wedged behind it.`,
-              "harness_timeout"
-            )
-          );
-        }, ms);
-      }),
-    ]);
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(
+          new HarnessError(
+            `\`${options.label}\` exceeded ${Math.round(options.ms / 1000)}s inside the sandbox. The container may still be executing it; the run is failed so the agent is not wedged behind it.`,
+            "harness_timeout"
+          )
+        );
+      }, options.ms);
+    });
+    if (options.signal) {
+      options.signal.addEventListener("abort", onAbort, { once: true });
+      if (options.signal.aborted) {
+        onAbort();
+      }
+    }
+    const guardedWork = work.then(
+      (value) => (cancellationRequested ? beginCancellation() : value),
+      (error: unknown) =>
+        cancellationRequested ? beginCancellation() : Promise.reject(error)
+    );
+    const candidates: Promise<T | never>[] = [guardedWork, deadline];
+    if (aborted) {
+      candidates.push(aborted);
+    }
+    return await Promise.race(candidates);
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+    if (options.signal) {
+      options.signal.removeEventListener("abort", onAbort);
+    }
   }
 }
 
@@ -187,18 +271,34 @@ export function requireHarness(
   return { auth: { name, value }, spec };
 }
 
+/**
+ * The probe's knobs are an object rather than positionals on purpose: the
+ * budget and the cancellation handles arrived from two different directions,
+ * and `probeInstalled(sandbox, spec, somethingMs, maybeSignal)` is exactly
+ * the shape where a caller silently passes the wrong third argument.
+ */
 async function probeInstalled(
   sandbox: SandboxLike,
   spec: HarnessSpec,
-  timeoutMs: number = PROBE_TIMEOUT_MS
+  options: {
+    destroySandbox?: SandboxDestroy;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  } = {}
 ): Promise<{ installed: boolean; version: string | null }> {
+  const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
   try {
-    const result = await withDeadline(
+    const result = await withDeadlineAndCancellation(
       sandbox.exec(`${spec.command} ${spec.versionArgs.join(" ")}`, {
         timeout: timeoutMs,
       }),
-      timeoutMs,
-      `${spec.command} --version`
+      {
+        destroySandbox: options.destroySandbox,
+        label: `${spec.command} --version`,
+        ms: timeoutMs,
+        sandbox,
+        signal: options.signal,
+      }
     );
     if (!result.success) {
       return { installed: false, version: null };
@@ -214,8 +314,17 @@ async function probeInstalled(
      * operator to add the package to the Dockerfile — advice that is wrong and
      * costs a rebuild before anyone questions it. The deadline names the real
      * condition, so it propagates.
+     *
+     * Cancellation propagates for the same reason and one more: a cancelled
+     * probe has already destroyed the container, so answering "not installed"
+     * would send the caller's retry at a sandbox that no longer exists.
      */
-    if (error instanceof HarnessError && error.code === "harness_timeout") {
+    if (
+      error instanceof HarnessError &&
+      (error.code === "harness_timeout" ||
+        error.code === "harness_cancelled" ||
+        error.code === "sandbox_cleanup_failed")
+    ) {
       throw error;
     }
     return { installed: false, version: null };
@@ -319,6 +428,15 @@ export async function runHarnessInSandbox(options: {
   sleep?: (ms: number) => Promise<void>;
   runtime: string;
   sandbox: MissionSandbox;
+  /**
+   * Reaps the container when the run is cancelled. Distinct from
+   * `resetSandbox`, which answers a sick placement mid-probe and expects the
+   * key to re-provision; this one ends the sandbox because nobody is waiting
+   * for it any more.
+   */
+  destroySandbox?: SandboxDestroy;
+  /** Aborts the run at the next sandbox boundary and reaps the container. */
+  signal?: AbortSignal;
   task: string;
   workspace?: string;
 }): Promise<HarnessRun> {
@@ -333,14 +451,20 @@ export async function runHarnessInSandbox(options: {
    * container also reads as "not installed", and that message tells the
    * operator to rebuild the image, which is wrong and expensive advice.
    */
+  const probeOptions = {
+    destroySandbox: options.destroySandbox,
+    signal: options.signal,
+    timeoutMs: PROBE_ATTEMPT_TIMEOUT_MS,
+  };
   let probe: { installed: boolean; version: string | null } | null = null;
   try {
-    probe = await probeInstalled(
-      options.sandbox,
-      spec,
-      PROBE_ATTEMPT_TIMEOUT_MS
-    );
+    probe = await probeInstalled(options.sandbox, spec, probeOptions);
   } catch (error) {
+    /**
+     * Only a deadline earns the second attempt. A cancelled probe has already
+     * reaped the container and has no caller left to serve, so retrying it
+     * would provision a fresh sandbox for a run nobody wants.
+     */
     if (!(error instanceof HarnessError && error.code === "harness_timeout")) {
       throw error;
     }
@@ -349,11 +473,7 @@ export async function runHarnessInSandbox(options: {
   if (!probe?.installed) {
     console.warn({ event: "sandbox.probe_retry_on_fresh_container" });
     await options.resetSandbox?.();
-    probe = await probeInstalled(
-      options.sandbox,
-      spec,
-      PROBE_ATTEMPT_TIMEOUT_MS
-    );
+    probe = await probeInstalled(options.sandbox, spec, probeOptions);
   }
   if (!probe.installed) {
     throw new HarnessError(
@@ -362,10 +482,15 @@ export async function runHarnessInSandbox(options: {
     );
   }
 
-  await withDeadline(
+  await withDeadlineAndCancellation(
     options.sandbox.exec(`mkdir -p ${cwd}`, { timeout: PROBE_TIMEOUT_MS }),
-    PROBE_TIMEOUT_MS,
-    "mkdir"
+    {
+      destroySandbox: options.destroySandbox,
+      label: "mkdir",
+      ms: PROBE_TIMEOUT_MS,
+      sandbox: options.sandbox,
+      signal: options.signal,
+    }
   );
 
   const invocation = buildInvocation({
@@ -413,7 +538,7 @@ export async function runHarnessInSandbox(options: {
   const pollMs = options.pollIntervalMs ?? PROCESS_POLL_INTERVAL_MS;
 
   const startedAt = now();
-  const started = await withDeadline(
+  const started = await withDeadlineAndCancellation(
     options.sandbox.startProcess(command, {
       autoCleanup: false,
       cwd,
@@ -429,8 +554,13 @@ export async function runHarnessInSandbox(options: {
         OPENAI_API_KEY: "",
       },
     }),
-    PROBE_ATTEMPT_TIMEOUT_MS,
-    `${spec.command} start`
+    {
+      destroySandbox: options.destroySandbox,
+      label: `${spec.command} start`,
+      ms: PROBE_ATTEMPT_TIMEOUT_MS,
+      sandbox: options.sandbox,
+      signal: options.signal,
+    }
   );
 
   const state = {

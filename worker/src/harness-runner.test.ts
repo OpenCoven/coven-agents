@@ -234,6 +234,123 @@ test("a probe timeout does not claim the harness is missing", async (t) => {
   assert.equal(error?.code, "harness_timeout");
 });
 
+test("cancelling a never-resolving probe clears its deadline before cleanup", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const clearTimeoutSpy = t.mock.method(globalThis, "clearTimeout");
+  const controller = new AbortController();
+  let resolveProbe!: () => void;
+  const never = new Promise<never>((resolve) => {
+    resolveProbe = () => resolve(undefined as never);
+  });
+  let resolveDestroy!: () => void;
+  const sandbox = {
+    exec: () => never,
+  } as unknown as Parameters<typeof runHarnessInSandbox>[0]["sandbox"];
+
+  const run = runHarnessInSandbox({
+    credential: { credential: "token-under-test" },
+    destroySandbox: () =>
+      new Promise<void>((resolve) => {
+        resolveDestroy = resolve;
+      }),
+    instructions: "instructions",
+    model: "auto",
+    runtime: "copilot",
+    sandbox,
+    signal: controller.signal,
+    task: "task",
+  });
+  const outcome = run.then(
+    () => null,
+    (rejection: unknown) => rejection
+  );
+
+  controller.abort();
+  assert.equal(
+    clearTimeoutSpy.mock.callCount(),
+    1,
+    "cancellation must clear the probe deadline synchronously"
+  );
+  resolveDestroy();
+
+  const error = (await outcome) as { code?: string };
+  assert.equal(error?.code, "harness_cancelled");
+  resolveProbe();
+  await Promise.resolve();
+});
+
+test("a sandbox that cannot be reaped names the cleanup failure", async () => {
+  // The run is over either way, but `harness_cancelled` would imply the
+  // container went with it. It did not, and the operator needs to know the
+  // difference before the idle reaper is the only thing left holding it.
+  const controller = new AbortController();
+  const sandbox = {
+    exec: () => new Promise<never>(() => undefined),
+  } as unknown as Parameters<typeof runHarnessInSandbox>[0]["sandbox"];
+
+  const run = runHarnessInSandbox({
+    credential: { credential: "token-under-test" },
+    destroySandbox: () => Promise.reject(new Error("container already gone")),
+    instructions: "instructions",
+    model: "auto",
+    runtime: "copilot",
+    sandbox,
+    signal: controller.signal,
+    task: "task",
+  });
+  const outcome = run.then(
+    () => null,
+    (rejection: unknown) => rejection
+  );
+
+  controller.abort();
+
+  const error = (await outcome) as { code?: string; message?: string };
+  assert.equal(error?.code, "sandbox_cleanup_failed");
+  assert.match(String(error?.message), /container already gone/);
+});
+
+test("a cancelled probe is not retried on a fresh container", async () => {
+  // Only a deadline earns the second attempt. Retrying a cancellation would
+  // provision a new sandbox for a run that no longer has a caller — the exact
+  // container churn the admission limits exist to prevent.
+  const controller = new AbortController();
+  let execCalls = 0;
+  let resets = 0;
+  const sandbox = {
+    exec: () => {
+      execCalls += 1;
+      return new Promise<never>(() => undefined);
+    },
+  } as unknown as Parameters<typeof runHarnessInSandbox>[0]["sandbox"];
+
+  const run = runHarnessInSandbox({
+    credential: { credential: "token-under-test" },
+    destroySandbox: () => Promise.resolve(),
+    instructions: "instructions",
+    model: "auto",
+    resetSandbox: () => {
+      resets += 1;
+      return Promise.resolve();
+    },
+    runtime: "copilot",
+    sandbox,
+    signal: controller.signal,
+    task: "task",
+  });
+  const outcome = run.then(
+    () => null,
+    (rejection: unknown) => rejection
+  );
+
+  controller.abort();
+
+  const error = (await outcome) as { code?: string };
+  assert.equal(error?.code, "harness_cancelled");
+  assert.equal(execCalls, 1, "the probe must not be attempted twice");
+  assert.equal(resets, 0, "cancellation must not reset the sandbox");
+});
+
 test("a warm-up reports ready when the probe answers first try", async () => {
   const calls: Call[] = [];
   const sandbox = fakeSandbox(
