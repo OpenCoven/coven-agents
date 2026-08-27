@@ -1,11 +1,8 @@
 import { and, eq } from "drizzle-orm";
 import type { databaseFor } from "@/lib/db/access";
 import { tenantCredential } from "@/lib/db/schema";
-import {
-  BOUND_AAD_VERSION,
-  decryptCredential,
-  encryptCredential,
-} from "./envelope";
+import { credentialAadContextForWrite } from "./aad-policy";
+import { decryptCredential, encryptCredential } from "./envelope";
 import { refreshCredential } from "./github-device";
 import { credentialKekRingFromEnvironment } from "./key-ring";
 import { credentialWhere } from "./scope";
@@ -144,13 +141,13 @@ async function persistCredential(
     serializeCredential(credential),
     ring.current,
     ring.currentVersion,
-    { harnessId, kind: "credential", tenant }
+    credentialAadContextForWrite(tenant, harnessId)
   );
 
   const updated = await db
     .update(tenantCredential)
     .set({
-      aadVersion: BOUND_AAD_VERSION,
+      aadVersion: sealed.aadVersion,
       ciphertext: sealed.ciphertext,
       credentialRevision: crypto.randomUUID(),
       envelopeRevision: crypto.randomUUID(),

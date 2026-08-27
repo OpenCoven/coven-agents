@@ -4,7 +4,8 @@ import { eq } from "drizzle-orm";
 import { databaseFor } from "@/lib/db/access";
 import { tenantCredential } from "@/lib/db/schema";
 import type { SubscriberSession } from "@/lib/session";
-import { BOUND_AAD_VERSION, encryptCredential } from "./envelope";
+import { credentialAadContextForWrite } from "./aad-policy";
+import { encryptCredential } from "./envelope";
 import { credentialKekRingFromEnvironment } from "./key-ring";
 import { credentialWhere } from "./scope";
 import { readCredentialForTenant as readCredentialForTenantCore } from "./store-core";
@@ -35,13 +36,13 @@ export async function putCredential(
     plaintext,
     ring.current,
     ring.currentVersion,
-    { harnessId, kind: "credential", tenant: session.tenant }
+    credentialAadContextForWrite(session.tenant, harnessId)
   );
 
   await db
     .insert(tenantCredential)
     .values({
-      aadVersion: BOUND_AAD_VERSION,
+      aadVersion: sealed.aadVersion,
       ciphertext: sealed.ciphertext,
       credentialRevision: crypto.randomUUID(),
       envelopeRevision: crypto.randomUUID(),
@@ -53,7 +54,7 @@ export async function putCredential(
     })
     .onConflictDoUpdate({
       set: {
-        aadVersion: BOUND_AAD_VERSION,
+        aadVersion: sealed.aadVersion,
         ciphertext: sealed.ciphertext,
         credentialRevision: crypto.randomUUID(),
         envelopeRevision: crypto.randomUUID(),

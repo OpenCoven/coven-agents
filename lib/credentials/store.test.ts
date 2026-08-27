@@ -41,7 +41,7 @@ test("both conditions are required, not either", () => {
   assert.ok(!sql.includes(" or "), "an OR would match another tenant's row");
 });
 
-test("credential storage writes the current version and reads the row version", () => {
+test("credential storage writes the selected envelope versions and reads the row versions", () => {
   const source = readFileSync(new URL("./store.ts", import.meta.url), "utf8");
   const coreSource = readFileSync(
     new URL("./store-core.ts", import.meta.url),
@@ -52,14 +52,17 @@ test("credential storage writes the current version and reads the row version", 
   assert.doesNotMatch(coreSource, /server-only/);
   assert.match(source, /ring\.currentVersion/);
   assert.match(source, /kekVersion: sealed\.kekVersion/);
-  assert.match(source, /aadVersion: BOUND_AAD_VERSION/);
+  assert.match(source, /aadVersion: sealed\.aadVersion/);
+  assert.match(source, /credentialAadContextForWrite/);
   assert.match(source, /tenant, harnessId/);
   assert.match(coreSource, /ring\.keyFor\(row\.kekVersion\)/);
   assert.match(coreSource, /aadVersion: row\.aadVersion/);
+  assert.match(coreSource, /aadVersion: sealed\.aadVersion/);
+  assert.match(coreSource, /credentialAadContextForWrite/);
   assert.match(coreSource, /tenant, harnessId/);
 });
 
-test("AAD defaults preserve legacy inserts while new writers bind version one", () => {
+test("AAD defaults and gated writes preserve rolling deployment compatibility", () => {
   const migration = readFileSync(
     new URL(
       "../db/migrations/0009_credential_kek_versions.sql",
@@ -86,8 +89,8 @@ test("AAD defaults preserve legacy inserts while new writers bind version one", 
     schema,
     /aadVersion: integer\("aadVersion"\)\.notNull\(\)\.default\(0\)/
   );
-  assert.match(source, /aadVersion: BOUND_AAD_VERSION/);
-  assert.match(coreSource, /aadVersion: BOUND_AAD_VERSION/);
+  assert.match(source, /aadVersion: sealed\.aadVersion/);
+  assert.match(coreSource, /aadVersion: sealed\.aadVersion/);
 });
 
 test("credential envelope writes fence stale writers with a fresh revision", () => {
@@ -357,12 +360,14 @@ test("OAuth refresh wins after an envelope-only rewrap and keeps the rotated tok
   const previousEnvironment = {
     AUTH_GITHUB_ID: process.env.AUTH_GITHUB_ID,
     AUTH_GITHUB_SECRET: process.env.AUTH_GITHUB_SECRET,
+    CREDENTIAL_AAD_WRITES_ENABLED: process.env.CREDENTIAL_AAD_WRITES_ENABLED,
     CREDENTIAL_KEK_CURRENT_VERSION: process.env.CREDENTIAL_KEK_CURRENT_VERSION,
     CREDENTIAL_KEK_V1: process.env.CREDENTIAL_KEK_V1,
     CREDENTIAL_KEK_V2: process.env.CREDENTIAL_KEK_V2,
   };
   process.env.AUTH_GITHUB_ID = "client";
   process.env.AUTH_GITHUB_SECRET = "secret";
+  process.env.CREDENTIAL_AAD_WRITES_ENABLED = "true";
   process.env.CREDENTIAL_KEK_CURRENT_VERSION = "v2";
   process.env.CREDENTIAL_KEK_V1 = oldKeyMaterial;
   process.env.CREDENTIAL_KEK_V2 = currentKeyMaterial;

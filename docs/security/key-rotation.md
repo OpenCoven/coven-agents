@@ -50,8 +50,8 @@ tokens may still be queued or in flight.
 
 Credential rows carry the exact KEK version that wrapped their per-credential
 data key and an `aadVersion`. Version `0` is the explicit legacy format with
-no AES-GCM associated data; version `1` binds every new credential ciphertext
-to a canonical tenant+harness context. The app encrypts new rows only with
+no AES-GCM associated data; version `1` binds credential ciphertext to a
+canonical tenant+harness context. The app encrypts new rows only with
 `CREDENTIAL_KEK_CURRENT_VERSION`; reads use the row's exact KEK and AAD
 versions and never infer or try another format when a row is unknown.
 
@@ -62,6 +62,7 @@ CREDENTIAL_KEK_CURRENT_VERSION=v1
 CREDENTIAL_KEK_V1=
 CREDENTIAL_KEK_V2=
 CREDENTIAL_KEK=
+CREDENTIAL_AAD_WRITES_ENABLED=false
 ```
 
 During the staged migration, the existing unversioned `CREDENTIAL_KEK` may
@@ -77,17 +78,20 @@ key material is never logged.
 1. Apply the credential revision/AAD migration before changing application
    traffic. It adds non-null `envelopeRevision` and `aadVersion` defaults and
    a database trigger that rejects any ciphertext, IV, wrapped-key, KEK-version,
-   or AAD-version update unless the revision changes. New writers explicitly
-   write `aadVersion=1`; the database default remains `0` so pre-change
-   writers can still insert explicit `kekVersion=v1`, `aadVersion=0` legacy
-   rows during the rolling deployment. Roll out the new writers, then drain
-   every old writer before allowing credential updates: an old writer's update
-   fails closed with the revision-trigger error instead of silently writing an
-   unbound envelope under a newer label. Do not remove the `aadVersion=0`
-   default until the legacy drain and AAD retirement gate have both passed.
-2. Deploy the new readers and writers, and keep old readers and writers drained
-   before binding legacy rows. Old code cannot read AAD-bound ciphertext.
-   Convert legacy rows in resumable batches:
+   or AAD-version update unless the revision changes. Keep
+   `CREDENTIAL_AAD_WRITES_ENABLED=false` during the rolling deployment, so
+   upgraded writers continue producing `aadVersion=0` envelopes that old
+   readers can decrypt. The database default also remains `0` for pre-change
+   writers. Roll out the new readers and writers, then drain every old instance.
+   An old writer's update fails closed with the revision-trigger error instead
+   of silently writing an unbound envelope under a newer label. Do not remove
+   the `aadVersion=0` default until the legacy drain and AAD retirement gate
+   have both passed.
+2. After every old reader and writer has drained, set
+   `CREDENTIAL_AAD_WRITES_ENABLED=true` and deploy. New credential writes and
+   OAuth refreshes now produce `aadVersion=1`. Old code cannot read AAD-bound
+   ciphertext, so do not open this gate before the drain is verified. Then
+   bind legacy rows in resumable batches:
 
    ```bash
    pnpm credentials:rewrap bind-aad --batch 100
