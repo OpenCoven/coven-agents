@@ -522,14 +522,31 @@ function ErrorBlock({
           </pre>
         ) : null}
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          <Btn onClick={onRetry} variant="secondary">
-            Retry the same mission
-          </Btn>
-          <Btn onClick={onAmend} variant="ghost">
-            Edit mission and retry
-          </Btn>
+          {/* One action leads, chosen by what the error said about itself: a
+              retryable failure invites the retry, a permanent one invites
+              the edit that could change the outcome. The same three doors
+              exist either way — only the emphasis moves. */}
+          {block.retryable ? (
+            <>
+              <Btn onClick={onRetry} variant="primary">
+                Retry mission
+              </Btn>
+              <Btn onClick={onAmend} variant="secondary">
+                Edit mission
+              </Btn>
+            </>
+          ) : (
+            <>
+              <Btn onClick={onAmend} variant="primary">
+                Edit mission
+              </Btn>
+              <Btn onClick={onRetry} variant="secondary">
+                Retry anyway
+              </Btn>
+            </>
+          )}
           <Btn onClick={onCopyReceipt} variant="ghost">
-            Copy failure receipt
+            Copy failure report
           </Btn>
         </div>
       </div>
