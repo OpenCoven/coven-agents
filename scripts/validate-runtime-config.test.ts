@@ -246,7 +246,7 @@ test("the start command uses the explicit release preflight", () => {
 
   assert.equal(
     manifest.scripts?.["validate:release"],
-    "tsx scripts/validate-runtime-config.ts --release"
+    "tsx --env-file-if-exists=.env.local scripts/validate-runtime-config.ts --release"
   );
   assert.match(manifest.scripts?.start ?? "", /^pnpm validate:release && /);
 });
