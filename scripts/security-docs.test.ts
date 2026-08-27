@@ -152,6 +152,14 @@ test("local cloud-runner setup shares distinct control and service tokens", () =
   );
 });
 
+test("the README diagnostic sends the acquired runner identity", () => {
+  const readme = readFileSync(readmeUrl, "utf8");
+  const identityVariable = "$RUNNER_IDENTITY_TOKEN";
+
+  assert.ok(readme.includes(`-H "Authorization: Bearer ${identityVariable}"`));
+  assert.equal(readme.includes('-H "Authorization: ******"'), false);
+});
+
 test("the README points to the incident runbooks", () => {
   const readme = readFileSync(readmeUrl, "utf8");
 

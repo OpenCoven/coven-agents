@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -23,7 +24,8 @@ function runValidator(
       | "VERCEL_ENV"
     >
   > = {},
-  arguments_: string[] = []
+  arguments_: string[] = [],
+  cwd = repositoryRoot
 ) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -42,11 +44,39 @@ function runValidator(
     process.execPath,
     ["--import", "tsx", validatorPath, ...arguments_],
     {
-      cwd: repositoryRoot,
+      cwd,
       encoding: "utf8",
       env,
     }
   );
+}
+
+function runReleaseValidatorFromFiles(
+  files: Record<string, string>,
+  overrides: Partial<NodeJS.ProcessEnv> = {}
+) {
+  const cwd = mkdtempSync(
+    join(repositoryRoot, ".validate-runtime-config-test-")
+  );
+
+  try {
+    for (const [name, contents] of Object.entries(files)) {
+      writeFileSync(join(cwd, name), contents);
+    }
+
+    return runValidator(
+      {
+        BETA_ALLOWLIST: undefined,
+        BETA_MODE: undefined,
+        RELEASE_AUDIENCE: undefined,
+        ...overrides,
+      },
+      ["--release"],
+      cwd
+    );
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+  }
 }
 
 test("rejects production Redis when the abuse key secret is missing or empty", () => {
@@ -239,6 +269,33 @@ test("the explicit release preflight enforces outside production markers", () =>
   );
 });
 
+test(".env.production.local takes precedence over .env.local", () => {
+  const result = runReleaseValidatorFromFiles({
+    ".env.local": "RELEASE_AUDIENCE=public\nBETA_MODE=on\n",
+    ".env.production.local": "RELEASE_AUDIENCE=public\nBETA_MODE=off\n",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("process environment takes precedence over production env files", () => {
+  const result = runReleaseValidatorFromFiles(
+    {
+      ".env.local":
+        "RELEASE_AUDIENCE=public\nBETA_MODE=off\nBETA_ALLOWLIST=member@example.com\n",
+      ".env.production.local":
+        "RELEASE_AUDIENCE=public\nBETA_MODE=on\nBETA_ALLOWLIST=not-an-email\n",
+    },
+    { RELEASE_AUDIENCE: "closed-beta" }
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /Closed beta requires BETA_ALLOWLIST to contain only valid email addresses/
+  );
+});
+
 test("the start command uses the explicit release preflight", () => {
   const manifest = JSON.parse(
     readFileSync(new URL("../package.json", import.meta.url), "utf8")
@@ -246,7 +303,7 @@ test("the start command uses the explicit release preflight", () => {
 
   assert.equal(
     manifest.scripts?.["validate:release"],
-    "tsx --env-file-if-exists=.env.local scripts/validate-runtime-config.ts --release"
+    "tsx scripts/validate-runtime-config.ts --release"
   );
   assert.match(manifest.scripts?.start ?? "", /^pnpm validate:release && /);
 });
