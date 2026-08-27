@@ -379,7 +379,7 @@ test("a stale provisional cleanup cannot discard an agent-confirmed run", async 
   assert.deepEqual(confirmation, { kind: "confirmed" });
   assert.equal(
     yolo.discardPreparedRun(runId, prepared.prepareOwner ?? ""),
-    "protected"
+    "confirmed"
   );
   assert.equal(yolo.getRun(runId)?.id, runId);
 });
@@ -2551,6 +2551,56 @@ test("configure rejects while decommissioning and accepts after completion", asy
   const updated = { ...definition(), name: "Reconfigured" };
   assert.equal(yolo.configure(updated).name, "Reconfigured");
   assert.equal(yolo.snapshot()?.name, "Reconfigured");
+});
+
+test("cloud workspace mutations are rejected before they are stored", () => {
+  const yolo = agent();
+  const invalid = {
+    ...definition(),
+    workspace: "/workspace/x; touch /tmp/pwn",
+  };
+
+  assert.throws(
+    () => yolo.configure(invalid),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.name === "HttpError" &&
+      error.message.includes("only use the /workspace")
+  );
+  assert.equal(yolo.snapshot()?.workspace, undefined);
+});
+
+test("queued runs revalidate workspace before admitted dispatch", async () => {
+  const yolo = agent();
+  const prepared = await yolo.enqueue(
+    {
+      operationId: OP_A,
+      task: "Create notes.md",
+    },
+    "run-workspace-mutation",
+    "workspace-mutation",
+    "identity"
+  );
+  const state = Reflect.get(yolo, "state") as {
+    definition: AgentDefinition;
+  };
+  yolo.setState({
+    ...state,
+    definition: {
+      ...state.definition,
+      workspace: "/workspace/x; touch /tmp/pwn",
+    },
+  } as never);
+
+  await assert.rejects(
+    () => yolo.startAdmitted(prepared.run.id, "1:workspace-mutation"),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.name === "HttpError" &&
+      error.message.includes("only use the /workspace")
+  );
+  assert.equal(fiberLog.started.length, 0);
+  assert.equal(yolo.getRun(prepared.run.id)?.status, "queued");
 });
 
 test("decommission persists cancel failures and retries all cleanup later", async () => {

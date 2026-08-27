@@ -326,6 +326,7 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
 
   upsert(definition: AgentDefinition): AgentDefinition {
     const parsed = agentDefinitionSchema.parse(definition);
+    validateCloudWorkspace(parsed);
     this.setState({
       // Spread first: replacing the whole object would drop the run index and
       // orphan every run id already registered against this directory.
@@ -1006,6 +1007,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       throw new AgentDecommissioningError();
     }
     const parsed = agentDefinitionSchema.parse(definition);
+    validateCloudWorkspace(parsed);
     this.setState({
       ...this.state,
       definition: parsed,
@@ -3110,6 +3112,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       }
     }
     const definition = this.requireActiveDefinition();
+    validateCloudWorkspace(definition);
     const lifecycleGeneration = this.currentLifecycle().generation;
     if (!(await this.repairPendingSandboxCleanup(definition))) {
       throw new AgentBusyError();
@@ -3210,6 +3213,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       return false;
     }
     const definition = this.requireActiveDefinition();
+    validateCloudWorkspace(definition);
     const identityToken = await this.readIdentityToken(runId);
     if (!identityToken) {
       await this.failRunAfterDispatchError(
@@ -3240,6 +3244,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     token?: string,
     fiberKey = cloudFiberKey(claimed.run.id)
   ): Promise<boolean> {
+    validateCloudWorkspace(definition);
     const runId = claimed.run.id;
     try {
       const receipt = await this.startFiber(
@@ -3760,7 +3765,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   discardPreparedRun(
     runId: string,
     prepareOwner: string
-  ): boolean | "protected" {
+  ): boolean | "protected" | "confirmed" {
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
@@ -3770,7 +3775,10 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (isTerminal(record.run.status)) {
       return true;
     }
-    if (record.admissionConfirmedAt || !record.pendingAdmission) {
+    if (record.admissionConfirmedAt) {
+      return "confirmed";
+    }
+    if (!record.pendingAdmission) {
       return "protected";
     }
     if (
@@ -3780,6 +3788,13 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       return "protected";
     }
     return this.discardRun(runId, prepareOwner);
+  }
+
+  isAdmissionConfirmed(runId: string, _prepareOwner: string): boolean {
+    return Boolean(
+      this.state.runs.find((candidate) => candidate.run.id === runId)
+        ?.admissionConfirmedAt
+    );
   }
 
   /**

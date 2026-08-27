@@ -11,6 +11,7 @@ import {
   normalizeEvent,
   type RunEvent,
   type RunSummary,
+  shellQuote,
   summarizeRun,
   toShellCommand,
 } from "@opencoven/harness";
@@ -461,7 +462,9 @@ export async function runHarnessInSandbox(options: {
   }
 
   await withDeadlineAndCancellation(
-    options.sandbox.exec(`mkdir -p ${cwd}`, { timeout: PROBE_TIMEOUT_MS }),
+    options.sandbox.exec(`mkdir -p ${shellQuote(cwd)}`, {
+      timeout: PROBE_TIMEOUT_MS,
+    }),
     {
       destroySandbox: options.destroySandbox,
       label: "mkdir",

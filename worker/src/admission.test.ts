@@ -341,7 +341,7 @@ test("persisted reject admissions never requeue after an asynchronous AgentBusy"
   assert.equal(requeues, 0);
 });
 
-test("provisional cleanup is alarmed and idempotently discarded without an admission row", async () => {
+test("provisional cleanup waits through its durable grace when admission is absent", async () => {
   let discarded = 0;
   const harness = runAdmissionHarness(() => ({
     discardPreparedRun: () => {
@@ -362,6 +362,14 @@ test("provisional cleanup is alarmed and idempotently discarded without an admis
   );
   await harness.admission.alarm();
 
+  assert.equal(discarded, 0);
+  harness.sql.exec(
+    "UPDATE admission_cleanup_tasks SET confirmation_grace_until = ?, next_attempt_at = 0",
+    Date.now() - 1
+  );
+  harness.setAlarm(0);
+  await harness.admission.alarm();
+
   assert.equal(discarded, 1);
   const provisionalTasks = harness.sql
     .exec<{ count: number }>(
@@ -371,7 +379,7 @@ test("provisional cleanup is alarmed and idempotently discarded without an admis
   assert.equal(provisionalTasks[0]?.count, 0);
 });
 
-test("provisional cleanup discards an admitted run that was never agent-confirmed", async () => {
+test("immediate provisional cleanup after admit preserves an unconfirmed run", async () => {
   let discarded = 0;
   const harness = runAdmissionHarness(() => ({
     discardPreparedRun: () => {
@@ -403,6 +411,24 @@ test("provisional cleanup discards an admitted run that was never agent-confirme
     1
   );
 
+  await harness.admission.alarm();
+
+  assert.equal(discarded, 0);
+  const retained = harness.sql
+    .exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = 'run-unconfirmed'"
+    )
+    .toArray() as { count: number }[];
+  assert.equal(retained[0]?.count, 1);
+
+  harness.sql.exec(
+    "UPDATE admission_cleanup_tasks SET confirmation_grace_until = ?, next_attempt_at = 0",
+    Date.now() - 1
+  );
+  harness.sql.exec(
+    "UPDATE admission_records SET state = 'terminal' WHERE run_id = 'run-unconfirmed'"
+  );
+  harness.setAlarm(0);
   await harness.admission.alarm();
 
   assert.equal(discarded, 1);
@@ -517,14 +543,15 @@ test("successful admission retains provisional cleanup until prepared run confir
   assert.equal(confirmedTasks[0]?.count, 0);
 });
 
-test("provisional cleanup protects an agent-confirmed run before coordinator confirmation", async () => {
+test("confirmed provisional cleanup is removed idempotently", async () => {
   let discarded = 0;
   const harness = runAdmissionHarness(() => ({
     discardPreparedRun: () => {
       discarded += 1;
-      return "protected" as const;
+      return "confirmed" as const;
     },
     getRun: () => ({ status: "queued" }),
+    isAdmissionConfirmed: () => true,
     startAdmitted: () => Promise.resolve(false),
     stop: () => Promise.resolve(null),
   }));
@@ -551,7 +578,7 @@ test("provisional cleanup protects an agent-confirmed run before coordinator con
 
   await harness.admission.alarm();
 
-  assert.equal(discarded, 1);
+  assert.equal(discarded, 0);
   const remaining = harness.sql
     .exec<{ count: number }>(
       "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = 'run-protected'"
@@ -559,8 +586,8 @@ test("provisional cleanup protects an agent-confirmed run before coordinator con
     .toArray() as { count: number }[];
   assert.equal(
     remaining[0]?.count,
-    1,
-    "protected provisional cleanup must remain until coordinator confirmation"
+    0,
+    "confirmed provisional cleanup must be removed even if coordinator confirmation was retried"
   );
 });
 
@@ -1043,7 +1070,11 @@ function runAdmissionHarness(
     discardPreparedRun?: (
       runId: string,
       prepareOwner: string
-    ) => Promise<boolean | "protected"> | boolean | "protected";
+    ) =>
+      | Promise<boolean | "protected" | "confirmed">
+      | boolean
+      | "protected"
+      | "confirmed";
     fenceAdmitted?: (runId: string, dispatchToken: string) => Promise<boolean>;
     requeueAdmitted?: (
       runId: string,

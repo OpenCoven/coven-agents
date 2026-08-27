@@ -70,6 +70,7 @@ const MAX_ALARM_REPAIR_FAILURES = 3;
 const DISPATCH_LEASE_MS = 60 * 1000;
 const DEFAULT_TERMINAL_RETENTION = MAX_TERMINAL_RUNS_PER_AGENT;
 const MAX_CLEANUP_TASKS_PER_ALARM = 50;
+export const PROVISIONAL_CONFIRMATION_GRACE_MS = 60 * 1000;
 export const MAX_GLOBAL_ADMISSION_ENTRIES = 1024;
 
 type SchedulerState = {
@@ -894,6 +895,7 @@ export class RunAdmission extends DurableObject<Env> {
           request_hash TEXT,
           attempts INTEGER NOT NULL DEFAULT 0,
           next_attempt_at INTEGER NOT NULL,
+          confirmation_grace_until INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY (run_id, admission_sequence)
         )
       `);
@@ -917,6 +919,7 @@ export class RunAdmission extends DurableObject<Env> {
             request_hash TEXT,
             attempts INTEGER NOT NULL DEFAULT 0,
             next_attempt_at INTEGER NOT NULL,
+            confirmation_grace_until INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (run_id, admission_sequence)
           )
         `);
@@ -946,6 +949,7 @@ export class RunAdmission extends DurableObject<Env> {
           "request_hash",
           "attempts",
           "next_attempt_at",
+          "confirmation_grace_until",
         ];
       } else if (!cleanupColumns.includes("dispatch_token")) {
         ctx.storage.sql.exec(
@@ -972,6 +976,19 @@ export class RunAdmission extends DurableObject<Env> {
           "ALTER TABLE admission_cleanup_tasks ADD COLUMN request_hash TEXT"
         );
       }
+      if (!cleanupColumns.includes("confirmation_grace_until")) {
+        ctx.storage.sql.exec(
+          "ALTER TABLE admission_cleanup_tasks ADD COLUMN confirmation_grace_until INTEGER NOT NULL DEFAULT 0"
+        );
+      }
+      ctx.storage.sql.exec(
+        `
+          UPDATE admission_cleanup_tasks
+          SET confirmation_grace_until = next_attempt_at + ?
+          WHERE kind = 'provisional' AND confirmation_grace_until <= 0
+        `,
+        PROVISIONAL_CONFIRMATION_GRACE_MS
+      );
       ctx.storage.sql.exec(`
         CREATE INDEX IF NOT EXISTS admission_cleanup_tasks_due_idx
         ON admission_cleanup_tasks (next_attempt_at, run_id, admission_sequence)
@@ -1314,24 +1331,30 @@ export class RunAdmission extends DurableObject<Env> {
       `
         INSERT INTO admission_cleanup_tasks
           (agent_id, run_id, admission_sequence, kind, dispatch_token,
-           prepare_owner, operation_id, request_hash, attempts, next_attempt_at)
-        VALUES (?, ?, 0, 'provisional', NULL, ?, ?, ?, 0, ?)
-        ON CONFLICT(run_id, admission_sequence) DO UPDATE SET
-          agent_id = excluded.agent_id,
-          kind = excluded.kind,
-          prepare_owner = excluded.prepare_owner,
-          operation_id = excluded.operation_id,
-          request_hash = excluded.request_hash,
-          attempts = 0,
-          next_attempt_at = excluded.next_attempt_at
-        WHERE admission_cleanup_tasks.kind = 'provisional'
+             prepare_owner, operation_id, request_hash, attempts, next_attempt_at,
+             confirmation_grace_until)
+          VALUES (?, ?, 0, 'provisional', NULL, ?, ?, ?, 0, ?, ?)
+          ON CONFLICT(run_id, admission_sequence) DO UPDATE SET
+            agent_id = excluded.agent_id,
+            kind = excluded.kind,
+            prepare_owner = excluded.prepare_owner,
+            operation_id = excluded.operation_id,
+            request_hash = excluded.request_hash,
+            attempts = 0,
+            next_attempt_at = excluded.next_attempt_at,
+            confirmation_grace_until = MAX(
+              admission_cleanup_tasks.confirmation_grace_until,
+              excluded.confirmation_grace_until
+            )
+          WHERE admission_cleanup_tasks.kind = 'provisional'
       `,
       agentId,
       runId,
       prepareOwner,
       operationId ?? `cleanup:${runId}`,
       requestHash ?? "cleanup",
-      Date.now()
+      Date.now(),
+      Date.now() + PROVISIONAL_CONFIRMATION_GRACE_MS
     );
     await this.ensureAlarm({ throwOnFailure: false });
   }
@@ -1362,11 +1385,11 @@ export class RunAdmission extends DurableObject<Env> {
 
   async confirmPreparedAdmission(
     runId: string,
-    prepareOwner: string,
+    prepareOwner: string | undefined,
     capability: AdmissionCleanupCapability
   ): Promise<PreparedAdmissionConfirmationOutcome> {
     await this.initialized;
-    if (!prepareOwner || !capability) {
+    if (!capability) {
       return { kind: "stale" };
     }
     return this.ctx.storage.transactionSync(() => {
@@ -1393,15 +1416,16 @@ export class RunAdmission extends DurableObject<Env> {
         `
           DELETE FROM admission_cleanup_tasks
           WHERE run_id = ?
-            AND admission_sequence = 0
-            AND kind = 'provisional'
-            AND prepare_owner = ?
-            AND agent_id = ?
+          AND admission_sequence = 0
+          AND kind = 'provisional'
+          AND (? IS NULL OR prepare_owner = ?)
+          AND agent_id = ?
             AND operation_id = ?
             AND request_hash = ?
         `,
         runId,
-        prepareOwner,
+        prepareOwner ?? null,
+        prepareOwner ?? null,
         capability.agentId,
         capability.operationId,
         capability.requestHash
@@ -2089,6 +2113,25 @@ export class RunAdmission extends DurableObject<Env> {
     );
   }
 
+  private rescheduleCleanupTask(
+    task: {
+      admission_sequence: number;
+      attempts: number;
+      kind: "admission" | "provisional";
+      run_id: string;
+    },
+    nextAttemptAt = Date.now() + ALARM_REPAIR_RETRY_MS
+  ): void {
+    this.ctx.storage.sql.exec(
+      "UPDATE admission_cleanup_tasks SET attempts = ?, next_attempt_at = ? WHERE run_id = ? AND admission_sequence = ? AND kind = ?",
+      task.attempts + 1,
+      nextAttemptAt,
+      task.run_id,
+      task.admission_sequence,
+      task.kind
+    );
+  }
+
   private async retryCleanupTasks(): Promise<void> {
     const tasks = this.ctx.storage.sql
       .exec<{
@@ -2098,6 +2141,7 @@ export class RunAdmission extends DurableObject<Env> {
         dispatch_token: string | null;
         kind: "admission" | "provisional";
         next_attempt_at: number;
+        confirmation_grace_until: number;
         operation_id: string | null;
         prepare_owner: string | null;
         request_hash: string | null;
@@ -2105,7 +2149,8 @@ export class RunAdmission extends DurableObject<Env> {
       }>(
         `
           SELECT agent_id, admission_sequence, attempts, dispatch_token, kind,
-                 next_attempt_at, operation_id, prepare_owner, request_hash, run_id
+                 next_attempt_at, confirmation_grace_until, operation_id,
+                 prepare_owner, request_hash, run_id
           FROM admission_cleanup_tasks
           WHERE next_attempt_at <= ?
           ORDER BY next_attempt_at, run_id, admission_sequence
@@ -2116,18 +2161,86 @@ export class RunAdmission extends DurableObject<Env> {
       .toArray();
     for (const task of tasks) {
       if (task.kind === "provisional") {
-        let completed: boolean | "protected" = false;
+        const now = Date.now();
+        const graceUntil =
+          task.confirmation_grace_until > 0
+            ? task.confirmation_grace_until
+            : now + PROVISIONAL_CONFIRMATION_GRACE_MS;
+        const current = this.findStoredByRunId(task.run_id);
+        const sameIncarnation =
+          current !== null &&
+          matchesCleanupIdentity(current, {
+            agentId: task.agent_id,
+            operationId: task.operation_id ?? "",
+            requestHash: task.request_hash ?? "",
+            runId: task.run_id,
+          });
+        if (current && !sameIncarnation) {
+          this.deleteCleanupTask(
+            task.run_id,
+            task.admission_sequence,
+            "provisional"
+          );
+          continue;
+        }
+
+        let confirmed = false;
+        try {
+          const agent = this.env.YoloAgent.getByName(task.agent_id);
+          const { isAdmissionConfirmed } = agent as unknown as {
+            isAdmissionConfirmed?: (
+              runId: string,
+              prepareOwner: string
+            ) => Promise<boolean> | boolean;
+          };
+          confirmed = Boolean(
+            isAdmissionConfirmed &&
+              // biome-ignore lint/performance/noAwaitInLoops: Cleanup tasks are deliberately processed sequentially.
+              (await isAdmissionConfirmed.call(
+                agent,
+                task.run_id,
+                task.prepare_owner ?? ""
+              ))
+          );
+        } catch {
+          confirmed = false;
+        }
+        if (confirmed) {
+          this.deleteCleanupTask(
+            task.run_id,
+            task.admission_sequence,
+            "provisional"
+          );
+          continue;
+        }
+
+        if (
+          current?.state === "queued" ||
+          current?.state === "active" ||
+          now < graceUntil
+        ) {
+          this.rescheduleCleanupTask(
+            task,
+            Math.max(graceUntil, now + ALARM_REPAIR_RETRY_MS)
+          );
+          continue;
+        }
+
+        let completed: boolean | "protected" | "confirmed" = false;
         try {
           const agent = this.env.YoloAgent.getByName(task.agent_id);
           const { discardPreparedRun } = agent as unknown as {
             discardPreparedRun?: (
               runId: string,
               prepareOwner: string
-            ) => Promise<boolean | "protected"> | boolean | "protected";
+            ) =>
+              | Promise<boolean | "protected" | "confirmed">
+              | boolean
+              | "protected"
+              | "confirmed";
           };
           completed = discardPreparedRun
-            ? // biome-ignore lint/performance/noAwaitInLoops: Cleanup tasks are deliberately processed sequentially.
-              await discardPreparedRun.call(
+            ? await discardPreparedRun.call(
                 agent,
                 task.run_id,
                 task.prepare_owner ?? ""
@@ -2136,28 +2249,14 @@ export class RunAdmission extends DurableObject<Env> {
         } catch {
           completed = false;
         }
-        if (completed === true) {
+        if (completed === true || completed === "confirmed") {
           this.deleteCleanupTask(
             task.run_id,
             task.admission_sequence,
             "provisional"
           );
-        } else if (completed === "protected") {
-          this.ctx.storage.sql.exec(
-            "UPDATE admission_cleanup_tasks SET attempts = ?, next_attempt_at = ? WHERE run_id = ? AND admission_sequence = ? AND kind = 'provisional'",
-            task.attempts + 1,
-            Date.now() + ALARM_REPAIR_RETRY_MS,
-            task.run_id,
-            task.admission_sequence
-          );
         } else {
-          this.ctx.storage.sql.exec(
-            "UPDATE admission_cleanup_tasks SET attempts = ?, next_attempt_at = ? WHERE run_id = ? AND admission_sequence = ? AND kind = 'provisional'",
-            task.attempts + 1,
-            Date.now() + ALARM_REPAIR_RETRY_MS,
-            task.run_id,
-            task.admission_sequence
-          );
+          this.rescheduleCleanupTask(task);
         }
         continue;
       }

@@ -1489,6 +1489,123 @@ test("concurrent identical requests reconcile a shared preparation without disca
   assert.equal(calls.includes("release"), false);
 });
 
+test("repeated duplicate confirmations finalize the coordinator cleanup task idempotently", async () => {
+  const operationId = "33333333-cccc-4555-8666-777777777778";
+  const runId = "44444444-dddd-4666-8777-888888888889";
+  const run = queuedRun(MINE, runId, operationId);
+  const requestHash = await hashOperation(MINE, run.task);
+  const tenantHash = await tenantAdmissionHash(
+    "test-edge-abuse-secret",
+    CALLER_TENANT
+  );
+  const calls: string[] = [];
+  let enqueueCount = 0;
+  let cleanupTasks = 1;
+  const capability = {
+    admissionSequence: 12,
+    agentId: MINE,
+    operationId,
+    requestHash,
+    runId,
+  };
+  const admissionRecord = {
+    agentId: MINE,
+    enqueuedAt: run.createdAt,
+    operationId,
+    requestHash,
+    runId,
+    state: "active" as const,
+    tenantHash,
+  };
+  const agent: CloudRunnerAgent = {
+    configure: (value: AgentDefinition) => value,
+    confirmAdmission: () => {
+      calls.push("agent-confirm");
+      return { kind: "confirmed" as const };
+    },
+    decommission: () => undefined,
+    discardRun: () => undefined,
+    enqueue: () => {
+      enqueueCount += 1;
+      return enqueueCount === 1
+        ? { created: true, prepareOwner: "creator", run }
+        : { created: false, run };
+    },
+    getEventStream: () => ({ events: [], terminal: false }),
+    getRun: () => run,
+    listRuns: () => [run],
+    snapshot: () => agents.get(MINE) ?? null,
+    stop: () => run,
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const admission = {
+    admit: () => ({
+      admissionCapability: capability,
+      kind: "active" as const,
+      runId,
+    }),
+    confirmPreparedAdmission: () => {
+      calls.push("coordinator-confirm");
+      cleanupTasks = Math.max(0, cleanupTasks - 1);
+      return { kind: "confirmed" as const };
+    },
+    getByOperationId: () => admissionRecord,
+    getCleanupCapability: () => capability,
+    release: () => true,
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const runnerInstance = createCloudRunner({
+    getAdmission: () => admission,
+    getDirectory: () => ({
+      list: () => [agents.get(MINE) as AgentDefinition],
+      lookupRun: () => MINE,
+      registerRun: () => true,
+      remove: () => undefined,
+      unregisterRun: () => undefined,
+      upsert: (value: AgentDefinition) => value,
+    }),
+    getYoloAgent: () => agent,
+  });
+  const request = () =>
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: run.task }),
+      headers: {
+        authorization: ["Bearer", token].join(" "),
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    });
+
+  const firstResponse = await runnerInstance.fetch(request(), {
+    ...environment,
+  } as never);
+  const secondResponse = await runnerInstance.fetch(request(), {
+    ...environment,
+  } as never);
+  const thirdResponse = await runnerInstance.fetch(request(), {
+    ...environment,
+  } as never);
+
+  assert.equal(firstResponse.status, 202);
+  assert.equal(secondResponse.status, 202);
+  assert.equal(thirdResponse.status, 202);
+  assert.deepEqual(calls, [
+    "agent-confirm",
+    "coordinator-confirm",
+    "agent-confirm",
+    "coordinator-confirm",
+    "agent-confirm",
+    "coordinator-confirm",
+  ]);
+  assert.equal(cleanupTasks, 0);
+});
+
 test("a cross-tenant duplicate cannot return or release a foreign admission", async () => {
   const operationId = "99999999-aaaa-4111-8222-333333333333";
   const localRunId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";

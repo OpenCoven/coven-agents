@@ -181,6 +181,37 @@ test("a run drives the harness CLI and passes only its own credential", async ()
   assert.equal(env.ANTHROPIC_API_KEY, "");
 });
 
+test("mkdir quotes a workspace path before handing it to the shell", async () => {
+  const calls: Call[] = [];
+  const sandbox = fakeSandbox(
+    {
+      "'copilot'": {
+        stdout: `${JSON.stringify({
+          exitCode: 0,
+          type: "result",
+        })}\n`,
+      },
+      "copilot --version": { stdout: "GitHub Copilot CLI 1.0.80\n" },
+    },
+    calls
+  );
+
+  await runHarnessInSandbox({
+    credential: { credential: "harness-token" },
+    instructions: "Be careful.",
+    model: "auto",
+    runtime: "copilot",
+    sandbox: sandbox as never,
+    task: "Create notes.md",
+    workspace: "/workspace/x; touch /tmp/pwn",
+  });
+
+  const mkdir = calls.find((call) => call.command.startsWith("mkdir -p"));
+  assert.ok(mkdir);
+  assert.equal(mkdir.command, "mkdir -p '/workspace/x; touch /tmp/pwn'");
+  assert.equal(mkdir.command.includes("mkdir -p /workspace/x;"), false);
+});
+
 test("a sandbox image without the CLI names the fix instead of failing opaquely", async () => {
   const calls: Call[] = [];
   const sandbox = fakeSandbox(
