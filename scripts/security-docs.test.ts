@@ -6,6 +6,7 @@ const threatModelUrl = new URL(
   "../docs/security/execution-threat-model.md",
   import.meta.url
 );
+const envExampleUrl = new URL("../.env.example", import.meta.url);
 const readmeUrl = new URL("../README.md", import.meta.url);
 const incidentUrl = new URL(
   "../docs/security/incident-response.md",
@@ -133,6 +134,22 @@ test("identity rotation exports PKCS8 private and SPKI public key material", () 
   );
   assert.doesNotMatch(runbooks, /exportKey\("raw", pair\.publicKey\)/);
   assert.match(runbooks, /PKCS8 private key and the SPKI public key/);
+});
+
+test("local cloud-runner setup shares distinct control and service tokens", () => {
+  const envExample = readFileSync(envExampleUrl, "utf8");
+  const readme = readFileSync(readmeUrl, "utf8");
+
+  assert.match(envExample, /^AGENT_CONTROL_TOKEN=$/m);
+  assert.match(
+    readme,
+    /console\.log\("AGENT_CONTROL_TOKEN=" \+ randomBytes\(32\)\.toString\("base64url"\)\);/
+  );
+  assert.match(readme, /Copy the same\s+`AGENT_CONTROL_TOKEN`/);
+  assert.match(
+    readme,
+    /`AGENT_CONTROL_TOKEN` and `RUNNER_SERVICE_TOKEN` are separate/
+  );
 });
 
 test("the README points to the incident runbooks", () => {

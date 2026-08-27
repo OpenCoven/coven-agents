@@ -7,7 +7,7 @@ executed evidence.
 
 ## Current release disposition
 
-**No-go as of 2026-08-26.**
+**No-go as of 2026-08-27.**
 
 Current blockers are factual and fail closed:
 
@@ -26,8 +26,8 @@ Current blockers are factual and fail closed:
 - the Stripe webhook claims an event before owner lookup and subscription
   mutation, so a post-claim failure or ignored owner is permanently deduplicated
   instead of recoverable by provider redelivery;
-- no candidate-specific, approved closed-beta or public-release audience
-  decision is retained; and
+- no candidate-specific `RELEASE_AUDIENCE` and matching approved closed-beta or
+  public-release configuration is retained; and
 - no retained, dated production-like end-to-end artifact proves subscriber,
   credential, cloud lifecycle, Stripe delivery, rollback, and recovery
   together.
@@ -48,8 +48,8 @@ Stop the release without exception when any of these is true:
 - Beads and Project are drifted or cannot be shown to agree;
 - Stripe event claim and subscription-state mutation are not atomic and
   retry-safe; or
-- the candidate lacks an explicit approved release-audience decision and
-  matching beta configuration.
+- `RELEASE_AUDIENCE` is absent or invalid, or its approved audience does not
+  match the beta configuration.
 
 A required row is **red** when its state is `Not implemented`, `Implemented`,
 or `Blocked`, or when its dated evidence no longer applies to the candidate
@@ -70,7 +70,7 @@ different configuration surfaces and must not be treated as interchangeable.
 | Runner identity | App `RUNNER_SIGNING_KEY`; app and Worker `RUNNER_VERIFY_KEY`; matching key pair. | Claims fail closed when either side is absent or mismatched. |
 | Credential lending | App and Worker `RUNNER_SERVICE_TOKEN`; app `CREDENTIAL_KEK`; Worker `APP_ORIGIN`. | The Worker has no operator or fallback harness credential. |
 | Billing | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, and canonical `APP_ORIGIN`. | Checkout and webhook return `503` when unconfigured. |
-| Release audience | Record an explicit candidate decision. Closed beta requires `BETA_MODE=on` and a reviewed, nonempty `BETA_ALLOWLIST`; public release requires separate approval and `BETA_MODE=off`. | An unset/default-off gate is useful for local development but is not approval to publish. Empty beta allowlists fail closed, and public mode must never be inferred from an omitted variable. |
+| Release audience | Set `RELEASE_AUDIENCE` exactly to `closed-beta` or `public`. Closed beta additionally requires `BETA_MODE=on` and a reviewed, nonempty `BETA_ALLOWLIST` containing only valid email addresses; public release requires separate approval and `BETA_MODE=off`. | [`scripts/validate-runtime-config.ts`](../../scripts/validate-runtime-config.ts) enforces this automatically for Vercel production and other `NODE_ENV=production` validation. Automatic runtime validation exempts Vercel preview/development builds, while `pnpm validate:release` always enforces. Unset/default-off cannot pass either production path. |
 | Other shipped app paths | `AI_GATEWAY_API_KEY` and `BLOB_READ_WRITE_TOKEN` when chat/model and upload paths remain enabled. | These are app feature dependencies, not runner credentials. |
 | Worker service bindings | Runtime bindings for `AGENT_CONTROL_TOKEN`, `RUNNER_VERIFY_KEY`, `RUNNER_SERVICE_TOKEN`, and `APP_ORIGIN`; plain Worker variable `ALLOWED_ORIGIN`; Durable Object/container bindings and migration; container image; and Wrangler authentication. | [`worker/.dev.vars.example`](../../worker/.dev.vars.example), [`worker/src/worker-secrets.d.ts`](../../worker/src/worker-secrets.d.ts), and [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc) define the current topology. |
 | Worker abuse controls | Secret binding `EDGE_ABUSE_KEY_SECRET` plus Cloudflare Rate Limiting bindings `EDGE_REQUEST_LIMITER`, `TENANT_MUTATION_LIMITER`, and `TENANT_RUN_LIMITER`. | The rate limiters are platform bindings declared under `ratelimits` in [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc), not app environment variables or `.dev.vars` entries. |
@@ -83,8 +83,15 @@ prerequisites and verification before it becomes release-supported.
 
 ## Database migration
 
-The production build runs runtime validation, then
-[`lib/db/migrate.ts`](../../lib/db/migrate.ts), then the Next build. Migration
+The build command runs
+[`scripts/validate-runtime-config.ts`](../../scripts/validate-runtime-config.ts),
+and the start command first runs its explicit `pnpm validate:release` mode. For
+Vercel production, `NODE_ENV=production` outside an explicit Vercel
+preview/development build, or explicit release validation, it rejects an
+absent, invalid, case-mismatched, or beta-inconsistent `RELEASE_AUDIENCE`.
+Ordinary local, test, and preview validation remains usable without declaring a
+release. The production build then runs
+[`lib/db/migrate.ts`](../../lib/db/migrate.ts) before the Next build. Migration
 silently skips when `POSTGRES_URL` is absent, which is acceptable for a
 database-free local build but is a production no-go.
 
@@ -146,6 +153,12 @@ but it is not release evidence for this candidate. The current hygiene snapshot
 fails, and focused tests plus check/typecheck from a documentation remediation
 do not replace a candidate-specific `pnpm test:unit` and `pnpm build`. A tracked
 secret scan is recommended in addition to, not instead of, the five gates.
+
+Because an ordinary local build intentionally does not infer a release
+audience, also retain a successful `pnpm validate:release` with the intended
+production configuration. It must contain the approved
+`RELEASE_AUDIENCE`/beta combination; a local `validate:runtime` pass that
+skipped audience validation is not release evidence.
 
 ## Required smoke paths
 
@@ -266,7 +279,7 @@ or guess at database compatibility.
 | Decision gate | Go evidence | Automatic no-go | Current status |
 | --- | --- | --- | --- |
 | P0 and dependencies | Authorized Beads query shows no unresolved release-blocking P0 or dependency. | Any unresolved P0, or authority unavailable. | **No-go:** the latest recorded pull returned `PermissionDenied`; authoritative current status is unavailable. |
-| Release audience | An approved candidate record names closed beta or public release. Closed beta has `BETA_MODE=on` and a reviewed, nonempty `BETA_ALLOWLIST`; public release has separate approval and `BETA_MODE=off`. | Missing decision, default/unset mode, empty beta allowlist, or public mode without separate approval. | **No-go:** no candidate-specific audience decision is retained; default-off is not approval. |
+| Release audience | An approved candidate record and successful production validation agree. Closed beta has `RELEASE_AUDIENCE=closed-beta`, `BETA_MODE=on`, and a reviewed, nonempty valid `BETA_ALLOWLIST`; public release has separate approval, `RELEASE_AUDIENCE=public`, and `BETA_MODE=off`. | Missing/invalid/case-mismatched audience, default/unset mode, invalid beta allowlist, mismatch, or public mode without separate approval. | **No-go:** no candidate-specific production audience configuration is retained; a local/default-off pass is not approval. |
 | Verification | Every required matrix row is `Verified` or `Certified` for the candidate. | Any required row red or `Blocked`. | **No-go:** subscriber sign-in, conformance, recovery, browser quality, preflight, and production smoke are not `Verified`. |
 | Roadmap freshness | `pnpm roadmap:status check` passes after authoritative reconciliation. | Stale aggregate. | **No-go:** the candidate Project check can pass, but Beads freshness cannot be established. |
 | Worktree safety | `pnpm hygiene` exits zero with no `AT RISK` worktree and the secondary count within the soft cap. | Any `AT RISK` worktree or a secondary count above the soft cap. | **No-go:** the timestamped hygiene evidence above reports both conditions. |

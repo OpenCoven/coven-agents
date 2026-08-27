@@ -5,6 +5,14 @@ described from tracked source and fresh local commands. Planning status remains
 subject to the private Beads authority, which was unavailable during this
 snapshot.
 
+> **Correction — 2026-08-27:** This historical snapshot predates production
+> release-audience enforcement. Its recorded `pnpm build` pass did not prove a
+> closed-beta or public-release decision. At `candidate HEAD`, production
+> validation requires an exact `RELEASE_AUDIENCE` and matching beta
+> configuration, and `pnpm validate:release` provides the explicit preflight;
+> ordinary local and Vercel preview validation remains non-release evidence.
+> The dated snapshot below is otherwise preserved.
+
 ## Snapshot metadata
 
 | Field | Value |

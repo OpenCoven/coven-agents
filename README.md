@@ -95,10 +95,11 @@ pnpm install
 cp .env.example .env.local
 ```
 
-Generate the local app's runner identity and credential-encryption values in a
-private terminal, then copy the four assignments into `.env.local`. The two
-random calls deliberately produce separate values; `CREDENTIAL_KEK` is exactly
-32 random bytes encoded as base64url.
+Generate the local app's runner identity, connection, and
+credential-encryption values in a private terminal, then copy the five
+assignments into `.env.local`. The three random calls deliberately produce
+separate values; `CREDENTIAL_KEK` is exactly 32 random bytes encoded as
+base64url.
 
 ```bash
 node --input-type=module -e '
@@ -106,6 +107,7 @@ import { randomBytes, webcrypto } from "node:crypto";
 const pair = await webcrypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
 const pkcs8 = await webcrypto.subtle.exportKey("pkcs8", pair.privateKey);
 const spki = await webcrypto.subtle.exportKey("spki", pair.publicKey);
+console.log("AGENT_CONTROL_TOKEN=" + randomBytes(32).toString("base64url"));
 console.log("RUNNER_SIGNING_KEY=" + Buffer.from(pkcs8).toString("base64url"));
 console.log("RUNNER_VERIFY_KEY=" + Buffer.from(spki).toString("base64url"));
 console.log("RUNNER_SERVICE_TOKEN=" + randomBytes(32).toString("base64url"));
@@ -115,8 +117,12 @@ console.log("CREDENTIAL_KEK=" + randomBytes(32).toString("base64url"));
 
 Do not copy the output into logs, issues, or tracked files.
 `RUNNER_SIGNING_KEY` and `CREDENTIAL_KEK` stay app-only. Copy the same
-`RUNNER_VERIFY_KEY` and `RUNNER_SERVICE_TOKEN` values to the Worker; the public
-key lets it verify app-minted claims without being able to mint one.
+`AGENT_CONTROL_TOKEN`, `RUNNER_VERIFY_KEY`, and `RUNNER_SERVICE_TOKEN` values
+to the Worker; the public key lets it verify app-minted claims without being
+able to mint one. `AGENT_CONTROL_TOKEN` and `RUNNER_SERVICE_TOKEN` are separate
+credentials: the first gates app-to-Worker requests, while the second
+authenticates the Worker's call back to the app's credential endpoint. Never
+reuse one as the other.
 
 ## Run the control plane
 
@@ -131,10 +137,10 @@ Open <http://localhost:3000/agents>.
 Create `worker/.dev.vars`:
 
 ```dotenv
-AGENT_CONTROL_TOKEN=replace-with-a-long-random-token
+AGENT_CONTROL_TOKEN=copy-the-exact-app-env-local-value
 EDGE_ABUSE_KEY_SECRET=replace-with-a-long-random-secret
-RUNNER_VERIFY_KEY=replace-with-the-base64url-ed25519-spki-public-key
-RUNNER_SERVICE_TOKEN=replace-with-a-long-random-token
+RUNNER_VERIFY_KEY=copy-the-exact-app-env-local-spki-value
+RUNNER_SERVICE_TOKEN=copy-the-exact-app-env-local-value
 APP_ORIGIN=http://localhost:3000
 ```
 
@@ -274,3 +280,19 @@ pnpm build
 
 Cloud sandbox startup and deployment additionally require a running Docker
 daemon and authenticated Wrangler session.
+
+`pnpm build` invokes `pnpm validate:runtime`, which enforces the audience in a
+production environment (`VERCEL_ENV=production`, or `NODE_ENV=production`
+outside a Vercel preview/development build). `pnpm start` first runs the
+explicit `pnpm validate:release` preflight. Production validation requires one
+exact audience declaration:
+
+- `RELEASE_AUDIENCE=closed-beta`, `BETA_MODE=on`, and a reviewed, nonempty
+  `BETA_ALLOWLIST` containing valid email addresses; or
+- `RELEASE_AUDIENCE=public` and `BETA_MODE=off`, after separate public-release
+  approval.
+
+Ordinary local, test, and Vercel preview `validate:runtime` runs do not require
+`RELEASE_AUDIENCE`; that convenience is not production approval. Run
+`pnpm validate:release` with the intended production configuration before
+promotion even when the local build gate passes.
