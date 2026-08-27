@@ -68,6 +68,7 @@ export type CloudRunnerEnvironment = Omit<
     | "AGENT_CONTROL_TOKEN"
     | "ALLOWED_ORIGIN"
     | "APP_ORIGIN"
+    | "OPERATOR_DIAGNOSTIC_TOKEN"
     | "RUNNER_VERIFY_KEY"
     | "RUNNER_VERIFY_KEY_ID"
     | "RUNNER_SERVICE_TOKEN"
@@ -1121,26 +1122,23 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
         url.pathname === "/api/diagnostics/sandbox" &&
         request.method === "POST";
       if (isDiagnosticsRoute) {
-        // The diagnostic is an operator probe, not a tenant operation. Accept
-        // only the deployment control token, whether supplied in the legacy
-        // worker header or as the documented bearer token. A runner identity
-        // is never accepted here, so stale or revoked claims cannot turn the
-        // control token into a paid sandbox grant.
-        const bearerControlToken = hasValidBearerToken(
-          request,
-          environment.AGENT_CONTROL_TOKEN ?? ""
-        );
-        const headerControlToken = hasValidHeaderToken(
-          request,
-          "x-runner-token",
-          environment.AGENT_CONTROL_TOKEN ?? ""
-        );
-        const hasAuthorization = request.headers.has("authorization");
-        const hasRunnerHeader = request.headers.has("x-runner-token");
+        // Diagnostics are a separate operator path. The deployment control
+        // token is browser-visible and must never authorize a paid probe.
+        const operatorToken = environment.OPERATOR_DIAGNOSTIC_TOKEN?.trim();
+        if (!operatorToken) {
+          return json(
+            errorEnvelope(
+              "diagnostic_unavailable",
+              "Please try again later.",
+              true
+            ),
+            { status: 503 },
+            cors
+          );
+        }
         if (
-          !(bearerControlToken || headerControlToken) ||
-          (hasAuthorization && !bearerControlToken) ||
-          (hasRunnerHeader && !headerControlToken)
+          !hasValidBearerToken(request, operatorToken) ||
+          request.headers.has("x-runner-token")
         ) {
           return json(
             errorEnvelope(

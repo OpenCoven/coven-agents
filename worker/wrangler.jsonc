@@ -29,6 +29,9 @@
     }
   ],
   "vars": {
+    // AGENT_CONTROL_TOKEN, OPERATOR_DIAGNOSTIC_TOKEN, and the other
+    // credentials are Wrangler secrets; keep their values out of this file
+    // and configure them with `wrangler secret put`.
     "ALLOWED_ORIGIN": "https://agents.opencoven.ai",
     "RUN_ADMISSION_CONSECUTIVE_MAX": "2",
     "RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX": "25",

@@ -22,6 +22,7 @@ import {
 import type { RunnerAuthorityResult } from "./runner-authority";
 
 const TOKEN = "test-token";
+const OPERATOR_TOKEN = "operator-diagnostic-token";
 const MINE = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
 const THEIRS = "9c1b7d2f-5a6b-4c90-8f1a-0f4e1f4d4a2e";
 const CALLER_TENANT = "tenant_under_test";
@@ -115,6 +116,7 @@ const environmentPromise = verifyKeySpki().then((spki) => ({
   ALLOWED_ORIGIN: "*",
   EDGE_ABUSE_KEY_SECRET: "test-edge-abuse-secret",
   EDGE_REQUEST_LIMITER: new RecordingLimiter(),
+  OPERATOR_DIAGNOSTIC_TOKEN: OPERATOR_TOKEN,
   RUNNER_VERIFY_KEY: spki,
   TENANT_MUTATION_LIMITER: new RecordingLimiter(),
   TENANT_RUN_LIMITER: new RecordingLimiter(),
@@ -549,7 +551,7 @@ test("lapsed identity is refused before sandbox or durable-object work", async (
   assert.deepEqual(warmed, []);
 });
 
-test("the sandbox diagnostic is operator-only and does not require tenant identity", async () => {
+test("the subscriber-visible control token cannot authorize the sandbox diagnostic", async () => {
   const environment = await environmentPromise;
   let diagnostics = 0;
   const response = await createCloudRunner({
@@ -575,16 +577,11 @@ test("the sandbox diagnostic is operator-only and does not require tenant identi
     environment as never
   );
 
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), {
-    exitCode: 0,
-    ok: true,
-    output: "coven-agents",
-  });
-  assert.equal(diagnostics, 1);
+  assert.equal(response.status, 401);
+  assert.equal(diagnostics, 0);
 });
 
-test("the diagnostic accepts the control token as a bearer operator token", async () => {
+test("the diagnostic accepts the separate operator token without tenant identity", async () => {
   const environment = await environmentPromise;
   let diagnostics = 0;
   const response = await createCloudRunner({
@@ -600,7 +597,7 @@ test("the diagnostic accepts the control token as a bearer operator token", asyn
     },
   }).fetch(
     new Request("https://runner.test/api/diagnostics/sandbox", {
-      headers: { authorization: `Bearer ${TOKEN}` },
+      headers: { authorization: `Bearer ${OPERATOR_TOKEN}` },
       method: "POST",
     }),
     environment as never
@@ -610,7 +607,34 @@ test("the diagnostic accepts the control token as a bearer operator token", asyn
   assert.equal(diagnostics, 1);
 });
 
-test("a runner identity cannot substitute for the diagnostic control token", async () => {
+test("the diagnostic fails closed when the operator token is missing", async () => {
+  const { OPERATOR_DIAGNOSTIC_TOKEN: _operatorToken, ...environment } =
+    await environmentPromise;
+  let diagnostics = 0;
+  const response = await createCloudRunner({
+    diagnoseSandbox: () => {
+      diagnostics += 1;
+      return { exitCode: 0, ok: true, output: "coven-agents" };
+    },
+    getDirectory: () => {
+      throw new Error("diagnostics must not open a tenant directory");
+    },
+    getYoloAgent: () => {
+      throw new Error("diagnostics must not open an agent");
+    },
+  }).fetch(
+    new Request("https://runner.test/api/diagnostics/sandbox", {
+      headers: { authorization: `Bearer ${OPERATOR_TOKEN}` },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(diagnostics, 0);
+});
+
+test("a runner identity cannot substitute for the diagnostic operator token", async () => {
   const environment = await environmentPromise;
   let diagnostics = 0;
   const response = await createCloudRunner({

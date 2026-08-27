@@ -69,6 +69,7 @@ test("the incident runbooks name every secret that exists", () => {
     "RUNNER_SIGNING_KEY",
     "RUNNER_VERIFY_KEY",
     "AGENT_CONTROL_TOKEN",
+    "OPERATOR_DIAGNOSTIC_TOKEN",
     "RUNNER_SERVICE_TOKEN",
     "AUTH_GITHUB_SECRET",
     "STRIPE_SECRET_KEY",

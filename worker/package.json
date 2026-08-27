@@ -6,7 +6,11 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
-    "test": "tsx --tsconfig tsconfig.test.json --test src/*.test.ts",
+    "harness:mint": "node --env-file-if-exists=.dev.vars harness/mint.mjs",
+    "harness:run": "node --env-file-if-exists=.dev.vars harness/run.mjs",
+    "harness:stub": "node --env-file-if-exists=.dev.vars harness/stub-credential.mjs",
+    "harness:test": "node --test harness/*.test.mjs",
+    "test": "pnpm harness:test && tsx --tsconfig tsconfig.test.json --test src/*.test.ts",
     "typecheck": "tsc --noEmit",
     "types": "wrangler types"
   },

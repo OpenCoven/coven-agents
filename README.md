@@ -125,8 +125,10 @@ Create `worker/.dev.vars`:
 
 ```dotenv
 AGENT_CONTROL_TOKEN=replace-with-a-long-random-token
+OPERATOR_DIAGNOSTIC_TOKEN=replace-with-a-different-long-random-token
 RUNNER_VERIFY_KEY_ID=key-2026-08
 RUNNER_VERIFY_KEY=replace-with-the-base64url-ed25519-public-key
+RUNNER_AUTH_VERSION=0
 # Optional during rotation; retire only after token expiry plus skew.
 RUNNER_VERIFY_PREVIOUS_KEY_ID=key-2026-07
 RUNNER_VERIFY_PREVIOUS_KEY=replace-with-the-old-base64url-ed25519-public-key
@@ -179,6 +181,7 @@ For deployment, set the secrets without committing them:
 ```bash
 cd worker
 pnpm wrangler secret put AGENT_CONTROL_TOKEN
+pnpm wrangler secret put OPERATOR_DIAGNOSTIC_TOKEN
 pnpm wrangler secret put EDGE_ABUSE_KEY_SECRET
 pnpm wrangler secret put RUNNER_VERIFY_KEY
 pnpm wrangler secret put RUNNER_VERIFY_KEY_ID
@@ -199,23 +202,23 @@ requests.
 Update `ALLOWED_ORIGIN` in `worker/wrangler.jsonc` to the deployed web origin and
 set `NEXT_PUBLIC_CLOUD_RUNNER_URL` on the web deployment.
 
-`AGENT_CONTROL_TOKEN` is read from the `env` binding, not from `process.env`.
-A Worker only exposes `vars` on `process.env`, and only under `nodejs_compat`;
-secrets never appear there. Reading a secret from `process.env` yields
-`undefined`, and because the token check treats an unset token as "deny", the
-symptom is a Worker that returns `401` to every request including a correct
-one. `worker/src/worker-secrets.d.ts` declares the secret on `Env` so this
-stays type-checked.
+`AGENT_CONTROL_TOKEN` and `OPERATOR_DIAGNOSTIC_TOKEN` are read from the `env`
+binding, not from `process.env`. A Worker only exposes `vars` on `process.env`,
+and only under `nodejs_compat`; secrets never appear there. Reading a secret
+from `process.env` yields `undefined`. `worker/src/worker-secrets.d.ts`
+declares both secrets on `Env` so this stays type-checked.
 
 After deployment, `POST /api/diagnostics/sandbox` performs an authenticated,
-one-shot command in a dedicated Cloudflare container. The fixed diagnostic
-sandbox is reused and automatically sleeps after 30 seconds of inactivity,
-which bounds container allocation without keeping it alive. Use it as the
-deployment smoke test:
+one-shot command in a dedicated Cloudflare container. It accepts only the
+separate `OPERATOR_DIAGNOSTIC_TOKEN` as a timing-safe bearer credential; the
+browser-visible `AGENT_CONTROL_TOKEN` and subscriber identities are denied.
+The fixed diagnostic sandbox is reused and automatically sleeps after 30
+seconds of inactivity, which bounds container allocation without keeping it
+alive. Use it as the deployment smoke test:
 
 ```bash
 curl -sS -X POST \
-  -H "Authorization: Bearer $AGENT_CONTROL_TOKEN" \
+  -H "Authorization: Bearer <OPERATOR_DIAGNOSTIC_TOKEN>" \
   -H "Content-Type: application/json" \
   --data '{}' \
   https://<your-worker>.workers.dev/api/diagnostics/sandbox
@@ -229,6 +232,11 @@ The current cloud backend spawns an already-authenticated coding CLI — the
 previous local runner was removed, and the shared contract now accepts only
 `cloud`. The control plane is never a model client, so it needs no provider
 credential.
+
+For the Docker-backed local Worker loop, use the exact environment-loading
+commands in [`worker/harness/README.md`](worker/harness/README.md). The
+`harness:mint`, `harness:stub`, and `harness:run` scripts load
+`worker/.dev.vars`; they do not contain a fallback control or service token.
 
 - `packages/harness` is the single definition of the CLI subset, the JSONL event
   normalizer, and the run summarizer. The sandbox calls it, so normalization

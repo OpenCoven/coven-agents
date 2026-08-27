@@ -22,6 +22,8 @@ interface Env {
    */
   APP_ORIGIN?: string;
   EDGE_ABUSE_KEY_SECRET?: string;
+  /** Dedicated operator credential for the rate-limited diagnostic route only. */
+  OPERATOR_DIAGNOSTIC_TOKEN?: string;
   RUNNER_SERVICE_TOKEN?: string;
   RUNNER_VERIFY_KEY?: string;
   RUNNER_VERIFY_KEY_ID?: string;

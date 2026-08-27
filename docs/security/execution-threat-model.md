@@ -87,7 +87,7 @@ Assumptions:
    `authVersion`. The Worker selects only the configured current or unexpired
    previous key by `kid`, then verifies the raw signed payload before parsing
    claims. The paid sandbox diagnostic is separate: it accepts only the
-   operator `AGENT_CONTROL_TOKEN` and no runner identity.
+   operator `OPERATOR_DIAGNOSTIC_TOKEN` and no runner identity.
 4. The Worker resolves the requested agent under the verified tenant and starts
    or resumes that agent's Durable Object.
 5. For a run, the Worker forwards the same signed identity plus its service
@@ -106,6 +106,7 @@ Assumptions:
 | --- | --- | --- |
 | Runner signing key ring | Current private key can mint cloud tenant claims; previous public keys support bounded overlap | Current private key in control plane; public verification ring in control plane and Worker |
 | Cloud control token | Gates access to the Worker deployment | Control plane, browser session, Worker |
+| Diagnostic operator token | Runs the unauthenticated-by-tenant Sandbox probe | Operator secret store and Worker only |
 | Worker service token | Gates the internal credential endpoint | Control plane and Worker |
 | Credential KEK | Decrypts tenant credential data keys | Control plane only |
 | Tenant harness credential | Acts as the tenant at a coding provider | Encrypted database row; in-memory run scope |
@@ -132,8 +133,9 @@ the signed claim minted in `lib/agents/runner-token.ts` and verified in
 `worker/src/routes.ts`. The Worker routes by the bounded `kid` hint, verifies
 the raw payload, and only then trusts claims. CORS narrows browser origins but
 is not treated as authentication. `/api/diagnostics/sandbox` is operator-only:
-it accepts the control token as its sole credential and refuses runner
-identity headers, so a revoked claim cannot authorize a paid probe.
+it accepts only the separate `OPERATOR_DIAGNOSTIC_TOKEN` as a timing-safe
+credential and refuses control-token and runner-identity headers, so a revoked
+claim cannot authorize a paid probe.
 
 ### B3. Control plane to internal credential endpoint
 

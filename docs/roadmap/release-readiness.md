@@ -61,7 +61,7 @@ Check presence and agreement without printing values.
 | Credential lending | App and Worker `RUNNER_SERVICE_TOKEN`; app `CREDENTIAL_KEK`; Worker `APP_ORIGIN`. | The Worker has no operator or fallback harness credential. |
 | Billing | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, and canonical `APP_ORIGIN`. | Checkout and webhook return `503` when unconfigured. |
 | Other shipped app paths | `AI_GATEWAY_API_KEY` and `BLOB_READ_WRITE_TOKEN` when chat/model and upload paths remain enabled. | These are app feature dependencies, not runner credentials. |
-| Worker | `AGENT_CONTROL_TOKEN`, `RUNNER_VERIFY_KEY`, `RUNNER_SERVICE_TOKEN`, `APP_ORIGIN`, correct `ALLOWED_ORIGIN`, Durable Object bindings/migration, container image, and Wrangler authentication. | [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc) enables observability and declares the current Worker topology. |
+| Worker | `AGENT_CONTROL_TOKEN`, `OPERATOR_DIAGNOSTIC_TOKEN`, `RUNNER_VERIFY_KEY`, `RUNNER_SERVICE_TOKEN`, `APP_ORIGIN`, correct `ALLOWED_ORIGIN`, Durable Object bindings/migration, container image, and Wrangler authentication. | [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc) enables observability and declares the current Worker topology. |
 | Demo recorder | Recorder variables from [`.env.example`](../../.env.example) only when producing a new owner-approved replay. | Guest playback itself is committed, stateless evidence and needs no recorder secret. |
 | Local execution | — | The local runner was removed in `91f21c8`; the shared contract accepts only `cloud`. Local smoke is not a current release gate. |
 
@@ -191,8 +191,9 @@ an incident-response trigger.
 Before traffic promotion:
 
 1. Confirm Worker observability is enabled for the deployed version.
-2. Run the authenticated `/api/diagnostics/sandbox` probe and retain its
-   sanitized result.
+2. Run the authenticated `/api/diagnostics/sandbox` probe with the
+   `OPERATOR_DIAGNOSTIC_TOKEN` and retain its sanitized result. The
+   browser-visible `AGENT_CONTROL_TOKEN` must be refused.
 3. Confirm app telemetry initializes and both app and Worker surface actionable
    failures without request bodies, credentials, private paths, or private
    planning text.

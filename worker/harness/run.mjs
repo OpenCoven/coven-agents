@@ -1,19 +1,26 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { readHarnessConfig } from "./config.mjs";
 
-const BASE = "http://127.0.0.1:8788";
-const token = execFileSync("node", [
-  new URL("./mint.mjs", import.meta.url).pathname,
-]).toString();
+const { controlToken, runnerUrl } = readHarnessConfig();
+const mintScript = fileURLToPath(new URL("./mint.mjs", import.meta.url));
+const envFile = fileURLToPath(new URL("../.dev.vars", import.meta.url));
+const token = execFileSync(process.execPath, [
+  `--env-file-if-exists=${envFile}`,
+  mintScript,
+])
+  .toString()
+  .trim();
 const headers = {
   authorization: `Bearer ${token}`,
   "content-type": "application/json",
-  "x-runner-token": "local-harness-control-token",
+  "x-runner-token": controlToken,
 };
 const t0 = Date.now();
 const stamp = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 
-const agentResponse = await fetch(`${BASE}/api/agents`, {
+const agentResponse = await fetch(`${runnerUrl}/api/agents`, {
   body: JSON.stringify({
     backend: "cloud",
     instructions:
@@ -38,7 +45,7 @@ if (!agentResponse.ok) {
 const agentId = agentBody.agent.id;
 console.log(stamp(), "agent created", agentId);
 
-const runResponse = await fetch(`${BASE}/api/agents/${agentId}/runs`, {
+const runResponse = await fetch(`${runnerUrl}/api/agents/${agentId}/runs`, {
   body: JSON.stringify({
     operationId: randomUUID(),
     task: "Say hello in one sentence, then finish.",
@@ -64,7 +71,7 @@ const deadline = Date.now() + 10 * 60 * 1000;
 while (Date.now() < deadline) {
   // biome-ignore lint/performance/noAwaitInLoops: a poll loop is sequential by definition.
   await new Promise((resolve) => setTimeout(resolve, 2000));
-  const snapshotResponse = await fetch(`${BASE}/api/runs/${runId}`, {
+  const snapshotResponse = await fetch(`${runnerUrl}/api/runs/${runId}`, {
     headers,
   });
   if (!snapshotResponse.ok) {

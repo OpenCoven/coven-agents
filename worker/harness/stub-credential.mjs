@@ -2,6 +2,7 @@ import { createPublicKey, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
+import { readHarnessConfig } from "./config.mjs";
 
 const PORT = 9797;
 const MAX_BODY_BYTES = 8192;
@@ -13,16 +14,8 @@ function base64UrlDecode(value) {
 }
 
 function readFixtureConfiguration() {
-  const keyId = process.env.RUNNER_VERIFY_KEY_ID ?? "key-local";
-  const authVersion = Number(process.env.RUNNER_AUTH_VERSION ?? "0");
-  const serviceToken =
-    process.env.RUNNER_SERVICE_TOKEN ?? "local-harness-service-token";
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(keyId)) {
-    throw new Error("RUNNER_VERIFY_KEY_ID must be a valid key id.");
-  }
-  if (!Number.isSafeInteger(authVersion) || authVersion < 0) {
-    throw new Error("RUNNER_AUTH_VERSION must be a non-negative integer.");
-  }
+  const { authVersion, controlToken, keyId, serviceToken } =
+    readHarnessConfig();
   const verifyKey = createPublicKey({
     format: "der",
     key: base64UrlDecode(
@@ -30,7 +23,7 @@ function readFixtureConfiguration() {
     ),
     type: "spki",
   });
-  return { authVersion, keyId, serviceToken, verifyKey };
+  return { authVersion, controlToken, keyId, serviceToken, verifyKey };
 }
 
 export function fixtureClaims(configuration = readFixtureConfiguration()) {
