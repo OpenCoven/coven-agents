@@ -1,33 +1,16 @@
 import "server-only";
 
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { databaseFor } from "@/lib/db/access";
 import { tenantCredential } from "@/lib/db/schema";
 import type { SubscriberSession } from "@/lib/session";
-import { decryptCredential, encryptCredential } from "./envelope";
-import { refreshCredential } from "./github-device";
-import { credentialKek } from "./kek";
-import {
-  needsRefresh,
-  parseStoredCredential,
-  type StoredCredential,
-  serializeCredential,
-} from "./shape";
+import { credentialAadContextForWrite } from "./aad-policy";
+import { encryptCredential } from "./envelope";
+import { credentialKekRingFromEnvironment } from "./key-ring";
+import { credentialWhere } from "./scope";
+import { readCredentialForTenant as readCredentialForTenantCore } from "./store-core";
 
-/**
- * Scopes a credential lookup to exactly one tenant AND one harness.
- *
- * Extracted so the scoping can be asserted without a database. Dropping the
- * harness condition is invisible to an outcome-based test — the query still
- * returns a row, just the wrong one — and handing a tenant's Copilot token to
- * a Codex run is a credential leak inside the tenant rather than a crash.
- */
-export function credentialWhere(tenant: string, harnessId: string) {
-  return and(
-    eq(tenantCredential.tenant, tenant),
-    eq(tenantCredential.harnessId, harnessId)
-  );
-}
+export { credentialWhere } from "./scope";
 
 /**
  * Tenant credential storage: the app is sole custodian of plaintext
@@ -48,21 +31,35 @@ export async function putCredential(
   plaintext: string
 ): Promise<void> {
   const db = databaseFor(session);
-  const sealed = await encryptCredential(plaintext, await credentialKek());
+  const ring = await credentialKekRingFromEnvironment();
+  const sealed = await encryptCredential(
+    plaintext,
+    ring.current,
+    ring.currentVersion,
+    credentialAadContextForWrite(session.tenant, harnessId)
+  );
 
   await db
     .insert(tenantCredential)
     .values({
+      aadVersion: sealed.aadVersion,
       ciphertext: sealed.ciphertext,
+      credentialRevision: crypto.randomUUID(),
+      envelopeRevision: crypto.randomUUID(),
       harnessId,
       iv: sealed.iv,
+      kekVersion: sealed.kekVersion,
       tenant: session.tenant,
       wrappedKey: sealed.wrappedKey,
     })
     .onConflictDoUpdate({
       set: {
+        aadVersion: sealed.aadVersion,
         ciphertext: sealed.ciphertext,
+        credentialRevision: crypto.randomUUID(),
+        envelopeRevision: crypto.randomUUID(),
         iv: sealed.iv,
+        kekVersion: sealed.kekVersion,
         updatedAt: new Date(),
         wrappedKey: sealed.wrappedKey,
       },
@@ -70,102 +67,12 @@ export async function putCredential(
     });
 }
 
-export async function readCredentialForTenant(
+export function readCredentialForTenant(
   tenant: string,
   harnessId: string,
   db: ReturnType<typeof databaseFor>
 ): Promise<string | null> {
-  const rows = await db
-    .select()
-    .from(tenantCredential)
-    .where(credentialWhere(tenant, harnessId))
-    .limit(1);
-
-  const [row] = rows;
-  if (!row) {
-    return null;
-  }
-
-  const raw = await decryptCredential(
-    { ciphertext: row.ciphertext, iv: row.iv, wrappedKey: row.wrappedKey },
-    await credentialKek()
-  );
-
-  const stored = parseStoredCredential(raw);
-
-  if (!stored) {
-    return null;
-  }
-
-  if (!needsRefresh(stored, Date.now())) {
-    return stored.kind === "pat" ? stored.token : stored.access;
-  }
-
-  // Refreshed here because this is the single point every run reads through,
-  // so a run that starts always holds a live token. A device-flow token lives
-  // eight hours; without this a subscriber's agents would work in the morning
-  // and fail silently by evening.
-  return await refreshStoredCredential(stored, tenant, harnessId, db);
-}
-
-async function refreshStoredCredential(
-  stored: StoredCredential,
-  tenant: string,
-  harnessId: string,
-  db: ReturnType<typeof databaseFor>
-): Promise<string | null> {
-  if (stored.kind !== "oauth") {
-    return stored.token;
-  }
-
-  const clientId = process.env.AUTH_GITHUB_ID;
-  const clientSecret = process.env.AUTH_GITHUB_SECRET;
-
-  if (!(clientId && clientSecret)) {
-    // Nothing can be refreshed without them. Returning the stale token beats
-    // returning null: it may still have minutes left, and a run that fails on
-    // an expired token is clearer than one that reports no credential at all.
-    return stored.access;
-  }
-
-  const refreshed = await refreshCredential(
-    { clientId, clientSecret, refresh: stored.refresh },
-    Date.now()
-  );
-
-  if (!refreshed) {
-    // A revoked authorization or an expired refresh token. No amount of
-    // retrying fixes either, so the row is removed and the tenant is asked to
-    // reconnect rather than left with a credential that silently never works.
-    await db.delete(tenantCredential).where(credentialWhere(tenant, harnessId));
-    return null;
-  }
-
-  await persistCredential(tenant, harnessId, refreshed, db);
-
-  return refreshed.kind === "pat" ? refreshed.token : refreshed.access;
-}
-
-async function persistCredential(
-  tenant: string,
-  harnessId: string,
-  credential: StoredCredential,
-  db: ReturnType<typeof databaseFor>
-): Promise<void> {
-  const sealed = await encryptCredential(
-    serializeCredential(credential),
-    await credentialKek()
-  );
-
-  await db
-    .update(tenantCredential)
-    .set({
-      ciphertext: sealed.ciphertext,
-      iv: sealed.iv,
-      updatedAt: new Date(),
-      wrappedKey: sealed.wrappedKey,
-    })
-    .where(credentialWhere(tenant, harnessId));
+  return readCredentialForTenantCore(tenant, harnessId, db);
 }
 
 /**

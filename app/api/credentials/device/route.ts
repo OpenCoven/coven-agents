@@ -21,7 +21,7 @@ import {
   exchangeDeviceCode,
   startDeviceFlow,
 } from "@/lib/credentials/github-device";
-import { credentialKek } from "@/lib/credentials/kek";
+import { credentialKek, credentialKekVersion } from "@/lib/credentials/kek";
 import { serializeCredential } from "@/lib/credentials/shape";
 import { putCredential } from "@/lib/credentials/store";
 import { databaseIdempotencyStore } from "@/lib/db/queries";
@@ -31,8 +31,10 @@ const devicePollSchema = z.object({
 });
 
 const DEVICE_RESULT_RETENTION_MS = 15 * 60_000;
-const deviceStartResponseStorage =
-  encryptedIdempotencyResponseStorage(credentialKek);
+const deviceStartResponseStorage = encryptedIdempotencyResponseStorage(
+  credentialKek,
+  credentialKekVersion
+);
 
 /**
  * Connects Copilot without the tenant ever seeing a token.

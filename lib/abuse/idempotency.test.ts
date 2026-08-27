@@ -516,8 +516,10 @@ function encryptedTestEnvelope(): StoredIdempotencyResponseEnvelope {
   return {
     kind: "encrypted_json",
     payload: {
+      aadVersion: 0,
       ciphertext: "ciphertext",
       iv: "iv",
+      kekVersion: "v1",
       wrappedKey: "wrapped-key",
     },
   };

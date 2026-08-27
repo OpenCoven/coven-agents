@@ -56,8 +56,9 @@ HS256-for-RS256 confusion to get wrong.
 **Credentials belong to tenants.** The operator's credentials are never lent
 out. Each tenant supplies their own harness credential; it is stored under
 envelope encryption (a per-credential AES-GCM data key wrapped by
-`CREDENTIAL_KEK`), fetched for the duration of one run, and redacted from run
-evidence. The worker holds no key material of its own.
+the versioned `CREDENTIAL_KEK_V1`/`CREDENTIAL_KEK_V2` ring), fetched for the
+duration of one run, and redacted from run evidence. The worker holds no key
+material of its own. See the [credential KEK rotation runbook](docs/security/key-rotation.md).
 
 **Product data is subscriber-gated.** New browser-facing product data access
 uses `databaseFor`, which accepts a `SubscriberSession` and nothing else.
@@ -159,9 +160,23 @@ single run. Setting `COPILOT_GITHUB_TOKEN` on the worker now does nothing.
 
 Each tenant supplies their own credential through the console, which is stored
 under envelope encryption — a per-credential AES-GCM data key wrapped by
-`CREDENTIAL_KEK`. Accepted values for a Copilot harness are a fine-grained PAT
-with the "Copilot Requests" permission, or an OAuth token from the Copilot CLI
-or `gh` app. Classic `ghp_` tokens are not supported.
+the versioned KEK ring. Production must configure
+`CREDENTIAL_KEK_CURRENT_VERSION=v2`,
+`CREDENTIAL_KEK_V1`, and `CREDENTIAL_KEK_V2`; local and CI builds may leave
+all `CREDENTIAL_KEK*` variables unset. New rows use AAD version `1`, binding
+the ciphertext to the tenant and harness; legacy rows are explicitly marked
+AAD version `0` and never fall back to another format. During the staged
+migration, drain old readers and writers, then run
+`pnpm credentials:rewrap bind-aad --batch 100` until it exits `0`. The command
+decrypts and re-encrypts one row in memory and CAS-protects the update. The old
+`CREDENTIAL_KEK` name may alias only `v1` and is not a current-key fallback.
+Keep both versioned keys until `pnpm credentials:rewrap verify --version v1`
+passes with zero `v1` and `aadVersion=0` rows.
+Rewrap is resumable: exit `0` means complete, exit `2` means resume after
+skips or remaining rows, and exit `1` means configuration or data failure.
+Accepted values for a Copilot harness are a fine-grained PAT with the
+"Copilot Requests" permission, or an OAuth token from the Copilot CLI or `gh`
+app. Classic `ghp_` tokens are not supported.
 
 `RUNNER_SERVICE_TOKEN` and `APP_ORIGIN` are how the worker asks the app for
 that credential. Both must be set, and the service token must match the app's.

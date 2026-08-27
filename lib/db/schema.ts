@@ -186,11 +186,15 @@ export type Stream = InferSelectModel<typeof stream>;
 export const tenantCredential = pgTable(
   "TenantCredential",
   {
+    aadVersion: integer("aadVersion").notNull().default(0),
     ciphertext: text("ciphertext").notNull(),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
+    credentialRevision: uuid("credentialRevision").notNull().defaultRandom(),
+    envelopeRevision: uuid("envelopeRevision").notNull().defaultRandom(),
     harnessId: varchar("harnessId", { length: 32 }).notNull(),
     id: uuid("id").primaryKey().notNull().defaultRandom(),
     iv: text("iv").notNull(),
+    kekVersion: varchar("kekVersion", { length: 32 }).notNull().default("v1"),
     tenant: varchar("tenant", { length: 64 }).notNull(),
     updatedAt: timestamp("updatedAt").notNull().defaultNow(),
     wrappedKey: text("wrappedKey").notNull(),
@@ -199,6 +203,14 @@ export const tenantCredential = pgTable(
     uniqueIndex("TenantCredential_tenant_harness_idx").on(
       table.tenant,
       table.harnessId
+    ),
+    check(
+      "TenantCredential_kekVersion_valid",
+      sql`${table.kekVersion} ~ '^[A-Za-z0-9_-]{1,32}$'`
+    ),
+    check(
+      "TenantCredential_aadVersion_valid",
+      sql`${table.aadVersion} in (0, 1)`
     ),
   ]
 );

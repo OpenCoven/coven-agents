@@ -336,10 +336,8 @@ test("device starts encrypt replay payloads while checkout uses tagged plaintext
   const deviceSource = read("app/api/credentials/device/route.ts");
   const checkoutSource = read("app/api/checkout/route.ts");
 
-  assert.match(
-    deviceSource,
-    /encryptedIdempotencyResponseStorage\(credentialKek\)/
-  );
+  assert.match(deviceSource, /encryptedIdempotencyResponseStorage\(/);
+  assert.match(deviceSource, /credentialKekVersion/);
   assert.match(
     functionBlock(deviceSource, "POST"),
     /responseStorage:\s*deviceStartResponseStorage/
@@ -454,6 +452,30 @@ test("identity version migration adds a non-null zero default", () => {
   assert.match(snapshot, /"authVersion"/);
   assert.match(snapshot, /"default": 0/);
   assert.match(snapshot, /"notNull": true/);
+});
+
+test("credential KEK migration backfills v1 before enforcing the version", () => {
+  const migration = read("lib/db/migrations/0009_credential_kek_versions.sql");
+  assert.match(
+    migration,
+    /ADD COLUMN IF NOT EXISTS "kekVersion" varchar\(32\) DEFAULT 'v1'/i
+  );
+  assert.match(
+    migration,
+    /UPDATE "TenantCredential"[\s\S]*SET "kekVersion" = 'v1'[\s\S]*IS NULL/i
+  );
+  assert.match(migration, /ALTER COLUMN "kekVersion" SET NOT NULL/i);
+  assert.match(migration, /ALTER COLUMN "kekVersion" DROP DEFAULT/i);
+  assert.match(migration, /TenantCredential_kekVersion_valid/);
+
+  const snapshot = read("lib/db/migrations/meta/0009_snapshot.json");
+  assert.match(snapshot, /"kekVersion"/);
+  assert.match(snapshot, /"type": "varchar\(32\)"/);
+  assert.match(snapshot, /"notNull": true/);
+  assert.match(
+    read("lib/db/migrations/meta/_journal.json"),
+    /0009_credential_kek_versions/
+  );
 });
 
 test("session revocation increments in the database update", () => {

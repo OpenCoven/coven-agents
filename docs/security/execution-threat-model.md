@@ -108,7 +108,7 @@ Assumptions:
 | Cloud control token | Gates access to the Worker deployment | Control plane, browser session, Worker |
 | Diagnostic operator token | Runs the unauthenticated-by-tenant Sandbox probe | Operator secret store and Worker only |
 | Worker service token | Gates the internal credential endpoint | Control plane and Worker |
-| Credential KEK | Decrypts tenant credential data keys | Control plane only |
+| Credential KEK ring | Decrypts tenant credential data keys; supports bounded rewrap before retirement | Control plane only |
 | Tenant harness credential | Acts as the tenant at a coding provider | Encrypted database row; in-memory run scope |
 | Tenant identity and entitlement | Determines persistence and execution authority | Control plane |
 | Agent definitions and run evidence | May contain private repository or task context | Tenant-scoped storage and UI |
@@ -159,8 +159,9 @@ against current server-owned `authVersion`, so revocation does not wait for
 token expiry. Narrow account, usage-status, and checkout
 paths are documented guest exceptions and expose no chat, document,
 credential, agent, or run data. Tenant credentials are scoped by tenant and
-harness and sealed before storage in `lib/credentials/store.ts`; the KEK has no
-default. The internal credential route is the documented service-to-service
+harness and sealed before storage in `lib/credentials/store.ts`; each row names
+one configured KEK version, and the ring has no default or brute-force
+fallback. The internal credential route is the documented service-to-service
 exception and replaces the session gate with service and signed-identity
 checks.
 
@@ -244,7 +245,7 @@ class explicitly.
 | T2 | The shared cloud control token becomes a master tenant credential. | The token only gates deployment access. Tenant identity comes from the signed claim; the internal credential endpoint independently verifies that claim and the database `authVersion` before reservation or decryption. | Browser compromise can use the current user's authority until session revocation or runner-claim expiry. |
 | T3 | A guest, lapsed, forged, or unknown entitlement gains subscriber persistence or execution. | `lib/session.ts` fails closed to internal plan `demo`; `lib/auth/subscriber-access.ts` gates model and persistent routes; `lib/db/access.ts` requires `SubscriberSession`; runner connection and identity routes refuse guest accounts; the Worker and internal credential binding require `plan === "subscriber"`. | The complete provider-ingestion state machine and adversarial transition coverage remain tracked by `coven-agents-security.2`. |
 | T4 | A tenant or harness receives another tenant's credential. | `lib/credentials/store.ts` scopes by tenant plus harness. The internal endpoint binds tenant to a verified claim, refuses mismatch, and lends one credential for one run. Isolation and binding tests cover cross-tenant and cross-harness cases. | Plaintext exists in control-plane and Worker memory during a run. Process compromise during that window can expose it. |
-| T5 | Credential storage is copied or read at rest. | Per-credential AES-GCM data keys are wrapped by `CREDENTIAL_KEK`; the KEK is required and not stored in rows. The Worker stores no harness credential between runs. | Database plus KEK compromise defeats encryption. Rotation and rewrapping need an operator procedure. |
+| T5 | Credential storage is copied or read at rest. | Per-credential AES-GCM data keys are wrapped by the exact versioned `CREDENTIAL_KEK_CURRENT_VERSION` ring named in each row; imported KEKs are non-extractable, and bounded rewrap changes only the wrapped DEK. The Worker stores no harness credential between runs. | Database plus the configured KEK ring compromise defeats encryption. Retiring v1 before the zero-row verification gate makes rows unreadable. |
 | T6 | Crafted tenant identifiers collide and share a cloud sandbox. | `worker/src/tenant.ts` rejects ambiguous identifiers and centralizes sandbox-key derivation. `worker/src/tenant.test.ts` covers collisions, missing owners, and create/delete consistency. | New owner kinds must preserve the exhaustive mapping and tests. |
 | T7 | A cloud harness escapes its intended filesystem or exfiltrates over the network. | Each agent runs in a Cloudflare sandbox keyed by tenant and agent. No operator harness credential is available as fallback. | Outbound policy is not yet declared or enforced. Complete `coven-agents-cloud.4`; expand readiness checks in `coven-agents-cloud.5`. |
 | T8 | A run exhausts memory, disk, processes, containers, or paid capacity. | Cloud runs are idempotent per operation, one active run per agent is enforced, and the credential boundary enforces the monthly cap before lending a credential. | Platform-wide queueing and fairness remain in `coven-agents-cloud.3`. |
