@@ -287,7 +287,7 @@ Run: `pnpm exec tsx --test lib/abuse/store.test.ts lib/ratelimit.test.ts`
 
 Expected: PASS, including 100 parallel calls allowing exactly the configured limit.
 
-- [x] **Step 7: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add lib/abuse lib/ratelimit.ts lib/ratelimit.test.ts .env.example
@@ -864,7 +864,7 @@ pnpm --filter @opencoven/cloud-runner test
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add app lib packages worker scripts docs/security
