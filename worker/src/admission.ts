@@ -11,6 +11,8 @@ import {
 export type AdmissionRecord = {
   agentId: string;
   enqueuedAt: string;
+  mode?: AdmissionMode;
+  noQueue?: boolean;
   operationId: string;
   requestHash: string;
   runId: string;
@@ -42,6 +44,8 @@ export type AdmissionDecision =
 
 export type AdmissionRequest = Omit<AdmissionRecord, "enqueuedAt" | "state"> & {
   mode?: AdmissionMode;
+  noQueue?: boolean;
+  prepareOwner?: string;
 };
 
 export type AdmissionLimits = {
@@ -80,6 +84,8 @@ const INITIAL_SCHEDULER_STATE: SchedulerState = {
 export type AdmissionDispatch = (record: AdmissionRecord) => Promise<boolean>;
 
 type StoredAdmissionRecord = AdmissionRecord & {
+  mode?: AdmissionMode;
+  noQueue?: boolean;
   dispatchLeaseUntil?: string;
   dispatchStartedAt?: string;
   dispatchToken?: string;
@@ -280,8 +286,15 @@ function cloneRecord(record: AdmissionRecord): AdmissionRecord {
   return { ...record };
 }
 
-function recordInput(input: AdmissionRequest): Omit<AdmissionRequest, "mode"> {
-  const { mode: _mode, ...record } = input;
+function recordInput(
+  input: AdmissionRequest
+): Omit<AdmissionRequest, "mode" | "noQueue" | "prepareOwner"> {
+  const {
+    mode: _mode,
+    noQueue: _noQueue,
+    prepareOwner: _prepareOwner,
+    ...record
+  } = input;
   return record;
 }
 
@@ -700,6 +713,8 @@ type AdmissionRow = {
   dispatch_started_at: string | null;
   dispatch_token: string | null;
   enqueued_at: string;
+  mode: string | null;
+  no_queue: number | null;
   operation_id: string;
   request_hash: string;
   run_id: string;
@@ -728,6 +743,8 @@ const NEXT_SEQUENCE_META_KEY = "next_sequence";
 const NEXT_DISPATCH_GENERATION_META_KEY = "next_dispatch_generation";
 
 function rowToStoredRecord(row: AdmissionRow): StoredAdmissionRecord {
+  const noQueue = row.no_queue === 1 || row.mode === "reject";
+  const mode: AdmissionMode = noQueue ? "reject" : "queue";
   if (
     (row.state !== "queued" &&
       row.state !== "active" &&
@@ -738,6 +755,10 @@ function rowToStoredRecord(row: AdmissionRow): StoredAdmissionRecord {
     !row.request_hash ||
     !row.run_id ||
     !row.tenant_hash ||
+    (row.mode !== null &&
+      row.mode !== undefined &&
+      row.mode !== "queue" &&
+      row.mode !== "reject") ||
     !Number.isSafeInteger(row.queue_sequence) ||
     row.queue_sequence <= 0
   ) {
@@ -748,6 +769,8 @@ function rowToStoredRecord(row: AdmissionRow): StoredAdmissionRecord {
   return {
     agentId: row.agent_id,
     enqueuedAt: row.enqueued_at,
+    mode,
+    noQueue,
     operationId: row.operation_id,
     requestHash: row.request_hash,
     runId: row.run_id,
@@ -787,6 +810,8 @@ export class RunAdmission extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS admission_records (
           agent_id TEXT NOT NULL,
           enqueued_at TEXT NOT NULL,
+          mode TEXT NOT NULL DEFAULT 'queue' CHECK (mode IN ('queue', 'reject')),
+          no_queue INTEGER NOT NULL DEFAULT 0 CHECK (no_queue IN (0, 1)),
           operation_id TEXT NOT NULL UNIQUE,
           request_hash TEXT NOT NULL,
           run_id TEXT PRIMARY KEY,
@@ -808,6 +833,19 @@ export class RunAdmission extends DurableObject<Env> {
           "ALTER TABLE admission_records ADD COLUMN dispatch_started_at TEXT"
         );
       }
+      if (!columns.includes("mode")) {
+        ctx.storage.sql.exec(
+          "ALTER TABLE admission_records ADD COLUMN mode TEXT NOT NULL DEFAULT 'queue'"
+        );
+      }
+      if (!columns.includes("no_queue")) {
+        ctx.storage.sql.exec(
+          "ALTER TABLE admission_records ADD COLUMN no_queue INTEGER NOT NULL DEFAULT 0"
+        );
+      }
+      ctx.storage.sql.exec(
+        "UPDATE admission_records SET no_queue = CASE WHEN mode = 'reject' THEN 1 ELSE 0 END"
+      );
       if (!columns.includes("dispatch_lease_until")) {
         ctx.storage.sql.exec(
           "ALTER TABLE admission_records ADD COLUMN dispatch_lease_until TEXT"
@@ -848,13 +886,17 @@ export class RunAdmission extends DurableObject<Env> {
           agent_id TEXT NOT NULL,
           run_id TEXT NOT NULL,
           admission_sequence INTEGER NOT NULL DEFAULT 0,
+          kind TEXT NOT NULL DEFAULT 'admission',
           dispatch_token TEXT,
+          prepare_owner TEXT,
+          operation_id TEXT,
+          request_hash TEXT,
           attempts INTEGER NOT NULL DEFAULT 0,
           next_attempt_at INTEGER NOT NULL,
           PRIMARY KEY (run_id, admission_sequence)
         )
       `);
-      const cleanupColumns = ctx.storage.sql
+      let cleanupColumns = ctx.storage.sql
         .exec<{ name: string }>("PRAGMA table_info(admission_cleanup_tasks)")
         .toArray()
         .map((column) => column.name);
@@ -867,7 +909,11 @@ export class RunAdmission extends DurableObject<Env> {
             agent_id TEXT NOT NULL,
             run_id TEXT NOT NULL,
             admission_sequence INTEGER NOT NULL DEFAULT 0,
+            kind TEXT NOT NULL DEFAULT 'admission',
             dispatch_token TEXT,
+            prepare_owner TEXT,
+            operation_id TEXT,
+            request_hash TEXT,
             attempts INTEGER NOT NULL DEFAULT 0,
             next_attempt_at INTEGER NOT NULL,
             PRIMARY KEY (run_id, admission_sequence)
@@ -875,10 +921,11 @@ export class RunAdmission extends DurableObject<Env> {
         `);
         ctx.storage.sql.exec(`
           INSERT INTO admission_cleanup_tasks
-            (agent_id, run_id, admission_sequence, dispatch_token, attempts, next_attempt_at)
+            (agent_id, run_id, admission_sequence, kind, dispatch_token, attempts, next_attempt_at)
           SELECT legacy.agent_id,
                  legacy.run_id,
                  admission_records.queue_sequence,
+                 'admission',
                  NULL,
                  legacy.attempts,
                  legacy.next_attempt_at
@@ -887,9 +934,41 @@ export class RunAdmission extends DurableObject<Env> {
             ON admission_records.run_id = legacy.run_id
         `);
         ctx.storage.sql.exec("DROP TABLE admission_cleanup_tasks_legacy");
+        cleanupColumns = [
+          "agent_id",
+          "run_id",
+          "admission_sequence",
+          "kind",
+          "dispatch_token",
+          "prepare_owner",
+          "operation_id",
+          "request_hash",
+          "attempts",
+          "next_attempt_at",
+        ];
       } else if (!cleanupColumns.includes("dispatch_token")) {
         ctx.storage.sql.exec(
           "ALTER TABLE admission_cleanup_tasks ADD COLUMN dispatch_token TEXT"
+        );
+      }
+      if (!cleanupColumns.includes("kind")) {
+        ctx.storage.sql.exec(
+          "ALTER TABLE admission_cleanup_tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'admission'"
+        );
+      }
+      if (!cleanupColumns.includes("prepare_owner")) {
+        ctx.storage.sql.exec(
+          "ALTER TABLE admission_cleanup_tasks ADD COLUMN prepare_owner TEXT"
+        );
+      }
+      if (!cleanupColumns.includes("operation_id")) {
+        ctx.storage.sql.exec(
+          "ALTER TABLE admission_cleanup_tasks ADD COLUMN operation_id TEXT"
+        );
+      }
+      if (!cleanupColumns.includes("request_hash")) {
+        ctx.storage.sql.exec(
+          "ALTER TABLE admission_cleanup_tasks ADD COLUMN request_hash TEXT"
         );
       }
       ctx.storage.sql.exec(`
@@ -898,14 +977,18 @@ export class RunAdmission extends DurableObject<Env> {
       `);
       ctx.storage.sql.exec(`
         DELETE FROM admission_cleanup_tasks
-        WHERE admission_sequence <= 0
-           OR NOT EXISTS (
+        WHERE (kind = 'admission' AND (
+                 admission_sequence <= 0
+                 OR NOT EXISTS (
              SELECT 1
              FROM admission_records
              WHERE admission_records.run_id = admission_cleanup_tasks.run_id
                AND admission_records.queue_sequence =
                  admission_cleanup_tasks.admission_sequence
-           )
+           )))
+           OR (kind = 'provisional' AND (
+                 prepare_owner IS NULL OR prepare_owner = ''
+           ))
       `);
       ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS admission_meta (
@@ -922,6 +1005,9 @@ export class RunAdmission extends DurableObject<Env> {
 
   async admit(input: AdmissionRequest): Promise<AdmissionDecision> {
     await this.initialized;
+    const mode: AdmissionMode =
+      input.noQueue || input.mode === "reject" ? "reject" : "queue";
+    const noQueue = mode === "reject";
     const limits = admissionLimits(this.env);
     await this.ensureAlarm({ throwOnFailure: true });
     const result = this.ctx.storage.transactionSync(() => {
@@ -943,7 +1029,7 @@ export class RunAdmission extends DurableObject<Env> {
           decision: decisionWithCleanupCapability(
             decision,
             cleanupCapability(existing),
-            input.mode !== undefined
+            input.mode !== undefined || input.noQueue !== undefined
           ),
           record: null,
         };
@@ -965,10 +1051,17 @@ export class RunAdmission extends DurableObject<Env> {
           decision: decisionWithCleanupCapability(
             decision,
             cleanupCapability(existingRun),
-            input.mode !== undefined
+            input.mode !== undefined || input.noQueue !== undefined
           ),
           record: null,
         };
+      }
+      if (input.prepareOwner) {
+        this.ctx.storage.sql.exec(
+          "DELETE FROM admission_cleanup_tasks WHERE run_id = ? AND kind = 'provisional' AND prepare_owner = ?",
+          input.runId,
+          input.prepareOwner
+        );
       }
       this.pruneTerminalRecords(1);
       if (!this.hasGlobalRetentionCapacity()) {
@@ -983,7 +1076,7 @@ export class RunAdmission extends DurableObject<Env> {
       const storedRecords = this.readStoredRecords();
       const nextSequence = this.readNextSequence();
       if (
-        input.mode === "reject" &&
+        noQueue &&
         storedRecords.some(
           (entry) =>
             entry.agentId === input.agentId &&
@@ -1006,16 +1099,22 @@ export class RunAdmission extends DurableObject<Env> {
         scheduler: this.readScheduler(),
       });
       const enqueuedRecord: StoredAdmissionRecord = {
-        ...input,
+        agentId: input.agentId,
         enqueuedAt: new Date(Date.now()).toISOString(),
+        mode,
+        noQueue,
+        operationId: input.operationId,
+        requestHash: input.requestHash,
+        runId: input.runId,
         sequence: nextSequence,
         state: "queued",
+        tenantHash: input.tenantHash,
       };
       const immediateScheduler = queue.schedulerForImmediateAdmission(input);
       const canActivateImmediately = immediateScheduler !== null;
       const decision = canActivateImmediately
         ? ({ kind: "active", runId: input.runId } as AdmissionDecision)
-        : input.mode === "reject"
+        : noQueue
           ? ({
               kind: "refused",
               reason:
@@ -1034,7 +1133,7 @@ export class RunAdmission extends DurableObject<Env> {
       if (decision.kind === "refused" || decision.kind === "duplicate") {
         return { decision, record: null };
       }
-      const record: StoredAdmissionRecord = canActivateImmediately
+      let record: StoredAdmissionRecord = canActivateImmediately
         ? {
             ...enqueuedRecord,
             state: "active",
@@ -1048,13 +1147,19 @@ export class RunAdmission extends DurableObject<Env> {
       this.writeMetaValue(NEXT_SEQUENCE_META_KEY, String(nextSequence + 1));
       if (immediateScheduler !== null) {
         this.writeScheduler(immediateScheduler);
-        this.markDispatchPending(record.runId);
+        const marked = this.markDispatchPending(record.runId);
+        if (!marked) {
+          throw new AdmissionConfigurationError(
+            "Active admission dispatch token was not persisted."
+          );
+        }
+        record = marked;
       }
       return {
         decision: decisionWithCleanupCapability(
           decision,
           cleanupCapability(record),
-          input.mode !== undefined
+          input.mode !== undefined || input.noQueue !== undefined
         ),
         record,
       };
@@ -1195,6 +1300,45 @@ export class RunAdmission extends DurableObject<Env> {
           }
         : {}),
     });
+    await this.ensureAlarm({ throwOnFailure: false });
+  }
+
+  async enqueueProvisionalCleanup(
+    agentId: string,
+    runId: string,
+    prepareOwner: string,
+    operationId?: string,
+    requestHash?: string
+  ): Promise<void> {
+    await this.initialized;
+    if (!agentId || !runId || !prepareOwner) {
+      throw new AdmissionConfigurationError(
+        "Provisional cleanup requires an agent, run, and prepare owner."
+      );
+    }
+    this.ctx.storage.sql.exec(
+      `
+        INSERT INTO admission_cleanup_tasks
+          (agent_id, run_id, admission_sequence, kind, dispatch_token,
+           prepare_owner, operation_id, request_hash, attempts, next_attempt_at)
+        VALUES (?, ?, 0, 'provisional', NULL, ?, ?, ?, 0, ?)
+        ON CONFLICT(run_id, admission_sequence) DO UPDATE SET
+          agent_id = excluded.agent_id,
+          kind = excluded.kind,
+          prepare_owner = excluded.prepare_owner,
+          operation_id = excluded.operation_id,
+          request_hash = excluded.request_hash,
+          attempts = 0,
+          next_attempt_at = excluded.next_attempt_at
+        WHERE admission_cleanup_tasks.kind = 'provisional'
+      `,
+      agentId,
+      runId,
+      prepareOwner,
+      operationId ?? `cleanup:${runId}`,
+      requestHash ?? "cleanup",
+      Date.now()
+    );
     await this.ensureAlarm({ throwOnFailure: false });
   }
 
@@ -1347,12 +1491,19 @@ export class RunAdmission extends DurableObject<Env> {
         );
       } catch (error) {
         if (isAgentBusyError(error)) {
-          const fenceToken = await this.fenceDispatch(candidate);
-          const reconciliation = fenceToken
-            ? this.requeueRecord(candidate, fenceToken)
-            : "ambiguous";
+          const fenceToken = await this.fenceDispatch(
+            candidate,
+            !candidate.noQueue
+          );
+          const reconciliation = candidate.noQueue
+            ? fenceToken
+              ? this.refuseDispatch(candidate, fenceToken)
+              : "ambiguous"
+            : fenceToken
+              ? this.requeueRecord(candidate, fenceToken)
+              : "ambiguous";
           if (reconciliation === "refused") {
-            await this.cleanupRejectedAdmission(candidate, true);
+            await this.cleanupRejectedAdmission(candidate, !candidate.noQueue);
           }
           if (reconciliation === "requeued") {
             return;
@@ -1466,7 +1617,9 @@ export class RunAdmission extends DurableObject<Env> {
         if (!this.dispatchTokenMatches(record.runId, fenceToken)) {
           return "ambiguous";
         }
-        return this.requeueRecord(record, fenceToken);
+        return record.noQueue
+          ? this.refuseDispatch(record, fenceToken)
+          : this.requeueRecord(record, fenceToken);
       }
       if (run.status === "running") {
         this.clearDispatchLease(record.runId, record.dispatchToken);
@@ -1533,6 +1686,22 @@ export class RunAdmission extends DurableObject<Env> {
       );
       return "requeued";
     });
+  }
+
+  private refuseDispatch(
+    record: StoredAdmissionRecord,
+    dispatchToken: string
+  ): ActiveReconciliation {
+    const current = this.findStoredByRunId(record.runId);
+    if (
+      current?.state !== "active" ||
+      current.dispatchToken !== dispatchToken
+    ) {
+      return "ambiguous";
+    }
+    this.terminalizeRecord(record.runId, dispatchToken);
+    this.enqueueCleanupTask({ ...current, dispatchToken });
+    return "refused";
   }
 
   private async ensureAlarm(options: {
@@ -1682,8 +1851,8 @@ export class RunAdmission extends DurableObject<Env> {
     const expired = this.ctx.storage.sql
       .exec<AdmissionRow>(
         `
-          SELECT agent_id, dispatch_token, enqueued_at, operation_id,
-                 request_hash, run_id, queue_sequence, state,
+          SELECT agent_id, dispatch_token, enqueued_at, mode, no_queue,
+                 operation_id, request_hash, run_id, queue_sequence, state,
                  terminalized_at, tenant_hash
           FROM admission_records
           WHERE state = 'queued'
@@ -1817,14 +1986,17 @@ export class RunAdmission extends DurableObject<Env> {
     this.ctx.storage.sql.exec(
       `
         INSERT INTO admission_cleanup_tasks
-          (agent_id, run_id, admission_sequence, dispatch_token, attempts, next_attempt_at)
-        VALUES (?, ?, ?, ?, 0, ?)
+          (agent_id, run_id, admission_sequence, kind, dispatch_token,
+           operation_id, request_hash, attempts, next_attempt_at)
+        VALUES (?, ?, ?, 'admission', ?, ?, ?, 0, ?)
         ON CONFLICT(run_id, admission_sequence) DO NOTHING
       `,
       record.agentId,
       record.runId,
       record.sequence,
       record.dispatchToken ?? null,
+      record.operationId,
+      record.requestHash,
       Date.now()
     );
   }
@@ -1840,11 +2012,18 @@ export class RunAdmission extends DurableObject<Env> {
     );
   }
 
-  private deleteCleanupTask(runId: string, admissionSequence: number): void {
+  private deleteCleanupTask(
+    runId: string,
+    admissionSequence: number,
+    kind?: "admission" | "provisional"
+  ): void {
     this.ctx.storage.sql.exec(
-      "DELETE FROM admission_cleanup_tasks WHERE run_id = ? AND admission_sequence = ?",
+      `DELETE FROM admission_cleanup_tasks
+       WHERE run_id = ? AND admission_sequence = ?
+         ${kind ? "AND kind = ?" : ""}`,
       runId,
-      admissionSequence
+      admissionSequence,
+      ...(kind ? [kind] : [])
     );
   }
 
@@ -1873,12 +2052,16 @@ export class RunAdmission extends DurableObject<Env> {
         agent_id: string;
         attempts: number;
         dispatch_token: string | null;
+        kind: "admission" | "provisional";
         next_attempt_at: number;
+        operation_id: string | null;
+        prepare_owner: string | null;
+        request_hash: string | null;
         run_id: string;
       }>(
         `
-          SELECT agent_id, admission_sequence, attempts, dispatch_token,
-                 next_attempt_at, run_id
+          SELECT agent_id, admission_sequence, attempts, dispatch_token, kind,
+                 next_attempt_at, operation_id, prepare_owner, request_hash, run_id
           FROM admission_cleanup_tasks
           WHERE next_attempt_at <= ?
           ORDER BY next_attempt_at, run_id, admission_sequence
@@ -1888,6 +2071,53 @@ export class RunAdmission extends DurableObject<Env> {
       )
       .toArray();
     for (const task of tasks) {
+      if (task.kind === "provisional") {
+        const current = this.findStoredByRunId(task.run_id);
+        if (current) {
+          this.deleteCleanupTask(
+            task.run_id,
+            task.admission_sequence,
+            "provisional"
+          );
+          continue;
+        }
+        let completed = false;
+        try {
+          const agent = this.env.YoloAgent.getByName(task.agent_id);
+          const { discardPreparedRun } = agent as unknown as {
+            discardPreparedRun?: (
+              runId: string,
+              prepareOwner: string
+            ) => Promise<boolean> | boolean;
+          };
+          completed = discardPreparedRun
+            ? // biome-ignore lint/performance/noAwaitInLoops: Cleanup tasks are deliberately processed sequentially.
+              await discardPreparedRun.call(
+                agent,
+                task.run_id,
+                task.prepare_owner ?? ""
+              )
+            : false;
+        } catch {
+          completed = false;
+        }
+        if (completed) {
+          this.deleteCleanupTask(
+            task.run_id,
+            task.admission_sequence,
+            "provisional"
+          );
+        } else {
+          this.ctx.storage.sql.exec(
+            "UPDATE admission_cleanup_tasks SET attempts = ?, next_attempt_at = ? WHERE run_id = ? AND admission_sequence = ? AND kind = 'provisional'",
+            task.attempts + 1,
+            Date.now() + ALARM_REPAIR_RETRY_MS,
+            task.run_id,
+            task.admission_sequence
+          );
+        }
+        continue;
+      }
       const current = this.findStoredByRunId(task.run_id);
       if (!current) {
         this.deleteCleanupTask(task.run_id, task.admission_sequence);
@@ -1909,7 +2139,6 @@ export class RunAdmission extends DurableObject<Env> {
       }
       let completed = false;
       try {
-        // biome-ignore lint/performance/noAwaitInLoops: Cleanup tasks are deliberately processed sequentially.
         const stopped = await this.stopForCleanup({
           agentId: task.agent_id,
           ...(task.dispatch_token
@@ -1971,8 +2200,8 @@ export class RunAdmission extends DurableObject<Env> {
     const [pending] = this.ctx.storage.sql
       .exec<AdmissionRow>(
         `
-          SELECT agent_id, dispatch_token, enqueued_at, operation_id,
-                 request_hash, run_id, queue_sequence, state,
+          SELECT agent_id, dispatch_token, enqueued_at, mode, no_queue,
+                 operation_id, request_hash, run_id, queue_sequence, state,
                  terminalized_at, tenant_hash
           FROM admission_records
           WHERE state = 'active'
@@ -2086,7 +2315,9 @@ export class RunAdmission extends DurableObject<Env> {
         if (!this.dispatchTokenMatches(record.runId, fenceToken)) {
           return "ambiguous";
         }
-        return this.requeueRecord(record, fenceToken);
+        return record.noQueue
+          ? this.refuseDispatch(record, fenceToken)
+          : this.requeueRecord(record, fenceToken);
       }
       return "ambiguous";
     } catch {
@@ -2178,7 +2409,7 @@ export class RunAdmission extends DurableObject<Env> {
   private readStoredRecords(): StoredAdmissionRecord[] {
     return this.ctx.storage.sql
       .exec<AdmissionRow>(
-        "SELECT agent_id, dispatch_token, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, terminalized_at, tenant_hash FROM admission_records ORDER BY queue_sequence"
+        "SELECT agent_id, dispatch_token, enqueued_at, mode, no_queue, operation_id, request_hash, run_id, queue_sequence, state, terminalized_at, tenant_hash FROM admission_records ORDER BY queue_sequence"
       )
       .toArray()
       .map(rowToStoredRecord);
@@ -2187,7 +2418,7 @@ export class RunAdmission extends DurableObject<Env> {
   private findByOperationId(operationId: string): StoredAdmissionRecord | null {
     const rows = this.ctx.storage.sql
       .exec<AdmissionRow>(
-        "SELECT agent_id, dispatch_token, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, terminalized_at, tenant_hash FROM admission_records WHERE operation_id = ?",
+        "SELECT agent_id, dispatch_token, enqueued_at, mode, no_queue, operation_id, request_hash, run_id, queue_sequence, state, terminalized_at, tenant_hash FROM admission_records WHERE operation_id = ?",
         operationId
       )
       .toArray();
@@ -2202,7 +2433,7 @@ export class RunAdmission extends DurableObject<Env> {
   private findStoredByRunId(runId: string): StoredAdmissionRecord | null {
     const rows = this.ctx.storage.sql
       .exec<AdmissionRow>(
-        "SELECT agent_id, dispatch_token, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, terminalized_at, tenant_hash, dispatch_started_at, dispatch_lease_until FROM admission_records WHERE run_id = ?",
+        "SELECT agent_id, dispatch_token, enqueued_at, mode, no_queue, operation_id, request_hash, run_id, queue_sequence, state, terminalized_at, tenant_hash, dispatch_started_at, dispatch_lease_until FROM admission_records WHERE run_id = ?",
         runId
       )
       .toArray();
@@ -2213,11 +2444,13 @@ export class RunAdmission extends DurableObject<Env> {
     this.ctx.storage.sql.exec(
       `
         INSERT INTO admission_records
-          (agent_id, enqueued_at, operation_id, request_hash, run_id, queue_sequence, state, tenant_hash, dispatch_started_at, dispatch_lease_until, dispatch_token, terminalized_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+          (agent_id, enqueued_at, mode, no_queue, operation_id, request_hash, run_id, queue_sequence, state, tenant_hash, dispatch_started_at, dispatch_lease_until, dispatch_token, terminalized_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
           agent_id = excluded.agent_id,
           enqueued_at = excluded.enqueued_at,
+          mode = excluded.mode,
+          no_queue = excluded.no_queue,
           operation_id = excluded.operation_id,
           request_hash = excluded.request_hash,
           queue_sequence = excluded.queue_sequence,
@@ -2232,6 +2465,8 @@ export class RunAdmission extends DurableObject<Env> {
       `,
       record.agentId,
       record.enqueuedAt,
+      record.mode,
+      record.noQueue ? 1 : 0,
       record.operationId,
       record.requestHash,
       record.runId,
@@ -2270,7 +2505,7 @@ export class RunAdmission extends DurableObject<Env> {
     );
   }
 
-  private markDispatchPending(runId: string): void {
+  private markDispatchPending(runId: string): StoredAdmissionRecord | null {
     const dispatchToken = this.newDispatchToken();
     this.ctx.storage.sql.exec(
       `
@@ -2286,6 +2521,7 @@ export class RunAdmission extends DurableObject<Env> {
       dispatchToken,
       runId
     );
+    return this.findStoredByRunId(runId);
   }
 
   private claimDispatchLease(runId: string, token?: string): string {

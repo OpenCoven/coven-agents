@@ -232,6 +232,46 @@ test("an orphaned enqueue is durably cleaned after its preparation deadline", as
   assert.deepEqual(destroyedSandboxes(), []);
 });
 
+test("a pending-admission schedule failure registers coordinator-owned provisional cleanup", async () => {
+  let provisional: unknown[] | undefined;
+  const yolo = new (class extends YoloAgent {
+    schedule(): Promise<never> {
+      return Promise.reject(new Error("schedule unavailable"));
+    }
+  })(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          enqueueProvisionalCleanup: (...args: unknown[]) => {
+            provisional = args;
+            return Promise.resolve();
+          },
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+
+  const runId = "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a32";
+  const prepared = await yolo.enqueue(
+    { operationId: OP_B, task: "Survive a scheduling outage." },
+    runId,
+    "schedule-failure-hash",
+    "identity"
+  );
+
+  assert.equal(prepared.created, true);
+  assert.equal(prepared.scheduleFailed, true);
+  assert.deepEqual(provisional, [
+    AGENT_ID,
+    runId,
+    prepared.prepareOwner,
+    OP_B,
+    "schedule-failure-hash",
+  ]);
+});
+
 test("an expired accepted admission releases its exact capability before discard", async () => {
   resetFiberLog();
   fiberControl.runFibers = false;

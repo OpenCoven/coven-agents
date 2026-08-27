@@ -134,6 +134,10 @@ export type CloudRunnerAgent = {
     runId: string,
     prepareOwner?: string
   ) => Awaitable<boolean | undefined>;
+  discardPreparedRun?: (
+    runId: string,
+    prepareOwner: string
+  ) => Awaitable<boolean>;
   decommission: () => Awaitable<void>;
   enqueue: (
     input: unknown,
@@ -144,6 +148,7 @@ export type CloudRunnerAgent = {
   ) => Awaitable<{
     created: boolean;
     prepareOwner?: string;
+    scheduleFailed?: boolean;
     run: RunSnapshot;
   }>;
   getEventStream: (
@@ -180,6 +185,13 @@ export type CloudRunnerAdmission = {
     agentId: string,
     runId: string,
     capability?: AdmissionCleanupCapability
+  ) => Awaitable<void>;
+  enqueueProvisionalCleanup?: (
+    agentId: string,
+    runId: string,
+    prepareOwner: string,
+    operationId?: string,
+    requestHash?: string
   ) => Awaitable<void>;
   release: (
     runId: string,
@@ -1481,6 +1493,30 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               }
             }
 
+            if (
+              prepared.created &&
+              prepared.scheduleFailed &&
+              prepared.prepareOwner &&
+              admission.enqueueProvisionalCleanup
+            ) {
+              try {
+                await admission.enqueueProvisionalCleanup(
+                  id,
+                  runId,
+                  prepared.prepareOwner,
+                  input.operationId,
+                  requestHash
+                );
+              } catch (error) {
+                await cleanupRun(agent, runId, id, {
+                  admission,
+                  prepareOwner: prepared.prepareOwner,
+                  stopFirst: true,
+                });
+                throw error;
+              }
+            }
+
             let decision: AdmissionDecision;
             const tenantHash = await tenantAdmissionHash(
               environment.EDGE_ABUSE_KEY_SECRET,
@@ -1491,6 +1527,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 agentId: id,
                 mode: runAdmissionMode,
                 operationId: input.operationId,
+                prepareOwner: prepared.prepareOwner,
                 requestHash,
                 runId,
                 tenantHash,
@@ -1729,7 +1766,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               decision.admissionCapability ?? null;
             let registrationSequence: number | undefined;
             try {
-              if (!admissionCapability && admission.getCleanupCapability) {
+              if (admission.getCleanupCapability) {
                 admissionCapability = await admission.getCleanupCapability(
                   runId,
                   {
@@ -1854,9 +1891,32 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                   }
                 }
               }
+              let cleanupCapability = admissionCapability;
+              if (admission.getCleanupCapability) {
+                try {
+                  cleanupCapability = await admission.getCleanupCapability(
+                    runId,
+                    {
+                      agentId: id,
+                      operationId: input.operationId,
+                      requestHash,
+                      runId,
+                    }
+                  );
+                } catch {
+                  cleanupCapability = null;
+                }
+              }
+              if (!cleanupCapability && admission.enqueueCleanup) {
+                try {
+                  await admission.enqueueCleanup(id, runId);
+                } catch {
+                  // Preserve the original registration failure.
+                }
+              }
               await cleanupRun(agent, runId, id, {
                 admission,
-                admissionCapability: admissionCapability ?? undefined,
+                admissionCapability: cleanupCapability ?? undefined,
                 allowUnowned: true,
                 prepareOwner: prepared.prepareOwner,
                 stopFirst: true,

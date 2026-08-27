@@ -21,6 +21,7 @@ import {
 import { YoloAgent } from "./agents";
 import {
   type AdmissionCleanupGuard,
+  AgentBusyError,
   OperationConflictError,
   planCloudRunStart,
 } from "./run-state";
@@ -298,6 +299,102 @@ test("reject admission refuses same-agent active contention without dispatching"
     )[0]?.count,
     0
   );
+});
+
+test("persisted reject admissions never requeue after an asynchronous AgentBusy", async () => {
+  let requeues = 0;
+  const harness = runAdmissionHarness(
+    () => ({
+      fenceAdmitted: () => Promise.resolve(true),
+      getRun: () => ({ status: "queued" }),
+      requeueAdmitted: () => {
+        requeues += 1;
+        return true;
+      },
+      startAdmitted: () => Promise.reject(new AgentBusyError()),
+      stop: () => Promise.resolve({ status: "cancelled" }),
+    }),
+    {
+      RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+    }
+  );
+
+  const decision = await harness.admission.admit({
+    ...request(26),
+    mode: "reject",
+  } as never);
+  assert.equal(decision.kind, "active");
+  assert.equal(decision.runId, "run-26");
+  await Promise.all(harness.background);
+
+  const [record] = harness.sql
+    .exec<{ mode: string; no_queue: number; state: string }>(
+      "SELECT mode, no_queue, state FROM admission_records WHERE run_id = ?",
+      "run-26"
+    )
+    .toArray() as { mode: string; no_queue: number; state: string }[];
+  assert.equal(record?.mode, "reject");
+  assert.equal(record?.no_queue, 1);
+  assert.equal(record?.state, "terminal");
+  assert.equal(requeues, 0);
+});
+
+test("provisional cleanup is alarmed and idempotently discarded without an admission row", async () => {
+  let discarded = 0;
+  const harness = runAdmissionHarness(() => ({
+    discardPreparedRun: () => {
+      discarded += 1;
+      return true;
+    },
+    getRun: () => null,
+    startAdmitted: () => Promise.resolve(false),
+    stop: () => Promise.resolve(null),
+  }));
+
+  await harness.admission.enqueueProvisionalCleanup(
+    "agent-provisional",
+    "run-provisional",
+    "prepare-owner-1",
+    "operation-provisional",
+    "hash-provisional"
+  );
+  await harness.admission.alarm();
+
+  assert.equal(discarded, 1);
+  const provisionalTasks = harness.sql
+    .exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE kind = 'provisional'"
+    )
+    .toArray() as { count: number }[];
+  assert.equal(provisionalTasks[0]?.count, 0);
+});
+
+test("successful admission invalidates its matching provisional cleanup task", async () => {
+  const harness = runAdmissionHarness(() => ({
+    getRun: () => ({ status: "running" }),
+    startAdmitted: () => Promise.resolve(true),
+    stop: () => Promise.resolve(null),
+  }));
+  await harness.admission.enqueueProvisionalCleanup(
+    "agent-27",
+    "run-27",
+    "prepare-owner-27"
+  );
+
+  assert.deepEqual(
+    await harness.admission.admit({
+      ...request(27),
+      prepareOwner: "prepare-owner-27",
+    } as never),
+    { kind: "active", runId: "run-27" }
+  );
+  const matchingTasks = harness.sql
+    .exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = 'run-27'"
+    )
+    .toArray() as { count: number }[];
+  assert.equal(matchingTasks[0]?.count, 0);
 });
 
 test("cleanup without an admission row does not create a sequence-zero task", async () => {

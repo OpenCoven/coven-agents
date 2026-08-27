@@ -2209,6 +2209,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   ): Promise<{
     created: boolean;
     prepareOwner?: string;
+    scheduleFailed?: boolean;
     run: RunSnapshot;
   }> {
     const { operationId, task } = startRunInputSchema.parse(input);
@@ -2251,7 +2252,14 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
             pendingAdmission,
           });
         }
-        await this.schedulePendingAdmission(plan.record.run.id);
+        const scheduleSucceeded = await this.schedulePendingAdmission(
+          plan.record.run.id
+        );
+        return {
+          created: false,
+          ...(scheduleSucceeded ? {} : { scheduleFailed: true }),
+          run: plan.record.run,
+        };
       }
       return Promise.resolve({ created: false, run: plan.record.run });
     }
@@ -2265,8 +2273,13 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (identityToken) {
       await this.attachIdentityCapability(runId, identityToken);
     }
-    await this.schedulePendingAdmission(runId);
-    return { created: true, prepareOwner, run: plan.record.run };
+    const scheduleSucceeded = await this.schedulePendingAdmission(runId);
+    return {
+      created: true,
+      prepareOwner,
+      ...(scheduleSucceeded ? {} : { scheduleFailed: true }),
+      run: plan.record.run,
+    };
   }
 
   private async attachIdentityCapability(
@@ -2416,13 +2429,13 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     };
   }
 
-  private async schedulePendingAdmission(runId: string): Promise<void> {
+  private async schedulePendingAdmission(runId: string): Promise<boolean> {
     const current = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
     const pending = current?.pendingAdmission;
     if (!current || !pending || current.run.status !== "queued") {
-      return;
+      return true;
     }
     const { schedule } = this as unknown as {
       schedule?: (
@@ -2433,7 +2446,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       ) => Promise<{ id: string }>;
     };
     if (!schedule || pending.scheduleId !== undefined) {
-      return;
+      return true;
     }
     const generation = pending.scheduleGeneration ?? 1;
     const token = pending.scheduleToken ?? crypto.randomUUID();
@@ -2469,7 +2482,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         latest.run.status !== "queued"
       ) {
         await this.cancelPendingAdmissionSchedule(scheduled.id);
-        return;
+        return true;
       }
       this.persistRun({
         ...latest,
@@ -2479,8 +2492,54 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         },
       });
     } catch {
-      // The durable deadline remains on the run. A retry request or a later
-      // lifecycle callback can schedule it again.
+      if (pending.prepareOwner) {
+        await this.registerProvisionalCleanup(
+          current.run.id,
+          pending.prepareOwner,
+          current.run.operationId,
+          current.operationHash
+        );
+      }
+      return false;
+    }
+    return true;
+  }
+
+  private async registerProvisionalCleanup(
+    runId: string,
+    prepareOwner: string,
+    operationId: string,
+    requestHash: string
+  ): Promise<boolean> {
+    const runAdmission = (
+      this.env as unknown as {
+        RunAdmission?: {
+          getByName?: (name: string) => {
+            enqueueProvisionalCleanup?: (
+              agentId: string,
+              runId: string,
+              prepareOwner: string,
+              operationId?: string,
+              requestHash?: string
+            ) => Promise<void>;
+          };
+        };
+      }
+    ).RunAdmission?.getByName?.("deployment");
+    if (!runAdmission?.enqueueProvisionalCleanup) {
+      return false;
+    }
+    try {
+      await runAdmission.enqueueProvisionalCleanup(
+        this.state.definition?.id ?? this.name,
+        runId,
+        prepareOwner,
+        operationId,
+        requestHash
+      );
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -3655,6 +3714,23 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       runs: this.state.runs.filter((candidate) => candidate.run.id !== runId),
     });
     return true;
+  }
+
+  /** Idempotently removes only the queued preparation owned by this nonce. */
+  discardPreparedRun(runId: string, prepareOwner: string): boolean {
+    const record = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (!record) {
+      return true;
+    }
+    if (
+      record.run.status !== "queued" ||
+      record.pendingAdmission?.prepareOwner !== prepareOwner
+    ) {
+      return true;
+    }
+    return this.discardRun(runId, prepareOwner);
   }
 
   /**
