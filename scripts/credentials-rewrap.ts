@@ -402,10 +402,11 @@ async function verifyIdempotencyRows(
       }
     }
 
-    afterId = rows.at(-1)?.id;
-    if (rows.length < input.batch || !afterId) {
+    const nextAfterId = rows.at(-1)?.id;
+    if (rows.length < input.batch || !nextAfterId || nextAfterId === afterId) {
       return;
     }
+    afterId = nextAfterId;
   }
 }
 
