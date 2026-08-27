@@ -428,3 +428,64 @@ test("a run streams events out while the CLI is still executing", async () => {
   assert.equal(run.summary.status, "completed");
   assert.equal(run.summary.output, "Working on it");
 });
+
+test("a finished stream settles the run even if the process never exits", async () => {
+  // Observed twice in production: copilot answered the mission, streamed its
+  // terminal result, and then lingered until the 900s deadline stamped the
+  // whole run failed — with the reaper destroying a container whose only
+  // crime was a process that would not exit. The stream's own verdict must
+  // outrank the exit that never comes.
+  const message = JSON.stringify({
+    data: { content: "Recon complete", model: "gpt-5" },
+    type: "assistant.message",
+  });
+  const result = JSON.stringify({
+    exitCode: 0,
+    sessionId: "s1",
+    type: "result",
+    usage: {},
+  });
+  const sandbox = {
+    exec(command: string, options?: Record<string, unknown>) {
+      if (command.startsWith("copilot --version")) {
+        return Promise.resolve({
+          command,
+          exitCode: 0,
+          stderr: "",
+          stdout: "GitHub Copilot CLI 1.0.80\n",
+          success: true,
+        });
+      }
+      if (command.startsWith("mkdir")) {
+        return Promise.resolve({
+          command,
+          exitCode: 0,
+          stderr: "",
+          stdout: "",
+          success: true,
+        });
+      }
+      const onOutput = options?.onOutput as (
+        source: string,
+        data: string
+      ) => void;
+      onOutput("stdout", `${message}\n${result}\n`);
+      // The process lingers forever after answering.
+      return new Promise<never>(() => undefined);
+    },
+  };
+
+  const run = await runHarnessInSandbox({
+    credential: { credential: "harness-token" },
+    finishGraceMs: 1,
+    instructions: "Be careful.",
+    model: "auto",
+    runtime: "copilot",
+    sandbox: sandbox as never,
+    task: "Survey the workspace.",
+  });
+
+  assert.equal(run.exitCode, 0);
+  assert.equal(run.summary.status, "completed");
+  assert.equal(run.summary.output, "Recon complete");
+});

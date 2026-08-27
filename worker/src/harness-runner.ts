@@ -17,6 +17,7 @@ import {
 
 const DEFAULT_WORKSPACE = "/workspace";
 export const RUN_TIMEOUT_MS = 900_000;
+const FINISH_GRACE_MS = 15_000;
 /**
  * Generous, and deliberately so. The deadline clock starts when the worker
  * awaits the exec, and that await covers the container's cold boot as well
@@ -289,6 +290,8 @@ export async function runHarnessInSandbox(options: {
    * unredacted here — the caller owns redaction before anything persists.
    */
   onEvent?: (event: RunEvent) => void;
+  /** Test seam: how long a finished stream waits for the process to exit. */
+  finishGraceMs?: number;
   runtime: string;
   sandbox: SandboxLike;
   task: string;
@@ -342,37 +345,93 @@ export async function runHarnessInSandbox(options: {
     }
   };
 
+  /**
+   * The stream's own completion signal outranks the process's exit.
+   *
+   * Copilot emits a terminal `result` line when the mission is answered, and
+   * the CLI can then linger — observed twice as a run that streamed its work
+   * live and was still stamped failed at the 900s deadline, with the reaper
+   * tearing down a container whose only crime was a process that would not
+   * exit. "Network connection lost (905s)" in the sandbox log was our own
+   * teardown, not the network. Once `finished` streams, the exec gets a
+   * short grace to exit on its own; after that the run settles from the
+   * streamed events, which carry everything the summary needs. The lingering
+   * process is left to the container's idle stop — the work is done, and a
+   * successful run must not reap the warm container the next run wants.
+   */
+  let settleEarly: (() => void) | undefined;
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const finishedEarly = new Promise<null>((resolve) => {
+    settleEarly = () => {
+      graceTimer = setTimeout(
+        () => resolve(null),
+        options.finishGraceMs ?? FINISH_GRACE_MS
+      );
+    };
+  });
+
+  const execution = options.sandbox.exec(command, {
+    cwd,
+    env: {
+      [auth.name]: auth.value,
+      // The harness is the only thing that talks to a model. Blanking
+      // provider keys makes that structural rather than a convention: even
+      // if one leaks into the container environment, a run cannot quietly
+      // consume it.
+      ANTHROPIC_API_KEY: "",
+      CI: "true",
+      HOME: cwd,
+      OPENAI_API_KEY: "",
+    },
+    onOutput: (source, data) => {
+      if (source !== "stdout") {
+        return;
+      }
+      for (const line of assembler.push(data)) {
+        emit(line);
+      }
+      if (streamed.some((event) => event.kind === "finished")) {
+        settleEarly?.();
+        settleEarly = undefined;
+      }
+    },
+    stream: true,
+    timeout: RUN_TIMEOUT_MS,
+  });
+  // The race may settle on the stream's finish first; a later exec rejection
+  // must not surface as an unhandled rejection.
+  execution.catch(() => undefined);
+
   const result = await withDeadline(
-    options.sandbox.exec(command, {
-      cwd,
-      env: {
-        [auth.name]: auth.value,
-        // The harness is the only thing that talks to a model. Blanking
-        // provider keys makes that structural rather than a convention: even
-        // if one leaks into the container environment, a run cannot quietly
-        // consume it.
-        ANTHROPIC_API_KEY: "",
-        CI: "true",
-        HOME: cwd,
-        OPENAI_API_KEY: "",
-      },
-      onOutput: (source, data) => {
-        if (source !== "stdout") {
-          return;
-        }
-        for (const line of assembler.push(data)) {
-          emit(line);
-        }
-      },
-      stream: true,
-      timeout: RUN_TIMEOUT_MS,
-    }),
+    Promise.race([execution, finishedEarly]),
     RUN_TIMEOUT_MS,
     spec.command
-  );
+  ).finally(() => clearTimeout(graceTimer));
 
   for (const line of assembler.flush()) {
     emit(line);
+  }
+
+  if (result === null) {
+    // Settled from the stream: the process is still alive, so there is no
+    // exit code — the finished event's own verdict is the authoritative one.
+    const finished = streamed.find(
+      (event): event is Extract<RunEvent, { kind: "finished" }> =>
+        event.kind === "finished"
+    );
+    const summary = summarizeRun(streamed);
+    console.log({
+      event: "sandbox.exec_settled_from_stream",
+      exitCode: finished?.exitCode ?? null,
+      status: summary.status,
+    });
+    return {
+      command: `${invocation.command} ${invocation.args[0] ?? ""}`.trim(),
+      events: streamed,
+      exitCode: finished?.exitCode ?? 0,
+      stderr: "",
+      summary,
+    };
   }
 
   const at = new Date().toISOString();
