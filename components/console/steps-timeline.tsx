@@ -53,6 +53,13 @@ export function StepsTimeline({
   steps: Step[];
 }) {
   const [width, setWidth] = useState(DEFAULT_WIDTH);
+  /**
+   * Rich by default: the rail opens showing each step's body lines, and one
+   * toggle collapses the whole index back to single-line entries. Expanded
+   * first, because the reader who opens this panel is looking for what
+   * happened, not for how compact the list can be.
+   */
+  const [rich, setRich] = useState(true);
   const dragFrom = useRef<{ startWidth: number; startX: number } | null>(null);
 
   const onPointerMove = useCallback((event: PointerEvent) => {
@@ -183,6 +190,26 @@ export function StepsTimeline({
         <div style={{ flex: 1 }} />
         <span style={{ ...type_.meta, ...tabular }}>{steps.length}</span>
         <button
+          aria-pressed={rich}
+          onClick={() => setRich((current) => !current)}
+          style={{
+            background: "transparent",
+            border: 0,
+            color: rich ? "var(--accent-presence)" : "var(--text-muted)",
+            cursor: "pointer",
+            font: "500 10px/1 var(--font-mono)",
+            padding: 0,
+          }}
+          title={
+            rich
+              ? "Collapse steps to one line each"
+              : "Expand steps to show what each one did"
+          }
+          type="button"
+        >
+          {rich ? "collapse" : "expand"}
+        </button>
+        <button
           aria-label="Collapse the steps panel"
           className="oc-tint"
           onClick={onToggle}
@@ -264,6 +291,32 @@ export function StepsTimeline({
               >
                 {step.detail}
               </span>
+              {rich && step.expanded.length > 1 ? (
+                <span
+                  style={{
+                    borderLeft: "2px solid var(--border-hairline)",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 2,
+                    marginTop: 3,
+                    paddingLeft: 7,
+                  }}
+                >
+                  {step.expanded.map((line, index) => (
+                    <span
+                      // biome-ignore lint/suspicious/noArrayIndexKey: the lines are a fixed excerpt of one immutable step; they never reorder.
+                      key={`${step.id}-x${index}`}
+                      style={{
+                        color: "var(--text-faint)",
+                        font: "400 10px/1.4 var(--font-mono)",
+                        ...truncate,
+                      }}
+                    >
+                      {line}
+                    </span>
+                  ))}
+                </span>
+              ) : null}
             </span>
             <span style={{ ...type_.meta, ...tabular, flex: "none" }}>
               {step.duration}

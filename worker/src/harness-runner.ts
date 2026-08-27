@@ -41,11 +41,15 @@ export const PROBE_TIMEOUT_MS = 300_000;
  * container reset between them. Cold placements are a coin flip in
  * production — healthy ones probe in 50–160s, sick ones answer HTTP 500
  * until the deadline — so one 300s attempt spends the whole budget on a
- * container that was never going to work, while two 150s attempts against
- * different placements keep the same worst case and turn a bad flip into a
- * 150s detour instead of a dead run.
+ * container that was never going to work. The attempt budget sits ABOVE the
+ * slowest healthy boot ever observed — 158s, a cold host pulling the image —
+ * because a budget below it turns a marginal-but-healthy boot into a
+ * guaranteed miss, and a run that splits into two such attempts then fails
+ * twice in a row by construction. 180s per attempt: the fast-500 sick case
+ * still detours in seconds, and only a genuinely dead placement spends the
+ * full attempt.
  */
-export const PROBE_ATTEMPT_TIMEOUT_MS = 150_000;
+export const PROBE_ATTEMPT_TIMEOUT_MS = 180_000;
 
 /**
  * `destroy` is optional on both shapes because cancellation is the only
