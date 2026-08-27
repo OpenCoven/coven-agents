@@ -20,6 +20,8 @@ import { Agent } from "agents";
 import {
   HarnessError,
   listCloudHarnesses,
+  PROBE_TIMEOUT_MS,
+  RUN_TIMEOUT_MS,
   runHarnessInSandbox,
   warmSandbox,
 } from "./harness-runner";
@@ -71,6 +73,14 @@ const WARM_FIBER_KEY = "warm";
  */
 const WARM_SLEEP_AFTER = "10m";
 const WARM_TRUST_WINDOW_MS = 10 * 60 * 1000;
+/**
+ * When a non-terminal run is provably a ghost: the probe deadline plus the
+ * run deadline plus two minutes of margin for dispatch and persistence. No
+ * live fiber can exist past this — both deadlines throw, and the catch
+ * closes the record — so anything older with a live status was interrupted
+ * before its catch could run.
+ */
+const RUN_OVERDUE_MS = PROBE_TIMEOUT_MS + RUN_TIMEOUT_MS + 120_000;
 
 /**
  * The harness and the contract name file operations differently — the harness
@@ -382,6 +392,23 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
 You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work only inside the sandbox, verify the result, and include exact evidence in your final response.`,
         model: definition.model,
         onEvent,
+        // A destroyed sandbox key re-provisions on the next exec — proven in
+        // production when the reaper's destroy was followed by a healthy
+        // 81s probe on the same key. This is what turns a sick placement
+        // into a 150s detour instead of a dead run.
+        resetSandbox: async () => {
+          console.warn({
+            agentId: definition.id,
+            event: "sandbox.reset_before_probe_retry",
+            runId: planned.run.id,
+          });
+          await getSandbox(
+            this.env.Sandbox,
+            await sandboxKey(tenantOf(definition), definition.id)
+          )
+            .destroy()
+            .catch(() => undefined);
+        },
         runtime: definition.runtime,
         sandbox: getSandbox(
           this.env.Sandbox,
@@ -593,10 +620,50 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
    * `terminal` is what lets the stream close rather than poll forever, so it
    * reports the run's status and not whether this batch happened to be empty.
    */
+  /**
+   * Closes any run that is provably dead but still marked live.
+   *
+   * Every path a run can take is bounded — the probe at 300s, the exec at
+   * 900s — so a record still non-terminal past their sum plus margin has no
+   * fiber behind it: the fiber either finished the record or died with a
+   * restart before it could. `onFiberRecovered` is the fast path for that
+   * case, but it was observed not firing for fibers interrupted by tonight's
+   * deploys, and three ghost runs kept their agents' active-run slots and
+   * their consoles reconnecting once a minute for an hour. Reconciling on
+   * the read path is deterministic: the very next poll of a ghost closes it.
+   */
+  private reconcileOverdueRuns(): void {
+    const now = Date.now();
+    const completedAt = new Date(now).toISOString();
+    let changed = false;
+    const runs = this.state.runs.map((record) => {
+      if (
+        isTerminal(record.run.status) ||
+        now - Date.parse(record.run.createdAt) < RUN_OVERDUE_MS
+      ) {
+        return record;
+      }
+      changed = true;
+      console.warn({
+        event: "run.recovered_after_interruption",
+        runId: record.run.id,
+        via: "overdue_reconcile",
+      });
+      return recoverCloudRunRecord(record, completedAt);
+    });
+    if (changed) {
+      this.setState({ ...this.state, runs });
+      if (this.state.definition) {
+        this.updateDefinition({ status: "error", updatedAt: completedAt });
+      }
+    }
+  }
+
   getEventStream(
     runId: string,
     lastEventId: number
   ): { events: RunEvent[]; terminal: boolean } | null {
+    this.reconcileOverdueRuns();
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
@@ -611,6 +678,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
 
   /** The recorded snapshot for one run, or null when this agent has no such run. */
   getRun(runId: string): RunSnapshot | null {
+    this.reconcileOverdueRuns();
     return (
       this.state.runs.find((record) => record.run.id === runId)?.run ?? null
     );
@@ -618,6 +686,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
 
   /** Every run this agent still retains, newest first. */
   listRuns(): RunSnapshot[] {
+    this.reconcileOverdueRuns();
     return [...this.state.runs]
       .sort(
         (left, right) =>

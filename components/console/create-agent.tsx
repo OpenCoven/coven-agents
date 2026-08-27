@@ -178,6 +178,7 @@ export function CreateAgent({
 
   return (
     <div
+      className="oc-create-agent"
       style={{
         background: "var(--bg-panel)",
         display: "flex",
@@ -186,6 +187,7 @@ export function CreateAgent({
       }}
     >
       <div
+        className="oc-create-agent-nav"
         style={{
           borderRight: hairline,
           display: "flex",
@@ -253,7 +255,7 @@ export function CreateAgent({
       </div>
 
       <div
-        className="oc-scroll"
+        className="oc-create-agent-content oc-scroll"
         style={{
           background: "var(--bg-base)",
           flex: 1,

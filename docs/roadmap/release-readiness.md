@@ -14,10 +14,9 @@ Current blockers are factual and fail closed:
 - the latest recorded authenticated private Beads/DoltHub pull returned
   `PermissionDenied`, so authoritative P0, dependency, and acceptance state
   cannot be reconciled; see [`current-state.md`](current-state.md);
-- `pnpm hygiene` at `2026-08-26T01:00:34-05:00` reported five worktrees, four
-  secondary worktrees against a soft cap of three, and one `AT RISK` branch,
-  `chore/ai-override`. Worktree state is live, so release operators must rerun
-  the command rather than treat that name as a durable inventory;
+- the previous `pnpm hygiene` snapshot reported an `AT RISK` worktree.
+  Worktree state is live, so release operators must rerun the command against
+  the candidate rather than treat a prior branch inventory as current;
 - the latest field-only Project query recorded in
   [`current-state.md`](current-state.md) found all 60 managed items were drafts,
   so GitHub issue state did not independently confirm delivery reconciliation;
@@ -65,6 +64,7 @@ different configuration surfaces and must not be treated as interchangeable.
 | --- | --- | --- |
 | Toolchain | Node.js 22 or newer, pnpm 10, frozen dependency install, Git, Docker for Sandbox image work, and authenticated deployment CLIs. | Declared in [`README.md`](../../README.md) and package metadata. |
 | App identity and data | `AUTH_SECRET`, `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET`, `POSTGRES_URL`, and canonical `APP_ORIGIN`. | GitHub is the only sign-in provider; production data requires PostgreSQL. |
+| Owner directory | `ADMIN_EMAILS` containing the exact normalized owner email allowlist when `/admin` is enabled. | Unauthorized page and API requests fail closed as non-cacheable `404` responses. Because the proxy participates in the production build, set this consistently for build and runtime. |
 | Production app abuse and run admission | Require all three app environment variables: `REDIS_URL`, a nonempty `ABUSE_KEY_SECRET`, and a positive-integer `GLOBAL_DAILY_RUN_CAP`. `ABUSE_CONTROL=off` is an emergency bypass for app request-policy enforcement only; normal releases require it unset or not `off`. It does not bypass run reservations, global or tenant cap enforcement, or Worker rate limiters. | Protected app routes fail closed with `503` when Redis is unconfigured in production. Credential lending fails closed with `503` and `capacity_unavailable` when the global cap or abuse key is unavailable. See [`.env.example`](../../.env.example), [`lib/abuse/enforce.ts`](../../lib/abuse/enforce.ts), and [`app/api/internal/credential/route.ts`](../../app/api/internal/credential/route.ts). |
 | App-to-runner connection | `NEXT_PUBLIC_CLOUD_RUNNER_URL` or server-side `CLOUD_RUNNER_URL`, plus matching `AGENT_CONTROL_TOKEN`. | The browser receives the connection from the app; the public URL requires a fresh app build when changed. |
 | Runner identity | App `RUNNER_SIGNING_KEY`; app and Worker `RUNNER_VERIFY_KEY`; matching key pair. | Claims fail closed when either side is absent or mismatched. |
@@ -137,22 +137,24 @@ leaves orphans untouched.
 
 ## Required local gates
 
-Run all five against the exact release candidate:
+Run all six against the exact release candidate:
 
 ```bash
 pnpm hygiene
 pnpm check
 pnpm typecheck
 pnpm test:unit
-pnpm build
+ADMIN_EMAILS=e2e-admin@example.invalid pnpm build
+E2E_PRODUCTION=1 PORT=3105 pnpm test
 ```
 
 Retain command, commit, environment, timestamp, exit status, and sanitized
-output. The last full snapshot passed check, typecheck, unit tests, and build,
-but it is not release evidence for this candidate. The current hygiene snapshot
-fails, and focused tests plus check/typecheck from a documentation remediation
-do not replace a candidate-specific `pnpm test:unit` and `pnpm build`. A tracked
-secret scan is recommended in addition to, not instead of, the five gates.
+output. The placeholder `ADMIN_EMAILS` value above is a local audit fixture,
+not release configuration. The last full snapshot passed check, typecheck, 936
+unit tests, sixteen browser tests against development and local production
+servers, and both default and demo production builds, but hygiene failed; it is
+not release evidence for this candidate. A tracked secret scan is recommended
+in addition to, not instead of, the six gates.
 
 Because an ordinary local build intentionally does not infer a release
 audience, also retain a successful `pnpm validate:release` with the intended
@@ -164,7 +166,7 @@ skipped audience validation is not release evidence.
 
 | Path | Required smoke | Evidence required | Current state |
 | --- | --- | --- | --- |
-| Demo | Build and deploy the app with `IS_DEMO=1`, load the deployment root signed out, let the deterministic replay reach completion, and verify sanitized output with no authentication, database, runner, billing, or persistence activity. | Dated browser trace or recording tied to the candidate and deployment. | Local replay/route tests are verified; no release-equivalent `IS_DEMO=1` artifact. |
+| Demo | Load the signed-out root, verify no database/runner mutation, exercise play, pause, seek, speed, and completion, and inspect sanitized replay output. | Dated browser trace or recording tied to the candidate and deployment. | A local production replay reached 10/10 sanitized events without console errors on 2026-08-26; no release-equivalent deployment artifact is retained. |
 | Subscriber | Exercise a real GitHub OAuth callback and account creation/adoption, guest refusal, active eligibility, expired/revoked refusal, connection retrieval, and usage display. | Dated trace plus sanitized account-state evidence for allowed and denied cases. | Eligibility logic and mocked OAuth start are covered; actual OAuth/account creation is not verified. |
 | Cloud | Run the authenticated deployment diagnostic, create an agent, start and observe a credentialed run, stream/poll to terminal state, cancel a bounded run, delete the agent, and verify tenant/sandbox cleanup. | Dated Worker/app logs, response summary, run identifiers, and cleanup result without credentials or private output. | Local worker tests pass; no live release-equivalent lifecycle artifact. |
 | Local, if supported | Create, run, cancel, and delete through the supported local boundary, including host isolation and cleanup checks. | Dated artifact from the declared supported local environment. | Not applicable: no local runner is tracked and `backend` is cloud-only. |
@@ -284,7 +286,7 @@ or guess at database compatibility.
 | Roadmap freshness | `pnpm roadmap:status check` passes after authoritative reconciliation. | Stale aggregate. | **No-go:** the candidate Project check can pass, but Beads freshness cannot be established. |
 | Worktree safety | `pnpm hygiene` exits zero with no `AT RISK` worktree and the secondary count within the soft cap. | Any `AT RISK` worktree or a secondary count above the soft cap. | **No-go:** the timestamped hygiene evidence above reports both conditions. |
 | Beads/Project/issues | A second apply and final preview are a complete no-op, and accepted delivery artifacts agree. | Drift, create/update/orphan work, partial or failed sync, or issue contradiction. | **No-go:** authoritative sync cannot run; the latest recorded Project query found managed items were drafts. |
-| Five local gates | All five pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** current hygiene fails and no all-five record exists for this candidate. |
+| Six local gates | All six pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** the latest full snapshot failed hygiene. |
 | Database | Staging migration, production backup, migration success, schema verification, and recovery record exist. | Missing backup, skipped/failed migration, or unproved recovery. | **No-go:** no candidate-specific production migration and restore artifact is retained. |
 | Smoke and Stripe | Demo, subscriber, cloud, and webhook evidence pass; Stripe claim/update recovery is atomic and retry-safe; local runs only if supported. | Any failed required smoke, missing webhook delivery, or claim-before-state behavior that permanently deduplicates failed processing. | **No-go:** only local/unit evidence is retained, and current Stripe claim/update ordering is not retry-safe. |
 | Isolation | Tenant, credential, identity, and redaction evidence pass in a release-equivalent environment. | Any cross-tenant or secret-boundary failure. | **No-go:** production-like isolation evidence is not retained. |

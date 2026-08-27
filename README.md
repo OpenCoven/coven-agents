@@ -132,6 +132,14 @@ pnpm dev
 
 Open <http://localhost:3000/agents>.
 
+### Owner directory
+
+The hidden `/admin` Warden directory is available only to exact, normalized
+email addresses in the comma-separated `ADMIN_EMAILS` allowlist. Unauthorized
+page and API requests return a non-cacheable `404`. Configure the same allowlist
+for production build and runtime because the proxy participates in the build;
+do not expose the route as general account administration.
+
 ## Run the runner
 
 Create `worker/.dev.vars`:

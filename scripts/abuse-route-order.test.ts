@@ -405,7 +405,11 @@ test("idempotency envelope migration uses tagged responses", () => {
 test("run reservation migration creates pseudonymous atomic budgets", () => {
   const migration = read("lib/db/migrations/0007_run_reservations.sql");
 
-  assert.match(migration, /CREATE TABLE "RunReservation"/);
+  // IF NOT EXISTS on purpose: the table reached production without its
+  // journal row, and an unguarded CREATE re-ran on every deploy and died on
+  // 42P07 — no build shipped for hours. The guard makes the migration
+  // converge from either starting state.
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS "RunReservation"/);
   assert.match(migration, /"runId" varchar\(64\) PRIMARY KEY/);
   assert.match(migration, /"tenantHash" varchar\(64\) NOT NULL/);
   assert.doesNotMatch(migration, /"tenant" varchar/);

@@ -400,15 +400,23 @@ function stepFor(block: ThreadBlock): Step | null {
         label: block.label,
         tone: block.status === "running" ? "running" : "muted",
       };
-    case "command":
+    case "command": {
+      // The result, not the invocation: the label already names what ran, so
+      // the detail line is the one place the step can say what came back.
+      // Falls back to the command for a tool that produced no output.
+      const outcome =
+        block.stdout.trim().split("\n", 1)[0] ||
+        block.stderr.trim().split("\n", 1)[0] ||
+        block.command;
       return {
         blockId: block.id,
-        detail: block.command,
+        detail: outcome,
         duration,
         id: block.id,
         label: `Ran ${commandHead(block.command)}`,
         tone: commandExitTone(block.exitCode),
       };
+    }
     case "files":
       return {
         blockId: block.id,
@@ -418,15 +426,24 @@ function stepFor(block: ThreadBlock): Step | null {
         label: block.label,
         tone: "muted",
       };
-    case "text":
+    case "text": {
+      const lines = block.text
+        .trim()
+        .split("\n")
+        .filter((line) => line.trim());
+      const first = lines[0] ?? "";
       return {
         blockId: block.id,
-        detail: block.text.trim().split("\n", 1)[0] ?? "",
+        // The first line plus how much sits behind it, so a one-word
+        // acknowledgement and a twelve-paragraph survey read differently in
+        // the rail without either being expanded.
+        detail: lines.length > 1 ? `${first} · ${lines.length} lines` : first,
         duration,
         id: block.id,
         label: block.live ? "Reporting" : "Reported",
         tone: block.live ? "running" : "muted",
       };
+    }
     case "error":
       return {
         blockId: block.id,
