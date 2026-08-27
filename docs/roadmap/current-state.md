@@ -5,15 +5,18 @@ described from tracked source and fresh local commands. Planning status remains
 subject to the private Beads authority, which was unavailable during this
 snapshot.
 
-> **Correction — 2026-08-27:** This historical snapshot predates production
-> release-audience enforcement. Its recorded `pnpm build` pass did not prove a
-> closed-beta or public-release decision. At `candidate HEAD`, production
-> validation requires an exact `RELEASE_AUDIENCE` and matching beta
-> configuration, and `pnpm validate:release` provides the explicit preflight;
-> ordinary local and Vercel preview validation remains non-release evidence.
-> The dated snapshot below is otherwise preserved.
+> **Candidate refresh — 2026-08-27:** The roadmap candidate includes
+> `origin/main` through `a8c197639c599c67132e73b376859dc4d6d48124`.
+> Production validation now requires an exact `RELEASE_AUDIENCE` and matching
+> beta configuration. A live field-only Project query and two applies reported
+> `roadmap status: unchanged`; the checked-in aggregate bytes were identical
+> before and after both applies. Lint, typecheck, unit, build, explicit
+> closed-beta configuration validation, tracked secret scan, and all 16 local
+> production browser tests passed. Hygiene remains blocked by two unrelated
+> `AT RISK` worktrees and four secondary worktrees against the soft cap of
+> three. The historical audit below is retained for its detailed evidence.
 
-## Snapshot metadata
+## Historical snapshot metadata
 
 | Field | Value |
 | --- | --- |
@@ -47,7 +50,7 @@ and the living [execution threat model](../security/execution-threat-model.md)
 are present on merged main. Their implementation evidence is real; their
 canonical Beads completion cannot be re-asserted while Beads is inaccessible.
 
-## Fresh validation evidence
+## Historical validation evidence
 
 These commands were run against the audit candidate after fast-forwarding to
 the latest available `origin/main`. Detailed UI evidence and limitations are in
@@ -107,7 +110,7 @@ closure check.
 | --- | --- | --- | --- | --- | --- |
 | Beads access and sync drift | High | BunsDev | Phase 0 planning authority | **Current: open blocker. Dolt/DoltHub returned `PermissionDenied`.** Keep Project and `ROADMAP.md` read-only as projections; do not apply or describe a sync as idempotent until an authenticated Dolt pull succeeds. | Authenticated Dolt pull; private review, update, commit, and push; authorized Project reconciliation; two sync applies; a final preview with 60 unchanged and zero create, update, or orphan; and reconciled shipped GitHub issues, all without private output. |
 | Issue and Project drift | Medium | Joint | Phase 0 planning authority | **Current: open.** All 60 managed Project items are drafts, so no GitHub issue state backs their status. Treat Project fields as a projection only. | Canonical linkage policy is recorded and a field-only check demonstrates that each managed status has an authoritative state source. |
-| Work exists only in another worktree | High | BunsDev | Repository integrity | **Current: open.** Hygiene identified one unpushed commit in `docs/repository-roadmap` and an unpushed, unmerged `fix/run-reconcile` branch. This audit did not alter or discard either worktree. | `pnpm hygiene` exits 0 with no `AT RISK` worktrees after the owning work is safely pushed/merged or deliberately removed by its owner. |
+| Work exists only in another worktree | High | BunsDev | Repository integrity | **Current: open.** The 2026-08-27 candidate hygiene run found `feat/admission-queue-rebased` with one unpushed commit and `fix/process-runner` absent from origin and not merged according to hygiene. It also found four secondary worktrees against the soft cap of three. The roadmap branch itself was pushed and synchronized; this audit did not alter or discard unrelated worktrees. | `pnpm hygiene` exits 0 with no `AT RISK` worktrees after the owning work is safely pushed/merged or deliberately removed by its owner, and the secondary count is within the soft cap. |
 | Remote checks are disabled | High | Joint | Evidence baseline | **Current: accepted with partial mitigation.** GitHub Actions remain intentionally off; signed commits plus all local gates are required. The current snapshot still has the hygiene failure above. | A signed, retained local gate record with every required gate green, or an explicit repository decision that re-enables trusted required checks. |
 | Typechecking depends on generated Next types | Medium | Copilot | Evidence baseline | **Current: partially mitigated.** `.next` is ignored while `tsconfig.json` includes generated `.next` type paths. Typecheck and build passed in this populated worktree, but clean-checkout order independence was not proved. | A clean checkout passes the documented gate order, or the scripts explicitly generate required Next types before typecheck. |
 | Production-path E2E is missing | High | Joint | Certify | **Current: open.** Sixteen browser cases pass against local development and production servers, and local production demo playback passes. Subscriber-shaped fixtures cover protected UI without exercising real GitHub OAuth, Stripe, tenant credential lending, cloud run lifecycle, or recovery; remote workflows are disabled. | A production-like, credential-safe suite covers authentication, subscription, tenant credential lending, cloud run lifecycle, and recovery with deterministic service boundaries. |
