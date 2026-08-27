@@ -1045,13 +1045,33 @@ Run: `pnpm exec tsx --test lib/credentials/leases.test.ts app/api/internal/crede
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/db lib/credentials app/api/internal/credential worker/src/agents.ts
 git commit -S -m "feat(security): bind credential loans to one run" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 ```
+
+Merged in PR #117 as `9f6cfa1d49de611df7c83e3fef3ab421e0bf5b3b`.
+
+- [x] **Step 7: Complete the staged production rollout**
+
+Production closure completed on 2026-08-27:
+
+1. migration `0012_credential_leases.sql` applied successfully;
+2. Worker version `86caa7ea-2c92-4205-a7e8-4febe3c384a4` deployed;
+3. signed run-scoped identity writes enabled;
+4. the 15-minute runner-token and browser compatibility window drained;
+5. legacy credential lending disabled;
+6. the final Vercel deployment reached Ready and was aliased to
+   `https://agents.opencoven.ai`;
+7. the app root retained its expected login redirect, while unauthenticated
+   app credential and Worker agent requests returned `401`.
+
+The final rollout state is
+`RUN_SCOPED_IDENTITY_WRITES_ENABLED=true` and
+`CREDENTIAL_LEGACY_LENDING_ENABLED=false`.
 
 ### Task 12: Enforce sandbox egress and aggressive cleanup
 
