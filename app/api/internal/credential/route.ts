@@ -6,9 +6,18 @@ import "server-only";
 // verified in `authorizeInternalRequest` below, checked before any database
 // access happens. This is the one place in the codebase permitted to import
 // `db` directly.
-import { importVerifyKey, verifyRunnerToken } from "@opencoven/agent-contracts";
+import {
+  MAX_RUNNER_TOKEN_BYTES,
+  type RunnerVerificationKeyRing,
+  verifyRunnerToken,
+} from "@opencoven/agent-contracts";
 import { eq } from "drizzle-orm";
+import { z } from "zod";
+import { readBoundedJson } from "@/lib/abuse/body";
 import { requireNonemptyAbuseKeySecret } from "@/lib/abuse/config";
+import { runnerVerificationKeyRingFromEnvironment } from "@/lib/agents/key-ring";
+import { authorizeInternalRequest } from "@/lib/auth/internal-service";
+import { sessionAuthorityMatches } from "@/lib/auth/session-revocation";
 import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
 import { periodStart } from "@/lib/billing/period";
 import {
@@ -32,23 +41,20 @@ import { resolveBoundTenant } from "./binding";
  * the worker (and nothing else) holds.
  */
 
-export function authorizeInternalRequest(
-  request: Request,
-  expected: string
-): boolean {
-  const supplied = request.headers.get("x-service-token");
+export { authorizeInternalRequest } from "@/lib/auth/internal-service";
 
-  if (!supplied || !expected || supplied.length !== expected.length) {
-    return false;
-  }
-
-  let mismatch = 0;
-  for (let i = 0; i < expected.length; i += 1) {
-    mismatch |= supplied.charCodeAt(i) ^ expected.charCodeAt(i);
-  }
-
-  return mismatch === 0;
-}
+const MAX_CREDENTIAL_BODY_BYTES = 8192;
+const MAX_CREDENTIAL_RUN_ID_LENGTH = 128;
+const MAX_CREDENTIAL_HARNESS_ID_LENGTH = 64;
+const MAX_CREDENTIAL_TENANT_LENGTH = 128;
+const credentialRequestSchema = z
+  .object({
+    harnessId: z.string().trim().min(1).max(MAX_CREDENTIAL_HARNESS_ID_LENGTH),
+    runId: z.string().trim().min(1).max(MAX_CREDENTIAL_RUN_ID_LENGTH),
+    tenant: z.string().trim().min(1).max(MAX_CREDENTIAL_TENANT_LENGTH),
+  })
+  .strict();
+const runnerTokenSchema = z.string().min(1).max(MAX_RUNNER_TOKEN_BYTES);
 
 export interface CredentialLendingDependencies {
   consume: (
@@ -191,27 +197,24 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  // A malformed body is a deterministic 400, not an unhandled throw surfacing
-  // as a 500. The caller is the worker, and it can only tell "I asked wrongly"
-  // from "the app is broken" if those are different statuses.
-  let body: {
-    harnessId?: unknown;
-    runId?: unknown;
-    tenant?: unknown;
-  } | null;
-  try {
-    body = (await request.json()) as {
-      harnessId?: unknown;
-      runId?: unknown;
-      tenant?: unknown;
-    } | null;
-  } catch {
+  const body = await readBoundedJson(
+    request,
+    MAX_CREDENTIAL_BODY_BYTES,
+    credentialRequestSchema
+  );
+  if (body.kind === "too_large") {
+    return Response.json({ error: "request_too_large" }, { status: 413 });
+  }
+  if (body.kind === "invalid") {
     return Response.json({ error: "invalid_request" }, { status: 400 });
   }
-  const { harnessId } = body ?? {};
 
-  if (typeof harnessId !== "string") {
-    return Response.json({ error: "invalid_request" }, { status: 400 });
+  const authorization = request.headers.get("authorization");
+  const identityToken = authorization?.startsWith("Bearer ")
+    ? authorization.slice(7)
+    : null;
+  if (!identityToken || !runnerTokenSchema.safeParse(identityToken).success) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
   // The service token proves the caller may reach this endpoint. It does not
@@ -219,22 +222,18 @@ export async function POST(request: Request): Promise<Response> {
   // straight from the body. That made one shared token a master key over every
   // tenant's credential. Identity now comes from the signed claim the worker
   // was handed when the run started, forwarded on.
-  const verifyKey = process.env.RUNNER_VERIFY_KEY;
-  if (!verifyKey) {
+  let verifyKeyRing: RunnerVerificationKeyRing;
+  try {
+    verifyKeyRing = await runnerVerificationKeyRingFromEnvironment();
+  } catch {
     return Response.json({ error: "identity_unavailable" }, { status: 503 });
   }
 
-  const authorization = request.headers.get("authorization");
-  const claims = authorization?.startsWith("Bearer ")
-    ? await verifyRunnerToken(
-        authorization.slice(7),
-        await importVerifyKey(verifyKey)
-      )
-    : null;
+  const claims = await verifyRunnerToken(identityToken, verifyKeyRing);
 
   let tenant: string | null;
   try {
-    tenant = resolveBoundTenant(claims, body ?? {}, { strict: true });
+    tenant = resolveBoundTenant(claims, body.value, { strict: true });
   } catch {
     // A body naming a different tenant than the claim is a caller doing
     // something it should not, not a malformed request.
@@ -244,21 +243,36 @@ export async function POST(request: Request): Promise<Response> {
   if (!tenant) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
-
-  const { runId } = body ?? {};
-
-  if (typeof runId !== "string" || !runId) {
-    return Response.json({ error: "invalid_request" }, { status: 400 });
+  if (!claims) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
   }
+
+  const { harnessId, runId } = body.value;
 
   // The cap is enforced here because this is the moment the credential is
   // lent — the one point every run must pass through, and the only one where
   // refusing costs nothing already spent.
-  const [owner] = await db
-    .select()
-    .from(user)
-    .where(eq(user.id, claims?.sub ?? ""))
-    .limit(1);
+  let owner: typeof user.$inferSelect | undefined;
+  try {
+    [owner] = await db
+      .select()
+      .from(user)
+      .where(eq(user.id, claims.sub))
+      .limit(1);
+  } catch {
+    return Response.json({ error: "identity_unavailable" }, { status: 503 });
+  }
+
+  if (
+    !owner ||
+    !sessionAuthorityMatches({
+      database: owner,
+      now: new Date(),
+      tokenAuthVersion: claims.authVersion,
+    })
+  ) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
 
   const resetsAt = owner?.subscribedUntil ?? null;
   const since = periodStart(resetsAt, owner?.billingPeriodStart ?? null);

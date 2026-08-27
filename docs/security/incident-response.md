@@ -34,7 +34,7 @@ was larger than assumed costs trust.
 | Level | Meaning | Examples | First action |
 | --- | --- | --- | --- |
 | **S1** | Another tenant's data is reachable | `CREDENTIAL_KEK`, `POSTGRES_URL`, a tenant's harness credential | Rotate immediately, then notify affected tenants |
-| **S2** | Our infrastructure is controllable, tenant data is not directly exposed | `RUNNER_SIGNING_KEY`, `AGENT_CONTROL_TOKEN`, `RUNNER_SERVICE_TOKEN`, `AUTH_SECRET` | Rotate immediately |
+| **S2** | Our infrastructure is controllable, tenant data is not directly exposed | `RUNNER_SIGNING_KEY`, `AGENT_CONTROL_TOKEN`, `OPERATOR_DIAGNOSTIC_TOKEN`, `RUNNER_SERVICE_TOKEN`, `AUTH_SECRET` | Rotate immediately |
 | **S3** | Cost or availability, no data boundary crossed | endpoint URL known, unauthenticated request flood | Measure, then decide |
 
 An **S1** is the only class that creates an obligation to someone other than
@@ -50,8 +50,9 @@ Everything that grants something, where it lives, and what it costs to rotate.
 | `CREDENTIAL_KEK` | Vercel | Decryption of every stored tenant credential | **Every tenant must reconnect** |
 | `POSTGRES_URL` and the `PG*` family | Vercel (Neon integration) | Full read/write on all tenant data | Brief downtime |
 | `AUTH_SECRET` | Vercel | Forging any signed-in session | Everyone is signed out |
-| `RUNNER_SIGNING_KEY` / `RUNNER_VERIFY_KEY` | Vercel / Vercel + worker | Minting an identity for any tenant | ≤15 min of failed runs |
-| `AGENT_CONTROL_TOKEN` | Vercel + worker | Reaching the worker at all | Seconds of failed runs |
+| `RUNNER_SIGNING_KEY_ID`, `RUNNER_SIGNING_KEY`, `RUNNER_SIGNING_PUBLIC_KEY`, and Worker `RUNNER_VERIFY_*` ring | Vercel / Vercel + worker | Minting an identity for any tenant | ≤15 min of failed runs |
+| `AGENT_CONTROL_TOKEN` | Vercel + worker | Reaching the worker deployment for browser requests | Seconds of failed runs |
+| `OPERATOR_DIAGNOSTIC_TOKEN` | Worker | Running the operator-only Sandbox diagnostic | Seconds of failed diagnostics |
 | `RUNNER_SERVICE_TOKEN` | Vercel + worker | Calling the internal credential endpoint | Seconds of failed runs |
 | `AUTH_GITHUB_SECRET` | Vercel | Impersonating our OAuth app | Sign-in breaks until updated |
 | `STRIPE_SECRET_KEY` | Vercel | Charging and refunding | None |
@@ -130,9 +131,9 @@ secret in every visitor's browser.
 
 ### `AGENT_CONTROL_TOKEN` — the worker's front door
 
-**Grants.** Reaching the worker at all. It does *not* identify anyone: a
-caller still needs an Ed25519 identity minted from a signed-in session, so this
-token alone cannot read or start anything.
+**Grants.** Reaching the worker at all. It does *not* identify a tenant: all
+reads, runs, and other tenant operations still need an Ed25519 identity minted
+from a signed-in session. It cannot authorize `/api/diagnostics/sandbox`.
 
 **Rotate.**
 
@@ -169,6 +170,43 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 # 401 expected
 ```
 
+### `OPERATOR_DIAGNOSTIC_TOKEN` — the deployment diagnostic
+
+**Grants.** Running `POST /api/diagnostics/sandbox` without tenant identity.
+This secret is stored only as a Worker secret, is compared timing-safely, and
+is never returned to the app or browser. The route is rate-limited before
+authentication and fails closed with `503` if the secret is missing.
+
+**Rotate.**
+
+```bash
+NEW="$(openssl rand -hex 32)"
+
+cd worker
+printf '%s' "$NEW" | npx wrangler secret put OPERATOR_DIAGNOSTIC_TOKEN
+```
+
+**Verify.** Do not print either value. The old value must be refused, the
+browser-visible control token must remain refused, and only the new operator
+value may return the diagnostic result:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST https://coven-agents-runner.opencovenagents.workers.dev/api/diagnostics/sandbox \
+  -H "Authorization: Bearer <old value>"
+# 401 expected
+
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST https://coven-agents-runner.opencovenagents.workers.dev/api/diagnostics/sandbox \
+  -H "X-Runner-Token: <AGENT_CONTROL_TOKEN>"
+# 401 expected
+
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST https://coven-agents-runner.opencovenagents.workers.dev/api/diagnostics/sandbox \
+  -H "Authorization: Bearer <new value>"
+# 200 expected
+```
+
 ### `RUNNER_SERVICE_TOKEN` — the internal credential endpoint
 
 **Grants.** Calling `/api/internal/credential`, which lends a tenant's harness
@@ -180,14 +218,17 @@ order, same reason.
 
 **Verify.** `/api/internal/credential` returns 401 for the old value.
 
-### `RUNNER_SIGNING_KEY` and `RUNNER_VERIFY_KEY` — the identity pair
+### Runner signing and verification key ring
 
 **Grants.** The signing key mints an identity claiming to be *any* tenant.
 This is the closest thing to a master key that does not touch the database.
 
-**They are a pair and must change together.** The worker verifies with
-`RUNNER_VERIFY_KEY`; the app signs with `RUNNER_SIGNING_KEY`. A mismatch means
-every run fails.
+**The current ID and key pair must change together. The Worker verifies with
+`RUNNER_VERIFY_KEY_ID`/`RUNNER_VERIFY_KEY`; the app signs with
+`RUNNER_SIGNING_KEY_ID`/`RUNNER_SIGNING_KEY`. A mismatch means every run
+fails. Keep the old public key configured as `RUNNER_VERIFY_PREVIOUS_KEY` until
+15 minutes plus clock skew have elapsed; never overwrite an unversioned key in
+place.
 
 ```bash
 # Generate an Ed25519 pair; export the pkcs8 private key and the raw public key
@@ -201,8 +242,10 @@ console.log("VERIFY", Buffer.from(raw).toString("base64url"));
 '
 ```
 
-Set `RUNNER_VERIFY_KEY` on the worker and in Vercel, and `RUNNER_SIGNING_KEY`
-in Vercel, then redeploy both.
+Set the Worker current/previous public-key ring through Wrangler and the app's
+current signing ring through Vercel, then redeploy both. The complete procedure
+and rollback are in [Runner key rotation](key-rotation.md). Never log key
+material.
 
 **What breaks.** Identity tokens live 15 minutes (`TOKEN_LIFETIME_SECONDS`), so
 in-flight runs fail until they are re-minted. There is no revocation list —

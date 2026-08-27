@@ -57,11 +57,11 @@ Check presence and agreement without printing values.
 | Owner directory | `ADMIN_EMAILS` containing the exact normalized owner email allowlist when `/admin` is enabled. | Unauthorized page and API requests fail closed as non-cacheable `404` responses. Because the proxy participates in the production build, set this consistently for build and runtime. |
 | Abuse controls | `REDIS_URL` and `ABUSE_KEY_SECRET` must both be present in production. | [`scripts/validate-runtime-config.ts`](../../scripts/validate-runtime-config.ts) rejects an incomplete pair, but it is not a complete deployment preflight. |
 | App-to-runner connection | `NEXT_PUBLIC_CLOUD_RUNNER_URL` or server-side `CLOUD_RUNNER_URL`, plus matching `AGENT_CONTROL_TOKEN`. | The browser receives the connection from the app; the public URL requires a fresh app build when changed. |
-| Runner identity | App `RUNNER_SIGNING_KEY`; app and Worker `RUNNER_VERIFY_KEY`; matching key pair. | Claims fail closed when either side is absent or mismatched. |
+| Runner identity | App `RUNNER_SIGNING_KEY_ID`/`RUNNER_SIGNING_KEY`/`RUNNER_SIGNING_PUBLIC_KEY`; Worker `RUNNER_VERIFY_KEY_ID`/`RUNNER_VERIFY_KEY` plus an optional previous key ring with last-signed and retirement timestamps. | Claims fail closed when either side is absent or mismatched; rotate with the [key runbook](../security/key-rotation.md). |
 | Credential lending | App and Worker `RUNNER_SERVICE_TOKEN`; app `CREDENTIAL_KEK`; Worker `APP_ORIGIN`. | The Worker has no operator or fallback harness credential. |
 | Billing | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, and canonical `APP_ORIGIN`. | Checkout and webhook return `503` when unconfigured. |
 | Other shipped app paths | `AI_GATEWAY_API_KEY` and `BLOB_READ_WRITE_TOKEN` when chat/model and upload paths remain enabled. | These are app feature dependencies, not runner credentials. |
-| Worker | `AGENT_CONTROL_TOKEN`, `RUNNER_VERIFY_KEY`, `RUNNER_SERVICE_TOKEN`, `APP_ORIGIN`, correct `ALLOWED_ORIGIN`, Durable Object bindings/migration, container image, and Wrangler authentication. | [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc) enables observability and declares the current Worker topology. |
+| Worker | `AGENT_CONTROL_TOKEN`, `OPERATOR_DIAGNOSTIC_TOKEN`, `RUNNER_VERIFY_KEY`, `RUNNER_SERVICE_TOKEN`, `APP_ORIGIN`, correct `ALLOWED_ORIGIN`, Durable Object bindings/migration, container image, and Wrangler authentication. | [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc) enables observability and declares the current Worker topology. |
 | Demo recorder | Recorder variables from [`.env.example`](../../.env.example) only when producing a new owner-approved replay. | Guest playback itself is committed, stateless evidence and needs no recorder secret. |
 | Local execution | — | The local runner was removed in `91f21c8`; the shared contract accepts only `cloud`. Local smoke is not a current release gate. |
 
@@ -191,8 +191,9 @@ an incident-response trigger.
 Before traffic promotion:
 
 1. Confirm Worker observability is enabled for the deployed version.
-2. Run the authenticated `/api/diagnostics/sandbox` probe and retain its
-   sanitized result.
+2. Run the authenticated `/api/diagnostics/sandbox` probe with the
+   `OPERATOR_DIAGNOSTIC_TOKEN` and retain its sanitized result. The
+   browser-visible `AGENT_CONTROL_TOKEN` must be refused.
 3. Confirm app telemetry initializes and both app and Worker surface actionable
    failures without request bodies, credentials, private paths, or private
    planning text.

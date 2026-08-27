@@ -51,3 +51,37 @@ test("the rest of the token is preserved", () => {
   assert.equal(refreshed.id, "user-1");
   assert.equal(refreshed.subscribedUntil, LATER.toISOString());
 });
+
+test("refreshing callback claims preserves the authoritative auth version", () => {
+  const refreshed = refreshTokenType(
+    {
+      authVersion: 7,
+      id: "user-1",
+      subscribedUntil: LATER.toISOString(),
+      type: "subscriber",
+    },
+    NOW
+  );
+
+  assert.equal(refreshed.authVersion, 7);
+  assert.equal(refreshed.type, "subscriber");
+});
+
+test("a client session update cannot change auth version or subscription date", () => {
+  const refreshed = refreshTokenType(
+    {
+      authVersion: 7,
+      id: "user-1",
+      subscribedUntil: null,
+      type: "demo",
+    },
+    NOW
+  );
+
+  assert.deepEqual(refreshed, {
+    authVersion: 7,
+    id: "user-1",
+    subscribedUntil: null,
+    type: "demo",
+  });
+});

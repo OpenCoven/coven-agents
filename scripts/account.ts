@@ -1,7 +1,12 @@
 #!/usr/bin/env tsx
-import { eq } from "drizzle-orm";
-import { db, findOrCreateFederatedUser } from "@/lib/db/queries";
+import { sql } from "drizzle-orm";
+import {
+  db,
+  findOrCreateFederatedUser,
+  revokeSessionsByEmail,
+} from "@/lib/db/queries";
 import { user } from "@/lib/db/schema";
+import { formatRevocationOutput } from "./account-output";
 
 /**
  * Creates an account or resets its password from the command line.
@@ -23,7 +28,12 @@ import { user } from "@/lib/db/schema";
  */
 
 async function findUser(email: string) {
-  const [row] = await db.select().from(user).where(eq(user.email, email));
+  const normalizedEmail = email.trim().toLowerCase();
+  const [row] = await db
+    .select()
+    .from(user)
+    .where(sql`lower(${user.email}) = lower(${normalizedEmail})`)
+    .limit(1);
 
   return row ?? null;
 }
@@ -79,6 +89,21 @@ async function show(email: string) {
   );
 }
 
+async function revokeSessions(email: string) {
+  const normalizedEmail = email.trim().toLowerCase();
+  const row = normalizedEmail
+    ? await revokeSessionsByEmail(normalizedEmail)
+    : null;
+  if (!row) {
+    process.stderr.write("No matching account.\n");
+    process.exitCode = 1;
+    return;
+  }
+
+  // Deliberately no email, database target, or other account data.
+  process.stdout.write(formatRevocationOutput(row));
+}
+
 async function main() {
   const [command, email] = process.argv.slice(2);
 
@@ -86,20 +111,24 @@ async function main() {
     process.stdout.write(
       "Usage:\n" +
         "  pnpm account create <email>\n" +
-        "  pnpm account show <email>\n"
+        "  pnpm account show <email>\n" +
+        "  pnpm account revoke-sessions <email>\n"
     );
     process.exitCode = 1;
     return;
   }
 
-  process.stdout.write(`database: ${describeTarget()}\n`);
-
   switch (command) {
     case "create":
+      process.stdout.write(`database: ${describeTarget()}\n`);
       await create(email);
       break;
     case "show":
+      process.stdout.write(`database: ${describeTarget()}\n`);
       await show(email);
+      break;
+    case "revoke-sessions":
+      await revokeSessions(email);
       break;
     default:
       process.stdout.write(`Unknown command: ${command}\n`);
@@ -108,8 +137,8 @@ async function main() {
 }
 
 main()
-  .catch((error) => {
-    process.stderr.write(`${error}\n`);
+  .catch(() => {
+    process.stderr.write("Account command failed.\n");
     process.exitCode = 1;
   })
   .finally(() => process.exit(process.exitCode ?? 0));

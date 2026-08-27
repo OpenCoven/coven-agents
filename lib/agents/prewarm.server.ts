@@ -1,3 +1,4 @@
+import { runnerKeyRingFromEnvironment } from "@/lib/agents/key-ring";
 import { claimsForUser, mintRunnerToken } from "@/lib/agents/runner-token";
 import { isSubscribedAt } from "@/lib/subscription";
 
@@ -19,6 +20,7 @@ const PREWARM_TIMEOUT_MS = 5000;
  */
 export async function prewarmTenantSandbox(
   user: {
+    authVersion: number;
     id: string;
     subscribedUntil: Date | null;
   },
@@ -32,14 +34,18 @@ export async function prewarmTenantSandbox(
       process.env.CLOUD_RUNNER_URL ?? process.env.NEXT_PUBLIC_CLOUD_RUNNER_URL
     )?.replace(/\/+$/, "");
     const controlToken = process.env.AGENT_CONTROL_TOKEN;
-    const signingKey = process.env.RUNNER_SIGNING_KEY;
-    if (!(endpoint && controlToken && signingKey)) {
+    if (!(endpoint && controlToken)) {
       return;
     }
+    const keyRing = await runnerKeyRingFromEnvironment();
 
     const identity = await mintRunnerToken(
-      claimsForUser({ id: user.id, type: "subscriber" }),
-      signingKey
+      claimsForUser({
+        authVersion: user.authVersion,
+        id: user.id,
+        type: "subscriber",
+      }),
+      keyRing
     );
     await request(`${endpoint}/api/tenant/prewarm`, {
       headers: {

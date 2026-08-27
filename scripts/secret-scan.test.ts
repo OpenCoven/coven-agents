@@ -172,6 +172,7 @@ test("a secret with no vendor prefix is still caught, by its name", () => {
     "CREDENTIAL_KEK",
     "RUNNER_SIGNING_KEY",
     "AGENT_CONTROL_TOKEN",
+    "OPERATOR_DIAGNOSTIC_TOKEN",
     "RUNNER_SERVICE_TOKEN",
     "STRIPE_WEBHOOK_SECRET",
     "AUTH_GITHUB_SECRET",
@@ -207,6 +208,7 @@ test("placeholders and references are not mistaken for secrets", () => {
     // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal text is the input under test.
     "${SOME_VAR}",
     "process.env.AUTH_SECRET",
+    "keys.currentPrivateKey",
     "recordingCredential",
     "RECORDING_CREDENTIAL",
     "runner-control-sensitive",

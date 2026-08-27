@@ -204,13 +204,6 @@ const protectedHandlers: RouteExpectation[] = [
     "usage_read"
   ),
   route(
-    "app/api/analytics/route.ts",
-    "GET",
-    "auth(",
-    ["runHistory("],
-    "analytics_read"
-  ),
-  route(
     "app/(chat)/api/models/route.ts",
     "GET",
     "GET(request",
@@ -281,6 +274,16 @@ test("deferred webhook and internal lending routes stay untouched", () => {
   for (const file of excludedRoutes) {
     assert.doesNotMatch(read(file), /enforceAbusePolicy/);
   }
+});
+
+test("analytics revalidates subscriber authority before reading history", () => {
+  const source = read("lib/analytics/response.ts");
+  const authorityIndex = source.indexOf("dependencies.authorize(");
+  const historyIndex = source.indexOf("dependencies.readHistory(");
+
+  assert.ok(authorityIndex >= 0);
+  assert.ok(historyIndex > authorityIndex);
+  assert.match(read("app/api/analytics/route.ts"), /ipAddress\(request\)/);
 });
 
 test("internal credential lending reserves before credential decryption", () => {
@@ -438,6 +441,48 @@ test("run reservation migration creates pseudonymous atomic budgets", () => {
   assert.match(snapshot, /RunUsage_countedAt_idx/);
   assert.match(snapshot, /RunUsage_tenant_countedAt_idx/);
   assert.match(snapshot, /billingPeriodStart/);
+});
+
+test("identity version migration adds a non-null zero default", () => {
+  const migration = read("lib/db/migrations/0008_identity_versions.sql");
+  assert.match(
+    migration,
+    /ALTER TABLE "User" ADD COLUMN "authVersion" integer DEFAULT 0 NOT NULL/i
+  );
+
+  const snapshot = read("lib/db/migrations/meta/0008_snapshot.json");
+  assert.match(snapshot, /"authVersion"/);
+  assert.match(snapshot, /"default": 0/);
+  assert.match(snapshot, /"notNull": true/);
+});
+
+test("session revocation increments in the database update", () => {
+  const source = read("lib/db/queries.ts");
+  const start = source.indexOf("export async function revokeSessionsByEmail");
+  assert.ok(start >= 0);
+  const revoke = source.slice(start, start + 1000);
+
+  assert.match(revoke, /\.update\(user\)/);
+  assert.match(source, /function emailMatches\(normalizedEmail: string\)/);
+  assert.match(
+    source,
+    /lower\(\$\{user\.email\}\) = lower\(\$\{normalizedEmail\}\)/
+  );
+  assert.match(revoke, /count\(\*\).*emailMatches\(normalizedEmail\)/s);
+  assert.match(revoke, /authVersion\} \+ 1/);
+  assert.match(revoke, /\.returning\(\{ authVersion: user\.authVersion/);
+});
+
+test("federated account creation stores canonical lowercase email", () => {
+  const source = read("lib/db/queries.ts");
+  const start = source.indexOf(
+    "export async function findOrCreateFederatedUser"
+  );
+  assert.ok(start >= 0);
+  const federated = source.slice(start, start + 1200);
+
+  assert.match(federated, /normalizeEmail\(email\)/);
+  assert.match(federated, /values\(\{ email: normalizedEmail/);
 });
 
 test("database claims and reclaims idempotency records atomically", () => {

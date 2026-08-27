@@ -1,5 +1,4 @@
 import {
-  base64UrlDecode,
   base64UrlEncode,
   type RunnerClaims,
   runnerClaimsSchema,
@@ -7,6 +6,7 @@ import {
   TOKEN_LIFETIME_SECONDS,
 } from "@opencoven/agent-contracts";
 import { isSubscriber, tenantForUser, toSession } from "@/lib/session";
+import type { RunnerKeyRing } from "./key-ring";
 
 /**
  * The ONLY place a runner identity token can be minted. This function lives
@@ -19,21 +19,14 @@ import { isSubscriber, tenantForUser, toSession } from "@/lib/session";
  * tenant.
  */
 export async function mintRunnerToken(
-  input: Omit<RunnerClaims, "exp">,
-  privateKeyPkcs8: string
+  input: Omit<RunnerClaims, "exp" | "kid">,
+  signingKey: Pick<RunnerKeyRing, "current">
 ): Promise<string> {
   const claims = runnerClaimsSchema.parse({
     ...input,
     exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    kid: signingKey.current.id,
   });
-
-  const key = await crypto.subtle.importKey(
-    "pkcs8",
-    new Uint8Array(base64UrlDecode(privateKeyPkcs8)),
-    { name: TOKEN_ALGORITHM },
-    false,
-    ["sign"]
-  );
 
   const payload = base64UrlEncode(
     new TextEncoder().encode(JSON.stringify(claims))
@@ -41,7 +34,7 @@ export async function mintRunnerToken(
 
   const signature = await crypto.subtle.sign(
     { name: TOKEN_ALGORITHM },
-    key,
+    signingKey.current.privateKey,
     new TextEncoder().encode(payload)
   );
 
@@ -67,10 +60,12 @@ export async function mintRunnerToken(
  * tenant that changed per mint would make their own agents disappear.
  */
 export function claimsForUser(user: {
+  authVersion: number;
   id: string;
   type: string;
-}): Omit<RunnerClaims, "exp"> {
+}): Omit<RunnerClaims, "exp" | "kid"> {
   return {
+    authVersion: user.authVersion,
     plan: isSubscriber(toSession(user)) ? "subscriber" : "demo",
     sub: user.id,
     tenant: tenantForUser(user.id),

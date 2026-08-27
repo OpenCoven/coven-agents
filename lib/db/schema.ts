@@ -21,6 +21,7 @@ import type { StoredIdempotencyResponseEnvelope } from "../abuse/idempotency-res
 export const user = pgTable(
   "User",
   {
+    authVersion: integer("authVersion").notNull().default(0),
     billingPeriodStart: timestamp("billingPeriodStart"),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
     email: varchar("email", { length: 64 }).notNull(),
