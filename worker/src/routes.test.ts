@@ -424,6 +424,122 @@ test("lapsed identity is refused before sandbox or durable-object work", async (
   assert.deepEqual(warmed, []);
 });
 
+test("the sandbox diagnostic is operator-only and does not require tenant identity", async () => {
+  const environment = await environmentPromise;
+  let diagnostics = 0;
+  const response = await createCloudRunner({
+    diagnoseSandbox: () => {
+      diagnostics += 1;
+      return {
+        exitCode: 0,
+        ok: true,
+        output: "coven-agents",
+      };
+    },
+    getDirectory: () => {
+      throw new Error("diagnostics must not open a tenant directory");
+    },
+    getYoloAgent: () => {
+      throw new Error("diagnostics must not open an agent");
+    },
+  }).fetch(
+    new Request("https://runner.test/api/diagnostics/sandbox", {
+      headers: { "x-runner-token": TOKEN },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    exitCode: 0,
+    ok: true,
+    output: "coven-agents",
+  });
+  assert.equal(diagnostics, 1);
+});
+
+test("the diagnostic accepts the control token as a bearer operator token", async () => {
+  const environment = await environmentPromise;
+  let diagnostics = 0;
+  const response = await createCloudRunner({
+    diagnoseSandbox: () => {
+      diagnostics += 1;
+      return { exitCode: 0, ok: true, output: "coven-agents" };
+    },
+    getDirectory: () => {
+      throw new Error("diagnostics must not open a tenant directory");
+    },
+    getYoloAgent: () => {
+      throw new Error("diagnostics must not open an agent");
+    },
+  }).fetch(
+    new Request("https://runner.test/api/diagnostics/sandbox", {
+      headers: { authorization: `Bearer ${TOKEN}` },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(diagnostics, 1);
+});
+
+test("a runner identity cannot substitute for the diagnostic control token", async () => {
+  const environment = await environmentPromise;
+  let diagnostics = 0;
+  const response = await createCloudRunner({
+    diagnoseSandbox: () => {
+      diagnostics += 1;
+      return { exitCode: 0, ok: true, output: "coven-agents" };
+    },
+    getDirectory: () => {
+      throw new Error("diagnostics must not open a tenant directory");
+    },
+    getYoloAgent: () => {
+      throw new Error("diagnostics must not open an agent");
+    },
+  }).fetch(
+    new Request("https://runner.test/api/diagnostics/sandbox", {
+      headers: { "x-runner-token": "ordinary-runner-token" },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(diagnostics, 0);
+});
+
+test("a diagnostic request carrying runner identity is refused rather than bypassing revocation", async () => {
+  const environment = await environmentPromise;
+  let diagnostics = 0;
+  const response = await createCloudRunner({
+    diagnoseSandbox: () => {
+      diagnostics += 1;
+      return { exitCode: 0, ok: true, output: "coven-agents" };
+    },
+    getDirectory: () => {
+      throw new Error("diagnostics must not open a tenant directory");
+    },
+    getYoloAgent: () => {
+      throw new Error("diagnostics must not open an agent");
+    },
+  }).fetch(
+    new Request("https://runner.test/api/diagnostics/sandbox", {
+      headers: {
+        authorization: "Bearer revoked-runner-identity",
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(diagnostics, 0);
+});
+
 async function callWithRunner(
   path: string,
   method: string,

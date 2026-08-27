@@ -86,11 +86,14 @@ Assumptions:
    deployment; the signed claim supplies `sub`, `tenant`, `plan`, `kid`, and
    `authVersion`. The Worker selects only the configured current or unexpired
    previous key by `kid`, then verifies the raw signed payload before parsing
-   claims.
+   claims. The paid sandbox diagnostic is separate: it accepts only the
+   operator `AGENT_CONTROL_TOKEN` and no runner identity.
 4. The Worker resolves the requested agent under the verified tenant and starts
    or resumes that agent's Durable Object.
 5. For a run, the Worker forwards the same signed identity plus its service
-   token to the control plane's internal credential endpoint.
+   token to the control plane's internal credential endpoint. The Worker also
+   sends that original bounded token to the authority endpoint; the app
+   verifies it independently before consulting session authority.
 6. The control plane binds the request to the verified claim, enforces the
    subscriber plan and run cap, decrypts one tenant/harness credential, and
    returns it for that run.
@@ -128,16 +131,21 @@ The cloud control token is a deployment gate, not identity. Identity comes from
 the signed claim minted in `lib/agents/runner-token.ts` and verified in
 `worker/src/routes.ts`. The Worker routes by the bounded `kid` hint, verifies
 the raw payload, and only then trusts claims. CORS narrows browser origins but
-is not treated as authentication.
+is not treated as authentication. `/api/diagnostics/sandbox` is operator-only:
+it accepts the control token as its sole credential and refuses runner
+identity headers, so a revoked claim cannot authorize a paid probe.
 
 ### B3. Control plane to internal credential endpoint
 
 The service token permits the caller to reach the endpoint. It does not choose
-a tenant. `app/api/internal/credential/route.ts` verifies the forwarded runner
-claim, and `app/api/internal/credential/binding.ts` derives the tenant and
-requires the subscriber plan. The control plane checks the current database
-`authVersion` before reservation or credential decryption. A body/claim
-mismatch is refused.
+a tenant. `app/api/internal/runner-authority/route.ts` accepts only a bounded
+body containing the original signed token, verifies it against the app's
+current/previous key ring, and derives the subject and tenant from the
+authenticated claims before the database lookup. The credential endpoint
+independently verifies the forwarded runner claim, and
+`app/api/internal/credential/binding.ts` derives the tenant and requires the
+subscriber plan. The control plane checks the current database `authVersion`
+before reservation or credential decryption. A body/claim mismatch is refused.
 
 ### B4. Control plane database and credential custody
 

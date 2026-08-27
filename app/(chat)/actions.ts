@@ -1,25 +1,24 @@
 "use server";
 
-import { generateText, type UIMessage } from "ai";
+import type { UIMessage } from "ai";
 import { cookies } from "next/headers";
 import { auth } from "@/app/(auth)/auth";
 import type { VisibilityType } from "@/components/chat/visibility-selector";
-import { titleModel } from "@/lib/ai/models";
-import { titlePrompt } from "@/lib/ai/prompts";
-import { getTitleModel } from "@/lib/ai/providers";
+import { enforceAbusePolicy } from "@/lib/abuse/enforce";
+import { generateTitleFromUserMessageInternal } from "@/lib/ai/title";
 import {
   type ChatActionDependencies,
   deleteTrailingMessagesForSession as deleteTrailingMessagesWithSession,
   updateChatVisibilityForSession as updateChatVisibilityWithSession,
 } from "@/lib/auth/chat-actions";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
+import { generateTitleWithAuthorization } from "@/lib/auth/title-generation";
 import {
   deleteMessagesByChatIdAfterTimestamp,
   getChatById,
   getMessageById,
   updateChatVisibilityById,
 } from "@/lib/db/queries";
-import { getTextFromMessage } from "@/lib/utils";
 
 const chatActionDependencies: ChatActionDependencies = {
   authorize: authorizeSubscriberAccess,
@@ -39,18 +38,12 @@ export async function generateTitleFromUserMessage({
 }: {
   message: UIMessage;
 }) {
-  const { text } = await generateText({
-    instructions: titlePrompt,
-    model: getTitleModel(),
-    prompt: getTextFromMessage(message),
-    providerOptions: {
-      gateway: { order: titleModel.gatewayOrder },
-    },
+  return generateTitleWithAuthorization(message, await auth(), {
+    authorize: authorizeSubscriberAccess,
+    enforceAbuse: enforceAbusePolicy,
+    generate: (candidate) =>
+      generateTitleFromUserMessageInternal({ message: candidate }),
   });
-  return text
-    .replace(/^[#*"\s]+/, "")
-    .replace(/["]+$/, "")
-    .trim();
 }
 
 export async function deleteTrailingMessages({ id }: { id: string }) {

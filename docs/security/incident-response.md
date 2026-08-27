@@ -51,7 +51,7 @@ Everything that grants something, where it lives, and what it costs to rotate.
 | `POSTGRES_URL` and the `PG*` family | Vercel (Neon integration) | Full read/write on all tenant data | Brief downtime |
 | `AUTH_SECRET` | Vercel | Forging any signed-in session | Everyone is signed out |
 | `RUNNER_SIGNING_KEY_ID`, `RUNNER_SIGNING_KEY`, `RUNNER_SIGNING_PUBLIC_KEY`, and Worker `RUNNER_VERIFY_*` ring | Vercel / Vercel + worker | Minting an identity for any tenant | ≤15 min of failed runs |
-| `AGENT_CONTROL_TOKEN` | Vercel + worker | Reaching the worker at all | Seconds of failed runs |
+| `AGENT_CONTROL_TOKEN` | Vercel + worker | Reaching the worker and operator diagnostics | Seconds of failed runs |
 | `RUNNER_SERVICE_TOKEN` | Vercel + worker | Calling the internal credential endpoint | Seconds of failed runs |
 | `AUTH_GITHUB_SECRET` | Vercel | Impersonating our OAuth app | Sign-in breaks until updated |
 | `STRIPE_SECRET_KEY` | Vercel | Charging and refunding | None |
@@ -130,9 +130,10 @@ secret in every visitor's browser.
 
 ### `AGENT_CONTROL_TOKEN` — the worker's front door
 
-**Grants.** Reaching the worker at all. It does *not* identify anyone: a
-caller still needs an Ed25519 identity minted from a signed-in session, so this
-token alone cannot read or start anything.
+**Grants.** Reaching the worker at all and running the operator-only
+`/api/diagnostics/sandbox` probe. It does *not* identify a tenant: all reads,
+runs, and other tenant operations still need an Ed25519 identity minted from a
+signed-in session.
 
 **Rotate.**
 

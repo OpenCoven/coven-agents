@@ -1,16 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { RunnerClaims } from "@opencoven/agent-contracts";
 import { checkRunnerAuthority } from "./runner-authority";
 
-const CLAIMS: RunnerClaims = {
-  authVersion: 4,
-  exp: 1_800_000_000,
-  kid: "current",
-  plan: "subscriber",
-  sub: "9c858901-8a57-4791-81fe-4c455b099bc9",
-  tenant: "u_9c8589018a57479181fe4c455b099bc9",
-};
+const TOKEN = "signed.runner.token";
 
 function response(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -19,11 +11,11 @@ function response(status: number, body: unknown): Response {
   });
 }
 
-test("authority sends the exact claim identity to the app and accepts only an allow response", async () => {
+test("authority sends the original signed token to the app and accepts only an allow response", async () => {
   let seenUrl = "";
   let seenInit: RequestInit | undefined;
   const result = await checkRunnerAuthority(
-    CLAIMS,
+    TOKEN,
     {
       appOrigin: "https://app.example/",
       serviceToken: "service-token",
@@ -43,10 +35,7 @@ test("authority sends the exact claim identity to the app and accepts only an al
     "service-token"
   );
   assert.deepEqual(JSON.parse(String(seenInit?.body)), {
-    authVersion: 4,
-    plan: "subscriber",
-    sub: CLAIMS.sub,
-    tenant: CLAIMS.tenant,
+    token: TOKEN,
   });
 });
 
@@ -59,7 +48,7 @@ test("authority maps generic app denials without parsing private data", async ()
       ] as const
     ).map(async ([status, kind, body]) => {
       const result = await checkRunnerAuthority(
-        CLAIMS,
+        TOKEN,
         { appOrigin: "https://app.example", serviceToken: "service-token" },
         () => Promise.resolve(response(status, body))
       );
@@ -70,30 +59,45 @@ test("authority maps generic app denials without parsing private data", async ()
 
 test("authority fails closed on missing configuration, outage, malformed allow, and oversized response", async () => {
   const unavailable = await checkRunnerAuthority(
-    CLAIMS,
+    TOKEN,
     { appOrigin: undefined, serviceToken: "service-token" },
     () => Promise.reject(new Error("offline"))
   );
   assert.deepEqual(unavailable, { kind: "unavailable" });
 
   const outage = await checkRunnerAuthority(
-    CLAIMS,
+    TOKEN,
     { appOrigin: "https://app.example", serviceToken: "service-token" },
     () => Promise.reject(new Error("offline"))
   );
   assert.deepEqual(outage, { kind: "unavailable" });
 
   const malformed = await checkRunnerAuthority(
-    CLAIMS,
+    TOKEN,
     { appOrigin: "https://app.example", serviceToken: "service-token" },
     () => Promise.resolve(response(200, { allowed: false }))
   );
   assert.deepEqual(malformed, { kind: "unavailable" });
 
   const oversized = await checkRunnerAuthority(
-    CLAIMS,
+    TOKEN,
     { appOrigin: "https://app.example", serviceToken: "service-token" },
     () => Promise.resolve(new Response("x".repeat(2049), { status: 200 }))
   );
   assert.deepEqual(oversized, { kind: "unavailable" });
+});
+
+test("authority refuses an oversized signed token before contacting the app", async () => {
+  let contacted = false;
+  const result = await checkRunnerAuthority(
+    "x".repeat(8193),
+    { appOrigin: "https://app.example", serviceToken: "service-token" },
+    () => {
+      contacted = true;
+      return Promise.resolve(response(200, { allowed: true }));
+    }
+  );
+
+  assert.deepEqual(result, { kind: "unavailable" });
+  assert.equal(contacted, false);
 });

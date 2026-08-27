@@ -1,4 +1,4 @@
-import type { RunnerClaims } from "@opencoven/agent-contracts";
+import { MAX_RUNNER_TOKEN_BYTES } from "@opencoven/agent-contracts";
 
 const AUTHORITY_PATH = "/api/internal/runner-authority";
 const MAX_AUTHORITY_RESPONSE_BYTES = 1024;
@@ -15,14 +15,20 @@ type RunnerFetch = (
 ) => Response | Promise<Response>;
 
 export async function checkRunnerAuthority(
-  claims: Pick<RunnerClaims, "authVersion" | "plan" | "sub" | "tenant">,
+  identityToken: string,
   configuration: {
     appOrigin: string | undefined;
     serviceToken: string | undefined;
   },
   fetchImpl: RunnerFetch = (input, init) => fetch(input, init)
 ): Promise<RunnerAuthorityResult> {
-  if (!configuration.appOrigin?.trim() || !configuration.serviceToken?.trim()) {
+  if (
+    typeof identityToken !== "string" ||
+    identityToken.length === 0 ||
+    identityToken.length > MAX_RUNNER_TOKEN_BYTES ||
+    !configuration.appOrigin?.trim() ||
+    !configuration.serviceToken?.trim()
+  ) {
     return { kind: "unavailable" };
   }
 
@@ -36,12 +42,7 @@ export async function checkRunnerAuthority(
   let response: Response;
   try {
     response = await fetchImpl(endpoint, {
-      body: JSON.stringify({
-        authVersion: claims.authVersion,
-        plan: claims.plan,
-        sub: claims.sub,
-        tenant: claims.tenant,
-      }),
+      body: JSON.stringify({ token: identityToken }),
       headers: {
         "content-type": "application/json",
         "x-service-token": configuration.serviceToken,

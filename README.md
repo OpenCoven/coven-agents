@@ -214,8 +214,10 @@ which bounds container allocation without keeping it alive. Use it as the
 deployment smoke test:
 
 ```bash
-curl -s -X POST \
-  -H "x-runner-token: $AGENT_CONTROL_TOKEN" \
+curl -sS -X POST \
+  -H "Authorization: Bearer $AGENT_CONTROL_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{}' \
   https://<your-worker>.workers.dev/api/diagnostics/sandbox
 # {"exitCode":0,"ok":true,"output":"coven-agents"}
 ```

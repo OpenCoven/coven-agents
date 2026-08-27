@@ -87,6 +87,60 @@ test("a token of the wrong length is refused without comparing content", () => {
   );
 });
 
+test("an oversized credential body is rejected before any credential work", async () => {
+  const previous = process.env.RUNNER_SERVICE_TOKEN;
+  process.env.RUNNER_SERVICE_TOKEN = "service-secret";
+  try {
+    const response = await (await import("./route")).POST(
+      new Request("https://app.test/api/internal/credential", {
+        body: "x".repeat(8193),
+        headers: {
+          "content-length": "8193",
+          "x-service-token": "service-secret",
+        },
+        method: "POST",
+      })
+    );
+    assert.equal(response.status, 413);
+    assert.deepEqual(await response.json(), { error: "request_too_large" });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.RUNNER_SERVICE_TOKEN;
+    } else {
+      process.env.RUNNER_SERVICE_TOKEN = previous;
+    }
+  }
+});
+
+test("an oversized identity token is rejected before database or reservation work", async () => {
+  const previous = process.env.RUNNER_SERVICE_TOKEN;
+  process.env.RUNNER_SERVICE_TOKEN = "service-secret";
+  try {
+    const response = await (await import("./route")).POST(
+      new Request("https://app.test/api/internal/credential", {
+        body: JSON.stringify({
+          harnessId: "copilot",
+          runId: "run-1",
+          tenant: "tenant_acme",
+        }),
+        headers: {
+          authorization: `Bearer ${"x".repeat(8193)}`,
+          "content-type": "application/json",
+          "x-service-token": "service-secret",
+        },
+        method: "POST",
+      })
+    );
+    assert.equal(response.status, 401);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.RUNNER_SERVICE_TOKEN;
+    } else {
+      process.env.RUNNER_SERVICE_TOKEN = previous;
+    }
+  }
+});
+
 function lendingInput(
   overrides: Partial<Parameters<typeof lendCredentialWithReservation>[0]> = {}
 ) {

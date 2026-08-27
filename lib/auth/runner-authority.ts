@@ -22,10 +22,11 @@ export type RunnerAuthorityDecision =
 /**
  * Compares a signed runner claim with the current product authority.
  *
- * The Worker cannot query the application database, so it sends this small
- * tuple to the internal authority endpoint. This function deliberately returns
- * only an access decision: neither the Worker nor its caller needs account
- * details to decide whether a request may continue.
+ * The Worker cannot query the application database, so the internal authority
+ * endpoint verifies the original signed token and derives this input before
+ * looking up the owner. This function deliberately returns only an access
+ * decision: neither the Worker nor its caller needs account details to decide
+ * whether a request may continue.
  */
 export function decideRunnerAuthority(
   input: RunnerAuthorityInput,

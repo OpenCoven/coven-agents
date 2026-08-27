@@ -31,6 +31,7 @@ import {
   corsHeaders,
   errorEnvelope,
   HttpError,
+  hasValidBearerToken,
   hasValidHeaderToken,
   json,
   readJson,
@@ -1116,6 +1117,59 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
         );
       }
 
+      const isDiagnosticsRoute =
+        url.pathname === "/api/diagnostics/sandbox" &&
+        request.method === "POST";
+      if (isDiagnosticsRoute) {
+        // The diagnostic is an operator probe, not a tenant operation. Accept
+        // only the deployment control token, whether supplied in the legacy
+        // worker header or as the documented bearer token. A runner identity
+        // is never accepted here, so stale or revoked claims cannot turn the
+        // control token into a paid sandbox grant.
+        const bearerControlToken = hasValidBearerToken(
+          request,
+          environment.AGENT_CONTROL_TOKEN ?? ""
+        );
+        const headerControlToken = hasValidHeaderToken(
+          request,
+          "x-runner-token",
+          environment.AGENT_CONTROL_TOKEN ?? ""
+        );
+        const hasAuthorization = request.headers.has("authorization");
+        const hasRunnerHeader = request.headers.has("x-runner-token");
+        if (
+          !(bearerControlToken || headerControlToken) ||
+          (hasAuthorization && !bearerControlToken) ||
+          (hasRunnerHeader && !headerControlToken)
+        ) {
+          return json(
+            errorEnvelope(
+              "unauthorized",
+              "Operator token was rejected.",
+              false
+            ),
+            { status: 401 },
+            cors
+          );
+        }
+        if (!dependencies.diagnoseSandbox) {
+          return json(
+            errorEnvelope("not_found", "Route was not found.", false),
+            { status: 404 },
+            cors
+          );
+        }
+        try {
+          return json(
+            await dependencies.diagnoseSandbox(environment),
+            {},
+            cors
+          );
+        } catch (error) {
+          return fail(error, cors);
+        }
+      }
+
       if (
         !hasValidHeaderToken(
           request,
@@ -1192,42 +1246,18 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
         return tenantAdmission;
       }
 
-      const isDiagnosticsRoute =
-        url.pathname === "/api/diagnostics/sandbox" &&
-        request.method === "POST";
-      if (!isDiagnosticsRoute) {
-        const authority = dependencies.checkAuthority
-          ? await dependencies.checkAuthority(claims, environment)
-          : await checkRunnerAuthority(
-              claims,
-              {
-                appOrigin: environment.APP_ORIGIN,
-                serviceToken: environment.RUNNER_SERVICE_TOKEN,
-              },
-              (input, init) => fetch(input, init)
-            );
-        if (authority.kind !== "allowed") {
-          return authorityResponse(authority, cors);
-        }
-      }
-
-      if (isDiagnosticsRoute) {
-        if (!dependencies.diagnoseSandbox) {
-          return json(
-            errorEnvelope("not_found", "Route was not found.", false),
-            { status: 404 },
-            cors
+      const authority = dependencies.checkAuthority
+        ? await dependencies.checkAuthority(claims, environment)
+        : await checkRunnerAuthority(
+            authorization.slice(7),
+            {
+              appOrigin: environment.APP_ORIGIN,
+              serviceToken: environment.RUNNER_SERVICE_TOKEN,
+            },
+            (input, init) => fetch(input, init)
           );
-        }
-        try {
-          return json(
-            await dependencies.diagnoseSandbox(environment),
-            {},
-            cors
-          );
-        } catch (error) {
-          return fail(error, cors);
-        }
+      if (authority.kind !== "allowed") {
+        return authorityResponse(authority, cors);
       }
 
       try {
