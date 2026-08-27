@@ -58,3 +58,29 @@ test("encrypted responses cannot be replayed for another owner", async () => {
     /does not belong to this idempotency claim/
   );
 });
+
+test("encrypted responses replay with the envelope's KEK after rotation", async () => {
+  const oldKek = await generateKek();
+  const currentKek = await generateKek();
+  let currentVersion = "v1";
+  let currentKekForWrites = oldKek;
+  const storage = encryptedIdempotencyResponseStorage(
+    (version) =>
+      Promise.resolve(
+        version === undefined
+          ? currentKekForWrites
+          : version === "v1"
+            ? oldKek
+            : currentKek
+      ),
+    () => Promise.resolve(currentVersion)
+  );
+
+  const stored = await storage.store({ status: "pending" }, CONTEXT);
+  currentVersion = "v2";
+  currentKekForWrites = currentKek;
+
+  assert.deepEqual(await storage.replay(stored, CONTEXT), {
+    status: "pending",
+  });
+});

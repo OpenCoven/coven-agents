@@ -7,18 +7,29 @@ const validatorPath = fileURLToPath(
   new URL("./validate-runtime-config.ts", import.meta.url)
 );
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+const TEST_KEK = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 function runValidator(
   overrides: Partial<
     Pick<
       NodeJS.ProcessEnv,
-      "ABUSE_KEY_SECRET" | "GLOBAL_DAILY_RUN_CAP" | "REDIS_URL"
+      | "ABUSE_KEY_SECRET"
+      | "CREDENTIAL_KEK"
+      | "CREDENTIAL_KEK_CURRENT_VERSION"
+      | "CREDENTIAL_KEK_V1"
+      | "CREDENTIAL_KEK_V2"
+      | "GLOBAL_DAILY_RUN_CAP"
+      | "REDIS_URL"
     >
   >
 ) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     ABUSE_KEY_SECRET: undefined,
+    CREDENTIAL_KEK: TEST_KEK,
+    CREDENTIAL_KEK_CURRENT_VERSION: "v1",
+    CREDENTIAL_KEK_V1: undefined,
+    CREDENTIAL_KEK_V2: undefined,
     GLOBAL_DAILY_RUN_CAP: undefined,
     NODE_ENV: "production",
     REDIS_URL: undefined,
@@ -93,4 +104,20 @@ test("accepts production without Redis", () => {
   const result = runValidator({});
 
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("rejects missing or conflicting credential KEK configuration", () => {
+  const missingCurrent = runValidator({
+    CREDENTIAL_KEK_CURRENT_VERSION: undefined,
+  });
+  assert.notEqual(missingCurrent.status, 0);
+  assert.match(missingCurrent.stderr, /CREDENTIAL_KEK_CURRENT_VERSION/);
+
+  const conflicting = runValidator({
+    CREDENTIAL_KEK: TEST_KEK,
+    CREDENTIAL_KEK_CURRENT_VERSION: "v1",
+    CREDENTIAL_KEK_V1: `${TEST_KEK}different`,
+  });
+  assert.notEqual(conflicting.status, 0);
+  assert.match(conflicting.stderr, /conflict|ambiguous/i);
 });

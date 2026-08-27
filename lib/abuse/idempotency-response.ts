@@ -2,6 +2,7 @@ import {
   decryptCredential,
   encryptCredential,
   type SealedCredential,
+  validateKekVersion,
 } from "../credentials/envelope";
 
 export type JsonValue =
@@ -51,7 +52,8 @@ export const plaintextIdempotencyResponseStorage: IdempotencyResponseStorage = {
 };
 
 export function encryptedIdempotencyResponseStorage(
-  kek: () => Promise<CryptoKey>
+  kek: (version?: string) => Promise<CryptoKey>,
+  kekVersion: () => Promise<string> = () => Promise.resolve("v1")
 ): IdempotencyResponseStorage {
   return {
     async replay(envelope, context) {
@@ -59,7 +61,10 @@ export function encryptedIdempotencyResponseStorage(
         throw new Error("Invalid encrypted response envelope.");
       }
 
-      const plaintext = await decryptCredential(envelope.payload, await kek());
+      const plaintext = await decryptCredential(
+        envelope.payload,
+        await kek(envelope.payload.kekVersion)
+      );
       const stored = parseEncryptedResponse(plaintext);
       if (
         stored.ownerId !== context.ownerId ||
@@ -78,9 +83,10 @@ export function encryptedIdempotencyResponseStorage(
         ownerId: context.ownerId,
         version: 1,
       });
+      const version = validateKekVersion(await kekVersion());
       return {
         kind: "encrypted_json",
-        payload: await encryptCredential(plaintext, await kek()),
+        payload: await encryptCredential(plaintext, await kek(), version),
       };
     },
   };

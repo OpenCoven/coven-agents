@@ -518,6 +518,7 @@ function encryptedTestEnvelope(): StoredIdempotencyResponseEnvelope {
     payload: {
       ciphertext: "ciphertext",
       iv: "iv",
+      kekVersion: "v1",
       wrappedKey: "wrapped-key",
     },
   };

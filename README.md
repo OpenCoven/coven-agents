@@ -56,8 +56,9 @@ HS256-for-RS256 confusion to get wrong.
 **Credentials belong to tenants.** The operator's credentials are never lent
 out. Each tenant supplies their own harness credential; it is stored under
 envelope encryption (a per-credential AES-GCM data key wrapped by
-`CREDENTIAL_KEK`), fetched for the duration of one run, and redacted from run
-evidence. The worker holds no key material of its own.
+the versioned `CREDENTIAL_KEK_V1`/`CREDENTIAL_KEK_V2` ring), fetched for the
+duration of one run, and redacted from run evidence. The worker holds no key
+material of its own. See the [credential KEK rotation runbook](docs/security/key-rotation.md).
 
 **Product data is subscriber-gated.** New browser-facing product data access
 uses `databaseFor`, which accepts a `SubscriberSession` and nothing else.

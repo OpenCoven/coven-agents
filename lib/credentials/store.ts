@@ -1,12 +1,13 @@
 import "server-only";
 
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { databaseFor } from "@/lib/db/access";
 import { tenantCredential } from "@/lib/db/schema";
 import type { SubscriberSession } from "@/lib/session";
 import { decryptCredential, encryptCredential } from "./envelope";
 import { refreshCredential } from "./github-device";
-import { credentialKek } from "./kek";
+import { credentialKekRingFromEnvironment } from "./key-ring";
+import { credentialWhere } from "./scope";
 import {
   needsRefresh,
   parseStoredCredential,
@@ -14,20 +15,7 @@ import {
   serializeCredential,
 } from "./shape";
 
-/**
- * Scopes a credential lookup to exactly one tenant AND one harness.
- *
- * Extracted so the scoping can be asserted without a database. Dropping the
- * harness condition is invisible to an outcome-based test — the query still
- * returns a row, just the wrong one — and handing a tenant's Copilot token to
- * a Codex run is a credential leak inside the tenant rather than a crash.
- */
-export function credentialWhere(tenant: string, harnessId: string) {
-  return and(
-    eq(tenantCredential.tenant, tenant),
-    eq(tenantCredential.harnessId, harnessId)
-  );
-}
+export { credentialWhere } from "./scope";
 
 /**
  * Tenant credential storage: the app is sole custodian of plaintext
@@ -48,7 +36,12 @@ export async function putCredential(
   plaintext: string
 ): Promise<void> {
   const db = databaseFor(session);
-  const sealed = await encryptCredential(plaintext, await credentialKek());
+  const ring = await credentialKekRingFromEnvironment();
+  const sealed = await encryptCredential(
+    plaintext,
+    ring.current,
+    ring.currentVersion
+  );
 
   await db
     .insert(tenantCredential)
@@ -56,6 +49,7 @@ export async function putCredential(
       ciphertext: sealed.ciphertext,
       harnessId,
       iv: sealed.iv,
+      kekVersion: sealed.kekVersion,
       tenant: session.tenant,
       wrappedKey: sealed.wrappedKey,
     })
@@ -63,6 +57,7 @@ export async function putCredential(
       set: {
         ciphertext: sealed.ciphertext,
         iv: sealed.iv,
+        kekVersion: sealed.kekVersion,
         updatedAt: new Date(),
         wrappedKey: sealed.wrappedKey,
       },
@@ -86,9 +81,15 @@ export async function readCredentialForTenant(
     return null;
   }
 
+  const ring = await credentialKekRingFromEnvironment();
   const raw = await decryptCredential(
-    { ciphertext: row.ciphertext, iv: row.iv, wrappedKey: row.wrappedKey },
-    await credentialKek()
+    {
+      ciphertext: row.ciphertext,
+      iv: row.iv,
+      kekVersion: row.kekVersion,
+      wrappedKey: row.wrappedKey,
+    },
+    ring.keyFor(row.kekVersion)
   );
 
   const stored = parseStoredCredential(raw);
@@ -152,9 +153,11 @@ async function persistCredential(
   credential: StoredCredential,
   db: ReturnType<typeof databaseFor>
 ): Promise<void> {
+  const ring = await credentialKekRingFromEnvironment();
   const sealed = await encryptCredential(
     serializeCredential(credential),
-    await credentialKek()
+    ring.current,
+    ring.currentVersion
   );
 
   await db
@@ -162,6 +165,7 @@ async function persistCredential(
     .set({
       ciphertext: sealed.ciphertext,
       iv: sealed.iv,
+      kekVersion: sealed.kekVersion,
       updatedAt: new Date(),
       wrappedKey: sealed.wrappedKey,
     })

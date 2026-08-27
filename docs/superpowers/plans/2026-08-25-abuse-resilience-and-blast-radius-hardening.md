@@ -287,7 +287,7 @@ Run: `pnpm exec tsx --test lib/abuse/store.test.ts lib/ratelimit.test.ts`
 
 Expected: PASS, including 100 parallel calls allowing exactly the configured limit.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add lib/abuse lib/ratelimit.ts lib/ratelimit.test.ts .env.example
@@ -886,11 +886,11 @@ git commit -S -m "feat(security): version sessions and runner keys" \
 - Modify: `docs/security/incident-response.md`
 - Modify: `docs/security/key-rotation.md`
 
-- [ ] **Step 1: Write failing envelope-version tests**
+- [x] **Step 1: Write failing envelope-version tests**
 
 Cover writing with the current KEK, reading with current or previous KEK, unknown version refusal, rewrapping without exposing plaintext to logs, interruption/resume, and rollback before old-key retirement.
 
-- [ ] **Step 2: Extend the stored envelope**
+- [x] **Step 2: Extend the stored envelope**
 
 Add `kekVersion` as a non-null short string. New rows use:
 
@@ -903,7 +903,7 @@ type CredentialEnvelopeV2 = {
 };
 ```
 
-- [ ] **Step 3: Implement the KEK registry**
+- [x] **Step 3: Implement the KEK registry**
 
 Read:
 
@@ -920,7 +920,7 @@ The registry must:
 - decrypt only named configured versions;
 - never fall back to trying every key.
 
-- [ ] **Step 4: Implement resumable rewrap**
+- [x] **Step 4: Implement resumable rewrap**
 
 `pnpm credentials:rewrap --from v1 --to v2 --batch 100`:
 
@@ -931,11 +931,11 @@ The registry must:
 5. prints counts and row IDs, never ciphertext or credentials;
 6. is safe to rerun.
 
-- [ ] **Step 5: Add the rotation gate**
+- [x] **Step 5: Add the rotation gate**
 
 The old KEK may be removed only when a query returns zero rows for its version and the rewrap verification test passes in production read-only mode.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run: `pnpm exec tsx --test lib/credentials/*.test.ts scripts/credentials-rewrap.test.ts`
 

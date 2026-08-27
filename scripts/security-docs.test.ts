@@ -64,6 +64,9 @@ test("the incident runbooks name every secret that exists", () => {
 
   for (const secret of [
     "CREDENTIAL_KEK",
+    "CREDENTIAL_KEK_CURRENT_VERSION",
+    "CREDENTIAL_KEK_V1",
+    "CREDENTIAL_KEK_V2",
     "POSTGRES_URL",
     "AUTH_SECRET",
     "RUNNER_SIGNING_KEY",
@@ -146,6 +149,22 @@ test("the runner key runbook documents bounded rotation and rollback", () => {
     "15 minutes plus",
     "Rollback",
     "never commit or log",
+  ]) {
+    assert.match(runbook, new RegExp(marker.replaceAll("*", "\\*")));
+  }
+});
+
+test("the credential key runbook documents staged rewrap and retirement", () => {
+  const runbook = readFileSync(keyRotationUrl, "utf8");
+
+  for (const marker of [
+    "CREDENTIAL_KEK_CURRENT_VERSION",
+    "CREDENTIAL_KEK_V1",
+    "CREDENTIAL_KEK_V2",
+    "credentials:rewrap --from v1 --to v2",
+    "credentials:rewrap verify --version v1",
+    "zero `v1` rows",
+    "opaque row",
   ]) {
     assert.match(runbook, new RegExp(marker.replaceAll("*", "\\*")));
   }

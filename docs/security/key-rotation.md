@@ -45,3 +45,76 @@ ID while both public keys remain configured. Keep the new key as previous with
 its own last-signed timestamp and retirement boundary until all tokens it could
 have issued have expired. Never shorten a previous retirement window while
 tokens may still be queued or in flight.
+
+## Credential KEK rotation
+
+Credential rows carry the exact KEK version that wrapped their per-credential
+data key. The app encrypts new rows only with
+`CREDENTIAL_KEK_CURRENT_VERSION`; reads never try another version when a row
+names an unknown or unconfigured key.
+
+Configure the fixed ring through the secret manager:
+
+```dotenv
+CREDENTIAL_KEK_CURRENT_VERSION=v1
+CREDENTIAL_KEK_V1=
+CREDENTIAL_KEK_V2=
+CREDENTIAL_KEK=
+```
+
+During the staged migration, the existing unversioned `CREDENTIAL_KEK` may
+alias **only** `v1`. If both `CREDENTIAL_KEK` and `CREDENTIAL_KEK_V1` are set,
+they must be the same value; otherwise the app fails closed. Always configure
+the current version and its matching key. Blank, malformed, duplicate, or
+unknown versions are rejected. KEK values may use unpadded base64url or the
+existing padded standard-base64 encoding. Imported KEKs are non-extractable and
+key material is never logged.
+
+### Rotation procedure
+
+1. Deploy the migration and application with
+   `CREDENTIAL_KEK_CURRENT_VERSION=v1` and the existing secret in
+   `CREDENTIAL_KEK_V1`. Keep `CREDENTIAL_KEK` only as the equal legacy alias
+   while old rows exist.
+2. Add the new secret as `CREDENTIAL_KEK_V2`, switch
+   `CREDENTIAL_KEK_CURRENT_VERSION=v2`, retain `CREDENTIAL_KEK_V1`, and deploy.
+3. Rewrap resumably. Repeat after interruptions or concurrent updates:
+
+   ```bash
+   pnpm credentials:rewrap --from v1 --to v2 --batch 100
+   ```
+
+4. Check the target without writing:
+
+   ```bash
+   pnpm credentials:rewrap --from v1 --to v2 --batch 100 --dry-run
+   ```
+
+5. Run the retirement gate in production:
+
+   ```bash
+   pnpm credentials:rewrap verify --version v1
+   ```
+
+   It succeeds only when zero `v1` rows remain and every current-version
+   wrapped data key can be unwrapped read-only. It prints counts and opaque row
+   IDs only; it never prints tenants, harnesses, credentials, ciphertext, or
+   keys.
+6. After the gate passes, remove the `CREDENTIAL_KEK` compatibility alias.
+   Retire `CREDENTIAL_KEK_V1` only after the same zero-row and current-key
+   verification conditions hold in production. Removing a key before the gate
+   makes affected credentials unreadable.
+
+### Rollback before retirement
+
+If the new key is unhealthy, set
+`CREDENTIAL_KEK_CURRENT_VERSION=v1` and keep both `CREDENTIAL_KEK_V1` and
+`CREDENTIAL_KEK_V2` configured. Existing `v2` rows remain readable, and the
+rewrap is reversible:
+
+```bash
+pnpm credentials:rewrap --from v2 --to v1 --batch 100
+```
+
+Do not remove either key until the rollback is complete and the appropriate
+read-only verification gate passes.

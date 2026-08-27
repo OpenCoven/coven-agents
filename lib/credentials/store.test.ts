@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { QueryBuilder } from "drizzle-orm/pg-core";
 import { tenantCredential } from "@/lib/db/schema";
-import { credentialWhere } from "./store";
+import { credentialWhere } from "./scope";
 
 function sqlFor(tenant: string, harnessId: string) {
   return new QueryBuilder()
@@ -28,4 +29,12 @@ test("both conditions are required, not either", () => {
 
   assert.ok(sql.includes(" and "), "conditions must be conjunctive");
   assert.ok(!sql.includes(" or "), "an OR would match another tenant's row");
+});
+
+test("credential storage writes the current version and reads the row version", () => {
+  const source = readFileSync(new URL("./store.ts", import.meta.url), "utf8");
+
+  assert.match(source, /ring\.currentVersion/);
+  assert.match(source, /kekVersion: sealed\.kekVersion/);
+  assert.match(source, /ring\.keyFor\(row\.kekVersion\)/);
 });

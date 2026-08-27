@@ -47,7 +47,7 @@ Everything that grants something, where it lives, and what it costs to rotate.
 
 | Secret | Stored in | Grants | Rotation cost |
 | --- | --- | --- | --- |
-| `CREDENTIAL_KEK` | Vercel | Decryption of every stored tenant credential | **Every tenant must reconnect** |
+| `CREDENTIAL_KEK_CURRENT_VERSION`, `CREDENTIAL_KEK_V1`, `CREDENTIAL_KEK_V2`, and legacy `CREDENTIAL_KEK` | Vercel | Versioned decryption of tenant credential data keys | Rewrap before retiring an old key |
 | `POSTGRES_URL` and the `PG*` family | Vercel (Neon integration) | Full read/write on all tenant data | Brief downtime |
 | `AUTH_SECRET` | Vercel | Forging any signed-in session | Everyone is signed out |
 | `RUNNER_SIGNING_KEY_ID`, `RUNNER_SIGNING_KEY`, `RUNNER_SIGNING_PUBLIC_KEY`, and Worker `RUNNER_VERIFY_*` ring | Vercel / Vercel + worker | Minting an identity for any tenant | ≤15 min of failed runs |
@@ -251,25 +251,49 @@ material.
 in-flight runs fail until they are re-minted. There is no revocation list —
 short expiry *is* the revocation mechanism, which is why the lifetime is short.
 
-### `CREDENTIAL_KEK` — read this before rotating
+### Credential KEK rotation — read this before rotating
 
 **Grants.** Unwrapping the per-credential data keys, and therefore every stored
-tenant credential. **S1.**
+tenant credential. **S1.** Rows name their exact version; the app encrypts only
+with `CREDENTIAL_KEK_CURRENT_VERSION` and never tries every configured key.
 
-**Rotating it destroys access to every stored credential.** Each row holds a
-DEK wrapped with AES-KW under this one KEK; change the KEK and no existing
-`wrappedKey` can be unwrapped again. There is no re-wrap path implemented.
+Configure `CREDENTIAL_KEK_CURRENT_VERSION`, `CREDENTIAL_KEK_V1`, and
+`CREDENTIAL_KEK_V2`. During staged migration, the old `CREDENTIAL_KEK` may
+alias only explicit `v1`. If both the legacy and `CREDENTIAL_KEK_V1` values are
+present, they must be identical or the app fails closed. Missing, blank,
+malformed, duplicate, and unknown versions fail closed.
 
-So there are two different situations:
+Removing the only configured KEK destroys access to every stored credential.
+Do not delete `CREDENTIAL_KEK_V1` while any row still names `v1`.
 
-- **The KEK leaked.** Rotate anyway. Every tenant must reconnect their harness,
-  and you must tell them why. Their *GitHub* credentials should also be treated
-  as exposed and revoked on GitHub's side — see the tenant runbook below.
-- **The KEK did not leak** and you are rotating on principle. Don't, not until
-  a re-wrap migration exists. Write the migration first.
+1. Deploy with the existing secret explicitly configured as `v1`, keeping the
+   legacy alias only until migration is complete.
+2. Add `CREDENTIAL_KEK_V2`, switch the current version to `v2`, and deploy.
+3. Rewrap in bounded, resumable batches:
 
-**Verify.** After rotation, `/api/credentials` reports no configured harnesses
-for any tenant. If it still reports one, the old KEK is still in use.
+   ```bash
+   pnpm credentials:rewrap --from v1 --to v2 --batch 100
+   ```
+
+4. Use `--dry-run` to verify target rows without writing, then run:
+
+   ```bash
+   pnpm credentials:rewrap verify --version v1
+   ```
+
+   The gate is successful only with zero `v1` rows and successful read-only
+   unwrap verification for every current-version row. It prints counts and
+   opaque row IDs only.
+5. Remove the legacy alias after zero `v1` rows. Retire `CREDENTIAL_KEK_V1`
+   only after the gate passes in production. If the KEK leaked, also notify
+   affected tenants and have them revoke their GitHub credentials.
+
+Before retirement, rollback is safe: set the current version back to `v1`,
+retain both versioned keys, and rewrap in the reverse direction:
+
+```bash
+pnpm credentials:rewrap --from v2 --to v1 --batch 100
+```
 
 ### `AUTH_SECRET` — sessions
 

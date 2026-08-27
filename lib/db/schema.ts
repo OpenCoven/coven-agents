@@ -191,6 +191,7 @@ export const tenantCredential = pgTable(
     harnessId: varchar("harnessId", { length: 32 }).notNull(),
     id: uuid("id").primaryKey().notNull().defaultRandom(),
     iv: text("iv").notNull(),
+    kekVersion: varchar("kekVersion", { length: 32 }).notNull(),
     tenant: varchar("tenant", { length: 64 }).notNull(),
     updatedAt: timestamp("updatedAt").notNull().defaultNow(),
     wrappedKey: text("wrappedKey").notNull(),
@@ -199,6 +200,10 @@ export const tenantCredential = pgTable(
     uniqueIndex("TenantCredential_tenant_harness_idx").on(
       table.tenant,
       table.harnessId
+    ),
+    check(
+      "TenantCredential_kekVersion_valid",
+      sql`${table.kekVersion} ~ '^[A-Za-z0-9_-]{1,32}$'`
     ),
   ]
 );
