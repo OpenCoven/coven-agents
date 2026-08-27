@@ -125,6 +125,18 @@ test("workspace traversal is refused", () => {
   assert.throws(() => resolveSandboxWorkspace("../../etc"), HarnessError);
 });
 
+test("a workspace bounded by the resolver can still carry a shell payload", () => {
+  // Documents the gap the quoting below closes: the resolver's job is where
+  // the path points, not what it spells. Both of these are legitimately
+  // inside /workspace, and neither is refused — so the caller cannot treat a
+  // resolved path as safe to interpolate.
+  assert.equal(
+    resolveSandboxWorkspace("repo; touch /tmp/pwned"),
+    "/workspace/repo; touch /tmp/pwned"
+  );
+  assert.equal(resolveSandboxWorkspace("repo$(id)"), "/workspace/repo$(id)");
+});
+
 test("JSONL split across chunk boundaries still parses", () => {
   const line = JSON.stringify({
     data: { content: "done", model: "gpt-5" },
@@ -467,6 +479,7 @@ function missionSandbox(config: {
   exitCode?: number;
 }) {
   const record = {
+    execs: [] as string[],
     killed: [] as string[],
     startCommand: "",
     startEnv: null as Record<string, string> | null,
@@ -475,6 +488,7 @@ function missionSandbox(config: {
   let statusIndex = -1;
   const sandbox = {
     exec(command: string) {
+      record.execs.push(command);
       return Promise.resolve({
         command,
         exitCode: 0,
@@ -554,6 +568,26 @@ test("a mission runs as a process and passes only its own credential", async () 
   assert.equal(run.summary.status, "completed");
   assert.equal(run.summary.output, "Recon complete");
   assert.equal(run.exitCode, 0);
+});
+
+test("a workspace carrying shell metacharacters is quoted, not executed", async () => {
+  // `resolveSandboxWorkspace` accepts this path — it points inside
+  // /workspace, which is all that check promises. Unquoted, the `;` ends the
+  // mkdir and the rest runs as its own command in the tenant's container.
+  const { record, sandbox } = missionSandbox({
+    exitCode: 0,
+    polls: [{ stdout: `${MISSION_MESSAGE}\n${MISSION_RESULT}\n` }],
+  });
+
+  await runMission(sandbox, { workspace: "repo; touch /tmp/pwned" });
+
+  const mkdir = record.execs.find((command) => command.startsWith("mkdir"));
+  assert.ok(mkdir, "the mission must create its workspace");
+  assert.equal(mkdir, "mkdir -p '/workspace/repo; touch /tmp/pwned'");
+  assert.ok(
+    !/mkdir -p \/workspace\/repo; touch/.test(mkdir),
+    "the payload must not survive as a second command"
+  );
 });
 
 test("a line split across two polls still parses", async () => {

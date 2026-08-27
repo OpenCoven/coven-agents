@@ -11,6 +11,7 @@ import {
   normalizeEvent,
   type RunEvent,
   type RunSummary,
+  shellQuote,
   summarizeRun,
   toShellCommand,
 } from "@opencoven/harness";
@@ -484,7 +485,18 @@ export async function runHarnessInSandbox(options: {
   }
 
   await withDeadlineAndCancellation(
-    options.sandbox.exec(`mkdir -p ${cwd}`, { timeout: PROBE_TIMEOUT_MS }),
+    /**
+     * Quoted, because `resolveSandboxWorkspace` bounds where the path may
+     * point and nothing else about it. `workspace: "repo; touch /tmp/pwned"`
+     * resolves to a path that is genuinely inside `/workspace` and so passes
+     * every check above — and then the `;` ends the `mkdir` and starts a
+     * second command. The blast radius is the tenant's own container, which
+     * they already run code in by design, but "already allowed to" is not a
+     * reason to hand them a shell they did not ask for.
+     */
+    options.sandbox.exec(`mkdir -p ${shellQuote(cwd)}`, {
+      timeout: PROBE_TIMEOUT_MS,
+    }),
     {
       destroySandbox: options.destroySandbox,
       label: "mkdir",
