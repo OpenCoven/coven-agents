@@ -489,3 +489,95 @@ test("a finished stream settles the run even if the process never exits", async 
   assert.equal(run.summary.status, "completed");
   assert.equal(run.summary.output, "Recon complete");
 });
+
+test("a transport drop after the streamed result still completes the run", async () => {
+  const message = JSON.stringify({
+    data: { content: "Recon complete", model: "gpt-5" },
+    type: "assistant.message",
+  });
+  const result = JSON.stringify({
+    exitCode: 0,
+    sessionId: "s1",
+    type: "result",
+    usage: {},
+  });
+  const sandbox = {
+    exec(command: string, options?: Record<string, unknown>) {
+      if (
+        command.startsWith("copilot --version") ||
+        command.startsWith("mkdir")
+      ) {
+        return Promise.resolve({
+          command,
+          exitCode: 0,
+          stderr: "",
+          stdout: command.startsWith("copilot")
+            ? "GitHub Copilot CLI 1.0.80\n"
+            : "",
+          success: true,
+        });
+      }
+      const onOutput = options?.onOutput as (s: string, d: string) => void;
+      onOutput("stdout", `${message}\n${result}\n`);
+      return Promise.reject(new Error("Network connection lost."));
+    },
+  };
+
+  const run = await runHarnessInSandbox({
+    credential: { credential: "harness-token" },
+    finishGraceMs: 1,
+    instructions: "Be careful.",
+    model: "auto",
+    runtime: "copilot",
+    sandbox: sandbox as never,
+    task: "Survey the workspace.",
+  });
+
+  assert.equal(run.summary.status, "completed");
+  assert.equal(run.summary.output, "Recon complete");
+});
+
+test("a transport drop before the result names the condition, not the transport", async () => {
+  const message = JSON.stringify({
+    data: { content: "Looking around…", model: "gpt-5" },
+    type: "assistant.message",
+  });
+  const sandbox = {
+    exec(command: string, options?: Record<string, unknown>) {
+      if (
+        command.startsWith("copilot --version") ||
+        command.startsWith("mkdir")
+      ) {
+        return Promise.resolve({
+          command,
+          exitCode: 0,
+          stderr: "",
+          stdout: command.startsWith("copilot")
+            ? "GitHub Copilot CLI 1.0.80\n"
+            : "",
+          success: true,
+        });
+      }
+      const onOutput = options?.onOutput as (s: string, d: string) => void;
+      onOutput("stdout", `${message}\n`);
+      return Promise.reject(new Error("Network connection lost."));
+    },
+  };
+
+  await assert.rejects(
+    runHarnessInSandbox({
+      credential: { credential: "harness-token" },
+      finishGraceMs: 1,
+      instructions: "Be careful.",
+      model: "auto",
+      runtime: "copilot",
+      sandbox: sandbox as never,
+      task: "Survey the workspace.",
+    }),
+    (error: unknown) =>
+      error instanceof HarnessError &&
+      error.code === "harness_stream_lost" &&
+      error.message.includes("recorded events") &&
+      !error.message.includes("Network connection lost")
+  );
+});

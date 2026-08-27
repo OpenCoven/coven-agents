@@ -92,8 +92,8 @@ export interface HarnessRun {
 export class HarnessError extends Error {
   readonly code: string;
 
-  constructor(message: string, code: string) {
-    super(message);
+  constructor(message: string, code: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.code = code;
     this.name = "HarnessError";
   }
@@ -402,11 +402,41 @@ export async function runHarnessInSandbox(options: {
   // must not surface as an unhandled rejection.
   execution.catch(() => undefined);
 
-  const result = await withDeadline(
-    Promise.race([execution, finishedEarly]),
-    RUN_TIMEOUT_MS,
-    spec.command
-  ).finally(() => clearTimeout(graceTimer));
+  let result: Awaited<typeof execution> | null;
+  try {
+    result = await withDeadline(
+      Promise.race([execution, finishedEarly]),
+      RUN_TIMEOUT_MS,
+      spec.command
+    );
+  } catch (error) {
+    /**
+     * The SDK's streaming exec connection genuinely drops on long runs —
+     * observed at 352s with `executeWithStreaming` throwing "Network
+     * connection lost" while the CLI was still working. Everything that
+     * streamed before the drop is already in hand, so the drop only decides
+     * HOW the run ends, not what was recorded: a stream that already
+     * carried the terminal result settles as if the process had exited, and
+     * one that did not gets an error naming the real condition instead of a
+     * bare transport message. Deadline timeouts pass through untouched —
+     * that path still reaps, and must keep doing so.
+     */
+    if (error instanceof HarnessError && error.code === "harness_timeout") {
+      throw error;
+    }
+    if (streamed.some((event) => event.kind === "finished")) {
+      result = null;
+    } else {
+      // biome-ignore lint/style/useErrorCause: the cause IS forwarded — HarnessError's third parameter hands it to Error's options — but the rule only recognizes the literal two-argument Error shape.
+      throw new HarnessError(
+        `The container's output stream dropped mid-run after ${streamed.length} recorded events. The transcript up to the drop is retained; the mission did not report a result.`,
+        "harness_stream_lost",
+        { cause: error }
+      );
+    }
+  } finally {
+    clearTimeout(graceTimer);
+  }
 
   for (const line of assembler.flush()) {
     emit(line);
