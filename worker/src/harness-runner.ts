@@ -34,6 +34,16 @@ const FINISH_GRACE_MS = 15_000;
  * the tick from the constant keeps the next change to it honest.
  */
 export const PROBE_TIMEOUT_MS = 300_000;
+/**
+ * The mission path splits the probe budget into two attempts with a
+ * container reset between them. Cold placements are a coin flip in
+ * production — healthy ones probe in 50–160s, sick ones answer HTTP 500
+ * until the deadline — so one 300s attempt spends the whole budget on a
+ * container that was never going to work, while two 150s attempts against
+ * different placements keep the same worst case and turn a bad flip into a
+ * 150s detour instead of a dead run.
+ */
+export const PROBE_ATTEMPT_TIMEOUT_MS = 150_000;
 
 type SandboxLike = Pick<Sandbox, "exec">;
 
@@ -174,14 +184,15 @@ export function requireHarness(
 
 async function probeInstalled(
   sandbox: SandboxLike,
-  spec: HarnessSpec
+  spec: HarnessSpec,
+  timeoutMs: number = PROBE_TIMEOUT_MS
 ): Promise<{ installed: boolean; version: string | null }> {
   try {
     const result = await withDeadline(
       sandbox.exec(`${spec.command} ${spec.versionArgs.join(" ")}`, {
-        timeout: PROBE_TIMEOUT_MS,
+        timeout: timeoutMs,
       }),
-      PROBE_TIMEOUT_MS,
+      timeoutMs,
       `${spec.command} --version`
     );
     if (!result.success) {
@@ -290,6 +301,13 @@ export async function runHarnessInSandbox(options: {
    * unredacted here — the caller owns redaction before anything persists.
    */
   onEvent?: (event: RunEvent) => void;
+  /**
+   * Destroys the current container so the next exec gets a fresh placement.
+   * Called once, between the two probe attempts, when the first attempt
+   * timed out or errored — proven in production: a destroyed sandbox key
+   * re-provisions on the next exec and has come back healthy.
+   */
+  resetSandbox?: () => Promise<void>;
   /** Test seam: how long a finished stream waits for the process to exit. */
   finishGraceMs?: number;
   runtime: string;
@@ -300,7 +318,36 @@ export async function runHarnessInSandbox(options: {
   const { auth, spec } = requireHarness(options.runtime, options.credential);
   const cwd = resolveSandboxWorkspace(options.workspace);
 
-  const probe = await probeInstalled(options.sandbox, spec);
+  /**
+   * Attempt one on whatever container answers; if it does not come up
+   * healthy inside its half of the budget — timeout or a sick transport —
+   * destroy it and spend the other half on a fresh placement. Only the
+   * second attempt's verdict is allowed to name a missing CLI: a sick
+   * container also reads as "not installed", and that message tells the
+   * operator to rebuild the image, which is wrong and expensive advice.
+   */
+  let probe: { installed: boolean; version: string | null } | null = null;
+  try {
+    probe = await probeInstalled(
+      options.sandbox,
+      spec,
+      PROBE_ATTEMPT_TIMEOUT_MS
+    );
+  } catch (error) {
+    if (!(error instanceof HarnessError && error.code === "harness_timeout")) {
+      throw error;
+    }
+    probe = null;
+  }
+  if (!probe?.installed) {
+    console.warn({ event: "sandbox.probe_retry_on_fresh_container" });
+    await options.resetSandbox?.();
+    probe = await probeInstalled(
+      options.sandbox,
+      spec,
+      PROBE_ATTEMPT_TIMEOUT_MS
+    );
+  }
   if (!probe.installed) {
     throw new HarnessError(
       `\`${spec.command}\` is not installed in the sandbox image. Add \`${spec.installPackage}\` to worker/Dockerfile and redeploy.`,

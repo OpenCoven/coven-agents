@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   HarnessError,
-  PROBE_TIMEOUT_MS,
+  PROBE_ATTEMPT_TIMEOUT_MS,
   parseHarnessStream,
   requireHarness,
   resolveSandboxWorkspace,
@@ -231,7 +231,13 @@ test("a hanging exec fails the run instead of wedging the agent", async (t) => {
     (rejection: unknown) => rejection
   );
 
-  t.mock.timers.tick(PROBE_TIMEOUT_MS + 1);
+  // Two attempts now share the probe budget, and the second attempt's timer
+  // only exists after the first fires — a single tick would leave it
+  // unscheduled and hang the suite. Tick per attempt, letting the promise
+  // chain schedule the next timer between ticks.
+  t.mock.timers.tick(PROBE_ATTEMPT_TIMEOUT_MS + 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(PROBE_ATTEMPT_TIMEOUT_MS + 1);
 
   const error = (await outcome) as { code?: string; message?: string };
   assert.equal(error?.code, "harness_timeout");
@@ -261,7 +267,9 @@ test("a probe timeout does not claim the harness is missing", async (t) => {
     (rejection: unknown) => rejection
   );
 
-  t.mock.timers.tick(PROBE_TIMEOUT_MS + 1);
+  t.mock.timers.tick(PROBE_ATTEMPT_TIMEOUT_MS + 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(PROBE_ATTEMPT_TIMEOUT_MS + 1);
 
   const error = (await outcome) as { code?: string };
   assert.notEqual(error?.code, "harness_missing");
@@ -580,4 +588,114 @@ test("a transport drop before the result names the condition, not the transport"
       error.message.includes("recorded events") &&
       !error.message.includes("Network connection lost")
   );
+});
+
+test("a sick first container is destroyed and the probe retries fresh", async () => {
+  // Cold placements are a coin flip in production: three runs died with the
+  // container answering HTTP 500 for the whole probe budget. The mission
+  // probe now spends half the budget per attempt with a reset between, so
+  // only a SECOND sick placement can fail the run.
+  const message = JSON.stringify({
+    data: { content: "Recon complete", model: "gpt-5" },
+    type: "assistant.message",
+  });
+  const result = JSON.stringify({
+    exitCode: 0,
+    sessionId: "s1",
+    type: "result",
+    usage: {},
+  });
+  let resets = 0;
+  let probes = 0;
+  const sandbox = {
+    exec(command: string, options?: Record<string, unknown>) {
+      if (command.startsWith("copilot --version")) {
+        probes += 1;
+        // The first placement is sick: its transport rejects. The second,
+        // after the reset, answers healthy.
+        if (resets === 0) {
+          return Promise.reject(new Error("HTTP error! status: 500"));
+        }
+        return Promise.resolve({
+          command,
+          exitCode: 0,
+          stderr: "",
+          stdout: "GitHub Copilot CLI 1.0.80\n",
+          success: true,
+        });
+      }
+      if (command.startsWith("mkdir")) {
+        return Promise.resolve({
+          command,
+          exitCode: 0,
+          stderr: "",
+          stdout: "",
+          success: true,
+        });
+      }
+      const onOutput = options?.onOutput as (s: string, d: string) => void;
+      onOutput("stdout", `${message}\n${result}\n`);
+      return Promise.resolve({
+        command,
+        exitCode: 0,
+        stderr: "",
+        stdout: "",
+        success: true,
+      });
+    },
+  };
+
+  const run = await runHarnessInSandbox({
+    credential: { credential: "harness-token" },
+    finishGraceMs: 1,
+    instructions: "Be careful.",
+    model: "auto",
+    resetSandbox: () => {
+      resets += 1;
+      return Promise.resolve();
+    },
+    runtime: "copilot",
+    sandbox: sandbox as never,
+    task: "Survey the workspace.",
+  });
+
+  assert.equal(resets, 1);
+  assert.equal(probes, 2);
+  assert.equal(run.summary.status, "completed");
+});
+
+test("two sick placements still name the missing CLI honestly", async () => {
+  let resets = 0;
+  const sandbox = {
+    exec(command: string) {
+      if (command.startsWith("copilot --version")) {
+        return Promise.reject(new Error("HTTP error! status: 500"));
+      }
+      return Promise.resolve({
+        command,
+        exitCode: 0,
+        stderr: "",
+        stdout: "",
+        success: true,
+      });
+    },
+  };
+
+  await assert.rejects(
+    runHarnessInSandbox({
+      credential: { credential: "harness-token" },
+      instructions: "Be careful.",
+      model: "auto",
+      resetSandbox: () => {
+        resets += 1;
+        return Promise.resolve();
+      },
+      runtime: "copilot",
+      sandbox: sandbox as never,
+      task: "Survey the workspace.",
+    }),
+    (error: unknown) =>
+      error instanceof HarnessError && error.code === "harness_missing"
+  );
+  assert.equal(resets, 1);
 });
