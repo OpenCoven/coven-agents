@@ -65,7 +65,7 @@ function decodeEnvelopeField(
   }
 }
 
-function decodeKeyMaterial(value: unknown): Uint8Array<ArrayBuffer> {
+export function decodeKekMaterial(value: unknown): Uint8Array<ArrayBuffer> {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
@@ -126,7 +126,7 @@ export function generateKek(): Promise<CryptoKey> {
  * can read its raw bytes back out, only use it to wrap and unwrap data keys.
  */
 export function importKek(raw: string): Promise<CryptoKey> {
-  const bytes = decodeKeyMaterial(raw);
+  const bytes = decodeKekMaterial(raw);
   if (bytes.length !== KEK_LENGTH_BITS / 8) {
     throw new Error("CREDENTIAL_KEK has an invalid length.");
   }

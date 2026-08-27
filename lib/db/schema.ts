@@ -188,10 +188,11 @@ export const tenantCredential = pgTable(
   {
     ciphertext: text("ciphertext").notNull(),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
+    envelopeRevision: uuid("envelopeRevision").notNull().defaultRandom(),
     harnessId: varchar("harnessId", { length: 32 }).notNull(),
     id: uuid("id").primaryKey().notNull().defaultRandom(),
     iv: text("iv").notNull(),
-    kekVersion: varchar("kekVersion", { length: 32 }).notNull(),
+    kekVersion: varchar("kekVersion", { length: 32 }).notNull().default("v1"),
     tenant: varchar("tenant", { length: 64 }).notNull(),
     updatedAt: timestamp("updatedAt").notNull().defaultNow(),
     wrappedKey: text("wrappedKey").notNull(),

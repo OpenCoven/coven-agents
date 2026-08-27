@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { importKek, KEK_VERSION_PATTERN } from "./envelope";
+import { decodeKekMaterial, importKek, KEK_VERSION_PATTERN } from "./envelope";
 
 const MAX_KEY_MATERIAL_LENGTH = 2_000_000;
 const SUPPORTED_VERSIONS = ["v1", "v2"] as const;
@@ -72,13 +72,43 @@ function configuredKeys(
     "CREDENTIAL_KEK_V2"
   );
 
-  if (legacy && v1 && legacy !== v1) {
+  if (
+    legacy &&
+    v1 &&
+    !sameBytes(decodeKekMaterial(legacy), decodeKekMaterial(v1))
+  ) {
     throw new Error(
       "CREDENTIAL_KEK and CREDENTIAL_KEK_V1 conflict; refusing ambiguous legacy configuration."
     );
   }
 
-  return { v1: v1 ?? legacy, v2 };
+  const configured = { v1: v1 ?? legacy, v2 };
+  const material = new Map<CredentialKekVersion, Uint8Array>();
+
+  for (const version of SUPPORTED_VERSIONS) {
+    const raw = configured[version];
+    if (raw === undefined) {
+      continue;
+    }
+    const bytes = decodeKekMaterial(raw);
+    for (const [otherVersion, otherBytes] of material) {
+      if (sameBytes(bytes, otherBytes)) {
+        throw new Error(
+          `CREDENTIAL_KEK_${version.toUpperCase()} duplicates ${otherVersion}; different KEK versions must use different key material.`
+        );
+      }
+    }
+    material.set(version, bytes);
+  }
+
+  return configured;
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return (
+    left.length === right.length &&
+    left.every((byte, index) => byte === right[index])
+  );
 }
 
 async function parseRing(

@@ -178,8 +178,10 @@ Release evidence must prove:
   other's resources or credentials;
 - the versioned `CREDENTIAL_KEK_CURRENT_VERSION`/`CREDENTIAL_KEK_V1`/
   `CREDENTIAL_KEK_V2` ring is present, tenant credentials decrypt only for
-  their tenant and harness, the Worker stores no fallback credential, and the
-  rewrap verification gate has passed before v1 retirement;
+  their tenant and harness, credential envelope writes are database-fenced,
+  the Worker stores no fallback credential, and the rewrap verification gate
+  has passed for both credentials and unexpired encrypted idempotency responses
+  before v1 retirement;
 - direct and encoded credential shapes are redacted from UI, persisted
   evidence, logs, diagnostics, and errors; and
 - browser connection material is not placed in persistent local storage.

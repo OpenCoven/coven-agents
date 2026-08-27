@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { encryptedIdempotencyResponseStorage } from "../lib/abuse/idempotency-response";
 import {
   decryptCredential,
   encryptCredential,
@@ -86,11 +87,16 @@ test("a concurrent update loses only the CAS and never overwrites newer data", a
   const sourceKek = await generateKek();
   const targetKek = await generateKek();
   const sealed = await encryptCredential("credential", sourceKek, "v1");
-  const row = { id: "opaque-row-id", ...sealed };
+  const row = {
+    envelopeRevision: "revision-before",
+    id: "opaque-row-id",
+    ...sealed,
+  };
   let casCalls = 0;
   const store: RewrapStore = {
     compareAndSwap() {
       casCalls += 1;
+      row.envelopeRevision = "revision-from-newer-writer";
       row.kekVersion = "v2";
       row.wrappedKey = "newer-write";
       return Promise.resolve(false);
@@ -109,6 +115,7 @@ test("a concurrent update loses only the CAS and never overwrites newer data", a
   assert.equal(casCalls, 1);
   assert.equal(result.skipped, 1);
   assert.equal(row.wrappedKey, "newer-write");
+  assert.equal(row.envelopeRevision, "revision-from-newer-writer");
 });
 
 test("a corrupt wrapped key fails one row without exposing its contents", async () => {
@@ -178,13 +185,16 @@ test("database updates use a transaction and wrapped-key CAS", () => {
   );
 
   assert.match(source, /db\.transaction/);
-  assert.match(source, /\.set\(\{ kekVersion: toVersion, wrappedKey \}\)/);
+  assert.match(source, /envelopeRevision:\s*crypto\.randomUUID\(\)/);
+  assert.match(source, /kekVersion: toVersion/);
+  assert.match(source, /wrappedKey/);
   assert.match(source, /eq\(tenantCredential\.id, row\.id\)/);
   assert.match(source, /eq\(tenantCredential\.kekVersion, row\.kekVersion\)/);
   assert.match(
     source,
     /eq\(tenantCredential\.wrappedKey, expectedWrappedKey\)/
   );
+  assert.match(source, /eq\(\s*tenantCredential\.envelopeRevision/);
 });
 
 test("the rewrap CLI returns resume for CAS conflicts and never prints payloads", async () => {
@@ -497,6 +507,286 @@ test("dry-run is read-only and reports clean or corrupt target rows", async () =
   assert.doesNotMatch(
     corruptOutput.join("\n"),
     /invalid|wrappedKey|ciphertext/i
+  );
+});
+
+test("retirement gate blocks an unexpired encrypted idempotency response", async () => {
+  const sourceKek = await generateKek();
+  const targetKek = await generateKek();
+  const current = await encryptCredential("current", targetKek, "v2");
+  const response = await encryptedIdempotencyResponseStorage(
+    (version) => Promise.resolve(version === "v1" ? sourceKek : targetKek),
+    () => Promise.resolve("v1")
+  ).store(
+    { status: "pending" },
+    {
+      operation: "credential_device_start",
+      ownerId: "opaque-owner",
+    }
+  );
+  const output: string[] = [];
+  const store: RewrapStore = {
+    compareAndSwap: async () => true,
+    listByVersion(version, _limit, afterId) {
+      return Promise.resolve(
+        !afterId && version === "v2" ? [{ id: "current", ...current }] : []
+      );
+    },
+    listUnexpiredIdempotency(now, _limit, afterId) {
+      return Promise.resolve(
+        !afterId && response.kind === "encrypted_json" && response.payload
+          ? [
+              {
+                expiresAt: new Date(now.getTime() + 60_000),
+                id: "opaque-idempotency-v1",
+                responseJson: response,
+              },
+            ]
+          : []
+      );
+    },
+  };
+
+  assert.equal(
+    await main(
+      ["verify", "--version", "v1"],
+      cliDependencies(sourceKek, targetKek, store, output)
+    ),
+    2
+  );
+  assert.match(output.at(-1) ?? "", /remaining=1 .*status=resume/);
+  assert.deepEqual(
+    output.filter((line) => line.includes("idempotency")),
+    ["idempotency_row_id: opaque-idempotency-v1"]
+  );
+  assert.doesNotMatch(output.join("\n"), /pending|opaque-owner|ciphertext/i);
+});
+
+test("expired idempotency responses do not block retirement", async () => {
+  const sourceKek = await generateKek();
+  const targetKek = await generateKek();
+  const current = await encryptCredential("current", targetKek, "v2");
+  const response = await encryptedIdempotencyResponseStorage(
+    () => Promise.resolve(sourceKek),
+    () => Promise.resolve("v1")
+  ).store(
+    { status: "expired" },
+    {
+      operation: "credential_device_start",
+      ownerId: "opaque-owner",
+    }
+  );
+  const store: RewrapStore = {
+    compareAndSwap: async () => true,
+    listByVersion(version, _limit, afterId) {
+      return Promise.resolve(
+        !afterId && version === "v2" ? [{ id: "current", ...current }] : []
+      );
+    },
+    listUnexpiredIdempotency() {
+      return Promise.resolve([]);
+    },
+  };
+
+  assert.equal(
+    await main(
+      ["verify", "--version", "v1"],
+      cliDependencies(sourceKek, targetKek, store, [])
+    ),
+    0
+  );
+  assert.equal(response.kind, "encrypted_json");
+});
+
+test("legacy encrypted idempotency responses block the v1 retirement gate", async () => {
+  const sourceKek = await generateKek();
+  const targetKek = await generateKek();
+  const current = await encryptCredential("current", targetKek, "v2");
+  const versioned = await encryptedIdempotencyResponseStorage(
+    () => Promise.resolve(sourceKek),
+    () => Promise.resolve("v1")
+  ).store(
+    { status: "legacy" },
+    {
+      operation: "credential_device_start",
+      ownerId: "opaque-owner",
+    }
+  );
+  if (versioned.kind !== "encrypted_json") {
+    throw new Error("expected encrypted envelope");
+  }
+  const legacy = {
+    kind: "encrypted_json" as const,
+    payload: {
+      ciphertext: versioned.payload.ciphertext,
+      iv: versioned.payload.iv,
+      wrappedKey: versioned.payload.wrappedKey,
+    },
+  };
+  const store: RewrapStore = {
+    compareAndSwap: async () => true,
+    listByVersion(version, _limit, afterId) {
+      return Promise.resolve(
+        !afterId && version === "v2" ? [{ id: "current", ...current }] : []
+      );
+    },
+    listUnexpiredIdempotency(now, _limit, afterId) {
+      return Promise.resolve(
+        afterId
+          ? []
+          : [
+              {
+                expiresAt: new Date(now.getTime() + 60_000),
+                id: "opaque-legacy-idempotency",
+                responseJson: legacy,
+              },
+            ]
+      );
+    },
+  };
+  const output: string[] = [];
+
+  assert.equal(
+    await main(
+      ["verify", "--version", "v1"],
+      cliDependencies(sourceKek, targetKek, store, output)
+    ),
+    2
+  );
+  assert.deepEqual(
+    output.filter((line) => line.includes("idempotency")),
+    ["idempotency_row_id: opaque-legacy-idempotency"]
+  );
+});
+
+test("plain idempotency responses are not classified as encrypted envelopes", async () => {
+  const sourceKek = await generateKek();
+  const targetKek = await generateKek();
+  const current = await encryptCredential("current", targetKek, "v2");
+  const store: RewrapStore = {
+    compareAndSwap: async () => true,
+    listByVersion(version, _limit, afterId) {
+      return Promise.resolve(
+        !afterId && version === "v2" ? [{ id: "current", ...current }] : []
+      );
+    },
+    listUnexpiredIdempotency(now, _limit, afterId) {
+      return Promise.resolve(
+        afterId
+          ? []
+          : [
+              {
+                expiresAt: new Date(now.getTime() + 60_000),
+                id: "opaque-plain-idempotency",
+                responseJson: {
+                  body: { status: "plain" },
+                  kind: "plain_json",
+                },
+              },
+            ]
+      );
+    },
+  };
+
+  assert.equal(
+    await main(
+      ["verify", "--version", "v1"],
+      cliDependencies(sourceKek, targetKek, store, [])
+    ),
+    0
+  );
+});
+
+test("malformed encrypted idempotency responses fail the retirement gate", async () => {
+  const sourceKek = await generateKek();
+  const targetKek = await generateKek();
+  const current = await encryptCredential("current", targetKek, "v2");
+  const output: string[] = [];
+  const store: RewrapStore = {
+    compareAndSwap: async () => true,
+    listByVersion(version, _limit, afterId) {
+      return Promise.resolve(
+        !afterId && version === "v2" ? [{ id: "current", ...current }] : []
+      );
+    },
+    listUnexpiredIdempotency(now, _limit, afterId) {
+      return Promise.resolve(
+        afterId
+          ? []
+          : [
+              {
+                expiresAt: new Date(now.getTime() + 60_000),
+                id: "opaque-malformed-idempotency",
+                responseJson: {
+                  kind: "encrypted_json",
+                  payload: { ciphertext: "malformed" },
+                },
+              },
+            ]
+      );
+    },
+  };
+
+  assert.equal(
+    await main(
+      ["verify", "--version", "v1"],
+      cliDependencies(sourceKek, targetKek, store, output)
+    ),
+    1
+  );
+  assert.deepEqual(
+    output.filter((line) => line.includes("idempotency")),
+    ["idempotency_row_id: opaque-malformed-idempotency"]
+  );
+});
+
+test("rollback retirement gate also counts unexpired v2 idempotency responses", async () => {
+  const sourceKek = await generateKek();
+  const targetKek = await generateKek();
+  const current = await encryptCredential("current", sourceKek, "v1");
+  const response = await encryptedIdempotencyResponseStorage(
+    () => Promise.resolve(targetKek),
+    () => Promise.resolve("v2")
+  ).store(
+    { status: "rollback" },
+    {
+      operation: "credential_device_start",
+      ownerId: "opaque-owner",
+    }
+  );
+  const store: RewrapStore = {
+    compareAndSwap: async () => true,
+    listByVersion(version, _limit, afterId) {
+      return Promise.resolve(
+        !afterId && version === "v1" ? [{ id: "current", ...current }] : []
+      );
+    },
+    listUnexpiredIdempotency(now, _limit, afterId) {
+      return Promise.resolve(
+        afterId
+          ? []
+          : [
+              {
+                expiresAt: new Date(now.getTime() + 60_000),
+                id: "opaque-idempotency-v2",
+                responseJson: response,
+              },
+            ]
+      );
+    },
+  };
+  const output: string[] = [];
+
+  assert.equal(
+    await main(
+      ["verify", "--version", "v2"],
+      cliDependencies(sourceKek, targetKek, store, output, "v1")
+    ),
+    2
+  );
+  assert.deepEqual(
+    output.filter((line) => line.includes("idempotency")),
+    ["idempotency_row_id: opaque-idempotency-v2"]
   );
 });
 

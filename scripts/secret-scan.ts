@@ -70,17 +70,26 @@ const SECRET_PATTERNS: ReadonlyArray<{
 /**
  * Every pattern above keys on a vendor prefix, which is exactly why none of
  * them can see this project's own secrets: `AUTH_SECRET`, the versioned
- * `CREDENTIAL_KEK_CURRENT_VERSION`/`CREDENTIAL_KEK_V1`/`CREDENTIAL_KEK_V2` ring,
+ * `CREDENTIAL_KEK_V1`/`CREDENTIAL_KEK_V2` ring,
  * `RUNNER_SIGNING_KEY`, and `AGENT_CONTROL_TOKEN` are raw base64 or hex with
  * no marker at all. The most damaging values in the repository were the ones
  * the scanner was structurally unable to detect.
  *
  * These rules key on the *name* instead. Matched generically rather than from
  * a list, so a secret added next year is covered without anyone remembering to
- * extend this.
+ * extend this. The separate credential-KEK rule below excludes the
+ * `CREDENTIAL_KEK_CURRENT_VERSION` selector because it is not secret material.
  */
 const SENSITIVE_NAME =
   /\b([A-Z][A-Z\d]*(?:_[A-Z\d]+)*_(?:SECRET|TOKEN|PASSWORD|PASSWD|KEY|KEK|CREDENTIAL)|PGPASSWORD|AUTH_SECRET)\s*[=:]\s*["'`]?([^\s"'`,;]+)/u;
+
+/**
+ * Credential KEKs are versioned by convention rather than by a fixed allowlist.
+ * The current-version selector is configuration, not secret material, so it is
+ * deliberately excluded while every other valid suffix remains covered.
+ */
+const CREDENTIAL_KEK_NAME =
+  /(?:\b(CREDENTIAL_KEK(?:_[A-Z0-9_]+)?)\b|["'](CREDENTIAL_KEK(?:_[A-Z0-9_]+)?)["'])\s*[=:]\s*["'`]?([^\s"'`,;}]+)/u;
 
 /**
  * A connection string carries its password inline, so the usual advice to keep
@@ -184,6 +193,17 @@ function namedFindings(line: string): string[] {
   const assignment = SENSITIVE_NAME.exec(line);
   if (assignment && looksLikeRealSecret(assignment[2])) {
     found.push(`value assigned to ${assignment[1]}`);
+  }
+
+  const credentialKek = CREDENTIAL_KEK_NAME.exec(line);
+  const credentialKekName = credentialKek?.[1] ?? credentialKek?.[2];
+  if (
+    credentialKek &&
+    credentialKekName !== "CREDENTIAL_KEK_CURRENT_VERSION" &&
+    credentialKekName !== assignment?.[1] &&
+    looksLikeRealSecret(credentialKek[3])
+  ) {
+    found.push(`value assigned to ${credentialKekName}`);
   }
 
   const url = CREDENTIALED_URL.exec(line);

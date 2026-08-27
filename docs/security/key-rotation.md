@@ -72,19 +72,27 @@ key material is never logged.
 
 ### Rotation procedure
 
-1. Deploy the migration and application with
+1. Apply the credential revision migration before changing application
+   traffic. It adds a non-null `envelopeRevision` default and a database
+   trigger that rejects any ciphertext, IV, or wrapped-key update unless the
+   revision changes. Roll out the new writers, then drain every old writer
+   before allowing credential updates: old writers may still insert rows (the
+   database labels omitted revisions with a fresh default and those rows remain
+   v1), but an old writer's update fails closed with the revision-trigger
+   error instead of silently writing a v1 envelope under a newer label.
+2. Deploy the application with
    `CREDENTIAL_KEK_CURRENT_VERSION=v1` and the existing secret in
    `CREDENTIAL_KEK_V1`. Keep `CREDENTIAL_KEK` only as the equal legacy alias
    while old rows exist.
-2. Add the new secret as `CREDENTIAL_KEK_V2`, switch
+3. Add the new secret as `CREDENTIAL_KEK_V2`, switch
    `CREDENTIAL_KEK_CURRENT_VERSION=v2`, retain `CREDENTIAL_KEK_V1`, and deploy.
-3. Rewrap resumably. Repeat after interruptions or concurrent updates:
+4. Rewrap resumably. Repeat after interruptions or concurrent updates:
 
    ```bash
    pnpm credentials:rewrap --from v1 --to v2 --batch 100
    ```
 
-4. Check the target without writing:
+5. Check the target without writing:
 
    ```bash
    pnpm credentials:rewrap --from v1 --to v2 --batch 100 --dry-run
@@ -94,20 +102,31 @@ key material is never logged.
    claiming completion of the source migration. It returns `0` when target
    rows are clean and `1` for configuration or corruption.
 
-5. Run the retirement gate in production:
+6. Wait for the bounded device-response retention window to drain, or
+   rewrap those idempotency envelopes through an equivalent reviewed operator
+   procedure. The retirement gate reads unexpired completed
+   `IdempotencyRecord` envelopes without exposing their bodies: versioned
+   payloads use their exact version, legacy payloads without `kekVersion` are
+   v1, and `plain_json` responses are ignored. A malformed encrypted response
+   fails the gate. The normal rewrap command intentionally does not rewrite
+   these short-lived rows.
+7. Run the retirement gate in production:
 
    ```bash
    pnpm credentials:rewrap verify --version v1
    ```
 
-   It succeeds only when zero `v1` rows remain and every current-version
-   wrapped data key can be unwrapped read-only. It prints counts and opaque row
-   IDs only; it never prints tenants, harnesses, credentials, ciphertext, or
-   keys. Exit `0` is a complete gate. Exit `2` means resume because v1 rows
-   remain or a compare-and-swap was skipped. Exit `1` means configuration or
-   corruption failure. A normal rewrap never claims completion when it exits
-   `2`; rerun it until the verify command exits `0`.
-6. After the gate passes, remove the `CREDENTIAL_KEK` compatibility alias.
+   It succeeds only when zero `v1` rows remain: zero `v1` credential rows,
+   zero unexpired encrypted v1 idempotency envelopes, and every
+   current-version credential and idempotency wrapped data key pass read-only
+   unwrapping. It prints counts and opaque row IDs for credential or
+   idempotency records only; it never prints tenants, harnesses, credentials,
+   response bodies,
+   ciphertext, or keys. Exit `0` is a complete gate. Exit `2` means resume
+   because v1 rows remain or a compare-and-swap was skipped. Exit `1` means
+   configuration or corruption failure. A normal rewrap never claims
+   completion when it exits `2`; rerun it until the verify command exits `0`.
+8. After the gate passes, remove the `CREDENTIAL_KEK` compatibility alias.
    Retire `CREDENTIAL_KEK_V1` only after the same zero-row and current-key
    verification conditions hold in production. Removing a key before the gate
    makes affected credentials unreadable.

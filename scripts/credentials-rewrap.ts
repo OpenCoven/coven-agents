@@ -2,6 +2,7 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, asc, eq, gt } from "drizzle-orm";
+import { parseStoredIdempotencyResponseEnvelope } from "../lib/abuse/idempotency-response";
 import {
   rewrapWrappedKey,
   unwrapDataKey,
@@ -16,9 +17,16 @@ export const DEFAULT_BATCH_SIZE = 100;
 export const MAX_BATCH_SIZE = 1000;
 
 export type RewrapRow = {
+  envelopeRevision?: string;
   id: string;
   kekVersion: string;
   wrappedKey: string;
+};
+
+export type RewrapIdempotencyRow = {
+  expiresAt: Date;
+  id: string;
+  responseJson: unknown;
 };
 
 export type RewrapStore = {
@@ -33,6 +41,11 @@ export type RewrapStore = {
     limit: number,
     afterId?: string
   ) => Promise<RewrapRow[]>;
+  listUnexpiredIdempotency?: (
+    now: Date,
+    limit: number,
+    afterId?: string
+  ) => Promise<RewrapIdempotencyRow[]>;
   listAll?: (limit: number, afterId?: string) => Promise<RewrapRow[]>;
 };
 
@@ -140,6 +153,16 @@ function reportFailure(
   target.failures += 1;
   target.failureIds.push(id);
   output(`row_id: ${id}`);
+}
+
+function reportIdempotencyFailure(
+  output: (line: string) => void,
+  target: RewrapResult,
+  id: string
+): void {
+  target.failures += 1;
+  target.failureIds.push(id);
+  output(`idempotency_row_id: ${id}`);
 }
 
 async function countRemaining(
@@ -302,6 +325,90 @@ export async function verifyRows(
   return summary;
 }
 
+async function verifyIdempotencyRows(
+  input: {
+    batch: number;
+    knownVersions: readonly string[];
+    key: CryptoKey;
+    now: Date;
+    oldVersion: string;
+    targetVersion: string;
+  },
+  store: RewrapStore,
+  summary: RewrapResult,
+  output: (line: string) => void
+): Promise<void> {
+  if (!store.listUnexpiredIdempotency) {
+    return;
+  }
+
+  const knownVersions = new Set(input.knownVersions);
+  let afterId: string | undefined;
+
+  while (true) {
+    // Idempotency responses are bounded by their retention window. The store
+    // filters at the database boundary, and the cursor keeps the gate
+    // deterministic without exposing response bodies.
+    // biome-ignore lint/performance/noAwaitInLoops: cursor pagination depends on the prior page
+    const rows = await store.listUnexpiredIdempotency(
+      input.now,
+      input.batch,
+      afterId
+    );
+    if (rows.length === 0) {
+      return;
+    }
+
+    for (const row of rows) {
+      if (row.expiresAt <= input.now) {
+        continue;
+      }
+
+      let envelope: ReturnType<typeof parseStoredIdempotencyResponseEnvelope>;
+      try {
+        envelope = parseStoredIdempotencyResponseEnvelope(row.responseJson);
+      } catch {
+        reportIdempotencyFailure(output, summary, row.id);
+        continue;
+      }
+
+      if (envelope.kind === "plain_json") {
+        continue;
+      }
+
+      const version = envelope.payload.kekVersion;
+      if (!knownVersions.has(version)) {
+        reportIdempotencyFailure(output, summary, row.id);
+        continue;
+      }
+      if (version === input.oldVersion) {
+        summary.remaining += 1;
+        output(`idempotency_row_id: ${row.id}`);
+        continue;
+      }
+      if (version !== input.targetVersion) {
+        reportIdempotencyFailure(output, summary, row.id);
+        continue;
+      }
+
+      try {
+        // Verification is intentionally read-only. No idempotency response is
+        // rewritten by this gate; bounded retention is the retirement path.
+        // biome-ignore lint/performance/noAwaitInLoops: deterministic verification order
+        await unwrapDataKey(envelope.payload.wrappedKey, input.key);
+        summary.verified += 1;
+      } catch {
+        reportIdempotencyFailure(output, summary, row.id);
+      }
+    }
+
+    afterId = rows.at(-1)?.id;
+    if (rows.length < input.batch || !afterId) {
+      return;
+    }
+  }
+}
+
 function unknownRows(
   store: RewrapStore,
   knownVersions: readonly string[],
@@ -337,7 +444,7 @@ function unknownRows(
 }
 
 async function databaseStore(): Promise<RewrapStore> {
-  const [{ db }, { tenantCredential }] = await Promise.all([
+  const [{ db }, { idempotencyRecord, tenantCredential }] = await Promise.all([
     import("../lib/db/queries"),
     import("../lib/db/schema"),
   ]);
@@ -347,12 +454,19 @@ async function databaseStore(): Promise<RewrapStore> {
       const updated = await db.transaction(async (transaction) =>
         transaction
           .update(tenantCredential)
-          .set({ kekVersion: toVersion, wrappedKey })
+          .set({
+            envelopeRevision: crypto.randomUUID(),
+            kekVersion: toVersion,
+            wrappedKey,
+          })
           .where(
             and(
               eq(tenantCredential.id, row.id),
               eq(tenantCredential.kekVersion, row.kekVersion),
-              eq(tenantCredential.wrappedKey, expectedWrappedKey)
+              eq(tenantCredential.wrappedKey, expectedWrappedKey),
+              row.envelopeRevision
+                ? eq(tenantCredential.envelopeRevision, row.envelopeRevision)
+                : undefined
             )
           )
           .returning({ id: tenantCredential.id })
@@ -362,6 +476,7 @@ async function databaseStore(): Promise<RewrapStore> {
     async listAll(limit, afterId) {
       const rows = await db
         .select({
+          envelopeRevision: tenantCredential.envelopeRevision,
           id: tenantCredential.id,
           kekVersion: tenantCredential.kekVersion,
           wrappedKey: tenantCredential.wrappedKey,
@@ -375,6 +490,7 @@ async function databaseStore(): Promise<RewrapStore> {
     async listByVersion(version, limit, afterId) {
       const rows = await db
         .select({
+          envelopeRevision: tenantCredential.envelopeRevision,
           id: tenantCredential.id,
           kekVersion: tenantCredential.kekVersion,
           wrappedKey: tenantCredential.wrappedKey,
@@ -387,6 +503,25 @@ async function databaseStore(): Promise<RewrapStore> {
           )
         )
         .orderBy(asc(tenantCredential.id))
+        .limit(limit);
+      return rows;
+    },
+    async listUnexpiredIdempotency(now, limit, afterId) {
+      const rows = await db
+        .select({
+          expiresAt: idempotencyRecord.expiresAt,
+          id: idempotencyRecord.id,
+          responseJson: idempotencyRecord.responseJson,
+        })
+        .from(idempotencyRecord)
+        .where(
+          and(
+            eq(idempotencyRecord.state, "completed"),
+            gt(idempotencyRecord.expiresAt, now),
+            afterId ? gt(idempotencyRecord.id, afterId) : undefined
+          )
+        )
+        .orderBy(asc(idempotencyRecord.id))
         .limit(limit);
       return rows;
     },
@@ -446,6 +581,19 @@ export async function run(
       output
     );
     summary.remaining = await countRemaining(store, oldVersion, batchSize);
+    await verifyIdempotencyRows(
+      {
+        batch: batchSize,
+        key: ring.current,
+        knownVersions: ring.versions,
+        now: new Date(),
+        oldVersion,
+        targetVersion: ring.currentVersion,
+      },
+      store,
+      summary,
+      output
+    );
     await unknownRows(store, ring.versions, batchSize, output, summary);
     summary.status = rewrapStatus(summary);
     printSummary(output, "verify", summary);

@@ -186,6 +186,25 @@ test("a secret with no vendor prefix is still caught, by its name", () => {
   }
 });
 
+test("versioned credential KEKs are caught in assignments and JSON", () => {
+  for (const [filePath, source] of [
+    ["config.ts", `const CREDENTIAL_KEK_V1 = "${RANDOM_BASE64}";`],
+    [".env.example", `CREDENTIAL_KEK_V2=${RANDOM_BASE64}`],
+    ["config.json", `{"CREDENTIAL_KEK_V3":"${RANDOM_BASE64}"}`],
+    ["config.json", `{"CREDENTIAL_KEK_FUTURE_2027":"${RANDOM_BASE64}"}`],
+  ]) {
+    const findings = scanText(filePath, source);
+
+    assert.equal(findings.length, 1, source);
+    assert.match(findings[0].category, /CREDENTIAL_KEK/);
+  }
+
+  assert.deepEqual(
+    scanText("config.json", `{"CREDENTIAL_KEK_CURRENT_VERSION":"v2"}`),
+    []
+  );
+});
+
 test("a connection string is caught by its inline password", () => {
   // The password is inside the URL, so advice about "keeping the password out
   // of the file" misses it entirely.

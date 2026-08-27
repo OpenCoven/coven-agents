@@ -87,6 +87,33 @@ test("conflicting legacy and versioned v1 keys fail closed", async () => {
   );
 });
 
+test("rejects identical decoded KEK material across different versions", async () => {
+  const same = await rawKek();
+
+  await assert.rejects(
+    () =>
+      credentialKekRingFromEnvironment({
+        CREDENTIAL_KEK_CURRENT_VERSION: "v2",
+        CREDENTIAL_KEK_V1: same,
+        CREDENTIAL_KEK_V2: same,
+      }),
+    /different versions|duplicate/i
+  );
+});
+
+test("permits the legacy alias to duplicate logical v1", async () => {
+  const v1 = await rawKek();
+  const legacy = Buffer.from(v1, "base64url").toString("base64");
+  const ring = await credentialKekRingFromEnvironment({
+    CREDENTIAL_KEK: legacy,
+    CREDENTIAL_KEK_CURRENT_VERSION: "v1",
+    CREDENTIAL_KEK_V1: v1,
+  });
+
+  assert.equal(ring.currentVersion, "v1");
+  assert.deepEqual(ring.versions, ["v1"]);
+});
+
 test("the cache is invalidated by any configuration change", async () => {
   const env = await environment();
   const first = await credentialKekRingFromEnvironment(env);

@@ -47,6 +47,7 @@ export async function putCredential(
     .insert(tenantCredential)
     .values({
       ciphertext: sealed.ciphertext,
+      envelopeRevision: crypto.randomUUID(),
       harnessId,
       iv: sealed.iv,
       kekVersion: sealed.kekVersion,
@@ -56,6 +57,7 @@ export async function putCredential(
     .onConflictDoUpdate({
       set: {
         ciphertext: sealed.ciphertext,
+        envelopeRevision: crypto.randomUUID(),
         iv: sealed.iv,
         kekVersion: sealed.kekVersion,
         updatedAt: new Date(),
@@ -164,6 +166,7 @@ async function persistCredential(
     .update(tenantCredential)
     .set({
       ciphertext: sealed.ciphertext,
+      envelopeRevision: crypto.randomUUID(),
       iv: sealed.iv,
       kekVersion: sealed.kekVersion,
       updatedAt: new Date(),
