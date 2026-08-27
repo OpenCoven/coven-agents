@@ -429,11 +429,12 @@ test("a warm-up for an unknown runtime touches no sandbox", async () => {
   assert.equal(calls.length, 0);
 });
 
-test("a warm-up swallows the probe timeout a run would propagate", async () => {
-  // `probeInstalled` deliberately rethrows deadline errors so a run's
-  // failure names the real condition. A warm-up has no user waiting on it,
-  // so the same timeout degrades to `failed` instead of escaping into the
-  // fiber.
+test("a warm-up with no destroy capability fails closed after a probe timeout", async () => {
+  // `probeInstalled` deliberately rethrows deadline errors so a run's failure
+  // names the real condition. A warm-up has no user waiting on it, so the same
+  // timeout degrades to `failed` instead of escaping into the fiber — and it
+  // stops at one attempt, because retrying against a container it cannot reap
+  // is the same attempt twice.
   let attempts = 0;
   const sandbox = {
     exec() {
@@ -449,7 +450,103 @@ test("a warm-up swallows the probe timeout a run would propagate", async () => {
   );
 
   assert.deepEqual(outcome, { ready: false, version: null });
+  assert.equal(attempts, 1);
+});
+
+test("a warm-up destroys a timed-out sandbox before retrying", async () => {
+  let attempts = 0;
+  let destroys = 0;
+  const sandbox = {
+    destroy() {
+      destroys += 1;
+      return Promise.resolve();
+    },
+    exec() {
+      attempts += 1;
+      if (attempts === 1) {
+        return Promise.reject(
+          new HarnessError("probe timed out", "harness_timeout")
+        );
+      }
+      return Promise.resolve({
+        exitCode: 0,
+        stderr: "",
+        stdout: "GitHub Copilot CLI 1.0.80\n",
+        success: true,
+      });
+    },
+  };
+
+  const outcome = await warmSandbox(sandbox as never, "copilot", () =>
+    Promise.resolve()
+  );
+
+  assert.deepEqual(outcome, {
+    ready: true,
+    version: "GitHub Copilot CLI 1.0.80",
+  });
   assert.equal(attempts, 2);
+  assert.equal(destroys, 1);
+});
+
+test("a warm-up does not retry when timed-out sandbox cleanup fails", async () => {
+  let attempts = 0;
+  let destroys = 0;
+  const sandbox = {
+    destroy() {
+      destroys += 1;
+      return Promise.reject(new Error("sandbox destroy failed"));
+    },
+    exec() {
+      attempts += 1;
+      return Promise.reject(
+        new HarnessError("probe timed out", "harness_timeout")
+      );
+    },
+  };
+
+  const outcome = await warmSandbox(sandbox as never, "copilot", () =>
+    Promise.resolve()
+  );
+
+  assert.deepEqual(outcome, { ready: false, version: null });
+  assert.equal(attempts, 1);
+  assert.equal(destroys, 1);
+});
+
+test("a warm-up yields the sandbox once a run owns it", async () => {
+  // The fence between warming and running. A warm-up outlives the request
+  // that started it, so by the time its retry comes due the sandbox may
+  // belong to a mission — and a warm-up that reaps a container mid-run is
+  // worse than one that never happened.
+  let attempts = 0;
+  let owns = true;
+  const sandbox = {
+    destroy: () => Promise.resolve(),
+    exec() {
+      attempts += 1;
+      return Promise.resolve({
+        exitCode: 1,
+        stderr: "",
+        stdout: "",
+        success: false,
+      });
+    },
+  };
+
+  const outcome = await warmSandbox(
+    sandbox as never,
+    "copilot",
+    () => {
+      // Ownership is lost while the retry pause is outstanding.
+      owns = false;
+      return Promise.resolve();
+    },
+    { ownsSandbox: () => owns }
+  );
+
+  assert.deepEqual(outcome, { ready: false, version: null });
+  assert.equal(attempts, 1, "the retry must not touch a sandbox it lost");
 });
 
 /**

@@ -14,7 +14,8 @@
      */
     "paths": {
       "agents": ["./test-support/agents.ts"],
-      "@cloudflare/sandbox": ["./test-support/cloudflare-sandbox.ts"]
+      "@cloudflare/sandbox": ["./test-support/cloudflare-sandbox.ts"],
+      "cloudflare:workers": ["./test-support/cloudflare-workers.ts"]
     }
   }
 }

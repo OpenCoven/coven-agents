@@ -14,7 +14,7 @@ Current blockers are factual and fail closed:
 - the latest recorded authenticated private Beads/DoltHub pull returned
   `PermissionDenied`, so authoritative P0, dependency, and acceptance state
   cannot be reconciled; see [`current-state.md`](current-state.md);
-- `pnpm hygiene` on the 2026-08-27 candidate reported four secondary worktrees
+- `pnpm hygiene` at `2026-08-27T02:06:28-05:00` reported four secondary worktrees
   against the soft cap of three and two unrelated `AT RISK` branches:
   `feat/admission-queue-rebased` had one unpushed commit and
   `fix/process-runner` was absent from origin and not merged according to
@@ -155,13 +155,15 @@ ADMIN_EMAILS=e2e-admin@example.invalid pnpm build
 Retain command, commit, environment, timestamp, exit status, and sanitized
 output. The placeholder `ADMIN_EMAILS` value above is a local audit fixture,
 not release configuration. `AUTH_SECRET` must be supplied from local
-environment storage and must not be committed. On 2026-08-27 the candidate passed
-check, typecheck, unit tests, a 32-page production build, and all sixteen local
-production browser tests. The first browser attempt omitted `AUTH_SECRET` and
-failed three subscriber-shaped tests at their explicit configuration guard;
-the corrected command above passed all sixteen. Hygiene still failed because
-of unrelated local-only worktrees and the secondary-worktree soft cap, so the
-complete six-gate set is not green. A tracked secret scan is recommended in
+environment storage and must not be committed. The last full snapshot passed
+check, typecheck, 947 unit tests, sixteen browser tests against development and
+local production servers, both default and demo production builds, and the
+local Docker-backed Sandbox diagnostic, but hygiene failed; it is not release
+evidence for this post-admission-queue candidate. The first production-browser
+attempt on the roadmap branch omitted `AUTH_SECRET` and failed three
+subscriber-shaped tests at their explicit configuration guard; the corrected
+command above passed all sixteen before the latest `main` merge. Rerun all six
+gates against the final candidate. A tracked secret scan is recommended in
 addition to, not instead of, the six gates.
 
 Because an ordinary local build intentionally does not infer a release
@@ -174,9 +176,9 @@ skipped audience validation is not release evidence.
 
 | Path | Required smoke | Evidence required | Current state |
 | --- | --- | --- | --- |
-| Demo | Load the signed-out root, verify no database/runner mutation, exercise play, pause, seek, speed, and completion, and inspect sanitized replay output. | Dated browser trace or recording tied to the candidate and deployment. | A local production replay reached 10/10 sanitized events without console errors on 2026-08-26; no release-equivalent deployment artifact is retained. |
+| Demo | Load the signed-out root, verify no database/runner mutation, exercise play, pause, seek, speed, and completion, and inspect sanitized replay output. | Dated browser trace or recording tied to the candidate and deployment. | A local production replay reached 10/10 sanitized events without console errors on 2026-08-27; no release-equivalent deployment artifact is retained. |
 | Subscriber | Exercise a real GitHub OAuth callback and account creation/adoption, guest refusal, active eligibility, expired/revoked refusal, connection retrieval, and usage display. | Dated trace plus sanitized account-state evidence for allowed and denied cases. | Eligibility logic and mocked OAuth start are covered; actual OAuth/account creation is not verified. |
-| Cloud | Run the authenticated deployment diagnostic, create an agent, start and observe a credentialed run, stream/poll to terminal state, cancel a bounded run, delete the agent, and verify tenant/sandbox cleanup. | Dated Worker/app logs, response summary, run identifiers, and cleanup result without credentials or private output. | Local worker tests pass; no live release-equivalent lifecycle artifact. |
+| Cloud | Run the authenticated deployment diagnostic, create an agent, start and observe a credentialed run, stream/poll to terminal state, cancel a bounded run, delete the agent, and verify tenant/sandbox cleanup. | Dated Worker/app logs, response summary, run identifiers, and cleanup result without credentials or private output. | The local Docker-backed diagnostic passes with the SDK-matched image. No deployed release-equivalent create/run/stream/cancel/delete lifecycle artifact exists. |
 | Local, if supported | Create, run, cancel, and delete through the supported local boundary, including host isolation and cleanup checks. | Dated artifact from the declared supported local environment. | Not applicable: no local runner is tracked and `backend` is cloud-only. |
 
 Smoke failure is a no-go. Do not retry until a failure disappears without

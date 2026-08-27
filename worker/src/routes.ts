@@ -6,6 +6,7 @@ import {
   createAgentInputSchema,
   type RunSnapshot,
   sanitizeEvidenceText,
+  startRunInputSchema,
   type WarmState,
 } from "@opencoven/agent-contracts";
 import { isRunnableHarness, SUPPORTED_HARNESS_IDS } from "@opencoven/harness";
@@ -15,6 +16,15 @@ import {
   workerRouteClass,
 } from "./abuse.js";
 import {
+  type AdmissionDecision,
+  type AdmissionRecord,
+  type AdmissionRequest,
+  AdmissionUnavailableError,
+  admissionMode,
+  tenantAdmissionHash,
+} from "./admission.js";
+import type { RunRegistrationResult } from "./agents.js";
+import {
   corsHeaders,
   errorEnvelope,
   HttpError,
@@ -23,7 +33,18 @@ import {
   readJson,
 } from "./http.js";
 import { importVerifyKey, verifyRunnerToken } from "./identity.js";
-import { AlreadyRunningError, OperationConflictError } from "./run-state.js";
+import {
+  type AdmissionCleanupCapability,
+  type AdmissionCleanupGuard,
+  type AdmissionConfirmationOutcome,
+  AgentBusyError,
+  AgentDecommissioningError,
+  AlreadyRunningError,
+  hashOperation,
+  isTerminal,
+  OperationConflictError,
+  type PreparedAdmissionConfirmationOutcome,
+} from "./run-state.js";
 import {
   createRunEventStream,
   type RunEventStreamOptions,
@@ -39,6 +60,11 @@ export type CloudRunnerEnvironment = Omit<
 > & {
   ALLOWED_ORIGIN: string;
   EDGE_ABUSE_KEY_SECRET?: string;
+  RUN_ADMISSION_CONSECUTIVE_MAX?: string;
+  RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX?: string;
+  RUN_ADMISSION_MODE?: string;
+  RUN_ADMISSION_TENANT_ACTIVE_MAX?: string;
+  RUN_ADMISSION_TENANT_QUEUE_MAX?: string;
   EDGE_REQUEST_LIMITER: RateLimit;
   TENANT_MUTATION_LIMITER: RateLimit;
   TENANT_RUN_LIMITER: RateLimit;
@@ -67,7 +93,26 @@ export type CloudRunnerDirectory = {
    * never be assembled without one. An accidental `list()` is a type error.
    */
   list: (tenantId: string) => Awaitable<AgentDefinition[]>;
-  registerRun: (runId: string, agentId: string) => Awaitable<void>;
+  registerRun: (
+    runId: string,
+    agentId: string,
+    status?: "active" | "queued" | "terminal"
+  ) => Awaitable<RunRegistrationResult | boolean>;
+  unregisterRun: (
+    runId: string,
+    agentId: string,
+    expectedSequence?: number
+  ) => Awaitable<boolean | undefined>;
+  markRunStatus?: (
+    runId: string,
+    agentId: string,
+    status: "active" | "queued" | "terminal"
+  ) => Awaitable<boolean | undefined>;
+  enqueueRunMappingCleanup?: (
+    runId: string,
+    agentId: string,
+    expectedSequence?: number
+  ) => Awaitable<void>;
   remove: (agentId: string) => Awaitable<void>;
   upsert: (definition: AgentDefinition) => Awaitable<AgentDefinition>;
   lookupRun: (runId: string) => Awaitable<string | null>;
@@ -75,7 +120,42 @@ export type CloudRunnerDirectory = {
 
 export type CloudRunnerAgent = {
   configure: (definition: AgentDefinition) => Awaitable<AgentDefinition>;
+  confirmAdmission?: (
+    runId: string,
+    operationId: string,
+    requestHash: string,
+    capability?: AdmissionCleanupCapability | null
+  ) => Awaitable<AdmissionConfirmationOutcome>;
+  isAdmissionConfirmed?: (
+    runId: string,
+    prepareOwner: string
+  ) => Awaitable<boolean>;
+  ensurePendingAdmissionCleanup?: (runId: string) => Awaitable<boolean>;
+  prepareOwnerMatches?: (
+    runId: string,
+    prepareOwner: string
+  ) => Awaitable<boolean>;
+  discardRun: (
+    runId: string,
+    prepareOwner?: string
+  ) => Awaitable<boolean | undefined>;
+  discardPreparedRun?: (
+    runId: string,
+    prepareOwner: string
+  ) => Awaitable<boolean | "protected" | "confirmed">;
   decommission: () => Awaitable<void>;
+  enqueue: (
+    input: unknown,
+    runId: string,
+    requestHash: string,
+    identityToken: string,
+    allowQueued?: boolean
+  ) => Awaitable<{
+    created: boolean;
+    prepareOwner?: string;
+    scheduleFailed?: boolean;
+    run: RunSnapshot;
+  }>;
   getEventStream: (
     runId: string,
     lastEventId: number
@@ -84,14 +164,50 @@ export type CloudRunnerAgent = {
   listRuns: () => Awaitable<RunSnapshot[]>;
   snapshot: () => Awaitable<AgentDefinition | null>;
   warm: () => Awaitable<WarmState>;
-  start: (
-    input: unknown,
-    identityToken: string
-  ) => Awaitable<{
-    created: boolean;
-    run: RunSnapshot;
-  }>;
-  stop: (runId: string) => Awaitable<RunSnapshot | null>;
+  stop: (
+    runId: string,
+    dispatchToken?: string,
+    reason?: string,
+    guard?: AdmissionCleanupGuard
+  ) => Awaitable<RunSnapshot | null>;
+};
+
+export type CloudRunnerAdmission = {
+  admit: (input: AdmissionRequest) => Awaitable<AdmissionDecision>;
+  getRecord?: (runId: string) => Awaitable<AdmissionRecord | null>;
+  getByOperationId?: (operationId: string) => Awaitable<AdmissionRecord | null>;
+  getCleanupCapability?: (
+    runId: string,
+    expected?: Pick<
+      AdmissionCleanupCapability,
+      "agentId" | "operationId" | "requestHash" | "runId"
+    >
+  ) => Awaitable<AdmissionCleanupCapability | null>;
+  validateCleanup?: (
+    capability: AdmissionCleanupCapability
+  ) => Awaitable<boolean>;
+  enqueueCleanup?: (
+    agentId: string,
+    runId: string,
+    capability?: AdmissionCleanupCapability
+  ) => Awaitable<void>;
+  enqueueProvisionalCleanup?: (
+    agentId: string,
+    runId: string,
+    prepareOwner: string,
+    operationId?: string,
+    requestHash?: string
+  ) => Awaitable<void>;
+  confirmPreparedAdmission?: (
+    runId: string,
+    prepareOwner: string | undefined,
+    capability: AdmissionCleanupCapability
+  ) => Awaitable<PreparedAdmissionConfirmationOutcome>;
+  release: (
+    runId: string,
+    dispatchToken?: string,
+    admissionSequence?: number
+  ) => Awaitable<boolean>;
 };
 
 export type CloudRunnerDependencies<
@@ -106,11 +222,549 @@ export type CloudRunnerDependencies<
     output: string;
   }>;
   getDirectory: (environment: Environment) => Awaitable<CloudRunnerDirectory>;
+  getAdmission?: (environment: Environment) => Awaitable<CloudRunnerAdmission>;
   getYoloAgent: (
     environment: Environment,
     agentId: string
   ) => Awaitable<CloudRunnerAgent>;
 };
+
+type CleanupRunOptions = {
+  admissionCapability?: AdmissionCleanupCapability;
+  admission?: CloudRunnerAdmission;
+  allowUnowned?: boolean;
+  prepareOwner?: string;
+  stopFirst?: boolean;
+};
+
+async function cleanupRun(
+  agent: CloudRunnerAgent,
+  runId: string,
+  agentId: string,
+  options: CleanupRunOptions = {}
+): Promise<unknown | null> {
+  const {
+    admissionCapability,
+    admission,
+    allowUnowned = false,
+    prepareOwner,
+    stopFirst = false,
+  } = options;
+  if (!prepareOwner && !allowUnowned) {
+    return null;
+  }
+  if (
+    allowUnowned &&
+    !prepareOwner &&
+    (!admissionCapability ||
+      admissionCapability.agentId !== agentId ||
+      admissionCapability.runId !== runId ||
+      !admission?.validateCleanup ||
+      !(await admission.validateCleanup(admissionCapability)))
+  ) {
+    return null;
+  }
+  let firstError: unknown | null = null;
+  let prepareOwnerVerified = false;
+  const remember = (error: unknown) => {
+    if (firstError === null) {
+      firstError = error;
+    }
+  };
+  const attempt = async (action: () => Awaitable<unknown>) => {
+    try {
+      return { ok: true, value: await action() } as const;
+    } catch (error) {
+      remember(error);
+      return { ok: false, value: undefined } as const;
+    }
+  };
+
+  if (prepareOwner && agent.prepareOwnerMatches) {
+    let ownerMatches = false;
+    try {
+      ownerMatches = await agent.prepareOwnerMatches(runId, prepareOwner);
+      prepareOwnerVerified = ownerMatches;
+      if (!ownerMatches && !allowUnowned) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    if (
+      !ownerMatches &&
+      (!admissionCapability ||
+        admissionCapability.agentId !== agentId ||
+        admissionCapability.runId !== runId ||
+        !admission?.validateCleanup ||
+        !(await admission.validateCleanup(admissionCapability)))
+    ) {
+      return null;
+    }
+  }
+
+  let safeToRelease = false;
+  if (stopFirst) {
+    if (prepareOwner) {
+      const discarded = await attempt(() =>
+        agent.discardRun(runId, prepareOwner)
+      );
+      if (discarded.ok && discarded.value !== false) {
+        safeToRelease = true;
+      } else {
+        if (prepareOwner) {
+          if (agent.prepareOwnerMatches) {
+            try {
+              if (
+                !(await agent.prepareOwnerMatches(runId, prepareOwner)) &&
+                !allowUnowned
+              ) {
+                return firstError;
+              }
+            } catch {
+              if (!allowUnowned) {
+                return firstError;
+              }
+            }
+          } else if (!allowUnowned) {
+            return firstError;
+          }
+        }
+        if (prepareOwner && !admissionCapability) {
+          if (agent.ensurePendingAdmissionCleanup) {
+            await attempt(() => agent.ensurePendingAdmissionCleanup?.(runId));
+          }
+          return firstError;
+        }
+        if (
+          allowUnowned &&
+          !prepareOwnerVerified &&
+          (!admissionCapability ||
+            admissionCapability.agentId !== agentId ||
+            admissionCapability.runId !== runId ||
+            !admission?.validateCleanup ||
+            !(await admission.validateCleanup(admissionCapability)))
+        ) {
+          return firstError;
+        }
+        const guard = admissionCapability
+          ? { ...admissionCapability, queuedOnly: false }
+          : undefined;
+        const stopped = await attempt(() =>
+          agent.stop(runId, undefined, undefined, guard)
+        );
+        safeToRelease =
+          stopped.ok &&
+          (stopped.value === null ||
+            (typeof stopped.value === "object" &&
+              stopped.value !== null &&
+              "status" in stopped.value &&
+              typeof stopped.value.status === "string" &&
+              isTerminal(stopped.value.status as RunSnapshot["status"])));
+      }
+    } else {
+      const guard = admissionCapability
+        ? { ...admissionCapability, queuedOnly: false }
+        : undefined;
+      const stopped = await attempt(() =>
+        agent.stop(runId, undefined, undefined, guard)
+      );
+      safeToRelease =
+        stopped.ok &&
+        (stopped.value === null ||
+          (typeof stopped.value === "object" &&
+            stopped.value !== null &&
+            "status" in stopped.value &&
+            typeof stopped.value.status === "string" &&
+            isTerminal(stopped.value.status as RunSnapshot["status"])));
+    }
+  } else {
+    const discarded = await attempt(() =>
+      agent.discardRun(runId, prepareOwner)
+    );
+    if (discarded.ok && discarded.value !== false) {
+      safeToRelease = true;
+    } else if (prepareOwner && !admissionCapability) {
+      if (agent.ensurePendingAdmissionCleanup) {
+        await attempt(() => agent.ensurePendingAdmissionCleanup?.(runId));
+      }
+      return firstError;
+    } else if (allowUnowned) {
+      if (
+        !admissionCapability ||
+        admissionCapability.agentId !== agentId ||
+        admissionCapability.runId !== runId ||
+        !admission?.validateCleanup ||
+        !(await admission.validateCleanup(admissionCapability))
+      ) {
+        return firstError;
+      }
+      const guard = admissionCapability
+        ? { ...admissionCapability, queuedOnly: false }
+        : undefined;
+      const stopped = await attempt(() =>
+        agent.stop(runId, undefined, undefined, guard)
+      );
+      safeToRelease =
+        stopped.ok &&
+        (stopped.value === null ||
+          (typeof stopped.value === "object" &&
+            stopped.value !== null &&
+            "status" in stopped.value &&
+            typeof stopped.value.status === "string" &&
+            isTerminal(stopped.value.status as RunSnapshot["status"])));
+    }
+  }
+  if (admission && safeToRelease) {
+    let exactCapability = admissionCapability;
+    if (
+      !exactCapability &&
+      admission.getRecord &&
+      admission.getCleanupCapability
+    ) {
+      const recordResult = await attempt(() => admission.getRecord?.(runId));
+      const record =
+        recordResult.ok && recordResult.value
+          ? (recordResult.value as AdmissionRecord)
+          : null;
+      if (record && record.agentId === agentId) {
+        const capability = await attempt(() =>
+          admission.getCleanupCapability?.(runId, {
+            agentId: record.agentId,
+            operationId: record.operationId,
+            requestHash: record.requestHash,
+            runId: record.runId,
+          })
+        );
+        if (capability.ok) {
+          exactCapability =
+            (capability.value as AdmissionCleanupCapability | null) ??
+            undefined;
+        }
+      }
+    }
+    if (exactCapability) {
+      const released = await attempt(() =>
+        admission.release(
+          runId,
+          exactCapability?.dispatchToken,
+          exactCapability?.admissionSequence
+        )
+      );
+      if (!released.ok && admission.enqueueCleanup) {
+        await attempt(() =>
+          admission.enqueueCleanup?.(agentId, runId, exactCapability)
+        );
+      }
+    } else if (admission.enqueueCleanup) {
+      await attempt(() =>
+        admission.enqueueCleanup?.(agentId, runId, admissionCapability)
+      );
+    }
+  } else if (admission?.enqueueCleanup) {
+    await attempt(() =>
+      admission.enqueueCleanup?.(agentId, runId, admissionCapability)
+    );
+  }
+  return firstError;
+}
+
+function isOperationConflict(error: unknown): boolean {
+  return (
+    error instanceof OperationConflictError ||
+    (error instanceof Error && error.name === "OperationConflictError")
+  );
+}
+
+function directoryRunStatus(
+  run: RunSnapshot
+): "active" | "queued" | "terminal" {
+  if (isTerminal(run.status)) {
+    return "terminal";
+  }
+  return run.status === "queued" ? "queued" : "active";
+}
+
+async function markDirectoryRunStatus(
+  directory: CloudRunnerDirectory,
+  run: RunSnapshot,
+  agentId: string
+): Promise<boolean | undefined> {
+  if (!directory.markRunStatus) {
+    return;
+  }
+  return await directory.markRunStatus(
+    run.id,
+    agentId,
+    directoryRunStatus(run)
+  );
+}
+
+async function compensateDirectoryRunMapping(
+  directory: CloudRunnerDirectory,
+  runId: string,
+  agentId: string,
+  expectedSequence?: number
+): Promise<void> {
+  try {
+    const unregistered = await directory.unregisterRun(
+      runId,
+      agentId,
+      expectedSequence
+    );
+    if (unregistered === false && directory.enqueueRunMappingCleanup) {
+      await directory.enqueueRunMappingCleanup(
+        runId,
+        agentId,
+        expectedSequence
+      );
+    }
+  } catch {
+    if (directory.enqueueRunMappingCleanup) {
+      try {
+        await directory.enqueueRunMappingCleanup(
+          runId,
+          agentId,
+          expectedSequence
+        );
+      } catch {
+        // Preserve the original registration failure.
+      }
+    }
+  }
+}
+
+function registeredSequence(
+  result: RunRegistrationResult | boolean
+): number | undefined {
+  return typeof result === "object" && result.kind === "registered"
+    ? result.sequence
+    : undefined;
+}
+
+function registrationSucceeded(
+  result: RunRegistrationResult | boolean
+): boolean {
+  return (
+    result === true ||
+    (typeof result === "object" && result.kind === "registered")
+  );
+}
+
+async function registerExistingRunMapping(
+  directory: CloudRunnerDirectory,
+  run: RunSnapshot,
+  agentId: string
+): Promise<void> {
+  let expectedSequence: number | undefined;
+  try {
+    const registered = await directory.registerRun(
+      run.id,
+      agentId,
+      directoryRunStatus(run)
+    );
+    if (!registrationSucceeded(registered)) {
+      throw new Error("Run directory registration was ambiguous.");
+    }
+    expectedSequence = registeredSequence(registered);
+    if ((await markDirectoryRunStatus(directory, run, agentId)) === false) {
+      throw new Error("Run directory status update was ambiguous.");
+    }
+  } catch (error) {
+    await compensateDirectoryRunMapping(
+      directory,
+      run.id,
+      agentId,
+      expectedSequence
+    );
+    throw error;
+  }
+}
+
+async function releaseTerminalAdmission(
+  directory: CloudRunnerDirectory,
+  run: RunSnapshot,
+  agentId: string,
+  admission?: CloudRunnerAdmission,
+  admissionCapability?: AdmissionCleanupCapability
+): Promise<void> {
+  let releaseError: unknown;
+  try {
+    if (admission) {
+      let capability = admissionCapability;
+      if (
+        !capability &&
+        admission.getRecord &&
+        admission.getCleanupCapability
+      ) {
+        const record = await admission.getRecord(run.id);
+        if (
+          record &&
+          record.agentId === agentId &&
+          record.operationId === run.operationId &&
+          record.runId === run.id
+        ) {
+          capability =
+            (await admission.getCleanupCapability(run.id, {
+              agentId: record.agentId,
+              operationId: record.operationId,
+              requestHash: record.requestHash,
+              runId: record.runId,
+            })) ?? undefined;
+        }
+      }
+      if (capability) {
+        const released = await admission.release(
+          run.id,
+          capability.dispatchToken,
+          capability.admissionSequence
+        );
+        if (!released && admission.enqueueCleanup) {
+          await admission.enqueueCleanup(agentId, run.id, capability);
+        }
+      } else if (admission.enqueueCleanup) {
+        await admission.enqueueCleanup(agentId, run.id);
+      }
+    }
+  } catch (error) {
+    releaseError = error;
+  } finally {
+    try {
+      await markDirectoryRunStatus(directory, run, agentId);
+    } catch {
+      // The terminal run remains authoritative; a later callback can repair
+      // the directory without turning an idempotent terminal response into a
+      // busy error.
+    }
+  }
+  if (releaseError) {
+    throw releaseError;
+  }
+}
+
+async function reconcilePreparedAdmissionOutcome(
+  directory: CloudRunnerDirectory,
+  agent: CloudRunnerAgent,
+  runId: string,
+  agentId: string,
+  admission: CloudRunnerAdmission,
+  admissionCapability: AdmissionCleanupCapability | null,
+  prepareOwner: string | undefined,
+  cors: Headers
+): Promise<Response> {
+  const local = await agent.getRun(runId);
+  if (local && isTerminal(local.status)) {
+    await registerExistingRunMapping(directory, local, agentId);
+    await releaseTerminalAdmission(
+      directory,
+      local,
+      agentId,
+      admission,
+      admissionCapability ?? undefined
+    );
+    return json(
+      {
+        apiVersion: AGENT_RUNNER_API_VERSION,
+        run: local,
+      },
+      { status: 202 },
+      cors
+    );
+  }
+  const cleanupError = await cleanupRun(agent, runId, agentId, {
+    admission,
+    admissionCapability: admissionCapability ?? undefined,
+    allowUnowned: true,
+    prepareOwner,
+    stopFirst: true,
+  });
+  if (cleanupError) {
+    throw cleanupError;
+  }
+  return busyResponse("global_busy", cors);
+}
+
+async function finalizePreparedAdmission(
+  agent: CloudRunnerAgent,
+  admission: CloudRunnerAdmission,
+  runId: string,
+  operationId: string,
+  requestHash: string,
+  admissionCapability: AdmissionCleanupCapability | null,
+  prepareOwner?: string
+): Promise<{
+  agentConfirmed: boolean;
+  confirmation?: AdmissionConfirmationOutcome;
+  coordinatorConfirmed: boolean;
+  coordinatorOutcome?: PreparedAdmissionConfirmationOutcome;
+}> {
+  if (!agent.confirmAdmission) {
+    return { agentConfirmed: false, coordinatorConfirmed: true };
+  }
+  const confirmation = await agent.confirmAdmission(
+    runId,
+    operationId,
+    requestHash,
+    admissionCapability
+  );
+  if (confirmation.kind !== "confirmed") {
+    return {
+      agentConfirmed: false,
+      confirmation,
+      coordinatorConfirmed: false,
+    };
+  }
+  if (!admissionCapability || !admission.confirmPreparedAdmission) {
+    return {
+      agentConfirmed: true,
+      confirmation,
+      coordinatorConfirmed: true,
+    };
+  }
+  const coordinatorOutcome = await admission.confirmPreparedAdmission(
+    runId,
+    prepareOwner,
+    admissionCapability
+  );
+  return {
+    agentConfirmed: true,
+    confirmation,
+    coordinatorConfirmed: coordinatorOutcome.kind === "confirmed",
+    coordinatorOutcome,
+  };
+}
+
+async function releaseAdmissionRecord(
+  admission: CloudRunnerAdmission,
+  record: AdmissionRecord,
+  capability?: AdmissionCleanupCapability | null
+): Promise<boolean> {
+  const exact =
+    capability ??
+    (admission.getCleanupCapability
+      ? await admission.getCleanupCapability(record.runId, {
+          agentId: record.agentId,
+          operationId: record.operationId,
+          requestHash: record.requestHash,
+          runId: record.runId,
+        })
+      : null);
+  if (!exact) {
+    if (admission.enqueueCleanup) {
+      await admission.enqueueCleanup(record.agentId, record.runId);
+    }
+    return false;
+  }
+  const released = await admission.release(
+    record.runId,
+    exact.dispatchToken,
+    exact.admissionSequence
+  );
+  if (!released && admission.enqueueCleanup) {
+    await admission.enqueueCleanup(record.agentId, record.runId, exact);
+  }
+  return released;
+}
 
 /**
  * The contract permits any harness runtime; this runner can only drive the ones
@@ -160,8 +814,38 @@ function fail(error: unknown, cors: Headers): Response {
     );
   }
   if (
+    error instanceof AdmissionUnavailableError ||
+    (error instanceof Error && error.name === "AdmissionUnavailableError")
+  ) {
+    return json(
+      errorEnvelope(
+        "admission_unavailable",
+        "Run admission is temporarily unavailable. Try again later.",
+        true
+      ),
+      { status: 503 },
+      cors
+    );
+  }
+  if (
+    error instanceof AgentDecommissioningError ||
+    (error instanceof Error && error.name === "AgentDecommissioningError")
+  ) {
+    return json(
+      errorEnvelope(
+        "agent_decommissioning",
+        "Agent decommission is still in progress. Try again later.",
+        true
+      ),
+      { status: 409 },
+      cors
+    );
+  }
+  if (
     error instanceof AlreadyRunningError ||
-    (error instanceof Error && error.name === "AlreadyRunningError")
+    error instanceof AgentBusyError ||
+    (error instanceof Error &&
+      (error.name === "AlreadyRunningError" || error.name === "AgentBusyError"))
   ) {
     return json(
       errorEnvelope(
@@ -263,10 +947,49 @@ function abuseResponse(
       cors
     );
   }
+
   return json(
     errorEnvelope("abuse_control_unavailable", "Please try again later.", true),
     { headers, status: 503 },
     cors
+  );
+}
+
+function busyResponse(
+  reason: "global_busy" | "tenant_queue_full",
+  cors: Headers
+): Response {
+  const message =
+    reason === "tenant_queue_full"
+      ? "This tenant has too much work waiting."
+      : "The cloud runner is busy. Try again later.";
+  return json(errorEnvelope("busy", message, true), { status: 409 }, cors);
+}
+
+function matchesLocalAdmission(
+  record: AdmissionRecord,
+  expected: Pick<
+    AdmissionRecord,
+    "agentId" | "operationId" | "requestHash" | "runId" | "tenantHash"
+  >
+): boolean {
+  return (
+    record.agentId === expected.agentId &&
+    record.operationId === expected.operationId &&
+    record.requestHash === expected.requestHash &&
+    record.runId === expected.runId &&
+    record.tenantHash === expected.tenantHash
+  );
+}
+
+function matchesLocalRun(
+  run: RunSnapshot,
+  expected: Pick<RunSnapshot, "agentId" | "id" | "operationId">
+): boolean {
+  return (
+    run.agentId === expected.agentId &&
+    run.id === expected.id &&
+    run.operationId === expected.operationId
   );
 }
 
@@ -560,19 +1283,799 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 cors
               );
             }
-            const started = await agent.start(
-              await readJson(request),
-              authorization.slice(7)
+            const input = startRunInputSchema.parse(await readJson(request));
+            const runAdmissionMode = admissionMode(environment);
+            const requestHash = await hashOperation(id, input.task);
+            let runId: string = crypto.randomUUID();
+            let prepared: Awaited<ReturnType<CloudRunnerAgent["enqueue"]>>;
+            try {
+              prepared = await agent.enqueue(
+                input,
+                runId,
+                requestHash,
+                authorization.slice(7),
+                runAdmissionMode === "queue"
+              );
+            } catch (error) {
+              await cleanupRun(agent, runId, id);
+              throw error;
+            }
+            let existingAdmission: CloudRunnerAdmission | null = null;
+            let admissionRecord: AdmissionRecord | null = null;
+            if (!prepared.created) {
+              if (
+                runAdmissionMode === "reject" &&
+                prepared.run.operationId !== input.operationId &&
+                !isTerminal(prepared.run.status)
+              ) {
+                return busyResponse("global_busy", cors);
+              }
+              if (isTerminal(prepared.run.status)) {
+                let terminalAdmission: CloudRunnerAdmission | undefined;
+                let stale: AdmissionRecord | null = null;
+                try {
+                  if (dependencies.getAdmission) {
+                    terminalAdmission =
+                      await dependencies.getAdmission(environment);
+                    stale = terminalAdmission.getByOperationId
+                      ? await terminalAdmission.getByOperationId(
+                          input.operationId
+                        )
+                      : null;
+                  }
+                } catch (error) {
+                  if (
+                    error instanceof AdmissionUnavailableError ||
+                    (error instanceof Error &&
+                      error.name === "AdmissionUnavailableError")
+                  ) {
+                    throw error;
+                  }
+                  throw new AdmissionUnavailableError(
+                    "Terminal run admission reconciliation failed.",
+                    { cause: error }
+                  );
+                }
+                if (stale) {
+                  const tenantHash = await tenantAdmissionHash(
+                    environment.EDGE_ABUSE_KEY_SECRET,
+                    callerTenant
+                  );
+                  if (
+                    !matchesLocalAdmission(stale, {
+                      agentId: id,
+                      operationId: input.operationId,
+                      requestHash,
+                      runId: prepared.run.id,
+                      tenantHash,
+                    })
+                  ) {
+                    throw new OperationConflictError();
+                  }
+                }
+                await registerExistingRunMapping(directory, prepared.run, id);
+                if (terminalAdmission && stale) {
+                  try {
+                    await releaseAdmissionRecord(terminalAdmission, stale);
+                  } catch (error) {
+                    if (
+                      error instanceof AdmissionUnavailableError ||
+                      (error instanceof Error &&
+                        error.name === "AdmissionUnavailableError")
+                    ) {
+                      throw error;
+                    }
+                    throw new AdmissionUnavailableError(
+                      "Terminal run admission reconciliation failed.",
+                      { cause: error }
+                    );
+                  }
+                }
+                await releaseTerminalAdmission(directory, prepared.run, id);
+                return json(
+                  {
+                    apiVersion: AGENT_RUNNER_API_VERSION,
+                    run: prepared.run,
+                  },
+                  { status: 202 },
+                  cors
+                );
+              }
+              try {
+                existingAdmission = dependencies.getAdmission
+                  ? await dependencies.getAdmission(environment)
+                  : null;
+                admissionRecord = existingAdmission?.getByOperationId
+                  ? await existingAdmission.getByOperationId(input.operationId)
+                  : null;
+              } catch {
+                return busyResponse("global_busy", cors);
+              }
+              if (existingAdmission && admissionRecord) {
+                const tenantHash = await tenantAdmissionHash(
+                  environment.EDGE_ABUSE_KEY_SECRET,
+                  callerTenant
+                );
+                if (
+                  !matchesLocalAdmission(admissionRecord, {
+                    agentId: id,
+                    operationId: input.operationId,
+                    requestHash,
+                    runId: prepared.run.id,
+                    tenantHash,
+                  })
+                ) {
+                  throw new OperationConflictError();
+                }
+                const originalAgentId = await directory.lookupRun(
+                  admissionRecord.runId
+                );
+                if (originalAgentId !== null && originalAgentId !== id) {
+                  throw new OperationConflictError();
+                }
+                const originalAgent = originalAgentId
+                  ? await yoloAgent(originalAgentId)
+                  : agent;
+                const original = await originalAgent.getRun(
+                  admissionRecord.runId
+                );
+                if (!original) {
+                  return busyResponse("global_busy", cors);
+                }
+                if (
+                  !matchesLocalRun(original, {
+                    agentId: id,
+                    id: prepared.run.id,
+                    operationId: input.operationId,
+                  }) ||
+                  (await hashOperation(original.agentId, original.task)) !==
+                    requestHash
+                ) {
+                  throw new OperationConflictError();
+                }
+                if (
+                  admissionRecord.state === "terminal" &&
+                  !isTerminal(original.status)
+                ) {
+                  const capability = existingAdmission.getCleanupCapability
+                    ? await existingAdmission.getCleanupCapability(
+                        admissionRecord.runId,
+                        {
+                          agentId: id,
+                          operationId: input.operationId,
+                          requestHash,
+                          runId: admissionRecord.runId,
+                        }
+                      )
+                    : null;
+                  const cleanupError = await cleanupRun(
+                    originalAgent,
+                    original.id,
+                    id,
+                    {
+                      admission: existingAdmission,
+                      admissionCapability: capability ?? undefined,
+                      allowUnowned: true,
+                      stopFirst: true,
+                    }
+                  );
+                  if (cleanupError) {
+                    throw cleanupError;
+                  }
+                  return busyResponse("global_busy", cors);
+                }
+                if (isTerminal(original.status)) {
+                  await registerExistingRunMapping(directory, original, id);
+                  await releaseTerminalAdmission(
+                    directory,
+                    original,
+                    id,
+                    existingAdmission
+                  );
+                } else {
+                  const capability = existingAdmission.getCleanupCapability
+                    ? await existingAdmission.getCleanupCapability(
+                        admissionRecord.runId,
+                        {
+                          agentId: admissionRecord.agentId,
+                          operationId: admissionRecord.operationId,
+                          requestHash: admissionRecord.requestHash,
+                          runId: admissionRecord.runId,
+                        }
+                      )
+                    : null;
+                  const { confirmation, coordinatorConfirmed } =
+                    await finalizePreparedAdmission(
+                      originalAgent,
+                      existingAdmission,
+                      original.id,
+                      admissionRecord.operationId,
+                      admissionRecord.requestHash,
+                      capability
+                    );
+                  if (confirmation && confirmation.kind !== "confirmed") {
+                    const latest = await originalAgent.getRun(original.id);
+                    if (latest && isTerminal(latest.status)) {
+                      await registerExistingRunMapping(directory, latest, id);
+                      await releaseTerminalAdmission(
+                        directory,
+                        latest,
+                        id,
+                        existingAdmission
+                      );
+                      return json(
+                        {
+                          apiVersion: AGENT_RUNNER_API_VERSION,
+                          run: latest,
+                        },
+                        { status: 202 },
+                        cors
+                      );
+                    }
+                    if (
+                      confirmation.kind === "stale_provisional" ||
+                      confirmation.kind === "expired"
+                    ) {
+                      const cleanupError = await cleanupRun(
+                        originalAgent,
+                        original.id,
+                        id,
+                        {
+                          admission: existingAdmission,
+                          admissionCapability:
+                            confirmation.admissionCapability ??
+                            capability ??
+                            undefined,
+                          prepareOwner: confirmation.prepareOwner,
+                          stopFirst: true,
+                        }
+                      );
+                      if (cleanupError) {
+                        throw cleanupError;
+                      }
+                    }
+                    return busyResponse("global_busy", cors);
+                  }
+                  if (!coordinatorConfirmed) {
+                    return await reconcilePreparedAdmissionOutcome(
+                      directory,
+                      originalAgent,
+                      original.id,
+                      admissionRecord.agentId,
+                      existingAdmission,
+                      capability,
+                      undefined,
+                      cors
+                    );
+                  }
+                  const latest = await originalAgent.getRun(original.id);
+                  if (latest && isTerminal(latest.status)) {
+                    await registerExistingRunMapping(directory, latest, id);
+                    await releaseTerminalAdmission(
+                      directory,
+                      latest,
+                      id,
+                      existingAdmission
+                    );
+                    return json(
+                      {
+                        apiVersion: AGENT_RUNNER_API_VERSION,
+                        run: latest,
+                      },
+                      { status: 202 },
+                      cors
+                    );
+                  }
+                }
+                const latest = await originalAgent.getRun(original.id);
+                if (!latest) {
+                  return busyResponse("global_busy", cors);
+                }
+                await registerExistingRunMapping(directory, latest, id);
+                return json(
+                  {
+                    apiVersion: AGENT_RUNNER_API_VERSION,
+                    run: latest,
+                  },
+                  { status: 202 },
+                  cors
+                );
+              }
+              if (prepared.run.status !== "queued") {
+                return busyResponse("global_busy", cors);
+              }
+              runId = prepared.run.id;
+            }
+            if (!dependencies.getAdmission) {
+              await cleanupRun(agent, runId, id, {
+                prepareOwner: prepared.prepareOwner,
+              });
+              throw new Error("Run admission is not configured.");
+            }
+
+            let admission: CloudRunnerAdmission;
+            if (existingAdmission) {
+              admission = existingAdmission;
+            } else {
+              try {
+                admission = await dependencies.getAdmission(environment);
+              } catch (error) {
+                await cleanupRun(agent, runId, id, {
+                  prepareOwner: prepared.prepareOwner,
+                });
+                if (runAdmissionMode === "reject") {
+                  return busyResponse("global_busy", cors);
+                }
+                throw error;
+              }
+            }
+
+            if (
+              prepared.created &&
+              prepared.scheduleFailed &&
+              prepared.prepareOwner &&
+              admission.enqueueProvisionalCleanup
+            ) {
+              try {
+                await admission.enqueueProvisionalCleanup(
+                  id,
+                  runId,
+                  prepared.prepareOwner,
+                  input.operationId,
+                  requestHash
+                );
+              } catch (error) {
+                await cleanupRun(agent, runId, id, {
+                  admission,
+                  prepareOwner: prepared.prepareOwner,
+                  stopFirst: true,
+                });
+                throw error;
+              }
+            }
+
+            let decision: AdmissionDecision;
+            const tenantHash = await tenantAdmissionHash(
+              environment.EDGE_ABUSE_KEY_SECRET,
+              callerTenant
             );
-            await directory.registerRun(started.run.id, id);
-            return json(
-              {
-                apiVersion: AGENT_RUNNER_API_VERSION,
-                run: started.run,
-              },
-              { status: 202 },
-              cors
-            );
+            try {
+              decision = await admission.admit({
+                agentId: id,
+                mode: runAdmissionMode,
+                operationId: input.operationId,
+                prepareOwner: prepared.prepareOwner,
+                requestHash,
+                runId,
+                tenantHash,
+              });
+            } catch (error) {
+              await cleanupRun(agent, runId, id, {
+                admission,
+                prepareOwner: prepared.prepareOwner,
+                stopFirst: true,
+              });
+              if (
+                runAdmissionMode === "reject" &&
+                !isOperationConflict(error)
+              ) {
+                return busyResponse("global_busy", cors);
+              }
+              throw error;
+            }
+
+            if (decision.kind === "refused") {
+              const cleanupError = await cleanupRun(agent, runId, id, {
+                admission,
+                prepareOwner: prepared.prepareOwner,
+                stopFirst: true,
+              });
+              if (cleanupError) {
+                throw cleanupError;
+              }
+              return busyResponse(decision.reason, cors);
+            }
+            if (decision.kind === "duplicate") {
+              let duplicateAdmission: AdmissionRecord | null = null;
+              try {
+                duplicateAdmission = admission.getByOperationId
+                  ? await admission.getByOperationId(input.operationId)
+                  : null;
+              } catch {
+                return busyResponse("global_busy", cors);
+              }
+              if (
+                !duplicateAdmission ||
+                !matchesLocalAdmission(duplicateAdmission, {
+                  agentId: id,
+                  operationId: input.operationId,
+                  requestHash,
+                  runId: decision.runId,
+                  tenantHash,
+                })
+              ) {
+                throw new OperationConflictError();
+              }
+              const originalAgentId = await directory.lookupRun(
+                duplicateAdmission.runId
+              );
+              if (
+                originalAgentId !== null &&
+                originalAgentId !== duplicateAdmission.agentId
+              ) {
+                throw new OperationConflictError();
+              }
+              const originalAgent = originalAgentId
+                ? await yoloAgent(originalAgentId)
+                : agent;
+              const original = await originalAgent.getRun(
+                duplicateAdmission.runId
+              );
+              if (!original) {
+                return busyResponse("global_busy", cors);
+              }
+              if (
+                !matchesLocalRun(original, {
+                  agentId: duplicateAdmission.agentId,
+                  id: duplicateAdmission.runId,
+                  operationId: duplicateAdmission.operationId,
+                }) ||
+                (await hashOperation(original.agentId, original.task)) !==
+                  duplicateAdmission.requestHash
+              ) {
+                throw new OperationConflictError();
+              }
+              if (
+                duplicateAdmission.state === "terminal" &&
+                !isTerminal(original.status)
+              ) {
+                const capability = admission.getCleanupCapability
+                  ? await admission.getCleanupCapability(
+                      duplicateAdmission.runId,
+                      {
+                        agentId: duplicateAdmission.agentId,
+                        operationId: duplicateAdmission.operationId,
+                        requestHash: duplicateAdmission.requestHash,
+                        runId: duplicateAdmission.runId,
+                      }
+                    )
+                  : null;
+                const cleanupError = await cleanupRun(
+                  originalAgent,
+                  original.id,
+                  id,
+                  {
+                    admission,
+                    admissionCapability: capability ?? undefined,
+                    allowUnowned: true,
+                    stopFirst: true,
+                  }
+                );
+                if (cleanupError) {
+                  throw cleanupError;
+                }
+                return busyResponse("global_busy", cors);
+              }
+              if (isTerminal(original.status)) {
+                await registerExistingRunMapping(
+                  directory,
+                  original,
+                  duplicateAdmission.agentId
+                );
+                await releaseTerminalAdmission(
+                  directory,
+                  original,
+                  id,
+                  admission
+                );
+              } else {
+                const capability =
+                  decision.admissionCapability ??
+                  (admission.getCleanupCapability
+                    ? await admission.getCleanupCapability(
+                        duplicateAdmission.runId,
+                        {
+                          agentId: duplicateAdmission.agentId,
+                          operationId: duplicateAdmission.operationId,
+                          requestHash: duplicateAdmission.requestHash,
+                          runId: duplicateAdmission.runId,
+                        }
+                      )
+                    : null);
+                const { confirmation, coordinatorConfirmed } =
+                  await finalizePreparedAdmission(
+                    originalAgent,
+                    admission,
+                    original.id,
+                    duplicateAdmission.operationId,
+                    duplicateAdmission.requestHash,
+                    capability,
+                    undefined
+                  );
+                if (confirmation && confirmation.kind !== "confirmed") {
+                  const latest = await originalAgent.getRun(original.id);
+                  if (latest && isTerminal(latest.status)) {
+                    await registerExistingRunMapping(
+                      directory,
+                      latest,
+                      duplicateAdmission.agentId
+                    );
+                    await releaseTerminalAdmission(
+                      directory,
+                      latest,
+                      id,
+                      admission
+                    );
+                    return json(
+                      {
+                        apiVersion: AGENT_RUNNER_API_VERSION,
+                        run: latest,
+                      },
+                      { status: 202 },
+                      cors
+                    );
+                  }
+                  if (
+                    confirmation.kind === "stale_provisional" ||
+                    confirmation.kind === "expired"
+                  ) {
+                    const cleanupError = await cleanupRun(
+                      originalAgent,
+                      original.id,
+                      id,
+                      {
+                        admission,
+                        admissionCapability:
+                          confirmation.admissionCapability ??
+                          capability ??
+                          undefined,
+                        prepareOwner: confirmation.prepareOwner,
+                        stopFirst: true,
+                      }
+                    );
+                    if (cleanupError) {
+                      throw cleanupError;
+                    }
+                  }
+                  return busyResponse("global_busy", cors);
+                }
+                if (!coordinatorConfirmed) {
+                  return await reconcilePreparedAdmissionOutcome(
+                    directory,
+                    originalAgent,
+                    original.id,
+                    duplicateAdmission.agentId,
+                    admission,
+                    capability,
+                    undefined,
+                    cors
+                  );
+                }
+                const latest = await originalAgent.getRun(original.id);
+                if (latest && isTerminal(latest.status)) {
+                  await registerExistingRunMapping(
+                    directory,
+                    latest,
+                    duplicateAdmission.agentId
+                  );
+                  await releaseTerminalAdmission(
+                    directory,
+                    latest,
+                    id,
+                    admission
+                  );
+                  return json(
+                    {
+                      apiVersion: AGENT_RUNNER_API_VERSION,
+                      run: latest,
+                    },
+                    { status: 202 },
+                    cors
+                  );
+                }
+              }
+              const latest = await originalAgent.getRun(original.id);
+              if (!latest) {
+                return busyResponse("global_busy", cors);
+              }
+              await registerExistingRunMapping(
+                directory,
+                latest,
+                duplicateAdmission.agentId
+              );
+              return json(
+                { apiVersion: AGENT_RUNNER_API_VERSION, run: latest },
+                { status: 202 },
+                cors
+              );
+            }
+            if (decision.kind === "queued" && runAdmissionMode === "reject") {
+              throw new AdmissionUnavailableError(
+                "Reject-mode admission returned queued work."
+              );
+            }
+
+            let admissionCapability: AdmissionCleanupCapability | null =
+              decision.admissionCapability ?? null;
+            let registrationSequence: number | undefined;
+            let agentAdmissionConfirmed = false;
+            let coordinatorAdmissionConfirmed = false;
+            try {
+              if (admission.getCleanupCapability) {
+                admissionCapability = await admission.getCleanupCapability(
+                  runId,
+                  {
+                    agentId: id,
+                    operationId: input.operationId,
+                    requestHash,
+                    runId,
+                  }
+                );
+              }
+              const { agentConfirmed, confirmation, coordinatorConfirmed } =
+                await finalizePreparedAdmission(
+                  agent,
+                  admission,
+                  runId,
+                  input.operationId,
+                  requestHash,
+                  admissionCapability,
+                  prepared.prepareOwner
+                );
+              agentAdmissionConfirmed = agentConfirmed;
+              coordinatorAdmissionConfirmed = coordinatorConfirmed;
+              if (confirmation && confirmation.kind !== "confirmed") {
+                const terminal = await agent.getRun(runId);
+                if (terminal && isTerminal(terminal.status)) {
+                  await releaseTerminalAdmission(
+                    directory,
+                    terminal,
+                    id,
+                    admission
+                  );
+                  return json(
+                    {
+                      apiVersion: AGENT_RUNNER_API_VERSION,
+                      run: terminal,
+                    },
+                    { status: 202 },
+                    cors
+                  );
+                }
+                if (
+                  confirmation.kind === "stale_provisional" ||
+                  confirmation.kind === "expired"
+                ) {
+                  await cleanupRun(agent, runId, id, {
+                    admission,
+                    admissionCapability:
+                      confirmation.admissionCapability ??
+                      admissionCapability ??
+                      undefined,
+                    prepareOwner:
+                      confirmation.prepareOwner ?? prepared.prepareOwner,
+                    stopFirst: true,
+                  });
+                }
+                return busyResponse("global_busy", cors);
+              }
+              if (!coordinatorAdmissionConfirmed) {
+                return await reconcilePreparedAdmissionOutcome(
+                  directory,
+                  agent,
+                  runId,
+                  id,
+                  admission,
+                  admissionCapability,
+                  prepared.prepareOwner,
+                  cors
+                );
+              }
+              const beforeRegistration = await agent.getRun(runId);
+              if (!beforeRegistration) {
+                throw new Error(
+                  "Admitted run disappeared before registration."
+                );
+              }
+              const registered = await directory.registerRun(
+                runId,
+                id,
+                directoryRunStatus(beforeRegistration)
+              );
+              if (!registrationSucceeded(registered)) {
+                throw new Error("Run directory registration was ambiguous.");
+              }
+              registrationSequence = registeredSequence(registered);
+              const admittedRun = await agent.getRun(runId);
+              if (!admittedRun) {
+                throw new Error("Admitted run disappeared after registration.");
+              }
+              if (
+                (await markDirectoryRunStatus(directory, admittedRun, id)) ===
+                false
+              ) {
+                throw new Error("Run directory status update was ambiguous.");
+              }
+              if (isTerminal(admittedRun.status)) {
+                await releaseTerminalAdmission(
+                  directory,
+                  admittedRun,
+                  id,
+                  admission
+                );
+              }
+              return json(
+                {
+                  apiVersion: AGENT_RUNNER_API_VERSION,
+                  run: admittedRun,
+                },
+                { status: 202 },
+                cors
+              );
+            } catch (error) {
+              try {
+                const unregistered = await directory.unregisterRun(
+                  runId,
+                  id,
+                  registrationSequence
+                );
+                if (
+                  unregistered === false &&
+                  directory.enqueueRunMappingCleanup
+                ) {
+                  await directory.enqueueRunMappingCleanup(
+                    runId,
+                    id,
+                    registrationSequence
+                  );
+                }
+              } catch {
+                if (directory.enqueueRunMappingCleanup) {
+                  try {
+                    await directory.enqueueRunMappingCleanup(
+                      runId,
+                      id,
+                      registrationSequence
+                    );
+                  } catch {
+                    // Preserve the original request failure.
+                  }
+                }
+              }
+              let cleanupCapability = admissionCapability;
+              if (admission.getCleanupCapability) {
+                try {
+                  cleanupCapability = await admission.getCleanupCapability(
+                    runId,
+                    {
+                      agentId: id,
+                      operationId: input.operationId,
+                      requestHash,
+                      runId,
+                    }
+                  );
+                } catch {
+                  cleanupCapability = null;
+                }
+              }
+              if (!cleanupCapability && admission.enqueueCleanup) {
+                try {
+                  await admission.enqueueCleanup(id, runId);
+                } catch {
+                  // Preserve the original registration failure.
+                }
+              }
+              if (!agentAdmissionConfirmed || coordinatorAdmissionConfirmed) {
+                await cleanupRun(agent, runId, id, {
+                  admission,
+                  admissionCapability: cleanupCapability ?? undefined,
+                  allowUnowned: true,
+                  prepareOwner: prepared.prepareOwner,
+                  stopFirst: true,
+                });
+              }
+              throw error;
+            }
           }
         }
 

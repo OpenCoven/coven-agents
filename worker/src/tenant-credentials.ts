@@ -63,6 +63,7 @@ export type CredentialTransport = {
    */
   identityToken: string;
   serviceToken: string;
+  signal?: AbortSignal;
 };
 
 export async function fetchTenantCredential(
@@ -85,6 +86,7 @@ export async function fetchTenantCredential(
         "x-service-token": transport.serviceToken,
       },
       method: "POST",
+      signal: transport.signal,
     }
   );
 

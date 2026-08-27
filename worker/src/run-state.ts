@@ -29,9 +29,67 @@ export const MAX_TERMINAL_RUNS_PER_AGENT = 20;
 
 const OUTPUT_TRUNCATED = "\n[output truncated by runner]";
 
+export type AdmissionCleanupCapability = {
+  admissionSequence: number;
+  agentId: string;
+  dispatchToken?: string;
+  operationId: string;
+  requestHash: string;
+  runId: string;
+};
+
+export type AdmissionCleanupGuard = AdmissionCleanupCapability & {
+  queuedOnly?: boolean;
+};
+
+export type PreparedAdmissionConfirmationOutcome =
+  | { kind: "confirmed" }
+  | { kind: "stale" }
+  | { kind: "terminal" };
+
+export type AdmissionConfirmationOutcome =
+  | { kind: "confirmed" }
+  | {
+      admissionCapability?: AdmissionCleanupCapability;
+      kind: "stale_provisional";
+      prepareOwner?: string;
+    }
+  | { kind: "lifecycle_pending" }
+  | { kind: "nonterminal" }
+  | { kind: "terminal" }
+  | {
+      admissionCapability?: AdmissionCleanupCapability;
+      kind: "expired";
+      prepareOwner?: string;
+    };
+
+export type AdmissionDispatchIntent = {
+  admissionSequence?: number;
+  fiberKey: string;
+  phase: "starting" | "fiber_started";
+  dispatchToken?: string;
+};
+
 export type CloudRunRecord = {
+  /**
+   * Admission's fencing token is internal coordination state. It is kept
+   * beside the run so recovered fibers and late callbacks can prove which
+   * dispatch they belong to without exposing it in the public snapshot.
+   */
+  dispatchToken?: string;
   events: RunEvent[];
   operationHash: string;
+  admissionConfirmedAt?: string;
+  admissionCapability?: AdmissionCleanupCapability;
+  pendingAdmission?: {
+    admissionCapability?: AdmissionCleanupCapability;
+    deadlineAt: number;
+    expiryClaim?: string;
+    prepareOwner?: string;
+    scheduleGeneration?: number;
+    scheduleId?: string;
+    scheduleToken?: string;
+  };
   run: RunSnapshot;
 };
 
@@ -75,10 +133,98 @@ export class OperationConflictError extends Error {
 }
 
 export class AlreadyRunningError extends Error {
-  constructor() {
-    super("An agent already has an active run.");
+  constructor(cause?: unknown) {
+    super(
+      "An agent already has an active run.",
+      cause === undefined ? undefined : { cause }
+    );
     this.name = "AlreadyRunningError";
   }
+}
+
+export class AgentBusyError extends AlreadyRunningError {
+  readonly code = "agent_busy";
+  readonly provenNotStarted = true;
+
+  constructor(cause?: unknown) {
+    super(cause);
+    this.name = "AgentBusyError";
+  }
+}
+
+export class InvalidWorkspaceError extends HttpError {
+  readonly provenNotStarted = true;
+
+  constructor() {
+    super(
+      "Cloud agents may only use the /workspace scratch sandbox.",
+      400,
+      "invalid_workspace"
+    );
+    this.name = "HttpError";
+  }
+}
+
+export class DispatchRejectedError extends Error {
+  readonly code = "dispatch_rejected";
+  readonly provenNotStarted = true;
+
+  constructor(cause?: unknown) {
+    super("Cloud run dispatch was rejected.", {
+      ...(cause === undefined ? {} : { cause }),
+    });
+    this.name = "DispatchRejectedError";
+  }
+}
+
+export function isDispatchRejectedError(error: unknown): boolean {
+  if (error instanceof DispatchRejectedError) {
+    return true;
+  }
+  if (error instanceof InvalidWorkspaceError) {
+    return true;
+  }
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const candidate = error as Error & {
+    code?: unknown;
+    provenNotStarted?: unknown;
+  };
+  return (
+    candidate.provenNotStarted === true &&
+    (error.name === "DispatchRejectedError" ||
+      error.name === "InvalidWorkspaceError" ||
+      candidate.code === "invalid_workspace")
+  );
+}
+
+export class AgentDecommissioningError extends Error {
+  readonly code = "agent_decommissioning";
+  readonly retryable = true;
+
+  constructor(
+    message = "Agent decommission is still in progress. Try again later."
+  ) {
+    super(message);
+    this.name = "AgentDecommissioningError";
+  }
+}
+
+export function isAgentBusyError(error: unknown): boolean {
+  if (error instanceof AgentBusyError) {
+    return true;
+  }
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  if (error.name === "AgentBusyError") {
+    return true;
+  }
+  return (
+    error.name === "AlreadyRunningError" &&
+    (error as Error & { code?: unknown }).code === "agent_busy"
+  );
 }
 
 function byteLength(value: string): number {
@@ -263,11 +409,7 @@ export function validateCloudWorkspace(
   ) {
     return "/workspace";
   }
-  throw new HttpError(
-    "Cloud agents may only use the /workspace scratch sandbox.",
-    400,
-    "invalid_workspace"
-  );
+  throw new InvalidWorkspaceError();
 }
 
 export function createQueuedRun(
@@ -601,15 +743,18 @@ export function cloudFiberKey(runId: string): string {
   return `run:${runId}`;
 }
 
-export function planCloudRunStart(input: {
-  agentId: string;
-  createdAt: string;
-  operationHash: string;
-  operationId: string;
-  records: CloudRunRecord[];
-  runId: string;
-  task: string;
-}): CloudRunStartPlan {
+export function planCloudRunStart(
+  input: {
+    agentId: string;
+    createdAt: string;
+    operationHash: string;
+    operationId: string;
+    records: CloudRunRecord[];
+    runId: string;
+    task: string;
+  },
+  options: { allowQueued?: boolean } = {}
+): CloudRunStartPlan {
   const existing = input.records.find(
     (candidate) => candidate.run.operationId === input.operationId
   );
@@ -623,8 +768,8 @@ export function planCloudRunStart(input: {
       record: existing,
     };
   }
-  const active = input.records.find(
-    (candidate) => !isTerminal(candidate.run.status)
+  const active = input.records.find((candidate) =>
+    options.allowQueued ? false : !isTerminal(candidate.run.status)
   );
   if (active) {
     return { kind: "already_running", record: active };

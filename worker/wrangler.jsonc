@@ -26,7 +26,12 @@
     }
   ],
   "vars": {
-    "ALLOWED_ORIGIN": "https://agents.opencoven.ai"
+    "ALLOWED_ORIGIN": "https://agents.opencoven.ai",
+    "RUN_ADMISSION_CONSECUTIVE_MAX": "2",
+    "RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX": "25",
+    "RUN_ADMISSION_MODE": "queue",
+    "RUN_ADMISSION_TENANT_ACTIVE_MAX": "2",
+    "RUN_ADMISSION_TENANT_QUEUE_MAX": "10"
   },
   "containers": [
     {
@@ -52,6 +57,10 @@
       {
         "class_name": "YoloAgent",
         "name": "YoloAgent"
+      },
+      {
+        "class_name": "RunAdmission",
+        "name": "RunAdmission"
       }
     ]
   },
@@ -59,6 +68,10 @@
     {
       "new_sqlite_classes": ["Sandbox", "AgentDirectory", "YoloAgent"],
       "tag": "v1"
+    },
+    {
+      "new_sqlite_classes": ["RunAdmission"],
+      "tag": "v2"
     }
   ]
 }

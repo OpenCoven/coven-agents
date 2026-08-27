@@ -351,12 +351,23 @@ const WARM_RETRY_DELAY_MS = 30_000;
  *
  * Never throws: warming is an optimization and a failed optimization must
  * degrade to today's behaviour, not to a failed anything.
+ *
+ * `ownsSandbox` is the fence between warming and running. A warm-up outlives
+ * the request that started it, so by the time its retry comes due the same
+ * sandbox may belong to a real run — and a warm-up that destroys a container
+ * mid-mission is worse than one that never ran. Checked before each attempt
+ * and again before the retry sleep pays out.
  */
 export async function warmSandbox(
   sandbox: SandboxLike,
   runtime: string,
   wait: (ms: number) => Promise<void> = (ms) =>
-    new Promise((resolve) => setTimeout(resolve, ms))
+    new Promise((resolve) => setTimeout(resolve, ms)),
+  options: {
+    destroy?: SandboxDestroy;
+    ownsSandbox?: () => boolean;
+    signal?: AbortSignal;
+  } = {}
 ): Promise<{ ready: boolean; version: string | null }> {
   const spec = harnessSpec(runtime);
   if (!spec) {
@@ -364,11 +375,49 @@ export async function warmSandbox(
   }
 
   const attempt = async () => {
+    if (options.signal?.aborted || options.ownsSandbox?.() === false) {
+      return { installed: false, retry: false, version: null };
+    }
     try {
-      return await probeInstalled(sandbox, spec);
-    } catch {
+      const result = await probeInstalled(sandbox, spec, {
+        destroySandbox: options.destroy,
+        signal: options.signal,
+      });
+      return { ...result, retry: !result.installed };
+    } catch (error) {
+      if (
+        error instanceof HarnessError &&
+        (error.code === "harness_cancelled" ||
+          error.code === "sandbox_cleanup_failed")
+      ) {
+        return { installed: false, retry: false, version: null };
+      }
+      if (error instanceof HarnessError && error.code === "harness_timeout") {
+        /**
+         * A warm-up that timed out has a container that is probably sick, and
+         * unlike a run there is nobody to hand it to. Reap it before the
+         * retry so attempt two lands on a fresh placement rather than the
+         * same wedged one — but only if reaping actually succeeds, because a
+         * retry against a container we failed to destroy is the same attempt
+         * twice.
+         */
+        const destroy = options.destroy ?? sandbox.destroy;
+        if (!destroy) {
+          return { installed: false, retry: false, version: null };
+        }
+        try {
+          if (options.destroy) {
+            await options.destroy();
+          } else {
+            await sandbox.destroy?.();
+          }
+        } catch {
+          return { installed: false, retry: false, version: null };
+        }
+        return { installed: false, retry: true, version: null };
+      }
       // A warm-up timeout is not a run timeout — nobody is waiting on it.
-      return { installed: false, version: null };
+      return { installed: false, retry: true, version: null };
     }
   };
 
@@ -376,7 +425,40 @@ export async function warmSandbox(
   if (first.installed) {
     return { ready: true, version: first.version };
   }
-  await wait(WARM_RETRY_DELAY_MS);
+  if (!first.retry) {
+    return { ready: false, version: null };
+  }
+  if (options.signal?.aborted) {
+    return { ready: false, version: null };
+  }
+  /**
+   * The retry sleep is the longest window in the warm path, so it races the
+   * abort rather than blocking it: waiting out a 30s pause to then discover
+   * the run was cancelled holds the container for no reason.
+   */
+  const canRetry = await new Promise<boolean>((resolve) => {
+    if (options.signal?.aborted || options.ownsSandbox?.() === false) {
+      resolve(false);
+      return;
+    }
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      options.signal?.removeEventListener("abort", onAbort);
+      resolve(value);
+    };
+    const onAbort = () => finish(false);
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    wait(WARM_RETRY_DELAY_MS)
+      .then(() => finish(true))
+      .catch(() => finish(false));
+  });
+  if (!canRetry) {
+    return { ready: false, version: null };
+  }
   const second = await attempt();
   return { ready: second.installed, version: second.version };
 }
