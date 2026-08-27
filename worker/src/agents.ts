@@ -80,6 +80,10 @@ type RunRegistration = {
   status: RunRegistrationStatus;
 };
 
+export type RunRegistrationResult =
+  | { kind: "conflict" }
+  | { kind: "registered"; sequence: number };
+
 type PendingUnregister = {
   agentId: string;
   expectedSequence?: number;
@@ -371,72 +375,19 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
     runId: string,
     agentId: string,
     status: Exclude<RunRegistrationStatus, "unknown"> = "active"
-  ): boolean {
+  ): RunRegistrationResult {
     const mappings = this.migrateRunMappings();
     const { runs } = mappings;
-    if (Object.hasOwn(runs, runId)) {
-      if (runs[runId] !== agentId) {
-        return false;
-      }
-      const pending = this.state.pendingRunStatuses?.[runId];
-      const registration = mappings.registrations[runId];
-      const effectiveStatus =
-        registration?.status !== "terminal" &&
-        pending?.agentId === agentId &&
-        pending.status !== "unknown"
-          ? pending.status
-          : status;
-      const registrations = {
-        ...mappings.registrations,
-        [runId]: {
-          agentId,
-          sequence: mappings.nextSequence,
-          status: effectiveStatus,
-        },
-      };
-      const pendingRunStatuses = {
-        ...(this.state.pendingRunStatuses ?? {}),
-      };
-      delete pendingRunStatuses[runId];
-      const pendingUnregisters = {
-        ...(this.state.pendingUnregisters ?? {}),
-      };
-      delete pendingUnregisters[runId];
-      const pruned = this.pruneRunMappings(runs, registrations);
-      this.setState({
-        ...this.state,
-        nextRunRegistrationSequence: mappings.nextSequence + 1,
-        pendingRunStatuses,
-        pendingUnregisters,
-        runRegistrations: pruned.registrations,
-        runs: pruned.runs,
-      });
-      return true;
-    }
     const legacy = this.readLegacyRun(runId);
-    if (legacy) {
-      if (legacy.agentId !== agentId) {
-        return false;
-      }
-      const pending = this.state.pendingRunStatuses?.[runId];
-      const effectiveStatus =
-        pending?.agentId === agentId && pending.status !== "unknown"
-          ? pending.status
-          : status;
-      const registrations = {
-        ...mappings.registrations,
-        [runId]: {
-          agentId,
-          sequence: mappings.nextSequence,
-          status: effectiveStatus,
-        },
-      };
-      const projectedRuns = { ...mappings.runs, [runId]: agentId };
-      const pruned = this.pruneRunMappings(projectedRuns, registrations);
-      this.directorySql(
-        "DELETE FROM agent_directory_legacy_runs WHERE run_id = ? AND agent_id = ?",
-        [runId, agentId]
-      );
+    const current = mappings.registrations[runId] ?? legacy;
+    const currentAgentId = runs[runId] ?? current?.agentId;
+    if (currentAgentId && currentAgentId !== agentId) {
+      return { kind: "conflict" };
+    }
+
+    // A terminal mapping is a durable tombstone. A stale registration retry
+    // may observe it, but must not turn it back into active or queued work.
+    if (current?.status === "terminal") {
       const pendingRunStatuses = {
         ...(this.state.pendingRunStatuses ?? {}),
       };
@@ -445,16 +396,16 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
         ...(this.state.pendingUnregisters ?? {}),
       };
       delete pendingUnregisters[runId];
-      this.setState({
-        ...this.state,
-        nextRunRegistrationSequence: mappings.nextSequence + 1,
-        pendingRunStatuses,
-        pendingUnregisters,
-        runRegistrations: pruned.registrations,
-        runs: pruned.runs,
-      });
-      return true;
+      if (Object.hasOwn(runs, runId)) {
+        this.setState({
+          ...this.state,
+          pendingRunStatuses,
+          pendingUnregisters,
+        });
+      }
+      return { kind: "registered", sequence: current.sequence };
     }
+
     const pending = this.state.pendingRunStatuses?.[runId];
     const effectiveStatus =
       pending?.agentId === agentId && pending.status !== "unknown"
@@ -477,6 +428,12 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
     };
     delete pendingUnregisters[runId];
     const pruned = this.pruneRunMappings(runs, registrations);
+    if (legacy) {
+      this.directorySql(
+        "DELETE FROM agent_directory_legacy_runs WHERE run_id = ? AND agent_id = ?",
+        [runId, agentId]
+      );
+    }
     this.setState({
       ...this.state,
       nextRunRegistrationSequence: mappings.nextSequence + 1,
@@ -485,7 +442,7 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
       runRegistrations: pruned.registrations,
       runs: { ...pruned.runs, [runId]: agentId },
     });
-    return true;
+    return { kind: "registered", sequence: mappings.nextSequence };
   }
 
   unregisterRun(
@@ -639,18 +596,6 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
       return runs[runId] ?? null;
     }
     return this.readLegacyRun(runId)?.agentId ?? null;
-  }
-
-  getRunRegistrationSequence(
-    runId: string,
-    agentId: string
-  ): number | undefined {
-    const mappings = this.migrateRunMappings();
-    const registration =
-      mappings.registrations[runId] ?? this.readLegacyRun(runId) ?? undefined;
-    return registration?.agentId === agentId
-      ? registration.sequence
-      : undefined;
   }
 
   enqueueRunMappingCleanup(
@@ -3727,7 +3672,6 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     reason = "Run cancelled by operator request.",
     guard?: AdmissionCleanupGuard
   ): Promise<RunSnapshot | null> {
-    const definition = this.requireDefinition();
     const record = this.state.runs.find(
       (candidate) => candidate.run.id === runId
     );
@@ -3778,6 +3722,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       }
     }
 
+    const definition = this.requireDefinition();
     if (this.state.sandbox?.cleanup) {
       if (!(await this.repairPendingSandboxCleanup(definition))) {
         throw new Error("Sandbox cleanup is still unavailable.");

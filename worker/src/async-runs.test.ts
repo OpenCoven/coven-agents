@@ -643,6 +643,24 @@ test("legacy state without decommission fields can still be decommissioned safel
   assert.equal(state.lifecycle.status, "decommissioned");
 });
 
+test("stopping an absent run does not require a decommissioned definition", async () => {
+  const yolo = new YoloAgent(undefined as never, {} as never);
+  const state = Reflect.get(yolo, "state") as Record<string, unknown> & {
+    lifecycle: { generation: number; status: string };
+  };
+  yolo.setState({
+    ...state,
+    definition: null,
+    lifecycle: {
+      generation: state.lifecycle.generation + 1,
+      status: "decommissioned",
+    },
+    runs: [],
+  } as never);
+
+  assert.equal(await yolo.stop("missing-after-decommission"), null);
+});
+
 test("admission accepts a run and dispatches one fiber", async () => {
   const yolo = agent();
 
@@ -3536,7 +3554,10 @@ function directory(): AgentDirectory {
 
 test("a registered run resolves back to its agent", () => {
   const index = directory();
-  index.registerRun(OP_A, AGENT_ID);
+  assert.deepEqual(index.registerRun(OP_A, AGENT_ID), {
+    kind: "registered",
+    sequence: 1,
+  });
 
   assert.equal(index.lookupRun(OP_A), AGENT_ID);
   assert.equal(index.lookupRun(OP_B), null);
@@ -3571,14 +3592,20 @@ test("unregistering a run is ownership guarded and idempotent", () => {
 
 test("a stale pending unregister cannot delete a newer registration", () => {
   const index = directory();
-  index.registerRun(OP_A, AGENT_ID);
-  const firstSequence = index.getRunRegistrationSequence(OP_A, AGENT_ID);
-  assert.ok(firstSequence);
+  const first = index.registerRun(OP_A, AGENT_ID);
+  assert.equal(first.kind, "registered");
+  if (first.kind !== "registered") {
+    return;
+  }
+  const firstSequence = first.sequence;
 
   index.enqueueRunMappingCleanup(OP_A, AGENT_ID, firstSequence);
-  index.registerRun(OP_A, AGENT_ID);
-  const secondSequence = index.getRunRegistrationSequence(OP_A, AGENT_ID);
-  assert.ok(secondSequence);
+  const second = index.registerRun(OP_A, AGENT_ID);
+  assert.equal(second.kind, "registered");
+  if (second.kind !== "registered") {
+    return;
+  }
+  const secondSequence = second.sequence;
   assert.notEqual(secondSequence, firstSequence);
 
   index.enqueueRunMappingCleanup(OP_A, AGENT_ID, firstSequence);
@@ -3587,6 +3614,30 @@ test("a stale pending unregister cannot delete a newer registration", () => {
   assert.equal(index.lookupRun(OP_A), AGENT_ID);
   assert.equal(index.unregisterRun(OP_A, AGENT_ID, firstSequence), false);
   assert.equal(index.unregisterRun(OP_A, AGENT_ID, secondSequence), true);
+});
+
+test("a stale re-registration cannot downgrade terminal run mappings", () => {
+  const index = directory();
+  const terminal = index.registerRun(OP_A, AGENT_ID, "terminal");
+  assert.deepEqual(terminal, { kind: "registered", sequence: 1 });
+
+  assert.deepEqual(index.registerRun(OP_A, AGENT_ID, "active"), {
+    kind: "registered",
+    sequence: 1,
+  });
+  assert.deepEqual(index.registerRun(OP_A, AGENT_ID, "queued"), {
+    kind: "registered",
+    sequence: 1,
+  });
+
+  const state = Reflect.get(index, "state") as {
+    runRegistrations?: Record<string, { sequence: number; status: string }>;
+  };
+  assert.deepEqual(state.runRegistrations?.[OP_A], {
+    agentId: AGENT_ID,
+    sequence: 1,
+    status: "terminal",
+  });
 });
 
 test("removing an agent drops its runs from the index", () => {
@@ -3672,7 +3723,10 @@ test("terminal status received before registration is applied to the mapping", (
     index.markRunStatus("pending-terminal", AGENT_ID, "terminal"),
     true
   );
-  assert.equal(index.registerRun("pending-terminal", AGENT_ID, "active"), true);
+  assert.deepEqual(index.registerRun("pending-terminal", AGENT_ID, "active"), {
+    kind: "registered",
+    sequence: 1,
+  });
 
   const state = Reflect.get(index, "state") as {
     runRegistrations?: Record<string, { status: string }>;

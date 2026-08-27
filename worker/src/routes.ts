@@ -23,6 +23,7 @@ import {
   admissionMode,
   tenantAdmissionHash,
 } from "./admission.js";
+import type { RunRegistrationResult } from "./agents.js";
 import {
   corsHeaders,
   errorEnvelope,
@@ -95,16 +96,12 @@ export type CloudRunnerDirectory = {
     runId: string,
     agentId: string,
     status?: "active" | "queued" | "terminal"
-  ) => Awaitable<boolean>;
+  ) => Awaitable<RunRegistrationResult | boolean>;
   unregisterRun: (
     runId: string,
     agentId: string,
     expectedSequence?: number
   ) => Awaitable<boolean | undefined>;
-  getRunRegistrationSequence?: (
-    runId: string,
-    agentId: string
-  ) => Awaitable<number | undefined>;
   markRunStatus?: (
     runId: string,
     agentId: string,
@@ -515,6 +512,23 @@ async function compensateDirectoryRunMapping(
   }
 }
 
+function registeredSequence(
+  result: RunRegistrationResult | boolean
+): number | undefined {
+  return typeof result === "object" && result.kind === "registered"
+    ? result.sequence
+    : undefined;
+}
+
+function registrationSucceeded(
+  result: RunRegistrationResult | boolean
+): boolean {
+  return (
+    result === true ||
+    (typeof result === "object" && result.kind === "registered")
+  );
+}
+
 async function registerExistingRunMapping(
   directory: CloudRunnerDirectory,
   run: RunSnapshot,
@@ -527,12 +541,10 @@ async function registerExistingRunMapping(
       agentId,
       directoryRunStatus(run)
     );
-    if (registered !== true) {
+    if (!registrationSucceeded(registered)) {
       throw new Error("Run directory registration was ambiguous.");
     }
-    expectedSequence = directory.getRunRegistrationSequence
-      ? await directory.getRunRegistrationSequence(run.id, agentId)
-      : undefined;
+    expectedSequence = registeredSequence(registered);
     if ((await markDirectoryRunStatus(directory, run, agentId)) === false) {
       throw new Error("Run directory status update was ambiguous.");
     }
@@ -1782,17 +1794,20 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 id,
                 directoryRunStatus(beforeRegistration)
               );
-              if (registered !== true) {
+              if (!registrationSucceeded(registered)) {
                 throw new Error("Run directory registration was ambiguous.");
               }
-              registrationSequence = directory.getRunRegistrationSequence
-                ? await directory.getRunRegistrationSequence(runId, id)
-                : undefined;
+              registrationSequence = registeredSequence(registered);
               const admittedRun = await agent.getRun(runId);
               if (!admittedRun) {
                 throw new Error("Admitted run disappeared after registration.");
               }
-              await markDirectoryRunStatus(directory, admittedRun, id);
+              if (
+                (await markDirectoryRunStatus(directory, admittedRun, id)) ===
+                false
+              ) {
+                throw new Error("Run directory status update was ambiguous.");
+              }
               if (isTerminal(admittedRun.status)) {
                 await releaseTerminalAdmission(
                   directory,

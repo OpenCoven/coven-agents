@@ -65,6 +65,7 @@ const MAX_ALARM_REPAIR_FAILURES = 3;
 const DISPATCH_LEASE_MS = 60 * 1000;
 const DEFAULT_TERMINAL_RETENTION = MAX_TERMINAL_RUNS_PER_AGENT;
 const MAX_CLEANUP_TASKS_PER_ALARM = 50;
+export const MAX_GLOBAL_ADMISSION_ENTRIES = 1024;
 
 type SchedulerState = {
   consecutiveDispatches: number;
@@ -357,8 +358,11 @@ export class AdmissionQueue {
           : index + 1;
       return { ...cloneRecord(record), sequence };
     });
-    const firstAvailableSequence =
-      Math.max(0, ...this.queueRecords.map((record) => record.sequence)) + 1;
+    let highestSequence = 0;
+    for (const record of this.queueRecords) {
+      highestSequence = Math.max(highestSequence, record.sequence);
+    }
+    const firstAvailableSequence = highestSequence + 1;
     this.nextSequence = Math.max(
       firstAvailableSequence,
       options.nextSequence ?? firstAvailableSequence
@@ -416,6 +420,9 @@ export class AdmissionQueue {
         runId: existing.runId,
         state: existing.state,
       };
+    }
+    if (this.queueRecords.length >= MAX_GLOBAL_ADMISSION_ENTRIES) {
+      return { kind: "refused", reason: "global_busy" };
     }
 
     if (
@@ -941,8 +948,40 @@ export class RunAdmission extends DurableObject<Env> {
           record: null,
         };
       }
+      const existingRun = this.findStoredByRunId(input.runId);
+      if (existingRun) {
+        if (
+          existingRun.operationId !== input.operationId ||
+          existingRun.requestHash !== input.requestHash
+        ) {
+          throw new OperationConflictError();
+        }
+        const decision = {
+          kind: "duplicate",
+          runId: existingRun.runId,
+          state: existingRun.state,
+        } as AdmissionDecision;
+        return {
+          decision: decisionWithCleanupCapability(
+            decision,
+            cleanupCapability(existingRun),
+            input.mode !== undefined
+          ),
+          record: null,
+        };
+      }
+      this.pruneTerminalRecords(1);
+      if (!this.hasGlobalRetentionCapacity()) {
+        return {
+          decision: {
+            kind: "refused",
+            reason: "global_busy",
+          } as AdmissionDecision,
+          record: null,
+        };
+      }
       const storedRecords = this.readStoredRecords();
-      const nextSequence = this.readNextSequence(storedRecords);
+      const nextSequence = this.readNextSequence();
       if (
         input.mode === "reject" &&
         storedRecords.some(
@@ -1499,11 +1538,7 @@ export class RunAdmission extends DurableObject<Env> {
   private async ensureAlarm(options: {
     throwOnFailure: boolean;
   }): Promise<boolean> {
-    const records = this.readStoredRecords();
-    const hasWork =
-      records.some(
-        (record) => record.state === "queued" || record.state === "active"
-      ) || this.hasCleanupTasks();
+    const hasWork = this.hasLiveRecords() || this.hasCleanupTasks();
     if (!hasWork) {
       this.writeMetaValue(NEXT_WAKE_META_KEY, "");
       try {
@@ -1516,6 +1551,7 @@ export class RunAdmission extends DurableObject<Env> {
     }
 
     const now = Date.now();
+    const records = this.readStoredRecords();
     const next = this.nextWakeAt(records, now);
     // The durable deadline is written before touching the platform alarm. A
     // later RPC can therefore repair a missing alarm without relying on an
@@ -1598,12 +1634,7 @@ export class RunAdmission extends DurableObject<Env> {
   }
 
   private hasOutstandingCoordinatedState(): boolean {
-    const records = this.readStoredRecords();
-    return (
-      records.some(
-        (record) => record.state === "queued" || record.state === "active"
-      ) || this.hasCleanupTasks()
-    );
+    return this.hasLiveRecords() || this.hasCleanupTasks();
   }
 
   private async failClosedQueuedAdmissions(): Promise<void> {
@@ -1749,6 +1780,28 @@ export class RunAdmission extends DurableObject<Env> {
       )
       .toArray();
     return (rows[0]?.count ?? 0) > 0;
+  }
+
+  private hasLiveRecords(): boolean {
+    const rows = this.ctx.storage.sql
+      .exec<{ found: number }>(
+        "SELECT 1 AS found FROM admission_records WHERE state IN ('queued', 'active') LIMIT 1"
+      )
+      .toArray();
+    return rows.length > 0;
+  }
+
+  private hasGlobalRetentionCapacity(): boolean {
+    const rows = this.ctx.storage.sql
+      .exec<{ count: number }>(
+        `
+          SELECT
+            (SELECT COUNT(*) FROM admission_records) +
+            (SELECT COUNT(*) FROM admission_cleanup_tasks) AS count
+        `
+      )
+      .toArray();
+    return (rows[0]?.count ?? 0) < MAX_GLOBAL_ADMISSION_ENTRIES;
   }
 
   private nextCleanupAt(): number | null {
@@ -2174,6 +2227,8 @@ export class RunAdmission extends DurableObject<Env> {
           dispatch_lease_until = NULL,
           dispatch_token = NULL,
           terminalized_at = NULL
+        WHERE admission_records.state <> 'terminal'
+           OR excluded.state = 'terminal'
       `,
       record.agentId,
       record.enqueuedAt,
@@ -2264,7 +2319,7 @@ export class RunAdmission extends DurableObject<Env> {
     );
   }
 
-  private pruneTerminalRecords(): void {
+  private pruneTerminalRecords(reservedEntries = 0): void {
     const retention = Math.min(
       terminalRetention(this.env),
       MAX_TERMINAL_RUNS_PER_AGENT
@@ -2297,6 +2352,64 @@ export class RunAdmission extends DurableObject<Env> {
           )
       `,
       retention
+    );
+
+    const recordRows = this.ctx.storage.sql
+      .exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM admission_records"
+      )
+      .toArray();
+    const removableRows = this.ctx.storage.sql
+      .exec<{ count: number }>(
+        `
+          SELECT COUNT(*) AS count
+          FROM admission_records
+          WHERE state = 'terminal'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM admission_cleanup_tasks AS cleanup
+              WHERE cleanup.run_id = admission_records.run_id
+                AND cleanup.admission_sequence = admission_records.queue_sequence
+            )
+        `
+      )
+      .toArray();
+    const taskRows = this.ctx.storage.sql
+      .exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM admission_cleanup_tasks"
+      )
+      .toArray();
+    const ceiling = MAX_GLOBAL_ADMISSION_ENTRIES - reservedEntries;
+    const excess = Math.max(
+      0,
+      Math.min(
+        removableRows[0]?.count ?? 0,
+        (recordRows[0]?.count ?? 0) + (taskRows[0]?.count ?? 0) - ceiling
+      )
+    );
+    if (excess === 0) {
+      return;
+    }
+    this.ctx.storage.sql.exec(
+      `
+        DELETE FROM admission_records
+        WHERE state = 'terminal'
+          AND run_id IN (
+            SELECT run_id
+            FROM admission_records
+            WHERE state = 'terminal'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM admission_cleanup_tasks AS cleanup
+                WHERE cleanup.run_id = admission_records.run_id
+                  AND cleanup.admission_sequence =
+                    admission_records.queue_sequence
+              )
+            ORDER BY COALESCE(terminalized_at, enqueued_at), queue_sequence
+            LIMIT ?
+          )
+      `,
+      excess
     );
   }
 
@@ -2389,10 +2502,14 @@ export class RunAdmission extends DurableObject<Env> {
     );
   }
 
-  private readNextSequence(records: readonly StoredAdmissionRecord[]): number {
+  private readNextSequence(): number {
     const persisted = Number(this.readMetaValue(NEXT_SEQUENCE_META_KEY) ?? "1");
-    const highest =
-      Math.max(0, ...records.map((record) => record.sequence)) + 1;
+    const rows = this.ctx.storage.sql
+      .exec<{ max_sequence: number | null }>(
+        "SELECT MAX(queue_sequence) AS max_sequence FROM admission_records"
+      )
+      .toArray();
+    const highest = (rows[0]?.max_sequence ?? 0) + 1;
     if (!Number.isSafeInteger(persisted) || persisted < 1) {
       throw new AdmissionConfigurationError(
         "Run admission sequence storage is invalid."

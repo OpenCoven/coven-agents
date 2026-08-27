@@ -14,6 +14,7 @@ import {
   AdmissionUnavailableError,
   admissionLimits,
   admissionMode,
+  MAX_GLOBAL_ADMISSION_ENTRIES,
   RunAdmission,
   tenantAdmissionHash,
 } from "./admission";
@@ -334,6 +335,146 @@ test("cleanup without an admission row does not create a sequence-zero task", as
   );
 });
 
+test("admission fails closed at the global retained-entry ceiling", async () => {
+  const harness = runAdmissionHarness(() => ({
+    getRun: () => null,
+    startAdmitted: () => Promise.resolve(false),
+    stop: () => Promise.resolve(null),
+  }));
+  await harness.admission.getRecord("initialize");
+
+  const protectedRecords = Math.ceil(MAX_GLOBAL_ADMISSION_ENTRIES / 2);
+  for (let index = 0; index < protectedRecords; index += 1) {
+    const record = {
+      ...request(index + 1, `tenant-${index}`),
+      enqueuedAt: new Date(index + 1).toISOString(),
+      state: "terminal" as const,
+    };
+    seedAdmissionRecord(harness, record, index + 1);
+    harness.sql.exec(
+      "INSERT INTO admission_cleanup_tasks (agent_id, run_id, admission_sequence, dispatch_token, attempts, next_attempt_at) VALUES (?, ?, ?, ?, ?, ?)",
+      record.agentId,
+      record.runId,
+      index + 1,
+      null,
+      0,
+      Date.now() + 60_000
+    );
+  }
+
+  assert.deepEqual(await harness.admission.admit(request(99_999)), {
+    kind: "refused",
+    reason: "global_busy",
+  });
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_records"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    protectedRecords
+  );
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_cleanup_tasks"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    protectedRecords
+  );
+});
+
+test("admission prunes unprotected terminal records before enforcing the ceiling", async () => {
+  const harness = runAdmissionHarness(() => ({
+    getRun: () => null,
+    startAdmitted: () => Promise.resolve(false),
+    stop: () => Promise.resolve(null),
+  }));
+  await harness.admission.getRecord("initialize");
+
+  for (let index = 0; index < MAX_GLOBAL_ADMISSION_ENTRIES; index += 1) {
+    seedAdmissionRecord(
+      harness,
+      {
+        ...request(index + 1, `tenant-${index}`),
+        enqueuedAt: new Date(index + 1).toISOString(),
+        state: "terminal" as const,
+      },
+      index + 1
+    );
+  }
+
+  assert.deepEqual(await harness.admission.admit(request(99_998)), {
+    kind: "active",
+    runId: "run-99998",
+  });
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_records"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    MAX_GLOBAL_ADMISSION_ENTRIES
+  );
+});
+
+test("cleanup clears an admission task after its agent was decommissioned", async () => {
+  const yolo = new YoloAgent(undefined as never, {} as never);
+  const state = Reflect.get(yolo, "state") as Record<string, unknown> & {
+    lifecycle: { generation: number; status: string };
+  };
+  yolo.setState({
+    ...state,
+    definition: null,
+    lifecycle: {
+      generation: state.lifecycle.generation + 1,
+      status: "decommissioned",
+    },
+    runs: [],
+  } as never);
+  const harness = runAdmissionHarness(() => ({
+    getRun: () => null,
+    startAdmitted: () => Promise.resolve(false),
+    stop: (runId, dispatchToken, reason, guard) =>
+      yolo.stop(runId, dispatchToken, reason, guard),
+  }));
+  await harness.admission.getRecord("initialize");
+  const record = activeRecord(100_000);
+  seedAdmissionRecord(harness, { ...record, state: "terminal" }, 1);
+  harness.sql.exec(
+    "INSERT INTO admission_cleanup_tasks (agent_id, run_id, admission_sequence, dispatch_token, attempts, next_attempt_at) VALUES (?, ?, ?, ?, ?, ?)",
+    record.agentId,
+    record.runId,
+    1,
+    null,
+    0,
+    Date.now()
+  );
+
+  await harness.admission.alarm();
+
+  assert.equal(
+    (
+      harness.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM admission_cleanup_tasks"
+        )
+        .toArray() as { count: number }[]
+    )[0]?.count,
+    0
+  );
+  assert.equal(
+    (await harness.admission.getRecord(record.runId))?.state,
+    "terminal"
+  );
+});
+
 test("async admit refuses a failed immediate dispatch when the queue has no slot", async () => {
   const operation = request(22);
   const queue = new AdmissionQueue({
@@ -401,6 +542,22 @@ test("deployment active ceiling refuses new work", async () => {
   });
 
   assert.deepEqual(await queue.admit(request(99, TENANT_B)), {
+    kind: "refused",
+    reason: "global_busy",
+  });
+});
+
+test("large queue input does not use a spread-based sequence maximum", () => {
+  const queue = new AdmissionQueue({
+    records: Array.from({ length: 100_000 }, (_unused, index) => ({
+      ...request(index + 1, `tenant-${index}`),
+      enqueuedAt: new Date(index).toISOString(),
+      sequence: index + 1,
+      state: "terminal" as const,
+    })),
+  });
+
+  assert.deepEqual(queue.admitSynchronously(request(100_001)), {
     kind: "refused",
     reason: "global_busy",
   });
@@ -542,6 +699,36 @@ test("duplicate operation ids return the original queued or active record", asyn
       operationId: "operation-active",
     }),
     { kind: "duplicate", runId: "run-4", state: "active" }
+  );
+});
+
+test("a reused run id cannot downgrade a terminal admission record", async () => {
+  const harness = runAdmissionHarness(() => ({
+    getRun: () => null,
+    startAdmitted: () => Promise.resolve(false),
+    stop: () => Promise.resolve(null),
+  }));
+  await harness.admission.getRecord("initialize");
+  const terminal = {
+    ...request(200),
+    enqueuedAt: new Date().toISOString(),
+    state: "terminal" as const,
+  };
+  seedAdmissionRecord(harness, terminal, 7);
+
+  await assert.rejects(
+    () =>
+      harness.admission.admit({
+        ...request(201),
+        operationId: "new-operation-for-terminal-run",
+        requestHash: "new-request-for-terminal-run",
+        runId: terminal.runId,
+      }),
+    OperationConflictError
+  );
+  assert.equal(
+    (await harness.admission.getRecord(terminal.runId))?.state,
+    "terminal"
   );
 });
 
