@@ -396,13 +396,11 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
         ...(this.state.pendingUnregisters ?? {}),
       };
       delete pendingUnregisters[runId];
-      if (Object.hasOwn(runs, runId)) {
-        this.setState({
-          ...this.state,
-          pendingRunStatuses,
-          pendingUnregisters,
-        });
-      }
+      this.setState({
+        ...this.state,
+        pendingRunStatuses,
+        pendingUnregisters,
+      });
       return { kind: "registered", sequence: current.sequence };
     }
 
