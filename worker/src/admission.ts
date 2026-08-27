@@ -6,6 +6,7 @@ import {
   isTerminal,
   MAX_TERMINAL_RUNS_PER_AGENT,
   OperationConflictError,
+  type PreparedAdmissionConfirmationOutcome,
 } from "./run-state";
 
 export type AdmissionRecord = {
@@ -1363,10 +1364,10 @@ export class RunAdmission extends DurableObject<Env> {
     runId: string,
     prepareOwner: string,
     capability: AdmissionCleanupCapability
-  ): Promise<boolean> {
+  ): Promise<PreparedAdmissionConfirmationOutcome> {
     await this.initialized;
     if (!prepareOwner || !capability) {
-      return false;
+      return { kind: "stale" };
     }
     return this.ctx.storage.transactionSync(() => {
       const current = this.findStoredByRunId(runId);
@@ -1378,10 +1379,15 @@ export class RunAdmission extends DurableObject<Env> {
           operationId: capability.operationId,
           requestHash: capability.requestHash,
           runId,
-        }) ||
-        current.dispatchToken !== capability.dispatchToken
+        })
       ) {
-        return false;
+        return { kind: "stale" };
+      }
+      if (current.state === "terminal") {
+        return { kind: "terminal" };
+      }
+      if (current.dispatchToken !== capability.dispatchToken) {
+        return { kind: "stale" };
       }
       this.ctx.storage.sql.exec(
         `
@@ -1391,12 +1397,16 @@ export class RunAdmission extends DurableObject<Env> {
             AND kind = 'provisional'
             AND prepare_owner = ?
             AND agent_id = ?
+            AND operation_id = ?
+            AND request_hash = ?
         `,
         runId,
         prepareOwner,
-        capability.agentId
+        capability.agentId,
+        capability.operationId,
+        capability.requestHash
       );
-      return true;
+      return { kind: "confirmed" };
     });
   }
 
@@ -2126,11 +2136,19 @@ export class RunAdmission extends DurableObject<Env> {
         } catch {
           completed = false;
         }
-        if (completed) {
+        if (completed === true) {
           this.deleteCleanupTask(
             task.run_id,
             task.admission_sequence,
             "provisional"
+          );
+        } else if (completed === "protected") {
+          this.ctx.storage.sql.exec(
+            "UPDATE admission_cleanup_tasks SET attempts = ?, next_attempt_at = ? WHERE run_id = ? AND admission_sequence = ? AND kind = 'provisional'",
+            task.attempts + 1,
+            Date.now() + ALARM_REPAIR_RETRY_MS,
+            task.run_id,
+            task.admission_sequence
           );
         } else {
           this.ctx.storage.sql.exec(

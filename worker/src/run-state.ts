@@ -42,6 +42,11 @@ export type AdmissionCleanupGuard = AdmissionCleanupCapability & {
   queuedOnly?: boolean;
 };
 
+export type PreparedAdmissionConfirmationOutcome =
+  | { kind: "confirmed" }
+  | { kind: "stale" }
+  | { kind: "terminal" };
+
 export type AdmissionConfirmationOutcome =
   | { kind: "confirmed" }
   | {

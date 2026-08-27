@@ -1090,7 +1090,7 @@ test("run admission passes its durable capability directly to confirmation", asy
         assert.equal(confirmedRunId, admittedRunId);
         assert.equal(prepareOwner, "prepare-owner-route");
         assert.deepEqual(receivedCapability, capability());
-        return true;
+        return { kind: "confirmed" as const };
       },
       release: () => false,
     }),
@@ -1121,6 +1121,177 @@ test("run admission passes its durable capability directly to confirmation", asy
   assert.equal(response.status, 202);
   assert.deepEqual(confirmedCapabilities, [capability()]);
   assert.deepEqual(calls, ["agent-confirm", "coordinator-confirm", "register"]);
+});
+
+test("terminal prepared admission cleans its exact queued local run without registering it", async () => {
+  const operationId = "33333333-aaaa-4555-8666-777777777779";
+  const runId = "44444444-bbbb-4666-8777-888888888889";
+  const prepareOwner = "prepare-owner-terminal-queued";
+  const run = queuedRun(MINE, runId, operationId);
+  const calls: string[] = [];
+  let admittedRunId = "";
+  let localRun = run;
+  const capability = {
+    admissionSequence: 8,
+    agentId: MINE,
+    operationId,
+    requestHash: "terminal-queued-hash",
+    runId,
+  };
+  const agent: CloudRunnerAgent = {
+    configure: (value) => value,
+    confirmAdmission: () => ({ kind: "confirmed" }),
+    decommission: () => undefined,
+    discardRun: (candidateRunId, owner) => {
+      calls.push(`discard:${candidateRunId}:${owner}`);
+      return candidateRunId === admittedRunId && owner === prepareOwner;
+    },
+    enqueue: (_input, requestedRunId) => {
+      admittedRunId = requestedRunId;
+      localRun = { ...run, id: requestedRunId };
+      return { created: true, prepareOwner, run: localRun };
+    },
+    getEventStream: () => ({ events: [], terminal: false }),
+    getRun: () => localRun,
+    listRuns: () => [localRun],
+    prepareOwnerMatches: () => true,
+    snapshot: () => agents.get(MINE) ?? null,
+    stop: () => run,
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const response = await createCloudRunner({
+    getAdmission: () => ({
+      admit: (input) => ({
+        admissionCapability: { ...capability, runId: input.runId },
+        kind: "active",
+        runId: input.runId,
+      }),
+      confirmPreparedAdmission: () => ({ kind: "terminal" as const }),
+      getCleanupCapability: (candidateRunId) => ({
+        ...capability,
+        runId: candidateRunId,
+      }),
+      release: () => false,
+    }),
+    getDirectory: () => ({
+      list: () => [agents.get(MINE) as AgentDefinition],
+      lookupRun: () => null,
+      registerRun: () => {
+        throw new Error("terminal admission must not register a queued run");
+      },
+      remove: () => undefined,
+      unregisterRun: () => undefined,
+      upsert: (value: AgentDefinition) => value,
+    }),
+    getYoloAgent: () => agent,
+  }).fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: run.task }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    { ...environment, RUN_ADMISSION_MODE: "queue" } as never
+  );
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(calls, [`discard:${admittedRunId}:${prepareOwner}`]);
+});
+
+test("terminal prepared admission returns and registers an already-terminal local run", async () => {
+  const operationId = "33333333-aaaa-4555-8666-777777777780";
+  const runId = "44444444-bbbb-4666-8777-888888888890";
+  const queued = queuedRun(MINE, runId, operationId);
+  const terminal: RunSnapshot = {
+    ...queued,
+    completedAt: "2026-08-26T00:00:01.000Z",
+    status: "completed",
+  };
+  const capability = {
+    admissionSequence: 9,
+    agentId: MINE,
+    operationId,
+    requestHash: "terminal-local-hash",
+    runId,
+  };
+  let released = false;
+  const agent: CloudRunnerAgent = {
+    configure: (value) => value,
+    confirmAdmission: () => ({ kind: "confirmed" }),
+    decommission: () => undefined,
+    discardRun: () => {
+      throw new Error("a terminal local run must not be discarded");
+    },
+    enqueue: () => ({
+      created: true,
+      prepareOwner: "prepare-owner-terminal",
+      run: queued,
+    }),
+    getEventStream: () => ({ events: [], terminal: true }),
+    getRun: () => terminal,
+    listRuns: () => [terminal],
+    snapshot: () => agents.get(MINE) ?? null,
+    stop: () => terminal,
+    warm: () => ({
+      status: "provisioning" as const,
+      updatedAt: "2026-08-26T00:00:00.000Z",
+    }),
+  };
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const response = await createCloudRunner({
+    getAdmission: () => ({
+      admit: () => ({ admissionCapability: capability, kind: "active", runId }),
+      confirmPreparedAdmission: () => ({ kind: "terminal" as const }),
+      getCleanupCapability: () => capability,
+      release: () => {
+        released = true;
+        return true;
+      },
+    }),
+    getDirectory: () => ({
+      list: () => [agents.get(MINE) as AgentDefinition],
+      lookupRun: () => null,
+      registerRun: (candidateRunId, candidateAgentId, status) => {
+        assert.equal(candidateRunId, runId);
+        assert.equal(candidateAgentId, MINE);
+        assert.equal(status, "terminal");
+        return true;
+      },
+      remove: () => undefined,
+      unregisterRun: () => undefined,
+      upsert: (value: AgentDefinition) => value,
+    }),
+    getYoloAgent: () => agent,
+  }).fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: queued.task }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    { ...environment, RUN_ADMISSION_MODE: "queue" } as never
+  );
+
+  assert.equal(response.status, 202);
+  assert.equal(released, true);
+  assert.deepEqual((await response.json()) as { run: RunSnapshot }, {
+    apiVersion: AGENT_RUNNER_API_VERSION,
+    run: terminal,
+  });
 });
 
 test("a terminal duplicate reconciles stale admission before returning the terminal run", async () => {

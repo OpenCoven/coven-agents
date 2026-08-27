@@ -232,6 +232,130 @@ test("an orphaned enqueue is durably cleaned after its preparation deadline", as
   assert.deepEqual(destroyedSandboxes(), []);
 });
 
+test("expiring one pending admission cannot discard another pending run", async () => {
+  const yolo = agent();
+  const firstRunId = "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a34";
+  const secondRunId = "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a35";
+  const first = await yolo.enqueue(
+    { operationId: OP_A, task: "Keep the other pending run." },
+    firstRunId,
+    "pending-a",
+    "identity-a"
+  );
+  const second = await yolo.enqueue(
+    { operationId: OP_B, task: "Expire this pending run." },
+    secondRunId,
+    "pending-b",
+    "identity-b"
+  );
+  assert.equal(first.created, true);
+  assert.equal(second.created, true);
+
+  const state = Reflect.get(yolo, "state") as { runs: CloudRunRecord[] };
+  yolo.setState({
+    ...state,
+    runs: state.runs.map((candidate) =>
+      candidate.run.id === secondRunId
+        ? {
+            ...candidate,
+            pendingAdmission: {
+              ...candidate.pendingAdmission,
+              deadlineAt: Date.now() - 1,
+            },
+          }
+        : candidate
+    ),
+  } as never);
+
+  assert.equal(await yolo.startAdmitted(secondRunId, "2:expire-second"), false);
+  assert.equal(yolo.getRun(firstRunId)?.id, firstRunId);
+  assert.equal(yolo.getRun(secondRunId), null);
+});
+
+test("a scheduled expiry callback carries the run fence and cannot expire another pending run", async () => {
+  const scheduled: { id: string; payload: unknown }[] = [];
+  const yolo = new (class extends YoloAgent {
+    schedule<T = string>(
+      _when: Date | number | string,
+      callback: keyof this,
+      payload?: T
+    ): Promise<{
+      id: string;
+      callback: string;
+      payload: T;
+      type: "scheduled";
+      time: number;
+    }> {
+      const result = {
+        callback: String(callback),
+        id: `pending-admission-${scheduled.length + 1}`,
+        payload: payload as T,
+        time: Date.now(),
+        type: "scheduled" as const,
+      };
+      scheduled.push({ id: result.id, payload });
+      return Promise.resolve(result);
+    }
+
+    cancelSchedule(): Promise<boolean> {
+      return Promise.resolve(true);
+    }
+  })(undefined as never, admissionTestEnv() as never);
+  yolo.configure(definition());
+
+  const firstRunId = "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a36";
+  const secondRunId = "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a37";
+  await yolo.enqueue(
+    { operationId: OP_A, task: "Expire only the first run." },
+    firstRunId,
+    "scheduled-a",
+    "identity-a"
+  );
+  await yolo.enqueue(
+    { operationId: OP_B, task: "Keep the second run." },
+    secondRunId,
+    "scheduled-b",
+    "identity-b"
+  );
+  const state = Reflect.get(yolo, "state") as { runs: CloudRunRecord[] };
+  yolo.setState({
+    ...state,
+    runs: state.runs.map((candidate) =>
+      candidate.run.id === firstRunId
+        ? {
+            ...candidate,
+            pendingAdmission: {
+              ...candidate.pendingAdmission,
+              deadlineAt: Date.now() - 1,
+            },
+          }
+        : candidate
+    ),
+  } as never);
+
+  const firstPayload = scheduled[0]?.payload as {
+    generation: number;
+    runId: string;
+    token: string;
+  };
+  const secondScheduleId = scheduled[1]?.id;
+  assert.equal(
+    await yolo.expirePendingAdmission(firstPayload, { id: secondScheduleId }),
+    true
+  );
+  assert.equal(yolo.getRun(firstRunId)?.id, firstRunId);
+  assert.equal(yolo.getRun(secondRunId)?.id, secondRunId);
+
+  assert.equal(
+    await yolo.expirePendingAdmission(firstPayload, {
+      id: scheduled[0]?.id,
+    }),
+    true
+  );
+  assert.equal(yolo.getRun(firstRunId), null);
+  assert.equal(yolo.getRun(secondRunId)?.id, secondRunId);
+});
+
 test("a stale provisional cleanup cannot discard an agent-confirmed run", async () => {
   const yolo = agent();
   const runId = "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5f4d4a33";
@@ -350,6 +474,9 @@ test("an expired accepted admission releases its exact capability before discard
     "identity"
   );
   const state = Reflect.get(yolo, "state") as { runs: CloudRunRecord[] };
+  const scheduleToken = state.runs.find(
+    (candidate) => candidate.run.id === runId
+  )?.pendingAdmission?.scheduleToken;
   yolo.setState({
     ...state,
     runs: state.runs.map((candidate) =>
@@ -367,7 +494,15 @@ test("an expired accepted admission releases its exact capability before discard
     ),
   } as never);
 
-  assert.equal(await yolo.expirePendingAdmission(), true);
+  assert.equal(
+    await yolo.expirePendingAdmission({
+      admissionSequence: capability.admissionSequence,
+      generation: 1,
+      runId,
+      token: scheduleToken ?? "",
+    }),
+    true
+  );
   assert.deepEqual(released, [
     {
       admissionSequence: capability.admissionSequence,

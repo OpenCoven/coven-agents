@@ -414,6 +414,67 @@ test("provisional cleanup discards an admitted run that was never agent-confirme
   assert.equal(remaining[0]?.count, 0);
 });
 
+test("prepared confirmation reports terminal admission without clearing provisional cleanup", async () => {
+  const harness = runAdmissionHarness(() => ({
+    getRun: () => ({ status: "completed" }),
+    startAdmitted: () => Promise.resolve(false),
+    stop: () => Promise.resolve(null),
+  }));
+  await harness.admission.enqueueProvisionalCleanup(
+    "agent-terminal",
+    "run-terminal",
+    "prepare-owner-terminal",
+    "operation-terminal",
+    "hash-terminal"
+  );
+  seedAdmissionRecord(
+    harness,
+    {
+      agentId: "agent-terminal",
+      enqueuedAt: new Date().toISOString(),
+      operationId: "operation-terminal",
+      requestHash: "hash-terminal",
+      runId: "run-terminal",
+      state: "terminal",
+      tenantHash: TENANT_A,
+    },
+    4
+  );
+
+  const stale = await harness.admission.confirmPreparedAdmission(
+    "run-terminal",
+    "prepare-owner-terminal",
+    {
+      admissionSequence: 3,
+      agentId: "agent-terminal",
+      operationId: "operation-terminal",
+      requestHash: "hash-terminal",
+      runId: "run-terminal",
+    }
+  );
+  assert.deepEqual(stale, { kind: "stale" });
+
+  const outcome = await harness.admission.confirmPreparedAdmission(
+    "run-terminal",
+    "prepare-owner-terminal",
+    {
+      admissionSequence: 4,
+      agentId: "agent-terminal",
+      dispatchToken: "expired-dispatch-token",
+      operationId: "operation-terminal",
+      requestHash: "hash-terminal",
+      runId: "run-terminal",
+    }
+  );
+  assert.deepEqual(outcome, { kind: "terminal" });
+  const remaining = harness.sql
+    .exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = 'run-terminal'"
+    )
+    .toArray() as { count: number }[];
+  assert.equal(remaining[0]?.count, 1);
+});
+
 test("successful admission retains provisional cleanup until prepared run confirmation", async () => {
   const harness = runAdmissionHarness(() => ({
     getRun: () => ({ status: "running" }),
@@ -423,7 +484,9 @@ test("successful admission retains provisional cleanup until prepared run confir
   await harness.admission.enqueueProvisionalCleanup(
     "agent-27",
     "run-27",
-    "prepare-owner-27"
+    "prepare-owner-27",
+    "operation-27",
+    "request-27"
   );
 
   const decision = await harness.admission.admit({
@@ -438,13 +501,13 @@ test("successful admission retains provisional cleanup until prepared run confir
     .toArray() as { count: number }[];
   assert.equal(matchingTasks[0]?.count, 1);
   assert.ok(decision.admissionCapability);
-  assert.equal(
+  assert.deepEqual(
     await harness.admission.confirmPreparedAdmission(
       "run-27",
       "prepare-owner-27",
       decision.admissionCapability as AdmissionCleanupCapability
     ),
-    true
+    { kind: "confirmed" }
   );
   const confirmedTasks = harness.sql
     .exec<{ count: number }>(
@@ -494,7 +557,11 @@ test("provisional cleanup protects an agent-confirmed run before coordinator con
       "SELECT COUNT(*) AS count FROM admission_cleanup_tasks WHERE run_id = 'run-protected'"
     )
     .toArray() as { count: number }[];
-  assert.equal(remaining[0]?.count, 0);
+  assert.equal(
+    remaining[0]?.count,
+    1,
+    "protected provisional cleanup must remain until coordinator confirmation"
+  );
 });
 
 test("cleanup without an admission row does not create a sequence-zero task", async () => {

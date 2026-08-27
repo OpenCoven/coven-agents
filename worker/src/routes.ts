@@ -43,6 +43,7 @@ import {
   hashOperation,
   isTerminal,
   OperationConflictError,
+  type PreparedAdmissionConfirmationOutcome,
 } from "./run-state.js";
 import {
   createRunEventStream,
@@ -197,7 +198,7 @@ export type CloudRunnerAdmission = {
     runId: string,
     prepareOwner: string,
     capability: AdmissionCleanupCapability
-  ) => Awaitable<boolean>;
+  ) => Awaitable<PreparedAdmissionConfirmationOutcome>;
   release: (
     runId: string,
     dispatchToken?: string,
@@ -635,6 +636,48 @@ async function releaseTerminalAdmission(
   if (releaseError) {
     throw releaseError;
   }
+}
+
+async function reconcilePreparedAdmissionOutcome(
+  directory: CloudRunnerDirectory,
+  agent: CloudRunnerAgent,
+  runId: string,
+  agentId: string,
+  admission: CloudRunnerAdmission,
+  admissionCapability: AdmissionCleanupCapability | null,
+  prepareOwner: string | undefined,
+  cors: Headers
+): Promise<Response> {
+  const local = await agent.getRun(runId);
+  if (local && isTerminal(local.status)) {
+    await registerExistingRunMapping(directory, local, agentId);
+    await releaseTerminalAdmission(
+      directory,
+      local,
+      agentId,
+      admission,
+      admissionCapability ?? undefined
+    );
+    return json(
+      {
+        apiVersion: AGENT_RUNNER_API_VERSION,
+        run: local,
+      },
+      { status: 202 },
+      cors
+    );
+  }
+  const cleanupError = await cleanupRun(agent, runId, agentId, {
+    admission,
+    admissionCapability: admissionCapability ?? undefined,
+    allowUnowned: true,
+    prepareOwner,
+    stopFirst: true,
+  });
+  if (cleanupError) {
+    throw cleanupError;
+  }
+  return busyResponse("global_busy", cors);
 }
 
 async function releaseAdmissionRecord(
@@ -1832,15 +1875,22 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                   admissionCapability &&
                   admission.confirmPreparedAdmission
                 ) {
-                  const coordinatorConfirmed =
+                  const coordinatorConfirmation =
                     await admission.confirmPreparedAdmission(
                       runId,
                       prepared.prepareOwner,
                       admissionCapability
                     );
-                  if (!coordinatorConfirmed) {
-                    throw new AdmissionUnavailableError(
-                      "Prepared admission confirmation failed."
+                  if (coordinatorConfirmation.kind !== "confirmed") {
+                    return await reconcilePreparedAdmissionOutcome(
+                      directory,
+                      agent,
+                      runId,
+                      id,
+                      admission,
+                      admissionCapability,
+                      prepared.prepareOwner,
+                      cors
                     );
                   }
                   coordinatorAdmissionConfirmed = true;

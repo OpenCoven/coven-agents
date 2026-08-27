@@ -185,6 +185,9 @@ type PendingAdmissionSchedulePayload = {
   generation: number;
   runId: string;
   token: string;
+  admissionSequence?: number;
+  prepareOwner?: string;
+  scheduleId?: string;
 };
 
 function base64Encode(bytes: Uint8Array): string {
@@ -2469,7 +2472,20 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         this,
         new Date(pending.deadlineAt),
         "expirePendingAdmission",
-        { generation, runId, token },
+        {
+          generation,
+          runId,
+          token,
+          ...(pending.admissionCapability?.admissionSequence === undefined
+            ? {}
+            : {
+                admissionSequence:
+                  pending.admissionCapability.admissionSequence,
+              }),
+          ...(pending.prepareOwner
+            ? { prepareOwner: pending.prepareOwner }
+            : {}),
+        },
         { idempotent: false }
       );
       const latest = this.state.runs.find(
@@ -2685,7 +2701,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
           latestPending.prepareOwner === pending.prepareOwner &&
           latestPending.deadlineAt === pending.deadlineAt &&
           latestPending.scheduleGeneration === pending.scheduleGeneration &&
-          latestPending.scheduleToken === pending.scheduleToken;
+          latestPending.scheduleToken === pending.scheduleToken &&
+          latestPending.scheduleId === pending.scheduleId &&
+          latestPending.expiryClaim === pending.expiryClaim;
     if (
       latestLifecycle.status !== "active" ||
       latestLifecycle.generation !== lifecycleGeneration ||
@@ -2779,27 +2797,34 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   }
 
   async expirePendingAdmission(
-    payload?: PendingAdmissionSchedulePayload,
+    payload: PendingAdmissionSchedulePayload,
     schedule?: { id?: string }
   ): Promise<boolean> {
-    let current = this.state.runs.find(
-      (candidate) => candidate.run.id === payload?.runId
-    );
-    if (!current && payload?.runId) {
+    if (
+      !payload?.runId ||
+      !Number.isSafeInteger(payload.generation) ||
+      !payload.token
+    ) {
       return true;
     }
-    if (!current) {
-      current = this.state.runs.find((candidate) => candidate.pendingAdmission);
-    }
+    let current = this.state.runs.find(
+      (candidate) => candidate.run.id === payload.runId
+    );
     const pending = current?.pendingAdmission;
     if (!current || !pending || isTerminal(current.run.status)) {
       return true;
     }
     if (
-      payload &&
-      (pending.scheduleGeneration !== payload.generation ||
-        pending.scheduleToken !== payload.token ||
-        (schedule?.id !== undefined && pending.scheduleId !== schedule.id))
+      pending.scheduleGeneration !== payload.generation ||
+      pending.scheduleToken !== payload.token ||
+      (payload.scheduleId !== undefined &&
+        pending.scheduleId !== payload.scheduleId) ||
+      (schedule?.id !== undefined && pending.scheduleId !== schedule.id) ||
+      (payload.prepareOwner !== undefined &&
+        pending.prepareOwner !== payload.prepareOwner) ||
+      (payload.admissionSequence !== undefined &&
+        pending.admissionCapability?.admissionSequence !==
+          payload.admissionSequence)
     ) {
       return true;
     }
@@ -3056,7 +3081,22 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         return true;
       }
       if (confirmation.kind === "expired") {
-        await this.expirePendingAdmission();
+        const pending = this.state.runs.find(
+          (candidate) => candidate.run.id === runId
+        )?.pendingAdmission;
+        if (
+          pending?.scheduleGeneration !== undefined &&
+          pending.scheduleToken
+        ) {
+          await this.expirePendingAdmission({
+            admissionSequence: pending.admissionCapability?.admissionSequence,
+            generation: pending.scheduleGeneration,
+            prepareOwner: pending.prepareOwner,
+            runId,
+            scheduleId: pending.scheduleId,
+            token: pending.scheduleToken,
+          });
+        }
       }
       if (confirmation.kind !== "confirmed") {
         return false;
@@ -3727,6 +3767,9 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (!record) {
       return true;
     }
+    if (isTerminal(record.run.status)) {
+      return true;
+    }
     if (record.admissionConfirmedAt || !record.pendingAdmission) {
       return "protected";
     }
@@ -3734,7 +3777,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       record.run.status !== "queued" ||
       record.pendingAdmission?.prepareOwner !== prepareOwner
     ) {
-      return true;
+      return "protected";
     }
     return this.discardRun(runId, prepareOwner);
   }
