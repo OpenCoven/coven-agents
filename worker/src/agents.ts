@@ -2032,6 +2032,23 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
 You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work only inside the sandbox, verify the result, and include exact evidence in your final response.`,
         model: definition.model,
         onEvent,
+        // A destroyed sandbox key re-provisions on the next exec — proven in
+        // production when the reaper's destroy was followed by a healthy
+        // 81s probe on the same key. This is what turns a sick placement
+        // into a 150s detour instead of a dead run.
+        resetSandbox: async () => {
+          console.warn({
+            agentId: definition.id,
+            event: "sandbox.reset_before_probe_retry",
+            runId: planned.run.id,
+          });
+          await getSandbox(
+            this.env.Sandbox,
+            await sandboxKey(tenantOf(definition), definition.id)
+          )
+            .destroy()
+            .catch(() => undefined);
+        },
         runtime: definition.runtime,
         sandbox: getSandbox(this.env.Sandbox, sandboxName, {
           // Chosen rather than inherited: the same idle window the warm-up

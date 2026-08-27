@@ -3,6 +3,7 @@
 "use client";
 
 import { HARNESS_SPECS } from "@opencoven/harness";
+import Link from "next/link";
 import { signOut } from "next-auth/react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -218,10 +219,16 @@ export function Settings({
   }, []);
 
   useEffect(() => {
+    if (!account) {
+      return;
+    }
     refreshCredentials().catch(() => undefined);
-  }, [refreshCredentials]);
+  }, [account, refreshCredentials]);
 
   useEffect(() => {
+    if (!account) {
+      return;
+    }
     let cancelled = false;
     fetch(`${BASE_PATH}/api/usage`)
       .then(async (response) =>
@@ -236,7 +243,7 @@ export function Settings({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [account]);
 
   const dirty = Object.values(drafts).some((value) => value.trim().length > 0);
 
@@ -336,8 +343,49 @@ export function Settings({
     ? Math.min(100, Math.round((usage.used / usage.cap) * 100))
     : 0;
 
+  if (!account) {
+    return (
+      <div
+        className="oc-settings-signed-out"
+        style={{
+          alignItems: "center",
+          background: "var(--bg-base)",
+          display: "flex",
+          flex: 1,
+          justifyContent: "center",
+          padding: 32,
+          textAlign: "center",
+        }}
+      >
+        <div style={{ maxWidth: 440 }}>
+          <Eyebrow>Account required</Eyebrow>
+          <h2 style={{ ...type_.display, fontSize: 28, margin: "10px 0 8px" }}>
+            Sign in to manage your account
+          </h2>
+          <p style={{ ...type_.body, margin: "0 auto", maxWidth: "42ch" }}>
+            Harness credentials, usage, and account data are available only
+            after GitHub sign-in.
+          </p>
+          <Link
+            href="/login"
+            style={{
+              ...pill("accent"),
+              display: "inline-flex",
+              marginTop: 20,
+              padding: "9px 14px",
+              textDecoration: "none",
+            }}
+          >
+            Sign in with GitHub
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
+      className="oc-settings"
       style={{
         background: "var(--bg-panel)",
         display: "flex",
@@ -348,6 +396,7 @@ export function Settings({
     >
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         <nav
+          className="oc-settings-nav"
           style={{
             borderRight: hairline,
             display: "flex",
@@ -397,7 +446,7 @@ export function Settings({
         </nav>
 
         <div
-          className="oc-scroll"
+          className="oc-settings-content oc-scroll"
           style={{
             background: "var(--bg-base)",
             flex: 1,

@@ -2,20 +2,14 @@ import { withBotId } from "botid/next/config";
 import type { NextConfig } from "next";
 
 const basePath = process.env.IS_DEMO === "1" ? "/demo" : "";
+const loginDestination = `${basePath}/login`;
+const rootDestination = basePath || "/agents";
 
 const nextConfig: NextConfig = {
   ...(basePath
     ? {
         assetPrefix: "/demo-assets",
         basePath,
-        redirects: async () => [
-          {
-            basePath: false,
-            destination: basePath,
-            permanent: false,
-            source: "/",
-          },
-        ],
       }
     : {}),
   cacheComponents: true,
@@ -49,6 +43,20 @@ const nextConfig: NextConfig = {
   },
   poweredByHeader: false,
   reactCompiler: true,
+  redirects: async () => [
+    {
+      basePath: false,
+      destination: rootDestination,
+      permanent: false,
+      source: "/",
+    },
+    {
+      basePath: false,
+      destination: loginDestination,
+      permanent: false,
+      source: "/register",
+    },
+  ],
 };
 
 export default withBotId(nextConfig);

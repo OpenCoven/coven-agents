@@ -316,6 +316,7 @@ export function Warden({ operator }: { operator: string }) {
       }}
     >
       <header
+        className="oc-admin-header"
         style={{
           alignItems: "center",
           background: "var(--bg-panel)",
@@ -342,6 +343,7 @@ export function Warden({ operator }: { operator: string }) {
         </span>
         <nav
           aria-label="Admin sections"
+          className="oc-admin-tabs"
           style={{
             background: "var(--bg-sunken)",
             border: hairline,
@@ -378,6 +380,7 @@ export function Warden({ operator }: { operator: string }) {
           ))}
         </nav>
         <fieldset
+          className="oc-admin-ranges"
           style={{
             background: "var(--bg-sunken)",
             border: hairline,
@@ -419,6 +422,7 @@ export function Warden({ operator }: { operator: string }) {
         </fieldset>
         <input
           aria-label="Search accounts — account id only"
+          className="oc-admin-search"
           onChange={(event) => {
             setQuery(event.target.value);
             setPage(0);
@@ -441,6 +445,7 @@ export function Warden({ operator }: { operator: string }) {
           value={query}
         />
         <span
+          className="oc-admin-owner"
           style={{ ...type_.meta, flex: "none" }}
           title={`${operator} — owner session. Views are not yet written to an audit log; the Audit tab says what that needs.`}
         >
@@ -449,7 +454,7 @@ export function Warden({ operator }: { operator: string }) {
       </header>
 
       <main
-        className="oc-scroll"
+        className="oc-admin-main oc-scroll"
         style={{
           flex: 1,
           minHeight: 0,
@@ -563,6 +568,7 @@ export function Warden({ operator }: { operator: string }) {
             </span>
 
             <div
+              className="oc-admin-table-scroll"
               style={{
                 background: "var(--bg-panel)",
                 border: hairline,

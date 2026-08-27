@@ -295,3 +295,124 @@
     animation: none;
   }
 }
+
+/* The console keeps its three-pane grammar on small screens: the rail becomes
+   a 58px index, and expanding it overlays the record instead of squeezing the
+   record out of the viewport. Creation and settings navigation become a
+   horizontal strip for the same reason. */
+@media (max-width: 720px) {
+  .oc-console-header {
+    gap: 8px !important;
+    padding: 0 8px !important;
+  }
+
+  .oc-header-brand-copy,
+  .oc-header-context,
+  .oc-header-search-label,
+  .oc-header-shortcut {
+    display: none !important;
+  }
+
+  .oc-console-header [data-console-search] {
+    flex: 0 0 32px !important;
+    justify-content: center;
+    min-width: 32px !important;
+    padding: 0 !important;
+  }
+
+  .oc-header-actions {
+    flex: 0 0 auto !important;
+  }
+
+  .oc-console-body,
+  .oc-console-body > section {
+    min-width: 0;
+  }
+
+  .oc-agent-rail {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 50;
+    max-width: min(268px, 86vw);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .oc-empty-console {
+    padding: 24px 18px !important;
+  }
+
+  .oc-empty-console h1 {
+    font-size: 25px !important;
+  }
+
+  .oc-create-agent,
+  .oc-settings > div {
+    flex-direction: column;
+  }
+
+  .oc-create-agent-nav,
+  .oc-settings-nav {
+    flex-direction: row !important;
+    width: 100% !important;
+    padding: 9px 10px !important;
+    overflow-x: auto;
+    border-right: 0 !important;
+    border-bottom: 1px solid var(--border-hairline) !important;
+  }
+
+  .oc-create-agent-nav > button,
+  .oc-settings-nav > button {
+    flex: none;
+    min-width: max-content;
+  }
+
+  .oc-create-agent-nav > div {
+    display: none;
+  }
+
+  .oc-create-agent-content,
+  .oc-settings-content {
+    padding: 20px 18px 24px !important;
+  }
+
+  .oc-settings-signed-out {
+    padding: 24px 18px !important;
+  }
+
+  .oc-admin-header {
+    flex-wrap: wrap;
+    height: auto !important;
+    min-height: 52px;
+    padding: 8px 10px !important;
+  }
+
+  .oc-admin-tabs {
+    flex: 1 1 auto !important;
+    justify-content: space-between;
+  }
+
+  .oc-admin-ranges {
+    order: 2;
+  }
+
+  .oc-admin-search {
+    flex: 1 1 140px !important;
+    order: 3;
+    min-width: 120px !important;
+  }
+
+  .oc-admin-owner {
+    order: 4;
+  }
+
+  .oc-admin-main {
+    padding: 14px 12px 24px !important;
+  }
+
+  .oc-admin-table-scroll {
+    overflow-x: auto !important;
+    overscroll-behavior-x: contain;
+  }
+}

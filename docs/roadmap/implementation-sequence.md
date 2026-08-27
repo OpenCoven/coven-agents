@@ -121,13 +121,16 @@ the roadmap worktree itself was clean and pushed at the evidence snapshot.
   collapsing them into a pass.
 - **Exit evidence:** The dated current-state snapshot and verification matrix
   identify the same branch state and contain the resulting evidence;
-  `pnpm hygiene`, `pnpm check`, `pnpm typecheck`, `pnpm test:unit`,
-  `pnpm build`, and `pnpm roadmap:status check` all exit 0 from that state.
+  `pnpm hygiene`, `pnpm check`, `pnpm typecheck`, `pnpm test:unit`, the current
+  Playwright suite, `pnpm build`, and `pnpm roadmap:status check` all exit 0
+  from that state.
 - **Rollback/recovery expectation:** Do not promote. Preserve sanitized failure
   evidence, repair the narrow cause, and rerun the complete baseline.
 
-**Current state:** lint, types, 805 unit tests, build, and roadmap status passed;
-hygiene did not.
+**Current state (2026-08-26 audit candidate):** lint, types, 936 unit tests,
+sixteen current browser tests against development and local production servers,
+default and demo builds, and roadmap status passed; hygiene did not. See the
+[dated UI/functionality audit](ui-functionality-audit-2026-08-26.md).
 
 ## Wave 1
 

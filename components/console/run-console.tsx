@@ -189,6 +189,20 @@ export function RunConsole() {
    */
   const [now, setNow] = useState(0);
 
+  useEffect(() => {
+    const compactViewport = window.matchMedia("(max-width: 720px)");
+    const collapseForViewport = () => {
+      if (compactViewport.matches) {
+        setRailCollapsed(true);
+      }
+    };
+
+    collapseForViewport();
+    compactViewport.addEventListener("change", collapseForViewport);
+    return () =>
+      compactViewport.removeEventListener("change", collapseForViewport);
+  }, []);
+
   const threadRef = useRef<HTMLDivElement>(null);
   const runsRef = useRef<ConsoleRun[]>([]);
   runsRef.current = runs;
@@ -210,6 +224,17 @@ export function RunConsole() {
   /* ---------------------------------------------------------------- wiring */
 
   useEffect(() => {
+    if (session.status === "loading") {
+      return;
+    }
+
+    if (session.status !== "authenticated") {
+      setCloudStatus("signed_out");
+      setConnection(EMPTY_CONNECTION);
+      setHasCredential(null);
+      return;
+    }
+
     let cancelled = false;
 
     // A connection entered by hand is used until the server answers, so a
@@ -246,7 +271,7 @@ export function RunConsole() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [session.status]);
 
   const refresh = useCallback(async () => {
     if (!connection.token) {
@@ -724,6 +749,14 @@ export function RunConsole() {
     setView("composer");
   }, []);
 
+  const openCreate = useCallback(() => {
+    if (session.status !== "authenticated") {
+      window.location.assign("/login");
+      return;
+    }
+    setView("create");
+  }, [session.status]);
+
   const openRun = useCallback((runId: string) => {
     setSelectedRunId(runId);
     setView("thread");
@@ -758,7 +791,7 @@ export function RunConsole() {
         group: "action",
         id: "new-agent",
         label: "Create an agent",
-        run: () => setView("create"),
+        run: openCreate,
       },
       {
         group: "action",
@@ -809,7 +842,7 @@ export function RunConsole() {
     }
 
     return items;
-  }, [agents, openComposer, openRun, runs]);
+  }, [agents, openComposer, openCreate, openRun, runs]);
 
   /* --------------------------------------------------------------- derived */
 
@@ -857,6 +890,7 @@ export function RunConsole() {
       <Toaster position="top-center" theme="dark" />
 
       <header
+        className="oc-console-header"
         style={{
           alignItems: "center",
           background: "var(--bg-panel)",
@@ -904,8 +938,12 @@ export function RunConsole() {
             <span style={{ color: "var(--accent-presence)", fontSize: 13 }}>
               ◆
             </span>
-            <span style={type_.title}>OpenCoven</span>
-            <Eyebrow style={{ color: "var(--text-muted)" }}>Runs</Eyebrow>
+            <span className="oc-header-brand-copy" style={type_.title}>
+              OpenCoven
+            </span>
+            <span className="oc-header-context">
+              <Eyebrow style={{ color: "var(--text-muted)" }}>Runs</Eyebrow>
+            </span>
           </Link>
         </div>
 
@@ -913,6 +951,7 @@ export function RunConsole() {
           aria-keyshortcuts="Meta+K"
           aria-label="Search or run a command"
           className="oc-tint"
+          data-console-search
           onClick={() => setPaletteOpen(true)}
           style={{
             alignItems: "center",
@@ -932,10 +971,14 @@ export function RunConsole() {
           type="button"
         >
           <Search size={13} />
-          <span style={{ flex: 1, textAlign: "left", ...truncate }}>
+          <span
+            className="oc-header-search-label"
+            style={{ flex: 1, textAlign: "left", ...truncate }}
+          >
             Search runs, agents, and commands
           </span>
           <kbd
+            className="oc-header-shortcut"
             style={{
               background: "var(--bg-raised)",
               border: hairline,
@@ -950,6 +993,7 @@ export function RunConsole() {
         </button>
 
         <div
+          className="oc-header-actions"
           style={{
             alignItems: "center",
             display: "flex",
@@ -993,6 +1037,7 @@ export function RunConsole() {
       </header>
 
       <div
+        className="oc-console-body"
         style={{ display: "flex", flex: 1, minHeight: 0, position: "relative" }}
       >
         {view === "analytics" ? (
@@ -1013,7 +1058,7 @@ export function RunConsole() {
               avatarSrc={avatarSrc}
               collapsed={railCollapsed}
               now={now}
-              onCreateAgent={() => setView("create")}
+              onCreateAgent={openCreate}
               onNewRun={openComposer}
               onOpenAccount={() => setView("settings")}
               onSelectAgent={openComposer}
@@ -1454,7 +1499,8 @@ export function RunConsole() {
               ) : (
                 <EmptyConsole
                   blocked={blocked}
-                  onCreate={() => setView("create")}
+                  onCreate={openCreate}
+                  signedOut={session.status !== "authenticated"}
                 />
               )}
             </section>
@@ -1606,12 +1652,15 @@ function ConfirmRemove({
 function EmptyConsole({
   blocked,
   onCreate,
+  signedOut,
 }: {
   blocked: string | null;
   onCreate: () => void;
+  signedOut: boolean;
 }) {
   return (
     <div
+      className="oc-empty-console"
       style={{
         alignItems: "center",
         display: "flex",
@@ -1642,12 +1691,12 @@ function EmptyConsole({
           }}
         >
           <Btn
-            disabled={blocked !== null}
+            disabled={blocked !== null && !signedOut}
             onClick={onCreate}
             size="md"
             variant="primary"
           >
-            Forge an agent
+            {signedOut ? "Sign in to forge" : "Forge an agent"}
           </Btn>
         </div>
 
