@@ -1,4 +1,4 @@
-CREATE TABLE "RunReservation" (
+CREATE TABLE IF NOT EXISTS "RunReservation" (
 	"consumedAt" timestamp,
 	"costUnits" integer NOT NULL,
 	"expiresAt" timestamp NOT NULL,
@@ -15,10 +15,10 @@ CREATE TABLE "RunReservation" (
 	CONSTRAINT "RunReservation_expiry_valid" CHECK ("RunReservation"."expiresAt" > "RunReservation"."reservedAt")
 );
 --> statement-breakpoint
-ALTER TABLE "User" ADD COLUMN "billingPeriodStart" timestamp;--> statement-breakpoint
-CREATE INDEX "RunReservation_tenant_day_state_idx" ON "RunReservation" USING btree ("tenantHash","periodDay","state");--> statement-breakpoint
-CREATE INDEX "RunReservation_day_state_idx" ON "RunReservation" USING btree ("periodDay","state");--> statement-breakpoint
-CREATE INDEX "RunReservation_tenant_period_state_idx" ON "RunReservation" USING btree ("tenantHash","periodMonth","state");--> statement-breakpoint
-CREATE INDEX "RunReservation_reserved_expiry_idx" ON "RunReservation" USING btree ("expiresAt") WHERE "RunReservation"."state" = 'reserved';--> statement-breakpoint
-CREATE INDEX "RunUsage_countedAt_idx" ON "RunUsage" USING btree ("countedAt");--> statement-breakpoint
-CREATE INDEX "RunUsage_tenant_countedAt_idx" ON "RunUsage" USING btree ("tenant","countedAt");
+ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "billingPeriodStart" timestamp;--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "RunReservation_tenant_day_state_idx" ON "RunReservation" USING btree ("tenantHash","periodDay","state");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "RunReservation_day_state_idx" ON "RunReservation" USING btree ("periodDay","state");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "RunReservation_tenant_period_state_idx" ON "RunReservation" USING btree ("tenantHash","periodMonth","state");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "RunReservation_reserved_expiry_idx" ON "RunReservation" USING btree ("expiresAt") WHERE "RunReservation"."state" = 'reserved';--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "RunUsage_countedAt_idx" ON "RunUsage" USING btree ("countedAt");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "RunUsage_tenant_countedAt_idx" ON "RunUsage" USING btree ("tenant","countedAt");
