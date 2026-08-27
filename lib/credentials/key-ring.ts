@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { importKek, KEK_VERSION_PATTERN } from "./envelope";
 
 const MAX_KEY_MATERIAL_LENGTH = 2_000_000;
@@ -58,12 +59,6 @@ function requireKeyMaterial(
 function configuredKeys(
   environment: CredentialKekEnvironment
 ): Record<CredentialKekVersion, string | undefined> {
-  for (const name of Object.keys(environment)) {
-    if (name.startsWith("CREDENTIAL_KEK_") && !CONFIGURATION_KEYS.has(name)) {
-      throw new Error(`Unsupported credential KEK configuration: ${name}.`);
-    }
-  }
-
   const legacy = requireKeyMaterial(
     optionalEnvironment(environment.CREDENTIAL_KEK),
     "CREDENTIAL_KEK"
@@ -149,15 +144,12 @@ async function parseRing(
 export function credentialKekRingFromEnvironment(
   environment: CredentialKekEnvironment = process.env
 ): Promise<CredentialKekRing> {
-  const values = {
-    currentVersion: optionalEnvironment(
-      environment.CREDENTIAL_KEK_CURRENT_VERSION
-    ),
-    legacy: optionalEnvironment(environment.CREDENTIAL_KEK),
-    v1: optionalEnvironment(environment.CREDENTIAL_KEK_V1),
-    v2: optionalEnvironment(environment.CREDENTIAL_KEK_V2),
-  };
-  const configKey = JSON.stringify(values);
+  let configKey: string;
+  try {
+    configKey = configurationFingerprint(environment);
+  } catch (error) {
+    return Promise.reject(error);
+  }
   if (keyRingCache?.configKey === configKey) {
     return keyRingCache.ring;
   }
@@ -165,4 +157,25 @@ export function credentialKekRingFromEnvironment(
   const ring = parseRing(environment);
   keyRingCache = { configKey, ring };
   return ring;
+}
+
+function configurationFingerprint(
+  environment: CredentialKekEnvironment
+): string {
+  const names = Object.keys(environment)
+    .filter(
+      (name) => name === "CREDENTIAL_KEK" || name.startsWith("CREDENTIAL_KEK_")
+    )
+    .sort();
+
+  for (const name of names) {
+    if (!CONFIGURATION_KEYS.has(name)) {
+      throw new Error(`Unsupported credential KEK configuration: ${name}.`);
+    }
+  }
+
+  const input = names
+    .map((name) => `${name}\0${environment[name] ?? "\0"}`)
+    .join("\0");
+  return createHash("sha256").update(input, "utf8").digest("hex");
 }

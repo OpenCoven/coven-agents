@@ -33,7 +33,7 @@ was larger than assumed costs trust.
 
 | Level | Meaning | Examples | First action |
 | --- | --- | --- | --- |
-| **S1** | Another tenant's data is reachable | `CREDENTIAL_KEK`, `POSTGRES_URL`, a tenant's harness credential | Rotate immediately, then notify affected tenants |
+| **S1** | Another tenant's data is reachable | Credential KEK ring, `POSTGRES_URL`, a tenant's harness credential | Rotate immediately, then notify affected tenants |
 | **S2** | Our infrastructure is controllable, tenant data is not directly exposed | `RUNNER_SIGNING_KEY`, `AGENT_CONTROL_TOKEN`, `OPERATOR_DIAGNOSTIC_TOKEN`, `RUNNER_SERVICE_TOKEN`, `AUTH_SECRET` | Rotate immediately |
 | **S3** | Cost or availability, no data boundary crossed | endpoint URL known, unauthenticated request flood | Measure, then decide |
 
@@ -251,7 +251,7 @@ material.
 in-flight runs fail until they are re-minted. There is no revocation list —
 short expiry *is* the revocation mechanism, which is why the lifetime is short.
 
-### Credential KEK rotation — read this before rotating
+### Credential KEK ring — read this before rotating
 
 **Grants.** Unwrapping the per-credential data keys, and therefore every stored
 tenant credential. **S1.** Rows name their exact version; the app encrypts only
@@ -259,9 +259,11 @@ with `CREDENTIAL_KEK_CURRENT_VERSION` and never tries every configured key.
 
 Configure `CREDENTIAL_KEK_CURRENT_VERSION`, `CREDENTIAL_KEK_V1`, and
 `CREDENTIAL_KEK_V2`. During staged migration, the old `CREDENTIAL_KEK` may
-alias only explicit `v1`. If both the legacy and `CREDENTIAL_KEK_V1` values are
-present, they must be identical or the app fails closed. Missing, blank,
-malformed, duplicate, and unknown versions fail closed.
+alias only explicit `v1`; it is never a general fallback. If both the legacy
+and `CREDENTIAL_KEK_V1` values are present, they must be identical or the app
+fails closed. Missing, blank, malformed, duplicate, and unknown versions fail
+closed. Rewrap exit `0` means complete, `2` means resumable work remains, and
+`1` means configuration or corruption failure.
 
 Removing the only configured KEK destroys access to every stored credential.
 Do not delete `CREDENTIAL_KEK_V1` while any row still names `v1`.
@@ -283,7 +285,7 @@ Do not delete `CREDENTIAL_KEK_V1` while any row still names `v1`.
 
    The gate is successful only with zero `v1` rows and successful read-only
    unwrap verification for every current-version row. It prints counts and
-   opaque row IDs only.
+   opaque row IDs only; exit `2` is an explicit resumable status, not success.
 5. Remove the legacy alias after zero `v1` rows. Retire `CREDENTIAL_KEK_V1`
    only after the gate passes in production. If the KEK leaked, also notify
    affected tenants and have them revoke their GitHub credentials.

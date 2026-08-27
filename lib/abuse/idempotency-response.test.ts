@@ -3,6 +3,7 @@ import test from "node:test";
 import { generateKek } from "../credentials/envelope";
 import {
   encryptedIdempotencyResponseStorage,
+  parseStoredIdempotencyResponseEnvelope,
   plaintextIdempotencyResponseStorage,
 } from "./idempotency-response";
 
@@ -23,8 +24,9 @@ test("plaintext responses use a non-null tagged envelope even for a null body", 
 
 test("encrypted device-flow responses never store the device code in plaintext", async () => {
   const kek = await generateKek();
-  const storage = encryptedIdempotencyResponseStorage(() =>
-    Promise.resolve(kek)
+  const storage = encryptedIdempotencyResponseStorage(
+    () => Promise.resolve(kek),
+    () => Promise.resolve("v2")
   );
   const body = {
     deviceCode: "device-code-sensitive",
@@ -42,8 +44,9 @@ test("encrypted device-flow responses never store the device code in plaintext",
 
 test("encrypted responses cannot be replayed for another owner", async () => {
   const kek = await generateKek();
-  const storage = encryptedIdempotencyResponseStorage(() =>
-    Promise.resolve(kek)
+  const storage = encryptedIdempotencyResponseStorage(
+    () => Promise.resolve(kek),
+    () => Promise.resolve("v2")
   );
   const stored = await storage.store(
     { deviceCode: "device-code-sensitive" },
@@ -63,24 +66,106 @@ test("encrypted responses replay with the envelope's KEK after rotation", async 
   const oldKek = await generateKek();
   const currentKek = await generateKek();
   let currentVersion = "v1";
-  let currentKekForWrites = oldKek;
   const storage = encryptedIdempotencyResponseStorage(
-    (version) =>
-      Promise.resolve(
-        version === undefined
-          ? currentKekForWrites
-          : version === "v1"
-            ? oldKek
-            : currentKek
-      ),
+    (version) => Promise.resolve(version === "v1" ? oldKek : currentKek),
     () => Promise.resolve(currentVersion)
   );
 
   const stored = await storage.store({ status: "pending" }, CONTEXT);
   currentVersion = "v2";
-  currentKekForWrites = currentKek;
 
   assert.deepEqual(await storage.replay(stored, CONTEXT), {
     status: "pending",
   });
+  assert.equal(
+    stored.kind === "encrypted_json" ? stored.payload.kekVersion : null,
+    "v1"
+  );
+});
+
+test("legacy encrypted envelopes are explicitly migrated to v1 at the boundary", async () => {
+  const oldKek = await generateKek();
+  const currentKek = await generateKek();
+  const keyFor = (version: string) =>
+    Promise.resolve(version === "v1" ? oldKek : currentKek);
+  const v1Storage = encryptedIdempotencyResponseStorage(keyFor, () =>
+    Promise.resolve("v1")
+  );
+  const versioned = await v1Storage.store({ status: "pending" }, CONTEXT);
+  assert.equal(versioned.kind, "encrypted_json");
+  if (versioned.kind !== "encrypted_json") {
+    throw new Error("expected encrypted envelope");
+  }
+
+  const legacy = {
+    kind: "encrypted_json" as const,
+    payload: {
+      ciphertext: versioned.payload.ciphertext,
+      iv: versioned.payload.iv,
+      wrappedKey: versioned.payload.wrappedKey,
+    },
+  };
+  const normalized = parseStoredIdempotencyResponseEnvelope(legacy);
+  assert.equal(
+    normalized.kind === "encrypted_json" ? normalized.payload.kekVersion : null,
+    "v1"
+  );
+
+  const v2Storage = encryptedIdempotencyResponseStorage(keyFor, () =>
+    Promise.resolve("v2")
+  );
+  assert.deepEqual(await v2Storage.replay(normalized, CONTEXT), {
+    status: "pending",
+  });
+});
+
+test("legacy encrypted envelopes fail closed when v1 is not configured", async () => {
+  const oldKek = await generateKek();
+  const versioned = await encryptedIdempotencyResponseStorage(
+    () => Promise.resolve(oldKek),
+    () => Promise.resolve("v1")
+  ).store({ status: "pending" }, CONTEXT);
+  if (versioned.kind !== "encrypted_json") {
+    throw new Error("expected encrypted envelope");
+  }
+
+  const legacy = parseStoredIdempotencyResponseEnvelope({
+    kind: "encrypted_json",
+    payload: {
+      ciphertext: versioned.payload.ciphertext,
+      iv: versioned.payload.iv,
+      wrappedKey: versioned.payload.wrappedKey,
+    },
+  });
+  const v2OnlyStorage = encryptedIdempotencyResponseStorage(
+    (version: string) => {
+      if (version !== "v2") {
+        return Promise.reject(new Error("v1 is not configured"));
+      }
+      return Promise.resolve(oldKek);
+    },
+    () => Promise.resolve("v2")
+  );
+
+  await assert.rejects(
+    v2OnlyStorage.replay(legacy, CONTEXT),
+    /v1 is not configured/
+  );
+});
+
+test("new encrypted envelopes use the configured current version", async () => {
+  const v2 = await generateKek();
+  const storage = encryptedIdempotencyResponseStorage(
+    (version: string) => {
+      assert.equal(version, "v2");
+      return Promise.resolve(v2);
+    },
+    () => Promise.resolve("v2")
+  );
+
+  const stored = await storage.store({ status: "current" }, CONTEXT);
+  assert.equal(
+    stored.kind === "encrypted_json" ? stored.payload.kekVersion : null,
+    "v2"
+  );
 });

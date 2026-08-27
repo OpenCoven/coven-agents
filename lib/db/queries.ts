@@ -23,6 +23,7 @@ import type {
   IdempotencyClaimHandle,
   IdempotencyStore,
 } from "../abuse/idempotency";
+import { parseStoredIdempotencyResponseEnvelope } from "../abuse/idempotency-response";
 import type { DayCount } from "../billing/history";
 import { fillDays, runsByDay } from "../billing/history";
 import {
@@ -321,7 +322,9 @@ export const databaseIdempotencyStore: IdempotencyStore = {
           return {
             kind: "completed",
             response: {
-              envelope: existing.responseJson,
+              envelope: parseStoredIdempotencyResponseEnvelope(
+                existing.responseJson
+              ),
               status: existing.responseStatus,
             },
           } as const;

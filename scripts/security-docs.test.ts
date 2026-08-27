@@ -165,6 +165,9 @@ test("the credential key runbook documents staged rewrap and retirement", () => 
     "credentials:rewrap verify --version v1",
     "zero `v1` rows",
     "opaque row",
+    "Exit `0`",
+    "Exit `2`",
+    "Exit `1`",
   ]) {
     assert.match(runbook, new RegExp(marker.replaceAll("*", "\\*")));
   }

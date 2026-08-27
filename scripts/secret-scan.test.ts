@@ -163,8 +163,9 @@ test("pre-commit and CI invoke the staged and tracked scanners", () => {
 test("a secret with no vendor prefix is still caught, by its name", () => {
   /**
    * The gap this closes. Every vendor pattern keys on a prefix, and this
-   * project's own secrets have none -- AUTH_SECRET, CREDENTIAL_KEK, and
-   * RUNNER_SIGNING_KEY are raw base64. The most damaging values in the
+   * project's own secrets have none -- AUTH_SECRET, the versioned credential
+   * KEK ring, and RUNNER_SIGNING_KEY are raw base64. The most damaging values
+   * in the
    * repository were the ones the scanner could not see.
    */
   for (const name of [

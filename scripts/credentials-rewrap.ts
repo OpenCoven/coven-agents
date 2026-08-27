@@ -7,7 +7,10 @@ import {
   unwrapDataKey,
   validateKekVersion,
 } from "../lib/credentials/envelope";
-import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
+import {
+  type CredentialKekRing,
+  credentialKekRingFromEnvironment,
+} from "../lib/credentials/key-ring";
 
 export const DEFAULT_BATCH_SIZE = 100;
 export const MAX_BATCH_SIZE = 1000;
@@ -46,7 +49,17 @@ export type RewrapResult = {
   remaining: number;
   rewrapped: number;
   skipped: number;
+  status: RewrapStatus;
   verified: number;
+};
+
+export type RewrapStatus = "complete" | "failed" | "resume";
+
+export type RewrapCliDependencies = {
+  loadRing: () => Promise<CredentialKekRing>;
+  loadStore: () => Promise<RewrapStore>;
+  stderr: (line: string) => void;
+  stdout: (line: string) => void;
 };
 
 function parseBatch(value: string | undefined): number {
@@ -114,6 +127,7 @@ function result(): RewrapResult {
     remaining: 0,
     rewrapped: 0,
     skipped: 0,
+    status: "complete",
     verified: 0,
   };
 }
@@ -149,6 +163,25 @@ async function countRemaining(
     }
     afterId = nextAfterId;
   }
+}
+
+export function rewrapStatus(summary: RewrapResult): RewrapStatus {
+  if (summary.failures > 0) {
+    return "failed";
+  }
+  if (summary.remaining > 0 || summary.skipped > 0) {
+    return "resume";
+  }
+  return "complete";
+}
+
+export function rewrapExitCode(
+  summary: Pick<RewrapResult, "failures" | "remaining" | "skipped">
+): 0 | 1 | 2 {
+  if (summary.failures > 0) {
+    return 1;
+  }
+  return summary.remaining > 0 || summary.skipped > 0 ? 2 : 0;
 }
 
 /**
@@ -224,6 +257,7 @@ export async function rewrapRows(
   }
 
   summary.remaining = await countRemaining(store, from, input.batch);
+  summary.status = rewrapStatus(summary);
   return summary;
 }
 
@@ -264,6 +298,7 @@ export async function verifyRows(
     }
   }
 
+  summary.status = rewrapStatus(summary);
   return summary;
 }
 
@@ -358,18 +393,25 @@ async function databaseStore(): Promise<RewrapStore> {
   };
 }
 
-function printSummary(label: string, summary: RewrapResult): void {
-  process.stdout.write(
+function printSummary(
+  output: (line: string) => void,
+  label: string,
+  summary: RewrapResult
+): void {
+  output(
     `${label} verified=${summary.verified} rewrapped=${summary.rewrapped} ` +
       `skipped=${summary.skipped} failures=${summary.failures} ` +
-      `remaining=${summary.remaining}\n`
+      `remaining=${summary.remaining} status=${summary.status}`
   );
 }
 
-async function run(argv: string[]): Promise<number> {
-  const ring = await credentialKekRingFromEnvironment();
-  const store = await databaseStore();
-  const output = (line: string) => process.stdout.write(`${line}\n`);
+export async function run(
+  argv: string[],
+  dependencies: RewrapCliDependencies = defaultDependencies()
+): Promise<number> {
+  const ring = await dependencies.loadRing();
+  const store = await dependencies.loadStore();
+  const output = dependencies.stdout;
 
   if (argv[0] === "verify") {
     let version: string | undefined;
@@ -405,8 +447,9 @@ async function run(argv: string[]): Promise<number> {
     );
     summary.remaining = await countRemaining(store, oldVersion, batchSize);
     await unknownRows(store, ring.versions, batchSize, output, summary);
-    printSummary("verify", summary);
-    return summary.remaining === 0 && summary.failures === 0 ? 0 : 1;
+    summary.status = rewrapStatus(summary);
+    printSummary(output, "verify", summary);
+    return rewrapExitCode(summary);
   }
 
   const args = parseRewrapArguments(argv);
@@ -419,7 +462,8 @@ async function run(argv: string[]): Promise<number> {
       output
     );
     await unknownRows(store, ring.versions, args.batch, output, summary);
-    printSummary("dry-run", summary);
+    summary.status = rewrapStatus(summary);
+    printSummary(output, "dry-run", summary);
     return summary.failures === 0 ? 0 : 1;
   }
 
@@ -435,16 +479,33 @@ async function run(argv: string[]): Promise<number> {
     output
   );
   await unknownRows(store, ring.versions, args.batch, output, summary);
-  printSummary("rewrap", summary);
-  return summary.failures === 0 ? 0 : 1;
+  summary.status = rewrapStatus(summary);
+  printSummary(output, "rewrap", summary);
+  return rewrapExitCode(summary);
+}
+
+export async function main(
+  argv: string[] = process.argv.slice(2),
+  dependencies: RewrapCliDependencies = defaultDependencies()
+): Promise<number> {
+  try {
+    return await run(argv, dependencies);
+  } catch {
+    dependencies.stderr("Credential rewrap failed.");
+    return 1;
+  }
+}
+
+function defaultDependencies(): RewrapCliDependencies {
+  return {
+    loadRing: () => credentialKekRingFromEnvironment(),
+    loadStore: () => databaseStore(),
+    stderr: (line) => process.stderr.write(`${line}\n`),
+    stdout: (line) => process.stdout.write(`${line}\n`),
+  };
 }
 
 const [, invokedPath] = process.argv;
 if (invokedPath && fileURLToPath(import.meta.url) === resolve(invokedPath)) {
-  run(process.argv.slice(2))
-    .then((code) => process.exit(code))
-    .catch(() => {
-      process.stderr.write("Credential rewrap failed.\n");
-      process.exit(1);
-    });
+  main().then((code) => process.exit(code));
 }

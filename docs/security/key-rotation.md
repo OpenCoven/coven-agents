@@ -90,6 +90,10 @@ key material is never logged.
    pnpm credentials:rewrap --from v1 --to v2 --batch 100 --dry-run
    ```
 
+   Dry-run verifies every target-version wrapped data key without writing or
+   claiming completion of the source migration. It returns `0` when target
+   rows are clean and `1` for configuration or corruption.
+
 5. Run the retirement gate in production:
 
    ```bash
@@ -99,7 +103,10 @@ key material is never logged.
    It succeeds only when zero `v1` rows remain and every current-version
    wrapped data key can be unwrapped read-only. It prints counts and opaque row
    IDs only; it never prints tenants, harnesses, credentials, ciphertext, or
-   keys.
+   keys. Exit `0` is a complete gate. Exit `2` means resume because v1 rows
+   remain or a compare-and-swap was skipped. Exit `1` means configuration or
+   corruption failure. A normal rewrap never claims completion when it exits
+   `2`; rerun it until the verify command exits `0`.
 6. After the gate passes, remove the `CREDENTIAL_KEK` compatibility alias.
    Retire `CREDENTIAL_KEK_V1` only after the same zero-row and current-key
    verification conditions hold in production. Removing a key before the gate

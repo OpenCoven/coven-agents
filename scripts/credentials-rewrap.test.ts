@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { encryptCredential, generateKek } from "../lib/credentials/envelope";
+import type { CredentialKekRing } from "../lib/credentials/key-ring";
 import {
+  main,
   parseRewrapArguments,
+  type RewrapCliDependencies,
   type RewrapStore,
   rewrapRows,
   verifyRows,
@@ -178,3 +181,264 @@ test("database updates use a transaction and wrapped-key CAS", () => {
     /eq\(tenantCredential\.wrappedKey, expectedWrappedKey\)/
   );
 });
+
+test("the rewrap CLI returns resume for CAS conflicts and never prints payloads", async () => {
+  const sourceKek = await generateKek();
+  const targetKek = await generateKek();
+  const sealed = await encryptCredential("secret", sourceKek, "v1");
+  const row = { id: "opaque-cas-row", ...sealed };
+  const output: string[] = [];
+  const dependencies = cliDependencies(
+    sourceKek,
+    targetKek,
+    {
+      compareAndSwap() {
+        return Promise.resolve(false);
+      },
+      listByVersion(version) {
+        return Promise.resolve(version === "v1" ? [row] : []);
+      },
+    },
+    output
+  );
+
+  assert.equal(await main(["--from", "v1", "--to", "v2"], dependencies), 2);
+  assert.match(output.at(-1) ?? "", /status=resume/);
+  assert.doesNotMatch(output.join("\n"), /secret|ciphertext|wrappedKey/i);
+});
+
+test("the rewrap CLI returns failure for corrupt rows and preserves privacy", async () => {
+  const sourceKek = await generateKek();
+  const targetKek = await generateKek();
+  const row = {
+    id: "opaque-invalid-row",
+    kekVersion: "v1",
+    wrappedKey: "corrupt",
+  };
+  const output: string[] = [];
+  const dependencies = cliDependencies(
+    sourceKek,
+    targetKek,
+    {
+      compareAndSwap() {
+        return Promise.resolve(true);
+      },
+      listByVersion(version) {
+        return Promise.resolve(version === "v1" ? [row] : []);
+      },
+    },
+    output
+  );
+
+  assert.equal(await main(["--from", "v1", "--to", "v2"], dependencies), 1);
+  assert.match(output.at(-1) ?? "", /status=failed/);
+  assert.deepEqual(output.slice(0, -1), ["row_id: opaque-invalid-row"]);
+  assert.doesNotMatch(output.join("\n"), /corrupt|wrappedKey|ciphertext/i);
+});
+
+test("verify returns zero for a clean current-key gate and two while old rows remain", async () => {
+  const sourceKek = await generateKek();
+  const targetKek = await generateKek();
+  const current = await encryptCredential("current", targetKek, "v2");
+  const old = await encryptCredential("old", sourceKek, "v1");
+  const cleanStore: RewrapStore = {
+    compareAndSwap: async () => true,
+    listAll() {
+      return Promise.resolve([{ id: "current", ...current }]);
+    },
+    listByVersion(version, _limit, afterId) {
+      if (afterId) {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(
+        version === "v2" ? [{ id: "current", ...current }] : []
+      );
+    },
+  };
+  const cleanOutput: string[] = [];
+  assert.equal(
+    await main(
+      ["verify", "--version", "v1"],
+      cliDependencies(sourceKek, targetKek, cleanStore, cleanOutput)
+    ),
+    0
+  );
+  assert.match(cleanOutput.at(-1) ?? "", /status=complete/);
+
+  const remainingStore: RewrapStore = {
+    compareAndSwap: async () => true,
+    listAll() {
+      return Promise.resolve([
+        { id: "current", ...current },
+        { id: "old", ...old },
+      ]);
+    },
+    listByVersion(version, _limit, afterId) {
+      if (afterId) {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(
+        version === "v2"
+          ? [{ id: "current", ...current }]
+          : version === "v1"
+            ? [{ id: "old", ...old }]
+            : []
+      );
+    },
+  };
+  const remainingOutput: string[] = [];
+  assert.equal(
+    await main(
+      ["verify", "--version", "v1"],
+      cliDependencies(sourceKek, targetKek, remainingStore, remainingOutput)
+    ),
+    2
+  );
+  assert.match(remainingOutput.at(-1) ?? "", /status=resume/);
+});
+
+test("verify returns one for a corrupt current row", async () => {
+  const sourceKek = await generateKek();
+  const targetKek = await generateKek();
+  const output: string[] = [];
+  const store: RewrapStore = {
+    compareAndSwap: async () => true,
+    listAll() {
+      return Promise.resolve([]);
+    },
+    listByVersion(version, _limit, afterId) {
+      if (afterId) {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(
+        version === "v2"
+          ? [
+              {
+                id: "opaque-current-row",
+                kekVersion: "v2",
+                wrappedKey: "corrupt",
+              },
+            ]
+          : []
+      );
+    },
+  };
+
+  assert.equal(
+    await main(
+      ["verify", "--version", "v1"],
+      cliDependencies(sourceKek, targetKek, store, output)
+    ),
+    1
+  );
+  assert.match(output.at(-1) ?? "", /status=failed/);
+  assert.doesNotMatch(output.join("\n"), /corrupt|wrappedKey|ciphertext/i);
+});
+
+test("dry-run is read-only and reports clean or corrupt target rows", async () => {
+  const sourceKek = await generateKek();
+  const targetKek = await generateKek();
+  const sealed = await encryptCredential("target", targetKek, "v2");
+  let writes = 0;
+  const cleanOutput: string[] = [];
+  const cleanStore: RewrapStore = {
+    compareAndSwap() {
+      writes += 1;
+      return Promise.resolve(true);
+    },
+    listAll() {
+      return Promise.resolve([]);
+    },
+    listByVersion(version, _limit, afterId) {
+      return Promise.resolve(
+        version === "v2" && !afterId ? [{ id: "target", ...sealed }] : []
+      );
+    },
+  };
+  assert.equal(
+    await main(
+      ["--from", "v1", "--to", "v2", "--dry-run"],
+      cliDependencies(sourceKek, targetKek, cleanStore, cleanOutput)
+    ),
+    0
+  );
+  assert.equal(writes, 0);
+  assert.match(cleanOutput.at(-1) ?? "", /dry-run .*status=complete/);
+
+  const corruptOutput: string[] = [];
+  const corruptStore: RewrapStore = {
+    compareAndSwap() {
+      writes += 1;
+      return Promise.resolve(true);
+    },
+    listAll() {
+      return Promise.resolve([]);
+    },
+    listByVersion(version, _limit, afterId) {
+      return Promise.resolve(
+        version === "v2" && !afterId
+          ? [{ id: "target-row-2", kekVersion: "v2", wrappedKey: "invalid" }]
+          : []
+      );
+    },
+  };
+  assert.equal(
+    await main(
+      ["--from", "v1", "--to", "v2", "--dry-run"],
+      cliDependencies(sourceKek, targetKek, corruptStore, corruptOutput)
+    ),
+    1
+  );
+  assert.match(corruptOutput.at(-1) ?? "", /dry-run .*status=failed/);
+  assert.doesNotMatch(
+    corruptOutput.join("\n"),
+    /invalid|wrappedKey|ciphertext/i
+  );
+});
+
+test("main turns configuration errors into a private failure", async () => {
+  const output: string[] = [];
+  const dependencies = cliDependencies(
+    await generateKek(),
+    await generateKek(),
+    {
+      compareAndSwap: async () => false,
+      listByVersion: async () => [],
+    },
+    output
+  );
+  dependencies.loadRing = () =>
+    Promise.reject(new Error("sensitive configuration detail"));
+
+  assert.equal(await main(["--from", "v1", "--to", "v2"], dependencies), 1);
+  assert.deepEqual(output, ["stderr: Credential rewrap failed."]);
+  assert.doesNotMatch(output.join("\n"), /sensitive|configuration detail/i);
+});
+
+function cliDependencies(
+  sourceKek: CryptoKey,
+  targetKek: CryptoKey,
+  store: RewrapStore,
+  output: string[]
+): RewrapCliDependencies {
+  const ring: CredentialKekRing = {
+    current: targetKek,
+    currentVersion: "v2",
+    keyFor(version) {
+      if (version === "v1") {
+        return sourceKek;
+      }
+      if (version === "v2") {
+        return targetKek;
+      }
+      throw new Error("version is not configured");
+    },
+    versions: ["v1", "v2"],
+  };
+  return {
+    loadRing: () => Promise.resolve(ring),
+    loadStore: () => Promise.resolve(store),
+    stderr: (line) => output.push(`stderr: ${line}`),
+    stdout: (line) => output.push(line),
+  };
+}

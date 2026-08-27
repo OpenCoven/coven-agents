@@ -97,3 +97,15 @@ test("the cache is invalidated by any configuration change", async () => {
   const third = await credentialKekRingFromEnvironment(changed);
   assert.notEqual(third, first);
 });
+
+test("unsupported configuration is rejected even after a valid cache hit", async () => {
+  const env = await environment();
+  await credentialKekRingFromEnvironment(env);
+
+  await assert.rejects(() =>
+    credentialKekRingFromEnvironment({
+      ...env,
+      CREDENTIAL_KEK_V3: env.CREDENTIAL_KEK_V2,
+    })
+  );
+});

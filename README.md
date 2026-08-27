@@ -160,9 +160,18 @@ single run. Setting `COPILOT_GITHUB_TOKEN` on the worker now does nothing.
 
 Each tenant supplies their own credential through the console, which is stored
 under envelope encryption — a per-credential AES-GCM data key wrapped by
-`CREDENTIAL_KEK`. Accepted values for a Copilot harness are a fine-grained PAT
-with the "Copilot Requests" permission, or an OAuth token from the Copilot CLI
-or `gh` app. Classic `ghp_` tokens are not supported.
+the versioned KEK ring. Configure
+`CREDENTIAL_KEK_CURRENT_VERSION=v2`,
+`CREDENTIAL_KEK_V1`, and `CREDENTIAL_KEK_V2`; new rows always use the current
+version and each database row names the exact key used to wrap it. During the
+staged migration, the old `CREDENTIAL_KEK` name may alias only `v1` and is not
+a current-key fallback. Keep both versioned keys until
+`pnpm credentials:rewrap verify --version v1` passes with zero `v1` rows.
+Rewrap is resumable: exit `0` means complete, exit `2` means resume after
+skips or remaining rows, and exit `1` means configuration or data failure.
+Accepted values for a Copilot harness are a fine-grained PAT with the
+"Copilot Requests" permission, or an OAuth token from the Copilot CLI or `gh`
+app. Classic `ghp_` tokens are not supported.
 
 `RUNNER_SERVICE_TOKEN` and `APP_ORIGIN` are how the worker asks the app for
 that credential. Both must be set, and the service token must match the app's.

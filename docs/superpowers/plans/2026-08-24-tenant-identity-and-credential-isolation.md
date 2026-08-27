@@ -1219,24 +1219,21 @@ import type { SubscriberSession } from "@/lib/session";
 import {
   decryptCredential,
   encryptCredential,
-  importKek,
   type SealedCredential,
 } from "./envelope";
-
-function kek(): Promise<CryptoKey> {
-  const raw = process.env.CREDENTIAL_KEK;
-  if (!raw) {
-    throw new Error("CREDENTIAL_KEK is not configured.");
-  }
-  return importKek(raw);
-}
+import { credentialKekRingFromEnvironment } from "./key-ring";
 
 export async function putCredential(
   session: SubscriberSession,
   harnessId: string,
   plaintext: string
 ): Promise<void> {
-  const sealed = await encryptCredential(plaintext, await kek());
+  const ring = await credentialKekRingFromEnvironment();
+  const sealed = await encryptCredential(
+    plaintext,
+    ring.current,
+    ring.currentVersion
+  );
   const db = databaseFor(session);
 
   await db
@@ -1272,12 +1269,14 @@ export async function readCredentialForTenant(
     return null;
   }
 
+  const ring = await credentialKekRingFromEnvironment();
   const sealed: SealedCredential = {
     ciphertext: row.ciphertext,
     iv: row.iv,
+    kekVersion: row.kekVersion,
     wrappedKey: row.wrappedKey,
   };
-  return await decryptCredential(sealed, await kek());
+  return await decryptCredential(sealed, ring.keyFor(row.kekVersion));
 }
 ```
 

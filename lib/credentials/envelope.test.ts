@@ -110,6 +110,12 @@ test("malformed envelope fields are rejected before WebCrypto", async () => {
   const sealed = await encryptCredential("secret", kek, "v1");
 
   await assert.rejects(() =>
+    decryptCredential(
+      { ...sealed, kekVersion: undefined } as unknown as typeof sealed,
+      kek
+    )
+  );
+  await assert.rejects(() =>
     decryptCredential({ ...sealed, kekVersion: "bad version" }, kek)
   );
   await assert.rejects(() =>

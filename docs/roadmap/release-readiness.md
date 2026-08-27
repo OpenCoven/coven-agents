@@ -58,7 +58,7 @@ Check presence and agreement without printing values.
 | Abuse controls | `REDIS_URL` and `ABUSE_KEY_SECRET` must both be present in production. | [`scripts/validate-runtime-config.ts`](../../scripts/validate-runtime-config.ts) rejects an incomplete pair, but it is not a complete deployment preflight. |
 | App-to-runner connection | `NEXT_PUBLIC_CLOUD_RUNNER_URL` or server-side `CLOUD_RUNNER_URL`, plus matching `AGENT_CONTROL_TOKEN`. | The browser receives the connection from the app; the public URL requires a fresh app build when changed. |
 | Runner identity | App `RUNNER_SIGNING_KEY_ID`/`RUNNER_SIGNING_KEY`/`RUNNER_SIGNING_PUBLIC_KEY`; Worker `RUNNER_VERIFY_KEY_ID`/`RUNNER_VERIFY_KEY` plus an optional previous key ring with last-signed and retirement timestamps. | Claims fail closed when either side is absent or mismatched; rotate with the [key runbook](../security/key-rotation.md). |
-| Credential lending | App and Worker `RUNNER_SERVICE_TOKEN`; app `CREDENTIAL_KEK`; Worker `APP_ORIGIN`. | The Worker has no operator or fallback harness credential. |
+| Credential lending | App and Worker `RUNNER_SERVICE_TOKEN`; app `CREDENTIAL_KEK_CURRENT_VERSION` with `CREDENTIAL_KEK_V1`/`CREDENTIAL_KEK_V2` ring; Worker `APP_ORIGIN`. | The Worker has no operator or fallback harness credential. Keep the v1 key and legacy alias only through the staged rewrap gate; retire them after zero v1 rows and successful verification. |
 | Billing | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, and canonical `APP_ORIGIN`. | Checkout and webhook return `503` when unconfigured. |
 | Other shipped app paths | `AI_GATEWAY_API_KEY` and `BLOB_READ_WRITE_TOKEN` when chat/model and upload paths remain enabled. | These are app feature dependencies, not runner credentials. |
 | Worker | `AGENT_CONTROL_TOKEN`, `OPERATOR_DIAGNOSTIC_TOKEN`, `RUNNER_VERIFY_KEY`, `RUNNER_SERVICE_TOKEN`, `APP_ORIGIN`, correct `ALLOWED_ORIGIN`, Durable Object bindings/migration, container image, and Wrangler authentication. | [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc) enables observability and declares the current Worker topology. |
@@ -176,8 +176,10 @@ Release evidence must prove:
 - the service token cannot select a tenant without a valid bound claim;
 - two controlled tenants cannot list, run, stream, stop, delete, or borrow each
   other's resources or credentials;
-- `CREDENTIAL_KEK` is present, tenant credentials decrypt only for their tenant
-  and harness, and the Worker stores no fallback credential;
+- the versioned `CREDENTIAL_KEK_CURRENT_VERSION`/`CREDENTIAL_KEK_V1`/
+  `CREDENTIAL_KEK_V2` ring is present, tenant credentials decrypt only for
+  their tenant and harness, the Worker stores no fallback credential, and the
+  rewrap verification gate has passed before v1 retirement;
 - direct and encoded credential shapes are redacted from UI, persisted
   evidence, logs, diagnostics, and errors; and
 - browser connection material is not placed in persistent local storage.

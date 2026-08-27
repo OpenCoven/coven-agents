@@ -920,6 +920,10 @@ The registry must:
 - decrypt only named configured versions;
 - never fall back to trying every key.
 
+During staged migration, an unversioned idempotency response envelope is
+accepted only at the JSON serialization boundary and is labeled exactly `v1`;
+credential rows are labeled by the migration and never use that fallback.
+
 - [x] **Step 4: Implement resumable rewrap**
 
 `pnpm credentials:rewrap --from v1 --to v2 --batch 100`:
