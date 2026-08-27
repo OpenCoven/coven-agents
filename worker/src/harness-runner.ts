@@ -97,6 +97,7 @@ async function withDeadlineAndCancellation<T>(
   let cancellationRequested = false;
   let cancellation: Promise<never> | undefined;
   let rejectAbort: (error: unknown) => void = () => undefined;
+  let onAbort: (() => void) | undefined;
   const abort = async (): Promise<never> => {
     try {
       await (options.destroySandbox
@@ -126,7 +127,7 @@ async function withDeadlineAndCancellation<T>(
         rejectAbort = reject;
       })
     : undefined;
-  const onAbort = () => {
+  onAbort = () => {
     cancellationRequested = true;
     // Cancellation has won as soon as the signal fires. Clear the deadline
     // before awaiting durable sandbox cleanup so a wedged operation cannot
@@ -148,7 +149,7 @@ async function withDeadlineAndCancellation<T>(
         );
       }, options.ms);
     });
-    if (options.signal) {
+    if (options.signal && onAbort) {
       options.signal.addEventListener("abort", onAbort, { once: true });
       if (options.signal.aborted) {
         onAbort();
@@ -169,7 +170,7 @@ async function withDeadlineAndCancellation<T>(
       clearTimeout(timer);
       timer = undefined;
     }
-    if (options.signal) {
+    if (options.signal && onAbort) {
       options.signal.removeEventListener("abort", onAbort);
     }
   }
