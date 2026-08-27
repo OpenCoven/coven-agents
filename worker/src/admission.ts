@@ -996,7 +996,7 @@ export class RunAdmission extends DurableObject<Env> {
       `);
       ctx.storage.sql.exec(`
         DELETE FROM admission_cleanup_tasks
-        WHERE (kind = 'admission' AND (
+        WHERE (kind IN ('admission', 'rejected') AND (
                  admission_sequence <= 0
                  OR NOT EXISTS (
              SELECT 1
@@ -1560,9 +1560,15 @@ export class RunAdmission extends DurableObject<Env> {
         );
       } catch (error) {
         if (isDispatchRejectedError(error)) {
-          this.terminalizeFailedAdmission(candidate, candidate.dispatchToken);
-          await this.discardRejectedAdmission(candidate);
-          continue;
+          const cleaned = await this.rejectRejectedAdmission(candidate);
+          if (cleaned) {
+            this.terminalizeFailedAdmission(candidate, candidate.dispatchToken);
+            continue;
+          }
+          this.enqueueCleanupTask(candidate, "rejected");
+          this.renewDispatchLease(candidate.runId, candidate.dispatchToken);
+          await this.ensureAlarm({ throwOnFailure: false });
+          return;
         }
         if (isAgentBusyError(error)) {
           const fenceToken = await this.fenceDispatch(
@@ -1990,11 +1996,27 @@ export class RunAdmission extends DurableObject<Env> {
     }
   }
 
-  private async discardRejectedAdmission(
+  private async rejectRejectedAdmission(
     record: StoredAdmissionRecord
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const agent = this.env.YoloAgent.getByName(record.agentId);
+      const reject = (
+        agent as unknown as {
+          rejectAdmitted?: (
+            runId: string,
+            capability: AdmissionCleanupCapability
+          ) => Promise<boolean> | boolean;
+        }
+      ).rejectAdmitted;
+      if (typeof reject === "function") {
+        return Boolean(
+          await reject.call(agent, record.runId, cleanupCapability(record))
+        );
+      }
+      // Older agent instances only expose the pre-confirmation cleanup RPC.
+      // Keep it as a compatibility fallback, but never treat a missing or
+      // failed cleanup method as proof that local state is gone.
       const discard = (
         agent as unknown as {
           discardRejectedRun?: (
@@ -2004,12 +2026,14 @@ export class RunAdmission extends DurableObject<Env> {
         }
       ).discardRejectedRun;
       if (typeof discard === "function") {
-        await discard.call(agent, record.runId, cleanupCapability(record));
+        return Boolean(
+          await discard.call(agent, record.runId, cleanupCapability(record))
+        );
       }
     } catch {
-      // The admission tombstone has already released capacity. A later
-      // reconciliation can retry local cleanup without reviving this claim.
+      // Keep the active admission claim until a later alarm proves cleanup.
     }
+    return false;
   }
 
   private async stopForCleanup(
@@ -2078,22 +2102,26 @@ export class RunAdmission extends DurableObject<Env> {
     return rows[0]?.next_attempt_at ?? null;
   }
 
-  private enqueueCleanupTask(record: StoredAdmissionRecord): void {
+  private enqueueCleanupTask(
+    record: StoredAdmissionRecord,
+    kind: "admission" | "rejected" = "admission"
+  ): void {
     this.ctx.storage.sql.exec(
       `
         INSERT INTO admission_cleanup_tasks
           (agent_id, run_id, admission_sequence, kind, dispatch_token,
            operation_id, request_hash, attempts, next_attempt_at)
-        VALUES (?, ?, ?, 'admission', ?, ?, ?, 0, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
         ON CONFLICT(run_id, admission_sequence) DO NOTHING
       `,
       record.agentId,
       record.runId,
       record.sequence,
+      kind,
       record.dispatchToken ?? null,
       record.operationId,
       record.requestHash,
-      Date.now()
+      kind === "rejected" ? Date.now() + ALARM_REPAIR_RETRY_MS : Date.now()
     );
   }
 
@@ -2102,7 +2130,7 @@ export class RunAdmission extends DurableObject<Env> {
     admissionSequence: number
   ): void {
     this.ctx.storage.sql.exec(
-      "DELETE FROM admission_cleanup_tasks WHERE run_id = ? AND admission_sequence <> ? AND kind = 'admission'",
+      "DELETE FROM admission_cleanup_tasks WHERE run_id = ? AND admission_sequence <> ? AND kind IN ('admission', 'rejected')",
       runId,
       admissionSequence
     );
@@ -2111,7 +2139,7 @@ export class RunAdmission extends DurableObject<Env> {
   private deleteCleanupTask(
     runId: string,
     admissionSequence: number,
-    kind?: "admission" | "provisional"
+    kind?: "admission" | "provisional" | "rejected"
   ): void {
     this.ctx.storage.sql.exec(
       `DELETE FROM admission_cleanup_tasks
@@ -2145,7 +2173,7 @@ export class RunAdmission extends DurableObject<Env> {
     task: {
       admission_sequence: number;
       attempts: number;
-      kind: "admission" | "provisional";
+      kind: "admission" | "provisional" | "rejected";
       run_id: string;
     },
     nextAttemptAt = Date.now() + ALARM_REPAIR_RETRY_MS
@@ -2160,6 +2188,27 @@ export class RunAdmission extends DurableObject<Env> {
     );
   }
 
+  private renewDispatchLease(
+    runId: string,
+    dispatchToken: string | undefined
+  ): void {
+    if (!dispatchToken) {
+      return;
+    }
+    this.ctx.storage.sql.exec(
+      `
+        UPDATE admission_records
+        SET dispatch_lease_until = ?
+        WHERE run_id = ?
+          AND state = 'active'
+          AND dispatch_token = ?
+      `,
+      new Date(Date.now() + DISPATCH_LEASE_MS).toISOString(),
+      runId,
+      dispatchToken
+    );
+  }
+
   private async retryCleanupTasks(): Promise<void> {
     const tasks = this.ctx.storage.sql
       .exec<{
@@ -2167,7 +2216,7 @@ export class RunAdmission extends DurableObject<Env> {
         agent_id: string;
         attempts: number;
         dispatch_token: string | null;
-        kind: "admission" | "provisional";
+        kind: "admission" | "provisional" | "rejected";
         next_attempt_at: number;
         confirmation_grace_until: number;
         operation_id: string | null;
@@ -2284,6 +2333,44 @@ export class RunAdmission extends DurableObject<Env> {
             "provisional"
           );
         } else {
+          this.rescheduleCleanupTask(task);
+        }
+        continue;
+      }
+      if (task.kind === "rejected") {
+        const current = this.findStoredByRunId(task.run_id);
+        const sameIncarnation =
+          current !== null &&
+          current.sequence === task.admission_sequence &&
+          matchesCleanupIdentity(current, {
+            agentId: task.agent_id,
+            operationId: task.operation_id ?? "",
+            requestHash: task.request_hash ?? "",
+            runId: task.run_id,
+          }) &&
+          current.dispatchToken === task.dispatch_token;
+        if (!sameIncarnation) {
+          this.deleteCleanupTask(
+            task.run_id,
+            task.admission_sequence,
+            "rejected"
+          );
+          continue;
+        }
+        const completed = await this.rejectRejectedAdmission(current);
+        if (completed) {
+          this.terminalizeRecord(task.run_id, task.dispatch_token ?? undefined);
+          this.pruneTerminalRecords();
+          this.deleteCleanupTask(
+            task.run_id,
+            task.admission_sequence,
+            "rejected"
+          );
+        } else {
+          this.renewDispatchLease(
+            task.run_id,
+            task.dispatch_token ?? undefined
+          );
           this.rescheduleCleanupTask(task);
         }
         continue;

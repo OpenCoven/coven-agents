@@ -643,6 +643,77 @@ test("only the provisional run creator can discard it, and confirmation clears o
   );
 });
 
+test("rejectAdmitted terminalizes an exact confirmed queued run without sandbox cleanup", async () => {
+  resetDestroyedSandboxes();
+  const yolo = agent();
+  const prepared = await yolo.enqueue(
+    { operationId: OP_A, task: "Reject before dispatch." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c9e",
+    "reject-before-dispatch",
+    "identity"
+  );
+  const capability = {
+    ...(await testAdmissionCapability(prepared.run.id, {
+      agentId: AGENT_ID,
+      operationId: OP_A,
+      requestHash: "reject-before-dispatch",
+    })),
+    dispatchToken: "1:reject-before-dispatch",
+  };
+
+  assert.deepEqual(
+    await yolo.confirmAdmission(
+      prepared.run.id,
+      OP_A,
+      "reject-before-dispatch",
+      capability
+    ),
+    { kind: "confirmed" }
+  );
+  const state = Reflect.get(yolo, "state") as {
+    definition: AgentDefinition | null;
+  };
+  yolo.setState({
+    ...state,
+    definition: {
+      ...state.definition,
+      workspace: "/mutated",
+    },
+  } as never);
+
+  assert.equal(yolo.rejectAdmitted(prepared.run.id, capability), true);
+  assert.equal(yolo.getRun(prepared.run.id)?.status, "failed");
+  assert.deepEqual(destroyedSandboxes(), []);
+  assert.equal(
+    (Reflect.get(yolo, "ephemeralIdentityTokens") as Map<string, unknown>).size,
+    0
+  );
+});
+
+test("discarding a prepared run removes its ephemeral identity token", async () => {
+  const yolo = agent();
+  const prepared = await yolo.enqueue(
+    { operationId: OP_B, task: "Discard before admission." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8ca0",
+    "discard-before-admission",
+    "identity"
+  );
+  assert.ok(prepared.prepareOwner);
+  assert.equal(
+    (Reflect.get(yolo, "ephemeralIdentityTokens") as Map<string, unknown>).size,
+    1
+  );
+
+  assert.equal(
+    yolo.discardPreparedRun(prepared.run.id, prepared.prepareOwner ?? ""),
+    true
+  );
+  assert.equal(
+    (Reflect.get(yolo, "ephemeralIdentityTokens") as Map<string, unknown>).size,
+    0
+  );
+});
+
 test("admission confirmation atomically wins the orphan timeout and rejects foreign data", async () => {
   const cancelled: string[] = [];
   const yolo = new (class extends YoloAgent {
@@ -3818,6 +3889,11 @@ test("admission terminal reporting does not retain an unbounded run map", async 
   assert.ok(
     Object.keys(state.admissionReported ?? {}).length <= 3,
     "terminal reporting state must be bounded with run retention"
+  );
+  assert.equal(
+    (Reflect.get(yolo, "ephemeralIdentityTokens") as Map<string, unknown>).size,
+    0,
+    "terminal runs must not retain ephemeral identity tokens"
   );
 });
 
