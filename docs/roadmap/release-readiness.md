@@ -7,17 +7,18 @@ executed evidence.
 
 ## Current release disposition
 
-**No-go as of 2026-08-26.**
+**No-go as of 2026-08-27.**
 
 Current blockers are factual and fail closed:
 
 - the authenticated private Beads/DoltHub pull returned `PermissionDenied`, so
   authoritative P0, dependency, and acceptance state cannot be reconciled;
-- `pnpm hygiene` at `2026-08-26T02:39:19-05:00` reported four worktrees, three
-  secondary worktrees, and two `AT RISK` branches: `docs/repository-roadmap`
-  has one unpushed commit, while `fix/run-reconcile` is not on origin and is not
-  merged. Worktree state is live, so release operators must rerun the command
-  rather than treat these names as a durable inventory;
+- `pnpm hygiene` at `2026-08-27T02:06:28-05:00` reported five worktrees, four
+  secondary worktrees, and two `AT RISK` branches:
+  `feat/admission-queue-rebased` has one unpushed commit and is not merged,
+  while `fix/process-runner` is not on origin and is not merged. Worktree state
+  is live, so release operators must rerun the command rather than treat these
+  names as a durable inventory;
 - all 60 managed Project items are draft items, so GitHub issue state cannot
   independently confirm delivery reconciliation;
 - required rows in [`verification-matrix.md`](verification-matrix.md) remain
@@ -128,19 +129,20 @@ E2E_PRODUCTION=1 PORT=3105 pnpm test
 
 Retain command, commit, environment, timestamp, exit status, and sanitized
 output. The placeholder `ADMIN_EMAILS` value above is a local audit fixture, not
-release configuration. The last full snapshot passed check, typecheck, 936 unit
+release configuration. The last full snapshot passed check, typecheck, 947 unit
 tests, sixteen browser tests against development and local production servers,
-and both default and demo production builds, but hygiene failed; it is not
-release evidence for a later commit. A tracked secret scan is recommended in
-addition to, not instead of, the six gates.
+both default and demo production builds, and the local Docker-backed Sandbox
+diagnostic, but hygiene failed; it is not release evidence for a later commit.
+A tracked secret scan is recommended in addition to, not instead of, the six
+gates.
 
 ## Required smoke paths
 
 | Path | Required smoke | Evidence required | Current state |
 | --- | --- | --- | --- |
-| Demo | Load the signed-out root, verify no database/runner mutation, exercise play, pause, seek, speed, and completion, and inspect sanitized replay output. | Dated browser trace or recording tied to the candidate and deployment. | A local production replay reached 10/10 sanitized events without console errors on 2026-08-26; no release-equivalent deployment artifact is retained. |
+| Demo | Load the signed-out root, verify no database/runner mutation, exercise play, pause, seek, speed, and completion, and inspect sanitized replay output. | Dated browser trace or recording tied to the candidate and deployment. | A local production replay reached 10/10 sanitized events without console errors on 2026-08-27; no release-equivalent deployment artifact is retained. |
 | Subscriber | Exercise GitHub sign-in, guest refusal, active eligibility, expired/revoked refusal, connection retrieval, and usage display. | Dated trace plus sanitized account-state evidence for allowed and denied cases. | Unit-verified; no production-like OAuth and Stripe transition artifact. |
-| Cloud | Run the authenticated deployment diagnostic, create an agent, start and observe a credentialed run, stream/poll to terminal state, cancel a bounded run, delete the agent, and verify tenant/sandbox cleanup. | Dated Worker/app logs, response summary, run identifiers, and cleanup result without credentials or private output. | Local worker tests pass; no live release-equivalent lifecycle artifact. |
+| Cloud | Run the authenticated deployment diagnostic, create an agent, start and observe a credentialed run, stream/poll to terminal state, cancel a bounded run, delete the agent, and verify tenant/sandbox cleanup. | Dated Worker/app logs, response summary, run identifiers, and cleanup result without credentials or private output. | The local Docker-backed diagnostic passes with the SDK-matched image. No deployed release-equivalent create/run/stream/cancel/delete lifecycle artifact exists. |
 | Local, if supported | Create, run, cancel, and delete through the supported local boundary, including host isolation and cleanup checks. | Dated artifact from the declared supported local environment. | Not applicable: no local runner is tracked and `backend` is cloud-only. |
 
 Smoke failure is a no-go. Do not retry until a failure disappears without
