@@ -46,18 +46,28 @@ export const KEY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
  */
 export const TENANT_ID_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
 
+export const runnerRunScopeSchema = z
+  .object({
+    agentId: z.string().uuid(),
+    harnessId: z.string().trim().min(1).max(64),
+    operationId: z.string().uuid(),
+  })
+  .strict();
+
 export const runnerClaimsSchema = z
   .object({
     authVersion: z.number().int().nonnegative().max(MAX_AUTH_VERSION),
     exp: z.number().int().positive(),
     kid: z.string().regex(KEY_ID_PATTERN),
     plan: z.enum(["demo", "subscriber"]),
+    run: runnerRunScopeSchema.optional(),
     sub: z.string().min(1).max(128),
     tenant: z.string().regex(TENANT_ID_PATTERN),
   })
   .strict();
 
 export type RunnerClaims = z.infer<typeof runnerClaimsSchema>;
+export type RunnerRunScope = z.infer<typeof runnerRunScopeSchema>;
 
 export function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";

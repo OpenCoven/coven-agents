@@ -13,10 +13,15 @@ import {
   serializeCredential,
 } from "./shape";
 
+export type CredentialStoreDatabase = Pick<
+  ReturnType<typeof databaseFor>,
+  "delete" | "select" | "update"
+>;
+
 export async function readCredentialForTenant(
   tenant: string,
   harnessId: string,
-  db: ReturnType<typeof databaseFor>
+  db: CredentialStoreDatabase
 ): Promise<string | null> {
   const rows = await db
     .select()
@@ -66,13 +71,95 @@ export async function readCredentialForTenant(
   );
 }
 
+export async function prepareCredentialForTenant(
+  tenant: string,
+  harnessId: string,
+  db: CredentialStoreDatabase
+): Promise<boolean> {
+  const rows = await db
+    .select()
+    .from(tenantCredential)
+    .where(credentialWhere(tenant, harnessId))
+    .for("update")
+    .limit(1);
+  const [row] = rows;
+  if (!row) {
+    return false;
+  }
+
+  const ring = await credentialKekRingFromEnvironment();
+  const stored = parseStoredCredential(
+    await decryptCredential(
+      {
+        aadVersion: row.aadVersion,
+        ciphertext: row.ciphertext,
+        iv: row.iv,
+        kekVersion: row.kekVersion,
+        wrappedKey: row.wrappedKey,
+      },
+      ring.keyFor(row.kekVersion),
+      { harnessId, kind: "credential", tenant }
+    )
+  );
+  if (!stored) {
+    return false;
+  }
+  if (!needsRefresh(stored, Date.now())) {
+    return true;
+  }
+  return (
+    (await refreshStoredCredential(
+      stored,
+      tenant,
+      harnessId,
+      row.id,
+      row.credentialRevision,
+      db
+    )) !== null
+  );
+}
+
+export async function readCredentialForTenantWithoutRefresh(
+  tenant: string,
+  harnessId: string,
+  db: CredentialStoreDatabase
+): Promise<string | null> {
+  const rows = await db
+    .select()
+    .from(tenantCredential)
+    .where(credentialWhere(tenant, harnessId))
+    .limit(1);
+  const [row] = rows;
+  if (!row) {
+    return null;
+  }
+  const ring = await credentialKekRingFromEnvironment();
+  const stored = parseStoredCredential(
+    await decryptCredential(
+      {
+        aadVersion: row.aadVersion,
+        ciphertext: row.ciphertext,
+        iv: row.iv,
+        kekVersion: row.kekVersion,
+        wrappedKey: row.wrappedKey,
+      },
+      ring.keyFor(row.kekVersion),
+      { harnessId, kind: "credential", tenant }
+    )
+  );
+  if (!stored) {
+    return null;
+  }
+  return stored.kind === "pat" ? stored.token : stored.access;
+}
+
 async function refreshStoredCredential(
   stored: StoredCredential,
   tenant: string,
   harnessId: string,
   expectedCredentialId: string,
   expectedCredentialRevision: string,
-  db: ReturnType<typeof databaseFor>
+  db: CredentialStoreDatabase
 ): Promise<string | null> {
   if (stored.kind !== "oauth") {
     return stored.token;
@@ -134,7 +221,7 @@ async function persistCredential(
   expectedCredentialId: string,
   expectedCredentialRevision: string,
   credential: StoredCredential,
-  db: ReturnType<typeof databaseFor>
+  db: CredentialStoreDatabase
 ): Promise<boolean> {
   const ring = await credentialKekRingFromEnvironment();
   const sealed = await encryptCredential(
@@ -170,7 +257,7 @@ async function persistCredential(
 async function readAuthoritativeCredential(
   tenant: string,
   harnessId: string,
-  db: ReturnType<typeof databaseFor>
+  db: CredentialStoreDatabase
 ): Promise<string | null> {
   const rows = await db
     .select()

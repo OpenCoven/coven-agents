@@ -196,7 +196,7 @@ Expected: PASS.
 
 Add the policy table to `docs/security/execution-threat-model.md`. State that production changes require a reviewed code change, shadow telemetry, and rollback threshold; environment variables may lower emergency limits but may not raise them above code maxima.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/abuse docs/security/execution-threat-model.md
@@ -959,20 +959,27 @@ git commit -S -m "feat(security): add resumable credential key rotation" \
 - Modify: `lib/db/schema.ts`
 - Create: `lib/credentials/leases.ts`
 - Create: `lib/credentials/leases.test.ts`
+- Modify: `packages/agent-contracts/src/identity.ts`
+- Modify: `app/api/runner-token/route.ts`
+- Modify: `lib/agents/identity.ts`
+- Modify: `lib/agents/client.ts`
+- Modify: `components/console/run-console.tsx`
 - Modify: `app/api/internal/credential/binding.ts`
 - Modify: `app/api/internal/credential/route.ts`
 - Modify: `worker/src/agents.ts`
-- Add: `lib/db/migrations/0010_credential_leases.sql`
+- Add: `lib/db/migrations/0012_credential_leases.sql`
 
-- [ ] **Step 1: Write failing lease tests**
+- [x] **Step 1: Write failing lease tests**
 
 Cover tenant mismatch, harness mismatch, run mismatch, duplicate consumption, expired lease, released reservation, and successful one-time consumption.
 
-- [ ] **Step 2: Define the request and lease contracts**
+- [x] **Step 2: Define the request and lease contracts**
 
 ```ts
 export type CredentialRequestEnvelope = {
+  agentId: string;
   harnessId: string;
+  operationId: string;
   requestId: string;
   runId: string;
   tenant: string;
@@ -982,31 +989,57 @@ export type CredentialLease = {
   consumedAt: Date | null;
   expiresAt: Date;
   harnessId: string;
+  operationIdHash: string;
   requestIdHash: string;
   runId: string;
   tenantHash: string;
 };
 ```
 
-- [ ] **Step 3: Enforce signed binding**
+- [x] **Step 3: Enforce signed binding**
 
 The internal route must verify:
 
 1. service token;
 2. signed runner claim and `kid`;
 3. body tenant equals claim tenant;
-4. body run ID exists in a reserved/active state;
-5. body harness equals the agent definition;
-6. request ID has not been consumed;
-7. lease is consumed transactionally before decryption.
+4. the signed claim's agent, harness, and operation equal the Worker agent
+   definition and run-start request, and the Worker uses that operation ID as
+   the run ID;
+5. body run ID exists in a reserved/active state;
+6. an issuance call has already persisted the immutable tenant, harness, run,
+   and request binding;
+7. the later consumption call presents that exact binding and the reservation
+   is still reserved;
+8. the one-use lease claim commits before any credential decryption;
+9. OAuth refresh or terminal deletion commits independently, so a later
+   lending rollback cannot undo it or repeat a rotated refresh;
+10. the final transaction reads without provider side effects and atomically
+    consumes the reservation and records run usage.
 
-Set lease expiry to two minutes. A consumed lease cannot be replayed even inside that window.
+Set lease expiry to two minutes. A consumed lease cannot be replayed even
+inside that window. Retain expired rows for 24 hours and delete older rows
+opportunistically during issuance; the consumed or expired reservation remains
+the durable replay barrier after lease-row cleanup.
 
-- [ ] **Step 4: Emit credential audit events**
+For rolling deployment, first set
+`CREDENTIAL_LEGACY_LENDING_ENABLED=true` and
+`RUN_SCOPED_IDENTITY_WRITES_ENABLED=false`, then deploy the app. The
+compatibility app accepts the old one-call Worker and still mints claims the old
+strict verifier can parse. Deploy the Worker; the new Worker accepts the
+compatibility app's legacy `200` response. Next set
+`RUN_SCOPED_IDENTITY_WRITES_ENABLED=true` and redeploy the app. Wait at least
+the 15-minute runner-token lifetime plus the browser bundle drain, then set
+`CREDENTIAL_LEGACY_LENDING_ENABLED=false` and redeploy. The normal final state
+is scoped writes enabled and legacy lending disabled. Remove both compatibility
+flags and paths in the next security cleanup after production confirms no
+legacy traffic.
+
+- [x] **Step 4: Emit credential audit events**
 
 Record only tenant hash, harness ID, run ID, operation, outcome, and timestamp. Never record the credential, wrapped key, raw tenant, service token, or runner claim.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `pnpm exec tsx --test lib/credentials/leases.test.ts app/api/internal/credential/*.test.ts`
 

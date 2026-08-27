@@ -1436,9 +1436,25 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               );
             }
             const input = startRunInputSchema.parse(await readJson(request));
+            if (
+              claims.run &&
+              (claims.run.agentId !== id ||
+                claims.run.harnessId !== current.runtime ||
+                claims.run.operationId !== input.operationId)
+            ) {
+              return json(
+                errorEnvelope(
+                  "identity_mismatch",
+                  "Run identity does not match the requested agent.",
+                  false
+                ),
+                { status: 403 },
+                cors
+              );
+            }
             const runAdmissionMode = admissionMode(environment);
             const requestHash = await hashOperation(id, input.task);
-            let runId: string = crypto.randomUUID();
+            let runId: string = input.operationId;
             let prepared: Awaited<ReturnType<CloudRunnerAgent["enqueue"]>>;
             try {
               prepared = await agent.enqueue(

@@ -36,6 +36,7 @@ export type ReservationCapReason =
   | "tenant_monthly_cap";
 
 export type ReserveRunResult =
+  | { kind: "conflict"; reason: "run_already_counted" }
   | { kind: "existing"; reservation: RunReservationRecord }
   | {
       cap: number;
@@ -55,6 +56,7 @@ export interface RunReservationTransaction {
     tenantHash?: string;
   }) => Promise<number>;
   findByRunId: (runId: string) => Promise<RunReservationRecord | null>;
+  hasUsageRunId: (runId: string) => Promise<boolean>;
   insert: (reservation: RunReservationRecord) => Promise<void>;
   markConsumed: (
     runId: string,
@@ -130,7 +132,12 @@ export function drizzleRunReservationDatabase(
                   tx
                     .select({ runId: runReservation.runId })
                     .from(runReservation)
-                    .where(eq(runReservation.runId, runUsage.runId))
+                    .where(
+                      and(
+                        eq(runReservation.runId, runUsage.runId),
+                        inArray(runReservation.state, ["reserved", "consumed"])
+                      )
+                    )
                 ),
               ];
               if (input.tenant !== undefined) {
@@ -162,6 +169,14 @@ export function drizzleRunReservationDatabase(
                 .where(eq(runReservation.runId, runId))
                 .limit(1);
               return reservation ?? null;
+            },
+            hasUsageRunId: async (runId) => {
+              const [usage] = await tx
+                .select({ runId: runUsage.runId })
+                .from(runUsage)
+                .where(eq(runUsage.runId, runId))
+                .limit(1);
+              return Boolean(usage);
             },
             insert: async (reservation) => {
               await tx.insert(runReservation).values(reservation);
@@ -282,6 +297,9 @@ export async function reserveRun(
     const existing = await tx.findByRunId(input.runId);
     if (existing) {
       return { kind: "existing", reservation: existing };
+    }
+    if (await tx.hasUsageRunId(input.runId)) {
+      return { kind: "conflict", reason: "run_already_counted" };
     }
 
     const tenantDailyUnits = await tx.activeUnits({

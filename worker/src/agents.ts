@@ -1847,6 +1847,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     definition: AgentDefinition,
     identityToken: string,
     runId: string,
+    operationId: string,
     signal?: AbortSignal
   ): Promise<string | null> {
     const { APP_ORIGIN, RUNNER_SERVICE_TOKEN } = this.env;
@@ -1856,7 +1857,14 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
       );
     }
     const fetched = await fetchTenantCredential(
-      { harnessId: definition.runtime, runId, tenant: tenantOf(definition) },
+      {
+        agentId: definition.id,
+        harnessId: definition.runtime,
+        operationId,
+        requestId: crypto.randomUUID(),
+        runId,
+        tenant: tenantOf(definition),
+      },
       {
         endpoint: APP_ORIGIN,
         // Wrapped, never passed bare. A Workers built-in detached from its
@@ -1934,6 +1942,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
         definition,
         identityToken,
         planned.run.id,
+        planned.run.operationId,
         signal
       );
       if (!this.executionIsLive(execution)) {
