@@ -4,6 +4,7 @@ import {
   HarnessError,
   PROBE_ATTEMPT_TIMEOUT_MS,
   parseHarnessStream,
+  RUN_TIMEOUT_MS,
   requireHarness,
   resolveSandboxWorkspace,
   runHarnessInSandbox,
@@ -136,49 +137,6 @@ test("JSONL split across chunk boundaries still parses", () => {
   );
   assert.equal(events.length, 1);
   assert.equal(events[0]?.kind, "message");
-});
-
-test("a run drives the harness CLI and passes only its own credential", async () => {
-  const calls: Call[] = [];
-  const result = JSON.stringify({
-    exitCode: 0,
-    sessionId: "s1",
-    type: "result",
-    usage: { codeChanges: { linesAdded: 2, linesRemoved: 0 } },
-  });
-  const message = JSON.stringify({
-    data: { content: "Created notes.md", model: "gpt-5" },
-    type: "assistant.message",
-  });
-  const sandbox = fakeSandbox(
-    {
-      "'copilot'": { stdout: `${message}\n${result}\n` },
-      "copilot --version": { stdout: "GitHub Copilot CLI 1.0.80\n" },
-    },
-    calls
-  );
-
-  const run = await runHarnessInSandbox({
-    credential: { credential: "harness-token" },
-    instructions: "Be careful.",
-    model: "auto",
-    runtime: "copilot",
-    sandbox: sandbox as never,
-    task: "Create notes.md",
-  });
-
-  assert.equal(run.exitCode, 0);
-  assert.equal(run.summary.status, "completed");
-  assert.equal(run.summary.output, "Created notes.md");
-  assert.equal(run.summary.sessionId, "s1");
-
-  const invocation = calls.at(-1);
-  assert.ok(invocation);
-  assert.ok(invocation.command.startsWith("'copilot'"));
-  const env = invocation.options?.env as Record<string, string>;
-  assert.equal(env.COPILOT_GITHUB_TOKEN, "harness-token");
-  assert.equal(env.OPENAI_API_KEY, "");
-  assert.equal(env.ANTHROPIC_API_KEY, "");
 });
 
 test("a sandbox image without the CLI names the fix instead of failing opaquely", async () => {
@@ -365,337 +323,221 @@ test("a warm-up swallows the probe timeout a run would propagate", async () => {
   assert.equal(attempts, 2);
 });
 
-test("a run streams events out while the CLI is still executing", async () => {
-  // The message line is split across two chunks on purpose: the assembler
-  // must hold the partial line, or a JSON object cut at a chunk boundary
-  // is dropped and the live view silently loses events.
-  const message = JSON.stringify({
-    data: { content: "Working on it", model: "gpt-5" },
-    type: "assistant.message",
-  });
-  const result = JSON.stringify({
-    exitCode: 0,
-    sessionId: "s1",
-    type: "result",
-    usage: {},
-  });
-  const seen: string[] = [];
+/**
+ * The mission path: a background process polled for logs. The fakes model
+ * the sandbox's process API — cumulative stdout per poll, a status that
+ * moves, and a kill that must be observed — because the run's whole failure
+ * history lives in the gap between "the CLI answered" and "the process
+ * exited".
+ */
+
+const MISSION_MESSAGE = JSON.stringify({
+  data: { content: "Recon complete", model: "gpt-5" },
+  type: "assistant.message",
+});
+const MISSION_RESULT = JSON.stringify({
+  exitCode: 0,
+  sessionId: "s1",
+  type: "result",
+  usage: {},
+});
+
+type PollScript = ({ stdout: string; stderr?: string } | "fail")[];
+
+function missionSandbox(config: {
+  polls: PollScript;
+  statuses?: string[];
+  exitCode?: number;
+}) {
+  const record = {
+    killed: [] as string[],
+    startCommand: "",
+    startEnv: null as Record<string, string> | null,
+  };
+  let poll = -1;
+  let statusIndex = -1;
   const sandbox = {
-    exec(command: string, options?: Record<string, unknown>) {
-      if (command.startsWith("copilot --version")) {
-        return Promise.resolve({
-          command,
-          exitCode: 0,
-          stderr: "",
-          stdout: "GitHub Copilot CLI 1.0.80\n",
-          success: true,
-        });
-      }
-      if (command.startsWith("mkdir")) {
-        return Promise.resolve({
-          command,
-          exitCode: 0,
-          stderr: "",
-          stdout: "",
-          success: true,
-        });
-      }
-      const onOutput = options?.onOutput as (
-        source: string,
-        data: string
-      ) => void;
-      const half = Math.floor(message.length / 2);
-      onOutput("stdout", message.slice(0, half));
-      onOutput("stderr", "noise that must not be parsed as events\n");
-      onOutput("stdout", `${message.slice(half)}\n${result}\n`);
-      // Deliberately empty stdout in the result: everything already
-      // streamed, and the events must come from the stream, not a re-parse.
+    exec(command: string) {
       return Promise.resolve({
         command,
         exitCode: 0,
         stderr: "",
-        stdout: "",
+        stdout: command.startsWith("copilot")
+          ? "GitHub Copilot CLI 1.0.80\n"
+          : "",
         success: true,
       });
     },
+    getProcess() {
+      statusIndex += 1;
+      const status =
+        config.statuses?.[
+          Math.min(statusIndex, (config.statuses?.length ?? 1) - 1)
+        ] ?? "running";
+      return Promise.resolve({
+        command: record.startCommand,
+        exitCode: config.exitCode,
+        id: "p1",
+        status,
+      });
+    },
+    getProcessLogs() {
+      poll += 1;
+      const step = config.polls[Math.min(poll, config.polls.length - 1)];
+      if (step === "fail" || step === undefined) {
+        return Promise.reject(new Error("Network connection lost."));
+      }
+      return Promise.resolve({
+        processId: "p1",
+        stderr: step.stderr ?? "",
+        stdout: step.stdout,
+      });
+    },
+    killProcess(id: string) {
+      record.killed.push(id);
+      return Promise.resolve();
+    },
+    startProcess(command: string, options?: { env?: Record<string, string> }) {
+      record.startCommand = command;
+      record.startEnv = options?.env ?? null;
+      return Promise.resolve({ command, id: "p1", status: "running" });
+    },
   };
+  return { record, sandbox };
+}
 
-  const run = await runHarnessInSandbox({
+function runMission(
+  sandbox: unknown,
+  extra: Record<string, unknown> = {}
+): ReturnType<typeof runHarnessInSandbox> {
+  return runHarnessInSandbox({
     credential: { credential: "harness-token" },
     instructions: "Be careful.",
     model: "auto",
-    onEvent: (event) => {
-      seen.push(event.kind);
-    },
     runtime: "copilot",
     sandbox: sandbox as never,
-    task: "Create notes.md",
+    sleep: () => Promise.resolve(),
+    task: "Survey the workspace.",
+    ...extra,
+  });
+}
+
+test("a mission runs as a process and passes only its own credential", async () => {
+  const { record, sandbox } = missionSandbox({
+    exitCode: 0,
+    polls: [{ stdout: `${MISSION_MESSAGE}\n${MISSION_RESULT}\n` }],
+  });
+
+  const run = await runMission(sandbox);
+
+  assert.ok(record.startCommand.startsWith("'copilot'"));
+  assert.equal(record.startEnv?.COPILOT_GITHUB_TOKEN, "harness-token");
+  assert.equal(record.startEnv?.OPENAI_API_KEY, "");
+  assert.equal(record.startEnv?.ANTHROPIC_API_KEY, "");
+  assert.equal(run.summary.status, "completed");
+  assert.equal(run.summary.output, "Recon complete");
+  assert.equal(run.exitCode, 0);
+});
+
+test("a line split across two polls still parses", async () => {
+  const half = Math.floor(MISSION_MESSAGE.length / 2);
+  const { sandbox } = missionSandbox({
+    polls: [
+      { stdout: MISSION_MESSAGE.slice(0, half) },
+      { stdout: `${MISSION_MESSAGE}\n${MISSION_RESULT}\n` },
+    ],
+  });
+  const seen: string[] = [];
+
+  const run = await runMission(sandbox, {
+    onEvent: (event: { kind: string }) => seen.push(event.kind),
   });
 
   assert.deepEqual(seen, ["message", "usage", "finished"]);
-  assert.equal(run.summary.status, "completed");
-  assert.equal(run.summary.output, "Working on it");
-});
-
-test("a finished stream settles the run even if the process never exits", async () => {
-  // Observed twice in production: copilot answered the mission, streamed its
-  // terminal result, and then lingered until the 900s deadline stamped the
-  // whole run failed — with the reaper destroying a container whose only
-  // crime was a process that would not exit. The stream's own verdict must
-  // outrank the exit that never comes.
-  const message = JSON.stringify({
-    data: { content: "Recon complete", model: "gpt-5" },
-    type: "assistant.message",
-  });
-  const result = JSON.stringify({
-    exitCode: 0,
-    sessionId: "s1",
-    type: "result",
-    usage: {},
-  });
-  const sandbox = {
-    exec(command: string, options?: Record<string, unknown>) {
-      if (command.startsWith("copilot --version")) {
-        return Promise.resolve({
-          command,
-          exitCode: 0,
-          stderr: "",
-          stdout: "GitHub Copilot CLI 1.0.80\n",
-          success: true,
-        });
-      }
-      if (command.startsWith("mkdir")) {
-        return Promise.resolve({
-          command,
-          exitCode: 0,
-          stderr: "",
-          stdout: "",
-          success: true,
-        });
-      }
-      const onOutput = options?.onOutput as (
-        source: string,
-        data: string
-      ) => void;
-      onOutput("stdout", `${message}\n${result}\n`);
-      // The process lingers forever after answering.
-      return new Promise<never>(() => undefined);
-    },
-  };
-
-  const run = await runHarnessInSandbox({
-    credential: { credential: "harness-token" },
-    finishGraceMs: 1,
-    instructions: "Be careful.",
-    model: "auto",
-    runtime: "copilot",
-    sandbox: sandbox as never,
-    task: "Survey the workspace.",
-  });
-
-  assert.equal(run.exitCode, 0);
-  assert.equal(run.summary.status, "completed");
   assert.equal(run.summary.output, "Recon complete");
 });
 
-test("a transport drop after the streamed result still completes the run", async () => {
-  const message = JSON.stringify({
-    data: { content: "Recon complete", model: "gpt-5" },
-    type: "assistant.message",
+test("the harness's finished verdict outranks a process that never exits", async () => {
+  const { record, sandbox } = missionSandbox({
+    polls: [{ stdout: `${MISSION_MESSAGE}\n${MISSION_RESULT}\n` }],
+    statuses: ["running"],
   });
-  const result = JSON.stringify({
-    exitCode: 0,
-    sessionId: "s1",
-    type: "result",
-    usage: {},
-  });
-  const sandbox = {
-    exec(command: string, options?: Record<string, unknown>) {
-      if (
-        command.startsWith("copilot --version") ||
-        command.startsWith("mkdir")
-      ) {
-        return Promise.resolve({
-          command,
-          exitCode: 0,
-          stderr: "",
-          stdout: command.startsWith("copilot")
-            ? "GitHub Copilot CLI 1.0.80\n"
-            : "",
-          success: true,
-        });
-      }
-      const onOutput = options?.onOutput as (s: string, d: string) => void;
-      onOutput("stdout", `${message}\n${result}\n`);
-      return Promise.reject(new Error("Network connection lost."));
-    },
-  };
 
-  const run = await runHarnessInSandbox({
-    credential: { credential: "harness-token" },
-    finishGraceMs: 1,
-    instructions: "Be careful.",
-    model: "auto",
-    runtime: "copilot",
-    sandbox: sandbox as never,
-    task: "Survey the workspace.",
-  });
+  const run = await runMission(sandbox);
 
   assert.equal(run.summary.status, "completed");
-  assert.equal(run.summary.output, "Recon complete");
+  // The lingering process is signalled so it cannot hold the container.
+  assert.deepEqual(record.killed, ["p1"]);
 });
 
-test("a transport drop before the result names the condition, not the transport", async () => {
-  const message = JSON.stringify({
-    data: { content: "Looking around…", model: "gpt-5" },
-    type: "assistant.message",
+test("a transient poll failure is tolerated, not fatal", async () => {
+  const { sandbox } = missionSandbox({
+    polls: [
+      { stdout: `${MISSION_MESSAGE}\n` },
+      "fail",
+      "fail",
+      { stdout: `${MISSION_MESSAGE}\n${MISSION_RESULT}\n` },
+    ],
   });
-  const sandbox = {
-    exec(command: string, options?: Record<string, unknown>) {
-      if (
-        command.startsWith("copilot --version") ||
-        command.startsWith("mkdir")
-      ) {
-        return Promise.resolve({
-          command,
-          exitCode: 0,
-          stderr: "",
-          stdout: command.startsWith("copilot")
-            ? "GitHub Copilot CLI 1.0.80\n"
-            : "",
-          success: true,
-        });
-      }
-      const onOutput = options?.onOutput as (s: string, d: string) => void;
-      onOutput("stdout", `${message}\n`);
-      return Promise.reject(new Error("Network connection lost."));
-    },
-  };
+
+  const run = await runMission(sandbox);
+
+  assert.equal(run.summary.status, "completed");
+});
+
+test("losing the container names the condition and the retained transcript", async () => {
+  const { sandbox } = missionSandbox({
+    polls: [
+      { stdout: `${MISSION_MESSAGE}\n` },
+      "fail",
+      "fail",
+      "fail",
+      "fail",
+      "fail",
+    ],
+  });
 
   await assert.rejects(
-    runHarnessInSandbox({
-      credential: { credential: "harness-token" },
-      finishGraceMs: 1,
-      instructions: "Be careful.",
-      model: "auto",
-      runtime: "copilot",
-      sandbox: sandbox as never,
-      task: "Survey the workspace.",
-    }),
+    runMission(sandbox),
     (error: unknown) =>
       error instanceof HarnessError &&
       error.code === "harness_stream_lost" &&
       error.message.includes("recorded events") &&
-      !error.message.includes("Network connection lost")
+      error.message.includes("failed polls")
   );
 });
 
-test("a sick first container is destroyed and the probe retries fresh", async () => {
-  // Cold placements are a coin flip in production: three runs died with the
-  // container answering HTTP 500 for the whole probe budget. The mission
-  // probe now spends half the budget per attempt with a reset between, so
-  // only a SECOND sick placement can fail the run.
-  const message = JSON.stringify({
-    data: { content: "Recon complete", model: "gpt-5" },
-    type: "assistant.message",
-  });
-  const result = JSON.stringify({
-    exitCode: 0,
-    sessionId: "s1",
-    type: "result",
-    usage: {},
-  });
-  let resets = 0;
-  let probes = 0;
-  const sandbox = {
-    exec(command: string, options?: Record<string, unknown>) {
-      if (command.startsWith("copilot --version")) {
-        probes += 1;
-        // The first placement is sick: its transport rejects. The second,
-        // after the reset, answers healthy.
-        if (resets === 0) {
-          return Promise.reject(new Error("HTTP error! status: 500"));
-        }
-        return Promise.resolve({
-          command,
-          exitCode: 0,
-          stderr: "",
-          stdout: "GitHub Copilot CLI 1.0.80\n",
-          success: true,
-        });
-      }
-      if (command.startsWith("mkdir")) {
-        return Promise.resolve({
-          command,
-          exitCode: 0,
-          stderr: "",
-          stdout: "",
-          success: true,
-        });
-      }
-      const onOutput = options?.onOutput as (s: string, d: string) => void;
-      onOutput("stdout", `${message}\n${result}\n`);
-      return Promise.resolve({
-        command,
-        exitCode: 0,
-        stderr: "",
-        stdout: "",
-        success: true,
-      });
-    },
-  };
-
-  const run = await runHarnessInSandbox({
-    credential: { credential: "harness-token" },
-    finishGraceMs: 1,
-    instructions: "Be careful.",
-    model: "auto",
-    resetSandbox: () => {
-      resets += 1;
-      return Promise.resolve();
-    },
-    runtime: "copilot",
-    sandbox: sandbox as never,
-    task: "Survey the workspace.",
+test("a process that exits without a result closes on its exit code", async () => {
+  const { sandbox } = missionSandbox({
+    exitCode: 1,
+    polls: [{ stderr: "copilot: no credential", stdout: "" }],
+    statuses: ["failed"],
   });
 
-  assert.equal(resets, 1);
-  assert.equal(probes, 2);
-  assert.equal(run.summary.status, "completed");
+  const run = await runMission(sandbox);
+
+  assert.equal(run.exitCode, 1);
+  assert.equal(run.stderr, "copilot: no credential");
 });
 
-test("two sick placements still name the missing CLI honestly", async () => {
-  let resets = 0;
-  const sandbox = {
-    exec(command: string) {
-      if (command.startsWith("copilot --version")) {
-        return Promise.reject(new Error("HTTP error! status: 500"));
-      }
-      return Promise.resolve({
-        command,
-        exitCode: 0,
-        stderr: "",
-        stdout: "",
-        success: true,
-      });
-    },
-  };
+test("the mission deadline signals the process and names the timeout", async () => {
+  let ticks = 0;
+  const { record, sandbox } = missionSandbox({
+    polls: [{ stdout: "" }],
+    statuses: ["running"],
+  });
 
   await assert.rejects(
-    runHarnessInSandbox({
-      credential: { credential: "harness-token" },
-      instructions: "Be careful.",
-      model: "auto",
-      resetSandbox: () => {
-        resets += 1;
-        return Promise.resolve();
+    runMission(sandbox, {
+      // The first read is the start clock; every later read has blown the
+      // budget, so the loop must kill and throw on its next turn.
+      clock: () => {
+        ticks += 1;
+        return ticks === 1 ? 0 : RUN_TIMEOUT_MS + 1000;
       },
-      runtime: "copilot",
-      sandbox: sandbox as never,
-      task: "Survey the workspace.",
     }),
     (error: unknown) =>
-      error instanceof HarnessError && error.code === "harness_missing"
+      error instanceof HarnessError && error.code === "harness_timeout"
   );
-  assert.equal(resets, 1);
+  assert.deepEqual(record.killed, ["p1"]);
 });

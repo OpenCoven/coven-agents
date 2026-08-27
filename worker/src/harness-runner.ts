@@ -17,7 +17,8 @@ import {
 
 const DEFAULT_WORKSPACE = "/workspace";
 export const RUN_TIMEOUT_MS = 900_000;
-const FINISH_GRACE_MS = 15_000;
+const PROCESS_POLL_INTERVAL_MS = 2000;
+const MAX_POLL_FAILURES = 5;
 /**
  * Generous, and deliberately so. The deadline clock starts when the worker
  * awaits the exec, and that await covers the container's cold boot as well
@@ -46,6 +47,10 @@ export const PROBE_TIMEOUT_MS = 300_000;
 export const PROBE_ATTEMPT_TIMEOUT_MS = 150_000;
 
 type SandboxLike = Pick<Sandbox, "exec">;
+type MissionSandbox = Pick<
+  Sandbox,
+  "exec" | "getProcess" | "getProcessLogs" | "killProcess" | "startProcess"
+>;
 
 /**
  * Enforces a deadline the SDK does not.
@@ -308,10 +313,12 @@ export async function runHarnessInSandbox(options: {
    * re-provisions on the next exec and has come back healthy.
    */
   resetSandbox?: () => Promise<void>;
-  /** Test seam: how long a finished stream waits for the process to exit. */
-  finishGraceMs?: number;
+  /** Test seams: the poll cadence and the clocks behind it. */
+  clock?: () => number;
+  pollIntervalMs?: number;
+  sleep?: (ms: number) => Promise<void>;
   runtime: string;
-  sandbox: SandboxLike;
+  sandbox: MissionSandbox;
   task: string;
   workspace?: string;
 }): Promise<HarnessRun> {
@@ -372,12 +379,18 @@ export async function runHarnessInSandbox(options: {
   const command = toShellCommand(invocation);
 
   /**
-   * The exec streams instead of buffering. Before this, stdout was parsed
-   * only after the CLI exited, so the thread showed nothing between
-   * "running" and the outcome — a fifteen-minute run was indistinguishable
-   * from a wedged one. `onOutput` is present in the SDK's compiled runtime
-   * (verified, unlike `timeout`), and the assembler holds partial lines so
-   * a JSON object split across chunks still parses.
+   * The mission runs as a background process and the worker polls its logs.
+   *
+   * This replaces a single streamed exec whose long-lived connection was the
+   * run's weakest part: it dropped at roughly six minutes on every long
+   * mission (352s, 433s, twice deadline-masked at 905s), and on a container
+   * re-provisioned after a probe retry its output callback delivered
+   * nothing at all — a run the operator watched "streaming" recorded zero
+   * events. Polling has neither failure mode. Each poll is a short request,
+   * so there is nothing long-lived to drop, and the worker reads stdout
+   * itself instead of trusting a callback across two RPC boundaries. The
+   * assembler holds partial lines so a JSON object split across polls still
+   * parses.
    */
   const assembler = new LineAssembler();
   const streamed: RunEvent[] = [];
@@ -391,140 +404,143 @@ export async function runHarnessInSandbox(options: {
       options.onEvent?.(event);
     }
   };
+  const hasFinished = () => streamed.some((event) => event.kind === "finished");
 
-  /**
-   * The stream's own completion signal outranks the process's exit.
-   *
-   * Copilot emits a terminal `result` line when the mission is answered, and
-   * the CLI can then linger — observed twice as a run that streamed its work
-   * live and was still stamped failed at the 900s deadline, with the reaper
-   * tearing down a container whose only crime was a process that would not
-   * exit. "Network connection lost (905s)" in the sandbox log was our own
-   * teardown, not the network. Once `finished` streams, the exec gets a
-   * short grace to exit on its own; after that the run settles from the
-   * streamed events, which carry everything the summary needs. The lingering
-   * process is left to the container's idle stop — the work is done, and a
-   * successful run must not reap the warm container the next run wants.
-   */
-  let settleEarly: (() => void) | undefined;
-  let graceTimer: ReturnType<typeof setTimeout> | undefined;
-  const finishedEarly = new Promise<null>((resolve) => {
-    settleEarly = () => {
-      graceTimer = setTimeout(
-        () => resolve(null),
-        options.finishGraceMs ?? FINISH_GRACE_MS
-      );
-    };
-  });
+  const now = options.clock ?? (() => Date.now());
+  const wait =
+    options.sleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const pollMs = options.pollIntervalMs ?? PROCESS_POLL_INTERVAL_MS;
 
-  const execution = options.sandbox.exec(command, {
-    cwd,
-    env: {
-      [auth.name]: auth.value,
-      // The harness is the only thing that talks to a model. Blanking
-      // provider keys makes that structural rather than a convention: even
-      // if one leaks into the container environment, a run cannot quietly
-      // consume it.
-      ANTHROPIC_API_KEY: "",
-      CI: "true",
-      HOME: cwd,
-      OPENAI_API_KEY: "",
-    },
-    onOutput: (source, data) => {
-      if (source !== "stdout") {
+  const startedAt = now();
+  const started = await withDeadline(
+    options.sandbox.startProcess(command, {
+      autoCleanup: false,
+      cwd,
+      env: {
+        [auth.name]: auth.value,
+        // The harness is the only thing that talks to a model. Blanking
+        // provider keys makes that structural rather than a convention: even
+        // if one leaks into the container environment, a run cannot quietly
+        // consume it.
+        ANTHROPIC_API_KEY: "",
+        CI: "true",
+        HOME: cwd,
+        OPENAI_API_KEY: "",
+      },
+    }),
+    PROBE_ATTEMPT_TIMEOUT_MS,
+    `${spec.command} start`
+  );
+
+  const state = {
+    consumed: 0,
+    exitCode: null as number | null,
+    pollFailures: 0,
+    processEnded: false,
+    stderrText: "",
+    timedOut: false,
+  };
+
+  /** One poll turn: read fresh output, then ask whether anything ended. */
+  const pollOnce = async (): Promise<"continue" | "done"> => {
+    const logs = await options.sandbox.getProcessLogs(started.id);
+    state.pollFailures = 0;
+    const fresh = logs.stdout.slice(state.consumed);
+    state.consumed = logs.stdout.length;
+    state.stderrText = logs.stderr;
+    for (const line of assembler.push(fresh)) {
+      emit(line);
+    }
+    if (hasFinished()) {
+      return "done";
+    }
+    const current = await options.sandbox.getProcess(started.id);
+    if (
+      !current ||
+      current.status === "completed" ||
+      current.status === "failed" ||
+      current.status === "killed" ||
+      current.status === "error"
+    ) {
+      state.exitCode = current?.exitCode ?? null;
+      state.processEnded = true;
+      return "done";
+    }
+    return "continue";
+  };
+
+  const drive = async (): Promise<void> => {
+    while (true) {
+      if (now() - startedAt > RUN_TIMEOUT_MS) {
+        state.timedOut = true;
         return;
       }
-      for (const line of assembler.push(data)) {
-        emit(line);
+      // biome-ignore lint/performance/noAwaitInLoops: polling is sequential by definition — each wait and read must finish before the next is decided.
+      await wait(pollMs);
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: see above.
+        if ((await pollOnce()) === "done") {
+          return;
+        }
+      } catch (error) {
+        state.pollFailures += 1;
+        if (state.pollFailures < MAX_POLL_FAILURES) {
+          continue;
+        }
+        if (hasFinished()) {
+          return;
+        }
+        // biome-ignore lint/style/useErrorCause: the cause IS forwarded — HarnessError's third parameter hands it to Error's options — but the rule only recognizes the literal two-argument Error shape.
+        throw new HarnessError(
+          `Lost contact with the container after ${streamed.length} recorded events and ${MAX_POLL_FAILURES} consecutive failed polls. The transcript up to the loss is retained; the mission did not report a result.`,
+          "harness_stream_lost",
+          { cause: error }
+        );
       }
-      if (streamed.some((event) => event.kind === "finished")) {
-        settleEarly?.();
-        settleEarly = undefined;
-      }
-    },
-    stream: true,
-    timeout: RUN_TIMEOUT_MS,
-  });
-  // The race may settle on the stream's finish first; a later exec rejection
-  // must not surface as an unhandled rejection.
-  execution.catch(() => undefined);
+    }
+  };
 
-  let result: Awaited<typeof execution> | null;
-  try {
-    result = await withDeadline(
-      Promise.race([execution, finishedEarly]),
-      RUN_TIMEOUT_MS,
-      spec.command
+  await drive();
+
+  if (state.timedOut) {
+    // The deadline is the one condition that still reaps upstream: a mission
+    // that produced neither a result nor an exit in fifteen minutes is
+    // wedged, and its container is suspect.
+    await options.sandbox.killProcess(started.id).catch(() => undefined);
+    throw new HarnessError(
+      `\`${spec.command}\` exceeded ${Math.round(RUN_TIMEOUT_MS / 1000)}s inside the sandbox. The process was signalled; the run is failed so the agent is not wedged behind it.`,
+      "harness_timeout"
     );
-  } catch (error) {
-    /**
-     * The SDK's streaming exec connection genuinely drops on long runs —
-     * observed at 352s with `executeWithStreaming` throwing "Network
-     * connection lost" while the CLI was still working. Everything that
-     * streamed before the drop is already in hand, so the drop only decides
-     * HOW the run ends, not what was recorded: a stream that already
-     * carried the terminal result settles as if the process had exited, and
-     * one that did not gets an error naming the real condition instead of a
-     * bare transport message. Deadline timeouts pass through untouched —
-     * that path still reaps, and must keep doing so.
-     */
-    if (error instanceof HarnessError && error.code === "harness_timeout") {
-      throw error;
-    }
-    if (streamed.some((event) => event.kind === "finished")) {
-      result = null;
-    } else {
-      // biome-ignore lint/style/useErrorCause: the cause IS forwarded — HarnessError's third parameter hands it to Error's options — but the rule only recognizes the literal two-argument Error shape.
-      throw new HarnessError(
-        `The container's output stream dropped mid-run after ${streamed.length} recorded events. The transcript up to the drop is retained; the mission did not report a result.`,
-        "harness_stream_lost",
-        { cause: error }
-      );
-    }
-  } finally {
-    clearTimeout(graceTimer);
+  }
+  if (!state.processEnded) {
+    // The harness answered but the process lingers; signal it so it cannot
+    // hold the container's CPU. The container itself stays for the next run.
+    await options.sandbox.killProcess(started.id).catch(() => undefined);
   }
 
   for (const line of assembler.flush()) {
     emit(line);
   }
 
-  if (result === null) {
-    // Settled from the stream: the process is still alive, so there is no
-    // exit code — the finished event's own verdict is the authoritative one.
-    const finished = streamed.find(
-      (event): event is Extract<RunEvent, { kind: "finished" }> =>
-        event.kind === "finished"
-    );
-    const summary = summarizeRun(streamed);
+  const finished = streamed.find(
+    (event): event is Extract<RunEvent, { kind: "finished" }> =>
+      event.kind === "finished"
+  );
+  const summary = summarizeRun(streamed);
+  if (!state.processEnded) {
     console.log({
       event: "sandbox.exec_settled_from_stream",
       exitCode: finished?.exitCode ?? null,
       status: summary.status,
     });
-    return {
-      command: `${invocation.command} ${invocation.args[0] ?? ""}`.trim(),
-      events: streamed,
-      exitCode: finished?.exitCode ?? 0,
-      stderr: "",
-      summary,
-    };
   }
-
-  const at = new Date().toISOString();
-  // A runtime that ignored the streaming callbacks still produced stdout —
-  // parse it rather than reporting an empty run.
-  const events =
-    streamed.length > 0
-      ? streamed
-      : parseHarnessStream(spec.id, result.stdout, at);
-  const summary = summarizeRun(events);
 
   return {
     command: `${invocation.command} ${invocation.args[0] ?? ""}`.trim(),
-    events,
-    exitCode: result.exitCode,
-    stderr: result.stderr,
+    events: streamed,
+    exitCode: finished?.exitCode ?? state.exitCode,
+    stderr: state.stderrText,
     summary,
   };
 }
