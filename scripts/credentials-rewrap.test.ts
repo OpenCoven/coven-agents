@@ -586,6 +586,7 @@ test("retirement gate blocks an unexpired encrypted idempotency response", async
   ).store(
     { status: "pending" },
     {
+      keyHash: "key-hash",
       operation: "credential_device_start",
       ownerId: "opaque-owner",
     }
@@ -605,6 +606,9 @@ test("retirement gate blocks an unexpired encrypted idempotency response", async
               {
                 expiresAt: new Date(now.getTime() + 60_000),
                 id: "opaque-idempotency-v1",
+                keyHash: "key-hash",
+                operation: "credential_device_start",
+                ownerId: "opaque-owner",
                 responseJson: response,
               },
             ]
@@ -701,6 +705,9 @@ test("legacy encrypted idempotency responses block the v1 retirement gate", asyn
               {
                 expiresAt: new Date(now.getTime() + 60_000),
                 id: "opaque-legacy-idempotency",
+                keyHash: "",
+                operation: "credential_device_start",
+                ownerId: "opaque-owner",
                 responseJson: legacy,
               },
             ]
@@ -741,6 +748,9 @@ test("plain idempotency responses are not classified as encrypted envelopes", as
               {
                 expiresAt: new Date(now.getTime() + 60_000),
                 id: "opaque-plain-idempotency",
+                keyHash: "",
+                operation: "credential_device_start",
+                ownerId: "opaque-owner",
                 responseJson: {
                   body: { status: "plain" },
                   kind: "plain_json",
@@ -780,6 +790,9 @@ test("malformed encrypted idempotency responses fail the retirement gate", async
               {
                 expiresAt: new Date(now.getTime() + 60_000),
                 id: "opaque-malformed-idempotency",
+                keyHash: "",
+                operation: "credential_device_start",
+                ownerId: "opaque-owner",
                 responseJson: {
                   kind: "encrypted_json",
                   payload: { ciphertext: "malformed" },
@@ -800,6 +813,82 @@ test("malformed encrypted idempotency responses fail the retirement gate", async
   assert.deepEqual(
     output.filter((line) => line.includes("idempotency")),
     ["idempotency_row_id: opaque-malformed-idempotency"]
+  );
+});
+
+test("malformed old idempotency envelope fields fail instead of blocking as remaining", async () => {
+  const sourceKek = await generateKek();
+  const targetKek = await generateKek();
+  const current = await encryptCredential("current", targetKek, "v2");
+  const response = await encryptedIdempotencyResponseStorage(
+    () => Promise.resolve(sourceKek),
+    () => Promise.resolve("v1")
+  ).store(
+    { status: "malformed" },
+    {
+      operation: "credential_device_start",
+      ownerId: "opaque-owner",
+    }
+  );
+  assert.equal(response.kind, "encrypted_json");
+  if (response.kind !== "encrypted_json") {
+    throw new Error("expected encrypted response");
+  }
+
+  const malformedPayloads = [
+    ["wrapped-key", { ...response.payload, wrappedKey: "malformed" }],
+    ["ciphertext", { ...response.payload, ciphertext: "malformed" }],
+    ["iv", { ...response.payload, iv: "malformed" }],
+    ["aad", { ...response.payload, aadVersion: 2 }],
+  ] as const;
+
+  await Promise.all(
+    malformedPayloads.map(async ([field, payload], index) => {
+      const output: string[] = [];
+      const id = `opaque-old-envelope-${index}`;
+      const store: RewrapStore = {
+        compareAndSwap: async () => true,
+        listByVersion(version, _limit, afterId) {
+          return Promise.resolve(
+            !afterId && version === "v2" ? [{ id: "current", ...current }] : []
+          );
+        },
+        listUnexpiredIdempotency(now, _limit, afterId) {
+          return Promise.resolve(
+            afterId
+              ? []
+              : [
+                  {
+                    expiresAt: new Date(now.getTime() + 60_000),
+                    id,
+                    keyHash: "",
+                    operation: "credential_device_start",
+                    ownerId: "opaque-owner",
+                    responseJson: { kind: "encrypted_json", payload },
+                  },
+                ]
+          );
+        },
+      };
+
+      assert.equal(
+        await main(
+          ["verify", "--version", "v1"],
+          cliDependencies(sourceKek, targetKek, store, output)
+        ),
+        1,
+        field
+      );
+      assert.match(output.at(-1) ?? "", /status=failed/);
+      assert.deepEqual(
+        output.filter((line) => line.includes("idempotency")),
+        [`idempotency_row_id: ${id}`]
+      );
+      assert.doesNotMatch(
+        output.join("\n"),
+        /malformed|wrappedKey|ciphertext/i
+      );
+    })
   );
 });
 
@@ -832,6 +921,9 @@ test("rollback retirement gate also counts unexpired v2 idempotency responses", 
               {
                 expiresAt: new Date(now.getTime() + 60_000),
                 id: "opaque-idempotency-v2",
+                keyHash: "",
+                operation: "credential_device_start",
+                ownerId: "opaque-owner",
                 responseJson: response,
               },
             ]

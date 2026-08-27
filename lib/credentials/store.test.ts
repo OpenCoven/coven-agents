@@ -8,7 +8,7 @@ import { tenantCredential } from "@/lib/db/schema";
 import { encryptCredential, generateKek } from "./envelope";
 import { credentialWhere } from "./scope";
 import { serializeCredential } from "./shape";
-import { readCredentialForTenant } from "./store";
+import { readCredentialForTenant } from "./store-core";
 
 function sqlFor(tenant: string, harnessId: string) {
   return new QueryBuilder()
@@ -38,12 +38,20 @@ test("both conditions are required, not either", () => {
 
 test("credential storage writes the current version and reads the row version", () => {
   const source = readFileSync(new URL("./store.ts", import.meta.url), "utf8");
+  const coreSource = readFileSync(
+    new URL("./store-core.ts", import.meta.url),
+    "utf8"
+  );
 
+  assert.match(source, /import ["']server-only["']/);
+  assert.doesNotMatch(coreSource, /server-only/);
   assert.match(source, /ring\.currentVersion/);
   assert.match(source, /kekVersion: sealed\.kekVersion/);
-  assert.match(source, /ring\.keyFor\(row\.kekVersion\)/);
   assert.match(source, /aadVersion: sealed\.aadVersion/);
   assert.match(source, /tenant, harnessId/);
+  assert.match(coreSource, /ring\.keyFor\(row\.kekVersion\)/);
+  assert.match(coreSource, /aadVersion: row\.aadVersion/);
+  assert.match(coreSource, /tenant, harnessId/);
 });
 
 test("credential envelope writes fence stale writers with a fresh revision", () => {
@@ -124,7 +132,10 @@ test("credential AAD migration and trigger fence legacy binding updates", () => 
 });
 
 test("OAuth refresh persists only when the row revision still matches", () => {
-  const source = readFileSync(new URL("./store.ts", import.meta.url), "utf8");
+  const source = readFileSync(
+    new URL("./store-core.ts", import.meta.url),
+    "utf8"
+  );
 
   assert.match(source, /row\.envelopeRevision/);
   assert.match(

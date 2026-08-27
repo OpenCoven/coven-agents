@@ -2,7 +2,10 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, asc, eq, gt } from "drizzle-orm";
-import { parseStoredIdempotencyResponseEnvelope } from "../lib/abuse/idempotency-response";
+import {
+  decryptStoredIdempotencyResponse,
+  parseStoredIdempotencyResponseEnvelope,
+} from "../lib/abuse/idempotency-response";
 import {
   type CredentialEnvelopeV2,
   decryptCredential,
@@ -34,6 +37,9 @@ export type RewrapRow = {
 export type RewrapIdempotencyRow = {
   expiresAt: Date;
   id: string;
+  keyHash: string;
+  operation: string;
+  ownerId: string;
   responseJson: unknown;
 };
 
@@ -502,7 +508,7 @@ async function verifyIdempotencyRows(
   input: {
     batch: number;
     knownVersions: readonly string[];
-    key: CryptoKey;
+    keyFor: (version: string) => CryptoKey;
     now: Date;
     oldVersion: string;
     targetVersion: string;
@@ -554,12 +560,7 @@ async function verifyIdempotencyRows(
         reportIdempotencyFailure(output, summary, row.id);
         continue;
       }
-      if (version === input.oldVersion) {
-        summary.remaining += 1;
-        output(`idempotency_row_id: ${row.id}`);
-        continue;
-      }
-      if (version !== input.targetVersion) {
+      if (version !== input.oldVersion && version !== input.targetVersion) {
         reportIdempotencyFailure(output, summary, row.id);
         continue;
       }
@@ -568,8 +569,21 @@ async function verifyIdempotencyRows(
         // Verification is intentionally read-only. No idempotency response is
         // rewritten by this gate; bounded retention is the retirement path.
         // biome-ignore lint/performance/noAwaitInLoops: deterministic verification order
-        await unwrapDataKey(envelope.payload.wrappedKey, input.key);
-        summary.verified += 1;
+        await decryptStoredIdempotencyResponse(
+          envelope,
+          input.keyFor(version),
+          {
+            keyHash: row.keyHash,
+            operation: row.operation,
+            ownerId: row.ownerId,
+          }
+        );
+        if (version === input.oldVersion) {
+          summary.remaining += 1;
+          output(`idempotency_row_id: ${row.id}`);
+        } else {
+          summary.verified += 1;
+        }
       } catch {
         reportIdempotencyFailure(output, summary, row.id);
       }
@@ -747,6 +761,9 @@ async function databaseStore(): Promise<RewrapStore> {
         .select({
           expiresAt: idempotencyRecord.expiresAt,
           id: idempotencyRecord.id,
+          keyHash: idempotencyRecord.keyHash,
+          operation: idempotencyRecord.operation,
+          ownerId: idempotencyRecord.ownerId,
           responseJson: idempotencyRecord.responseJson,
         })
         .from(idempotencyRecord)
@@ -791,7 +808,7 @@ export async function run(
         batch: args.batch,
         currentKek: ring.current,
         currentVersion: ring.currentVersion,
-        keyFor: (version) => ring.keyFor(version),
+        keyFor: (candidateVersion) => ring.keyFor(candidateVersion),
       },
       store,
       output
@@ -837,7 +854,7 @@ export async function run(
     await verifyIdempotencyRows(
       {
         batch: batchSize,
-        key: ring.current,
+        keyFor: (candidateVersion) => ring.keyFor(candidateVersion),
         knownVersions: ring.versions,
         now: new Date(),
         oldVersion,

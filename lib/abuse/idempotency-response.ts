@@ -57,6 +57,41 @@ export type IdempotencyResponseStorage = {
   ) => Promise<StoredIdempotencyResponseEnvelope>;
 };
 
+export async function decryptStoredIdempotencyResponse(
+  envelope: Extract<
+    StoredIdempotencyResponseEnvelope,
+    { kind: "encrypted_json" }
+  >,
+  key: CryptoKey,
+  context: IdempotencyResponseContext
+): Promise<JsonValue> {
+  let plaintext: string;
+  try {
+    plaintext = await decryptCredential(envelope.payload, key, {
+      keyHash: context.keyHash,
+      kind: "idempotency",
+      operation: context.operation,
+      ownerId: context.ownerId,
+    });
+  } catch (error) {
+    throw new Error(
+      "Encrypted response does not belong to this idempotency claim.",
+      { cause: error }
+    );
+  }
+
+  const stored = parseEncryptedResponse(plaintext);
+  if (
+    stored.ownerId !== context.ownerId ||
+    stored.operation !== context.operation
+  ) {
+    throw new Error(
+      "Encrypted response does not belong to this idempotency claim."
+    );
+  }
+  return stored.body;
+}
+
 /**
  * Normalizes data read from the JSONB boundary. Before KEK versions were
  * stored, encrypted idempotency payloads had exactly three fields; that
@@ -115,30 +150,7 @@ export function encryptedIdempotencyResponseStorage(
       }
 
       const key = await kek(parsedEnvelope.payload.kekVersion);
-      let plaintext: string;
-      try {
-        plaintext = await decryptCredential(parsedEnvelope.payload, key, {
-          keyHash: context.keyHash,
-          kind: "idempotency",
-          operation: context.operation,
-          ownerId: context.ownerId,
-        });
-      } catch (error) {
-        throw new Error(
-          "Encrypted response does not belong to this idempotency claim.",
-          { cause: error }
-        );
-      }
-      const stored = parseEncryptedResponse(plaintext);
-      if (
-        stored.ownerId !== context.ownerId ||
-        stored.operation !== context.operation
-      ) {
-        throw new Error(
-          "Encrypted response does not belong to this idempotency claim."
-        );
-      }
-      return stored.body;
+      return decryptStoredIdempotencyResponse(parsedEnvelope, key, context);
     },
     async store(body, context) {
       const plaintext = JSON.stringify({
