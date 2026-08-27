@@ -128,7 +128,7 @@ the roadmap worktree itself was clean and pushed at the evidence snapshot.
   evidence, repair the narrow cause, and rerun the complete baseline.
 
 **Current state (2026-08-27 audit candidate):** lint, types, 947 unit tests,
-sixteen current browser tests against development and local production servers,
+seventeen current browser tests against development and local production servers,
 default and demo builds, the local Docker-backed Sandbox diagnostic, and roadmap
 status passed; hygiene did not. See the [dated UI/functionality
 audit](ui-functionality-audit-2026-08-26.md).

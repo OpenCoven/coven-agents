@@ -130,7 +130,7 @@ E2E_PRODUCTION=1 PORT=3105 pnpm test
 Retain command, commit, environment, timestamp, exit status, and sanitized
 output. The placeholder `ADMIN_EMAILS` value above is a local audit fixture, not
 release configuration. The last full snapshot passed check, typecheck, 947 unit
-tests, sixteen browser tests against development and local production servers,
+tests, seventeen browser tests against development and local production servers,
 both default and demo production builds, and the local Docker-backed Sandbox
 diagnostic, but hygiene failed; it is not release evidence for a later commit.
 A tracked secret scan is recommended in addition to, not instead of, the six
