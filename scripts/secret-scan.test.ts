@@ -205,6 +205,61 @@ test("versioned credential KEKs are caught in assignments and JSON", () => {
   );
 });
 
+test("scans every credential KEK key in a JSON line regardless of order", () => {
+  for (const source of [
+    `{"CREDENTIAL_KEK_CURRENT_VERSION":"v2","CREDENTIAL_KEK_V1":"${RANDOM_BASE64}"}`,
+    `{"CREDENTIAL_KEK_V1":"${RANDOM_BASE64}","CREDENTIAL_KEK_CURRENT_VERSION":"v2"}`,
+  ]) {
+    const findings = scanText("config.json", source);
+
+    assert.equal(findings.length, 1, source);
+    assert.equal(findings[0]?.category, "value assigned to CREDENTIAL_KEK_V1");
+  }
+});
+
+test("scans multiple versioned credential KEKs on one line", () => {
+  const findings = scanText(
+    "config.json",
+    `{"CREDENTIAL_KEK_V1":"${RANDOM_BASE64}","CREDENTIAL_KEK_V2":"${RANDOM_HEX}"}`
+  );
+
+  assert.deepEqual(
+    findings.map(({ category, line }) => ({ category, line })),
+    [
+      { category: "value assigned to CREDENTIAL_KEK_V1", line: 1 },
+      { category: "value assigned to CREDENTIAL_KEK_V2", line: 1 },
+    ]
+  );
+});
+
+test("scans versioned credential KEKs across multiline env assignments", () => {
+  const findings = scanText(
+    ".env",
+    [
+      `CREDENTIAL_KEK_V1=${RANDOM_BASE64}`,
+      `CREDENTIAL_KEK_V2=${RANDOM_HEX}`,
+    ].join("\n")
+  );
+
+  assert.deepEqual(
+    findings.map(({ category, line }) => ({ category, line })),
+    [
+      { category: "value assigned to CREDENTIAL_KEK_V1", line: 1 },
+      { category: "value assigned to CREDENTIAL_KEK_V2", line: 2 },
+    ]
+  );
+});
+
+test("does not report the credential KEK current-version selector", () => {
+  assert.deepEqual(
+    scanText(
+      "config.json",
+      `{"CREDENTIAL_KEK_CURRENT_VERSION":"v1","OTHER":"safe"}`
+    ),
+    []
+  );
+});
+
 test("a connection string is caught by its inline password", () => {
   // The password is inside the URL, so advice about "keeping the password out
   // of the file" misses it entirely.

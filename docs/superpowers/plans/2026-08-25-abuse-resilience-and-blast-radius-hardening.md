@@ -945,7 +945,7 @@ Run: `pnpm exec tsx --test lib/credentials/*.test.ts scripts/credentials-rewrap.
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add lib/db lib/credentials scripts package.json docs/security

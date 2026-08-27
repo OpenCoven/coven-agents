@@ -195,15 +195,19 @@ function namedFindings(line: string): string[] {
     found.push(`value assigned to ${assignment[1]}`);
   }
 
-  const credentialKek = CREDENTIAL_KEK_NAME.exec(line);
-  const credentialKekName = credentialKek?.[1] ?? credentialKek?.[2];
-  if (
-    credentialKek &&
-    credentialKekName !== "CREDENTIAL_KEK_CURRENT_VERSION" &&
-    credentialKekName !== assignment?.[1] &&
-    looksLikeRealSecret(credentialKek[3])
-  ) {
-    found.push(`value assigned to ${credentialKekName}`);
+  // Match every key on the line. A fresh global regex keeps `matchAll` from
+  // inheriting mutable `lastIndex` state across calls.
+  for (const credentialKek of line.matchAll(
+    new RegExp(CREDENTIAL_KEK_NAME.source, "gu")
+  )) {
+    const credentialKekName = credentialKek[1] ?? credentialKek[2];
+    if (
+      credentialKekName !== "CREDENTIAL_KEK_CURRENT_VERSION" &&
+      credentialKekName !== assignment?.[1] &&
+      looksLikeRealSecret(credentialKek[3])
+    ) {
+      found.push(`value assigned to ${credentialKekName}`);
+    }
   }
 
   const url = CREDENTIALED_URL.exec(line);
