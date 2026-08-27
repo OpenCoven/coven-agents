@@ -6,9 +6,11 @@ import { readHarnessConfig } from "./config.mjs";
 
 const PORT = 9797;
 const MAX_BODY_BYTES = 8192;
+const TOKEN_CLOCK_SKEW_SECONDS = 0;
 const FIXTURE_SUBJECT = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
 const FIXTURE_TENANT = `u_${FIXTURE_SUBJECT.replaceAll("-", "")}`;
 
+// Keep this boundary identical to verifyRunnerToken in agent-contracts.
 function base64UrlDecode(value) {
   return Buffer.from(value, "base64url");
 }
@@ -38,7 +40,8 @@ export function fixtureClaims(configuration = readFixtureConfiguration()) {
 
 export function isFixtureToken(
   token,
-  configuration = readFixtureConfiguration()
+  configuration = readFixtureConfiguration(),
+  now = Date.now()
 ) {
   if (typeof token !== "string") {
     return false;
@@ -61,7 +64,7 @@ export function isFixtureToken(
     claims.sub !== expected.sub ||
     claims.tenant !== expected.tenant ||
     !Number.isSafeInteger(claims.exp) ||
-    claims.exp <= Math.floor(Date.now() / 1000)
+    claims.exp + TOKEN_CLOCK_SKEW_SECONDS <= Math.floor(now / 1000)
   ) {
     return false;
   }

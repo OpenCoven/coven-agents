@@ -134,7 +134,8 @@ function optionalConfig(value: string | undefined): string | undefined {
  * decoded, parsed, or trusted in any way — an attacker-controlled string never
  * reaches JSON.parse or the schema until it has been proven to be what the
  * key holder actually signed. Expiry is checked last, once the claims are
- * already known to be authentic.
+ * already known to be authentic; a claim expires when
+ * `exp + TOKEN_CLOCK_SKEW_SECONDS <= floor(now seconds)`.
  */
 export async function verifyRunnerToken(
   token: string,
@@ -229,7 +230,7 @@ export async function verifyRunnerToken(
 
   if (
     claims.kid !== kid ||
-    claims.exp + TOKEN_CLOCK_SKEW_SECONDS < Math.floor(now.getTime() / 1000)
+    claims.exp + TOKEN_CLOCK_SKEW_SECONDS <= Math.floor(now.getTime() / 1000)
   ) {
     return null;
   }

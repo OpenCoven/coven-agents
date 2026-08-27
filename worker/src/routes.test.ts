@@ -607,8 +607,64 @@ test("the diagnostic accepts the separate operator token without tenant identity
   assert.equal(diagnostics, 1);
 });
 
+test("the diagnostic fails closed when operator and control secrets are aliases", async () => {
+  const environment = await environmentPromise;
+  let diagnostics = 0;
+  const response = await createCloudRunner({
+    diagnoseSandbox: () => {
+      diagnostics += 1;
+      return { exitCode: 0, ok: true, output: "coven-agents" };
+    },
+    getDirectory: () => {
+      throw new Error("diagnostics must not open a tenant directory");
+    },
+    getYoloAgent: () => {
+      throw new Error("diagnostics must not open an agent");
+    },
+  }).fetch(
+    new Request("https://runner.test/api/diagnostics/sandbox", {
+      headers: { authorization: `Bearer ${OPERATOR_TOKEN}` },
+      method: "POST",
+    }),
+    {
+      ...environment,
+      AGENT_CONTROL_TOKEN: OPERATOR_TOKEN,
+    } as never
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(diagnostics, 0);
+});
+
 test("the diagnostic fails closed when the operator token is missing", async () => {
   const { OPERATOR_DIAGNOSTIC_TOKEN: _operatorToken, ...environment } =
+    await environmentPromise;
+  let diagnostics = 0;
+  const response = await createCloudRunner({
+    diagnoseSandbox: () => {
+      diagnostics += 1;
+      return { exitCode: 0, ok: true, output: "coven-agents" };
+    },
+    getDirectory: () => {
+      throw new Error("diagnostics must not open a tenant directory");
+    },
+    getYoloAgent: () => {
+      throw new Error("diagnostics must not open an agent");
+    },
+  }).fetch(
+    new Request("https://runner.test/api/diagnostics/sandbox", {
+      headers: { authorization: `Bearer ${OPERATOR_TOKEN}` },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(diagnostics, 0);
+});
+
+test("the diagnostic fails closed when the control token is missing", async () => {
+  const { AGENT_CONTROL_TOKEN: _controlToken, ...environment } =
     await environmentPromise;
   let diagnostics = 0;
   const response = await createCloudRunner({

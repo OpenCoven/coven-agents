@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import {
   AGENT_RUNNER_API_VERSION,
   AGENT_RUNNER_LIMITS,
@@ -99,6 +99,17 @@ export function hasValidHeaderToken(
     return false;
   }
   return timingSafeEqual(a, b);
+}
+
+/**
+ * Compares deployment secrets without exposing their lengths or using a
+ * short-circuiting string comparison. Hashing first gives timingSafeEqual
+ * fixed-size inputs while keeping the raw secret out of any error path.
+ */
+export function secretsEqual(left: string, right: string): boolean {
+  const leftDigest = createHash("sha256").update(left, "utf8").digest();
+  const rightDigest = createHash("sha256").update(right, "utf8").digest();
+  return timingSafeEqual(leftDigest, rightDigest);
 }
 
 export async function readJson(

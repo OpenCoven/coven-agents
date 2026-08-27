@@ -17,7 +17,10 @@ export const TOKEN_ALGORITHM = "Ed25519";
  * enough that "wait it out" is an acceptable incident response.
  */
 export const TOKEN_LIFETIME_SECONDS = 900;
-/** No implicit clock skew: expiry and key retirement use the same UTC clock. */
+/**
+ * No implicit clock skew: a token is expired when
+ * `exp + TOKEN_CLOCK_SKEW_SECONDS <= floor(now seconds)`.
+ */
 export const TOKEN_CLOCK_SKEW_SECONDS = 0;
 export const MAX_RUNNER_TOKEN_BYTES = 8192;
 export const MAX_RUNNER_TOKEN_SEGMENT_BYTES = 6144;

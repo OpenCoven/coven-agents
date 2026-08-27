@@ -66,6 +66,42 @@ test("routes by kid and verifies current and unexpired previous keys", async () 
   );
 });
 
+test("rejects the expiry boundary and earlier, but accepts one second after", async () => {
+  const current = await keyPair();
+  const ring = await importVerifyKeyRing(
+    {
+      currentId: "current",
+      currentPublicKey: await publicSpki(current.publicKey),
+    },
+    NOW
+  );
+  const boundary = Math.floor(NOW.getTime() / 1000);
+
+  assert.equal(
+    await verifyRunnerToken(
+      await token(current, "current", boundary - 1),
+      ring,
+      NOW
+    ),
+    null
+  );
+  assert.equal(
+    await verifyRunnerToken(
+      await token(current, "current", boundary),
+      ring,
+      NOW
+    ),
+    null
+  );
+  assert.ok(
+    await verifyRunnerToken(
+      await token(current, "current", boundary + 1),
+      ring,
+      NOW
+    )
+  );
+});
+
 test("refuses unknown and retired key ids", async () => {
   const current = await keyPair();
   const previous = await keyPair();
@@ -110,7 +146,11 @@ test("accepts a previous token exactly at retireAt and refuses it after", async 
     },
     NOW
   );
-  const previousToken = await token(previous, "previous");
+  const previousToken = await token(
+    previous,
+    "previous",
+    Math.floor(NOW.getTime() / 1000) + 901
+  );
 
   assert.ok(
     await verifyRunnerToken(

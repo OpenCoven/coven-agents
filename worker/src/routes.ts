@@ -35,6 +35,7 @@ import {
   hasValidHeaderToken,
   json,
   readJson,
+  secretsEqual,
 } from "./http.js";
 import { verifyRunnerToken } from "./identity.js";
 import {
@@ -130,6 +131,22 @@ async function getVerifyKeyRing(
   const ring = await importVerifyKeyRing(config);
   verifyKeyCache = { configKey, ring };
   return ring;
+}
+
+export function validateDiagnosticSecretConfiguration(environment: {
+  AGENT_CONTROL_TOKEN?: string;
+  OPERATOR_DIAGNOSTIC_TOKEN?: string;
+}): string | null {
+  const operatorToken = environment.OPERATOR_DIAGNOSTIC_TOKEN?.trim();
+  const controlToken = environment.AGENT_CONTROL_TOKEN?.trim();
+  if (
+    !operatorToken ||
+    !controlToken ||
+    secretsEqual(operatorToken, controlToken)
+  ) {
+    return null;
+  }
+  return operatorToken;
 }
 
 export type CloudRunnerDirectory = {
@@ -1124,7 +1141,8 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
       if (isDiagnosticsRoute) {
         // Diagnostics are a separate operator path. The deployment control
         // token is browser-visible and must never authorize a paid probe.
-        const operatorToken = environment.OPERATOR_DIAGNOSTIC_TOKEN?.trim();
+        const operatorToken =
+          validateDiagnosticSecretConfiguration(environment);
         if (!operatorToken) {
           return json(
             errorEnvelope(
