@@ -130,6 +130,7 @@ RUNNER_VERIFY_KEY=replace-with-the-base64url-ed25519-public-key
 # Optional during rotation; retire only after token expiry plus skew.
 RUNNER_VERIFY_PREVIOUS_KEY_ID=key-2026-07
 RUNNER_VERIFY_PREVIOUS_KEY=replace-with-the-old-base64url-ed25519-public-key
+RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT=2026-08-27T00:00:00.000Z
 RUNNER_VERIFY_PREVIOUS_RETIRE_AT=2026-08-27T00:15:00.000Z
 RUNNER_SERVICE_TOKEN=replace-with-a-long-random-token
 APP_ORIGIN=http://localhost:3000
@@ -183,6 +184,7 @@ pnpm wrangler secret put RUNNER_VERIFY_KEY
 pnpm wrangler secret put RUNNER_VERIFY_KEY_ID
 pnpm wrangler secret put RUNNER_VERIFY_PREVIOUS_KEY_ID
 pnpm wrangler secret put RUNNER_VERIFY_PREVIOUS_KEY
+pnpm wrangler secret put RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT
 pnpm wrangler secret put RUNNER_VERIFY_PREVIOUS_RETIRE_AT
 pnpm wrangler secret put RUNNER_SERVICE_TOKEN
 pnpm wrangler secret put APP_ORIGIN

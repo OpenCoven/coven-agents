@@ -1,30 +1,40 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   base64UrlDecode,
   splitToken,
   TOKEN_LIFETIME_SECONDS,
 } from "@opencoven/agent-contracts";
+import type { RunnerKeyRing } from "./key-ring";
 import { claimsForUser, mintRunnerToken } from "./runner-token";
 
-async function signingKey(): Promise<{ pkcs8: string; publicKey: CryptoKey }> {
+async function signingKey(): Promise<{
+  keyRing: Pick<RunnerKeyRing, "current">;
+  publicKey: CryptoKey;
+}> {
   const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
     "sign",
     "verify",
   ])) as CryptoKeyPair;
-  const raw = await crypto.subtle.exportKey("pkcs8", pair.privateKey);
   return {
-    pkcs8: Buffer.from(raw).toString("base64url"),
+    keyRing: {
+      current: {
+        id: "test-current",
+        privateKey: pair.privateKey,
+        publicKey: pair.publicKey,
+      },
+    },
     publicKey: pair.publicKey,
   };
 }
 
 test("a minted token carries the requested claims and a future expiry", async () => {
-  const { pkcs8 } = await signingKey();
+  const { keyRing } = await signingKey();
 
   const token = await mintRunnerToken(
     { authVersion: 0, plan: "subscriber", sub: "user-1", tenant: "acme" },
-    pkcs8
+    keyRing
   );
 
   const parts = splitToken(token);
@@ -36,7 +46,7 @@ test("a minted token carries the requested claims and a future expiry", async ()
   assert.equal(payload.tenant, "acme");
   assert.equal(payload.plan, "subscriber");
   assert.equal(payload.sub, "user-1");
-  assert.equal(payload.kid, "legacy");
+  assert.equal(payload.kid, "test-current");
   assert.equal(payload.authVersion, 0);
 
   const now = Math.floor(Date.now() / 1000);
@@ -49,7 +59,7 @@ test("a minted token carries the requested claims and a future expiry", async ()
 
 test("the signature verifies against the matching public key", async () => {
   // The contract with the worker: what this mints is what that verifies.
-  const { pkcs8, publicKey } = await signingKey();
+  const { keyRing, publicKey } = await signingKey();
 
   const token = await mintRunnerToken(
     {
@@ -58,7 +68,7 @@ test("the signature verifies against the matching public key", async () => {
       sub: "user-2",
       tenant: "d_9c8589018a57479181fe4c455b099bc9",
     },
-    pkcs8
+    keyRing
   );
   const parts = splitToken(token);
   assert.ok(parts);
@@ -79,7 +89,7 @@ test("a token minted by one key does not verify against another", async () => {
 
   const token = await mintRunnerToken(
     { authVersion: 0, plan: "subscriber", sub: "user-1", tenant: "victim" },
-    signer.pkcs8
+    signer.keyRing
   );
   const parts = splitToken(token);
   assert.ok(parts);
@@ -97,12 +107,12 @@ test("a token minted by one key does not verify against another", async () => {
 test("minting refuses claims the worker would reject", async () => {
   // Validating at mint time means a malformed claim fails here, loudly, rather
   // than becoming a token that silently never verifies.
-  const { pkcs8 } = await signingKey();
+  const { keyRing } = await signingKey();
 
   await assert.rejects(() =>
     mintRunnerToken(
       { authVersion: 0, plan: "subscriber", sub: "user-1", tenant: "" },
-      pkcs8
+      keyRing
     )
   );
   await assert.rejects(() =>
@@ -113,7 +123,7 @@ test("minting refuses claims the worker would reject", async () => {
         sub: "user-1",
         tenant: "t".repeat(65),
       },
-      pkcs8
+      keyRing
     )
   );
 });
@@ -163,4 +173,15 @@ test("claims carry a stable tenant derived from the user id", () => {
   assert.equal(first.tenant, second.tenant);
   assert.equal(first.tenant, "u_6ba7b8109dad11d180b400c04fd430c8");
   assert.equal(first.sub, "6ba7b810-9dad-11d1-80b4-00c04fd430c8");
+});
+
+test("production minting has no raw key or caller-selected key-id overload", () => {
+  const source = readFileSync(
+    new URL("./runner-token.ts", import.meta.url),
+    "utf8"
+  );
+
+  assert.doesNotMatch(source, /signingKey:\s*string/);
+  assert.doesNotMatch(source, /legacyKeyId/);
+  assert.doesNotMatch(source, /base64UrlDecode/);
 });

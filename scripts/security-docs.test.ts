@@ -140,6 +140,7 @@ test("the runner key runbook documents bounded rotation and rollback", () => {
   for (const marker of [
     "RUNNER_SIGNING_KEY_ID",
     "RUNNER_VERIFY_KEY_ID",
+    "RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT",
     "RUNNER_VERIFY_PREVIOUS_RETIRE_AT",
     "15 minutes plus",
     "Rollback",
@@ -147,4 +148,20 @@ test("the runner key runbook documents bounded rotation and rollback", () => {
   ]) {
     assert.match(runbook, new RegExp(marker.replaceAll("*", "\\*")));
   }
+});
+
+test("auth callbacks and the client update preserve server-owned identity", () => {
+  const authSource = readFileSync(
+    new URL("../app/(auth)/auth.ts", import.meta.url),
+    "utf8"
+  );
+  const avatarSource = readFileSync(
+    new URL("../components/account/avatar-settings.tsx", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(authSource, /token\.authVersion = row\.authVersion/);
+  assert.match(authSource, /session\.user\.authVersion = token\.authVersion/);
+  assert.match(authSource, /return refreshTokenType\(token, new Date\(\)\)/);
+  assert.match(avatarSource, /await update\(\{ image \}\)/);
 });

@@ -290,7 +290,10 @@ test("mints a fresh validated subscriber identity for every request including cl
   };
   const authorizations: string[] = [];
   const mintedClaims: Omit<RunnerClaims, "exp" | "kid">[] = [];
-  const signingKeys: string[] = [];
+  const signingKeys: (
+    | Pick<import("@/lib/agents/key-ring").RunnerKeyRing, "current">
+    | undefined
+  )[] = [];
   let mintCount = 0;
   // biome-ignore lint/suspicious/useAwait: injected fetch matches the native asynchronous fetch contract.
   const request = async (
@@ -362,8 +365,8 @@ test("mints a fresh validated subscriber identity for every request including cl
     }))
   );
   assert.deepEqual(
-    signingKeys,
-    Array.from({ length: 5 }, () => SIGNING_KEY)
+    signingKeys.map((signer) => signer?.current.id),
+    Array.from({ length: 5 }, () => undefined)
   );
 });
 

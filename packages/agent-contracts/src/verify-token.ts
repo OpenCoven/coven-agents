@@ -7,13 +7,19 @@ import {
   splitToken,
   TOKEN_ALGORITHM,
   TOKEN_CLOCK_SKEW_SECONDS,
+  TOKEN_LIFETIME_SECONDS,
 } from "./identity";
 
 const MAX_VERIFY_KEY_MATERIAL_LENGTH = 4096;
 
 export type RunnerVerificationKeyRing = {
   current: { id: string; publicKey: CryptoKey };
-  previous?: { id: string; publicKey: CryptoKey; retireAt: Date };
+  previous?: {
+    id: string;
+    lastSignedAt: Date;
+    publicKey: CryptoKey;
+    retireAt: Date;
+  };
 };
 
 export type RunnerVerificationKeyConfig = {
@@ -21,6 +27,7 @@ export type RunnerVerificationKeyConfig = {
   currentPublicKey: string;
   previousId?: string;
   previousPublicKey?: string;
+  previousLastSignedAt?: string;
   previousRetireAt?: string;
 };
 
@@ -49,47 +56,71 @@ export async function importVerifyKey(spki: string): Promise<CryptoKey> {
 
 export async function importVerifyKeyRing(
   config: RunnerVerificationKeyConfig,
-  now = new Date()
+  _now = new Date()
 ): Promise<RunnerVerificationKeyRing> {
-  if (
-    typeof config.currentId !== "string" ||
-    !KEY_ID_PATTERN.test(config.currentId)
-  ) {
+  const currentId =
+    typeof config.currentId === "string" ? config.currentId.trim() : "";
+  const previousId = optionalConfig(config.previousId);
+  const previousPublicKeyText = optionalConfig(config.previousPublicKey);
+  const previousLastSignedAt = optionalConfig(config.previousLastSignedAt);
+  const previousRetireAt = optionalConfig(config.previousRetireAt);
+  if (typeof config.currentId !== "string" || !KEY_ID_PATTERN.test(currentId)) {
     throw new Error("Runner current key id is invalid.");
   }
   const currentPublicKey = await importVerifyKey(config.currentPublicKey);
 
   const hasPrevious = [
-    config.previousId,
-    config.previousPublicKey,
-    config.previousRetireAt,
+    previousId,
+    previousPublicKeyText,
+    previousLastSignedAt,
+    previousRetireAt,
   ].some((value) => value !== undefined);
   if (!hasPrevious) {
-    return { current: { id: config.currentId, publicKey: currentPublicKey } };
+    return { current: { id: currentId, publicKey: currentPublicKey } };
   }
   if (
-    !config.previousId ||
-    !config.previousPublicKey ||
-    !config.previousRetireAt ||
-    typeof config.previousId !== "string" ||
-    !KEY_ID_PATTERN.test(config.previousId) ||
-    config.previousId === config.currentId
+    !previousId ||
+    !previousPublicKeyText ||
+    !previousLastSignedAt ||
+    !previousRetireAt ||
+    !KEY_ID_PATTERN.test(previousId) ||
+    previousId === currentId
   ) {
     throw new Error("Runner previous key configuration is invalid.");
   }
-  const retireAt = new Date(config.previousRetireAt);
-  if (Number.isNaN(retireAt.getTime()) || retireAt.getTime() <= now.getTime()) {
-    throw new Error("Runner previous key retirement must be in the future.");
+  const lastSignedAt = new Date(previousLastSignedAt);
+  const retireAt = new Date(previousRetireAt);
+  if (
+    Number.isNaN(lastSignedAt.getTime()) ||
+    Number.isNaN(retireAt.getTime())
+  ) {
+    throw new Error("Runner previous key timestamps are invalid.");
   }
-  const previousPublicKey = await importVerifyKey(config.previousPublicKey);
+  const minimumRetireAt =
+    lastSignedAt.getTime() +
+    (TOKEN_LIFETIME_SECONDS + TOKEN_CLOCK_SKEW_SECONDS) * 1000;
+  if (
+    !Number.isFinite(minimumRetireAt) ||
+    retireAt.getTime() < minimumRetireAt
+  ) {
+    throw new Error(
+      "Runner previous key retirement is earlier than the last-signed token lifetime."
+    );
+  }
+  const previousPublicKey = await importVerifyKey(previousPublicKeyText);
   return {
-    current: { id: config.currentId, publicKey: currentPublicKey },
+    current: { id: currentId, publicKey: currentPublicKey },
     previous: {
-      id: config.previousId,
+      id: previousId,
+      lastSignedAt,
       publicKey: previousPublicKey,
       retireAt,
     },
   };
+}
+
+function optionalConfig(value: string | undefined): string | undefined {
+  return value?.trim() ? value : undefined;
 }
 
 /**
@@ -156,7 +187,7 @@ export async function verifyRunnerToken(
   if (
     previous &&
     candidate.id === previous.id &&
-    now.getTime() >= previous.retireAt.getTime()
+    now.getTime() > previous.retireAt.getTime()
   ) {
     return null;
   }

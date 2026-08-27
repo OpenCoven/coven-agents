@@ -19,6 +19,7 @@ import {
   AgentDecommissioningError,
   hashOperation,
 } from "./run-state";
+import type { RunnerAuthorityResult } from "./runner-authority";
 
 const TOKEN = "test-token";
 const MINE = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
@@ -149,12 +150,14 @@ const agents = new Map<string, AgentDefinition>([
 let decommissioned: string[] = [];
 let stopped: string[] = [];
 let warmed: string[] = [];
+let authorityDirectoryLookups = 0;
 let configureFailure: Error | null = null;
 
-function runner() {
+function runner(authority: RunnerAuthorityResult = { kind: "allowed" }) {
   decommissioned = [];
   stopped = [];
   warmed = [];
+  authorityDirectoryLookups = 0;
 
   const directory: CloudRunnerDirectory = {
     list: (tenantId) =>
@@ -231,7 +234,11 @@ function runner() {
     }) as unknown as CloudRunnerAgent;
 
   return createCloudRunner({
-    getDirectory: () => directory,
+    checkAuthority: () => authority,
+    getDirectory: () => {
+      authorityDirectoryLookups += 1;
+      return directory;
+    },
     getYoloAgent,
   });
 }
@@ -382,6 +389,61 @@ test("tenant reads consume no mutation or run capacity", async () => {
   assert.equal(mutation.keys.length, 0);
   assert.equal(run.keys.length, 0);
 });
+
+test("revoked identity is refused before request body parsing or downstream calls", async () => {
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const response = await runner({ kind: "unauthorized" }).fetch(
+    new Request("https://runner.test/api/agents", {
+      body: "not-json",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(authorityDirectoryLookups, 0);
+  assert.deepEqual(decommissioned, []);
+  assert.deepEqual(warmed, []);
+});
+
+test("lapsed identity is refused before sandbox or durable-object work", async () => {
+  const response = await callWithRunner("/api/agents", "GET", {
+    kind: "subscription_required",
+  });
+
+  assert.equal(response.status, 403);
+  assert.equal(authorityDirectoryLookups, 0);
+  assert.deepEqual(decommissioned, []);
+  assert.deepEqual(warmed, []);
+});
+
+async function callWithRunner(
+  path: string,
+  method: string,
+  authority: RunnerAuthorityResult
+): Promise<Response> {
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  return runner(authority).fetch(
+    new Request(`https://runner.test${path}`, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method,
+    }),
+    environment as never
+  );
+}
 
 test("limiter outages fail closed without revealing the failed scope", async () => {
   const environment = await environmentPromise;
@@ -765,6 +827,7 @@ async function failingRunner(error: Error): Promise<Response> {
   };
 
   return createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getDirectory: () => directory,
     getYoloAgent: () => ({}) as unknown as CloudRunnerAgent,
   }).fetch(
@@ -999,6 +1062,7 @@ test("run admission happens before dispatch and receives only a tenant hash", as
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: (input) => {
         calls.push("admit");
@@ -1084,6 +1148,7 @@ test("run admission passes its durable capability directly to confirmation", asy
   ]);
 
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () =>
         ({
@@ -1177,6 +1242,7 @@ test("terminal prepared admission cleans its exact queued local run without regi
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: (input) => ({
         admissionCapability: { ...capability, runId: input.runId },
@@ -1261,6 +1327,7 @@ test("terminal prepared admission returns and registers an already-terminal loca
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => ({ admissionCapability: capability, kind: "active", runId }),
       confirmPreparedAdmission: () => ({ kind: "terminal" as const }),
@@ -1338,6 +1405,7 @@ test("a terminal duplicate reconciles stale admission before returning the termi
     CALLER_TENANT
   );
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => {
         throw new Error("a terminal duplicate must not admit again");
@@ -1462,6 +1530,7 @@ test("concurrent identical requests reconcile a shared preparation without disca
     identityToken(),
   ]);
   const runnerInstance = createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => admission,
     getDirectory: () => ({
       list: () => [agents.get(MINE) as AgentDefinition],
@@ -1571,6 +1640,7 @@ test("repeated duplicate confirmations finalize the coordinator cleanup task ide
     identityToken(),
   ]);
   const runnerInstance = createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => admission,
     getDirectory: () => ({
       list: () => [agents.get(MINE) as AgentDefinition],
@@ -1655,6 +1725,7 @@ test("a cross-tenant duplicate cannot return or release a foreign admission", as
     ),
   };
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => {
         throw new Error("a duplicate must not admit again");
@@ -1742,6 +1813,7 @@ test("a stale local duplicate cannot release a different run with the same opera
     ),
   };
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => {
         throw new Error("a duplicate must not admit again");
@@ -1811,6 +1883,7 @@ test("an orphan queued duplicate resumes admission with its existing run", async
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: (input: { runId: string }) => {
         admittedRunId = input.runId;
@@ -1944,6 +2017,7 @@ test("duplicate retries repair missing directory mappings for every run state", 
       }),
     };
     const runnerInstance = createCloudRunner({
+      checkAuthority: () => ({ kind: "allowed" }),
       getAdmission: () => ({
         admit: () => {
           throw new Error("a duplicate must not admit again");
@@ -2053,6 +2127,7 @@ test("reject mode preflights local contention without creating a provisional run
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => {
         admissionCalls += 1;
@@ -2126,6 +2201,7 @@ test("schedule failure registers provisional cleanup before admission can refuse
     ["x-runner-token", TOKEN],
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => {
         admittedAfterRegistration = provisional !== undefined;
@@ -2192,6 +2268,7 @@ test("reject mode refuses an unhealthy admission object without bypassing it", a
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => Promise.reject(new Error("admission unavailable")),
       release: () => false,
@@ -2253,6 +2330,7 @@ test("reject mode does not clean up an unexpected queued decision", async () => 
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => {
         calls.push("admit");
@@ -2320,6 +2398,7 @@ test("reject mode does not race cleanup for an unexpected queued decision", asyn
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => {
         calls.push("admit");
@@ -2421,6 +2500,7 @@ test("reject mode does not schedule cleanup for an unexpected queued decision", 
     identityToken(),
   ]);
   const runnerInstance = createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => admission,
     getDirectory: () => ({
       list: () => [agents.get(MINE) as AgentDefinition],
@@ -2509,6 +2589,7 @@ test("a failed provisional cleanup keeps local owner cleanup armed without admis
   ]);
 
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => Promise.reject(new Error("admission unavailable")),
       enqueueCleanup: () => {
@@ -2649,6 +2730,7 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
     identityToken(),
   ]);
   const runnerInstance = createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => admission,
     getDirectory: () => directory,
     getYoloAgent: () => agent,
@@ -2772,6 +2854,7 @@ test("a run mapping is unregistered when the admitted run disappears after regis
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: (input: { runId: string }) => ({
         kind: "active" as const,

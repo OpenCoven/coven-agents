@@ -2,6 +2,7 @@ import {
   agentEnvelopeSchema,
   agentIdSchema,
   agentsEnvelopeSchema,
+  base64UrlDecode,
   createAgentInputSchema,
   KEY_ID_PATTERN,
   okEnvelopeSchema,
@@ -16,6 +17,7 @@ import {
   sanitizeEvidenceText,
   startRunInputSchema,
 } from "@opencoven/agent-contracts";
+import type { RunnerKeyRing } from "@/lib/agents/key-ring";
 import { mintRunnerToken } from "@/lib/agents/runner-token";
 import type { ArrivedEvent } from "@/lib/demo/offsets";
 import { DEMO_REPOSITORY } from "@/lib/demo/recordable";
@@ -81,8 +83,7 @@ type RunnerConnection = {
 
 type IdentityMinter = (
   claims: Omit<RunnerClaims, "exp" | "kid">,
-  signingKey: string,
-  legacyKeyId?: string
+  signingKey?: Pick<RunnerKeyRing, "current">
 ) => Promise<string>;
 
 class RetryableSseError extends Error {
@@ -118,6 +119,37 @@ class PotentialOrphanError extends Error {
 
 function nonblank(value: string | undefined): value is string {
   return Boolean(value?.trim());
+}
+
+async function currentSigner(
+  signingKey: string,
+  signingKeyId: string
+): Promise<Pick<RunnerKeyRing, "current">> {
+  const privateKey = await crypto.subtle.importKey(
+    "pkcs8",
+    new Uint8Array(base64UrlDecode(signingKey)),
+    { name: "Ed25519" },
+    true,
+    ["sign"]
+  );
+  const privateJwk = await crypto.subtle.exportKey("jwk", privateKey);
+  if (!(privateJwk.crv && privateJwk.kty && privateJwk.x)) {
+    throw new Error("Demo runner signing key has no public component.");
+  }
+  const publicKey = await crypto.subtle.importKey(
+    "jwk",
+    { crv: privateJwk.crv, kty: privateJwk.kty, x: privateJwk.x },
+    { name: "Ed25519" },
+    false,
+    ["verify"]
+  );
+  return {
+    current: {
+      id: signingKeyId,
+      privateKey,
+      publicKey,
+    },
+  };
 }
 
 export function readCaptureEnvironment(
@@ -745,14 +777,19 @@ export async function captureRun(
   const configuration = readCaptureEnvironment(
     dependencies.environment ?? process.env
   );
-  const mintIdentity = dependencies.mintIdentity ?? mintRunnerToken;
+  const mintIdentity =
+    dependencies.mintIdentity ??
+    ((claims, providedSigner) => {
+      if (!providedSigner) {
+        throw new Error("Runner signer is unavailable.");
+      }
+      return mintRunnerToken(claims, providedSigner);
+    });
+  const signer = dependencies.mintIdentity
+    ? undefined
+    : await currentSigner(configuration.signingKey, configuration.signingKeyId);
   const connection: RunnerConnection = {
-    identityToken: () =>
-      mintIdentity(
-        configuration.identityClaims,
-        configuration.signingKey,
-        configuration.signingKeyId
-      ),
+    identityToken: () => mintIdentity(configuration.identityClaims, signer),
     request: dependencies.request ?? globalThis.fetch,
     runnerToken: configuration.runnerToken,
     runnerUrl: configuration.runnerUrl,

@@ -13,6 +13,7 @@ import {
 import { eq } from "drizzle-orm";
 import { requireNonemptyAbuseKeySecret } from "@/lib/abuse/config";
 import { runnerVerificationKeyRingFromEnvironment } from "@/lib/agents/key-ring";
+import { authorizeInternalRequest } from "@/lib/auth/internal-service";
 import { sessionAuthorityMatches } from "@/lib/auth/session-revocation";
 import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
 import { periodStart } from "@/lib/billing/period";
@@ -37,23 +38,7 @@ import { resolveBoundTenant } from "./binding";
  * the worker (and nothing else) holds.
  */
 
-export function authorizeInternalRequest(
-  request: Request,
-  expected: string
-): boolean {
-  const supplied = request.headers.get("x-service-token");
-
-  if (!supplied || !expected || supplied.length !== expected.length) {
-    return false;
-  }
-
-  let mismatch = 0;
-  for (let i = 0; i < expected.length; i += 1) {
-    mismatch |= supplied.charCodeAt(i) ^ expected.charCodeAt(i);
-  }
-
-  return mismatch === 0;
-}
+export { authorizeInternalRequest } from "@/lib/auth/internal-service";
 
 export interface CredentialLendingDependencies {
   consume: (

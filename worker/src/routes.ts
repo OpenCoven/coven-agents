@@ -5,6 +5,7 @@ import {
   agentIdSchema,
   createAgentInputSchema,
   importVerifyKeyRing,
+  type RunnerClaims,
   type RunnerVerificationKeyRing,
   type RunSnapshot,
   sanitizeEvidenceText,
@@ -48,6 +49,10 @@ import {
   type PreparedAdmissionConfirmationOutcome,
 } from "./run-state.js";
 import {
+  checkRunnerAuthority,
+  type RunnerAuthorityResult,
+} from "./runner-authority.js";
+import {
   createRunEventStream,
   type RunEventStreamOptions,
   type RunEventStreamSnapshot,
@@ -61,10 +66,13 @@ export type CloudRunnerEnvironment = Omit<
     Env,
     | "AGENT_CONTROL_TOKEN"
     | "ALLOWED_ORIGIN"
+    | "APP_ORIGIN"
     | "RUNNER_VERIFY_KEY"
     | "RUNNER_VERIFY_KEY_ID"
+    | "RUNNER_SERVICE_TOKEN"
     | "RUNNER_VERIFY_PREVIOUS_KEY_ID"
     | "RUNNER_VERIFY_PREVIOUS_KEY"
+    | "RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT"
     | "RUNNER_VERIFY_PREVIOUS_RETIRE_AT"
   >,
   "ALLOWED_ORIGIN"
@@ -95,16 +103,23 @@ let verifyKeyCache: {
 async function getVerifyKeyRing(
   environment: CloudRunnerEnvironment
 ): Promise<RunnerVerificationKeyRing> {
-  const currentPublicKey = environment.RUNNER_VERIFY_KEY;
+  const currentPublicKey = environment.RUNNER_VERIFY_KEY?.trim()
+    ? environment.RUNNER_VERIFY_KEY
+    : undefined;
   if (!currentPublicKey) {
     throw new Error("Runner verify key is not configured.");
   }
+  const optional = (value: string | undefined): string | undefined =>
+    value?.trim() ? value : undefined;
   const config = {
-    currentId: environment.RUNNER_VERIFY_KEY_ID ?? "legacy",
+    currentId: optional(environment.RUNNER_VERIFY_KEY_ID) ?? "legacy",
     currentPublicKey,
-    previousId: environment.RUNNER_VERIFY_PREVIOUS_KEY_ID,
-    previousPublicKey: environment.RUNNER_VERIFY_PREVIOUS_KEY,
-    previousRetireAt: environment.RUNNER_VERIFY_PREVIOUS_RETIRE_AT,
+    previousId: optional(environment.RUNNER_VERIFY_PREVIOUS_KEY_ID),
+    previousLastSignedAt: optional(
+      environment.RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT
+    ),
+    previousPublicKey: optional(environment.RUNNER_VERIFY_PREVIOUS_KEY),
+    previousRetireAt: optional(environment.RUNNER_VERIFY_PREVIOUS_RETIRE_AT),
   };
   const configKey = JSON.stringify(config);
   if (verifyKeyCache?.configKey === configKey) {
@@ -249,6 +264,10 @@ export type CloudRunnerDependencies<
     ok: boolean;
     output: string;
   }>;
+  checkAuthority?: (
+    claims: Pick<RunnerClaims, "authVersion" | "plan" | "sub" | "tenant">,
+    environment: Environment
+  ) => Awaitable<RunnerAuthorityResult>;
   getDirectory: (environment: Environment) => Awaitable<CloudRunnerDirectory>;
   getAdmission?: (environment: Environment) => Awaitable<CloudRunnerAdmission>;
   getYoloAgent: (
@@ -983,6 +1002,39 @@ function abuseResponse(
   );
 }
 
+function authorityResponse(
+  decision: Exclude<RunnerAuthorityResult, { kind: "allowed" }>,
+  cors: Headers
+): Response {
+  if (decision.kind === "unauthorized") {
+    return json(
+      errorEnvelope("unauthorized", "Identity was rejected.", false),
+      { status: 401 },
+      cors
+    );
+  }
+  if (decision.kind === "subscription_required") {
+    return json(
+      errorEnvelope(
+        "subscription_required",
+        "An active subscription is required.",
+        false
+      ),
+      { status: 403 },
+      cors
+    );
+  }
+  return json(
+    errorEnvelope(
+      "authority_unavailable",
+      "Runner authority is temporarily unavailable. Try again later.",
+      true
+    ),
+    { status: 503 },
+    cors
+  );
+}
+
 function busyResponse(
   reason: "global_busy" | "tenant_queue_full",
   cors: Headers
@@ -1089,7 +1141,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
        * worker cannot verify identity — no verify key configured — it must
        * refuse rather than fall back to a default tenant.
        */
-      if (!environment.RUNNER_VERIFY_KEY) {
+      if (!environment.RUNNER_VERIFY_KEY?.trim()) {
         return json(
           errorEnvelope("unauthorized", "Identity cannot be verified.", false),
           { status: 401 },
@@ -1140,10 +1192,26 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
         return tenantAdmission;
       }
 
-      if (
+      const isDiagnosticsRoute =
         url.pathname === "/api/diagnostics/sandbox" &&
-        request.method === "POST"
-      ) {
+        request.method === "POST";
+      if (!isDiagnosticsRoute) {
+        const authority = dependencies.checkAuthority
+          ? await dependencies.checkAuthority(claims, environment)
+          : await checkRunnerAuthority(
+              claims,
+              {
+                appOrigin: environment.APP_ORIGIN,
+                serviceToken: environment.RUNNER_SERVICE_TOKEN,
+              },
+              (input, init) => fetch(input, init)
+            );
+        if (authority.kind !== "allowed") {
+          return authorityResponse(authority, cors);
+        }
+      }
+
+      if (isDiagnosticsRoute) {
         if (!dependencies.diagnoseSandbox) {
           return json(
             errorEnvelope("not_found", "Route was not found.", false),

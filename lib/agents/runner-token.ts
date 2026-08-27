@@ -1,7 +1,5 @@
 import {
-  base64UrlDecode,
   base64UrlEncode,
-  KEY_ID_PATTERN,
   type RunnerClaims,
   runnerClaimsSchema,
   TOKEN_ALGORITHM,
@@ -22,30 +20,13 @@ import type { RunnerKeyRing } from "./key-ring";
  */
 export async function mintRunnerToken(
   input: Omit<RunnerClaims, "exp" | "kid">,
-  signingKey: string | Pick<RunnerKeyRing, "current">,
-  legacyKeyId = "legacy"
+  signingKey: Pick<RunnerKeyRing, "current">
 ): Promise<string> {
-  const keyId =
-    typeof signingKey === "string" ? legacyKeyId : signingKey.current.id;
-  if (!KEY_ID_PATTERN.test(keyId)) {
-    throw new Error("Runner signing key id is invalid.");
-  }
   const claims = runnerClaimsSchema.parse({
     ...input,
     exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
-    kid: keyId,
+    kid: signingKey.current.id,
   });
-
-  const key =
-    typeof signingKey === "string"
-      ? await crypto.subtle.importKey(
-          "pkcs8",
-          new Uint8Array(base64UrlDecode(signingKey)),
-          { name: TOKEN_ALGORITHM },
-          false,
-          ["sign"]
-        )
-      : signingKey.current.privateKey;
 
   const payload = base64UrlEncode(
     new TextEncoder().encode(JSON.stringify(claims))
@@ -53,7 +34,7 @@ export async function mintRunnerToken(
 
   const signature = await crypto.subtle.sign(
     { name: TOKEN_ALGORITHM },
-    key,
+    signingKey.current.privateKey,
     new TextEncoder().encode(payload)
   );
 

@@ -204,13 +204,6 @@ const protectedHandlers: RouteExpectation[] = [
     "usage_read"
   ),
   route(
-    "app/api/analytics/route.ts",
-    "GET",
-    "auth(",
-    ["runHistory("],
-    "analytics_read"
-  ),
-  route(
     "app/(chat)/api/models/route.ts",
     "GET",
     "GET(request",
@@ -281,6 +274,16 @@ test("deferred webhook and internal lending routes stay untouched", () => {
   for (const file of excludedRoutes) {
     assert.doesNotMatch(read(file), /enforceAbusePolicy/);
   }
+});
+
+test("analytics revalidates subscriber authority before reading history", () => {
+  const source = read("lib/analytics/response.ts");
+  const authorityIndex = source.indexOf("dependencies.authorize(");
+  const historyIndex = source.indexOf("dependencies.readHistory(");
+
+  assert.ok(authorityIndex >= 0);
+  assert.ok(historyIndex > authorityIndex);
+  assert.match(read("app/api/analytics/route.ts"), /ipAddress\(request\)/);
 });
 
 test("internal credential lending reserves before credential decryption", () => {

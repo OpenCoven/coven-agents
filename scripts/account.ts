@@ -6,6 +6,7 @@ import {
   revokeSessionsByEmail,
 } from "@/lib/db/queries";
 import { user } from "@/lib/db/schema";
+import { formatRevocationOutput } from "./account-output";
 
 /**
  * Creates an account or resets its password from the command line.
@@ -95,9 +96,7 @@ async function revokeSessions(email: string) {
   }
 
   // Deliberately no email, database target, or other account data.
-  process.stdout.write(
-    `account_id: ${row.id}\nauth_version: ${row.authVersion}\n`
-  );
+  process.stdout.write(formatRevocationOutput(row));
 }
 
 async function main() {
