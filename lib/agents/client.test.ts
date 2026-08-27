@@ -346,6 +346,43 @@ test("with an identity minter, the two tokens travel on separate headers", async
   assert.equal(seen.get("x-runner-token"), "deployment-gate");
 });
 
+test("a cloud run mints identity for its exact agent, harness, and operation", async () => {
+  let body: { operationId?: string } = {};
+  let scope: unknown;
+  const request: typeof globalThis.fetch = (_input, init) => {
+    body = JSON.parse(String(init?.body));
+    return Promise.resolve(
+      json(
+        {
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          run: { ...snapshot("queued"), operationId: body.operationId },
+        },
+        202
+      )
+    );
+  };
+  const client = new RunnerClient(
+    { endpoint: "https://runner.test", token: "deployment-gate" },
+    request,
+    {
+      mintIdentity: (run) => {
+        scope = run;
+        return Promise.resolve("minted-identity");
+      },
+    }
+  );
+
+  await client.startRun(agent.id, "Fix the tests.", {
+    harnessId: agent.runtime,
+  });
+
+  assert.deepEqual(scope, {
+    agentId: agent.id,
+    harnessId: agent.runtime,
+    operationId: body.operationId,
+  });
+});
+
 test("without a minter the single token stays on authorization", async () => {
   // The local runner has no tenancy and must keep working unchanged.
   let seen = new Headers();

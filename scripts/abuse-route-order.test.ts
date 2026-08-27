@@ -286,30 +286,52 @@ test("analytics revalidates subscriber authority before reading history", () => 
   assert.match(read("app/api/analytics/route.ts"), /ipAddress\(request\)/);
 });
 
-test("internal credential lending reserves before credential decryption", () => {
+test("internal credential lending binds authority before credential decryption", () => {
   const source = read("app/api/internal/credential/route.ts");
   const post = exportedFunctionBlock(source, "POST");
-  const lending = functionBlock(source, "lendCredentialWithReservation");
+  const issuance = functionBlock(source, "lendCredentialWithReservation");
+  const lending = functionBlock(source, "lendCredentialWithLease");
+  const leaseSource = read("lib/credentials/leases.ts");
+  const consumption = functionBlock(leaseSource, "consumeCredentialLease");
   const ownerIndex = post.indexOf(".select()");
-  const lendingIndex = post.indexOf("lendCredentialWithReservation(");
-  const reserveIndex = lending.indexOf("dependencies.reserve({");
+  const issuanceIndex = post.indexOf("lendCredentialWithReservation(");
+  const reserveIndex = issuance.indexOf("dependencies.reserve({");
+  const issueIndex = issuance.indexOf("dependencies.issue({");
+  const leaseIndex = lending.indexOf("dependencies.lease(");
   const readIndex = lending.indexOf("dependencies.readCredential(");
-  const consumeIndex = lending.indexOf("dependencies.consume({");
+  const markIndex = consumption.indexOf("tx.markConsumed(");
+  const prepareIndex = consumption.indexOf("await prepare()");
+  const operationIndex = consumption.indexOf("operation(tx.credentialStore)");
+  const consumeIndex = consumption.indexOf("tx.consumeReservation(");
 
   assert.ok(ownerIndex >= 0, "credential lending must look up the owner");
   assert.ok(
-    lendingIndex > ownerIndex,
+    issuanceIndex > ownerIndex,
     "owner lookup must precede budget reservation"
   );
-  assert.ok(reserveIndex >= 0, "credential lending must reserve capacity");
+  assert.ok(reserveIndex >= 0, "credential issuance must reserve capacity");
   assert.ok(
-    readIndex > reserveIndex,
-    "reservation must precede credential read"
+    issueIndex > reserveIndex,
+    "reservation must precede immutable lease issuance"
+  );
+  assert.ok(leaseIndex >= 0, "credential lending must consume a lease");
+  assert.ok(
+    readIndex > leaseIndex,
+    "lease consumption must enclose credential read"
   );
   assert.ok(
-    consumeIndex > readIndex,
-    "successful credential retrieval must precede consumption"
+    markIndex >= 0 && markIndex < prepareIndex,
+    "lease consumption must commit before credential preparation"
   );
+  assert.ok(
+    prepareIndex < operationIndex,
+    "provider refresh must precede the side-effect-free credential read"
+  );
+  assert.ok(
+    consumeIndex < operationIndex,
+    "reservation consumption must precede credential decryption"
+  );
+  assert.match(issuance, /releaseAfterLendingFailure/);
   assert.match(lending, /releaseAfterLendingFailure/);
 });
 

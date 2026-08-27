@@ -33,7 +33,17 @@ test("a minted token carries the requested claims and a future expiry", async ()
   const { keyRing } = await signingKey();
 
   const token = await mintRunnerToken(
-    { authVersion: 0, plan: "subscriber", sub: "user-1", tenant: "acme" },
+    {
+      authVersion: 0,
+      plan: "subscriber",
+      run: {
+        agentId: "11111111-1111-4111-8111-111111111111",
+        harnessId: "copilot",
+        operationId: "22222222-2222-4222-8222-222222222222",
+      },
+      sub: "user-1",
+      tenant: "acme",
+    },
     keyRing
   );
 
@@ -48,6 +58,11 @@ test("a minted token carries the requested claims and a future expiry", async ()
   assert.equal(payload.sub, "user-1");
   assert.equal(payload.kid, "test-current");
   assert.equal(payload.authVersion, 0);
+  assert.deepEqual(payload.run, {
+    agentId: "11111111-1111-4111-8111-111111111111",
+    harnessId: "copilot",
+    operationId: "22222222-2222-4222-8222-222222222222",
+  });
 
   const now = Math.floor(Date.now() / 1000);
   assert.ok(payload.exp > now, "expiry must be in the future");

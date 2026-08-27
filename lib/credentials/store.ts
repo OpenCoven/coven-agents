@@ -8,7 +8,12 @@ import { credentialAadContextForWrite } from "./aad-policy";
 import { encryptCredential } from "./envelope";
 import { credentialKekRingFromEnvironment } from "./key-ring";
 import { credentialWhere } from "./scope";
-import { readCredentialForTenant as readCredentialForTenantCore } from "./store-core";
+import {
+  type CredentialStoreDatabase,
+  prepareCredentialForTenant as prepareCredentialForTenantCore,
+  readCredentialForTenant as readCredentialForTenantCore,
+  readCredentialForTenantWithoutRefresh as readCredentialForTenantWithoutRefreshCore,
+} from "./store-core";
 
 export { credentialWhere } from "./scope";
 
@@ -70,9 +75,25 @@ export async function putCredential(
 export function readCredentialForTenant(
   tenant: string,
   harnessId: string,
-  db: ReturnType<typeof databaseFor>
+  db: CredentialStoreDatabase
 ): Promise<string | null> {
   return readCredentialForTenantCore(tenant, harnessId, db);
+}
+
+export function prepareCredentialForTenant(
+  tenant: string,
+  harnessId: string,
+  db: CredentialStoreDatabase
+): Promise<boolean> {
+  return prepareCredentialForTenantCore(tenant, harnessId, db);
+}
+
+export function readCredentialForTenantWithoutRefresh(
+  tenant: string,
+  harnessId: string,
+  db: CredentialStoreDatabase
+): Promise<string | null> {
+  return readCredentialForTenantWithoutRefreshCore(tenant, harnessId, db);
 }
 
 /**

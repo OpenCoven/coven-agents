@@ -302,6 +302,44 @@ export const runReservation = pgTable(
 export type RunReservation = InferSelectModel<typeof runReservation>;
 
 /**
+ * One short-lived, one-use capability to decrypt a credential for one run.
+ *
+ * Raw tenant and request identifiers are never stored. `runId` is unique so a
+ * caller cannot mint fresh request ids to borrow the same credential twice.
+ */
+export const credentialLease = pgTable(
+  "CredentialLease",
+  {
+    consumedAt: timestamp("consumedAt"),
+    expiresAt: timestamp("expiresAt").notNull(),
+    harnessId: varchar("harnessId", { length: 64 }).notNull(),
+    issuedAt: timestamp("issuedAt").notNull().defaultNow(),
+    operationIdHash: varchar("operationIdHash", { length: 64 })
+      .notNull()
+      .unique(),
+    requestIdHash: varchar("requestIdHash", { length: 64 })
+      .primaryKey()
+      .notNull(),
+    runId: varchar("runId", { length: 64 }).notNull(),
+    tenantHash: varchar("tenantHash", { length: 64 }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("CredentialLease_run_idx").on(table.runId),
+    index("CredentialLease_expiry_idx").on(table.expiresAt),
+    check(
+      "CredentialLease_expiry_valid",
+      sql`${table.expiresAt} > ${table.issuedAt}`
+    ),
+    check(
+      "CredentialLease_consumption_valid",
+      sql`${table.consumedAt} is null or (${table.consumedAt} >= ${table.issuedAt} and ${table.consumedAt} < ${table.expiresAt})`
+    ),
+  ]
+);
+
+export type CredentialLease = InferSelectModel<typeof credentialLease>;
+
+/**
  * Stripe event ids already processed.
  *
  * Stripe retries delivery, so a replayed `invoice.paid` would otherwise extend

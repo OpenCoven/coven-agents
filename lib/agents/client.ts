@@ -6,6 +6,7 @@ import {
   type CreateAgentInput,
   okEnvelopeSchema,
   type RunEvent,
+  type RunnerRunScope,
   type RunResult,
   type RunSnapshot,
   runEnvelopeSchema,
@@ -32,7 +33,7 @@ export type RunnerClientOptions = {
    * Absent for the local runner, which has no tenancy and still authenticates
    * with a single token.
    */
-  mintIdentity?: () => Promise<string>;
+  mintIdentity?: (run?: RunnerRunScope) => Promise<string>;
   /** Overridable so tests do not spend real seconds asleep. */
   pollIntervalMs?: number;
 };
@@ -156,7 +157,7 @@ export class RunnerClient {
   private readonly endpoint: string;
   private readonly request: Fetch;
   private readonly pollIntervalMs: number;
-  private readonly mintIdentity?: () => Promise<string>;
+  private readonly mintIdentity?: (run?: RunnerRunScope) => Promise<string>;
 
   constructor(
     connection: RunnerConnection,
@@ -177,12 +178,14 @@ export class RunnerClient {
    * one the single token stays on `Authorization`, which is what the local
    * runner still expects.
    */
-  private async authHeaders(): Promise<Record<string, string>> {
+  private async authHeaders(
+    run?: RunnerRunScope
+  ): Promise<Record<string, string>> {
     if (!this.mintIdentity) {
       return { authorization: `Bearer ${this.connection.token}` };
     }
     return {
-      authorization: `Bearer ${await this.mintIdentity()}`,
+      authorization: `Bearer ${await this.mintIdentity(run)}`,
       "x-runner-token": this.connection.token,
     };
   }
@@ -231,18 +234,20 @@ export class RunnerClient {
   async runAgent(
     agentId: string,
     task: string,
-    options: { signal?: AbortSignal } = {}
+    options: { harnessId?: string; signal?: AbortSignal } = {}
   ): Promise<RunResult> {
+    const currentOperationId = operationId();
     const response = await this.fetch(
       `/api/agents/${encodeURIComponent(agentId)}/runs`,
       {
         // An operation id makes the start idempotent on the cloud runner: a
         // retried POST resolves to the same run instead of starting a second.
         // The local runner ignores the extra field.
-        body: JSON.stringify({ operationId: operationId(), task }),
+        body: JSON.stringify({ operationId: currentOperationId, task }),
         method: "POST",
         signal: options.signal,
-      }
+      },
+      this.runIdentityScope(agentId, currentOperationId, options.harnessId)
     );
     const body = await response.json();
 
@@ -315,13 +320,19 @@ export class RunnerClient {
    * fill while the run is in flight, and awaiting completion first would leave
    * the record empty for the whole run and then paint it all at once.
    */
-  async startRun(agentId: string, task: string): Promise<RunSnapshot> {
+  async startRun(
+    agentId: string,
+    task: string,
+    options: { harnessId?: string } = {}
+  ): Promise<RunSnapshot> {
+    const currentOperationId = operationId();
     const response = await this.fetch(
       `/api/agents/${encodeURIComponent(agentId)}/runs`,
       {
-        body: JSON.stringify({ operationId: operationId(), task }),
+        body: JSON.stringify({ operationId: currentOperationId, task }),
         method: "POST",
-      }
+      },
+      this.runIdentityScope(agentId, currentOperationId, options.harnessId)
     );
     const body = await response.json();
 
@@ -451,7 +462,33 @@ export class RunnerClient {
     okEnvelopeSchema.parse(await response.json());
   }
 
-  private async fetch(path: string, init: RequestInit = {}): Promise<Response> {
+  private runIdentityScope(
+    agentId: string,
+    currentOperationId: string,
+    harnessId: string | undefined
+  ): RunnerRunScope | undefined {
+    if (!this.mintIdentity) {
+      return undefined;
+    }
+    if (!harnessId) {
+      throw new RunnerApiError(
+        "A harness is required to authorize a cloud run.",
+        "missing_harness",
+        0
+      );
+    }
+    return {
+      agentId,
+      harnessId,
+      operationId: currentOperationId,
+    };
+  }
+
+  private async fetch(
+    path: string,
+    init: RequestInit = {},
+    run?: RunnerRunScope
+  ): Promise<Response> {
     if (!this.endpoint) {
       throw new RunnerApiError(
         "Runner endpoint is required.",
@@ -471,7 +508,7 @@ export class RunnerClient {
       ...init,
       headers: {
         accept: "application/json",
-        ...(await this.authHeaders()),
+        ...(await this.authHeaders(run)),
         ...(init.body ? { "content-type": "application/json" } : {}),
         ...init.headers,
       },

@@ -1,6 +1,7 @@
 import {
   base64UrlEncode,
   type RunnerClaims,
+  type RunnerRunScope,
   runnerClaimsSchema,
   TOKEN_ALGORITHM,
   TOKEN_LIFETIME_SECONDS,
@@ -59,14 +60,18 @@ export async function mintRunnerToken(
  * visitor, wrong here, because this path always has a signed-in user and a
  * tenant that changed per mint would make their own agents disappear.
  */
-export function claimsForUser(user: {
-  authVersion: number;
-  id: string;
-  type: string;
-}): Omit<RunnerClaims, "exp" | "kid"> {
+export function claimsForUser(
+  user: {
+    authVersion: number;
+    id: string;
+    type: string;
+  },
+  run?: RunnerRunScope
+): Omit<RunnerClaims, "exp" | "kid"> {
   return {
     authVersion: user.authVersion,
     plan: isSubscriber(toSession(user)) ? "subscriber" : "demo",
+    ...(run ? { run } : {}),
     sub: user.id,
     tenant: tenantForUser(user.id),
   };

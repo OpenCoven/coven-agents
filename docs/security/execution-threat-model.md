@@ -81,22 +81,32 @@ Assumptions:
    derives product identity and entitlement; GitHub profile data is not cloud
    runner authority.
 2. An eligible subscriber asks the control plane for the coarse cloud
-   connection gate and a short-lived Ed25519-signed runner claim.
+   connection gate. Read and management requests use a short-lived generic
+   Ed25519 claim; each run start mints an uncached claim scoped to its agent,
+   harness, and browser-generated operation ID. The Worker uses that signed
+   operation ID as the run ID, so the credential route can verify the run
+   identifier without trusting a new Worker-supplied value.
 3. The browser sends both to the Worker. `X-Runner-Token` permits reaching the
    deployment; the signed claim supplies `sub`, `tenant`, `plan`, `kid`, and
-   `authVersion`. The Worker selects only the configured current or unexpired
-   previous key by `kid`, then verifies the raw signed payload before parsing
-   claims. The paid sandbox diagnostic is separate: it accepts only the
+   `authVersion` and, for a run, its immutable run scope. The Worker selects
+   only the configured current or unexpired previous key by `kid`, then
+   verifies the raw signed payload before parsing claims. It rejects a scoped
+   claim whose agent, harness, or operation differs from the stored definition
+   and start request. The paid sandbox diagnostic is separate: it accepts only the
    operator `OPERATOR_DIAGNOSTIC_TOKEN` and no runner identity.
 4. The Worker resolves the requested agent under the verified tenant and starts
    or resumes that agent's Durable Object.
-5. For a run, the Worker forwards the same signed identity plus its service
-   token to the control plane's internal credential endpoint. The Worker also
-   sends that original bounded token to the authority endpoint; the app
-   verifies it independently before consulting session authority.
-6. The control plane binds the request to the verified claim, enforces the
-   subscriber plan and run cap, decrypts one tenant/harness credential, and
-   returns it for that run.
+5. For a run, the Worker forwards the same run-scoped identity plus its service
+   token, actual run ID, and a fresh request ID to the control plane's internal
+   credential endpoint. The Worker also sends that original bounded token to
+   the authority endpoint; the app verifies it independently before consulting
+   session authority.
+6. The control plane verifies the signed agent/harness/operation scope, reserves
+   capacity, and issues one two-minute lease. A second call irrevocably claims
+   that lease before any credential plaintext exists. OAuth refresh or terminal
+   deletion then commits outside the lease transaction. A final transaction
+   reads the already-prepared credential without provider side effects and
+   consumes the reservation and run usage before returning the credential.
 7. The Worker injects the credential into one harness process in one sandbox.
    Normalized, redacted evidence returns through the shared contract.
 
@@ -148,6 +158,45 @@ independently verifies the forwarded runner claim, and
 `app/api/internal/credential/binding.ts` derives the tenant and requires the
 subscriber plan. The control plane checks the current database `authVersion`
 before reservation or credential decryption. A body/claim mismatch is refused.
+Each Worker run carries a fresh opaque request ID and the harness from the
+active agent definition. The originating app has already signed that agent,
+harness, and operation into the uncached run claim, and the Worker rejects a
+scope that does not match its stored definition. The app then verifies the same
+scope independently. Issuance reserves capacity and persists HMAC hashes of the
+operation, request, and tenant alongside the harness and run. Consumption first
+commits the one-use claim before decrypting. Provider refresh and terminal
+credential deletion commit separately so a later lending rollback cannot undo
+them; the final transaction has no provider side effects and atomically reads
+the prepared credential, consumes the reservation, and records run usage. A
+run, operation, request ID, tenant, or harness mismatch and every duplicate,
+expired, released, or consumed reservation fail before plaintext exists.
+Lease rows older than 24 hours are removed by an independently committed
+cleanup before issuance; reservation state remains the replay barrier after
+cleanup. Rolling deployment uses explicit, temporary legacy-lending and
+scoped-identity-write flags; the steady state enables scoped claims and
+fail-closes legacy lending.
+
+```mermaid
+sequenceDiagram
+  participant UI as Subscriber browser
+  participant App as Next control plane
+  participant Worker as Cloudflare Worker/DO
+  participant DB as PostgreSQL
+  participant OAuth as GitHub OAuth
+
+  UI->>App: Mint claim(agent, harness, operation)
+  App-->>UI: Signed uncached run claim
+  UI->>Worker: Start(agent, operation, claim)
+  Worker->>Worker: Verify claim and stored definition
+  Worker->>App: Issue(run, request, claim)
+  App->>DB: Reserve run + persist hashed lease binding
+  Worker->>App: Consume(same binding, claim)
+  App->>DB: Commit lease claim before plaintext
+  App->>OAuth: Refresh only if needed
+  App->>DB: Commit refresh or terminal deletion
+  App->>DB: Read prepared credential + consume reservation/usage
+  App-->>Worker: One credential
+```
 
 ### B4. Control plane database and credential custody
 
@@ -163,7 +212,8 @@ harness and sealed before storage in `lib/credentials/store.ts`; each row names
 one configured KEK version, and the ring has no default or brute-force
 fallback. The internal credential route is the documented service-to-service
 exception and replaces the session gate with service and signed-identity
-checks.
+checks. Credential-lease audit events contain only tenant hash, harness ID, run
+ID, operation, outcome, and timestamp.
 
 ### B5. Worker to Durable Objects and sandboxes
 

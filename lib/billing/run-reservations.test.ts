@@ -61,6 +61,13 @@ class MemoryReservationDatabase
     return Promise.resolve(this.reservations.get(runId) ?? null);
   }
 
+  hasUsageRunId(runId: string): Promise<boolean> {
+    return Promise.resolve(
+      this.legacyUsage.some((usage) => usage.runId === runId) ||
+        [...this.usage].some((usage) => usage.endsWith(`:${runId}`))
+    );
+  }
+
   releaseExpired(now: Date): Promise<void> {
     for (const [runId, reservation] of this.reservations) {
       if (reservation.state === "reserved" && reservation.expiresAt <= now) {
@@ -100,8 +107,10 @@ class MemoryReservationDatabase
     }
 
     for (const legacy of this.legacyUsage) {
+      const matchingReservation = this.reservations.get(legacy.runId);
       if (
-        !this.reservations.has(legacy.runId) &&
+        (matchingReservation === undefined ||
+          matchingReservation.state === "released") &&
         (input.tenant === undefined || legacy.tenant === input.tenant) &&
         (input.periodDay === undefined ||
           legacy.countedAt.toISOString().slice(0, 10) === input.periodDay) &&
@@ -307,6 +316,64 @@ test("a duplicate run id returns the existing reservation and charges once", asy
     await db.activeUnits({
       now: NOW,
       periodDay: "2026-08-25",
+      tenantHash: tenantHashForReservation(TENANT, SECRET),
+    }),
+    1
+  );
+});
+
+test("a run id already present in usage cannot receive a reservation", async () => {
+  const db = new MemoryReservationDatabase();
+  db.legacyUsage.push({
+    countedAt: NOW,
+    runId: "already-counted",
+    tenant: TENANT,
+  });
+
+  const result = await reserveRun(db, reservationInput("already-counted"));
+
+  assert.deepEqual(result, {
+    kind: "conflict",
+    reason: "run_already_counted",
+  });
+  assert.equal(db.reservations.size, 0);
+  assert.equal(
+    await db.activeUnits({
+      now: NOW,
+      periodDay: "2026-08-25",
+      tenant: TENANT,
+      tenantHash: tenantHashForReservation(TENANT, SECRET),
+    }),
+    1
+  );
+});
+
+test("a released reservation cannot mask or reuse existing usage", async () => {
+  const db = new MemoryReservationDatabase();
+  await reserveRun(db, reservationInput("released-counted"));
+  await releaseRunReservation(db, {
+    releasedAt: NOW,
+    runId: "released-counted",
+  });
+  db.legacyUsage.push({
+    countedAt: NOW,
+    runId: "released-counted",
+    tenant: TENANT,
+  });
+
+  const result = await reserveRun(db, reservationInput("released-counted"));
+
+  assert.equal(result.kind, "existing");
+  assert.equal(
+    result.kind === "existing" ? result.reservation.state : undefined,
+    "released"
+  );
+  assert.equal(db.reservations.size, 1);
+  assert.equal(
+    await db.activeUnits({
+      now: NOW,
+      periodDay: "2026-08-25",
+      tenant: TENANT,
       tenantHash: tenantHashForReservation(TENANT, SECRET),
     }),
     1

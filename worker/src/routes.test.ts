@@ -1058,6 +1058,43 @@ test("a demo claim cannot start a run", async () => {
   assert.equal(response.status, 403);
 });
 
+test("a run-scoped claim must match the stored agent harness and operation", async () => {
+  const operationId = "44444444-5555-4666-8777-888888888888";
+  const pair = await getKeyPair();
+  const token = await mint(pair.privateKey, {
+    authVersion: 0,
+    exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    kid: "legacy",
+    plan: "subscriber",
+    run: {
+      agentId: MINE,
+      harnessId: "claude",
+      operationId,
+    },
+    sub: "user-1",
+    tenant: CALLER_TENANT,
+  });
+
+  const response = await runner().fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: "do the thing" }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    (await environmentPromise) as never
+  );
+
+  assert.equal(response.status, 403);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "identity_mismatch"
+  );
+});
+
 /**
  * The fallback handler is the only place an unrecognised failure is ever seen,
  * so what it logs is the whole diagnosis.
@@ -1332,7 +1369,7 @@ function queuedRun(
 
 test("run admission happens before dispatch and receives only a tenant hash", async () => {
   const operationId = "33333333-4444-4555-8666-777777777777";
-  const runId = "44444444-5555-4666-8777-888888888888";
+  const runId = operationId;
   const calls: string[] = [];
   const admissionRequests: {
     mode?: string;
@@ -1345,10 +1382,11 @@ test("run admission happens before dispatch and receives only a tenant hash", as
     discardRun: () => undefined,
     enqueue: (
       _input: unknown,
-      _runId: string,
+      suppliedRunId: string,
       _requestHash: string,
       _identityToken: string
     ) => {
+      assert.equal(suppliedRunId, operationId);
       calls.push("enqueue");
       return { created: true, run };
     },

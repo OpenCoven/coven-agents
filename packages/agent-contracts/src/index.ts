@@ -6,7 +6,7 @@ export {
   sanitizeEvidencePath,
   sanitizeEvidenceText,
 } from "./evidence";
-export type { RunnerClaims } from "./identity";
+export type { RunnerClaims, RunnerRunScope } from "./identity";
 export {
   base64UrlDecode,
   base64UrlEncode,
@@ -16,6 +16,7 @@ export {
   MAX_RUNNER_TOKEN_BYTES,
   MAX_RUNNER_TOKEN_SEGMENT_BYTES,
   runnerClaimsSchema,
+  runnerRunScopeSchema,
   splitToken,
   TENANT_ID_PATTERN,
   TOKEN_ALGORITHM,
