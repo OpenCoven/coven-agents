@@ -14,13 +14,16 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   description:
-    "Create autonomous OpenCoven agents that run locally or in isolated cloud sandboxes.",
+    "Create autonomous OpenCoven agents that run in isolated cloud sandboxes.",
+  metadataBase: new URL(process.env.APP_ORIGIN ?? "http://localhost:3000"),
   title: "Coven Agents",
 };
 
 export const viewport = {
   maximumScale: 1,
 };
+
+const analyticsEnabled = process.env.VERCEL === "1";
 
 const geist = Geist({
   display: "swap",
@@ -115,7 +118,7 @@ export default function RootLayout({
         >
           <TooltipProvider>{children}</TooltipProvider>
         </ThemeProvider>
-        <Analytics />
+        {analyticsEnabled ? <Analytics /> : null}
       </body>
     </html>
   );

@@ -1,61 +1,73 @@
 import { expect, test } from "@playwright/test";
+import { subscriberCookies } from "./session";
 
-test.describe("Chat Page", () => {
-  test("home page loads with input field", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.getByTestId("multimodal-input")).toBeVisible();
-  });
-
-  test("can type in the input field", async ({ page }) => {
-    await page.goto("/");
-    const input = page.getByTestId("multimodal-input");
-    await input.fill("Hello world");
-    await expect(input).toHaveValue("Hello world");
-  });
-
-  test("submit button is visible", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.getByTestId("send-button")).toBeVisible();
-  });
-
-  test("suggested actions are visible on empty chat", async ({ page }) => {
-    await page.goto("/");
-    const suggestions = page.locator("[data-testid='suggested-actions']");
-    await expect(suggestions).toBeVisible();
-  });
-
-  test("can stop generation with stop button", async ({ page }) => {
-    await page.goto("/");
-
-    // Type and send a message
-    await page.getByTestId("multimodal-input").fill("Hello");
-    await page.getByTestId("send-button").click();
-
-    // Stop button should appear during generation
-    const stopButton = page.getByTestId("stop-button");
-    // If generation starts, stop button appears
-    // This is a best-effort check since timing depends on API
-    await stopButton.click({ timeout: 5000 }).catch(() => {
-      // Generation may have finished before we could click
+test.describe("Legacy chat surface", () => {
+  test("signed-out direct entries stop before protected chat requests", async ({
+    page,
+  }) => {
+    const protectedRequests: string[] = [];
+    page.on("request", (request) => {
+      const { pathname } = new URL(request.url());
+      if (pathname === "/api/messages" || pathname === "/api/history") {
+        protectedRequests.push(pathname);
+      }
     });
+
+    await page.goto("/chat/e2e-chat");
+
+    await expect(
+      page.getByRole("heading", { name: "Sign in to use chat" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Sign in with GitHub" })
+    ).toHaveAttribute("href", "/login");
+    await expect(page.getByTestId("multimodal-input")).toHaveCount(0);
+    expect(protectedRequests).toEqual([]);
   });
-});
 
-test.describe("Chat Input Features", () => {
-  test("input clears after sending", async ({ page }) => {
-    await page.goto("/");
+  test("subscriber chat input and model selection remain operable", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.route("**/api/messages?**", (route) =>
+      route.fulfill({
+        body: JSON.stringify({
+          isReadonly: false,
+          messages: [],
+          userId: null,
+          visibility: "private",
+        }),
+        contentType: "application/json",
+        status: 200,
+      })
+    );
+    await page.route("**/api/history?**", (route) =>
+      route.fulfill({
+        body: JSON.stringify({ chats: [], hasMore: false }),
+        contentType: "application/json",
+        status: 200,
+      })
+    );
+    await page.route("**/api/models", (route) =>
+      route.fulfill({
+        body: JSON.stringify({ capabilities: {} }),
+        contentType: "application/json",
+        status: 200,
+      })
+    );
+
+    await page.goto("/chat/e2e-chat");
+
     const input = page.getByTestId("multimodal-input");
-    await input.fill("Test message");
-    await page.getByTestId("send-button").click();
+    await expect(input).toBeVisible();
+    await input.fill("Line 1\nLine 2");
+    await expect(input).toHaveValue("Line 1\nLine 2");
+    await expect(page.getByTestId("send-button")).toBeVisible();
 
-    // Input should clear after sending
-    await expect(input).toHaveValue("");
-  });
-
-  test("input supports multiline text", async ({ page }) => {
-    await page.goto("/");
-    const input = page.getByTestId("multimodal-input");
-    await input.fill("Line 1\nLine 2\nLine 3");
-    await expect(input).toContainText("Line 1");
+    await page.getByTestId("model-selector").click();
+    await expect(page.getByPlaceholder("Search models...")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByPlaceholder("Search models...")).not.toBeVisible();
   });
 });

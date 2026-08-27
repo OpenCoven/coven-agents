@@ -15,7 +15,12 @@ test.describe("Authentication Pages", () => {
     ).toBeVisible();
     await expect(
       page.getByText(
-        "New accounts start with guest access, and signing in never starts an agent, sandbox, or run."
+        /New accounts start with guest access, and signing in never starts an agent or a run\./
+      )
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        /we begin warming the sandbox so the first mission starts fast/i
       )
     ).toBeVisible();
     const githubButton = page.getByRole("button", {

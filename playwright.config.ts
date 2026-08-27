@@ -12,6 +12,8 @@ config({
 
 /* Keep E2E isolated from the app developers commonly run on port 3000. */
 const PORT = process.env.PORT || 3100;
+const useProductionBuild = process.env.E2E_PRODUCTION === "1";
+const nextCommand = "node node_modules/next/dist/bin/next";
 
 /**
  * Set webServer.url and use.baseURL with the location
@@ -24,7 +26,7 @@ const baseURL = `http://localhost:${PORT}`;
  */
 export default defineConfig({
   expect: {
-    timeout: 240 * 1000,
+    timeout: 10 * 1000,
   },
   /* Fail the build on CI if you accidentally left test.only in the source code. */
   forbidOnly: !!process.env.CI,
@@ -78,7 +80,7 @@ export default defineConfig({
   testDir: "./tests",
 
   /* Configure global timeout for each test */
-  timeout: 240 * 1000, // 120 seconds
+  timeout: 30 * 1000,
   /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
   use: {
     /* Base URL to use in actions like `await page.goto('/')`. */
@@ -90,7 +92,13 @@ export default defineConfig({
 
   /* Run your local dev server before starting the tests */
   webServer: {
-    command: `pnpm dev --port ${PORT}`,
+    command: useProductionBuild
+      ? `pnpm validate:runtime && exec ${nextCommand} start --port ${PORT}`
+      : `exec ${nextCommand} dev --turbo --port ${PORT}`,
+    env: {
+      ...process.env,
+      ADMIN_EMAILS: process.env.ADMIN_EMAILS || "e2e-admin@example.invalid",
+    },
     reuseExistingServer: false,
     timeout: 120 * 1000,
     url: `${baseURL}/ping`,

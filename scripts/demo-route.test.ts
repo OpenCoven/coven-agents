@@ -18,6 +18,11 @@ const replayPlayerUrl = new URL(
   "../components/demo/replay-player.tsx",
   import.meta.url
 );
+const nextConfigUrl = new URL("../next.config.ts", import.meta.url);
+const chatPageUrl = new URL(
+  "../app/(chat)/chat/[id]/page.tsx",
+  import.meta.url
+);
 
 function read(url: URL) {
   return readFileSync(url, "utf8");
@@ -35,6 +40,33 @@ test("the root page preserves the demo gate and agents redirect", () => {
   assert.match(rootPage, /resolveRootRoute\(process\.env\.IS_DEMO\)/);
   assert.match(rootPage, /redirect\(route\.location\)/);
   assert.match(rootPage, /loadDemoTranscript\(/);
+});
+
+test("the default root redirect runs before the page is rendered", () => {
+  const nextConfig = read(nextConfigUrl);
+
+  assert.match(nextConfig, /const rootDestination = basePath \|\| "\/agents"/);
+  assert.match(
+    nextConfig,
+    /redirects:\s*async \(\) =>\s*\[\s*\{[\s\S]*?destination: rootDestination[\s\S]*?source: "\/"/
+  );
+});
+
+test("registration redirects before the redirect-only page is rendered", () => {
+  const nextConfig = read(nextConfigUrl);
+
+  assert.match(nextConfig, /const loginDestination = `\$\{basePath\}\/login`/);
+  assert.match(
+    nextConfig,
+    /destination: loginDestination[\s\S]*?source: "\/register"/
+  );
+});
+
+test("the layout-owned chat leaf opts out of instant rendering", () => {
+  const chatPage = read(chatPageUrl);
+
+  assert.match(chatPage, /export const instant = false/);
+  assert.match(chatPage, /return null/);
 });
 
 test("the client player plans the transcript before scheduling playback", () => {

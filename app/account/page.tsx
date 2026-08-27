@@ -42,7 +42,67 @@ type TabId = (typeof TABS)[number]["id"];
 
 export default function Page() {
   const [tab, setTab] = useState<TabId>("copilot");
-  const { data: session } = useSession();
+  const { data: session, status } = useSession();
+
+  if (status === "loading") {
+    return (
+      <div
+        aria-busy="true"
+        className="h-dvh w-full bg-background"
+        role="status"
+      >
+        <span className="sr-only">Loading account settings</span>
+      </div>
+    );
+  }
+
+  if (!session?.user) {
+    return (
+      <div className="flex h-dvh w-full flex-col overflow-hidden bg-background">
+        <header className="flex shrink-0 items-center gap-4 border-border border-b px-4 py-4 sm:px-6">
+          <Link
+            aria-label="OpenCoven home"
+            className="flex items-center gap-2 transition-opacity hover:opacity-80"
+            href="/"
+          >
+            <span className="text-[13px] text-[var(--oc-accent)] leading-none">
+              ◆
+            </span>
+            <span className="font-medium text-[13px] tracking-[-0.01em]">
+              OpenCoven
+            </span>
+          </Link>
+          <Link
+            className="flex items-center gap-1.5 text-[13px] text-muted-foreground transition-colors hover:text-foreground"
+            href="/agents"
+          >
+            <ArrowLeftIcon className="size-3.5" />
+            Back
+          </Link>
+        </header>
+        <main className="flex flex-1 items-center justify-center px-5 py-10 text-center">
+          <div className="max-w-[440px]">
+            <p className="font-medium text-[11px] text-muted-foreground uppercase tracking-[0.14em]">
+              Account required
+            </p>
+            <h1 className="mt-3 font-semibold text-2xl tracking-tight">
+              Sign in to manage your account
+            </h1>
+            <p className="mt-2 text-[13px] text-muted-foreground leading-relaxed">
+              Harness credentials, usage, profile, and account data are
+              available after GitHub sign-in.
+            </p>
+            <Link
+              className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white transition-opacity hover:opacity-90"
+              href="/login"
+            >
+              Sign in with GitHub
+            </Link>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-dvh w-full flex-col overflow-hidden bg-background">
@@ -84,9 +144,12 @@ export default function Page() {
       </header>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <div className="flex min-h-0 w-full">
-          <nav className="flex w-[200px] shrink-0 flex-col gap-1 border-border border-r px-4 py-6">
-            <p className="px-3 pb-2 font-medium text-[11px] text-muted-foreground uppercase tracking-[0.14em]">
+        <div className="flex min-h-0 w-full flex-col sm:flex-row">
+          <nav
+            aria-label="Account settings"
+            className="flex w-full shrink-0 flex-row gap-1 overflow-x-auto border-border border-b px-3 py-3 sm:w-[200px] sm:flex-col sm:overflow-x-visible sm:border-r sm:border-b-0 sm:px-4 sm:py-6"
+          >
+            <p className="hidden px-3 pb-2 font-medium text-[11px] text-muted-foreground uppercase tracking-[0.14em] sm:block">
               Settings
             </p>
 
@@ -102,7 +165,7 @@ export default function Page() {
 
           {/* Only the panel scrolls, so the navigation never moves and a tall
             section cannot push the page into a second scrollbar. */}
-          <section className="min-w-0 flex-1 overflow-y-auto px-8 py-6">
+          <section className="min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-8 sm:py-6">
             {tab === "copilot" ? <HarnessCredentials /> : null}
             {tab === "profile" ? <AvatarSettings /> : null}
             {tab === "usage" ? <UsageMeter /> : null}
@@ -134,7 +197,7 @@ function TabButton({
   return (
     <button
       className={cn(
-        "flex items-center gap-2.5 rounded-[8px] px-3 py-2 text-left text-[13px] transition-colors",
+        "flex shrink-0 items-center gap-2.5 rounded-[8px] px-3 py-2 text-left text-[13px] transition-colors",
         active
           ? "bg-[var(--oc-accent-soft)] font-medium text-[var(--oc-accent)]"
           : "text-muted-foreground hover:bg-secondary hover:text-foreground"

@@ -94,6 +94,7 @@ function MiniRail({
   return (
     <aside
       aria-label="Navigation, collapsed"
+      className="oc-agent-mini-rail"
       style={{
         alignItems: "center",
         background: "var(--bg-panel)",
@@ -393,6 +394,7 @@ export function AgentRail(props: RailProps) {
 
   return (
     <aside
+      className="oc-agent-rail"
       style={{
         background: "var(--bg-panel)",
         borderRight: hairline,

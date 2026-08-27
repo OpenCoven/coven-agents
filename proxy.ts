@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
+import { isAdminEmail } from "./lib/admin/access";
 import { betaVerdict, isAllowedIdentity, readBetaGate } from "./lib/beta";
 import { guestRegex, isDevelopmentEnvironment } from "./lib/constants";
 import { DEMO_COOKIE_NAME, isCanonicalUuid } from "./lib/session";
@@ -30,6 +31,18 @@ export async function proxy(request: NextRequest) {
   });
 
   const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+
+  // Refuse the hidden owner surface before React can stream a 200 response
+  // around `notFound()`. The page and API repeat this gate as defense in depth.
+  if (pathname === `${base}/admin` && !isAdminEmail(token?.email)) {
+    return new Response("Not Found", {
+      headers: {
+        "cache-control": "no-store",
+        "content-type": "text/plain; charset=utf-8",
+      },
+      status: 404,
+    });
+  }
 
   // Closed beta. Checked before the demo cookie is minted, because the demo
   // session needs no sign-in — gating only the sign-in path would leave the

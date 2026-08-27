@@ -1,4 +1,5 @@
 import { cookies } from "next/headers";
+import Link from "next/link";
 import Script from "next/script";
 import { SessionProvider } from "next-auth/react";
 import { Suspense } from "react";
@@ -31,6 +32,32 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 async function SidebarShell({ children }: { children: React.ReactNode }) {
   const [session, cookieStore] = await Promise.all([auth(), cookies()]);
   const isCollapsed = cookieStore.get("sidebar_state")?.value !== "true";
+
+  if (session?.user?.type !== "subscriber") {
+    const signedIn = Boolean(session?.user);
+    return (
+      <main className="flex h-dvh w-full items-center justify-center bg-background px-5 py-10 text-center">
+        <div className="max-w-[440px]">
+          <p className="font-medium text-[11px] text-muted-foreground uppercase tracking-[0.14em]">
+            {signedIn ? "Subscription required" : "Account required"}
+          </p>
+          <h1 className="mt-3 font-semibold text-2xl tracking-tight">
+            {signedIn ? "Subscribe to use chat" : "Sign in to use chat"}
+          </h1>
+          <p className="mt-2 text-[13px] text-muted-foreground leading-relaxed">
+            Chat history, models, and uploads are available to active
+            subscribers.
+          </p>
+          <Link
+            className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white transition-opacity hover:opacity-90"
+            href={signedIn ? "/account" : "/login"}
+          >
+            {signedIn ? "Open account settings" : "Sign in with GitHub"}
+          </Link>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <SidebarProvider defaultOpen={!isCollapsed}>

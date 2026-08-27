@@ -3,8 +3,8 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { proxy } from "@/proxy";
 
-function visit(cookie?: string): Promise<Response> {
-  const request = new NextRequest("https://app.test/", {
+function visit(cookie?: string, path = "/"): Promise<Response> {
+  const request = new NextRequest(`https://app.test${path}`, {
     headers: cookie ? { cookie } : {},
   });
   return proxy(request) as Promise<Response>;
@@ -54,4 +54,12 @@ test("an anonymous visit is never redirected to a guest provider", async () => {
 
   assert.notEqual(response.status, 307);
   assert.equal(response.headers.get("location"), null);
+});
+
+test("the admin page refuses before rendering or minting a demo identity", async () => {
+  const response = await visit(undefined, "/admin");
+
+  assert.equal(response.status, 404);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("set-cookie"), null);
 });
