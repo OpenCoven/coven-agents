@@ -45,7 +45,12 @@ export type CredentialLeaseAuditEvent = {
   event: "credential_lease";
   harnessId: string;
   operation: "consume" | "issue";
-  outcome: CredentialLeaseDeniedReason | "consumed" | "failed" | "issued";
+  outcome:
+    | CredentialLeaseDeniedReason
+    | "consumed"
+    | "failed"
+    | "issued"
+    | "released";
   runId: string;
   tenantHash: string;
 };
@@ -61,6 +66,9 @@ export interface CredentialLeaseTransaction {
     consumedAt: Date
   ) => Promise<RunReservation | null>;
   credentialStore: CredentialStoreDatabase;
+  deleteByRequestIdHash: (
+    requestIdHash: string
+  ) => Promise<CredentialLeaseRecord | null>;
   findByOperationIdHash: (
     operationIdHash: string
   ) => Promise<CredentialLeaseRecord | null>;
@@ -119,6 +127,13 @@ export function drizzleCredentialLeaseDatabase(
             return reservation;
           },
           credentialStore: tx,
+          deleteByRequestIdHash: async (requestIdHash) => {
+            const [row] = await tx
+              .delete(credentialLease)
+              .where(eq(credentialLease.requestIdHash, requestIdHash))
+              .returning();
+            return row ?? null;
+          },
           findByOperationIdHash: async (operationIdHash) => {
             const [row] = await tx
               .select()
@@ -283,7 +298,8 @@ export async function consumeCredentialLease<T>(
   },
   prepare: () => Promise<void>,
   operation: (database: CredentialStoreDatabase) => Promise<T>,
-  audit: CredentialLeaseAuditSink = defaultCredentialLeaseAudit
+  audit: CredentialLeaseAuditSink = defaultCredentialLeaseAudit,
+  options: Readonly<{ consumeReservation?: boolean }> = {}
 ): Promise<T> {
   validateInput(input);
   const now = input.now ?? new Date();
@@ -344,13 +360,15 @@ export async function consumeCredentialLease<T>(
       }
       const reservation = await tx.findReservationForUpdate(input.runId);
       assertReservationAvailable(reservation, tenantHash, finalNow);
-      const consumed = await tx.consumeReservation(
-        input.runId,
-        input.tenant,
-        finalNow
-      );
-      if (consumed?.state !== "consumed") {
-        throw new CredentialLeaseDeniedError("reservation_unavailable");
+      if (options.consumeReservation !== false) {
+        const consumed = await tx.consumeReservation(
+          input.runId,
+          input.tenant,
+          finalNow
+        );
+        if (consumed?.state !== "consumed") {
+          throw new CredentialLeaseDeniedError("reservation_unavailable");
+        }
       }
       return await operation(tx.credentialStore);
     });
@@ -377,6 +395,105 @@ export async function consumeCredentialLease<T>(
     });
     throw error;
   }
+}
+
+/**
+ * A pre-launch lease is disposable when durable process attachment never
+ * happened. Deleting the exact, HMAC-bound record permits one safe retry while
+ * preserving one-use semantics for every lease that reached launch.
+ */
+export async function releaseCredentialLease(
+  database: CredentialLeaseDatabase,
+  input: {
+    harnessId: string;
+    keySecret: string;
+    now?: Date;
+    operationId: string;
+    requestId: string;
+    runId: string;
+    tenant: string;
+  },
+  audit: CredentialLeaseAuditSink = defaultCredentialLeaseAudit
+): Promise<boolean> {
+  validateInput(input);
+  const now = input.now ?? new Date();
+  const tenantHash = tenantHashForReservation(input.tenant, input.keySecret);
+  const operationIdHash = hashOperationId(input.operationId, input.keySecret);
+  const requestIdHash = hashRequestId(input.requestId, input.keySecret);
+  try {
+    const released = await database.transaction(async (tx) => {
+      const existing = await tx.findByRequestIdHash(requestIdHash);
+      if (!existing) {
+        return false;
+      }
+      assertBinding(existing, {
+        harnessId: input.harnessId,
+        operationIdHash,
+        runId: input.runId,
+        tenantHash,
+      });
+      return Boolean(await tx.deleteByRequestIdHash(requestIdHash));
+    });
+    await audit({
+      at: now.toISOString(),
+      event: "credential_lease",
+      harnessId: input.harnessId,
+      operation: "consume",
+      outcome: "released",
+      runId: input.runId,
+      tenantHash,
+    });
+    return released;
+  } catch (error) {
+    await audit({
+      at: now.toISOString(),
+      event: "credential_lease",
+      harnessId: input.harnessId,
+      operation: "consume",
+      outcome:
+        error instanceof CredentialLeaseDeniedError ? error.reason : "failed",
+      runId: input.runId,
+      tenantHash,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Recovery and cancellation have only a durable run identifier. A lease has a
+ * unique run binding, so deleting the located request hash cannot widen to
+ * another run or expose tenant/credential material.
+ */
+export async function releaseCredentialLeaseForRun(
+  database: CredentialLeaseDatabase,
+  runId: string,
+  audit: CredentialLeaseAuditSink = defaultCredentialLeaseAudit
+): Promise<boolean> {
+  if (!runId || runId.length > 64) {
+    throw new Error("runId is invalid.");
+  }
+  const now = new Date();
+  const released = await database.transaction(async (tx) => {
+    const existing = await tx.findByRunId(runId);
+    if (!existing) {
+      return null;
+    }
+    const deleted = await tx.deleteByRequestIdHash(existing.requestIdHash);
+    return deleted ?? null;
+  });
+  if (!released) {
+    return false;
+  }
+  await audit({
+    at: now.toISOString(),
+    event: "credential_lease",
+    harnessId: released.harnessId,
+    operation: "consume",
+    outcome: "released",
+    runId: released.runId,
+    tenantHash: released.tenantHash,
+  });
+  return true;
 }
 
 function assertBinding(

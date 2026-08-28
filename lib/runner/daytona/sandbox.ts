@@ -611,6 +611,48 @@ async function deleteFirstDaytonaSandbox(
   }
 }
 
+/**
+ * A process cleanup failure can require deleting its persistent sandbox.
+ * Reserve a distinct lifecycle state first so no dispatch can attach a new
+ * process while Daytona deletion is in flight; only confirmed deletion clears
+ * the next sandbox generation.
+ */
+export async function resetDaytonaSandboxForCancellation(
+  operator: RunnerOperator,
+  authority: RunnerDispatchAuthority,
+  dependencies: DaytonaSandboxDependencies
+): Promise<boolean> {
+  const reserved =
+    await dependencies.store.beginDaytonaSandboxResetForCancellation(
+      operator,
+      authority
+    );
+  if (reserved.kind !== "resetting") {
+    return false;
+  }
+  const agent = reserved.value;
+  try {
+    await deleteFirstDaytonaSandbox(
+      [
+        ...(agent.daytonaSandboxId ? [agent.daytonaSandboxId] : []),
+        daytonaSandboxName(agent.tenant, agent.id),
+      ],
+      dependencies
+    );
+  } catch {
+    return false;
+  }
+  const cleared = await dependencies.store.finishDaytonaSandboxResetForRecovery(
+    operator,
+    {
+      agentId: agent.id,
+      expectedGeneration: agent.sandboxGeneration,
+      expectedVersion: agent.version,
+    }
+  );
+  return cleared.kind === "updated";
+}
+
 async function reconcileAmbiguousDaytonaSandbox(
   agent: RunnerAgentRecord,
   dependencies: DaytonaSandboxDependencies,
@@ -644,6 +686,7 @@ async function ensureDaytonaSandboxWithPersistence(
   persistence: DaytonaSandboxPersistence
 ): Promise<{ agent: RunnerAgentRecord; sandbox: Sandbox }> {
   if (
+    agent.sandboxLifecycle === "resetting" ||
     agent.sandboxLifecycle === "decommissioning" ||
     agent.sandboxLifecycle === "decommission_failed"
   ) {

@@ -455,6 +455,7 @@ export const runnerAgent = pgTable(
         "provisioning",
         "provisioning_ambiguous",
         "ready",
+        "resetting",
         "decommissioning",
         "decommission_failed",
       ],
@@ -500,7 +501,7 @@ export const runnerAgent = pgTable(
     ),
     check(
       "RunnerAgent_sandboxLifecycle_valid",
-      sql`${table.sandboxLifecycle} in ('unprovisioned', 'provisioning', 'provisioning_ambiguous', 'ready', 'decommissioning', 'decommission_failed')`
+      sql`${table.sandboxLifecycle} in ('unprovisioned', 'provisioning', 'provisioning_ambiguous', 'ready', 'resetting', 'decommissioning', 'decommission_failed')`
     ),
     check(
       "RunnerAgent_warmStatus_valid",
@@ -520,6 +521,7 @@ export const runnerRun = pgTable(
   "RunnerRun",
   {
     agentId: uuid("agentId").notNull(),
+    cancellationRequestedAt: timestamp("cancellationRequestedAt"),
     commandEvidence: jsonb("commandEvidence")
       .$type<CommandEvidence[]>()
       .notNull()
@@ -530,6 +532,7 @@ export const runnerRun = pgTable(
       length: 36,
     }),
     daytonaCommandId: text("daytonaCommandId"),
+    daytonaLogCursor: integer("daytonaLogCursor").notNull().default(0),
     daytonaSessionId: text("daytonaSessionId"),
     dispatchLeaseExpiresAt: timestamp("dispatchLeaseExpiresAt"),
     dispatchLeaseToken: varchar("dispatchLeaseToken", { length: 80 }),
@@ -616,6 +619,10 @@ export const runnerRun = pgTable(
     ),
     check("RunnerRun_queueSequence_positive", sql`${table.queueSequence} > 0`),
     check("RunnerRun_logCursor_nonnegative", sql`${table.logCursor} >= 0`),
+    check(
+      "RunnerRun_daytonaLogCursor_nonnegative",
+      sql`${table.daytonaLogCursor} >= 0`
+    ),
     check("RunnerRun_version_nonnegative", sql`${table.version} >= 0`),
     check(
       "RunnerRun_timestamps_valid",
@@ -644,6 +651,10 @@ export const runnerRun = pgTable(
     check(
       "RunnerRun_daytonaCommand_requires_session",
       sql`${table.daytonaCommandId} is null or ${table.daytonaSessionId} is not null`
+    ),
+    check(
+      "RunnerRun_daytonaSession_requires_attempt",
+      sql`${table.daytonaSessionId} is null or ${table.daytonaAttemptId} is not null`
     ),
     check(
       "RunnerRun_daytonaAttempt_valid",

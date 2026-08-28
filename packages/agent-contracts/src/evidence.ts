@@ -17,6 +17,7 @@ const authorizationHeader = /\b((?:proxy-)?authorization\s*:\s*)[^\r\n"']+/giu;
 const apiKeyHeader =
   /\b((?:x[-_])?(?:api[-_]?key|auth[-_]?token|access[-_]?token)\s*:\s*)[^\r\n"']+/giu;
 const bearerValue = /\b(Bearer\s+)[^\s"'`,;]+/giu;
+const cookieHeader = /\b((?:set-)?cookie\s*:\s*)[^\r\n]+/giu;
 
 const providerKeyPatterns = [
   /\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b/gu,
@@ -38,6 +39,8 @@ function isSensitiveKey(value: string): boolean {
   return [
     "TOKEN",
     "SECRET",
+    "SESSION",
+    "COOKIE",
     "PASSWORD",
     "API_KEY",
     "ACCESS_KEY",
@@ -111,6 +114,7 @@ export function sanitizeEvidenceText(
     sanitized
       .replace(authorizationHeader, `$1${REDACTED}`)
       .replace(apiKeyHeader, `$1${REDACTED}`)
+      .replace(cookieHeader, `$1${REDACTED}`)
       .replace(bearerValue, `$1${REDACTED}`)
   ).replace(secretCliOption, `$1${REDACTED}`);
   for (const pattern of providerKeyPatterns) {

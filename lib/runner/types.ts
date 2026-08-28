@@ -55,6 +55,7 @@ export type RunnerSandboxLifecycle =
   | "provisioning"
   | "provisioning_ambiguous"
   | "ready"
+  | "resetting"
   | "decommissioning"
   | "decommission_failed";
 export type RunnerWarmStatus =
@@ -67,6 +68,20 @@ export type RunnerDispatchState =
   | "dispatching"
   | "running"
   | "terminal";
+
+export type RunnerAdmissionLimits = Readonly<{
+  consecutiveDispatches: number;
+  deploymentActiveRuns: number;
+  tenantActiveRuns: number;
+  tenantQueuedRuns: number;
+}>;
+
+export const DEFAULT_RUNNER_ADMISSION_LIMITS: RunnerAdmissionLimits = {
+  consecutiveDispatches: 2,
+  deploymentActiveRuns: 25,
+  tenantActiveRuns: 2,
+  tenantQueuedRuns: 10,
+};
 
 export type RunnerAgentRecord = {
   createdAt: Date;
@@ -94,11 +109,13 @@ export type RunnerRunRecord = Omit<
   RunSnapshot,
   "apiVersion" | "completedAt" | "createdAt" | "error" | "startedAt"
 > & {
+  cancellationRequestedAt: Date | null;
   completedAt: Date | null;
   createdAt: Date;
   daytonaCommandId: string | null;
   daytonaAttemptId: RunnerDaytonaAttemptId | null;
   daytonaSessionId: string | null;
+  daytonaLogCursor: number;
   dispatchLeaseExpiresAt: Date | null;
   dispatchLeaseToken: string | null;
   dispatchState: RunnerDispatchState;
@@ -141,7 +158,9 @@ export type UpdateRunnerAgentInput = {
 
 export type StartRunnerRunInput = {
   agentId: string;
+  admission?: RunnerAdmissionLimits;
   id: string;
+  initialDispatch?: Pick<DispatchClaimInput, "leaseExpiresAt" | "leaseToken">;
   operationId: string;
   requestHash: string;
   task: string;
@@ -162,6 +181,7 @@ export type DispatchFence = {
 };
 
 export type AppendRunnerEventInput = DispatchFence & {
+  daytonaLogCursor?: number;
   event: WithoutEventId<RunEvent>;
   snapshot?: RunnerSnapshotPatch;
 };
@@ -169,6 +189,7 @@ export type AppendRunnerEventInput = DispatchFence & {
 export type DispatchClaimInput = {
   leaseExpiresAt: Date;
   leaseToken: string;
+  limits?: RunnerAdmissionLimits;
 };
 
 export type RunnerClaimedDispatch = Readonly<{
@@ -234,6 +255,64 @@ export type ReleaseDaytonaAttemptInput = {
 export type ReleaseExpiredDaytonaAttemptInput = ExpiredDispatchRequeueInput & {
   attemptId: RunnerDaytonaAttemptId;
 };
+
+export type ClaimExpiredDaytonaAttemptCleanupInput =
+  ReleaseExpiredDaytonaAttemptInput & {
+    leaseExpiresAt: Date;
+    newLeaseToken: string;
+  };
+
+export type ExpiredDaytonaAttemptCleanupClaim =
+  | {
+      authority: RunnerDispatchAuthority;
+      kind: "claimed";
+      run: RunnerRunRecord;
+    }
+  | { kind: "lease_lost" | "not_expired" | "not_found" | "not_live" };
+
+export type AdoptExpiredDaytonaProcessInput =
+  ClaimExpiredDaytonaAttemptCleanupInput;
+
+export type ExpiredDaytonaProcessAdoption =
+  | {
+      authority: RunnerDispatchAuthority;
+      kind: "adopted";
+      run: RunnerRunRecord;
+    }
+  | { kind: "lease_lost" | "not_expired" | "not_found" | "not_live" };
+
+export type ClaimTerminalDaytonaAttemptCleanupInput = {
+  attemptId: RunnerDaytonaAttemptId;
+  expectedVersion: number;
+  leaseExpiresAt: Date;
+  newLeaseToken: string;
+  oldLeaseToken: string;
+  runId: string;
+};
+
+export type TerminalDaytonaAttemptCleanupClaim =
+  | {
+      authority: RunnerDispatchAuthority;
+      kind: "claimed";
+      run: RunnerRunRecord;
+    }
+  | { kind: "lease_lost" | "not_expired" | "not_found" | "not_live" };
+
+export type RequestRunnerCancellationInput = {
+  leaseExpiresAt: Date;
+  leaseToken: string;
+  runId: string;
+};
+
+export type RunnerCancellationRequestOutcome =
+  | {
+      authority: RunnerDispatchAuthority;
+      kind: "requested";
+      run: RunnerRunRecord;
+    }
+  | { kind: "already_terminal"; run: RunnerRunRecord }
+  | { kind: "in_progress" }
+  | { kind: "not_found" };
 
 export type RunnerMutationOutcome<T> =
   | { kind: "updated"; value: T }

@@ -11,6 +11,8 @@ import {
   type CredentialLeaseTransaction,
   consumeCredentialLease,
   issueCredentialLease,
+  releaseCredentialLease,
+  releaseCredentialLeaseForRun,
 } from "./leases";
 
 const NOW = new Date("2026-08-27T19:00:00.000Z");
@@ -102,6 +104,16 @@ function memoryDatabase(options: {
           });
         },
         credentialStore: {} as CredentialLeaseTransaction["credentialStore"],
+        deleteByRequestIdHash: (requestIdHash) => {
+          const index = working.findIndex(
+            (row) => row.requestIdHash === requestIdHash
+          );
+          if (index < 0) {
+            return Promise.resolve(null);
+          }
+          const [deleted] = working.splice(index, 1);
+          return Promise.resolve(deleted ?? null);
+        },
         findByOperationIdHash: (operationIdHash) =>
           Promise.resolve(
             working.find((row) => row.operationIdHash === operationIdHash) ??
@@ -349,6 +361,44 @@ test("a consumed request cannot be replayed", async () => {
   assert.equal(decryptions, 1);
 });
 
+test("a consumed lease can be released after a pre-launch failure", async () => {
+  const database = memoryDatabase({ reservation: reservation() });
+  await issueCredentialLease(database, input(), NO_AUDIT);
+  await consumeCredentialLease(
+    database,
+    input(),
+    NO_PREPARE,
+    () => Promise.resolve("credential"),
+    NO_AUDIT,
+    { consumeReservation: false }
+  );
+
+  await releaseCredentialLease(database, input(), NO_AUDIT);
+
+  assert.equal(database.leases.length, 0);
+});
+
+test("operator cleanup releases only the exact run lease", async () => {
+  const database = memoryDatabase({
+    leases: [
+      lease(),
+      lease({
+        operationIdHash: operationHash("operation-2"),
+        requestIdHash: requestHash("request-2"),
+        runId: "run-2",
+      }),
+    ],
+    reservation: reservation(),
+  });
+
+  await releaseCredentialLeaseForRun(database, "run-1", NO_AUDIT);
+
+  assert.deepEqual(
+    database.leases.map((record) => record.runId),
+    ["run-2"]
+  );
+});
+
 test("an existing request cannot change tenant, harness, operation, or run", async () => {
   const database = memoryDatabase({ reservation: reservation() });
   await issueCredentialLease(database, input(), NO_AUDIT);
@@ -500,6 +550,7 @@ test("a failed transaction commit never repeats credential decryption", async ()
             state: "consumed",
           }),
         credentialStore: {} as CredentialLeaseTransaction["credentialStore"],
+        deleteByRequestIdHash: () => Promise.resolve(null),
         findByOperationIdHash: () => Promise.resolve(lease()),
         findByRequestIdHash: () =>
           Promise.resolve(

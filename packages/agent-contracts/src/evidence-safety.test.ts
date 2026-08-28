@@ -72,3 +72,13 @@ test("redacts an isolated sensitive environment assignment", () => {
   assert.equal(sanitized.includes(secret), false);
   assert.equal(sanitized, "OPENAI_API_KEY=[REDACTED]");
 });
+
+test("redacts request and response session cookies from runner evidence", () => {
+  const cookie = "session-id-private-value";
+  const sanitized = sanitizeEvidenceText(
+    `Cookie: session=${cookie}; theme=dark\nSet-Cookie: session=${cookie}; HttpOnly`
+  );
+
+  assert.equal(sanitized.includes(cookie), false);
+  assert.match(sanitized, /\[REDACTED\]/);
+});

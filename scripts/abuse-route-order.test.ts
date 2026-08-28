@@ -287,14 +287,18 @@ test("analytics revalidates subscriber authority before reading history", () => 
 });
 
 test("internal credential lending binds authority before credential decryption", () => {
-  const source = read("app/api/internal/credential/route.ts");
-  const post = exportedFunctionBlock(source, "POST");
-  const issuance = functionBlock(source, "lendCredentialWithReservation");
-  const lending = functionBlock(source, "lendCredentialWithLease");
+  const routeSource = read("app/api/internal/credential/route.ts");
+  const lendingSource = read("lib/credentials/lending.ts");
+  const post = exportedFunctionBlock(routeSource, "POST");
+  const issuance = functionBlock(
+    lendingSource,
+    "lendCredentialWithReservation"
+  );
+  const lending = functionBlock(lendingSource, "lendCredentialWithLease");
   const leaseSource = read("lib/credentials/leases.ts");
   const consumption = functionBlock(leaseSource, "consumeCredentialLease");
   const ownerIndex = post.indexOf(".select()");
-  const issuanceIndex = post.indexOf("lendCredentialWithReservation(");
+  const issuanceIndex = post.indexOf("lendCredentialWithReservationService(");
   const reserveIndex = issuance.indexOf("dependencies.reserve({");
   const issueIndex = issuance.indexOf("dependencies.issue({");
   const leaseIndex = lending.indexOf("dependencies.lease(");
