@@ -32,7 +32,9 @@ async function mint(
 
 function claims(overrides: Partial<RunnerClaims> = {}): RunnerClaims {
   return {
+    authVersion: 0,
     exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    kid: "legacy",
     plan: "subscriber",
     sub: "user-1",
     tenant: "acme",
@@ -116,9 +118,5 @@ test("a payload is never parsed until its signature is proven", async () => {
     JSON.parse = realParse;
   }
 
-  assert.equal(
-    parsed,
-    false,
-    "the payload must not be parsed when the signature does not verify"
-  );
+  assert.equal(parsed, false, "full claims must not be parsed before verify");
 });

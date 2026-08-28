@@ -1,4 +1,5 @@
 import { validateAbuseConfig } from "../lib/abuse/config";
+import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
 
 const BETA_EMAIL = /^[^\s@,]+@[^\s@,]+$/;
 
@@ -60,10 +61,18 @@ function validateReleaseAudience(
   }
 }
 
-export function validateRuntimeConfig(
+function hasCredentialKekConfiguration(
+  environment: NodeJS.ProcessEnv
+): boolean {
+  return Object.keys(environment).some(
+    (name) => name === "CREDENTIAL_KEK" || name.startsWith("CREDENTIAL_KEK_")
+  );
+}
+
+export async function validateRuntimeConfig(
   env: NodeJS.ProcessEnv,
   explicitRelease: boolean
-): void {
+): Promise<void> {
   validateReleaseAudience(env, explicitRelease);
 
   validateAbuseConfig({
@@ -72,4 +81,8 @@ export function validateRuntimeConfig(
     keySecret: env.ABUSE_KEY_SECRET,
     redisUrl: env.REDIS_URL,
   });
+
+  if (hasCredentialKekConfiguration(env)) {
+    await credentialKekRingFromEnvironment(env);
+  }
 }

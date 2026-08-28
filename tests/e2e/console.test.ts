@@ -1,4 +1,41 @@
 import { expect, test } from "@playwright/test";
+import { subscriberCookies } from "./session";
+
+const AGENT_ID = "11111111-1111-4111-8111-111111111111";
+const RUN_ID = "22222222-2222-4222-8222-222222222222";
+const RUNNER_IDENTITY = `${Buffer.from(
+  JSON.stringify({ exp: 4_102_444_800 })
+).toString("base64url")}.audit-signature`;
+
+const retainedAgent = {
+  backend: "cloud",
+  createdAt: "2026-08-27T06:00:00.000Z",
+  description: "Verifies the run timeline.",
+  id: AGENT_ID,
+  instructions: "Report evidence clearly.",
+  lastRunAt: "2026-08-27T06:01:00.000Z",
+  model: "auto",
+  name: "Timeline auditor",
+  runtime: "copilot",
+  status: "idle",
+  updatedAt: "2026-08-27T06:01:00.000Z",
+  workspace: "/workspace",
+};
+
+const retainedRun = {
+  agentId: AGENT_ID,
+  apiVersion: "1.0",
+  commandEvidence: [],
+  completedAt: "2026-08-27T06:01:00.000Z",
+  createdAt: "2026-08-27T06:00:00.000Z",
+  fileEvidence: [],
+  id: RUN_ID,
+  operationId: "33333333-3333-4333-8333-333333333333",
+  output: "Timeline verified.",
+  startedAt: "2026-08-27T06:00:01.000Z",
+  status: "completed",
+  task: "Verify timeline output",
+};
 
 test.describe("Run console", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
@@ -98,5 +135,67 @@ test.describe("Run console", () => {
         () => document.documentElement.scrollWidth <= innerWidth
       )
     ).toBe(true);
+  });
+
+  test("a retained run exposes rich steps and the global collapse control", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route("**/api/runner-connection", (route) =>
+      route.fulfill({
+        json: { endpoint: "http://127.0.0.1:8787", token: "audit-token" },
+      })
+    );
+    await page.route("**/api/runner-token", (route) =>
+      route.fulfill({ json: { token: RUNNER_IDENTITY } })
+    );
+    await page.route("http://127.0.0.1:8787/**", (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({ json: { agents: [retainedAgent] } });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", runs: [retainedRun] },
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}/events`) {
+        const event = {
+          at: "2026-08-27T06:00:30.000Z",
+          evidence: {
+            command: "pnpm test",
+            completedAt: "2026-08-27T06:00:30.000Z",
+            exitCode: 0,
+            startedAt: "2026-08-27T06:00:20.000Z",
+            stderr: "",
+            stdout: "first output line\nsecond output line",
+          },
+          id: 1,
+          type: "command",
+        };
+        return route.fulfill({
+          body: `data: ${JSON.stringify(event)}\n\n`,
+          contentType: "text/event-stream",
+        });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+    await page
+      .getByRole("complementary")
+      .getByRole("button", { name: /completed Verify timeline/ })
+      .click();
+
+    await expect(page.getByText("second output line")).toBeVisible();
+    await page.getByRole("button", { exact: true, name: "collapse" }).click();
+    await expect(page.getByText("second output line")).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { exact: true, name: "expand" })
+    ).toBeVisible();
   });
 });

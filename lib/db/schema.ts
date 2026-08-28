@@ -21,6 +21,7 @@ import type { StoredIdempotencyResponseEnvelope } from "../abuse/idempotency-res
 export const user = pgTable(
   "User",
   {
+    authVersion: integer("authVersion").notNull().default(0),
     billingPeriodStart: timestamp("billingPeriodStart"),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
     email: varchar("email", { length: 64 }).notNull(),
@@ -185,11 +186,15 @@ export type Stream = InferSelectModel<typeof stream>;
 export const tenantCredential = pgTable(
   "TenantCredential",
   {
+    aadVersion: integer("aadVersion").notNull().default(0),
     ciphertext: text("ciphertext").notNull(),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
+    credentialRevision: uuid("credentialRevision").notNull().defaultRandom(),
+    envelopeRevision: uuid("envelopeRevision").notNull().defaultRandom(),
     harnessId: varchar("harnessId", { length: 32 }).notNull(),
     id: uuid("id").primaryKey().notNull().defaultRandom(),
     iv: text("iv").notNull(),
+    kekVersion: varchar("kekVersion", { length: 32 }).notNull().default("v1"),
     tenant: varchar("tenant", { length: 64 }).notNull(),
     updatedAt: timestamp("updatedAt").notNull().defaultNow(),
     wrappedKey: text("wrappedKey").notNull(),
@@ -198,6 +203,14 @@ export const tenantCredential = pgTable(
     uniqueIndex("TenantCredential_tenant_harness_idx").on(
       table.tenant,
       table.harnessId
+    ),
+    check(
+      "TenantCredential_kekVersion_valid",
+      sql`${table.kekVersion} ~ '^[A-Za-z0-9_-]{1,32}$'`
+    ),
+    check(
+      "TenantCredential_aadVersion_valid",
+      sql`${table.aadVersion} in (0, 1)`
     ),
   ]
 );
@@ -287,6 +300,44 @@ export const runReservation = pgTable(
 );
 
 export type RunReservation = InferSelectModel<typeof runReservation>;
+
+/**
+ * One short-lived, one-use capability to decrypt a credential for one run.
+ *
+ * Raw tenant and request identifiers are never stored. `runId` is unique so a
+ * caller cannot mint fresh request ids to borrow the same credential twice.
+ */
+export const credentialLease = pgTable(
+  "CredentialLease",
+  {
+    consumedAt: timestamp("consumedAt"),
+    expiresAt: timestamp("expiresAt").notNull(),
+    harnessId: varchar("harnessId", { length: 64 }).notNull(),
+    issuedAt: timestamp("issuedAt").notNull().defaultNow(),
+    operationIdHash: varchar("operationIdHash", { length: 64 })
+      .notNull()
+      .unique(),
+    requestIdHash: varchar("requestIdHash", { length: 64 })
+      .primaryKey()
+      .notNull(),
+    runId: varchar("runId", { length: 64 }).notNull(),
+    tenantHash: varchar("tenantHash", { length: 64 }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("CredentialLease_run_idx").on(table.runId),
+    index("CredentialLease_expiry_idx").on(table.expiresAt),
+    check(
+      "CredentialLease_expiry_valid",
+      sql`${table.expiresAt} > ${table.issuedAt}`
+    ),
+    check(
+      "CredentialLease_consumption_valid",
+      sql`${table.consumedAt} is null or (${table.consumedAt} >= ${table.issuedAt} and ${table.consumedAt} < ${table.expiresAt})`
+    ),
+  ]
+);
+
+export type CredentialLease = InferSelectModel<typeof credentialLease>;
 
 /**
  * Stripe event ids already processed.

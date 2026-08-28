@@ -69,17 +69,27 @@ const SECRET_PATTERNS: ReadonlyArray<{
 
 /**
  * Every pattern above keys on a vendor prefix, which is exactly why none of
- * them can see this project's own secrets: `AUTH_SECRET`, `CREDENTIAL_KEK`,
+ * them can see this project's own secrets: `AUTH_SECRET`, the versioned
+ * `CREDENTIAL_KEK_V1`/`CREDENTIAL_KEK_V2` ring,
  * `RUNNER_SIGNING_KEY`, and `AGENT_CONTROL_TOKEN` are raw base64 or hex with
  * no marker at all. The most damaging values in the repository were the ones
  * the scanner was structurally unable to detect.
  *
  * These rules key on the *name* instead. Matched generically rather than from
  * a list, so a secret added next year is covered without anyone remembering to
- * extend this.
+ * extend this. The separate credential-KEK rule below excludes the
+ * `CREDENTIAL_KEK_CURRENT_VERSION` selector because it is not secret material.
  */
 const SENSITIVE_NAME =
   /\b([A-Z][A-Z\d]*(?:_[A-Z\d]+)*_(?:SECRET|TOKEN|PASSWORD|PASSWD|KEY|KEK|CREDENTIAL)|PGPASSWORD|AUTH_SECRET)\s*[=:]\s*["'`]?([^\s"'`,;]+)/u;
+
+/**
+ * Credential KEKs are versioned by convention rather than by a fixed allowlist.
+ * The current-version selector is configuration, not secret material, so it is
+ * deliberately excluded while every other valid suffix remains covered.
+ */
+const CREDENTIAL_KEK_NAME =
+  /(?:\b(CREDENTIAL_KEK(?:_[A-Z0-9_]+)?)\b|["'](CREDENTIAL_KEK(?:_[A-Z0-9_]+)?)["'])\s*[=:]\s*["'`]?([^\s"'`,;}]+)/u;
 
 /**
  * A connection string carries its password inline, so the usual advice to keep
@@ -140,6 +150,11 @@ export function looksLikeRealSecret(value: string): boolean {
   if (/^[A-Za-z_$][A-Za-z_$]*$/u.test(value)) {
     return false;
   }
+  if (
+    /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+$/u.test(value)
+  ) {
+    return false;
+  }
 
   return new Set(value).size >= MIN_DISTINCT_CHARACTERS;
 }
@@ -178,6 +193,53 @@ function namedFindings(line: string): string[] {
   const assignment = SENSITIVE_NAME.exec(line);
   if (assignment && looksLikeRealSecret(assignment[2])) {
     found.push(`value assigned to ${assignment[1]}`);
+  }
+
+  // Match every key on the line. A fresh global regex keeps `matchAll` from
+  // inheriting mutable `lastIndex` state across calls.
+  for (const credentialKek of line.matchAll(
+    new RegExp(CREDENTIAL_KEK_NAME.source, "gu")
+  )) {
+    const credentialKekName = credentialKek[1] ?? credentialKek[2];
+    if (
+      credentialKekName !== "CREDENTIAL_KEK_CURRENT_VERSION" &&
+      credentialKekName !== assignment?.[1] &&
+      looksLikeCredentialKek(credentialKek[3])
+    ) {
+      found.push(`value assigned to ${credentialKekName}`);
+    }
+
+    function looksLikeCredentialKek(value: string): boolean {
+      const normalized = value.trim().replace(/^(['"`])([\s\S]*)\1$/u, "$2");
+      if (!normalized || PLACEHOLDER.test(normalized)) {
+        return false;
+      }
+
+      const decoded = decodeBase64(normalized);
+      if (decoded?.length === 32) {
+        return true;
+      }
+
+      return normalized.length >= 32;
+    }
+
+    function decodeBase64(value: string): Uint8Array | null {
+      if (
+        !/^[A-Za-z0-9+/_-]+={0,2}$/u.test(value) ||
+        /[=]{1,2}(?!$)/u.test(value)
+      ) {
+        return null;
+      }
+      const unpadded = value.replace(/[=]+$/u, "");
+      if (unpadded.length % 4 === 1) {
+        return null;
+      }
+      const standard = unpadded.replace(/-/gu, "+").replace(/_/gu, "/");
+      const padded = standard + "=".repeat((4 - (standard.length % 4)) % 4);
+      const bytes = Buffer.from(padded, "base64");
+      const canonical = bytes.toString("base64").replace(/[=]+$/u, "");
+      return canonical === standard ? new Uint8Array(bytes) : null;
+    }
   }
 
   const url = CREDENTIALED_URL.exec(line);

@@ -1,4 +1,4 @@
-import { isSubscribedAt } from "@/lib/subscription";
+import { sessionAuthorityMatches } from "./session-revocation";
 import {
   decideSubscriberAccess,
   type SessionLike,
@@ -6,6 +6,7 @@ import {
 } from "./subscriber-access";
 
 type SubscriptionRecord = {
+  authVersion?: number | null;
   subscribedUntil?: Date | null;
 };
 
@@ -23,8 +24,23 @@ export async function revalidateSubscriberAccess(
     return decision;
   }
 
-  const user = await lookup(decision.userId);
-  if (!user || !isSubscribedAt(user, now)) {
+  let user: SubscriptionRecord | null;
+  try {
+    user = await lookup(decision.userId);
+  } catch {
+    return { kind: "subscription_required" };
+  }
+  if (
+    !user ||
+    !sessionAuthorityMatches({
+      database: {
+        authVersion: user.authVersion ?? Number.NaN,
+        subscribedUntil: user.subscribedUntil ?? null,
+      },
+      now,
+      tokenAuthVersion: session?.user?.authVersion ?? Number.NaN,
+    })
+  ) {
     return { kind: "subscription_required" };
   }
 

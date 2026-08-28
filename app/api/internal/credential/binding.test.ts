@@ -3,7 +3,9 @@ import test from "node:test";
 import { resolveBoundTenant } from "./binding";
 
 const CLAIMS = {
+  authVersion: 0,
   exp: 1,
+  kid: "legacy",
   plan: "subscriber" as const,
   sub: "u",
   tenant: "acme",

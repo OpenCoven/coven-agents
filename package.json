@@ -8,6 +8,7 @@
     "beads:sync": "tsx scripts/beads-project-sync.ts",
     "build": "pnpm validate:runtime && tsx lib/db/migrate.ts && next build",
     "check": "ultracite check",
+    "credentials:rewrap": "tsx --conditions=react-server --env-file-if-exists=.env.local scripts/credentials-rewrap.ts",
     "db:check": "drizzle-kit check",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "npx tsx lib/db/migrate.ts",

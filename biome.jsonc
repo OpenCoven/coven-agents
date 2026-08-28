@@ -17,7 +17,10 @@
       "!components/ui",
       "!lib/utils.ts",
       "!hooks/use-mobile.ts",
-      "!worker/worker-configuration.d.ts"
+      "!worker/worker-configuration.d.ts",
+      // wrangler dev writes generated bundles here while running; linting
+      // them fails `pnpm check` on any machine with a live dev worker.
+      "!worker/.wrangler"
     ]
   },
   "linter": {

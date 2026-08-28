@@ -12,6 +12,7 @@ import {
   lt,
   lte,
   type SQL,
+  sql,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -22,6 +23,7 @@ import type {
   IdempotencyClaimHandle,
   IdempotencyStore,
 } from "../abuse/idempotency";
+import { parseStoredIdempotencyResponseEnvelope } from "../abuse/idempotency-response";
 import type { DayCount } from "../billing/history";
 import { fillDays, runsByDay } from "../billing/history";
 import {
@@ -49,9 +51,20 @@ import {
 const client = postgres(process.env.POSTGRES_URL ?? "");
 export const db = drizzle(client);
 
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function emailMatches(normalizedEmail: string): SQL {
+  return sql`lower(${user.email}) = lower(${normalizedEmail})`;
+}
+
 export async function getUser(email: string): Promise<User[]> {
   try {
-    return await db.select().from(user).where(eq(user.email, email));
+    return await db
+      .select()
+      .from(user)
+      .where(emailMatches(normalizeEmail(email)));
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
   }
@@ -71,21 +84,49 @@ export async function getUser(email: string): Promise<User[]> {
  */
 export async function findOrCreateFederatedUser(email: string): Promise<User> {
   try {
-    const [existing] = await db
+    const normalizedEmail = normalizeEmail(email);
+    const matches = await db
       .select()
       .from(user)
-      .where(eq(user.email, email));
+      .where(emailMatches(normalizedEmail))
+      .limit(2);
 
-    if (existing) {
-      return existing;
+    if (matches.length > 1) {
+      throw new ChatbotError("bad_request:database");
+    }
+    if (matches[0]) {
+      return matches[0];
     }
 
     const [created] = await db
       .insert(user)
-      .values({ email, emailVerified: true })
+      .values({ email: normalizedEmail, emailVerified: true })
       .returning();
 
+    if (!created) {
+      throw new ChatbotError("bad_request:database");
+    }
     return created;
+  } catch (error) {
+    if (error instanceof ChatbotError) {
+      throw error;
+    }
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
+export async function findVerifiedUserByEmail(
+  email: string
+): Promise<User | null> {
+  try {
+    const matches = await db
+      .select()
+      .from(user)
+      .where(
+        and(eq(user.emailVerified, true), emailMatches(normalizeEmail(email)))
+      )
+      .limit(2);
+    return matches.length === 1 ? (matches[0] ?? null) : null;
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
   }
@@ -104,6 +145,36 @@ export async function findOrCreateFederatedUser(email: string): Promise<User> {
 export async function findUserById(id: string): Promise<User | null> {
   try {
     const [row] = await db.select().from(user).where(eq(user.id, id)).limit(1);
+    return row ?? null;
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
+/**
+ * Atomically advances the account's session authority. PostgreSQL evaluates
+ * the increment while holding the row lock, so concurrent operators cannot
+ * overwrite one another's revocation.
+ */
+export async function revokeSessionsByEmail(
+  email: string
+): Promise<{ authVersion: number; id: string } | null> {
+  try {
+    const normalizedEmail = normalizeEmail(email);
+    if (!normalizedEmail) {
+      return null;
+    }
+
+    const [row] = await db
+      .update(user)
+      .set({ authVersion: sql`${user.authVersion} + 1` })
+      .where(
+        and(
+          emailMatches(normalizedEmail),
+          sql`(select count(*) from ${user} where ${emailMatches(normalizedEmail)}) = 1`
+        )
+      )
+      .returning({ authVersion: user.authVersion, id: user.id });
     return row ?? null;
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
@@ -251,7 +322,9 @@ export const databaseIdempotencyStore: IdempotencyStore = {
           return {
             kind: "completed",
             response: {
-              envelope: existing.responseJson,
+              envelope: parseStoredIdempotencyResponseEnvelope(
+                existing.responseJson
+              ),
               status: existing.responseStatus,
             },
           } as const;

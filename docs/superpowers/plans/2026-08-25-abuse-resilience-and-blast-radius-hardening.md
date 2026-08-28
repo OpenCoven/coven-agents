@@ -196,7 +196,7 @@ Expected: PASS.
 
 Add the policy table to `docs/security/execution-threat-model.md`. State that production changes require a reviewed code change, shadow telemetry, and rollback threshold; environment variables may lower emergency limits but may not raise them above code maxima.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/abuse docs/security/execution-threat-model.md
@@ -287,7 +287,7 @@ Run: `pnpm exec tsx --test lib/abuse/store.test.ts lib/ratelimit.test.ts`
 
 Expected: PASS, including 100 parallel calls allowing exactly the configured limit.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add lib/abuse lib/ratelimit.ts lib/ratelimit.test.ts .env.example
@@ -793,13 +793,17 @@ git commit -S -m "feat(worker): bound and fairly schedule cloud runs" \
 - Modify: `packages/agent-contracts/src/verify-token.ts`
 - Modify: `worker/src/routes.ts`
 - Modify: `app/api/internal/credential/route.ts`
-- Add: `lib/db/migrations/0007_identity_versions.sql`
+- Modify: `scripts/account.ts`
+- Modify: `README.md`
+- Modify: `docs/security/incident-response.md`
+- Add: `docs/security/key-rotation.md`
+- Add: `lib/db/migrations/0008_identity_versions.sql`
 
-- [ ] **Step 1: Write failing session-revocation tests**
+- [x] **Step 1: Write failing session-revocation tests**
 
 Add `authVersion` to the user row and JWT. Assert a server-side increment denies an existing token immediately, while an unchanged version remains valid.
 
-- [ ] **Step 2: Implement session version checks**
+- [x] **Step 2: Implement session version checks**
 
 ```ts
 export type SessionAuthority = {
@@ -822,11 +826,11 @@ pnpm account revoke-sessions <email>
 
 The command increments `authVersion` and prints only the account ID and new version.
 
-- [ ] **Step 3: Write failing runner key-ring tests**
+- [x] **Step 3: Write failing runner key-ring tests**
 
 Cover current-key minting, current and previous verification, unknown `kid`, retired key refusal, and the existing 15-minute expiry.
 
-- [ ] **Step 4: Add `kid` and dual verification**
+- [x] **Step 4: Add `kid` and dual verification**
 
 ```ts
 export type RunnerKeyRing = {
@@ -837,7 +841,7 @@ export type RunnerKeyRing = {
 
 Claims include `kid`. Mint only with `current`. Worker and internal credential verification accept `current` and an unexpired `previous`.
 
-- [ ] **Step 5: Add rotation configuration**
+- [x] **Step 5: Add rotation configuration**
 
 Document:
 
@@ -848,7 +852,7 @@ Document:
 
 Never overwrite one unversioned signing key in place.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run:
 
@@ -860,7 +864,7 @@ pnpm --filter @opencoven/cloud-runner test
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add app lib packages worker scripts docs/security
@@ -878,15 +882,15 @@ git commit -S -m "feat(security): version sessions and runner keys" \
 - Modify: `lib/credentials/store.ts`
 - Create: `scripts/credentials-rewrap.ts`
 - Create: `scripts/credentials-rewrap.test.ts`
-- Add: `lib/db/migrations/0008_credential_kek_versions.sql`
+- Add: `lib/db/migrations/0009_credential_kek_versions.sql`
 - Modify: `docs/security/incident-response.md`
-- Create: `docs/security/key-rotation.md`
+- Modify: `docs/security/key-rotation.md`
 
-- [ ] **Step 1: Write failing envelope-version tests**
+- [x] **Step 1: Write failing envelope-version tests**
 
 Cover writing with the current KEK, reading with current or previous KEK, unknown version refusal, rewrapping without exposing plaintext to logs, interruption/resume, and rollback before old-key retirement.
 
-- [ ] **Step 2: Extend the stored envelope**
+- [x] **Step 2: Extend the stored envelope**
 
 Add `kekVersion` as a non-null short string. New rows use:
 
@@ -899,7 +903,7 @@ type CredentialEnvelopeV2 = {
 };
 ```
 
-- [ ] **Step 3: Implement the KEK registry**
+- [x] **Step 3: Implement the KEK registry**
 
 Read:
 
@@ -916,7 +920,11 @@ The registry must:
 - decrypt only named configured versions;
 - never fall back to trying every key.
 
-- [ ] **Step 4: Implement resumable rewrap**
+During staged migration, an unversioned idempotency response envelope is
+accepted only at the JSON serialization boundary and is labeled exactly `v1`;
+credential rows are labeled by the migration and never use that fallback.
+
+- [x] **Step 4: Implement resumable rewrap**
 
 `pnpm credentials:rewrap --from v1 --to v2 --batch 100`:
 
@@ -927,17 +935,17 @@ The registry must:
 5. prints counts and row IDs, never ciphertext or credentials;
 6. is safe to rerun.
 
-- [ ] **Step 5: Add the rotation gate**
+- [x] **Step 5: Add the rotation gate**
 
 The old KEK may be removed only when a query returns zero rows for its version and the rewrap verification test passes in production read-only mode.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run: `pnpm exec tsx --test lib/credentials/*.test.ts scripts/credentials-rewrap.test.ts`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add lib/db lib/credentials scripts package.json docs/security
@@ -951,20 +959,27 @@ git commit -S -m "feat(security): add resumable credential key rotation" \
 - Modify: `lib/db/schema.ts`
 - Create: `lib/credentials/leases.ts`
 - Create: `lib/credentials/leases.test.ts`
+- Modify: `packages/agent-contracts/src/identity.ts`
+- Modify: `app/api/runner-token/route.ts`
+- Modify: `lib/agents/identity.ts`
+- Modify: `lib/agents/client.ts`
+- Modify: `components/console/run-console.tsx`
 - Modify: `app/api/internal/credential/binding.ts`
 - Modify: `app/api/internal/credential/route.ts`
 - Modify: `worker/src/agents.ts`
-- Add: `lib/db/migrations/0009_credential_leases.sql`
+- Add: `lib/db/migrations/0012_credential_leases.sql`
 
-- [ ] **Step 1: Write failing lease tests**
+- [x] **Step 1: Write failing lease tests**
 
 Cover tenant mismatch, harness mismatch, run mismatch, duplicate consumption, expired lease, released reservation, and successful one-time consumption.
 
-- [ ] **Step 2: Define the request and lease contracts**
+- [x] **Step 2: Define the request and lease contracts**
 
 ```ts
 export type CredentialRequestEnvelope = {
+  agentId: string;
   harnessId: string;
+  operationId: string;
   requestId: string;
   runId: string;
   tenant: string;
@@ -974,43 +989,89 @@ export type CredentialLease = {
   consumedAt: Date | null;
   expiresAt: Date;
   harnessId: string;
+  operationIdHash: string;
   requestIdHash: string;
   runId: string;
   tenantHash: string;
 };
 ```
 
-- [ ] **Step 3: Enforce signed binding**
+- [x] **Step 3: Enforce signed binding**
 
 The internal route must verify:
 
 1. service token;
 2. signed runner claim and `kid`;
 3. body tenant equals claim tenant;
-4. body run ID exists in a reserved/active state;
-5. body harness equals the agent definition;
-6. request ID has not been consumed;
-7. lease is consumed transactionally before decryption.
+4. the signed claim's agent, harness, and operation equal the Worker agent
+   definition and run-start request, and the Worker uses that operation ID as
+   the run ID;
+5. body run ID exists in a reserved/active state;
+6. an issuance call has already persisted the immutable tenant, harness, run,
+   and request binding;
+7. the later consumption call presents that exact binding and the reservation
+   is still reserved;
+8. the one-use lease claim commits before any credential decryption;
+9. OAuth refresh or terminal deletion commits independently, so a later
+   lending rollback cannot undo it or repeat a rotated refresh;
+10. the final transaction reads without provider side effects and atomically
+    consumes the reservation and records run usage.
 
-Set lease expiry to two minutes. A consumed lease cannot be replayed even inside that window.
+Set lease expiry to two minutes. A consumed lease cannot be replayed even
+inside that window. Retain expired rows for 24 hours and delete older rows
+opportunistically during issuance; the consumed or expired reservation remains
+the durable replay barrier after lease-row cleanup.
 
-- [ ] **Step 4: Emit credential audit events**
+For rolling deployment, first set
+`CREDENTIAL_LEGACY_LENDING_ENABLED=true` and
+`RUN_SCOPED_IDENTITY_WRITES_ENABLED=false`, then deploy the app. The
+compatibility app accepts the old one-call Worker and still mints claims the old
+strict verifier can parse. Deploy the Worker; the new Worker accepts the
+compatibility app's legacy `200` response. Next set
+`RUN_SCOPED_IDENTITY_WRITES_ENABLED=true` and redeploy the app. Wait at least
+the 15-minute runner-token lifetime plus the browser bundle drain, then set
+`CREDENTIAL_LEGACY_LENDING_ENABLED=false` and redeploy. The normal final state
+is scoped writes enabled and legacy lending disabled. Remove both compatibility
+flags and paths in the next security cleanup after production confirms no
+legacy traffic.
+
+- [x] **Step 4: Emit credential audit events**
 
 Record only tenant hash, harness ID, run ID, operation, outcome, and timestamp. Never record the credential, wrapped key, raw tenant, service token, or runner claim.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `pnpm exec tsx --test lib/credentials/leases.test.ts app/api/internal/credential/*.test.ts`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/db lib/credentials app/api/internal/credential worker/src/agents.ts
 git commit -S -m "feat(security): bind credential loans to one run" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 ```
+
+Merged in PR #117 as `9f6cfa1d49de611df7c83e3fef3ab421e0bf5b3b`.
+
+- [x] **Step 7: Complete the staged production rollout**
+
+Production closure completed on 2026-08-27:
+
+1. migration `0012_credential_leases.sql` applied successfully;
+2. Worker version `86caa7ea-2c92-4205-a7e8-4febe3c384a4` deployed;
+3. signed run-scoped identity writes enabled;
+4. the 15-minute runner-token and browser compatibility window drained;
+5. legacy credential lending disabled;
+6. the final Vercel deployment reached Ready and was aliased to
+   `https://agents.opencoven.ai`;
+7. the app root retained its expected login redirect, while unauthenticated
+   app credential and Worker agent requests returned `401`.
+
+The final rollout state is
+`RUN_SCOPED_IDENTITY_WRITES_ENABLED=true` and
+`CREDENTIAL_LEGACY_LENDING_ENABLED=false`.
 
 ### Task 12: Enforce sandbox egress and aggressive cleanup
 

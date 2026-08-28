@@ -542,7 +542,9 @@ export function RunConsole() {
     const task = draft.trim();
     setStarting(true);
     try {
-      const snapshot = await client.startRun(selectedAgent.id, task);
+      const snapshot = await client.startRun(selectedAgent.id, task, {
+        harnessId: selectedAgent.runtime,
+      });
       setRuns((current) => [
         { agentId: selectedAgent.id, events: [], lastEventId: 0, snapshot },
         ...current,

@@ -204,13 +204,6 @@ const protectedHandlers: RouteExpectation[] = [
     "usage_read"
   ),
   route(
-    "app/api/analytics/route.ts",
-    "GET",
-    "auth(",
-    ["runHistory("],
-    "analytics_read"
-  ),
-  route(
     "app/(chat)/api/models/route.ts",
     "GET",
     "GET(request",
@@ -283,30 +276,62 @@ test("deferred webhook and internal lending routes stay untouched", () => {
   }
 });
 
-test("internal credential lending reserves before credential decryption", () => {
+test("analytics revalidates subscriber authority before reading history", () => {
+  const source = read("lib/analytics/response.ts");
+  const authorityIndex = source.indexOf("dependencies.authorize(");
+  const historyIndex = source.indexOf("dependencies.readHistory(");
+
+  assert.ok(authorityIndex >= 0);
+  assert.ok(historyIndex > authorityIndex);
+  assert.match(read("app/api/analytics/route.ts"), /ipAddress\(request\)/);
+});
+
+test("internal credential lending binds authority before credential decryption", () => {
   const source = read("app/api/internal/credential/route.ts");
   const post = exportedFunctionBlock(source, "POST");
-  const lending = functionBlock(source, "lendCredentialWithReservation");
+  const issuance = functionBlock(source, "lendCredentialWithReservation");
+  const lending = functionBlock(source, "lendCredentialWithLease");
+  const leaseSource = read("lib/credentials/leases.ts");
+  const consumption = functionBlock(leaseSource, "consumeCredentialLease");
   const ownerIndex = post.indexOf(".select()");
-  const lendingIndex = post.indexOf("lendCredentialWithReservation(");
-  const reserveIndex = lending.indexOf("dependencies.reserve({");
+  const issuanceIndex = post.indexOf("lendCredentialWithReservation(");
+  const reserveIndex = issuance.indexOf("dependencies.reserve({");
+  const issueIndex = issuance.indexOf("dependencies.issue({");
+  const leaseIndex = lending.indexOf("dependencies.lease(");
   const readIndex = lending.indexOf("dependencies.readCredential(");
-  const consumeIndex = lending.indexOf("dependencies.consume({");
+  const markIndex = consumption.indexOf("tx.markConsumed(");
+  const prepareIndex = consumption.indexOf("await prepare()");
+  const operationIndex = consumption.indexOf("operation(tx.credentialStore)");
+  const consumeIndex = consumption.indexOf("tx.consumeReservation(");
 
   assert.ok(ownerIndex >= 0, "credential lending must look up the owner");
   assert.ok(
-    lendingIndex > ownerIndex,
+    issuanceIndex > ownerIndex,
     "owner lookup must precede budget reservation"
   );
-  assert.ok(reserveIndex >= 0, "credential lending must reserve capacity");
+  assert.ok(reserveIndex >= 0, "credential issuance must reserve capacity");
   assert.ok(
-    readIndex > reserveIndex,
-    "reservation must precede credential read"
+    issueIndex > reserveIndex,
+    "reservation must precede immutable lease issuance"
+  );
+  assert.ok(leaseIndex >= 0, "credential lending must consume a lease");
+  assert.ok(
+    readIndex > leaseIndex,
+    "lease consumption must enclose credential read"
   );
   assert.ok(
-    consumeIndex > readIndex,
-    "successful credential retrieval must precede consumption"
+    markIndex >= 0 && markIndex < prepareIndex,
+    "lease consumption must commit before credential preparation"
   );
+  assert.ok(
+    prepareIndex < operationIndex,
+    "provider refresh must precede the side-effect-free credential read"
+  );
+  assert.ok(
+    consumeIndex < operationIndex,
+    "reservation consumption must precede credential decryption"
+  );
+  assert.match(issuance, /releaseAfterLendingFailure/);
   assert.match(lending, /releaseAfterLendingFailure/);
 });
 
@@ -333,10 +358,8 @@ test("device starts encrypt replay payloads while checkout uses tagged plaintext
   const deviceSource = read("app/api/credentials/device/route.ts");
   const checkoutSource = read("app/api/checkout/route.ts");
 
-  assert.match(
-    deviceSource,
-    /encryptedIdempotencyResponseStorage\(credentialKek\)/
-  );
+  assert.match(deviceSource, /encryptedIdempotencyResponseStorage\(/);
+  assert.match(deviceSource, /credentialKekVersion/);
   assert.match(
     functionBlock(deviceSource, "POST"),
     /responseStorage:\s*deviceStartResponseStorage/
@@ -438,6 +461,72 @@ test("run reservation migration creates pseudonymous atomic budgets", () => {
   assert.match(snapshot, /RunUsage_countedAt_idx/);
   assert.match(snapshot, /RunUsage_tenant_countedAt_idx/);
   assert.match(snapshot, /billingPeriodStart/);
+});
+
+test("identity version migration adds a non-null zero default", () => {
+  const migration = read("lib/db/migrations/0008_identity_versions.sql");
+  assert.match(
+    migration,
+    /ALTER TABLE "User" ADD COLUMN "authVersion" integer DEFAULT 0 NOT NULL/i
+  );
+
+  const snapshot = read("lib/db/migrations/meta/0008_snapshot.json");
+  assert.match(snapshot, /"authVersion"/);
+  assert.match(snapshot, /"default": 0/);
+  assert.match(snapshot, /"notNull": true/);
+});
+
+test("credential KEK migration backfills v1 before enforcing the version", () => {
+  const migration = read("lib/db/migrations/0009_credential_kek_versions.sql");
+  assert.match(
+    migration,
+    /ADD COLUMN IF NOT EXISTS "kekVersion" varchar\(32\) DEFAULT 'v1'/i
+  );
+  assert.match(
+    migration,
+    /UPDATE "TenantCredential"[\s\S]*SET "kekVersion" = 'v1'[\s\S]*IS NULL/i
+  );
+  assert.match(migration, /ALTER COLUMN "kekVersion" SET NOT NULL/i);
+  assert.match(migration, /ALTER COLUMN "kekVersion" DROP DEFAULT/i);
+  assert.match(migration, /TenantCredential_kekVersion_valid/);
+
+  const snapshot = read("lib/db/migrations/meta/0009_snapshot.json");
+  assert.match(snapshot, /"kekVersion"/);
+  assert.match(snapshot, /"type": "varchar\(32\)"/);
+  assert.match(snapshot, /"notNull": true/);
+  assert.match(
+    read("lib/db/migrations/meta/_journal.json"),
+    /0009_credential_kek_versions/
+  );
+});
+
+test("session revocation increments in the database update", () => {
+  const source = read("lib/db/queries.ts");
+  const start = source.indexOf("export async function revokeSessionsByEmail");
+  assert.ok(start >= 0);
+  const revoke = source.slice(start, start + 1000);
+
+  assert.match(revoke, /\.update\(user\)/);
+  assert.match(source, /function emailMatches\(normalizedEmail: string\)/);
+  assert.match(
+    source,
+    /lower\(\$\{user\.email\}\) = lower\(\$\{normalizedEmail\}\)/
+  );
+  assert.match(revoke, /count\(\*\).*emailMatches\(normalizedEmail\)/s);
+  assert.match(revoke, /authVersion\} \+ 1/);
+  assert.match(revoke, /\.returning\(\{ authVersion: user\.authVersion/);
+});
+
+test("federated account creation stores canonical lowercase email", () => {
+  const source = read("lib/db/queries.ts");
+  const start = source.indexOf(
+    "export async function findOrCreateFederatedUser"
+  );
+  assert.ok(start >= 0);
+  const federated = source.slice(start, start + 1200);
+
+  assert.match(federated, /normalizeEmail\(email\)/);
+  assert.match(federated, /values\(\{ email: normalizedEmail/);
 });
 
 test("database claims and reclaims idempotency records atomically", () => {

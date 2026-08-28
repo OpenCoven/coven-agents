@@ -20,9 +20,10 @@ test("signed-in guest accounts require a subscription", () => {
 test("subscriber authority returns the typed account identity", () => {
   assert.deepEqual(
     decideSubscriberAccess({
-      user: { id: USER_ID, type: "subscriber" },
+      user: { authVersion: 0, id: USER_ID, type: "subscriber" },
     }),
     {
+      authVersion: 0,
       kind: "allowed",
       session: {
         kind: "subscriber",
@@ -40,5 +41,14 @@ test("unknown account types fail closed as guest access", () => {
       user: { id: USER_ID, type: "owner" },
     }),
     { kind: "subscription_required" }
+  );
+});
+
+test("malformed account ids fail closed at the authorization boundary", () => {
+  assert.deepEqual(
+    decideSubscriberAccess({
+      user: { authVersion: 0, id: "not-a-uuid", type: "subscriber" },
+    }),
+    { kind: "unauthorized" }
   );
 });

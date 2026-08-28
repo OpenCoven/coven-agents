@@ -5,13 +5,20 @@ import { prewarmTenantSandbox } from "./prewarm.server";
 const USER_ID = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
 const FUTURE = new Date(Date.now() + 86_400_000);
 
-async function signingKey(): Promise<string> {
+async function signingKeys(): Promise<{
+  privateKey: string;
+  publicKey: string;
+}> {
   const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
     "sign",
     "verify",
   ])) as CryptoKeyPair;
   const raw = await crypto.subtle.exportKey("pkcs8", pair.privateKey);
-  return Buffer.from(raw).toString("base64url");
+  const publicKey = await crypto.subtle.exportKey("spki", pair.publicKey);
+  return {
+    privateKey: Buffer.from(raw).toString("base64url"),
+    publicKey: Buffer.from(publicKey).toString("base64url"),
+  };
 }
 
 type Recorded = { headers: Record<string, string>; url: string };
@@ -54,15 +61,17 @@ async function withEnv(
 
 test("a subscriber's sign-in warms through the prewarm route", async () => {
   const calls: Recorded[] = [];
+  const keys = await signingKeys();
   await withEnv(
     {
       AGENT_CONTROL_TOKEN: "control-token",
       CLOUD_RUNNER_URL: "https://runner.test/",
-      RUNNER_SIGNING_KEY: await signingKey(),
+      RUNNER_SIGNING_KEY: keys.privateKey,
+      RUNNER_VERIFY_KEY: keys.publicKey,
     },
     async () => {
       await prewarmTenantSandbox(
-        { id: USER_ID, subscribedUntil: FUTURE },
+        { authVersion: 0, id: USER_ID, subscribedUntil: FUTURE },
         recordingFetch(calls)
       );
     }
@@ -79,19 +88,25 @@ test("a subscriber's sign-in warms through the prewarm route", async () => {
 
 test("a lapsed subscription warms nothing and touches no network", async () => {
   const calls: Recorded[] = [];
+  const keys = await signingKeys();
   await withEnv(
     {
       AGENT_CONTROL_TOKEN: "control-token",
       CLOUD_RUNNER_URL: "https://runner.test",
-      RUNNER_SIGNING_KEY: await signingKey(),
+      RUNNER_SIGNING_KEY: keys.privateKey,
+      RUNNER_VERIFY_KEY: keys.publicKey,
     },
     async () => {
       await prewarmTenantSandbox(
-        { id: USER_ID, subscribedUntil: new Date(Date.now() - 1000) },
+        {
+          authVersion: 0,
+          id: USER_ID,
+          subscribedUntil: new Date(Date.now() - 1000),
+        },
         recordingFetch(calls)
       );
       await prewarmTenantSandbox(
-        { id: USER_ID, subscribedUntil: null },
+        { authVersion: 0, id: USER_ID, subscribedUntil: null },
         recordingFetch(calls)
       );
     }
@@ -108,10 +123,11 @@ test("missing configuration skips the warm instead of throwing", async () => {
       CLOUD_RUNNER_URL: undefined,
       NEXT_PUBLIC_CLOUD_RUNNER_URL: undefined,
       RUNNER_SIGNING_KEY: undefined,
+      RUNNER_VERIFY_KEY: undefined,
     },
     async () => {
       await prewarmTenantSandbox(
-        { id: USER_ID, subscribedUntil: FUTURE },
+        { authVersion: 0, id: USER_ID, subscribedUntil: FUTURE },
         recordingFetch(calls)
       );
     }
@@ -123,20 +139,22 @@ test("missing configuration skips the warm instead of throwing", async () => {
 test("every failure inside the warm is swallowed", async () => {
   // Sign-in must never inherit the warmer's problems: a throwing transport
   // and a non-uuid user id both resolve silently.
+  const keys = await signingKeys();
   await withEnv(
     {
       AGENT_CONTROL_TOKEN: "control-token",
       CLOUD_RUNNER_URL: "https://runner.test",
-      RUNNER_SIGNING_KEY: await signingKey(),
+      RUNNER_SIGNING_KEY: keys.privateKey,
+      RUNNER_VERIFY_KEY: keys.publicKey,
     },
     async () => {
       await prewarmTenantSandbox(
-        { id: USER_ID, subscribedUntil: FUTURE },
+        { authVersion: 0, id: USER_ID, subscribedUntil: FUTURE },
         (() =>
           Promise.reject(new Error("socket closed"))) as unknown as typeof fetch
       );
       await prewarmTenantSandbox(
-        { id: "not-a-uuid", subscribedUntil: FUTURE },
+        { authVersion: 0, id: "not-a-uuid", subscribedUntil: FUTURE },
         recordingFetch([])
       );
     }

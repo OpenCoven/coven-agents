@@ -12,6 +12,10 @@ const incidentUrl = new URL(
   "../docs/security/incident-response.md",
   import.meta.url
 );
+const keyRotationUrl = new URL(
+  "../docs/security/key-rotation.md",
+  import.meta.url
+);
 
 test("the execution threat model covers every required security surface", () => {
   assert.equal(existsSync(threatModelUrl), true);
@@ -61,11 +65,15 @@ test("the incident runbooks name every secret that exists", () => {
 
   for (const secret of [
     "CREDENTIAL_KEK",
+    "CREDENTIAL_KEK_CURRENT_VERSION",
+    "CREDENTIAL_KEK_V1",
+    "CREDENTIAL_KEK_V2",
     "POSTGRES_URL",
     "AUTH_SECRET",
     "RUNNER_SIGNING_KEY",
     "RUNNER_VERIFY_KEY",
     "AGENT_CONTROL_TOKEN",
+    "OPERATOR_DIAGNOSTIC_TOKEN",
     "RUNNER_SERVICE_TOKEN",
     "AUTH_GITHUB_SECRET",
     "STRIPE_SECRET_KEY",
@@ -152,12 +160,12 @@ test("local cloud-runner setup shares distinct control and service tokens", () =
   );
 });
 
-test("the README diagnostic sends the acquired runner identity", () => {
+test("the README diagnostic uses the separate operator credential", () => {
   const readme = readFileSync(readmeUrl, "utf8");
-  const identityVariable = "$RUNNER_IDENTITY_TOKEN";
+  const operatorVariable = "$OPERATOR_DIAGNOSTIC_TOKEN";
 
-  assert.ok(readme.includes(`-H "Authorization: Bearer ${identityVariable}"`));
-  assert.equal(readme.includes('-H "Authorization: ******"'), false);
+  assert.ok(readme.includes(`-H "Authorization: Bearer ${operatorVariable}"`));
+  assert.equal(readme.includes("$RUNNER_IDENTITY_TOKEN"), false);
 });
 
 test("the README points to the incident runbooks", () => {
@@ -167,4 +175,56 @@ test("the README points to the incident runbooks", () => {
     readme,
     /\[Security incident response\]\(docs\/security\/incident-response\.md\)/
   );
+});
+
+test("the runner key runbook documents bounded rotation and rollback", () => {
+  assert.equal(existsSync(keyRotationUrl), true);
+  const runbook = readFileSync(keyRotationUrl, "utf8");
+
+  for (const marker of [
+    "RUNNER_SIGNING_KEY_ID",
+    "RUNNER_VERIFY_KEY_ID",
+    "RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT",
+    "RUNNER_VERIFY_PREVIOUS_RETIRE_AT",
+    "15 minutes plus",
+    "Rollback",
+    "never commit or log",
+  ]) {
+    assert.match(runbook, new RegExp(marker.replaceAll("*", "\\*")));
+  }
+});
+
+test("the credential key runbook documents staged rewrap and retirement", () => {
+  const runbook = readFileSync(keyRotationUrl, "utf8");
+
+  for (const marker of [
+    "CREDENTIAL_KEK_CURRENT_VERSION",
+    "CREDENTIAL_KEK_V1",
+    "CREDENTIAL_KEK_V2",
+    "credentials:rewrap --from v1 --to v2",
+    "credentials:rewrap verify --version v1",
+    "zero `v1` rows",
+    "opaque row",
+    "Exit `0`",
+    "Exit `2`",
+    "Exit `1`",
+  ]) {
+    assert.match(runbook, new RegExp(marker.replaceAll("*", "\\*")));
+  }
+});
+
+test("auth callbacks and the client update preserve server-owned identity", () => {
+  const authSource = readFileSync(
+    new URL("../app/(auth)/auth.ts", import.meta.url),
+    "utf8"
+  );
+  const avatarSource = readFileSync(
+    new URL("../components/account/avatar-settings.tsx", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(authSource, /token\.authVersion = row\.authVersion/);
+  assert.match(authSource, /session\.user\.authVersion = token\.authVersion/);
+  assert.match(authSource, /return refreshTokenType\(token, new Date\(\)\)/);
+  assert.match(avatarSource, /await update\(\{ image \}\)/);
 });

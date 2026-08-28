@@ -70,13 +70,13 @@ different configuration surfaces and must not be treated as interchangeable.
 | Owner directory | `ADMIN_EMAILS` containing the exact normalized owner email allowlist when `/admin` is enabled. | Unauthorized page and API requests fail closed as non-cacheable `404` responses. Because the proxy participates in the production build, set this consistently for build and runtime. |
 | Production app abuse and run admission | Require all three app environment variables: `REDIS_URL`, a nonempty `ABUSE_KEY_SECRET`, and a positive-integer `GLOBAL_DAILY_RUN_CAP`. `ABUSE_CONTROL=off` is an emergency bypass for app request-policy enforcement only; normal releases require it unset or not `off`. It does not bypass run reservations, global or tenant cap enforcement, or Worker rate limiters. | Protected app routes fail closed with `503` when Redis is unconfigured in production. Credential lending fails closed with `503` and `capacity_unavailable` when the global cap or abuse key is unavailable. See [`.env.example`](../../.env.example), [`lib/abuse/enforce.ts`](../../lib/abuse/enforce.ts), and [`app/api/internal/credential/route.ts`](../../app/api/internal/credential/route.ts). |
 | App-to-runner connection | `NEXT_PUBLIC_CLOUD_RUNNER_URL` or server-side `CLOUD_RUNNER_URL`, plus matching `AGENT_CONTROL_TOKEN`. | The browser receives the connection from the app; the public URL requires a fresh app build when changed. |
-| Runner identity | App `RUNNER_SIGNING_KEY`; app and Worker `RUNNER_VERIFY_KEY`; matching key pair. | Claims fail closed when either side is absent or mismatched. |
-| Credential lending | App and Worker `RUNNER_SERVICE_TOKEN`; app `CREDENTIAL_KEK`; Worker `APP_ORIGIN`. | The Worker has no operator or fallback harness credential. |
+| Runner identity | App `RUNNER_SIGNING_KEY_ID`/`RUNNER_SIGNING_KEY`/`RUNNER_SIGNING_PUBLIC_KEY`; Worker `RUNNER_VERIFY_KEY_ID`/`RUNNER_VERIFY_KEY` plus an optional previous key ring with last-signed and retirement timestamps. | Claims carry `authVersion` and optional run scope, fail closed when either side is absent or mismatched, and are re-authorized against current account state before credential access. Rotate with the [key runbook](../security/key-rotation.md). |
+| Credential lending | App and Worker `RUNNER_SERVICE_TOKEN`; app `CREDENTIAL_KEK_CURRENT_VERSION` with the required `CREDENTIAL_KEK_V1`/`CREDENTIAL_KEK_V2` ring; Worker `APP_ORIGIN`. | The Worker has no operator or fallback harness credential. Production rollout must complete AAD binding, versioned rewrap, run-scoped identity, authority revalidation, and one-run credential lease gates before retiring compatibility keys or flags. |
 | Billing | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, and canonical `APP_ORIGIN`. | Checkout and webhook return `503` when unconfigured. |
 | Release audience | Set `RELEASE_AUDIENCE` exactly to `closed-beta` or `public`. Closed beta additionally requires `BETA_MODE=on` and a reviewed, nonempty `BETA_ALLOWLIST` containing only valid email addresses; public release requires separate approval and `BETA_MODE=off`. | [`scripts/validate-runtime-config.ts`](../../scripts/validate-runtime-config.ts) enforces this automatically for Vercel production and other `NODE_ENV=production` validation. Automatic runtime validation exempts Vercel preview/development builds, while `pnpm validate:release` always enforces. Unset/default-off cannot pass either production path. |
 | Other shipped app paths | `AI_GATEWAY_API_KEY` and `BLOB_READ_WRITE_TOKEN` when chat/model and upload paths remain enabled. | These are app feature dependencies, not runner credentials. |
-| Worker service bindings | Runtime bindings for `AGENT_CONTROL_TOKEN`, `RUNNER_VERIFY_KEY`, `RUNNER_SERVICE_TOKEN`, and `APP_ORIGIN`; plain Worker variable `ALLOWED_ORIGIN`; Durable Object/container bindings and migration; container image; and Wrangler authentication. | [`worker/.dev.vars.example`](../../worker/.dev.vars.example), [`worker/src/worker-secrets.d.ts`](../../worker/src/worker-secrets.d.ts), and [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc) define the current topology. |
-| Worker abuse controls | Secret binding `EDGE_ABUSE_KEY_SECRET` plus Cloudflare Rate Limiting bindings `EDGE_REQUEST_LIMITER`, `TENANT_MUTATION_LIMITER`, and `TENANT_RUN_LIMITER`. | The rate limiters are platform bindings declared under `ratelimits` in [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc), not app environment variables or `.dev.vars` entries. |
+| Worker service bindings | Secret bindings for `AGENT_CONTROL_TOKEN`, `OPERATOR_DIAGNOSTIC_TOKEN`, current and optional previous `RUNNER_VERIFY_*` key-ring values, `RUNNER_SERVICE_TOKEN`, and `APP_ORIGIN`; plain Worker variable `ALLOWED_ORIGIN`; Durable Object/container bindings and migrations; container image; and Wrangler authentication. | [`worker/.dev.vars.example`](../../worker/.dev.vars.example), [`worker/src/worker-secrets.d.ts`](../../worker/src/worker-secrets.d.ts), and [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc) define the current topology. The diagnostic token is separate from browser-visible deployment and identity credentials. |
+| Worker abuse and admission controls | Secret binding `EDGE_ABUSE_KEY_SECRET`; Cloudflare Rate Limiting bindings `EDGE_REQUEST_LIMITER`, `TENANT_MUTATION_LIMITER`, and `TENANT_RUN_LIMITER`; and reviewed `RUN_ADMISSION_*` queue/capacity values. | Rate limiters are platform bindings under `ratelimits`; admission values are plain Wrangler variables. Neither is an app environment variable or bypassed by `ABUSE_CONTROL=off`. |
 | Demo recorder | Recorder variables from [`.env.example`](../../.env.example) only when producing a new owner-approved replay. | Guest playback itself is committed, stateless evidence and needs no recorder secret. |
 | Local execution | — | The local runner was removed in `91f21c8`; the shared contract accepts only `cloud`. Local smoke is not a current release gate. |
 
@@ -155,16 +155,12 @@ ADMIN_EMAILS=e2e-admin@example.invalid pnpm build
 Retain command, commit, environment, timestamp, exit status, and sanitized
 output. The placeholder `ADMIN_EMAILS` value above is a local audit fixture,
 not release configuration. `AUTH_SECRET` must be supplied from local
-environment storage and must not be committed. The last full snapshot passed
-check, typecheck, 947 unit tests, sixteen browser tests against development and
-local production servers, both default and demo production builds, and the
-local Docker-backed Sandbox diagnostic, but hygiene failed; it is not release
-evidence for this post-admission-queue candidate. The first production-browser
-attempt on the roadmap branch omitted `AUTH_SECRET` and failed three
-subscriber-shaped tests at their explicit configuration guard; the corrected
-command above passed all sixteen before the latest `main` merge. Rerun all six
-gates against the final candidate. A tracked secret scan is recommended in
-addition to, not instead of, the six gates.
+environment storage and must not be committed. The deployed `57023f1` baseline
+recorded green check, typecheck, 947 unit tests, seventeen browser tests,
+default and demo production builds, and the Docker-backed Sandbox diagnostic.
+That evidence predates this merge candidate and cannot substitute for rerunning
+all six gates against its final signed commit. A tracked secret scan is
+recommended in addition to, not instead of, the six gates.
 
 Because an ordinary local build intentionally does not infer a release
 audience, also retain a successful `pnpm validate:release` with the intended
@@ -176,7 +172,7 @@ skipped audience validation is not release evidence.
 
 | Path | Required smoke | Evidence required | Current state |
 | --- | --- | --- | --- |
-| Demo | Load the signed-out root, verify no database/runner mutation, exercise play, pause, seek, speed, and completion, and inspect sanitized replay output. | Dated browser trace or recording tied to the candidate and deployment. | A local production replay reached 10/10 sanitized events without console errors on 2026-08-27; no release-equivalent deployment artifact is retained. |
+| Demo | Deploy/build with `IS_DEMO=1`, load the signed-out root, play the committed replay through completion, and verify sanitized output with no database or runner persistence. | Dated browser trace or recording tied to the candidate and deployment. | A local production replay reached 10/10 sanitized events without console errors on 2026-08-27; no release-equivalent deployment artifact is retained. |
 | Subscriber | Exercise a real GitHub OAuth callback and account creation/adoption, guest refusal, active eligibility, expired/revoked refusal, connection retrieval, and usage display. | Dated trace plus sanitized account-state evidence for allowed and denied cases. | Eligibility logic and mocked OAuth start are covered; actual OAuth/account creation is not verified. |
 | Cloud | Run the authenticated deployment diagnostic, create an agent, start and observe a credentialed run, stream/poll to terminal state, cancel a bounded run, delete the agent, and verify tenant/sandbox cleanup. | Dated Worker/app logs, response summary, run identifiers, and cleanup result without credentials or private output. | The local Docker-backed diagnostic passes with the SDK-matched image. No deployed release-equivalent create/run/stream/cancel/delete lifecycle artifact exists. |
 | Local, if supported | Create, run, cancel, and delete through the supported local boundary, including host isolation and cleanup checks. | Dated artifact from the declared supported local environment. | Not applicable: no local runner is tracked and `backend` is cloud-only. |
@@ -221,8 +217,11 @@ recovery implementation or current production delivery artifact is retained.
 Release evidence must prove:
 
 - the deployment token grants reach but never tenant identity;
-- the signing and verification keys agree, and old or mismatched claims fail;
-- the service token cannot select a tenant without a valid bound claim;
+- current and previous signing/verification key IDs agree, retirement windows
+  are bounded, stale `authVersion` claims fail, and run-scoped claims bind the
+  agent, harness, and operation;
+- the service token cannot select a tenant without authority revalidation,
+  matching run scope, a valid reservation, and a one-run credential lease;
 - two controlled tenants cannot list, run, stream, stop, delete, or borrow each
   other's resources or credentials;
 - `CREDENTIAL_KEK` is present, tenant credentials decrypt only for their tenant
@@ -280,8 +279,11 @@ or guess at database compatibility.
 - **Cloud run state:** current code records bounded lifecycle state and marks
   interrupted runs, but crash, restart, and partial-write recovery are not
   verified against real persistence. Do not claim recovery certification.
-- **Tenant credentials:** database plus KEK are required. Rotating a compromised
-  KEK has no rewrap path; tenants must reconnect.
+- **Tenant credentials:** database plus the complete versioned KEK ring are
+  required. Rewrap and AAD binding are resumable and CAS-protected; retain old
+  keys until verification reports zero old-version and legacy-AAD rows. Active
+  one-run leases remain authority-bound and must not be reconstructed from
+  Worker state.
 - **Deleted or retained evidence:** no automated purge or restore is authorized.
   Use explicit retention/deletion procedures with tenant and privacy review
   before destructive work.
@@ -296,7 +298,7 @@ or guess at database compatibility.
 | Roadmap freshness | `pnpm roadmap:status check` passes after authoritative reconciliation. | Stale aggregate. | **No-go:** the candidate Project check can pass, but Beads freshness cannot be established. |
 | Worktree safety | `pnpm hygiene` exits zero with no `AT RISK` worktree and the secondary count within the soft cap. | Any `AT RISK` worktree or a secondary count above the soft cap. | **No-go:** the 2026-08-27 candidate run found two unrelated `AT RISK` worktrees and four secondary worktrees against the soft cap of three. |
 | Beads/Project/issues | A second apply and final preview are a complete no-op, and accepted delivery artifacts agree. | Drift, create/update/orphan work, partial or failed sync, or issue contradiction. | **No-go:** authoritative sync cannot run; the latest recorded Project query found managed items were drafts. |
-| Six local gates | All six pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** check, typecheck, unit, build, and all 16 configured production browser tests passed; hygiene failed for the worktree conditions above. |
+| Six local gates | All six pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** the prior deployed baseline passed its non-hygiene gates, but no complete retained run exists for the final merge candidate. |
 | Database | Staging migration, production backup, migration success, schema verification, and recovery record exist. | Missing backup, skipped/failed migration, or unproved recovery. | **No-go:** no candidate-specific production migration and restore artifact is retained. |
 | Smoke and Stripe | Demo, subscriber, cloud, and webhook evidence pass; Stripe claim/update recovery is atomic and retry-safe; local runs only if supported. | Any failed required smoke, missing webhook delivery, or claim-before-state behavior that permanently deduplicates failed processing. | **No-go:** only local/unit evidence is retained, and current Stripe claim/update ordering is not retry-safe. |
 | Isolation | Tenant, credential, identity, and redaction evidence pass in a release-equivalent environment. | Any cross-tenant or secret-boundary failure. | **No-go:** production-like isolation evidence is not retained. |

@@ -163,8 +163,9 @@ test("pre-commit and CI invoke the staged and tracked scanners", () => {
 test("a secret with no vendor prefix is still caught, by its name", () => {
   /**
    * The gap this closes. Every vendor pattern keys on a prefix, and this
-   * project's own secrets have none -- AUTH_SECRET, CREDENTIAL_KEK, and
-   * RUNNER_SIGNING_KEY are raw base64. The most damaging values in the
+   * project's own secrets have none -- AUTH_SECRET, the versioned credential
+   * KEK ring, and RUNNER_SIGNING_KEY are raw base64. The most damaging values
+   * in the
    * repository were the ones the scanner could not see.
    */
   for (const name of [
@@ -172,6 +173,7 @@ test("a secret with no vendor prefix is still caught, by its name", () => {
     "CREDENTIAL_KEK",
     "RUNNER_SIGNING_KEY",
     "AGENT_CONTROL_TOKEN",
+    "OPERATOR_DIAGNOSTIC_TOKEN",
     "RUNNER_SERVICE_TOKEN",
     "STRIPE_WEBHOOK_SECRET",
     "AUTH_GITHUB_SECRET",
@@ -182,6 +184,101 @@ test("a secret with no vendor prefix is still caught, by its name", () => {
     assert.equal(findings.length, 1, `${name} was not caught`);
     assert.match(findings[0].category, new RegExp(name));
   }
+});
+
+test("versioned credential KEKs are caught in assignments and JSON", () => {
+  for (const [filePath, source] of [
+    ["config.ts", `const CREDENTIAL_KEK_V1 = "${RANDOM_BASE64}";`],
+    [".env.example", `CREDENTIAL_KEK_V2=${RANDOM_BASE64}`],
+    ["config.json", `{"CREDENTIAL_KEK_V3":"${RANDOM_BASE64}"}`],
+    ["config.json", `{"CREDENTIAL_KEK_FUTURE_2027":"${RANDOM_BASE64}"}`],
+  ]) {
+    const findings = scanText(filePath, source);
+
+    assert.equal(findings.length, 1, source);
+    assert.match(findings[0].category, /CREDENTIAL_KEK/);
+  }
+
+  assert.deepEqual(
+    scanText("config.json", `{"CREDENTIAL_KEK_CURRENT_VERSION":"v2"}`),
+    []
+  );
+});
+
+test("credential KEKs catch all-letter base64 keys and suspicious malformed values", () => {
+  const alphabeticKey = "A".repeat(43);
+  const malformedLongValue = `not-a-real-key-${"z".repeat(32)}`;
+
+  for (const source of [
+    `CREDENTIAL_KEK_V1="${alphabeticKey}"`,
+    `{"CREDENTIAL_KEK_V2":"${alphabeticKey}"}`,
+  ]) {
+    const findings = scanText("config.env", source);
+    assert.equal(findings.length, 1, source);
+    assert.match(findings[0].category, /CREDENTIAL_KEK/);
+  }
+
+  const malformedFindings = scanText(
+    ".env",
+    `CREDENTIAL_KEK_V1='${malformedLongValue}'`
+  );
+  assert.equal(malformedFindings.length, 1);
+  assert.match(malformedFindings[0].category, /CREDENTIAL_KEK_V1/);
+});
+
+test("scans every credential KEK key in a JSON line regardless of order", () => {
+  for (const source of [
+    `{"CREDENTIAL_KEK_CURRENT_VERSION":"v2","CREDENTIAL_KEK_V1":"${RANDOM_BASE64}"}`,
+    `{"CREDENTIAL_KEK_V1":"${RANDOM_BASE64}","CREDENTIAL_KEK_CURRENT_VERSION":"v2"}`,
+  ]) {
+    const findings = scanText("config.json", source);
+
+    assert.equal(findings.length, 1, source);
+    assert.equal(findings[0]?.category, "value assigned to CREDENTIAL_KEK_V1");
+  }
+});
+
+test("scans multiple versioned credential KEKs on one line", () => {
+  const findings = scanText(
+    "config.json",
+    `{"CREDENTIAL_KEK_V1":"${RANDOM_BASE64}","CREDENTIAL_KEK_V2":"${RANDOM_HEX}"}`
+  );
+
+  assert.deepEqual(
+    findings.map(({ category, line }) => ({ category, line })),
+    [
+      { category: "value assigned to CREDENTIAL_KEK_V1", line: 1 },
+      { category: "value assigned to CREDENTIAL_KEK_V2", line: 1 },
+    ]
+  );
+});
+
+test("scans versioned credential KEKs across multiline env assignments", () => {
+  const findings = scanText(
+    ".env",
+    [
+      `CREDENTIAL_KEK_V1=${RANDOM_BASE64}`,
+      `CREDENTIAL_KEK_V2=${RANDOM_HEX}`,
+    ].join("\n")
+  );
+
+  assert.deepEqual(
+    findings.map(({ category, line }) => ({ category, line })),
+    [
+      { category: "value assigned to CREDENTIAL_KEK_V1", line: 1 },
+      { category: "value assigned to CREDENTIAL_KEK_V2", line: 2 },
+    ]
+  );
+});
+
+test("does not report the credential KEK current-version selector", () => {
+  assert.deepEqual(
+    scanText(
+      "config.json",
+      `{"CREDENTIAL_KEK_CURRENT_VERSION":"v1","OTHER":"safe"}`
+    ),
+    []
+  );
 });
 
 test("a connection string is caught by its inline password", () => {
@@ -207,6 +304,7 @@ test("placeholders and references are not mistaken for secrets", () => {
     // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal text is the input under test.
     "${SOME_VAR}",
     "process.env.AUTH_SECRET",
+    "keys.currentPrivateKey",
     "recordingCredential",
     "RECORDING_CREDENTIAL",
     "runner-control-sensitive",

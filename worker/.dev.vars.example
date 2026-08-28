@@ -1,7 +1,11 @@
 AGENT_CONTROL_TOKEN=replace-with-a-long-random-token
+OPERATOR_DIAGNOSTIC_TOKEN=replace-with-a-different-long-random-token
 EDGE_ABUSE_KEY_SECRET=replace-with-a-long-random-secret
+RUNNER_VERIFY_KEY_ID=key-local
 RUNNER_VERIFY_KEY=replace-with-the-base64url-ed25519-public-key
-RUNNER_SERVICE_TOKEN=replace-with-a-long-random-token
-APP_ORIGIN=http://localhost:3000
+RUNNER_AUTH_VERSION=0
+RUNNER_SERVICE_TOKEN=replace-with-a-long-random-service-token
+RUNNER_URL=http://127.0.0.1:8788
+APP_ORIGIN=http://127.0.0.1:9797
 # Harness credentials are tenant-owned and fetched per run. Do not add provider
 # or operator harness tokens to the Worker environment.

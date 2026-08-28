@@ -19,8 +19,10 @@ import {
   AgentDecommissioningError,
   hashOperation,
 } from "./run-state";
+import type { RunnerAuthorityResult } from "./runner-authority";
 
 const TOKEN = "test-token";
+const OPERATOR_TOKEN = "operator-diagnostic-token";
 const MINE = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
 const THEIRS = "9c1b7d2f-5a6b-4c90-8f1a-0f4e1f4d4a2e";
 const CALLER_TENANT = "tenant_under_test";
@@ -86,7 +88,9 @@ function identityToken(): Promise<string> {
   if (!suiteToken) {
     suiteToken = getKeyPair().then((pair) =>
       mint(pair.privateKey, {
+        authVersion: 0,
         exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+        kid: "legacy",
         plan: "subscriber",
         sub: "user-1",
         tenant: CALLER_TENANT,
@@ -112,6 +116,7 @@ const environmentPromise = verifyKeySpki().then((spki) => ({
   ALLOWED_ORIGIN: "*",
   EDGE_ABUSE_KEY_SECRET: "test-edge-abuse-secret",
   EDGE_REQUEST_LIMITER: new RecordingLimiter(),
+  OPERATOR_DIAGNOSTIC_TOKEN: OPERATOR_TOKEN,
   RUNNER_VERIFY_KEY: spki,
   TENANT_MUTATION_LIMITER: new RecordingLimiter(),
   TENANT_RUN_LIMITER: new RecordingLimiter(),
@@ -147,12 +152,17 @@ const agents = new Map<string, AgentDefinition>([
 let decommissioned: string[] = [];
 let stopped: string[] = [];
 let warmed: string[] = [];
+let authorityDirectoryLookups = 0;
 let configureFailure: Error | null = null;
 
-function runner() {
+function runner(
+  authority: RunnerAuthorityResult = { kind: "allowed" },
+  useDefaultAuthority = false
+) {
   decommissioned = [];
   stopped = [];
   warmed = [];
+  authorityDirectoryLookups = 0;
 
   const directory: CloudRunnerDirectory = {
     list: (tenantId) =>
@@ -180,6 +190,23 @@ function runner() {
       decommission: () => {
         decommissioned.push(agentId);
       },
+      enqueue: (_input: unknown, runId: string) => ({
+        created: false,
+        run: {
+          agentId: MINE,
+          apiVersion: "2026-08-01",
+          commandEvidence: [],
+          completedAt: "2026-08-20T12:00:05.000Z",
+          createdAt: "2026-08-20T12:00:00.000Z",
+          fileEvidence: [],
+          id: runId,
+          operationId: MINE,
+          output: "done",
+          startedAt: "2026-08-20T12:00:01.000Z",
+          status: "completed",
+          task: "Do the thing.",
+        },
+      }),
       getEventStream: () => ({ events: [], terminal: false }),
       // Returns a real run rather than null. With null the route 404s because
       // the run is missing, so the test would pass whether or not ownership is
@@ -229,7 +256,11 @@ function runner() {
     }) as unknown as CloudRunnerAgent;
 
   return createCloudRunner({
-    getDirectory: () => directory,
+    ...(useDefaultAuthority ? {} : { checkAuthority: () => authority }),
+    getDirectory: () => {
+      authorityDirectoryLookups += 1;
+      return directory;
+    },
     getYoloAgent,
   });
 }
@@ -250,6 +281,111 @@ async function call(path: string, method = "GET"): Promise<Response> {
     environment as never
   );
 }
+
+test("default authority dependency gates health, auth, create, and run while forged identity is denied", async () => {
+  const environment = {
+    ...(await environmentPromise),
+    APP_ORIGIN: "https://app.test",
+    RUNNER_SERVICE_TOKEN: "service-token",
+  };
+  const token = await identityToken();
+  const authorityRequests: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/api/internal/runner-authority") {
+      const body = JSON.parse(String(init?.body)) as { token?: string };
+      authorityRequests.push(body.token ?? "");
+      const authorized =
+        new Headers(init?.headers).get("x-service-token") === "service-token" &&
+        body.token === token;
+      return Promise.resolve(
+        Response.json(
+          authorized ? { allowed: true } : { error: "unauthorized" },
+          { status: authorized ? 200 : 401 }
+        )
+      );
+    }
+    return Promise.reject(new Error(`unexpected fetch: ${url}`));
+  }) as unknown as typeof fetch;
+
+  try {
+    assert.equal(
+      (
+        await runner(undefined, true).fetch(
+          new Request("https://runner.test/api/health"),
+          environment as never
+        )
+      ).status,
+      200
+    );
+
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-runner-token": TOKEN,
+    };
+    const authorized = runner(undefined, true);
+    assert.equal(
+      (
+        await authorized.fetch(
+          new Request("https://runner.test/api/agents", { headers }),
+          environment as never
+        )
+      ).status,
+      200
+    );
+    assert.equal(
+      (
+        await authorized.fetch(
+          new Request("https://runner.test/api/agents", {
+            body: JSON.stringify({
+              backend: "cloud",
+              instructions: "Do the thing.",
+              model: "auto",
+              name: "Created",
+              runtime: "copilot",
+            }),
+            headers,
+            method: "POST",
+          }),
+          environment as never
+        )
+      ).status,
+      201
+    );
+    assert.equal(
+      (
+        await authorized.fetch(
+          new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+            body: JSON.stringify({
+              operationId: "44444444-5555-4666-8777-888888888888",
+              task: "Do the thing.",
+            }),
+            headers,
+            method: "POST",
+          }),
+          environment as never
+        )
+      ).status,
+      202
+    );
+    assert.equal(authorityRequests.length, 3);
+
+    const forged = await authorized.fetch(
+      new Request("https://runner.test/api/agents", {
+        headers: {
+          ...headers,
+          authorization: "Bearer forged.runner.token",
+        },
+      }),
+      environment as never
+    );
+    assert.equal(forged.status, 401);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("source floods are refused before deployment-token verification", async () => {
   const environment = await environmentPromise;
@@ -380,6 +516,255 @@ test("tenant reads consume no mutation or run capacity", async () => {
   assert.equal(mutation.keys.length, 0);
   assert.equal(run.keys.length, 0);
 });
+
+test("revoked identity is refused before request body parsing or downstream calls", async () => {
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  const response = await runner({ kind: "unauthorized" }).fetch(
+    new Request("https://runner.test/api/agents", {
+      body: "not-json",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(authorityDirectoryLookups, 0);
+  assert.deepEqual(decommissioned, []);
+  assert.deepEqual(warmed, []);
+});
+
+test("lapsed identity is refused before sandbox or durable-object work", async () => {
+  const response = await callWithRunner("/api/agents", "GET", {
+    kind: "subscription_required",
+  });
+
+  assert.equal(response.status, 403);
+  assert.equal(authorityDirectoryLookups, 0);
+  assert.deepEqual(decommissioned, []);
+  assert.deepEqual(warmed, []);
+});
+
+test("the subscriber-visible control token cannot authorize the sandbox diagnostic", async () => {
+  const environment = await environmentPromise;
+  let diagnostics = 0;
+  const response = await createCloudRunner({
+    diagnoseSandbox: () => {
+      diagnostics += 1;
+      return {
+        exitCode: 0,
+        ok: true,
+        output: "coven-agents",
+      };
+    },
+    getDirectory: () => {
+      throw new Error("diagnostics must not open a tenant directory");
+    },
+    getYoloAgent: () => {
+      throw new Error("diagnostics must not open an agent");
+    },
+  }).fetch(
+    new Request("https://runner.test/api/diagnostics/sandbox", {
+      headers: { "x-runner-token": TOKEN },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(diagnostics, 0);
+});
+
+test("the diagnostic accepts the separate operator token without tenant identity", async () => {
+  const environment = await environmentPromise;
+  let diagnostics = 0;
+  const response = await createCloudRunner({
+    diagnoseSandbox: () => {
+      diagnostics += 1;
+      return { exitCode: 0, ok: true, output: "coven-agents" };
+    },
+    getDirectory: () => {
+      throw new Error("diagnostics must not open a tenant directory");
+    },
+    getYoloAgent: () => {
+      throw new Error("diagnostics must not open an agent");
+    },
+  }).fetch(
+    new Request("https://runner.test/api/diagnostics/sandbox", {
+      headers: { authorization: `Bearer ${OPERATOR_TOKEN}` },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(diagnostics, 1);
+});
+
+test("the diagnostic fails closed when operator and control secrets are aliases", async () => {
+  const environment = await environmentPromise;
+  let diagnostics = 0;
+  const response = await createCloudRunner({
+    diagnoseSandbox: () => {
+      diagnostics += 1;
+      return { exitCode: 0, ok: true, output: "coven-agents" };
+    },
+    getDirectory: () => {
+      throw new Error("diagnostics must not open a tenant directory");
+    },
+    getYoloAgent: () => {
+      throw new Error("diagnostics must not open an agent");
+    },
+  }).fetch(
+    new Request("https://runner.test/api/diagnostics/sandbox", {
+      headers: { authorization: `Bearer ${OPERATOR_TOKEN}` },
+      method: "POST",
+    }),
+    {
+      ...environment,
+      AGENT_CONTROL_TOKEN: OPERATOR_TOKEN,
+    } as never
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(diagnostics, 0);
+});
+
+test("the diagnostic fails closed when the operator token is missing", async () => {
+  const { OPERATOR_DIAGNOSTIC_TOKEN: _operatorToken, ...environment } =
+    await environmentPromise;
+  let diagnostics = 0;
+  const response = await createCloudRunner({
+    diagnoseSandbox: () => {
+      diagnostics += 1;
+      return { exitCode: 0, ok: true, output: "coven-agents" };
+    },
+    getDirectory: () => {
+      throw new Error("diagnostics must not open a tenant directory");
+    },
+    getYoloAgent: () => {
+      throw new Error("diagnostics must not open an agent");
+    },
+  }).fetch(
+    new Request("https://runner.test/api/diagnostics/sandbox", {
+      headers: { authorization: `Bearer ${OPERATOR_TOKEN}` },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(diagnostics, 0);
+});
+
+test("the diagnostic fails closed when the control token is missing", async () => {
+  const { AGENT_CONTROL_TOKEN: _controlToken, ...environment } =
+    await environmentPromise;
+  let diagnostics = 0;
+  const response = await createCloudRunner({
+    diagnoseSandbox: () => {
+      diagnostics += 1;
+      return { exitCode: 0, ok: true, output: "coven-agents" };
+    },
+    getDirectory: () => {
+      throw new Error("diagnostics must not open a tenant directory");
+    },
+    getYoloAgent: () => {
+      throw new Error("diagnostics must not open an agent");
+    },
+  }).fetch(
+    new Request("https://runner.test/api/diagnostics/sandbox", {
+      headers: { authorization: `Bearer ${OPERATOR_TOKEN}` },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(diagnostics, 0);
+});
+
+test("a runner identity cannot substitute for the diagnostic operator token", async () => {
+  const environment = await environmentPromise;
+  let diagnostics = 0;
+  const response = await createCloudRunner({
+    diagnoseSandbox: () => {
+      diagnostics += 1;
+      return { exitCode: 0, ok: true, output: "coven-agents" };
+    },
+    getDirectory: () => {
+      throw new Error("diagnostics must not open a tenant directory");
+    },
+    getYoloAgent: () => {
+      throw new Error("diagnostics must not open an agent");
+    },
+  }).fetch(
+    new Request("https://runner.test/api/diagnostics/sandbox", {
+      headers: { "x-runner-token": "ordinary-runner-token" },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(diagnostics, 0);
+});
+
+test("a diagnostic request carrying runner identity is refused rather than bypassing revocation", async () => {
+  const environment = await environmentPromise;
+  let diagnostics = 0;
+  const response = await createCloudRunner({
+    diagnoseSandbox: () => {
+      diagnostics += 1;
+      return { exitCode: 0, ok: true, output: "coven-agents" };
+    },
+    getDirectory: () => {
+      throw new Error("diagnostics must not open a tenant directory");
+    },
+    getYoloAgent: () => {
+      throw new Error("diagnostics must not open an agent");
+    },
+  }).fetch(
+    new Request("https://runner.test/api/diagnostics/sandbox", {
+      headers: {
+        authorization: "Bearer revoked-runner-identity",
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    environment as never
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(diagnostics, 0);
+});
+
+async function callWithRunner(
+  path: string,
+  method: string,
+  authority: RunnerAuthorityResult
+): Promise<Response> {
+  const [environment, token] = await Promise.all([
+    environmentPromise,
+    identityToken(),
+  ]);
+  return runner(authority).fetch(
+    new Request(`https://runner.test${path}`, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-runner-token": TOKEN,
+      },
+      method,
+    }),
+    environment as never
+  );
+}
 
 test("limiter outages fail closed without revealing the failed scope", async () => {
   const environment = await environmentPromise;
@@ -645,7 +1030,9 @@ test("a demo claim cannot start a run", async () => {
   // missing credential, or succeeds outright on one still stored.
   const pair = await getKeyPair();
   const demoToken = await mint(pair.privateKey, {
+    authVersion: 0,
     exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    kid: "legacy",
     plan: "demo",
     sub: "user-1",
     tenant: CALLER_TENANT,
@@ -669,6 +1056,43 @@ test("a demo claim cannot start a run", async () => {
   );
 
   assert.equal(response.status, 403);
+});
+
+test("a run-scoped claim must match the stored agent harness and operation", async () => {
+  const operationId = "44444444-5555-4666-8777-888888888888";
+  const pair = await getKeyPair();
+  const token = await mint(pair.privateKey, {
+    authVersion: 0,
+    exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    kid: "legacy",
+    plan: "subscriber",
+    run: {
+      agentId: MINE,
+      harnessId: "claude",
+      operationId,
+    },
+    sub: "user-1",
+    tenant: CALLER_TENANT,
+  });
+
+  const response = await runner().fetch(
+    new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+      body: JSON.stringify({ operationId, task: "do the thing" }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "x-runner-token": TOKEN,
+      },
+      method: "POST",
+    }),
+    (await environmentPromise) as never
+  );
+
+  assert.equal(response.status, 403);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "identity_mismatch"
+  );
 });
 
 /**
@@ -761,6 +1185,7 @@ async function failingRunner(error: Error): Promise<Response> {
   };
 
   return createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getDirectory: () => directory,
     getYoloAgent: () => ({}) as unknown as CloudRunnerAgent,
   }).fetch(
@@ -830,7 +1255,9 @@ test("a demo claim creates without warming", async () => {
   // nothing.
   const pair = await getKeyPair();
   const demoToken = await mint(pair.privateKey, {
+    authVersion: 0,
     exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    kid: "legacy",
     plan: "demo",
     sub: "user-1",
     tenant: CALLER_TENANT,
@@ -870,7 +1297,9 @@ test("tenant prewarm boots the most recently used agent", async () => {
 test("tenant prewarm with no agents warms nothing", async () => {
   const pair = await getKeyPair();
   const token = await mint(pair.privateKey, {
+    authVersion: 0,
     exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    kid: "legacy",
     plan: "subscriber",
     sub: "user-2",
     tenant: "t_no_agents",
@@ -894,7 +1323,9 @@ test("tenant prewarm with no agents warms nothing", async () => {
 test("a demo claim cannot prewarm", async () => {
   const pair = await getKeyPair();
   const demoToken = await mint(pair.privateKey, {
+    authVersion: 0,
     exp: Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SECONDS,
+    kid: "legacy",
     plan: "demo",
     sub: "user-1",
     tenant: CALLER_TENANT,
@@ -938,7 +1369,7 @@ function queuedRun(
 
 test("run admission happens before dispatch and receives only a tenant hash", async () => {
   const operationId = "33333333-4444-4555-8666-777777777777";
-  const runId = "44444444-5555-4666-8777-888888888888";
+  const runId = operationId;
   const calls: string[] = [];
   const admissionRequests: {
     mode?: string;
@@ -951,10 +1382,11 @@ test("run admission happens before dispatch and receives only a tenant hash", as
     discardRun: () => undefined,
     enqueue: (
       _input: unknown,
-      _runId: string,
+      suppliedRunId: string,
       _requestHash: string,
       _identityToken: string
     ) => {
+      assert.equal(suppliedRunId, operationId);
       calls.push("enqueue");
       return { created: true, run };
     },
@@ -989,6 +1421,7 @@ test("run admission happens before dispatch and receives only a tenant hash", as
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: (input) => {
         calls.push("admit");
@@ -1074,6 +1507,7 @@ test("run admission passes its durable capability directly to confirmation", asy
   ]);
 
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () =>
         ({
@@ -1167,6 +1601,7 @@ test("terminal prepared admission cleans its exact queued local run without regi
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: (input) => ({
         admissionCapability: { ...capability, runId: input.runId },
@@ -1251,6 +1686,7 @@ test("terminal prepared admission returns and registers an already-terminal loca
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => ({ admissionCapability: capability, kind: "active", runId }),
       confirmPreparedAdmission: () => ({ kind: "terminal" as const }),
@@ -1328,6 +1764,7 @@ test("a terminal duplicate reconciles stale admission before returning the termi
     CALLER_TENANT
   );
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => {
         throw new Error("a terminal duplicate must not admit again");
@@ -1452,6 +1889,7 @@ test("concurrent identical requests reconcile a shared preparation without disca
     identityToken(),
   ]);
   const runnerInstance = createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => admission,
     getDirectory: () => ({
       list: () => [agents.get(MINE) as AgentDefinition],
@@ -1561,6 +1999,7 @@ test("repeated duplicate confirmations finalize the coordinator cleanup task ide
     identityToken(),
   ]);
   const runnerInstance = createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => admission,
     getDirectory: () => ({
       list: () => [agents.get(MINE) as AgentDefinition],
@@ -1645,6 +2084,7 @@ test("a cross-tenant duplicate cannot return or release a foreign admission", as
     ),
   };
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => {
         throw new Error("a duplicate must not admit again");
@@ -1732,6 +2172,7 @@ test("a stale local duplicate cannot release a different run with the same opera
     ),
   };
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => {
         throw new Error("a duplicate must not admit again");
@@ -1801,6 +2242,7 @@ test("an orphan queued duplicate resumes admission with its existing run", async
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: (input: { runId: string }) => {
         admittedRunId = input.runId;
@@ -1934,6 +2376,7 @@ test("duplicate retries repair missing directory mappings for every run state", 
       }),
     };
     const runnerInstance = createCloudRunner({
+      checkAuthority: () => ({ kind: "allowed" }),
       getAdmission: () => ({
         admit: () => {
           throw new Error("a duplicate must not admit again");
@@ -2043,6 +2486,7 @@ test("reject mode preflights local contention without creating a provisional run
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => {
         admissionCalls += 1;
@@ -2116,6 +2560,7 @@ test("schedule failure registers provisional cleanup before admission can refuse
     ["x-runner-token", TOKEN],
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => {
         admittedAfterRegistration = provisional !== undefined;
@@ -2182,6 +2627,7 @@ test("reject mode refuses an unhealthy admission object without bypassing it", a
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => Promise.reject(new Error("admission unavailable")),
       release: () => false,
@@ -2243,6 +2689,7 @@ test("reject mode does not clean up an unexpected queued decision", async () => 
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => {
         calls.push("admit");
@@ -2310,6 +2757,7 @@ test("reject mode does not race cleanup for an unexpected queued decision", asyn
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => {
         calls.push("admit");
@@ -2411,6 +2859,7 @@ test("reject mode does not schedule cleanup for an unexpected queued decision", 
     identityToken(),
   ]);
   const runnerInstance = createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => admission,
     getDirectory: () => ({
       list: () => [agents.get(MINE) as AgentDefinition],
@@ -2499,6 +2948,7 @@ test("a failed provisional cleanup keeps local owner cleanup armed without admis
   ]);
 
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: () => Promise.reject(new Error("admission unavailable")),
       enqueueCleanup: () => {
@@ -2639,6 +3089,7 @@ test("registerRun failure stops the run, releases admission, and allows reuse", 
     identityToken(),
   ]);
   const runnerInstance = createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => admission,
     getDirectory: () => directory,
     getYoloAgent: () => agent,
@@ -2762,6 +3213,7 @@ test("a run mapping is unregistered when the admitted run disappears after regis
     identityToken(),
   ]);
   const response = await createCloudRunner({
+    checkAuthority: () => ({ kind: "allowed" }),
     getAdmission: () => ({
       admit: (input: { runId: string }) => ({
         kind: "active" as const,

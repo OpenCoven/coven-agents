@@ -1,4 +1,8 @@
-import { base64UrlDecode, splitToken } from "@opencoven/agent-contracts";
+import {
+  base64UrlDecode,
+  type RunnerRunScope,
+  splitToken,
+} from "@opencoven/agent-contracts";
 
 /**
  * Replace a token this long before it expires.
@@ -12,7 +16,7 @@ const MINT_ENDPOINT = "/api/runner-token";
 
 type FetchLike = (
   input: string,
-  init?: { method?: string }
+  init?: { body?: string; headers?: Record<string, string>; method?: string }
 ) => Promise<Response>;
 
 /** Reads `exp` without verifying — the worker verifies; this only schedules. */
@@ -47,15 +51,27 @@ function expiryOf(token: string): number | null {
  */
 export function createIdentityMinter(
   fetchImpl: FetchLike = (input, init) => fetch(input, init)
-): () => Promise<string> {
+): (run?: RunnerRunScope) => Promise<string> {
   let cached: { expiresAt: number; token: string } | null = null;
 
-  return async () => {
-    if (cached && cached.expiresAt - Date.now() > IDENTITY_REFRESH_MARGIN_MS) {
+  return async (run) => {
+    if (
+      !run &&
+      cached &&
+      cached.expiresAt - Date.now() > IDENTITY_REFRESH_MARGIN_MS
+    ) {
       return cached.token;
     }
 
-    const response = await fetchImpl(MINT_ENDPOINT, { method: "POST" });
+    const response = await fetchImpl(MINT_ENDPOINT, {
+      ...(run
+        ? {
+            body: JSON.stringify({ run }),
+            headers: { "content-type": "application/json" },
+          }
+        : {}),
+      method: "POST",
+    });
     if (!response.ok) {
       throw new Error(
         `Could not obtain a runner identity (${response.status}). Sign in and try again.`
@@ -74,7 +90,9 @@ export function createIdentityMinter(
       throw new Error("The identity endpoint returned an unreadable token.");
     }
 
-    cached = { expiresAt, token: body.token };
+    if (!run) {
+      cached = { expiresAt, token: body.token };
+    }
     return body.token;
   };
 }

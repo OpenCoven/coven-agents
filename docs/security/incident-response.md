@@ -33,8 +33,8 @@ was larger than assumed costs trust.
 
 | Level | Meaning | Examples | First action |
 | --- | --- | --- | --- |
-| **S1** | Another tenant's data is reachable | `CREDENTIAL_KEK`, `POSTGRES_URL`, a tenant's harness credential | Rotate immediately, then notify affected tenants |
-| **S2** | Our infrastructure is controllable, tenant data is not directly exposed | `RUNNER_SIGNING_KEY`, `AGENT_CONTROL_TOKEN`, `RUNNER_SERVICE_TOKEN`, `AUTH_SECRET` | Rotate immediately |
+| **S1** | Another tenant's data is reachable | Credential KEK ring, `POSTGRES_URL`, a tenant's harness credential | Rotate immediately, then notify affected tenants |
+| **S2** | Our infrastructure is controllable, tenant data is not directly exposed | `RUNNER_SIGNING_KEY`, `AGENT_CONTROL_TOKEN`, `OPERATOR_DIAGNOSTIC_TOKEN`, `RUNNER_SERVICE_TOKEN`, `AUTH_SECRET` | Rotate immediately |
 | **S3** | Cost or availability, no data boundary crossed | endpoint URL known, unauthenticated request flood | Measure, then decide |
 
 An **S1** is the only class that creates an obligation to someone other than
@@ -47,11 +47,12 @@ Everything that grants something, where it lives, and what it costs to rotate.
 
 | Secret | Stored in | Grants | Rotation cost |
 | --- | --- | --- | --- |
-| `CREDENTIAL_KEK` | Vercel | Decryption of every stored tenant credential | **Every tenant must reconnect** |
+| `CREDENTIAL_KEK_CURRENT_VERSION`, `CREDENTIAL_KEK_V1`, `CREDENTIAL_KEK_V2`, and legacy `CREDENTIAL_KEK` | Vercel | Versioned decryption of tenant credential data keys | Rewrap before retiring an old key |
 | `POSTGRES_URL` and the `PG*` family | Vercel (Neon integration) | Full read/write on all tenant data | Brief downtime |
 | `AUTH_SECRET` | Vercel | Forging any signed-in session | Everyone is signed out |
-| `RUNNER_SIGNING_KEY` / `RUNNER_VERIFY_KEY` | Vercel / Vercel + worker | Minting an identity for any tenant | ≤15 min of failed runs |
-| `AGENT_CONTROL_TOKEN` | Vercel + worker | Reaching the worker at all | Seconds of failed runs |
+| `RUNNER_SIGNING_KEY_ID`, `RUNNER_SIGNING_KEY`, `RUNNER_SIGNING_PUBLIC_KEY`, and Worker `RUNNER_VERIFY_*` ring | Vercel / Vercel + worker | Minting an identity for any tenant | ≤15 min of failed runs |
+| `AGENT_CONTROL_TOKEN` | Vercel + worker | Reaching the worker deployment for browser requests | Seconds of failed runs |
+| `OPERATOR_DIAGNOSTIC_TOKEN` | Worker | Running the operator-only Sandbox diagnostic | Seconds of failed diagnostics |
 | `RUNNER_SERVICE_TOKEN` | Vercel + worker | Calling the internal credential endpoint | Seconds of failed runs |
 | `AUTH_GITHUB_SECRET` | Vercel | Impersonating our OAuth app | Sign-in breaks until updated |
 | `STRIPE_SECRET_KEY` | Vercel | Charging and refunding | None |
@@ -130,9 +131,9 @@ secret in every visitor's browser.
 
 ### `AGENT_CONTROL_TOKEN` — the worker's front door
 
-**Grants.** Reaching the worker at all. It does *not* identify anyone: a
-caller still needs an Ed25519 identity minted from a signed-in session, so this
-token alone cannot read or start anything.
+**Grants.** Reaching the worker at all. It does *not* identify a tenant: all
+reads, runs, and other tenant operations still need an Ed25519 identity minted
+from a signed-in session. It cannot authorize `/api/diagnostics/sandbox`.
 
 **Rotate.**
 
@@ -169,6 +170,43 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 # 401 expected
 ```
 
+### `OPERATOR_DIAGNOSTIC_TOKEN` — the deployment diagnostic
+
+**Grants.** Running `POST /api/diagnostics/sandbox` without tenant identity.
+This secret is stored only as a Worker secret, is compared timing-safely, and
+is never returned to the app or browser. The route is rate-limited before
+authentication and fails closed with `503` if the secret is missing.
+
+**Rotate.**
+
+```bash
+NEW="$(openssl rand -hex 32)"
+
+cd worker
+printf '%s' "$NEW" | npx wrangler secret put OPERATOR_DIAGNOSTIC_TOKEN
+```
+
+**Verify.** Do not print either value. The old value must be refused, the
+browser-visible control token must remain refused, and only the new operator
+value may return the diagnostic result:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST https://coven-agents-runner.opencovenagents.workers.dev/api/diagnostics/sandbox \
+  -H "Authorization: Bearer <old value>"
+# 401 expected
+
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST https://coven-agents-runner.opencovenagents.workers.dev/api/diagnostics/sandbox \
+  -H "X-Runner-Token: <AGENT_CONTROL_TOKEN>"
+# 401 expected
+
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST https://coven-agents-runner.opencovenagents.workers.dev/api/diagnostics/sandbox \
+  -H "Authorization: Bearer <new value>"
+# 200 expected
+```
+
 ### `RUNNER_SERVICE_TOKEN` — the internal credential endpoint
 
 **Grants.** Calling `/api/internal/credential`, which lends a tenant's harness
@@ -180,14 +218,17 @@ order, same reason.
 
 **Verify.** `/api/internal/credential` returns 401 for the old value.
 
-### `RUNNER_SIGNING_KEY` and `RUNNER_VERIFY_KEY` — the identity pair
+### Runner signing and verification key ring
 
 **Grants.** The signing key mints an identity claiming to be *any* tenant.
 This is the closest thing to a master key that does not touch the database.
 
-**They are a pair and must change together.** The worker verifies with
-`RUNNER_VERIFY_KEY`; the app signs with `RUNNER_SIGNING_KEY`. A mismatch means
-every run fails.
+**The current ID and key pair must change together. The Worker verifies with
+`RUNNER_VERIFY_KEY_ID`/`RUNNER_VERIFY_KEY`; the app signs with
+`RUNNER_SIGNING_KEY_ID`/`RUNNER_SIGNING_KEY`. A mismatch means every run
+fails. Keep the old public key configured as `RUNNER_VERIFY_PREVIOUS_KEY` until
+15 minutes plus clock skew have elapsed; never overwrite an unversioned key in
+place.
 
 ```bash
 # Generate an Ed25519 pair; export the PKCS8 private key and the SPKI public key
@@ -202,32 +243,60 @@ console.log("VERIFY", Buffer.from(spki).toString("base64url"));
 '
 ```
 
-Set `RUNNER_VERIFY_KEY` on the worker and in Vercel, and `RUNNER_SIGNING_KEY`
-in Vercel, then redeploy both.
+Set the Worker current/previous public-key ring through Wrangler and the app's
+current signing ring through Vercel, then redeploy both. The complete procedure
+and rollback are in [Runner key rotation](key-rotation.md). Never log key
+material.
 
 **What breaks.** Identity tokens live 15 minutes (`TOKEN_LIFETIME_SECONDS`), so
 in-flight runs fail until they are re-minted. There is no revocation list —
 short expiry *is* the revocation mechanism, which is why the lifetime is short.
 
-### `CREDENTIAL_KEK` — read this before rotating
+### Credential KEK ring — read this before rotating
 
 **Grants.** Unwrapping the per-credential data keys, and therefore every stored
-tenant credential. **S1.**
+tenant credential. **S1.** Rows name their exact version; the app encrypts only
+with `CREDENTIAL_KEK_CURRENT_VERSION` and never tries every configured key.
 
-**Rotating it destroys access to every stored credential.** Each row holds a
-DEK wrapped with AES-KW under this one KEK; change the KEK and no existing
-`wrappedKey` can be unwrapped again. There is no re-wrap path implemented.
+Configure `CREDENTIAL_KEK_CURRENT_VERSION`, `CREDENTIAL_KEK_V1`, and
+`CREDENTIAL_KEK_V2`. During staged migration, the old `CREDENTIAL_KEK` may
+alias only explicit `v1`; it is never a general fallback. If both the legacy
+and `CREDENTIAL_KEK_V1` values are present, they must be identical or the app
+fails closed. Missing, blank, malformed, duplicate, and unknown versions fail
+closed. Rewrap exit `0` means complete, `2` means resumable work remains, and
+`1` means configuration or corruption failure.
 
-So there are two different situations:
+Removing the only configured KEK destroys access to every stored credential.
+Do not delete `CREDENTIAL_KEK_V1` while any row still names `v1`.
 
-- **The KEK leaked.** Rotate anyway. Every tenant must reconnect their harness,
-  and you must tell them why. Their *GitHub* credentials should also be treated
-  as exposed and revoked on GitHub's side — see the tenant runbook below.
-- **The KEK did not leak** and you are rotating on principle. Don't, not until
-  a re-wrap migration exists. Write the migration first.
+1. Deploy with the existing secret explicitly configured as `v1`, keeping the
+   legacy alias only until migration is complete.
+2. Add `CREDENTIAL_KEK_V2`, switch the current version to `v2`, and deploy.
+3. Rewrap in bounded, resumable batches:
 
-**Verify.** After rotation, `/api/credentials` reports no configured harnesses
-for any tenant. If it still reports one, the old KEK is still in use.
+   ```bash
+   pnpm credentials:rewrap --from v1 --to v2 --batch 100
+   ```
+
+4. Use `--dry-run` to verify target rows without writing, then run:
+
+   ```bash
+   pnpm credentials:rewrap verify --version v1
+   ```
+
+   The gate is successful only with zero `v1` rows and successful read-only
+   unwrap verification for every current-version row. It prints counts and
+   opaque row IDs only; exit `2` is an explicit resumable status, not success.
+5. Remove the legacy alias after zero `v1` rows. Retire `CREDENTIAL_KEK_V1`
+   only after the gate passes in production. If the KEK leaked, also notify
+   affected tenants and have them revoke their GitHub credentials.
+
+Before retirement, rollback is safe: set the current version back to `v1`,
+retain both versioned keys, and rewrap in the reverse direction:
+
+```bash
+pnpm credentials:rewrap --from v2 --to v1 --batch 100
+```
 
 ### `AUTH_SECRET` — sessions
 

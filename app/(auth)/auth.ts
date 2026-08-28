@@ -1,11 +1,16 @@
 import { after } from "next/server";
-import NextAuth, { type DefaultSession } from "next-auth";
+import NextAuth, { type DefaultSession, type Session } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
 import GitHub from "next-auth/providers/github";
 import { prewarmTenantSandbox } from "@/lib/agents/prewarm.server";
 import { fetchGithubEmail } from "@/lib/auth/github-email-fetch";
-import { findOrCreateFederatedUser } from "@/lib/db/queries";
+import {
+  authVersionMatches,
+  validAuthVersion,
+} from "@/lib/auth/session-revocation";
+import { findOrCreateFederatedUser, findUserById } from "@/lib/db/queries";
 import { refreshTokenType } from "@/lib/session-claims";
+import { userTypeFor } from "@/lib/subscription";
 import { authConfig } from "./auth.config";
 
 export type UserType = "demo" | "subscriber";
@@ -13,12 +18,14 @@ export type UserType = "demo" | "subscriber";
 declare module "next-auth" {
   interface Session extends DefaultSession {
     user: {
+      authVersion: number;
       id: string;
       type: UserType;
     } & DefaultSession["user"];
   }
 
   interface User {
+    authVersion?: number;
     email?: string | null;
     id?: string;
     subscribedUntil?: Date | null;
@@ -28,6 +35,7 @@ declare module "next-auth" {
 
 declare module "next-auth/jwt" {
   interface JWT extends DefaultJWT {
+    authVersion?: number;
     id: string;
     /** Carried so `type` can be recomputed without a database read. */
     subscribedUntil?: string | null;
@@ -37,7 +45,7 @@ declare module "next-auth/jwt" {
 
 export const {
   handlers: { GET, POST },
-  auth,
+  auth: nextAuth,
   signIn,
   signOut,
 } = NextAuth({
@@ -81,6 +89,7 @@ export const {
         const row = await findOrCreateFederatedUser(email);
         token.email = row.email;
         token.id = row.id;
+        token.authVersion = row.authVersion;
         // Carried on the token so the account menu can render the stored
         // avatar without a database read on every request. `update()` from
         // the settings form is what keeps it current between sign-ins.
@@ -95,6 +104,7 @@ export const {
         try {
           after(() =>
             prewarmTenantSandbox({
+              authVersion: row.authVersion,
               id: row.id,
               subscribedUntil: row.subscribedUntil ?? null,
             })
@@ -108,6 +118,7 @@ export const {
 
       if (user) {
         token.id = user.id as string;
+        token.authVersion = user.authVersion ?? 0;
         // The date, not the derived type, is what gets carried. `type` used to
         // be written here once and never recomputed, so a lapsed subscription
         // kept subscriber entitlements — and a subscriber session is what may
@@ -121,6 +132,9 @@ export const {
     session({ session, token }) {
       if (session.user) {
         session.user.id = token.id;
+        if (validAuthVersion(token.authVersion)) {
+          session.user.authVersion = token.authVersion;
+        }
         session.user.type = token.type;
         session.user.image = token.picture ?? null;
       }
@@ -149,3 +163,45 @@ export const {
     }),
   ],
 });
+
+/**
+ * NextAuth verifies the cookie, but the cookie is not the authority for
+ * revocation. Every server-side authorization helper calls this wrapper,
+ * which re-reads the user row and rejects stale or malformed versions.
+ */
+export async function auth() {
+  let session: Session | null;
+  try {
+    session = await nextAuth();
+  } catch {
+    return null;
+  }
+
+  if (!session) {
+    return null;
+  }
+  const userId = session?.user?.id;
+  if (!userId) {
+    return null;
+  }
+
+  const tokenAuthVersion = session.user.authVersion;
+  if (!validAuthVersion(tokenAuthVersion)) {
+    return null;
+  }
+
+  let owner: Awaited<ReturnType<typeof findUserById>>;
+  try {
+    owner = await findUserById(userId);
+  } catch {
+    return null;
+  }
+  if (!owner || !authVersionMatches(owner.authVersion, tokenAuthVersion)) {
+    return null;
+  }
+
+  session.user.authVersion = owner.authVersion;
+  session.user.type = userTypeFor(owner, new Date());
+  session.user.image = owner.image ?? null;
+  return session;
+}

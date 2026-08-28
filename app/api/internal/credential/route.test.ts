@@ -4,6 +4,7 @@ import {
   type RunReservationRecord,
   tenantHashForReservation,
 } from "@/lib/billing/run-reservations";
+import { CredentialLeaseDeniedError } from "@/lib/credentials/leases";
 import {
   CapReachedError,
   fetchTenantCredential,
@@ -11,6 +12,9 @@ import {
 import {
   authorizeInternalRequest,
   type CredentialLendingDependencies,
+  credentialRunScopeMatches,
+  legacyCredentialLendingEnabled,
+  lendCredentialWithLease,
   lendCredentialWithReservation,
 } from "./route";
 
@@ -77,6 +81,55 @@ test("an unconfigured service token never authorizes", () => {
   assert.equal(authorizeInternalRequest(request(), ""), false);
 });
 
+test("credential scope binds the signed agent, harness, and operation", () => {
+  const scope = {
+    agentId: "11111111-1111-4111-8111-111111111111",
+    harnessId: "copilot",
+    operationId: "22222222-2222-4222-8222-222222222222",
+  };
+  const scopedRequest = {
+    ...scope,
+    requestId: "request-1",
+    runId: scope.operationId,
+  };
+
+  assert.equal(credentialRunScopeMatches(scope, scopedRequest), true);
+  assert.equal(
+    credentialRunScopeMatches(scope, {
+      ...scopedRequest,
+      harnessId: "claude",
+    }),
+    false
+  );
+  assert.equal(
+    credentialRunScopeMatches(scope, {
+      ...scopedRequest,
+      operationId: "33333333-3333-4333-8333-333333333333",
+    }),
+    false
+  );
+  assert.equal(
+    credentialRunScopeMatches(scope, {
+      ...scopedRequest,
+      requestId: undefined,
+    }),
+    false
+  );
+  assert.equal(
+    credentialRunScopeMatches(scope, {
+      ...scopedRequest,
+      runId: "33333333-3333-4333-8333-333333333333",
+    }),
+    false
+  );
+});
+
+test("legacy lending is fail-closed unless explicitly enabled", () => {
+  assert.equal(legacyCredentialLendingEnabled(undefined), false);
+  assert.equal(legacyCredentialLendingEnabled("false"), false);
+  assert.equal(legacyCredentialLendingEnabled("true"), true);
+});
+
 test("a token of the wrong length is refused without comparing content", () => {
   assert.equal(
     authorizeInternalRequest(
@@ -87,6 +140,61 @@ test("a token of the wrong length is refused without comparing content", () => {
   );
 });
 
+test("an oversized credential body is rejected before any credential work", async () => {
+  const previous = process.env.RUNNER_SERVICE_TOKEN;
+  process.env.RUNNER_SERVICE_TOKEN = "service-secret";
+  try {
+    const response = await (await import("./route")).POST(
+      new Request("https://app.test/api/internal/credential", {
+        body: "x".repeat(8193),
+        headers: {
+          "content-length": "8193",
+          "x-service-token": "service-secret",
+        },
+        method: "POST",
+      })
+    );
+    assert.equal(response.status, 413);
+    assert.deepEqual(await response.json(), { error: "request_too_large" });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.RUNNER_SERVICE_TOKEN;
+    } else {
+      process.env.RUNNER_SERVICE_TOKEN = previous;
+    }
+  }
+});
+
+test("an oversized identity token is rejected before database or reservation work", async () => {
+  const previous = process.env.RUNNER_SERVICE_TOKEN;
+  process.env.RUNNER_SERVICE_TOKEN = "service-secret";
+  try {
+    const response = await (await import("./route")).POST(
+      new Request("https://app.test/api/internal/credential", {
+        body: JSON.stringify({
+          harnessId: "copilot",
+          requestId: "request-1",
+          runId: "run-1",
+          tenant: "tenant_acme",
+        }),
+        headers: {
+          authorization: `Bearer ${"x".repeat(8193)}`,
+          "content-type": "application/json",
+          "x-service-token": "service-secret",
+        },
+        method: "POST",
+      })
+    );
+    assert.equal(response.status, 401);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.RUNNER_SERVICE_TOKEN;
+    } else {
+      process.env.RUNNER_SERVICE_TOKEN = previous;
+    }
+  }
+});
+
 function lendingInput(
   overrides: Partial<Parameters<typeof lendCredentialWithReservation>[0]> = {}
 ) {
@@ -95,7 +203,9 @@ function lendingInput(
     harnessId: "claude",
     keySecret: "fixed-test-abuse-key-secret",
     now: NOW,
+    operationId: "22222222-2222-4222-8222-222222222222",
     periodStart: PERIOD_START,
+    requestId: "request-1",
     resetsAt: RESETS_AT,
     runId: "run-1",
     tenant: "tenant_acme",
@@ -108,15 +218,32 @@ function lendingDependencies(
   overrides: Partial<CredentialLendingDependencies> = {}
 ): CredentialLendingDependencies {
   return {
-    consume: () => {
-      events.push("consume");
+    consumeLegacy: () => {
+      events.push("consume-legacy");
       return Promise.resolve({
         kind: "consumed",
-        reservation: RESERVATION,
+        reservation: { ...RESERVATION, consumedAt: NOW, state: "consumed" },
       });
+    },
+    issue: () => {
+      events.push("issue");
+      return Promise.resolve();
+    },
+    lease: async (_input, prepare, operation) => {
+      events.push("lease");
+      await prepare();
+      return await operation({} as never);
+    },
+    prepareCredential: () => {
+      events.push("prepare");
+      return Promise.resolve(true);
     },
     readCredential: () => {
       events.push("read");
+      return Promise.resolve("credential-secret");
+    },
+    readCredentialLegacy: () => {
+      events.push("read-legacy");
       return Promise.resolve("credential-secret");
     },
     release: () => {
@@ -138,17 +265,48 @@ function lendingDependencies(
   };
 }
 
-test("reservation precedes credential read and consumption follows it", async () => {
+test("the one-use lease is consumed before credential read", async () => {
   const events: string[] = [];
+  const dependencies = lendingDependencies(events);
 
-  const response = await lendCredentialWithReservation(
+  const issued = await lendCredentialWithReservation(
     lendingInput(),
-    lendingDependencies(events)
+    dependencies
   );
+  const response = await lendCredentialWithLease(lendingInput(), dependencies);
 
+  assert.equal(issued.status, 201);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { credential: "credential-secret" });
-  assert.deepEqual(events, ["reserve", "read", "consume"]);
+  assert.deepEqual(events, ["reserve", "issue", "lease", "prepare", "read"]);
+});
+
+test("the worker contract completes issuance before credential consumption", async () => {
+  const events: string[] = [];
+  const dependencies = lendingDependencies(events);
+
+  const credential = await fetchTenantCredential(
+    {
+      agentId: "11111111-1111-4111-8111-111111111111",
+      harnessId: "claude",
+      operationId: "22222222-2222-4222-8222-222222222222",
+      requestId: "request-1",
+      runId: "run-1",
+      tenant: "tenant_acme",
+    },
+    {
+      endpoint: "https://app.test",
+      fetchImpl: (url) =>
+        new URL(url).searchParams.get("phase") === "issue"
+          ? lendCredentialWithReservation(lendingInput(), dependencies)
+          : lendCredentialWithLease(lendingInput(), dependencies),
+      identityToken: "identity",
+      serviceToken: "service",
+    }
+  );
+
+  assert.equal(credential, "credential-secret");
+  assert.deepEqual(events, ["reserve", "issue", "lease", "prepare", "read"]);
 });
 
 test("missing global capacity configuration fails before credential read", async () => {
@@ -215,6 +373,28 @@ test("tenant cap refusals are stable and do not read a credential", async () => 
   );
 });
 
+test("a run id already counted in usage is rejected before credential work", async () => {
+  const events: string[] = [];
+  const response = await lendCredentialWithReservation(
+    lendingInput(),
+    lendingDependencies(events, {
+      reserve: () => {
+        events.push("reserve");
+        return Promise.resolve({
+          kind: "conflict",
+          reason: "run_already_counted",
+        });
+      },
+    })
+  );
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    error: "reservation_unavailable",
+  });
+  assert.deepEqual(events, ["reserve"]);
+});
+
 test("tenant cap payloads round-trip through the worker contract", async () => {
   const cases = [
     {
@@ -242,7 +422,14 @@ test("tenant cap payloads round-trip through the worker contract", async () => {
       await assert.rejects(
         () =>
           fetchTenantCredential(
-            { harnessId: "claude", runId: "run-1", tenant: "tenant_acme" },
+            {
+              agentId: "11111111-1111-4111-8111-111111111111",
+              harnessId: "claude",
+              operationId: "22222222-2222-4222-8222-222222222222",
+              requestId: "request-1",
+              runId: "run-1",
+              tenant: "tenant_acme",
+            },
             {
               endpoint: "https://app.test",
               fetchImpl: () =>
@@ -325,7 +512,14 @@ test("global admission closure stays generic through the worker contract", async
   await assert.rejects(
     () =>
       fetchTenantCredential(
-        { harnessId: "claude", runId: "run-1", tenant: "tenant_acme" },
+        {
+          agentId: "11111111-1111-4111-8111-111111111111",
+          harnessId: "claude",
+          operationId: "22222222-2222-4222-8222-222222222222",
+          requestId: "request-1",
+          runId: "run-1",
+          tenant: "tenant_acme",
+        },
         {
           endpoint: "https://app.test",
           fetchImpl,
@@ -340,57 +534,93 @@ test("global admission closure stays generic through the worker contract", async
 
 test("a missing credential releases the reservation", async () => {
   const events: string[] = [];
-  const response = await lendCredentialWithReservation(
-    lendingInput(),
-    lendingDependencies(events, {
-      readCredential: () => {
-        events.push("read");
-        return Promise.resolve(null);
-      },
-    })
-  );
+  const dependencies = lendingDependencies(events, {
+    readCredential: () => {
+      events.push("read");
+      return Promise.resolve(null);
+    },
+  });
+  await lendCredentialWithReservation(lendingInput(), dependencies);
+  const response = await lendCredentialWithLease(lendingInput(), dependencies);
 
   assert.equal(response.status, 404);
   assert.deepEqual(await response.json(), { error: "no_credential" });
-  assert.deepEqual(events, ["reserve", "read", "release"]);
+  assert.deepEqual(events, [
+    "reserve",
+    "issue",
+    "lease",
+    "prepare",
+    "read",
+    "release",
+  ]);
+});
+
+test("a revoked credential is removed before the final lending transaction", async () => {
+  const events: string[] = [];
+  const dependencies = lendingDependencies(events, {
+    prepareCredential: () => {
+      events.push("prepare");
+      return Promise.resolve(false);
+    },
+  });
+  await lendCredentialWithReservation(lendingInput(), dependencies);
+  const response = await lendCredentialWithLease(lendingInput(), dependencies);
+
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { error: "no_credential" });
+  assert.deepEqual(events, ["reserve", "issue", "lease", "prepare", "release"]);
 });
 
 test("a credential read failure releases the reservation and stays bounded", async () => {
   const events: string[] = [];
-  const response = await lendCredentialWithReservation(
-    lendingInput(),
-    lendingDependencies(events, {
-      readCredential: () => {
-        events.push("read");
-        return Promise.reject(new Error("sensitive decrypt detail"));
-      },
-    })
-  );
+  const dependencies = lendingDependencies(events, {
+    readCredential: () => {
+      events.push("read");
+      return Promise.reject(new Error("sensitive decrypt detail"));
+    },
+  });
+  await lendCredentialWithReservation(lendingInput(), dependencies);
+  const response = await lendCredentialWithLease(lendingInput(), dependencies);
 
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), {
     error: "credential_unavailable",
   });
-  assert.deepEqual(events, ["reserve", "read", "release"]);
+  assert.deepEqual(events, [
+    "reserve",
+    "issue",
+    "lease",
+    "prepare",
+    "read",
+    "release",
+  ]);
 });
 
-test("a failed consumption releases any still-active reservation", async () => {
+test("a failed atomic lease transaction releases any still-active reservation", async () => {
   const events: string[] = [];
-  const response = await lendCredentialWithReservation(
-    lendingInput(),
-    lendingDependencies(events, {
-      consume: () => {
-        events.push("consume");
-        return Promise.resolve({ kind: "missing" });
-      },
-    })
-  );
+  const dependencies = lendingDependencies(events, {
+    lease: async (_input, prepare, operation) => {
+      events.push("lease");
+      await prepare();
+      await operation({} as never);
+      throw new Error("lease transaction failed");
+    },
+  });
+  await lendCredentialWithReservation(lendingInput(), dependencies);
+  const response = await lendCredentialWithLease(lendingInput(), dependencies);
 
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), {
     error: "credential_unavailable",
   });
-  assert.deepEqual(events, ["reserve", "read", "consume", "release"]);
+  assert.deepEqual(events, [
+    "reserve",
+    "issue",
+    "lease",
+    "prepare",
+    "read",
+    "release",
+  ]);
 });
 
 test("a previously released duplicate never reads a credential", async () => {
@@ -417,4 +647,69 @@ test("a previously released duplicate never reads a credential", async () => {
     error: "reservation_unavailable",
   });
   assert.deepEqual(events, ["reserve"]);
+});
+
+test("a previously consumed duplicate cannot issue another lease", async () => {
+  const events: string[] = [];
+  const response = await lendCredentialWithReservation(
+    lendingInput(),
+    lendingDependencies(events, {
+      reserve: () => {
+        events.push("reserve");
+        return Promise.resolve({
+          kind: "existing",
+          reservation: {
+            ...RESERVATION,
+            consumedAt: NOW,
+            state: "consumed",
+          },
+        });
+      },
+    })
+  );
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    error: "reservation_unavailable",
+  });
+  assert.deepEqual(events, ["reserve"]);
+});
+
+test("a losing concurrent issuance cannot release the winning reservation", async () => {
+  const events: string[] = [];
+  const response = await lendCredentialWithReservation(
+    lendingInput(),
+    lendingDependencies(events, {
+      issue: () => {
+        events.push("issue");
+        return Promise.reject(
+          new CredentialLeaseDeniedError("run_already_leased")
+        );
+      },
+    })
+  );
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    error: "credential_lease_unavailable",
+  });
+  assert.deepEqual(events, ["reserve", "issue"]);
+});
+
+test("a replayed credential lease is denied before credential decryption", async () => {
+  const events: string[] = [];
+  const dependencies = lendingDependencies(events, {
+    lease: () => {
+      events.push("lease");
+      return Promise.reject(new CredentialLeaseDeniedError("replayed"));
+    },
+  });
+  await lendCredentialWithReservation(lendingInput(), dependencies);
+  const response = await lendCredentialWithLease(lendingInput(), dependencies);
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    error: "credential_lease_unavailable",
+  });
+  assert.deepEqual(events, ["reserve", "issue", "lease"]);
 });

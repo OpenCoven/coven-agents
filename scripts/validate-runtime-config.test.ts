@@ -9,6 +9,7 @@ const validatorPath = fileURLToPath(
   new URL("./validate-runtime-config.ts", import.meta.url)
 );
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+const TEST_KEK = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 function runValidator(
   overrides: Partial<
@@ -17,6 +18,10 @@ function runValidator(
       | "ABUSE_KEY_SECRET"
       | "BETA_ALLOWLIST"
       | "BETA_MODE"
+      | "CREDENTIAL_KEK"
+      | "CREDENTIAL_KEK_CURRENT_VERSION"
+      | "CREDENTIAL_KEK_V1"
+      | "CREDENTIAL_KEK_V2"
       | "GLOBAL_DAILY_RUN_CAP"
       | "NODE_ENV"
       | "REDIS_URL"
@@ -32,6 +37,10 @@ function runValidator(
     ABUSE_KEY_SECRET: undefined,
     BETA_ALLOWLIST: undefined,
     BETA_MODE: "off",
+    CREDENTIAL_KEK: undefined,
+    CREDENTIAL_KEK_CURRENT_VERSION: undefined,
+    CREDENTIAL_KEK_V1: undefined,
+    CREDENTIAL_KEK_V2: undefined,
     GLOBAL_DAILY_RUN_CAP: undefined,
     NODE_ENV: "production",
     REDIS_URL: undefined,
@@ -140,6 +149,53 @@ test("accepts production without Redis", () => {
   const result = runValidator({});
 
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("accepts a production build with no credential KEK variables", () => {
+  const result = runValidator({
+    CREDENTIAL_KEK: undefined,
+    CREDENTIAL_KEK_CURRENT_VERSION: undefined,
+    CREDENTIAL_KEK_V1: undefined,
+    CREDENTIAL_KEK_V2: undefined,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("rejects partial credential KEK configuration", () => {
+  const missingCurrent = runValidator({
+    CREDENTIAL_KEK_CURRENT_VERSION: undefined,
+    CREDENTIAL_KEK_V1: TEST_KEK,
+  });
+  assert.notEqual(missingCurrent.status, 0);
+  assert.match(missingCurrent.stderr, /CREDENTIAL_KEK_CURRENT_VERSION/);
+
+  const missingKey = runValidator({
+    CREDENTIAL_KEK: undefined,
+    CREDENTIAL_KEK_CURRENT_VERSION: "v1",
+    CREDENTIAL_KEK_V1: undefined,
+  });
+  assert.notEqual(missingKey.status, 0);
+  assert.match(missingKey.stderr, /CREDENTIAL_KEK_V1/);
+});
+
+test("accepts valid credential KEK configuration", () => {
+  const result = runValidator({
+    CREDENTIAL_KEK: TEST_KEK,
+    CREDENTIAL_KEK_CURRENT_VERSION: "v1",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("rejects conflicting credential KEK configuration", () => {
+  const conflicting = runValidator({
+    CREDENTIAL_KEK: TEST_KEK,
+    CREDENTIAL_KEK_CURRENT_VERSION: "v1",
+    CREDENTIAL_KEK_V1: `${TEST_KEK}different`,
+  });
+  assert.notEqual(conflicting.status, 0);
+  assert.match(conflicting.stderr, /conflict|ambiguous/i);
 });
 
 test("requires an exact release audience in production", () => {

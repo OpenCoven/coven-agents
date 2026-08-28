@@ -5,7 +5,9 @@ import { createIdentityMinter, IDENTITY_REFRESH_MARGIN_MS } from "./identity";
 
 function tokenExpiringIn(seconds: number): string {
   const claims = {
+    authVersion: 0,
     exp: Math.floor(Date.now() / 1000) + seconds,
+    kid: "legacy",
     plan: "demo",
     sub: "user-1",
     tenant: "u_3f2504e04f8911d39a0c0305e82c3301",
@@ -39,6 +41,29 @@ test("a freshly minted token is reused rather than re-minted", async () => {
 
   assert.equal(first, second);
   assert.equal(calls(), 1, "a valid token must not be re-minted");
+});
+
+test("run-scoped identities are bound in the mint request and never cached", async () => {
+  const requests: Array<{ body?: string; headers?: Record<string, string> }> =
+    [];
+  const mint = createIdentityMinter((_input, init) => {
+    requests.push(init ?? {});
+    return Promise.resolve(
+      Response.json({ token: tokenExpiringIn(900) }, { status: 200 })
+    );
+  });
+  const run = {
+    agentId: "11111111-1111-4111-8111-111111111111",
+    harnessId: "copilot",
+    operationId: "22222222-2222-4222-8222-222222222222",
+  };
+
+  await mint(run);
+  await mint(run);
+
+  assert.equal(requests.length, 2);
+  assert.deepEqual(JSON.parse(requests[0]?.body ?? "{}"), { run });
+  assert.equal(requests[0]?.headers?.["content-type"], "application/json");
 });
 
 test("a token close to expiry is replaced before it is refused", async () => {

@@ -4,6 +4,9 @@ import {
   type AgentDefinition,
   agentIdSchema,
   createAgentInputSchema,
+  importVerifyKeyRing,
+  type RunnerClaims,
+  type RunnerVerificationKeyRing,
   type RunSnapshot,
   sanitizeEvidenceText,
   startRunInputSchema,
@@ -28,11 +31,13 @@ import {
   corsHeaders,
   errorEnvelope,
   HttpError,
+  hasValidBearerToken,
   hasValidHeaderToken,
   json,
   readJson,
+  secretsEqual,
 } from "./http.js";
-import { importVerifyKey, verifyRunnerToken } from "./identity.js";
+import { verifyRunnerToken } from "./identity.js";
 import {
   type AdmissionCleanupCapability,
   type AdmissionCleanupGuard,
@@ -46,6 +51,10 @@ import {
   type PreparedAdmissionConfirmationOutcome,
 } from "./run-state.js";
 import {
+  checkRunnerAuthority,
+  type RunnerAuthorityResult,
+} from "./runner-authority.js";
+import {
   createRunEventStream,
   type RunEventStreamOptions,
   type RunEventStreamSnapshot,
@@ -55,7 +64,20 @@ import { tenantOf } from "./tenant.js";
 type Awaitable<T> = T | Promise<T>;
 
 export type CloudRunnerEnvironment = Omit<
-  Pick<Env, "AGENT_CONTROL_TOKEN" | "ALLOWED_ORIGIN" | "RUNNER_VERIFY_KEY">,
+  Pick<
+    Env,
+    | "AGENT_CONTROL_TOKEN"
+    | "ALLOWED_ORIGIN"
+    | "APP_ORIGIN"
+    | "OPERATOR_DIAGNOSTIC_TOKEN"
+    | "RUNNER_VERIFY_KEY"
+    | "RUNNER_VERIFY_KEY_ID"
+    | "RUNNER_SERVICE_TOKEN"
+    | "RUNNER_VERIFY_PREVIOUS_KEY_ID"
+    | "RUNNER_VERIFY_PREVIOUS_KEY"
+    | "RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT"
+    | "RUNNER_VERIFY_PREVIOUS_RETIRE_AT"
+  >,
   "ALLOWED_ORIGIN"
 > & {
   ALLOWED_ORIGIN: string;
@@ -76,15 +98,55 @@ export type CloudRunnerEnvironment = Omit<
  * rotated key must be picked up immediately, not served stale until a
  * redeploy.
  */
-let verifyKeyCache: { key: CryptoKey; spki: string } | null = null;
+let verifyKeyCache: {
+  configKey: string;
+  ring: RunnerVerificationKeyRing;
+} | null = null;
 
-async function getVerifyKey(spki: string): Promise<CryptoKey> {
-  if (verifyKeyCache?.spki === spki) {
-    return verifyKeyCache.key;
+async function getVerifyKeyRing(
+  environment: CloudRunnerEnvironment
+): Promise<RunnerVerificationKeyRing> {
+  const currentPublicKey = environment.RUNNER_VERIFY_KEY?.trim()
+    ? environment.RUNNER_VERIFY_KEY
+    : undefined;
+  if (!currentPublicKey) {
+    throw new Error("Runner verify key is not configured.");
   }
-  const key = await importVerifyKey(spki);
-  verifyKeyCache = { key, spki };
-  return key;
+  const optional = (value: string | undefined): string | undefined =>
+    value?.trim() ? value : undefined;
+  const config = {
+    currentId: optional(environment.RUNNER_VERIFY_KEY_ID) ?? "legacy",
+    currentPublicKey,
+    previousId: optional(environment.RUNNER_VERIFY_PREVIOUS_KEY_ID),
+    previousLastSignedAt: optional(
+      environment.RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT
+    ),
+    previousPublicKey: optional(environment.RUNNER_VERIFY_PREVIOUS_KEY),
+    previousRetireAt: optional(environment.RUNNER_VERIFY_PREVIOUS_RETIRE_AT),
+  };
+  const configKey = JSON.stringify(config);
+  if (verifyKeyCache?.configKey === configKey) {
+    return verifyKeyCache.ring;
+  }
+  const ring = await importVerifyKeyRing(config);
+  verifyKeyCache = { configKey, ring };
+  return ring;
+}
+
+export function validateDiagnosticSecretConfiguration(environment: {
+  AGENT_CONTROL_TOKEN?: string;
+  OPERATOR_DIAGNOSTIC_TOKEN?: string;
+}): string | null {
+  const operatorToken = environment.OPERATOR_DIAGNOSTIC_TOKEN?.trim();
+  const controlToken = environment.AGENT_CONTROL_TOKEN?.trim();
+  if (
+    !operatorToken ||
+    !controlToken ||
+    secretsEqual(operatorToken, controlToken)
+  ) {
+    return null;
+  }
+  return operatorToken;
 }
 
 export type CloudRunnerDirectory = {
@@ -221,6 +283,10 @@ export type CloudRunnerDependencies<
     ok: boolean;
     output: string;
   }>;
+  checkAuthority?: (
+    claims: Pick<RunnerClaims, "authVersion" | "plan" | "sub" | "tenant">,
+    environment: Environment
+  ) => Awaitable<RunnerAuthorityResult>;
   getDirectory: (environment: Environment) => Awaitable<CloudRunnerDirectory>;
   getAdmission?: (environment: Environment) => Awaitable<CloudRunnerAdmission>;
   getYoloAgent: (
@@ -955,6 +1021,39 @@ function abuseResponse(
   );
 }
 
+function authorityResponse(
+  decision: Exclude<RunnerAuthorityResult, { kind: "allowed" }>,
+  cors: Headers
+): Response {
+  if (decision.kind === "unauthorized") {
+    return json(
+      errorEnvelope("unauthorized", "Identity was rejected.", false),
+      { status: 401 },
+      cors
+    );
+  }
+  if (decision.kind === "subscription_required") {
+    return json(
+      errorEnvelope(
+        "subscription_required",
+        "An active subscription is required.",
+        false
+      ),
+      { status: 403 },
+      cors
+    );
+  }
+  return json(
+    errorEnvelope(
+      "authority_unavailable",
+      "Runner authority is temporarily unavailable. Try again later.",
+      true
+    ),
+    { status: 503 },
+    cors
+  );
+}
+
 function busyResponse(
   reason: "global_busy" | "tenant_queue_full",
   cors: Headers
@@ -1036,6 +1135,57 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
         );
       }
 
+      const isDiagnosticsRoute =
+        url.pathname === "/api/diagnostics/sandbox" &&
+        request.method === "POST";
+      if (isDiagnosticsRoute) {
+        // Diagnostics are a separate operator path. The deployment control
+        // token is browser-visible and must never authorize a paid probe.
+        const operatorToken =
+          validateDiagnosticSecretConfiguration(environment);
+        if (!operatorToken) {
+          return json(
+            errorEnvelope(
+              "diagnostic_unavailable",
+              "Please try again later.",
+              true
+            ),
+            { status: 503 },
+            cors
+          );
+        }
+        if (
+          !hasValidBearerToken(request, operatorToken) ||
+          request.headers.has("x-runner-token")
+        ) {
+          return json(
+            errorEnvelope(
+              "unauthorized",
+              "Operator token was rejected.",
+              false
+            ),
+            { status: 401 },
+            cors
+          );
+        }
+        if (!dependencies.diagnoseSandbox) {
+          return json(
+            errorEnvelope("not_found", "Route was not found.", false),
+            { status: 404 },
+            cors
+          );
+        }
+        try {
+          return json(
+            await dependencies.diagnoseSandbox(environment),
+            {},
+            cors
+          );
+        } catch (error) {
+          return fail(error, cors);
+        }
+      }
+
       if (
         !hasValidHeaderToken(
           request,
@@ -1061,7 +1211,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
        * worker cannot verify identity — no verify key configured — it must
        * refuse rather than fall back to a default tenant.
        */
-      if (!environment.RUNNER_VERIFY_KEY) {
+      if (!environment.RUNNER_VERIFY_KEY?.trim()) {
         return json(
           errorEnvelope("unauthorized", "Identity cannot be verified.", false),
           { status: 401 },
@@ -1076,9 +1226,19 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
           cors
         );
       }
+      let verifyKeyRing: RunnerVerificationKeyRing;
+      try {
+        verifyKeyRing = await getVerifyKeyRing(environment);
+      } catch {
+        return json(
+          errorEnvelope("unauthorized", "Identity cannot be verified.", false),
+          { status: 401 },
+          cors
+        );
+      }
       const claims = await verifyRunnerToken(
         authorization.slice(7),
-        await getVerifyKey(environment.RUNNER_VERIFY_KEY)
+        verifyKeyRing
       );
       if (!claims) {
         return json(
@@ -1102,26 +1262,18 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
         return tenantAdmission;
       }
 
-      if (
-        url.pathname === "/api/diagnostics/sandbox" &&
-        request.method === "POST"
-      ) {
-        if (!dependencies.diagnoseSandbox) {
-          return json(
-            errorEnvelope("not_found", "Route was not found.", false),
-            { status: 404 },
-            cors
+      const authority = dependencies.checkAuthority
+        ? await dependencies.checkAuthority(claims, environment)
+        : await checkRunnerAuthority(
+            authorization.slice(7),
+            {
+              appOrigin: environment.APP_ORIGIN,
+              serviceToken: environment.RUNNER_SERVICE_TOKEN,
+            },
+            (input, init) => fetch(input, init)
           );
-        }
-        try {
-          return json(
-            await dependencies.diagnoseSandbox(environment),
-            {},
-            cors
-          );
-        } catch (error) {
-          return fail(error, cors);
-        }
+      if (authority.kind !== "allowed") {
+        return authorityResponse(authority, cors);
       }
 
       try {
@@ -1284,9 +1436,25 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               );
             }
             const input = startRunInputSchema.parse(await readJson(request));
+            if (
+              claims.run &&
+              (claims.run.agentId !== id ||
+                claims.run.harnessId !== current.runtime ||
+                claims.run.operationId !== input.operationId)
+            ) {
+              return json(
+                errorEnvelope(
+                  "identity_mismatch",
+                  "Run identity does not match the requested agent.",
+                  false
+                ),
+                { status: 403 },
+                cors
+              );
+            }
             const runAdmissionMode = admissionMode(environment);
             const requestHash = await hashOperation(id, input.task);
-            let runId: string = crypto.randomUUID();
+            let runId: string = input.operationId;
             let prepared: Awaited<ReturnType<CloudRunnerAgent["enqueue"]>>;
             try {
               prepared = await agent.enqueue(

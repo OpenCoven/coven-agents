@@ -133,17 +133,15 @@ test("redacts every configured recorder secret from captured events and results"
   const fixture = dependencies();
   const runnerToken = "runner-token-sensitive";
   const signingKey = "signing-key-sensitive";
-  const subject = "recorder-subject-sensitive";
-  const tenant = "recorder_tenant_sensitive";
+  const recorderEmail = "recorder@example.com";
   const ephemeralIdentity = "minted-identity-sensitive";
 
   const code = await runDemoRecorder(
     ["--name", "parser-test", "--task", "Add a parser test."],
     {
+      DEMO_RECORDER_ACCOUNT_EMAIL: recorderEmail,
       DEMO_RECORDING_CREDENTIAL: credential,
       DEMO_RUNNER_SIGNING_KEY: signingKey,
-      DEMO_RUNNER_SUBJECT: subject,
-      DEMO_RUNNER_TENANT: tenant,
       DEMO_RUNNER_TOKEN: runnerToken,
     },
     {
@@ -162,7 +160,7 @@ test("redacts every configured recorder secret from captured events and results"
           ],
           result: {
             ...result,
-            output: `${signingKey} ${tenant}`,
+            output: `${signingKey} ${recorderEmail}`,
           },
           secrets: [ephemeralIdentity],
         })),
@@ -174,8 +172,7 @@ test("redacts every configured recorder secret from captured events and results"
   for (const secret of [
     runnerToken,
     signingKey,
-    subject,
-    tenant,
+    recorderEmail,
     ephemeralIdentity,
   ]) {
     assert.equal(written.includes(secret), false);

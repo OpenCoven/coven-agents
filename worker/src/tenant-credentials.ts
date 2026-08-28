@@ -20,7 +20,10 @@
  */
 
 export type CredentialRequest = {
+  agentId: string;
   harnessId: string;
+  operationId: string;
+  requestId: string;
   runId: string;
   tenant: string;
 };
@@ -70,24 +73,33 @@ export async function fetchTenantCredential(
   request: CredentialRequest,
   transport: CredentialTransport
 ): Promise<string | null> {
+  const endpoint = new URL("/api/internal/credential", transport.endpoint);
+  const issueEndpoint = new URL(endpoint);
+  issueEndpoint.searchParams.set("phase", "issue");
+  const issued = await postCredentialRequest(
+    issueEndpoint.toString(),
+    request,
+    transport
+  );
+  if (issued.status === 429) {
+    throw await capReachedError(issued);
+  }
+  if (issued.status === 404) {
+    return null;
+  }
+  if (issued.status === 200) {
+    return await credentialFromResponse(issued);
+  }
+  if (issued.status !== 201) {
+    throw new Error(`Failed to issue credential lease: ${issued.status}`);
+  }
+
   // A rejected fetch (network failure, DNS failure, etc.) propagates
   // unchanged — that is "we could not ask", not "there is none".
-  const response = await transport.fetchImpl(
-    new URL("/api/internal/credential", transport.endpoint).toString(),
-    {
-      body: JSON.stringify({
-        harnessId: request.harnessId,
-        runId: request.runId,
-        tenant: request.tenant,
-      }),
-      headers: {
-        authorization: `Bearer ${transport.identityToken}`,
-        "content-type": "application/json",
-        "x-service-token": transport.serviceToken,
-      },
-      method: "POST",
-      signal: transport.signal,
-    }
+  const response = await postCredentialRequest(
+    endpoint.toString(),
+    request,
+    transport
   );
 
   if (response.status === 404) {
@@ -98,23 +110,17 @@ export async function fetchTenantCredential(
   // numbers that can explain the refusal. Discarding it here is what turned
   // "you are out of runs" into a bare status code.
   if (response.status === 429) {
-    const body = (await response.json().catch(() => null)) as {
-      cap?: unknown;
-      resetsAt?: unknown;
-      used?: unknown;
-    } | null;
-
-    throw new CapReachedError(
-      typeof body?.cap === "number" ? body.cap : 0,
-      typeof body?.used === "number" ? body.used : 0,
-      typeof body?.resetsAt === "string" ? body.resetsAt : null
-    );
+    throw await capReachedError(response);
   }
 
   if (!response.ok) {
     throw new Error(`Failed to fetch tenant credential: ${response.status}`);
   }
 
+  return await credentialFromResponse(response);
+}
+
+async function credentialFromResponse(response: Response): Promise<string> {
   const body = (await response.json()) as { credential?: unknown };
   if (typeof body.credential !== "string" || !body.credential) {
     // A 200 means the app found a credential, so an unusable body is a bug in
@@ -126,6 +132,44 @@ export async function fetchTenantCredential(
     );
   }
   return body.credential;
+}
+
+function postCredentialRequest(
+  endpoint: string,
+  request: CredentialRequest,
+  transport: CredentialTransport
+): Promise<Response> {
+  return transport.fetchImpl(endpoint, {
+    body: JSON.stringify({
+      agentId: request.agentId,
+      harnessId: request.harnessId,
+      operationId: request.operationId,
+      requestId: request.requestId,
+      runId: request.runId,
+      tenant: request.tenant,
+    }),
+    headers: {
+      authorization: `Bearer ${transport.identityToken}`,
+      "content-type": "application/json",
+      "x-service-token": transport.serviceToken,
+    },
+    method: "POST",
+    signal: transport.signal,
+  });
+}
+
+async function capReachedError(response: Response): Promise<CapReachedError> {
+  const body = (await response.json().catch(() => null)) as {
+    cap?: unknown;
+    resetsAt?: unknown;
+    used?: unknown;
+  } | null;
+
+  return new CapReachedError(
+    typeof body?.cap === "number" ? body.cap : 0,
+    typeof body?.used === "number" ? body.used : 0,
+    typeof body?.resetsAt === "string" ? body.resetsAt : null
+  );
 }
 
 /**
