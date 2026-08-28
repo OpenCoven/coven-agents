@@ -53,6 +53,9 @@ importers:
       '@daytona/sdk':
         specifier: 0.207.0
         version: 0.207.0(bufferutil@4.1.0)
+      '@next/env':
+        specifier: 16.3.1
+        version: 16.3.1
       '@opencoven/agent-contracts':
         specifier: workspace:*
         version: link:packages/agent-contracts

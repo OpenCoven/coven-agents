@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -59,6 +61,8 @@ function runValidator(
     Pick<
       NodeJS.ProcessEnv,
       | "ABUSE_KEY_SECRET"
+      | "BETA_ALLOWLIST"
+      | "BETA_MODE"
       | "CREDENTIAL_KEK"
       | "CREDENTIAL_KEK_CURRENT_VERSION"
       | "CREDENTIAL_KEK_V1"
@@ -72,20 +76,27 @@ function runValidator(
       | "DAYTONA_SNAPSHOT"
       | "DAYTONA_TARGET"
       | "GLOBAL_DAILY_RUN_CAP"
+      | "NODE_ENV"
       | "OPERATOR_DIAGNOSTIC_TOKEN"
       | "REDIS_URL"
+      | "RELEASE_AUDIENCE"
       | "RUNNER_RECONCILE_SECRET"
       | "RUN_ADMISSION_CONSECUTIVE_MAX"
       | "RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX"
       | "RUN_ADMISSION_MODE"
       | "RUN_ADMISSION_TENANT_ACTIVE_MAX"
       | "RUN_ADMISSION_TENANT_QUEUE_MAX"
+      | "VERCEL_ENV"
     >
-  >
+  > = {},
+  arguments_: string[] = [],
+  cwd = repositoryRoot
 ) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     ABUSE_KEY_SECRET: undefined,
+    BETA_ALLOWLIST: undefined,
+    BETA_MODE: "off",
     CREDENTIAL_KEK: undefined,
     CREDENTIAL_KEK_CURRENT_VERSION: undefined,
     CREDENTIAL_KEK_V1: undefined,
@@ -102,21 +113,55 @@ function runValidator(
     NODE_ENV: "production",
     OPERATOR_DIAGNOSTIC_TOKEN: undefined,
     REDIS_URL: undefined,
+    RELEASE_AUDIENCE: "public",
     RUN_ADMISSION_CONSECUTIVE_MAX: undefined,
     RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: undefined,
     RUN_ADMISSION_MODE: undefined,
     RUN_ADMISSION_TENANT_ACTIVE_MAX: undefined,
     RUN_ADMISSION_TENANT_QUEUE_MAX: undefined,
     RUNNER_RECONCILE_SECRET: undefined,
+    VERCEL_ENV: undefined,
     ...VALID_ENV,
   };
   Object.assign(env, overrides);
 
-  return spawnSync(process.execPath, ["--import", "tsx", validatorPath], {
-    cwd: repositoryRoot,
-    encoding: "utf8",
-    env,
-  });
+  return spawnSync(
+    process.execPath,
+    ["--import", "tsx", validatorPath, ...arguments_],
+    {
+      cwd,
+      encoding: "utf8",
+      env,
+    }
+  );
+}
+
+function runReleaseValidatorFromFiles(
+  files: Record<string, string>,
+  overrides: Partial<NodeJS.ProcessEnv> = {}
+) {
+  const cwd = mkdtempSync(
+    join(repositoryRoot, ".validate-runtime-config-test-")
+  );
+
+  try {
+    for (const [name, contents] of Object.entries(files)) {
+      writeFileSync(join(cwd, name), contents);
+    }
+
+    return runValidator(
+      {
+        BETA_ALLOWLIST: undefined,
+        BETA_MODE: undefined,
+        RELEASE_AUDIENCE: undefined,
+        ...overrides,
+      },
+      ["--release"],
+      cwd
+    );
+  } finally {
+    rmSync(cwd, { force: true, recursive: true });
+  }
 }
 
 test("rejects missing required production configuration", () => {
@@ -143,6 +188,89 @@ test("rejects blank required production configuration", () => {
   }
 });
 
+test("rejects production Redis when the abuse key secret is missing or empty", () => {
+  for (const abuseKeySecret of [undefined, ""]) {
+    const result = runValidator({ ABUSE_KEY_SECRET: abuseKeySecret });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /ABUSE_KEY_SECRET/);
+  }
+});
+
+test("accepts production Redis when the abuse key secret is valid", () => {
+  const result = runValidator();
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(
+    `${result.stdout}${result.stderr}`,
+    new RegExp(VALID_ENV.ABUSE_KEY_SECRET ?? "")
+  );
+});
+
+test("rejects configured run reservations without a nonempty abuse key secret", () => {
+  for (const abuseKeySecret of [undefined, "", "  "]) {
+    const result = runValidator({
+      ABUSE_KEY_SECRET: abuseKeySecret,
+      GLOBAL_DAILY_RUN_CAP: "500",
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /ABUSE_KEY_SECRET/);
+  }
+});
+
+test("rejects a malformed global daily run cap", () => {
+  const result = runValidator({ GLOBAL_DAILY_RUN_CAP: "not-a-number" });
+
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /GLOBAL_DAILY_RUN_CAP must be a positive integer/
+  );
+});
+
+test("rejects a production configuration without Redis", () => {
+  const result = runValidator({ REDIS_URL: undefined });
+
+  assertRejectedWithMessage(
+    result,
+    "Missing required production environment variables: REDIS_URL."
+  );
+});
+
+test("permits preview validation without production Daytona secrets or Redis", () => {
+  const result = runValidator({
+    ABUSE_KEY_SECRET: undefined,
+    DAYTONA_API_KEY: undefined,
+    DAYTONA_DOMAIN_ALLOW_LIST: undefined,
+    DAYTONA_SNAPSHOT: undefined,
+    NODE_ENV: "production",
+    OPERATOR_DIAGNOSTIC_TOKEN: undefined,
+    REDIS_URL: undefined,
+    RELEASE_AUDIENCE: undefined,
+    RUNNER_RECONCILE_SECRET: undefined,
+    VERCEL_ENV: "preview",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("accepts valid run reservation configuration without Redis in preview", () => {
+  const result = runValidator({
+    DAYTONA_API_KEY: undefined,
+    DAYTONA_DOMAIN_ALLOW_LIST: undefined,
+    DAYTONA_SNAPSHOT: undefined,
+    GLOBAL_DAILY_RUN_CAP: "500",
+    NODE_ENV: "development",
+    OPERATOR_DIAGNOSTIC_TOKEN: undefined,
+    REDIS_URL: undefined,
+    RELEASE_AUDIENCE: undefined,
+    RUNNER_RECONCILE_SECRET: undefined,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("rejects an invalid Daytona target", () => {
   const result = runValidator({ DAYTONA_TARGET: "moon" });
 
@@ -157,6 +285,31 @@ test("preflight defaults blank Daytona endpoint and target", () => {
     });
 
     assert.equal(result.status, 0, result.stderr);
+  }
+});
+
+test("rejects malformed explicitly configured Daytona settings in preview", () => {
+  for (const overrides of [
+    { DAYTONA_API_URL: "http://app.daytona.io/api" },
+    { DAYTONA_DOMAIN_ALLOW_LIST: "https://github.com" },
+    { DAYTONA_REQUEST_TIMEOUT_MS: "0" },
+    { DAYTONA_SNAPSHOT: "not-versioned" },
+    { DAYTONA_TARGET: "moon" },
+  ]) {
+    const result = runValidator({
+      ABUSE_KEY_SECRET: undefined,
+      DAYTONA_API_KEY: undefined,
+      DAYTONA_DOMAIN_ALLOW_LIST: undefined,
+      DAYTONA_SNAPSHOT: undefined,
+      NODE_ENV: "development",
+      OPERATOR_DIAGNOSTIC_TOKEN: undefined,
+      REDIS_URL: undefined,
+      RELEASE_AUDIENCE: undefined,
+      RUNNER_RECONCILE_SECRET: undefined,
+      ...overrides,
+    });
+
+    assert.notEqual(result.status, 0);
   }
 });
 
@@ -349,34 +502,168 @@ test("rejects conflicting credential KEK configuration", () => {
   assert.match(conflicting.stderr, /conflict|ambiguous/i);
 });
 
-test("rejects a malformed global daily run cap", () => {
+test("requires an exact release audience in production", () => {
+  for (const releaseAudience of [
+    undefined,
+    "",
+    "Public",
+    "public ",
+    "closed-beta,public",
+    "closed_beta",
+  ]) {
+    const result = runValidator({ RELEASE_AUDIENCE: releaseAudience });
+
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      /RELEASE_AUDIENCE must be exactly "closed-beta" or "public"/
+    );
+  }
+});
+
+test("closed beta requires beta mode on", () => {
+  for (const betaMode of [undefined, "", "off", "ON", "on "]) {
+    const result = runValidator({
+      BETA_ALLOWLIST: "member@example.com",
+      BETA_MODE: betaMode,
+      RELEASE_AUDIENCE: "closed-beta",
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Closed beta requires BETA_MODE=on/);
+  }
+});
+
+test("closed beta requires a nonempty valid allowlist", () => {
+  for (const betaAllowlist of [
+    undefined,
+    "",
+    " ",
+    ",",
+    "member@example.com,",
+    "not-an-email",
+    "member@example.com,not-an-email",
+  ]) {
+    const result = runValidator({
+      BETA_ALLOWLIST: betaAllowlist,
+      BETA_MODE: "on",
+      RELEASE_AUDIENCE: "closed-beta",
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      /Closed beta requires BETA_ALLOWLIST to contain only valid email addresses/
+    );
+  }
+});
+
+test("accepts an explicit closed beta audience", () => {
   const result = runValidator({
-    GLOBAL_DAILY_RUN_CAP: "not-a-number",
+    BETA_ALLOWLIST: " Member@Example.com , other@example.com ",
+    BETA_MODE: "on",
+    RELEASE_AUDIENCE: "closed-beta",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("public release requires beta mode explicitly off", () => {
+  for (const betaMode of [undefined, "", "on", "OFF", "off "]) {
+    const result = runValidator({
+      BETA_MODE: betaMode,
+      RELEASE_AUDIENCE: "public",
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Public release requires BETA_MODE=off/);
+  }
+});
+
+test("release audience is not required for local or preview validation", () => {
+  for (const environment of [
+    { NODE_ENV: "development", VERCEL_ENV: undefined },
+    { NODE_ENV: "test", VERCEL_ENV: undefined },
+    { NODE_ENV: "production", VERCEL_ENV: "preview" },
+  ] as const) {
+    const result = runValidator({
+      ...environment,
+      BETA_MODE: undefined,
+      RELEASE_AUDIENCE: undefined,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+  }
+});
+
+test("Vercel production enforces release audience regardless of NODE_ENV", () => {
+  const result = runValidator({
+    BETA_MODE: undefined,
+    NODE_ENV: "development",
+    RELEASE_AUDIENCE: undefined,
+    VERCEL_ENV: "production",
   });
 
   assert.notEqual(result.status, 0);
   assert.match(
     result.stderr,
-    /GLOBAL_DAILY_RUN_CAP must be a positive integer/
+    /RELEASE_AUDIENCE must be exactly "closed-beta" or "public"/
   );
 });
 
-test("accepts a valid production configuration without printing secrets", () => {
-  const result = runValidator({
-    DAYTONA_DOMAIN_ALLOW_LIST: "github.com,api.github.com",
-    GLOBAL_DAILY_RUN_CAP: "500",
+test("the explicit release preflight enforces outside production markers", () => {
+  const result = runValidator(
+    {
+      BETA_MODE: undefined,
+      NODE_ENV: "development",
+      RELEASE_AUDIENCE: undefined,
+      VERCEL_ENV: "preview",
+    },
+    ["--release"]
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /RELEASE_AUDIENCE must be exactly "closed-beta" or "public"/
+  );
+});
+
+test(".env.production.local takes precedence over .env.local", () => {
+  const result = runReleaseValidatorFromFiles({
+    ".env.local": "RELEASE_AUDIENCE=public\nBETA_MODE=on\n",
+    ".env.production.local": "RELEASE_AUDIENCE=public\nBETA_MODE=off\n",
   });
 
   assert.equal(result.status, 0, result.stderr);
-  for (const secret of [
-    VALID_ENV.ABUSE_KEY_SECRET,
-    VALID_ENV.DAYTONA_API_KEY,
-    VALID_ENV.OPERATOR_DIAGNOSTIC_TOKEN,
-    VALID_ENV.RUNNER_RECONCILE_SECRET,
-  ]) {
-    assert.doesNotMatch(
-      `${result.stdout}${result.stderr}`,
-      new RegExp(secret ?? "")
-    );
-  }
+});
+
+test("process environment takes precedence over production env files", () => {
+  const result = runReleaseValidatorFromFiles(
+    {
+      ".env.local":
+        "RELEASE_AUDIENCE=public\nBETA_MODE=off\nBETA_ALLOWLIST=member@example.com\n",
+      ".env.production.local":
+        "RELEASE_AUDIENCE=public\nBETA_MODE=on\nBETA_ALLOWLIST=not-an-email\n",
+    },
+    { RELEASE_AUDIENCE: "closed-beta" }
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /Closed beta requires BETA_ALLOWLIST to contain only valid email addresses/
+  );
+});
+
+test("the start command uses the explicit release preflight", () => {
+  const manifest = JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8")
+  ) as { scripts?: Record<string, string> };
+
+  assert.equal(
+    manifest.scripts?.["validate:release"],
+    "tsx scripts/validate-runtime-config.ts --release"
+  );
+  assert.match(manifest.scripts?.start ?? "", /^pnpm validate:release && /);
 });
