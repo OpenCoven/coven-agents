@@ -1,0 +1,458 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { DaytonaNotFoundError, SnapshotState } from "@daytona/sdk";
+import {
+  COPILOT_CLI_VERSION,
+  createDaytonaBuildLogSanitizer,
+  createDaytonaCopilotImage,
+  createDaytonaSnapshotDefinition,
+  DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE,
+  DAYTONA_COPILOT_IMAGE_BASE,
+  DAYTONA_COPILOT_SNAPSHOT_NAME,
+  DAYTONA_DEFAULT_API_URL,
+  DAYTONA_DEFAULT_TARGET,
+  type DaytonaSnapshot,
+  type DaytonaSnapshotConfiguration,
+  type DaytonaSnapshotService,
+  daytonaClientConfiguration,
+  daytonaSnapshotConfiguration,
+  PNPM_VERSION,
+  provisionDaytonaSnapshot,
+  sanitizeDaytonaBuildLog,
+  WORKSPACE_DIRECTORY,
+} from "./image";
+
+const API_KEY = "daytona-api-key-for-test";
+const configuration: DaytonaSnapshotConfiguration = {
+  apiKey: API_KEY,
+  apiUrl: "https://app.daytona.io/api",
+  snapshotName: DAYTONA_COPILOT_SNAPSHOT_NAME,
+  target: "us",
+};
+
+function environment(
+  overrides: Record<string, string | undefined> = {}
+): NodeJS.ProcessEnv {
+  return { NODE_ENV: "test", ...overrides };
+}
+
+function missingSnapshot(): DaytonaNotFoundError {
+  return new DaytonaNotFoundError("Snapshot not found", 404);
+}
+
+function activeSnapshot(): DaytonaSnapshot {
+  return {
+    name: DAYTONA_COPILOT_SNAPSHOT_NAME,
+    state: SnapshotState.ACTIVE,
+  };
+}
+
+test("defines the pinned Copilot CLI snapshot image exactly", () => {
+  const image = createDaytonaCopilotImage();
+  const definition = createDaytonaSnapshotDefinition(configuration);
+
+  assert.equal(
+    image.dockerfile,
+    [
+      `FROM ${DAYTONA_COPILOT_IMAGE_BASE}`,
+      `RUN npm install --global pnpm@${PNPM_VERSION} @github/copilot@${COPILOT_CLI_VERSION}`,
+      `RUN mkdir --parents ${WORKSPACE_DIRECTORY}`,
+      `WORKDIR ${WORKSPACE_DIRECTORY}`,
+      "",
+    ].join("\n")
+  );
+  assert.equal(image.contextList.length, 0);
+  assert.equal(definition.name, DAYTONA_COPILOT_SNAPSHOT_NAME);
+  assert.equal(definition.image.dockerfile, image.dockerfile);
+  assert.equal(image.dockerfile.includes("apt-get"), false);
+});
+
+test("validates Daytona snapshot configuration and passes API URL, key, and target", () => {
+  assert.throws(
+    () => daytonaSnapshotConfiguration(environment()),
+    /Missing required Daytona environment variable: DAYTONA_API_KEY\./u
+  );
+  assert.throws(
+    () =>
+      daytonaSnapshotConfiguration(
+        environment({
+          DAYTONA_API_KEY: API_KEY,
+          DAYTONA_API_URL: "http://daytona.test/api",
+          DAYTONA_SNAPSHOT: DAYTONA_COPILOT_SNAPSHOT_NAME,
+          DAYTONA_TARGET: "us",
+        })
+      ),
+    /DAYTONA_API_URL must be an absolute HTTPS URL\./u
+  );
+  assert.throws(
+    () =>
+      daytonaSnapshotConfiguration(
+        environment({
+          DAYTONA_API_KEY: API_KEY,
+          DAYTONA_API_URL: configuration.apiUrl,
+          DAYTONA_SNAPSHOT: "coven-agents-copilot-latest",
+          DAYTONA_TARGET: "moon",
+        })
+      ),
+    /DAYTONA_TARGET must be "us" or "eu"\./u
+  );
+  assert.throws(
+    () =>
+      daytonaSnapshotConfiguration(
+        environment({
+          DAYTONA_API_KEY: API_KEY,
+          DAYTONA_API_URL: configuration.apiUrl,
+          DAYTONA_SNAPSHOT: "coven-agents-copilot-latest",
+          DAYTONA_TARGET: "us",
+        })
+      ),
+    /DAYTONA_SNAPSHOT must be a versioned coven-agents-copilot-N name\./u
+  );
+
+  const configured = daytonaSnapshotConfiguration(
+    environment({
+      DAYTONA_API_KEY: API_KEY,
+      DAYTONA_API_URL: configuration.apiUrl,
+      DAYTONA_SNAPSHOT: configuration.snapshotName,
+      DAYTONA_TARGET: configuration.target,
+    })
+  );
+
+  assert.deepEqual(configured, configuration);
+  assert.deepEqual(daytonaClientConfiguration(configured), {
+    apiKey: API_KEY,
+    apiUrl: configuration.apiUrl,
+    target: "us",
+  });
+});
+
+test("defaults blank endpoint and target through the shared Daytona parser", () => {
+  const defaulted = daytonaSnapshotConfiguration(
+    environment({
+      DAYTONA_API_KEY: API_KEY,
+      DAYTONA_API_URL: "  ",
+      DAYTONA_SNAPSHOT: configuration.snapshotName,
+      DAYTONA_TARGET: "",
+    })
+  );
+
+  assert.deepEqual(defaulted, {
+    ...configuration,
+    apiUrl: DAYTONA_DEFAULT_API_URL,
+    target: DAYTONA_DEFAULT_TARGET,
+  });
+});
+
+test("redacts full Authorization header values without altering other log text", () => {
+  const basicCredential = "ZGF5dG9uYS11c2VyOnRlc3QtcGFzcw==";
+  const bearerCredential = "raw-bearer-credential-value";
+  const sanitized = sanitizeDaytonaBuildLog(
+    [
+      "starting image build",
+      `aUtHoRiZaTiOn : Basic ${basicCredential}`,
+      `AUTHORIZATION:\tBearer ${bearerCredential}`,
+      "image build complete",
+    ].join("\n"),
+    API_KEY
+  );
+
+  assert.equal(sanitized.includes(basicCredential), false);
+  assert.equal(sanitized.includes(bearerCredential), false);
+  assert.equal(
+    sanitized,
+    [
+      "starting image build",
+      "aUtHoRiZaTiOn : [REDACTED]",
+      "AUTHORIZATION:\t[REDACTED]",
+      "image build complete",
+    ].join("\n")
+  );
+});
+
+test("fails closed after detecting a split Authorization marker", () => {
+  const basicCredential = "ZGF5dG9uYS11c2VyOnRlc3QtcGFzcw==";
+  const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
+
+  assert.equal(
+    sanitizer.write("starting image build\nAuthorization: Basic "),
+    "starting image build\nAuthorization: [REDACTED]"
+  );
+  assert.equal(sanitizer.write("Ba"), "");
+  assert.equal(sanitizer.write(`sic ${basicCredential}\r`), "");
+  assert.equal(
+    sanitizer.write("\nAuthorization: Bearer raw-bearer-credential-"),
+    ""
+  );
+  assert.equal(sanitizer.write("value\r"), "");
+  assert.equal(sanitizer.write("\nimage build complete"), "");
+  assert.equal(sanitizer.flush(), "");
+});
+
+test("streams SDK-trimmed chunks without waiting for newline boundaries", () => {
+  const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
+  const chunks = [
+    "starting image build",
+    ` installing ${"dependencies ".repeat(12)}`,
+    " image build complete",
+  ];
+  const emitted = chunks.map((chunk) => sanitizer.write(chunk));
+  emitted.push(sanitizer.flush());
+
+  assert.equal(emitted.join(""), chunks.join(""));
+  assert.ok(emitted.slice(0, -1).some((chunk) => chunk.length > 0));
+});
+
+test("keeps only a bounded tail for huge no-newline SDK chunks", () => {
+  const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
+  const log = "x".repeat(1_000_000);
+  const emitted = sanitizer.write(log);
+
+  assert.equal(emitted.length, log.length - DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE);
+  assert.equal(sanitizer.flush().length, DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE);
+});
+
+test("redacts markers split across SDK-trimmed chunks and suppresses values", () => {
+  const scenarios = [
+    {
+      chunks: ["safe output Author", "ization: Bear", "er secret-value"],
+      expected: "safe output Authorization: [REDACTED]",
+      secret: "secret-value",
+    },
+    {
+      chunks: ["safe output Ba", "sic ", "basic-credential"],
+      expected: "safe output Basic [REDACTED]",
+      secret: "basic-credential",
+    },
+    {
+      chunks: ["safe output Be", "arer ", "bearer-token"],
+      expected: "safe output Bearer [REDACTED]",
+      secret: "bearer-token",
+    },
+    {
+      chunks: ["safe output cred", "ential = ", "credential-value"],
+      expected: "safe output credential = [REDACTED]",
+      secret: "credential-value",
+    },
+    {
+      chunks: ["safe output daytona-api", "-key-for-test"],
+      expected: "safe output [REDACTED]",
+      secret: API_KEY,
+    },
+    {
+      chunks: ["safe output Authorization", " ".repeat(128), ": secret-value"],
+      expected: "safe output Authorization [REDACTED]",
+      secret: "secret-value",
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
+    const emitted = scenario.chunks.map((chunk) => sanitizer.write(chunk));
+    emitted.push(sanitizer.flush());
+    const output = emitted.join("");
+
+    assert.equal(output, scenario.expected);
+    assert.equal(output.includes(scenario.secret), false);
+  }
+});
+
+test("redacts auth schemes ending SDK-trimmed callback chunks", () => {
+  const scenarios = [
+    {
+      chunks: [
+        "starting image build BeArEr ",
+        "bearer-credential-",
+        "continued ",
+      ],
+      expected: "starting image build BeArEr [REDACTED]",
+      secret: "bearer-credential-continued",
+    },
+    {
+      chunks: [
+        "starting image build bAsIc\t",
+        "basic-credential-",
+        "continued\t",
+      ],
+      expected: "starting image build bAsIc [REDACTED]",
+      secret: "basic-credential-continued",
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
+    const emitted = scenario.chunks.map((chunk) =>
+      sanitizer.write(chunk.trimEnd())
+    );
+
+    assert.equal(emitted.join(""), scenario.expected);
+    assert.equal(emitted.join("").includes(scenario.secret), false);
+    assert.equal(sanitizer.flush(), "");
+  }
+});
+
+test("does not retain huge sensitive values or flush suppressed remainders", () => {
+  const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
+  const hugeSecret = "s".repeat(1_000_000);
+
+  assert.equal(
+    sanitizer.write("starting token="),
+    "starting token= [REDACTED]"
+  );
+  assert.equal(sanitizer.write(hugeSecret), "");
+  assert.equal(sanitizer.flush(), "");
+});
+
+test("does not flush incomplete sensitive marker prefixes", () => {
+  const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
+  assert.equal(sanitizer.write("starting Authorizatio"), "");
+  assert.equal(sanitizer.flush(), "starting ");
+});
+
+test("refuses to recreate a snapshot that already exists", async () => {
+  let createCalls = 0;
+  const snapshot: DaytonaSnapshotService = {
+    create: () => {
+      createCalls += 1;
+      return Promise.resolve(activeSnapshot());
+    },
+    get: () => Promise.resolve(activeSnapshot()),
+  };
+
+  await assert.rejects(
+    provisionDaytonaSnapshot(configuration, {
+      log: () => undefined,
+      snapshot,
+    }),
+    /already exists; refusing to recreate/u
+  );
+  assert.equal(createCalls, 0);
+});
+
+test("creates the configured image and verifies the resulting active snapshot", async () => {
+  const getCalls: string[] = [];
+  const createCalls: Parameters<DaytonaSnapshotService["create"]>[] = [];
+  const logs: string[] = [];
+  const snapshot: DaytonaSnapshotService = {
+    create: (...arguments_) => {
+      createCalls.push(arguments_);
+      arguments_[1].onLogs("building Copilot CLI");
+      return Promise.resolve({
+        name: DAYTONA_COPILOT_SNAPSHOT_NAME,
+        state: SnapshotState.BUILDING,
+      });
+    },
+    get: (name) => {
+      getCalls.push(name);
+      if (getCalls.length === 1) {
+        return Promise.reject(missingSnapshot());
+      }
+      return Promise.resolve(activeSnapshot());
+    },
+  };
+
+  const result = await provisionDaytonaSnapshot(configuration, {
+    log: (message) => logs.push(message),
+    snapshot,
+  });
+
+  assert.deepEqual(result, activeSnapshot());
+  assert.deepEqual(getCalls, [
+    DAYTONA_COPILOT_SNAPSHOT_NAME,
+    DAYTONA_COPILOT_SNAPSHOT_NAME,
+  ]);
+  assert.equal(createCalls.length, 1);
+  assert.equal(createCalls[0]?.[0].name, DAYTONA_COPILOT_SNAPSHOT_NAME);
+  assert.equal(
+    createCalls[0]?.[0].image.dockerfile,
+    createDaytonaCopilotImage().dockerfile
+  );
+  assert.deepEqual(logs, ["building Copilot CLI"]);
+});
+
+test("forwards sanitized snapshot build logs without secrets", async () => {
+  const logs: string[] = [];
+  const token = "build-token-value";
+  const credential = "credential-value";
+  const snapshot: DaytonaSnapshotService = {
+    create: (_parameters, options) => {
+      options.onLogs(
+        [
+          `api_key=${API_KEY}`,
+          `token: ${token}`,
+          `credential=${credential}`,
+          `Authorization: Bearer ${token}`,
+        ].join("\n")
+      );
+      return Promise.resolve(activeSnapshot());
+    },
+    get: () => {
+      if (logs.length === 0) {
+        return Promise.reject(missingSnapshot());
+      }
+      return Promise.resolve(activeSnapshot());
+    },
+  };
+
+  await provisionDaytonaSnapshot(configuration, {
+    log: (message) => logs.push(message),
+    snapshot,
+  });
+
+  assert.equal(logs.length, 1);
+  const log = logs.join("");
+  assert.ok(log);
+  assert.equal(log.includes(API_KEY), false);
+  assert.equal(log.includes(token), false);
+  assert.equal(log.includes(credential), false);
+  assert.match(log, /api_key= \[REDACTED\]/u);
+});
+
+test("fails closed for a split Authorization value when snapshot creation fails", async () => {
+  const logs: string[] = [];
+  const basicCredential = "ZGF5dG9uYS11c2VyOnRlc3QtcGFzcw==";
+  const snapshot: DaytonaSnapshotService = {
+    create: (_parameters, options) => {
+      options.onLogs("starting image build Author");
+      options.onLogs("ization: Ba");
+      options.onLogs(`sic ${basicCredential}`);
+      return Promise.reject(new Error("Daytona unavailable"));
+    },
+    get: () => Promise.reject(missingSnapshot()),
+  };
+
+  await assert.rejects(
+    provisionDaytonaSnapshot(configuration, {
+      log: (message) => logs.push(message),
+      snapshot,
+    }),
+    /Failed to create Daytona snapshot/u
+  );
+
+  assert.deepEqual(logs, ["starting image build Authorization: [REDACTED]"]);
+  assert.equal(logs.join("").includes(basicCredential), false);
+});
+
+test("rejects a created snapshot that cannot be verified as active", async () => {
+  let getCount = 0;
+  const snapshot: DaytonaSnapshotService = {
+    create: () => Promise.resolve(activeSnapshot()),
+    get: () => {
+      getCount += 1;
+      if (getCount === 1) {
+        return Promise.reject(missingSnapshot());
+      }
+      return Promise.resolve({
+        name: DAYTONA_COPILOT_SNAPSHOT_NAME,
+        state: SnapshotState.BUILD_FAILED,
+      });
+    },
+  };
+
+  await assert.rejects(
+    provisionDaytonaSnapshot(configuration, {
+      log: () => undefined,
+      snapshot,
+    }),
+    /is not active after creation \(state: build_failed\)/u
+  );
+});

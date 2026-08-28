@@ -23,61 +23,75 @@ export const harnessesEnvelopeSchema = z.object({
   harnesses: z.array(harnessStatusSchema),
 });
 
+export const runEventTimestampSchema = z.string().datetime();
+
 /**
  * One normalized frame of a live run. Every harness is translated into this
  * vocabulary so the UI never learns a vendor's private event names.
  */
 export const runEventSchema = z.discriminatedUnion("kind", [
   z.object({
-    at: z.string(),
+    at: runEventTimestampSchema,
     harness: harnessIdSchema,
     kind: z.literal("started"),
     runId: z.string(),
   }),
-  z.object({ at: z.string(), kind: z.literal("reasoning"), text: z.string() }),
-  z.object({ at: z.string(), kind: z.literal("delta"), text: z.string() }),
   z.object({
-    at: z.string(),
+    at: runEventTimestampSchema,
+    kind: z.literal("reasoning"),
+    text: z.string(),
+  }),
+  z.object({
+    at: runEventTimestampSchema,
+    kind: z.literal("delta"),
+    text: z.string(),
+  }),
+  z.object({
+    at: runEventTimestampSchema,
     kind: z.literal("message"),
     model: z.string().nullable(),
     text: z.string(),
   }),
   z.object({
-    at: z.string(),
+    at: runEventTimestampSchema,
     callId: z.string(),
     kind: z.literal("tool-start"),
     summary: z.string(),
     tool: z.string(),
   }),
   z.object({
-    at: z.string(),
+    at: runEventTimestampSchema,
     callId: z.string(),
     kind: z.literal("tool-end"),
     success: z.boolean(),
     summary: z.string(),
   }),
   z.object({
-    at: z.string(),
+    at: runEventTimestampSchema,
     kind: z.literal("file"),
     operation: z.string(),
     path: z.string(),
   }),
   z.object({
-    at: z.string(),
+    at: runEventTimestampSchema,
     kind: z.literal("usage"),
     linesAdded: z.number().int().nullable(),
     linesRemoved: z.number().int().nullable(),
     premiumRequests: z.number().nullable(),
   }),
   z.object({
-    at: z.string(),
+    at: runEventTimestampSchema,
     exitCode: z.number().int().nullable(),
     filesModified: z.array(z.string()),
     kind: z.literal("finished"),
     sessionId: z.string().nullable(),
     status: z.enum(["completed", "failed"]),
   }),
-  z.object({ at: z.string(), kind: z.literal("error"), message: z.string() }),
+  z.object({
+    at: runEventTimestampSchema,
+    kind: z.literal("error"),
+    message: z.string(),
+  }),
 ]);
 
 export type HarnessId = z.infer<typeof harnessIdSchema>;

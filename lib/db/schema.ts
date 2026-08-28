@@ -1,3 +1,10 @@
+import {
+  AGENT_RUNNER_LIMITS,
+  type CommandEvidence,
+  type FileEvidence,
+  type RunError,
+  type RunEvent,
+} from "@opencoven/agent-contracts";
 import { type InferSelectModel, sql } from "drizzle-orm";
 import {
   boolean,
@@ -12,11 +19,28 @@ import {
   primaryKey,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
 import type { StoredIdempotencyResponseEnvelope } from "../abuse/idempotency-response";
+
+const runnerMaxCommandResultsSql = sql.raw(
+  String(AGENT_RUNNER_LIMITS.maxCommandResults)
+);
+const runnerMaxDetailsLengthSql = sql.raw(
+  String(AGENT_RUNNER_LIMITS.maxDetailsLength)
+);
+const runnerMaxEventOutputLengthSql = sql.raw(
+  String(AGENT_RUNNER_LIMITS.maxEventOutputLength)
+);
+const runnerMaxFileOperationsSql = sql.raw(
+  String(AGENT_RUNNER_LIMITS.maxFileOperations)
+);
+const runnerMaxMessageLengthSql = sql.raw(
+  String(AGENT_RUNNER_LIMITS.maxMessageLength)
+);
 
 export const user = pgTable(
   "User",
@@ -404,3 +428,273 @@ export const idempotencyRecord = pgTable(
 );
 
 export type IdempotencyRecord = InferSelectModel<typeof idempotencyRecord>;
+
+export const runnerAgent = pgTable(
+  "RunnerAgent",
+  {
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    daytonaSandboxId: text("daytonaSandboxId"),
+    description: varchar("description", { length: 240 }).notNull().default(""),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    instructions: varchar("instructions", {
+      length: AGENT_RUNNER_LIMITS.maxInstructionsLength,
+    }).notNull(),
+    lastRunAt: timestamp("lastRunAt"),
+    model: varchar("model", {
+      length: AGENT_RUNNER_LIMITS.maxModelLength,
+    }).notNull(),
+    name: varchar("name", { length: 64 }).notNull(),
+    runtime: varchar("runtime", {
+      enum: ["cloud", "codex", "claude", "copilot"],
+      length: 16,
+    }).notNull(),
+    sandboxGeneration: integer("sandboxGeneration").notNull().default(0),
+    sandboxLifecycle: varchar("sandboxLifecycle", {
+      enum: [
+        "unprovisioned",
+        "provisioning",
+        "provisioning_ambiguous",
+        "ready",
+        "decommissioning",
+        "decommission_failed",
+      ],
+      length: 24,
+    })
+      .notNull()
+      .default("unprovisioned"),
+    sandboxUpdatedAt: timestamp("sandboxUpdatedAt").notNull().defaultNow(),
+    status: varchar("status", {
+      enum: ["idle", "running", "error"],
+      length: 16,
+    })
+      .notNull()
+      .default("idle"),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+    version: integer("version").notNull().default(0),
+    warmStatus: varchar("warmStatus", {
+      enum: ["not_started", "provisioning", "ready", "failed"],
+      length: 16,
+    })
+      .notNull()
+      .default("not_started"),
+    warmUpdatedAt: timestamp("warmUpdatedAt").notNull().defaultNow(),
+    workspace: varchar("workspace", {
+      length: AGENT_RUNNER_LIMITS.maxWorkspaceLength,
+    }),
+  },
+  (table) => [
+    unique("RunnerAgent_id_tenant_key").on(table.id, table.tenant),
+    index("RunnerAgent_tenant_updatedAt_idx").on(table.tenant, table.updatedAt),
+    check(
+      "RunnerAgent_tenant_valid",
+      sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`
+    ),
+    check(
+      "RunnerAgent_runtime_valid",
+      sql`${table.runtime} in ('cloud', 'codex', 'claude', 'copilot')`
+    ),
+    check(
+      "RunnerAgent_status_valid",
+      sql`${table.status} in ('idle', 'running', 'error')`
+    ),
+    check(
+      "RunnerAgent_sandboxLifecycle_valid",
+      sql`${table.sandboxLifecycle} in ('unprovisioned', 'provisioning', 'provisioning_ambiguous', 'ready', 'decommissioning', 'decommission_failed')`
+    ),
+    check(
+      "RunnerAgent_warmStatus_valid",
+      sql`${table.warmStatus} in ('not_started', 'provisioning', 'ready', 'failed')`
+    ),
+    check(
+      "RunnerAgent_sandboxGeneration_nonnegative",
+      sql`${table.sandboxGeneration} >= 0`
+    ),
+    check("RunnerAgent_version_nonnegative", sql`${table.version} >= 0`),
+  ]
+);
+
+export type RunnerAgent = InferSelectModel<typeof runnerAgent>;
+
+export const runnerRun = pgTable(
+  "RunnerRun",
+  {
+    agentId: uuid("agentId").notNull(),
+    commandEvidence: jsonb("commandEvidence")
+      .$type<CommandEvidence[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    completedAt: timestamp("completedAt"),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    daytonaAttemptId: varchar("daytonaAttemptId", {
+      length: 36,
+    }),
+    daytonaCommandId: text("daytonaCommandId"),
+    daytonaSessionId: text("daytonaSessionId"),
+    dispatchLeaseExpiresAt: timestamp("dispatchLeaseExpiresAt"),
+    dispatchLeaseToken: varchar("dispatchLeaseToken", { length: 80 }),
+    dispatchState: varchar("dispatchState", {
+      enum: ["queued", "dispatching", "running", "terminal"],
+      length: 16,
+    })
+      .notNull()
+      .default("queued"),
+    error: jsonb("error").$type<RunError>(),
+    fileEvidence: jsonb("fileEvidence")
+      .$type<FileEvidence[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    logCursor: integer("logCursor").notNull().default(0),
+    operationId: uuid("operationId").notNull(),
+    output: text("output").notNull().default(""),
+    queueSequence: integer("queueSequence")
+      .generatedAlwaysAsIdentity()
+      .notNull(),
+    requestHash: varchar("requestHash", { length: 64 }).notNull(),
+    startedAt: timestamp("startedAt"),
+    status: varchar("status", {
+      enum: ["queued", "running", "completed", "failed", "cancelled"],
+      length: 16,
+    })
+      .notNull()
+      .default("queued"),
+    task: varchar("task", {
+      length: AGENT_RUNNER_LIMITS.maxTaskLength,
+    }).notNull(),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+    version: integer("version").notNull().default(0),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.agentId, table.tenant],
+      foreignColumns: [runnerAgent.id, runnerAgent.tenant],
+      name: "RunnerRun_agentId_tenant_RunnerAgent_id_tenant_fk",
+    }).onDelete("cascade"),
+    index("RunnerRun_agent_createdAt_idx").on(table.agentId, table.createdAt),
+    index("RunnerRun_queued_sequence_idx")
+      .on(table.queueSequence)
+      .where(sql`${table.dispatchState} = 'queued'`),
+    uniqueIndex("RunnerRun_queueSequence_unique_idx").on(table.queueSequence),
+    index("RunnerRun_active_tenant_idx")
+      .on(table.tenant, table.status)
+      .where(sql`${table.status} in ('queued', 'running')`),
+    index("RunnerRun_expired_dispatch_lease_idx")
+      .on(table.dispatchLeaseExpiresAt)
+      .where(
+        sql`${table.dispatchLeaseToken} is not null and ${table.dispatchState} in ('dispatching', 'running')`
+      ),
+    index("RunnerRun_terminal_retention_idx")
+      .on(table.agentId, table.completedAt)
+      .where(sql`${table.status} in ('completed', 'failed', 'cancelled')`),
+    uniqueIndex("RunnerRun_agent_operation_idx").on(
+      table.agentId,
+      table.operationId
+    ),
+    uniqueIndex("RunnerRun_daytonaSessionId_live_idx")
+      .on(table.daytonaSessionId)
+      .where(
+        sql`${table.daytonaSessionId} is not null and ${table.status} in ('queued', 'running')`
+      ),
+    uniqueIndex("RunnerRun_daytonaCommandId_live_idx")
+      .on(table.daytonaCommandId)
+      .where(
+        sql`${table.daytonaCommandId} is not null and ${table.status} in ('queued', 'running')`
+      ),
+    check(
+      "RunnerRun_tenant_valid",
+      sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`
+    ),
+    check(
+      "RunnerRun_status_valid",
+      sql`${table.status} in ('queued', 'running', 'completed', 'failed', 'cancelled')`
+    ),
+    check(
+      "RunnerRun_dispatchState_valid",
+      sql`${table.dispatchState} in ('queued', 'dispatching', 'running', 'terminal')`
+    ),
+    check("RunnerRun_queueSequence_positive", sql`${table.queueSequence} > 0`),
+    check("RunnerRun_logCursor_nonnegative", sql`${table.logCursor} >= 0`),
+    check("RunnerRun_version_nonnegative", sql`${table.version} >= 0`),
+    check(
+      "RunnerRun_timestamps_valid",
+      sql`(${table.status} = 'queued' and ${table.startedAt} is null and ${table.completedAt} is null) or (${table.status} = 'running' and ${table.startedAt} is not null and ${table.completedAt} is null and ${table.startedAt} >= ${table.createdAt}) or (${table.status} in ('completed', 'failed', 'cancelled') and ${table.completedAt} is not null and ${table.completedAt} >= ${table.createdAt} and (${table.startedAt} is null or (${table.startedAt} >= ${table.createdAt} and ${table.completedAt} >= ${table.startedAt})))`
+    ),
+    check(
+      "RunnerRun_dispatchLease_valid",
+      sql`(${table.dispatchState} = 'queued' and ${table.status} = 'queued' and ${table.dispatchLeaseToken} is null and ${table.dispatchLeaseExpiresAt} is null) or (${table.dispatchState} = 'dispatching' and ${table.status} = 'queued' and ${table.dispatchLeaseToken} is not null and ${table.dispatchLeaseExpiresAt} is not null and ${table.dispatchLeaseExpiresAt} > ${table.createdAt}) or (${table.dispatchState} = 'running' and ${table.status} = 'running' and ${table.dispatchLeaseToken} is not null and ${table.dispatchLeaseExpiresAt} is not null and ${table.dispatchLeaseExpiresAt} > ${table.createdAt}) or (${table.dispatchState} = 'terminal' and ${table.status} in ('completed', 'failed', 'cancelled') and ((${table.dispatchLeaseToken} is null and ${table.dispatchLeaseExpiresAt} is null) or (${table.dispatchLeaseToken} is not null and ${table.dispatchLeaseExpiresAt} is not null)))`
+    ),
+    check(
+      "RunnerRun_output_bounded",
+      sql`char_length(${table.output}) <= ${runnerMaxEventOutputLengthSql}`
+    ),
+    check(
+      "RunnerRun_error_bounded",
+      sql`${table.error} is null or (jsonb_typeof(${table.error}) = 'object' and ${table.error} ?& array['code', 'message', 'retryable'] and (${table.error} - 'code' - 'message' - 'retryable' - 'details') = '{}'::jsonb and jsonb_typeof(${table.error}->'code') = 'string' and (${table.error}->>'code') = btrim(${table.error}->>'code') and char_length(${table.error}->>'code') between 1 and 64 and jsonb_typeof(${table.error}->'message') = 'string' and (${table.error}->>'message') = btrim(${table.error}->>'message') and char_length(${table.error}->>'message') between 1 and ${runnerMaxMessageLengthSql} and jsonb_typeof(${table.error}->'retryable') = 'boolean' and (not (${table.error} ? 'details') or (jsonb_typeof(${table.error}->'details') = 'string' and (${table.error}->>'details') = btrim(${table.error}->>'details') and char_length(${table.error}->>'details') between 1 and ${runnerMaxDetailsLengthSql})))`
+    ),
+    check(
+      "RunnerRun_commandEvidence_bounded",
+      sql`jsonb_typeof(${table.commandEvidence}) = 'array' and jsonb_array_length(${table.commandEvidence}) <= ${runnerMaxCommandResultsSql}`
+    ),
+    check(
+      "RunnerRun_fileEvidence_bounded",
+      sql`jsonb_typeof(${table.fileEvidence}) = 'array' and jsonb_array_length(${table.fileEvidence}) <= ${runnerMaxFileOperationsSql}`
+    ),
+    check(
+      "RunnerRun_daytonaCommand_requires_session",
+      sql`${table.daytonaCommandId} is null or ${table.daytonaSessionId} is not null`
+    ),
+    check(
+      "RunnerRun_daytonaAttempt_valid",
+      sql`${table.daytonaAttemptId} is null or ${table.daytonaAttemptId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'`
+    ),
+  ]
+);
+
+export type RunnerRun = InferSelectModel<typeof runnerRun>;
+
+export const runnerRunEvent = pgTable(
+  "RunnerRunEvent",
+  {
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    event: jsonb("event").$type<RunEvent>().notNull(),
+    eventId: integer("eventId").notNull(),
+    runId: uuid("runId")
+      .notNull()
+      .references(() => runnerRun.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    primaryKey({ columns: [table.runId, table.eventId] }),
+    check("RunnerRunEvent_eventId_nonnegative", sql`${table.eventId} >= 0`),
+    check(
+      "RunnerRunEvent_event_object",
+      sql`jsonb_typeof(${table.event}) = 'object'`
+    ),
+  ]
+);
+
+export type RunnerRunEvent = InferSelectModel<typeof runnerRunEvent>;
+
+export const runnerScheduler = pgTable(
+  "RunnerScheduler",
+  {
+    consecutiveDispatchCount: integer("consecutiveDispatchCount")
+      .notNull()
+      .default(0),
+    lastDispatchedTenantHash: varchar("lastDispatchedTenantHash", {
+      length: 67,
+    }),
+    singleton: boolean("singleton").primaryKey().notNull().default(true),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [
+    check("RunnerScheduler_singleton", sql`${table.singleton} = true`),
+    check(
+      "RunnerScheduler_consecutiveDispatchCount_nonnegative",
+      sql`${table.consecutiveDispatchCount} >= 0`
+    ),
+  ]
+);
+
+export type RunnerScheduler = InferSelectModel<typeof runnerScheduler>;

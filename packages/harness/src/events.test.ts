@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { LineAssembler, normalizeCopilotEvent, normalizeEvent } from "./events";
+import {
+  LineAssembler,
+  MalformedHarnessEventError,
+  normalizeCopilotEvent,
+  normalizeEvent,
+} from "./events";
 
 const AT = "2026-08-20T17:00:00.000Z";
 
@@ -184,6 +189,24 @@ test("a non-zero exit is reported as failed", () => {
   );
   const finished = events.at(-1);
   assert.equal(finished?.kind === "finished" && finished.status, "failed");
+});
+
+test("rejects malformed nested structured result values", () => {
+  for (const usage of [
+    [42],
+    { codeChanges: [] },
+    { codeChanges: { filesModified: [42] } },
+    { codeChanges: { filesModified: "not-an-array" } },
+  ]) {
+    assert.throws(
+      () =>
+        normalizeCopilotEvent(
+          JSON.stringify({ exitCode: 0, type: "result", usage }),
+          AT
+        ),
+      MalformedHarnessEventError
+    );
+  }
 });
 
 test("harnesses without a translation emit nothing rather than invented detail", () => {

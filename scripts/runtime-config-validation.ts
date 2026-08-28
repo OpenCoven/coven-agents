@@ -1,7 +1,31 @@
 import { validateAbuseConfig } from "../lib/abuse/config";
 import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
+import {
+  daytonaDomainAllowList,
+  daytonaRequestTimeout,
+  daytonaSnapshotConfiguration,
+} from "../lib/runner/daytona/config";
 
 const BETA_EMAIL = /^[^\s@,]+@[^\s@,]+$/;
+const REQUIRED_PRODUCTION_VARIABLES = [
+  "DAYTONA_API_KEY",
+  "DAYTONA_DOMAIN_ALLOW_LIST",
+  "DAYTONA_SNAPSHOT",
+  "REDIS_URL",
+  "ABUSE_KEY_SECRET",
+  "RUNNER_RECONCILE_SECRET",
+  "OPERATOR_DIAGNOSTIC_TOKEN",
+] as const;
+const DAYTONA_INTERVAL_DEFAULTS = {
+  DAYTONA_AUTO_ARCHIVE_MINUTES: "10080",
+  DAYTONA_AUTO_STOP_MINUTES: "15",
+} as const;
+const ADMISSION_LIMIT_MAXIMUMS = {
+  RUN_ADMISSION_CONSECUTIVE_MAX: "2",
+  RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "25",
+  RUN_ADMISSION_TENANT_ACTIVE_MAX: "2",
+  RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+} as const;
 
 function isProductionRelease(
   env: NodeJS.ProcessEnv,
@@ -69,11 +93,154 @@ function hasCredentialKekConfiguration(
   );
 }
 
+function validateProductionDaytonaConfig(environment: NodeJS.ProcessEnv): void {
+  const missing = REQUIRED_PRODUCTION_VARIABLES.filter(
+    (name) => !environment[name]?.trim()
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required production environment variables: ${missing.join(", ")}.`
+    );
+  }
+
+  daytonaRequestTimeout(environment);
+  daytonaDomainAllowList(environment);
+  daytonaSnapshotConfiguration(environment);
+  validateDaytonaIntervals(environment);
+  validateAdmissionSettings(environment);
+}
+
+function validateConfiguredPreviewDaytonaConfig(
+  environment: NodeJS.ProcessEnv
+): void {
+  if (environment.DAYTONA_REQUEST_TIMEOUT_MS !== undefined) {
+    daytonaRequestTimeout(environment);
+  }
+  if (environment.DAYTONA_DOMAIN_ALLOW_LIST?.trim()) {
+    daytonaDomainAllowList(environment);
+  }
+  if (
+    environment.DAYTONA_API_URL !== undefined ||
+    environment.DAYTONA_SNAPSHOT !== undefined ||
+    environment.DAYTONA_TARGET !== undefined
+  ) {
+    daytonaSnapshotConfiguration({
+      ...environment,
+      DAYTONA_API_KEY:
+        environment.DAYTONA_API_KEY?.trim() || "preview-validation-key",
+      DAYTONA_SNAPSHOT:
+        environment.DAYTONA_SNAPSHOT === undefined
+          ? "coven-agents-copilot-1"
+          : environment.DAYTONA_SNAPSHOT,
+    });
+  }
+
+  for (const name of Object.keys(DAYTONA_INTERVAL_DEFAULTS)) {
+    if (environment[name] !== undefined) {
+      validateNonNegativeSafeIntegerSetting(
+        name,
+        environment[name],
+        DAYTONA_INTERVAL_DEFAULTS[
+          name as keyof typeof DAYTONA_INTERVAL_DEFAULTS
+        ]
+      );
+    }
+  }
+  for (const [name, maximum] of Object.entries(ADMISSION_LIMIT_MAXIMUMS)) {
+    if (environment[name] !== undefined) {
+      validateBoundedNonNegativeSafeIntegerSetting(
+        name,
+        environment[name],
+        maximum
+      );
+    }
+  }
+  if (environment.RUN_ADMISSION_MODE !== undefined) {
+    validateRunAdmissionMode(environment.RUN_ADMISSION_MODE);
+  }
+}
+
+function validateDaytonaIntervals(environment: NodeJS.ProcessEnv): void {
+  for (const [name, defaultValue] of Object.entries(
+    DAYTONA_INTERVAL_DEFAULTS
+  )) {
+    validateNonNegativeSafeIntegerSetting(
+      name,
+      environment[name],
+      defaultValue
+    );
+  }
+}
+
+function validateAdmissionSettings(environment: NodeJS.ProcessEnv): void {
+  for (const [name, maximum] of Object.entries(ADMISSION_LIMIT_MAXIMUMS)) {
+    validateBoundedNonNegativeSafeIntegerSetting(
+      name,
+      environment[name],
+      maximum
+    );
+  }
+  validateRunAdmissionMode(environment.RUN_ADMISSION_MODE);
+}
+
+function validateNonNegativeSafeIntegerSetting(
+  name: string,
+  configured: string | undefined,
+  defaultValue: string,
+  errorMessage = `${name} must be a non-negative safe integer.`
+): number {
+  const value = (configured === undefined ? defaultValue : configured).trim();
+  if (!/^\d+$/u.test(value)) {
+    throw new Error(errorMessage);
+  }
+
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(errorMessage);
+  }
+  return parsed;
+}
+
+function validateBoundedNonNegativeSafeIntegerSetting(
+  name: string,
+  configured: string | undefined,
+  maximum: string
+): number {
+  const errorMessage = `${name} must be a non-negative safe integer no greater than ${maximum}.`;
+  const parsed = validateNonNegativeSafeIntegerSetting(
+    name,
+    configured,
+    maximum,
+    errorMessage
+  );
+  if (parsed > Number(maximum)) {
+    throw new Error(errorMessage);
+  }
+  return parsed;
+}
+
+function validateRunAdmissionMode(configured: string | undefined): "queue" {
+  const normalized = configured?.trim();
+  if (normalized === undefined || normalized === "") {
+    return "queue";
+  }
+  if (normalized !== "queue") {
+    throw new Error('RUN_ADMISSION_MODE must be "queue" when set.');
+  }
+  return "queue";
+}
+
 export async function validateRuntimeConfig(
   env: NodeJS.ProcessEnv,
   explicitRelease: boolean
 ): Promise<void> {
+  const productionRelease = isProductionRelease(env, explicitRelease);
   validateReleaseAudience(env, explicitRelease);
+  if (productionRelease) {
+    validateProductionDaytonaConfig(env);
+  } else {
+    validateConfiguredPreviewDaytonaConfig(env);
+  }
 
   validateAbuseConfig({
     globalDailyRunCap: env.GLOBAL_DAILY_RUN_CAP,
