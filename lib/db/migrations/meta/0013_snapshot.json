@@ -807,6 +807,13 @@
           "notNull": true,
           "default": "now()"
         },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
         "warmStatus": {
           "name": "warmStatus",
           "type": "varchar(16)",
@@ -881,6 +888,10 @@
         "RunnerAgent_sandboxGeneration_nonnegative": {
           "name": "RunnerAgent_sandboxGeneration_nonnegative",
           "value": "\"RunnerAgent\".\"sandboxGeneration\" >= 0"
+        },
+        "RunnerAgent_version_nonnegative": {
+          "name": "RunnerAgent_version_nonnegative",
+          "value": "\"RunnerAgent\".\"version\" >= 0"
         }
       },
       "isRLSEnabled": false

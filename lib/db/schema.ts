@@ -457,6 +457,7 @@ export const runnerAgent = pgTable(
       .default("idle"),
     tenant: varchar("tenant", { length: 64 }).notNull(),
     updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+    version: integer("version").notNull().default(0),
     warmStatus: varchar("warmStatus", {
       enum: ["not_started", "provisioning", "ready", "failed"],
       length: 16,
@@ -491,6 +492,7 @@ export const runnerAgent = pgTable(
       "RunnerAgent_sandboxGeneration_nonnegative",
       sql`${table.sandboxGeneration} >= 0`
     ),
+    check("RunnerAgent_version_nonnegative", sql`${table.version} >= 0`),
   ]
 );
 

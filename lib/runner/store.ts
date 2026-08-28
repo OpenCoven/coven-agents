@@ -15,6 +15,9 @@ import type {
   CreateRunnerAgentInput,
   DispatchClaimInput,
   DispatchFence,
+  ExpiredDispatchLeaseAdoptionInput,
+  ExpiredDispatchRecoveryOutcome,
+  ExpiredDispatchRequeueInput,
   FinalizeRunnerRunInput,
   RunnerAgentRecord,
   RunnerMutationOutcome,
@@ -76,16 +79,70 @@ function statement(
   return { args, name, query };
 }
 
+function column<T>(row: Record<string, unknown>, name: string): T {
+  const value = row[name];
+  if (value === undefined) {
+    throw new Error(`Runner query did not return "${name}".`);
+  }
+  return value as T;
+}
+
 function asAgent(row: Record<string, unknown>): RunnerAgentRecord {
-  return row as unknown as RunnerAgentRecord;
+  return {
+    createdAt: column(row, "createdAt"),
+    daytonaSandboxId: column(row, "daytonaSandboxId"),
+    description: column(row, "description"),
+    id: column(row, "id"),
+    instructions: column(row, "instructions"),
+    lastRunAt: column(row, "lastRunAt"),
+    model: column(row, "model"),
+    name: column(row, "name"),
+    runtime: column(row, "runtime"),
+    sandboxGeneration: column(row, "sandboxGeneration"),
+    status: column(row, "status"),
+    tenant: column(row, "tenant"),
+    updatedAt: column(row, "updatedAt"),
+    version: column(row, "version"),
+    warmStatus: column(row, "warmStatus"),
+    warmUpdatedAt: column(row, "warmUpdatedAt"),
+    workspace: column(row, "workspace"),
+  };
 }
 
 function asRun(row: Record<string, unknown>): RunnerRunRecord {
-  return row as unknown as RunnerRunRecord;
+  return {
+    agentId: column(row, "agentId"),
+    commandEvidence: column(row, "commandEvidence"),
+    completedAt: column(row, "completedAt"),
+    createdAt: column(row, "createdAt"),
+    daytonaCommandId: column(row, "daytonaCommandId"),
+    daytonaSessionId: column(row, "daytonaSessionId"),
+    dispatchLeaseExpiresAt: column(row, "dispatchLeaseExpiresAt"),
+    dispatchLeaseToken: column(row, "dispatchLeaseToken"),
+    dispatchState: column(row, "dispatchState"),
+    error: column(row, "error"),
+    fileEvidence: column(row, "fileEvidence"),
+    id: column(row, "id"),
+    logCursor: column(row, "logCursor"),
+    operationId: column(row, "operationId"),
+    output: column(row, "output"),
+    queueSequence: column(row, "queueSequence"),
+    requestHash: column(row, "requestHash"),
+    startedAt: column(row, "startedAt"),
+    status: column(row, "status"),
+    task: column(row, "task"),
+    tenant: column(row, "tenant"),
+    version: column(row, "version"),
+  };
 }
 
 function asEvent(row: Record<string, unknown>): RunnerRunEventRecord {
-  return row as unknown as RunnerRunEventRecord;
+  return {
+    createdAt: column(row, "createdAt"),
+    event: column(row, "event"),
+    eventId: column(row, "eventId"),
+    runId: column(row, "runId"),
+  };
 }
 
 function eventJson(event: RunEvent): string {
@@ -148,18 +205,12 @@ async function lockedOperatorRun(
 
 function fenceOutcome(
   run: RunnerRunRecord,
-  input: DispatchFence,
-  allowExpired = false
+  input: DispatchFence
 ): { kind: "stale_version" } | { kind: "lease_lost" } | null {
   if (run.version !== input.expectedVersion) {
     return { kind: "stale_version" };
   }
-  if (
-    run.dispatchLeaseToken !== input.leaseToken ||
-    (!allowExpired &&
-      (!run.dispatchLeaseExpiresAt ||
-        run.dispatchLeaseExpiresAt.getTime() <= input.now.getTime()))
-  ) {
+  if (run.dispatchLeaseToken !== input.leaseToken) {
     return { kind: "lease_lost" };
   }
   return null;
@@ -199,6 +250,17 @@ function runningFenceOutcome(
     : { kind: "not_live" };
 }
 
+function isExpectedLiveDispatch(
+  run: RunnerRunRecord,
+  expectedDispatchState: "dispatching" | "running"
+): boolean {
+  return (
+    run.dispatchState === expectedDispatchState &&
+    ((expectedDispatchState === "dispatching" && run.status === "queued") ||
+      (expectedDispatchState === "running" && run.status === "running"))
+  );
+}
+
 async function pruneTerminalRunsInTransaction(
   transaction: RunnerStoreTransaction,
   tenant: string,
@@ -234,6 +296,41 @@ export type RunnerStore = ReturnType<typeof createRunnerStore>;
  */
 export function createRunnerStore(database: RunnerStoreDatabase) {
   return {
+    adoptExpiredDispatchLease: (
+      operator: RunnerOperator,
+      input: ExpiredDispatchLeaseAdoptionInput
+    ): Promise<ExpiredDispatchRecoveryOutcome> =>
+      database.transaction(async (transaction) => {
+        const run = await lockedOperatorRun(transaction, operator, input.runId);
+        if (!run) {
+          return { kind: "not_found" };
+        }
+        if (run.dispatchLeaseToken !== input.oldLeaseToken) {
+          return { kind: "lease_lost" };
+        }
+        if (!isExpectedLiveDispatch(run, input.expectedDispatchState)) {
+          return { kind: "not_live" };
+        }
+        const [updated] = await transaction.execute(
+          statement(
+            "adopt-expired-dispatch-lease",
+            input,
+            sql`UPDATE "RunnerRun"
+              SET "dispatchLeaseToken" = ${input.newLeaseToken},
+                  "dispatchLeaseExpiresAt" = ${input.leaseExpiresAt},
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${input.runId}
+                AND "dispatchLeaseToken" = ${input.oldLeaseToken}
+                AND "dispatchLeaseExpiresAt" <= clock_timestamp()
+                AND "dispatchState" = ${input.expectedDispatchState}
+              RETURNING *`
+          )
+        );
+        return updated
+          ? { kind: "adopted", value: asRun(updated) }
+          : { kind: "not_expired" };
+      }),
     appendEvent: (
       principal: RunnerPrincipal,
       input: AppendRunnerEventInput
@@ -268,7 +365,6 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               expectedVersion: input.expectedVersion,
               fileEvidence: evidenceJson(input.snapshot?.fileEvidence),
               leaseToken: input.leaseToken,
-              now: input.now,
               output: input.snapshot?.output ?? null,
               runId: input.runId,
               tenant: principal.tenant,
@@ -284,14 +380,14 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "tenant" = ${principal.tenant}
                 AND "version" = ${input.expectedVersion}
                 AND "dispatchLeaseToken" = ${input.leaseToken}
-                AND "dispatchLeaseExpiresAt" > ${input.now}
+                AND "dispatchLeaseExpiresAt" > clock_timestamp()
                 AND "dispatchState" = 'running'
                 AND "status" = 'running'
               RETURNING *`
           )
         );
         if (!updated) {
-          return { kind: "stale_version" };
+          return { kind: "lease_lost" };
         }
         const [inserted] = await transaction.execute(
           statement(
@@ -373,7 +469,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "tenant" = ${run.tenant}
                 AND "version" = ${input.expectedVersion}
                 AND "dispatchLeaseToken" = ${input.leaseToken}
-                AND "dispatchLeaseExpiresAt" > ${input.now}
+                AND "dispatchLeaseExpiresAt" > clock_timestamp()
                 AND "dispatchState" = 'dispatching'
                 AND "status" = 'queued'
                 AND ("daytonaSessionId" IS NULL OR "daytonaSessionId" = ${input.sessionId ?? null})
@@ -382,7 +478,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           )
         );
         if (!updated) {
-          throw new Error("Runner Daytona attachment validation changed.");
+          return { kind: "lease_lost" };
         }
         if (input.sandboxId !== undefined) {
           const updatedAgent = await transaction.execute(
@@ -395,7 +491,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 tenant: run.tenant,
               },
               sql`UPDATE "RunnerAgent"
-                SET "daytonaSandboxId" = ${input.sandboxId}, "updatedAt" = now()
+                SET "daytonaSandboxId" = ${input.sandboxId},
+                    "updatedAt" = now(),
+                    "version" = "version" + 1
                 WHERE "id" = ${run.agentId}
                   AND "tenant" = ${run.tenant}
                   AND "sandboxGeneration" = ${input.sandboxGeneration}
@@ -427,7 +525,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             SET "dispatchState" = 'dispatching',
                 "dispatchLeaseToken" = ${input.leaseToken},
                 "dispatchLeaseExpiresAt" = ${input.leaseExpiresAt},
-                "updatedAt" = ${input.now},
+                "updatedAt" = now(),
                 "version" = "version" + 1
             WHERE "id" IN (SELECT "id" FROM candidate)
             RETURNING *`
@@ -445,7 +543,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (!run) {
           return { kind: "not_found" };
         }
-        const rejected = fenceOutcome(run, input, true);
+        const rejected = fenceOutcome(run, input);
         if (rejected) {
           return rejected;
         }
@@ -469,6 +567,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           ? { kind: "updated", value: asRun(updated) }
           : { kind: "stale_version" };
       }),
+
     createAgent: (principal: RunnerPrincipal, input: CreateRunnerAgentInput) =>
       database.transaction(async (transaction) => {
         const [agent] = await transaction.execute(
@@ -577,13 +676,13 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               WHERE "id" = ${input.runId}
                 AND "version" = ${input.expectedVersion}
                 AND "dispatchLeaseToken" = ${input.leaseToken}
-                AND "dispatchLeaseExpiresAt" > ${input.now}
+                AND "dispatchLeaseExpiresAt" > clock_timestamp()
                 AND "status" IN ('queued', 'running')
               RETURNING *`
           )
         );
         if (!updated) {
-          return { kind: "stale_version" };
+          return { kind: "lease_lost" };
         }
         const finalized = asRun(updated);
         const event: RunEvent =
@@ -678,13 +777,13 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             sql`UPDATE "RunnerRun"
               SET "dispatchState" = 'running',
                   "status" = 'running',
-                  "startedAt" = ${input.now},
-                  "updatedAt" = ${input.now},
+                  "startedAt" = clock_timestamp(),
+                  "updatedAt" = clock_timestamp(),
                   "version" = "version" + 1
               WHERE "id" = ${input.runId}
                 AND "version" = ${input.expectedVersion}
                 AND "dispatchLeaseToken" = ${input.leaseToken}
-                AND "dispatchLeaseExpiresAt" > ${input.now}
+                AND "dispatchLeaseExpiresAt" > clock_timestamp()
                 AND "dispatchState" = 'dispatching'
                 AND "status" = 'queued'
               RETURNING *`
@@ -692,7 +791,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         );
         return updated
           ? { kind: "updated", value: asRun(updated) }
-          : { kind: "stale_version" };
+          : { kind: "lease_lost" };
       }),
 
     pruneTerminalRuns: (principal: RunnerPrincipal, agentId: string) =>
@@ -746,14 +845,58 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               WHERE "id" = ${input.runId}
                 AND "version" = ${input.expectedVersion}
                 AND "dispatchLeaseToken" = ${input.leaseToken}
-                AND "dispatchLeaseExpiresAt" > ${input.now}
+                AND "dispatchLeaseExpiresAt" > clock_timestamp()
                 AND "dispatchState" IN ('dispatching', 'running')
               RETURNING *`
           )
         );
         return updated
           ? { kind: "updated", value: asRun(updated) }
-          : { kind: "stale_version" };
+          : { kind: "lease_lost" };
+      }),
+
+    requeueExpiredDispatch: (
+      operator: RunnerOperator,
+      input: ExpiredDispatchRequeueInput
+    ): Promise<ExpiredDispatchRecoveryOutcome> =>
+      database.transaction(async (transaction) => {
+        const run = await lockedOperatorRun(transaction, operator, input.runId);
+        if (!run) {
+          return { kind: "not_found" };
+        }
+        if (run.dispatchLeaseToken !== input.oldLeaseToken) {
+          return { kind: "lease_lost" };
+        }
+        if (!isExpectedLiveDispatch(run, input.expectedDispatchState)) {
+          return { kind: "not_live" };
+        }
+        if (run.daytonaSessionId || run.daytonaCommandId) {
+          return { kind: "provider_identifiers_attached" };
+        }
+        const [updated] = await transaction.execute(
+          statement(
+            "requeue-expired-dispatch",
+            input,
+            sql`UPDATE "RunnerRun"
+              SET "dispatchLeaseToken" = NULL,
+                  "dispatchLeaseExpiresAt" = NULL,
+                  "dispatchState" = 'queued',
+                  "status" = 'queued',
+                  "startedAt" = NULL,
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${input.runId}
+                AND "dispatchLeaseToken" = ${input.oldLeaseToken}
+                AND "dispatchLeaseExpiresAt" <= clock_timestamp()
+                AND "dispatchState" = ${input.expectedDispatchState}
+                AND "daytonaSessionId" IS NULL
+                AND "daytonaCommandId" IS NULL
+              RETURNING *`
+          )
+        );
+        return updated
+          ? { kind: "requeued", value: asRun(updated) }
+          : { kind: "not_expired" };
       }),
 
     scanExpiredDispatchLeases: (
@@ -914,10 +1057,11 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                   "model" = ${input.model},
                   "runtime" = ${input.runtime},
                   "workspace" = ${input.workspace},
-                  "updatedAt" = now()
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
               WHERE "id" = ${input.id}
                 AND "tenant" = ${principal.tenant}
-                AND "updatedAt" = ${input.expectedUpdatedAt}
+                AND "version" = ${input.expectedVersion}
               RETURNING *`
           )
         );

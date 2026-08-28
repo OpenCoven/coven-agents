@@ -4,7 +4,12 @@ import { AGENT_RUNNER_API_VERSION } from "@opencoven/agent-contracts";
 import { sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { createRunnerStore, type RunnerStoreStatement } from "./store";
-import type { RunnerOperator, RunnerPrincipal, RunnerRunRecord } from "./types";
+import type {
+  RunnerAgentRecord,
+  RunnerOperator,
+  RunnerPrincipal,
+  RunnerRunRecord,
+} from "./types";
 
 const principal: RunnerPrincipal = {
   kind: "subscriber",
@@ -21,7 +26,6 @@ function queryText(statement: RunnerStoreStatement): string {
 function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
   return {
     agentId: "00000000-0000-4000-8000-000000000001",
-    apiVersion: AGENT_RUNNER_API_VERSION,
     commandEvidence: [],
     completedAt: null,
     createdAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -43,6 +47,29 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     task: "test task",
     tenant: "tenant_a",
     version: 7,
+    ...overrides,
+  };
+}
+
+function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
+  return {
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    daytonaSandboxId: null,
+    description: "",
+    id: "00000000-0000-4000-8000-000000000001",
+    instructions: "test instructions",
+    lastRunAt: null,
+    model: "test-model",
+    name: "test",
+    runtime: "cloud",
+    sandboxGeneration: 0,
+    status: "idle",
+    tenant: principal.tenant,
+    updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    version: 0,
+    warmStatus: "not_started",
+    warmUpdatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    workspace: null,
     ...overrides,
   };
 }
@@ -140,7 +167,6 @@ test("event ids advance from the locked run cursor and update atomically", async
     event: { output: "progress", type: "output" },
     expectedVersion: 2,
     leaseToken: "lease-a",
-    now,
     runId: current.id,
   });
 
@@ -155,6 +181,11 @@ test("event ids advance from the locked run cursor and update atomically", async
     queryText(statements[1] as RunnerStoreStatement),
     /"dispatchState" = 'running'/
   );
+  assert.match(
+    queryText(statements[1] as RunnerStoreStatement),
+    /"dispatchLeaseExpiresAt" > clock_timestamp\(\)/
+  );
+  assert.equal("now" in (statements[1] as RunnerStoreStatement).args, false);
 });
 
 test("stale versions are rejected before an event write", async () => {
@@ -164,7 +195,6 @@ test("stale versions are rejected before an event write", async () => {
     event: { output: "progress", type: "output" },
     expectedVersion: 8,
     leaseToken: "lease-a",
-    now: new Date("2026-01-01T00:00:01.000Z"),
     runId: run().id,
   });
 
@@ -172,8 +202,7 @@ test("stale versions are rejected before an event write", async () => {
   assert.equal(statements.length, 1);
 });
 
-test("expired and non-live dispatches cannot append events", async () => {
-  const now = new Date("2026-01-01T00:01:00.000Z");
+test("database-clock lease fences and dispatch state prevent event appends", async () => {
   const expired = scripted([
     run({
       dispatchState: "running",
@@ -193,7 +222,6 @@ test("expired and non-live dispatches cannot append events", async () => {
     event: { output: "progress", type: "output" } as const,
     expectedVersion: 7,
     leaseToken: "lease-a",
-    now,
     runId: run().id,
   };
 
@@ -203,8 +231,12 @@ test("expired and non-live dispatches cannot append events", async () => {
   assert.deepEqual(await nonLive.store.appendEvent(principal, input), {
     kind: "not_live",
   });
-  assert.equal(expired.statements.length, 1);
+  assert.equal(expired.statements.length, 2);
   assert.equal(nonLive.statements.length, 1);
+  assert.match(
+    queryText(expired.statements[1] as RunnerStoreStatement),
+    /"dispatchLeaseExpiresAt" > clock_timestamp\(\)/
+  );
 });
 
 test("lease fencing rejects a stale dispatcher", async () => {
@@ -213,12 +245,164 @@ test("lease fencing rejects a stale dispatcher", async () => {
   const result = await store.markDispatchRunning(operator, {
     expectedVersion: 7,
     leaseToken: "old",
-    now: new Date("2026-01-01T00:00:01.000Z"),
     runId: run().id,
   });
 
   assert.deepEqual(result, { kind: "lease_lost" });
   assert.equal(statements.length, 1);
+});
+
+test("all live lease mutations predicate against the database clock", async () => {
+  const dispatching = run();
+  const running = run({
+    dispatchState: "running",
+    startedAt: new Date("2026-01-01T00:00:01.000Z"),
+    status: "running",
+  });
+  const terminal = run({
+    completedAt: new Date("2026-01-01T00:00:02.000Z"),
+    dispatchState: "terminal",
+    startedAt: running.startedAt,
+    status: "completed",
+    version: running.version + 1,
+  });
+  const mark = scripted([dispatching], [running]);
+  const renew = scripted([running], [run({ ...running, version: 8 })]);
+  const finalize = scripted([running], [terminal], [], []);
+
+  await mark.store.markDispatchRunning(operator, {
+    expectedVersion: dispatching.version,
+    leaseToken: "lease-a",
+    runId: dispatching.id,
+  });
+  await renew.store.renewDispatchLease(operator, {
+    expectedVersion: running.version,
+    leaseExpiresAt: new Date("2026-01-01T00:05:00.000Z"),
+    leaseToken: "lease-a",
+    runId: running.id,
+  });
+  await finalize.store.finalizeRun(operator, {
+    commandEvidence: [],
+    completedAt: terminal.completedAt as Date,
+    expectedVersion: running.version,
+    fileEvidence: [],
+    leaseToken: "lease-a",
+    output: "",
+    runId: running.id,
+    status: "completed",
+  });
+
+  for (const statement of [
+    mark.statements[1],
+    renew.statements[1],
+    finalize.statements[1],
+  ]) {
+    assert.ok(statement);
+    assert.match(
+      queryText(statement),
+      /"dispatchLeaseExpiresAt" > clock_timestamp\(\)/
+    );
+    assert.equal("now" in statement.args, false);
+  }
+});
+
+test("expired dispatch recovery requeues only ID-free rows with a database-clock fence", async () => {
+  const current = run();
+  const requeued = run({
+    dispatchLeaseExpiresAt: null,
+    dispatchLeaseToken: null,
+    dispatchState: "queued",
+    startedAt: null,
+    version: current.version + 1,
+  });
+  const { statements, store } = scripted([current], [requeued]);
+
+  const result = await store.requeueExpiredDispatch(operator, {
+    expectedDispatchState: "dispatching",
+    oldLeaseToken: current.dispatchLeaseToken as string,
+    runId: current.id,
+  });
+
+  assert.equal(result.kind, "requeued");
+  assert.equal(result.kind === "requeued" && result.value.version, 8);
+  const update = statements[1] as RunnerStoreStatement;
+  assert.match(
+    queryText(update),
+    /"dispatchLeaseExpiresAt" <= clock_timestamp\(\)/
+  );
+  assert.match(queryText(update), /"daytonaSessionId" IS NULL/);
+  assert.match(queryText(update), /"daytonaCommandId" IS NULL/);
+  assert.match(queryText(update), /"startedAt" = NULL/);
+});
+
+test("expired dispatch recovery reports stale, non-expired, and provider-attached rows", async () => {
+  const current = run();
+  const stale = scripted([run({ dispatchLeaseToken: "newer-lease" })]);
+  const unexpired = scripted([current], []);
+  const attached = scripted([run({ daytonaSessionId: "session" })]);
+
+  const input = {
+    expectedDispatchState: "dispatching" as const,
+    oldLeaseToken: "lease-a",
+    runId: current.id,
+  };
+  assert.deepEqual(await stale.store.requeueExpiredDispatch(operator, input), {
+    kind: "lease_lost",
+  });
+  assert.deepEqual(
+    await unexpired.store.requeueExpiredDispatch(operator, input),
+    { kind: "not_expired" }
+  );
+  assert.deepEqual(
+    await attached.store.requeueExpiredDispatch(operator, input),
+    { kind: "provider_identifiers_attached" }
+  );
+  assert.equal(stale.statements.length, 1);
+  assert.equal(unexpired.statements.length, 2);
+  assert.equal(attached.statements.length, 1);
+});
+
+test("expired dispatch recovery adopts a new lease with the expected live state", async () => {
+  const current = run({
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+  });
+  const adopted = run({
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+    dispatchLeaseExpiresAt: new Date("2026-01-01T00:05:00.000Z"),
+    dispatchLeaseToken: "replacement-lease",
+    version: current.version + 1,
+  });
+  const { statements, store } = scripted([current], [adopted]);
+  const input = {
+    expectedDispatchState: "dispatching",
+    leaseExpiresAt: adopted.dispatchLeaseExpiresAt as Date,
+    newLeaseToken: "replacement-lease",
+    oldLeaseToken: "lease-a",
+    runId: current.id,
+  } as const;
+
+  const result = await store.adoptExpiredDispatchLease(operator, input);
+
+  assert.equal(result.kind, "adopted");
+  assert.equal(
+    result.kind === "adopted" && result.value.dispatchLeaseToken,
+    "replacement-lease"
+  );
+  const update = statements[1] as RunnerStoreStatement;
+  assert.match(
+    queryText(update),
+    /"dispatchLeaseExpiresAt" <= clock_timestamp\(\)/
+  );
+  assert.match(queryText(update), /"dispatchState" = \$\d+/);
+
+  const stale = scripted([run({ dispatchLeaseToken: "newer-lease" })]);
+  assert.deepEqual(
+    await stale.store.adoptExpiredDispatchLease(operator, input),
+    { kind: "lease_lost" }
+  );
+  assert.equal(stale.statements.length, 1);
 });
 
 test("terminal retention deletes only terminal runs beyond the newest twenty", async () => {
@@ -263,7 +447,7 @@ test("principal mutations bind every affected row to the principal tenant", asyn
       },
     ]
   );
-  const create = scripted([{}]);
+  const create = scripted([]);
   const update = scripted([], [{ id: current.agentId }]);
   const remove = scripted(
     [{ id: current.agentId }],
@@ -276,7 +460,6 @@ test("principal mutations bind every affected row to the principal tenant", asyn
     event: { output: "progress", type: "output" },
     expectedVersion: 7,
     leaseToken: "lease-a",
-    now: new Date("2026-01-01T00:00:01.000Z"),
     runId: current.id,
   });
   await create.store.createAgent(principal, {
@@ -288,7 +471,7 @@ test("principal mutations bind every affected row to the principal tenant", asyn
   });
   await update.store.updateAgent(principal, {
     description: "",
-    expectedUpdatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    expectedVersion: 0,
     id: current.agentId,
     instructions: "test instructions",
     model: "test-model",
@@ -328,7 +511,6 @@ test("Daytona attachment validates mismatches before making any update", async (
     commandId: "command",
     expectedVersion: dispatching.version,
     leaseToken: "lease-a",
-    now: new Date("2026-01-01T00:00:01.000Z"),
     runId: dispatching.id,
     sandboxGeneration: 1,
     sandboxId: "sandbox",
@@ -350,7 +532,6 @@ test("Daytona identifier conflicts cannot partially attach a sandbox", async () 
     commandId: "command",
     expectedVersion: dispatching.version,
     leaseToken: "lease-a",
-    now: new Date("2026-01-01T00:00:01.000Z"),
     runId: dispatching.id,
     sandboxGeneration: 1,
     sandboxId: "sandbox",
@@ -370,16 +551,17 @@ test("Daytona attachment keeps the run update tenant scoped", async () => {
   const { statements, store } = scripted(
     [dispatching],
     [{ id: dispatching.agentId, sandboxGeneration: 1 }],
-    [updated]
+    [updated],
+    [{ id: dispatching.agentId }]
   );
 
   const result = await store.attachDaytonaIdentifiers(operator, {
     commandId: "command",
     expectedVersion: dispatching.version,
     leaseToken: "lease-a",
-    now: new Date("2026-01-01T00:00:01.000Z"),
     runId: dispatching.id,
     sandboxGeneration: 1,
+    sandboxId: "sandbox",
     sessionId: "session",
   });
 
@@ -388,6 +570,47 @@ test("Daytona attachment keeps the run update tenant scoped", async () => {
   assert.ok(update);
   assert.equal(update.args.tenant, dispatching.tenant);
   assert.match(queryText(update), /"tenant"\s*=\s*\$\d+/);
+  assert.match(
+    queryText(update),
+    /"dispatchLeaseExpiresAt" > clock_timestamp\(\)/
+  );
+  assert.equal("now" in update.args, false);
+  const sandboxUpdate = statements[3] as RunnerStoreStatement;
+  assert.match(queryText(sandboxUpdate), /"version" = "version" \+ 1/);
+});
+
+test("agent updates use integer versions", async () => {
+  const current = agent({ version: 4 });
+  const updated = agent({ version: 5 });
+  const update = scripted([updated]);
+
+  const result = await update.store.updateAgent(principal, {
+    description: "updated",
+    expectedVersion: current.version,
+    id: current.id,
+    instructions: current.instructions,
+    model: current.model,
+    name: current.name,
+    runtime: current.runtime,
+    workspace: current.workspace,
+  });
+
+  assert.equal(result.kind, "updated");
+  assert.equal(result.kind === "updated" && result.value.version, 5);
+  const query = queryText(update.statements[0] as RunnerStoreStatement);
+  assert.match(query, /"version" = "version" \+ 1/);
+  assert.match(query, /AND "version" = \$\d+/);
+  assert.doesNotMatch(query, /"updatedAt" = \$\d+/);
+});
+
+test("raw database run rows derive the canonical public API version", async () => {
+  const raw = run();
+  const { store } = scripted([raw]);
+
+  const snapshot = await store.getRun(principal, raw.id);
+
+  assert.equal("apiVersion" in raw, false);
+  assert.equal(snapshot?.apiVersion, AGENT_RUNNER_API_VERSION);
 });
 
 test("agent deletion and starts serialize through the same agent lock", async () => {

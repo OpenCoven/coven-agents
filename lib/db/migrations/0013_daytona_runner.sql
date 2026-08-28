@@ -12,6 +12,7 @@ CREATE TABLE "RunnerAgent" (
 	"status" varchar(16) DEFAULT 'idle' NOT NULL,
 	"tenant" varchar(64) NOT NULL,
 	"updatedAt" timestamp DEFAULT now() NOT NULL,
+	"version" integer DEFAULT 0 NOT NULL,
 	"warmStatus" varchar(16) DEFAULT 'not_started' NOT NULL,
 	"warmUpdatedAt" timestamp DEFAULT now() NOT NULL,
 	"workspace" varchar(1024),
@@ -20,7 +21,8 @@ CREATE TABLE "RunnerAgent" (
 	CONSTRAINT "RunnerAgent_runtime_valid" CHECK ("RunnerAgent"."runtime" in ('cloud', 'codex', 'claude', 'copilot')),
 	CONSTRAINT "RunnerAgent_status_valid" CHECK ("RunnerAgent"."status" in ('idle', 'running', 'error')),
 	CONSTRAINT "RunnerAgent_warmStatus_valid" CHECK ("RunnerAgent"."warmStatus" in ('not_started', 'provisioning', 'ready', 'failed')),
-	CONSTRAINT "RunnerAgent_sandboxGeneration_nonnegative" CHECK ("RunnerAgent"."sandboxGeneration" >= 0)
+	CONSTRAINT "RunnerAgent_sandboxGeneration_nonnegative" CHECK ("RunnerAgent"."sandboxGeneration" >= 0),
+	CONSTRAINT "RunnerAgent_version_nonnegative" CHECK ("RunnerAgent"."version" >= 0)
 );
 --> statement-breakpoint
 CREATE TABLE "RunnerRun" (

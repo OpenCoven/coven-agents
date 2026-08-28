@@ -51,6 +51,7 @@ export type RunnerAgentRecord = {
   status: RunnerAgentStatus;
   tenant: string;
   updatedAt: Date;
+  version: number;
   warmStatus: RunnerWarmStatus;
   warmUpdatedAt: Date;
   workspace: string | null;
@@ -58,7 +59,7 @@ export type RunnerAgentRecord = {
 
 export type RunnerRunRecord = Omit<
   RunSnapshot,
-  "completedAt" | "createdAt" | "startedAt"
+  "apiVersion" | "completedAt" | "createdAt" | "startedAt"
 > & {
   completedAt: Date | null;
   createdAt: Date;
@@ -94,7 +95,7 @@ export type CreateRunnerAgentInput = {
 
 export type UpdateRunnerAgentInput = {
   description: string;
-  expectedUpdatedAt: Date;
+  expectedVersion: number;
   id: string;
   instructions: string;
   model: string;
@@ -122,7 +123,6 @@ type WithoutEventId<T> = T extends unknown ? Omit<T, "id"> : never;
 export type DispatchFence = {
   expectedVersion: number;
   leaseToken: string;
-  now: Date;
   runId: string;
 };
 
@@ -134,7 +134,6 @@ export type AppendRunnerEventInput = DispatchFence & {
 export type DispatchClaimInput = {
   leaseExpiresAt: Date;
   leaseToken: string;
-  now: Date;
 };
 
 export type AttachDaytonaIdentifiersInput = DispatchFence & {
@@ -154,6 +153,20 @@ export type FinalizeRunnerRunInput = DispatchFence & {
   status: "completed" | "failed" | "cancelled";
 };
 
+export type ExpiredDispatchRequeueInput = {
+  expectedDispatchState: Extract<
+    RunnerDispatchState,
+    "dispatching" | "running"
+  >;
+  oldLeaseToken: string;
+  runId: string;
+};
+
+export type ExpiredDispatchLeaseAdoptionInput = ExpiredDispatchRequeueInput & {
+  leaseExpiresAt: Date;
+  newLeaseToken: string;
+};
+
 export type RunnerMutationOutcome<T> =
   | { kind: "updated"; value: T }
   | { kind: "not_found" }
@@ -161,3 +174,12 @@ export type RunnerMutationOutcome<T> =
   | { kind: "lease_lost" }
   | { kind: "not_live" }
   | { kind: "generation_mismatch" };
+
+export type ExpiredDispatchRecoveryOutcome =
+  | { kind: "requeued"; value: RunnerRunRecord }
+  | { kind: "adopted"; value: RunnerRunRecord }
+  | { kind: "not_found" }
+  | { kind: "lease_lost" }
+  | { kind: "not_live" }
+  | { kind: "provider_identifiers_attached" }
+  | { kind: "not_expired" };
