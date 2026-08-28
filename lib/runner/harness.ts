@@ -18,11 +18,13 @@ import {
   harnessStatus,
   isRunnableHarness,
   LineAssembler,
+  MalformedHarnessEventError,
   normalizeEvent,
   runEventSchema,
   runEventTimestampSchema,
   toShellCommand,
 } from "@opencoven/harness";
+import { ZodError } from "zod";
 
 export type {
   HarnessId,
@@ -290,17 +292,32 @@ export function parseHarnessLog(
   let malformedDiagnostics = 0;
 
   for (const line of lines) {
-    let validJson = true;
+    let malformed = false;
     try {
       JSON.parse(line);
     } catch {
-      validJson = false;
+      malformed = true;
     }
-    const normalized = normalizeEvent(harness, line, fallbackAt).map((event) =>
-      sanitizeHarnessEvent(harness, event, credential, fallbackAt)
-    );
-    events.push(...normalized);
-    if (!validJson && malformedDiagnostics < MAX_MALFORMED_DIAGNOSTICS) {
+    if (!malformed) {
+      try {
+        const normalized = normalizeEvent(harness, line, fallbackAt).map(
+          (event) =>
+            sanitizeHarnessEvent(harness, event, credential, fallbackAt)
+        );
+        events.push(...normalized);
+      } catch (error) {
+        if (
+          !(
+            error instanceof MalformedHarnessEventError ||
+            error instanceof ZodError
+          )
+        ) {
+          throw error;
+        }
+        malformed = true;
+      }
+    }
+    if (malformed && malformedDiagnostics < MAX_MALFORMED_DIAGNOSTICS) {
       events.push(
         sanitizeHarnessEvent(
           harness,

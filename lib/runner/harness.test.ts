@@ -154,6 +154,7 @@ test("flushes a terminal trailing event and emits malformed diagnostics once", (
     sessionId: "session",
     type: "result",
   });
+
   const parsed = parseHarnessLog("copilot", terminal, 0, true, SECRET, AT);
   assert.equal(parsed.cursor, terminal.length);
   assert.equal(
@@ -214,4 +215,63 @@ test("flushes a terminal trailing event and emits malformed diagnostics once", (
     completedTerminal.events.some((event) => event.kind === "finished"),
     true
   );
+});
+
+test("skips malformed structured records without stopping later valid results", () => {
+  const malformedRecords = [
+    {
+      type: "result",
+      usage: [SECRET],
+    },
+    {
+      type: "result",
+      usage: { codeChanges: [SECRET] },
+    },
+    {
+      type: "result",
+      usage: { codeChanges: { filesModified: [42] } },
+    },
+    {
+      type: "result",
+      usage: { codeChanges: { filesModified: SECRET } },
+    },
+  ];
+  const valid = JSON.stringify({
+    exitCode: 0,
+    sessionId: "safe-session",
+    type: "result",
+    usage: {
+      codeChanges: { filesModified: ["safe.ts"], linesAdded: 1 },
+      premiumRequests: 1,
+    },
+  });
+  const stdout = `${malformedRecords
+    .map((record) => JSON.stringify(record))
+    .join("\n")}\n${valid}\n`;
+
+  const parsed = parseHarnessLog("copilot", stdout, 0, false, SECRET, AT);
+  assert.equal(parsed.cursor, stdout.length);
+  assert.equal(JSON.stringify(parsed).includes(SECRET), false);
+  assert.equal(
+    parsed.events.filter((event) => event.kind === "error").length,
+    malformedRecords.length
+  );
+  assert.deepEqual(parsed.events.at(-1), {
+    at: AT,
+    exitCode: 0,
+    filesModified: ["safe.ts"],
+    kind: "finished",
+    sessionId: "safe-session",
+    status: "completed",
+  });
+
+  const replay = parseHarnessLog(
+    "copilot",
+    stdout,
+    parsed.cursor,
+    false,
+    SECRET,
+    AT
+  );
+  assert.deepEqual(replay.events, []);
 });

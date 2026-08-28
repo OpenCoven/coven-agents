@@ -11,22 +11,6 @@ import type { HarnessId, RunEvent } from "./schema";
  * time, and inventing a rendering for one would put false detail on screen.
  */
 
-interface CopilotEnvelope {
-  data?: Record<string, unknown>;
-  exitCode?: number;
-  sessionId?: string;
-  timestamp?: string;
-  type?: string;
-  usage?: {
-    codeChanges?: {
-      filesModified?: string[];
-      linesAdded?: number;
-      linesRemoved?: number;
-    };
-    premiumRequests?: number;
-  };
-}
-
 const MAX_SUMMARY = 160;
 
 function asString(value: unknown): string | null {
@@ -37,6 +21,76 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+export class MalformedHarnessEventError extends Error {
+  constructor() {
+    super("Harness event has an invalid structured JSON shape.");
+    this.name = "MalformedHarnessEventError";
+  }
+}
+
+function malformed(): never {
+  throw new MalformedHarnessEventError();
+}
+
+function optionalString(
+  record: Record<string, unknown>,
+  key: string
+): string | undefined {
+  const value = record[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  return asString(value) ?? malformed();
+}
+
+function optionalNumber(
+  record: Record<string, unknown>,
+  key: string,
+  integer = false
+): number | undefined {
+  const value = record[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    (integer && !Number.isInteger(value))
+  ) {
+    return malformed();
+  }
+  return value;
+}
+
+function optionalRecord(
+  record: Record<string, unknown>,
+  key: string
+): Record<string, unknown> | undefined {
+  const value = record[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  return asRecord(value) ?? malformed();
+}
+
+function eventData(envelope: Record<string, unknown>): Record<string, unknown> {
+  return optionalRecord(envelope, "data") ?? {};
+}
+
+function stringArray(
+  record: Record<string, unknown>,
+  key: string
+): string[] | undefined {
+  const value = record[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    return malformed();
+  }
+  return value;
 }
 
 function clamp(value: string): string {
@@ -84,36 +138,64 @@ export function normalizeCopilotEvent(
   line: string,
   fallbackAt: string
 ): RunEvent[] {
-  let parsed: CopilotEnvelope;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(line) as CopilotEnvelope;
+    parsed = JSON.parse(line);
   } catch {
     // A non-JSON line is CLI chrome, not an event. Dropping it keeps the
     // stream clean; genuine failures still surface through the exit code.
     return [];
   }
 
-  const at = parsed.timestamp ?? fallbackAt;
-  const data = parsed.data ?? {};
+  const envelope = asRecord(parsed);
+  if (!envelope) {
+    throw new MalformedHarnessEventError();
+  }
+  const type = optionalString(envelope, "type");
+  if (!type) {
+    return [];
+  }
+  const at = optionalString(envelope, "timestamp") ?? fallbackAt;
 
-  switch (parsed.type) {
+  switch (type) {
     case "assistant.reasoning": {
-      const text = asString(data.content);
-      return text ? [{ at, kind: "reasoning", text }] : [];
-    }
-    case "assistant.message_delta": {
-      const text = asString(data.deltaContent);
-      return text ? [{ at, kind: "delta", text }] : [];
-    }
-    case "assistant.message": {
+      const data = eventData(envelope);
       const text = asString(data.content);
       return text
-        ? [{ at, kind: "message", model: asString(data.model), text }]
-        : [];
+        ? [{ at, kind: "reasoning", text }]
+        : data.content === undefined
+          ? []
+          : malformed();
+    }
+    case "assistant.message_delta": {
+      const data = eventData(envelope);
+      const text = asString(data.deltaContent);
+      return text
+        ? [{ at, kind: "delta", text }]
+        : data.deltaContent === undefined
+          ? []
+          : malformed();
+    }
+    case "assistant.message": {
+      const data = eventData(envelope);
+      const text = asString(data.content);
+      return text
+        ? [
+            {
+              at,
+              kind: "message",
+              model: optionalString(data, "model") ?? null,
+              text,
+            },
+          ]
+        : data.content === undefined
+          ? []
+          : malformed();
     }
     case "tool.execution_start": {
-      const tool = asString(data.toolName);
-      const callId = asString(data.toolCallId);
+      const data = eventData(envelope);
+      const tool = optionalString(data, "toolName");
+      const callId = optionalString(data, "toolCallId");
       if (!(tool && callId)) {
         return [];
       }
@@ -122,65 +204,82 @@ export function normalizeCopilotEvent(
           at,
           callId,
           kind: "tool-start",
-          summary: summarizeArguments(tool, asRecord(data.arguments)),
+          summary: summarizeArguments(
+            tool,
+            optionalRecord(data, "arguments") ?? null
+          ),
           tool,
         },
       ];
     }
     case "tool.execution_complete": {
-      const callId = asString(data.toolCallId);
+      const data = eventData(envelope);
+      const callId = optionalString(data, "toolCallId");
       if (!callId) {
         return [];
       }
-      const result = asRecord(data.result);
-      const summary = asString(result?.content) ?? "";
+      const result = optionalRecord(data, "result");
+      const summary = result ? (optionalString(result, "content") ?? "") : "";
+      const { success } = data;
+      if (success !== undefined && typeof success !== "boolean") {
+        return malformed();
+      }
       return [
         {
           at,
           callId,
           kind: "tool-end",
-          success: data.success !== false,
+          success: success !== false,
           summary: clamp(summary),
         },
       ];
     }
     case "session.info": {
-      const infoType = asString(data.infoType) ?? "";
+      const data = eventData(envelope);
+      const infoType = optionalString(data, "infoType") ?? "";
       const operation = fileOperationFor(infoType);
-      const path = asString(data.message);
+      const path = optionalString(data, "message");
       return operation && path ? [{ at, kind: "file", operation, path }] : [];
     }
     case "session.usage_checkpoint": {
-      const premiumRequests = data.totalPremiumRequests;
+      const data = eventData(envelope);
+      const premiumRequests = optionalNumber(data, "totalPremiumRequests");
       return [
         {
           at,
           kind: "usage",
           linesAdded: null,
           linesRemoved: null,
-          premiumRequests:
-            typeof premiumRequests === "number" ? premiumRequests : null,
+          premiumRequests: premiumRequests ?? null,
         },
       ];
     }
     case "result": {
-      const changes = parsed.usage?.codeChanges;
-      const exitCode =
-        typeof parsed.exitCode === "number" ? parsed.exitCode : null;
+      const usage = optionalRecord(envelope, "usage");
+      const changes = usage ? optionalRecord(usage, "codeChanges") : undefined;
+      const exitCode = optionalNumber(envelope, "exitCode", true) ?? null;
       return [
         {
           at,
           kind: "usage",
-          linesAdded: changes?.linesAdded ?? null,
-          linesRemoved: changes?.linesRemoved ?? null,
-          premiumRequests: parsed.usage?.premiumRequests ?? null,
+          linesAdded: changes
+            ? (optionalNumber(changes, "linesAdded", true) ?? null)
+            : null,
+          linesRemoved: changes
+            ? (optionalNumber(changes, "linesRemoved", true) ?? null)
+            : null,
+          premiumRequests: usage
+            ? (optionalNumber(usage, "premiumRequests") ?? null)
+            : null,
         },
         {
           at,
           exitCode,
-          filesModified: changes?.filesModified ?? [],
+          filesModified: changes
+            ? (stringArray(changes, "filesModified") ?? [])
+            : [],
           kind: "finished",
-          sessionId: parsed.sessionId ?? null,
+          sessionId: optionalString(envelope, "sessionId") ?? null,
           status: exitCode === 0 ? "completed" : "failed",
         },
       ];

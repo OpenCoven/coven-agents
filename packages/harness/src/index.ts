@@ -1,5 +1,6 @@
 export {
   LineAssembler,
+  MalformedHarnessEventError,
   normalizeCopilotEvent,
   normalizeEvent,
 } from "./events";

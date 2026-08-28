@@ -507,6 +507,60 @@ test("snapshots complete JSONL once, flushes terminal fragments, and redacts mal
   assert.deepEqual(noDuplicate.events, []);
 });
 
+test("continues polling after malformed structured JSONL records", async () => {
+  const malformed = [
+    JSON.stringify({ type: "result", usage: [SECRET] }),
+    JSON.stringify({
+      type: "result",
+      usage: { codeChanges: { filesModified: [42] } },
+    }),
+    JSON.stringify({
+      type: "result",
+      usage: { codeChanges: { filesModified: SECRET } },
+    }),
+  ];
+  const valid = JSON.stringify({
+    exitCode: 0,
+    sessionId: "safe-session",
+    type: "result",
+  });
+  const stdout = `${malformed.join("\n")}\n${valid}\n`;
+  const snapshot = await snapshotDaytonaProcess({
+    commandId: "cmd-1",
+    credential: SECRET,
+    cursor: 0,
+    harness: "copilot",
+    sandbox: processDouble({
+      command: { exitCode: 0 },
+      logs: { stdout },
+    }).sandbox,
+    sessionId: SESSION,
+  });
+
+  assert.equal(snapshot.cursor, stdout.length);
+  assert.equal(snapshot.status, "completed");
+  assert.equal(
+    snapshot.events.filter((event) => event.kind === "error").length,
+    malformed.length
+  );
+  const finished = snapshot.events.at(-1);
+  assert.equal(finished?.kind === "finished" && finished.status, "completed");
+  assert.equal(JSON.stringify(snapshot).includes(SECRET), false);
+
+  const replay = await snapshotDaytonaProcess({
+    commandId: "cmd-1",
+    credential: SECRET,
+    cursor: snapshot.cursor,
+    harness: "copilot",
+    sandbox: processDouble({
+      command: { exitCode: 0 },
+      logs: { stdout },
+    }).sandbox,
+    sessionId: SESSION,
+  });
+  assert.deepEqual(replay.events, []);
+});
+
 test("leaves a terminal partial tail pending until the complete event arrives", async () => {
   const line = JSON.stringify({
     data: { content: "trailing event" },
