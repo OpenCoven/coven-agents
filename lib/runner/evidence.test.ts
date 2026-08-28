@@ -282,6 +282,58 @@ test("projects terminal output, evidence, and errors as bounded strict events", 
     [2, 3, 4, 5, 6]
   );
   assert.equal(projection.events.at(-1)?.type, "failed");
+  assert.deepEqual(projection.run.error, {
+    code: "runner_failure",
+    details: "details [REDACTED]",
+    message: "message [REDACTED]",
+    retryable: false,
+  });
+});
+
+test("includes a null error in completed snapshots and completion events", () => {
+  const projection = projectTerminalRun(
+    queuedSnapshot(),
+    {
+      completedAt: "2026-08-20T20:02:00.000Z",
+      credential: null,
+      output: "Finished.",
+      status: "completed",
+    },
+    2
+  );
+  const completed = projection.events.find(
+    (event) => event.type === "completed"
+  );
+
+  assert.equal(Object.hasOwn(projection.run, "error"), true);
+  assert.equal(projection.run.error, null);
+  assert.ok(completed && completed.type === "completed");
+  assert.equal(Object.hasOwn(completed.run, "error"), true);
+  assert.equal(completed.run.error, null);
+});
+
+test("includes a null error in cancelled terminal snapshots", () => {
+  const projection = projectTerminalRun(
+    queuedSnapshot(),
+    {
+      completedAt: "2026-08-20T20:02:00.000Z",
+      credential: null,
+      output: "",
+      status: "cancelled",
+    },
+    2
+  );
+
+  assert.equal(Object.hasOwn(projection.run, "error"), true);
+  assert.equal(projection.run.error, null);
+  assert.deepEqual(projection.events, [
+    {
+      at: "2026-08-20T20:02:00.000Z",
+      id: 2,
+      status: "cancelled",
+      type: "status",
+    },
+  ]);
 });
 
 test("retains active runs, recent terminal runs, and bounded event history", () => {

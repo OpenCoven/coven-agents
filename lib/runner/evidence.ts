@@ -616,7 +616,7 @@ export function projectTerminalRun(
     ...snapshot,
     commandEvidence: normalizedCommands.evidence,
     completedAt: result.completedAt,
-    ...(error ? { error } : {}),
+    error,
     fileEvidence: normalizedFiles.evidence,
     output: sanitizeRunText(
       diagnostics.length > 0
