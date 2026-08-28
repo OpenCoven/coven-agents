@@ -41,7 +41,11 @@ import {
   type as type_,
   well,
 } from "@/components/console/styles";
-import { RunnerClient, type RunnerConnection } from "@/lib/agents/client";
+import {
+  RunnerApiError,
+  RunnerClient,
+  type RunnerConnection,
+} from "@/lib/agents/client";
 import {
   type ConnectionStatusKind,
   connectionMessage,
@@ -319,6 +323,35 @@ export function RunConsole() {
         setStreamingRunId((current) => current ?? live);
       }
     } catch (error) {
+      /**
+       * A refused token with a stored connection means the stored one is
+       * stale — the deployment token rotates, session storage does not, and
+       * the console then presents last week's key on every request while
+       * looking merely "rejected". Dropping the stored connection lets the
+       * server-provisioned one take over on the next provision pass instead
+       * of leaving the operator to guess that a hidden cache is the problem.
+       */
+      if (
+        error instanceof RunnerApiError &&
+        error.status === 401 &&
+        window.sessionStorage.getItem(CONNECTION_KEY)
+      ) {
+        window.sessionStorage.removeItem(CONNECTION_KEY);
+        toast.error(
+          "The saved runner connection was rejected and has been cleared. Reconnecting…"
+        );
+        provisionConnection()
+          .then((status) => {
+            if (status.kind === "provisioned") {
+              setConnection({
+                endpoint: status.endpoint,
+                token: status.token,
+              });
+            }
+          })
+          .catch(() => undefined);
+        return;
+      }
       toast.error(
         error instanceof Error ? error.message : "Could not reach the runner."
       );
