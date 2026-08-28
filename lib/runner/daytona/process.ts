@@ -1,8 +1,14 @@
 import "server-only";
 
+import type {
+  Sandbox,
+  SessionCommandLogsResponse,
+  SessionExecuteResponse,
+} from "@daytona/sdk";
 import { sanitizeEvidenceText } from "@opencoven/agent-contracts";
 import {
   buildHarnessCommand,
+  HARNESS_SPECS,
   type HarnessCredential,
   type HarnessStatus,
   harnessesFromProbe,
@@ -20,31 +26,19 @@ import { classifyDaytonaProviderError } from "./sandbox";
 const STAGING_TIMEOUT_SECONDS = 15;
 
 /**
- * These shapes are the relevant SDK 0.207 toolbox process API responses.
- * They are declared structurally because the SDK does not re-export its
- * generated `Command` and `Session` model types from its package entrypoint.
+ * Daytona's command model has no lifecycle status in SDK 0.207, but it can
+ * arrive from newer toolbox deployments. Treating it as optional keeps the
+ * process boundary compatible with both forms.
  */
 type DaytonaCommand = Readonly<{
-  command: string;
   exitCode?: number;
-  id: string;
+  status?: string;
 }>;
-type DaytonaSession = Readonly<{
-  commands: readonly DaytonaCommand[];
-  sessionId: string;
-}>;
-type DaytonaSessionCommandLogs = Readonly<{
-  output: string;
-  stderr: string;
-  stdout: string;
-}>;
-type DaytonaSessionExecute = Readonly<{
-  cmdId: string;
-  exitCode?: number;
-  output?: string;
-  stderr?: string;
-  stdout?: string;
-}>;
+type DaytonaSession = Awaited<
+  ReturnType<Sandbox["process"]["listSessions"]>
+>[number];
+type DaytonaSessionCommandLogs = SessionCommandLogsResponse;
+type DaytonaSessionExecute = SessionExecuteResponse;
 
 export type DaytonaProcessService = Readonly<{
   createSession: (sessionId: string) => Promise<void>;
@@ -132,12 +126,24 @@ function asyncCommand(
   workspace: string,
   harnessCommand: string
 ): string {
+  const providerCredentialVariables = [
+    "ANTHROPIC_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "GOOGLE_API_KEY",
+    "OPENAI_API_KEY",
+  ];
+  const credentialVariables = [
+    ...new Set([
+      ...HARNESS_SPECS.flatMap((spec) => spec.authEnvVars),
+      ...providerCredentialVariables,
+    ]),
+  ].filter((name) => name !== authName);
   return [
     "set -eu",
     `${authName}="$(cat -- ${shellQuote(credentialPath)})"`,
     `export ${authName}`,
     `rm -f -- ${shellQuote(credentialPath)}`,
-    "unset ANTHROPIC_API_KEY OPENAI_API_KEY AZURE_OPENAI_API_KEY GOOGLE_API_KEY",
+    `unset ${credentialVariables.join(" ")}`,
     "export CI=true",
     `export HOME=${shellQuote(workspace)}`,
     `mkdir -p -- ${shellQuote(workspace)}`,
@@ -161,6 +167,41 @@ async function removeCredential(
   }
 }
 
+/**
+ * A rejected create call may still have reached Daytona. Delete by the
+ * deterministic ID even when its first lookup missed it, then verify absence
+ * so a retry cannot attach to a session left by that ambiguous request.
+ */
+async function removeSession(
+  sandbox: DaytonaProcessSandbox,
+  sessionId: string
+): Promise<void> {
+  // The first lookup provides a bounded view of a session a rejected create
+  // may have left behind. A failed lookup must not skip the deterministic
+  // delete; a successful empty lookup does not need one.
+  let lookupFailed = false;
+  let exists = false;
+  try {
+    const sessions = await sandbox.process.listSessions();
+    exists = sessions.some((session) => session.sessionId === sessionId);
+  } catch {
+    lookupFailed = true;
+  }
+  if (exists || lookupFailed) {
+    try {
+      await sandbox.process.deleteSession(sessionId);
+    } catch (error) {
+      if (classifyDaytonaProviderError(error) !== "not_found") {
+        throw error;
+      }
+    }
+  }
+  const remaining = await sandbox.process.listSessions();
+  if (remaining.some((session) => session.sessionId === sessionId)) {
+    throw new Error("Daytona session remained after deletion.");
+  }
+}
+
 async function cleanupFailedStart(
   sandbox: DaytonaProcessSandbox,
   credentialPath: string,
@@ -175,11 +216,7 @@ async function cleanupFailedStart(
   }
   if (sessionName) {
     try {
-      await sandbox.process.deleteSession(sessionName);
-      const sessions = await sandbox.process.listSessions();
-      if (sessions.some((session) => session.sessionId === sessionName)) {
-        throw new Error("Daytona session remained after deletion.");
-      }
+      await removeSession(sandbox, sessionName);
     } catch (error) {
       failures.push(error);
     }
@@ -190,7 +227,8 @@ async function cleanupFailedStart(
     throw new DaytonaProcessError(
       `Daytona ${primaryCode} and credential/process cleanup could not be confirmed.`,
       "credential_cleanup_failed",
-      true
+      true,
+      { cause: primary }
     );
   }
   throw primary;
@@ -253,15 +291,28 @@ export async function startDaytonaProcess(input: {
     );
   }
 
-  let createdSession = false;
   try {
-    await process.createSession(sessionId);
-    createdSession = true;
+    await removeSession(input.sandbox, sessionId);
   } catch (error) {
     return await cleanupFailedStart(
       input.sandbox,
       credentialPath,
-      null,
+      sessionId,
+      providerError(
+        "session_create_failed",
+        "Daytona could not prepare the run process session.",
+        error
+      )
+    );
+  }
+
+  try {
+    await process.createSession(sessionId);
+  } catch (error) {
+    return await cleanupFailedStart(
+      input.sandbox,
+      credentialPath,
+      sessionId,
       providerError(
         "session_create_failed",
         "Daytona could not create the run process session.",
@@ -299,7 +350,7 @@ export async function startDaytonaProcess(input: {
     return await cleanupFailedStart(
       input.sandbox,
       credentialPath,
-      createdSession ? sessionId : null,
+      sessionId,
       error instanceof DaytonaProcessError
         ? error
         : providerError(
@@ -319,6 +370,42 @@ export type DaytonaLogSnapshot = Readonly<{
   status: "running" | "completed" | "failed";
   summary: RunSummary;
 }>;
+
+function normalizeDaytonaLogs(
+  logs: DaytonaSessionCommandLogs
+): Readonly<{ output: string; stderr: string; stdout: string }> {
+  return {
+    output: typeof logs.output === "string" ? logs.output : "",
+    stderr: typeof logs.stderr === "string" ? logs.stderr : "",
+    stdout: typeof logs.stdout === "string" ? logs.stdout : "",
+  };
+}
+
+function normalizeDaytonaCommand(command: DaytonaCommand): Readonly<{
+  exitCode: number | null;
+  status: string | null;
+}> {
+  return {
+    exitCode:
+      typeof command.exitCode === "number" &&
+      Number.isSafeInteger(command.exitCode)
+        ? command.exitCode
+        : null,
+    status: typeof command.status === "string" ? command.status : null,
+  };
+}
+
+function isTerminalDaytonaCommand(
+  command: Readonly<{ exitCode: number | null; status: string | null }>
+): boolean {
+  return (
+    command.exitCode !== null ||
+    command.status === "completed" ||
+    command.status === "failed" ||
+    command.status === "error" ||
+    command.status === "killed"
+  );
+}
 
 /**
  * Reads the SDK's accumulated stdout snapshot. Daytona exposes no command
@@ -341,24 +428,42 @@ export async function snapshotDaytonaProcess(input: {
     ),
     input.sandbox.process.getSessionCommand(input.sessionId, input.commandId),
   ]);
-  const terminal = command.exitCode !== undefined;
+  const normalizedLogs = normalizeDaytonaLogs(logs);
+  const normalizedCommand = normalizeDaytonaCommand(command);
+  const terminal = isTerminalDaytonaCommand(normalizedCommand);
   const parsed = parseHarnessLog(
     input.harness,
-    logs.stdout,
+    normalizedLogs.stdout,
     input.cursor,
     terminal,
     input.credential,
     (input.now?.() ?? new Date()).toISOString()
   );
+  // Daytona returns cumulative logs. Parse the complete sanitized transcript
+  // independently of the delivery cursor so terminal state and summary stay
+  // authoritative on later polls without replaying events to the caller.
+  const authoritative = parseHarnessLog(
+    input.harness,
+    normalizedLogs.stdout,
+    0,
+    terminal,
+    input.credential,
+    (input.now?.() ?? new Date()).toISOString()
+  );
   const events = [...parsed.events, ...parsed.diagnostics];
-  const result = events.find(
+  const authoritativeEvents = [
+    ...authoritative.events,
+    ...authoritative.diagnostics,
+  ];
+  const result = authoritativeEvents.find(
     (event): event is Extract<RunEvent, { kind: "finished" }> =>
       event.kind === "finished"
   );
-  const summary = summarizeRun(events);
+  const summary = summarizeRun(authoritativeEvents);
   const status = result
     ? result.status
-    : terminal && command.exitCode === 0
+    : normalizedCommand.status === "completed" ||
+        (terminal && normalizedCommand.exitCode === 0)
       ? "completed"
       : terminal
         ? "failed"
@@ -367,7 +472,7 @@ export async function snapshotDaytonaProcess(input: {
     cursor: parsed.cursor,
     diagnostics: parsed.diagnostics,
     events,
-    exitCode: result?.exitCode ?? command.exitCode ?? null,
+    exitCode: result?.exitCode ?? normalizedCommand.exitCode,
     status,
     summary: {
       ...summary,

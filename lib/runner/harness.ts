@@ -30,6 +30,7 @@ export type {
   RunSummary,
 } from "@opencoven/harness";
 export {
+  HARNESS_SPECS,
   LineAssembler,
   shellQuote,
   summarizeRun,
