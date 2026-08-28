@@ -8,6 +8,10 @@ import {
   type RunnerCredentialAcquireResult,
   type RunnerCredentialDependencies,
 } from "@/lib/credentials/runner-credential";
+import {
+  type RunnerAttemptRedactionEnvelope,
+  sealRunnerAttemptRedactionFromEnvironment,
+} from "./attempt-redaction";
 import { daytonaDispatchAuthorizers } from "./daytona/dispatch";
 import {
   DaytonaProcessError,
@@ -93,6 +97,8 @@ type DispatchStore = Pick<
   | "claimNextDispatch"
   | "getDispatchAgent"
   | "markDispatchRunningForDispatch"
+  | "persistAttemptRedaction"
+  | "deleteAttemptRedaction"
   | "releaseDaytonaPreparation"
   | "releaseUnstartedDispatch"
 > &
@@ -155,6 +161,12 @@ export type RunnerDispatchDependencies = Readonly<{
   limits: RunnerAdmissionLimits;
   operator: RunnerOperator;
   randomToken?: () => string;
+  sealAttemptRedaction?: (input: {
+    attemptId: string;
+    credential: string;
+    runId: string;
+    tenant: string;
+  }) => Promise<RunnerAttemptRedactionEnvelope>;
   startProcess?: (
     input: Parameters<typeof startDaytonaProcess>[0]
   ) => Promise<DaytonaStartedProcess>;
@@ -575,6 +587,19 @@ export async function dispatchRunnerClaim(
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
 
+  try {
+    await credential.acquisition.commit();
+  } catch {
+    try {
+      await credential.acquisition.compensate();
+    } catch {
+      return { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
+    return (await releaseUnstarted(dependencies, authority))
+      ? { kind: "retryable", reason: "credential_unavailable", runId: run.id }
+      : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
+
   const callbacks = daytonaDispatchAuthorizers(
     dependencies.store,
     dependencies.operator,
@@ -586,8 +611,39 @@ export async function dispatchRunnerClaim(
       (dependencies.startProcess ?? startDaytonaProcess)({
         ...callbacks,
         credential: credentialAtBoundary,
+        deleteAttemptRedaction: async () =>
+          (
+            await dependencies.store.deleteAttemptRedaction(
+              dependencies.operator,
+              callbacks.currentAuthority()
+            )
+          ).kind === "deleted",
         instructions: ensured.agent.instructions,
         model: ensured.agent.model,
+        persistAttemptRedaction: async ({
+          attemptId,
+          credential: credentialForRedaction,
+          runId,
+        }) => {
+          const envelope = await (
+            dependencies.sealAttemptRedaction ??
+            sealRunnerAttemptRedactionFromEnvironment
+          )({
+            attemptId,
+            credential: credentialForRedaction,
+            runId,
+            tenant: run.tenant,
+          });
+          return (
+            (
+              await dependencies.store.persistAttemptRedaction(
+                dependencies.operator,
+                callbacks.currentAuthority(),
+                { ...envelope, attemptId }
+              )
+            ).kind === "persisted"
+          );
+        },
         runId: run.id,
         runtime: ensured.agent.runtime,
         sandbox: ensured.sandbox,
@@ -600,7 +656,7 @@ export async function dispatchRunnerClaim(
       return { kind: "retained", reason: "cleanup_pending", runId: run.id };
     }
     try {
-      await credential.acquisition.abort();
+      await credential.acquisition.compensate();
     } catch {
       return { kind: "retained", reason: "cleanup_pending", runId: run.id };
     }
@@ -619,15 +675,6 @@ export async function dispatchRunnerClaim(
         : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
 
-  try {
-    await credential.acquisition.commit();
-  } catch {
-    return {
-      kind: "retained",
-      reason: "attached_accounting_pending",
-      runId: run.id,
-    };
-  }
   try {
     const marked = await dependencies.store.markDispatchRunningForDispatch(
       dependencies.operator,

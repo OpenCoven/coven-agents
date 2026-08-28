@@ -202,6 +202,7 @@ test("dispatch claim outages do not expose store errors", async () => {
 
 test("dispatch claims before sandbox and credential acquisition", async () => {
   const calls: string[] = [];
+  let persistedRedaction: unknown;
   const claimedRun = run();
   const authority = {
     expectedVersion: claimedRun.version,
@@ -244,6 +245,7 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
       calls.push("claim");
       return claimed;
     },
+    deleteAttemptRedaction: async () => ({ kind: "deleted" as const }),
     getDispatchAgent: async () => {
       calls.push("get-agent");
       return { agent: agent(), kind: "found" as const, run: claimedRun };
@@ -262,6 +264,12 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
           status: "running",
         }),
       };
+    },
+    persistAttemptRedaction: async (...arguments_: unknown[]) => {
+      const [, , redaction] = arguments_;
+      calls.push("persist-redaction");
+      persistedRedaction = redaction;
+      return { kind: "persisted" as const };
     },
     releaseDaytonaPreparation: async () => ({
       authority,
@@ -310,10 +318,29 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
     limits: admissionLimitsFromEnvironment({}),
     operator,
     randomToken: () => "next-lease",
+    sealAttemptRedaction: async (input) => {
+      calls.push("seal-redaction");
+      assert.equal(input.credential, "secret");
+      return {
+        aadVersion: 1,
+        ciphertext: "ciphertext",
+        iv: "iv",
+        kekVersion: "v1",
+        wrappedKey: "wrapped-key",
+      };
+    },
     startProcess: async (input) => {
       calls.push("start");
       const prepared = await input.authorizePreparation({ runId: input.runId });
       assert.equal(prepared, attemptId);
+      assert.equal(
+        await input.persistAttemptRedaction({
+          attemptId,
+          credential: "secret",
+          runId: input.runId,
+        }),
+        true
+      );
       const launched = await input.authorizeLaunch({
         attemptId,
         commandId: "command",
@@ -339,16 +366,19 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
     "get-agent",
     "sandbox",
     "credential",
+    "commit",
     "start",
     "authorize-preparation",
+    "seal-redaction",
+    "persist-redaction",
     "authorize-launch",
-    "commit",
     "mark-running",
   ]);
   assert.equal(JSON.stringify(result).includes("secret"), false);
+  assert.equal(JSON.stringify(persistedRedaction).includes("secret"), false);
 });
 
-test("a proven failed start releases credential resources with the callback's current fence", async () => {
+test("a proven failed launch compensates accounting with the callback's current fence", async () => {
   const calls: string[] = [];
   const claimedRun = run();
   const authority = {
@@ -400,7 +430,10 @@ test("a proven failed start releases credential resources with the callback's cu
           calls.push("abort");
         },
         commit: async () => {
-          throw new Error("must not commit");
+          calls.push("commit");
+        },
+        compensate: async () => {
+          calls.push("compensate");
         },
         toJSON: () => "[redacted]",
         use: async <T>(
@@ -432,11 +465,68 @@ test("a proven failed start releases credential resources with the callback's cu
     runId: claimedRun.id,
   });
   assert.deepEqual(calls, [
+    "commit",
     "prepare",
     "release-preparation",
-    "abort",
+    "compensate",
     "release:3",
   ]);
+});
+
+test("an accounting commit outage never starts an unaccounted provider command", async () => {
+  const calls: string[] = [];
+  const claimedRun = run();
+  const authority = {
+    expectedVersion: claimedRun.version,
+    leaseToken: claimedRun.dispatchLeaseToken as string,
+    runId: claimedRun.id,
+  } as RunnerDispatchAuthority;
+  const result = await dispatchNextRunnerRun({
+    acquireCredential: async () => ({
+      acquisition: {
+        commit: async () => {
+          calls.push("commit");
+          throw new Error("transient billing outage");
+        },
+        compensate: async () => {
+          calls.push("compensate");
+        },
+        toJSON: () => "[redacted]",
+        use: async <T>(
+          boundary: (credential: { credential: string | null }) => Promise<T>
+        ) => await boundary({ credential: "secret" }),
+      } as never,
+      kind: "acquired" as const,
+    }),
+    credentialInput: () => ({}) as never,
+    ensureSandbox: async () => ({ agent: agent(), sandbox: {} as never }),
+    limits: admissionLimitsFromEnvironment({}),
+    operator,
+    randomToken: () => "lease",
+    startProcess: async () => {
+      calls.push("start");
+      throw new Error("provider must not start");
+    },
+    store: {
+      claimNextDispatch: async () => ({ authority, run: claimedRun }),
+      getDispatchAgent: async () => ({
+        agent: agent(),
+        kind: "found" as const,
+        run: claimedRun,
+      }),
+      releaseUnstartedDispatch: async () => {
+        calls.push("release");
+        return { kind: "released" as const, value: claimedRun };
+      },
+    } as never,
+  });
+
+  assert.deepEqual(result, {
+    kind: "retryable",
+    reason: "credential_unavailable",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(calls, ["commit", "compensate", "release"]);
 });
 
 test("capacity refusal terminalizes the claimed run before freeing its lease", async () => {

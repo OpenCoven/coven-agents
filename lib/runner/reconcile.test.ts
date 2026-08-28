@@ -114,6 +114,10 @@ test("reconciliation claims exact expired preparation cleanup before requeue", a
           },
         };
       },
+      deleteAttemptRedaction: async () => {
+        calls.push("delete-redaction");
+        return { kind: "deleted" as const };
+      },
       requeueAfterDaytonaAttemptCleanup: async () => {
         calls.push("requeue");
         return { kind: "requeued" as const, value: expired };
@@ -133,6 +137,7 @@ test("reconciliation claims exact expired preparation cleanup before requeue", a
     "scan",
     "claim-cleanup",
     "resolve",
+    "delete-redaction",
     "requeue",
     "dispatch",
   ]);
@@ -148,6 +153,150 @@ test("reconciliation claims exact expired preparation cleanup before requeue", a
     terminalCleaned: 0,
     terminalized: 0,
   });
+});
+
+test("command-free recovery resets a fenced sandbox before requeueing", async () => {
+  const calls: string[] = [];
+  const expired = run();
+  const authority = {
+    attemptId,
+    expectedVersion: expired.version + 1,
+    leaseToken: "cleanup-lease",
+    runId: expired.id,
+  } as RunnerDispatchAuthority;
+  const result = await reconcileAndDispatch({
+    operator,
+    provider: {
+      resetSandbox: async (_run, resetAuthority) => {
+        calls.push("reset");
+        assert.equal(resetAuthority, authority);
+        return true;
+      },
+      resolveSandbox: async () => {
+        calls.push("resolve");
+        return {} as never;
+      },
+      stop: async () => {
+        calls.push("stop");
+        return { kind: "sandbox_reset_required" as const };
+      },
+    },
+    randomToken: () => "cleanup-lease",
+    rollbackCredentialResources: async () => {
+      calls.push("rollback-credential");
+    },
+    store: {
+      claimExpiredDaytonaAttemptCleanup: async () => {
+        calls.push("claim-cleanup");
+        return {
+          authority,
+          kind: "claimed" as const,
+          run: {
+            ...expired,
+            dispatchLeaseToken: authority.leaseToken,
+            version: authority.expectedVersion,
+          },
+        };
+      },
+      deleteAttemptRedaction: async () => {
+        calls.push("delete-redaction");
+        return { kind: "deleted" as const };
+      },
+      requeueAfterDaytonaAttemptCleanup: async () => {
+        calls.push("requeue");
+        return { kind: "requeued" as const, value: expired };
+      },
+      requeueExpiredDispatch: async () => ({ kind: "not_live" as const }),
+      scanExpiredDispatchLeases: async () => {
+        calls.push("scan");
+        return [expired];
+      },
+    } as never,
+  });
+
+  assert.deepEqual(calls, [
+    "scan",
+    "claim-cleanup",
+    "resolve",
+    "stop",
+    "reset",
+    "delete-redaction",
+    "rollback-credential",
+    "requeue",
+  ]);
+  assert.equal(result.deferred, 0);
+  assert.equal(result.requeued, 1);
+});
+
+test("an absent attached sandbox retires redaction before requeueing", async () => {
+  const calls: string[] = [];
+  const attached = run({
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+    dispatchState: "running",
+    startedAt: new Date("2026-08-28T14:58:00.000Z"),
+    status: "running",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: attached.version + 1,
+    leaseToken: "adopted-lease",
+    runId: attached.id,
+  } as RunnerDispatchAuthority;
+  const result = await reconcileAndDispatch({
+    operator,
+    provider: {
+      resolveSandbox: async () => {
+        calls.push("resolve");
+        return null;
+      },
+      stop: async () => {
+        throw new Error("must not stop an absent sandbox");
+      },
+    },
+    randomToken: () => "adopted-lease",
+    releaseCredentialResources: async () => {
+      calls.push("release-credential");
+    },
+    store: {
+      adoptExpiredDaytonaProcess: async () => {
+        calls.push("adopt");
+        return {
+          authority,
+          kind: "adopted" as const,
+          run: {
+            ...attached,
+            dispatchLeaseToken: authority.leaseToken,
+            version: authority.expectedVersion,
+          },
+        };
+      },
+      deleteAttemptRedaction: async () => {
+        calls.push("delete-redaction");
+        return { kind: "deleted" as const };
+      },
+      requeueAfterDaytonaAttemptCleanup: async () => {
+        calls.push("requeue");
+        return { kind: "requeued" as const, value: attached };
+      },
+      requeueExpiredDispatch: async () => ({ kind: "not_live" as const }),
+      scanExpiredDispatchLeases: async () => {
+        calls.push("scan");
+        return [attached];
+      },
+    } as never,
+  });
+
+  assert.deepEqual(calls, [
+    "scan",
+    "adopt",
+    "resolve",
+    "delete-redaction",
+    "release-credential",
+    "requeue",
+  ]);
+  assert.equal(result.adopted, 1);
+  assert.equal(result.requeued, 1);
 });
 
 test("ambiguous sandbox provisioning attaches only the scanned generation", async () => {
@@ -248,13 +397,17 @@ test("terminal cleanup retries only after claiming the exact expired attempt", a
     dispatchLimit: 1,
     operator,
     provider: {
+      resetSandbox: async () => {
+        calls.push("reset");
+        return true;
+      },
       resolveSandbox: async () => {
         calls.push("resolve");
         return null;
       },
       stop: async () => {
         calls.push("stop");
-        return { kind: "stopped" as const };
+        return { kind: "sandbox_reset_required" as const };
       },
     },
     randomToken: () => "terminal-cleanup",
@@ -274,6 +427,10 @@ test("terminal cleanup retries only after claiming the exact expired attempt", a
       cleanupTerminalLease: async () => {
         calls.push("cleanup-lease");
         return { kind: "updated" as const, value: terminal };
+      },
+      deleteAttemptRedaction: async () => {
+        calls.push("delete-redaction");
+        return { kind: "deleted" as const };
       },
       releaseTerminalDaytonaAttempt: async () => {
         calls.push("release");
@@ -295,11 +452,175 @@ test("terminal cleanup retries only after claiming the exact expired attempt", a
     "scan-terminal",
     "claim",
     "resolve",
+    "delete-redaction",
     "release",
     "cleanup-lease",
   ]);
   assert.equal(result.terminalCleaned, 1);
   assert.equal(result.failures, 0);
+});
+
+test("terminal cleanup resets a fenced sandbox before releasing its exact attempt", async () => {
+  const calls: string[] = [];
+  const terminal = run({
+    completedAt: new Date("2026-08-28T14:59:00.000Z"),
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+    dispatchState: "terminal",
+    status: "failed",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: terminal.version + 1,
+    leaseToken: "terminal-cleanup",
+    runId: terminal.id,
+  } as RunnerDispatchAuthority;
+  const releasedAuthority = {
+    ...authority,
+    expectedVersion: authority.expectedVersion + 1,
+  } as RunnerDispatchAuthority;
+  const result = await reconcileAndDispatch({
+    operator,
+    provider: {
+      resetSandbox: async () => {
+        calls.push("reset");
+        return true;
+      },
+      resolveSandbox: async () => {
+        calls.push("resolve");
+        return {} as never;
+      },
+      stop: async () => {
+        calls.push("stop");
+        return { kind: "sandbox_reset_required" as const };
+      },
+    },
+    randomToken: () => "terminal-cleanup",
+    store: {
+      claimTerminalDaytonaAttemptCleanup: async () => {
+        calls.push("claim");
+        return {
+          authority,
+          kind: "claimed" as const,
+          run: {
+            ...terminal,
+            dispatchLeaseToken: authority.leaseToken,
+            version: authority.expectedVersion,
+          },
+        };
+      },
+      cleanupTerminalLease: async () => {
+        calls.push("cleanup-lease");
+        return { kind: "updated" as const, value: terminal };
+      },
+      deleteAttemptRedaction: async () => {
+        calls.push("delete-redaction");
+        return { kind: "deleted" as const };
+      },
+      releaseTerminalDaytonaAttempt: async () => {
+        calls.push("release");
+        return { authority: releasedAuthority, kind: "released" as const };
+      },
+      scanExpiredDispatchLeases: async () => {
+        calls.push("scan-expired");
+        return [];
+      },
+      scanTerminalDaytonaAttemptCleanups: async () => {
+        calls.push("scan-terminal");
+        return [terminal];
+      },
+    } as never,
+  });
+
+  assert.deepEqual(calls, [
+    "scan-expired",
+    "scan-terminal",
+    "claim",
+    "resolve",
+    "stop",
+    "reset",
+    "delete-redaction",
+    "release",
+    "cleanup-lease",
+  ]);
+  assert.equal(result.terminalCleaned, 1);
+});
+
+test("terminal reset failure records one safe diagnostic and defers later recovery", async () => {
+  const calls: string[] = [];
+  const terminal = run({
+    completedAt: new Date("2026-08-28T14:59:00.000Z"),
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+    dispatchState: "terminal",
+    status: "failed",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: terminal.version + 1,
+    leaseToken: "terminal-cleanup",
+    runId: terminal.id,
+  } as RunnerDispatchAuthority;
+  const result = await reconcileAndDispatch({
+    operator,
+    provider: {
+      resetSandbox: async () => {
+        calls.push("reset");
+        return false;
+      },
+      resolveSandbox: async () => {
+        calls.push("resolve");
+        return {} as never;
+      },
+      stop: async () => {
+        calls.push("stop");
+        return { kind: "sandbox_reset_required" as const };
+      },
+    },
+    randomToken: () => "terminal-cleanup",
+    store: {
+      appendTerminalCleanupDiagnostic: async () => {
+        calls.push("diagnostic");
+        return {
+          authority,
+          event: {} as never,
+          kind: "appended" as const,
+        };
+      },
+      claimTerminalDaytonaAttemptCleanup: async () => {
+        calls.push("claim");
+        return {
+          authority,
+          kind: "claimed" as const,
+          run: {
+            ...terminal,
+            dispatchLeaseToken: authority.leaseToken,
+            version: authority.expectedVersion,
+          },
+        };
+      },
+      scanExpiredDispatchLeases: async () => {
+        calls.push("scan-expired");
+        return [];
+      },
+      scanTerminalDaytonaAttemptCleanups: async () => {
+        calls.push("scan-terminal");
+        return [terminal];
+      },
+    } as never,
+  });
+
+  assert.deepEqual(calls, [
+    "scan-expired",
+    "scan-terminal",
+    "claim",
+    "resolve",
+    "stop",
+    "reset",
+    "diagnostic",
+  ]);
+  assert.equal(result.terminalCleaned, 0);
+  assert.equal(result.deferred, 1);
 });
 
 test("a provider outage for one expired run does not abort unrelated recovery", async () => {
@@ -341,6 +662,7 @@ test("a provider outage for one expired run does not abort unrelated recovery", 
           run: candidate,
         };
       },
+      deleteAttemptRedaction: async () => ({ kind: "deleted" as const }),
       requeueAfterDaytonaAttemptCleanup: async () => ({
         kind: "requeued" as const,
         value: second,
@@ -383,13 +705,17 @@ test("expired cancellation intent terminalizes instead of requeueing", async () 
       },
     },
     randomToken: () => "cancel-lease",
-    releaseCredentialResources: async () => {
-      calls.push("release-credential");
+    rollbackCredentialResources: async () => {
+      calls.push("rollback-credential");
     },
     store: {
       cleanupTerminalLease: async () => {
         calls.push("cleanup-lease");
         return { kind: "updated" as const, value: cancelling };
+      },
+      deleteAttemptRedaction: async () => {
+        calls.push("delete-redaction");
+        return { kind: "deleted" as const };
       },
       finalizeRun: async () => {
         calls.push("finalize");
@@ -427,7 +753,7 @@ test("expired cancellation intent terminalizes instead of requeueing", async () 
   assert.deepEqual(calls, [
     "scan",
     "takeover",
-    "release-credential",
+    "rollback-credential",
     "finalize",
     "cleanup-lease",
   ]);
@@ -452,6 +778,10 @@ test("a terminal command with an unsettled log tail remains retryable", async ()
   } as RunnerDispatchAuthority;
   const result = await reconcileAndDispatch({
     clock: () => new Date("2026-08-28T15:00:00.000Z"),
+    openAttemptRedaction: async () => {
+      calls.push("open-redaction");
+      return "redaction-secret";
+    },
     operator,
     provider: {
       resolveSandbox: async () => {
@@ -495,6 +825,31 @@ test("a terminal command with an unsettled log tail remains retryable", async ()
           },
         };
       },
+      appendDispatchEventBatch: async () => {
+        calls.push("append-batch");
+        return {
+          authority,
+          events: [],
+          kind: "appended" as const,
+          run: {} as never,
+        };
+      },
+      readAttemptRedaction: async () => {
+        calls.push("read-redaction");
+        return {
+          kind: "found" as const,
+          value: {
+            aadVersion: 1,
+            attemptId,
+            ciphertext: "ciphertext",
+            createdAt: new Date(),
+            iv: "iv",
+            kekVersion: "v1",
+            runId: attached.id,
+            wrappedKey: "wrapped",
+          },
+        };
+      },
       requeueExpiredDispatch: async () => ({ kind: "not_live" as const }),
       scanExpiredDispatchLeases: async () => {
         calls.push("scan");
@@ -503,7 +858,15 @@ test("a terminal command with an unsettled log tail remains retryable", async ()
     } as never,
   });
 
-  assert.deepEqual(calls, ["scan", "adopt", "resolve", "snapshot"]);
+  assert.deepEqual(calls, [
+    "scan",
+    "adopt",
+    "resolve",
+    "read-redaction",
+    "open-redaction",
+    "snapshot",
+    "append-batch",
+  ]);
   assert.equal(result.deferred, 1);
   assert.equal(result.terminalized, 0);
 });
@@ -550,6 +913,10 @@ test("cancellation records durable intent before exact remote stop", async () =>
         calls.push("cleanup-lease");
         return { kind: "updated" as const, value: active };
       },
+      deleteAttemptRedaction: async () => {
+        calls.push("delete-redaction");
+        return { kind: "deleted" as const };
+      },
       finalizeRun: async () => {
         calls.push("finalize");
         return {
@@ -588,12 +955,81 @@ test("cancellation records durable intent before exact remote stop", async () =>
     "intent",
     "resolve",
     "stop",
+    "delete-redaction",
     "release-credential",
     "finalize",
     "release",
     "cleanup-lease",
   ]);
   assert.deepEqual(result, { kind: "cancelled", runId: active.id });
+});
+
+test("cancelling an unstarted dispatch compensates before finalizing", async () => {
+  const calls: string[] = [];
+  const unstarted = run({ daytonaAttemptId: null });
+  const authority = {
+    expectedVersion: unstarted.version + 1,
+    leaseToken: "cancel-lease",
+    runId: unstarted.id,
+  } as RunnerDispatchAuthority;
+  const finalized = {
+    ...unstarted,
+    completedAt: new Date("2026-08-28T15:00:00.000Z"),
+    dispatchLeaseToken: authority.leaseToken,
+    dispatchState: "terminal" as const,
+    status: "cancelled" as const,
+    version: authority.expectedVersion + 1,
+  };
+  const result = await cancelRunnerRun(unstarted.id, {
+    operator,
+    provider: {
+      resolveSandbox: async () => {
+        throw new Error("must not resolve an unstarted dispatch");
+      },
+      stop: async () => {
+        throw new Error("must not stop an unstarted dispatch");
+      },
+    },
+    randomToken: () => "cancel-lease",
+    rollbackCredentialResources: async () => {
+      calls.push("rollback-credential");
+    },
+    store: {
+      cleanupTerminalLease: async () => {
+        calls.push("cleanup-lease");
+        return { kind: "updated" as const, value: finalized };
+      },
+      finalizeRun: async () => {
+        calls.push("finalize");
+        return {
+          kind: "finalized" as const,
+          prunedRunIds: [],
+          run: finalized,
+        };
+      },
+      requestRunCancellation: async () => {
+        calls.push("intent");
+        return {
+          authority,
+          kind: "requested" as const,
+          run: {
+            ...unstarted,
+            cancellationRequestedAt: new Date("2026-08-28T15:00:00.000Z"),
+            dispatchLeaseToken: authority.leaseToken,
+            version: authority.expectedVersion,
+          },
+        };
+      },
+    } as never,
+  });
+
+  assert.deepEqual(calls, [
+    "intent",
+    "rollback-credential",
+    "finalize",
+    "cleanup-lease",
+  ]);
+  assert.deepEqual(result, { kind: "cancelled", runId: unstarted.id });
 });
 
 test("cancellation keeps durable intent and records a safe diagnostic when reset is required", async () => {
@@ -701,6 +1137,7 @@ test("cancellation fails closed for an unfenced provider identifier", async () =
 
 test("reconciliation appends only fresh logs and terminalizes a settled command", async () => {
   const calls: string[] = [];
+  const credential = "attempt-redaction-secret";
   const attached = run({
     daytonaCommandId: "command",
     daytonaSessionId: "session",
@@ -725,14 +1162,24 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
   const result = await reconcileAndDispatch({
     clock: () => new Date("2026-08-28T15:00:00.000Z"),
     dispatchLimit: 1,
+    openAttemptRedaction: async (scope) => {
+      calls.push("open-redaction");
+      assert.equal(scope.attemptId, attemptId);
+      return credential;
+    },
     operator,
     provider: {
+      resetSandbox: async () => {
+        calls.push("reset");
+        return true;
+      },
       resolveSandbox: async () => {
         calls.push("resolve");
         return {} as never;
       },
-      snapshot: async () => {
+      snapshot: async (input) => {
         calls.push("snapshot");
+        assert.equal(input.credential, credential);
         return {
           cursor: 42,
           events: [
@@ -740,25 +1187,47 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
               at: "2026-08-28T15:00:00.000Z",
               kind: "message",
               model: null,
-              text: "safe output",
+              text: `message ${credential}`,
+            },
+            {
+              at: "2026-08-28T15:00:00.000Z",
+              callId: credential,
+              kind: "tool-start",
+              summary: credential,
+              tool: credential,
+            },
+            {
+              at: "2026-08-28T15:00:00.000Z",
+              callId: credential,
+              kind: "tool-end",
+              success: true,
+              summary: credential,
+            },
+            {
+              at: "2026-08-28T15:00:00.000Z",
+              kind: "file",
+              operation: "edit",
+              path: `/workspace/${credential}`,
             },
           ],
           exitCode: 0,
           logsSettled: true,
           status: "completed",
           summary: {
-            fileOperations: [],
-            output: "safe output",
+            fileOperations: [{ operation: "modify", path: credential }],
+            output: `output ${credential}`,
             premiumRequests: null,
             sessionId: null,
             status: "completed",
-            toolCalls: [],
+            toolCalls: [
+              { success: true, summary: credential, tool: credential },
+            ],
           },
         };
       },
       stop: async () => {
         calls.push("stop");
-        return { kind: "stopped" as const };
+        return { kind: "sandbox_reset_required" as const };
       },
     },
     randomToken: () => "adopted-lease",
@@ -775,11 +1244,24 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
           },
         };
       },
-      appendDispatchEvent: async () => {
-        calls.push("append");
+      appendDispatchEventBatch: async (
+        _operator: unknown,
+        _authority: unknown,
+        batch: unknown
+      ) => {
+        calls.push("append-batch");
+        assert.equal(
+          (batch as { daytonaLogCursor: number }).daytonaLogCursor,
+          42
+        );
+        assert.equal(
+          JSON.stringify(batch).includes(credential),
+          false,
+          "provider events must be redacted before persistence"
+        );
         return {
           authority: afterEvent,
-          event: {} as never,
+          events: [],
           kind: "appended" as const,
           run: {} as never,
         };
@@ -788,8 +1270,17 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
         calls.push("cleanup-lease");
         return { kind: "updated" as const, value: attached };
       },
-      finalizeRun: async () => {
+      deleteAttemptRedaction: async () => {
+        calls.push("delete-redaction");
+        return { kind: "deleted" as const };
+      },
+      finalizeRun: async (_operator: unknown, finalization: unknown) => {
         calls.push("finalize");
+        assert.equal(
+          JSON.stringify(finalization).includes(credential),
+          false,
+          "terminal evidence must be redacted before persistence"
+        );
         return {
           kind: "finalized" as const,
           prunedRunIds: [],
@@ -799,6 +1290,22 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
             dispatchState: "terminal",
             status: "completed",
             version: afterTerminal.expectedVersion,
+          },
+        };
+      },
+      readAttemptRedaction: async () => {
+        calls.push("read-redaction");
+        return {
+          kind: "found" as const,
+          value: {
+            aadVersion: 1,
+            attemptId,
+            ciphertext: "ciphertext",
+            createdAt: new Date(),
+            iv: "iv",
+            kekVersion: "v1",
+            runId: attached.id,
+            wrappedKey: "wrapped",
           },
         };
       },
@@ -821,10 +1328,14 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
     "scan",
     "adopt",
     "resolve",
+    "read-redaction",
+    "open-redaction",
     "snapshot",
-    "append",
+    "append-batch",
     "finalize",
     "stop",
+    "reset",
+    "delete-redaction",
     "release-attempt",
     "cleanup-lease",
   ]);
@@ -834,7 +1345,7 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
     dispatched: 0,
     expiredScanned: 1,
     failures: 0,
-    logEvents: 1,
+    logEvents: 3,
     requeued: 0,
     sandboxRecovered: 0,
     terminalCleaned: 0,

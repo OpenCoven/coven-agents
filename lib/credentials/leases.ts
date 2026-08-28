@@ -17,6 +17,7 @@ export const CREDENTIAL_LEASE_TTL_MS = 2 * 60 * 1000;
 export const CREDENTIAL_LEASE_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 export type CredentialLeaseRecord = CredentialLease;
+export type CredentialLeaseIssueResult = { kind: "existing" | "issued" };
 export type CredentialLeaseDeniedReason =
   | "expired"
   | "harness_mismatch"
@@ -201,7 +202,7 @@ export async function issueCredentialLease(
     tenant: string;
   },
   audit: CredentialLeaseAuditSink = defaultCredentialLeaseAudit
-): Promise<void> {
+): Promise<CredentialLeaseIssueResult> {
   validateInput(input);
   const now = input.now ?? new Date();
   const tenantHash = tenantHashForReservation(input.tenant, input.keySecret);
@@ -212,7 +213,7 @@ export async function issueCredentialLease(
     await database.cleanupExpiredBefore(
       new Date(now.getTime() - CREDENTIAL_LEASE_RETENTION_MS)
     );
-    await database.transaction(async (tx) => {
+    const result = await database.transaction(async (tx) => {
       const existingRequest = await tx.findByRequestIdHash(requestIdHash);
       if (existingRequest) {
         assertBinding(existingRequest, {
@@ -227,7 +228,7 @@ export async function issueCredentialLease(
       assertReservationAvailable(reservation, tenantHash, now);
       if (existingRequest) {
         assertLeaseUsable(existingRequest, now);
-        return;
+        return { kind: "existing" as const };
       }
 
       const racedRequest = await tx.findByRequestIdHash(requestIdHash);
@@ -239,7 +240,7 @@ export async function issueCredentialLease(
           tenantHash,
         });
         assertLeaseUsable(racedRequest, now);
-        return;
+        return { kind: "existing" as const };
       }
 
       if (await tx.findByRunId(input.runId)) {
@@ -259,6 +260,7 @@ export async function issueCredentialLease(
         runId: input.runId,
         tenantHash,
       });
+      return { kind: "issued" as const };
     });
     await audit({
       at: now.toISOString(),
@@ -269,6 +271,7 @@ export async function issueCredentialLease(
       runId: input.runId,
       tenantHash,
     });
+    return result;
   } catch (error) {
     await audit({
       at: now.toISOString(),

@@ -1,5 +1,5 @@
 {
-  "id": "bd2bc904-e77a-4323-8c8a-88604a64222e",
+  "id": "84f1b98b-6477-4425-84b1-91dd17eeaf9f",
   "prevId": "38929010-16db-4e7c-9a5b-5fc76af7e377",
   "version": "7",
   "dialect": "postgresql",
@@ -870,6 +870,28 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "RunnerAgent_sandbox_recovery_idx": {
+          "name": "RunnerAgent_sandbox_recovery_idx",
+          "columns": [
+            {
+              "expression": "sandboxLifecycle",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sandboxUpdatedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"RunnerAgent\".\"sandboxLifecycle\" in ('provisioning', 'provisioning_ambiguous', 'resetting', 'decommissioning')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -914,6 +936,97 @@
       },
       "isRLSEnabled": false
     },
+    "public.RunnerAttemptRedaction": {
+      "name": "RunnerAttemptRedaction",
+      "schema": "",
+      "columns": {
+        "aadVersion": {
+          "name": "aadVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "attemptId": {
+          "name": "attemptId",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ciphertext": {
+          "name": "ciphertext",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "iv": {
+          "name": "iv",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kekVersion": {
+          "name": "kekVersion",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "runId": {
+          "name": "runId",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "wrappedKey": {
+          "name": "wrappedKey",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "RunnerAttemptRedaction_runId_RunnerRun_id_fk": {
+          "name": "RunnerAttemptRedaction_runId_RunnerRun_id_fk",
+          "tableFrom": "RunnerAttemptRedaction",
+          "tableTo": "RunnerRun",
+          "columnsFrom": ["runId"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "RunnerAttemptRedaction_attemptId_unique": {
+          "name": "RunnerAttemptRedaction_attemptId_unique",
+          "nullsNotDistinct": false,
+          "columns": ["attemptId"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "RunnerAttemptRedaction_aadVersion_valid": {
+          "name": "RunnerAttemptRedaction_aadVersion_valid",
+          "value": "\"RunnerAttemptRedaction\".\"aadVersion\" = 1"
+        },
+        "RunnerAttemptRedaction_attemptId_valid": {
+          "name": "RunnerAttemptRedaction_attemptId_valid",
+          "value": "\"RunnerAttemptRedaction\".\"attemptId\" ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'"
+        },
+        "RunnerAttemptRedaction_envelope_nonempty": {
+          "name": "RunnerAttemptRedaction_envelope_nonempty",
+          "value": "char_length(\"RunnerAttemptRedaction\".\"ciphertext\") > 0 and char_length(\"RunnerAttemptRedaction\".\"iv\") > 0 and char_length(\"RunnerAttemptRedaction\".\"kekVersion\") > 0 and char_length(\"RunnerAttemptRedaction\".\"wrappedKey\") > 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.RunnerRun": {
       "name": "RunnerRun",
       "schema": "",
@@ -924,18 +1037,18 @@
           "primaryKey": false,
           "notNull": true
         },
+        "cancellationRequestedAt": {
+          "name": "cancellationRequestedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
         "commandEvidence": {
           "name": "commandEvidence",
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
           "default": "'[]'::jsonb"
-        },
-        "cancellationRequestedAt": {
-          "name": "cancellationRequestedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
         },
         "completedAt": {
           "name": "completedAt",
@@ -1206,6 +1319,22 @@
           ],
           "isUnique": false,
           "where": "\"RunnerRun\".\"status\" in ('completed', 'failed', 'cancelled')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunnerRun_terminal_attempt_cleanup_idx": {
+          "name": "RunnerRun_terminal_attempt_cleanup_idx",
+          "columns": [
+            {
+              "expression": "dispatchLeaseExpiresAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"RunnerRun\".\"dispatchState\" = 'terminal' and \"RunnerRun\".\"daytonaAttemptId\" is not null and \"RunnerRun\".\"dispatchLeaseToken\" is not null",
           "concurrently": false,
           "method": "btree",
           "with": {}

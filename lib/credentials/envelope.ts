@@ -48,6 +48,12 @@ export type EnvelopeAadContext =
       kind: "idempotency";
       operation: string;
       ownerId: string;
+    }
+  | {
+      attemptId: string;
+      kind: "runner_attempt_redaction";
+      runId: string;
+      tenant: string;
     };
 
 export function validateKekVersion(
@@ -94,12 +100,19 @@ function encodeLengthPrefixedAad(
   const fields =
     context.kind === "credential"
       ? ["credential", context.tenant, context.harnessId]
-      : [
-          "idempotency",
-          context.ownerId,
-          context.operation,
-          context.keyHash ?? "",
-        ];
+      : context.kind === "idempotency"
+        ? [
+            "idempotency",
+            context.ownerId,
+            context.operation,
+            context.keyHash ?? "",
+          ]
+        : [
+            "runner_attempt_redaction",
+            context.tenant,
+            context.runId,
+            context.attemptId,
+          ];
   const encoder = new TextEncoder();
   const encodedFields = fields.map((field) => encoder.encode(field));
   const prefix = encoder.encode("opencoven-envelope-aad-v1");

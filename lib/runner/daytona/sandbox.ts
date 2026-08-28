@@ -612,10 +612,10 @@ async function deleteFirstDaytonaSandbox(
 }
 
 /**
- * A process cleanup failure can require deleting its persistent sandbox.
- * Reserve a distinct lifecycle state first so no dispatch can attach a new
- * process while Daytona deletion is in flight; only confirmed deletion clears
- * the next sandbox generation.
+ * An exact cancellation, terminal, or command-free attempt cleanup can require
+ * deleting its persistent sandbox. Reserve a distinct lifecycle state first so
+ * no dispatch can attach a new process while Daytona deletion is in flight;
+ * only confirmed deletion clears the next sandbox generation.
  */
 export async function resetDaytonaSandboxForCancellation(
   operator: RunnerOperator,

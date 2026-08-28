@@ -292,6 +292,295 @@ test("dispatch event appends advance the distinct Daytona byte cursor", async ()
   );
 });
 
+test("dispatch event batches atomically advance one provider cursor", async () => {
+  const current = run({
+    daytonaLogCursor: 10,
+    dispatchState: "running",
+    logCursor: 3,
+    startedAt: new Date("2026-01-01T00:00:01.000Z"),
+    status: "running",
+  });
+  const updated = run({
+    ...current,
+    daytonaLogCursor: 42,
+    logCursor: 5,
+    output: "second",
+    version: current.version + 1,
+  });
+  const events = [4, 5].map((eventId) => ({
+    createdAt: new Date(),
+    event: { id: eventId, output: `event-${eventId}`, type: "output" } as const,
+    eventId,
+    runId: current.id,
+  }));
+  const { statements, store } = scripted([current], [updated], events, []);
+
+  const result = await store.appendDispatchEventBatch(
+    operator,
+    {
+      expectedVersion: current.version,
+      leaseToken: current.dispatchLeaseToken as string,
+      runId: current.id,
+    } as RunnerDispatchAuthority,
+    {
+      daytonaLogCursor: 42,
+      events: [
+        { output: "event-4", type: "output" },
+        { output: "event-5", type: "output" },
+      ],
+      snapshot: { output: "second" },
+    }
+  );
+
+  assert.equal(result.kind, "appended");
+  assert.deepEqual(
+    statements.map((statement) => statement.name),
+    [
+      "lock-live-dispatch-run",
+      "update-run-after-dispatch-event-batch",
+      "insert-dispatch-run-event-batch",
+      "prune-run-events-after-dispatch-batch",
+    ]
+  );
+  assert.equal(
+    (statements[1] as RunnerStoreStatement).args.daytonaLogCursor,
+    42
+  );
+  assert.equal((statements[1] as RunnerStoreStatement).args.eventCount, 2);
+  assert.match(
+    queryText(statements[2] as RunnerStoreStatement),
+    /INSERT INTO "RunnerRunEvent"/u
+  );
+  assert.match(
+    queryText(statements[2] as RunnerStoreStatement),
+    /VALUES \(\$\d+, \$\d+, CAST\(\$\d+ AS jsonb\)\), \(\$\d+, \$\d+, CAST\(\$\d+ AS jsonb\)\)/u
+  );
+});
+
+test("dispatch batches retain the newest events beyond the retention limit", async () => {
+  const current = run({
+    daytonaLogCursor: 10,
+    dispatchState: "running",
+    logCursor: 3,
+    startedAt: new Date("2026-01-01T00:00:01.000Z"),
+    status: "running",
+  });
+  const count = MAX_EVENTS_PER_RUN + 1;
+  const updated = run({
+    ...current,
+    daytonaLogCursor: 42,
+    logCursor: current.logCursor + count,
+    version: current.version + 1,
+  });
+  const inserted = Array.from({ length: count }, (_, index) => {
+    const eventId = current.logCursor + index + 1;
+    return {
+      createdAt: new Date(),
+      event: {
+        id: eventId,
+        output: `event-${eventId}`,
+        type: "output",
+      } as const,
+      eventId,
+      runId: current.id,
+    };
+  });
+  const { statements, store } = scripted([current], [updated], inserted, []);
+
+  const result = await store.appendDispatchEventBatch(
+    operator,
+    {
+      expectedVersion: current.version,
+      leaseToken: current.dispatchLeaseToken as string,
+      runId: current.id,
+    } as RunnerDispatchAuthority,
+    {
+      daytonaLogCursor: 42,
+      events: inserted.map(({ event }) => ({
+        output: event.output,
+        type: event.type,
+      })),
+    }
+  );
+
+  assert.equal(result.kind, "appended");
+  const persistedEvents = (statements[2] as RunnerStoreStatement).args.events;
+  assert.ok(Array.isArray(persistedEvents));
+  assert.equal(persistedEvents.length, count);
+  assert.equal(
+    (statements[3] as RunnerStoreStatement).name,
+    "prune-run-events-after-dispatch-batch"
+  );
+});
+
+test("attempt redaction envelopes are fenced, server-only, and deletable by exact attempt", async () => {
+  const attemptId =
+    "53af1a29-4e98-43d6-ac5b-3b9dcba5e735" as RunnerDaytonaAttemptId;
+  const current = run({ daytonaAttemptId: attemptId });
+  const authority = {
+    attemptId,
+    expectedVersion: current.version,
+    leaseToken: current.dispatchLeaseToken as string,
+    runId: current.id,
+  } as RunnerDispatchAuthority;
+  const envelope = {
+    aadVersion: 1,
+    attemptId,
+    ciphertext: "ciphertext",
+    iv: "iv",
+    kekVersion: "v1",
+    wrappedKey: "wrapped-key",
+  };
+  const persisted = scripted([current], [{ runId: current.id }]);
+  const loaded = scripted(
+    [current],
+    [
+      {
+        ...envelope,
+        createdAt: new Date(),
+        runId: current.id,
+      },
+    ]
+  );
+  const deleted = scripted([current], [{ runId: current.id }]);
+
+  assert.equal(
+    (
+      await persisted.store.persistAttemptRedaction(
+        operator,
+        authority,
+        envelope
+      )
+    ).kind,
+    "persisted"
+  );
+  const read = await loaded.store.readAttemptRedaction(operator, authority);
+  assert.equal(read.kind, "found");
+  assert.equal(read.kind === "found" && read.value.ciphertext, "ciphertext");
+  assert.equal(
+    (await deleted.store.deleteAttemptRedaction(operator, authority)).kind,
+    "deleted"
+  );
+  assert.match(
+    queryText(persisted.statements[1] as RunnerStoreStatement),
+    /"RunnerAttemptRedaction"/u
+  );
+  assert.match(
+    queryText(deleted.statements[1] as RunnerStoreStatement),
+    /"attemptId" = \$\d+/u
+  );
+});
+
+test("a failed second batch event rolls back cursor and every event before retry", async () => {
+  const current = run({
+    daytonaLogCursor: 10,
+    dispatchState: "running",
+    logCursor: 3,
+    startedAt: new Date("2026-01-01T00:00:01.000Z"),
+    status: "running",
+  });
+  let failInsert = true;
+  let state = {
+    events: [] as { eventId: number; output: string }[],
+    run: current,
+  };
+  const store = createRunnerStore({
+    transaction: async (callback) => {
+      const draft = {
+        events: state.events.map((event) => ({ ...event })),
+        run: { ...state.run },
+      };
+      const result = await callback({
+        // biome-ignore lint/suspicious/useAwait: The transaction double implements the asynchronous store boundary.
+        execute: async (statement) => {
+          switch (statement.name) {
+            case "lock-live-dispatch-run":
+              return [draft.run] as never;
+            case "update-run-after-dispatch-event-batch":
+              draft.run = {
+                ...draft.run,
+                daytonaLogCursor: Number(statement.args.daytonaLogCursor),
+                logCursor: Number(statement.args.nextEventId),
+                version: draft.run.version + 1,
+              };
+              return [draft.run] as never;
+            case "insert-dispatch-run-event-batch": {
+              if (failInsert) {
+                throw new Error("second provider event rejected");
+              }
+              const serialized = statement.args.events as string[];
+              draft.events.push(
+                ...serialized.map((event) => {
+                  const parsed = JSON.parse(event) as {
+                    id: number;
+                    output: string;
+                  };
+                  return { eventId: parsed.id, output: parsed.output };
+                })
+              );
+              return serialized.map((event) => {
+                const parsed = JSON.parse(event) as {
+                  id: number;
+                  output: string;
+                };
+                return {
+                  createdAt: new Date(),
+                  event: {
+                    id: parsed.id,
+                    output: parsed.output,
+                    type: "output",
+                  },
+                  eventId: parsed.id,
+                  runId: current.id,
+                };
+              }) as never;
+            }
+            case "prune-run-events-after-dispatch-batch":
+              return [] as never;
+            default:
+              throw new Error(`Unexpected statement ${statement.name}`);
+          }
+        },
+      });
+      state = draft;
+      return result;
+    },
+  });
+  const authority = {
+    expectedVersion: current.version,
+    leaseToken: current.dispatchLeaseToken as string,
+    runId: current.id,
+  } as RunnerDispatchAuthority;
+  const input = {
+    daytonaLogCursor: 42,
+    events: [
+      { output: "first", type: "output" as const },
+      { output: "second", type: "output" as const },
+    ],
+  };
+
+  await assert.rejects(
+    () => store.appendDispatchEventBatch(operator, authority, input),
+    /second provider event rejected/u
+  );
+  assert.equal(state.run.logCursor, current.logCursor);
+  assert.equal(state.run.daytonaLogCursor, current.daytonaLogCursor);
+  assert.deepEqual(state.events, []);
+
+  failInsert = false;
+  const retried = await store.appendDispatchEventBatch(
+    operator,
+    authority,
+    input
+  );
+  assert.equal(retried.kind, "appended");
+  assert.deepEqual(state.events, [
+    { eventId: 4, output: "first" },
+    { eventId: 5, output: "second" },
+  ]);
+  assert.equal(state.run.daytonaLogCursor, 42);
+});
+
 test("a log-only reconciliation advances Daytona cursor without inventing an event", async () => {
   const current = run({
     daytonaLogCursor: 10,
@@ -1396,6 +1685,44 @@ test("fair dispatch selection locks scheduler and enforces tenant and agent capa
   assert.match(candidate, /md5\("queued"\."tenant"\)/u);
 });
 
+test("queue selection stays globally FIFO until the consecutive tenant cap requires a switch", async () => {
+  const queued = run({
+    dispatchLeaseExpiresAt: null,
+    dispatchLeaseToken: null,
+    dispatchState: "queued",
+  });
+  const claimed = run({
+    ...queued,
+    dispatchLeaseExpiresAt: new Date("2026-01-01T00:01:00.000Z"),
+    dispatchLeaseToken: "lease-b",
+  });
+  const { statements, store } = scripted(
+    [{ consecutiveDispatchCount: 1, lastDispatchedTenantHash: "tenant-a" }],
+    [{ activeCount: 0 }],
+    [queued],
+    [claimed],
+    []
+  );
+
+  await store.claimNextDispatch(operator, {
+    leaseExpiresAt: claimed.dispatchLeaseExpiresAt as Date,
+    leaseToken: claimed.dispatchLeaseToken as string,
+    limits: {
+      consecutiveDispatches: 2,
+      deploymentActiveRuns: 25,
+      tenantActiveRuns: 2,
+      tenantQueuedRuns: 10,
+    },
+  });
+
+  const selection = queryText(statements[2] as RunnerStoreStatement);
+  assert.match(selection, /ORDER BY "queued"\."queueSequence" ASC\s+LIMIT 1/u);
+  assert.match(selection, /\$\d+ >= \$\d+[\s\S]*"tenantHash" = \$/u);
+  assert.equal(statements[2]?.args.consecutiveDispatches, 2);
+  assert.match(selection, /FROM eligible_tenants AS "otherTenant"/u);
+  assert.doesNotMatch(selection, /lastTenantEligible|lastHeadSequence/u);
+});
+
 test("dispatch authority cannot access unleased, expired, or another run", async () => {
   const authority = await claimedAuthority(run());
   const denied = await Promise.all(
@@ -1742,6 +2069,54 @@ test("sandbox-reset-required cancellation records only a safe diagnostic", async
   assert.doesNotMatch(JSON.stringify(persisted), /secret|token|cookie/u);
 });
 
+test("terminal reset requirements append a safe fenced diagnostic without clearing the attempt", async () => {
+  const attemptId =
+    "53af1a29-4e98-43d6-ac5b-3b9dcba5e738" as RunnerDaytonaAttemptId;
+  const terminal = run({
+    completedAt: new Date("2026-01-01T00:00:02.000Z"),
+    daytonaAttemptId: attemptId,
+    daytonaCommandId: "command",
+    daytonaSessionId: daytonaRunSessionName(run().id, attemptId),
+    dispatchState: "terminal",
+    status: "failed",
+  });
+  const updated = run({ ...terminal, logCursor: 4, version: 8 });
+  const event = {
+    createdAt: new Date(),
+    event: {
+      id: 4,
+      output: "Terminal cleanup requires a sandbox reset.",
+      type: "output",
+    } as const,
+    eventId: 4,
+    runId: terminal.id,
+  };
+  const authority = {
+    attemptId,
+    expectedVersion: terminal.version,
+    leaseToken: terminal.dispatchLeaseToken as string,
+    runId: terminal.id,
+  } as RunnerDispatchAuthority;
+  const { statements, store } = scripted([terminal], [updated], [event], []);
+
+  const result = await store.appendTerminalCleanupDiagnostic(
+    operator,
+    authority
+  );
+
+  assert.equal(result.kind, "appended");
+  assert.match(
+    queryText(statements[1] as RunnerStoreStatement),
+    /"dispatchState" = 'terminal'/u
+  );
+  assert.equal(
+    JSON.stringify((statements[2] as RunnerStoreStatement).args).includes(
+      "secret"
+    ),
+    false
+  );
+});
+
 test("cancellation sandbox reset reserves and clears a fenced generation", async () => {
   const current = run({
     cancellationRequestedAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -1795,6 +2170,53 @@ test("cancellation sandbox reset reserves and clears a fenced generation", async
     queryText(finish.statements[0] as RunnerStoreStatement),
     /"daytonaSandboxId" = NULL/u
   );
+});
+
+test("terminal attempt cleanup can reserve a fenced sandbox reset", async () => {
+  const attemptId =
+    "53af1a29-4e98-43d6-ac5b-3b9dcba5e740" as RunnerDaytonaAttemptId;
+  const terminal = run({
+    completedAt: new Date("2026-01-01T00:00:02.000Z"),
+    daytonaAttemptId: attemptId,
+    daytonaCommandId: "command",
+    daytonaSessionId: daytonaRunSessionName(run().id, attemptId),
+    dispatchState: "terminal",
+    status: "failed",
+  });
+  const currentAgent = agent({
+    daytonaSandboxId: "sandbox",
+    sandboxGeneration: 2,
+    sandboxLifecycle: "ready",
+    version: 4,
+  });
+  const resetting = agent({
+    ...currentAgent,
+    sandboxGeneration: 3,
+    sandboxLifecycle: "resetting" as never,
+    version: 5,
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: terminal.version,
+    leaseToken: terminal.dispatchLeaseToken as string,
+    runId: terminal.id,
+  } as RunnerDispatchAuthority;
+  const { statements, store } = scripted(
+    [terminal],
+    [currentAgent],
+    [resetting]
+  );
+
+  const reserved = await store.beginDaytonaSandboxResetForCancellation(
+    operator,
+    authority
+  );
+
+  assert.equal(reserved.kind, "resetting");
+  const update = queryText(statements[2] as RunnerStoreStatement);
+  assert.match(update, /"dispatchState" = 'terminal'/u);
+  assert.match(update, /"daytonaAttemptId" = \$\d+/u);
+  assert.match(update, /"activeRun"/u);
 });
 
 test("a proven unstarted dispatch releases its exact lease for the next queue claim", async () => {

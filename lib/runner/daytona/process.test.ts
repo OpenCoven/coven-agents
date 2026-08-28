@@ -151,8 +151,10 @@ const startInput = (sandbox: DaytonaProcessSandbox) => ({
   authorizeLaunch: async () => LAUNCH_AUTHORITY,
   authorizePreparation: async () => PREPARATION_CLAIM,
   credential: { credential: SECRET },
+  deleteAttemptRedaction: async () => true,
   instructions: "Use tests.",
   model: "auto",
+  persistAttemptRedaction: async () => true,
   releasePreparation: async () => LAUNCH_AUTHORITY,
   runId: RUN_ID,
   runtime: "copilot",
@@ -268,6 +270,31 @@ test("attaches the exact attempt and command only after execution accepts", asyn
     calls.slice(0, executeIndex).some((call) => call.kind === "list"),
     true
   );
+});
+
+test("persists attempt redaction before staging and retires it after proven failed cleanup", async () => {
+  const { sandbox } = processDouble({ stageError: new Error("stage failed") });
+  const redaction: string[] = [];
+
+  await assert.rejects(() =>
+    startDaytonaProcess({
+      ...startInput(sandbox),
+      deleteAttemptRedaction: ({ attemptId, runId }) => {
+        redaction.push(`delete:${attemptId}:${runId}`);
+        return Promise.resolve(true);
+      },
+      persistAttemptRedaction: ({ attemptId, credential, runId }) => {
+        assert.equal(credential, SECRET);
+        redaction.push(`persist:${attemptId}:${runId}`);
+        return Promise.resolve(true);
+      },
+    })
+  );
+
+  assert.deepEqual(redaction, [
+    `persist:${PREPARATION_CLAIM}:${RUN_ID}`,
+    `delete:${PREPARATION_CLAIM}:${RUN_ID}`,
+  ]);
 });
 
 test("performs zero SDK mutations when durable preparation is stale or explicitly denied", async () => {

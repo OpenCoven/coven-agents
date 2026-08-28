@@ -229,7 +229,7 @@ function lendingDependencies(
     },
     issue: () => {
       events.push("issue");
-      return Promise.resolve();
+      return Promise.resolve({ kind: "issued" as const });
     },
     lease: async (_input, prepare, operation) => {
       events.push("lease");

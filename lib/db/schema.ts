@@ -487,6 +487,11 @@ export const runnerAgent = pgTable(
   (table) => [
     unique("RunnerAgent_id_tenant_key").on(table.id, table.tenant),
     index("RunnerAgent_tenant_updatedAt_idx").on(table.tenant, table.updatedAt),
+    index("RunnerAgent_sandbox_recovery_idx")
+      .on(table.sandboxLifecycle, table.sandboxUpdatedAt)
+      .where(
+        sql`${table.sandboxLifecycle} in ('provisioning', 'provisioning_ambiguous', 'resetting', 'decommissioning')`
+      ),
     check(
       "RunnerAgent_tenant_valid",
       sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`
@@ -591,6 +596,11 @@ export const runnerRun = pgTable(
     index("RunnerRun_terminal_retention_idx")
       .on(table.agentId, table.completedAt)
       .where(sql`${table.status} in ('completed', 'failed', 'cancelled')`),
+    index("RunnerRun_terminal_attempt_cleanup_idx")
+      .on(table.dispatchLeaseExpiresAt)
+      .where(
+        sql`${table.dispatchState} = 'terminal' and ${table.daytonaAttemptId} is not null and ${table.dispatchLeaseToken} is not null`
+      ),
     uniqueIndex("RunnerRun_agent_operation_idx").on(
       table.agentId,
       table.operationId
@@ -664,6 +674,45 @@ export const runnerRun = pgTable(
 );
 
 export type RunnerRun = InferSelectModel<typeof runnerRun>;
+
+/**
+ * Attempt-scoped encrypted material used solely to redact later Daytona logs.
+ * It intentionally has no plaintext or public runner-record projection.
+ */
+export const runnerAttemptRedaction = pgTable(
+  "RunnerAttemptRedaction",
+  {
+    aadVersion: integer("aadVersion").notNull(),
+    attemptId: varchar("attemptId", { length: 36 }).notNull().unique(),
+    ciphertext: text("ciphertext").notNull(),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    iv: varchar("iv", { length: 64 }).notNull(),
+    kekVersion: varchar("kekVersion", { length: 32 }).notNull(),
+    runId: uuid("runId")
+      .primaryKey()
+      .notNull()
+      .references(() => runnerRun.id, { onDelete: "cascade" }),
+    wrappedKey: varchar("wrappedKey", { length: 128 }).notNull(),
+  },
+  (table) => [
+    check(
+      "RunnerAttemptRedaction_aadVersion_valid",
+      sql`${table.aadVersion} = 1`
+    ),
+    check(
+      "RunnerAttemptRedaction_attemptId_valid",
+      sql`${table.attemptId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'`
+    ),
+    check(
+      "RunnerAttemptRedaction_envelope_nonempty",
+      sql`char_length(${table.ciphertext}) > 0 and char_length(${table.iv}) > 0 and char_length(${table.kekVersion}) > 0 and char_length(${table.wrappedKey}) > 0`
+    ),
+  ]
+);
+
+export type RunnerAttemptRedaction = InferSelectModel<
+  typeof runnerAttemptRedaction
+>;
 
 export const runnerRunEvent = pgTable(
   "RunnerRunEvent",

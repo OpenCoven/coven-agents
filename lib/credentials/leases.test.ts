@@ -298,11 +298,13 @@ test("issuing a lease creates an unconsumed two-minute binding", async () => {
 test("repeating the same issuance is idempotent", async () => {
   const database = memoryDatabase({ reservation: reservation() });
 
-  await issueCredentialLease(database, input(), NO_AUDIT);
-  await issueCredentialLease(database, input(), NO_AUDIT);
+  const first = await issueCredentialLease(database, input(), NO_AUDIT);
+  const second = await issueCredentialLease(database, input(), NO_AUDIT);
 
   assert.equal(database.leases.length, 1);
   assert.equal(database.leases[0]?.consumedAt, null);
+  assert.deepEqual(first, { kind: "issued" });
+  assert.deepEqual(second, { kind: "existing" });
 });
 
 test("issuance removes lease rows older than the retention window", async () => {

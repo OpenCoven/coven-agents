@@ -135,6 +135,26 @@ export type RunnerRunEventRecord = {
   runId: string;
 };
 
+/**
+ * Server-only encrypted attempt material. It must never be nested in
+ * RunnerRunRecord or any subscriber-facing projection.
+ */
+export type RunnerAttemptRedactionRecord = {
+  aadVersion: number;
+  attemptId: RunnerDaytonaAttemptId;
+  ciphertext: string;
+  createdAt: Date;
+  iv: string;
+  kekVersion: string;
+  runId: string;
+  wrappedKey: string;
+};
+
+export type PersistRunnerAttemptRedactionInput = Omit<
+  RunnerAttemptRedactionRecord,
+  "createdAt" | "runId"
+>;
+
 export type CreateRunnerAgentInput = {
   description?: string;
   id: string;
@@ -183,6 +203,12 @@ export type DispatchFence = {
 export type AppendRunnerEventInput = DispatchFence & {
   daytonaLogCursor?: number;
   event: WithoutEventId<RunEvent>;
+  snapshot?: RunnerSnapshotPatch;
+};
+
+export type AppendRunnerEventBatchInput = DispatchFence & {
+  daytonaLogCursor: number;
+  events: readonly WithoutEventId<RunEvent>[];
   snapshot?: RunnerSnapshotPatch;
 };
 

@@ -19,6 +19,7 @@ import {
 } from "./evidence";
 import type {
   AdoptExpiredDaytonaProcessInput,
+  AppendRunnerEventBatchInput,
   AppendRunnerEventInput,
   BeginDaytonaSandboxDecommissionInput,
   BeginDaytonaSandboxWarmInput,
@@ -35,12 +36,14 @@ import type {
   ExpiredDispatchRecoveryOutcome,
   ExpiredDispatchRequeueInput,
   FinalizeRunnerRunInput,
+  PersistRunnerAttemptRedactionInput,
   ReleaseDaytonaAttemptInput,
   ReleaseExpiredDaytonaAttemptInput,
   RequestRunnerCancellationInput,
   ReserveDaytonaSandboxInput,
   RunnerAdmissionLimits,
   RunnerAgentRecord,
+  RunnerAttemptRedactionRecord,
   RunnerCancellationRequestOutcome,
   RunnerClaimedDispatch,
   RunnerDaytonaAttemptId,
@@ -58,6 +61,8 @@ import { DEFAULT_RUNNER_ADMISSION_LIMITS } from "./types";
 
 const CANCELLATION_CLEANUP_DIAGNOSTIC =
   "Cancellation cleanup requires a sandbox reset.";
+const TERMINAL_CLEANUP_RESET_DIAGNOSTIC =
+  "Terminal cleanup requires a sandbox reset.";
 
 export type RunnerStoreStatement = {
   args: Readonly<Record<string, unknown>>;
@@ -177,6 +182,21 @@ function asEvent(row: Record<string, unknown>): RunnerRunEventRecord {
     event: column(row, "event"),
     eventId: column(row, "eventId"),
     runId: column(row, "runId"),
+  };
+}
+
+function asAttemptRedaction(
+  row: Record<string, unknown>
+): RunnerAttemptRedactionRecord {
+  return {
+    aadVersion: column(row, "aadVersion"),
+    attemptId: column(row, "attemptId"),
+    ciphertext: column(row, "ciphertext"),
+    createdAt: column(row, "createdAt"),
+    iv: column(row, "iv"),
+    kekVersion: column(row, "kekVersion"),
+    runId: column(row, "runId"),
+    wrappedKey: column(row, "wrappedKey"),
   };
 }
 
@@ -355,38 +375,15 @@ async function selectEligibleDispatch(
               WHERE "otherTenant"."tenantHash" <> ${scheduler.lastDispatchedTenantHash}
             )
           )
-        ),
-        ranked_tenants AS (
-          SELECT
-            "fair_tenants".*,
-            EXISTS (
-              SELECT 1
-              FROM fair_tenants AS "lastTenant"
-              WHERE "lastTenant"."tenantHash" = ${scheduler.lastDispatchedTenantHash}
-            ) AS "lastTenantEligible",
-            (
-              SELECT "lastTenant"."headSequence"
-              FROM fair_tenants AS "lastTenant"
-              WHERE "lastTenant"."tenantHash" = ${scheduler.lastDispatchedTenantHash}
-              LIMIT 1
-            ) AS "lastHeadSequence"
-          FROM fair_tenants
         )
         SELECT "queued".*
         FROM "RunnerRun" AS "queued"
-        INNER JOIN ranked_tenants
-          ON "ranked_tenants"."tenant" = "queued"."tenant"
-          AND "ranked_tenants"."headSequence" = "queued"."queueSequence"
+        INNER JOIN fair_tenants
+          ON "fair_tenants"."tenant" = "queued"."tenant"
+          AND "fair_tenants"."headSequence" = "queued"."queueSequence"
         WHERE "queued"."dispatchState" = 'queued'
           AND "queued"."status" = 'queued'
-        ORDER BY
-          CASE
-            WHEN "lastTenantEligible"
-              AND "queued"."queueSequence" <= "lastHeadSequence"
-              THEN 1
-            ELSE 0
-          END ASC,
-          "queued"."queueSequence" ASC
+        ORDER BY "queued"."queueSequence" ASC
         LIMIT 1
         FOR UPDATE OF "queued" SKIP LOCKED`
     )
@@ -1070,6 +1067,125 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           run: runSnapshot(run),
         };
       }),
+
+    appendDispatchEventBatch: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority,
+      input: Omit<AppendRunnerEventBatchInput, keyof DispatchFence>
+    ): Promise<
+      | {
+          authority: RunnerDispatchAuthority;
+          events: RunnerRunEventRecord[];
+          kind: "appended";
+          run: RunSnapshot;
+        }
+      | { kind: "not_live" }
+    > =>
+      database.transaction(async (transaction) => {
+        if (
+          !Number.isSafeInteger(input.daytonaLogCursor) ||
+          input.daytonaLogCursor < 0
+        ) {
+          return { kind: "not_live" };
+        }
+        const current = await lockedLiveDispatchRun(transaction, authority, [
+          "running",
+        ]);
+        if (!current) {
+          return { kind: "not_live" };
+        }
+        if (
+          input.daytonaLogCursor < current.daytonaLogCursor ||
+          (input.events.length > 0 &&
+            input.daytonaLogCursor === current.daytonaLogCursor)
+        ) {
+          return { kind: "not_live" };
+        }
+        const firstEventId = current.logCursor + 1;
+        const events = input.events.map(
+          (event, index) => ({ ...event, id: firstEventId + index }) as RunEvent
+        );
+        const nextEventId = current.logCursor + events.length;
+        const [updated] = await transaction.execute(
+          statement(
+            "update-run-after-dispatch-event-batch",
+            {
+              commandEvidence: evidenceJson(input.snapshot?.commandEvidence),
+              daytonaLogCursor: input.daytonaLogCursor,
+              eventCount: events.length,
+              expectedVersion: authority.expectedVersion,
+              fileEvidence: evidenceJson(input.snapshot?.fileEvidence),
+              firstEventId,
+              leaseToken: authority.leaseToken,
+              nextEventId,
+              output: input.snapshot?.output ?? null,
+              runId: current.id,
+              tenant: current.tenant,
+            },
+            sql`UPDATE "RunnerRun"
+              SET "logCursor" = ${nextEventId},
+                  "daytonaLogCursor" = ${input.daytonaLogCursor},
+                  "output" = COALESCE(${input.snapshot?.output ?? null}, "output"),
+                  "commandEvidence" = COALESCE(CAST(${evidenceJson(input.snapshot?.commandEvidence)} AS jsonb), "commandEvidence"),
+                  "fileEvidence" = COALESCE(CAST(${evidenceJson(input.snapshot?.fileEvidence)} AS jsonb), "fileEvidence"),
+                  "updatedAt" = clock_timestamp(),
+                  "version" = "version" + 1
+              WHERE "id" = ${current.id}
+                AND "tenant" = ${current.tenant}
+                AND "version" = ${authority.expectedVersion}
+                AND "dispatchLeaseToken" = ${authority.leaseToken}
+                AND "dispatchLeaseExpiresAt" > clock_timestamp()
+                AND "dispatchState" = 'running'
+                AND "status" = 'running'
+                AND "cancellationRequestedAt" IS NULL
+              RETURNING *`
+          )
+        );
+        if (!updated) {
+          return { kind: "not_live" };
+        }
+        const inserted =
+          events.length === 0
+            ? []
+            : await transaction.execute(
+                statement(
+                  "insert-dispatch-run-event-batch",
+                  {
+                    events: events.map((event) => eventJson(event)),
+                    firstEventId,
+                    runId: current.id,
+                    tenant: current.tenant,
+                  },
+                  sql`INSERT INTO "RunnerRunEvent" ("runId", "eventId", "event")
+                    VALUES ${sql.join(
+                      events.map(
+                        (event) =>
+                          sql`(${current.id}, ${event.id}, CAST(${eventJson(event)} AS jsonb))`
+                      ),
+                      sql`, `
+                    )}
+                    RETURNING *`
+                )
+              );
+        if (inserted.length !== events.length) {
+          throw new Error(
+            "Runner event batch insert returned an incomplete row set."
+          );
+        }
+        await pruneRunEventsInTransaction(
+          transaction,
+          "prune-run-events-after-dispatch-batch",
+          current.id,
+          current.tenant
+        );
+        const value = asRun(updated);
+        return {
+          authority: dispatchAuthority(value),
+          events: inserted.map(asEvent),
+          kind: "appended",
+          run: runSnapshot(value),
+        };
+      }),
     appendEvent: (
       principal: RunnerPrincipal,
       input: AppendRunnerEventInput
@@ -1157,6 +1273,93 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           event: asEvent(inserted),
           kind: "appended",
           run: runSnapshot(asRun(updated)),
+        };
+      }),
+
+    appendTerminalCleanupDiagnostic: (
+      operator: RunnerOperator,
+      authority: RunnerDispatchAuthority
+    ): Promise<
+      | {
+          authority: RunnerDispatchAuthority;
+          event: RunnerRunEventRecord;
+          kind: "appended";
+        }
+      | { kind: "not_live" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedOperatorRun(
+          transaction,
+          operator,
+          authority.runId
+        );
+        if (
+          !run ||
+          fenceOutcome(run, authority) ||
+          !authority.attemptId ||
+          run.daytonaAttemptId !== authority.attemptId ||
+          run.dispatchState !== "terminal"
+        ) {
+          return { kind: "not_live" };
+        }
+        const eventId = run.logCursor + 1;
+        const event: RunEvent = {
+          id: eventId,
+          output: TERMINAL_CLEANUP_RESET_DIAGNOSTIC,
+          type: "output",
+        };
+        const [updated] = await transaction.execute(
+          statement(
+            "append-terminal-cleanup-diagnostic",
+            {
+              attemptId: authority.attemptId,
+              eventId,
+              expectedVersion: authority.expectedVersion,
+              leaseToken: authority.leaseToken,
+              runId: run.id,
+              tenant: run.tenant,
+            },
+            sql`UPDATE "RunnerRun"
+              SET "logCursor" = ${eventId},
+                  "updatedAt" = clock_timestamp(),
+                  "version" = "version" + 1
+              WHERE "id" = ${run.id}
+                AND "tenant" = ${run.tenant}
+                AND "version" = ${authority.expectedVersion}
+                AND "dispatchLeaseToken" = ${authority.leaseToken}
+                AND "dispatchState" = 'terminal'
+                AND "daytonaAttemptId" = ${authority.attemptId}
+              RETURNING *`
+          )
+        );
+        if (!updated) {
+          return { kind: "not_live" };
+        }
+        const [inserted] = await transaction.execute(
+          statement(
+            "insert-terminal-cleanup-diagnostic",
+            { event: eventJson(event), eventId, runId: run.id },
+            sql`INSERT INTO "RunnerRunEvent" ("runId", "eventId", "event")
+              VALUES (${run.id}, ${eventId}, CAST(${eventJson(event)} AS jsonb))
+              RETURNING *`
+          )
+        );
+        if (!inserted) {
+          throw new Error(
+            "Runner terminal cleanup diagnostic insert returned no row."
+          );
+        }
+        await pruneRunEventsInTransaction(
+          transaction,
+          "prune-run-events-after-terminal-cleanup-diagnostic",
+          run.id,
+          run.tenant
+        );
+        const value = asRun(updated);
+        return {
+          authority: dispatchAuthority(value),
+          event: asEvent(inserted),
+          kind: "appended",
         };
       }),
 
@@ -1531,9 +1734,10 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
       }),
 
     /**
-     * Fences the persistent sandbox before a cancellation reset can delete it.
-     * `resetting` blocks every provisioning path until Daytona absence is
-     * confirmed and the next sandbox generation is cleared.
+     * Fences the persistent sandbox before an exact cancellation, terminal,
+     * or command-free attempt cleanup can delete it. `resetting` blocks every
+     * provisioning path until Daytona absence is confirmed and the next
+     * sandbox generation is cleared.
      */
     beginDaytonaSandboxResetForCancellation: (
       operator: RunnerOperator,
@@ -1549,12 +1753,21 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           operator,
           authority.runId
         );
+        const liveCancellation =
+          Boolean(run?.cancellationRequestedAt) &&
+          (run?.dispatchState === "dispatching" ||
+            run?.dispatchState === "running");
+        const exactAttemptCleanup =
+          Boolean(authority.attemptId) &&
+          run?.daytonaAttemptId === authority.attemptId &&
+          (run?.dispatchState === "terminal" ||
+            ((run?.dispatchState === "dispatching" ||
+              run?.dispatchState === "running") &&
+              run.daytonaCommandId === null));
         if (
           !run ||
           fenceOutcome(run, authority) ||
-          !run.cancellationRequestedAt ||
-          (run.dispatchState !== "dispatching" &&
-            run.dispatchState !== "running")
+          (!liveCancellation && !exactAttemptCleanup)
         ) {
           return { kind: "not_live" };
         }
@@ -1576,6 +1789,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             "begin-daytona-sandbox-reset-for-cancellation",
             {
               agentId: agent.id,
+              attemptId: authority.attemptId ?? null,
               expectedGeneration: agent.sandboxGeneration,
               expectedVersion: agent.version,
               leaseToken: authority.leaseToken,
@@ -1600,6 +1814,13 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                   'provisioning_ambiguous',
                   'ready'
                 )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM "RunnerRun" AS "activeRun"
+                  WHERE "activeRun"."agentId" = ${agent.id}
+                    AND "activeRun"."id" <> ${run.id}
+                    AND "activeRun"."dispatchState" IN ('dispatching', 'running')
+                )
                 AND EXISTS (
                   SELECT 1
                   FROM "RunnerRun"
@@ -1607,8 +1828,22 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                     AND "version" = ${authority.expectedVersion}
                     AND "dispatchLeaseToken" = ${authority.leaseToken}
                     AND "dispatchLeaseExpiresAt" > clock_timestamp()
-                    AND "cancellationRequestedAt" IS NOT NULL
-                    AND "dispatchState" IN ('dispatching', 'running')
+                    AND (
+                      (
+                        "cancellationRequestedAt" IS NOT NULL
+                        AND "dispatchState" IN ('dispatching', 'running')
+                      )
+                      OR (
+                        "daytonaAttemptId" = ${authority.attemptId ?? null}
+                        AND (
+                          "dispatchState" = 'terminal'
+                          OR (
+                            "dispatchState" IN ('dispatching', 'running')
+                            AND "daytonaCommandId" IS NULL
+                          )
+                        )
+                      )
+                    )
                 )
               RETURNING *`
           )
@@ -2002,6 +2237,36 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (!deleted) {
           throw new Error("Locked Runner agent disappeared before deletion.");
         }
+        return { kind: "deleted" };
+      }),
+
+    deleteAttemptRedaction: (
+      operator: RunnerOperator,
+      authority: RunnerDispatchAuthority
+    ): Promise<{ kind: "deleted" } | { kind: "not_live" }> =>
+      database.transaction(async (transaction) => {
+        const run = await lockedOperatorRun(
+          transaction,
+          operator,
+          authority.runId
+        );
+        if (
+          !run ||
+          fenceOutcome(run, authority) ||
+          !authority.attemptId ||
+          run.daytonaAttemptId !== authority.attemptId
+        ) {
+          return { kind: "not_live" };
+        }
+        await transaction.execute(
+          statement(
+            "delete-runner-attempt-redaction",
+            { attemptId: authority.attemptId, runId: run.id },
+            sql`DELETE FROM "RunnerAttemptRedaction"
+              WHERE "runId" = ${run.id}
+                AND "attemptId" = ${authority.attemptId}`
+          )
+        );
         return { kind: "deleted" };
       }),
 
@@ -2650,10 +2915,103 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return { authority: dispatchAuthority(value), kind: "updated", value };
       }),
 
+    persistAttemptRedaction: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority,
+      input: PersistRunnerAttemptRedactionInput
+    ): Promise<{ kind: "persisted" } | { kind: "not_live" }> =>
+      database.transaction(async (transaction) => {
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+        ]);
+        if (
+          !run ||
+          authority.attemptId !== input.attemptId ||
+          run.daytonaAttemptId !== input.attemptId
+        ) {
+          return { kind: "not_live" };
+        }
+        const [persisted] = await transaction.execute(
+          statement(
+            "persist-runner-attempt-redaction",
+            {
+              aadVersion: input.aadVersion,
+              attemptId: input.attemptId,
+              ciphertext: input.ciphertext,
+              iv: input.iv,
+              kekVersion: input.kekVersion,
+              runId: run.id,
+              wrappedKey: input.wrappedKey,
+            },
+            sql`INSERT INTO "RunnerAttemptRedaction" (
+                "runId",
+                "attemptId",
+                "aadVersion",
+                "ciphertext",
+                "iv",
+                "kekVersion",
+                "wrappedKey"
+              ) VALUES (
+                ${run.id},
+                ${input.attemptId},
+                ${input.aadVersion},
+                ${input.ciphertext},
+                ${input.iv},
+                ${input.kekVersion},
+                ${input.wrappedKey}
+              )
+              ON CONFLICT ("runId") DO UPDATE
+                SET "aadVersion" = EXCLUDED."aadVersion",
+                    "ciphertext" = EXCLUDED."ciphertext",
+                    "iv" = EXCLUDED."iv",
+                    "kekVersion" = EXCLUDED."kekVersion",
+                    "wrappedKey" = EXCLUDED."wrappedKey"
+                WHERE "RunnerAttemptRedaction"."attemptId" = EXCLUDED."attemptId"
+              RETURNING "runId"`
+          )
+        );
+        return persisted ? { kind: "persisted" } : { kind: "not_live" };
+      }),
+
     pruneTerminalRuns: (principal: RunnerPrincipal, agentId: string) =>
       database.transaction((transaction) =>
         pruneTerminalRunsInTransaction(transaction, principal.tenant, agentId)
       ),
+
+    readAttemptRedaction: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority
+    ): Promise<
+      | { kind: "found"; value: RunnerAttemptRedactionRecord }
+      | { kind: "missing" | "not_live" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+          "running",
+        ]);
+        if (
+          !run ||
+          !authority.attemptId ||
+          run.daytonaAttemptId !== authority.attemptId
+        ) {
+          return { kind: "not_live" };
+        }
+        const [redaction] = await transaction.execute(
+          statement(
+            "read-runner-attempt-redaction",
+            { attemptId: authority.attemptId, runId: run.id },
+            sql`SELECT *
+              FROM "RunnerAttemptRedaction"
+              WHERE "runId" = ${run.id}
+                AND "attemptId" = ${authority.attemptId}
+              LIMIT 1`
+          )
+        );
+        return redaction
+          ? { kind: "found", value: asAttemptRedaction(redaction) }
+          : { kind: "missing" };
+      }),
 
     readEventsAfter: (
       principal: RunnerPrincipal,

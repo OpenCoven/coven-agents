@@ -7,6 +7,7 @@ import {
   consumeRunnerCredentialReservation,
   type RunnerCredentialDependencies,
   releaseRunnerCredentialResources,
+  rollbackRunnerCredentialResources,
 } from "./runner-credential";
 
 const NOW = new Date("2026-08-28T15:00:00.000Z");
@@ -29,12 +30,21 @@ function reservation(): RunReservationRecord {
 
 function dependencies(calls: string[]): RunnerCredentialDependencies {
   return {
+    compensateReservation: async () => {
+      calls.push("compensate");
+      return { kind: "compensated", reservation: reservation() };
+    },
     consumeReservation: async () => {
       calls.push("consume");
       return { kind: "consumed", reservation: reservation() };
     },
+    discardReservation: async () => {
+      calls.push("discard-reservation");
+      return reservation();
+    },
     issueLease: async () => {
       calls.push("issue");
+      return { kind: "issued" as const };
     },
     leaseCredential: async (_input, prepare, operation) => {
       calls.push("lease");
@@ -56,10 +66,6 @@ function dependencies(calls: string[]): RunnerCredentialDependencies {
     releaseLeaseForRun: async () => {
       calls.push("release-lease-for-run");
       return true;
-    },
-    releaseReservation: async () => {
-      calls.push("release-reservation");
-      return reservation();
     },
     reserveRun: async () => {
       calls.push("reserve");
@@ -90,7 +96,9 @@ test("runner credential is one-use and never serializes its plaintext", async ()
     throw new Error("Credential acquisition unexpectedly failed.");
   }
   assert.deepEqual(calls, ["reserve", "issue", "lease", "prepare", "read"]);
+  assert.deepEqual(calls, ["reserve", "issue", "lease", "prepare", "read"]);
   assert.equal(JSON.stringify(result.acquisition).includes(SECRET), false);
+  await result.acquisition.commit();
 
   const started = await result.acquisition.use((credential) => {
     assert.equal(credential.credential, SECRET);
@@ -98,8 +106,14 @@ test("runner credential is one-use and never serializes its plaintext", async ()
   });
   assert.equal(started, "started");
   await assert.rejects(() => result.acquisition.use(() => Promise.resolve()));
-  await result.acquisition.abort();
-  assert.deepEqual(calls.slice(-2), ["release-lease", "release-reservation"]);
+  assert.deepEqual(calls, [
+    "reserve",
+    "issue",
+    "lease",
+    "prepare",
+    "read",
+    "consume",
+  ]);
 });
 
 test("credential acquisition releases reservation and lease when preparation fails", async () => {
@@ -119,12 +133,80 @@ test("credential acquisition releases reservation and lease when preparation fai
     "lease",
     "prepare",
     "release-lease",
-    "release-reservation",
+    "discard-reservation",
   ]);
   assert.equal(
     result.kind === "unavailable" && result.error.code,
     "credential_unavailable"
   );
+});
+
+test("uncertain pre-launch cleanup remains an explicit retryable failure", async () => {
+  const calls: string[] = [];
+  const service = dependencies(calls);
+  service.prepareCredential = async () => {
+    calls.push("prepare");
+    return false;
+  };
+  service.releaseLease = async () => {
+    calls.push("release-lease");
+    return false;
+  };
+  service.discardReservation = async () => {
+    calls.push("discard-reservation");
+    return null;
+  };
+
+  const result = await acquireRunnerCredential(input(), service);
+
+  assert.equal(result.kind, "unavailable");
+  assert.equal(
+    result.kind === "unavailable" && result.error.code,
+    "cleanup_pending"
+  );
+  assert.equal(result.kind === "unavailable" && result.error.retryable, true);
+  assert.deepEqual(calls, [
+    "reserve",
+    "issue",
+    "lease",
+    "prepare",
+    "release-lease",
+    "discard-reservation",
+  ]);
+});
+
+test("a transient post-lease credential read failure retires the exact lease and permits retry", async () => {
+  const calls: string[] = [];
+  const service = dependencies(calls);
+  let failRead = true;
+  service.leaseCredential = async (_input, prepare, operation) => {
+    calls.push("lease");
+    await prepare();
+    if (failRead) {
+      failRead = false;
+      throw new Error("transient credential store failure");
+    }
+    return await operation({} as never);
+  };
+
+  const first = await acquireRunnerCredential(input(), service);
+  const second = await acquireRunnerCredential(input(), service);
+
+  assert.equal(first.kind, "unavailable");
+  assert.equal(second.kind, "acquired");
+  assert.deepEqual(calls, [
+    "reserve",
+    "issue",
+    "lease",
+    "prepare",
+    "release-lease",
+    "discard-reservation",
+    "reserve",
+    "issue",
+    "lease",
+    "prepare",
+    "read",
+  ]);
 });
 
 test("capacity refusal never issues or decrypts a credential", async () => {
@@ -167,7 +249,7 @@ test("terminal cleanup releases only durable credential resources for its run", 
     dependencies(calls)
   );
 
-  assert.deepEqual(calls, ["release-lease-for-run", "release-reservation"]);
+  assert.deepEqual(calls, ["release-lease-for-run", "discard-reservation"]);
 });
 
 test("attached runner work consumes its existing reservation idempotently", async () => {
@@ -178,4 +260,29 @@ test("attached runner work consumes its existing reservation idempotently", asyn
   );
 
   assert.deepEqual(calls, ["consume"]);
+});
+
+test("a pre-launch consumed reservation is compensated exactly once", async () => {
+  const calls: string[] = [];
+  const result = await acquireRunnerCredential(input(), dependencies(calls));
+
+  assert.equal(result.kind, "acquired");
+  if (result.kind !== "acquired") {
+    throw new Error("Credential acquisition unexpectedly failed.");
+  }
+  await result.acquisition.commit();
+  await result.acquisition.compensate();
+  await result.acquisition.compensate();
+
+  assert.deepEqual(calls.slice(-2), ["release-lease", "compensate"]);
+});
+
+test("recovery rolls back an unstarted attached accounting transition", async () => {
+  const calls: string[] = [];
+  await rollbackRunnerCredentialResources(
+    { runId: "00000000-0000-4000-8000-000000000002", tenant: "tenant_a" },
+    dependencies(calls)
+  );
+
+  assert.deepEqual(calls, ["release-lease-for-run", "compensate"]);
 });

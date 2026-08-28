@@ -20,7 +20,9 @@ export interface CredentialLendingDependencies {
   consumeLegacy: (
     input: Parameters<typeof consumeRunReservation>[1]
   ) => ReturnType<typeof consumeRunReservation>;
-  issue: (input: Parameters<typeof issueCredentialLease>[1]) => Promise<void>;
+  issue: (
+    input: Parameters<typeof issueCredentialLease>[1]
+  ) => ReturnType<typeof issueCredentialLease>;
   lease: (
     input: Parameters<typeof consumeCredentialLease>[1],
     prepare: () => Promise<void>,

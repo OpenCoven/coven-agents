@@ -12,12 +12,18 @@ import {
 import {
   consumeRunnerCredentialReservation,
   releaseRunnerCredentialResources,
+  rollbackRunnerCredentialResources,
 } from "@/lib/credentials/runner-credential";
 import {
   type DaytonaRunnerDispatchDependencies,
   daytonaRunnerDispatchDependencies,
   dispatchNextRunnerRun,
 } from "./admission";
+import {
+  openRunnerAttemptRedactionFromEnvironment,
+  type RunnerAttemptRedactionEnvelope,
+  type RunnerAttemptRedactionScope,
+} from "./attempt-redaction";
 import { daytonaSandboxName } from "./daytona/names";
 import {
   type DaytonaLogSnapshot,
@@ -55,20 +61,22 @@ type ReconciliationStore = Pick<
   | "requestRunCancellation"
   | "claimExpiredDaytonaAttemptCleanup"
   | "adoptExpiredDaytonaProcess"
-  | "advanceDaytonaLogCursor"
-  | "appendDispatchEvent"
+  | "appendDispatchEventBatch"
   | "cleanupTerminalLease"
   | "finalizeRun"
   | "markDispatchRunningForDispatch"
+  | "readAttemptRedaction"
   | "requeueAfterDaytonaAttemptCleanup"
   | "requeueExpiredDispatch"
   | "releaseTerminalDaytonaAttempt"
+  | "deleteAttemptRedaction"
   | "scanExpiredDispatchLeases"
 > &
   Partial<
     Pick<
       RunnerStore,
       | "appendCancellationDiagnostic"
+      | "appendTerminalCleanupDiagnostic"
       | "claimTerminalDaytonaAttemptCleanup"
       | "scanTerminalDaytonaAttemptCleanups"
     >
@@ -202,7 +210,12 @@ export type ReconcileAndDispatchDependencies = Readonly<{
   providerConcurrency?: number;
   randomToken?: () => string;
   consumeCredentialReservation?: (run: RunnerRunRecord) => Promise<void>;
+  openAttemptRedaction?: (
+    scope: RunnerAttemptRedactionScope,
+    envelope: RunnerAttemptRedactionEnvelope
+  ) => Promise<string>;
   releaseCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
+  rollbackCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
   sandboxRecovery?: Omit<
     ReconcileDaytonaSandboxesDependencies,
     "clock" | "operator"
@@ -246,6 +259,8 @@ export function daytonaRunnerReconciliationDependencies(
         dependencies.credentialDependencies
       ),
     dispatch: () => dispatchNextRunnerRun(dispatch),
+    openAttemptRedaction: (scope, envelope) =>
+      openRunnerAttemptRedactionFromEnvironment(scope, envelope),
     operator: dependencies.operator,
     provider: daytonaReconciliationProvider({
       daytona: dependencies.daytona,
@@ -261,6 +276,11 @@ export function daytonaRunnerReconciliationDependencies(
     releaseCredentialResources: (run) =>
       releaseRunnerCredentialResources(
         run.id,
+        dependencies.credentialDependencies
+      ),
+    rollbackCredentialResources: (run) =>
+      rollbackRunnerCredentialResources(
+        { runId: run.id, tenant: run.tenant },
         dependencies.credentialDependencies
       ),
     sandboxRecovery: {
@@ -279,13 +299,19 @@ type CancellationFinalizationStore = Pick<
 >;
 
 type CancellationStore = CancellationFinalizationStore &
-  Pick<RunnerStore, "appendCancellationDiagnostic" | "requestRunCancellation">;
+  Pick<
+    RunnerStore,
+    | "appendCancellationDiagnostic"
+    | "deleteAttemptRedaction"
+    | "requestRunCancellation"
+  >;
 
 export type CancelRunnerRunDependencies = Readonly<{
   clock?: () => Date;
   operator: RunnerOperator;
   provider: RunnerReconciliationProvider;
   randomToken?: () => string;
+  rollbackCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
   releaseCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
   store: CancellationStore;
 }>;
@@ -325,6 +351,11 @@ export function daytonaRunnerCancellationDependencies(
     releaseCredentialResources: (run) =>
       releaseRunnerCredentialResources(
         run.id,
+        dependencies.credentialDependencies
+      ),
+    rollbackCredentialResources: (run) =>
+      rollbackRunnerCredentialResources(
+        { runId: run.id, tenant: run.tenant },
         dependencies.credentialDependencies
       ),
     store: dependencies.store,
@@ -413,6 +444,119 @@ async function releaseCredentialResources(
   } catch {
     return false;
   }
+}
+
+async function rollbackCredentialResources(
+  run: RunnerRunRecord,
+  dependencies: Pick<
+    ReconcileAndDispatchDependencies | CancelRunnerRunDependencies,
+    "rollbackCredentialResources"
+  >
+): Promise<boolean> {
+  if (!dependencies.rollbackCredentialResources) {
+    return true;
+  }
+  try {
+    await dependencies.rollbackCredentialResources(run);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function openAttemptRedaction(
+  run: RunnerRunRecord,
+  authority: RunnerDispatchAuthority,
+  dependencies: ReconcileAndDispatchDependencies
+): Promise<string | null> {
+  if (!authority.attemptId || run.daytonaAttemptId !== authority.attemptId) {
+    return null;
+  }
+  const persisted = await dependencies.store.readAttemptRedaction(
+    dependencies.operator,
+    authority
+  );
+  if (persisted.kind !== "found") {
+    return null;
+  }
+  const credential = await (
+    dependencies.openAttemptRedaction ??
+    openRunnerAttemptRedactionFromEnvironment
+  )(
+    {
+      attemptId: authority.attemptId,
+      runId: run.id,
+      tenant: run.tenant,
+    },
+    persisted.value
+  );
+  return credential.trim() ? credential : null;
+}
+
+async function retireAttemptRedaction(
+  authority: RunnerDispatchAuthority,
+  dependencies: Pick<
+    ReconcileAndDispatchDependencies | CancelRunnerRunDependencies,
+    "operator" | "store"
+  >
+): Promise<boolean> {
+  try {
+    return (
+      (
+        await dependencies.store.deleteAttemptRedaction(
+          dependencies.operator,
+          authority
+        )
+      ).kind === "deleted"
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function resetSandboxAfterStopFailure(
+  run: RunnerRunRecord,
+  authority: RunnerDispatchAuthority,
+  dependencies: Pick<
+    ReconcileAndDispatchDependencies | CancelRunnerRunDependencies,
+    "provider"
+  >
+): Promise<boolean> {
+  try {
+    return Boolean(await dependencies.provider.resetSandbox?.(run, authority));
+  } catch {
+    return false;
+  }
+}
+
+async function stopTerminalAttempt(
+  run: RunnerRunRecord,
+  authority: RunnerDispatchAuthority,
+  sandbox: DaytonaProcessSandbox,
+  dependencies: ReconcileAndDispatchDependencies
+): Promise<boolean> {
+  if (!authority.attemptId) {
+    return false;
+  }
+  const stopped = await dependencies.provider.stop(sandbox, {
+    attemptId: authority.attemptId,
+    runId: run.id,
+  });
+  if (stopped.kind === "stopped") {
+    return true;
+  }
+  if (await resetSandboxAfterStopFailure(run, authority, dependencies)) {
+    return true;
+  }
+  try {
+    await dependencies.store.appendTerminalCleanupDiagnostic?.(
+      dependencies.operator,
+      authority
+    );
+  } catch {
+    // The terminal attempt and lease remain the durable retry record.
+  }
+  return false;
 }
 
 type SandboxRecoveryOutcome = "deferred" | "failed" | "recovered";
@@ -587,7 +731,10 @@ export async function reconcileDaytonaSandboxes(
   );
 }
 
-function terminalEvidence(snapshot: DaytonaLogSnapshot): Readonly<{
+function terminalEvidence(
+  snapshot: DaytonaLogSnapshot,
+  credential: string
+): Readonly<{
   commandEvidence: CommandEvidence[];
   error: RunError | null;
   fileEvidence: FileEvidence[];
@@ -597,10 +744,10 @@ function terminalEvidence(snapshot: DaytonaLogSnapshot): Readonly<{
     commandEvidence: snapshot.summary.toolCalls
       .slice(0, AGENT_RUNNER_LIMITS.maxCommandResults)
       .map((call) => ({
-        command: call.tool,
+        command: sanitizeRunText(call.tool, credential),
         exitCode: call.success ? 0 : 1,
         stderr: "",
-        stdout: call.summary,
+        stdout: sanitizeRunText(call.summary, credential),
       })),
     error:
       snapshot.status === "failed"
@@ -612,7 +759,10 @@ function terminalEvidence(snapshot: DaytonaLogSnapshot): Readonly<{
         : null,
     fileEvidence: snapshot.summary.fileOperations
       .slice(0, AGENT_RUNNER_LIMITS.maxFileOperations)
-      .map((file) => ({ operation: file.operation, path: file.path }))
+      .map((file) => ({
+        operation: file.operation,
+        path: sanitizeRunText(file.path, credential),
+      }))
       .filter(
         (file): file is FileEvidence =>
           file.operation === "create" ||
@@ -620,7 +770,7 @@ function terminalEvidence(snapshot: DaytonaLogSnapshot): Readonly<{
           file.operation === "delete"
       ),
     output: truncateUtf8(
-      sanitizeRunText(snapshot.summary.output, null),
+      sanitizeRunText(snapshot.summary.output, credential),
       AGENT_RUNNER_LIMITS.maxEventOutputLength,
       AGENT_RUNNER_LIMITS.maxEventOutputLength
     ),
@@ -689,30 +839,27 @@ async function reconcileAttachedProcess(
         attemptId: run.daytonaAttemptId,
         runId: run.id,
       });
-      if (stopped.kind !== "stopped") {
-        let reset = false;
+      if (
+        stopped.kind !== "stopped" &&
+        !(await resetSandboxAfterStopFailure(
+          adopted.run,
+          adopted.authority,
+          dependencies
+        ))
+      ) {
         try {
-          reset = Boolean(
-            await dependencies.provider.resetSandbox?.(
-              adopted.run,
-              adopted.authority
-            )
+          await dependencies.store.appendCancellationDiagnostic?.(
+            dependencies.operator,
+            adopted.authority
           );
         } catch {
-          reset = false;
+          // The cancellation intent remains a durable retry record.
         }
-        if (!reset) {
-          try {
-            await dependencies.store.appendCancellationDiagnostic?.(
-              dependencies.operator,
-              adopted.authority
-            );
-          } catch {
-            // The cancellation intent remains a durable retry record.
-          }
-          return { adopted: true, kind: "deferred" };
-        }
+        return { adopted: true, kind: "deferred" };
       }
+    }
+    if (!(await retireAttemptRedaction(adopted.authority, dependencies))) {
+      return { adopted: true, kind: "deferred" };
     }
     if (!(await releaseCredentialResources(adopted.run, dependencies))) {
       return { adopted: true, kind: "deferred" };
@@ -725,6 +872,9 @@ async function reconcileAttachedProcess(
     );
   }
   if (!sandbox) {
+    if (!(await retireAttemptRedaction(adopted.authority, dependencies))) {
+      return { adopted: true, kind: "deferred" };
+    }
     if (!(await releaseCredentialResources(adopted.run, dependencies))) {
       return { adopted: true, kind: "deferred" };
     }
@@ -746,141 +896,150 @@ async function reconcileAttachedProcess(
     }
   }
 
-  const { authority: adoptedAuthority, run: adoptedRun } = adopted;
-  let authority = adoptedAuthority;
-  let liveRun = adoptedRun;
-  if (liveRun.dispatchState === "dispatching") {
-    const marked = await dependencies.store.markDispatchRunningForDispatch(
-      dependencies.operator,
-      authority
+  let redactionCredential: string | null | undefined;
+  try {
+    redactionCredential = await openAttemptRedaction(
+      adopted.run,
+      adopted.authority,
+      dependencies
     );
-    if (marked.kind !== "updated") {
+    if (!redactionCredential) {
       return { adopted: true, kind: "deferred" };
     }
-    const { authority: markedAuthority, value: markedRun } = marked;
-    authority = markedAuthority;
-    liveRun = markedRun;
-  }
+    const credentialForRedaction = redactionCredential;
+    const { authority: adoptedAuthority, run: adoptedRun } = adopted;
+    let authority = adoptedAuthority;
+    let liveRun = adoptedRun;
+    if (liveRun.dispatchState === "dispatching") {
+      const marked = await dependencies.store.markDispatchRunningForDispatch(
+        dependencies.operator,
+        authority
+      );
+      if (marked.kind !== "updated") {
+        return { adopted: true, kind: "deferred" };
+      }
+      const { authority: markedAuthority, value: markedRun } = marked;
+      authority = markedAuthority;
+      liveRun = markedRun;
+    }
 
-  const snapshot = await (
-    dependencies.provider.snapshot ?? snapshotDaytonaProcess
-  )({
-    attemptId: run.daytonaAttemptId,
-    commandId: run.daytonaCommandId,
-    credential: null,
-    cursor: liveRun.daytonaLogCursor,
-    harness: "copilot",
-    runId: run.id,
-    sandbox,
-  });
-  const toolNames = new Map<string, string>();
-  const projected = snapshot.events
-    .map((event) => projectHarnessRunEvent(event, 0, null, toolNames))
-    .filter((event): event is RunEvent => event !== null);
-  for (const [index, event] of projected.entries()) {
-    // biome-ignore lint/performance/noAwaitInLoops: Event writes advance a version fence in strict cursor order.
-    const appended = await dependencies.store.appendDispatchEvent(
+    const snapshot = await (
+      dependencies.provider.snapshot ?? snapshotDaytonaProcess
+    )({
+      attemptId: run.daytonaAttemptId,
+      commandId: run.daytonaCommandId,
+      credential: credentialForRedaction,
+      cursor: liveRun.daytonaLogCursor,
+      harness: "copilot",
+      runId: run.id,
+      sandbox,
+    });
+    const toolNames = new Map<string, string>();
+    const projected = snapshot.events
+      .map((event) =>
+        projectHarnessRunEvent(event, 0, credentialForRedaction, toolNames)
+      )
+      .filter((event): event is RunEvent => event !== null);
+    const evidence = terminalEvidence(snapshot, credentialForRedaction);
+    const appended = await dependencies.store.appendDispatchEventBatch(
       dependencies.operator,
       authority,
       {
-        ...(index === projected.length - 1
-          ? { daytonaLogCursor: snapshot.cursor }
-          : {}),
-        event: withoutEventId(event) as never,
+        daytonaLogCursor: snapshot.cursor,
+        events: projected.map(withoutEventId) as never,
+        snapshot: {
+          commandEvidence: evidence.commandEvidence,
+          fileEvidence: evidence.fileEvidence,
+          output: evidence.output,
+        },
       }
     );
     if (appended.kind !== "appended") {
+      return { adopted: true, kind: "deferred" };
+    }
+    ({ authority } = appended);
+
+    if (snapshot.status === "running" || !snapshot.logsSettled) {
       return {
         adopted: true,
         kind: "deferred",
-        logEvents: index,
+        logEvents: projected.length,
       };
     }
-    const { authority: appendedAuthority } = appended;
-    authority = appendedAuthority;
-  }
-  if (projected.length === 0 && snapshot.cursor > liveRun.daytonaLogCursor) {
-    const advanced = await dependencies.store.advanceDaytonaLogCursor(
+    const finalized = await dependencies.store.finalizeRun(
       dependencies.operator,
-      authority,
-      snapshot.cursor
+      {
+        commandEvidence: evidence.commandEvidence,
+        completedAt: clock(),
+        error: evidence.error,
+        expectedVersion: authority.expectedVersion,
+        fileEvidence: evidence.fileEvidence,
+        leaseToken: authority.leaseToken,
+        output: evidence.output,
+        runId: run.id,
+        status: snapshot.status,
+      }
     );
-    if (advanced.kind !== "updated") {
-      return { adopted: true, kind: "deferred" };
+    if (finalized.kind !== "finalized") {
+      return {
+        adopted: true,
+        kind: "deferred",
+        logEvents: projected.length,
+      };
     }
-    const { authority: advancedAuthority } = advanced;
-    authority = advancedAuthority;
-  }
-
-  if (snapshot.status === "running" || !snapshot.logsSettled) {
-    return {
-      adopted: true,
-      kind: "deferred",
-      logEvents: projected.length,
-    };
-  }
-  const evidence = terminalEvidence(snapshot);
-  const finalized = await dependencies.store.finalizeRun(
-    dependencies.operator,
-    {
-      commandEvidence: evidence.commandEvidence,
-      completedAt: clock(),
-      error: evidence.error,
-      expectedVersion: authority.expectedVersion,
-      fileEvidence: evidence.fileEvidence,
+    const terminalAuthority = {
+      attemptId: run.daytonaAttemptId,
+      expectedVersion: finalized.run.version,
       leaseToken: authority.leaseToken,
-      output: evidence.output,
       runId: run.id,
-      status: snapshot.status,
+    } as RunnerDispatchAuthority;
+    if (
+      !(await stopTerminalAttempt(
+        finalized.run,
+        terminalAuthority,
+        sandbox,
+        dependencies
+      ))
+    ) {
+      return {
+        adopted: true,
+        kind: "terminalized",
+        logEvents: projected.length,
+      };
     }
-  );
-  if (finalized.kind !== "finalized") {
-    return {
-      adopted: true,
-      kind: "deferred",
-      logEvents: projected.length,
-    };
-  }
-  const terminalAuthority = {
-    attemptId: run.daytonaAttemptId,
-    expectedVersion: finalized.run.version,
-    leaseToken: authority.leaseToken,
-    runId: run.id,
-  } as RunnerDispatchAuthority;
-  const stopped = await dependencies.provider.stop(sandbox, {
-    attemptId: run.daytonaAttemptId,
-    runId: run.id,
-  });
-  if (stopped.kind !== "stopped") {
-    return {
-      adopted: true,
-      kind: "terminalized",
-      logEvents: projected.length,
-    };
-  }
-  if (!(await releaseCredentialResources(finalized.run, dependencies))) {
-    return {
-      adopted: true,
-      kind: "terminalized",
-      logEvents: projected.length,
-    };
-  }
-  const released = await dependencies.store.releaseTerminalDaytonaAttempt(
-    dependencies.operator,
-    terminalAuthority,
-    { attemptId: run.daytonaAttemptId }
-  );
-  if (released.kind === "released") {
-    await dependencies.store.cleanupTerminalLease(
+    if (!(await releaseCredentialResources(finalized.run, dependencies))) {
+      return {
+        adopted: true,
+        kind: "terminalized",
+        logEvents: projected.length,
+      };
+    }
+    if (!(await retireAttemptRedaction(terminalAuthority, dependencies))) {
+      return {
+        adopted: true,
+        kind: "terminalized",
+        logEvents: projected.length,
+      };
+    }
+    const released = await dependencies.store.releaseTerminalDaytonaAttempt(
       dependencies.operator,
-      released.authority
+      terminalAuthority,
+      { attemptId: run.daytonaAttemptId }
     );
+    if (released.kind === "released") {
+      await dependencies.store.cleanupTerminalLease(
+        dependencies.operator,
+        released.authority
+      );
+    }
+    return {
+      adopted: true,
+      kind: "terminalized",
+      logEvents: projected.length,
+    };
+  } finally {
+    redactionCredential = undefined;
   }
-  return {
-    adopted: true,
-    kind: "terminalized",
-    logEvents: projected.length,
-  };
 }
 
 async function recoverExpiredDispatch(
@@ -906,7 +1065,7 @@ async function recoverExpiredDispatch(
       if (claimed.run.daytonaSessionId || claimed.run.daytonaCommandId) {
         return { kind: "deferred" };
       }
-      if (!(await releaseCredentialResources(claimed.run, dependencies))) {
+      if (!(await rollbackCredentialResources(claimed.run, dependencies))) {
         return { kind: "deferred" };
       }
       return await finalizeRecoveredCancellation(
@@ -915,6 +1074,9 @@ async function recoverExpiredDispatch(
         dependencies,
         dependencies.clock ?? (() => new Date())
       );
+    }
+    if (!(await rollbackCredentialResources(run, dependencies))) {
+      return { kind: "deferred" };
     }
     const requeued = await dependencies.store.requeueExpiredDispatch(
       dependencies.operator,
@@ -959,11 +1121,21 @@ async function recoverExpiredDispatch(
       attemptId: run.daytonaAttemptId,
       runId: run.id,
     });
-    if (stopped.kind !== "stopped") {
+    if (
+      stopped.kind !== "stopped" &&
+      !(await resetSandboxAfterStopFailure(
+        claimed.run,
+        claimed.authority,
+        dependencies
+      ))
+    ) {
       return { kind: "deferred" };
     }
   }
-  if (!(await releaseCredentialResources(claimed.run, dependencies))) {
+  if (!(await retireAttemptRedaction(claimed.authority, dependencies))) {
+    return { kind: "deferred" };
+  }
+  if (!(await rollbackCredentialResources(claimed.run, dependencies))) {
     return { kind: "deferred" };
   }
   if (claimed.run.cancellationRequestedAt) {
@@ -1011,14 +1183,19 @@ async function recoverTerminalAttempt(
     claimed.run,
     claimed.authority
   );
-  if (sandbox) {
-    const stopped = await dependencies.provider.stop(sandbox, {
-      attemptId: run.daytonaAttemptId,
-      runId: run.id,
-    });
-    if (stopped.kind !== "stopped") {
-      return "deferred";
-    }
+  if (
+    sandbox &&
+    !(await stopTerminalAttempt(
+      claimed.run,
+      claimed.authority,
+      sandbox,
+      dependencies
+    ))
+  ) {
+    return "deferred";
+  }
+  if (!(await retireAttemptRedaction(claimed.authority, dependencies))) {
+    return "deferred";
   }
   if (!(await releaseCredentialResources(claimed.run, dependencies))) {
     return "deferred";
@@ -1130,7 +1307,7 @@ export async function cancelRunnerRun(
       return { kind: "cleanup_required", runId };
     }
     try {
-      if (!(await releaseCredentialResources(run, dependencies))) {
+      if (!(await rollbackCredentialResources(run, dependencies))) {
         return { kind: "cleanup_required", runId };
       }
       return await finalizeCancellation(run, authority, dependencies, clock);
@@ -1155,29 +1332,25 @@ export async function cancelRunnerRun(
     } catch {
       return { kind: "cleanup_required", runId };
     }
-    if (stopped.kind !== "stopped") {
+    if (
+      stopped.kind !== "stopped" &&
+      !(await resetSandboxAfterStopFailure(run, authority, dependencies))
+    ) {
       try {
-        if (!(await dependencies.provider.resetSandbox?.(run, authority))) {
-          await dependencies.store.appendCancellationDiagnostic(
-            dependencies.operator,
-            authority
-          );
-          return { kind: "sandbox_reset_required", runId };
-        }
+        await dependencies.store.appendCancellationDiagnostic(
+          dependencies.operator,
+          authority
+        );
       } catch {
-        try {
-          await dependencies.store.appendCancellationDiagnostic(
-            dependencies.operator,
-            authority
-          );
-        } catch {
-          // The durable cancellation intent remains the retry record.
-        }
-        return { kind: "sandbox_reset_required", runId };
+        // The durable cancellation intent remains the retry record.
       }
+      return { kind: "sandbox_reset_required", runId };
     }
   }
   try {
+    if (!(await retireAttemptRedaction(authority, dependencies))) {
+      return { kind: "cleanup_required", runId };
+    }
     if (!(await releaseCredentialResources(run, dependencies))) {
       return { kind: "cleanup_required", runId };
     }
