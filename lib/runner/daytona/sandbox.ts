@@ -22,6 +22,7 @@ import { daytonaSandboxLabels, daytonaSandboxName } from "./names";
 const DEFAULT_AUTO_ARCHIVE_MINUTES = 10_080;
 const DEFAULT_AUTO_STOP_MINUTES = 15;
 const SANDBOX_OPERATION_TIMEOUT_SECONDS = 60;
+const SANDBOX_TRANSITION_POLL_INTERVAL_MS = 1000;
 export const SANDBOX_PROVISIONING_TIMEOUT_MS = 5 * 60 * 1000;
 export const SANDBOX_WARM_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -45,8 +46,16 @@ export type DaytonaSandboxConfiguration = Readonly<{
   snapshotName: string;
 }>;
 
+export type DaytonaSandboxLifecycleDependencies = Readonly<{
+  now?: () => number;
+  signal?: AbortSignal;
+  sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  transitionTimeoutMs?: number;
+}>;
+
 export type DaytonaSandboxDependencies = Readonly<{
   daytona: DaytonaSandboxService;
+  lifecycle?: DaytonaSandboxLifecycleDependencies;
   store: RunnerStore;
 }>;
 
@@ -153,7 +162,141 @@ function sandboxCreateParameters(
   };
 }
 
-async function startOrRecoverSandbox(sandbox: Sandbox): Promise<void> {
+function transitionTimeoutError(): DaytonaSandboxLifecycleError {
+  return new DaytonaSandboxLifecycleError(
+    "Daytona sandbox shutdown transition did not finish in time.",
+    { retryable: true }
+  );
+}
+
+function transitionAbortedError(): DaytonaSandboxLifecycleError {
+  return new DaytonaSandboxLifecycleError(
+    "Daytona sandbox shutdown transition was aborted.",
+    { retryable: true }
+  );
+}
+
+function throwIfTransitionAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw transitionAbortedError();
+  }
+}
+
+function sleepForTransition(
+  milliseconds: number,
+  signal: AbortSignal | undefined
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(resolve, milliseconds);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timeout);
+        reject(transitionAbortedError());
+      },
+      { once: true }
+    );
+  });
+}
+
+function terminalTransitionError(
+  state: SandboxState | undefined
+): DaytonaSandboxLifecycleError | undefined {
+  if (state === SandboxState.DESTROYED) {
+    return new DaytonaSandboxLifecycleError(
+      "Daytona sandbox was destroyed during shutdown.",
+      { retryable: false }
+    );
+  }
+  if (state === SandboxState.BUILD_FAILED || state === SandboxState.ERROR) {
+    return new DaytonaSandboxLifecycleError(
+      "Daytona sandbox shutdown transition failed.",
+      { retryable: false }
+    );
+  }
+  if (state === SandboxState.DESTROYING) {
+    return new DaytonaSandboxLifecycleError(
+      "Daytona sandbox is being deleted during shutdown.",
+      { retryable: true }
+    );
+  }
+  return undefined;
+}
+
+function stableShutdownState(
+  transition: SandboxState,
+  state: SandboxState | undefined
+): boolean {
+  return (
+    (transition === SandboxState.STOPPING && state === SandboxState.STOPPED) ||
+    (transition === SandboxState.ARCHIVING &&
+      state === SandboxState.ARCHIVED) ||
+    (transition === SandboxState.PAUSING && state === SandboxState.PAUSED)
+  );
+}
+
+function isStartedSandbox(sandbox: Sandbox): boolean {
+  return sandbox.state === SandboxState.STARTED;
+}
+
+function waitForShutdownTransition(
+  sandbox: Sandbox,
+  transition: SandboxState,
+  lifecycle: DaytonaSandboxLifecycleDependencies | undefined
+): Promise<"started" | "stable"> {
+  const now = lifecycle?.now ?? Date.now;
+  const sleep = lifecycle?.sleep ?? sleepForTransition;
+  const timeoutMs =
+    lifecycle?.transitionTimeoutMs ?? SANDBOX_OPERATION_TIMEOUT_SECONDS * 1000;
+  const deadline = now() + timeoutMs;
+
+  async function poll(): Promise<"started" | "stable"> {
+    throwIfTransitionAborted(lifecycle?.signal);
+    if (isStartedSandbox(sandbox)) {
+      return "started";
+    }
+    if (stableShutdownState(transition, sandbox.state)) {
+      return "stable";
+    }
+    const terminalError = terminalTransitionError(sandbox.state);
+    if (terminalError) {
+      throw terminalError;
+    }
+    if (now() >= deadline) {
+      throw transitionTimeoutError();
+    }
+
+    await sandbox.refreshData();
+
+    throwIfTransitionAborted(lifecycle?.signal);
+    if (isStartedSandbox(sandbox)) {
+      return "started";
+    }
+    if (stableShutdownState(transition, sandbox.state)) {
+      return "stable";
+    }
+    const refreshedTerminalError = terminalTransitionError(sandbox.state);
+    if (refreshedTerminalError) {
+      throw refreshedTerminalError;
+    }
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) {
+      throw transitionTimeoutError();
+    }
+    await sleep(
+      Math.min(SANDBOX_TRANSITION_POLL_INTERVAL_MS, remainingMs),
+      lifecycle?.signal
+    );
+    return poll();
+  }
+
+  return poll();
+}
+
+async function startOrRecoverSandbox(
+  sandbox: Sandbox,
+  lifecycle?: DaytonaSandboxLifecycleDependencies
+): Promise<void> {
   if (sandbox.state === SandboxState.STARTED) {
     return;
   }
@@ -189,6 +332,24 @@ async function startOrRecoverSandbox(sandbox: Sandbox): Promise<void> {
       "Stored Daytona sandbox is being deleted.",
       { retryable: true }
     );
+  }
+  if (
+    sandbox.state === SandboxState.STOPPING ||
+    sandbox.state === SandboxState.ARCHIVING ||
+    sandbox.state === SandboxState.PAUSING
+  ) {
+    const transition = sandbox.state;
+    const result = await waitForShutdownTransition(
+      sandbox,
+      transition,
+      lifecycle
+    );
+    if (result === "started") {
+      return;
+    }
+    // Daytona's start operation waits for readiness, including resuming PAUSED.
+    await sandbox.start(SANDBOX_OPERATION_TIMEOUT_SECONDS);
+    return;
   }
   await sandbox.waitUntilStarted(SANDBOX_OPERATION_TIMEOUT_SECONDS);
 }
@@ -283,7 +444,7 @@ async function createSandbox(
     dependencies,
     created
   );
-  await startOrRecoverSandbox(sandbox);
+  await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
   return { agent: persisted, sandbox };
 }
 
@@ -369,7 +530,7 @@ export async function ensureDaytonaSandbox(
   if (sandbox.state === SandboxState.DESTROYED) {
     return createSandbox(principal, agent, configuration, dependencies);
   }
-  await startOrRecoverSandbox(sandbox);
+  await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
   return { agent, sandbox };
 }
 

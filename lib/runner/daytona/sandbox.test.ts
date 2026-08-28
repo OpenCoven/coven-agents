@@ -11,6 +11,7 @@ import type { RunnerAgentRecord, RunnerPrincipal } from "../types";
 import { daytonaSandboxName } from "./names";
 import {
   classifyDaytonaProviderError,
+  DaytonaSandboxLifecycleError,
   deleteDaytonaSandbox,
   ensureDaytonaSandbox,
   warmDaytonaSandbox,
@@ -56,6 +57,7 @@ function sandbox(
   state: SandboxState | undefined,
   hooks: {
     delete?: (timeout?: number, wait?: boolean) => Promise<void>;
+    refreshData?: () => Promise<void>;
     recover?: () => Promise<void>;
     start?: () => Promise<void>;
     waitUntilStarted?: (timeout?: number) => Promise<void>;
@@ -67,6 +69,7 @@ function sandbox(
     id: "sandbox-id",
     labels: {},
     recover: () => hooks.recover?.() ?? Promise.resolve(),
+    refreshData: () => hooks.refreshData?.() ?? Promise.resolve(),
     start: () => hooks.start?.() ?? Promise.resolve(),
     state,
     waitUntilStarted: (timeout?: number) =>
@@ -147,15 +150,12 @@ test("only started sandboxes are ready; Daytona lifecycle methods handle every o
     SandboxState.CREATING,
     SandboxState.RESTORING,
     SandboxState.STARTING,
-    SandboxState.STOPPING,
     SandboxState.PENDING_BUILD,
     SandboxState.BUILDING_SNAPSHOT,
     SandboxState.PULLING_SNAPSHOT,
-    SandboxState.ARCHIVING,
     SandboxState.RESIZING,
     SandboxState.SNAPSHOTTING,
     SandboxState.FORKING,
-    SandboxState.PAUSING,
     SandboxState.RESUMING,
     SandboxState.UNKNOWN,
     SandboxState.UNKNOWN_DEFAULT_OPEN_API,
@@ -260,6 +260,162 @@ test("only started sandboxes are ready; Daytona lifecycle methods handle every o
             (retryable ? "retryable" : "non_retryable")
       )
     )
+  );
+});
+
+test("shutdown transitions refresh to stable states before starting", async () => {
+  const available = agent({
+    daytonaSandboxId: "stored",
+    sandboxLifecycle: "ready",
+  });
+  const cases = [
+    [SandboxState.STOPPING, SandboxState.STOPPED],
+    [SandboxState.ARCHIVING, SandboxState.ARCHIVED],
+    [SandboxState.PAUSING, SandboxState.PAUSED],
+  ] as const;
+
+  await Promise.all(
+    cases.map(async ([transition, stable]) => {
+      let refreshes = 0;
+      let starts = 0;
+      let waits = 0;
+      const resolved = sandbox(transition, {
+        refreshData: () => {
+          refreshes += 1;
+          resolved.state = stable;
+          return Promise.resolve();
+        },
+        start: () => {
+          starts += 1;
+          assert.equal(resolved.state, stable);
+          return Promise.resolve();
+        },
+        waitUntilStarted: () => {
+          waits += 1;
+          return Promise.resolve();
+        },
+      });
+      await ensureDaytonaSandbox(principal, available, config, {
+        daytona: {
+          create: () => Promise.reject(new Error("must not create")),
+          get: () => Promise.resolve(resolved),
+        },
+        lifecycle: {
+          sleep: () => Promise.reject(new Error("must not sleep")),
+        },
+        store: store({}),
+      });
+      assert.equal(refreshes, 1);
+      assert.equal(starts, 1);
+      assert.equal(waits, 0);
+    })
+  );
+});
+
+test("a shutdown transition that reaches started returns without starting again", async () => {
+  const available = agent({
+    daytonaSandboxId: "stored",
+    sandboxLifecycle: "ready",
+  });
+  let starts = 0;
+  let waits = 0;
+  const resolved = sandbox(SandboxState.STOPPING, {
+    refreshData: () => {
+      resolved.state = SandboxState.STARTED;
+      return Promise.resolve();
+    },
+    start: () => {
+      starts += 1;
+      return Promise.resolve();
+    },
+    waitUntilStarted: () => {
+      waits += 1;
+      return Promise.resolve();
+    },
+  });
+
+  await ensureDaytonaSandbox(principal, available, config, {
+    daytona: {
+      create: () => Promise.reject(new Error("must not create")),
+      get: () => Promise.resolve(resolved),
+    },
+    store: store({}),
+  });
+  assert.equal(starts, 0);
+  assert.equal(waits, 0);
+});
+
+test("timed out shutdown transitions return retryable lifecycle errors", async () => {
+  const available = agent({
+    daytonaSandboxId: "stored",
+    sandboxLifecycle: "ready",
+  });
+  let now = 0;
+  let refreshes = 0;
+  const resolved = sandbox(SandboxState.ARCHIVING, {
+    refreshData: () => {
+      refreshes += 1;
+      return Promise.resolve();
+    },
+  });
+
+  await assert.rejects(
+    ensureDaytonaSandbox(principal, available, config, {
+      daytona: {
+        create: () => Promise.reject(new Error("must not create")),
+        get: () => Promise.resolve(resolved),
+      },
+      lifecycle: {
+        now: () => now,
+        sleep: (milliseconds) => {
+          now += milliseconds;
+          return Promise.resolve();
+        },
+        transitionTimeoutMs: 2000,
+      },
+      store: store({}),
+    }),
+    (error: unknown) =>
+      error instanceof DaytonaSandboxLifecycleError &&
+      error.retryable === true &&
+      /did not finish/u.test(error.message)
+  );
+  assert.equal(refreshes, 2);
+});
+
+test("terminal shutdown transition failures are explicitly non-retryable", async () => {
+  const available = agent({
+    daytonaSandboxId: "stored",
+    sandboxLifecycle: "ready",
+  });
+  await Promise.all(
+    (
+      [
+        [SandboxState.ERROR, /shutdown transition failed/u],
+        [SandboxState.DESTROYED, /was destroyed during shutdown/u],
+      ] as const
+    ).map(async ([terminal, message]) => {
+      const resolved = sandbox(SandboxState.PAUSING, {
+        refreshData: () => {
+          resolved.state = terminal;
+          return Promise.resolve();
+        },
+      });
+
+      await assert.rejects(
+        ensureDaytonaSandbox(principal, available, config, {
+          daytona: {
+            create: () => Promise.reject(new Error("must not create")),
+            get: () => Promise.resolve(resolved),
+          },
+          store: store({}),
+        }),
+        (error: unknown) =>
+          error instanceof DaytonaSandboxLifecycleError &&
+          error.retryable === false &&
+          message.test(error.message)
+      );
+    })
   );
 });
 
