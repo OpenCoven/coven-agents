@@ -14,6 +14,7 @@ import {
   daytonaSnapshotConfiguration,
   PNPM_VERSION,
   provisionDaytonaSnapshot,
+  sanitizeDaytonaBuildLog,
   WORKSPACE_DIRECTORY,
 } from "./image";
 
@@ -121,6 +122,32 @@ test("validates Daytona snapshot configuration and passes API URL, key, and targ
   });
 });
 
+test("redacts full Authorization header values without altering other log text", () => {
+  const basicCredential = "ZGF5dG9uYS11c2VyOnRlc3QtcGFzcw==";
+  const bearerCredential = "raw-bearer-credential-value";
+  const sanitized = sanitizeDaytonaBuildLog(
+    [
+      "starting image build",
+      `aUtHoRiZaTiOn : Basic ${basicCredential}`,
+      `AUTHORIZATION:\tBearer ${bearerCredential}`,
+      "image build complete",
+    ].join("\n"),
+    API_KEY
+  );
+
+  assert.equal(sanitized.includes(basicCredential), false);
+  assert.equal(sanitized.includes(bearerCredential), false);
+  assert.equal(
+    sanitized,
+    [
+      "starting image build",
+      "aUtHoRiZaTiOn : [REDACTED]",
+      "AUTHORIZATION:\t[REDACTED]",
+      "image build complete",
+    ].join("\n")
+  );
+});
+
 test("refuses to recreate a snapshot that already exists", async () => {
   let createCalls = 0;
   const snapshot: DaytonaSnapshotService = {
@@ -214,7 +241,7 @@ test("forwards sanitized snapshot build logs without secrets", async () => {
   assert.equal(log.includes(credential), false);
   assert.match(log, /api_key= \[REDACTED\]/u);
   assert.match(log, /token: \[REDACTED\]/u);
-  assert.match(log, /Bearer \[REDACTED\]/u);
+  assert.match(log, /Authorization: \[REDACTED\]/u);
 });
 
 test("rejects a created snapshot that cannot be verified as active", async () => {

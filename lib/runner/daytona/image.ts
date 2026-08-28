@@ -16,7 +16,8 @@ export const WORKSPACE_DIRECTORY = "/workspace";
 const VERSIONED_SNAPSHOT_NAME = /^coven-agents-copilot-\d+$/u;
 const SENSITIVE_LOG_VALUE =
   /\b(?:api[-_]?key|token|secret|password|credential)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)/giu;
-const BEARER_AUTHORIZATION_PATTERN = /\bBearer\s+\S+/giu;
+const AUTHORIZATION_HEADER_VALUE =
+  /(^|[^A-Za-z0-9-])(authorization)([ \t]*:[ \t]*)[^\r\n]*/gimu;
 
 export type DaytonaSnapshotConfiguration = Readonly<{
   apiKey: string;
@@ -129,7 +130,11 @@ export function sanitizeDaytonaBuildLog(chunk: string, apiKey: string): string {
       const separator = match.includes("=") ? "=" : ":";
       return `${match.slice(0, match.indexOf(separator) + 1)} [REDACTED]`;
     })
-    .replace(BEARER_AUTHORIZATION_PATTERN, "Bearer [REDACTED]");
+    .replace(
+      AUTHORIZATION_HEADER_VALUE,
+      (_match, prefix: string, headerName: string, separator: string) =>
+        `${prefix}${headerName}${separator}[REDACTED]`
+    );
 }
 
 function isNotFoundError(error: unknown): boolean {
