@@ -241,12 +241,34 @@ export type DaytonaStartedProcess = Readonly<{
   workspace: string;
 }>;
 
+export type DaytonaLaunchAuthorization = Readonly<{
+  runId: string;
+  sessionId: string;
+}>;
+
+/**
+ * Durable launch gate supplied by the dispatch service.
+ *
+ * It must atomically verify the active dispatch lease, reject cancelled or
+ * stale runs, and persist the supplied session ID before returning `true`.
+ * Callers must durably record cancellation before invoking
+ * `stopDaytonaProcess`; this adapter deliberately uses no process-local lock.
+ * Daytona supplies the command ID only after execution is accepted, so the
+ * caller persists the returned `DaytonaStartedProcess.commandId` under the
+ * same durable dispatch fence before command reconciliation.
+ */
+export type DaytonaLaunchAuthorizer = (
+  launch: DaytonaLaunchAuthorization
+) => Promise<boolean>;
+
 /**
  * Stages the tenant credential exactly once, creates a short-lived process
- * session, then starts one non-echoing async command. The credential is never
- * included in command text, returned data, or error messages.
+ * session, durably authorizes it for launch, then starts one non-echoing async
+ * command. The credential is never included in command text, returned data,
+ * authorization input, or error messages.
  */
 export async function startDaytonaProcess(input: {
+  authorizeLaunch: DaytonaLaunchAuthorizer;
   credential: HarnessCredential;
   instructions: string;
   model: string;
@@ -322,6 +344,40 @@ export async function startDaytonaProcess(input: {
   }
 
   try {
+    if (typeof input.authorizeLaunch !== "function") {
+      throw new DaytonaProcessError(
+        "Daytona launch authorization is required before starting a process.",
+        "process_start_failed",
+        false
+      );
+    }
+    const authorized = await input.authorizeLaunch({
+      runId: input.runId,
+      sessionId,
+    });
+    if (!authorized) {
+      throw new DaytonaProcessError(
+        "Daytona launch authorization no longer permits starting the process.",
+        "process_start_failed",
+        false
+      );
+    }
+  } catch (error) {
+    return await cleanupFailedStart(
+      input.sandbox,
+      credentialPath,
+      sessionId,
+      error instanceof DaytonaProcessError
+        ? error
+        : new DaytonaProcessError(
+            "Daytona launch authorization could not be confirmed.",
+            "process_start_failed",
+            false
+          )
+    );
+  }
+
+  try {
     const response = await process.executeSessionCommand(sessionId, {
       command: asyncCommand(
         auth.name,
@@ -367,6 +423,7 @@ export type DaytonaLogSnapshot = Readonly<{
   diagnostics: readonly RunEvent[];
   events: readonly RunEvent[];
   exitCode: number | null;
+  logsSettled: boolean;
   status: "running" | "completed" | "failed";
   summary: RunSummary;
 }>;
@@ -421,16 +478,19 @@ export async function snapshotDaytonaProcess(input: {
   sandbox: DaytonaProcessSandbox;
   sessionId: string;
 }): Promise<DaytonaLogSnapshot> {
-  const [logs, command] = await Promise.all([
-    input.sandbox.process.getSessionCommandLogs(
+  const normalizedCommand = normalizeDaytonaCommand(
+    await input.sandbox.process.getSessionCommand(
       input.sessionId,
       input.commandId
-    ),
-    input.sandbox.process.getSessionCommand(input.sessionId, input.commandId),
-  ]);
-  const normalizedLogs = normalizeDaytonaLogs(logs);
-  const normalizedCommand = normalizeDaytonaCommand(command);
+    )
+  );
   const terminal = isTerminalDaytonaCommand(normalizedCommand);
+  const normalizedLogs = normalizeDaytonaLogs(
+    await input.sandbox.process.getSessionCommandLogs(
+      input.sessionId,
+      input.commandId
+    )
+  );
   const parsed = parseHarnessLog(
     input.harness,
     normalizedLogs.stdout,
@@ -473,6 +533,7 @@ export async function snapshotDaytonaProcess(input: {
     diagnostics: parsed.diagnostics,
     events,
     exitCode: result?.exitCode ?? normalizedCommand.exitCode,
+    logsSettled: !parsed.pendingTail,
     status,
     summary: {
       ...summary,
@@ -490,42 +551,59 @@ export type DaytonaStopResult =
 
 /**
  * `deleteSession` is the only session termination operation in SDK 0.207.
- * We immediately verify absence with `listSessions`, the strongest bounded
- * confirmation exposed by that API. A classified 404 or 410 from
- * `deleteSession` also confirms the deterministic session is absent. Sandbox
- * deletion remains the caller's job.
+ * After confirmed absence, it removes and verifies the run's deterministic
+ * credential path. A classified 404 or 410 confirms session absence but does
+ * not skip credential cleanup. Callers must record cancellation durably before
+ * calling this function so the launch authorizer rejects a concurrent start.
+ * Sandbox deletion remains the caller's job.
  */
 export async function stopDaytonaProcess(
   sandbox: DaytonaProcessSandbox,
-  sessionId: string
+  input: Readonly<{ runId: string; sessionId: string }>
 ): Promise<DaytonaStopResult> {
+  let sessionAbsent = false;
   try {
-    await sandbox.process.deleteSession(sessionId);
+    await sandbox.process.deleteSession(input.sessionId);
   } catch (error) {
-    if (classifyDaytonaProviderError(error) === "not_found") {
-      return { kind: "stopped" };
+    if (classifyDaytonaProviderError(error) !== "not_found") {
+      return {
+        error: providerError(
+          "sandbox_reset_required",
+          "Daytona could not confirm process session termination; reset the sandbox.",
+          error
+        ),
+        kind: "sandbox_reset_required",
+      };
     }
-    return {
-      error: providerError(
-        "sandbox_reset_required",
-        "Daytona could not confirm process session termination; reset the sandbox.",
-        error
-      ),
-      kind: "sandbox_reset_required",
-    };
+    sessionAbsent = true;
+  }
+
+  if (!sessionAbsent) {
+    try {
+      const sessions = await sandbox.process.listSessions();
+      if (sessions.some((session) => session.sessionId === input.sessionId)) {
+        throw new Error("Daytona session remained after deletion.");
+      }
+    } catch (error) {
+      return {
+        error: providerError(
+          "sandbox_reset_required",
+          "Daytona could not confirm process session termination; reset the sandbox.",
+          error
+        ),
+        kind: "sandbox_reset_required",
+      };
+    }
   }
 
   try {
-    const sessions = await sandbox.process.listSessions();
-    if (sessions.some((session) => session.sessionId === sessionId)) {
-      throw new Error("Daytona session remained after deletion.");
-    }
+    await removeCredential(sandbox, daytonaRunCredentialPath(input.runId));
     return { kind: "stopped" };
   } catch (error) {
     return {
       error: providerError(
         "sandbox_reset_required",
-        "Daytona could not confirm process session termination; reset the sandbox.",
+        "Daytona could not confirm deterministic credential removal; reset the sandbox.",
         error
       ),
       kind: "sandbox_reset_required",

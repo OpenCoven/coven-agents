@@ -108,4 +108,32 @@ test("flushes a terminal trailing event and bounds malformed diagnostics", () =>
       malformed.diagnostics[0].message,
     "Malformed harness JSONL event was ignored."
   );
+
+  const partialTerminal = parseHarnessLog(
+    "copilot",
+    terminal.slice(0, -1),
+    0,
+    true,
+    SECRET,
+    AT
+  );
+  assert.equal(partialTerminal.cursor, 0);
+  assert.equal(partialTerminal.pendingTail, true);
+  assert.deepEqual(partialTerminal.events, []);
+  assert.deepEqual(partialTerminal.diagnostics, []);
+
+  const completedTerminal = parseHarnessLog(
+    "copilot",
+    terminal,
+    partialTerminal.cursor,
+    true,
+    SECRET,
+    AT
+  );
+  assert.equal(completedTerminal.pendingTail, false);
+  assert.equal(completedTerminal.cursor, terminal.length);
+  assert.equal(
+    completedTerminal.events.some((event) => event.kind === "finished"),
+    true
+  );
 });

@@ -157,12 +157,14 @@ export type HarnessLogParse = Readonly<{
   cursor: number;
   diagnostics: readonly RunEvent[];
   events: readonly RunEvent[];
+  pendingTail: boolean;
 }>;
 
 /**
  * Parses the accumulated stdout returned by a provider without retaining it.
- * A live poll advances through complete newline-delimited frames only; a
- * terminal poll consumes its final unterminated JSON object as well.
+ * A live poll advances through complete newline-delimited frames only. A
+ * terminal poll consumes its final unterminated JSON object only when it is
+ * valid JSON; a partial provider write remains pending for the next poll.
  */
 export function parseHarnessLog(
   harness: HarnessId,
@@ -178,11 +180,23 @@ export function parseHarnessLog(
       : 0;
   const fresh = stdout.slice(safeCursor);
   const finalNewline = fresh.lastIndexOf("\n");
-  const consumed = terminal
-    ? fresh
-    : finalNewline === -1
-      ? ""
-      : fresh.slice(0, finalNewline + 1);
+  const trailing = finalNewline === -1 ? fresh : fresh.slice(finalNewline + 1);
+  const hasUnterminatedTail = trailing.length > 0;
+  let pendingTail = false;
+  let consumed: string;
+  if (!terminal) {
+    consumed = finalNewline === -1 ? "" : fresh.slice(0, finalNewline + 1);
+  } else if (hasUnterminatedTail) {
+    try {
+      JSON.parse(trailing);
+      consumed = fresh;
+    } catch {
+      consumed = finalNewline === -1 ? "" : fresh.slice(0, finalNewline + 1);
+      pendingTail = true;
+    }
+  } else {
+    consumed = fresh;
+  }
   const nextCursor = safeCursor + consumed.length;
   const assembler = new LineAssembler();
   const lines = terminal
@@ -210,7 +224,7 @@ export function parseHarnessLog(
       });
     }
   }
-  return { cursor: nextCursor, diagnostics, events };
+  return { cursor: nextCursor, diagnostics, events, pendingTail };
 }
 
 export function buildHarnessCommand(input: {

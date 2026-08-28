@@ -27,6 +27,7 @@ function processDouble(
   options: {
     command?: { exitCode?: number; status?: string };
     cleanupError?: Error;
+    cleanupExitCode?: number;
     createError?: Error;
     createCreatesSession?: boolean;
     deleteError?: Error;
@@ -42,6 +43,7 @@ function processDouble(
   } = {}
 ) {
   const calls: Call[] = [];
+  let commandCalls = 0;
   let deleteCalls = 0;
   let listCalls = 0;
   let sessions = [...(options.sessions ?? [])];
@@ -76,16 +78,23 @@ function processDouble(
       },
       executeCommand: (command, _cwd, env) => {
         calls.push({ command, env, kind: "command" });
-        if (calls.filter((call) => call.kind === "command").length === 1) {
+        commandCalls += 1;
+        if (commandCalls === 1 && command.includes("umask 077")) {
           if (options.stageError) {
             return Promise.reject(options.stageError);
           }
           return Promise.resolve({ exitCode: options.stageExitCode ?? 0 });
         }
-        if (options.cleanupError) {
+        if (command.includes("rm -f --") && options.cleanupError) {
           return Promise.reject(options.cleanupError);
         }
-        return Promise.resolve({ exitCode: 0 });
+        return Promise.resolve({
+          exitCode:
+            command.includes("rm -f --") &&
+            options.cleanupExitCode !== undefined
+              ? options.cleanupExitCode
+              : 0,
+        });
       },
       executeSessionCommand: (_sessionId, request) => {
         calls.push({ command: request.command, kind: "start" });
@@ -94,19 +103,23 @@ function processDouble(
         }
         return Promise.resolve({ cmdId: options.startId ?? "cmd-1" });
       },
-      getSessionCommand: () =>
-        Promise.resolve({
+      getSessionCommand: () => {
+        calls.push({ command: "cmd-1", kind: "status" });
+        return Promise.resolve({
           command: "safe command",
           exitCode: options.command?.exitCode,
           id: "cmd-1",
           status: options.command?.status,
-        }),
-      getSessionCommandLogs: () =>
-        Promise.resolve({
+        });
+      },
+      getSessionCommandLogs: () => {
+        calls.push({ command: "cmd-1", kind: "logs" });
+        return Promise.resolve({
           output: options.logs?.output ?? options.logs?.stdout,
           stderr: options.logs?.stderr,
           stdout: options.logs?.stdout,
-        }),
+        });
+      },
       listSessions: () => {
         listCalls += 1;
         calls.push({ command: SESSION, kind: "list" });
@@ -121,6 +134,7 @@ function processDouble(
 }
 
 const startInput = (sandbox: DaytonaProcessSandbox) => ({
+  authorizeLaunch: async () => true,
   credential: { credential: SECRET },
   instructions: "Use tests.",
   model: "auto",
@@ -130,6 +144,8 @@ const startInput = (sandbox: DaytonaProcessSandbox) => ({
   task: "Print safe output.",
   workspace: "repo",
 });
+
+const stopInput = { runId: RUN_ID, sessionId: SESSION };
 
 function allReturnedText(value: unknown): string {
   return JSON.stringify(value, Object.getOwnPropertyNames(value));
@@ -179,6 +195,72 @@ test("stages only through per-call env and starts a safe asynchronous session", 
   assert.ok(launch?.command.includes("export HOME='/workspace/repo'"));
   assert.ok(launch?.command.includes("exec 'copilot'"));
   assert.equal(allReturnedText(started).includes(SECRET), false);
+});
+
+test("durably authorizes and persists the session before executing", async () => {
+  const { calls, sandbox } = processDouble();
+  const authorizations: unknown[] = [];
+  let persistedSessionId: string | null = null;
+
+  await startDaytonaProcess({
+    ...startInput(sandbox),
+    authorizeLaunch: (launch) => {
+      calls.push({ command: launch.sessionId, kind: "authorize" });
+      authorizations.push(launch);
+      persistedSessionId = launch.sessionId;
+      return Promise.resolve(true);
+    },
+  });
+
+  const authorizationIndex = calls.findIndex(
+    (call) => call.kind === "authorize"
+  );
+  const executeIndex = calls.findIndex((call) => call.kind === "start");
+  assert.deepEqual(authorizations, [{ runId: RUN_ID, sessionId: SESSION }]);
+  assert.equal(persistedSessionId, SESSION);
+  assert.ok(authorizationIndex > -1);
+  assert.ok(executeIndex > -1);
+  assert.ok(authorizationIndex < executeIndex);
+  assert.equal(
+    calls.slice(0, executeIndex).some((call) => call.kind === "list"),
+    true
+  );
+});
+
+test("does not execute when durable cancellation rejects launch authorization", async () => {
+  const { calls, sandbox } = processDouble();
+  const cancellation = { recorded: false };
+
+  await assert.rejects(
+    () =>
+      startDaytonaProcess({
+        ...startInput(sandbox),
+        authorizeLaunch: () => {
+          cancellation.recorded = true;
+          return Promise.resolve(false);
+        },
+      }),
+    (error: unknown) =>
+      error instanceof DaytonaProcessError &&
+      error.code === "process_start_failed"
+  );
+
+  assert.equal(cancellation.recorded, true);
+  assert.equal(
+    calls.some((call) => call.kind === "start"),
+    false
+  );
+  assert.equal(
+    calls.some((call) => call.kind === "delete"),
+    true
+  );
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.kind === "command" &&
+        call.command === `rm -f -- '${PATH}' && test ! -e '${PATH}'`
+    )
+  );
 });
 
 test("cleans deterministic credentials and sessions at every failed start boundary", async () => {
@@ -304,6 +386,7 @@ test("snapshots complete JSONL once, flushes terminal fragments, and redacts mal
   });
   assert.equal(live.cursor, 0);
   assert.deepEqual(live.events, []);
+  assert.equal(live.logsSettled, true);
 
   const completed = await snapshotDaytonaProcess({
     commandId: "cmd-1",
@@ -312,12 +395,13 @@ test("snapshots complete JSONL once, flushes terminal fragments, and redacts mal
     harness: "copilot",
     sandbox: processDouble({
       command: { exitCode: 0 },
-      logs: { stdout: `${line}\nnot-json-${SECRET}` },
+      logs: { stdout: `${line}\nnot-json-${SECRET}\n` },
     }).sandbox,
     sessionId: SESSION,
   });
   assert.equal(completed.status, "completed");
-  assert.equal(completed.cursor, `${line}\nnot-json-${SECRET}`.length);
+  assert.equal(completed.cursor, `${line}\nnot-json-${SECRET}\n`.length);
+  assert.equal(completed.diagnostics.length, 1);
   assert.equal(JSON.stringify(completed).includes(SECRET), false);
 
   const noDuplicate = await snapshotDaytonaProcess({
@@ -327,11 +411,84 @@ test("snapshots complete JSONL once, flushes terminal fragments, and redacts mal
     harness: "copilot",
     sandbox: processDouble({
       command: { exitCode: 0 },
-      logs: { stdout: `${line}\nnot-json-${SECRET}` },
+      logs: { stdout: `${line}\nnot-json-${SECRET}\n` },
     }).sandbox,
     sessionId: SESSION,
   });
   assert.deepEqual(noDuplicate.events, []);
+});
+
+test("leaves a terminal partial tail pending until the complete event arrives", async () => {
+  const line = JSON.stringify({
+    data: { content: "trailing event" },
+    type: "assistant.message",
+  });
+  const partial = await snapshotDaytonaProcess({
+    commandId: "cmd-1",
+    credential: SECRET,
+    cursor: 0,
+    harness: "copilot",
+    sandbox: processDouble({
+      command: { exitCode: 0 },
+      logs: { stdout: line.slice(0, -1) },
+    }).sandbox,
+    sessionId: SESSION,
+  });
+
+  assert.equal(partial.status, "completed");
+  assert.equal(partial.logsSettled, false);
+  assert.equal(partial.cursor, 0);
+  assert.deepEqual(partial.events, []);
+  assert.deepEqual(partial.diagnostics, []);
+
+  const completed = await snapshotDaytonaProcess({
+    commandId: "cmd-1",
+    credential: SECRET,
+    cursor: partial.cursor,
+    harness: "copilot",
+    sandbox: processDouble({
+      command: { exitCode: 0 },
+      logs: { stdout: line },
+    }).sandbox,
+    sessionId: SESSION,
+  });
+  assert.equal(completed.logsSettled, true);
+  assert.equal(completed.cursor, line.length);
+  assert.equal(completed.events.length, 1);
+
+  const duplicate = await snapshotDaytonaProcess({
+    commandId: "cmd-1",
+    credential: SECRET,
+    cursor: completed.cursor,
+    harness: "copilot",
+    sandbox: processDouble({
+      command: { exitCode: 0 },
+      logs: { stdout: line },
+    }).sandbox,
+    sessionId: SESSION,
+  });
+  assert.deepEqual(duplicate.events, []);
+});
+
+test("reads Daytona command status before its log snapshot", async () => {
+  const { calls, sandbox } = processDouble({
+    command: { exitCode: 0 },
+    logs: { stdout: "" },
+  });
+  await snapshotDaytonaProcess({
+    commandId: "cmd-1",
+    credential: SECRET,
+    cursor: 0,
+    harness: "copilot",
+    sandbox,
+    sessionId: SESSION,
+  });
+  assert.deepEqual(
+    calls
+      .filter((call) => call.kind === "status" || call.kind === "logs")
+      .map((call) => call.kind),
+    ["status", "logs"]
+  );
 });
 
 test("cursored snapshots retain the full terminal result and summary without replaying events", async () => {
@@ -424,7 +581,7 @@ test("the Daytona SDK Sandbox process shape is assignable", () => {
 });
 
 test("stops sessions only after API absence confirmation and asks caller to reset on failure", async () => {
-  const stopped = await stopDaytonaProcess(processDouble().sandbox, SESSION);
+  const stopped = await stopDaytonaProcess(processDouble().sandbox, stopInput);
   assert.deepEqual(stopped, { kind: "stopped" });
 
   const reset = await stopDaytonaProcess(
@@ -432,7 +589,7 @@ test("stops sessions only after API absence confirmation and asks caller to rese
       deleteLeavesSession: true,
       sessions: [{ commands: [], sessionId: SESSION }],
     }).sandbox,
-    SESSION
+    stopInput
   );
   assert.equal(reset.kind, "sandbox_reset_required");
   assert.equal(
@@ -442,14 +599,14 @@ test("stops sessions only after API absence confirmation and asks caller to rese
 
   const deleteFailed = await stopDaytonaProcess(
     processDouble({ deleteError: new Error(SECRET) }).sandbox,
-    SESSION
+    stopInput
   );
   assert.equal(deleteFailed.kind, "sandbox_reset_required");
   assert.equal(JSON.stringify(deleteFailed).includes(SECRET), false);
 
   const retryableDeleteFailed = await stopDaytonaProcess(
     processDouble({ deleteError: new DaytonaTimeoutError("timeout") }).sandbox,
-    SESSION
+    stopInput
   );
   assert.equal(retryableDeleteFailed.kind, "sandbox_reset_required");
   assert.equal(
@@ -459,7 +616,36 @@ test("stops sessions only after API absence confirmation and asks caller to rese
   );
 });
 
-test("treats Daytona 404 and 410 session deletion responses as stopped across retries", async () => {
+test("requires deterministic credential cleanup and verification before stopped", async () => {
+  const { calls, sandbox } = processDouble();
+  assert.deepEqual(await stopDaytonaProcess(sandbox, stopInput), {
+    kind: "stopped",
+  });
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.kind === "command" &&
+        call.command === `rm -f -- '${PATH}' && test ! -e '${PATH}'` &&
+        call.env === undefined
+    )
+  );
+
+  const reset = await stopDaytonaProcess(
+    processDouble({ cleanupExitCode: 1 }).sandbox,
+    stopInput
+  );
+  assert.equal(reset.kind, "sandbox_reset_required");
+  assert.equal(JSON.stringify(reset).includes(SECRET), false);
+
+  const cleanupAmbiguous = await stopDaytonaProcess(
+    processDouble({ cleanupError: new Error(SECRET) }).sandbox,
+    stopInput
+  );
+  assert.equal(cleanupAmbiguous.kind, "sandbox_reset_required");
+  assert.equal(JSON.stringify(cleanupAmbiguous).includes(SECRET), false);
+});
+
+test("treats Daytona 404 and 410 session deletion responses as stopped only after credential cleanup", async () => {
   const absenceErrors = [
     new DaytonaNotFoundError("session missing", 404),
     new DaytonaGoneError("session gone", 410),
@@ -470,15 +656,24 @@ test("treats Daytona 404 and 410 session deletion responses as stopped across re
       assert.equal(classifyDaytonaProviderError(error), "not_found");
       const { calls, sandbox } = processDouble({ deleteError: error });
 
-      assert.deepEqual(await stopDaytonaProcess(sandbox, SESSION), {
+      assert.deepEqual(await stopDaytonaProcess(sandbox, stopInput), {
         kind: "stopped",
       });
-      assert.deepEqual(await stopDaytonaProcess(sandbox, SESSION), {
+      assert.deepEqual(await stopDaytonaProcess(sandbox, stopInput), {
         kind: "stopped",
       });
       assert.deepEqual(
         calls.map((call) => call.kind),
-        ["delete", "delete"]
+        ["delete", "command", "delete", "command"]
+      );
+      assert.equal(
+        calls
+          .filter((call) => call.kind === "command")
+          .every(
+            (call) =>
+              call.command === `rm -f -- '${PATH}' && test ! -e '${PATH}'`
+          ),
+        true
       );
     })
   );
