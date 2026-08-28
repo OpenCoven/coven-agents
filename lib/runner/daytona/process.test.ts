@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Sandbox } from "@daytona/sdk";
+import {
+  DaytonaGoneError,
+  DaytonaNotFoundError,
+  DaytonaTimeoutError,
+  type Sandbox,
+} from "@daytona/sdk";
 import type { DaytonaProcessSandbox } from "./process";
 import {
   DaytonaProcessError,
@@ -9,6 +14,7 @@ import {
   stopDaytonaProcess,
   sweepDaytonaCredentials,
 } from "./process";
+import { classifyDaytonaProviderError } from "./sandbox";
 
 const RUN_ID = "53af1a29-4e98-43d6-ac5b-3b9dcba5e730";
 const SECRET = "copilot-credential-9f3b";
@@ -440,6 +446,42 @@ test("stops sessions only after API absence confirmation and asks caller to rese
   );
   assert.equal(deleteFailed.kind, "sandbox_reset_required");
   assert.equal(JSON.stringify(deleteFailed).includes(SECRET), false);
+
+  const retryableDeleteFailed = await stopDaytonaProcess(
+    processDouble({ deleteError: new DaytonaTimeoutError("timeout") }).sandbox,
+    SESSION
+  );
+  assert.equal(retryableDeleteFailed.kind, "sandbox_reset_required");
+  assert.equal(
+    retryableDeleteFailed.kind === "sandbox_reset_required" &&
+      retryableDeleteFailed.error.retryable,
+    true
+  );
+});
+
+test("treats Daytona 404 and 410 session deletion responses as stopped across retries", async () => {
+  const absenceErrors = [
+    new DaytonaNotFoundError("session missing", 404),
+    new DaytonaGoneError("session gone", 410),
+  ];
+
+  await Promise.all(
+    absenceErrors.map(async (error) => {
+      assert.equal(classifyDaytonaProviderError(error), "not_found");
+      const { calls, sandbox } = processDouble({ deleteError: error });
+
+      assert.deepEqual(await stopDaytonaProcess(sandbox, SESSION), {
+        kind: "stopped",
+      });
+      assert.deepEqual(await stopDaytonaProcess(sandbox, SESSION), {
+        kind: "stopped",
+      });
+      assert.deepEqual(
+        calls.map((call) => call.kind),
+        ["delete", "delete"]
+      );
+    })
+  );
 });
 
 test("sweeps only deterministic credential paths", async () => {

@@ -491,7 +491,9 @@ export type DaytonaStopResult =
 /**
  * `deleteSession` is the only session termination operation in SDK 0.207.
  * We immediately verify absence with `listSessions`, the strongest bounded
- * confirmation exposed by that API. Sandbox deletion remains the caller's job.
+ * confirmation exposed by that API. A classified 404 or 410 from
+ * `deleteSession` also confirms the deterministic session is absent. Sandbox
+ * deletion remains the caller's job.
  */
 export async function stopDaytonaProcess(
   sandbox: DaytonaProcessSandbox,
@@ -499,6 +501,21 @@ export async function stopDaytonaProcess(
 ): Promise<DaytonaStopResult> {
   try {
     await sandbox.process.deleteSession(sessionId);
+  } catch (error) {
+    if (classifyDaytonaProviderError(error) === "not_found") {
+      return { kind: "stopped" };
+    }
+    return {
+      error: providerError(
+        "sandbox_reset_required",
+        "Daytona could not confirm process session termination; reset the sandbox.",
+        error
+      ),
+      kind: "sandbox_reset_required",
+    };
+  }
+
+  try {
     const sessions = await sandbox.process.listSessions();
     if (sessions.some((session) => session.sessionId === sessionId)) {
       throw new Error("Daytona session remained after deletion.");
