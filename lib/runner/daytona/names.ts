@@ -40,6 +40,9 @@ export function daytonaSessionName(tenant: string, agentId: string): string {
 
 const RUN_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const ATTEMPT_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const DAYTONA_RUN_ATTEMPT_DIGEST_LENGTH = 40;
 
 function requireRunId(runId: string): string {
   if (!RUN_ID_PATTERN.test(runId)) {
@@ -48,15 +51,29 @@ function requireRunId(runId: string): string {
   return runId.toLowerCase();
 }
 
-/**
- * A run owns one short-lived Daytona process session. Unlike agent sandbox
- * names, this is intentionally directly traceable to the database run UUID.
- */
-export function daytonaRunSessionName(runId: string): string {
-  return `coven-run-${requireRunId(runId)}`;
+function requireAttemptId(attemptId: string): string {
+  if (!ATTEMPT_ID_PATTERN.test(attemptId)) {
+    throw new Error("Daytona run names require a UUID attempt id.");
+  }
+  return attemptId.toLowerCase();
 }
 
-/** The only credential-file path a run process is permitted to address. */
-export function daytonaRunCredentialPath(runId: string): string {
-  return `/tmp/${daytonaRunSessionName(runId)}.credential`;
+/**
+ * An attempt owns one short-lived Daytona process session. The digest keeps
+ * provider IDs below Daytona's 63-character limit while binding the name to
+ * both validated durable UUIDs.
+ */
+export function daytonaRunSessionName(
+  runId: string,
+  attemptId: string
+): string {
+  return `coven-run-${sha256(`${requireRunId(runId)}\0${requireAttemptId(attemptId)}`).slice(0, DAYTONA_RUN_ATTEMPT_DIGEST_LENGTH)}`;
+}
+
+/** The only credential-file path an attempt is permitted to address. */
+export function daytonaRunCredentialPath(
+  runId: string,
+  attemptId: string
+): string {
+  return `/tmp/${daytonaRunSessionName(runId, attemptId)}.credential`;
 }

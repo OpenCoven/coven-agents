@@ -13,9 +13,9 @@ import { MAX_EVENTS_PER_RUN } from "./evidence";
 import { createRunnerStore, type RunnerStoreStatement } from "./store";
 import type {
   RunnerAgentRecord,
+  RunnerDaytonaAttemptId,
   RunnerDispatchAuthority,
   RunnerOperator,
-  RunnerPreparationClaim,
   RunnerPrincipal,
   RunnerRunRecord,
 } from "./types";
@@ -38,8 +38,8 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     commandEvidence: [],
     completedAt: null,
     createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    daytonaAttemptId: null,
     daytonaCommandId: null,
-    daytonaPreparationClaim: null,
     daytonaSessionId: null,
     dispatchLeaseExpiresAt: new Date("2026-01-01T00:01:00.000Z"),
     dispatchLeaseToken: "lease-a",
@@ -483,7 +483,11 @@ test("expired dispatch recovery requeues only ID-free rows with a database-clock
     startedAt: null,
     version: current.version + 1,
   });
-  const { statements, store } = scripted([current], [requeued]);
+  const { statements, store } = scripted(
+    [current],
+    [{ id: current.id }],
+    [requeued]
+  );
 
   const result = await store.requeueExpiredDispatch(operator, {
     expectedDispatchState: "dispatching",
@@ -493,7 +497,7 @@ test("expired dispatch recovery requeues only ID-free rows with a database-clock
 
   assert.equal(result.kind, "requeued");
   assert.equal(result.kind === "requeued" && result.value.version, 8);
-  const update = statements[1] as RunnerStoreStatement;
+  const update = statements[2] as RunnerStoreStatement;
   assert.match(
     queryText(update),
     /"dispatchLeaseExpiresAt" <= clock_timestamp\(\)/
@@ -507,18 +511,15 @@ test("expired dispatch recovery reports stale, non-expired, and provider-attache
   const current = run();
   const stale = scripted([run({ dispatchLeaseToken: "newer-lease" })]);
   const unexpired = scripted([current], []);
-  const attached = scripted([run({ daytonaSessionId: "session" })]);
-  const preparationClaim = "old-claim" as RunnerPreparationClaim;
+  const attached = scripted(
+    [run({ daytonaSessionId: "session" })],
+    [{ id: current.id }]
+  );
+  const attemptId =
+    "53af1a29-4e98-43d6-ac5b-3b9dcba5e734" as RunnerDaytonaAttemptId;
   const claimOnly = scripted(
-    [run({ daytonaPreparationClaim: preparationClaim })],
-    [
-      run({
-        daytonaPreparationClaim: null,
-        dispatchLeaseExpiresAt: null,
-        dispatchLeaseToken: null,
-        dispatchState: "queued",
-      }),
-    ]
+    [run({ daytonaAttemptId: attemptId })],
+    [{ id: current.id }]
   );
 
   const input = {
@@ -537,17 +538,14 @@ test("expired dispatch recovery reports stale, non-expired, and provider-attache
     await attached.store.requeueExpiredDispatch(operator, input),
     { kind: "provider_identifiers_attached" }
   );
-  assert.equal(
-    (await claimOnly.store.requeueExpiredDispatch(operator, input)).kind,
-    "requeued"
+  assert.deepEqual(
+    await claimOnly.store.requeueExpiredDispatch(operator, input),
+    { attemptId, kind: "cleanup_required" }
   );
   assert.equal(stale.statements.length, 1);
   assert.equal(unexpired.statements.length, 2);
-  assert.equal(attached.statements.length, 1);
-  assert.match(
-    queryText(claimOnly.statements[1] as RunnerStoreStatement),
-    /"daytonaPreparationClaim" = NULL/
-  );
+  assert.equal(attached.statements.length, 2);
+  assert.equal(claimOnly.statements.length, 2);
 });
 
 test("expired dispatch recovery adopts a new lease with the expected live state", async () => {
@@ -562,7 +560,11 @@ test("expired dispatch recovery adopts a new lease with the expected live state"
     dispatchLeaseToken: "replacement-lease",
     version: current.version + 1,
   });
-  const { statements, store } = scripted([current], [adopted]);
+  const { statements, store } = scripted(
+    [current],
+    [{ id: current.id }],
+    [adopted]
+  );
   const input = {
     expectedDispatchState: "dispatching",
     leaseExpiresAt: adopted.dispatchLeaseExpiresAt as Date,
@@ -578,13 +580,13 @@ test("expired dispatch recovery adopts a new lease with the expected live state"
     result.kind === "adopted" && result.value.dispatchLeaseToken,
     "replacement-lease"
   );
-  const update = statements[1] as RunnerStoreStatement;
+  const update = statements[2] as RunnerStoreStatement;
   assert.match(
     queryText(update),
     /"dispatchLeaseExpiresAt" <= clock_timestamp\(\)/
   );
   assert.match(queryText(update), /"dispatchState" = \$\d+/);
-  assert.match(queryText(update), /"daytonaPreparationClaim" = NULL/);
+  assert.doesNotMatch(queryText(update), /"daytonaAttemptId" = NULL/);
 
   const stale = scripted([run({ dispatchLeaseToken: "newer-lease" })]);
   assert.deepEqual(
@@ -592,6 +594,109 @@ test("expired dispatch recovery adopts a new lease with the expected live state"
     { kind: "lease_lost" }
   );
   assert.equal(stale.statements.length, 1);
+});
+
+test("expired attempt recovery requires exact cleanup before requeue", async () => {
+  const attemptA =
+    "53af1a29-4e98-43d6-ac5b-3b9dcba5e735" as RunnerDaytonaAttemptId;
+  const current = run({
+    daytonaAttemptId: attemptA,
+    daytonaCommandId: "command-a",
+    daytonaSessionId: daytonaRunSessionName(run().id, attemptA),
+  });
+  const input = {
+    attemptId: attemptA,
+    expectedDispatchState: "dispatching" as const,
+    oldLeaseToken: current.dispatchLeaseToken as string,
+    runId: current.id,
+  };
+  const blocked = scripted([current], [{ id: current.id }]);
+  assert.deepEqual(
+    await blocked.store.requeueExpiredDispatch(operator, input),
+    { attemptId: attemptA, kind: "cleanup_required" }
+  );
+  assert.equal(blocked.statements.length, 2);
+
+  const releasedRun = run({
+    ...current,
+    daytonaAttemptId: null,
+    daytonaCommandId: null,
+    daytonaSessionId: null,
+    version: current.version + 1,
+  });
+  const release = scripted([current], [releasedRun]);
+  assert.deepEqual(
+    await release.store.releaseExpiredDaytonaAttempt(operator, input),
+    { kind: "released", value: releasedRun }
+  );
+  const releaseQuery = queryText(release.statements[1] as RunnerStoreStatement);
+  assert.match(releaseQuery, /"daytonaAttemptId" = NULL/);
+  assert.match(releaseQuery, /"daytonaSessionId" = NULL/);
+  assert.match(releaseQuery, /"daytonaCommandId" = NULL/);
+  assert.match(releaseQuery, /"daytonaAttemptId" = \$\d+/);
+  assert.match(releaseQuery, /"dispatchLeaseExpiresAt" <= clock_timestamp\(\)/);
+
+  const requeued = run({
+    ...releasedRun,
+    dispatchLeaseExpiresAt: null,
+    dispatchLeaseToken: null,
+    dispatchState: "queued",
+    version: releasedRun.version + 1,
+  });
+  const requeue = scripted([releasedRun], [{ id: current.id }], [requeued]);
+  assert.deepEqual(
+    await requeue.store.requeueExpiredDispatch(operator, {
+      expectedDispatchState: "dispatching",
+      oldLeaseToken: current.dispatchLeaseToken as string,
+      runId: current.id,
+    }),
+    { kind: "requeued", value: requeued }
+  );
+});
+
+test("terminal cleanup retains ownership until the exact attempt is released", async () => {
+  const attemptId =
+    "53af1a29-4e98-43d6-ac5b-3b9dcba5e736" as RunnerDaytonaAttemptId;
+  const terminal = run({
+    completedAt: new Date("2026-01-01T00:00:01.000Z"),
+    daytonaAttemptId: attemptId,
+    daytonaCommandId: "command",
+    daytonaSessionId: daytonaRunSessionName(run().id, attemptId),
+    dispatchState: "terminal",
+    status: "completed",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: terminal.version,
+    leaseToken: terminal.dispatchLeaseToken as string,
+    runId: terminal.id,
+  } as RunnerDispatchAuthority;
+  const blocked = scripted([terminal]);
+  assert.deepEqual(
+    await blocked.store.cleanupTerminalLease(operator, authority),
+    { kind: "not_live" }
+  );
+
+  const released = run({
+    ...terminal,
+    daytonaAttemptId: null,
+    daytonaCommandId: null,
+    daytonaSessionId: null,
+    version: terminal.version + 1,
+  });
+  const release = scripted([terminal], [released]);
+  assert.equal(
+    (
+      await release.store.releaseTerminalDaytonaAttempt(operator, authority, {
+        attemptId,
+      })
+    ).kind,
+    "released"
+  );
+  const releaseQuery = queryText(release.statements[1] as RunnerStoreStatement);
+  assert.match(releaseQuery, /"daytonaAttemptId" = NULL/);
+  assert.match(releaseQuery, /"daytonaSessionId" = NULL/);
+  assert.match(releaseQuery, /"daytonaCommandId" = NULL/);
 });
 
 test("terminal retention deletes only terminal runs beyond the newest twenty", async () => {
@@ -873,7 +978,6 @@ test("dispatch sandbox and event mutations are fenced and derive their agent", a
 test("dispatch store methods fence preparation, attachment, and release", async () => {
   const dispatching = run();
   const authority = await claimedAuthority(dispatching);
-  const sessionId = daytonaRunSessionName(dispatching.id);
   const preparedRun = run({ version: dispatching.version + 1 });
   const preparation = scripted([dispatching], [preparedRun]);
 
@@ -883,12 +987,12 @@ test("dispatch store methods fence preparation, attachment, and release", async 
   );
   assert.equal(claim.kind, "authorized");
   assert.match(
-    String(claim.kind === "authorized" && claim.claim),
+    String(claim.kind === "authorized" && claim.attemptId),
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
   );
   assert.match(
     queryText(preparation.statements[1] as RunnerStoreStatement),
-    /"daytonaPreparationClaim" IS NULL/
+    /"daytonaAttemptId" IS NULL/
   );
   assert.match(
     queryText(preparation.statements[1] as RunnerStoreStatement),
@@ -902,12 +1006,14 @@ test("dispatch store methods fence preparation, attachment, and release", async 
   if (claim.kind !== "authorized") {
     throw new Error("Preparation unexpectedly lost its dispatch.");
   }
+  const sessionId = daytonaRunSessionName(dispatching.id, claim.attemptId);
 
   const launchCurrent = run({
-    daytonaPreparationClaim: claim.claim,
+    daytonaAttemptId: claim.attemptId,
     version: preparedRun.version,
   });
   const launchUpdated = run({
+    daytonaAttemptId: claim.attemptId,
     daytonaCommandId: "command",
     daytonaSessionId: sessionId,
     version: launchCurrent.version + 1,
@@ -917,8 +1023,8 @@ test("dispatch store methods fence preparation, attachment, and release", async 
     operator,
     claim.authority,
     {
+      attemptId: claim.attemptId,
       commandId: "command",
-      preparationClaim: claim.claim,
       sessionId,
     }
   );
@@ -928,31 +1034,31 @@ test("dispatch store methods fence preparation, attachment, and release", async 
     sessionId
   );
   assert.equal(
-    launched.kind === "authorized" && launched.value.daytonaPreparationClaim,
-    null
+    launched.kind === "authorized" && launched.value.daytonaAttemptId,
+    claim.attemptId
   );
   assert.match(
     queryText(launch.statements[1] as RunnerStoreStatement),
     /"dispatchLeaseExpiresAt" > clock_timestamp\(\)/
   );
-  assert.match(
+  assert.doesNotMatch(
     queryText(launch.statements[1] as RunnerStoreStatement),
-    /"daytonaPreparationClaim" = NULL/
+    /"daytonaAttemptId" = NULL/
   );
 
   const releaseCurrent = run({
-    daytonaPreparationClaim: claim.claim,
+    daytonaAttemptId: claim.attemptId,
     version: preparedRun.version,
   });
   const releaseUpdated = run({
-    daytonaPreparationClaim: null,
+    daytonaAttemptId: null,
     version: releaseCurrent.version + 1,
   });
   const release = scripted([releaseCurrent], [releaseUpdated]);
   const released = await release.store.releaseDaytonaPreparation(
     operator,
     claim.authority,
-    { preparationClaim: claim.claim }
+    { attemptId: claim.attemptId }
   );
   assert.equal(released.kind, "released");
   assert.equal(
@@ -961,7 +1067,7 @@ test("dispatch store methods fence preparation, attachment, and release", async 
   );
   assert.match(
     queryText(release.statements[1] as RunnerStoreStatement),
-    /"daytonaPreparationClaim" = \$\d+/
+    /"daytonaAttemptId" = \$\d+/
   );
   assert.match(
     queryText(release.statements[1] as RunnerStoreStatement),
@@ -973,8 +1079,8 @@ test("dispatch store methods fence preparation, attachment, and release", async 
     {
       authorizeDaytonaLaunch: (_operator, prepared, input) => {
         callbackLaunched =
-          prepared.preparationClaim === claim.claim &&
-          input.preparationClaim === claim.claim &&
+          prepared.attemptId === claim.attemptId &&
+          input.attemptId === claim.attemptId &&
           input.sessionId === sessionId;
         return Promise.resolve({
           authority:
@@ -993,11 +1099,11 @@ test("dispatch store methods fence preparation, attachment, and release", async 
   const callbackClaim = await callbacks.authorizePreparation({
     runId: dispatching.id,
   });
-  assert.equal(callbackClaim, claim.claim);
+  assert.equal(callbackClaim, claim.attemptId);
   assert.equal(
     await callbacks.authorizeLaunch({
+      attemptId: claim.attemptId,
       commandId: "command",
-      preparationClaim: claim.claim,
       runId: dispatching.id,
       sessionId,
     }),
@@ -1006,13 +1112,14 @@ test("dispatch store methods fence preparation, attachment, and release", async 
   assert.equal(callbackLaunched, true);
 });
 
-test("preparation claims exclude parallel attempts and stale releases", async () => {
+test("attempt ownership excludes parallel attempts and stale releases", async () => {
   const dispatching = run();
   const authority = await claimedAuthority(dispatching);
-  const existingClaim = "newer-claim" as RunnerPreparationClaim;
+  const existingClaim =
+    "53af1a29-4e98-43d6-ac5b-3b9dcba5e732" as RunnerDaytonaAttemptId;
   const parallel = scripted([
     run({
-      daytonaPreparationClaim: existingClaim,
+      daytonaAttemptId: existingClaim,
       version: authority.expectedVersion,
     }),
   ]);
@@ -1025,11 +1132,11 @@ test("preparation claims exclude parallel attempts and stale releases", async ()
 
   const staleAuthority = {
     ...authority,
-    preparationClaim: "stale-claim" as RunnerPreparationClaim,
+    attemptId: "53af1a29-4e98-43d6-ac5b-3b9dcba5e733" as RunnerDaytonaAttemptId,
   } as RunnerDispatchAuthority;
   const staleRelease = scripted([
     run({
-      daytonaPreparationClaim: existingClaim,
+      daytonaAttemptId: existingClaim,
       version: authority.expectedVersion,
     }),
   ]);
@@ -1039,8 +1146,7 @@ test("preparation claims exclude parallel attempts and stale releases", async ()
       operator,
       staleAuthority,
       {
-        preparationClaim:
-          staleAuthority.preparationClaim as RunnerPreparationClaim,
+        attemptId: staleAuthority.attemptId as RunnerDaytonaAttemptId,
       }
     ),
     { kind: "not_live" }

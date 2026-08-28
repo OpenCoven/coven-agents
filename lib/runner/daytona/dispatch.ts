@@ -16,7 +16,7 @@ export type DaytonaDispatchAuthorizers = Readonly<{
 
 /**
  * Adapts a single operator dispatch authority to Daytona's process callbacks.
- * The preparation claim stays closure-local until it is presented to launch.
+ * The attempt stays closure-local and every callback carries it exactly.
  */
 export function daytonaDispatchAuthorizers(
   store: Pick<
@@ -35,21 +35,21 @@ export function daytonaDispatchAuthorizers(
       if (
         launch.runId !== authority.runId ||
         !prepared ||
-        launch.preparationClaim !== prepared.preparationClaim
+        launch.attemptId !== prepared.attemptId
       ) {
         return Promise.resolve(null);
       }
       return store
         .authorizeDaytonaLaunch(operator, prepared, {
+          attemptId: launch.attemptId,
           commandId: launch.commandId,
-          preparationClaim: launch.preparationClaim,
           sessionId: launch.sessionId,
         })
         .then((result) => {
           if (result.kind !== "authorized") {
             return null;
           }
-          prepared = undefined;
+          prepared = result.authority;
           return result.authority;
         });
     },
@@ -65,18 +65,18 @@ export function daytonaDispatchAuthorizers(
         return null;
       }
       prepared = result.authority;
-      return result.claim;
+      return result.attemptId;
     },
     releasePreparation: async (release) => {
       if (
         release.runId !== authority.runId ||
         !prepared ||
-        release.preparationClaim !== prepared.preparationClaim
+        release.attemptId !== prepared.attemptId
       ) {
         return null;
       }
       const result = await store.releaseDaytonaPreparation(operator, prepared, {
-        preparationClaim: release.preparationClaim,
+        attemptId: release.attemptId,
       });
       if (result.kind !== "released") {
         return null;

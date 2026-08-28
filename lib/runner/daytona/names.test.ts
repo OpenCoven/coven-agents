@@ -20,14 +20,28 @@ test("Daytona sandbox names are deterministic, legal, and tenant-private", () =>
   assert.match(daytonaSessionName(tenant, agentId), /^[a-z0-9-]{3,63}$/u);
 });
 
-test("Daytona process session and credential names are run UUID deterministic", () => {
+test("Daytona process names are deterministic, legal, and attempt-scoped", () => {
   const runId = "53af1a29-4e98-43d6-ac5b-3b9dcba5e730";
-  assert.equal(daytonaRunSessionName(runId), `coven-run-${runId}`);
+  const attemptA = "53af1a29-4e98-43d6-ac5b-3b9dcba5e731";
+  const attemptB = "53af1a29-4e98-43d6-ac5b-3b9dcba5e732";
+  const sessionA = daytonaRunSessionName(runId, attemptA);
+
+  assert.equal(sessionA, daytonaRunSessionName(runId, attemptA));
+  assert.match(sessionA, /^coven-run-[a-f0-9]{40}$/u);
+  assert.ok(sessionA.length <= 63);
+  assert.notEqual(sessionA, daytonaRunSessionName(runId, attemptB));
   assert.equal(
-    daytonaRunCredentialPath(runId),
-    `/tmp/coven-run-${runId}.credential`
+    daytonaRunCredentialPath(runId, attemptA),
+    `/tmp/${sessionA}.credential`
   );
-  assert.throws(() => daytonaRunSessionName("../unsafe"), /UUID run id/u);
+  assert.throws(
+    () => daytonaRunSessionName("../unsafe", attemptA),
+    /UUID run id/u
+  );
+  assert.throws(
+    () => daytonaRunSessionName(runId, "../unsafe"),
+    /UUID attempt id/u
+  );
 });
 
 test("Daytona labels retain only the UUID and a tenant digest", () => {

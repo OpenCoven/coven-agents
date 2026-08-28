@@ -25,7 +25,7 @@ export type RunnerPrincipal = {
 export type RunnerOperator = { kind: "runner-operator" };
 
 declare const runnerDispatchAuthorityBrand: unique symbol;
-declare const runnerPreparationClaimBrand: unique symbol;
+declare const runnerDaytonaAttemptIdBrand: unique symbol;
 
 /**
  * Opaque authority minted from a live operator dispatch claim. It cannot be
@@ -34,7 +34,7 @@ declare const runnerPreparationClaimBrand: unique symbol;
 export type RunnerDispatchAuthority = Readonly<{
   expectedVersion: number;
   leaseToken: string;
-  preparationClaim?: RunnerPreparationClaim;
+  attemptId?: RunnerDaytonaAttemptId;
   runId: string;
   readonly [runnerDispatchAuthorityBrand]: "RunnerDispatchAuthority";
 }>;
@@ -44,8 +44,8 @@ export type RunnerDispatchAuthority = Readonly<{
  * mints it before provider mutation and persists it separately from provider
  * identifiers.
  */
-export type RunnerPreparationClaim = string & {
-  readonly [runnerPreparationClaimBrand]: "RunnerPreparationClaim";
+export type RunnerDaytonaAttemptId = string & {
+  readonly [runnerDaytonaAttemptIdBrand]: "RunnerDaytonaAttemptId";
 };
 
 export type RunnerRuntime = "cloud" | "codex" | "claude" | "copilot";
@@ -96,7 +96,7 @@ export type RunnerRunRecord = Omit<
   completedAt: Date | null;
   createdAt: Date;
   daytonaCommandId: string | null;
-  daytonaPreparationClaim: RunnerPreparationClaim | null;
+  daytonaAttemptId: RunnerDaytonaAttemptId | null;
   daytonaSessionId: string | null;
   dispatchLeaseExpiresAt: Date | null;
   dispatchLeaseToken: string | null;
@@ -234,8 +234,12 @@ export type ExpiredDispatchLeaseAdoptionInput = ExpiredDispatchRequeueInput & {
   newLeaseToken: string;
 };
 
-export type ReleaseDaytonaPreparationInput = {
-  preparationClaim: RunnerPreparationClaim;
+export type ReleaseDaytonaAttemptInput = {
+  attemptId: RunnerDaytonaAttemptId;
+};
+
+export type ReleaseExpiredDaytonaAttemptInput = ExpiredDispatchRequeueInput & {
+  attemptId: RunnerDaytonaAttemptId;
 };
 
 export type RunnerMutationOutcome<T> =
@@ -253,4 +257,5 @@ export type ExpiredDispatchRecoveryOutcome =
   | { kind: "lease_lost" }
   | { kind: "not_live" }
   | { kind: "provider_identifiers_attached" }
+  | { attemptId: RunnerDaytonaAttemptId; kind: "cleanup_required" }
   | { kind: "not_expired" };

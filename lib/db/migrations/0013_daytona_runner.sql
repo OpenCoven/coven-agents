@@ -34,7 +34,7 @@ CREATE TABLE "RunnerRun" (
 	"completedAt" timestamp,
 	"createdAt" timestamp DEFAULT now() NOT NULL,
 	"daytonaCommandId" text,
-	"daytonaPreparationClaim" varchar(64),
+	"daytonaAttemptId" varchar(36),
 	"daytonaSessionId" text,
 	"dispatchLeaseExpiresAt" timestamp,
 	"dispatchLeaseToken" varchar(80),
@@ -66,7 +66,7 @@ CREATE TABLE "RunnerRun" (
 	CONSTRAINT "RunnerRun_commandEvidence_bounded" CHECK (jsonb_typeof("RunnerRun"."commandEvidence") = 'array' and jsonb_array_length("RunnerRun"."commandEvidence") <= 256),
 	CONSTRAINT "RunnerRun_fileEvidence_bounded" CHECK (jsonb_typeof("RunnerRun"."fileEvidence") = 'array' and jsonb_array_length("RunnerRun"."fileEvidence") <= 256),
 	CONSTRAINT "RunnerRun_daytonaCommand_requires_session" CHECK ("RunnerRun"."daytonaCommandId" is null or "RunnerRun"."daytonaSessionId" is not null),
-	CONSTRAINT "RunnerRun_daytonaPreparation_unattached" CHECK ("RunnerRun"."daytonaPreparationClaim" is null or ("RunnerRun"."daytonaSessionId" is null and "RunnerRun"."daytonaCommandId" is null))
+	CONSTRAINT "RunnerRun_daytonaAttempt_valid" CHECK ("RunnerRun"."daytonaAttemptId" is null or "RunnerRun"."daytonaAttemptId" ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
 );
 --> statement-breakpoint
 CREATE TABLE "RunnerRunEvent" (

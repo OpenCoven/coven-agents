@@ -20,7 +20,7 @@ import {
   shellQuote,
   summarizeRun,
 } from "../harness";
-import type { RunnerDispatchAuthority, RunnerPreparationClaim } from "../types";
+import type { RunnerDaytonaAttemptId, RunnerDispatchAuthority } from "../types";
 import { daytonaRunCredentialPath, daytonaRunSessionName } from "./names";
 import { classifyDaytonaProviderError } from "./sandbox";
 
@@ -209,9 +209,9 @@ async function cleanupFailedStart(
   sessionName: string,
   primary: DaytonaProcessError,
   releasePreparation: (
-    preparationClaim: DaytonaPreparationClaim
+    attemptId: DaytonaAttemptId
   ) => Promise<RunnerDispatchAuthority | null>,
-  preparationClaim: DaytonaPreparationClaim
+  attemptId: DaytonaAttemptId
 ): Promise<never> {
   const failures: unknown[] = [];
   try {
@@ -233,7 +233,7 @@ async function cleanupFailedStart(
     );
   }
   try {
-    if (!(await releasePreparation(preparationClaim))) {
+    if (!(await releasePreparation(attemptId))) {
       throw new Error("Preparation release was rejected.");
     }
   } catch {
@@ -249,6 +249,7 @@ async function cleanupFailedStart(
 }
 
 export type DaytonaStartedProcess = Readonly<{
+  attemptId: DaytonaAttemptId;
   commandId: string;
   credentialPath: string;
   dispatchAuthority: RunnerDispatchAuthority;
@@ -257,10 +258,10 @@ export type DaytonaStartedProcess = Readonly<{
 }>;
 
 /**
- * Opaque durable ownership of a single preparation attempt. Only the durable
+ * Opaque durable ownership of a single provider attempt. Only the durable
  * dispatch implementation may mint this branded value.
  */
-export type DaytonaPreparationClaim = RunnerPreparationClaim;
+export type DaytonaAttemptId = RunnerDaytonaAttemptId;
 
 export type DaytonaPreparationAuthorization = Readonly<{
   runId: string;
@@ -270,19 +271,17 @@ export type DaytonaPreparationAuthorization = Readonly<{
  * Durable pre-mutation gate supplied by the dispatch service.
  *
  * This must atomically verify the active dispatch lease/run and reserve
- * exclusive ownership of the run's deterministic session and credential path
- * for the returned claim. It returns `null` when the run is cancelled, stale,
- * or displaced. It must never allow overlapping valid claims for a run:
- * because Daytona session ownership is deterministic, a later claim may not
- * be issued until cleanup by the earlier claim cannot delete its resources.
+ * exclusive ownership of this run attempt's deterministic session and
+ * credential path. It returns `null` when the run is cancelled, stale, or
+ * displaced. It must never allow a second unresolved attempt for a run.
  */
 export type DaytonaPreparationAuthorizer = (
   authorization: DaytonaPreparationAuthorization
-) => Promise<DaytonaPreparationClaim | null>;
+) => Promise<DaytonaAttemptId | null>;
 
 export type DaytonaLaunchAuthorization = Readonly<{
   commandId?: string;
-  preparationClaim: DaytonaPreparationClaim;
+  attemptId: DaytonaAttemptId;
   runId: string;
   sessionId: string;
 }>;
@@ -290,12 +289,9 @@ export type DaytonaLaunchAuthorization = Readonly<{
 /**
  * Durable launch gate supplied by the dispatch service.
  *
- * It must atomically verify that the supplied preparation claim remains the
- * current exclusive claim for the active dispatch lease/run, reject cancelled
- * or displaced claims, and persist the supplied provider identifiers before
- * returning the next dispatch authority. The exclusive preparation invariant
- * prevents cleanup of a rejected claim from deleting a session authorized by
- * another claim.
+ * It must atomically verify that the supplied attempt remains current under
+ * the active dispatch lease/run, reject cancelled or displaced attempts, and
+ * persist the supplied provider identifiers without releasing the attempt.
  * Callers must durably record cancellation before invoking
  * `stopDaytonaProcess`; this adapter deliberately uses no process-local lock.
  * Daytona supplies the command ID only after execution is accepted, so this
@@ -307,7 +303,7 @@ export type DaytonaLaunchAuthorizer = (
 
 export type DaytonaPreparationRelease = (
   release: Readonly<{
-    preparationClaim: DaytonaPreparationClaim;
+    attemptId: DaytonaAttemptId;
     runId: string;
   }>
 ) => Promise<RunnerDispatchAuthority | null>;
@@ -333,8 +329,6 @@ export async function startDaytonaProcess(input: {
 }): Promise<DaytonaStartedProcess> {
   const { auth, spec } = requireHarness(input.runtime, input.credential);
   const workspace = resolveSandboxWorkspace(input.workspace);
-  const sessionId = daytonaRunSessionName(input.runId);
-  const credentialPath = daytonaRunCredentialPath(input.runId);
   const { process } = input.sandbox;
 
   if (typeof input.authorizePreparation !== "function") {
@@ -358,9 +352,9 @@ export async function startDaytonaProcess(input: {
       false
     );
   }
-  let preparationClaim: DaytonaPreparationClaim | null;
+  let attemptId: DaytonaAttemptId | null;
   try {
-    preparationClaim = await input.authorizePreparation({
+    attemptId = await input.authorizePreparation({
       runId: input.runId,
     });
   } catch {
@@ -373,13 +367,15 @@ export async function startDaytonaProcess(input: {
       true
     );
   }
-  if (!preparationClaim) {
+  if (!attemptId) {
     throw new DaytonaProcessError(
       "Daytona preparation authorization could not be confirmed.",
       "process_start_failed",
       false
     );
   }
+  const sessionId = daytonaRunSessionName(input.runId, attemptId);
+  const credentialPath = daytonaRunCredentialPath(input.runId, attemptId);
 
   try {
     // A deterministic session can survive an ambiguous earlier create. Its
@@ -397,10 +393,10 @@ export async function startDaytonaProcess(input: {
       ),
       (claim) =>
         input.releasePreparation({
-          preparationClaim: claim,
+          attemptId: claim,
           runId: input.runId,
         }),
-      preparationClaim
+      attemptId
     );
   }
 
@@ -432,10 +428,10 @@ export async function startDaytonaProcess(input: {
           ),
       (claim) =>
         input.releasePreparation({
-          preparationClaim: claim,
+          attemptId: claim,
           runId: input.runId,
         }),
-      preparationClaim
+      attemptId
     );
   }
 
@@ -453,10 +449,10 @@ export async function startDaytonaProcess(input: {
       ),
       (claim) =>
         input.releasePreparation({
-          preparationClaim: claim,
+          attemptId: claim,
           runId: input.runId,
         }),
-      preparationClaim
+      attemptId
     );
   }
 
@@ -500,18 +496,18 @@ export async function startDaytonaProcess(input: {
           ),
       (claim) =>
         input.releasePreparation({
-          preparationClaim: claim,
+          attemptId: claim,
           runId: input.runId,
         }),
-      preparationClaim
+      attemptId
     );
   }
 
   let launchAuthority: RunnerDispatchAuthority | null;
   try {
     launchAuthority = await input.authorizeLaunch({
+      attemptId,
       commandId,
-      preparationClaim,
       runId: input.runId,
       sessionId,
     });
@@ -527,10 +523,10 @@ export async function startDaytonaProcess(input: {
       ),
       (claim) =>
         input.releasePreparation({
-          preparationClaim: claim,
+          attemptId: claim,
           runId: input.runId,
         }),
-      preparationClaim
+      attemptId
     );
   }
   if (!launchAuthority) {
@@ -545,13 +541,14 @@ export async function startDaytonaProcess(input: {
       ),
       (claim) =>
         input.releasePreparation({
-          preparationClaim: claim,
+          attemptId: claim,
           runId: input.runId,
         }),
-      preparationClaim
+      attemptId
     );
   }
   return {
+    attemptId,
     commandId,
     credentialPath,
     dispatchAuthority: launchAuthority,
@@ -611,24 +608,23 @@ function isTerminalDaytonaCommand(
  * supplied by its 0.207 process API.
  */
 export async function snapshotDaytonaProcess(input: {
+  attemptId: DaytonaAttemptId;
   commandId: string;
   credential: string | null;
   cursor: number;
   harness: "copilot";
   now?: () => Date;
   sandbox: DaytonaProcessSandbox;
-  sessionId: string;
+  runId: string;
 }): Promise<DaytonaLogSnapshot> {
+  const sessionId = daytonaRunSessionName(input.runId, input.attemptId);
   const normalizedCommand = normalizeDaytonaCommand(
-    await input.sandbox.process.getSessionCommand(
-      input.sessionId,
-      input.commandId
-    )
+    await input.sandbox.process.getSessionCommand(sessionId, input.commandId)
   );
   const terminal = isTerminalDaytonaCommand(normalizedCommand);
   const normalizedLogs = normalizeDaytonaLogs(
     await input.sandbox.process.getSessionCommandLogs(
-      input.sessionId,
+      sessionId,
       input.commandId
     )
   );
@@ -686,7 +682,10 @@ export type DaytonaStopResult =
       kind: "sandbox_reset_required";
     }>;
 
-export type DaytonaStopInput = Readonly<{ runId: string }>;
+export type DaytonaStopInput = Readonly<{
+  attemptId: DaytonaAttemptId;
+  runId: string;
+}>;
 
 /**
  * `deleteSession` is the only session termination operation in SDK 0.207.
@@ -700,7 +699,7 @@ export async function stopDaytonaProcess(
   sandbox: DaytonaProcessSandbox,
   input: DaytonaStopInput
 ): Promise<DaytonaStopResult> {
-  const sessionId = daytonaRunSessionName(input.runId);
+  const sessionId = daytonaRunSessionName(input.runId, input.attemptId);
   let sessionAbsent = false;
   try {
     await sandbox.process.deleteSession(sessionId);
@@ -737,7 +736,10 @@ export async function stopDaytonaProcess(
   }
 
   try {
-    await removeCredential(sandbox, daytonaRunCredentialPath(input.runId));
+    await removeCredential(
+      sandbox,
+      daytonaRunCredentialPath(input.runId, input.attemptId)
+    );
     return { kind: "stopped" };
   } catch (error) {
     return {
@@ -754,9 +756,15 @@ export async function stopDaytonaProcess(
 /** Deletes only deterministic per-run paths after terminal or expired starts. */
 export async function sweepDaytonaCredentials(
   sandbox: DaytonaProcessSandbox,
-  runIds: readonly string[]
+  attempts: readonly Readonly<{ attemptId: DaytonaAttemptId; runId: string }>[]
 ): Promise<void> {
-  const paths = [...new Set(runIds)].map(daytonaRunCredentialPath);
+  const paths = [
+    ...new Set(
+      attempts.map(({ attemptId, runId }) =>
+        daytonaRunCredentialPath(runId, attemptId)
+      )
+    ),
+  ];
   if (paths.length === 0) {
     return;
   }

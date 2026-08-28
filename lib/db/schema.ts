@@ -525,10 +525,10 @@ export const runnerRun = pgTable(
       .default(sql`'[]'::jsonb`),
     completedAt: timestamp("completedAt"),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
-    daytonaCommandId: text("daytonaCommandId"),
-    daytonaPreparationClaim: varchar("daytonaPreparationClaim", {
-      length: 64,
+    daytonaAttemptId: varchar("daytonaAttemptId", {
+      length: 36,
     }),
+    daytonaCommandId: text("daytonaCommandId"),
     daytonaSessionId: text("daytonaSessionId"),
     dispatchLeaseExpiresAt: timestamp("dispatchLeaseExpiresAt"),
     dispatchLeaseToken: varchar("dispatchLeaseToken", { length: 80 }),
@@ -645,8 +645,8 @@ export const runnerRun = pgTable(
       sql`${table.daytonaCommandId} is null or ${table.daytonaSessionId} is not null`
     ),
     check(
-      "RunnerRun_daytonaPreparation_unattached",
-      sql`${table.daytonaPreparationClaim} is null or (${table.daytonaSessionId} is null and ${table.daytonaCommandId} is null)`
+      "RunnerRun_daytonaAttempt_valid",
+      sql`${table.daytonaAttemptId} is null or ${table.daytonaAttemptId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'`
     ),
   ]
 );

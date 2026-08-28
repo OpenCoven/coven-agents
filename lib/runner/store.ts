@@ -26,14 +26,15 @@ import type {
   ExpiredDispatchRecoveryOutcome,
   ExpiredDispatchRequeueInput,
   FinalizeRunnerRunInput,
-  ReleaseDaytonaPreparationInput,
+  ReleaseDaytonaAttemptInput,
+  ReleaseExpiredDaytonaAttemptInput,
   ReserveDaytonaSandboxInput,
   RunnerAgentRecord,
   RunnerClaimedDispatch,
+  RunnerDaytonaAttemptId,
   RunnerDispatchAuthority,
   RunnerMutationOutcome,
   RunnerOperator,
-  RunnerPreparationClaim,
   RunnerPrincipal,
   RunnerRunEventRecord,
   RunnerRunRecord,
@@ -129,8 +130,8 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
     commandEvidence: column(row, "commandEvidence"),
     completedAt: column(row, "completedAt"),
     createdAt: column(row, "createdAt"),
+    daytonaAttemptId: column(row, "daytonaAttemptId"),
     daytonaCommandId: column(row, "daytonaCommandId"),
-    daytonaPreparationClaim: column(row, "daytonaPreparationClaim"),
     daytonaSessionId: column(row, "daytonaSessionId"),
     dispatchLeaseExpiresAt: column(row, "dispatchLeaseExpiresAt"),
     dispatchLeaseToken: column(row, "dispatchLeaseToken"),
@@ -418,6 +419,23 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (!isExpectedLiveDispatch(run, input.expectedDispatchState)) {
           return { kind: "not_live" };
         }
+        const [expired] = await transaction.execute(
+          statement(
+            "confirm-expired-dispatch-adoption",
+            input,
+            sql`SELECT "id" FROM "RunnerRun"
+              WHERE "id" = ${input.runId}
+                AND "dispatchLeaseToken" = ${input.oldLeaseToken}
+                AND "dispatchLeaseExpiresAt" <= clock_timestamp()
+                AND "dispatchState" = ${input.expectedDispatchState}`
+          )
+        );
+        if (!expired) {
+          return { kind: "not_expired" };
+        }
+        if (run.daytonaAttemptId) {
+          return { attemptId: run.daytonaAttemptId, kind: "cleanup_required" };
+        }
         const [updated] = await transaction.execute(
           statement(
             "adopt-expired-dispatch-lease",
@@ -425,7 +443,6 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             sql`UPDATE "RunnerRun"
               SET "dispatchLeaseToken" = ${input.newLeaseToken},
                   "dispatchLeaseExpiresAt" = ${input.leaseExpiresAt},
-                  "daytonaPreparationClaim" = NULL,
                   "updatedAt" = now(),
                   "version" = "version" + 1
               WHERE "id" = ${input.runId}
@@ -888,7 +905,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
       authority: RunnerDispatchAuthority,
       input: {
         commandId?: string;
-        preparationClaim: RunnerPreparationClaim;
+        attemptId: RunnerDaytonaAttemptId;
         sessionId: string;
       }
     ): Promise<
@@ -905,11 +922,11 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         ]);
         if (
           !run ||
-          authority.preparationClaim !== input.preparationClaim ||
-          run.daytonaPreparationClaim !== input.preparationClaim ||
+          authority.attemptId !== input.attemptId ||
+          run.daytonaAttemptId !== input.attemptId ||
           run.daytonaSessionId ||
           run.daytonaCommandId ||
-          input.sessionId !== daytonaRunSessionName(run.id)
+          input.sessionId !== daytonaRunSessionName(run.id, input.attemptId)
         ) {
           return { kind: "not_live" };
         }
@@ -917,10 +934,10 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           statement(
             "authorize-daytona-launch",
             {
+              attemptId: input.attemptId,
               commandId: input.commandId ?? null,
               expectedVersion: authority.expectedVersion,
               leaseToken: authority.leaseToken,
-              preparationClaim: input.preparationClaim,
               runId: run.id,
               sessionId: input.sessionId,
               tenant: run.tenant,
@@ -928,7 +945,6 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             sql`UPDATE "RunnerRun"
               SET "daytonaSessionId" = ${input.sessionId},
                   "daytonaCommandId" = ${input.commandId ?? null},
-                  "daytonaPreparationClaim" = NULL,
                   "updatedAt" = now(),
                   "version" = "version" + 1
               WHERE "id" = ${run.id}
@@ -938,67 +954,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "dispatchLeaseExpiresAt" > clock_timestamp()
                 AND "dispatchState" = 'dispatching'
                 AND "status" = 'queued'
-                AND "daytonaPreparationClaim" = ${input.preparationClaim}
-                AND "daytonaSessionId" IS NULL
-                AND "daytonaCommandId" IS NULL
-              RETURNING *`
-          )
-        );
-        if (!updated) {
-          return { kind: "not_live" };
-        }
-        const value = asRun(updated);
-        return {
-          authority: dispatchAuthority(value),
-          kind: "authorized",
-          value,
-        };
-      }),
-
-    authorizeDaytonaPreparation: (
-      _operator: RunnerOperator,
-      authority: RunnerDispatchAuthority
-    ): Promise<
-      | {
-          authority: RunnerDispatchAuthority;
-          claim: RunnerPreparationClaim;
-          kind: "authorized";
-        }
-      | { kind: "not_live" }
-    > =>
-      database.transaction(async (transaction) => {
-        const run = await lockedLiveDispatchRun(transaction, authority, [
-          "dispatching",
-        ]);
-        if (!run || run.daytonaSessionId || run.daytonaCommandId) {
-          return { kind: "not_live" };
-        }
-        if (run.daytonaPreparationClaim) {
-          return { kind: "not_live" };
-        }
-        const claim = randomUUID() as RunnerPreparationClaim;
-        const [updated] = await transaction.execute(
-          statement(
-            "claim-daytona-process-preparation",
-            {
-              expectedVersion: authority.expectedVersion,
-              leaseToken: authority.leaseToken,
-              preparationClaim: claim,
-              runId: run.id,
-              tenant: run.tenant,
-            },
-            sql`UPDATE "RunnerRun"
-              SET "daytonaPreparationClaim" = ${claim},
-                  "updatedAt" = now(),
-                  "version" = "version" + 1
-              WHERE "id" = ${run.id}
-                AND "tenant" = ${run.tenant}
-                AND "version" = ${authority.expectedVersion}
-                AND "dispatchLeaseToken" = ${authority.leaseToken}
-                AND "dispatchLeaseExpiresAt" > clock_timestamp()
-                AND "dispatchState" = 'dispatching'
-                AND "status" = 'queued'
-                AND "daytonaPreparationClaim" IS NULL
+                AND "daytonaAttemptId" = ${input.attemptId}
                 AND "daytonaSessionId" IS NULL
                 AND "daytonaCommandId" IS NULL
               RETURNING *`
@@ -1011,9 +967,72 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return {
           authority: {
             ...dispatchAuthority(value),
-            preparationClaim: claim,
+            attemptId: input.attemptId,
           } as RunnerDispatchAuthority,
-          claim,
+          kind: "authorized",
+          value,
+        };
+      }),
+
+    authorizeDaytonaPreparation: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority
+    ): Promise<
+      | {
+          authority: RunnerDispatchAuthority;
+          attemptId: RunnerDaytonaAttemptId;
+          kind: "authorized";
+        }
+      | { kind: "not_live" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+        ]);
+        if (!run || run.daytonaSessionId || run.daytonaCommandId) {
+          return { kind: "not_live" };
+        }
+        if (run.daytonaAttemptId) {
+          return { kind: "not_live" };
+        }
+        const attemptId = randomUUID() as RunnerDaytonaAttemptId;
+        const [updated] = await transaction.execute(
+          statement(
+            "claim-daytona-process-preparation",
+            {
+              attemptId,
+              expectedVersion: authority.expectedVersion,
+              leaseToken: authority.leaseToken,
+              runId: run.id,
+              tenant: run.tenant,
+            },
+            sql`UPDATE "RunnerRun"
+              SET "daytonaAttemptId" = ${attemptId},
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${run.id}
+                AND "tenant" = ${run.tenant}
+                AND "version" = ${authority.expectedVersion}
+                AND "dispatchLeaseToken" = ${authority.leaseToken}
+                AND "dispatchLeaseExpiresAt" > clock_timestamp()
+                AND "dispatchState" = 'dispatching'
+                AND "status" = 'queued'
+                AND "daytonaAttemptId" IS NULL
+                AND "daytonaSessionId" IS NULL
+                AND "daytonaCommandId" IS NULL
+              RETURNING *`
+          )
+        );
+        if (!updated) {
+          return { kind: "not_live" };
+        }
+        const value = asRun(updated);
+        return {
+          attemptId,
+          authority: {
+            ...dispatchAuthority(value),
+            attemptId,
+          } as RunnerDispatchAuthority,
           kind: "authorized",
         };
       }),
@@ -1212,6 +1231,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         const rejected = fenceOutcome(run, input);
         if (rejected) {
           return rejected;
+        }
+        if (run.daytonaAttemptId) {
+          return { kind: "not_live" };
         }
         const [updated] = await transaction.execute(
           statement(
@@ -1793,7 +1815,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
     releaseDaytonaPreparation: (
       _operator: RunnerOperator,
       authority: RunnerDispatchAuthority,
-      input: ReleaseDaytonaPreparationInput
+      input: ReleaseDaytonaAttemptInput
     ): Promise<
       | { authority: RunnerDispatchAuthority; kind: "released" }
       | { kind: "not_live" }
@@ -1804,8 +1826,8 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         ]);
         if (
           !run ||
-          authority.preparationClaim !== input.preparationClaim ||
-          run.daytonaPreparationClaim !== input.preparationClaim ||
+          authority.attemptId !== input.attemptId ||
+          run.daytonaAttemptId !== input.attemptId ||
           run.daytonaSessionId ||
           run.daytonaCommandId
         ) {
@@ -1815,14 +1837,14 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           statement(
             "release-daytona-process-preparation",
             {
+              attemptId: input.attemptId,
               expectedVersion: authority.expectedVersion,
               leaseToken: authority.leaseToken,
-              preparationClaim: input.preparationClaim,
               runId: run.id,
               tenant: run.tenant,
             },
             sql`UPDATE "RunnerRun"
-              SET "daytonaPreparationClaim" = NULL,
+              SET "daytonaAttemptId" = NULL,
                   "updatedAt" = now(),
                   "version" = "version" + 1
               WHERE "id" = ${run.id}
@@ -1832,9 +1854,125 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "dispatchLeaseExpiresAt" > clock_timestamp()
                 AND "dispatchState" = 'dispatching'
                 AND "status" = 'queued'
-                AND "daytonaPreparationClaim" = ${input.preparationClaim}
+                AND "daytonaAttemptId" = ${input.attemptId}
                 AND "daytonaSessionId" IS NULL
                 AND "daytonaCommandId" IS NULL
+              RETURNING *`
+          )
+        );
+        return updated
+          ? { authority: dispatchAuthority(asRun(updated)), kind: "released" }
+          : { kind: "not_live" };
+      }),
+
+    /**
+     * This is the recovery fence used only after the caller has confirmed
+     * deletion of the attempt-derived provider session and credential file.
+     * It never receives a provider identifier, so stale recovery work can
+     * target only the attempt it was handed.
+     */
+    releaseExpiredDaytonaAttempt: (
+      _operator: RunnerOperator,
+      input: ReleaseExpiredDaytonaAttemptInput
+    ): Promise<
+      | { kind: "released"; value: RunnerRunRecord }
+      | { kind: "not_found" }
+      | { kind: "lease_lost" }
+      | { kind: "not_live" }
+      | { kind: "not_expired" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedOperatorRun(
+          transaction,
+          _operator,
+          input.runId
+        );
+        if (!run) {
+          return { kind: "not_found" };
+        }
+        if (run.dispatchLeaseToken !== input.oldLeaseToken) {
+          return { kind: "lease_lost" };
+        }
+        if (!isExpectedLiveDispatch(run, input.expectedDispatchState)) {
+          return { kind: "not_live" };
+        }
+        if (run.daytonaAttemptId !== input.attemptId) {
+          return { kind: "not_live" };
+        }
+        const [updated] = await transaction.execute(
+          statement(
+            "release-expired-daytona-attempt",
+            input,
+            sql`UPDATE "RunnerRun"
+              SET "daytonaAttemptId" = NULL,
+                  "daytonaSessionId" = NULL,
+                  "daytonaCommandId" = NULL,
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${input.runId}
+                AND "dispatchLeaseToken" = ${input.oldLeaseToken}
+                AND "dispatchLeaseExpiresAt" <= clock_timestamp()
+                AND "dispatchState" = ${input.expectedDispatchState}
+                AND "daytonaAttemptId" = ${input.attemptId}
+              RETURNING *`
+          )
+        );
+        return updated
+          ? { kind: "released", value: asRun(updated) }
+          : { kind: "not_expired" };
+      }),
+
+    releaseTerminalDaytonaAttempt: (
+      operator: RunnerOperator,
+      authority: RunnerDispatchAuthority,
+      input: ReleaseDaytonaAttemptInput
+    ): Promise<
+      | { authority: RunnerDispatchAuthority; kind: "released" }
+      | { kind: "not_found" }
+      | { kind: "not_live" }
+      | { kind: "stale_version" }
+      | { kind: "lease_lost" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedOperatorRun(
+          transaction,
+          operator,
+          authority.runId
+        );
+        if (!run) {
+          return { kind: "not_found" };
+        }
+        const rejected = fenceOutcome(run, authority);
+        if (rejected) {
+          return rejected;
+        }
+        if (
+          authority.attemptId !== input.attemptId ||
+          run.daytonaAttemptId !== input.attemptId ||
+          run.dispatchState !== "terminal"
+        ) {
+          return { kind: "not_live" };
+        }
+        const [updated] = await transaction.execute(
+          statement(
+            "release-terminal-daytona-attempt",
+            {
+              attemptId: input.attemptId,
+              expectedVersion: authority.expectedVersion,
+              leaseToken: authority.leaseToken,
+              runId: run.id,
+            },
+            sql`UPDATE "RunnerRun"
+              SET "daytonaAttemptId" = NULL,
+                  "daytonaSessionId" = NULL,
+                  "daytonaCommandId" = NULL,
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${run.id}
+                AND "version" = ${authority.expectedVersion}
+                AND "dispatchLeaseToken" = ${authority.leaseToken}
+                AND "dispatchState" = 'terminal'
+                AND "daytonaAttemptId" = ${input.attemptId}
               RETURNING *`
           )
         );
@@ -1892,6 +2030,23 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (!isExpectedLiveDispatch(run, input.expectedDispatchState)) {
           return { kind: "not_live" };
         }
+        const [expired] = await transaction.execute(
+          statement(
+            "confirm-expired-dispatch-requeue",
+            input,
+            sql`SELECT "id" FROM "RunnerRun"
+              WHERE "id" = ${input.runId}
+                AND "dispatchLeaseToken" = ${input.oldLeaseToken}
+                AND "dispatchLeaseExpiresAt" <= clock_timestamp()
+                AND "dispatchState" = ${input.expectedDispatchState}`
+          )
+        );
+        if (!expired) {
+          return { kind: "not_expired" };
+        }
+        if (run.daytonaAttemptId) {
+          return { attemptId: run.daytonaAttemptId, kind: "cleanup_required" };
+        }
         if (run.daytonaSessionId || run.daytonaCommandId) {
           return { kind: "provider_identifiers_attached" };
         }
@@ -1903,7 +2058,6 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               SET "dispatchLeaseToken" = NULL,
                   "dispatchLeaseExpiresAt" = NULL,
                   "dispatchState" = 'queued',
-                  "daytonaPreparationClaim" = NULL,
                   "status" = 'queued',
                   "startedAt" = NULL,
                   "updatedAt" = now(),
