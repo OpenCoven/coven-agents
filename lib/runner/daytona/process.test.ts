@@ -6,7 +6,7 @@ import {
   DaytonaTimeoutError,
   type Sandbox,
 } from "@daytona/sdk";
-import type { DaytonaProcessSandbox } from "./process";
+import type { DaytonaPreparationClaim, DaytonaProcessSandbox } from "./process";
 import {
   DaytonaProcessError,
   snapshotDaytonaProcess,
@@ -20,6 +20,7 @@ const RUN_ID = "53af1a29-4e98-43d6-ac5b-3b9dcba5e730";
 const SECRET = "copilot-credential-9f3b";
 const SESSION = `coven-run-${RUN_ID}`;
 const PATH = `/tmp/${SESSION}.credential`;
+const PREPARATION_CLAIM = "preparation-claim-a" as DaytonaPreparationClaim;
 
 type Call = { command: string; env?: Record<string, string>; kind: string };
 
@@ -50,6 +51,7 @@ function processDouble(
   const sandbox: DaytonaProcessSandbox = {
     process: {
       createSession: () => {
+        calls.push({ command: SESSION, kind: "create" });
         if (options.createError) {
           if (options.createCreatesSession) {
             sessions.push({ commands: [], sessionId: SESSION });
@@ -130,11 +132,16 @@ function processDouble(
       },
     },
   };
-  return { calls, sandbox };
+  return {
+    calls,
+    sandbox,
+    sessionIds: () => sessions.map((session) => session.sessionId),
+  };
 }
 
 const startInput = (sandbox: DaytonaProcessSandbox) => ({
   authorizeLaunch: async () => true,
+  authorizePreparation: async () => PREPARATION_CLAIM,
   credential: { credential: SECRET },
   instructions: "Use tests.",
   model: "auto",
@@ -195,9 +202,13 @@ test("stages only through per-call env and starts a safe asynchronous session", 
   assert.ok(launch?.command.includes("export HOME='/workspace/repo'"));
   assert.ok(launch?.command.includes("exec 'copilot'"));
   assert.equal(allReturnedText(started).includes(SECRET), false);
+  assert.deepEqual(
+    calls.slice(0, 5).map((call) => call.kind),
+    ["command", "list", "list", "create", "start"]
+  );
 });
 
-test("durably authorizes and persists the session before executing", async () => {
+test("prepares durably and passes its exact claim before executing", async () => {
   const { calls, sandbox } = processDouble();
   const authorizations: unknown[] = [];
   let persistedSessionId: string | null = null;
@@ -210,14 +221,33 @@ test("durably authorizes and persists the session before executing", async () =>
       persistedSessionId = launch.sessionId;
       return Promise.resolve(true);
     },
+    authorizePreparation: (preparation) => {
+      calls.push({ command: preparation.runId, kind: "prepare" });
+      return Promise.resolve(PREPARATION_CLAIM);
+    },
   });
 
   const authorizationIndex = calls.findIndex(
     (call) => call.kind === "authorize"
   );
   const executeIndex = calls.findIndex((call) => call.kind === "start");
-  assert.deepEqual(authorizations, [{ runId: RUN_ID, sessionId: SESSION }]);
+  assert.deepEqual(authorizations, [
+    {
+      preparationClaim: PREPARATION_CLAIM,
+      runId: RUN_ID,
+      sessionId: SESSION,
+    },
+  ]);
+  assert.equal(
+    (authorizations[0] as { preparationClaim: DaytonaPreparationClaim })
+      .preparationClaim,
+    PREPARATION_CLAIM
+  );
   assert.equal(persistedSessionId, SESSION);
+  assert.deepEqual(
+    calls.map((call) => call.kind),
+    ["prepare", "command", "list", "list", "create", "authorize", "start"]
+  );
   assert.ok(authorizationIndex > -1);
   assert.ok(executeIndex > -1);
   assert.ok(authorizationIndex < executeIndex);
@@ -227,8 +257,25 @@ test("durably authorizes and persists the session before executing", async () =>
   );
 });
 
-test("does not execute when durable cancellation rejects launch authorization", async () => {
+test("performs zero SDK mutations when durable preparation is stale", async () => {
   const { calls, sandbox } = processDouble();
+
+  await assert.rejects(
+    () =>
+      startDaytonaProcess({
+        ...startInput(sandbox),
+        authorizePreparation: () => Promise.resolve(null),
+      }),
+    (error: unknown) =>
+      error instanceof DaytonaProcessError &&
+      error.code === "process_start_failed"
+  );
+
+  assert.deepEqual(calls, []);
+});
+
+test("cleans only its prepared resources when launch authorization is rejected", async () => {
+  const { calls, sandbox, sessionIds } = processDouble();
   const cancellation = { recorded: false };
 
   await assert.rejects(
@@ -261,6 +308,7 @@ test("does not execute when durable cancellation rejects launch authorization", 
         call.command === `rm -f -- '${PATH}' && test ! -e '${PATH}'`
     )
   );
+  assert.deepEqual(sessionIds(), []);
 });
 
 test("cleans deterministic credentials and sessions at every failed start boundary", async () => {
@@ -292,6 +340,44 @@ test("cleans deterministic credentials and sessions at every failed start bounda
   );
 });
 
+test("a rejected interleaved preparation cannot delete the first claim's session", async () => {
+  const { calls, sandbox, sessionIds } = processDouble();
+  let releaseFirstLaunch: ((authorized: boolean) => void) | undefined;
+  let signalFirstLaunch: (() => void) | undefined;
+  const firstLaunchReached = new Promise<void>((resolve) => {
+    signalFirstLaunch = resolve;
+  });
+  const first = startDaytonaProcess({
+    ...startInput(sandbox),
+    authorizeLaunch: () =>
+      new Promise((resolve) => {
+        releaseFirstLaunch = resolve;
+        signalFirstLaunch?.();
+      }),
+  });
+
+  await firstLaunchReached;
+  assert.deepEqual(sessionIds(), [SESSION]);
+  const mutationsBeforeSecond = calls.length;
+
+  await assert.rejects(
+    () =>
+      startDaytonaProcess({
+        ...startInput(sandbox),
+        authorizePreparation: () => Promise.resolve(null),
+      }),
+    (error: unknown) => error instanceof DaytonaProcessError
+  );
+
+  assert.equal(calls.length, mutationsBeforeSecond);
+  assert.deepEqual(sessionIds(), [SESSION]);
+  if (!releaseFirstLaunch) {
+    throw new Error("First launch authorization did not become pending.");
+  }
+  releaseFirstLaunch(true);
+  await first;
+});
+
 test("ambiguous session creation is looked up, deleted, and verified before retry", async () => {
   const { calls, sandbox } = processDouble({
     createCreatesSession: true,
@@ -307,7 +393,7 @@ test("ambiguous session creation is looked up, deleted, and verified before retr
 
   assert.deepEqual(
     calls.map((call) => call.kind),
-    ["command", "list", "list", "command", "list", "delete", "list"]
+    ["command", "list", "list", "create", "command", "list", "delete", "list"]
   );
   assert.equal(
     calls
@@ -331,8 +417,8 @@ test("an ambiguous creation still deletes its session when its first cleanup loo
       error.code === "session_create_failed"
   );
 
-  assert.equal(calls[5]?.kind, "delete");
-  assert.equal(calls[5]?.command, SESSION);
+  assert.equal(calls[6]?.kind, "delete");
+  assert.equal(calls[6]?.command, SESSION);
 });
 
 test("a stale deterministic session is removed before a retry creates a fresh one", async () => {

@@ -241,7 +241,36 @@ export type DaytonaStartedProcess = Readonly<{
   workspace: string;
 }>;
 
+declare const daytonaPreparationClaimBrand: unique symbol;
+
+/**
+ * Opaque durable ownership of a single preparation attempt. Only the durable
+ * dispatch implementation may mint this branded value.
+ */
+export type DaytonaPreparationClaim = string & {
+  readonly [daytonaPreparationClaimBrand]: "DaytonaPreparationClaim";
+};
+
+export type DaytonaPreparationAuthorization = Readonly<{
+  runId: string;
+}>;
+
+/**
+ * Durable pre-mutation gate supplied by the dispatch service.
+ *
+ * This must atomically verify the active dispatch lease/run and reserve
+ * exclusive ownership of the run's deterministic session and credential path
+ * for the returned claim. It returns `null` when the run is cancelled, stale,
+ * or displaced. It must never allow overlapping valid claims for a run:
+ * because Daytona session ownership is deterministic, a later claim may not
+ * be issued until cleanup by the earlier claim cannot delete its resources.
+ */
+export type DaytonaPreparationAuthorizer = (
+  authorization: DaytonaPreparationAuthorization
+) => Promise<DaytonaPreparationClaim | null>;
+
 export type DaytonaLaunchAuthorization = Readonly<{
+  preparationClaim: DaytonaPreparationClaim;
   runId: string;
   sessionId: string;
 }>;
@@ -249,8 +278,11 @@ export type DaytonaLaunchAuthorization = Readonly<{
 /**
  * Durable launch gate supplied by the dispatch service.
  *
- * It must atomically verify the active dispatch lease, reject cancelled or
- * stale runs, and persist the supplied session ID before returning `true`.
+ * It must atomically verify that the supplied preparation claim remains the
+ * current exclusive claim for the active dispatch lease/run, reject cancelled
+ * or displaced claims, and persist the supplied session ID before returning
+ * `true`. The exclusive preparation invariant prevents cleanup of a rejected
+ * claim from deleting a session authorized by another claim.
  * Callers must durably record cancellation before invoking
  * `stopDaytonaProcess`; this adapter deliberately uses no process-local lock.
  * Daytona supplies the command ID only after execution is accepted, so the
@@ -269,6 +301,7 @@ export type DaytonaLaunchAuthorizer = (
  */
 export async function startDaytonaProcess(input: {
   authorizeLaunch: DaytonaLaunchAuthorizer;
+  authorizePreparation: DaytonaPreparationAuthorizer;
   credential: HarnessCredential;
   instructions: string;
   model: string;
@@ -283,6 +316,29 @@ export async function startDaytonaProcess(input: {
   const sessionId = daytonaRunSessionName(input.runId);
   const credentialPath = daytonaRunCredentialPath(input.runId);
   const { process } = input.sandbox;
+
+  if (typeof input.authorizePreparation !== "function") {
+    throw new DaytonaProcessError(
+      "Daytona preparation authorization is required before provider mutation.",
+      "process_start_failed",
+      false
+    );
+  }
+  const preparationClaim = await input
+    .authorizePreparation({
+      runId: input.runId,
+    })
+    .then(
+      (claim) => claim,
+      () => null
+    );
+  if (!preparationClaim) {
+    throw new DaytonaProcessError(
+      "Daytona preparation authorization could not be confirmed.",
+      "process_start_failed",
+      false
+    );
+  }
 
   try {
     const staged = await process.executeCommand(
@@ -352,6 +408,7 @@ export async function startDaytonaProcess(input: {
       );
     }
     const authorized = await input.authorizeLaunch({
+      preparationClaim,
       runId: input.runId,
       sessionId,
     });
