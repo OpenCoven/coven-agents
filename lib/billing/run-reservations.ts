@@ -55,6 +55,12 @@ export interface RunReservationTransaction {
     tenant?: string;
     tenantHash?: string;
   }) => Promise<number>;
+  compensateConsumed: (
+    runId: string,
+    tenant: string,
+    compensatedAt: Date
+  ) => Promise<RunReservationRecord | null>;
+  discardReserved: (runId: string) => Promise<RunReservationRecord | null>;
   findByRunId: (runId: string) => Promise<RunReservationRecord | null>;
   hasUsageRunId: (runId: string) => Promise<boolean>;
   insert: (reservation: RunReservationRecord) => Promise<void>;
@@ -161,6 +167,48 @@ export function drizzleRunReservationDatabase(
                 .where(and(...legacyConditions));
 
               return (reservationRow?.units ?? 0) + (legacyRow?.units ?? 0);
+            },
+            compensateConsumed: async (runId, tenant, compensatedAt) => {
+              const [updated] = await tx
+                .update(runReservation)
+                .set({
+                  consumedAt: null,
+                  releasedAt: compensatedAt,
+                  state: "released",
+                })
+                .where(
+                  and(
+                    eq(runReservation.runId, runId),
+                    eq(runReservation.state, "consumed")
+                  )
+                )
+                .returning();
+              if (updated) {
+                await tx
+                  .delete(runUsage)
+                  .where(
+                    and(eq(runUsage.runId, runId), eq(runUsage.tenant, tenant))
+                  );
+                return updated;
+              }
+              const [reservation] = await tx
+                .select()
+                .from(runReservation)
+                .where(eq(runReservation.runId, runId))
+                .limit(1);
+              return reservation ?? null;
+            },
+            discardReserved: async (runId) => {
+              const [discarded] = await tx
+                .delete(runReservation)
+                .where(
+                  and(
+                    eq(runReservation.runId, runId),
+                    eq(runReservation.state, "reserved")
+                  )
+                )
+                .returning();
+              return discarded ?? null;
             },
             findByRunId: async (runId) => {
               const [reservation] = await tx
@@ -374,11 +422,54 @@ export async function consumeRunReservation(
     if (!reservation) {
       return { kind: "missing" };
     }
+
     if (reservation.state === "released") {
       return { kind: "released", reservation };
     }
     return { kind: "consumed", reservation };
   });
+}
+
+/**
+ * Deletes only an unconsumed reservation. It is used when credential
+ * preparation failed before a command could become authoritative, allowing a
+ * retry to reserve the same durable run identifier without consuming capacity.
+ */
+export async function discardRunReservation(
+  database: RunReservationDatabase,
+  input: { runId: string }
+): Promise<RunReservationRecord | null> {
+  return await withSerializableRetry(database, (tx) =>
+    tx.discardReserved(input.runId)
+  );
+}
+
+/**
+ * Reverses a just-consumed reservation only after provider cleanup proves no
+ * command launched. The usage row and reservation state change in the same
+ * serializable transaction, preventing an unlaunched run from being billed.
+ */
+export async function compensateRunReservation(
+  database: RunReservationDatabase,
+  input: { compensatedAt?: Date; runId: string; tenant: string }
+): Promise<
+  | { kind: "compensated"; reservation: RunReservationRecord }
+  | { kind: "missing" }
+  | { kind: "not_consumed"; reservation: RunReservationRecord }
+> {
+  const reservation = await withSerializableRetry(database, (tx) =>
+    tx.compensateConsumed(
+      input.runId,
+      input.tenant,
+      input.compensatedAt ?? new Date()
+    )
+  );
+  if (!reservation) {
+    return { kind: "missing" };
+  }
+  return reservation.state === "released"
+    ? { kind: "compensated", reservation }
+    : { kind: "not_consumed", reservation };
 }
 
 export async function releaseRunReservation(

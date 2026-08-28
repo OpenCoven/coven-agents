@@ -17,6 +17,7 @@ import {
   daytonaSandboxConfiguration,
   deleteDaytonaSandbox,
   ensureDaytonaSandbox,
+  resetDaytonaSandboxForCancellation,
   warmDaytonaSandbox,
 } from "./sandbox";
 
@@ -94,6 +95,7 @@ test("stored provider IDs are resolved and stopped or archived sandboxes start",
           return Promise.resolve();
         },
       });
+
       const result = await ensureDaytonaSandbox(
         principal,
         agent({ daytonaSandboxId: "stored", sandboxLifecycle: "ready" }),
@@ -113,6 +115,62 @@ test("stored provider IDs are resolved and stopped or archived sandboxes start",
       assert.equal(starts, 1);
     })
   );
+});
+
+test("cancellation reset fences the sandbox before clearing its generation", async () => {
+  const calls: string[] = [];
+  const dispatchAuthority = {
+    expectedVersion: 2,
+    leaseToken: "cancel-lease",
+    runId: "00000000-0000-4000-8000-000000000002",
+  } as never;
+  const resetting = agent({
+    daytonaSandboxId: "sandbox",
+    sandboxGeneration: 2,
+    sandboxLifecycle: "resetting",
+    version: 4,
+  });
+  const cleared = agent({
+    ...resetting,
+    daytonaSandboxId: null,
+    sandboxLifecycle: "unprovisioned",
+    version: 5,
+  });
+
+  const reset = await resetDaytonaSandboxForCancellation(
+    { kind: "runner-operator" },
+    dispatchAuthority,
+    {
+      daytona: {
+        create: () => Promise.reject(new Error("must not create")),
+        get: () =>
+          Promise.resolve(
+            sandbox(SandboxState.STARTED, {
+              delete: () => {
+                calls.push("delete");
+                return Promise.resolve();
+              },
+            })
+          ),
+      },
+      store: store({
+        beginDaytonaSandboxResetForCancellation: () => {
+          calls.push("begin");
+          return Promise.resolve({
+            kind: "resetting" as const,
+            value: resetting,
+          });
+        },
+        finishDaytonaSandboxResetForRecovery: () => {
+          calls.push("finish");
+          return Promise.resolve({ kind: "updated" as const, value: cleared });
+        },
+      }),
+    }
+  );
+
+  assert.equal(reset, true);
+  assert.deepEqual(calls, ["begin", "delete", "finish"]);
 });
 
 test("only Daytona-reported recoverable errors call recover", async () => {

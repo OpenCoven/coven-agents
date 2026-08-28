@@ -11,6 +11,7 @@ import type {
 export type DaytonaDispatchAuthorizers = Readonly<{
   authorizeLaunch: DaytonaLaunchAuthorizer;
   authorizePreparation: DaytonaPreparationAuthorizer;
+  currentAuthority: () => RunnerDispatchAuthority;
   releasePreparation: DaytonaPreparationRelease;
 }>;
 
@@ -29,6 +30,7 @@ export function daytonaDispatchAuthorizers(
   authority: RunnerDispatchAuthority
 ): DaytonaDispatchAuthorizers {
   let prepared: RunnerDispatchAuthority | undefined;
+  let latest = authority;
 
   return {
     authorizeLaunch: (launch) => {
@@ -50,6 +52,7 @@ export function daytonaDispatchAuthorizers(
             return null;
           }
           prepared = result.authority;
+          latest = result.authority;
           return result.authority;
         });
     },
@@ -65,8 +68,10 @@ export function daytonaDispatchAuthorizers(
         return null;
       }
       prepared = result.authority;
+      latest = result.authority;
       return result.attemptId;
     },
+    currentAuthority: () => latest,
     releasePreparation: async (release) => {
       if (
         release.runId !== authority.runId ||
@@ -82,6 +87,7 @@ export function daytonaDispatchAuthorizers(
         return null;
       }
       prepared = undefined;
+      latest = result.authority;
       return result.authority;
     },
   };

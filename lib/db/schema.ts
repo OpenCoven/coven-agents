@@ -455,6 +455,7 @@ export const runnerAgent = pgTable(
         "provisioning",
         "provisioning_ambiguous",
         "ready",
+        "resetting",
         "decommissioning",
         "decommission_failed",
       ],
@@ -486,6 +487,11 @@ export const runnerAgent = pgTable(
   (table) => [
     unique("RunnerAgent_id_tenant_key").on(table.id, table.tenant),
     index("RunnerAgent_tenant_updatedAt_idx").on(table.tenant, table.updatedAt),
+    index("RunnerAgent_sandbox_recovery_idx")
+      .on(table.sandboxLifecycle, table.sandboxUpdatedAt)
+      .where(
+        sql`${table.sandboxLifecycle} in ('provisioning', 'provisioning_ambiguous', 'resetting', 'decommissioning')`
+      ),
     check(
       "RunnerAgent_tenant_valid",
       sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`
@@ -500,7 +506,7 @@ export const runnerAgent = pgTable(
     ),
     check(
       "RunnerAgent_sandboxLifecycle_valid",
-      sql`${table.sandboxLifecycle} in ('unprovisioned', 'provisioning', 'provisioning_ambiguous', 'ready', 'decommissioning', 'decommission_failed')`
+      sql`${table.sandboxLifecycle} in ('unprovisioned', 'provisioning', 'provisioning_ambiguous', 'ready', 'resetting', 'decommissioning', 'decommission_failed')`
     ),
     check(
       "RunnerAgent_warmStatus_valid",
@@ -520,6 +526,7 @@ export const runnerRun = pgTable(
   "RunnerRun",
   {
     agentId: uuid("agentId").notNull(),
+    cancellationRequestedAt: timestamp("cancellationRequestedAt"),
     commandEvidence: jsonb("commandEvidence")
       .$type<CommandEvidence[]>()
       .notNull()
@@ -530,6 +537,7 @@ export const runnerRun = pgTable(
       length: 36,
     }),
     daytonaCommandId: text("daytonaCommandId"),
+    daytonaLogCursor: integer("daytonaLogCursor").notNull().default(0),
     daytonaSessionId: text("daytonaSessionId"),
     dispatchLeaseExpiresAt: timestamp("dispatchLeaseExpiresAt"),
     dispatchLeaseToken: varchar("dispatchLeaseToken", { length: 80 }),
@@ -588,6 +596,11 @@ export const runnerRun = pgTable(
     index("RunnerRun_terminal_retention_idx")
       .on(table.agentId, table.completedAt)
       .where(sql`${table.status} in ('completed', 'failed', 'cancelled')`),
+    index("RunnerRun_terminal_attempt_cleanup_idx")
+      .on(table.dispatchLeaseExpiresAt)
+      .where(
+        sql`${table.dispatchState} = 'terminal' and ${table.daytonaAttemptId} is not null and ${table.dispatchLeaseToken} is not null`
+      ),
     uniqueIndex("RunnerRun_agent_operation_idx").on(
       table.agentId,
       table.operationId
@@ -616,6 +629,10 @@ export const runnerRun = pgTable(
     ),
     check("RunnerRun_queueSequence_positive", sql`${table.queueSequence} > 0`),
     check("RunnerRun_logCursor_nonnegative", sql`${table.logCursor} >= 0`),
+    check(
+      "RunnerRun_daytonaLogCursor_nonnegative",
+      sql`${table.daytonaLogCursor} >= 0`
+    ),
     check("RunnerRun_version_nonnegative", sql`${table.version} >= 0`),
     check(
       "RunnerRun_timestamps_valid",
@@ -646,6 +663,10 @@ export const runnerRun = pgTable(
       sql`${table.daytonaCommandId} is null or ${table.daytonaSessionId} is not null`
     ),
     check(
+      "RunnerRun_daytonaSession_requires_attempt",
+      sql`${table.daytonaSessionId} is null or ${table.daytonaAttemptId} is not null`
+    ),
+    check(
       "RunnerRun_daytonaAttempt_valid",
       sql`${table.daytonaAttemptId} is null or ${table.daytonaAttemptId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'`
     ),
@@ -653,6 +674,45 @@ export const runnerRun = pgTable(
 );
 
 export type RunnerRun = InferSelectModel<typeof runnerRun>;
+
+/**
+ * Attempt-scoped encrypted material used solely to redact later Daytona logs.
+ * It intentionally has no plaintext or public runner-record projection.
+ */
+export const runnerAttemptRedaction = pgTable(
+  "RunnerAttemptRedaction",
+  {
+    aadVersion: integer("aadVersion").notNull(),
+    attemptId: varchar("attemptId", { length: 36 }).notNull().unique(),
+    ciphertext: text("ciphertext").notNull(),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    iv: varchar("iv", { length: 64 }).notNull(),
+    kekVersion: varchar("kekVersion", { length: 32 }).notNull(),
+    runId: uuid("runId")
+      .primaryKey()
+      .notNull()
+      .references(() => runnerRun.id, { onDelete: "cascade" }),
+    wrappedKey: varchar("wrappedKey", { length: 128 }).notNull(),
+  },
+  (table) => [
+    check(
+      "RunnerAttemptRedaction_aadVersion_valid",
+      sql`${table.aadVersion} = 1`
+    ),
+    check(
+      "RunnerAttemptRedaction_attemptId_valid",
+      sql`${table.attemptId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'`
+    ),
+    check(
+      "RunnerAttemptRedaction_envelope_nonempty",
+      sql`char_length(${table.ciphertext}) > 0 and char_length(${table.iv}) > 0 and char_length(${table.kekVersion}) > 0 and char_length(${table.wrappedKey}) > 0`
+    ),
+  ]
+);
+
+export type RunnerAttemptRedaction = InferSelectModel<
+  typeof runnerAttemptRedaction
+>;
 
 export const runnerRunEvent = pgTable(
   "RunnerRunEvent",

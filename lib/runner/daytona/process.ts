@@ -209,6 +209,7 @@ async function cleanupFailedStart(
   credentialPath: string,
   sessionName: string,
   primary: DaytonaProcessError,
+  deleteAttemptRedaction: (attemptId: DaytonaAttemptId) => Promise<boolean>,
   releasePreparation: (
     attemptId: DaytonaAttemptId
   ) => Promise<RunnerDispatchAuthority | null>,
@@ -229,6 +230,19 @@ async function cleanupFailedStart(
     throw new DaytonaProcessError(
       `Daytona ${primary.code} cleanup could not be confirmed; reset the sandbox before retrying.`,
       "sandbox_reset_required",
+      true,
+      { cause: primary }
+    );
+  }
+  try {
+    if (!(await deleteAttemptRedaction(attemptId))) {
+      throw new Error("Attempt redaction deletion was rejected.");
+    }
+  } catch {
+    // biome-ignore lint/style/useErrorCause: Durable redaction errors can contain encrypted metadata.
+    throw new DaytonaProcessError(
+      "Daytona cleanup succeeded but attempt redaction retirement could not be confirmed.",
+      "durable_release_failed",
       true,
       { cause: primary }
     );
@@ -309,6 +323,21 @@ export type DaytonaPreparationRelease = (
   }>
 ) => Promise<RunnerDispatchAuthority | null>;
 
+export type DaytonaAttemptRedactionPersister = (
+  input: Readonly<{
+    attemptId: DaytonaAttemptId;
+    credential: string;
+    runId: string;
+  }>
+) => Promise<boolean>;
+
+export type DaytonaAttemptRedactionRelease = (
+  input: Readonly<{
+    attemptId: DaytonaAttemptId;
+    runId: string;
+  }>
+) => Promise<boolean>;
+
 /**
  * Stages the tenant credential exactly once, creates a short-lived process
  * session, starts one non-echoing async command, then durably attaches the
@@ -319,8 +348,10 @@ export async function startDaytonaProcess(input: {
   authorizeLaunch: DaytonaLaunchAuthorizer;
   authorizePreparation: DaytonaPreparationAuthorizer;
   credential: HarnessCredential;
+  deleteAttemptRedaction: DaytonaAttemptRedactionRelease;
   instructions: string;
   model: string;
+  persistAttemptRedaction: DaytonaAttemptRedactionPersister;
   releasePreparation: DaytonaPreparationRelease;
   runId: string;
   runtime: string;
@@ -353,6 +384,20 @@ export async function startDaytonaProcess(input: {
       false
     );
   }
+  if (typeof input.persistAttemptRedaction !== "function") {
+    throw new DaytonaProcessError(
+      "Daytona attempt redaction persistence is required before provider mutation.",
+      "process_start_failed",
+      false
+    );
+  }
+  if (typeof input.deleteAttemptRedaction !== "function") {
+    throw new DaytonaProcessError(
+      "Daytona attempt redaction cleanup is required before provider mutation.",
+      "process_start_failed",
+      false
+    );
+  }
   let attemptId: DaytonaAttemptId | null;
   try {
     attemptId = await input.authorizePreparation({
@@ -379,6 +424,37 @@ export async function startDaytonaProcess(input: {
   const credentialPath = daytonaRunCredentialPath(input.runId, attemptId);
 
   try {
+    if (
+      !(await input.persistAttemptRedaction({
+        attemptId,
+        credential: auth.value,
+        runId: input.runId,
+      }))
+    ) {
+      throw new Error("Attempt redaction persistence was rejected.");
+    }
+  } catch {
+    return await cleanupFailedStart(
+      input.sandbox,
+      credentialPath,
+      sessionId,
+      new DaytonaProcessError(
+        "Daytona attempt redaction persistence could not be confirmed.",
+        "process_start_failed",
+        true
+      ),
+      (claim) =>
+        input.deleteAttemptRedaction({ attemptId: claim, runId: input.runId }),
+      (claim) =>
+        input.releasePreparation({
+          attemptId: claim,
+          runId: input.runId,
+        }),
+      attemptId
+    );
+  }
+
+  try {
     // A deterministic session can survive an ambiguous earlier create. Its
     // absence must be confirmed before a new credential is ever written.
     await removeSession(input.sandbox, sessionId);
@@ -392,6 +468,8 @@ export async function startDaytonaProcess(input: {
         "Daytona could not prepare the run process session.",
         error
       ),
+      (claim) =>
+        input.deleteAttemptRedaction({ attemptId: claim, runId: input.runId }),
       (claim) =>
         input.releasePreparation({
           attemptId: claim,
@@ -428,6 +506,8 @@ export async function startDaytonaProcess(input: {
             error
           ),
       (claim) =>
+        input.deleteAttemptRedaction({ attemptId: claim, runId: input.runId }),
+      (claim) =>
         input.releasePreparation({
           attemptId: claim,
           runId: input.runId,
@@ -448,6 +528,8 @@ export async function startDaytonaProcess(input: {
         "Daytona could not create the run process session.",
         error
       ),
+      (claim) =>
+        input.deleteAttemptRedaction({ attemptId: claim, runId: input.runId }),
       (claim) =>
         input.releasePreparation({
           attemptId: claim,
@@ -496,6 +578,8 @@ export async function startDaytonaProcess(input: {
             error
           ),
       (claim) =>
+        input.deleteAttemptRedaction({ attemptId: claim, runId: input.runId }),
+      (claim) =>
         input.releasePreparation({
           attemptId: claim,
           runId: input.runId,
@@ -523,6 +607,8 @@ export async function startDaytonaProcess(input: {
         true
       ),
       (claim) =>
+        input.deleteAttemptRedaction({ attemptId: claim, runId: input.runId }),
+      (claim) =>
         input.releasePreparation({
           attemptId: claim,
           runId: input.runId,
@@ -540,6 +626,8 @@ export async function startDaytonaProcess(input: {
         "process_start_failed",
         false
       ),
+      (claim) =>
+        input.deleteAttemptRedaction({ attemptId: claim, runId: input.runId }),
       (claim) =>
         input.releasePreparation({
           attemptId: claim,

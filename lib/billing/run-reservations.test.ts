@@ -4,7 +4,9 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import { runReservation, runUsage } from "@/lib/db/schema";
 import { periodStart } from "./period";
 import {
+  compensateRunReservation,
   consumeRunReservation,
+  discardRunReservation,
   globalDailyRunCapFromEnv,
   type RunReservationDatabase,
   type RunReservationRecord,
@@ -121,6 +123,38 @@ class MemoryReservationDatabase
       }
     }
     return Promise.resolve(units);
+  }
+
+  compensateConsumed(
+    runId: string,
+    tenant: string,
+    compensatedAt: Date
+  ): Promise<RunReservationRecord | null> {
+    const reservation = this.reservations.get(runId);
+    if (!reservation) {
+      return Promise.resolve(null);
+    }
+    if (reservation.state !== "consumed") {
+      return Promise.resolve(reservation);
+    }
+    const released: RunReservationRecord = {
+      ...reservation,
+      consumedAt: null,
+      releasedAt: compensatedAt,
+      state: "released",
+    };
+    this.reservations.set(runId, released);
+    this.usage.delete(`${tenant}:${runId}`);
+    return Promise.resolve(released);
+  }
+
+  discardReserved(runId: string): Promise<RunReservationRecord | null> {
+    const reservation = this.reservations.get(runId);
+    if (reservation?.state !== "reserved") {
+      return Promise.resolve(null);
+    }
+    this.reservations.delete(runId);
+    return Promise.resolve(reservation);
   }
 
   insert(reservation: RunReservationRecord): Promise<void> {
@@ -729,6 +763,43 @@ test("released reservations do not consume tenant or global capacity", async () 
     tenantDailyRemaining: 1,
     tenantMonthlyRemaining: 1,
   });
+});
+
+test("discarding an unconsumed reservation lets a transient credential failure retry safely", async () => {
+  const db = new MemoryReservationDatabase();
+  await reserveRun(db, reservationInput("retryable-credential"));
+
+  const discarded = await discardRunReservation(db, {
+    runId: "retryable-credential",
+  });
+  const retried = await reserveRun(
+    db,
+    reservationInput("retryable-credential")
+  );
+
+  assert.equal(discarded?.runId, "retryable-credential");
+  assert.equal(retried.kind, "reserved");
+  assert.equal(db.usage.size, 0);
+});
+
+test("compensating a pre-launch consumed reservation removes its usage charge", async () => {
+  const db = new MemoryReservationDatabase();
+  await reserveRun(db, reservationInput("launch-compensation"));
+  await consumeRunReservation(db, {
+    consumedAt: NOW,
+    runId: "launch-compensation",
+    tenant: TENANT,
+  });
+
+  const compensated = await compensateRunReservation(db, {
+    compensatedAt: new Date(NOW.getTime() + 1000),
+    runId: "launch-compensation",
+    tenant: TENANT,
+  });
+
+  assert.equal(compensated.kind, "compensated");
+  assert.equal(db.usage.has(`${TENANT}:launch-compensation`), false);
+  assert.equal(db.reservations.get("launch-compensation")?.state, "released");
 });
 
 test("global capacity configuration accepts only positive integers", () => {

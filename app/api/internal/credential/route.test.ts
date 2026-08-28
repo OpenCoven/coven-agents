@@ -6,16 +6,18 @@ import {
 } from "@/lib/billing/run-reservations";
 import { CredentialLeaseDeniedError } from "@/lib/credentials/leases";
 import {
+  type CredentialLendingDependencies,
+  lendCredentialWithLease,
+  lendCredentialWithReservation,
+} from "@/lib/credentials/lending";
+import {
   CapReachedError,
   fetchTenantCredential,
 } from "@/worker/src/tenant-credentials";
 import {
   authorizeInternalRequest,
-  type CredentialLendingDependencies,
   credentialRunScopeMatches,
   legacyCredentialLendingEnabled,
-  lendCredentialWithLease,
-  lendCredentialWithReservation,
 } from "./route";
 
 const NOW = new Date("2026-08-25T18:00:00.000Z");
@@ -227,7 +229,7 @@ function lendingDependencies(
     },
     issue: () => {
       events.push("issue");
-      return Promise.resolve();
+      return Promise.resolve({ kind: "issued" as const });
     },
     lease: async (_input, prepare, operation) => {
       events.push("lease");
