@@ -32,7 +32,7 @@
     "test": "export PLAYWRIGHT=True && pnpm exec playwright test",
     "test:unit": "tsx --test scripts/*.test.ts && tsx --conditions=react-server --test 'lib/**/*.test.ts' 'app/**/*.test.ts' && pnpm --filter @opencoven/agent-contracts test && pnpm --filter @opencoven/harness test && pnpm --filter @opencoven/cloud-runner test",
     "typecheck": "tsc --noEmit && pnpm -r typecheck",
-    "validate:runtime": "tsx scripts/validate-runtime-config.ts"
+    "validate:runtime": "tsx --env-file-if-exists=.env.local scripts/validate-runtime-config.ts"
   },
   "lint-staged": {
     "*": "corepack pnpm run fix --"

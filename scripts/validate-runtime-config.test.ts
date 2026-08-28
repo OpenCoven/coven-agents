@@ -145,6 +145,37 @@ test("rejects an invalid Daytona target", () => {
   assertRejectedWithMessage(result, 'DAYTONA_TARGET must be "us" or "eu".');
 });
 
+test("defaults RUN_ADMISSION_MODE to queue when omitted", () => {
+  const result = runValidator({ RUN_ADMISSION_MODE: undefined });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("defaults RUN_ADMISSION_MODE to queue when blank", () => {
+  for (const blankValue of ["", "  "]) {
+    const result = runValidator({ RUN_ADMISSION_MODE: blankValue });
+
+    assert.equal(result.status, 0, result.stderr);
+  }
+});
+
+test('accepts RUN_ADMISSION_MODE set to "queue" after trimming', () => {
+  const result = runValidator({ RUN_ADMISSION_MODE: " queue " });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("rejects invalid RUN_ADMISSION_MODE values", () => {
+  for (const invalidValue of ["reject", "bypass"]) {
+    const result = runValidator({ RUN_ADMISSION_MODE: invalidValue });
+
+    assertRejectedWithMessage(
+      result,
+      'RUN_ADMISSION_MODE must be "queue" when set.'
+    );
+  }
+});
+
 test("accepts zero-valued runtime and admission settings", () => {
   const result = runValidator({
     DAYTONA_AUTO_ARCHIVE_MINUTES: "0",

@@ -70,6 +70,8 @@ function validateProductionRuntimeConfig(environment: NodeJS.ProcessEnv): void {
       maximum
     );
   }
+
+  validateRunAdmissionMode(environment.RUN_ADMISSION_MODE);
 }
 
 function validateDaytonaTarget(configured: string | undefined): void {
@@ -122,6 +124,17 @@ function validateBoundedNonNegativeSafeIntegerSetting(
     throw new Error(errorMessage);
   }
   return parsed;
+}
+
+function validateRunAdmissionMode(configured: string | undefined): "queue" {
+  const normalized = configured?.trim();
+  if (normalized === undefined || normalized === "") {
+    return "queue";
+  }
+  if (normalized !== "queue") {
+    throw new Error('RUN_ADMISSION_MODE must be "queue" when set.');
+  }
+  return "queue";
 }
 
 main().catch((error: unknown) => {
