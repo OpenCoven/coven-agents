@@ -951,6 +951,67 @@ test("warm and decommission transitions retain generation and version fences", a
   assert.match(deleteQuery, /"version" = \$/u);
 });
 
+test("durable decommissioning resumes with its current generation and provider ID", async () => {
+  const decommissioning = agent({
+    daytonaSandboxId: "sandbox-after-crash",
+    sandboxGeneration: 8,
+    sandboxLifecycle: "decommissioning",
+    version: 13,
+  });
+  const { statements, store } = scripted([decommissioning]);
+
+  const result = await store.beginDaytonaSandboxDecommission(
+    principal,
+    decommissioning.id
+  );
+
+  assert.deepEqual(result, { kind: "decommissioning", value: decommissioning });
+  assert.deepEqual(
+    statements.map((item) => item.name),
+    ["lock-agent-for-daytona-decommission"]
+  );
+  assert.equal(
+    result.kind === "decommissioning" && result.value.daytonaSandboxId,
+    "sandbox-after-crash"
+  );
+  assert.equal(
+    result.kind === "decommissioning" && result.value.sandboxGeneration,
+    8
+  );
+});
+
+test("permanent decommission failures persist error, warm, and lifecycle state", async () => {
+  const decommissioning = agent({
+    daytonaSandboxId: "sandbox",
+    sandboxGeneration: 2,
+    sandboxLifecycle: "decommissioning",
+    version: 5,
+  });
+  const failed = agent({
+    ...decommissioning,
+    sandboxLifecycle: "decommission_failed",
+    status: "error",
+    version: 6,
+    warmStatus: "failed",
+  });
+  const { statements, store } = scripted([failed]);
+
+  assert.deepEqual(
+    await store.failDaytonaSandboxDecommission(principal, {
+      agentId: decommissioning.id,
+      expectedGeneration: decommissioning.sandboxGeneration,
+      expectedVersion: decommissioning.version,
+    }),
+    { kind: "updated", value: failed }
+  );
+
+  const query = queryText(statements[0] as RunnerStoreStatement);
+  assert.match(query, /"sandboxLifecycle" = 'decommission_failed'/u);
+  assert.match(query, /"status" = 'error'/u);
+  assert.match(query, /"warmStatus" = 'failed'/u);
+  assert.match(query, /"warmUpdatedAt" = now\(\)/u);
+});
+
 test("the production statement shape remains Drizzle-safe", () => {
   const statement: RunnerStoreStatement = {
     args: {},

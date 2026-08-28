@@ -384,7 +384,7 @@ export async function deleteDaytonaSandbox(
   dependencies: DaytonaSandboxDependencies
 ): Promise<
   | { kind: "deleted" }
-  | { kind: "busy" | "in_progress" | "not_found" | "stale_version" }
+  | { kind: "busy" | "not_found" | "stale_version" }
   | { kind: "failed"; error: DaytonaProviderErrorKind }
 > {
   const decommission = await dependencies.store.beginDaytonaSandboxDecommission(
@@ -392,9 +392,7 @@ export async function deleteDaytonaSandbox(
     agentId
   );
   if (decommission.kind !== "decommissioning") {
-    return decommission.kind === "in_progress"
-      ? { kind: "in_progress" }
-      : decommission;
+    return decommission;
   }
 
   const agent = decommission.value;
@@ -404,12 +402,14 @@ export async function deleteDaytonaSandbox(
       await sandbox.delete(SANDBOX_OPERATION_TIMEOUT_SECONDS, true);
     } catch (error) {
       const kind = classifyDaytonaProviderError(error);
-      if (kind !== "not_found") {
+      if (kind === "non_retryable") {
         await dependencies.store.failDaytonaSandboxDecommission(principal, {
           agentId: agent.id,
           expectedGeneration: agent.sandboxGeneration,
           expectedVersion: agent.version,
         });
+      }
+      if (kind !== "not_found") {
         return { error: kind, kind: "failed" };
       }
     }

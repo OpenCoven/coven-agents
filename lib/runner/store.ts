@@ -594,7 +594,6 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
       | { kind: "decommissioning"; value: RunnerAgentRecord }
       | { kind: "busy" }
       | { kind: "not_found" }
-      | { kind: "in_progress"; value: RunnerAgentRecord }
     > =>
       database.transaction(async (transaction) => {
         const [current] = await transaction.execute(
@@ -612,7 +611,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         }
         const agent = asAgent(current);
         if (agent.sandboxLifecycle === "decommissioning") {
-          return { kind: "in_progress", value: agent };
+          return { kind: "decommissioning", value: agent };
         }
         const [liveRun] = await transaction.execute(
           statement(
@@ -904,6 +903,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             { ...input, tenant: principal.tenant },
             sql`UPDATE "RunnerAgent"
               SET "sandboxLifecycle" = 'decommission_failed',
+                  "status" = 'error',
+                  "warmStatus" = 'failed',
+                  "warmUpdatedAt" = now(),
                   "updatedAt" = now(),
                   "version" = "version" + 1
               WHERE "id" = ${input.agentId}

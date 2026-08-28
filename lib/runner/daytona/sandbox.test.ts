@@ -341,7 +341,198 @@ test("decommissioning is durable until provider deletion or provider-not-found",
     }),
   });
   assert.deepEqual(retry, { error: "retryable", kind: "failed" });
-  assert.equal(persistedFailure, true);
+  assert.equal(persistedFailure, false);
+});
+
+test("a durable decommission retries with the current sandbox fence after a crash", async () => {
+  const recovered = agent({
+    daytonaSandboxId: "sandbox-after-crash",
+    sandboxGeneration: 7,
+    sandboxLifecycle: "decommissioning",
+    version: 12,
+  });
+  let fetchedId: string | undefined;
+  let deleted = 0;
+  let deletionFence: Record<string, unknown> | undefined;
+
+  const result = await deleteDaytonaSandbox(principal, recovered.id, {
+    daytona: {
+      create: () => Promise.reject(new Error("no create")),
+      get: (id) => {
+        fetchedId = id;
+        return Promise.resolve(
+          sandbox(SandboxState.STARTED, {
+            delete: () => {
+              deleted += 1;
+              return Promise.resolve();
+            },
+          })
+        );
+      },
+    },
+    store: store({
+      beginDaytonaSandboxDecommission: () =>
+        Promise.resolve({ kind: "decommissioning" as const, value: recovered }),
+      deleteDecommissionedAgent: (
+        _principal: unknown,
+        input: Record<string, unknown>
+      ) => {
+        deletionFence = input;
+        return Promise.resolve({ kind: "deleted" as const });
+      },
+    }),
+  });
+
+  assert.deepEqual(result, { kind: "deleted" });
+  assert.equal(fetchedId, recovered.daytonaSandboxId);
+  assert.equal(deleted, 1);
+  assert.deepEqual(deletionFence, {
+    agentId: recovered.id,
+    expectedGeneration: 7,
+    expectedVersion: 12,
+  });
+});
+
+test("a retryable decommission failure remains resumable for a later successful retry", async () => {
+  const decommissioning = agent({
+    daytonaSandboxId: "stored",
+    sandboxGeneration: 5,
+    sandboxLifecycle: "decommissioning",
+    version: 10,
+  });
+  let attempts = 0;
+  let deleted = 0;
+  const dependencies = {
+    daytona: {
+      create: () => Promise.reject(new Error("no create")),
+      get: () => {
+        attempts += 1;
+        return attempts === 1
+          ? Promise.reject(new DaytonaTimeoutError("retry"))
+          : Promise.resolve(sandbox(SandboxState.STARTED));
+      },
+    },
+    store: store({
+      beginDaytonaSandboxDecommission: () =>
+        Promise.resolve({
+          kind: "decommissioning" as const,
+          value: decommissioning,
+        }),
+      deleteDecommissionedAgent: () => {
+        deleted += 1;
+        return Promise.resolve({ kind: "deleted" as const });
+      },
+      failDaytonaSandboxDecommission: () =>
+        Promise.reject(new Error("retryable failures must not transition")),
+    }),
+  };
+
+  assert.deepEqual(
+    await deleteDaytonaSandbox(principal, decommissioning.id, dependencies),
+    { error: "retryable", kind: "failed" }
+  );
+  assert.deepEqual(
+    await deleteDaytonaSandbox(principal, decommissioning.id, dependencies),
+    { kind: "deleted" }
+  );
+  assert.equal(attempts, 2);
+  assert.equal(deleted, 1);
+});
+
+test("concurrent decommission retries tolerate provider and database idempotency", async () => {
+  const decommissioning = agent({
+    daytonaSandboxId: "stored",
+    sandboxGeneration: 3,
+    sandboxLifecycle: "decommissioning",
+    version: 6,
+  });
+  let providerDeletes = 0;
+  let databaseDeletes = 0;
+  const result = await Promise.all(
+    [1, 2].map(() =>
+      deleteDaytonaSandbox(principal, decommissioning.id, {
+        daytona: {
+          create: () => Promise.reject(new Error("no create")),
+          get: () =>
+            Promise.resolve(
+              sandbox(SandboxState.STARTED, {
+                delete: () => {
+                  providerDeletes += 1;
+                  return providerDeletes === 1
+                    ? Promise.resolve()
+                    : Promise.reject(new DaytonaNotFoundError("gone"));
+                },
+              })
+            ),
+        },
+        store: store({
+          beginDaytonaSandboxDecommission: () =>
+            Promise.resolve({
+              kind: "decommissioning" as const,
+              value: decommissioning,
+            }),
+          deleteDecommissionedAgent: () => {
+            databaseDeletes += 1;
+            return Promise.resolve(
+              databaseDeletes === 1
+                ? { kind: "deleted" as const }
+                : { kind: "not_found" as const }
+            );
+          },
+        }),
+      })
+    )
+  );
+
+  assert.deepEqual(result, [{ kind: "deleted" }, { kind: "not_found" }]);
+  assert.equal(providerDeletes, 2);
+  assert.equal(databaseDeletes, 2);
+});
+
+test("non-retryable decommission failures persist the terminal lifecycle state", async () => {
+  const decommissioning = agent({
+    daytonaSandboxId: "stored",
+    sandboxGeneration: 4,
+    sandboxLifecycle: "decommissioning",
+    version: 9,
+  });
+  let persistedFence: Record<string, unknown> | undefined;
+
+  const result = await deleteDaytonaSandbox(principal, decommissioning.id, {
+    daytona: {
+      create: () => Promise.reject(new Error("no create")),
+      get: () => Promise.reject(new Error("invalid provider request")),
+    },
+    store: store({
+      beginDaytonaSandboxDecommission: () =>
+        Promise.resolve({
+          kind: "decommissioning" as const,
+          value: decommissioning,
+        }),
+      failDaytonaSandboxDecommission: (
+        _principal: unknown,
+        input: Record<string, unknown>
+      ) => {
+        persistedFence = input;
+        return Promise.resolve({
+          kind: "updated" as const,
+          value: agent({
+            ...decommissioning,
+            sandboxLifecycle: "decommission_failed",
+            status: "error",
+            warmStatus: "failed",
+          }),
+        });
+      },
+    }),
+  });
+
+  assert.deepEqual(result, { error: "non_retryable", kind: "failed" });
+  assert.deepEqual(persistedFence, {
+    agentId: decommissioning.id,
+    expectedGeneration: 4,
+    expectedVersion: 9,
+  });
 });
 
 test("provider error classification separates absent, retryable, and permanent failures", () => {
