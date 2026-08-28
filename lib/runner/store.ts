@@ -14,7 +14,6 @@ import { daytonaRunSessionName } from "./daytona/names";
 import { MAX_EVENTS_PER_RUN } from "./evidence";
 import type {
   AppendRunnerEventInput,
-  AttachDaytonaIdentifiersInput,
   BeginDaytonaSandboxDecommissionInput,
   BeginDaytonaSandboxWarmInput,
   CreateRunnerAgentInput,
@@ -232,23 +231,6 @@ function fenceOutcome(
   return null;
 }
 
-function dispatchingFenceOutcome(
-  run: RunnerRunRecord,
-  input: DispatchFence
-):
-  | { kind: "stale_version" }
-  | { kind: "lease_lost" }
-  | { kind: "not_live" }
-  | null {
-  const rejected = fenceOutcome(run, input);
-  if (rejected) {
-    return rejected;
-  }
-  return run.dispatchState === "dispatching" && run.status === "queued"
-    ? null
-    : { kind: "not_live" };
-}
-
 function dispatchAuthority(run: RunnerRunRecord): RunnerDispatchAuthority {
   if (!run.dispatchLeaseToken) {
     throw new Error("Cannot mint dispatch authority without an active lease.");
@@ -352,6 +334,9 @@ async function pruneTerminalRunsInTransaction(
         WHERE "agentId" = ${agentId}
           AND "tenant" = ${tenant}
           AND "status" IN ('completed', 'failed', 'cancelled')
+          AND "daytonaAttemptId" IS NULL
+          AND "daytonaSessionId" IS NULL
+          AND "daytonaCommandId" IS NULL
         ORDER BY "completedAt" DESC NULLS LAST, "id" DESC
         OFFSET 20
       )
@@ -435,6 +420,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         }
         if (run.daytonaAttemptId) {
           return { attemptId: run.daytonaAttemptId, kind: "cleanup_required" };
+        }
+        if (run.daytonaSessionId || run.daytonaCommandId) {
+          return { kind: "provider_identifiers_attached" };
         }
         const [updated] = await transaction.execute(
           statement(
@@ -633,168 +621,6 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           kind: "appended",
           run: runSnapshot(asRun(updated)),
         };
-      }),
-
-    attachDaytonaIdentifiers: (
-      _operator: RunnerOperator,
-      input: AttachDaytonaIdentifiersInput
-    ): Promise<RunnerMutationOutcome<RunnerRunRecord>> =>
-      database.transaction(async (transaction) => {
-        const run = await lockedOperatorRun(
-          transaction,
-          _operator,
-          input.runId
-        );
-        if (!run) {
-          return { kind: "not_found" };
-        }
-        const rejected = dispatchingFenceOutcome(run, input);
-        if (rejected) {
-          return rejected;
-        }
-        if (
-          (run.daytonaSessionId !== null &&
-            run.daytonaSessionId !== (input.sessionId ?? null)) ||
-          (run.daytonaCommandId !== null &&
-            run.daytonaCommandId !== (input.commandId ?? null))
-        ) {
-          return { kind: "stale_version" };
-        }
-        const [agent] = await transaction.execute(
-          statement(
-            "lock-agent-for-daytona-attach",
-            {
-              agentId: run.agentId,
-              sandboxGeneration: input.sandboxGeneration,
-              tenant: run.tenant,
-            },
-            sql`SELECT * FROM "RunnerAgent"
-              WHERE "id" = ${run.agentId}
-                AND "tenant" = ${run.tenant}
-              FOR UPDATE`
-          )
-        );
-        if (
-          !agent ||
-          Number(agent.sandboxGeneration) !== input.sandboxGeneration
-        ) {
-          return { kind: "generation_mismatch" };
-        }
-        const [updated] = await transaction.execute(
-          statement(
-            "attach-daytona-run-identifiers",
-            { ...input, tenant: run.tenant },
-            sql`UPDATE "RunnerRun"
-              SET "daytonaSessionId" = COALESCE(${input.sessionId ?? null}, "daytonaSessionId"),
-                  "daytonaCommandId" = COALESCE(${input.commandId ?? null}, "daytonaCommandId"),
-                  "updatedAt" = now(),
-                  "version" = "version" + 1
-              WHERE "id" = ${input.runId}
-                AND "tenant" = ${run.tenant}
-                AND "version" = ${input.expectedVersion}
-                AND "dispatchLeaseToken" = ${input.leaseToken}
-                AND "dispatchLeaseExpiresAt" > clock_timestamp()
-                AND "dispatchState" = 'dispatching'
-                AND "status" = 'queued'
-                AND ("daytonaSessionId" IS NULL OR "daytonaSessionId" = ${input.sessionId ?? null})
-                AND ("daytonaCommandId" IS NULL OR "daytonaCommandId" = ${input.commandId ?? null})
-              RETURNING *`
-          )
-        );
-        if (!updated) {
-          return { kind: "lease_lost" };
-        }
-        if (input.sandboxId !== undefined) {
-          const updatedAgent = await transaction.execute(
-            statement(
-              "attach-daytona-sandbox",
-              {
-                agentId: run.agentId,
-                sandboxGeneration: input.sandboxGeneration,
-                sandboxId: input.sandboxId,
-                tenant: run.tenant,
-              },
-              sql`UPDATE "RunnerAgent"
-                SET "daytonaSandboxId" = ${input.sandboxId},
-                    "updatedAt" = now(),
-                    "version" = "version" + 1
-                WHERE "id" = ${run.agentId}
-                  AND "tenant" = ${run.tenant}
-                  AND "sandboxGeneration" = ${input.sandboxGeneration}
-                RETURNING "id"`
-            )
-          );
-          if (!updatedAgent[0]) {
-            throw new Error("Runner Daytona sandbox generation changed.");
-          }
-        }
-        return { kind: "updated", value: asRun(updated) };
-      }),
-
-    attachDaytonaProcessForDispatch: (
-      _operator: RunnerOperator,
-      authority: RunnerDispatchAuthority,
-      input: { commandId: string; sandboxGeneration: number; sessionId: string }
-    ): Promise<
-      | {
-          authority: RunnerDispatchAuthority;
-          kind: "updated";
-          value: RunnerRunRecord;
-        }
-      | { kind: "generation_mismatch" }
-      | { kind: "not_found" }
-      | { kind: "not_live" }
-      | { kind: "stale_version" }
-    > =>
-      database.transaction(async (transaction) => {
-        const run = await lockedLiveDispatchRun(transaction, authority, [
-          "dispatching",
-        ]);
-        if (!run) {
-          return { kind: "not_live" };
-        }
-        if (run.daytonaSessionId !== input.sessionId || run.daytonaCommandId) {
-          return { kind: "stale_version" };
-        }
-        const agent = await lockedDispatchAgent(transaction, run);
-        if (!agent) {
-          return { kind: "not_found" };
-        }
-        if (agent.sandboxGeneration !== input.sandboxGeneration) {
-          return { kind: "generation_mismatch" };
-        }
-        const [updated] = await transaction.execute(
-          statement(
-            "attach-daytona-process-for-dispatch",
-            {
-              commandId: input.commandId,
-              expectedVersion: authority.expectedVersion,
-              leaseToken: authority.leaseToken,
-              runId: run.id,
-              sessionId: input.sessionId,
-              tenant: run.tenant,
-            },
-            sql`UPDATE "RunnerRun"
-              SET "daytonaCommandId" = ${input.commandId},
-                  "updatedAt" = now(),
-                  "version" = "version" + 1
-              WHERE "id" = ${run.id}
-                AND "tenant" = ${run.tenant}
-                AND "version" = ${authority.expectedVersion}
-                AND "dispatchLeaseToken" = ${authority.leaseToken}
-                AND "dispatchLeaseExpiresAt" > clock_timestamp()
-                AND "dispatchState" = 'dispatching'
-                AND "status" = 'queued'
-                AND "daytonaSessionId" = ${input.sessionId}
-                AND "daytonaCommandId" IS NULL
-              RETURNING *`
-          )
-        );
-        if (!updated) {
-          return { kind: "not_live" };
-        }
-        const value = asRun(updated);
-        return { authority: dispatchAuthority(value), kind: "updated", value };
       }),
 
     attachDaytonaSandbox: (
@@ -1899,6 +1725,14 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (run.daytonaAttemptId !== input.attemptId) {
           return { kind: "not_live" };
         }
+        const sessionId = daytonaRunSessionName(run.id, input.attemptId);
+        if (
+          (run.daytonaSessionId !== null &&
+            run.daytonaSessionId !== sessionId) ||
+          (run.daytonaCommandId !== null && run.daytonaSessionId !== sessionId)
+        ) {
+          return { kind: "not_live" };
+        }
         const [updated] = await transaction.execute(
           statement(
             "release-expired-daytona-attempt",
@@ -1914,6 +1748,8 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "dispatchLeaseExpiresAt" <= clock_timestamp()
                 AND "dispatchState" = ${input.expectedDispatchState}
                 AND "daytonaAttemptId" = ${input.attemptId}
+                AND ("daytonaSessionId" IS NULL OR "daytonaSessionId" = ${sessionId})
+                AND ("daytonaCommandId" IS NULL OR "daytonaSessionId" = ${sessionId})
               RETURNING *`
           )
         );
@@ -1953,6 +1789,14 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         ) {
           return { kind: "not_live" };
         }
+        const sessionId = daytonaRunSessionName(run.id, input.attemptId);
+        if (
+          (run.daytonaSessionId !== null &&
+            run.daytonaSessionId !== sessionId) ||
+          (run.daytonaCommandId !== null && run.daytonaSessionId !== sessionId)
+        ) {
+          return { kind: "not_live" };
+        }
         const [updated] = await transaction.execute(
           statement(
             "release-terminal-daytona-attempt",
@@ -1973,6 +1817,8 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "dispatchLeaseToken" = ${authority.leaseToken}
                 AND "dispatchState" = 'terminal'
                 AND "daytonaAttemptId" = ${input.attemptId}
+                AND ("daytonaSessionId" IS NULL OR "daytonaSessionId" = ${sessionId})
+                AND ("daytonaCommandId" IS NULL OR "daytonaSessionId" = ${sessionId})
               RETURNING *`
           )
         );
@@ -2066,6 +1912,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "dispatchLeaseToken" = ${input.oldLeaseToken}
                 AND "dispatchLeaseExpiresAt" <= clock_timestamp()
                 AND "dispatchState" = ${input.expectedDispatchState}
+                AND "daytonaAttemptId" IS NULL
                 AND "daytonaSessionId" IS NULL
                 AND "daytonaCommandId" IS NULL
               RETURNING *`

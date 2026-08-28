@@ -77,6 +77,7 @@ export class DaytonaProcessError extends Error {
   readonly code:
     | "credential_cleanup_failed"
     | "credential_stage_failed"
+    | "durable_release_failed"
     | "harness_missing"
     | "process_start_failed"
     | "sandbox_reset_required"
@@ -240,7 +241,7 @@ async function cleanupFailedStart(
     // biome-ignore lint/style/useErrorCause: Release errors can contain durable-store details.
     throw new DaytonaProcessError(
       "Daytona cleanup succeeded but preparation release could not be confirmed.",
-      "sandbox_reset_required",
+      "durable_release_failed",
       true,
       { cause: primary }
     );

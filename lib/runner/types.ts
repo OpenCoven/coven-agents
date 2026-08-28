@@ -180,14 +180,6 @@ export type DispatchSandboxFence = {
   expectedVersion: number;
 };
 
-export type AttachDaytonaIdentifiersInput = DispatchFence & {
-  sandboxGeneration: number;
-  sandboxId?: string;
-} & (
-    | { commandId: string; sessionId: string }
-    | { commandId?: undefined; sessionId?: string }
-  );
-
 export type FinalizeRunnerRunInput = DispatchFence & {
   commandEvidence: CommandEvidence[];
   completedAt: Date;

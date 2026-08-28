@@ -548,14 +548,9 @@ test("expired dispatch recovery reports stale, non-expired, and provider-attache
   assert.equal(claimOnly.statements.length, 2);
 });
 
-test("expired dispatch recovery adopts a new lease with the expected live state", async () => {
-  const current = run({
-    daytonaCommandId: "command",
-    daytonaSessionId: "session",
-  });
+test("expired dispatch recovery adopts only ownership-free runs", async () => {
+  const current = run();
   const adopted = run({
-    daytonaCommandId: "command",
-    daytonaSessionId: "session",
     dispatchLeaseExpiresAt: new Date("2026-01-01T00:05:00.000Z"),
     dispatchLeaseToken: "replacement-lease",
     version: current.version + 1,
@@ -596,6 +591,44 @@ test("expired dispatch recovery adopts a new lease with the expected live state"
   assert.equal(stale.statements.length, 1);
 });
 
+test("expired dispatch adoption retains every unresolved Daytona ownership field", async () => {
+  const attemptId =
+    "53af1a29-4e98-43d6-ac5b-3b9dcba5e737" as RunnerDaytonaAttemptId;
+  const current = run();
+  const input = {
+    expectedDispatchState: "dispatching" as const,
+    leaseExpiresAt: new Date("2026-01-01T00:05:00.000Z"),
+    newLeaseToken: "replacement-lease",
+    oldLeaseToken: current.dispatchLeaseToken as string,
+    runId: current.id,
+  };
+  const cases = [
+    {
+      expected: { attemptId, kind: "cleanup_required" },
+      ownership: { daytonaAttemptId: attemptId },
+    },
+    {
+      expected: { kind: "provider_identifiers_attached" },
+      ownership: { daytonaSessionId: "legacy-session" },
+    },
+    {
+      expected: { kind: "provider_identifiers_attached" },
+      ownership: { daytonaCommandId: "legacy-command" },
+    },
+  ] as const;
+
+  await Promise.all(
+    cases.map(async ({ expected, ownership }) => {
+      const recovery = scripted([run(ownership)], [{ id: current.id }]);
+      assert.deepEqual(
+        await recovery.store.adoptExpiredDispatchLease(operator, input),
+        expected
+      );
+      assert.equal(recovery.statements.length, 2);
+    })
+  );
+});
+
 test("expired attempt recovery requires exact cleanup before requeue", async () => {
   const attemptA =
     "53af1a29-4e98-43d6-ac5b-3b9dcba5e735" as RunnerDaytonaAttemptId;
@@ -634,6 +667,14 @@ test("expired attempt recovery requires exact cleanup before requeue", async () 
   assert.match(releaseQuery, /"daytonaSessionId" = NULL/);
   assert.match(releaseQuery, /"daytonaCommandId" = NULL/);
   assert.match(releaseQuery, /"daytonaAttemptId" = \$\d+/);
+  assert.match(
+    releaseQuery,
+    /"daytonaSessionId" IS NULL OR "daytonaSessionId" = \$/
+  );
+  assert.match(
+    releaseQuery,
+    /"daytonaCommandId" IS NULL OR "daytonaSessionId" = \$/
+  );
   assert.match(releaseQuery, /"dispatchLeaseExpiresAt" <= clock_timestamp\(\)/);
 
   const requeued = run({
@@ -652,6 +693,49 @@ test("expired attempt recovery requires exact cleanup before requeue", async () 
     }),
     { kind: "requeued", value: requeued }
   );
+  const requeueQuery = queryText(requeue.statements[2] as RunnerStoreStatement);
+  assert.match(requeueQuery, /"daytonaAttemptId" IS NULL/);
+  assert.match(requeueQuery, /"daytonaSessionId" IS NULL/);
+  assert.match(requeueQuery, /"daytonaCommandId" IS NULL/);
+});
+
+test("expired attempt release leaves replacement and unowned resources untouched", async () => {
+  const attemptA =
+    "53af1a29-4e98-43d6-ac5b-3b9dcba5e735" as RunnerDaytonaAttemptId;
+  const attemptB =
+    "53af1a29-4e98-43d6-ac5b-3b9dcba5e736" as RunnerDaytonaAttemptId;
+  const current = run();
+  const input = {
+    attemptId: attemptA,
+    expectedDispatchState: "dispatching" as const,
+    oldLeaseToken: current.dispatchLeaseToken as string,
+    runId: current.id,
+  };
+  const replacement = scripted([
+    run({
+      daytonaAttemptId: attemptB,
+      daytonaCommandId: "command-b",
+      daytonaSessionId: daytonaRunSessionName(current.id, attemptB),
+    }),
+  ]);
+  const unowned = scripted([
+    run({
+      daytonaAttemptId: attemptA,
+      daytonaCommandId: "legacy-command",
+      daytonaSessionId: "legacy-session",
+    }),
+  ]);
+
+  assert.deepEqual(
+    await replacement.store.releaseExpiredDaytonaAttempt(operator, input),
+    { kind: "not_live" }
+  );
+  assert.deepEqual(
+    await unowned.store.releaseExpiredDaytonaAttempt(operator, input),
+    { kind: "not_live" }
+  );
+  assert.equal(replacement.statements.length, 1);
+  assert.equal(unowned.statements.length, 1);
 });
 
 test("terminal cleanup retains ownership until the exact attempt is released", async () => {
@@ -699,7 +783,21 @@ test("terminal cleanup retains ownership until the exact attempt is released", a
   assert.match(releaseQuery, /"daytonaCommandId" = NULL/);
 });
 
-test("terminal retention deletes only terminal runs beyond the newest twenty", async () => {
+test("terminal retention at capacity retains unresolved attempts", async () => {
+  const { statements, store } = scripted();
+  const deleted = await store.pruneTerminalRuns(principal, "agent");
+
+  assert.deepEqual(deleted, []);
+  const [pruneStatement] = statements;
+  assert.ok(pruneStatement);
+  const query = queryText(pruneStatement);
+  assert.match(query, /"daytonaAttemptId" IS NULL/);
+  assert.match(query, /"daytonaSessionId" IS NULL/);
+  assert.match(query, /"daytonaCommandId" IS NULL/);
+  assert.match(query, /OFFSET 20/);
+});
+
+test("terminal retention prunes cleanup-free runs beyond capacity", async () => {
   const { statements, store } = scripted([{ id: "old-run" }]);
   const deleted = await store.pruneTerminalRuns(principal, "agent");
 
@@ -708,6 +806,9 @@ test("terminal retention deletes only terminal runs beyond the newest twenty", a
   assert.ok(pruneStatement);
   const query = queryText(pruneStatement);
   assert.match(query, /"status" IN \('completed', 'failed', 'cancelled'\)/);
+  assert.match(query, /"daytonaAttemptId" IS NULL/);
+  assert.match(query, /"daytonaSessionId" IS NULL/);
+  assert.match(query, /"daytonaCommandId" IS NULL/);
   assert.match(query, /OFFSET 20/);
   assert.match(query, /"tenant"\s*=\s*\$\d+/);
 });
@@ -798,83 +899,11 @@ test("principal mutations bind every affected row to the principal tenant", asyn
   }
 });
 
-test("Daytona attachment validates mismatches before making any update", async () => {
-  const dispatching = run();
-  const { statements, store } = scripted(
-    [dispatching],
-    [{ id: dispatching.agentId, sandboxGeneration: 2 }]
-  );
+test("Daytona process attachment has no arbitrary legacy store API", () => {
+  const { store } = scripted();
 
-  const result = await store.attachDaytonaIdentifiers(operator, {
-    commandId: "command",
-    expectedVersion: dispatching.version,
-    leaseToken: "lease-a",
-    runId: dispatching.id,
-    sandboxGeneration: 1,
-    sandboxId: "sandbox",
-    sessionId: "session",
-  });
-
-  assert.deepEqual(result, { kind: "generation_mismatch" });
-  assert.deepEqual(
-    statements.map((statement) => statement.name),
-    ["lock-operator-run", "lock-agent-for-daytona-attach"]
-  );
-});
-
-test("Daytona identifier conflicts cannot partially attach a sandbox", async () => {
-  const dispatching = run({ daytonaSessionId: "existing-session" });
-  const { statements, store } = scripted([dispatching]);
-
-  const result = await store.attachDaytonaIdentifiers(operator, {
-    commandId: "command",
-    expectedVersion: dispatching.version,
-    leaseToken: "lease-a",
-    runId: dispatching.id,
-    sandboxGeneration: 1,
-    sandboxId: "sandbox",
-    sessionId: "different-session",
-  });
-
-  assert.deepEqual(result, { kind: "stale_version" });
-  assert.deepEqual(
-    statements.map((statement) => statement.name),
-    ["lock-operator-run"]
-  );
-});
-
-test("Daytona attachment keeps the run update tenant scoped", async () => {
-  const dispatching = run();
-  const updated = run({ version: dispatching.version + 1 });
-  const { statements, store } = scripted(
-    [dispatching],
-    [{ id: dispatching.agentId, sandboxGeneration: 1 }],
-    [updated],
-    [{ id: dispatching.agentId }]
-  );
-
-  const result = await store.attachDaytonaIdentifiers(operator, {
-    commandId: "command",
-    expectedVersion: dispatching.version,
-    leaseToken: "lease-a",
-    runId: dispatching.id,
-    sandboxGeneration: 1,
-    sandboxId: "sandbox",
-    sessionId: "session",
-  });
-
-  assert.equal(result.kind, "updated");
-  const [, , update] = statements;
-  assert.ok(update);
-  assert.equal(update.args.tenant, dispatching.tenant);
-  assert.match(queryText(update), /"tenant"\s*=\s*\$\d+/);
-  assert.match(
-    queryText(update),
-    /"dispatchLeaseExpiresAt" > clock_timestamp\(\)/
-  );
-  assert.equal("now" in update.args, false);
-  const sandboxUpdate = statements[3] as RunnerStoreStatement;
-  assert.match(queryText(sandboxUpdate), /"version" = "version" \+ 1/);
+  assert.equal(Object.hasOwn(store, "attachDaytonaIdentifiers"), false);
+  assert.equal(Object.hasOwn(store, "attachDaytonaProcessForDispatch"), false);
 });
 
 test("dispatch authority derives agent ownership from its live leased run", async () => {

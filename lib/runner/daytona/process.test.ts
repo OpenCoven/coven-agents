@@ -591,7 +591,7 @@ test("surfaces safe combined cleanup failure without retaining provider secrets"
   );
 });
 
-test("retains the claim when cleanup succeeds but preparation release fails", async () => {
+test("retains the claim with a retryable durable-release error when cleanup succeeds but release fails", async () => {
   const { calls, sandbox, sessionIds } = processDouble({
     stageError: new Error(SECRET),
   });
@@ -608,7 +608,7 @@ test("retains the claim when cleanup succeeds but preparation release fails", as
       }),
     (error: unknown) =>
       error instanceof DaytonaProcessError &&
-      error.code === "sandbox_reset_required" &&
+      error.code === "durable_release_failed" &&
       error.retryable === true &&
       allReturnedText(error).includes(SECRET) === false
   );
@@ -621,6 +621,42 @@ test("retains the claim when cleanup succeeds but preparation release fails", as
         call.kind === "command" &&
         call.command === `rm -f -- '${PATH}' && test ! -e '${PATH}'`
     )
+  );
+});
+
+test("a stale attempt release cannot request a reset of a replacement attempt's sandbox", async () => {
+  const attemptB = "53af1a29-4e98-43d6-ac5b-3b9dcba5e732" as DaytonaAttemptId;
+  const sessionB = daytonaRunSessionName(RUN_ID, attemptB);
+  const { calls, sandbox, sessionIds } = processDouble({
+    sessions: [{ commands: [], sessionId: sessionB }],
+    stageError: new Error(SECRET),
+  });
+  const releases: unknown[] = [];
+
+  await assert.rejects(
+    () =>
+      startDaytonaProcess({
+        ...startInput(sandbox),
+        releasePreparation: (release) => {
+          releases.push(release);
+          return Promise.resolve(null);
+        },
+      }),
+    (error: unknown) =>
+      error instanceof DaytonaProcessError &&
+      error.code === "durable_release_failed" &&
+      error.retryable === true &&
+      error.message.includes("reset") === false &&
+      allReturnedText(error).includes(SECRET) === false
+  );
+
+  assert.deepEqual(releases, [{ attemptId: PREPARATION_CLAIM, runId: RUN_ID }]);
+  assert.deepEqual(sessionIds(), [sessionB]);
+  assert.equal(
+    calls
+      .filter((call) => call.kind === "delete")
+      .some((call) => call.command === sessionB),
+    false
   );
 });
 
