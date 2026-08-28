@@ -168,6 +168,14 @@ test("the README diagnostic uses the separate operator credential", () => {
   assert.equal(readme.includes("$RUNNER_IDENTITY_TOKEN"), false);
 });
 
+test("the README preserves bodyless runner-token compatibility", () => {
+  const readme = readFileSync(readmeUrl, "utf8");
+
+  assert.match(readme, /bodyless\s+`POST \/api\/runner-token`/);
+  assert.match(readme, /absent or zero-byte body as\s+unscoped/);
+  assert.match(readme, /malformed, unknown-field, and oversized JSON/);
+});
+
 test("the README points to the incident runbooks", () => {
   const readme = readFileSync(readmeUrl, "utf8");
 

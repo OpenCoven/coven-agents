@@ -14,12 +14,11 @@ Current blockers are factual and fail closed:
 - the latest recorded authenticated private Beads/DoltHub pull returned
   `PermissionDenied`, so authoritative P0, dependency, and acceptance state
   cannot be reconciled; see [`current-state.md`](current-state.md);
-- `pnpm hygiene` at `2026-08-27T02:06:28-05:00` reported four secondary worktrees
-  against the soft cap of three and two unrelated `AT RISK` branches:
-  `feat/admission-queue-rebased` had one unpushed commit and
-  `fix/process-runner` was absent from origin and not merged according to
-  hygiene. Worktree state is live, so release operators must rerun the command
-  rather than treat those names as a durable inventory;
+- `pnpm hygiene` at `2026-08-27T20:21:00-05:00` reported three secondary
+  worktrees, exactly at the soft cap, and only this candidate worktree as
+  `AT RISK` because its merge commit was unpushed and its fix was uncommitted.
+  This is pre-push evidence, not a durable branch inventory; release operators
+  must rerun the command against the clean, pushed candidate;
 - the latest field-only Project query recorded in
   [`current-state.md`](current-state.md) found all 60 managed items were drafts,
   so GitHub issue state did not independently confirm delivery reconciliation;
@@ -28,6 +27,9 @@ Current blockers are factual and fail closed:
 - the Stripe webhook claims an event before owner lookup and subscription
   mutation, so a post-claim failure or ignored owner is permanently deduplicated
   instead of recoverable by provider redelivery;
+- the deployed app returns `400 invalid_request` when the existing browser
+  identity minter sends a zero-byte `POST /api/runner-token`; the candidate
+  compatibility fix has local route evidence but is not deployed;
 - no candidate-specific `RELEASE_AUDIENCE` and matching approved closed-beta or
   public-release configuration is retained; and
 - no retained, dated production-like end-to-end artifact proves subscriber,
@@ -50,6 +52,8 @@ Stop the release without exception when any of these is true:
 - Beads and Project are drifted or cannot be shown to agree;
 - Stripe event claim and subscription-state mutation are not atomic and
   retry-safe; or
+- the deployed browser identity minter cannot obtain both unscoped and
+  run-scoped runner tokens from the candidate API; or
 - `RELEASE_AUDIENCE` is absent or invalid, or its approved audience does not
   match the beta configuration.
 
@@ -97,6 +101,12 @@ release. The production build then runs
 [`lib/db/migrate.ts`](../../lib/db/migrate.ts) before the Next build. Migration
 silently skips when `POSTGRES_URL` is absent, which is acceptable for a
 database-free local build but is a production no-go.
+
+The candidate includes identity-version, credential-KEK, envelope-revision,
+credential-revision, and credential-lease migrations `0008` through `0012`.
+Their rollout gates are coupled to session revocation, key-ring compatibility,
+AAD rewrap, run-scoped authority, and lease behavior; schema success alone does
+not authorize retiring compatibility keys or flags.
 
 Before release:
 
@@ -173,12 +183,33 @@ skipped audience validation is not release evidence.
 | Path | Required smoke | Evidence required | Current state |
 | --- | --- | --- | --- |
 | Demo | Deploy/build with `IS_DEMO=1`, load the signed-out root, play the committed replay through completion, and verify sanitized output with no database or runner persistence. | Dated browser trace or recording tied to the candidate and deployment. | A local production replay reached 10/10 sanitized events without console errors on 2026-08-27; no release-equivalent deployment artifact is retained. |
-| Subscriber | Exercise a real GitHub OAuth callback and account creation/adoption, guest refusal, active eligibility, expired/revoked refusal, connection retrieval, and usage display. | Dated trace plus sanitized account-state evidence for allowed and denied cases. | Eligibility logic and mocked OAuth start are covered; actual OAuth/account creation is not verified. |
+| Subscriber | Exercise a real GitHub OAuth callback and account creation/adoption, guest refusal, active eligibility, expired/revoked refusal, connection retrieval, bodyless unscoped identity minting, strict run-scoped identity minting, and usage display. | Dated trace plus sanitized account-state evidence for allowed and denied cases. | Eligibility and runner-token compatibility have local tests; actual OAuth/account creation and the candidate token fix are not verified in deployment. |
 | Cloud | Run the authenticated deployment diagnostic, create an agent, start and observe a credentialed run, stream/poll to terminal state, cancel a bounded run, delete the agent, and verify tenant/sandbox cleanup. | Dated Worker/app logs, response summary, run identifiers, and cleanup result without credentials or private output. | The local Docker-backed diagnostic passes with the SDK-matched image. No deployed release-equivalent create/run/stream/cancel/delete lifecycle artifact exists. |
 | Local, if supported | Create, run, cancel, and delete through the supported local boundary, including host isolation and cleanup checks. | Dated artifact from the declared supported local environment. | Not applicable: no local runner is tracked and `backend` is cloud-only. |
 
 Smoke failure is a no-go. Do not retry until a failure disappears without
 recording the first failure and its disposition.
+
+## Runner token compatibility
+
+**Current deployment blocker:** the browser identity minter intentionally sends
+a bodyless `POST /api/runner-token` for unscoped calls. The deployed route tests
+`request.body` and then parses any non-null stream as JSON. In production the
+runtime exposes a zero-byte stream rather than `null`, so the shared strict JSON
+reader returns `invalid` and the route responds `400 {"error":"invalid_request"}`.
+
+The candidate treats only absent or zero-byte bodies as an empty strict request.
+Valid `{}` and a valid `run` scope pass; malformed JSON, unknown fields, and
+oversized input retain `400` and `413` responses. Local route-level evidence is
+not deployment evidence. Before go:
+
+1. Deploy the signed candidate without changing the browser minter contract.
+2. From an authenticated active-subscriber browser, prove a bodyless mint
+   succeeds and can authorize an unscoped Worker request.
+3. Start a run and prove the JSON scope binds the exact agent, harness, and
+   operation through Worker authority and credential lease checks.
+4. Retain sanitized request status, candidate/deployment identifiers, and
+   timestamps without recording tokens or request bodies.
 
 ## Stripe webhook delivery
 
@@ -224,8 +255,10 @@ Release evidence must prove:
   matching run scope, a valid reservation, and a one-run credential lease;
 - two controlled tenants cannot list, run, stream, stop, delete, or borrow each
   other's resources or credentials;
-- `CREDENTIAL_KEK` is present, tenant credentials decrypt only for their tenant
-  and harness, and the Worker stores no fallback credential;
+- the complete versioned `CREDENTIAL_KEK_CURRENT_VERSION`/
+  `CREDENTIAL_KEK_V1`/`CREDENTIAL_KEK_V2` ring is present, AAD binds each
+  ciphertext to its tenant and harness, rewrap verification has no old rows,
+  and the Worker stores no fallback credential;
 - direct and encoded credential shapes are redacted from UI, persisted
   evidence, logs, diagnostics, and errors; and
 - browser connection material is not placed in persistent local storage.
@@ -239,8 +272,10 @@ an incident-response trigger.
 Before traffic promotion:
 
 1. Confirm Worker observability is enabled for the deployed version.
-2. Run the authenticated `/api/diagnostics/sandbox` probe and retain its
-   sanitized result.
+2. Run the authenticated `/api/diagnostics/sandbox` probe with the separate
+   `OPERATOR_DIAGNOSTIC_TOKEN` and retain its sanitized result. The
+   browser-visible `AGENT_CONTROL_TOKEN` and subscriber identity must be
+   refused.
 3. Confirm app telemetry initializes and both app and Worker surface actionable
    failures without request bodies, credentials, private paths, or private
    planning text.
@@ -296,11 +331,11 @@ or guess at database compatibility.
 | Release audience | An approved candidate record and successful production validation agree. Closed beta has `RELEASE_AUDIENCE=closed-beta`, `BETA_MODE=on`, and a reviewed, nonempty valid `BETA_ALLOWLIST`; public release has separate approval, `RELEASE_AUDIENCE=public`, and `BETA_MODE=off`. | Missing/invalid/case-mismatched audience, default/unset mode, invalid beta allowlist, mismatch, or public mode without separate approval. | **No-go:** no candidate-specific production audience configuration is retained; a local/default-off pass is not approval. |
 | Verification | Every required matrix row is `Verified` or `Certified` for the candidate. | Any required row red or `Blocked`. | **No-go:** subscriber sign-in, conformance, recovery, browser quality, preflight, and production smoke are not `Verified`. |
 | Roadmap freshness | `pnpm roadmap:status check` passes after authoritative reconciliation. | Stale aggregate. | **No-go:** the candidate Project check can pass, but Beads freshness cannot be established. |
-| Worktree safety | `pnpm hygiene` exits zero with no `AT RISK` worktree and the secondary count within the soft cap. | Any `AT RISK` worktree or a secondary count above the soft cap. | **No-go:** the 2026-08-27 candidate run found two unrelated `AT RISK` worktrees and four secondary worktrees against the soft cap of three. |
+| Worktree safety | `pnpm hygiene` exits zero with no `AT RISK` worktree and the secondary count within the soft cap. | Any `AT RISK` worktree or a secondary count above the soft cap. | **Pending:** the `2026-08-27T20:21:00-05:00` pre-push run found three secondary worktrees and only this candidate worktree `AT RISK`; rerun after its commit and push before release. |
 | Beads/Project/issues | A second apply and final preview are a complete no-op, and accepted delivery artifacts agree. | Drift, create/update/orphan work, partial or failed sync, or issue contradiction. | **No-go:** authoritative sync cannot run; the latest recorded Project query found managed items were drafts. |
 | Six local gates | All six pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** the prior deployed baseline passed its non-hygiene gates, but no complete retained run exists for the final merge candidate. |
 | Database | Staging migration, production backup, migration success, schema verification, and recovery record exist. | Missing backup, skipped/failed migration, or unproved recovery. | **No-go:** no candidate-specific production migration and restore artifact is retained. |
-| Smoke and Stripe | Demo, subscriber, cloud, and webhook evidence pass; Stripe claim/update recovery is atomic and retry-safe; local runs only if supported. | Any failed required smoke, missing webhook delivery, or claim-before-state behavior that permanently deduplicates failed processing. | **No-go:** only local/unit evidence is retained, and current Stripe claim/update ordering is not retry-safe. |
+| Smoke and Stripe | Demo, subscriber, bodyless and run-scoped identity minting, cloud lifecycle, and webhook evidence pass; Stripe claim/update recovery is atomic and retry-safe; local runs only if supported. | Any failed required smoke, undeployed token compatibility fix, missing webhook delivery, or claim-before-state behavior that permanently deduplicates failed processing. | **No-go:** the runner-token fix is local-only, only local/unit lifecycle evidence is retained, and current Stripe claim/update ordering is not retry-safe. |
 | Isolation | Tenant, credential, identity, and redaction evidence pass in a release-equivalent environment. | Any cross-tenant or secret-boundary failure. | **No-go:** production-like isolation evidence is not retained. |
 | Observability, rollback, recovery | Diagnostics pass and a dated rollback/recovery rehearsal is retained with named operators. | Blind operation, missing owner, or unproved recovery for affected data. | **No-go:** health/readiness and persisted-run recovery remain incomplete. |
 | Actions policy | All evidence is local and retained while Actions remain intentionally disabled. If CI is separately restored, refresh the roadmap and replace this evidence policy before counting remote checks. | Treating an unrun workflow as evidence or re-enabling Actions without separate approval. | **Accepted constraint:** not a go signal; every other gate still applies. |

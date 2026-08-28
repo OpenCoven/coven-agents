@@ -185,6 +185,11 @@ has elapsed. Never log or commit key material; use Vercel and Wrangler
 secrets. The legacy `RUNNER_VERIFY_KEY`/`RUNNER_SIGNING_KEY` pair remains
 supported only as an explicit migration compatibility path.
 
+The browser identity minter intentionally keeps the original bodyless
+`POST /api/runner-token` request for unscoped calls. Run starts send a strict
+JSON `run` scope instead. The endpoint treats an absent or zero-byte body as
+unscoped, while malformed, unknown-field, and oversized JSON remains rejected.
+
 **The worker holds no harness credential.** It used to read
 `COPILOT_GITHUB_TOKEN` from its own environment, which meant every tenant ran
 on the operator's GitHub access. That is gone: `requireHarness` never consults

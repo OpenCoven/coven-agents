@@ -38,7 +38,14 @@ export async function POST(request: Request) {
 
   let run: z.infer<typeof runnerRunScopeSchema> | undefined;
   if (request.body) {
-    const body = await readBoundedJson(request, 1024, runnerTokenRequestSchema);
+    const body = await readBoundedJson(
+      request,
+      1024,
+      runnerTokenRequestSchema,
+      {
+        emptyBody: {},
+      }
+    );
     if (body.kind === "too_large") {
       return Response.json({ error: "request_too_large" }, { status: 413 });
     }
