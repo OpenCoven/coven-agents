@@ -37,3 +37,26 @@ export function daytonaSandboxLabels(
 export function daytonaSessionName(tenant: string, agentId: string): string {
   return `${daytonaSandboxName(tenant, agentId)}-session`;
 }
+
+const RUN_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+function requireRunId(runId: string): string {
+  if (!RUN_ID_PATTERN.test(runId)) {
+    throw new Error("Daytona run names require a UUID run id.");
+  }
+  return runId.toLowerCase();
+}
+
+/**
+ * A run owns one short-lived Daytona process session. Unlike agent sandbox
+ * names, this is intentionally directly traceable to the database run UUID.
+ */
+export function daytonaRunSessionName(runId: string): string {
+  return `coven-run-${requireRunId(runId)}`;
+}
+
+/** The only credential-file path a run process is permitted to address. */
+export function daytonaRunCredentialPath(runId: string): string {
+  return `/tmp/${daytonaRunSessionName(runId)}.credential`;
+}
