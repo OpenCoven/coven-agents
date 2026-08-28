@@ -237,6 +237,40 @@ test("redacts markers split across SDK-trimmed chunks and suppresses values", ()
   }
 });
 
+test("redacts auth schemes ending SDK-trimmed callback chunks", () => {
+  const scenarios = [
+    {
+      chunks: [
+        "starting image build BeArEr ",
+        "bearer-credential-",
+        "continued ",
+      ],
+      expected: "starting image build BeArEr [REDACTED]",
+      secret: "bearer-credential-continued",
+    },
+    {
+      chunks: [
+        "starting image build bAsIc\t",
+        "basic-credential-",
+        "continued\t",
+      ],
+      expected: "starting image build bAsIc [REDACTED]",
+      secret: "basic-credential-continued",
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
+    const emitted = scenario.chunks.map((chunk) =>
+      sanitizer.write(chunk.trimEnd())
+    );
+
+    assert.equal(emitted.join(""), scenario.expected);
+    assert.equal(emitted.join("").includes(scenario.secret), false);
+    assert.equal(sanitizer.flush(), "");
+  }
+});
+
 test("does not retain huge sensitive values or flush suppressed remainders", () => {
   const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
   const hugeSecret = "s".repeat(1_000_000);

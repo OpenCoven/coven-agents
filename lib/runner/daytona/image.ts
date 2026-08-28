@@ -28,6 +28,7 @@ const SECRET_KEY_MARKER = new RegExp(
   "giu"
 );
 const AUTH_SCHEME_MARKER = /(^|[^A-Za-z0-9-])(bearer|basic)([ \t]+)/giu;
+const PENDING_AUTH_SCHEME_MARKER = /(^|[^A-Za-z0-9-])(bearer|basic)$/giu;
 const PENDING_AUTHORIZATION_MARKER =
   /(^|[^A-Za-z0-9-])(authorization)([ \t]+)/giu;
 const PENDING_SECRET_KEY_MARKER =
@@ -228,6 +229,10 @@ function findSensitiveMarker(
   );
   marker = earliestMarker(marker, markerFromPattern(text, SECRET_KEY_MARKER));
   marker = earliestMarker(marker, markerFromPattern(text, AUTH_SCHEME_MARKER));
+  marker = earliestMarker(
+    marker,
+    markerFromPattern(text, PENDING_AUTH_SCHEME_MARKER)
+  );
   marker = earliestMarker(
     marker,
     markerFromPattern(text, PENDING_AUTHORIZATION_MARKER)
