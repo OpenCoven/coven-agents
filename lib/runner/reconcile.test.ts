@@ -101,6 +101,9 @@ test("reconciliation claims exact expired preparation cleanup before requeue", a
       },
     },
     randomToken: () => "cleanup-lease",
+    rollbackCredentialResources: async () => {
+      calls.push("rollback-credential");
+    },
     store: {
       claimExpiredDaytonaAttemptCleanup: async () => {
         calls.push("claim-cleanup");
@@ -138,6 +141,7 @@ test("reconciliation claims exact expired preparation cleanup before requeue", a
     "claim-cleanup",
     "resolve",
     "delete-redaction",
+    "rollback-credential",
     "requeue",
     "dispatch",
   ]);
@@ -228,10 +232,13 @@ test("command-free recovery resets a fenced sandbox before requeueing", async ()
   assert.equal(result.requeued, 1);
 });
 
-test("an absent attached sandbox retires redaction before requeueing", async () => {
+test("an absent attached sandbox resets accounting before fresh redispatch", async () => {
   const calls: string[] = [];
+  let accountingReset = false;
+  let daytonaCursorReset = false;
   const attached = run({
     daytonaCommandId: "command",
+    daytonaLogCursor: 42,
     daytonaSessionId: "session",
     dispatchState: "running",
     startedAt: new Date("2026-08-28T14:58:00.000Z"),
@@ -244,6 +251,12 @@ test("an absent attached sandbox retires redaction before requeueing", async () 
     runId: attached.id,
   } as RunnerDispatchAuthority;
   const result = await reconcileAndDispatch({
+    dispatch: async () => {
+      assert.equal(accountingReset, true);
+      assert.equal(daytonaCursorReset, true);
+      calls.push("redispatch");
+      return { kind: "started" as const };
+    },
     operator,
     provider: {
       resolveSandbox: async () => {
@@ -255,8 +268,9 @@ test("an absent attached sandbox retires redaction before requeueing", async () 
       },
     },
     randomToken: () => "adopted-lease",
-    releaseCredentialResources: async () => {
-      calls.push("release-credential");
+    rollbackCredentialResources: async () => {
+      calls.push("rollback-credential");
+      accountingReset = true;
     },
     store: {
       adoptExpiredDaytonaProcess: async () => {
@@ -277,7 +291,17 @@ test("an absent attached sandbox retires redaction before requeueing", async () 
       },
       requeueAfterDaytonaAttemptCleanup: async () => {
         calls.push("requeue");
-        return { kind: "requeued" as const, value: attached };
+        const requeued = {
+          kind: "requeued" as const,
+          value: {
+            ...attached,
+            daytonaAttemptId: null,
+            daytonaLogCursor: 0,
+            daytonaSessionId: null,
+          },
+        };
+        daytonaCursorReset = requeued.value.daytonaLogCursor === 0;
+        return requeued;
       },
       requeueExpiredDispatch: async () => ({ kind: "not_live" as const }),
       scanExpiredDispatchLeases: async () => {
@@ -292,10 +316,12 @@ test("an absent attached sandbox retires redaction before requeueing", async () 
     "adopt",
     "resolve",
     "delete-redaction",
-    "release-credential",
+    "rollback-credential",
     "requeue",
+    "redispatch",
   ]);
   assert.equal(result.adopted, 1);
+  assert.equal(result.dispatched, 1);
   assert.equal(result.requeued, 1);
 });
 
@@ -411,6 +437,9 @@ test("terminal cleanup retries only after claiming the exact expired attempt", a
       },
     },
     randomToken: () => "terminal-cleanup",
+    releaseCredentialResources: async () => {
+      calls.push("release-credential");
+    },
     store: {
       claimTerminalDaytonaAttemptCleanup: async () => {
         calls.push("claim");
@@ -453,6 +482,7 @@ test("terminal cleanup retries only after claiming the exact expired attempt", a
     "claim",
     "resolve",
     "delete-redaction",
+    "release-credential",
     "release",
     "cleanup-lease",
   ]);
@@ -496,6 +526,9 @@ test("terminal cleanup resets a fenced sandbox before releasing its exact attemp
       },
     },
     randomToken: () => "terminal-cleanup",
+    releaseCredentialResources: async () => {
+      calls.push("release-credential");
+    },
     store: {
       claimTerminalDaytonaAttemptCleanup: async () => {
         calls.push("claim");
@@ -540,6 +573,7 @@ test("terminal cleanup resets a fenced sandbox before releasing its exact attemp
     "stop",
     "reset",
     "delete-redaction",
+    "release-credential",
     "release",
     "cleanup-lease",
   ]);
@@ -644,6 +678,7 @@ test("a provider outage for one expired run does not abort unrelated recovery", 
     },
     providerConcurrency: 1,
     randomToken: () => "cleanup-lease",
+    rollbackCredentialResources: async () => undefined,
     store: {
       claimExpiredDaytonaAttemptCleanup: async (
         _operator: RunnerOperator,
@@ -812,6 +847,9 @@ test("a terminal command with an unsettled log tail remains retryable", async ()
       },
     },
     randomToken: () => "adopted-lease",
+    releaseCredentialResources: async () => {
+      calls.push("release-credential");
+    },
     store: {
       adoptExpiredDaytonaProcess: async () => {
         calls.push("adopt");
@@ -964,9 +1002,14 @@ test("cancellation records durable intent before exact remote stop", async () =>
   assert.deepEqual(result, { kind: "cancelled", runId: active.id });
 });
 
-test("cancelling an unstarted dispatch compensates before finalizing", async () => {
+test("cancelling a queued run compensates before finalizing without provider work", async () => {
   const calls: string[] = [];
-  const unstarted = run({ daytonaAttemptId: null });
+  const unstarted = run({
+    daytonaAttemptId: null,
+    dispatchLeaseExpiresAt: null,
+    dispatchLeaseToken: null,
+    dispatchState: "queued",
+  });
   const authority = {
     expectedVersion: unstarted.version + 1,
     leaseToken: "cancel-lease",
@@ -1015,7 +1058,9 @@ test("cancelling an unstarted dispatch compensates before finalizing", async () 
           run: {
             ...unstarted,
             cancellationRequestedAt: new Date("2026-08-28T15:00:00.000Z"),
+            dispatchLeaseExpiresAt: new Date("2026-08-28T15:01:00.000Z"),
             dispatchLeaseToken: authority.leaseToken,
+            dispatchState: "dispatching",
             version: authority.expectedVersion,
           },
         };
@@ -1231,6 +1276,9 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
       },
     },
     randomToken: () => "adopted-lease",
+    releaseCredentialResources: async () => {
+      calls.push("release-credential");
+    },
     store: {
       adoptExpiredDaytonaProcess: async () => {
         calls.push("adopt");
@@ -1335,6 +1383,7 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
     "finalize",
     "stop",
     "reset",
+    "release-credential",
     "delete-redaction",
     "release-attempt",
     "cleanup-lease",

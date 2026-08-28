@@ -436,7 +436,7 @@ async function releaseCredentialResources(
   >
 ): Promise<boolean> {
   if (!dependencies.releaseCredentialResources) {
-    return true;
+    return false;
   }
   try {
     await dependencies.releaseCredentialResources(run);
@@ -454,7 +454,7 @@ async function rollbackCredentialResources(
   >
 ): Promise<boolean> {
   if (!dependencies.rollbackCredentialResources) {
-    return true;
+    return false;
   }
   try {
     await dependencies.rollbackCredentialResources(run);
@@ -875,7 +875,7 @@ async function reconcileAttachedProcess(
     if (!(await retireAttemptRedaction(adopted.authority, dependencies))) {
       return { adopted: true, kind: "deferred" };
     }
-    if (!(await releaseCredentialResources(adopted.run, dependencies))) {
+    if (!(await rollbackCredentialResources(adopted.run, dependencies))) {
       return { adopted: true, kind: "deferred" };
     }
     const requeued = await dependencies.store.requeueAfterDaytonaAttemptCleanup(

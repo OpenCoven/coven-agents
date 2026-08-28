@@ -1,23 +1,27 @@
 import "server-only";
 
 import { inspect } from "node:util";
+import { and, eq } from "drizzle-orm";
 import {
-  compensateRunReservation,
   consumeRunReservation,
-  discardRunReservation,
   drizzleRunReservationDatabase,
   type ReserveRunResult,
   reserveRun,
 } from "@/lib/billing/run-reservations";
 import type { databaseFor } from "@/lib/db/access";
+import {
+  type CredentialLease,
+  credentialLease,
+  type RunReservation,
+  runReservation,
+  runUsage,
+} from "@/lib/db/schema";
 import type { HarnessCredential } from "@/lib/runner/harness";
 import {
   CredentialLeaseDeniedError,
   consumeCredentialLease,
   drizzleCredentialLeaseDatabase,
   issueCredentialLease,
-  releaseCredentialLease,
-  releaseCredentialLeaseForRun,
 } from "./leases";
 import {
   prepareCredentialForTenant,
@@ -28,6 +32,28 @@ import type { CredentialStoreDatabase } from "./store-core";
 type ProductionDatabase = ReturnType<typeof databaseFor>;
 type ReservationInput = Parameters<typeof reserveRun>[1];
 type LeaseInput = Parameters<typeof issueCredentialLease>[1];
+const SERIALIZABLE = { isolationLevel: "serializable" } as const;
+
+export type RunnerCredentialCleanupInput =
+  | Readonly<{ mode: "prelaunch"; runId: string; tenant: string }>
+  | Readonly<{ mode: "terminal"; runId: string }>;
+
+export type RunnerCredentialCleanupResult =
+  | Readonly<{ kind: "cleaned" }>
+  | Readonly<{ kind: "cleanup_pending"; retryable: true }>;
+
+export interface RunnerCredentialCleanupTransaction {
+  deleteLeaseForRun: (runId: string) => Promise<CredentialLease | null>;
+  deleteReservation: (runId: string) => Promise<RunReservation | null>;
+  deleteUsageForRun: (runId: string, tenant: string) => Promise<void>;
+  lockReservation: (runId: string) => Promise<RunReservation | null>;
+}
+
+export interface RunnerCredentialCleanupDatabase {
+  transaction: <T>(
+    callback: (transaction: RunnerCredentialCleanupTransaction) => Promise<T>
+  ) => Promise<T>;
+}
 
 export type RunnerCredentialAcquireInput = Omit<
   ReservationInput,
@@ -43,15 +69,12 @@ export type RunnerCredentialAcquireInput = Omit<
   }>;
 
 export interface RunnerCredentialDependencies {
-  compensateReservation: (
-    input: Parameters<typeof compensateRunReservation>[1]
-  ) => ReturnType<typeof compensateRunReservation>;
+  cleanupResources: (
+    input: RunnerCredentialCleanupInput
+  ) => Promise<RunnerCredentialCleanupResult>;
   consumeReservation: (
     input: Parameters<typeof consumeRunReservation>[1]
   ) => ReturnType<typeof consumeRunReservation>;
-  discardReservation: (
-    input: Parameters<typeof discardRunReservation>[1]
-  ) => ReturnType<typeof discardRunReservation>;
   issueLease: (input: LeaseInput) => ReturnType<typeof issueCredentialLease>;
   leaseCredential: (
     input: Parameters<typeof consumeCredentialLease>[1],
@@ -64,8 +87,6 @@ export interface RunnerCredentialDependencies {
     harnessId: string,
     database: CredentialStoreDatabase
   ) => Promise<string | null>;
-  releaseLease: (input: LeaseInput) => Promise<boolean>;
-  releaseLeaseForRun: (runId: string) => Promise<boolean>;
   reserveRun: (input: ReservationInput) => Promise<ReserveRunResult>;
 }
 
@@ -95,6 +116,119 @@ export class RunnerCredentialServiceError extends Error {
     this.code = code;
     this.retryable = retryable;
   }
+}
+
+function cleanupPendingError(): RunnerCredentialServiceError {
+  return new RunnerCredentialServiceError(
+    "cleanup_pending",
+    "Runner credential cleanup could not be confirmed.",
+    true
+  );
+}
+
+export function drizzleRunnerCredentialCleanupDatabase(
+  database: ProductionDatabase
+): RunnerCredentialCleanupDatabase {
+  return {
+    transaction: (callback) =>
+      database.transaction(
+        async (transaction) =>
+          callback({
+            deleteLeaseForRun: async (runId) => {
+              const [deleted] = await transaction
+                .delete(credentialLease)
+                .where(eq(credentialLease.runId, runId))
+                .returning();
+              return deleted ?? null;
+            },
+            deleteReservation: async (runId) => {
+              const [deleted] = await transaction
+                .delete(runReservation)
+                .where(eq(runReservation.runId, runId))
+                .returning();
+              return deleted ?? null;
+            },
+            deleteUsageForRun: async (runId, tenant) => {
+              await transaction
+                .delete(runUsage)
+                .where(
+                  and(eq(runUsage.runId, runId), eq(runUsage.tenant, tenant))
+                );
+            },
+            lockReservation: async (runId) => {
+              const [reservation] = await transaction
+                .select()
+                .from(runReservation)
+                .where(eq(runReservation.runId, runId))
+                .for("update")
+                .limit(1);
+              return reservation ?? null;
+            },
+          }),
+        SERIALIZABLE
+      ),
+  };
+}
+
+/**
+ * Locks the reservation before deleting its credential lease. A concurrent
+ * consumer must wait for this transaction, then finds no lease/reservation and
+ * cannot launch using accounting that is being rolled back.
+ */
+export async function cleanupRunnerCredentialResourcesAtomically(
+  database: RunnerCredentialCleanupDatabase,
+  input: RunnerCredentialCleanupInput
+): Promise<RunnerCredentialCleanupResult> {
+  try {
+    await database.transaction(async (transaction) => {
+      const reservation = await transaction.lockReservation(input.runId);
+      await transaction.deleteLeaseForRun(input.runId);
+      if (input.mode === "prelaunch") {
+        await transaction.deleteUsageForRun(input.runId, input.tenant);
+      }
+      if (
+        reservation &&
+        (input.mode === "prelaunch" || reservation.state !== "consumed") &&
+        !(await transaction.deleteReservation(input.runId))
+      ) {
+        throw new Error("Runner reservation cleanup was rejected.");
+      }
+    });
+    return { kind: "cleaned" };
+  } catch {
+    return { kind: "cleanup_pending", retryable: true };
+  }
+}
+
+async function completeCredentialCleanup(
+  input: RunnerCredentialCleanupInput,
+  dependencies: Pick<RunnerCredentialDependencies, "cleanupResources">
+): Promise<void> {
+  let result: RunnerCredentialCleanupResult;
+  try {
+    result = await dependencies.cleanupResources(input);
+  } catch {
+    // biome-ignore lint/style/useErrorCause: Cleanup adapters can expose database metadata.
+    throw cleanupPendingError();
+  }
+  if (result.kind !== "cleaned") {
+    throw cleanupPendingError();
+  }
+}
+
+/**
+ * Removes the exact one-use lease, reservation, and any counted usage after
+ * confirmed provider absence. The atomic cleanup makes the same run eligible
+ * for a fresh reservation on redispatch.
+ */
+export async function compensateRunnerCredentialReservation(
+  input: Readonly<{ runId: string; tenant: string }>,
+  dependencies: Pick<RunnerCredentialDependencies, "cleanupResources">
+): Promise<void> {
+  await completeCredentialCleanup(
+    { mode: "prelaunch", runId: input.runId, tenant: input.tenant },
+    dependencies
+  );
 }
 
 export type RunnerCredentialAcquireResult =
@@ -154,10 +288,7 @@ export class RunnerCredentialAcquisition {
   readonly #credential: OneUseRunnerCredential;
   readonly #dependencies: Pick<
     RunnerCredentialDependencies,
-    | "compensateReservation"
-    | "consumeReservation"
-    | "discardReservation"
-    | "releaseLease"
+    "cleanupResources" | "consumeReservation"
   >;
   readonly #leaseInput: LeaseInput;
   #state: AcquisitionState = "available";
@@ -167,10 +298,7 @@ export class RunnerCredentialAcquisition {
     leaseInput: LeaseInput,
     dependencies: Pick<
       RunnerCredentialDependencies,
-      | "compensateReservation"
-      | "consumeReservation"
-      | "discardReservation"
-      | "releaseLease"
+      "cleanupResources" | "consumeReservation"
     >
   ) {
     this.#credential = new OneUseRunnerCredential(plaintext);
@@ -247,24 +375,10 @@ export class RunnerCredentialAcquisition {
     ) {
       return;
     }
-    const [lease, reservation] = await Promise.allSettled([
-      this.#dependencies.releaseLease(this.#leaseInput),
-      this.#dependencies.discardReservation({
-        runId: this.#leaseInput.runId,
-      }),
-    ]);
-    if (
-      lease.status !== "fulfilled" ||
-      lease.value !== true ||
-      reservation.status !== "fulfilled" ||
-      reservation.value === null
-    ) {
-      throw new RunnerCredentialServiceError(
-        "cleanup_pending",
-        "Runner credential cleanup could not be confirmed.",
-        true
-      );
-    }
+    await compensateRunnerCredentialReservation(
+      { runId: this.#leaseInput.runId, tenant: this.#leaseInput.tenant },
+      this.#dependencies
+    );
     this.#state = "aborted";
   }
 
@@ -280,59 +394,10 @@ export class RunnerCredentialAcquisition {
     if (this.#state === "aborted") {
       return;
     }
-    try {
-      if (!(await this.#dependencies.releaseLease(this.#leaseInput))) {
-        throw new Error("Runner credential lease cleanup was rejected.");
-      }
-    } catch {
-      // biome-ignore lint/style/useErrorCause: Credential lease errors can contain encrypted metadata.
-      throw new RunnerCredentialServiceError(
-        "cleanup_pending",
-        "Runner credential cleanup could not be confirmed.",
-        true
-      );
-    }
-    let compensation: Awaited<
-      ReturnType<RunnerCredentialDependencies["compensateReservation"]>
-    >;
-    try {
-      compensation = await this.#dependencies.compensateReservation({
-        runId: this.#leaseInput.runId,
-        tenant: this.#leaseInput.tenant,
-      });
-    } catch {
-      // biome-ignore lint/style/useErrorCause: Reservation errors can contain encrypted metadata.
-      throw new RunnerCredentialServiceError(
-        "cleanup_pending",
-        "Runner reservation compensation could not be confirmed.",
-        true
-      );
-    }
-    if (compensation.kind === "missing") {
-      throw new RunnerCredentialServiceError(
-        "cleanup_pending",
-        "Runner reservation compensation could not be confirmed.",
-        true
-      );
-    }
-    if (compensation.kind === "not_consumed") {
-      try {
-        if (
-          !(await this.#dependencies.discardReservation({
-            runId: this.#leaseInput.runId,
-          }))
-        ) {
-          throw new Error("Runner reservation cleanup was rejected.");
-        }
-      } catch {
-        // biome-ignore lint/style/useErrorCause: Reservation errors can contain encrypted metadata.
-        throw new RunnerCredentialServiceError(
-          "cleanup_pending",
-          "Runner reservation cleanup could not be confirmed.",
-          true
-        );
-      }
-    }
+    await compensateRunnerCredentialReservation(
+      { runId: this.#leaseInput.runId, tenant: this.#leaseInput.tenant },
+      this.#dependencies
+    );
     this.#state = "compensated";
   }
 
@@ -387,26 +452,20 @@ function leaseDeniedError(error: unknown): RunnerCredentialServiceError {
 }
 
 async function releasePreLaunchResources(
-  dependencies: Pick<
-    RunnerCredentialDependencies,
-    "discardReservation" | "releaseLease"
-  >,
+  dependencies: Pick<RunnerCredentialDependencies, "cleanupResources">,
   leaseInput: LeaseInput
 ): Promise<RunnerCredentialServiceError | null> {
-  const [lease, reservation] = await Promise.allSettled([
-    dependencies.releaseLease(leaseInput),
-    dependencies.discardReservation({ runId: leaseInput.runId }),
-  ]);
-  return lease.status !== "fulfilled" ||
-    lease.value !== true ||
-    reservation.status !== "fulfilled" ||
-    reservation.value === null
-    ? new RunnerCredentialServiceError(
-        "cleanup_pending",
-        "Runner credential cleanup could not be confirmed.",
-        true
-      )
-    : null;
+  try {
+    await compensateRunnerCredentialReservation(
+      { runId: leaseInput.runId, tenant: leaseInput.tenant },
+      dependencies
+    );
+    return null;
+  } catch (error) {
+    return error instanceof RunnerCredentialServiceError
+      ? error
+      : cleanupPendingError();
+  }
 }
 
 /**
@@ -509,28 +568,16 @@ export async function acquireRunnerCredential(
 }
 
 /**
- * Releases a reservation/lease only when a process never reached durable
- * launch. Both operations are exact-run and idempotent; failures are surfaced
- * so callers retain their recovery ownership instead of silently requeueing.
+ * Releases transient credential state after terminal cleanup while preserving
+ * the consumed reservation for a command that did launch. Failures are
+ * surfaced so callers retain their recovery ownership instead of silently
+ * completing cleanup.
  */
 export async function releaseRunnerCredentialResources(
   runId: string,
-  dependencies: Pick<
-    RunnerCredentialDependencies,
-    "discardReservation" | "releaseLeaseForRun"
-  >
+  dependencies: Pick<RunnerCredentialDependencies, "cleanupResources">
 ): Promise<void> {
-  const [lease, reservation] = await Promise.allSettled([
-    dependencies.releaseLeaseForRun(runId),
-    dependencies.discardReservation({ runId }),
-  ]);
-  if (lease.status === "rejected" || reservation.status === "rejected") {
-    throw new RunnerCredentialServiceError(
-      "cleanup_pending",
-      "Runner credential cleanup could not be confirmed.",
-      true
-    );
-  }
+  await completeCredentialCleanup({ mode: "terminal", runId }, dependencies);
 }
 
 /**
@@ -540,28 +587,9 @@ export async function releaseRunnerCredentialResources(
  */
 export async function rollbackRunnerCredentialResources(
   input: Readonly<{ runId: string; tenant: string }>,
-  dependencies: Pick<
-    RunnerCredentialDependencies,
-    "compensateReservation" | "discardReservation" | "releaseLeaseForRun"
-  >
+  dependencies: Pick<RunnerCredentialDependencies, "cleanupResources">
 ): Promise<void> {
-  try {
-    await dependencies.releaseLeaseForRun(input.runId);
-    const compensation = await dependencies.compensateReservation({
-      runId: input.runId,
-      tenant: input.tenant,
-    });
-    if (compensation.kind === "not_consumed") {
-      await dependencies.discardReservation({ runId: input.runId });
-    }
-  } catch {
-    // biome-ignore lint/style/useErrorCause: Cleanup errors can contain encrypted metadata.
-    throw new RunnerCredentialServiceError(
-      "cleanup_pending",
-      "Runner pre-launch cleanup could not be confirmed.",
-      true
-    );
-  }
+  await compensateRunnerCredentialReservation(input, dependencies);
 }
 
 /**
@@ -598,13 +626,13 @@ export async function consumeRunnerCredentialReservation(
 export function drizzleRunnerCredentialDependencies(
   database: ProductionDatabase
 ): RunnerCredentialDependencies {
+  const cleanup = drizzleRunnerCredentialCleanupDatabase(database);
   const reservations = drizzleRunReservationDatabase(database);
   const leases = drizzleCredentialLeaseDatabase(database);
   return {
-    compensateReservation: (input) =>
-      compensateRunReservation(reservations, input),
+    cleanupResources: (input) =>
+      cleanupRunnerCredentialResourcesAtomically(cleanup, input),
     consumeReservation: (input) => consumeRunReservation(reservations, input),
-    discardReservation: (input) => discardRunReservation(reservations, input),
     issueLease: (input) => issueCredentialLease(leases, input),
     leaseCredential: (input, prepare, operation) =>
       consumeCredentialLease(leases, input, prepare, operation, undefined, {
@@ -620,8 +648,6 @@ export function drizzleRunnerCredentialDependencies(
         harnessId,
         credentialDatabase
       ),
-    releaseLease: (input) => releaseCredentialLease(leases, input),
-    releaseLeaseForRun: (runId) => releaseCredentialLeaseForRun(leases, runId),
     reserveRun: (input) => reserveRun(reservations, input),
   };
 }

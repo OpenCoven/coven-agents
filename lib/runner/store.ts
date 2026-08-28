@@ -3333,8 +3333,8 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
 
     /**
      * Cancelling rotates dispatch authority before the provider is touched.
-     * Authorization callbacks reject the durable intent, so an interleaved
-     * preparation can never attach a newly started command after cancellation.
+     * A queued row becomes a leased dispatching cleanup state because queued
+     * rows cannot carry lease fields under the database invariant.
      */
     requestRunCancellation: (
       operator: RunnerOperator,
@@ -3360,6 +3360,10 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             },
             sql`UPDATE "RunnerRun"
               SET "cancellationRequestedAt" = clock_timestamp(),
+                  "dispatchState" = CASE
+                    WHEN "dispatchState" = 'queued' THEN 'dispatching'
+                    ELSE "dispatchState"
+                  END,
                   "dispatchLeaseToken" = ${input.leaseToken},
                   "dispatchLeaseExpiresAt" = ${input.leaseExpiresAt},
                   "updatedAt" = clock_timestamp(),
@@ -3447,6 +3451,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               SET "daytonaAttemptId" = NULL,
                   "daytonaSessionId" = NULL,
                   "daytonaCommandId" = NULL,
+                  "daytonaLogCursor" = 0,
                   "dispatchLeaseToken" = NULL,
                   "dispatchLeaseExpiresAt" = NULL,
                   "dispatchState" = 'queued',
@@ -3855,6 +3860,16 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (!agent) {
           return { kind: "not_found" };
         }
+        const existingOperation = await lockedOperationRun(
+          transaction,
+          input,
+          principal.tenant
+        );
+        if (existingOperation) {
+          return existingOperation.requestHash === input.requestHash
+            ? { kind: "duplicate", run: runSnapshot(existingOperation) }
+            : { kind: "conflict", run: runSnapshot(existingOperation) };
+        }
         if (
           agent.sandboxLifecycle !== "unprovisioned" &&
           agent.sandboxLifecycle !== "provisioning" &&
@@ -3878,16 +3893,6 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (input.admission) {
           const limits = admissionLimits(input.admission);
           const scheduler = await lockRunnerScheduler(transaction);
-          const existing = await lockedOperationRun(
-            transaction,
-            input,
-            principal.tenant
-          );
-          if (existing) {
-            return existing.requestHash === input.requestHash
-              ? { kind: "duplicate", run: runSnapshot(existing) }
-              : { kind: "conflict", run: runSnapshot(existing) };
-          }
           if (
             (await activeDispatchCount(transaction)) >=
             limits.deploymentActiveRuns

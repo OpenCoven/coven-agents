@@ -93,6 +93,40 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
   };
 }
 
+function hasDispatchLease(
+  record: RunnerRunRecord
+): record is RunnerRunRecord & {
+  dispatchLeaseExpiresAt: Date;
+  dispatchLeaseToken: string;
+} {
+  return (
+    record.dispatchLeaseToken !== null && record.dispatchLeaseExpiresAt !== null
+  );
+}
+
+function satisfiesDispatchLeaseConstraint(record: RunnerRunRecord): boolean {
+  return (
+    (record.dispatchState === "queued" &&
+      record.status === "queued" &&
+      !hasDispatchLease(record)) ||
+    (record.dispatchState === "dispatching" &&
+      record.status === "queued" &&
+      hasDispatchLease(record) &&
+      record.dispatchLeaseExpiresAt > record.createdAt) ||
+    (record.dispatchState === "running" &&
+      record.status === "running" &&
+      hasDispatchLease(record) &&
+      record.dispatchLeaseExpiresAt > record.createdAt) ||
+    (record.dispatchState === "terminal" &&
+      (record.status === "completed" ||
+        record.status === "failed" ||
+        record.status === "cancelled") &&
+      (hasDispatchLease(record) ||
+        (record.dispatchLeaseToken === null &&
+          record.dispatchLeaseExpiresAt === null)))
+  );
+}
+
 function scripted(...responses: Record<string, unknown>[][]) {
   const statements: RunnerStoreStatement[] = [];
   const store = createRunnerStore({
@@ -153,7 +187,6 @@ test("duplicate starts return the immutable matching request", async () => {
   const existing = run();
   const { store } = scripted(
     [{ id: existing.agentId, sandboxLifecycle: "ready" }],
-    [],
     [existing]
   );
 
@@ -177,7 +210,6 @@ test("reusing an operation with another request hash conflicts", async () => {
   const existing = run();
   const { store } = scripted(
     [{ id: existing.agentId, sandboxLifecycle: "ready" }],
-    [],
     [existing]
   );
 
@@ -191,6 +223,52 @@ test("reusing an operation with another request hash conflicts", async () => {
 
   assert.equal(result.kind, "conflict");
   assert.equal(result.kind === "conflict" && result.run.id, existing.id);
+});
+
+test("operation retries win over reset or decommission lifecycle rejection", async () => {
+  await Promise.all(
+    (["resetting", "decommissioning"] as const).map(async (lifecycle) => {
+      const existing = run();
+      const matching = scripted(
+        [{ id: existing.agentId, sandboxLifecycle: lifecycle }],
+        [existing]
+      );
+      const conflicting = scripted(
+        [{ id: existing.agentId, sandboxLifecycle: lifecycle }],
+        [existing]
+      );
+
+      const [duplicate, conflict] = await Promise.all([
+        matching.store.startRun(principal, {
+          agentId: existing.agentId,
+          id: existing.id,
+          operationId: existing.operationId,
+          requestHash: existing.requestHash,
+          task: existing.task,
+        }),
+        conflicting.store.startRun(principal, {
+          agentId: existing.agentId,
+          id: existing.id,
+          operationId: existing.operationId,
+          requestHash: "b".repeat(64),
+          task: existing.task,
+        }),
+      ]);
+
+      assert.equal(duplicate.kind, "duplicate", lifecycle);
+      assert.equal(conflict.kind, "conflict", lifecycle);
+      assert.deepEqual(
+        matching.statements.map((statement) => statement.name),
+        ["lock-agent-for-run-start", "get-operation-run-before-admission"],
+        lifecycle
+      );
+      assert.deepEqual(
+        conflicting.statements.map((statement) => statement.name),
+        ["lock-agent-for-run-start", "get-operation-run-before-admission"],
+        lifecycle
+      );
+    })
+  );
 });
 
 test("event ids advance from the locked run cursor and update atomically", async () => {
@@ -1223,6 +1301,7 @@ test("confirmed attempt cleanup releases ownership and requeues atomically", asy
     "53af1a29-4e98-43d6-ac5b-3b9dcba5e737" as RunnerDaytonaAttemptId;
   const current = run({
     daytonaAttemptId: attemptId,
+    daytonaLogCursor: 42,
     dispatchLeaseExpiresAt: new Date("2026-01-01T00:05:00.000Z"),
     dispatchLeaseToken: "cleanup-lease",
     version: 8,
@@ -1230,6 +1309,7 @@ test("confirmed attempt cleanup releases ownership and requeues atomically", asy
   const requeued = run({
     ...current,
     daytonaAttemptId: null,
+    daytonaLogCursor: 0,
     dispatchLeaseExpiresAt: null,
     dispatchLeaseToken: null,
     dispatchState: "queued",
@@ -1249,6 +1329,7 @@ test("confirmed attempt cleanup releases ownership and requeues atomically", asy
   );
   const update = statements[1] as RunnerStoreStatement;
   assert.match(queryText(update), /"daytonaAttemptId" = NULL/u);
+  assert.match(queryText(update), /"daytonaLogCursor" = 0/u);
   assert.match(queryText(update), /"dispatchState" = 'queued'/u);
   assert.match(
     queryText(update),
@@ -1552,6 +1633,7 @@ test("principal mutations bind every affected row to the principal tenant", asyn
   );
   const start = scripted(
     [{ id: current.agentId, sandboxLifecycle: "ready" }],
+    [],
     [],
     [current]
   );
@@ -2034,6 +2116,38 @@ test("cancellation intent fences the old dispatcher before remote cleanup", asyn
   assert.match(queryText(update), /"dispatchLeaseToken" = \$\d+/u);
 });
 
+test("queued cancellation enters a schema-valid leased cleanup state", async () => {
+  const queued = run({
+    dispatchLeaseExpiresAt: null,
+    dispatchLeaseToken: null,
+    dispatchState: "queued",
+  });
+  const requested = run({
+    ...queued,
+    cancellationRequestedAt: new Date("2026-01-01T00:00:01.000Z"),
+    dispatchLeaseExpiresAt: new Date("2026-01-01T00:01:00.000Z"),
+    dispatchLeaseToken: "cancel-lease",
+    dispatchState: "dispatching",
+    version: queued.version + 1,
+  });
+  const { statements, store } = scripted([queued], [requested]);
+
+  const result = await store.requestRunCancellation(operator, {
+    leaseExpiresAt: requested.dispatchLeaseExpiresAt as Date,
+    leaseToken: requested.dispatchLeaseToken as string,
+    runId: queued.id,
+  });
+
+  assert.equal(result.kind, "requested");
+  assert.equal(
+    result.kind === "requested" && satisfiesDispatchLeaseConstraint(result.run),
+    true
+  );
+  const update = queryText(statements[1] as RunnerStoreStatement);
+  assert.match(update, /WHEN "dispatchState" = 'queued' THEN 'dispatching'/u);
+  assert.match(update, /"cancellationRequestedAt" = clock_timestamp\(\)/u);
+});
+
 test("sandbox-reset-required cancellation records only a safe diagnostic", async () => {
   const current = run({
     cancellationRequestedAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -2356,6 +2470,7 @@ test("agent deletion and starts serialize through the same agent lock", async ()
   const start = scripted(
     [{ id: current.agentId, sandboxLifecycle: "ready" }],
     [],
+    [],
     [current]
   );
 
@@ -2376,8 +2491,12 @@ test("agent deletion and starts serialize through the same agent lock", async ()
     ["lock-agent-for-delete", "find-live-run-for-agent", "delete-idle-agent"]
   );
   assert.deepEqual(
-    start.statements.slice(0, 2).map((statement) => statement.name),
-    ["lock-agent-for-run-start", "insert-run"]
+    start.statements.slice(0, 3).map((statement) => statement.name),
+    [
+      "lock-agent-for-run-start",
+      "get-operation-run-before-admission",
+      "insert-run",
+    ]
   );
   for (const statement of [deletion.statements[0], start.statements[0]]) {
     assert.ok(statement);
@@ -2684,14 +2803,15 @@ test("decommission rejects live provisioning and fences a stale provisioning tak
   assert.match(query, /WHEN "sandboxLifecycle" = 'provisioning'/u);
 });
 
-test("decommissioning lifecycle rejects run admission before inserting a run", async () => {
+test("a new operation is rejected only after lifecycle idempotency lookup", async () => {
   await Promise.all(
-    (["decommissioning", "decommission_failed"] as const).map(
+    (["resetting", "decommissioning", "decommission_failed"] as const).map(
       async (lifecycle) => {
         const current = agent({ sandboxLifecycle: lifecycle });
-        const { statements, store } = scripted([
-          { id: current.id, sandboxLifecycle: lifecycle },
-        ]);
+        const { statements, store } = scripted(
+          [{ id: current.id, sandboxLifecycle: lifecycle }],
+          []
+        );
         const result = await store.startRun(principal, {
           agentId: current.id,
           id: "00000000-0000-4000-8000-000000000099",
@@ -2702,7 +2822,7 @@ test("decommissioning lifecycle rejects run admission before inserting a run", a
         assert.deepEqual(result, { kind: "sandbox_unavailable", lifecycle });
         assert.deepEqual(
           statements.map((statement) => statement.name),
-          ["lock-agent-for-run-start"]
+          ["lock-agent-for-run-start", "get-operation-run-before-admission"]
         );
       }
     )
@@ -2716,6 +2836,7 @@ test("normal, unprovisioned, and provisioning agents remain eligible for run adm
         const current = run();
         const { statements, store } = scripted(
           [{ id: current.agentId, sandboxLifecycle }],
+          [],
           [current],
           [{}],
           [current]
@@ -2732,6 +2853,7 @@ test("normal, unprovisioned, and provisioning agents remain eligible for run adm
           statements.map((statement) => statement.name),
           [
             "lock-agent-for-run-start",
+            "get-operation-run-before-admission",
             "insert-run",
             "insert-accepted-event",
             "advance-run-after-acceptance",
@@ -2746,6 +2868,7 @@ test("admission-aware starts serialize tenant depth and preserve queue refusal",
   const current = run();
   const { statements, store } = scripted(
     [{ id: current.agentId, sandboxLifecycle: "ready" }],
+    [],
     [
       {
         consecutiveDispatchCount: 0,
@@ -2753,7 +2876,6 @@ test("admission-aware starts serialize tenant depth and preserve queue refusal",
         singleton: true,
       },
     ],
-    [],
     [{ activeCount: 0 }],
     [{ queuedCount: 10 }]
   );
@@ -2777,17 +2899,17 @@ test("admission-aware starts serialize tenant depth and preserve queue refusal",
     statements.map((entry) => entry.name),
     [
       "lock-agent-for-run-start",
-      "lock-runner-scheduler",
       "get-operation-run-before-admission",
+      "lock-runner-scheduler",
       "count-active-runs-for-admission",
       "count-queued-runs-for-tenant-admission",
     ]
   );
   assert.match(
-    queryText(statements[1] as RunnerStoreStatement),
+    queryText(statements[2] as RunnerStoreStatement),
     /ON CONFLICT .* DO UPDATE/u
   );
-  assert.match(queryText(statements[2] as RunnerStoreStatement), /FOR UPDATE/u);
+  assert.match(queryText(statements[1] as RunnerStoreStatement), /FOR UPDATE/u);
   assert.match(
     queryText(statements[4] as RunnerStoreStatement),
     /"dispatchState" = 'queued'/u
@@ -2815,13 +2937,13 @@ test("zero queue capacity atomically claims an immediately eligible run", async 
   });
   const { statements, store } = scripted(
     [{ id: current.agentId, sandboxLifecycle: "ready" }],
+    [],
     [
       {
         consecutiveDispatchCount: 0,
         lastDispatchedTenantHash: null,
       },
     ],
-    [],
     [{ activeCount: 0 }],
     [current],
     [{}],
@@ -2858,8 +2980,8 @@ test("zero queue capacity atomically claims an immediately eligible run", async 
     statements.map((entry) => entry.name),
     [
       "lock-agent-for-run-start",
-      "lock-runner-scheduler",
       "get-operation-run-before-admission",
+      "lock-runner-scheduler",
       "count-active-runs-for-admission",
       "insert-run",
       "insert-accepted-event",
