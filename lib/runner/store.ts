@@ -9,6 +9,7 @@ import type {
 import { AGENT_RUNNER_API_VERSION } from "@opencoven/agent-contracts";
 import { type SQL, sql } from "drizzle-orm";
 import type { databaseFor } from "@/lib/db/access";
+import { MAX_EVENTS_PER_RUN } from "./evidence";
 import type {
   AppendRunnerEventInput,
   AttachDaytonaIdentifiersInput,
@@ -408,6 +409,30 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (!inserted) {
           throw new Error("Runner event insert returned no row.");
         }
+        await transaction.execute(
+          statement(
+            "prune-run-events-after-append",
+            {
+              maxEvents: MAX_EVENTS_PER_RUN,
+              runId: input.runId,
+              tenant: principal.tenant,
+            },
+            sql`DELETE FROM "RunnerRunEvent"
+              WHERE "runId" = ${input.runId}
+                AND EXISTS (
+                  SELECT 1 FROM "RunnerRun"
+                  WHERE "id" = ${input.runId}
+                    AND "tenant" = ${principal.tenant}
+                )
+                AND "eventId" IN (
+                  SELECT "eventId"
+                  FROM "RunnerRunEvent"
+                  WHERE "runId" = ${input.runId}
+                  ORDER BY "eventId" DESC
+                  OFFSET ${MAX_EVENTS_PER_RUN}
+                )`
+          )
+        );
         return {
           event: asEvent(inserted),
           kind: "appended",
@@ -808,14 +833,20 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         const rows = await transaction.execute(
           statement(
             "read-events-after",
-            { afterEventId, runId, tenant: principal.tenant },
+            {
+              afterEventId,
+              maxEvents: MAX_EVENTS_PER_RUN,
+              runId,
+              tenant: principal.tenant,
+            },
             sql`SELECT "RunnerRunEvent".*
               FROM "RunnerRunEvent"
               INNER JOIN "RunnerRun" ON "RunnerRun"."id" = "RunnerRunEvent"."runId"
               WHERE "RunnerRunEvent"."runId" = ${runId}
                 AND "RunnerRun"."tenant" = ${principal.tenant}
                 AND "RunnerRunEvent"."eventId" > ${afterEventId}
-              ORDER BY "RunnerRunEvent"."eventId" ASC`
+              ORDER BY "RunnerRunEvent"."eventId" ASC
+              LIMIT ${MAX_EVENTS_PER_RUN}`
           )
         );
         return rows.map(asEvent);

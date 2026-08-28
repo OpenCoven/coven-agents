@@ -7,6 +7,7 @@ import {
 } from "@opencoven/agent-contracts";
 import { sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
+import { MAX_EVENTS_PER_RUN } from "./evidence";
 import { createRunnerStore, type RunnerStoreStatement } from "./store";
 import type {
   RunnerAgentRecord,
@@ -165,7 +166,7 @@ test("event ids advance from the locked run cursor and update atomically", async
     eventId: 42,
     runId: current.id,
   };
-  const { statements, store } = scripted([current], [updated], [event]);
+  const { statements, store } = scripted([current], [updated], [event], []);
 
   const result = await store.appendEvent(principal, {
     event: { output: "progress", type: "output" },
@@ -178,6 +179,16 @@ test("event ids advance from the locked run cursor and update atomically", async
   assert.equal(result.kind === "appended" && result.event.eventId, 42);
   assert.equal(statements[1]?.args.eventId, 42);
   assert.equal(statements[2]?.args.eventId, 42);
+  assert.equal(statements[3]?.name, "prune-run-events-after-append");
+  assert.equal(statements[3]?.args.maxEvents, MAX_EVENTS_PER_RUN);
+  assert.match(
+    queryText(statements[3] as RunnerStoreStatement),
+    /DELETE FROM "RunnerRunEvent"/
+  );
+  assert.match(
+    queryText(statements[3] as RunnerStoreStatement),
+    /ORDER BY "eventId" DESC\s+OFFSET \$\d+/
+  );
   const [lockedStatement] = statements;
   assert.ok(lockedStatement);
   assert.match(queryText(lockedStatement), /FOR UPDATE/);
@@ -190,6 +201,81 @@ test("event ids advance from the locked run cursor and update atomically", async
     /"dispatchLeaseExpiresAt" > clock_timestamp\(\)/
   );
   assert.equal("now" in (statements[1] as RunnerStoreStatement).args, false);
+});
+
+test("event retention prunes only the oldest rows in the append transaction", async () => {
+  const current = run({
+    dispatchState: "running",
+    logCursor: MAX_EVENTS_PER_RUN,
+    startedAt: new Date("2026-01-01T00:00:00.000Z"),
+    status: "running",
+  });
+  const updated = run({
+    ...current,
+    logCursor: MAX_EVENTS_PER_RUN + 1,
+    version: current.version + 1,
+  });
+  const inserted = {
+    createdAt: new Date(),
+    event: {
+      id: MAX_EVENTS_PER_RUN + 1,
+      output: "newest",
+      type: "output",
+    } as const,
+    eventId: MAX_EVENTS_PER_RUN + 1,
+    runId: current.id,
+  };
+  const { statements, store } = scripted([current], [updated], [inserted], []);
+
+  const result = await store.appendEvent(principal, {
+    event: { output: "newest", type: "output" },
+    expectedVersion: current.version,
+    leaseToken: current.dispatchLeaseToken as string,
+    runId: current.id,
+  });
+
+  assert.equal(result.kind, "appended");
+  assert.deepEqual(
+    statements.map((entry) => entry.name),
+    [
+      "lock-principal-run",
+      "update-run-after-event",
+      "insert-run-event",
+      "prune-run-events-after-append",
+    ]
+  );
+  assert.match(
+    queryText(statements[3] as RunnerStoreStatement),
+    /WHERE "runId" = \$\d+[\s\S]*AND "eventId" IN/
+  );
+});
+
+test("event reads return the retained stale-resume suffix in bounded cursor order", async () => {
+  const retained = [7, 8, 9].map((eventId) => ({
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    event: {
+      at: "2026-01-01T00:00:00.000Z",
+      id: eventId,
+      output: `event ${eventId}`,
+      type: "output",
+    } as const,
+    eventId,
+    runId: "run",
+  }));
+  const { statements, store } = scripted(retained);
+
+  const events = await store.readEventsAfter(principal, "run", 1);
+
+  assert.deepEqual(
+    events.map((event) => event.eventId),
+    [7, 8, 9]
+  );
+  assert.equal(statements[0]?.args.afterEventId, 1);
+  assert.equal(statements[0]?.args.maxEvents, MAX_EVENTS_PER_RUN);
+  assert.match(
+    queryText(statements[0] as RunnerStoreStatement),
+    /ORDER BY "RunnerRunEvent"\."eventId" ASC\s+LIMIT \$\d+/
+  );
 });
 
 test("stale versions are rejected before an event write", async () => {

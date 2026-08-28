@@ -57,88 +57,117 @@ export function createRunEventStream(
   const sleep = options.sleep ?? waitForPoll;
   const now = options.now ?? Date.now;
   let cancelled = false;
+  let closed = false;
+  let cursor = options.lastEventId;
+  let lastActivityAt = now();
+  let terminal = false;
+  const pending: RunEvent[] = [];
   let removeAbortListener: (() => void) | undefined;
+  let controllerRef: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const abortController = new AbortController();
+
+  const close = (): void => {
+    if (!closed) {
+      closed = true;
+      removeAbortListener?.();
+      controllerRef?.close();
+    }
+  };
+  const fail = (error: unknown): void => {
+    if (!closed) {
+      closed = true;
+      removeAbortListener?.();
+      controllerRef?.error(error);
+    }
+  };
+  const abort = (): void => {
+    cancelled = true;
+    abortController.abort();
+    close();
+  };
+  const cancel = (): void => {
+    if (!closed) {
+      cancelled = true;
+      closed = true;
+      abortController.abort();
+      removeAbortListener?.();
+    }
+  };
 
   return new ReadableStream<Uint8Array>({
     cancel() {
-      cancelled = true;
-      removeAbortListener?.();
+      cancel();
     },
-    start(controller) {
-      let closed = false;
-      const close = (): void => {
-        if (!closed) {
-          closed = true;
-          removeAbortListener?.();
-          controller.close();
+    async pull(streamController) {
+      controllerRef = streamController;
+      try {
+        while (!cancelled && !abortController.signal.aborted) {
+          const queuedEvent = pending.shift();
+          if (queuedEvent) {
+            streamController.enqueue(
+              encoder.encode(serializeEvent(queuedEvent))
+            );
+            cursor = queuedEvent.id;
+            lastActivityAt = now();
+            if (terminal && pending.length === 0) {
+              close();
+            }
+            return;
+          }
+          if (terminal) {
+            close();
+            return;
+          }
+
+          // biome-ignore lint/performance/noAwaitInLoops: Each poll advances one SSE cursor.
+          const snapshot = await options.read(cursor);
+          if (!snapshot || cancelled || abortController.signal.aborted) {
+            close();
+            return;
+          }
+          const { events, terminal: isTerminal } = snapshot;
+          let latestEventId = cursor;
+          for (const snapshotEvent of [...events].sort(
+            (left, right) => left.id - right.id
+          )) {
+            if (snapshotEvent.id > latestEventId) {
+              pending.push(snapshotEvent);
+              latestEventId = snapshotEvent.id;
+            }
+          }
+          terminal = isTerminal;
+          if (pending.length > 0 || terminal) {
+            continue;
+          }
+
+          const remainingIdleMs = idleTimeoutMs - (now() - lastActivityAt);
+          if (remainingIdleMs <= 0) {
+            close();
+            return;
+          }
+          await sleep(
+            Math.min(pollIntervalMs, remainingIdleMs),
+            abortController.signal
+          );
         }
-      };
-      const fail = (error: unknown): void => {
-        if (!closed) {
-          closed = true;
-          removeAbortListener?.();
-          controller.error(error);
-        }
-      };
-      const onAbort = (): void => {
-        cancelled = true;
         close();
-      };
+      } catch (error) {
+        if (cancelled || abortController.signal.aborted) {
+          close();
+        } else {
+          fail(error);
+        }
+      }
+    },
+    start(streamController) {
+      controllerRef = streamController;
+      const onAbort = (): void => abort();
       options.signal?.addEventListener("abort", onAbort, { once: true });
       removeAbortListener = () =>
         options.signal?.removeEventListener("abort", onAbort);
-
-      const pump = async (): Promise<void> => {
-        let cursor = options.lastEventId;
-        let lastActivityAt = now();
-        try {
-          while (!cancelled && !options.signal?.aborted) {
-            // biome-ignore lint/performance/noAwaitInLoops: Each poll advances one SSE cursor.
-            const snapshot = await options.read(cursor);
-            if (!snapshot || cancelled || options.signal?.aborted) {
-              close();
-              return;
-            }
-            const events = [...snapshot.events].sort(
-              (left, right) => left.id - right.id
-            );
-            let delivered = false;
-            for (const event of events) {
-              if (event.id <= cursor) {
-                continue;
-              }
-              controller.enqueue(encoder.encode(serializeEvent(event)));
-              cursor = event.id;
-              delivered = true;
-            }
-            if (delivered) {
-              lastActivityAt = now();
-            }
-            if (snapshot.terminal) {
-              close();
-              return;
-            }
-            const remainingIdleMs = idleTimeoutMs - (now() - lastActivityAt);
-            if (remainingIdleMs <= 0) {
-              close();
-              return;
-            }
-            await sleep(
-              Math.min(pollIntervalMs, remainingIdleMs),
-              options.signal
-            );
-          }
-          close();
-        } catch (error) {
-          if (cancelled || options.signal?.aborted) {
-            close();
-          } else {
-            fail(error);
-          }
-        }
-      };
-
-      queueMicrotask(pump);
+      if (options.signal?.aborted) {
+        abort();
+      }
     },
   });
 }

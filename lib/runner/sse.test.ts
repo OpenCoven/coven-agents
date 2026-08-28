@@ -57,6 +57,60 @@ test("resumes after an event ID, orders delivery, formats SSE, and avoids duplic
   );
 });
 
+test("delivers a retained suffix for a stale resume cursor without duplicates", async () => {
+  const payload = await readAll(
+    createRunEventStream({
+      lastEventId: 1,
+      read: async () => ({
+        events: [event(8), event(7), event(8), event(9)],
+        terminal: true,
+      }),
+    })
+  );
+
+  assert.deepEqual(
+    [...payload.matchAll(/^id: (\d+)$/gmu)].map((match) => Number(match[1])),
+    [7, 8, 9]
+  );
+});
+
+test("limits slow-consumer buffering to one event per pull", async () => {
+  let serialized = 0;
+  const trackedEvent = (id: number): RunEvent =>
+    ({
+      at: createdAt,
+      id,
+      get output() {
+        serialized += 1;
+        return `event ${id}`;
+      },
+      type: "output",
+    }) as RunEvent;
+  const stream = createRunEventStream({
+    lastEventId: 0,
+    read: async () => ({
+      events: [trackedEvent(1), trackedEvent(2), trackedEvent(3)],
+      terminal: true,
+    }),
+  });
+  const reader = stream.getReader();
+  let closed = false;
+  const closeObserver = reader.closed.then(() => {
+    closed = true;
+  });
+
+  assert.match(new TextDecoder().decode((await reader.read()).value), /id: 1/u);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(serialized, 2);
+  assert.equal(closed, false);
+  assert.match(new TextDecoder().decode((await reader.read()).value), /id: 2/u);
+  assert.match(new TextDecoder().decode((await reader.read()).value), /id: 3/u);
+  assert.deepEqual(await reader.read(), { done: true, value: undefined });
+  await closeObserver;
+});
+
 test("keeps polling for later events and closes after a terminal snapshot", async () => {
   const nextPoll = deferred();
   let terminal = false;
@@ -126,4 +180,27 @@ test("closes and cleans up when the request is aborted", async () => {
   controller.abort();
 
   assert.deepEqual(await reader.read(), { done: true, value: undefined });
+});
+
+test("cancelling aborts an in-flight injected sleep", async () => {
+  const sleeping = deferred();
+  let sleepSignal: AbortSignal | undefined;
+  const stream = createRunEventStream({
+    lastEventId: 0,
+    read: async () => ({ events: [], terminal: false }),
+    sleep: async (_milliseconds, signal) => {
+      sleepSignal = signal;
+      signal?.addEventListener("abort", sleeping.resolve, { once: true });
+      await sleeping.promise;
+    },
+  });
+  const reader = stream.getReader();
+  const reading = reader.read();
+
+  await Promise.resolve();
+  await Promise.resolve();
+  await reader.cancel();
+
+  assert.ok(sleepSignal?.aborted);
+  assert.deepEqual(await reading, { done: true, value: undefined });
 });
