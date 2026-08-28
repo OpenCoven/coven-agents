@@ -9,6 +9,10 @@ function event(id: number): RunEvent {
   return { at: createdAt, id, output: `event ${id}`, type: "output" };
 }
 
+function terminalEvent(id: number): RunEvent {
+  return { id, status: "cancelled", type: "status" };
+}
+
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => {
@@ -57,21 +61,29 @@ test("resumes after an event ID, orders delivery, formats SSE, and avoids duplic
   );
 });
 
-test("delivers a retained suffix for a stale resume cursor without duplicates", async () => {
-  const payload = await readAll(
-    createRunEventStream({
-      lastEventId: 1,
-      read: async () => ({
-        events: [event(8), event(7), event(8), event(9)],
-        terminal: true,
-      }),
-    })
-  );
+test("delivers a retained terminal event before closing a stale resume", async () => {
+  const reader = createRunEventStream({
+    lastEventId: 1,
+    read: async () => ({
+      events: [event(8), event(7), event(8), terminalEvent(9)],
+      terminal: true,
+    }),
+  }).getReader();
+  const decoder = new TextDecoder();
+  const chunks = [
+    decoder.decode((await reader.read()).value),
+    decoder.decode((await reader.read()).value),
+    decoder.decode((await reader.read()).value),
+  ];
 
   assert.deepEqual(
-    [...payload.matchAll(/^id: (\d+)$/gmu)].map((match) => Number(match[1])),
+    chunks.flatMap((chunk) =>
+      [...chunk.matchAll(/^id: (\d+)$/gmu)].map((match) => Number(match[1]))
+    ),
     [7, 8, 9]
   );
+  assert.match(chunks[2] as string, /event: status/u);
+  assert.deepEqual(await reader.read(), { done: true, value: undefined });
 });
 
 test("limits slow-consumer buffering to one event per pull", async () => {

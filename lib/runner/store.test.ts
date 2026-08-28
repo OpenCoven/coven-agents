@@ -250,6 +250,59 @@ test("event retention prunes only the oldest rows in the append transaction", as
   );
 });
 
+test("finalization retains the terminal event when the live history is at capacity", async () => {
+  const startedAt = new Date("2026-01-01T00:00:00.000Z");
+  const current = run({
+    dispatchState: "running",
+    logCursor: MAX_EVENTS_PER_RUN,
+    startedAt,
+    status: "running",
+  });
+  const finalized = run({
+    completedAt: new Date("2026-01-01T00:00:01.000Z"),
+    dispatchState: "terminal",
+    logCursor: MAX_EVENTS_PER_RUN + 1,
+    startedAt,
+    status: "completed",
+    version: current.version + 1,
+  });
+  const { statements, store } = scripted([current], [finalized], [], [], []);
+
+  const result = await store.finalizeRun(operator, {
+    commandEvidence: [],
+    completedAt: finalized.completedAt as Date,
+    expectedVersion: current.version,
+    fileEvidence: [],
+    leaseToken: current.dispatchLeaseToken as string,
+    output: "",
+    runId: current.id,
+    status: "completed",
+  });
+
+  assert.equal(result.kind, "finalized");
+  assert.deepEqual(
+    statements.map((entry) => entry.name),
+    [
+      "lock-operator-run",
+      "finalize-run",
+      "insert-terminal-event",
+      "prune-run-events-after-finalize",
+      "prune-terminal-runs",
+    ]
+  );
+  const terminalEvent = JSON.parse(
+    String((statements[2] as RunnerStoreStatement).args.event)
+  );
+  assert.equal(terminalEvent.id, MAX_EVENTS_PER_RUN + 1);
+  assert.equal(terminalEvent.type, "completed");
+  const prune = statements[3] as RunnerStoreStatement;
+  assert.equal(prune.args.maxEvents, MAX_EVENTS_PER_RUN);
+  assert.equal(prune.args.runId, current.id);
+  assert.equal(prune.args.tenant, current.tenant);
+  assert.match(queryText(prune), /DELETE FROM "RunnerRunEvent"/);
+  assert.match(queryText(prune), /ORDER BY "eventId" DESC\s+OFFSET \$\d+/);
+});
+
 test("event reads return the retained stale-resume suffix in bounded cursor order", async () => {
   const retained = [7, 8, 9].map((eventId) => ({
     createdAt: new Date("2026-01-01T00:00:00.000Z"),

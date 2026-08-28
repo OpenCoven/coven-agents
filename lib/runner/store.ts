@@ -288,6 +288,34 @@ async function pruneTerminalRunsInTransaction(
   return rows.map((row) => String(row.id));
 }
 
+async function pruneRunEventsInTransaction(
+  transaction: RunnerStoreTransaction,
+  name: string,
+  runId: string,
+  tenant: string
+): Promise<void> {
+  await transaction.execute(
+    statement(
+      name,
+      { maxEvents: MAX_EVENTS_PER_RUN, runId, tenant },
+      sql`DELETE FROM "RunnerRunEvent"
+        WHERE "runId" = ${runId}
+          AND EXISTS (
+            SELECT 1 FROM "RunnerRun"
+            WHERE "id" = ${runId}
+              AND "tenant" = ${tenant}
+          )
+          AND "eventId" IN (
+            SELECT "eventId"
+            FROM "RunnerRunEvent"
+            WHERE "runId" = ${runId}
+            ORDER BY "eventId" DESC
+            OFFSET ${MAX_EVENTS_PER_RUN}
+          )`
+    )
+  );
+}
+
 export type RunnerStore = ReturnType<typeof createRunnerStore>;
 
 /**
@@ -409,29 +437,11 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (!inserted) {
           throw new Error("Runner event insert returned no row.");
         }
-        await transaction.execute(
-          statement(
-            "prune-run-events-after-append",
-            {
-              maxEvents: MAX_EVENTS_PER_RUN,
-              runId: input.runId,
-              tenant: principal.tenant,
-            },
-            sql`DELETE FROM "RunnerRunEvent"
-              WHERE "runId" = ${input.runId}
-                AND EXISTS (
-                  SELECT 1 FROM "RunnerRun"
-                  WHERE "id" = ${input.runId}
-                    AND "tenant" = ${principal.tenant}
-                )
-                AND "eventId" IN (
-                  SELECT "eventId"
-                  FROM "RunnerRunEvent"
-                  WHERE "runId" = ${input.runId}
-                  ORDER BY "eventId" DESC
-                  OFFSET ${MAX_EVENTS_PER_RUN}
-                )`
-          )
+        await pruneRunEventsInTransaction(
+          transaction,
+          "prune-run-events-after-append",
+          input.runId,
+          principal.tenant
         );
         return {
           event: asEvent(inserted),
@@ -723,6 +733,12 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             sql`INSERT INTO "RunnerRunEvent" ("runId", "eventId", "event")
               VALUES (${input.runId}, ${eventId}, CAST(${eventJson(event)} AS jsonb))`
           )
+        );
+        await pruneRunEventsInTransaction(
+          transaction,
+          "prune-run-events-after-finalize",
+          input.runId,
+          finalized.tenant
         );
         const prunedRunIds = await pruneTerminalRunsInTransaction(
           transaction,
