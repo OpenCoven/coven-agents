@@ -36,6 +36,17 @@ export async function POST(request: Request) {
     return abuseAdmissionResponse(admission);
   }
 
+  /**
+   * A body-less POST is the common case — the console's background mint
+   * sends none — and it must not be mistaken for a malformed one. Branching
+   * on `request.body` was that mistake: in the deployed Node runtime an
+   * empty POST arrives as a non-null empty stream, the strict reader calls
+   * zero bytes invalid, and every plain mint 400s — observed in production
+   * as "Could not obtain a runner identity (400)" on a signed-in console
+   * that had done nothing wrong. The route-specific empty-body value preserves
+   * strict validation for malformed, unknown-field, oversized, and run-scoped
+   * JSON while treating an actual zero-byte stream as an unscoped request.
+   */
   let run: z.infer<typeof runnerRunScopeSchema> | undefined;
   if (request.body) {
     const body = await readBoundedJson(
