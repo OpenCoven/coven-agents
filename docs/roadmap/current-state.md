@@ -14,7 +14,7 @@ snapshot.
 > existing browser identity minter sends a zero-byte `POST /api/runner-token`;
 > the candidate fixes that compatibility boundary with fourteen passing
 > route/client cases, but the fix is not deployed. On the final candidate,
-> lint, typecheck, 1,163 unit tests, the 32-page build, release configuration
+> lint, typecheck, 1,329 unit tests, the 33-page build, release configuration
 > validation, tracked secret scan, 62 roadmap tests, and two byte-identical
 > live roadmap applies passed. The production-browser gate passed 15 of 17
 > cases; the Warden and legacy-chat subscriber cases cannot satisfy the new

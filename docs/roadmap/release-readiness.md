@@ -168,7 +168,7 @@ Retain command, commit, environment, timestamp, exit status, and sanitized
 output. The placeholder `ADMIN_EMAILS` value above is a local audit fixture,
 not release configuration. `AUTH_SECRET` must be supplied from local
 environment storage and must not be committed. On the final signed candidate,
-check, typecheck, 1,163 unit tests, and the 32-page production build passed.
+check, typecheck, 1,329 unit tests, and the 33-page production build passed.
 Hygiene later became red when the unrelated `fix/process-runner` worktree
 gained one uncommitted file. The browser command passed 15 of 17 cases; Warden
 and legacy chat failed because the database-free cookie fixture cannot satisfy
@@ -339,7 +339,7 @@ or guess at database compatibility.
 | Roadmap freshness | `pnpm roadmap:status check` passes after authoritative reconciliation. | Stale aggregate. | **No-go:** the candidate Project check can pass, but Beads freshness cannot be established. |
 | Worktree safety | `pnpm hygiene` exits zero with no `AT RISK` worktree and the secondary count within the soft cap. | Any `AT RISK` worktree or a secondary count above the soft cap. | **No-go:** the latest exact-candidate run found `fix/process-runner` `AT RISK` with one uncommitted file. There are three secondary worktrees, exactly at the soft cap. |
 | Beads/Project/issues | A second apply and final preview are a complete no-op, and accepted delivery artifacts agree. | Drift, create/update/orphan work, partial or failed sync, or issue contradiction. | **No-go:** authoritative sync cannot run; the latest recorded Project query found managed items were drafts. |
-| Six local gates | All six pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** check, typecheck, 1,163 unit tests, and the 32-page build passed. Hygiene is externally blocked, and the production-browser gate passed 15 of 17 while failing the Warden and legacy-chat subscriber cases at the database-backed session-authority boundary. |
+| Six local gates | All six pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** check, typecheck, 1,329 unit tests, and the 33-page build passed. Hygiene is externally blocked, and the production-browser gate passed 15 of 17 while failing the Warden and legacy-chat subscriber cases at the database-backed session-authority boundary. |
 | Database | Staging migration, production backup, migration success, schema verification, and recovery record exist. | Missing backup, skipped/failed migration, or unproved recovery. | **No-go:** no candidate-specific production migration and restore artifact is retained. |
 | Smoke and Stripe | Demo, subscriber, bodyless and run-scoped identity minting, cloud lifecycle, and webhook evidence pass; Stripe claim/update recovery is atomic and retry-safe; local runs only if supported. | Any failed required smoke, undeployed token compatibility fix, missing webhook delivery, or claim-before-state behavior that permanently deduplicates failed processing. | **No-go:** the runner-token fix is local-only, only local/unit lifecycle evidence is retained, and current Stripe claim/update ordering is not retry-safe. |
 | Isolation | Tenant, credential, identity, and redaction evidence pass in a release-equivalent environment. | Any cross-tenant or secret-boundary failure. | **No-go:** production-like isolation evidence is not retained. |
