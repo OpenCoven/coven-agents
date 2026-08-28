@@ -50,20 +50,20 @@ function processDouble(
   let sessions = [...(options.sessions ?? [])];
   const sandbox: DaytonaProcessSandbox = {
     process: {
-      createSession: () => {
-        calls.push({ command: SESSION, kind: "create" });
+      createSession: (sessionId) => {
+        calls.push({ command: sessionId, kind: "create" });
         if (options.createError) {
           if (options.createCreatesSession) {
-            sessions.push({ commands: [], sessionId: SESSION });
+            sessions.push({ commands: [], sessionId });
           }
           return Promise.reject(options.createError);
         }
-        sessions.push({ commands: [], sessionId: SESSION });
+        sessions.push({ commands: [], sessionId });
         return Promise.resolve();
       },
-      deleteSession: () => {
+      deleteSession: (sessionId) => {
         deleteCalls += 1;
-        calls.push({ command: SESSION, kind: "delete" });
+        calls.push({ command: sessionId, kind: "delete" });
         if (
           options.deleteError &&
           (options.deleteErrorOnCall === undefined ||
@@ -73,7 +73,7 @@ function processDouble(
         }
         if (!options.deleteLeavesSession) {
           sessions = sessions.filter(
-            (session) => session.sessionId !== SESSION
+            (session) => session.sessionId !== sessionId
           );
         }
         return Promise.resolve();
@@ -152,7 +152,7 @@ const startInput = (sandbox: DaytonaProcessSandbox) => ({
   workspace: "repo",
 });
 
-const stopInput = { runId: RUN_ID, sessionId: SESSION };
+const stopInput = { runId: RUN_ID };
 
 function allReturnedText(value: unknown): string {
   return JSON.stringify(value, Object.getOwnPropertyNames(value));
@@ -720,6 +720,37 @@ test("the Daytona SDK Sandbox process shape is assignable", () => {
   const acceptsSdkSandbox = (sandbox: Sandbox): DaytonaProcessSandbox =>
     sandbox;
   assert.equal(typeof acceptsSdkSandbox, "function");
+});
+
+test("derives its stop target from run ID and ignores external caller IDs", async () => {
+  const externalSessionId = "coven-run-8f5c24f2-9dc2-4874-b635-e1d4bf03674a";
+  const legacyInput = { runId: RUN_ID, sessionId: externalSessionId };
+  const { calls, sandbox, sessionIds } = processDouble({
+    sessions: [
+      { commands: [], sessionId: SESSION },
+      { commands: [], sessionId: externalSessionId },
+    ],
+  });
+
+  assert.deepEqual(await stopDaytonaProcess(sandbox, legacyInput), {
+    kind: "stopped",
+  });
+  assert.deepEqual(
+    calls.filter((call) => call.kind === "delete").map((call) => call.command),
+    [SESSION]
+  );
+  assert.deepEqual(sessionIds(), [externalSessionId]);
+});
+
+test("rejects invalid stop run IDs before any Daytona mutation", async () => {
+  const { calls, sandbox } = processDouble();
+
+  await assert.rejects(
+    () => stopDaytonaProcess(sandbox, { runId: "../unsafe" }),
+    /UUID run id/u
+  );
+
+  assert.deepEqual(calls, []);
 });
 
 test("stops sessions only after API absence confirmation and asks caller to reset on failure", async () => {

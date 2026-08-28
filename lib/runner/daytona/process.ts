@@ -601,6 +601,8 @@ export type DaytonaStopResult =
       kind: "sandbox_reset_required";
     }>;
 
+export type DaytonaStopInput = Readonly<{ runId: string }>;
+
 /**
  * `deleteSession` is the only session termination operation in SDK 0.207.
  * After confirmed absence, it removes and verifies the run's deterministic
@@ -611,11 +613,12 @@ export type DaytonaStopResult =
  */
 export async function stopDaytonaProcess(
   sandbox: DaytonaProcessSandbox,
-  input: Readonly<{ runId: string; sessionId: string }>
+  input: DaytonaStopInput
 ): Promise<DaytonaStopResult> {
+  const sessionId = daytonaRunSessionName(input.runId);
   let sessionAbsent = false;
   try {
-    await sandbox.process.deleteSession(input.sessionId);
+    await sandbox.process.deleteSession(sessionId);
   } catch (error) {
     if (classifyDaytonaProviderError(error) !== "not_found") {
       return {
@@ -633,7 +636,7 @@ export async function stopDaytonaProcess(
   if (!sessionAbsent) {
     try {
       const sessions = await sandbox.process.listSessions();
-      if (sessions.some((session) => session.sessionId === input.sessionId)) {
+      if (sessions.some((session) => session.sessionId === sessionId)) {
         throw new Error("Daytona session remained after deletion.");
       }
     } catch (error) {
