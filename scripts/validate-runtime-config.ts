@@ -9,9 +9,11 @@ const REQUIRED_PRODUCTION_VARIABLES = [
   "RUNNER_RECONCILE_SECRET",
   "OPERATOR_DIAGNOSTIC_TOKEN",
 ] as const;
-const RUNTIME_INTEGER_DEFAULTS = {
+const DAYTONA_INTERVAL_DEFAULTS = {
   DAYTONA_AUTO_ARCHIVE_MINUTES: "10080",
   DAYTONA_AUTO_STOP_MINUTES: "15",
+} as const;
+const ADMISSION_LIMIT_MAXIMUMS = {
   RUN_ADMISSION_CONSECUTIVE_MAX: "2",
   RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "25",
   RUN_ADMISSION_TENANT_ACTIVE_MAX: "2",
@@ -51,8 +53,22 @@ function validateProductionRuntimeConfig(environment: NodeJS.ProcessEnv): void {
 
   validateDaytonaTarget(environment.DAYTONA_TARGET);
 
-  for (const [name, defaultValue] of Object.entries(RUNTIME_INTEGER_DEFAULTS)) {
-    validatePositiveIntegerSetting(name, environment[name], defaultValue);
+  for (const [name, defaultValue] of Object.entries(
+    DAYTONA_INTERVAL_DEFAULTS
+  )) {
+    validateNonNegativeSafeIntegerSetting(
+      name,
+      environment[name],
+      defaultValue
+    );
+  }
+
+  for (const [name, maximum] of Object.entries(ADMISSION_LIMIT_MAXIMUMS)) {
+    validateBoundedNonNegativeSafeIntegerSetting(
+      name,
+      environment[name],
+      maximum
+    );
   }
 }
 
@@ -63,19 +79,47 @@ function validateDaytonaTarget(configured: string | undefined): void {
   }
 }
 
-function validatePositiveIntegerSetting(
-  name: string,
+function parseConfiguredNumber(
   configured: string | undefined,
   defaultValue: string
 ): number {
   const value = (configured === undefined ? defaultValue : configured).trim();
-  if (!/^[1-9]\d*$/.test(value)) {
-    throw new Error(`${name} must be a positive integer.`);
+  return Number(value);
+}
+
+function validateNonNegativeSafeIntegerSetting(
+  name: string,
+  configured: string | undefined,
+  defaultValue: string,
+  errorMessage = `${name} must be a non-negative safe integer.`
+): number {
+  const value = (configured === undefined ? defaultValue : configured).trim();
+  if (!/^\d+$/.test(value)) {
+    throw new Error(errorMessage);
   }
 
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new Error(`${name} must be a positive integer.`);
+  const parsed = parseConfiguredNumber(configured, defaultValue);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(errorMessage);
+  }
+  return parsed;
+}
+
+function validateBoundedNonNegativeSafeIntegerSetting(
+  name: string,
+  configured: string | undefined,
+  maximum: string
+): number {
+  const errorMessage = `${name} must be a non-negative safe integer no greater than ${maximum}.`;
+  const parsed = validateNonNegativeSafeIntegerSetting(
+    name,
+    configured,
+    maximum,
+    errorMessage
+  );
+  const parsedMaximum = Number(maximum);
+  if (parsed > parsedMaximum) {
+    throw new Error(errorMessage);
   }
   return parsed;
 }

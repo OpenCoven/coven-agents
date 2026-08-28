@@ -33,14 +33,24 @@ const REQUIRED_PRODUCTION_VARIABLES = [
   "REDIS_URL",
   "RUNNER_RECONCILE_SECRET",
 ] as const;
-const REQUIRED_POSITIVE_INTEGER_VARIABLES = [
+const DAYTONA_NON_NEGATIVE_SAFE_INTEGER_VARIABLES = [
   "DAYTONA_AUTO_ARCHIVE_MINUTES",
   "DAYTONA_AUTO_STOP_MINUTES",
-  "RUN_ADMISSION_CONSECUTIVE_MAX",
-  "RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX",
-  "RUN_ADMISSION_TENANT_ACTIVE_MAX",
-  "RUN_ADMISSION_TENANT_QUEUE_MAX",
 ] as const;
+const ADMISSION_LIMIT_MAXIMUMS = {
+  RUN_ADMISSION_CONSECUTIVE_MAX: "2",
+  RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "25",
+  RUN_ADMISSION_TENANT_ACTIVE_MAX: "2",
+  RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+} as const;
+
+function assertRejectedWithMessage(
+  result: ReturnType<typeof runValidator>,
+  message: string
+) {
+  assert.notEqual(result.status, 0);
+  assert.equal(result.stderr.trim(), message);
+}
 
 function runValidator(
   overrides: Partial<
@@ -109,12 +119,9 @@ test("rejects missing required production configuration", () => {
   for (const variableName of REQUIRED_PRODUCTION_VARIABLES) {
     const result = runValidator({ [variableName]: undefined });
 
-    assert.notEqual(result.status, 0);
-    assert.match(
-      result.stderr,
-      new RegExp(
-        `Missing required production environment variables: ${variableName}`
-      )
+    assertRejectedWithMessage(
+      result,
+      `Missing required production environment variables: ${variableName}.`
     );
   }
 });
@@ -124,12 +131,9 @@ test("rejects blank required production configuration", () => {
     for (const blankValue of ["", "  "]) {
       const result = runValidator({ [variableName]: blankValue });
 
-      assert.notEqual(result.status, 0);
-      assert.match(
-        result.stderr,
-        new RegExp(
-          `Missing required production environment variables: ${variableName}`
-        )
+      assertRejectedWithMessage(
+        result,
+        `Missing required production environment variables: ${variableName}.`
       );
     }
   }
@@ -138,19 +142,87 @@ test("rejects blank required production configuration", () => {
 test("rejects an invalid Daytona target", () => {
   const result = runValidator({ DAYTONA_TARGET: "moon" });
 
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /DAYTONA_TARGET must be "us" or "eu"\./);
+  assertRejectedWithMessage(result, 'DAYTONA_TARGET must be "us" or "eu".');
 });
 
-test("rejects malformed positive integer runtime settings", () => {
-  for (const variableName of REQUIRED_POSITIVE_INTEGER_VARIABLES) {
-    const result = runValidator({ [variableName]: "0" });
-    assert.notEqual(result.status, 0);
-    assert.match(
-      result.stderr,
-      new RegExp(`${variableName} must be a positive integer\\.`)
+test("accepts zero-valued runtime and admission settings", () => {
+  const result = runValidator({
+    DAYTONA_AUTO_ARCHIVE_MINUTES: "0",
+    DAYTONA_AUTO_STOP_MINUTES: "0",
+    RUN_ADMISSION_CONSECUTIVE_MAX: "0",
+    RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "0",
+    RUN_ADMISSION_TENANT_ACTIVE_MAX: "0",
+    RUN_ADMISSION_TENANT_QUEUE_MAX: "0",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("rejects invalid Daytona interval settings", () => {
+  const invalidValues = ["-1", "1.5", "9007199254740992"] as const;
+
+  for (const variableName of DAYTONA_NON_NEGATIVE_SAFE_INTEGER_VARIABLES) {
+    for (const invalidValue of invalidValues) {
+      const result = runValidator({ [variableName]: invalidValue });
+
+      assertRejectedWithMessage(
+        result,
+        `${variableName} must be a non-negative safe integer.`
+      );
+    }
+  }
+});
+
+test("rejects invalid admission limit settings", () => {
+  const invalidValues = ["-1", "1.5", "9007199254740992"] as const;
+
+  for (const [variableName, maximum] of Object.entries(
+    ADMISSION_LIMIT_MAXIMUMS
+  )) {
+    for (const invalidValue of invalidValues) {
+      const result = runValidator({ [variableName]: invalidValue });
+
+      assertRejectedWithMessage(
+        result,
+        `${variableName} must be a non-negative safe integer no greater than ${maximum}.`
+      );
+    }
+  }
+});
+
+test("rejects admission limits above their hard maxima", () => {
+  const aboveMaximums = {
+    RUN_ADMISSION_CONSECUTIVE_MAX: "3",
+    RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "26",
+    RUN_ADMISSION_TENANT_ACTIVE_MAX: "3",
+    RUN_ADMISSION_TENANT_QUEUE_MAX: "11",
+  } as const;
+
+  for (const [variableName, invalidValue] of Object.entries(aboveMaximums)) {
+    const result = runValidator({ [variableName]: invalidValue });
+
+    assertRejectedWithMessage(
+      result,
+      `${variableName} must be a non-negative safe integer no greater than ${
+        ADMISSION_LIMIT_MAXIMUMS[
+          variableName as keyof typeof ADMISSION_LIMIT_MAXIMUMS
+        ]
+      }.`
     );
   }
+});
+
+test("accepts default runtime integer settings when omitted", () => {
+  const result = runValidator({
+    DAYTONA_AUTO_ARCHIVE_MINUTES: undefined,
+    DAYTONA_AUTO_STOP_MINUTES: undefined,
+    RUN_ADMISSION_CONSECUTIVE_MAX: undefined,
+    RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: undefined,
+    RUN_ADMISSION_TENANT_ACTIVE_MAX: undefined,
+    RUN_ADMISSION_TENANT_QUEUE_MAX: undefined,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("accepts a production build with no credential KEK variables", () => {
