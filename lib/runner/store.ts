@@ -162,7 +162,7 @@ function runSnapshot(run: RunnerRunRecord): RunSnapshot {
     commandEvidence: run.commandEvidence,
     completedAt: run.completedAt?.toISOString() ?? null,
     createdAt: run.createdAt.toISOString(),
-    ...(run.error ? { error: run.error } : {}),
+    error: run.error,
     fileEvidence: run.fileEvidence,
     id: run.id,
     operationId: run.operationId,

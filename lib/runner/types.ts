@@ -59,7 +59,7 @@ export type RunnerAgentRecord = {
 
 export type RunnerRunRecord = Omit<
   RunSnapshot,
-  "apiVersion" | "completedAt" | "createdAt" | "startedAt"
+  "apiVersion" | "completedAt" | "createdAt" | "error" | "startedAt"
 > & {
   completedAt: Date | null;
   createdAt: Date;
@@ -68,6 +68,7 @@ export type RunnerRunRecord = Omit<
   dispatchLeaseExpiresAt: Date | null;
   dispatchLeaseToken: string | null;
   dispatchState: RunnerDispatchState;
+  error: RunError | null;
   logCursor: number;
   queueSequence: number;
   requestHash: string;

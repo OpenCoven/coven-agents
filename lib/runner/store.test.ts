@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AGENT_RUNNER_API_VERSION } from "@opencoven/agent-contracts";
+import {
+  AGENT_RUNNER_API_VERSION,
+  runEventSchema,
+  runSnapshotSchema,
+} from "@opencoven/agent-contracts";
 import { sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { createRunnerStore, type RunnerStoreStatement } from "./store";
@@ -603,14 +607,78 @@ test("agent updates use integer versions", async () => {
   assert.doesNotMatch(query, /"updatedAt" = \$\d+/);
 });
 
-test("raw database run rows derive the canonical public API version", async () => {
-  const raw = run();
+test("raw database rows serialize nullable errors in canonical snapshots", async () => {
+  const raw: Record<string, unknown> = {
+    ...run({
+      commandEvidence: [
+        {
+          command: "echo complete",
+          exitCode: 0,
+          stderr: "",
+          stdout: "complete",
+        },
+      ],
+      fileEvidence: [{ operation: "create", path: "/workspace/result.txt" }],
+    }),
+    error: null,
+  };
   const { store } = scripted([raw]);
 
-  const snapshot = await store.getRun(principal, raw.id);
+  const snapshot = await store.getRun(principal, String(raw.id));
+  const serialized = JSON.parse(JSON.stringify(snapshot));
 
   assert.equal("apiVersion" in raw, false);
   assert.equal(snapshot?.apiVersion, AGENT_RUNNER_API_VERSION);
+  assert.equal(runSnapshotSchema.safeParse(serialized).success, true);
+  assert.equal(Object.hasOwn(serialized, "error"), true);
+  assert.equal(serialized.error, null);
+});
+
+test("terminal events serialize nullable errors from raw database rows", async () => {
+  const startedAt = new Date("2026-01-01T00:00:01.000Z");
+  const current: Record<string, unknown> = {
+    ...run({
+      dispatchState: "running",
+      startedAt,
+      status: "running",
+    }),
+    error: null,
+  };
+  const finalized: Record<string, unknown> = {
+    ...run({
+      completedAt: new Date("2026-01-01T00:00:02.000Z"),
+      dispatchState: "terminal",
+      startedAt,
+      status: "completed",
+      version: 8,
+    }),
+    error: null,
+  };
+  const { statements, store } = scripted([current], [finalized], [], []);
+
+  const result = await store.finalizeRun(operator, {
+    commandEvidence: [],
+    completedAt: finalized.completedAt as Date,
+    expectedVersion: 7,
+    fileEvidence: [],
+    leaseToken: "lease-a",
+    output: "",
+    runId: String(finalized.id),
+    status: "completed",
+  });
+
+  assert.equal(result.kind, "finalized");
+  assert.equal(
+    result.kind === "finalized" && Object.hasOwn(result.run, "error"),
+    true
+  );
+  assert.equal(result.kind === "finalized" && result.run.error, null);
+  const event = JSON.parse(
+    String((statements[2] as RunnerStoreStatement).args.event)
+  );
+  assert.equal(runEventSchema.safeParse(event).success, true);
+  assert.equal(Object.hasOwn(event.run, "error"), true);
+  assert.equal(event.run.error, null);
 });
 
 test("agent deletion and starts serialize through the same agent lock", async () => {
