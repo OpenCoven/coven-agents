@@ -794,6 +794,13 @@
           "notNull": true,
           "default": "'unprovisioned'"
         },
+        "sandboxUpdatedAt": {
+          "name": "sandboxUpdatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
         "status": {
           "name": "status",
           "type": "varchar(16)",

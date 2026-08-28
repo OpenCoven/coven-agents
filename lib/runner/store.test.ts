@@ -69,6 +69,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     runtime: "cloud",
     sandboxGeneration: 0,
     sandboxLifecycle: "unprovisioned",
+    sandboxUpdatedAt: new Date("2026-01-01T00:00:00.000Z"),
     status: "idle",
     tenant: principal.tenant,
     updatedAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -111,7 +112,11 @@ test("principal methods bind every read and mutation to its tenant", async () =>
 
 test("duplicate starts return the immutable matching request", async () => {
   const existing = run();
-  const { store } = scripted([{ id: existing.agentId }], [], [existing]);
+  const { store } = scripted(
+    [{ id: existing.agentId, sandboxLifecycle: "ready" }],
+    [],
+    [existing]
+  );
 
   const result = await store.startRun(principal, {
     agentId: existing.agentId,
@@ -131,7 +136,11 @@ test("duplicate starts return the immutable matching request", async () => {
 
 test("reusing an operation with another request hash conflicts", async () => {
   const existing = run();
-  const { store } = scripted([{ id: existing.agentId }], [], [existing]);
+  const { store } = scripted(
+    [{ id: existing.agentId, sandboxLifecycle: "ready" }],
+    [],
+    [existing]
+  );
 
   const result = await store.startRun(principal, {
     agentId: existing.agentId,
@@ -598,7 +607,11 @@ test("principal mutations bind every affected row to the principal tenant", asyn
     [],
     [{ id: current.agentId }]
   );
-  const start = scripted([{ id: current.agentId }], [], [current]);
+  const start = scripted(
+    [{ id: current.agentId, sandboxLifecycle: "ready" }],
+    [],
+    [current]
+  );
 
   await append.store.appendEvent(principal, {
     event: { output: "progress", type: "output" },
@@ -828,7 +841,11 @@ test("agent deletion and starts serialize through the same agent lock", async ()
     [],
     [{ id: current.agentId }]
   );
-  const start = scripted([{ id: current.agentId }], [], [current]);
+  const start = scripted(
+    [{ id: current.agentId, sandboxLifecycle: "ready" }],
+    [],
+    [current]
+  );
 
   assert.deepEqual(
     await deletion.store.deleteAgent(principal, current.agentId),
@@ -877,6 +894,7 @@ test("sandbox generation reservation locks and fences the stored ID", async () =
     expectedGeneration: current.sandboxGeneration,
     expectedSandboxId: current.daytonaSandboxId,
     expectedVersion: current.version,
+    provisioningStaleBefore: new Date("2026-01-01T00:00:00.000Z"),
   });
 
   assert.equal(result.kind, "reserved");
@@ -922,12 +940,18 @@ test("warm and decommission transitions retain generation and version fences", a
         agentId: current.id,
         expectedGeneration: current.sandboxGeneration,
         expectedVersion: current.version,
+        warmStaleBefore: new Date("2026-01-01T00:00:00.000Z"),
       })
     ).kind,
     "started"
   );
   assert.equal(
-    (await store.beginDaytonaSandboxDecommission(principal, current.id)).kind,
+    (
+      await store.beginDaytonaSandboxDecommission(principal, {
+        agentId: current.id,
+        provisioningStaleBefore: new Date("2026-01-01T00:00:00.000Z"),
+      })
+    ).kind,
     "decommissioning"
   );
   assert.equal(
@@ -960,10 +984,10 @@ test("durable decommissioning resumes with its current generation and provider I
   });
   const { statements, store } = scripted([decommissioning]);
 
-  const result = await store.beginDaytonaSandboxDecommission(
-    principal,
-    decommissioning.id
-  );
+  const result = await store.beginDaytonaSandboxDecommission(principal, {
+    agentId: decommissioning.id,
+    provisioningStaleBefore: new Date("2026-01-01T00:00:00.000Z"),
+  });
 
   assert.deepEqual(result, { kind: "decommissioning", value: decommissioning });
   assert.deepEqual(
@@ -1010,6 +1034,200 @@ test("permanent decommission failures persist error, warm, and lifecycle state",
   assert.match(query, /"status" = 'error'/u);
   assert.match(query, /"warmStatus" = 'failed'/u);
   assert.match(query, /"warmUpdatedAt" = now\(\)/u);
+});
+
+test("stale provisioning reservations are taken over while live leases remain in progress", async () => {
+  const cutoff = new Date("2026-01-01T00:00:00.000Z");
+  const live = agent({
+    sandboxGeneration: 2,
+    sandboxLifecycle: "provisioning",
+    sandboxUpdatedAt: new Date("2026-01-01T00:00:01.000Z"),
+    version: 4,
+  });
+  const stale = agent({
+    sandboxGeneration: 2,
+    sandboxLifecycle: "provisioning",
+    sandboxUpdatedAt: new Date("2025-12-31T23:59:59.000Z"),
+    version: 4,
+  });
+  const taken = agent({
+    ...stale,
+    sandboxGeneration: 3,
+    sandboxUpdatedAt: cutoff,
+    version: 5,
+  });
+  const liveStore = scripted([live]);
+  const staleStore = scripted([stale], [taken]);
+
+  assert.deepEqual(
+    await liveStore.store.reserveDaytonaSandbox(principal, {
+      agentId: live.id,
+      expectedGeneration: 0,
+      expectedSandboxId: null,
+      expectedVersion: 0,
+      provisioningStaleBefore: cutoff,
+    }),
+    { kind: "in_progress", value: live }
+  );
+  assert.deepEqual(
+    await staleStore.store.reserveDaytonaSandbox(principal, {
+      agentId: stale.id,
+      expectedGeneration: 0,
+      expectedSandboxId: null,
+      expectedVersion: 0,
+      provisioningStaleBefore: cutoff,
+    }),
+    { kind: "reserved", value: taken }
+  );
+  const query = queryText(staleStore.statements[1] as RunnerStoreStatement);
+  assert.match(query, /"sandboxUpdatedAt" <= \$/u);
+  assert.match(query, /"sandboxGeneration" = "sandboxGeneration" \+ 1/u);
+});
+
+test("stale warm operations are fenced and reclaimed while live warming remains in progress", async () => {
+  const cutoff = new Date("2026-01-01T00:00:00.000Z");
+  const live = agent({
+    daytonaSandboxId: "sandbox",
+    sandboxGeneration: 2,
+    sandboxLifecycle: "ready",
+    version: 4,
+    warmStatus: "provisioning",
+    warmUpdatedAt: new Date("2026-01-01T00:00:01.000Z"),
+  });
+  const stale = agent({
+    ...live,
+    warmUpdatedAt: new Date("2025-12-31T23:59:59.000Z"),
+  });
+  const reclaimed = agent({
+    ...stale,
+    version: 5,
+    warmUpdatedAt: cutoff,
+  });
+  const liveStore = scripted([live]);
+  const staleStore = scripted([stale], [reclaimed]);
+
+  assert.equal(
+    (
+      await liveStore.store.beginDaytonaSandboxWarm(principal, {
+        agentId: live.id,
+        expectedGeneration: live.sandboxGeneration,
+        expectedVersion: 0,
+        warmStaleBefore: cutoff,
+      })
+    ).kind,
+    "in_progress"
+  );
+  assert.deepEqual(
+    await staleStore.store.beginDaytonaSandboxWarm(principal, {
+      agentId: stale.id,
+      expectedGeneration: stale.sandboxGeneration,
+      expectedVersion: stale.version,
+      warmStaleBefore: cutoff,
+    }),
+    { kind: "started", value: reclaimed }
+  );
+  assert.match(
+    queryText(staleStore.statements[1] as RunnerStoreStatement),
+    /"warmUpdatedAt" <= \$/u
+  );
+});
+
+test("decommission rejects live provisioning and fences a stale provisioning takeover", async () => {
+  const cutoff = new Date("2026-01-01T00:00:00.000Z");
+  const live = agent({
+    sandboxGeneration: 2,
+    sandboxLifecycle: "provisioning",
+    sandboxUpdatedAt: new Date("2026-01-01T00:00:01.000Z"),
+    version: 4,
+  });
+  const stale = agent({
+    ...live,
+    sandboxUpdatedAt: new Date("2025-12-31T23:59:59.000Z"),
+  });
+  const decommissioning = agent({
+    ...stale,
+    sandboxGeneration: 3,
+    sandboxLifecycle: "decommissioning",
+    version: 5,
+  });
+  const liveStore = scripted([live], []);
+  const staleStore = scripted([stale], [], [decommissioning]);
+
+  assert.deepEqual(
+    await liveStore.store.beginDaytonaSandboxDecommission(principal, {
+      agentId: live.id,
+      provisioningStaleBefore: cutoff,
+    }),
+    { kind: "busy" }
+  );
+  assert.deepEqual(
+    await staleStore.store.beginDaytonaSandboxDecommission(principal, {
+      agentId: stale.id,
+      provisioningStaleBefore: cutoff,
+    }),
+    { kind: "decommissioning", value: decommissioning }
+  );
+  const query = queryText(staleStore.statements[2] as RunnerStoreStatement);
+  assert.match(query, /"sandboxUpdatedAt" <= \$/u);
+  assert.match(query, /WHEN "sandboxLifecycle" = 'provisioning'/u);
+});
+
+test("decommissioning lifecycle rejects run admission before inserting a run", async () => {
+  await Promise.all(
+    (["decommissioning", "decommission_failed"] as const).map(
+      async (lifecycle) => {
+        const current = agent({ sandboxLifecycle: lifecycle });
+        const { statements, store } = scripted([
+          { id: current.id, sandboxLifecycle: lifecycle },
+        ]);
+        const result = await store.startRun(principal, {
+          agentId: current.id,
+          id: "00000000-0000-4000-8000-000000000099",
+          operationId: "00000000-0000-4000-8000-000000000098",
+          requestHash: "a".repeat(64),
+          task: "test",
+        });
+        assert.deepEqual(result, { kind: "sandbox_unavailable", lifecycle });
+        assert.deepEqual(
+          statements.map((statement) => statement.name),
+          ["lock-agent-for-run-start"]
+        );
+      }
+    )
+  );
+});
+
+test("normal, unprovisioned, and provisioning agents remain eligible for run admission", async () => {
+  await Promise.all(
+    (["unprovisioned", "provisioning", "ready"] as const).map(
+      async (sandboxLifecycle) => {
+        const current = run();
+        const { statements, store } = scripted(
+          [{ id: current.agentId, sandboxLifecycle }],
+          [current],
+          [{}],
+          [current]
+        );
+        const result = await store.startRun(principal, {
+          agentId: current.agentId,
+          id: current.id,
+          operationId: current.operationId,
+          requestHash: current.requestHash,
+          task: current.task,
+        });
+        assert.equal(result.kind, "created");
+        assert.deepEqual(
+          statements.map((statement) => statement.name),
+          [
+            "lock-agent-for-run-start",
+            "insert-run",
+            "insert-accepted-event",
+            "advance-run-after-acceptance",
+          ]
+        );
+      }
+    )
+  );
 });
 
 test("the production statement shape remains Drizzle-safe", () => {

@@ -10,6 +10,7 @@ CREATE TABLE "RunnerAgent" (
 	"runtime" varchar(16) NOT NULL,
 	"sandboxGeneration" integer DEFAULT 0 NOT NULL,
 	"sandboxLifecycle" varchar(24) DEFAULT 'unprovisioned' NOT NULL,
+	"sandboxUpdatedAt" timestamp DEFAULT now() NOT NULL,
 	"status" varchar(16) DEFAULT 'idle' NOT NULL,
 	"tenant" varchar(64) NOT NULL,
 	"updatedAt" timestamp DEFAULT now() NOT NULL,

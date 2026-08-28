@@ -55,6 +55,7 @@ export type RunnerAgentRecord = {
   runtime: RunnerRuntime;
   sandboxGeneration: number;
   sandboxLifecycle: RunnerSandboxLifecycle;
+  sandboxUpdatedAt: Date;
   status: RunnerAgentStatus;
   tenant: string;
   updatedAt: Date;
@@ -166,12 +167,22 @@ export type ReserveDaytonaSandboxInput = {
   expectedGeneration: number;
   expectedSandboxId: string | null;
   expectedVersion: number;
+  provisioningStaleBefore: Date;
 };
 
 export type DaytonaSandboxFence = {
   agentId: string;
   expectedGeneration: number;
   expectedVersion: number;
+};
+
+export type BeginDaytonaSandboxWarmInput = DaytonaSandboxFence & {
+  warmStaleBefore: Date;
+};
+
+export type BeginDaytonaSandboxDecommissionInput = {
+  agentId: string;
+  provisioningStaleBefore: Date;
 };
 
 export type ExpiredDispatchRequeueInput = {

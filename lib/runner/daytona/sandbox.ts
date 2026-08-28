@@ -22,6 +22,8 @@ import { daytonaSandboxLabels, daytonaSandboxName } from "./names";
 const DEFAULT_AUTO_ARCHIVE_MINUTES = 10_080;
 const DEFAULT_AUTO_STOP_MINUTES = 15;
 const SANDBOX_OPERATION_TIMEOUT_SECONDS = 60;
+export const SANDBOX_PROVISIONING_TIMEOUT_MS = 5 * 60 * 1000;
+export const SANDBOX_WARM_TIMEOUT_MS = 5 * 60 * 1000;
 
 export type DaytonaProviderErrorKind =
   | "not_found"
@@ -106,6 +108,9 @@ export function daytonaSandboxConfiguration(
 export function classifyDaytonaProviderError(
   error: unknown
 ): DaytonaProviderErrorKind {
+  if (error instanceof DaytonaSandboxLifecycleError) {
+    return error.retryable ? "retryable" : "non_retryable";
+  }
   if (
     error instanceof DaytonaNotFoundError ||
     error instanceof DaytonaGoneError ||
@@ -149,20 +154,27 @@ function sandboxCreateParameters(
 }
 
 async function startOrRecoverSandbox(sandbox: Sandbox): Promise<void> {
+  if (sandbox.state === SandboxState.STARTED) {
+    return;
+  }
   if (sandbox.state === SandboxState.ERROR && sandbox.recoverable === true) {
     await sandbox.recover(SANDBOX_OPERATION_TIMEOUT_SECONDS);
     return;
   }
   if (
     sandbox.state === SandboxState.STOPPED ||
-    sandbox.state === SandboxState.ARCHIVED
+    sandbox.state === SandboxState.ARCHIVED ||
+    sandbox.state === SandboxState.PAUSED
   ) {
     await sandbox.start(SANDBOX_OPERATION_TIMEOUT_SECONDS);
     return;
   }
-  if (sandbox.state === SandboxState.DESTROYED) {
+  if (
+    sandbox.state === SandboxState.DESTROYED ||
+    sandbox.state === SandboxState.BUILD_FAILED
+  ) {
     throw new DaytonaSandboxLifecycleError(
-      "Stored Daytona sandbox is destroyed.",
+      "Stored Daytona sandbox is terminally unusable.",
       { retryable: false }
     );
   }
@@ -178,13 +190,15 @@ async function startOrRecoverSandbox(sandbox: Sandbox): Promise<void> {
       { retryable: true }
     );
   }
+  await sandbox.waitUntilStarted(SANDBOX_OPERATION_TIMEOUT_SECONDS);
 }
 
-async function persistCreatedSandbox(
+async function persistSandbox(
   principal: RunnerPrincipal,
   reserved: RunnerAgentRecord,
   sandbox: Sandbox,
-  dependencies: DaytonaSandboxDependencies
+  dependencies: DaytonaSandboxDependencies,
+  deleteOnAttachLoss: boolean
 ): Promise<RunnerAgentRecord> {
   const attached = await dependencies.store.attachDaytonaSandbox(principal, {
     agentId: reserved.id,
@@ -196,11 +210,13 @@ async function persistCreatedSandbox(
     return attached.value;
   }
 
-  try {
-    await sandbox.delete(SANDBOX_OPERATION_TIMEOUT_SECONDS, true);
-  } catch (error) {
-    if (classifyDaytonaProviderError(error) !== "not_found") {
-      throw error;
+  if (deleteOnAttachLoss) {
+    try {
+      await sandbox.delete(SANDBOX_OPERATION_TIMEOUT_SECONDS, true);
+    } catch (error) {
+      if (classifyDaytonaProviderError(error) !== "not_found") {
+        throw error;
+      }
     }
   }
   throw new DaytonaSandboxLifecycleError(
@@ -220,6 +236,9 @@ async function createSandbox(
     expectedGeneration: agent.sandboxGeneration,
     expectedSandboxId: agent.daytonaSandboxId,
     expectedVersion: agent.version,
+    provisioningStaleBefore: new Date(
+      Date.now() - SANDBOX_PROVISIONING_TIMEOUT_MS
+    ),
   });
   if (reserved.kind === "in_progress") {
     throw new DaytonaSandboxLifecycleError(
@@ -235,43 +254,89 @@ async function createSandbox(
   }
 
   let sandbox: Sandbox;
+  let created = false;
   try {
-    sandbox = await dependencies.daytona.create(
-      sandboxCreateParameters(reserved.value, configuration),
-      { timeout: SANDBOX_OPERATION_TIMEOUT_SECONDS }
+    sandbox = await dependencies.daytona.get(
+      daytonaSandboxName(reserved.value.tenant, reserved.value.id)
     );
   } catch (error) {
-    const failed = await dependencies.store.failDaytonaSandboxReservation(
-      principal,
-      {
-        agentId: reserved.value.id,
-        expectedGeneration: reserved.value.sandboxGeneration,
-        expectedVersion: reserved.value.version,
-      }
-    );
-    if (failed.kind === "not_found" || failed.kind === "stale_version") {
-      throw new DaytonaSandboxLifecycleError(
-        "Daytona sandbox generation changed during creation.",
-        { cause: error, retryable: true }
-      );
+    if (classifyDaytonaProviderError(error) !== "not_found") {
+      await failSandboxReservation(principal, reserved.value, dependencies);
+      throw error;
     }
-    throw error;
+    try {
+      sandbox = await dependencies.daytona.create(
+        sandboxCreateParameters(reserved.value, configuration),
+        { timeout: SANDBOX_OPERATION_TIMEOUT_SECONDS }
+      );
+      created = true;
+    } catch (createError) {
+      await failSandboxReservation(principal, reserved.value, dependencies);
+      throw createError;
+    }
   }
 
-  const persisted = await persistCreatedSandbox(
+  const persisted = await persistSandbox(
     principal,
     reserved.value,
     sandbox,
-    dependencies
+    dependencies,
+    created
   );
   await startOrRecoverSandbox(sandbox);
   return { agent: persisted, sandbox };
 }
 
+async function failSandboxReservation(
+  principal: RunnerPrincipal,
+  reserved: RunnerAgentRecord,
+  dependencies: DaytonaSandboxDependencies
+): Promise<void> {
+  const failed = await dependencies.store.failDaytonaSandboxReservation(
+    principal,
+    {
+      agentId: reserved.id,
+      expectedGeneration: reserved.sandboxGeneration,
+      expectedVersion: reserved.version,
+    }
+  );
+  if (failed.kind === "not_found" || failed.kind === "stale_version") {
+    throw new DaytonaSandboxLifecycleError(
+      "Daytona sandbox generation changed during provisioning.",
+      { retryable: true }
+    );
+  }
+}
+
+async function deleteFirstDaytonaSandbox(
+  identifiers: readonly string[],
+  dependencies: DaytonaSandboxDependencies
+): Promise<void> {
+  const [identifier, ...remaining] = identifiers;
+  if (!identifier) {
+    return;
+  }
+  let sandbox: Sandbox;
+  try {
+    sandbox = await dependencies.daytona.get(identifier);
+  } catch (error) {
+    if (classifyDaytonaProviderError(error) !== "not_found") {
+      throw error;
+    }
+    return deleteFirstDaytonaSandbox(remaining, dependencies);
+  }
+  try {
+    await sandbox.delete(SANDBOX_OPERATION_TIMEOUT_SECONDS, true);
+  } catch (error) {
+    if (classifyDaytonaProviderError(error) !== "not_found") {
+      throw error;
+    }
+  }
+}
+
 /**
- * Resolves only the provider ID stored on the agent. A replacement is created
- * only after Daytona reports that that ID is gone, or its returned state is
- * destroyed.
+ * Resolves the stored provider ID and only creates after the deterministic
+ * sandbox name is confirmed absent.
  */
 export async function ensureDaytonaSandbox(
   principal: RunnerPrincipal,
@@ -288,13 +353,7 @@ export async function ensureDaytonaSandbox(
       { retryable: true }
     );
   }
-  if (agent.sandboxLifecycle === "provisioning") {
-    throw new DaytonaSandboxLifecycleError(
-      "Daytona sandbox provisioning is already in progress.",
-      { retryable: true }
-    );
-  }
-  if (!agent.daytonaSandboxId) {
+  if (agent.sandboxLifecycle === "provisioning" || !agent.daytonaSandboxId) {
     return createSandbox(principal, agent, configuration, dependencies);
   }
 
@@ -340,6 +399,7 @@ export async function warmDaytonaSandbox(
     agentId: ensured.agent.id,
     expectedGeneration: ensured.agent.sandboxGeneration,
     expectedVersion: ensured.agent.version,
+    warmStaleBefore: new Date(Date.now() - SANDBOX_WARM_TIMEOUT_MS),
   });
   if (warm.kind === "in_progress") {
     return { kind: "in_progress" };
@@ -389,30 +449,36 @@ export async function deleteDaytonaSandbox(
 > {
   const decommission = await dependencies.store.beginDaytonaSandboxDecommission(
     principal,
-    agentId
+    {
+      agentId,
+      provisioningStaleBefore: new Date(
+        Date.now() - SANDBOX_PROVISIONING_TIMEOUT_MS
+      ),
+    }
   );
   if (decommission.kind !== "decommissioning") {
     return decommission;
   }
 
   const agent = decommission.value;
-  if (agent.daytonaSandboxId) {
-    try {
-      const sandbox = await dependencies.daytona.get(agent.daytonaSandboxId);
-      await sandbox.delete(SANDBOX_OPERATION_TIMEOUT_SECONDS, true);
-    } catch (error) {
-      const kind = classifyDaytonaProviderError(error);
-      if (kind === "non_retryable") {
-        await dependencies.store.failDaytonaSandboxDecommission(principal, {
-          agentId: agent.id,
-          expectedGeneration: agent.sandboxGeneration,
-          expectedVersion: agent.version,
-        });
-      }
-      if (kind !== "not_found") {
-        return { error: kind, kind: "failed" };
-      }
+  try {
+    await deleteFirstDaytonaSandbox(
+      [
+        ...(agent.daytonaSandboxId ? [agent.daytonaSandboxId] : []),
+        daytonaSandboxName(agent.tenant, agent.id),
+      ],
+      dependencies
+    );
+  } catch (error) {
+    const kind = classifyDaytonaProviderError(error);
+    if (kind === "non_retryable") {
+      await dependencies.store.failDaytonaSandboxDecommission(principal, {
+        agentId: agent.id,
+        expectedGeneration: agent.sandboxGeneration,
+        expectedVersion: agent.version,
+      });
     }
+    return { error: kind, kind: "failed" };
   }
 
   return dependencies.store.deleteDecommissionedAgent(principal, {

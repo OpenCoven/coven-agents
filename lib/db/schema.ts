@@ -461,6 +461,7 @@ export const runnerAgent = pgTable(
     })
       .notNull()
       .default("unprovisioned"),
+    sandboxUpdatedAt: timestamp("sandboxUpdatedAt").notNull().defaultNow(),
     status: varchar("status", {
       enum: ["idle", "running", "error"],
       length: 16,
