@@ -161,7 +161,9 @@ function allReturnedText(value: unknown): string {
 test("stages only through per-call env and starts a safe asynchronous session", async () => {
   const { calls, sandbox } = processDouble();
   const started = await startDaytonaProcess(startInput(sandbox));
-  const [stage] = calls;
+  const stage = calls.find(
+    (call) => call.kind === "command" && call.command.includes("umask 077")
+  );
   const launch = calls.find((call) => call.kind === "start");
 
   assert.deepEqual(started, {
@@ -204,7 +206,7 @@ test("stages only through per-call env and starts a safe asynchronous session", 
   assert.equal(allReturnedText(started).includes(SECRET), false);
   assert.deepEqual(
     calls.slice(0, 5).map((call) => call.kind),
-    ["command", "list", "list", "create", "start"]
+    ["list", "list", "command", "create", "start"]
   );
 });
 
@@ -246,7 +248,7 @@ test("prepares durably and passes its exact claim before executing", async () =>
   assert.equal(persistedSessionId, SESSION);
   assert.deepEqual(
     calls.map((call) => call.kind),
-    ["prepare", "command", "list", "list", "create", "authorize", "start"]
+    ["prepare", "list", "list", "command", "create", "authorize", "start"]
   );
   assert.ok(authorizationIndex > -1);
   assert.ok(executeIndex > -1);
@@ -257,18 +259,42 @@ test("prepares durably and passes its exact claim before executing", async () =>
   );
 });
 
-test("performs zero SDK mutations when durable preparation is stale", async () => {
+test("performs zero SDK mutations when durable preparation is stale or explicitly denied", async () => {
+  await Promise.all(
+    [null, false].map(async (claim) => {
+      const { calls, sandbox } = processDouble();
+
+      await assert.rejects(
+        () =>
+          startDaytonaProcess({
+            ...startInput(sandbox),
+            authorizePreparation: () => Promise.resolve(claim as never),
+          }),
+        (error: unknown) =>
+          error instanceof DaytonaProcessError &&
+          error.code === "process_start_failed" &&
+          error.retryable === false
+      );
+
+      assert.deepEqual(calls, []);
+    })
+  );
+});
+
+test("treats a failed durable preparation callback as a safe retryable start error", async () => {
   const { calls, sandbox } = processDouble();
 
   await assert.rejects(
     () =>
       startDaytonaProcess({
         ...startInput(sandbox),
-        authorizePreparation: () => Promise.resolve(null),
+        authorizePreparation: () => Promise.reject(new Error(SECRET)),
       }),
     (error: unknown) =>
       error instanceof DaytonaProcessError &&
-      error.code === "process_start_failed"
+      error.code === "process_start_failed" &&
+      error.retryable === true &&
+      allReturnedText(error).includes(SECRET) === false
   );
 
   assert.deepEqual(calls, []);
@@ -289,7 +315,8 @@ test("cleans only its prepared resources when launch authorization is rejected",
       }),
     (error: unknown) =>
       error instanceof DaytonaProcessError &&
-      error.code === "process_start_failed"
+      error.code === "process_start_failed" &&
+      error.retryable === false
   );
 
   assert.equal(cancellation.recorded, true);
@@ -308,6 +335,37 @@ test("cleans only its prepared resources when launch authorization is rejected",
         call.command === `rm -f -- '${PATH}' && test ! -e '${PATH}'`
     )
   );
+  assert.deepEqual(sessionIds(), []);
+});
+
+test("cleans prepared resources when launch authorization throws and returns a retryable error", async () => {
+  const { calls, sandbox, sessionIds } = processDouble();
+
+  await assert.rejects(
+    () =>
+      startDaytonaProcess({
+        ...startInput(sandbox),
+        authorizeLaunch: () => Promise.reject(new Error(SECRET)),
+      }),
+    (error: unknown) =>
+      error instanceof DaytonaProcessError &&
+      error.code === "process_start_failed" &&
+      error.retryable === true &&
+      allReturnedText(error).includes(SECRET) === false
+  );
+
+  assert.equal(
+    calls.some((call) => call.kind === "start"),
+    false
+  );
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.kind === "command" &&
+        call.command === `rm -f -- '${PATH}' && test ! -e '${PATH}'`
+    )
+  );
+  assert.ok(calls.some((call) => call.kind === "delete"));
   assert.deepEqual(sessionIds(), []);
 });
 
@@ -393,7 +451,7 @@ test("ambiguous session creation is looked up, deleted, and verified before retr
 
   assert.deepEqual(
     calls.map((call) => call.kind),
-    ["command", "list", "list", "create", "command", "list", "delete", "list"]
+    ["list", "list", "command", "create", "command", "list", "delete", "list"]
   );
   assert.equal(
     calls
@@ -421,7 +479,7 @@ test("an ambiguous creation still deletes its session when its first cleanup loo
   assert.equal(calls[6]?.command, SESSION);
 });
 
-test("a stale deterministic session is removed before a retry creates a fresh one", async () => {
+test("removes and confirms a stale deterministic session before staging a new credential", async () => {
   const { calls, sandbox } = processDouble({
     sessions: [{ commands: [], sessionId: SESSION }],
   });
@@ -429,10 +487,36 @@ test("a stale deterministic session is removed before a retry creates a fresh on
   await startDaytonaProcess(startInput(sandbox));
 
   assert.deepEqual(
-    calls.slice(1, 4).map((call) => call.kind),
-    ["list", "delete", "list"]
+    calls.slice(0, 4).map((call) => call.kind),
+    ["list", "delete", "list", "command"]
   );
   assert.equal(calls.filter((call) => call.kind === "start").length, 1);
+});
+
+test("aborts with zero credential staging when stale-session cleanup is ambiguous", async () => {
+  const { calls, sandbox } = processDouble({
+    deleteError: new Error(SECRET),
+    sessions: [{ commands: [], sessionId: SESSION }],
+  });
+
+  await assert.rejects(
+    () => startDaytonaProcess(startInput(sandbox)),
+    (error: unknown) =>
+      error instanceof DaytonaProcessError &&
+      error.code === "session_create_failed" &&
+      allReturnedText(error).includes(SECRET) === false
+  );
+
+  assert.deepEqual(
+    calls.map((call) => call.kind),
+    ["list", "delete"]
+  );
+  assert.equal(
+    calls.some(
+      (call) => call.kind === "command" && call.command.includes("umask 077")
+    ),
+    false
+  );
 });
 
 test("surfaces safe combined cleanup failure without retaining provider secrets", async () => {

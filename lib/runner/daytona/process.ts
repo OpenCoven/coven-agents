@@ -324,19 +324,38 @@ export async function startDaytonaProcess(input: {
       false
     );
   }
-  const preparationClaim = await input
-    .authorizePreparation({
+  let preparationClaim: DaytonaPreparationClaim | null;
+  try {
+    preparationClaim = await input.authorizePreparation({
       runId: input.runId,
-    })
-    .then(
-      (claim) => claim,
-      () => null
+    });
+  } catch {
+    // Authorization callbacks can cross a durable database boundary. Keep
+    // their failure retryable, but never retain or expose their raw error.
+    // biome-ignore lint/style/useErrorCause: Durable authorization errors can contain secret database details.
+    throw new DaytonaProcessError(
+      "Daytona preparation authorization could not be confirmed.",
+      "process_start_failed",
+      true
     );
+  }
   if (!preparationClaim) {
     throw new DaytonaProcessError(
       "Daytona preparation authorization could not be confirmed.",
       "process_start_failed",
       false
+    );
+  }
+
+  try {
+    // A deterministic session can survive an ambiguous earlier create. Its
+    // absence must be confirmed before a new credential is ever written.
+    await removeSession(input.sandbox, sessionId);
+  } catch (error) {
+    throw providerError(
+      "session_create_failed",
+      "Daytona could not prepare the run process session.",
+      error
     );
   }
 
@@ -370,21 +389,6 @@ export async function startDaytonaProcess(input: {
   }
 
   try {
-    await removeSession(input.sandbox, sessionId);
-  } catch (error) {
-    return await cleanupFailedStart(
-      input.sandbox,
-      credentialPath,
-      sessionId,
-      providerError(
-        "session_create_failed",
-        "Daytona could not prepare the run process session.",
-        error
-      )
-    );
-  }
-
-  try {
     await process.createSession(sessionId);
   } catch (error) {
     return await cleanupFailedStart(
@@ -399,38 +403,48 @@ export async function startDaytonaProcess(input: {
     );
   }
 
-  try {
-    if (typeof input.authorizeLaunch !== "function") {
-      throw new DaytonaProcessError(
-        "Daytona launch authorization is required before starting a process.",
-        "process_start_failed",
-        false
-      );
-    }
-    const authorized = await input.authorizeLaunch({
-      preparationClaim,
-      runId: input.runId,
-      sessionId,
-    });
-    if (!authorized) {
-      throw new DaytonaProcessError(
-        "Daytona launch authorization no longer permits starting the process.",
-        "process_start_failed",
-        false
-      );
-    }
-  } catch (error) {
+  if (typeof input.authorizeLaunch !== "function") {
     return await cleanupFailedStart(
       input.sandbox,
       credentialPath,
       sessionId,
-      error instanceof DaytonaProcessError
-        ? error
-        : new DaytonaProcessError(
-            "Daytona launch authorization could not be confirmed.",
-            "process_start_failed",
-            false
-          )
+      new DaytonaProcessError(
+        "Daytona launch authorization is required before starting a process.",
+        "process_start_failed",
+        false
+      )
+    );
+  }
+
+  let authorized: boolean;
+  try {
+    authorized = await input.authorizeLaunch({
+      preparationClaim,
+      runId: input.runId,
+      sessionId,
+    });
+  } catch {
+    return await cleanupFailedStart(
+      input.sandbox,
+      credentialPath,
+      sessionId,
+      new DaytonaProcessError(
+        "Daytona launch authorization could not be confirmed.",
+        "process_start_failed",
+        true
+      )
+    );
+  }
+  if (!authorized) {
+    return await cleanupFailedStart(
+      input.sandbox,
+      credentialPath,
+      sessionId,
+      new DaytonaProcessError(
+        "Daytona launch authorization no longer permits starting the process.",
+        "process_start_failed",
+        false
+      )
     );
   }
 
