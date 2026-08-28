@@ -14,11 +14,6 @@ Current blockers are factual and fail closed:
 - the latest recorded authenticated private Beads/DoltHub pull returned
   `PermissionDenied`, so authoritative P0, dependency, and acceptance state
   cannot be reconciled; see [`current-state.md`](current-state.md);
-- `pnpm hygiene` at `2026-08-27T20:21:00-05:00` reported three secondary
-  worktrees, exactly at the soft cap, and only this candidate worktree as
-  `AT RISK` because its merge commit was unpushed and its fix was uncommitted.
-  This is pre-push evidence, not a durable branch inventory; release operators
-  must rerun the command against the clean, pushed candidate;
 - the latest field-only Project query recorded in
   [`current-state.md`](current-state.md) found all 60 managed items were drafts,
   so GitHub issue state did not independently confirm delivery reconciliation;
@@ -30,6 +25,10 @@ Current blockers are factual and fail closed:
 - the deployed app returns `400 invalid_request` when the existing browser
   identity minter sends a zero-byte `POST /api/runner-token`; the candidate
   compatibility fix has local route evidence but is not deployed;
+- the final production-browser gate passed 15 of 17 cases. Warden and legacy
+  chat cannot authenticate because their cookie-only fixtures do not provide
+  the database-backed session authority required after `authVersion`
+  revocation was introduced;
 - no candidate-specific `RELEASE_AUDIENCE` and matching approved closed-beta or
   public-release configuration is retained; and
 - no retained, dated production-like end-to-end artifact proves subscriber,
@@ -165,12 +164,14 @@ ADMIN_EMAILS=e2e-admin@example.invalid pnpm build
 Retain command, commit, environment, timestamp, exit status, and sanitized
 output. The placeholder `ADMIN_EMAILS` value above is a local audit fixture,
 not release configuration. `AUTH_SECRET` must be supplied from local
-environment storage and must not be committed. The deployed `57023f1` baseline
-recorded green check, typecheck, 947 unit tests, seventeen browser tests,
-default and demo production builds, and the Docker-backed Sandbox diagnostic.
-That evidence predates this merge candidate and cannot substitute for rerunning
-all six gates against its final signed commit. A tracked secret scan is
-recommended in addition to, not instead of, the six gates.
+environment storage and must not be committed. On the final signed candidate,
+hygiene, check, typecheck, 1,163 unit tests, and the 32-page production build
+passed. The browser command passed 15 of 17 cases; Warden and legacy chat failed
+because the database-free cookie fixture cannot satisfy server-side
+`authVersion` revalidation. A tracked secret scan, release configuration
+preflight, 62 roadmap tests, and two byte-identical live roadmap applies also
+passed. The six-gate set remains red until a database-backed subscriber browser
+fixture passes without a production authorization bypass.
 
 Because an ordinary local build intentionally does not infer a release
 audience, also retain a successful `pnpm validate:release` with the intended
@@ -331,9 +332,9 @@ or guess at database compatibility.
 | Release audience | An approved candidate record and successful production validation agree. Closed beta has `RELEASE_AUDIENCE=closed-beta`, `BETA_MODE=on`, and a reviewed, nonempty valid `BETA_ALLOWLIST`; public release has separate approval, `RELEASE_AUDIENCE=public`, and `BETA_MODE=off`. | Missing/invalid/case-mismatched audience, default/unset mode, invalid beta allowlist, mismatch, or public mode without separate approval. | **No-go:** no candidate-specific production audience configuration is retained; a local/default-off pass is not approval. |
 | Verification | Every required matrix row is `Verified` or `Certified` for the candidate. | Any required row red or `Blocked`. | **No-go:** subscriber sign-in, conformance, recovery, browser quality, preflight, and production smoke are not `Verified`. |
 | Roadmap freshness | `pnpm roadmap:status check` passes after authoritative reconciliation. | Stale aggregate. | **No-go:** the candidate Project check can pass, but Beads freshness cannot be established. |
-| Worktree safety | `pnpm hygiene` exits zero with no `AT RISK` worktree and the secondary count within the soft cap. | Any `AT RISK` worktree or a secondary count above the soft cap. | **Pending:** the `2026-08-27T20:21:00-05:00` pre-push run found three secondary worktrees and only this candidate worktree `AT RISK`; rerun after its commit and push before release. |
+| Worktree safety | `pnpm hygiene` exits zero with no `AT RISK` worktree and the secondary count within the soft cap. | Any `AT RISK` worktree or a secondary count above the soft cap. | **Go:** final candidate hygiene passed with four worktrees total, three secondary, no `AT RISK` worktree, and this pushed worktree reapable. |
 | Beads/Project/issues | A second apply and final preview are a complete no-op, and accepted delivery artifacts agree. | Drift, create/update/orphan work, partial or failed sync, or issue contradiction. | **No-go:** authoritative sync cannot run; the latest recorded Project query found managed items were drafts. |
-| Six local gates | All six pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** the prior deployed baseline passed its non-hygiene gates, but no complete retained run exists for the final merge candidate. |
+| Six local gates | All six pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** hygiene, check, typecheck, 1,163 unit tests, and the 32-page build passed; the production-browser gate passed 15 of 17 and failed the Warden and legacy-chat subscriber cases at the database-backed session-authority boundary. |
 | Database | Staging migration, production backup, migration success, schema verification, and recovery record exist. | Missing backup, skipped/failed migration, or unproved recovery. | **No-go:** no candidate-specific production migration and restore artifact is retained. |
 | Smoke and Stripe | Demo, subscriber, bodyless and run-scoped identity minting, cloud lifecycle, and webhook evidence pass; Stripe claim/update recovery is atomic and retry-safe; local runs only if supported. | Any failed required smoke, undeployed token compatibility fix, missing webhook delivery, or claim-before-state behavior that permanently deduplicates failed processing. | **No-go:** the runner-token fix is local-only, only local/unit lifecycle evidence is retained, and current Stripe claim/update ordering is not retry-safe. |
 | Isolation | Tenant, credential, identity, and redaction evidence pass in a release-equivalent environment. | Any cross-tenant or secret-boundary failure. | **No-go:** production-like isolation evidence is not retained. |

@@ -12,21 +12,15 @@ snapshot.
 > credential KEK/AAD rewrap, one-run credential leases, and bounded fair run
 > admission. Production currently returns `400 invalid_request` when the
 > existing browser identity minter sends a zero-byte `POST /api/runner-token`;
-> the candidate fixes that compatibility boundary with seven passing local
-> route cases, but the fix is not deployed. The earlier candidate refresh below
-> is retained as historical evidence; its commit coverage, counts, and gate
-> results do not describe the final candidate.
-
-> **Candidate refresh — 2026-08-27:** The roadmap candidate includes
-> `origin/main` through `de06e68`.
-> Production validation now requires an exact `RELEASE_AUDIENCE` and matching
-> beta configuration. A live field-only Project query and two applies reported
-> `roadmap status: unchanged`; the checked-in aggregate bytes were identical
-> before and after both applies. Lint, typecheck, unit, build, explicit
-> closed-beta configuration validation, tracked secret scan, and all 16 local
-> production browser tests passed. Hygiene remains blocked by two unrelated
-> `AT RISK` worktrees and four secondary worktrees against the soft cap of
-> three. The historical audit below is retained for its detailed evidence.
+> the candidate fixes that compatibility boundary with fourteen passing
+> route/client cases, but the fix is not deployed. On the final candidate,
+> hygiene, lint, typecheck, 1,163 unit tests, the 32-page build, release
+> configuration validation, tracked secret scan, 62 roadmap tests, and two
+> byte-identical live roadmap applies passed. The production-browser gate
+> passed 15 of 17 cases; the Warden and legacy-chat subscriber cases cannot
+> satisfy the new database-backed `authVersion` revalidation with their
+> cookie-only fixture. The historical audit below is retained for detailed
+> baseline evidence.
 
 ## Historical snapshot metadata
 
@@ -124,10 +118,10 @@ closure check.
 | --- | --- | --- | --- | --- | --- |
 | Beads access and sync drift | High | BunsDev | Phase 0 planning authority | **Current: open blocker. Dolt/DoltHub returned `PermissionDenied`.** Keep Project and `ROADMAP.md` read-only as projections; do not apply or describe a sync as idempotent until an authenticated Dolt pull succeeds. | Authenticated Dolt pull; private review, update, commit, and push; authorized Project reconciliation; two sync applies; a final preview with 60 unchanged and zero create, update, or orphan; and reconciled shipped GitHub issues, all without private output. |
 | Issue and Project drift | Medium | Joint | Phase 0 planning authority | **Current: open.** All 60 managed Project items are drafts, so no GitHub issue state backs their status. Treat Project fields as a projection only. | Canonical linkage policy is recorded and a field-only check demonstrates that each managed status has an authoritative state source. |
-| Work exists only in another worktree | High | BunsDev | Repository integrity | **Current: open.** The 2026-08-27 candidate hygiene run found `feat/admission-queue-rebased` with one unpushed commit and `fix/process-runner` absent from origin and not merged according to hygiene. It also found four secondary worktrees against the soft cap of three. The roadmap branch itself was pushed and synchronized; this audit did not alter or discard unrelated worktrees. | `pnpm hygiene` exits 0 with no `AT RISK` worktrees after the owning work is safely pushed/merged or deliberately removed by its owner, and the secondary count is within the soft cap. |
-| Remote checks are disabled | High | Joint | Evidence baseline | **Current: accepted with partial mitigation.** GitHub Actions remain intentionally off; signed commits plus all local gates are required. The current snapshot still has the hygiene failure above. | A signed, retained local gate record with every required gate green, or an explicit repository decision that re-enables trusted required checks. |
+| Work exists only in another worktree | High | BunsDev | Repository integrity | **Current: mitigated.** Final candidate hygiene reported four worktrees total, three secondary, no `AT RISK` worktree, and the pushed roadmap worktree as reapable. The secondary count is exactly at the soft cap. | Keep `pnpm hygiene` green and reap the roadmap worktree after the branch is merged or otherwise preserved. |
+| Remote checks are disabled | High | Joint | Evidence baseline | **Current: accepted with partial mitigation.** GitHub Actions remain intentionally off; signed commits plus all local gates are required. The five repository-required gates are green on the candidate, but the additional release browser gate remains red as recorded above. | A signed, retained local release-gate record with every required gate green, or an explicit repository decision that re-enables trusted required checks. |
 | Typechecking depends on generated Next types | Medium | Copilot | Evidence baseline | **Current: partially mitigated.** `.next` is ignored while `tsconfig.json` includes generated `.next` type paths. Typecheck and build passed in this populated worktree, but clean-checkout order independence was not proved. | A clean checkout passes the documented gate order, or the scripts explicitly generate required Next types before typecheck. |
-| Production-path E2E is missing | High | Joint | Certify | **Current: open.** Seventeen browser cases pass against local development and production servers, local production demo playback passes, and the Docker-backed one-shot Sandbox diagnostic passes. Subscriber-shaped fixtures cover protected UI without exercising real GitHub OAuth, Stripe, tenant credential lending, a full deployed cloud run lifecycle, or recovery; remote workflows are disabled. | A production-like, credential-safe suite covers authentication, subscription, tenant credential lending, cloud run lifecycle, and recovery with deterministic service boundaries. |
+| Production-path E2E is missing | High | Joint | Certify | **Current: open.** Fifteen of seventeen final-candidate production-browser cases pass. Warden and legacy chat fail because cookie-only subscriber fixtures no longer satisfy database-backed session-version revalidation. Existing fixtures also do not exercise real GitHub OAuth, Stripe, tenant credential lending, a full deployed cloud run lifecycle, or recovery; remote workflows are disabled. | Add a database-backed subscriber fixture that proves `authVersion` and subscription authority without a production bypass, then cover authentication, subscription, tenant credential lending, cloud run lifecycle, and recovery with deterministic service boundaries. |
 | Cloud egress and network policy are incomplete | High | Joint | Wave 2 execution safety | **Current: partially mitigated.** Per-agent containers isolate execution, but cloud outbound behavior is not yet declared and enforced. | An enforced outbound policy, deployed denial tests, operator-visible failures, and recovery evidence after a policy violation. |
 | Cloud fairness and concurrency controls need release evidence | High | Joint | Wave 4 platform | **Current: partially mitigated.** Global capacity admission, bounded tenant-aware fair queueing, dispatch fencing, expiration, cancellation, and cleanup are implemented with deterministic unit coverage. Operator-visible deployed behavior and recovery under real platform exhaustion are not certified. | Dated staging or production-like capacity, fairness, cancellation, expiry, and recovery evidence with operator-visible queue state and no leaked capacity. |
 | Output redaction is incomplete end to end | High | Joint | Wave 2 execution safety | **Current: partially mitigated.** Shared pattern-based redaction exists and selected cloud and guest boundaries use it, but complete boundary coverage is not proved. | Cross-boundary leak tests cover direct and encoded values and prove sanitized display, persistence, logs, and errors. |
