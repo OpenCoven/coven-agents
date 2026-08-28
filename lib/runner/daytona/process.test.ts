@@ -6,6 +6,7 @@ import {
   DaytonaTimeoutError,
   type Sandbox,
 } from "@daytona/sdk";
+import type { RunnerDispatchAuthority } from "../types";
 import type { DaytonaPreparationClaim, DaytonaProcessSandbox } from "./process";
 import {
   DaytonaProcessError,
@@ -21,6 +22,11 @@ const SECRET = "copilot-credential-9f3b";
 const SESSION = `coven-run-${RUN_ID}`;
 const PATH = `/tmp/${SESSION}.credential`;
 const PREPARATION_CLAIM = "preparation-claim-a" as DaytonaPreparationClaim;
+const LAUNCH_AUTHORITY = {
+  expectedVersion: 9,
+  leaseToken: "lease-a",
+  runId: RUN_ID,
+} as RunnerDispatchAuthority;
 
 type Call = { command: string; env?: Record<string, string>; kind: string };
 
@@ -140,11 +146,12 @@ function processDouble(
 }
 
 const startInput = (sandbox: DaytonaProcessSandbox) => ({
-  authorizeLaunch: async () => true,
+  authorizeLaunch: async () => LAUNCH_AUTHORITY,
   authorizePreparation: async () => PREPARATION_CLAIM,
   credential: { credential: SECRET },
   instructions: "Use tests.",
   model: "auto",
+  releasePreparation: async () => LAUNCH_AUTHORITY,
   runId: RUN_ID,
   runtime: "copilot",
   sandbox,
@@ -169,6 +176,7 @@ test("stages only through per-call env and starts a safe asynchronous session", 
   assert.deepEqual(started, {
     commandId: "cmd-1",
     credentialPath: PATH,
+    dispatchAuthority: LAUNCH_AUTHORITY,
     sessionId: SESSION,
     workspace: "/workspace/repo",
   });
@@ -210,7 +218,7 @@ test("stages only through per-call env and starts a safe asynchronous session", 
   );
 });
 
-test("prepares durably and passes its exact claim before executing", async () => {
+test("attaches the exact claim and command only after execution accepts", async () => {
   const { calls, sandbox } = processDouble();
   const authorizations: unknown[] = [];
   let persistedSessionId: string | null = null;
@@ -221,7 +229,7 @@ test("prepares durably and passes its exact claim before executing", async () =>
       calls.push({ command: launch.sessionId, kind: "authorize" });
       authorizations.push(launch);
       persistedSessionId = launch.sessionId;
-      return Promise.resolve(true);
+      return Promise.resolve(LAUNCH_AUTHORITY);
     },
     authorizePreparation: (preparation) => {
       calls.push({ command: preparation.runId, kind: "prepare" });
@@ -235,6 +243,7 @@ test("prepares durably and passes its exact claim before executing", async () =>
   const executeIndex = calls.findIndex((call) => call.kind === "start");
   assert.deepEqual(authorizations, [
     {
+      commandId: "cmd-1",
       preparationClaim: PREPARATION_CLAIM,
       runId: RUN_ID,
       sessionId: SESSION,
@@ -248,11 +257,11 @@ test("prepares durably and passes its exact claim before executing", async () =>
   assert.equal(persistedSessionId, SESSION);
   assert.deepEqual(
     calls.map((call) => call.kind),
-    ["prepare", "list", "list", "command", "create", "authorize", "start"]
+    ["prepare", "list", "list", "command", "create", "start", "authorize"]
   );
   assert.ok(authorizationIndex > -1);
   assert.ok(executeIndex > -1);
-  assert.ok(authorizationIndex < executeIndex);
+  assert.ok(authorizationIndex > executeIndex);
   assert.equal(
     calls.slice(0, executeIndex).some((call) => call.kind === "list"),
     true
@@ -303,6 +312,7 @@ test("treats a failed durable preparation callback as a safe retryable start err
 test("cleans only its prepared resources when launch authorization is rejected", async () => {
   const { calls, sandbox, sessionIds } = processDouble();
   const cancellation = { recorded: false };
+  const releases: unknown[] = [];
 
   await assert.rejects(
     () =>
@@ -310,7 +320,11 @@ test("cleans only its prepared resources when launch authorization is rejected",
         ...startInput(sandbox),
         authorizeLaunch: () => {
           cancellation.recorded = true;
-          return Promise.resolve(false);
+          return Promise.resolve(null);
+        },
+        releasePreparation: (release) => {
+          releases.push(release);
+          return Promise.resolve(LAUNCH_AUTHORITY);
         },
       }),
     (error: unknown) =>
@@ -322,7 +336,7 @@ test("cleans only its prepared resources when launch authorization is rejected",
   assert.equal(cancellation.recorded, true);
   assert.equal(
     calls.some((call) => call.kind === "start"),
-    false
+    true
   );
   assert.equal(
     calls.some((call) => call.kind === "delete"),
@@ -336,16 +350,24 @@ test("cleans only its prepared resources when launch authorization is rejected",
     )
   );
   assert.deepEqual(sessionIds(), []);
+  assert.deepEqual(releases, [
+    { preparationClaim: PREPARATION_CLAIM, runId: RUN_ID },
+  ]);
 });
 
 test("cleans prepared resources when launch authorization throws and returns a retryable error", async () => {
   const { calls, sandbox, sessionIds } = processDouble();
+  const releases: unknown[] = [];
 
   await assert.rejects(
     () =>
       startDaytonaProcess({
         ...startInput(sandbox),
         authorizeLaunch: () => Promise.reject(new Error(SECRET)),
+        releasePreparation: (release) => {
+          releases.push(release);
+          return Promise.resolve(LAUNCH_AUTHORITY);
+        },
       }),
     (error: unknown) =>
       error instanceof DaytonaProcessError &&
@@ -356,7 +378,7 @@ test("cleans prepared resources when launch authorization throws and returns a r
 
   assert.equal(
     calls.some((call) => call.kind === "start"),
-    false
+    true
   );
   assert.ok(
     calls.some(
@@ -367,6 +389,9 @@ test("cleans prepared resources when launch authorization throws and returns a r
   );
   assert.ok(calls.some((call) => call.kind === "delete"));
   assert.deepEqual(sessionIds(), []);
+  assert.deepEqual(releases, [
+    { preparationClaim: PREPARATION_CLAIM, runId: RUN_ID },
+  ]);
 });
 
 test("cleans deterministic credentials and sessions at every failed start boundary", async () => {
@@ -378,7 +403,16 @@ test("cleans deterministic credentials and sessions at every failed start bounda
       { options: { startId: "" }, sessionCleanup: true },
     ].map(async ({ options, sessionCleanup }) => {
       const { calls, sandbox } = processDouble(options);
-      await assert.rejects(() => startDaytonaProcess(startInput(sandbox)));
+      const releases: unknown[] = [];
+      await assert.rejects(() =>
+        startDaytonaProcess({
+          ...startInput(sandbox),
+          releasePreparation: (release) => {
+            releases.push(release);
+            return Promise.resolve(LAUNCH_AUTHORITY);
+          },
+        })
+      );
       assert.ok(
         calls.some(
           (call) =>
@@ -394,13 +428,18 @@ test("cleans deterministic credentials and sessions at every failed start bounda
         calls.some((call) => call.kind === "delete"),
         sessionCleanup
       );
+      assert.deepEqual(releases, [
+        { preparationClaim: PREPARATION_CLAIM, runId: RUN_ID },
+      ]);
     })
   );
 });
 
 test("a rejected interleaved preparation cannot delete the first claim's session", async () => {
   const { calls, sandbox, sessionIds } = processDouble();
-  let releaseFirstLaunch: ((authorized: boolean) => void) | undefined;
+  let releaseFirstLaunch:
+    | ((authorized: RunnerDispatchAuthority | null) => void)
+    | undefined;
   let signalFirstLaunch: (() => void) | undefined;
   const firstLaunchReached = new Promise<void>((resolve) => {
     signalFirstLaunch = resolve;
@@ -432,7 +471,7 @@ test("a rejected interleaved preparation cannot delete the first claim's session
   if (!releaseFirstLaunch) {
     throw new Error("First launch authorization did not become pending.");
   }
-  releaseFirstLaunch(true);
+  releaseFirstLaunch(LAUNCH_AUTHORITY);
   await first;
 });
 
@@ -503,13 +542,13 @@ test("aborts with zero credential staging when stale-session cleanup is ambiguou
     () => startDaytonaProcess(startInput(sandbox)),
     (error: unknown) =>
       error instanceof DaytonaProcessError &&
-      error.code === "session_create_failed" &&
+      error.code === "sandbox_reset_required" &&
       allReturnedText(error).includes(SECRET) === false
   );
 
   assert.deepEqual(
     calls.map((call) => call.kind),
-    ["list", "delete"]
+    ["list", "delete", "command", "list", "delete"]
   );
   assert.equal(
     calls.some(
@@ -530,12 +569,47 @@ test("surfaces safe combined cleanup failure without retaining provider secrets"
     () => startDaytonaProcess(startInput(sandbox)),
     (error: unknown) => {
       assert.ok(error instanceof DaytonaProcessError);
-      assert.equal(error.code, "credential_cleanup_failed");
+      assert.equal(error.code, "sandbox_reset_required");
       assert.equal(allReturnedText(error).includes(SECRET), false);
       assert.ok(error.cause instanceof DaytonaProcessError);
       assert.equal(error.cause.code, "session_create_failed");
       return true;
     }
+  );
+});
+
+test("retains the claim when cleanup succeeds but preparation release fails", async () => {
+  const { calls, sandbox, sessionIds } = processDouble({
+    stageError: new Error(SECRET),
+  });
+  const releases: unknown[] = [];
+
+  await assert.rejects(
+    () =>
+      startDaytonaProcess({
+        ...startInput(sandbox),
+        releasePreparation: (release) => {
+          releases.push(release);
+          return Promise.reject(new Error(SECRET));
+        },
+      }),
+    (error: unknown) =>
+      error instanceof DaytonaProcessError &&
+      error.code === "sandbox_reset_required" &&
+      error.retryable === true &&
+      allReturnedText(error).includes(SECRET) === false
+  );
+
+  assert.deepEqual(releases, [
+    { preparationClaim: PREPARATION_CLAIM, runId: RUN_ID },
+  ]);
+  assert.deepEqual(sessionIds(), []);
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.kind === "command" &&
+        call.command === `rm -f -- '${PATH}' && test ! -e '${PATH}'`
+    )
   );
 });
 

@@ -40,8 +40,9 @@ export type RunnerDispatchAuthority = Readonly<{
 }>;
 
 /**
- * Opaque ownership of a deterministic Daytona session during launch
- * preparation. The store mints it only after claiming the session on the run.
+ * Opaque ownership of a deterministic Daytona launch preparation. The store
+ * mints it before provider mutation and persists it separately from provider
+ * identifiers.
  */
 export type RunnerPreparationClaim = string & {
   readonly [runnerPreparationClaimBrand]: "RunnerPreparationClaim";
@@ -95,6 +96,7 @@ export type RunnerRunRecord = Omit<
   completedAt: Date | null;
   createdAt: Date;
   daytonaCommandId: string | null;
+  daytonaPreparationClaim: RunnerPreparationClaim | null;
   daytonaSessionId: string | null;
   dispatchLeaseExpiresAt: Date | null;
   dispatchLeaseToken: string | null;
@@ -230,6 +232,10 @@ export type ExpiredDispatchRequeueInput = {
 export type ExpiredDispatchLeaseAdoptionInput = ExpiredDispatchRequeueInput & {
   leaseExpiresAt: Date;
   newLeaseToken: string;
+};
+
+export type ReleaseDaytonaPreparationInput = {
+  preparationClaim: RunnerPreparationClaim;
 };
 
 export type RunnerMutationOutcome<T> =

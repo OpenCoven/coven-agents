@@ -526,6 +526,9 @@ export const runnerRun = pgTable(
     completedAt: timestamp("completedAt"),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
     daytonaCommandId: text("daytonaCommandId"),
+    daytonaPreparationClaim: varchar("daytonaPreparationClaim", {
+      length: 64,
+    }),
     daytonaSessionId: text("daytonaSessionId"),
     dispatchLeaseExpiresAt: timestamp("dispatchLeaseExpiresAt"),
     dispatchLeaseToken: varchar("dispatchLeaseToken", { length: 80 }),
@@ -640,6 +643,10 @@ export const runnerRun = pgTable(
     check(
       "RunnerRun_daytonaCommand_requires_session",
       sql`${table.daytonaCommandId} is null or ${table.daytonaSessionId} is not null`
+    ),
+    check(
+      "RunnerRun_daytonaPreparation_unattached",
+      sql`${table.daytonaPreparationClaim} is null or (${table.daytonaSessionId} is null and ${table.daytonaCommandId} is null)`
     ),
   ]
 );

@@ -950,6 +950,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "daytonaPreparationClaim": {
+          "name": "daytonaPreparationClaim",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
         "daytonaSessionId": {
           "name": "daytonaSessionId",
           "type": "text",
@@ -1311,6 +1317,10 @@
         "RunnerRun_daytonaCommand_requires_session": {
           "name": "RunnerRun_daytonaCommand_requires_session",
           "value": "\"RunnerRun\".\"daytonaCommandId\" is null or \"RunnerRun\".\"daytonaSessionId\" is not null"
+        },
+        "RunnerRun_daytonaPreparation_unattached": {
+          "name": "RunnerRun_daytonaPreparation_unattached",
+          "value": "\"RunnerRun\".\"daytonaPreparationClaim\" is null or (\"RunnerRun\".\"daytonaSessionId\" is null and \"RunnerRun\".\"daytonaCommandId\" is null)"
         }
       },
       "isRLSEnabled": false

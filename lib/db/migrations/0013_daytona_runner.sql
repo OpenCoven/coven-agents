@@ -34,6 +34,7 @@ CREATE TABLE "RunnerRun" (
 	"completedAt" timestamp,
 	"createdAt" timestamp DEFAULT now() NOT NULL,
 	"daytonaCommandId" text,
+	"daytonaPreparationClaim" varchar(64),
 	"daytonaSessionId" text,
 	"dispatchLeaseExpiresAt" timestamp,
 	"dispatchLeaseToken" varchar(80),
@@ -64,7 +65,8 @@ CREATE TABLE "RunnerRun" (
 	CONSTRAINT "RunnerRun_error_bounded" CHECK ("RunnerRun"."error" is null or (jsonb_typeof("RunnerRun"."error") = 'object' and "RunnerRun"."error" ?& array['code', 'message', 'retryable'] and ("RunnerRun"."error" - 'code' - 'message' - 'retryable' - 'details') = '{}'::jsonb and jsonb_typeof("RunnerRun"."error"->'code') = 'string' and ("RunnerRun"."error"->>'code') = btrim("RunnerRun"."error"->>'code') and char_length("RunnerRun"."error"->>'code') between 1 and 64 and jsonb_typeof("RunnerRun"."error"->'message') = 'string' and ("RunnerRun"."error"->>'message') = btrim("RunnerRun"."error"->>'message') and char_length("RunnerRun"."error"->>'message') between 1 and 500 and jsonb_typeof("RunnerRun"."error"->'retryable') = 'boolean' and (not ("RunnerRun"."error" ? 'details') or (jsonb_typeof("RunnerRun"."error"->'details') = 'string' and ("RunnerRun"."error"->>'details') = btrim("RunnerRun"."error"->>'details') and char_length("RunnerRun"."error"->>'details') between 1 and 2000)))),
 	CONSTRAINT "RunnerRun_commandEvidence_bounded" CHECK (jsonb_typeof("RunnerRun"."commandEvidence") = 'array' and jsonb_array_length("RunnerRun"."commandEvidence") <= 256),
 	CONSTRAINT "RunnerRun_fileEvidence_bounded" CHECK (jsonb_typeof("RunnerRun"."fileEvidence") = 'array' and jsonb_array_length("RunnerRun"."fileEvidence") <= 256),
-	CONSTRAINT "RunnerRun_daytonaCommand_requires_session" CHECK ("RunnerRun"."daytonaCommandId" is null or "RunnerRun"."daytonaSessionId" is not null)
+	CONSTRAINT "RunnerRun_daytonaCommand_requires_session" CHECK ("RunnerRun"."daytonaCommandId" is null or "RunnerRun"."daytonaSessionId" is not null),
+	CONSTRAINT "RunnerRun_daytonaPreparation_unattached" CHECK ("RunnerRun"."daytonaPreparationClaim" is null or ("RunnerRun"."daytonaSessionId" is null and "RunnerRun"."daytonaCommandId" is null))
 );
 --> statement-breakpoint
 CREATE TABLE "RunnerRunEvent" (

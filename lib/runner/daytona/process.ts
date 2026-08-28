@@ -20,7 +20,7 @@ import {
   shellQuote,
   summarizeRun,
 } from "../harness";
-import type { RunnerPreparationClaim } from "../types";
+import type { RunnerDispatchAuthority, RunnerPreparationClaim } from "../types";
 import { daytonaRunCredentialPath, daytonaRunSessionName } from "./names";
 import { classifyDaytonaProviderError } from "./sandbox";
 
@@ -206,8 +206,12 @@ async function removeSession(
 async function cleanupFailedStart(
   sandbox: DaytonaProcessSandbox,
   credentialPath: string,
-  sessionName: string | null,
-  primary: unknown
+  sessionName: string,
+  primary: DaytonaProcessError,
+  releasePreparation: (
+    preparationClaim: DaytonaPreparationClaim
+  ) => Promise<RunnerDispatchAuthority | null>,
+  preparationClaim: DaytonaPreparationClaim
 ): Promise<never> {
   const failures: unknown[] = [];
   try {
@@ -215,19 +219,28 @@ async function cleanupFailedStart(
   } catch (error) {
     failures.push(error);
   }
-  if (sessionName) {
-    try {
-      await removeSession(sandbox, sessionName);
-    } catch (error) {
-      failures.push(error);
-    }
+  try {
+    await removeSession(sandbox, sessionName);
+  } catch (error) {
+    failures.push(error);
   }
   if (failures.length > 0) {
-    const primaryCode =
-      primary instanceof DaytonaProcessError ? primary.code : "start_failed";
     throw new DaytonaProcessError(
-      `Daytona ${primaryCode} and credential/process cleanup could not be confirmed.`,
-      "credential_cleanup_failed",
+      `Daytona ${primary.code} cleanup could not be confirmed; reset the sandbox before retrying.`,
+      "sandbox_reset_required",
+      true,
+      { cause: primary }
+    );
+  }
+  try {
+    if (!(await releasePreparation(preparationClaim))) {
+      throw new Error("Preparation release was rejected.");
+    }
+  } catch {
+    // biome-ignore lint/style/useErrorCause: Release errors can contain durable-store details.
+    throw new DaytonaProcessError(
+      "Daytona cleanup succeeded but preparation release could not be confirmed.",
+      "sandbox_reset_required",
       true,
       { cause: primary }
     );
@@ -238,6 +251,7 @@ async function cleanupFailedStart(
 export type DaytonaStartedProcess = Readonly<{
   commandId: string;
   credentialPath: string;
+  dispatchAuthority: RunnerDispatchAuthority;
   sessionId: string;
   workspace: string;
 }>;
@@ -267,6 +281,7 @@ export type DaytonaPreparationAuthorizer = (
 ) => Promise<DaytonaPreparationClaim | null>;
 
 export type DaytonaLaunchAuthorization = Readonly<{
+  commandId?: string;
   preparationClaim: DaytonaPreparationClaim;
   runId: string;
   sessionId: string;
@@ -277,24 +292,31 @@ export type DaytonaLaunchAuthorization = Readonly<{
  *
  * It must atomically verify that the supplied preparation claim remains the
  * current exclusive claim for the active dispatch lease/run, reject cancelled
- * or displaced claims, and persist the supplied session ID before returning
- * `true`. The exclusive preparation invariant prevents cleanup of a rejected
- * claim from deleting a session authorized by another claim.
+ * or displaced claims, and persist the supplied provider identifiers before
+ * returning the next dispatch authority. The exclusive preparation invariant
+ * prevents cleanup of a rejected claim from deleting a session authorized by
+ * another claim.
  * Callers must durably record cancellation before invoking
  * `stopDaytonaProcess`; this adapter deliberately uses no process-local lock.
- * Daytona supplies the command ID only after execution is accepted, so the
- * caller persists the returned `DaytonaStartedProcess.commandId` under the
- * same durable dispatch fence before command reconciliation.
+ * Daytona supplies the command ID only after execution is accepted, so this
+ * gate is the final attachment immediately after that acceptance.
  */
 export type DaytonaLaunchAuthorizer = (
   launch: DaytonaLaunchAuthorization
-) => Promise<boolean>;
+) => Promise<RunnerDispatchAuthority | null>;
+
+export type DaytonaPreparationRelease = (
+  release: Readonly<{
+    preparationClaim: DaytonaPreparationClaim;
+    runId: string;
+  }>
+) => Promise<RunnerDispatchAuthority | null>;
 
 /**
  * Stages the tenant credential exactly once, creates a short-lived process
- * session, durably authorizes it for launch, then starts one non-echoing async
- * command. The credential is never included in command text, returned data,
- * authorization input, or error messages.
+ * session, starts one non-echoing async command, then durably attaches the
+ * accepted process. The credential is never included in command text,
+ * returned data, authorization input, or error messages.
  */
 export async function startDaytonaProcess(input: {
   authorizeLaunch: DaytonaLaunchAuthorizer;
@@ -302,6 +324,7 @@ export async function startDaytonaProcess(input: {
   credential: HarnessCredential;
   instructions: string;
   model: string;
+  releasePreparation: DaytonaPreparationRelease;
   runId: string;
   runtime: string;
   sandbox: DaytonaProcessSandbox;
@@ -317,6 +340,20 @@ export async function startDaytonaProcess(input: {
   if (typeof input.authorizePreparation !== "function") {
     throw new DaytonaProcessError(
       "Daytona preparation authorization is required before provider mutation.",
+      "process_start_failed",
+      false
+    );
+  }
+  if (typeof input.releasePreparation !== "function") {
+    throw new DaytonaProcessError(
+      "Daytona preparation release is required before provider mutation.",
+      "process_start_failed",
+      false
+    );
+  }
+  if (typeof input.authorizeLaunch !== "function") {
+    throw new DaytonaProcessError(
+      "Daytona launch authorization is required before provider mutation.",
       "process_start_failed",
       false
     );
@@ -349,10 +386,21 @@ export async function startDaytonaProcess(input: {
     // absence must be confirmed before a new credential is ever written.
     await removeSession(input.sandbox, sessionId);
   } catch (error) {
-    throw providerError(
-      "session_create_failed",
-      "Daytona could not prepare the run process session.",
-      error
+    return await cleanupFailedStart(
+      input.sandbox,
+      credentialPath,
+      sessionId,
+      providerError(
+        "session_create_failed",
+        "Daytona could not prepare the run process session.",
+        error
+      ),
+      (claim) =>
+        input.releasePreparation({
+          preparationClaim: claim,
+          runId: input.runId,
+        }),
+      preparationClaim
     );
   }
 
@@ -374,14 +422,20 @@ export async function startDaytonaProcess(input: {
     return await cleanupFailedStart(
       input.sandbox,
       credentialPath,
-      null,
+      sessionId,
       error instanceof DaytonaProcessError
         ? error
         : providerError(
             "credential_stage_failed",
             "Daytona could not safely stage the harness credential.",
             error
-          )
+          ),
+      (claim) =>
+        input.releasePreparation({
+          preparationClaim: claim,
+          runId: input.runId,
+        }),
+      preparationClaim
     );
   }
 
@@ -396,55 +450,17 @@ export async function startDaytonaProcess(input: {
         "session_create_failed",
         "Daytona could not create the run process session.",
         error
-      )
+      ),
+      (claim) =>
+        input.releasePreparation({
+          preparationClaim: claim,
+          runId: input.runId,
+        }),
+      preparationClaim
     );
   }
 
-  if (typeof input.authorizeLaunch !== "function") {
-    return await cleanupFailedStart(
-      input.sandbox,
-      credentialPath,
-      sessionId,
-      new DaytonaProcessError(
-        "Daytona launch authorization is required before starting a process.",
-        "process_start_failed",
-        false
-      )
-    );
-  }
-
-  let authorized: boolean;
-  try {
-    authorized = await input.authorizeLaunch({
-      preparationClaim,
-      runId: input.runId,
-      sessionId,
-    });
-  } catch {
-    return await cleanupFailedStart(
-      input.sandbox,
-      credentialPath,
-      sessionId,
-      new DaytonaProcessError(
-        "Daytona launch authorization could not be confirmed.",
-        "process_start_failed",
-        true
-      )
-    );
-  }
-  if (!authorized) {
-    return await cleanupFailedStart(
-      input.sandbox,
-      credentialPath,
-      sessionId,
-      new DaytonaProcessError(
-        "Daytona launch authorization no longer permits starting the process.",
-        "process_start_failed",
-        false
-      )
-    );
-  }
-
+  let commandId: string;
   try {
     const response = await process.executeSessionCommand(sessionId, {
       command: asyncCommand(
@@ -469,7 +485,7 @@ export async function startDaytonaProcess(input: {
         true
       );
     }
-    return { commandId: response.cmdId, credentialPath, sessionId, workspace };
+    commandId = response.cmdId;
   } catch (error) {
     return await cleanupFailedStart(
       input.sandbox,
@@ -481,9 +497,67 @@ export async function startDaytonaProcess(input: {
             "process_start_failed",
             "Daytona could not start the asynchronous harness command.",
             error
-          )
+          ),
+      (claim) =>
+        input.releasePreparation({
+          preparationClaim: claim,
+          runId: input.runId,
+        }),
+      preparationClaim
     );
   }
+
+  let launchAuthority: RunnerDispatchAuthority | null;
+  try {
+    launchAuthority = await input.authorizeLaunch({
+      commandId,
+      preparationClaim,
+      runId: input.runId,
+      sessionId,
+    });
+  } catch {
+    return await cleanupFailedStart(
+      input.sandbox,
+      credentialPath,
+      sessionId,
+      new DaytonaProcessError(
+        "Daytona launch authorization could not be confirmed.",
+        "process_start_failed",
+        true
+      ),
+      (claim) =>
+        input.releasePreparation({
+          preparationClaim: claim,
+          runId: input.runId,
+        }),
+      preparationClaim
+    );
+  }
+  if (!launchAuthority) {
+    return await cleanupFailedStart(
+      input.sandbox,
+      credentialPath,
+      sessionId,
+      new DaytonaProcessError(
+        "Daytona launch authorization no longer permits attaching the process.",
+        "process_start_failed",
+        false
+      ),
+      (claim) =>
+        input.releasePreparation({
+          preparationClaim: claim,
+          runId: input.runId,
+        }),
+      preparationClaim
+    );
+  }
+  return {
+    commandId,
+    credentialPath,
+    dispatchAuthority: launchAuthority,
+    sessionId,
+    workspace,
+  };
 }
 
 export type DaytonaLogSnapshot = Readonly<{
