@@ -20,6 +20,7 @@ import {
   shellQuote,
   summarizeRun,
 } from "../harness";
+import type { RunnerPreparationClaim } from "../types";
 import { daytonaRunCredentialPath, daytonaRunSessionName } from "./names";
 import { classifyDaytonaProviderError } from "./sandbox";
 
@@ -241,15 +242,11 @@ export type DaytonaStartedProcess = Readonly<{
   workspace: string;
 }>;
 
-declare const daytonaPreparationClaimBrand: unique symbol;
-
 /**
  * Opaque durable ownership of a single preparation attempt. Only the durable
  * dispatch implementation may mint this branded value.
  */
-export type DaytonaPreparationClaim = string & {
-  readonly [daytonaPreparationClaimBrand]: "DaytonaPreparationClaim";
-};
+export type DaytonaPreparationClaim = RunnerPreparationClaim;
 
 export type DaytonaPreparationAuthorization = Readonly<{
   runId: string;

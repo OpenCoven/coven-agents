@@ -9,6 +9,8 @@ import {
   DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE,
   DAYTONA_COPILOT_IMAGE_BASE,
   DAYTONA_COPILOT_SNAPSHOT_NAME,
+  DAYTONA_DEFAULT_API_URL,
+  DAYTONA_DEFAULT_TARGET,
   type DaytonaSnapshot,
   type DaytonaSnapshotConfiguration,
   type DaytonaSnapshotService,
@@ -121,6 +123,23 @@ test("validates Daytona snapshot configuration and passes API URL, key, and targ
     apiKey: API_KEY,
     apiUrl: configuration.apiUrl,
     target: "us",
+  });
+});
+
+test("defaults blank endpoint and target through the shared Daytona parser", () => {
+  const defaulted = daytonaSnapshotConfiguration(
+    environment({
+      DAYTONA_API_KEY: API_KEY,
+      DAYTONA_API_URL: "  ",
+      DAYTONA_SNAPSHOT: configuration.snapshotName,
+      DAYTONA_TARGET: "",
+    })
+  );
+
+  assert.deepEqual(defaulted, {
+    ...configuration,
+    apiUrl: DAYTONA_DEFAULT_API_URL,
+    target: DAYTONA_DEFAULT_TARGET,
   });
 });
 

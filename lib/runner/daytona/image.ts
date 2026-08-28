@@ -6,6 +6,14 @@ import {
   Image,
   SnapshotState,
 } from "@daytona/sdk";
+import type { DaytonaSnapshotConfiguration } from "./config";
+
+export {
+  DAYTONA_DEFAULT_API_URL,
+  DAYTONA_DEFAULT_TARGET,
+  type DaytonaSnapshotConfiguration,
+  daytonaSnapshotConfiguration,
+} from "./config";
 
 export const DAYTONA_COPILOT_IMAGE_BASE = "node:22-bookworm-slim";
 export const DAYTONA_COPILOT_SNAPSHOT_NAME = "coven-agents-copilot-1";
@@ -13,7 +21,6 @@ export const COPILOT_CLI_VERSION = "1.0.80";
 export const PNPM_VERSION = "10.32.1";
 export const WORKSPACE_DIRECTORY = "/workspace";
 
-const VERSIONED_SNAPSHOT_NAME = /^coven-agents-copilot-\d+$/u;
 const SENSITIVE_LOG_VALUE =
   /\b(?:api[-_]?key|token|secret|password|credential)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)/giu;
 const AUTHORIZATION_HEADER_VALUE =
@@ -54,13 +61,6 @@ const MARKER_NAMES = [
  */
 export const DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE = 96;
 
-export type DaytonaSnapshotConfiguration = Readonly<{
-  apiKey: string;
-  apiUrl: string;
-  snapshotName: string;
-  target: "eu" | "us";
-}>;
-
 export type DaytonaSnapshot = Readonly<{
   name: string;
   state: string;
@@ -89,56 +89,6 @@ type SensitiveMarker = Readonly<{
   index: number;
   replacement: string;
 }>;
-
-function configuredValue(
-  environment: NodeJS.ProcessEnv,
-  name:
-    | "DAYTONA_API_KEY"
-    | "DAYTONA_API_URL"
-    | "DAYTONA_SNAPSHOT"
-    | "DAYTONA_TARGET"
-): string {
-  const value = environment[name]?.trim();
-  if (!value) {
-    throw new Error(`Missing required Daytona environment variable: ${name}.`);
-  }
-  return value;
-}
-
-/**
- * Validates the configuration consumed by the snapshot command without
- * importing the production runtime validator, which is a CLI entrypoint.
- */
-export function daytonaSnapshotConfiguration(
-  environment: NodeJS.ProcessEnv
-): DaytonaSnapshotConfiguration {
-  const apiKey = configuredValue(environment, "DAYTONA_API_KEY");
-  const apiUrl = configuredValue(environment, "DAYTONA_API_URL");
-  const snapshotName = configuredValue(environment, "DAYTONA_SNAPSHOT");
-  const target = configuredValue(environment, "DAYTONA_TARGET");
-
-  let parsedApiUrl: URL;
-  try {
-    parsedApiUrl = new URL(apiUrl);
-  } catch (error) {
-    throw new Error("DAYTONA_API_URL must be an absolute HTTPS URL.", {
-      cause: error,
-    });
-  }
-  if (parsedApiUrl.protocol !== "https:") {
-    throw new Error("DAYTONA_API_URL must be an absolute HTTPS URL.");
-  }
-  if (target !== "eu" && target !== "us") {
-    throw new Error('DAYTONA_TARGET must be "us" or "eu".');
-  }
-  if (!VERSIONED_SNAPSHOT_NAME.test(snapshotName)) {
-    throw new Error(
-      "DAYTONA_SNAPSHOT must be a versioned coven-agents-copilot-N name."
-    );
-  }
-
-  return { apiKey, apiUrl: parsedApiUrl.toString(), snapshotName, target };
-}
 
 export function daytonaClientConfiguration(
   configuration: DaytonaSnapshotConfiguration

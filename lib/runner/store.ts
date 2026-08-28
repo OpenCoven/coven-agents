@@ -9,6 +9,7 @@ import type {
 import { AGENT_RUNNER_API_VERSION } from "@opencoven/agent-contracts";
 import { type SQL, sql } from "drizzle-orm";
 import type { databaseFor } from "@/lib/db/access";
+import { daytonaRunSessionName } from "./daytona/names";
 import { MAX_EVENTS_PER_RUN } from "./evidence";
 import type {
   AppendRunnerEventInput,
@@ -19,14 +20,18 @@ import type {
   DaytonaSandboxFence,
   DispatchClaimInput,
   DispatchFence,
+  DispatchSandboxFence,
   ExpiredDispatchLeaseAdoptionInput,
   ExpiredDispatchRecoveryOutcome,
   ExpiredDispatchRequeueInput,
   FinalizeRunnerRunInput,
   ReserveDaytonaSandboxInput,
   RunnerAgentRecord,
+  RunnerClaimedDispatch,
+  RunnerDispatchAuthority,
   RunnerMutationOutcome,
   RunnerOperator,
+  RunnerPreparationClaim,
   RunnerPrincipal,
   RunnerRunEventRecord,
   RunnerRunRecord,
@@ -240,6 +245,66 @@ function dispatchingFenceOutcome(
     : { kind: "not_live" };
 }
 
+function dispatchAuthority(run: RunnerRunRecord): RunnerDispatchAuthority {
+  if (!run.dispatchLeaseToken) {
+    throw new Error("Cannot mint dispatch authority without an active lease.");
+  }
+  return {
+    expectedVersion: run.version,
+    leaseToken: run.dispatchLeaseToken,
+    runId: run.id,
+  } as RunnerDispatchAuthority;
+}
+
+async function lockedLiveDispatchRun(
+  transaction: RunnerStoreTransaction,
+  authority: RunnerDispatchAuthority,
+  states: readonly ("dispatching" | "running")[]
+): Promise<RunnerRunRecord | null> {
+  const [run] = await transaction.execute(
+    statement(
+      "lock-live-dispatch-run",
+      {
+        dispatchStates: states,
+        expectedVersion: authority.expectedVersion,
+        leaseToken: authority.leaseToken,
+        runId: authority.runId,
+      },
+      sql`SELECT * FROM "RunnerRun"
+        WHERE "id" = ${authority.runId}
+          AND "version" = ${authority.expectedVersion}
+          AND "dispatchLeaseToken" = ${authority.leaseToken}
+          AND "dispatchLeaseExpiresAt" > clock_timestamp()
+          AND "dispatchState" IN (${sql.join(
+            states.map((state) => sql`${state}`),
+            sql`, `
+          )})
+          AND (
+            ("dispatchState" = 'dispatching' AND "status" = 'queued')
+            OR ("dispatchState" = 'running' AND "status" = 'running')
+          )
+        FOR UPDATE`
+    )
+  );
+  return run ? asRun(run) : null;
+}
+
+async function lockedDispatchAgent(
+  transaction: RunnerStoreTransaction,
+  run: RunnerRunRecord
+): Promise<RunnerAgentRecord | null> {
+  const [agent] = await transaction.execute(
+    statement(
+      "lock-agent-for-live-dispatch",
+      { agentId: run.agentId, tenant: run.tenant },
+      sql`SELECT * FROM "RunnerAgent"
+        WHERE "id" = ${run.agentId} AND "tenant" = ${run.tenant}
+        FOR UPDATE`
+    )
+  );
+  return agent ? asAgent(agent) : null;
+}
+
 function runningFenceOutcome(
   run: RunnerRunRecord,
   input: DispatchFence
@@ -332,11 +397,15 @@ export type RunnerStore = ReturnType<typeof createRunnerStore>;
 export function createRunnerStore(database: RunnerStoreDatabase) {
   return {
     adoptExpiredDispatchLease: (
-      operator: RunnerOperator,
+      _operator: RunnerOperator,
       input: ExpiredDispatchLeaseAdoptionInput
     ): Promise<ExpiredDispatchRecoveryOutcome> =>
       database.transaction(async (transaction) => {
-        const run = await lockedOperatorRun(transaction, operator, input.runId);
+        const run = await lockedOperatorRun(
+          transaction,
+          _operator,
+          input.runId
+        );
         if (!run) {
           return { kind: "not_found" };
         }
@@ -365,6 +434,95 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return updated
           ? { kind: "adopted", value: asRun(updated) }
           : { kind: "not_expired" };
+      }),
+
+    appendDispatchEvent: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority,
+      input: Omit<AppendRunnerEventInput, keyof DispatchFence>
+    ): Promise<
+      | {
+          authority: RunnerDispatchAuthority;
+          event: RunnerRunEventRecord;
+          kind: "appended";
+          run: RunSnapshot;
+        }
+      | { kind: "not_live" }
+    > =>
+      database.transaction(async (transaction) => {
+        const current = await lockedLiveDispatchRun(transaction, authority, [
+          "running",
+        ]);
+        if (!current) {
+          return { kind: "not_live" };
+        }
+        const eventId = current.logCursor + 1;
+        const event = { ...input.event, id: eventId } as RunEvent;
+        const [updated] = await transaction.execute(
+          statement(
+            "update-run-after-dispatch-event",
+            {
+              commandEvidence: evidenceJson(input.snapshot?.commandEvidence),
+              eventId,
+              expectedVersion: authority.expectedVersion,
+              fileEvidence: evidenceJson(input.snapshot?.fileEvidence),
+              leaseToken: authority.leaseToken,
+              output: input.snapshot?.output ?? null,
+              runId: current.id,
+              tenant: current.tenant,
+            },
+            sql`UPDATE "RunnerRun"
+              SET "logCursor" = ${eventId},
+                  "output" = COALESCE(${input.snapshot?.output ?? null}, "output"),
+                  "commandEvidence" = COALESCE(CAST(${evidenceJson(input.snapshot?.commandEvidence)} AS jsonb), "commandEvidence"),
+                  "fileEvidence" = COALESCE(CAST(${evidenceJson(input.snapshot?.fileEvidence)} AS jsonb), "fileEvidence"),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${current.id}
+                AND "tenant" = ${current.tenant}
+                AND "version" = ${authority.expectedVersion}
+                AND "dispatchLeaseToken" = ${authority.leaseToken}
+                AND "dispatchLeaseExpiresAt" > clock_timestamp()
+                AND "dispatchState" = 'running'
+                AND "status" = 'running'
+              RETURNING *`
+          )
+        );
+        if (!updated) {
+          return { kind: "not_live" };
+        }
+        const [inserted] = await transaction.execute(
+          statement(
+            "insert-dispatch-run-event",
+            {
+              event: eventJson(event),
+              eventId,
+              runId: current.id,
+              tenant: current.tenant,
+            },
+            sql`INSERT INTO "RunnerRunEvent" ("runId", "eventId", "event")
+              SELECT ${current.id}, ${eventId}, CAST(${eventJson(event)} AS jsonb)
+              FROM "RunnerRun"
+              WHERE "id" = ${current.id} AND "tenant" = ${current.tenant}
+              RETURNING *`
+          )
+        );
+        if (!inserted) {
+          throw new Error("Runner event insert returned no row.");
+        }
+        await pruneRunEventsInTransaction(
+          transaction,
+          "prune-run-events-after-dispatch-append",
+          current.id,
+          current.tenant
+        );
+        const run = asRun(updated);
+        return {
+          authority: dispatchAuthority(run),
+          event: asEvent(inserted),
+          kind: "appended",
+          run: runSnapshot(run),
+        };
       }),
     appendEvent: (
       principal: RunnerPrincipal,
@@ -457,11 +615,15 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
       }),
 
     attachDaytonaIdentifiers: (
-      operator: RunnerOperator,
+      _operator: RunnerOperator,
       input: AttachDaytonaIdentifiersInput
     ): Promise<RunnerMutationOutcome<RunnerRunRecord>> =>
       database.transaction(async (transaction) => {
-        const run = await lockedOperatorRun(transaction, operator, input.runId);
+        const run = await lockedOperatorRun(
+          transaction,
+          _operator,
+          input.runId
+        );
         if (!run) {
           return { kind: "not_found" };
         }
@@ -548,13 +710,79 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return { kind: "updated", value: asRun(updated) };
       }),
 
+    attachDaytonaProcessForDispatch: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority,
+      input: { commandId: string; sandboxGeneration: number; sessionId: string }
+    ): Promise<
+      | {
+          authority: RunnerDispatchAuthority;
+          kind: "updated";
+          value: RunnerRunRecord;
+        }
+      | { kind: "generation_mismatch" }
+      | { kind: "not_found" }
+      | { kind: "not_live" }
+      | { kind: "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+        ]);
+        if (!run) {
+          return { kind: "not_live" };
+        }
+        if (run.daytonaSessionId !== input.sessionId || run.daytonaCommandId) {
+          return { kind: "stale_version" };
+        }
+        const agent = await lockedDispatchAgent(transaction, run);
+        if (!agent) {
+          return { kind: "not_found" };
+        }
+        if (agent.sandboxGeneration !== input.sandboxGeneration) {
+          return { kind: "generation_mismatch" };
+        }
+        const [updated] = await transaction.execute(
+          statement(
+            "attach-daytona-process-for-dispatch",
+            {
+              commandId: input.commandId,
+              expectedVersion: authority.expectedVersion,
+              leaseToken: authority.leaseToken,
+              runId: run.id,
+              sessionId: input.sessionId,
+              tenant: run.tenant,
+            },
+            sql`UPDATE "RunnerRun"
+              SET "daytonaCommandId" = ${input.commandId},
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${run.id}
+                AND "tenant" = ${run.tenant}
+                AND "version" = ${authority.expectedVersion}
+                AND "dispatchLeaseToken" = ${authority.leaseToken}
+                AND "dispatchLeaseExpiresAt" > clock_timestamp()
+                AND "dispatchState" = 'dispatching'
+                AND "status" = 'queued'
+                AND "daytonaSessionId" = ${input.sessionId}
+                AND "daytonaCommandId" IS NULL
+              RETURNING *`
+          )
+        );
+        if (!updated) {
+          return { kind: "not_live" };
+        }
+        const value = asRun(updated);
+        return { authority: dispatchAuthority(value), kind: "updated", value };
+      }),
+
     attachDaytonaSandbox: (
       principal: RunnerPrincipal,
       input: DaytonaSandboxFence & { sandboxId: string }
     ): Promise<
       | { kind: "updated"; value: RunnerAgentRecord }
       | { kind: "not_found" }
-      | { kind: "stale_version" }
+      | { current: RunnerAgentRecord; kind: "stale_version" }
     > =>
       database.transaction(async (transaction) => {
         const [updated] = await transaction.execute(
@@ -582,13 +810,148 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           statement(
             "get-agent-after-daytona-sandbox-attach",
             { agentId: input.agentId, tenant: principal.tenant },
-            sql`SELECT "id" FROM "RunnerAgent"
+            sql`SELECT * FROM "RunnerAgent"
               WHERE "id" = ${input.agentId}
                 AND "tenant" = ${principal.tenant}
               LIMIT 1`
           )
         );
-        return current ? { kind: "stale_version" } : { kind: "not_found" };
+        return current
+          ? { current: asAgent(current), kind: "stale_version" as const }
+          : { kind: "not_found" as const };
+      }),
+
+    attachDaytonaSandboxForDispatch: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority,
+      input: DispatchSandboxFence & { sandboxId: string }
+    ): Promise<
+      | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "not_found" }
+      | { kind: "not_live" }
+      | { kind: "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+          "running",
+        ]);
+        if (!run) {
+          return { kind: "not_live" };
+        }
+        const agent = await lockedDispatchAgent(transaction, run);
+        if (!agent) {
+          return { kind: "not_found" };
+        }
+        if (
+          agent.version !== input.expectedVersion ||
+          agent.sandboxGeneration !== input.expectedGeneration ||
+          agent.sandboxLifecycle !== "provisioning"
+        ) {
+          return { kind: "stale_version" };
+        }
+        const [updated] = await transaction.execute(
+          statement(
+            "attach-daytona-sandbox-for-dispatch",
+            {
+              agentId: run.agentId,
+              expectedGeneration: input.expectedGeneration,
+              expectedVersion: input.expectedVersion,
+              sandboxId: input.sandboxId,
+              tenant: run.tenant,
+            },
+            sql`UPDATE "RunnerAgent"
+              SET "daytonaSandboxId" = ${input.sandboxId},
+                  "sandboxLifecycle" = 'ready',
+                  "sandboxUpdatedAt" = now(),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${run.agentId}
+                AND "tenant" = ${run.tenant}
+                AND "version" = ${input.expectedVersion}
+                AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "sandboxLifecycle" = 'provisioning'
+              RETURNING *`
+          )
+        );
+        return updated
+          ? { kind: "updated", value: asAgent(updated) }
+          : { kind: "stale_version" };
+      }),
+
+    authorizeDaytonaLaunch: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority,
+      input: { preparationClaim: RunnerPreparationClaim; sessionId: string }
+    ): Promise<boolean> =>
+      database.transaction(async (transaction) => {
+        if (
+          authority.preparationClaim !== input.preparationClaim ||
+          input.preparationClaim !==
+            (daytonaRunSessionName(authority.runId) as RunnerPreparationClaim)
+        ) {
+          return false;
+        }
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+        ]);
+        return run?.daytonaSessionId === input.sessionId;
+      }),
+
+    authorizeDaytonaPreparation: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority
+    ): Promise<
+      | {
+          authority: RunnerDispatchAuthority;
+          claim: RunnerPreparationClaim;
+          kind: "authorized";
+        }
+      | { kind: "not_live" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+        ]);
+        if (!run || run.daytonaSessionId || run.daytonaCommandId) {
+          return { kind: "not_live" };
+        }
+        const sessionId = daytonaRunSessionName(run.id);
+        const [updated] = await transaction.execute(
+          statement(
+            "claim-daytona-process-preparation",
+            {
+              expectedVersion: authority.expectedVersion,
+              leaseToken: authority.leaseToken,
+              runId: run.id,
+              sessionId,
+            },
+            sql`UPDATE "RunnerRun"
+              SET "daytonaSessionId" = ${sessionId},
+                  "updatedAt" = now()
+              WHERE "id" = ${run.id}
+                AND "version" = ${authority.expectedVersion}
+                AND "dispatchLeaseToken" = ${authority.leaseToken}
+                AND "dispatchLeaseExpiresAt" > clock_timestamp()
+                AND "dispatchState" = 'dispatching'
+                AND "status" = 'queued'
+                AND "daytonaSessionId" IS NULL
+                AND "daytonaCommandId" IS NULL
+              RETURNING "id"`
+          )
+        );
+        if (!updated) {
+          return { kind: "not_live" };
+        }
+        const claim = sessionId as RunnerPreparationClaim;
+        return {
+          authority: {
+            ...authority,
+            preparationClaim: claim,
+          } as RunnerDispatchAuthority,
+          claim,
+          kind: "authorized",
+        };
       }),
 
     beginDaytonaSandboxDecommission: (
@@ -763,7 +1126,14 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             RETURNING *`
           )
         );
-        return run ? asRun(run) : null;
+        if (!run) {
+          return null;
+        }
+        const claimed = asRun(run);
+        return {
+          authority: dispatchAuthority(claimed),
+          run: claimed,
+        } satisfies RunnerClaimedDispatch;
       }),
 
     cleanupTerminalLease: (
@@ -1002,6 +1372,55 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return current ? { kind: "stale_version" } : { kind: "not_found" };
       }),
 
+    failDaytonaSandboxReservationForDispatch: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority,
+      input: DispatchSandboxFence
+    ): Promise<
+      | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "not_found" }
+      | { kind: "not_live" }
+      | { kind: "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+          "running",
+        ]);
+        if (!run) {
+          return { kind: "not_live" };
+        }
+        const agent = await lockedDispatchAgent(transaction, run);
+        if (!agent) {
+          return { kind: "not_found" };
+        }
+        const [updated] = await transaction.execute(
+          statement(
+            "fail-daytona-sandbox-reservation-for-dispatch",
+            {
+              agentId: run.agentId,
+              expectedGeneration: input.expectedGeneration,
+              expectedVersion: input.expectedVersion,
+              tenant: run.tenant,
+            },
+            sql`UPDATE "RunnerAgent"
+              SET "sandboxLifecycle" = 'unprovisioned',
+                  "sandboxUpdatedAt" = now(),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${run.agentId}
+                AND "tenant" = ${run.tenant}
+                AND "version" = ${input.expectedVersion}
+                AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "sandboxLifecycle" = 'provisioning'
+              RETURNING *`
+          )
+        );
+        return updated
+          ? { kind: "updated", value: asAgent(updated) }
+          : { kind: "stale_version" };
+      }),
+
     finalizeRun: (
       operator: RunnerOperator,
       input: FinalizeRunnerRunInput
@@ -1131,6 +1550,26 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return agent ? asAgent(agent) : null;
       }),
 
+    getDispatchAgent: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority
+    ): Promise<
+      | { agent: RunnerAgentRecord; kind: "found"; run: RunnerRunRecord }
+      | { kind: "not_found" }
+      | { kind: "not_live" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+          "running",
+        ]);
+        if (!run) {
+          return { kind: "not_live" };
+        }
+        const agent = await lockedDispatchAgent(transaction, run);
+        return agent ? { agent, kind: "found", run } : { kind: "not_found" };
+      }),
+
     getRun: (principal: RunnerPrincipal, runId: string) =>
       database.transaction(async (transaction) => {
         const [run] = await transaction.execute(
@@ -1204,6 +1643,54 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return updated
           ? { kind: "updated", value: asRun(updated) }
           : { kind: "lease_lost" };
+      }),
+
+    markDispatchRunningForDispatch: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority
+    ): Promise<
+      | {
+          authority: RunnerDispatchAuthority;
+          kind: "updated";
+          value: RunnerRunRecord;
+        }
+      | { kind: "not_live" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+        ]);
+        if (!run) {
+          return { kind: "not_live" };
+        }
+        const [updated] = await transaction.execute(
+          statement(
+            "mark-dispatch-running-for-dispatch",
+            {
+              expectedVersion: authority.expectedVersion,
+              leaseToken: authority.leaseToken,
+              runId: run.id,
+            },
+            sql`UPDATE "RunnerRun"
+              SET "dispatchState" = 'running',
+                  "status" = 'running',
+                  "startedAt" = clock_timestamp(),
+                  "updatedAt" = clock_timestamp(),
+                  "version" = "version" + 1
+              WHERE "id" = ${run.id}
+                AND "version" = ${authority.expectedVersion}
+                AND "dispatchLeaseToken" = ${authority.leaseToken}
+                AND "dispatchLeaseExpiresAt" > clock_timestamp()
+                AND "dispatchState" = 'dispatching'
+                AND "status" = 'queued'
+              RETURNING *`
+          )
+        );
+        if (!updated) {
+          return { kind: "not_live" };
+        }
+        const value = asRun(updated);
+        return { authority: dispatchAuthority(value), kind: "updated", value };
       }),
 
     pruneTerminalRuns: (principal: RunnerPrincipal, agentId: string) =>
@@ -1379,6 +1866,74 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                     AND "daytonaSandboxId" IS NOT DISTINCT FROM ${input.expectedSandboxId}
                     AND "sandboxLifecycle" IN ('unprovisioned', 'ready')
                   )
+                  OR (
+                    "sandboxLifecycle" = 'provisioning'
+                    AND "sandboxUpdatedAt" <= ${input.provisioningStaleBefore}
+                  )
+                )
+              RETURNING *`
+          )
+        );
+        return reserved
+          ? { kind: "reserved", value: asAgent(reserved) }
+          : { kind: "stale_version" };
+      }),
+
+    reserveDaytonaSandboxForDispatch: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority,
+      input: Pick<ReserveDaytonaSandboxInput, "provisioningStaleBefore">
+    ): Promise<
+      | { kind: "reserved" | "in_progress"; value: RunnerAgentRecord }
+      | { kind: "not_found" }
+      | { kind: "not_live" }
+      | { kind: "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+          "running",
+        ]);
+        if (!run) {
+          return { kind: "not_live" };
+        }
+        const agent = await lockedDispatchAgent(transaction, run);
+        if (!agent) {
+          return { kind: "not_found" };
+        }
+        if (
+          agent.sandboxLifecycle === "provisioning" &&
+          agent.sandboxUpdatedAt > input.provisioningStaleBefore
+        ) {
+          return { kind: "in_progress", value: agent };
+        }
+        if (
+          agent.sandboxLifecycle === "decommissioning" ||
+          agent.sandboxLifecycle === "decommission_failed"
+        ) {
+          return { kind: "stale_version" };
+        }
+        const [reserved] = await transaction.execute(
+          statement(
+            "reserve-daytona-sandbox-for-dispatch",
+            {
+              agentId: run.agentId,
+              provisioningStaleBefore: input.provisioningStaleBefore,
+              tenant: run.tenant,
+            },
+            sql`UPDATE "RunnerAgent"
+              SET "daytonaSandboxId" = NULL,
+                  "sandboxGeneration" = "sandboxGeneration" + 1,
+                  "sandboxLifecycle" = 'provisioning',
+                  "sandboxUpdatedAt" = now(),
+                  "warmStatus" = 'not_started',
+                  "warmUpdatedAt" = now(),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${run.agentId}
+                AND "tenant" = ${run.tenant}
+                AND (
+                  "sandboxLifecycle" IN ('unprovisioned', 'ready')
                   OR (
                     "sandboxLifecycle" = 'provisioning'
                     AND "sandboxUpdatedAt" <= ${input.provisioningStaleBefore}

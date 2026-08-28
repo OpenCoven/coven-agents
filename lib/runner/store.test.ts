@@ -7,6 +7,8 @@ import {
 } from "@opencoven/agent-contracts";
 import { sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
+import { daytonaDispatchAuthorizers } from "./daytona/dispatch";
+import { daytonaRunSessionName } from "./daytona/names";
 import { MAX_EVENTS_PER_RUN } from "./evidence";
 import { createRunnerStore, type RunnerStoreStatement } from "./store";
 import type {
@@ -95,6 +97,16 @@ function scripted(...responses: Record<string, unknown>[][]) {
       }),
   });
   return { statements, store };
+}
+
+async function claimedAuthority(value: RunnerRunRecord) {
+  const { store } = scripted([value]);
+  const claimed = await store.claimNextDispatch(operator, {
+    leaseExpiresAt: value.dispatchLeaseExpiresAt as Date,
+    leaseToken: value.dispatchLeaseToken as string,
+  });
+  assert.ok(claimed);
+  return claimed.authority;
 }
 
 test("principal methods bind every read and mutation to its tenant", async () => {
@@ -734,6 +746,168 @@ test("Daytona attachment keeps the run update tenant scoped", async () => {
   assert.equal("now" in update.args, false);
   const sandboxUpdate = statements[3] as RunnerStoreStatement;
   assert.match(queryText(sandboxUpdate), /"version" = "version" \+ 1/);
+});
+
+test("dispatch authority derives agent ownership from its live leased run", async () => {
+  const dispatching = run();
+  const authority = await claimedAuthority(dispatching);
+  const associated = agent({
+    id: dispatching.agentId,
+    tenant: dispatching.tenant,
+  });
+  const { statements, store } = scripted([dispatching], [associated]);
+
+  const result = await store.getDispatchAgent(operator, authority);
+
+  assert.equal(result.kind, "found");
+  assert.equal(result.kind === "found" && result.agent.id, dispatching.agentId);
+  assert.deepEqual(
+    statements.map((statement) => statement.name),
+    ["lock-live-dispatch-run", "lock-agent-for-live-dispatch"]
+  );
+  assert.equal(statements[1]?.args.agentId, dispatching.agentId);
+  assert.equal(statements[1]?.args.tenant, dispatching.tenant);
+  assert.match(
+    queryText(statements[0] as RunnerStoreStatement),
+    /"dispatchLeaseExpiresAt" > clock_timestamp\(\)/
+  );
+});
+
+test("dispatch authority cannot access unleased, expired, or another run", async () => {
+  const authority = await claimedAuthority(run());
+  const denied = await Promise.all(
+    ["unleased", "expired", "other"].map(async (label) => {
+      const { statements, store } = scripted([]);
+      const result = await store.getDispatchAgent(operator, authority);
+
+      return { label, result, statements };
+    })
+  );
+  for (const { label, result, statements } of denied) {
+    assert.deepEqual(result, { kind: "not_live" }, label);
+    assert.equal(statements.length, 1, label);
+    assert.match(
+      queryText(statements[0] as RunnerStoreStatement),
+      /"dispatchLeaseToken" = \$\d+/
+    );
+  }
+});
+
+test("dispatch sandbox and event mutations are fenced and derive their agent", async () => {
+  const running = run({
+    dispatchState: "running",
+    startedAt: new Date("2026-01-01T00:00:00.000Z"),
+    status: "running",
+  });
+  const authority = await claimedAuthority(running);
+  const provisioning = agent({
+    id: running.agentId,
+    sandboxGeneration: 2,
+    sandboxLifecycle: "provisioning",
+    tenant: running.tenant,
+    version: 4,
+  });
+  const attached = agent({
+    ...provisioning,
+    daytonaSandboxId: "sandbox",
+    sandboxLifecycle: "ready",
+    version: 5,
+  });
+  const sandboxStore = scripted([running], [provisioning], [attached]);
+  const attachedResult =
+    await sandboxStore.store.attachDaytonaSandboxForDispatch(
+      operator,
+      authority,
+      {
+        expectedGeneration: provisioning.sandboxGeneration,
+        expectedVersion: provisioning.version,
+        sandboxId: "sandbox",
+      }
+    );
+  assert.equal(attachedResult.kind, "updated");
+  assert.equal(sandboxStore.statements[2]?.args.agentId, running.agentId);
+  assert.equal("agentId" in (sandboxStore.statements[0]?.args ?? {}), false);
+
+  const updated = run({ ...running, logCursor: 4, version: 8 });
+  const event = {
+    createdAt: new Date(),
+    event: { id: 4, output: "progress", type: "output" },
+    eventId: 4,
+    runId: running.id,
+  };
+  const eventStore = scripted([running], [updated], [event], []);
+  const appended = await eventStore.store.appendDispatchEvent(
+    operator,
+    authority,
+    { event: { output: "progress", type: "output" } }
+  );
+  assert.equal(appended.kind, "appended");
+  assert.equal(eventStore.statements[1]?.args.tenant, running.tenant);
+  assert.equal("userId" in (eventStore.statements[1]?.args ?? {}), false);
+});
+
+test("dispatch store methods implement durable Daytona preparation callbacks", async () => {
+  const dispatching = run();
+  const authority = await claimedAuthority(dispatching);
+  const sessionId = daytonaRunSessionName(dispatching.id);
+  const preparation = scripted([dispatching], [{ id: dispatching.id }]);
+
+  const claim = await preparation.store.authorizeDaytonaPreparation(
+    operator,
+    authority
+  );
+  assert.equal(claim.kind, "authorized");
+  assert.equal(claim.kind === "authorized" && claim.claim, sessionId);
+  assert.match(
+    queryText(preparation.statements[1] as RunnerStoreStatement),
+    /"daytonaSessionId" IS NULL/
+  );
+  assert.equal(claim.kind, "authorized");
+  if (claim.kind !== "authorized") {
+    throw new Error("Preparation unexpectedly lost its dispatch.");
+  }
+
+  const launch = scripted([run({ daytonaSessionId: sessionId })]);
+  assert.equal(
+    await launch.store.authorizeDaytonaLaunch(operator, claim.authority, {
+      preparationClaim: claim.claim,
+      sessionId,
+    }),
+    true
+  );
+  assert.match(
+    queryText(launch.statements[0] as RunnerStoreStatement),
+    /"dispatchLeaseExpiresAt" > clock_timestamp\(\)/
+  );
+
+  let launched = false;
+  const callbacks = daytonaDispatchAuthorizers(
+    {
+      authorizeDaytonaLaunch: (_operator, prepared, input) => {
+        launched =
+          prepared.preparationClaim === claim.claim &&
+          input.preparationClaim === claim.claim &&
+          input.sessionId === sessionId;
+        return Promise.resolve(true);
+      },
+      authorizeDaytonaPreparation: () => Promise.resolve(claim),
+    },
+    operator,
+    authority
+  );
+  const callbackClaim = await callbacks.authorizePreparation({
+    runId: dispatching.id,
+  });
+  assert.equal(callbackClaim, claim.claim);
+  assert.equal(
+    await callbacks.authorizeLaunch({
+      preparationClaim: claim.claim,
+      runId: dispatching.id,
+      sessionId,
+    }),
+    true
+  );
+  assert.equal(launched, true);
 });
 
 test("agent updates use integer versions", async () => {

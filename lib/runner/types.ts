@@ -24,6 +24,29 @@ export type RunnerPrincipal = {
  */
 export type RunnerOperator = { kind: "runner-operator" };
 
+declare const runnerDispatchAuthorityBrand: unique symbol;
+declare const runnerPreparationClaimBrand: unique symbol;
+
+/**
+ * Opaque authority minted from a live operator dispatch claim. It cannot be
+ * constructed by subscriber-facing code and every use is re-fenced in SQL.
+ */
+export type RunnerDispatchAuthority = Readonly<{
+  expectedVersion: number;
+  leaseToken: string;
+  preparationClaim?: RunnerPreparationClaim;
+  runId: string;
+  readonly [runnerDispatchAuthorityBrand]: "RunnerDispatchAuthority";
+}>;
+
+/**
+ * Opaque ownership of a deterministic Daytona session during launch
+ * preparation. The store mints it only after claiming the session on the run.
+ */
+export type RunnerPreparationClaim = string & {
+  readonly [runnerPreparationClaimBrand]: "RunnerPreparationClaim";
+};
+
 export type RunnerRuntime = "cloud" | "codex" | "claude" | "copilot";
 export type RunnerAgentStatus = "idle" | "running" | "error";
 export type RunnerSandboxLifecycle =
@@ -143,6 +166,16 @@ export type AppendRunnerEventInput = DispatchFence & {
 export type DispatchClaimInput = {
   leaseExpiresAt: Date;
   leaseToken: string;
+};
+
+export type RunnerClaimedDispatch = Readonly<{
+  authority: RunnerDispatchAuthority;
+  run: RunnerRunRecord;
+}>;
+
+export type DispatchSandboxFence = {
+  expectedGeneration: number;
+  expectedVersion: number;
 };
 
 export type AttachDaytonaIdentifiersInput = DispatchFence & {

@@ -1,5 +1,6 @@
 import { validateAbuseConfig } from "../lib/abuse/config";
 import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
+import { daytonaSnapshotConfiguration } from "../lib/runner/daytona/config";
 
 const REQUIRED_PRODUCTION_VARIABLES = [
   "DAYTONA_API_KEY",
@@ -51,7 +52,7 @@ function validateProductionRuntimeConfig(environment: NodeJS.ProcessEnv): void {
     );
   }
 
-  validateDaytonaTarget(environment.DAYTONA_TARGET);
+  daytonaSnapshotConfiguration(environment);
 
   for (const [name, defaultValue] of Object.entries(
     DAYTONA_INTERVAL_DEFAULTS
@@ -72,13 +73,6 @@ function validateProductionRuntimeConfig(environment: NodeJS.ProcessEnv): void {
   }
 
   validateRunAdmissionMode(environment.RUN_ADMISSION_MODE);
-}
-
-function validateDaytonaTarget(configured: string | undefined): void {
-  const normalized = configured === undefined ? "us" : configured.trim();
-  if (normalized !== "us" && normalized !== "eu") {
-    throw new Error('DAYTONA_TARGET must be "us" or "eu".');
-  }
 }
 
 function parseConfiguredNumber(

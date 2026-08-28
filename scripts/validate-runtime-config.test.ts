@@ -145,6 +145,17 @@ test("rejects an invalid Daytona target", () => {
   assertRejectedWithMessage(result, 'DAYTONA_TARGET must be "us" or "eu".');
 });
 
+test("preflight defaults blank Daytona endpoint and target", () => {
+  for (const blankValue of [undefined, "", "  "]) {
+    const result = runValidator({
+      DAYTONA_API_URL: blankValue,
+      DAYTONA_TARGET: blankValue,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+  }
+});
+
 test("defaults RUN_ADMISSION_MODE to queue when omitted", () => {
   const result = runValidator({ RUN_ADMISSION_MODE: undefined });
 

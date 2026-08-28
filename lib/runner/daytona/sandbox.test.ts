@@ -566,7 +566,7 @@ test("a provider-not-found stored ID fences a replacement before persisting it",
   );
 });
 
-test("a stale generation deletes the unpersistable replacement", async () => {
+test("a stale generation leaves its deterministic replacement intact", async () => {
   let deletes = 0;
   const created = sandbox(SandboxState.STARTED, {
     delete: () => {
@@ -595,7 +595,119 @@ test("a stale generation deletes the unpersistable replacement", async () => {
     }),
     /generation changed/u
   );
-  assert.equal(deletes, 1);
+  assert.equal(deletes, 0);
+});
+
+test("an unconfirmed created-sandbox attach reports retryable cleanup needed", async () => {
+  let deletes = 0;
+  const created = sandbox(SandboxState.STARTED, {
+    delete: () => {
+      deletes += 1;
+      return Promise.resolve();
+    },
+  });
+
+  await assert.rejects(
+    ensureDaytonaSandbox(principal, agent(), config, {
+      daytona: {
+        create: () => Promise.resolve(created),
+        get: () => Promise.reject(new DaytonaNotFoundError("missing")),
+      },
+      store: store({
+        attachDaytonaSandbox: () => Promise.reject(new Error("store outage")),
+        reserveDaytonaSandbox: () =>
+          Promise.resolve({
+            kind: "reserved" as const,
+            value: agent({
+              sandboxGeneration: 1,
+              sandboxLifecycle: "provisioning",
+              version: 1,
+            }),
+          }),
+      }),
+    }),
+    (error: unknown) =>
+      error instanceof DaytonaSandboxLifecycleError &&
+      error.kind === "cleanup_needed" &&
+      error.retryable
+  );
+  assert.equal(deletes, 0);
+});
+
+test("an older creator cannot delete a sandbox adopted by a newer generation", async () => {
+  const oldReservation = agent({
+    sandboxGeneration: 1,
+    sandboxLifecycle: "provisioning",
+    version: 1,
+  });
+  const newReservation = agent({
+    ...oldReservation,
+    sandboxGeneration: 2,
+    version: 2,
+  });
+  const adopted = agent({
+    ...newReservation,
+    daytonaSandboxId: "sandbox-id",
+    sandboxLifecycle: "ready",
+    version: 3,
+  });
+  let attachCalls = 0;
+  let deletes = 0;
+  let signalOldAttach!: () => void;
+  let releaseOldAttach!: () => void;
+  const oldAttachReached = new Promise<void>((resolve) => {
+    signalOldAttach = resolve;
+  });
+  const oldAttach = new Promise<{ kind: "stale_version" }>((resolve) => {
+    releaseOldAttach = () => resolve({ kind: "stale_version" });
+  });
+  const created = sandbox(SandboxState.STARTED, {
+    delete: () => {
+      deletes += 1;
+      return Promise.resolve();
+    },
+  });
+  const providerLookups = [
+    Promise.reject(new DaytonaNotFoundError("missing")),
+    Promise.resolve(created),
+  ];
+  const lifecycleStore = store({
+    attachDaytonaSandbox: () => {
+      attachCalls += 1;
+      signalOldAttach();
+      return attachCalls === 1
+        ? oldAttach
+        : Promise.resolve({ kind: "updated" as const, value: adopted });
+    },
+    reserveDaytonaSandbox: () =>
+      Promise.resolve(
+        attachCalls === 0
+          ? { kind: "reserved" as const, value: oldReservation }
+          : { kind: "reserved" as const, value: newReservation }
+      ),
+  });
+
+  const old = ensureDaytonaSandbox(principal, agent(), config, {
+    daytona: {
+      create: () => Promise.resolve(created),
+      get: () => providerLookups.shift() as Promise<Sandbox>,
+    },
+    store: lifecycleStore,
+  });
+  await oldAttachReached;
+  const newer = await ensureDaytonaSandbox(principal, oldReservation, config, {
+    daytona: {
+      create: () => Promise.reject(new Error("must not create")),
+      get: () => Promise.resolve(created),
+    },
+    store: lifecycleStore,
+  });
+  releaseOldAttach();
+  await assert.rejects(old, /generation changed/u);
+
+  assert.equal(deletes, 0);
+  assert.equal(newer.agent.daytonaSandboxId, created.id);
+  assert.equal(newer.agent.sandboxGeneration, newReservation.sandboxGeneration);
 });
 
 test("warming probes only the sandbox and persists success or failure through fences", async () => {

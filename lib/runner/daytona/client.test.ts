@@ -37,6 +37,38 @@ test("Daytona client configuration validates a bounded request timeout", () => {
   );
 });
 
+test("client construction accepts the same blank defaults as snapshot parsing", () => {
+  const configured = daytonaRunnerConfiguration({
+    ...environment(),
+    DAYTONA_API_URL: " ",
+    DAYTONA_TARGET: "",
+  });
+  const configurations: DaytonaConfig[] = [];
+
+  daytonaClient(
+    {
+      ...environment(),
+      DAYTONA_API_URL: " ",
+      DAYTONA_TARGET: "",
+    },
+    (configuration) => {
+      configurations.push(configuration);
+      return {} as never;
+    }
+  );
+
+  assert.equal(configured.apiUrl, "https://app.daytona.io/api");
+  assert.equal(configured.target, "us");
+  assert.deepEqual(configurations, [
+    {
+      apiKey: "test-daytona-key",
+      apiUrl: configured.apiUrl,
+      requestTimeoutMs: configured.requestTimeoutMs,
+      target: configured.target,
+    },
+  ]);
+});
+
 test("Daytona client caches production construction and permits injected factories", () => {
   resetDaytonaClientForTest();
   let calls = 0;
