@@ -53,6 +53,7 @@ export type RunnerAgentStatus = "idle" | "running" | "error";
 export type RunnerSandboxLifecycle =
   | "unprovisioned"
   | "provisioning"
+  | "provisioning_ambiguous"
   | "ready"
   | "decommissioning"
   | "decommission_failed";

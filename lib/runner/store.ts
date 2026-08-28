@@ -11,7 +11,12 @@ import { AGENT_RUNNER_API_VERSION } from "@opencoven/agent-contracts";
 import { type SQL, sql } from "drizzle-orm";
 import type { databaseFor } from "@/lib/db/access";
 import { daytonaRunSessionName } from "./daytona/names";
-import { MAX_EVENTS_PER_RUN } from "./evidence";
+import {
+  MAX_EVENT_PAGE_BYTES,
+  MAX_EVENTS_PER_PAGE,
+  MAX_EVENTS_PER_RUN,
+  MAX_PERSISTED_EVENT_BYTES_PER_RUN,
+} from "./evidence";
 import type {
   AppendRunnerEventInput,
   BeginDaytonaSandboxDecommissionInput,
@@ -357,21 +362,36 @@ async function pruneRunEventsInTransaction(
   await transaction.execute(
     statement(
       name,
-      { maxEvents: MAX_EVENTS_PER_RUN, runId, tenant },
-      sql`DELETE FROM "RunnerRunEvent"
+      {
+        maxEventBytes: MAX_PERSISTED_EVENT_BYTES_PER_RUN,
+        maxEvents: MAX_EVENTS_PER_RUN,
+        runId,
+        tenant,
+      },
+      sql`WITH ranked AS (
+          SELECT "eventId",
+              row_number() OVER (ORDER BY "eventId" DESC) AS "newestRank",
+              sum(pg_column_size("event")) OVER (
+                ORDER BY "eventId" DESC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+              ) AS "retainedBytes"
+          FROM "RunnerRunEvent"
+          WHERE "runId" = ${runId}
+        ),
+        prunable AS (
+          SELECT "eventId"
+          FROM ranked
+          WHERE "newestRank" > ${MAX_EVENTS_PER_RUN}
+            OR ("newestRank" > 1 AND "retainedBytes" > ${MAX_PERSISTED_EVENT_BYTES_PER_RUN})
+        )
+        DELETE FROM "RunnerRunEvent"
         WHERE "runId" = ${runId}
           AND EXISTS (
             SELECT 1 FROM "RunnerRun"
             WHERE "id" = ${runId}
               AND "tenant" = ${tenant}
           )
-          AND "eventId" IN (
-            SELECT "eventId"
-            FROM "RunnerRunEvent"
-            WHERE "runId" = ${runId}
-            ORDER BY "eventId" DESC
-            OFFSET ${MAX_EVENTS_PER_RUN}
-          )`
+          AND "eventId" IN (SELECT "eventId" FROM prunable)`
     )
   );
 }
@@ -646,7 +666,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "tenant" = ${principal.tenant}
                 AND "version" = ${input.expectedVersion}
                 AND "sandboxGeneration" = ${input.expectedGeneration}
-                AND "sandboxLifecycle" = 'provisioning'
+                AND "sandboxLifecycle" IN ('provisioning', 'provisioning_ambiguous')
               RETURNING *`
           )
         );
@@ -693,7 +713,8 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (
           agent.version !== input.expectedVersion ||
           agent.sandboxGeneration !== input.expectedGeneration ||
-          agent.sandboxLifecycle !== "provisioning"
+          (agent.sandboxLifecycle !== "provisioning" &&
+            agent.sandboxLifecycle !== "provisioning_ambiguous")
         ) {
           return { kind: "stale_version" };
         }
@@ -717,7 +738,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "tenant" = ${run.tenant}
                 AND "version" = ${input.expectedVersion}
                 AND "sandboxGeneration" = ${input.expectedGeneration}
-                AND "sandboxLifecycle" = 'provisioning'
+                AND "sandboxLifecycle" IN ('provisioning', 'provisioning_ambiguous')
               RETURNING *`
           )
         );
@@ -868,6 +889,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
       input: BeginDaytonaSandboxDecommissionInput
     ): Promise<
       | { kind: "decommissioning"; value: RunnerAgentRecord }
+      | { kind: "cleanup_required"; value: RunnerAgentRecord }
       | { kind: "busy" }
       | { kind: "not_found" }
     > =>
@@ -886,6 +908,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           return { kind: "not_found" };
         }
         const agent = asAgent(current);
+        if (agent.sandboxLifecycle === "provisioning_ambiguous") {
+          return { kind: "cleanup_required", value: agent };
+        }
         if (agent.sandboxLifecycle === "decommissioning") {
           return { kind: "decommissioning", value: agent };
         }
@@ -1520,6 +1545,97 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return rows.map(asAgent);
       }),
 
+    markDaytonaSandboxReservationAmbiguous: (
+      principal: RunnerPrincipal,
+      input: DaytonaSandboxFence
+    ): Promise<
+      | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "not_found" }
+      | { kind: "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const [updated] = await transaction.execute(
+          statement(
+            "mark-daytona-sandbox-reservation-ambiguous",
+            { ...input, tenant: principal.tenant },
+            sql`UPDATE "RunnerAgent"
+              SET "sandboxLifecycle" = 'provisioning_ambiguous',
+                  "sandboxUpdatedAt" = now(),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${input.agentId}
+                AND "tenant" = ${principal.tenant}
+                AND "version" = ${input.expectedVersion}
+                AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "sandboxLifecycle" = 'provisioning'
+              RETURNING *`
+          )
+        );
+        if (updated) {
+          return { kind: "updated", value: asAgent(updated) };
+        }
+        const [current] = await transaction.execute(
+          statement(
+            "get-agent-after-daytona-sandbox-ambiguity",
+            { agentId: input.agentId, tenant: principal.tenant },
+            sql`SELECT "id" FROM "RunnerAgent"
+              WHERE "id" = ${input.agentId}
+                AND "tenant" = ${principal.tenant}
+              LIMIT 1`
+          )
+        );
+        return current ? { kind: "stale_version" } : { kind: "not_found" };
+      }),
+
+    markDaytonaSandboxReservationAmbiguousForDispatch: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority,
+      input: DispatchSandboxFence
+    ): Promise<
+      | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "not_found" }
+      | { kind: "not_live" }
+      | { kind: "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+          "running",
+        ]);
+        if (!run) {
+          return { kind: "not_live" };
+        }
+        const agent = await lockedDispatchAgent(transaction, run);
+        if (!agent) {
+          return { kind: "not_found" };
+        }
+        const [updated] = await transaction.execute(
+          statement(
+            "mark-daytona-sandbox-reservation-ambiguous-for-dispatch",
+            {
+              agentId: run.agentId,
+              expectedGeneration: input.expectedGeneration,
+              expectedVersion: input.expectedVersion,
+              tenant: run.tenant,
+            },
+            sql`UPDATE "RunnerAgent"
+              SET "sandboxLifecycle" = 'provisioning_ambiguous',
+                  "sandboxUpdatedAt" = now(),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${run.agentId}
+                AND "tenant" = ${run.tenant}
+                AND "version" = ${input.expectedVersion}
+                AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "sandboxLifecycle" IN ('provisioning', 'provisioning_ambiguous')
+              RETURNING *`
+          )
+        );
+        return updated
+          ? { kind: "updated", value: asAgent(updated) }
+          : { kind: "stale_version" };
+      }),
+
     markDispatchRunning: (
       operator: RunnerOperator,
       input: DispatchFence
@@ -1621,18 +1737,35 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             "read-events-after",
             {
               afterEventId,
-              maxEvents: MAX_EVENTS_PER_RUN,
+              maxEventBytes: MAX_EVENT_PAGE_BYTES,
+              maxEvents: MAX_EVENTS_PER_PAGE,
               runId,
               tenant: principal.tenant,
             },
-            sql`SELECT "RunnerRunEvent".*
-              FROM "RunnerRunEvent"
-              INNER JOIN "RunnerRun" ON "RunnerRun"."id" = "RunnerRunEvent"."runId"
-              WHERE "RunnerRunEvent"."runId" = ${runId}
-                AND "RunnerRun"."tenant" = ${principal.tenant}
-                AND "RunnerRunEvent"."eventId" > ${afterEventId}
-              ORDER BY "RunnerRunEvent"."eventId" ASC
-              LIMIT ${MAX_EVENTS_PER_RUN}`
+            sql`WITH candidate AS (
+                SELECT "RunnerRunEvent".*,
+                    pg_column_size("RunnerRunEvent"."event") AS "eventBytes"
+                FROM "RunnerRunEvent"
+                INNER JOIN "RunnerRun" ON "RunnerRun"."id" = "RunnerRunEvent"."runId"
+                WHERE "RunnerRunEvent"."runId" = ${runId}
+                  AND "RunnerRun"."tenant" = ${principal.tenant}
+                  AND "RunnerRunEvent"."eventId" > ${afterEventId}
+                ORDER BY "RunnerRunEvent"."eventId" ASC
+                LIMIT ${MAX_EVENTS_PER_PAGE}
+              ),
+              paged AS (
+                SELECT *,
+                    row_number() OVER (ORDER BY "eventId" ASC) AS "pageRank",
+                    sum("eventBytes") OVER (
+                      ORDER BY "eventId" ASC
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS "pageBytes"
+                FROM candidate
+              )
+              SELECT "createdAt", "event", "eventId", "runId"
+              FROM paged
+              WHERE "pageRank" = 1 OR "pageBytes" <= ${MAX_EVENT_PAGE_BYTES}
+              ORDER BY "eventId" ASC`
           )
         );
         return rows.map(asEvent);
@@ -2135,6 +2268,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (
           agent.sandboxLifecycle !== "unprovisioned" &&
           agent.sandboxLifecycle !== "provisioning" &&
+          agent.sandboxLifecycle !== "provisioning_ambiguous" &&
           agent.sandboxLifecycle !== "ready"
         ) {
           return {

@@ -60,8 +60,7 @@ export function createRunEventStream(
   let closed = false;
   let cursor = options.lastEventId;
   let lastActivityAt = now();
-  let terminal = false;
-  const pending: RunEvent[] = [];
+  let pending: RunEvent | undefined;
   let removeAbortListener: (() => void) | undefined;
   let controllerRef: ReadableStreamDefaultController<Uint8Array> | undefined;
   const abortController = new AbortController();
@@ -102,20 +101,14 @@ export function createRunEventStream(
       controllerRef = streamController;
       try {
         while (!cancelled && !abortController.signal.aborted) {
-          const queuedEvent = pending.shift();
+          const queuedEvent = pending;
           if (queuedEvent) {
+            pending = undefined;
             streamController.enqueue(
               encoder.encode(serializeEvent(queuedEvent))
             );
             cursor = queuedEvent.id;
             lastActivityAt = now();
-            if (terminal && pending.length === 0) {
-              close();
-            }
-            return;
-          }
-          if (terminal) {
-            close();
             return;
           }
 
@@ -125,19 +118,22 @@ export function createRunEventStream(
             close();
             return;
           }
-          const { events, terminal: isTerminal } = snapshot;
-          let latestEventId = cursor;
-          for (const snapshotEvent of [...events].sort(
-            (left, right) => left.id - right.id
-          )) {
-            if (snapshotEvent.id > latestEventId) {
-              pending.push(snapshotEvent);
-              latestEventId = snapshotEvent.id;
+          let nextEvent: RunEvent | undefined;
+          for (const snapshotEvent of snapshot.events) {
+            if (
+              snapshotEvent.id > cursor &&
+              (!nextEvent || snapshotEvent.id < nextEvent.id)
+            ) {
+              nextEvent = snapshotEvent;
             }
           }
-          terminal = isTerminal;
-          if (pending.length > 0 || terminal) {
+          if (nextEvent) {
+            pending = nextEvent;
             continue;
+          }
+          if (snapshot.terminal) {
+            close();
+            return;
           }
 
           const remainingIdleMs = idleTimeoutMs - (now() - lastActivityAt);

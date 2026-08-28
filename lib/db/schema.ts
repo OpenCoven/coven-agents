@@ -453,6 +453,7 @@ export const runnerAgent = pgTable(
       enum: [
         "unprovisioned",
         "provisioning",
+        "provisioning_ambiguous",
         "ready",
         "decommissioning",
         "decommission_failed",
@@ -499,7 +500,7 @@ export const runnerAgent = pgTable(
     ),
     check(
       "RunnerAgent_sandboxLifecycle_valid",
-      sql`${table.sandboxLifecycle} in ('unprovisioned', 'provisioning', 'ready', 'decommissioning', 'decommission_failed')`
+      sql`${table.sandboxLifecycle} in ('unprovisioned', 'provisioning', 'provisioning_ambiguous', 'ready', 'decommissioning', 'decommission_failed')`
     ),
     check(
       "RunnerAgent_warmStatus_valid",

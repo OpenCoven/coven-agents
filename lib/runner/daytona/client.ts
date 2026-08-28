@@ -3,13 +3,10 @@ import "server-only";
 import { Daytona, type DaytonaConfig } from "@daytona/sdk";
 import {
   type DaytonaSnapshotConfiguration,
-  daytonaClientConfiguration,
+  daytonaRequestTimeout,
   daytonaSnapshotConfiguration,
-} from "./image";
-
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-const MAX_REQUEST_TIMEOUT_MS = 120_000;
-const MIN_REQUEST_TIMEOUT_MS = 1000;
+} from "./config";
+import { daytonaClientConfiguration } from "./image";
 
 export type DaytonaRunnerConfiguration = DaytonaSnapshotConfiguration &
   Readonly<{ requestTimeoutMs: number }>;
@@ -17,28 +14,6 @@ export type DaytonaRunnerConfiguration = DaytonaSnapshotConfiguration &
 export type DaytonaClientFactory = (configuration: DaytonaConfig) => Daytona;
 
 let cachedClient: Daytona | undefined;
-
-function configuredRequestTimeout(environment: NodeJS.ProcessEnv): number {
-  const raw =
-    environment.DAYTONA_REQUEST_TIMEOUT_MS?.trim() ??
-    String(DEFAULT_REQUEST_TIMEOUT_MS);
-  if (!/^\d+$/u.test(raw)) {
-    throw new Error(
-      `DAYTONA_REQUEST_TIMEOUT_MS must be an integer between ${MIN_REQUEST_TIMEOUT_MS} and ${MAX_REQUEST_TIMEOUT_MS}.`
-    );
-  }
-  const timeout = Number(raw);
-  if (
-    !Number.isSafeInteger(timeout) ||
-    timeout < MIN_REQUEST_TIMEOUT_MS ||
-    timeout > MAX_REQUEST_TIMEOUT_MS
-  ) {
-    throw new Error(
-      `DAYTONA_REQUEST_TIMEOUT_MS must be an integer between ${MIN_REQUEST_TIMEOUT_MS} and ${MAX_REQUEST_TIMEOUT_MS}.`
-    );
-  }
-  return timeout;
-}
 
 /**
  * Uses Task 5's validation for the API endpoint, key, target, and snapshot.
@@ -49,7 +24,7 @@ export function daytonaRunnerConfiguration(
 ): DaytonaRunnerConfiguration {
   return {
     ...daytonaSnapshotConfiguration(environment),
-    requestTimeoutMs: configuredRequestTimeout(environment),
+    requestTimeoutMs: daytonaRequestTimeout(environment),
   };
 }
 

@@ -2,15 +2,20 @@ import "server-only";
 
 import {
   type CreateSandboxFromSnapshotParams,
+  DaytonaAuthenticationError,
   DaytonaBadGatewayError,
+  DaytonaBadRequestError,
+  DaytonaConflictError,
   DaytonaConnectionError,
   DaytonaError,
+  DaytonaForbiddenError,
   DaytonaGoneError,
   DaytonaInternalServerError,
   DaytonaNotFoundError,
   DaytonaRateLimitError,
   DaytonaServiceUnavailableError,
   DaytonaTimeoutError,
+  DaytonaUnprocessableEntityError,
   type Sandbox,
   SandboxState,
 } from "@daytona/sdk";
@@ -21,7 +26,7 @@ import type {
   RunnerOperator,
   RunnerPrincipal,
 } from "../types";
-import { daytonaSnapshotConfiguration } from "./image";
+import { daytonaDomainAllowList, daytonaSnapshotConfiguration } from "./config";
 import { daytonaSandboxLabels, daytonaSandboxName } from "./names";
 
 const DEFAULT_AUTO_ARCHIVE_MINUTES = 10_080;
@@ -35,6 +40,8 @@ export type DaytonaProviderErrorKind =
   | "not_found"
   | "retryable"
   | "non_retryable";
+
+export type DaytonaSandboxCreateErrorKind = "ambiguous" | "definite_rejection";
 
 export type DaytonaSandboxService = Readonly<{
   create: (
@@ -104,7 +111,7 @@ function nonNegativeMinutes(
 export function daytonaSandboxConfiguration(
   environment: NodeJS.ProcessEnv = process.env
 ): DaytonaSandboxConfiguration {
-  const domainAllowList = environment.DAYTONA_DOMAIN_ALLOW_LIST?.trim();
+  const domainAllowList = daytonaDomainAllowList(environment);
   return {
     autoArchiveInterval: nonNegativeMinutes(
       environment,
@@ -150,6 +157,35 @@ export function classifyDaytonaProviderError(
     return "retryable";
   }
   return "non_retryable";
+}
+
+/**
+ * A failed create is safe to reset only when Daytona explicitly rejected it.
+ * Transport and unknown failures may be emitted after Daytona accepted the
+ * request, so their deterministic name remains reserved for reconciliation.
+ */
+export function classifyDaytonaSandboxCreateError(
+  error: unknown
+): DaytonaSandboxCreateErrorKind {
+  if (error instanceof DaytonaSandboxLifecycleError) {
+    return error.retryable ? "ambiguous" : "definite_rejection";
+  }
+  if (
+    error instanceof DaytonaBadRequestError ||
+    error instanceof DaytonaAuthenticationError ||
+    error instanceof DaytonaForbiddenError ||
+    error instanceof DaytonaNotFoundError ||
+    error instanceof DaytonaConflictError ||
+    error instanceof DaytonaGoneError ||
+    error instanceof DaytonaUnprocessableEntityError ||
+    (error instanceof DaytonaError &&
+      error.statusCode !== undefined &&
+      error.statusCode >= 400 &&
+      error.statusCode < 500)
+  ) {
+    return "definite_rejection";
+  }
+  return "ambiguous";
 }
 
 function sandboxCreateParameters(
@@ -368,6 +404,13 @@ type DaytonaSandboxPersistence = Readonly<{
     | { kind: "not_found" }
     | { kind: "stale_version" }
   >;
+  markAmbiguous: (
+    reserved: RunnerAgentRecord
+  ) => Promise<
+    | { kind: "updated"; value: RunnerAgentRecord }
+    | { kind: "not_found" }
+    | { kind: "stale_version" }
+  >;
   reserve: (
     agent: RunnerAgentRecord
   ) => Promise<
@@ -392,6 +435,12 @@ function subscriberSandboxPersistence(
       }),
     fail: (reserved) =>
       dependencies.store.failDaytonaSandboxReservation(principal, {
+        agentId: reserved.id,
+        expectedGeneration: reserved.sandboxGeneration,
+        expectedVersion: reserved.version,
+      }),
+    markAmbiguous: (reserved) =>
+      dependencies.store.markDaytonaSandboxReservationAmbiguous(principal, {
         agentId: reserved.id,
         expectedGeneration: reserved.sandboxGeneration,
         expectedVersion: reserved.version,
@@ -475,9 +524,42 @@ async function createSandbox(
       );
       created = true;
     } catch (createError) {
-      await failSandboxReservation(reserved.value, persistence);
-      throw createError;
+      if (
+        classifyDaytonaSandboxCreateError(createError) === "definite_rejection"
+      ) {
+        await failSandboxReservation(reserved.value, persistence);
+        throw createError;
+      }
+      return markSandboxReservationAmbiguous(
+        reserved.value,
+        persistence,
+        createError
+      );
     }
+  }
+
+  async function markSandboxReservationAmbiguous(
+    reservation: RunnerAgentRecord,
+    store: DaytonaSandboxPersistence,
+    cause: unknown
+  ): Promise<never> {
+    try {
+      const marked = await store.markAmbiguous(reservation);
+      if (marked.kind === "updated") {
+        throw new DaytonaSandboxLifecycleError(
+          "Daytona sandbox creation outcome is ambiguous; cleanup reconciliation is required before retry.",
+          { cause, kind: "cleanup_needed", retryable: true }
+        );
+      }
+    } catch (error) {
+      if (error instanceof DaytonaSandboxLifecycleError) {
+        throw error;
+      }
+    }
+    throw new DaytonaSandboxLifecycleError(
+      "Daytona sandbox creation outcome is ambiguous; cleanup reconciliation is required before retry.",
+      { cause, kind: "cleanup_needed", retryable: true }
+    );
   }
 
   const persisted = await persistSandbox(
@@ -529,6 +611,28 @@ async function deleteFirstDaytonaSandbox(
   }
 }
 
+async function reconcileAmbiguousDaytonaSandbox(
+  agent: RunnerAgentRecord,
+  dependencies: DaytonaSandboxDependencies,
+  persistence: DaytonaSandboxPersistence
+): Promise<{ agent: RunnerAgentRecord; sandbox: Sandbox }> {
+  try {
+    const sandbox = await dependencies.daytona.get(
+      daytonaSandboxName(agent.tenant, agent.id)
+    );
+    const persisted = await persistSandbox(agent, sandbox, persistence, false);
+    return { agent: persisted, sandbox };
+  } catch (error) {
+    if (error instanceof DaytonaSandboxLifecycleError) {
+      throw error;
+    }
+    throw new DaytonaSandboxLifecycleError(
+      "Daytona sandbox creation remains ambiguous; cleanup reconciliation is required before retry.",
+      { cause: error, kind: "cleanup_needed", retryable: true }
+    );
+  }
+}
+
 /**
  * Resolves the stored provider ID and only creates after the deterministic
  * sandbox name is confirmed absent.
@@ -547,6 +651,15 @@ async function ensureDaytonaSandboxWithPersistence(
       "Daytona sandbox is being decommissioned.",
       { retryable: true }
     );
+  }
+  if (agent.sandboxLifecycle === "provisioning_ambiguous") {
+    const reconciled = await reconcileAmbiguousDaytonaSandbox(
+      agent,
+      dependencies,
+      persistence
+    );
+    await startOrRecoverSandbox(reconciled.sandbox, dependencies.lifecycle);
+    return reconciled;
   }
   if (agent.sandboxLifecycle === "provisioning" || !agent.daytonaSandboxId) {
     return createSandbox(agent, configuration, dependencies, persistence);
@@ -640,6 +753,20 @@ export async function ensureDaytonaSandboxForDispatch(
           ? { kind: "stale_version" as const }
           : result;
       },
+      markAmbiguous: async (reserved) => {
+        const result =
+          await dependencies.store.markDaytonaSandboxReservationAmbiguousForDispatch(
+            operator,
+            authority,
+            {
+              expectedGeneration: reserved.sandboxGeneration,
+              expectedVersion: reserved.version,
+            }
+          );
+        return result.kind === "not_live"
+          ? { kind: "stale_version" as const }
+          : result;
+      },
       reserve: async () => {
         const result =
           await dependencies.store.reserveDaytonaSandboxForDispatch(
@@ -721,8 +848,8 @@ export async function warmDaytonaSandbox(
 
 /**
  * Fences the durable row before asking Daytona to delete and removes the row
- * only after Daytona confirms deletion. Provider 404/410 means it is already
- * gone and is therefore an idempotent successful delete.
+ * only after Daytona confirms deletion. Provider 404/410 means a known
+ * sandbox is already gone; ambiguous creations must reconcile separately.
  */
 export async function deleteDaytonaSandbox(
   principal: RunnerPrincipal,
@@ -742,6 +869,28 @@ export async function deleteDaytonaSandbox(
       ),
     }
   );
+  if (decommission.kind === "cleanup_required") {
+    try {
+      const sandbox = await dependencies.daytona.get(
+        daytonaSandboxName(decommission.value.tenant, decommission.value.id)
+      );
+      const attached = await dependencies.store.attachDaytonaSandbox(
+        principal,
+        {
+          agentId: decommission.value.id,
+          expectedGeneration: decommission.value.sandboxGeneration,
+          expectedVersion: decommission.value.version,
+          sandboxId: sandbox.id,
+        }
+      );
+      if (attached.kind !== "updated") {
+        return { error: "retryable", kind: "failed" };
+      }
+    } catch {
+      return { error: "retryable", kind: "failed" };
+    }
+    return deleteDaytonaSandbox(principal, agentId, dependencies);
+  }
   if (decommission.kind !== "decommissioning") {
     return decommission;
   }

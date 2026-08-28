@@ -14,6 +14,7 @@ const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
   DAYTONA_API_URL: "https://app.daytona.io/api",
   DAYTONA_AUTO_ARCHIVE_MINUTES: "10080",
   DAYTONA_AUTO_STOP_MINUTES: "15",
+  DAYTONA_DOMAIN_ALLOW_LIST: "github.com,api.github.com",
   DAYTONA_SNAPSHOT: "coven-agents-copilot-1",
   DAYTONA_TARGET: "us",
   OPERATOR_DIAGNOSTIC_TOKEN: "subprocess-test-operator-token",
@@ -28,6 +29,7 @@ const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
 const REQUIRED_PRODUCTION_VARIABLES = [
   "ABUSE_KEY_SECRET",
   "DAYTONA_API_KEY",
+  "DAYTONA_DOMAIN_ALLOW_LIST",
   "DAYTONA_SNAPSHOT",
   "OPERATOR_DIAGNOSTIC_TOKEN",
   "REDIS_URL",
@@ -66,6 +68,7 @@ function runValidator(
       | "DAYTONA_AUTO_ARCHIVE_MINUTES"
       | "DAYTONA_AUTO_STOP_MINUTES"
       | "DAYTONA_DOMAIN_ALLOW_LIST"
+      | "DAYTONA_REQUEST_TIMEOUT_MS"
       | "DAYTONA_SNAPSHOT"
       | "DAYTONA_TARGET"
       | "GLOBAL_DAILY_RUN_CAP"
@@ -92,6 +95,7 @@ function runValidator(
     DAYTONA_AUTO_ARCHIVE_MINUTES: undefined,
     DAYTONA_AUTO_STOP_MINUTES: undefined,
     DAYTONA_DOMAIN_ALLOW_LIST: undefined,
+    DAYTONA_REQUEST_TIMEOUT_MS: undefined,
     DAYTONA_SNAPSHOT: undefined,
     DAYTONA_TARGET: undefined,
     GLOBAL_DAILY_RUN_CAP: undefined,
@@ -213,6 +217,37 @@ test("rejects invalid Daytona interval settings", () => {
       );
     }
   }
+});
+
+test("rejects missing, malformed, and unsafe production Daytona egress settings", () => {
+  for (const invalidValue of [
+    undefined,
+    "",
+    "  ",
+    "github.com,",
+    "https://github.com",
+    "github.com/path",
+    "github.com:443",
+    "github.com,\napi.github.com",
+  ]) {
+    const result = runValidator({ DAYTONA_DOMAIN_ALLOW_LIST: invalidValue });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /DAYTONA_DOMAIN_ALLOW_LIST/u);
+  }
+});
+
+test("validates Daytona request timeout through the shared client parser", () => {
+  const defaulted = runValidator({ DAYTONA_REQUEST_TIMEOUT_MS: undefined });
+  assert.equal(defaulted.status, 0, defaulted.stderr);
+
+  for (const invalidValue of ["0", "-1", "1.5", "9007199254740992", "120001"]) {
+    const result = runValidator({ DAYTONA_REQUEST_TIMEOUT_MS: invalidValue });
+    assertRejectedWithMessage(
+      result,
+      "DAYTONA_REQUEST_TIMEOUT_MS must be an integer between 1000 and 120000."
+    );
+  }
+  assert.equal(runValidator({ DAYTONA_REQUEST_TIMEOUT_MS: "1000" }).status, 0);
 });
 
 test("rejects invalid admission limit settings", () => {

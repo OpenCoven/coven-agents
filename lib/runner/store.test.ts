@@ -9,7 +9,12 @@ import { sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { daytonaDispatchAuthorizers } from "./daytona/dispatch";
 import { daytonaRunSessionName } from "./daytona/names";
-import { MAX_EVENTS_PER_RUN } from "./evidence";
+import {
+  MAX_EVENT_PAGE_BYTES,
+  MAX_EVENTS_PER_PAGE,
+  MAX_EVENTS_PER_RUN,
+  MAX_PERSISTED_EVENT_BYTES_PER_RUN,
+} from "./evidence";
 import { createRunnerStore, type RunnerStoreStatement } from "./store";
 import type {
   RunnerAgentRecord,
@@ -212,7 +217,7 @@ test("event ids advance from the locked run cursor and update atomically", async
   );
   assert.match(
     queryText(statements[3] as RunnerStoreStatement),
-    /ORDER BY "eventId" DESC\s+OFFSET \$\d+/
+    /row_number\(\) OVER \(ORDER BY "eventId" DESC\)/
   );
   const [lockedStatement] = statements;
   assert.ok(lockedStatement);
@@ -228,7 +233,7 @@ test("event ids advance from the locked run cursor and update atomically", async
   assert.equal("now" in (statements[1] as RunnerStoreStatement).args, false);
 });
 
-test("event retention prunes only the oldest rows in the append transaction", async () => {
+test("event retention atomically prunes count and byte overflow while preserving the newest row", async () => {
   const current = run({
     dispatchState: "running",
     logCursor: MAX_EVENTS_PER_RUN,
@@ -272,6 +277,18 @@ test("event retention prunes only the oldest rows in the append transaction", as
   assert.match(
     queryText(statements[3] as RunnerStoreStatement),
     /WHERE "runId" = \$\d+[\s\S]*AND "eventId" IN/
+  );
+  assert.equal(
+    statements[3]?.args.maxEventBytes,
+    MAX_PERSISTED_EVENT_BYTES_PER_RUN
+  );
+  assert.match(
+    queryText(statements[3] as RunnerStoreStatement),
+    /pg_column_size\("event"\)/
+  );
+  assert.match(
+    queryText(statements[3] as RunnerStoreStatement),
+    /"newestRank" > 1[\s\S]*"retainedBytes" > \$\d+/
   );
 });
 
@@ -325,7 +342,8 @@ test("finalization retains the terminal event when the live history is at capaci
   assert.equal(prune.args.runId, current.id);
   assert.equal(prune.args.tenant, current.tenant);
   assert.match(queryText(prune), /DELETE FROM "RunnerRunEvent"/);
-  assert.match(queryText(prune), /ORDER BY "eventId" DESC\s+OFFSET \$\d+/);
+  assert.equal(prune.args.maxEventBytes, MAX_PERSISTED_EVENT_BYTES_PER_RUN);
+  assert.match(queryText(prune), /"newestRank" > 1/);
 });
 
 test("event reads return the retained stale-resume suffix in bounded cursor order", async () => {
@@ -349,10 +367,19 @@ test("event reads return the retained stale-resume suffix in bounded cursor orde
     [7, 8, 9]
   );
   assert.equal(statements[0]?.args.afterEventId, 1);
-  assert.equal(statements[0]?.args.maxEvents, MAX_EVENTS_PER_RUN);
+  assert.equal(statements[0]?.args.maxEvents, MAX_EVENTS_PER_PAGE);
+  assert.equal(statements[0]?.args.maxEventBytes, MAX_EVENT_PAGE_BYTES);
   assert.match(
     queryText(statements[0] as RunnerStoreStatement),
     /ORDER BY "RunnerRunEvent"\."eventId" ASC\s+LIMIT \$\d+/
+  );
+  assert.match(
+    queryText(statements[0] as RunnerStoreStatement),
+    /pg_column_size\("RunnerRunEvent"\."event"\)/
+  );
+  assert.match(
+    queryText(statements[0] as RunnerStoreStatement),
+    /"pageRank" = 1 OR "pageBytes" <= \$\d+/
   );
 });
 

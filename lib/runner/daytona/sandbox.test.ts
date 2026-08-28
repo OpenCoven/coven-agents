@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  DaytonaBadRequestError,
   DaytonaNotFoundError,
   DaytonaTimeoutError,
   type Sandbox,
@@ -11,7 +12,9 @@ import type { RunnerAgentRecord, RunnerPrincipal } from "../types";
 import { daytonaSandboxName } from "./names";
 import {
   classifyDaytonaProviderError,
+  classifyDaytonaSandboxCreateError,
   DaytonaSandboxLifecycleError,
+  daytonaSandboxConfiguration,
   deleteDaytonaSandbox,
   ensureDaytonaSandbox,
   warmDaytonaSandbox,
@@ -1094,4 +1097,182 @@ test("provider error classification separates absent, retryable, and permanent f
     classifyDaytonaProviderError(new Error("invalid")),
     "non_retryable"
   );
+});
+
+test("creation failures distinguish provider rejections from ambiguous outcomes", () => {
+  assert.equal(
+    classifyDaytonaSandboxCreateError(new DaytonaBadRequestError("invalid")),
+    "definite_rejection"
+  );
+  assert.equal(
+    classifyDaytonaSandboxCreateError(new DaytonaTimeoutError("timeout")),
+    "ambiguous"
+  );
+  assert.equal(
+    classifyDaytonaSandboxCreateError(new Error("opaque transport failure")),
+    "ambiguous"
+  );
+});
+
+test("production Daytona egress configuration is required and normalized", () => {
+  const environment = {
+    DAYTONA_API_KEY: "test-key",
+    DAYTONA_DOMAIN_ALLOW_LIST: " GitHub.com,api.github.com,github.com ",
+    DAYTONA_SNAPSHOT: "coven-agents-copilot-1",
+    NODE_ENV: "production",
+  } as NodeJS.ProcessEnv;
+  assert.equal(
+    daytonaSandboxConfiguration(environment).domainAllowList,
+    "github.com,api.github.com"
+  );
+  for (const invalidValue of [
+    undefined,
+    "",
+    "github.com,",
+    "https://github.com",
+    "github.com/path",
+    "github.com:443",
+  ]) {
+    assert.throws(
+      () =>
+        daytonaSandboxConfiguration({
+          ...environment,
+          DAYTONA_DOMAIN_ALLOW_LIST: invalidValue,
+        }),
+      /DAYTONA_DOMAIN_ALLOW_LIST/u
+    );
+  }
+});
+
+test("a timeout after Daytona may have accepted creation remains durable until deterministic reconciliation attaches it", async () => {
+  const reserved = agent({
+    sandboxGeneration: 1,
+    sandboxLifecycle: "provisioning",
+    version: 1,
+  });
+  const ambiguous = agent({
+    ...reserved,
+    sandboxLifecycle: "provisioning_ambiguous",
+    version: 2,
+  });
+  let resetCalls = 0;
+  let marked = 0;
+
+  await assert.rejects(
+    ensureDaytonaSandbox(principal, agent(), config, {
+      daytona: {
+        create: () => Promise.reject(new DaytonaTimeoutError("timed out")),
+        get: () =>
+          Promise.reject(new DaytonaNotFoundError("absent before create")),
+      },
+      store: store({
+        failDaytonaSandboxReservation: () => {
+          resetCalls += 1;
+          return Promise.resolve({ kind: "updated" as const, value: agent() });
+        },
+        markDaytonaSandboxReservationAmbiguous: () => {
+          marked += 1;
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: ambiguous,
+          });
+        },
+        reserveDaytonaSandbox: () =>
+          Promise.resolve({ kind: "reserved" as const, value: reserved }),
+      }),
+    }),
+    (error: unknown) =>
+      error instanceof DaytonaSandboxLifecycleError &&
+      error.kind === "cleanup_needed" &&
+      error.retryable
+  );
+  assert.equal(marked, 1);
+  assert.equal(resetCalls, 0);
+
+  const discovered = sandbox(SandboxState.STARTED);
+  const attached = agent({
+    ...ambiguous,
+    daytonaSandboxId: discovered.id,
+    sandboxLifecycle: "ready",
+    version: 3,
+  });
+  const reconciled = await ensureDaytonaSandbox(principal, ambiguous, config, {
+    daytona: {
+      create: () => Promise.reject(new Error("must not create")),
+      get: (identifier) => {
+        assert.equal(
+          identifier,
+          daytonaSandboxName(principal.tenant, ambiguous.id)
+        );
+        return Promise.resolve(discovered);
+      },
+    },
+    store: store({
+      attachDaytonaSandbox: () =>
+        Promise.resolve({ kind: "updated" as const, value: attached }),
+    }),
+  });
+  assert.equal(reconciled.agent, attached);
+  assert.equal(reconciled.sandbox, discovered);
+});
+
+test("definite Daytona creation rejection resets the reservation", async () => {
+  const reserved = agent({
+    sandboxGeneration: 1,
+    sandboxLifecycle: "provisioning",
+    version: 1,
+  });
+  let resetCalls = 0;
+
+  await assert.rejects(
+    ensureDaytonaSandbox(principal, agent(), config, {
+      daytona: {
+        create: () => Promise.reject(new DaytonaBadRequestError("invalid")),
+        get: () => Promise.reject(new DaytonaNotFoundError("absent")),
+      },
+      store: store({
+        failDaytonaSandboxReservation: () => {
+          resetCalls += 1;
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: agent({ sandboxLifecycle: "unprovisioned" }),
+          });
+        },
+        markDaytonaSandboxReservationAmbiguous: () =>
+          Promise.reject(new Error("must not mark ambiguity")),
+        reserveDaytonaSandbox: () =>
+          Promise.resolve({ kind: "reserved" as const, value: reserved }),
+      }),
+    }),
+    /invalid/u
+  );
+  assert.equal(resetCalls, 1);
+});
+
+test("decommissioning an ambiguously created sandbox retains its row when reconciliation is not found", async () => {
+  const ambiguous = agent({
+    sandboxGeneration: 2,
+    sandboxLifecycle: "provisioning_ambiguous",
+    version: 4,
+  });
+  let deleted = 0;
+  const result = await deleteDaytonaSandbox(principal, ambiguous.id, {
+    daytona: {
+      create: () => Promise.reject(new Error("must not create")),
+      get: () => Promise.reject(new DaytonaNotFoundError("not yet visible")),
+    },
+    store: store({
+      beginDaytonaSandboxDecommission: () =>
+        Promise.resolve({
+          kind: "cleanup_required" as const,
+          value: ambiguous,
+        }),
+      deleteDecommissionedAgent: () => {
+        deleted += 1;
+        return Promise.resolve({ kind: "deleted" as const });
+      },
+    }),
+  });
+  assert.deepEqual(result, { error: "retryable", kind: "failed" });
+  assert.equal(deleted, 0);
 });

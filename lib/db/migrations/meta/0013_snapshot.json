@@ -897,7 +897,7 @@
         },
         "RunnerAgent_sandboxLifecycle_valid": {
           "name": "RunnerAgent_sandboxLifecycle_valid",
-          "value": "\"RunnerAgent\".\"sandboxLifecycle\" in ('unprovisioned', 'provisioning', 'ready', 'decommissioning', 'decommission_failed')"
+          "value": "\"RunnerAgent\".\"sandboxLifecycle\" in ('unprovisioned', 'provisioning', 'provisioning_ambiguous', 'ready', 'decommissioning', 'decommission_failed')"
         },
         "RunnerAgent_warmStatus_valid": {
           "name": "RunnerAgent_warmStatus_valid",

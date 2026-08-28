@@ -49,7 +49,7 @@ test("resumes after an event ID, orders delivery, formats SSE, and avoids duplic
     })
   );
 
-  assert.deepEqual(cursors, [1]);
+  assert.deepEqual(cursors, [1, 2, 3]);
   assert.deepEqual(
     [...payload.matchAll(/^id: (\d+)$/gmu)].map((match) => Number(match[1])),
     [2, 3]
@@ -105,6 +105,7 @@ test("limits slow-consumer buffering to one event per pull", async () => {
       terminal: true,
     }),
   });
+
   const reader = stream.getReader();
   let closed = false;
   const closeObserver = reader.closed.then(() => {
@@ -115,12 +116,40 @@ test("limits slow-consumer buffering to one event per pull", async () => {
   await Promise.resolve();
   await Promise.resolve();
 
-  assert.equal(serialized, 2);
+  assert.equal(serialized, 1);
   assert.equal(closed, false);
   assert.match(new TextDecoder().decode((await reader.read()).value), /id: 2/u);
   assert.match(new TextDecoder().decode((await reader.read()).value), /id: 3/u);
   assert.deepEqual(await reader.read(), { done: true, value: undefined });
   await closeObserver;
+});
+
+test("drains stale resumes over multiple pages without retaining a page queue", async () => {
+  const cursors: number[] = [];
+  const pages = new Map<number, readonly RunEvent[]>([
+    [0, [event(7), event(8)]],
+    [7, [event(8)]],
+    [8, [event(9)]],
+    [9, []],
+  ]);
+  const payload = await readAll(
+    createRunEventStream({
+      lastEventId: 0,
+      read: (cursor) => {
+        cursors.push(cursor);
+        return Promise.resolve({
+          events: [...(pages.get(cursor) ?? [])],
+          terminal: cursor >= 8,
+        });
+      },
+    })
+  );
+
+  assert.deepEqual(cursors, [0, 7, 8, 9]);
+  assert.deepEqual(
+    [...payload.matchAll(/^id: (\d+)$/gmu)].map((match) => Number(match[1])),
+    [7, 8, 9]
+  );
 });
 
 test("keeps polling for later events and closes after a terminal snapshot", async () => {

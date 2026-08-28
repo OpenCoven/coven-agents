@@ -1,9 +1,14 @@
 import { validateAbuseConfig } from "../lib/abuse/config";
 import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
-import { daytonaSnapshotConfiguration } from "../lib/runner/daytona/config";
+import {
+  daytonaDomainAllowList,
+  daytonaRequestTimeout,
+  daytonaSnapshotConfiguration,
+} from "../lib/runner/daytona/config";
 
 const REQUIRED_PRODUCTION_VARIABLES = [
   "DAYTONA_API_KEY",
+  "DAYTONA_DOMAIN_ALLOW_LIST",
   "DAYTONA_SNAPSHOT",
   "REDIS_URL",
   "ABUSE_KEY_SECRET",
@@ -52,6 +57,8 @@ function validateProductionRuntimeConfig(environment: NodeJS.ProcessEnv): void {
     );
   }
 
+  daytonaRequestTimeout(environment);
+  daytonaDomainAllowList(environment);
   daytonaSnapshotConfiguration(environment);
 
   for (const [name, defaultValue] of Object.entries(
