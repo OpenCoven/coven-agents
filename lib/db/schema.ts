@@ -19,6 +19,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
   varchar,
@@ -468,6 +469,7 @@ export const runnerAgent = pgTable(
     }),
   },
   (table) => [
+    unique("RunnerAgent_id_tenant_key").on(table.id, table.tenant),
     index("RunnerAgent_tenant_updatedAt_idx").on(table.tenant, table.updatedAt),
     check(
       "RunnerAgent_tenant_valid",
@@ -497,9 +499,7 @@ export type RunnerAgent = InferSelectModel<typeof runnerAgent>;
 export const runnerRun = pgTable(
   "RunnerRun",
   {
-    agentId: uuid("agentId")
-      .notNull()
-      .references(() => runnerAgent.id, { onDelete: "restrict" }),
+    agentId: uuid("agentId").notNull(),
     commandEvidence: jsonb("commandEvidence")
       .$type<CommandEvidence[]>()
       .notNull()
@@ -542,6 +542,11 @@ export const runnerRun = pgTable(
     version: integer("version").notNull().default(0),
   },
   (table) => [
+    foreignKey({
+      columns: [table.agentId, table.tenant],
+      foreignColumns: [runnerAgent.id, runnerAgent.tenant],
+      name: "RunnerRun_agentId_tenant_RunnerAgent_id_tenant_fk",
+    }).onDelete("cascade"),
     index("RunnerRun_agent_createdAt_idx").on(table.agentId, table.createdAt),
     index("RunnerRun_queued_sequence_idx")
       .on(table.queueSequence)
@@ -603,7 +608,7 @@ export const runnerRun = pgTable(
     ),
     check(
       "RunnerRun_error_bounded",
-      sql`${table.error} is null or (jsonb_typeof(${table.error}) = 'object' and octet_length(coalesce(${table.error}->>'code', '')) between 1 and 64 and octet_length(coalesce(${table.error}->>'message', '')) between 1 and ${runnerMaxMessageLengthSql} and (not (${table.error} ? 'details') or octet_length(coalesce(${table.error}->>'details', '')) between 1 and ${runnerMaxDetailsLengthSql}) and jsonb_typeof(${table.error}->'retryable') = 'boolean')`
+      sql`${table.error} is null or (jsonb_typeof(${table.error}) = 'object' and ${table.error} ? 'code' and jsonb_typeof(${table.error}->'code') = 'string' and octet_length(${table.error}->>'code') between 1 and 64 and ${table.error} ? 'message' and jsonb_typeof(${table.error}->'message') = 'string' and octet_length(${table.error}->>'message') between 1 and ${runnerMaxMessageLengthSql} and ${table.error} ? 'retryable' and jsonb_typeof(${table.error}->'retryable') = 'boolean' and (not (${table.error} ? 'details') or (jsonb_typeof(${table.error}->'details') = 'string' and octet_length(${table.error}->>'details') between 1 and ${runnerMaxDetailsLengthSql})))`
     ),
     check(
       "RunnerRun_commandEvidence_bounded",

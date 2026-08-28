@@ -1,5 +1,5 @@
 {
-  "id": "487983e3-4f73-4b8b-9f75-928a17871f7b",
+  "id": "38929010-16db-4e7c-9a5b-5fc76af7e377",
   "prevId": "ad42f11b-d1a1-4d0d-a620-63f86fb65bb5",
   "version": "7",
   "dialect": "postgresql",
@@ -730,18 +730,18 @@
           "notNull": true,
           "default": "now()"
         },
+        "daytonaSandboxId": {
+          "name": "daytonaSandboxId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "description": {
           "name": "description",
           "type": "varchar(240)",
           "primaryKey": false,
           "notNull": true,
           "default": "''"
-        },
-        "daytonaSandboxId": {
-          "name": "daytonaSandboxId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         },
         "id": {
           "name": "id",
@@ -853,7 +853,13 @@
       },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "RunnerAgent_id_tenant_key": {
+          "name": "RunnerAgent_id_tenant_key",
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
+        }
+      },
       "policies": {},
       "checkConstraints": {
         "RunnerAgent_tenant_valid": {
@@ -1185,13 +1191,13 @@
         }
       },
       "foreignKeys": {
-        "RunnerRun_agentId_RunnerAgent_id_fk": {
-          "name": "RunnerRun_agentId_RunnerAgent_id_fk",
+        "RunnerRun_agentId_tenant_RunnerAgent_id_tenant_fk": {
+          "name": "RunnerRun_agentId_tenant_RunnerAgent_id_tenant_fk",
           "tableFrom": "RunnerRun",
           "tableTo": "RunnerAgent",
-          "columnsFrom": ["agentId"],
-          "columnsTo": ["id"],
-          "onDelete": "restrict",
+          "columnsFrom": ["agentId", "tenant"],
+          "columnsTo": ["id", "tenant"],
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -1237,7 +1243,7 @@
         },
         "RunnerRun_error_bounded": {
           "name": "RunnerRun_error_bounded",
-          "value": "\"RunnerRun\".\"error\" is null or (jsonb_typeof(\"RunnerRun\".\"error\") = 'object' and octet_length(coalesce(\"RunnerRun\".\"error\"->>'code', '')) between 1 and 64 and octet_length(coalesce(\"RunnerRun\".\"error\"->>'message', '')) between 1 and 500 and (not (\"RunnerRun\".\"error\" ? 'details') or octet_length(coalesce(\"RunnerRun\".\"error\"->>'details', '')) between 1 and 2000) and jsonb_typeof(\"RunnerRun\".\"error\"->'retryable') = 'boolean')"
+          "value": "\"RunnerRun\".\"error\" is null or (jsonb_typeof(\"RunnerRun\".\"error\") = 'object' and \"RunnerRun\".\"error\" ? 'code' and jsonb_typeof(\"RunnerRun\".\"error\"->'code') = 'string' and octet_length(\"RunnerRun\".\"error\"->>'code') between 1 and 64 and \"RunnerRun\".\"error\" ? 'message' and jsonb_typeof(\"RunnerRun\".\"error\"->'message') = 'string' and octet_length(\"RunnerRun\".\"error\"->>'message') between 1 and 500 and \"RunnerRun\".\"error\" ? 'retryable' and jsonb_typeof(\"RunnerRun\".\"error\"->'retryable') = 'boolean' and (not (\"RunnerRun\".\"error\" ? 'details') or (jsonb_typeof(\"RunnerRun\".\"error\"->'details') = 'string' and octet_length(\"RunnerRun\".\"error\"->>'details') between 1 and 2000)))"
         },
         "RunnerRun_commandEvidence_bounded": {
           "name": "RunnerRun_commandEvidence_bounded",
