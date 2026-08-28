@@ -1239,11 +1239,11 @@
         },
         "RunnerRun_output_bounded": {
           "name": "RunnerRun_output_bounded",
-          "value": "octet_length(\"RunnerRun\".\"output\") <= 100000"
+          "value": "char_length(\"RunnerRun\".\"output\") <= 100000"
         },
         "RunnerRun_error_bounded": {
           "name": "RunnerRun_error_bounded",
-          "value": "\"RunnerRun\".\"error\" is null or (jsonb_typeof(\"RunnerRun\".\"error\") = 'object' and \"RunnerRun\".\"error\" ? 'code' and jsonb_typeof(\"RunnerRun\".\"error\"->'code') = 'string' and octet_length(\"RunnerRun\".\"error\"->>'code') between 1 and 64 and \"RunnerRun\".\"error\" ? 'message' and jsonb_typeof(\"RunnerRun\".\"error\"->'message') = 'string' and octet_length(\"RunnerRun\".\"error\"->>'message') between 1 and 500 and \"RunnerRun\".\"error\" ? 'retryable' and jsonb_typeof(\"RunnerRun\".\"error\"->'retryable') = 'boolean' and (not (\"RunnerRun\".\"error\" ? 'details') or (jsonb_typeof(\"RunnerRun\".\"error\"->'details') = 'string' and octet_length(\"RunnerRun\".\"error\"->>'details') between 1 and 2000)))"
+          "value": "\"RunnerRun\".\"error\" is null or (jsonb_typeof(\"RunnerRun\".\"error\") = 'object' and \"RunnerRun\".\"error\" ?& array['code', 'message', 'retryable'] and (\"RunnerRun\".\"error\" - 'code' - 'message' - 'retryable' - 'details') = '{}'::jsonb and jsonb_typeof(\"RunnerRun\".\"error\"->'code') = 'string' and (\"RunnerRun\".\"error\"->>'code') = btrim(\"RunnerRun\".\"error\"->>'code') and char_length(\"RunnerRun\".\"error\"->>'code') between 1 and 64 and jsonb_typeof(\"RunnerRun\".\"error\"->'message') = 'string' and (\"RunnerRun\".\"error\"->>'message') = btrim(\"RunnerRun\".\"error\"->>'message') and char_length(\"RunnerRun\".\"error\"->>'message') between 1 and 500 and jsonb_typeof(\"RunnerRun\".\"error\"->'retryable') = 'boolean' and (not (\"RunnerRun\".\"error\" ? 'details') or (jsonb_typeof(\"RunnerRun\".\"error\"->'details') = 'string' and (\"RunnerRun\".\"error\"->>'details') = btrim(\"RunnerRun\".\"error\"->>'details') and char_length(\"RunnerRun\".\"error\"->>'details') between 1 and 2000)))"
         },
         "RunnerRun_commandEvidence_bounded": {
           "name": "RunnerRun_commandEvidence_bounded",

@@ -604,11 +604,11 @@ export const runnerRun = pgTable(
     ),
     check(
       "RunnerRun_output_bounded",
-      sql`octet_length(${table.output}) <= ${runnerMaxEventOutputLengthSql}`
+      sql`char_length(${table.output}) <= ${runnerMaxEventOutputLengthSql}`
     ),
     check(
       "RunnerRun_error_bounded",
-      sql`${table.error} is null or (jsonb_typeof(${table.error}) = 'object' and ${table.error} ? 'code' and jsonb_typeof(${table.error}->'code') = 'string' and octet_length(${table.error}->>'code') between 1 and 64 and ${table.error} ? 'message' and jsonb_typeof(${table.error}->'message') = 'string' and octet_length(${table.error}->>'message') between 1 and ${runnerMaxMessageLengthSql} and ${table.error} ? 'retryable' and jsonb_typeof(${table.error}->'retryable') = 'boolean' and (not (${table.error} ? 'details') or (jsonb_typeof(${table.error}->'details') = 'string' and octet_length(${table.error}->>'details') between 1 and ${runnerMaxDetailsLengthSql})))`
+      sql`${table.error} is null or (jsonb_typeof(${table.error}) = 'object' and ${table.error} ?& array['code', 'message', 'retryable'] and (${table.error} - 'code' - 'message' - 'retryable' - 'details') = '{}'::jsonb and jsonb_typeof(${table.error}->'code') = 'string' and (${table.error}->>'code') = btrim(${table.error}->>'code') and char_length(${table.error}->>'code') between 1 and 64 and jsonb_typeof(${table.error}->'message') = 'string' and (${table.error}->>'message') = btrim(${table.error}->>'message') and char_length(${table.error}->>'message') between 1 and ${runnerMaxMessageLengthSql} and jsonb_typeof(${table.error}->'retryable') = 'boolean' and (not (${table.error} ? 'details') or (jsonb_typeof(${table.error}->'details') = 'string' and (${table.error}->>'details') = btrim(${table.error}->>'details') and char_length(${table.error}->>'details') between 1 and ${runnerMaxDetailsLengthSql})))`
     ),
     check(
       "RunnerRun_commandEvidence_bounded",
