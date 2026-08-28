@@ -6,6 +6,7 @@ import {
   createDaytonaBuildLogSanitizer,
   createDaytonaCopilotImage,
   createDaytonaSnapshotDefinition,
+  DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE,
   DAYTONA_COPILOT_IMAGE_BASE,
   DAYTONA_COPILOT_SNAPSHOT_NAME,
   type DaytonaSnapshot,
@@ -149,46 +150,109 @@ test("redacts full Authorization header values without altering other log text",
   );
 });
 
-test("buffers split log lines until Authorization values can be redacted", () => {
+test("fails closed after detecting a split Authorization marker", () => {
   const basicCredential = "ZGF5dG9uYS11c2VyOnRlc3QtcGFzcw==";
-  const bearerCredential = "raw-bearer-credential-value";
   const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
 
   assert.equal(
     sanitizer.write("starting image build\nAuthorization: Basic "),
-    "starting image build\n"
+    "starting image build\nAuthorization: [REDACTED]"
   );
   assert.equal(sanitizer.write("Ba"), "");
   assert.equal(sanitizer.write(`sic ${basicCredential}\r`), "");
   assert.equal(
     sanitizer.write("\nAuthorization: Bearer raw-bearer-credential-"),
-    "Authorization: [REDACTED]\r\n"
+    ""
   );
   assert.equal(sanitizer.write("value\r"), "");
-  assert.equal(
-    sanitizer.write("\nimage build complete"),
-    "Authorization: [REDACTED]\r\n"
-  );
-  assert.equal(sanitizer.flush(), "image build complete");
+  assert.equal(sanitizer.write("\nimage build complete"), "");
+  assert.equal(sanitizer.flush(), "");
+});
 
-  const emitted = [
-    "starting image build\n",
-    "Authorization: [REDACTED]\r\n",
-    "Authorization: [REDACTED]\r\n",
-    "image build complete",
-  ].join("");
-  assert.equal(emitted.includes(basicCredential), false);
-  assert.equal(emitted.includes(bearerCredential), false);
-  assert.equal(emitted.includes("Basic"), false);
+test("streams SDK-trimmed chunks without waiting for newline boundaries", () => {
+  const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
+  const chunks = [
+    "starting image build",
+    ` installing ${"dependencies ".repeat(12)}`,
+    " image build complete",
+  ];
+  const emitted = chunks.map((chunk) => sanitizer.write(chunk));
+  emitted.push(sanitizer.flush());
+
+  assert.equal(emitted.join(""), chunks.join(""));
+  assert.ok(emitted.slice(0, -1).some((chunk) => chunk.length > 0));
+});
+
+test("keeps only a bounded tail for huge no-newline SDK chunks", () => {
+  const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
+  const log = "x".repeat(1_000_000);
+  const emitted = sanitizer.write(log);
+
+  assert.equal(emitted.length, log.length - DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE);
+  assert.equal(sanitizer.flush().length, DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE);
+});
+
+test("redacts markers split across SDK-trimmed chunks and suppresses values", () => {
+  const scenarios = [
+    {
+      chunks: ["safe output Author", "ization: Bear", "er secret-value"],
+      expected: "safe output Authorization: [REDACTED]",
+      secret: "secret-value",
+    },
+    {
+      chunks: ["safe output Ba", "sic ", "basic-credential"],
+      expected: "safe output Basic [REDACTED]",
+      secret: "basic-credential",
+    },
+    {
+      chunks: ["safe output Be", "arer ", "bearer-token"],
+      expected: "safe output Bearer [REDACTED]",
+      secret: "bearer-token",
+    },
+    {
+      chunks: ["safe output cred", "ential = ", "credential-value"],
+      expected: "safe output credential = [REDACTED]",
+      secret: "credential-value",
+    },
+    {
+      chunks: ["safe output daytona-api", "-key-for-test"],
+      expected: "safe output [REDACTED]",
+      secret: API_KEY,
+    },
+    {
+      chunks: ["safe output Authorization", " ".repeat(128), ": secret-value"],
+      expected: "safe output Authorization [REDACTED]",
+      secret: "secret-value",
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
+    const emitted = scenario.chunks.map((chunk) => sanitizer.write(chunk));
+    emitted.push(sanitizer.flush());
+    const output = emitted.join("");
+
+    assert.equal(output, scenario.expected);
+    assert.equal(output.includes(scenario.secret), false);
+  }
+});
+
+test("does not retain huge sensitive values or flush suppressed remainders", () => {
+  const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
+  const hugeSecret = "s".repeat(1_000_000);
+
   assert.equal(
-    emitted,
-    [
-      "starting image build\n",
-      "Authorization: [REDACTED]\r\n",
-      "Authorization: [REDACTED]\r\n",
-      "image build complete",
-    ].join("")
+    sanitizer.write("starting token="),
+    "starting token= [REDACTED]"
   );
+  assert.equal(sanitizer.write(hugeSecret), "");
+  assert.equal(sanitizer.flush(), "");
+});
+
+test("does not flush incomplete sensitive marker prefixes", () => {
+  const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
+  assert.equal(sanitizer.write("starting Authorizatio"), "");
+  assert.equal(sanitizer.flush(), "starting ");
 });
 
 test("refuses to recreate a snapshot that already exists", async () => {
@@ -281,24 +345,22 @@ test("forwards sanitized snapshot build logs without secrets", async () => {
     snapshot,
   });
 
-  assert.equal(logs.length, 2);
+  assert.equal(logs.length, 1);
   const log = logs.join("");
   assert.ok(log);
   assert.equal(log.includes(API_KEY), false);
   assert.equal(log.includes(token), false);
   assert.equal(log.includes(credential), false);
   assert.match(log, /api_key= \[REDACTED\]/u);
-  assert.match(log, /token: \[REDACTED\]/u);
-  assert.match(log, /Authorization: \[REDACTED\]/u);
 });
 
-test("flushes and redacts an incomplete final log line after creation fails", async () => {
+test("fails closed for a split Authorization value when snapshot creation fails", async () => {
   const logs: string[] = [];
   const basicCredential = "ZGF5dG9uYS11c2VyOnRlc3QtcGFzcw==";
   const snapshot: DaytonaSnapshotService = {
     create: (_parameters, options) => {
-      options.onLogs("starting image build\nAuthorization: Basic ");
-      options.onLogs("Ba");
+      options.onLogs("starting image build Author");
+      options.onLogs("ization: Ba");
       options.onLogs(`sic ${basicCredential}`);
       return Promise.reject(new Error("Daytona unavailable"));
     },
@@ -313,10 +375,7 @@ test("flushes and redacts an incomplete final log line after creation fails", as
     /Failed to create Daytona snapshot/u
   );
 
-  assert.deepEqual(logs, [
-    "starting image build\n",
-    "Authorization: [REDACTED]",
-  ]);
+  assert.deepEqual(logs, ["starting image build Authorization: [REDACTED]"]);
   assert.equal(logs.join("").includes(basicCredential), false);
 });
 

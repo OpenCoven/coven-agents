@@ -18,6 +18,40 @@ const SENSITIVE_LOG_VALUE =
   /\b(?:api[-_]?key|token|secret|password|credential)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)/giu;
 const AUTHORIZATION_HEADER_VALUE =
   /(^|[^A-Za-z0-9-])(authorization)([ \t]*:[ \t]*)[^\r\n]*/gimu;
+const MAX_MARKER_WHITESPACE = 32;
+const AUTHORIZATION_MARKER = new RegExp(
+  `(^|[^A-Za-z0-9-])(authorization)([ \\t]{0,${MAX_MARKER_WHITESPACE}}:[ \\t]{0,${MAX_MARKER_WHITESPACE}})`,
+  "giu"
+);
+const SECRET_KEY_MARKER = new RegExp(
+  `(^|[^A-Za-z0-9_])(api[-_]?key|token|secret|password|credential)(\\s{0,${MAX_MARKER_WHITESPACE}}[:=]\\s{0,${MAX_MARKER_WHITESPACE}})`,
+  "giu"
+);
+const AUTH_SCHEME_MARKER = /(^|[^A-Za-z0-9-])(bearer|basic)([ \t]+)/giu;
+const PENDING_AUTHORIZATION_MARKER =
+  /(^|[^A-Za-z0-9-])(authorization)([ \t]+)/giu;
+const PENDING_SECRET_KEY_MARKER =
+  /(^|[^A-Za-z0-9_])(api[-_]?key|token|secret|password|credential)(\s+)/giu;
+const MARKER_NAMES = [
+  "authorization",
+  "api-key",
+  "api_key",
+  "apikey",
+  "token",
+  "secret",
+  "password",
+  "credential",
+  "bearer",
+  "basic",
+] as const;
+
+/**
+ * The longest supported marker is 78 characters (authorization plus bounded
+ * whitespace and a separator). Longer whitespace runs fail closed as soon as
+ * they start. Retaining 96 characters leaves room for its boundary and lets
+ * ordinary output stream without waiting for line endings.
+ */
+export const DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE = 96;
 
 export type DaytonaSnapshotConfiguration = Readonly<{
   apiKey: string;
@@ -48,6 +82,11 @@ export type DaytonaSnapshotProvisioningDependencies = Readonly<{
 export type DaytonaBuildLogSanitizer = Readonly<{
   flush: () => string;
   write: (chunk: string) => string;
+}>;
+
+type SensitiveMarker = Readonly<{
+  index: number;
+  replacement: string;
 }>;
 
 function configuredValue(
@@ -142,31 +181,184 @@ export function sanitizeDaytonaBuildLog(chunk: string, apiKey: string): string {
     );
 }
 
+function earliestMarker(
+  current: SensitiveMarker | undefined,
+  candidate: SensitiveMarker | undefined
+): SensitiveMarker | undefined {
+  if (!candidate || (current && current.index <= candidate.index)) {
+    return current;
+  }
+  return candidate;
+}
+
+function markerFromPattern(
+  text: string,
+  pattern: RegExp
+): SensitiveMarker | undefined {
+  pattern.lastIndex = 0;
+  const match = pattern.exec(text);
+  if (!match || match.index === undefined) {
+    return undefined;
+  }
+
+  const [, prefix = "", name = "", separator = ""] = match;
+  return {
+    index: match.index + prefix.length,
+    replacement: `${name}${separator.trimEnd()} [REDACTED]`,
+  };
+}
+
+function findSensitiveMarker(
+  text: string,
+  apiKey: string
+): SensitiveMarker | undefined {
+  let marker =
+    apiKey.length > 0
+      ? (() => {
+          const index = text.indexOf(apiKey);
+          return index === -1
+            ? undefined
+            : { index, replacement: "[REDACTED]" };
+        })()
+      : undefined;
+
+  marker = earliestMarker(
+    marker,
+    markerFromPattern(text, AUTHORIZATION_MARKER)
+  );
+  marker = earliestMarker(marker, markerFromPattern(text, SECRET_KEY_MARKER));
+  marker = earliestMarker(marker, markerFromPattern(text, AUTH_SCHEME_MARKER));
+  marker = earliestMarker(
+    marker,
+    markerFromPattern(text, PENDING_AUTHORIZATION_MARKER)
+  );
+  return earliestMarker(
+    marker,
+    markerFromPattern(text, PENDING_SECRET_KEY_MARKER)
+  );
+}
+
+function isMarkerBoundary(
+  text: string,
+  index: number,
+  pattern: RegExp
+): boolean {
+  const previous = text[index - 1];
+  return index === 0 || !pattern.test(previous);
+}
+
+function possibleMarkerSuffixLength(text: string, apiKey: string): number {
+  let longest = 0;
+  const lowercaseText = text.toLowerCase();
+
+  for (const markerName of MARKER_NAMES) {
+    for (let length = 1; length <= markerName.length; length += 1) {
+      const suffix = markerName.slice(0, length);
+      if (
+        lowercaseText.endsWith(suffix) &&
+        isMarkerBoundary(text, text.length - suffix.length, /[A-Za-z0-9-]/u)
+      ) {
+        longest = Math.max(longest, suffix.length);
+      }
+    }
+  }
+
+  const keyPrefix =
+    /(?:^|[^A-Za-z0-9_])(api[-_]?key|token|secret|password|credential)[ \t]{0,32}(?:[:=][ \t]{0,32})?$/iu.exec(
+      text
+    );
+  if (keyPrefix?.index !== undefined) {
+    longest = Math.max(
+      longest,
+      keyPrefix[0].length - (keyPrefix[1]?.length ?? 0)
+    );
+  }
+
+  const authorizationPrefix =
+    /(?:^|[^A-Za-z0-9-])authorization[ \t]{0,32}(?::[ \t]{0,32})?$/iu.exec(
+      text
+    );
+  if (authorizationPrefix?.index !== undefined) {
+    longest = Math.max(
+      longest,
+      authorizationPrefix[0].length - (authorizationPrefix[1]?.length ?? 0)
+    );
+  }
+
+  const schemePrefix = /(?:^|[^A-Za-z0-9-])(?:bearer|basic)[ \t]*$/iu.exec(
+    text
+  );
+  if (schemePrefix?.index !== undefined) {
+    longest = Math.max(
+      longest,
+      schemePrefix[0].length - (schemePrefix[1]?.length ?? 0)
+    );
+  }
+
+  for (let length = 1; length < apiKey.length; length += 1) {
+    if (text.endsWith(apiKey.slice(0, length))) {
+      longest = Math.max(longest, length);
+    }
+  }
+  return longest;
+}
+
 /**
- * Sanitizes only complete log lines so split credentials are joined before
- * redaction. The buffered final line must be flushed when streaming finishes.
+ * The Daytona SDK trims every callback chunk, so callbacks cannot be treated
+ * as log records. This retains only enough text to recognize a split marker.
+ * Once one is found, the remainder is untrustworthy and is never emitted.
  */
 export function createDaytonaBuildLogSanitizer(
   apiKey: string
 ): DaytonaBuildLogSanitizer {
   let buffered = "";
+  let suppressed = false;
+  const lookbehind = Math.max(
+    DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE,
+    apiKey.length - 1
+  );
+
+  function redactMarker(text: string): string | undefined {
+    const marker = findSensitiveMarker(text, apiKey);
+    if (!marker) {
+      return undefined;
+    }
+    suppressed = true;
+    buffered = "";
+    return `${text.slice(0, marker.index)}${marker.replacement}`;
+  }
 
   return {
     flush() {
-      const remainder = buffered;
-      buffered = "";
-      return sanitizeDaytonaBuildLog(remainder, apiKey);
-    },
-    write(chunk) {
-      buffered += chunk;
-      const finalNewline = buffered.lastIndexOf("\n");
-      if (finalNewline === -1) {
+      if (suppressed) {
         return "";
       }
 
-      const completeLines = buffered.slice(0, finalNewline + 1);
-      buffered = buffered.slice(finalNewline + 1);
-      return sanitizeDaytonaBuildLog(completeLines, apiKey);
+      const redacted = redactMarker(buffered);
+      if (redacted) {
+        return redacted;
+      }
+
+      const safeLength =
+        buffered.length - possibleMarkerSuffixLength(buffered, apiKey);
+      const remainder = buffered.slice(0, safeLength);
+      buffered = "";
+      return remainder;
+    },
+    write(chunk) {
+      if (suppressed || !chunk) {
+        return "";
+      }
+
+      const text = buffered + chunk;
+      const redacted = redactMarker(text);
+      if (redacted) {
+        return redacted;
+      }
+
+      const safeLength = Math.max(0, text.length - lookbehind);
+      buffered = text.slice(safeLength);
+      return text.slice(0, safeLength);
     },
   };
 }
