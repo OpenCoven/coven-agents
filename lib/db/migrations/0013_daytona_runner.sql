@@ -9,6 +9,7 @@ CREATE TABLE "RunnerAgent" (
 	"name" varchar(64) NOT NULL,
 	"runtime" varchar(16) NOT NULL,
 	"sandboxGeneration" integer DEFAULT 0 NOT NULL,
+	"sandboxLifecycle" varchar(24) DEFAULT 'unprovisioned' NOT NULL,
 	"status" varchar(16) DEFAULT 'idle' NOT NULL,
 	"tenant" varchar(64) NOT NULL,
 	"updatedAt" timestamp DEFAULT now() NOT NULL,
@@ -20,6 +21,7 @@ CREATE TABLE "RunnerAgent" (
 	CONSTRAINT "RunnerAgent_tenant_valid" CHECK ("RunnerAgent"."tenant" ~ '^[A-Za-z0-9_]{1,64}$'),
 	CONSTRAINT "RunnerAgent_runtime_valid" CHECK ("RunnerAgent"."runtime" in ('cloud', 'codex', 'claude', 'copilot')),
 	CONSTRAINT "RunnerAgent_status_valid" CHECK ("RunnerAgent"."status" in ('idle', 'running', 'error')),
+	CONSTRAINT "RunnerAgent_sandboxLifecycle_valid" CHECK ("RunnerAgent"."sandboxLifecycle" in ('unprovisioned', 'provisioning', 'ready', 'decommissioning', 'decommission_failed')),
 	CONSTRAINT "RunnerAgent_warmStatus_valid" CHECK ("RunnerAgent"."warmStatus" in ('not_started', 'provisioning', 'ready', 'failed')),
 	CONSTRAINT "RunnerAgent_sandboxGeneration_nonnegative" CHECK ("RunnerAgent"."sandboxGeneration" >= 0),
 	CONSTRAINT "RunnerAgent_version_nonnegative" CHECK ("RunnerAgent"."version" >= 0)

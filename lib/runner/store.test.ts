@@ -68,6 +68,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     name: "test",
     runtime: "cloud",
     sandboxGeneration: 0,
+    sandboxLifecycle: "unprovisioned",
     status: "idle",
     tenant: principal.tenant,
     updatedAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -854,6 +855,100 @@ test("agent deletion and starts serialize through the same agent lock", async ()
     assert.match(queryText(statement), /FOR UPDATE/);
     assert.match(queryText(statement), /"tenant"\s*=\s*\$\d+/);
   }
+});
+
+test("sandbox generation reservation locks and fences the stored ID", async () => {
+  const current = agent({
+    daytonaSandboxId: "old-sandbox",
+    sandboxGeneration: 4,
+    sandboxLifecycle: "ready",
+    version: 8,
+  });
+  const reserved = agent({
+    daytonaSandboxId: null,
+    sandboxGeneration: 5,
+    sandboxLifecycle: "provisioning",
+    version: 9,
+  });
+  const { statements, store } = scripted([current], [reserved]);
+
+  const result = await store.reserveDaytonaSandbox(principal, {
+    agentId: current.id,
+    expectedGeneration: current.sandboxGeneration,
+    expectedSandboxId: current.daytonaSandboxId,
+    expectedVersion: current.version,
+  });
+
+  assert.equal(result.kind, "reserved");
+  assert.deepEqual(
+    statements.map((item) => item.name),
+    [
+      "lock-agent-for-daytona-sandbox-reservation",
+      "reserve-daytona-sandbox-generation",
+    ]
+  );
+  assert.match(queryText(statements[0] as RunnerStoreStatement), /FOR UPDATE/u);
+  const query = queryText(statements[1] as RunnerStoreStatement);
+  assert.match(query, /"sandboxGeneration" = "sandboxGeneration" \+ 1/u);
+  assert.match(query, /"sandboxLifecycle" = 'provisioning'/u);
+  assert.match(query, /"daytonaSandboxId" IS NOT DISTINCT FROM/u);
+});
+
+test("warm and decommission transitions retain generation and version fences", async () => {
+  const current = agent({
+    daytonaSandboxId: "sandbox",
+    sandboxGeneration: 2,
+    sandboxLifecycle: "ready",
+    version: 3,
+  });
+  const warming = agent({ ...current, version: 4, warmStatus: "provisioning" });
+  const decommissioning = agent({
+    ...warming,
+    sandboxLifecycle: "decommissioning",
+    version: 5,
+  });
+  const { statements, store } = scripted(
+    [current],
+    [warming],
+    [current],
+    [],
+    [decommissioning],
+    [{ id: current.id }]
+  );
+
+  assert.equal(
+    (
+      await store.beginDaytonaSandboxWarm(principal, {
+        agentId: current.id,
+        expectedGeneration: current.sandboxGeneration,
+        expectedVersion: current.version,
+      })
+    ).kind,
+    "started"
+  );
+  assert.equal(
+    (await store.beginDaytonaSandboxDecommission(principal, current.id)).kind,
+    "decommissioning"
+  );
+  assert.equal(
+    (
+      await store.deleteDecommissionedAgent(principal, {
+        agentId: current.id,
+        expectedGeneration: current.sandboxGeneration,
+        expectedVersion: decommissioning.version,
+      })
+    ).kind,
+    "deleted"
+  );
+
+  const warmQuery = queryText(statements[1] as RunnerStoreStatement);
+  const decommissionQuery = queryText(statements[4] as RunnerStoreStatement);
+  const deleteQuery = queryText(statements[5] as RunnerStoreStatement);
+  assert.match(warmQuery, /"warmStatus" = 'provisioning'/u);
+  assert.match(warmQuery, /"sandboxGeneration" = \$/u);
+  assert.match(decommissionQuery, /"sandboxLifecycle" = 'decommissioning'/u);
+  assert.match(deleteQuery, /"sandboxLifecycle" = 'decommissioning'/u);
+  assert.match(deleteQuery, /"version" = \$/u);
 });
 
 test("the production statement shape remains Drizzle-safe", () => {

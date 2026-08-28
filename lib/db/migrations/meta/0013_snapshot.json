@@ -787,6 +787,13 @@
           "notNull": true,
           "default": 0
         },
+        "sandboxLifecycle": {
+          "name": "sandboxLifecycle",
+          "type": "varchar(24)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'unprovisioned'"
+        },
         "status": {
           "name": "status",
           "type": "varchar(16)",
@@ -880,6 +887,10 @@
         "RunnerAgent_status_valid": {
           "name": "RunnerAgent_status_valid",
           "value": "\"RunnerAgent\".\"status\" in ('idle', 'running', 'error')"
+        },
+        "RunnerAgent_sandboxLifecycle_valid": {
+          "name": "RunnerAgent_sandboxLifecycle_valid",
+          "value": "\"RunnerAgent\".\"sandboxLifecycle\" in ('unprovisioned', 'provisioning', 'ready', 'decommissioning', 'decommission_failed')"
         },
         "RunnerAgent_warmStatus_valid": {
           "name": "RunnerAgent_warmStatus_valid",

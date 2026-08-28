@@ -449,6 +449,18 @@ export const runnerAgent = pgTable(
       length: 16,
     }).notNull(),
     sandboxGeneration: integer("sandboxGeneration").notNull().default(0),
+    sandboxLifecycle: varchar("sandboxLifecycle", {
+      enum: [
+        "unprovisioned",
+        "provisioning",
+        "ready",
+        "decommissioning",
+        "decommission_failed",
+      ],
+      length: 24,
+    })
+      .notNull()
+      .default("unprovisioned"),
     status: varchar("status", {
       enum: ["idle", "running", "error"],
       length: 16,
@@ -483,6 +495,10 @@ export const runnerAgent = pgTable(
     check(
       "RunnerAgent_status_valid",
       sql`${table.status} in ('idle', 'running', 'error')`
+    ),
+    check(
+      "RunnerAgent_sandboxLifecycle_valid",
+      sql`${table.sandboxLifecycle} in ('unprovisioned', 'provisioning', 'ready', 'decommissioning', 'decommission_failed')`
     ),
     check(
       "RunnerAgent_warmStatus_valid",

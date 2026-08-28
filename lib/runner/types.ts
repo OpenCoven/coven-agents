@@ -26,6 +26,12 @@ export type RunnerOperator = { kind: "runner-operator" };
 
 export type RunnerRuntime = "cloud" | "codex" | "claude" | "copilot";
 export type RunnerAgentStatus = "idle" | "running" | "error";
+export type RunnerSandboxLifecycle =
+  | "unprovisioned"
+  | "provisioning"
+  | "ready"
+  | "decommissioning"
+  | "decommission_failed";
 export type RunnerWarmStatus =
   | "not_started"
   | "provisioning"
@@ -48,6 +54,7 @@ export type RunnerAgentRecord = {
   name: string;
   runtime: RunnerRuntime;
   sandboxGeneration: number;
+  sandboxLifecycle: RunnerSandboxLifecycle;
   status: RunnerAgentStatus;
   tenant: string;
   updatedAt: Date;
@@ -152,6 +159,19 @@ export type FinalizeRunnerRunInput = DispatchFence & {
   fileEvidence: FileEvidence[];
   output: string;
   status: "completed" | "failed" | "cancelled";
+};
+
+export type ReserveDaytonaSandboxInput = {
+  agentId: string;
+  expectedGeneration: number;
+  expectedSandboxId: string | null;
+  expectedVersion: number;
+};
+
+export type DaytonaSandboxFence = {
+  agentId: string;
+  expectedGeneration: number;
+  expectedVersion: number;
 };
 
 export type ExpiredDispatchRequeueInput = {
