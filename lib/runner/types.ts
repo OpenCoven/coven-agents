@@ -1,3 +1,5 @@
+import "server-only";
+
 import type {
   CommandEvidence,
   FileEvidence,
@@ -117,11 +119,15 @@ export type RunnerSnapshotPatch = {
 
 type WithoutEventId<T> = T extends unknown ? Omit<T, "id"> : never;
 
-export type AppendRunnerEventInput = {
-  event: WithoutEventId<RunEvent>;
+export type DispatchFence = {
   expectedVersion: number;
   leaseToken: string;
+  now: Date;
   runId: string;
+};
+
+export type AppendRunnerEventInput = DispatchFence & {
+  event: WithoutEventId<RunEvent>;
   snapshot?: RunnerSnapshotPatch;
 };
 
@@ -129,13 +135,6 @@ export type DispatchClaimInput = {
   leaseExpiresAt: Date;
   leaseToken: string;
   now: Date;
-};
-
-export type DispatchFence = {
-  expectedVersion: number;
-  leaseToken: string;
-  now: Date;
-  runId: string;
 };
 
 export type AttachDaytonaIdentifiersInput = DispatchFence & {
@@ -160,4 +159,5 @@ export type RunnerMutationOutcome<T> =
   | { kind: "not_found" }
   | { kind: "stale_version" }
   | { kind: "lease_lost" }
+  | { kind: "not_live" }
   | { kind: "generation_mismatch" };

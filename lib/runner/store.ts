@@ -165,6 +165,40 @@ function fenceOutcome(
   return null;
 }
 
+function dispatchingFenceOutcome(
+  run: RunnerRunRecord,
+  input: DispatchFence
+):
+  | { kind: "stale_version" }
+  | { kind: "lease_lost" }
+  | { kind: "not_live" }
+  | null {
+  const rejected = fenceOutcome(run, input);
+  if (rejected) {
+    return rejected;
+  }
+  return run.dispatchState === "dispatching" && run.status === "queued"
+    ? null
+    : { kind: "not_live" };
+}
+
+function runningFenceOutcome(
+  run: RunnerRunRecord,
+  input: DispatchFence
+):
+  | { kind: "stale_version" }
+  | { kind: "lease_lost" }
+  | { kind: "not_live" }
+  | null {
+  const rejected = fenceOutcome(run, input);
+  if (rejected) {
+    return rejected;
+  }
+  return run.dispatchState === "running" && run.status === "running"
+    ? null
+    : { kind: "not_live" };
+}
+
 async function pruneTerminalRunsInTransaction(
   transaction: RunnerStoreTransaction,
   tenant: string,
@@ -208,6 +242,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
       | { kind: "not_found" }
       | { kind: "stale_version" }
       | { kind: "lease_lost" }
+      | { kind: "not_live" }
     > =>
       database.transaction(async (transaction) => {
         const run = await lockedPrincipalRun(
@@ -218,11 +253,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (!run) {
           return { kind: "not_found" };
         }
-        if (run.version !== input.expectedVersion) {
-          return { kind: "stale_version" };
-        }
-        if (run.dispatchLeaseToken !== input.leaseToken) {
-          return { kind: "lease_lost" };
+        const rejected = runningFenceOutcome(run, input);
+        if (rejected) {
+          return rejected;
         }
         const eventId = run.logCursor + 1;
         const event = { ...input.event, id: eventId } as RunEvent;
@@ -235,6 +268,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               expectedVersion: input.expectedVersion,
               fileEvidence: evidenceJson(input.snapshot?.fileEvidence),
               leaseToken: input.leaseToken,
+              now: input.now,
               output: input.snapshot?.output ?? null,
               runId: input.runId,
               tenant: principal.tenant,
@@ -250,6 +284,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "tenant" = ${principal.tenant}
                 AND "version" = ${input.expectedVersion}
                 AND "dispatchLeaseToken" = ${input.leaseToken}
+                AND "dispatchLeaseExpiresAt" > ${input.now}
+                AND "dispatchState" = 'running'
+                AND "status" = 'running'
               RETURNING *`
           )
         );
@@ -291,9 +328,17 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (!run) {
           return { kind: "not_found" };
         }
-        const rejected = fenceOutcome(run, input);
+        const rejected = dispatchingFenceOutcome(run, input);
         if (rejected) {
           return rejected;
+        }
+        if (
+          (run.daytonaSessionId !== null &&
+            run.daytonaSessionId !== (input.sessionId ?? null)) ||
+          (run.daytonaCommandId !== null &&
+            run.daytonaCommandId !== (input.commandId ?? null))
+        ) {
+          return { kind: "stale_version" };
         }
         const [agent] = await transaction.execute(
           statement(
@@ -315,6 +360,30 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         ) {
           return { kind: "generation_mismatch" };
         }
+        const [updated] = await transaction.execute(
+          statement(
+            "attach-daytona-run-identifiers",
+            { ...input, tenant: run.tenant },
+            sql`UPDATE "RunnerRun"
+              SET "daytonaSessionId" = COALESCE(${input.sessionId ?? null}, "daytonaSessionId"),
+                  "daytonaCommandId" = COALESCE(${input.commandId ?? null}, "daytonaCommandId"),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${input.runId}
+                AND "tenant" = ${run.tenant}
+                AND "version" = ${input.expectedVersion}
+                AND "dispatchLeaseToken" = ${input.leaseToken}
+                AND "dispatchLeaseExpiresAt" > ${input.now}
+                AND "dispatchState" = 'dispatching'
+                AND "status" = 'queued'
+                AND ("daytonaSessionId" IS NULL OR "daytonaSessionId" = ${input.sessionId ?? null})
+                AND ("daytonaCommandId" IS NULL OR "daytonaCommandId" = ${input.commandId ?? null})
+              RETURNING *`
+          )
+        );
+        if (!updated) {
+          throw new Error("Runner Daytona attachment validation changed.");
+        }
         if (input.sandboxId !== undefined) {
           const updatedAgent = await transaction.execute(
             statement(
@@ -334,30 +403,10 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             )
           );
           if (!updatedAgent[0]) {
-            return { kind: "generation_mismatch" };
+            throw new Error("Runner Daytona sandbox generation changed.");
           }
         }
-        const [updated] = await transaction.execute(
-          statement(
-            "attach-daytona-run-identifiers",
-            input,
-            sql`UPDATE "RunnerRun"
-              SET "daytonaSessionId" = COALESCE(${input.sessionId ?? null}, "daytonaSessionId"),
-                  "daytonaCommandId" = COALESCE(${input.commandId ?? null}, "daytonaCommandId"),
-                  "updatedAt" = now(),
-                  "version" = "version" + 1
-              WHERE "id" = ${input.runId}
-                AND "version" = ${input.expectedVersion}
-                AND "dispatchLeaseToken" = ${input.leaseToken}
-                AND "dispatchLeaseExpiresAt" > ${input.now}
-                AND ("daytonaSessionId" IS NULL OR "daytonaSessionId" = ${input.sessionId ?? null})
-                AND ("daytonaCommandId" IS NULL OR "daytonaCommandId" = ${input.commandId ?? null})
-              RETURNING *`
-          )
-        );
-        return updated
-          ? { kind: "updated", value: asRun(updated) }
-          : { kind: "stale_version" };
+        return { kind: "updated", value: asRun(updated) };
       }),
 
     claimNextDispatch: (_operator: RunnerOperator, input: DispatchClaimInput) =>
@@ -448,6 +497,33 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
       { kind: "deleted" } | { kind: "not_found" } | { kind: "busy" }
     > =>
       database.transaction(async (transaction) => {
+        const [agent] = await transaction.execute(
+          statement(
+            "lock-agent-for-delete",
+            { agentId, tenant: principal.tenant },
+            sql`SELECT "id" FROM "RunnerAgent"
+              WHERE "id" = ${agentId}
+                AND "tenant" = ${principal.tenant}
+              FOR UPDATE`
+          )
+        );
+        if (!agent) {
+          return { kind: "not_found" };
+        }
+        const [liveRun] = await transaction.execute(
+          statement(
+            "find-live-run-for-agent",
+            { agentId, tenant: principal.tenant },
+            sql`SELECT "id" FROM "RunnerRun"
+              WHERE "agentId" = ${agentId}
+                AND "tenant" = ${principal.tenant}
+                AND "status" IN ('queued', 'running')
+              LIMIT 1`
+          )
+        );
+        if (liveRun) {
+          return { kind: "busy" };
+        }
         const [deleted] = await transaction.execute(
           statement(
             "delete-idle-agent",
@@ -455,26 +531,13 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             sql`DELETE FROM "RunnerAgent"
               WHERE "id" = ${agentId}
                 AND "tenant" = ${principal.tenant}
-                AND NOT EXISTS (
-                  SELECT 1 FROM "RunnerRun"
-                  WHERE "RunnerRun"."agentId" = "RunnerAgent"."id"
-                    AND "RunnerRun"."tenant" = ${principal.tenant}
-                    AND "RunnerRun"."status" IN ('queued', 'running')
-                )
               RETURNING "id"`
           )
         );
-        if (deleted) {
-          return { kind: "deleted" };
+        if (!deleted) {
+          throw new Error("Locked Runner agent disappeared before deletion.");
         }
-        const [agent] = await transaction.execute(
-          statement(
-            "get-agent-after-delete",
-            { agentId, tenant: principal.tenant },
-            sql`SELECT "id" FROM "RunnerAgent" WHERE "id" = ${agentId} AND "tenant" = ${principal.tenant} LIMIT 1`
-          )
-        );
-        return agent ? { kind: "busy" } : { kind: "not_found" };
+        return { kind: "deleted" };
       }),
 
     finalizeRun: (

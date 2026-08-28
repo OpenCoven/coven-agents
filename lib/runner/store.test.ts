@@ -113,8 +113,21 @@ test("reusing an operation with another request hash conflicts", async () => {
 });
 
 test("event ids advance from the locked run cursor and update atomically", async () => {
-  const current = run({ logCursor: 41, version: 2 });
-  const updated = run({ logCursor: 42, version: 3 });
+  const now = new Date("2026-01-01T00:00:01.000Z");
+  const current = run({
+    dispatchState: "running",
+    logCursor: 41,
+    startedAt: now,
+    status: "running",
+    version: 2,
+  });
+  const updated = run({
+    dispatchState: "running",
+    logCursor: 42,
+    startedAt: now,
+    status: "running",
+    version: 3,
+  });
   const event = {
     createdAt: new Date(),
     event: { id: 42, output: "progress", type: "output" } as const,
@@ -127,6 +140,7 @@ test("event ids advance from the locked run cursor and update atomically", async
     event: { output: "progress", type: "output" },
     expectedVersion: 2,
     leaseToken: "lease-a",
+    now,
     runId: current.id,
   });
 
@@ -137,6 +151,10 @@ test("event ids advance from the locked run cursor and update atomically", async
   const [lockedStatement] = statements;
   assert.ok(lockedStatement);
   assert.match(queryText(lockedStatement), /FOR UPDATE/);
+  assert.match(
+    queryText(statements[1] as RunnerStoreStatement),
+    /"dispatchState" = 'running'/
+  );
 });
 
 test("stale versions are rejected before an event write", async () => {
@@ -146,11 +164,47 @@ test("stale versions are rejected before an event write", async () => {
     event: { output: "progress", type: "output" },
     expectedVersion: 8,
     leaseToken: "lease-a",
+    now: new Date("2026-01-01T00:00:01.000Z"),
     runId: run().id,
   });
 
   assert.deepEqual(result, { kind: "stale_version" });
   assert.equal(statements.length, 1);
+});
+
+test("expired and non-live dispatches cannot append events", async () => {
+  const now = new Date("2026-01-01T00:01:00.000Z");
+  const expired = scripted([
+    run({
+      dispatchState: "running",
+      startedAt: new Date("2026-01-01T00:00:00.000Z"),
+      status: "running",
+    }),
+  ]);
+  const nonLive = scripted([
+    run({
+      dispatchLeaseExpiresAt: new Date("2026-01-01T00:02:00.000Z"),
+      dispatchState: "terminal",
+      startedAt: new Date("2026-01-01T00:00:00.000Z"),
+      status: "completed",
+    }),
+  ]);
+  const input = {
+    event: { output: "progress", type: "output" } as const,
+    expectedVersion: 7,
+    leaseToken: "lease-a",
+    now,
+    runId: run().id,
+  };
+
+  assert.deepEqual(await expired.store.appendEvent(principal, input), {
+    kind: "lease_lost",
+  });
+  assert.deepEqual(await nonLive.store.appendEvent(principal, input), {
+    kind: "not_live",
+  });
+  assert.equal(expired.statements.length, 1);
+  assert.equal(nonLive.statements.length, 1);
 });
 
 test("lease fencing rejects a stale dispatcher", async () => {
@@ -188,6 +242,187 @@ test("global scans require the operator authority and do not manufacture tenant 
   for (const statement of statements) {
     assert.equal("tenant" in statement.args, false);
     assert.doesNotMatch(queryText(statement), /"tenant"\s*=\s*\$\d+/);
+  }
+});
+
+test("principal mutations bind every affected row to the principal tenant", async () => {
+  const current = run({
+    dispatchState: "running",
+    startedAt: new Date("2026-01-01T00:00:00.000Z"),
+    status: "running",
+  });
+  const append = scripted(
+    [current],
+    [run({ version: 8 })],
+    [
+      {
+        createdAt: new Date(),
+        event: { id: 4, output: "progress", type: "output" },
+        eventId: 4,
+        runId: current.id,
+      },
+    ]
+  );
+  const create = scripted([{}]);
+  const update = scripted([], [{ id: current.agentId }]);
+  const remove = scripted(
+    [{ id: current.agentId }],
+    [],
+    [{ id: current.agentId }]
+  );
+  const start = scripted([{ id: current.agentId }], [], [current]);
+
+  await append.store.appendEvent(principal, {
+    event: { output: "progress", type: "output" },
+    expectedVersion: 7,
+    leaseToken: "lease-a",
+    now: new Date("2026-01-01T00:00:01.000Z"),
+    runId: current.id,
+  });
+  await create.store.createAgent(principal, {
+    id: current.agentId,
+    instructions: "test instructions",
+    model: "test-model",
+    name: "test",
+    runtime: "cloud",
+  });
+  await update.store.updateAgent(principal, {
+    description: "",
+    expectedUpdatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    id: current.agentId,
+    instructions: "test instructions",
+    model: "test-model",
+    name: "test",
+    runtime: "cloud",
+    workspace: null,
+  });
+  await remove.store.deleteAgent(principal, current.agentId);
+  await start.store.startRun(principal, {
+    agentId: current.agentId,
+    id: current.id,
+    operationId: current.operationId,
+    requestHash: current.requestHash,
+    task: current.task,
+  });
+
+  for (const statement of [
+    ...append.statements,
+    ...create.statements,
+    ...update.statements,
+    ...remove.statements,
+    ...start.statements,
+  ]) {
+    assert.equal(statement.args.tenant, principal.tenant);
+    assert.match(queryText(statement), /"tenant"/);
+  }
+});
+
+test("Daytona attachment validates mismatches before making any update", async () => {
+  const dispatching = run();
+  const { statements, store } = scripted(
+    [dispatching],
+    [{ id: dispatching.agentId, sandboxGeneration: 2 }]
+  );
+
+  const result = await store.attachDaytonaIdentifiers(operator, {
+    commandId: "command",
+    expectedVersion: dispatching.version,
+    leaseToken: "lease-a",
+    now: new Date("2026-01-01T00:00:01.000Z"),
+    runId: dispatching.id,
+    sandboxGeneration: 1,
+    sandboxId: "sandbox",
+    sessionId: "session",
+  });
+
+  assert.deepEqual(result, { kind: "generation_mismatch" });
+  assert.deepEqual(
+    statements.map((statement) => statement.name),
+    ["lock-operator-run", "lock-agent-for-daytona-attach"]
+  );
+});
+
+test("Daytona identifier conflicts cannot partially attach a sandbox", async () => {
+  const dispatching = run({ daytonaSessionId: "existing-session" });
+  const { statements, store } = scripted([dispatching]);
+
+  const result = await store.attachDaytonaIdentifiers(operator, {
+    commandId: "command",
+    expectedVersion: dispatching.version,
+    leaseToken: "lease-a",
+    now: new Date("2026-01-01T00:00:01.000Z"),
+    runId: dispatching.id,
+    sandboxGeneration: 1,
+    sandboxId: "sandbox",
+    sessionId: "different-session",
+  });
+
+  assert.deepEqual(result, { kind: "stale_version" });
+  assert.deepEqual(
+    statements.map((statement) => statement.name),
+    ["lock-operator-run"]
+  );
+});
+
+test("Daytona attachment keeps the run update tenant scoped", async () => {
+  const dispatching = run();
+  const updated = run({ version: dispatching.version + 1 });
+  const { statements, store } = scripted(
+    [dispatching],
+    [{ id: dispatching.agentId, sandboxGeneration: 1 }],
+    [updated]
+  );
+
+  const result = await store.attachDaytonaIdentifiers(operator, {
+    commandId: "command",
+    expectedVersion: dispatching.version,
+    leaseToken: "lease-a",
+    now: new Date("2026-01-01T00:00:01.000Z"),
+    runId: dispatching.id,
+    sandboxGeneration: 1,
+    sessionId: "session",
+  });
+
+  assert.equal(result.kind, "updated");
+  const [, , update] = statements;
+  assert.ok(update);
+  assert.equal(update.args.tenant, dispatching.tenant);
+  assert.match(queryText(update), /"tenant"\s*=\s*\$\d+/);
+});
+
+test("agent deletion and starts serialize through the same agent lock", async () => {
+  const current = run();
+  const deletion = scripted(
+    [{ id: current.agentId }],
+    [],
+    [{ id: current.agentId }]
+  );
+  const start = scripted([{ id: current.agentId }], [], [current]);
+
+  assert.deepEqual(
+    await deletion.store.deleteAgent(principal, current.agentId),
+    { kind: "deleted" }
+  );
+  await start.store.startRun(principal, {
+    agentId: current.agentId,
+    id: current.id,
+    operationId: current.operationId,
+    requestHash: current.requestHash,
+    task: current.task,
+  });
+
+  assert.deepEqual(
+    deletion.statements.map((statement) => statement.name),
+    ["lock-agent-for-delete", "find-live-run-for-agent", "delete-idle-agent"]
+  );
+  assert.deepEqual(
+    start.statements.slice(0, 2).map((statement) => statement.name),
+    ["lock-agent-for-run-start", "insert-run"]
+  );
+  for (const statement of [deletion.statements[0], start.statements[0]]) {
+    assert.ok(statement);
+    assert.match(queryText(statement), /FOR UPDATE/);
+    assert.match(queryText(statement), /"tenant"\s*=\s*\$\d+/);
   }
 });
 
