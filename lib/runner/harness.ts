@@ -19,6 +19,8 @@ import {
   isRunnableHarness,
   LineAssembler,
   normalizeEvent,
+  runEventSchema,
+  runEventTimestampSchema,
   toShellCommand,
 } from "@opencoven/harness";
 
@@ -123,39 +125,121 @@ function redact(value: string, credential: string | null): string {
   return sanitizeEvidenceText(value, credential ? [credential] : []);
 }
 
-function sanitizeEvent(event: RunEvent, credential: string | null): RunEvent {
+function canonicalTimestamp(
+  value: string,
+  credential: string | null,
+  fallbackAt: string
+): string {
+  const canonical = (candidate: string): string | null => {
+    const parsed = runEventTimestampSchema.safeParse(
+      redact(candidate, credential)
+    );
+    if (!parsed.success) {
+      return null;
+    }
+    const date = new Date(parsed.data);
+    if (Number.isNaN(date.valueOf())) {
+      return null;
+    }
+    const timestamp = date.toISOString();
+    return runEventTimestampSchema.safeParse(timestamp).success
+      ? timestamp
+      : null;
+  };
+
+  return canonical(value) ?? canonical(fallbackAt) ?? new Date().toISOString();
+}
+
+/**
+ * Removes credential material from every string a harness can provide and
+ * validates the result through the normalized event contract before it can be
+ * persisted. Invalid timestamps are replaced rather than returning their raw
+ * provider value.
+ */
+export function sanitizeHarnessEvent(
+  fallbackHarness: HarnessId,
+  event: RunEvent,
+  credential: string | null,
+  fallbackAt: string
+): RunEvent {
+  const at = canonicalTimestamp(event.at, credential, fallbackAt);
   switch (event.kind) {
+    case "started": {
+      const harness = redact(event.harness, credential);
+      return runEventSchema.parse({
+        ...event,
+        at,
+        harness:
+          harness === "copilot" || harness === "codex" || harness === "claude"
+            ? harness
+            : fallbackHarness,
+        runId: redact(event.runId, credential),
+      });
+    }
     case "reasoning":
     case "delta":
-      return { ...event, text: redact(event.text, credential) };
+      return runEventSchema.parse({
+        ...event,
+        at,
+        text: redact(event.text, credential),
+      });
     case "message":
-      return { ...event, text: redact(event.text, credential) };
+      return runEventSchema.parse({
+        ...event,
+        at,
+        model: event.model === null ? null : redact(event.model, credential),
+        text: redact(event.text, credential),
+      });
     case "tool-start":
+      return runEventSchema.parse({
+        ...event,
+        at,
+        callId: redact(event.callId, credential),
+        summary: redact(event.summary, credential),
+        tool: redact(event.tool, credential),
+      });
     case "tool-end":
-      return { ...event, summary: redact(event.summary, credential) };
+      return runEventSchema.parse({
+        ...event,
+        at,
+        callId: redact(event.callId, credential),
+        summary: redact(event.summary, credential),
+      });
     case "file":
-      return {
+      return runEventSchema.parse({
         ...event,
+        at,
+        operation: redact(event.operation, credential),
         path: redact(sanitizeEvidencePath(event.path), credential),
-      };
+      });
+    case "usage":
+      return runEventSchema.parse({ ...event, at });
     case "finished":
-      return {
+      return runEventSchema.parse({
         ...event,
+        at,
         filesModified: event.filesModified.map((path) =>
           redact(sanitizeEvidencePath(path), credential)
         ),
-        sessionId: event.sessionId ? redact(event.sessionId, credential) : null,
-      };
+        sessionId:
+          event.sessionId === null ? null : redact(event.sessionId, credential),
+      });
     case "error":
-      return { ...event, message: redact(event.message, credential) };
+      return runEventSchema.parse({
+        ...event,
+        at,
+        message: redact(event.message, credential),
+      });
     default:
-      return event;
+      throw new HarnessError(
+        "Unknown normalized harness event cannot be persisted.",
+        "unknown_harness"
+      );
   }
 }
 
 export type HarnessLogParse = Readonly<{
   cursor: number;
-  diagnostics: readonly RunEvent[];
   events: readonly RunEvent[];
   pendingTail: boolean;
 }>;
@@ -203,7 +287,7 @@ export function parseHarnessLog(
     ? [...assembler.push(consumed), ...assembler.flush()]
     : assembler.push(consumed);
   const events: RunEvent[] = [];
-  const diagnostics: RunEvent[] = [];
+  let malformedDiagnostics = 0;
 
   for (const line of lines) {
     let validJson = true;
@@ -213,18 +297,26 @@ export function parseHarnessLog(
       validJson = false;
     }
     const normalized = normalizeEvent(harness, line, fallbackAt).map((event) =>
-      sanitizeEvent(event, credential)
+      sanitizeHarnessEvent(harness, event, credential, fallbackAt)
     );
     events.push(...normalized);
-    if (!validJson && diagnostics.length < MAX_MALFORMED_DIAGNOSTICS) {
-      diagnostics.push({
-        at: fallbackAt,
-        kind: "error",
-        message: "Malformed harness JSONL event was ignored.",
-      });
+    if (!validJson && malformedDiagnostics < MAX_MALFORMED_DIAGNOSTICS) {
+      events.push(
+        sanitizeHarnessEvent(
+          harness,
+          {
+            at: fallbackAt,
+            kind: "error",
+            message: "Malformed harness JSONL event was ignored.",
+          },
+          credential,
+          fallbackAt
+        )
+      );
+      malformedDiagnostics += 1;
     }
   }
-  return { cursor: nextCursor, diagnostics, events, pendingTail };
+  return { cursor: nextCursor, events, pendingTail };
 }
 
 export function buildHarnessCommand(input: {

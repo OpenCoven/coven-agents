@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { type RunEvent, runEventSchema } from "@opencoven/harness";
 import {
   buildHarnessCommand,
   HarnessError,
   parseHarnessLog,
   requireHarness,
   resolveSandboxWorkspace,
+  sanitizeHarnessEvent,
 } from "./harness";
 
 const AT = "2026-08-28T09:00:00.000Z";
@@ -80,7 +82,73 @@ test("quotes Copilot invocation and keeps incomplete JSONL outside the cursor", 
   assert.deepEqual(duplicate.events, []);
 });
 
-test("flushes a terminal trailing event and bounds malformed diagnostics", () => {
+test("sanitizes every harness-controlled string field through the event contract", () => {
+  const contaminatedAt = `not-a-timestamp-${SECRET}`;
+  const events: RunEvent[] = [
+    {
+      at: contaminatedAt,
+      harness: `copilot-${SECRET}`,
+      kind: "started",
+      runId: SECRET,
+    } as unknown as RunEvent,
+    { at: contaminatedAt, kind: "reasoning", text: SECRET },
+    { at: contaminatedAt, kind: "delta", text: SECRET },
+    { at: contaminatedAt, kind: "message", model: SECRET, text: SECRET },
+    {
+      at: contaminatedAt,
+      callId: SECRET,
+      kind: "tool-start",
+      summary: SECRET,
+      tool: SECRET,
+    },
+    {
+      at: contaminatedAt,
+      callId: SECRET,
+      kind: "tool-end",
+      success: true,
+      summary: SECRET,
+    },
+    {
+      at: contaminatedAt,
+      kind: "file",
+      operation: SECRET,
+      path: SECRET,
+    },
+    {
+      at: contaminatedAt,
+      kind: "usage",
+      linesAdded: null,
+      linesRemoved: null,
+      premiumRequests: null,
+    },
+    {
+      at: contaminatedAt,
+      exitCode: 0,
+      filesModified: [SECRET],
+      kind: "finished",
+      sessionId: SECRET,
+      status: "completed",
+    },
+    { at: contaminatedAt, kind: "error", message: SECRET },
+  ];
+
+  for (const event of events) {
+    const sanitized = sanitizeHarnessEvent("copilot", event, SECRET, AT);
+    assert.equal(JSON.stringify(sanitized).includes(SECRET), false);
+    assert.equal(sanitized.at, AT);
+    assert.equal(runEventSchema.safeParse(sanitized).success, true);
+  }
+
+  const canonical = sanitizeHarnessEvent(
+    "copilot",
+    { at: "2026-08-28T09:00:00Z", kind: "delta", text: "safe" },
+    SECRET,
+    AT
+  );
+  assert.equal(canonical.at, AT);
+});
+
+test("flushes a terminal trailing event and emits malformed diagnostics once", () => {
   const terminal = JSON.stringify({
     exitCode: 0,
     sessionId: "session",
@@ -101,13 +169,24 @@ test("flushes a terminal trailing event and bounds malformed diagnostics", () =>
     SECRET,
     AT
   );
-  assert.equal(malformed.diagnostics.length, 1);
   assert.equal(JSON.stringify(malformed).includes(SECRET), false);
   assert.equal(
-    malformed.diagnostics[0]?.kind === "error" &&
-      malformed.diagnostics[0].message,
+    malformed.events.filter((event) => event.kind === "error").length,
+    1
+  );
+  assert.equal(
+    malformed.events[0]?.kind === "error" && malformed.events[0].message,
     "Malformed harness JSONL event was ignored."
   );
+  const replay = parseHarnessLog(
+    "copilot",
+    `not JSON ${SECRET}\n`,
+    malformed.cursor,
+    false,
+    SECRET,
+    AT
+  );
+  assert.deepEqual(replay.events, []);
 
   const partialTerminal = parseHarnessLog(
     "copilot",
@@ -120,7 +199,6 @@ test("flushes a terminal trailing event and bounds malformed diagnostics", () =>
   assert.equal(partialTerminal.cursor, 0);
   assert.equal(partialTerminal.pendingTail, true);
   assert.deepEqual(partialTerminal.events, []);
-  assert.deepEqual(partialTerminal.diagnostics, []);
 
   const completedTerminal = parseHarnessLog(
     "copilot",

@@ -30,5 +30,6 @@ export {
   harnessStatusSchema,
   type RunEvent,
   runEventSchema,
+  runEventTimestampSchema,
 } from "./schema";
 export { type RunSummary, summarizeRun } from "./summary";

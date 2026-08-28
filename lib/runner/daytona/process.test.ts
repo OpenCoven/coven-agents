@@ -487,7 +487,10 @@ test("snapshots complete JSONL once, flushes terminal fragments, and redacts mal
   });
   assert.equal(completed.status, "completed");
   assert.equal(completed.cursor, `${line}\nnot-json-${SECRET}\n`.length);
-  assert.equal(completed.diagnostics.length, 1);
+  assert.equal(
+    completed.events.filter((event) => event.kind === "error").length,
+    1
+  );
   assert.equal(JSON.stringify(completed).includes(SECRET), false);
 
   const noDuplicate = await snapshotDaytonaProcess({
@@ -525,7 +528,6 @@ test("leaves a terminal partial tail pending until the complete event arrives", 
   assert.equal(partial.logsSettled, false);
   assert.equal(partial.cursor, 0);
   assert.deepEqual(partial.events, []);
-  assert.deepEqual(partial.diagnostics, []);
 
   const completed = await snapshotDaytonaProcess({
     commandId: "cmd-1",

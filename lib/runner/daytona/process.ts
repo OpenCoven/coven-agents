@@ -477,7 +477,6 @@ export async function startDaytonaProcess(input: {
 
 export type DaytonaLogSnapshot = Readonly<{
   cursor: number;
-  diagnostics: readonly RunEvent[];
   events: readonly RunEvent[];
   exitCode: number | null;
   logsSettled: boolean;
@@ -567,11 +566,8 @@ export async function snapshotDaytonaProcess(input: {
     input.credential,
     (input.now?.() ?? new Date()).toISOString()
   );
-  const events = [...parsed.events, ...parsed.diagnostics];
-  const authoritativeEvents = [
-    ...authoritative.events,
-    ...authoritative.diagnostics,
-  ];
+  const { events } = parsed;
+  const { events: authoritativeEvents } = authoritative;
   const result = authoritativeEvents.find(
     (event): event is Extract<RunEvent, { kind: "finished" }> =>
       event.kind === "finished"
@@ -587,7 +583,6 @@ export async function snapshotDaytonaProcess(input: {
         : "running";
   return {
     cursor: parsed.cursor,
-    diagnostics: parsed.diagnostics,
     events,
     exitCode: result?.exitCode ?? normalizedCommand.exitCode,
     logsSettled: !parsed.pendingTail,
