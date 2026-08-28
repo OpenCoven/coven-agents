@@ -45,6 +45,11 @@ export type DaytonaSnapshotProvisioningDependencies = Readonly<{
   snapshot: DaytonaSnapshotService;
 }>;
 
+export type DaytonaBuildLogSanitizer = Readonly<{
+  flush: () => string;
+  write: (chunk: string) => string;
+}>;
+
 function configuredValue(
   environment: NodeJS.ProcessEnv,
   name:
@@ -137,6 +142,35 @@ export function sanitizeDaytonaBuildLog(chunk: string, apiKey: string): string {
     );
 }
 
+/**
+ * Sanitizes only complete log lines so split credentials are joined before
+ * redaction. The buffered final line must be flushed when streaming finishes.
+ */
+export function createDaytonaBuildLogSanitizer(
+  apiKey: string
+): DaytonaBuildLogSanitizer {
+  let buffered = "";
+
+  return {
+    flush() {
+      const remainder = buffered;
+      buffered = "";
+      return sanitizeDaytonaBuildLog(remainder, apiKey);
+    },
+    write(chunk) {
+      buffered += chunk;
+      const finalNewline = buffered.lastIndexOf("\n");
+      if (finalNewline === -1) {
+        return "";
+      }
+
+      const completeLines = buffered.slice(0, finalNewline + 1);
+      buffered = buffered.slice(finalNewline + 1);
+      return sanitizeDaytonaBuildLog(completeLines, apiKey);
+    },
+  };
+}
+
 function isNotFoundError(error: unknown): boolean {
   return (
     error instanceof DaytonaNotFoundError ||
@@ -181,6 +215,7 @@ export async function provisionDaytonaSnapshot(
     );
   }
 
+  const logSanitizer = createDaytonaBuildLogSanitizer(configuration.apiKey);
   try {
     await dependencies.snapshot.create(
       {
@@ -189,9 +224,10 @@ export async function provisionDaytonaSnapshot(
       },
       {
         onLogs: (chunk) => {
-          dependencies.log(
-            sanitizeDaytonaBuildLog(chunk, configuration.apiKey)
-          );
+          const completeLines = logSanitizer.write(chunk);
+          if (completeLines) {
+            dependencies.log(completeLines);
+          }
         },
       }
     );
@@ -200,6 +236,11 @@ export async function provisionDaytonaSnapshot(
       `Failed to create Daytona snapshot "${configuration.snapshotName}".`,
       { cause: error }
     );
+  } finally {
+    const remainder = logSanitizer.flush();
+    if (remainder) {
+      dependencies.log(remainder);
+    }
   }
 
   let snapshot: DaytonaSnapshot;

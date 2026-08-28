@@ -3,6 +3,7 @@ import test from "node:test";
 import { DaytonaNotFoundError, SnapshotState } from "@daytona/sdk";
 import {
   COPILOT_CLI_VERSION,
+  createDaytonaBuildLogSanitizer,
   createDaytonaCopilotImage,
   createDaytonaSnapshotDefinition,
   DAYTONA_COPILOT_IMAGE_BASE,
@@ -148,6 +149,48 @@ test("redacts full Authorization header values without altering other log text",
   );
 });
 
+test("buffers split log lines until Authorization values can be redacted", () => {
+  const basicCredential = "ZGF5dG9uYS11c2VyOnRlc3QtcGFzcw==";
+  const bearerCredential = "raw-bearer-credential-value";
+  const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
+
+  assert.equal(
+    sanitizer.write("starting image build\nAuthorization: Basic "),
+    "starting image build\n"
+  );
+  assert.equal(sanitizer.write("Ba"), "");
+  assert.equal(sanitizer.write(`sic ${basicCredential}\r`), "");
+  assert.equal(
+    sanitizer.write("\nAuthorization: Bearer raw-bearer-credential-"),
+    "Authorization: [REDACTED]\r\n"
+  );
+  assert.equal(sanitizer.write("value\r"), "");
+  assert.equal(
+    sanitizer.write("\nimage build complete"),
+    "Authorization: [REDACTED]\r\n"
+  );
+  assert.equal(sanitizer.flush(), "image build complete");
+
+  const emitted = [
+    "starting image build\n",
+    "Authorization: [REDACTED]\r\n",
+    "Authorization: [REDACTED]\r\n",
+    "image build complete",
+  ].join("");
+  assert.equal(emitted.includes(basicCredential), false);
+  assert.equal(emitted.includes(bearerCredential), false);
+  assert.equal(emitted.includes("Basic"), false);
+  assert.equal(
+    emitted,
+    [
+      "starting image build\n",
+      "Authorization: [REDACTED]\r\n",
+      "Authorization: [REDACTED]\r\n",
+      "image build complete",
+    ].join("")
+  );
+});
+
 test("refuses to recreate a snapshot that already exists", async () => {
   let createCalls = 0;
   const snapshot: DaytonaSnapshotService = {
@@ -216,7 +259,12 @@ test("forwards sanitized snapshot build logs without secrets", async () => {
   const snapshot: DaytonaSnapshotService = {
     create: (_parameters, options) => {
       options.onLogs(
-        `api_key=${API_KEY}\ntoken: ${token}\ncredential=${credential}\nAuthorization: Bearer ${token}`
+        [
+          `api_key=${API_KEY}`,
+          `token: ${token}`,
+          `credential=${credential}`,
+          `Authorization: Bearer ${token}`,
+        ].join("\n")
       );
       return Promise.resolve(activeSnapshot());
     },
@@ -233,8 +281,8 @@ test("forwards sanitized snapshot build logs without secrets", async () => {
     snapshot,
   });
 
-  assert.equal(logs.length, 1);
-  const [log] = logs;
+  assert.equal(logs.length, 2);
+  const log = logs.join("");
   assert.ok(log);
   assert.equal(log.includes(API_KEY), false);
   assert.equal(log.includes(token), false);
@@ -242,6 +290,34 @@ test("forwards sanitized snapshot build logs without secrets", async () => {
   assert.match(log, /api_key= \[REDACTED\]/u);
   assert.match(log, /token: \[REDACTED\]/u);
   assert.match(log, /Authorization: \[REDACTED\]/u);
+});
+
+test("flushes and redacts an incomplete final log line after creation fails", async () => {
+  const logs: string[] = [];
+  const basicCredential = "ZGF5dG9uYS11c2VyOnRlc3QtcGFzcw==";
+  const snapshot: DaytonaSnapshotService = {
+    create: (_parameters, options) => {
+      options.onLogs("starting image build\nAuthorization: Basic ");
+      options.onLogs("Ba");
+      options.onLogs(`sic ${basicCredential}`);
+      return Promise.reject(new Error("Daytona unavailable"));
+    },
+    get: () => Promise.reject(missingSnapshot()),
+  };
+
+  await assert.rejects(
+    provisionDaytonaSnapshot(configuration, {
+      log: (message) => logs.push(message),
+      snapshot,
+    }),
+    /Failed to create Daytona snapshot/u
+  );
+
+  assert.deepEqual(logs, [
+    "starting image build\n",
+    "Authorization: [REDACTED]",
+  ]);
+  assert.equal(logs.join("").includes(basicCredential), false);
 });
 
 test("rejects a created snapshot that cannot be verified as active", async () => {
