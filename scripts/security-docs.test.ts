@@ -6,6 +6,7 @@ const threatModelUrl = new URL(
   "../docs/security/execution-threat-model.md",
   import.meta.url
 );
+const envExampleUrl = new URL("../.env.example", import.meta.url);
 const readmeUrl = new URL("../README.md", import.meta.url);
 const incidentUrl = new URL(
   "../docs/security/incident-response.md",
@@ -126,6 +127,53 @@ test("the runbooks state the two facts that break a rotation", () => {
 
   // A copied network trace carries every request header, including the token.
   assert.match(runbooks, /copied network trace is a credential disclosure/);
+});
+
+test("identity rotation exports PKCS8 private and SPKI public key material", () => {
+  const runbooks = readFileSync(incidentUrl, "utf8");
+
+  assert.match(
+    runbooks,
+    /const pkcs8 = await subtle\.exportKey\("pkcs8", pair\.privateKey\)/
+  );
+  assert.match(
+    runbooks,
+    /const spki = await subtle\.exportKey\("spki", pair\.publicKey\)/
+  );
+  assert.doesNotMatch(runbooks, /exportKey\("raw", pair\.publicKey\)/);
+  assert.match(runbooks, /PKCS8 private key and the SPKI public key/);
+});
+
+test("local cloud-runner setup shares distinct control and service tokens", () => {
+  const envExample = readFileSync(envExampleUrl, "utf8");
+  const readme = readFileSync(readmeUrl, "utf8");
+
+  assert.match(envExample, /^AGENT_CONTROL_TOKEN=$/m);
+  assert.match(
+    readme,
+    /console\.log\("AGENT_CONTROL_TOKEN=" \+ randomBytes\(32\)\.toString\("base64url"\)\);/
+  );
+  assert.match(readme, /Copy the same\s+`AGENT_CONTROL_TOKEN`/);
+  assert.match(
+    readme,
+    /`AGENT_CONTROL_TOKEN` and `RUNNER_SERVICE_TOKEN` are separate/
+  );
+});
+
+test("the README diagnostic uses the separate operator credential", () => {
+  const readme = readFileSync(readmeUrl, "utf8");
+  const operatorVariable = "$OPERATOR_DIAGNOSTIC_TOKEN";
+
+  assert.ok(readme.includes(`-H "Authorization: Bearer ${operatorVariable}"`));
+  assert.equal(readme.includes("$RUNNER_IDENTITY_TOKEN"), false);
+});
+
+test("the README preserves bodyless runner-token compatibility", () => {
+  const readme = readFileSync(readmeUrl, "utf8");
+
+  assert.match(readme, /bodyless\s+`POST \/api\/runner-token`/);
+  assert.match(readme, /absent or zero-byte body as\s+unscoped/);
+  assert.match(readme, /malformed, unknown-field, and oversized JSON/);
 });
 
 test("the README points to the incident runbooks", () => {

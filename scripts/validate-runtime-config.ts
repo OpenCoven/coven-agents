@@ -1,24 +1,15 @@
-import { validateAbuseConfig } from "../lib/abuse/config";
-import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
+import { loadEnvConfig } from "@next/env";
 
-async function main() {
-  validateAbuseConfig({
-    globalDailyRunCap: process.env.GLOBAL_DAILY_RUN_CAP,
-    isProduction: true,
-    keySecret: process.env.ABUSE_KEY_SECRET,
-    redisUrl: process.env.REDIS_URL,
-  });
-  if (hasCredentialKekConfiguration(process.env)) {
-    await credentialKekRingFromEnvironment();
+import { validateRuntimeConfig } from "./runtime-config-validation";
+
+const explicitRelease = process.argv.includes("--release");
+
+async function main(): Promise<void> {
+  if (explicitRelease) {
+    loadEnvConfig(process.cwd(), false);
   }
-}
 
-function hasCredentialKekConfiguration(
-  environment: NodeJS.ProcessEnv
-): boolean {
-  return Object.keys(environment).some(
-    (name) => name === "CREDENTIAL_KEK" || name.startsWith("CREDENTIAL_KEK_")
-  );
+  await validateRuntimeConfig(process.env, explicitRelease);
 }
 
 main().catch((error: unknown) => {

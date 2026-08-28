@@ -40,5 +40,7 @@ tsconfig.tsbuildinfo
 # removed and re-added it, which is exactly when nobody is looking.
 .env*
 !.env.example
-/worker/.wrangler/state
+/worker/.wrangler/state/v3/do
+/worker/.wrangler/state/v3/observability/miniflare-wobs-trace-store
+/worker/.wrangler/state/v3/ratelimit/miniflare-RateLimiterObject
 /worker/.wrangler/tmp

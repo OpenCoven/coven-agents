@@ -4,20 +4,27 @@
 
 - The private Beads + DoltHub database is the source of truth.
 - OpenCoven Project #10 is generated from that source.
-- Sync is one-way: CI reads DoltHub and writes GitHub Project items only.
+- Sync is one-way: sync tooling reads DoltHub and writes GitHub Project items
+  only.
 - Managed Project fields, title, and body are overwritten on every sync.
 - Unrelated Project metadata is preserved.
 - Sync never archives or deletes items automatically.
 
-## Workflow
+## Current operation and dormant workflow
 
-The `beads project sync` workflow runs on:
+GitHub Actions are intentionally disabled for this private pre-release
+repository. The `beads project sync` workflow definition is therefore dormant:
+its schedule and manual dispatch are configured for a separately approved
+future restoration, but they do not run now. Current operation is local and
+manual through the commands in this guide by an authorized maintainer.
+
+If Actions are restored, the workflow definition is configured for:
 
 - the daily schedule `17 8 * * *`; and
 - `workflow_dispatch`.
 
-It runs only on `refs/heads/main`, uses `permissions: contents: read`, and
-expects these job-level environment values:
+When restored, it is restricted to `refs/heads/main`, uses
+`permissions: contents: read`, and expects these job-level values:
 
 ```bash
 BEADS_WORKSPACE="${RUNNER_TEMP}/coven-agents-beads"
@@ -26,17 +33,18 @@ COVEN_PROJECT_NUMBER=10
 DOLT_REMOTE_URL=https://doltremoteapi.dolthub.com/OpenCoven/coven-agents-beads
 ```
 
-CI does not seed/import Beads data and does not `dolt push`; it restores the
-private database read-only and writes only to Project #10. DoltHub credentials
-are scoped to the restore step, and `GH_TOKEN` is scoped only to the preview
-and apply steps that call GitHub.
+The dormant definition does not seed/import Beads data or `dolt push`; when
+restored, it restores the private database read-only and writes only to Project
+#10. DoltHub credentials are scoped to the restore step, and `GH_TOKEN` is
+scoped only to the preview and apply steps that call GitHub.
 
 ## Required secrets and minimum permissions
 
 - `DOLT_REMOTE_USER`
 - `DOLT_REMOTE_PASSWORD`
-- `GH_TOKEN` locally for `preview` / `apply`, or `secrets.COVEN_PROJECT_TOKEN`
-  in GitHub Actions for the same steps
+- `GH_TOKEN` locally for current `preview` / `apply`, or
+  `secrets.COVEN_PROJECT_TOKEN` if the dormant GitHub Actions workflow is
+  separately restored
 
 Minimum access:
 
@@ -66,10 +74,10 @@ node --version
 pnpm --version
 ```
 
-CI pins `gh` to `2.98.0` and verifies the release tarball SHA-256 before using
-it.
+The dormant workflow definition pins `gh` to `2.98.0` and verifies the release
+tarball SHA-256 before using it.
 
-Linux amd64 matches CI:
+Linux amd64 matches the configured future workflow runner:
 
 ```bash
 curl --fail --location --silent --show-error \

@@ -21,7 +21,8 @@ function declaredContentLength(headers: Headers): number | "invalid" | null {
 export async function readBoundedJson<T>(
   request: Request,
   maximumBytes: number,
-  schema: z.ZodType<T>
+  schema: z.ZodType<T>,
+  options: { emptyBody?: unknown } = {}
 ): Promise<BoundedBodyResult<T>> {
   validateMaximum(maximumBytes);
 
@@ -31,8 +32,17 @@ export async function readBoundedJson<T>(
   }
 
   const body = await readBoundedBytes(request, maximumBytes);
-  if (body.kind !== "ok" || body.value.byteLength === 0) {
-    return body.kind === "ok" ? { kind: "invalid" } : body;
+  if (body.kind !== "ok") {
+    return body;
+  }
+  if (body.value.byteLength === 0) {
+    if (!Object.hasOwn(options, "emptyBody")) {
+      return { kind: "invalid" };
+    }
+    const parsed = schema.safeParse(options.emptyBody);
+    return parsed.success
+      ? { kind: "ok", value: parsed.data }
+      : { kind: "invalid" };
   }
 
   try {

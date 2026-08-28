@@ -7,6 +7,5 @@ RUNNER_AUTH_VERSION=0
 RUNNER_SERVICE_TOKEN=replace-with-a-long-random-service-token
 RUNNER_URL=http://127.0.0.1:8788
 APP_ORIGIN=http://127.0.0.1:9797
-# Harness credential, not a model provider key. A fine-grained PAT with the
-# "Copilot Requests" permission, or an OAuth token from the Copilot CLI or gh app.
-COPILOT_GITHUB_TOKEN=replace-with-a-github-token-that-has-copilot-access
+# Harness credentials are tenant-owned and fetched per run. Do not add provider
+# or operator harness tokens to the Worker environment.

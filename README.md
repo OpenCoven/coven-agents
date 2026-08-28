@@ -99,6 +99,39 @@ pnpm install
 cp .env.example .env.local
 ```
 
+Generate the local app's versioned runner identity, deployment gate, internal
+service credential, and credential-encryption key in a private terminal. Copy
+the assignments into `.env.local`; each random call deliberately creates a
+different credential.
+
+```bash
+node --input-type=module -e '
+import { randomBytes, webcrypto } from "node:crypto";
+const pair = await webcrypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+const pkcs8 = await webcrypto.subtle.exportKey("pkcs8", pair.privateKey);
+const spki = await webcrypto.subtle.exportKey("spki", pair.publicKey);
+console.log("AGENT_CONTROL_TOKEN=" + randomBytes(32).toString("base64url"));
+console.log("RUNNER_SERVICE_TOKEN=" + randomBytes(32).toString("base64url"));
+console.log("RUNNER_SIGNING_KEY_ID=key-local");
+console.log("RUNNER_SIGNING_KEY=" + Buffer.from(pkcs8).toString("base64url"));
+console.log("RUNNER_SIGNING_PUBLIC_KEY=" + Buffer.from(spki).toString("base64url"));
+console.log("CREDENTIAL_KEK_CURRENT_VERSION=v1");
+console.log("CREDENTIAL_KEK=" + randomBytes(32).toString("base64url"));
+'
+```
+
+Do not copy the output into logs, issues, or tracked files. The signing key and
+credential KEK stay app-only. Copy the same
+`AGENT_CONTROL_TOKEN` and `RUNNER_SERVICE_TOKEN` values to the Worker.
+`AGENT_CONTROL_TOKEN` and `RUNNER_SERVICE_TOKEN` are separate credentials:
+the first gates app-to-Worker requests, while the second authenticates
+Worker-to-app internal calls. Copy `RUNNER_SIGNING_KEY_ID` to
+Worker `RUNNER_VERIFY_KEY_ID` and copy the SPKI
+`RUNNER_SIGNING_PUBLIC_KEY` value to Worker `RUNNER_VERIFY_KEY`. Generate a
+separate `OPERATOR_DIAGNOSTIC_TOKEN`; it must never reuse either app-to-Worker
+credential. The legacy app `RUNNER_VERIFY_KEY`/`RUNNER_SIGNING_KEY` pair is
+supported only while migrating to the explicit key ID and public-key fields.
+
 ## Run the control plane
 
 ```bash
@@ -125,17 +158,18 @@ nonzero failure.
 Create `worker/.dev.vars`:
 
 ```dotenv
-AGENT_CONTROL_TOKEN=replace-with-a-long-random-token
+AGENT_CONTROL_TOKEN=copy-the-exact-app-env-local-value
 OPERATOR_DIAGNOSTIC_TOKEN=replace-with-a-different-long-random-token
-RUNNER_VERIFY_KEY_ID=key-2026-08
-RUNNER_VERIFY_KEY=replace-with-the-base64url-ed25519-public-key
+EDGE_ABUSE_KEY_SECRET=replace-with-a-long-random-secret
+RUNNER_VERIFY_KEY_ID=copy-the-app-runner-signing-key-id
+RUNNER_VERIFY_KEY=copy-the-app-runner-signing-public-key
 RUNNER_AUTH_VERSION=0
 # Optional during rotation; retire only after token expiry plus skew.
 RUNNER_VERIFY_PREVIOUS_KEY_ID=key-2026-07
 RUNNER_VERIFY_PREVIOUS_KEY=replace-with-the-old-base64url-ed25519-public-key
 RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT=2026-08-27T00:00:00.000Z
 RUNNER_VERIFY_PREVIOUS_RETIRE_AT=2026-08-27T00:15:00.000Z
-RUNNER_SERVICE_TOKEN=replace-with-a-long-random-token
+RUNNER_SERVICE_TOKEN=copy-the-exact-app-env-local-value
 APP_ORIGIN=http://localhost:3000
 ```
 
@@ -150,6 +184,11 @@ back while retaining both verification keys until the original expiry window
 has elapsed. Never log or commit key material; use Vercel and Wrangler
 secrets. The legacy `RUNNER_VERIFY_KEY`/`RUNNER_SIGNING_KEY` pair remains
 supported only as an explicit migration compatibility path.
+
+The browser identity minter intentionally keeps the original bodyless
+`POST /api/runner-token` request for unscoped calls. Run starts send a strict
+JSON `run` scope instead. The endpoint treats an absent or zero-byte body as
+unscoped, while malformed, unknown-field, and oversized JSON remains rejected.
 
 **The worker holds no harness credential.** It used to read
 `COPILOT_GITHUB_TOKEN` from its own environment, which meant every tenant ran
@@ -188,8 +227,16 @@ Then:
 ```bash
 docker info
 pnpm --filter @opencoven/cloud-runner types
-pnpm dev:cloud
+pnpm --filter @opencoven/cloud-runner exec wrangler dev \
+  --var ALLOWED_ORIGIN:http://localhost:3000
 ```
+
+The committed Wrangler configuration contains the production
+`ALLOWED_ORIGIN`. The command-line variable is a noncommitted local override;
+do not edit the production origin merely to run localhost. For the standalone
+Docker-backed harness and its stub app, follow
+[`worker/harness/README.md`](worker/harness/README.md), which uses its own local
+`APP_ORIGIN`.
 
 For deployment, set the secrets without committing them:
 
@@ -214,8 +261,8 @@ deployment. It HMAC-pseudonymizes source IP and tenant rate-limit keys; if it
 is absent, the Worker fails closed with `503` before serving non-preflight
 requests.
 
-Update `ALLOWED_ORIGIN` in `worker/wrangler.jsonc` to the deployed web origin and
-set `NEXT_PUBLIC_CLOUD_RUNNER_URL` on the web deployment.
+Confirm the committed `ALLOWED_ORIGIN` in `worker/wrangler.jsonc` matches the
+deployed web origin and set `NEXT_PUBLIC_CLOUD_RUNNER_URL` on the web deployment.
 
 `AGENT_CONTROL_TOKEN` and `OPERATOR_DIAGNOSTIC_TOKEN` are read from the `env`
 binding, not from `process.env`. A Worker only exposes `vars` on `process.env`,
@@ -233,7 +280,7 @@ alive. Use it as the deployment smoke test:
 
 ```bash
 curl -sS -X POST \
-  -H "Authorization: Bearer <OPERATOR_DIAGNOSTIC_TOKEN>" \
+  -H "Authorization: Bearer $OPERATOR_DIAGNOSTIC_TOKEN" \
   -H "Content-Type: application/json" \
   --data '{}' \
   https://<your-worker>.workers.dev/api/diagnostics/sandbox
@@ -301,3 +348,19 @@ pnpm build
 
 Cloud sandbox startup and deployment additionally require a running Docker
 daemon and authenticated Wrangler session.
+
+`pnpm build` invokes `pnpm validate:runtime`, which enforces the audience in a
+production environment (`VERCEL_ENV=production`, or `NODE_ENV=production`
+outside a Vercel preview/development build). `pnpm start` first runs the
+explicit `pnpm validate:release` preflight. Production validation requires one
+exact audience declaration:
+
+- `RELEASE_AUDIENCE=closed-beta`, `BETA_MODE=on`, and a reviewed, nonempty
+  `BETA_ALLOWLIST` containing valid email addresses; or
+- `RELEASE_AUDIENCE=public` and `BETA_MODE=off`, after separate public-release
+  approval.
+
+Ordinary local, test, and Vercel preview `validate:runtime` runs do not require
+`RELEASE_AUDIENCE`; that convenience is not production approval. Run
+`pnpm validate:release` with the intended production configuration before
+promotion even when the local build gate passes.
