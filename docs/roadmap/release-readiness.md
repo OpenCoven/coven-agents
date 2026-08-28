@@ -14,9 +14,6 @@ Current blockers are factual and fail closed:
 - the latest recorded authenticated private Beads/DoltHub pull returned
   `PermissionDenied`, so authoritative P0, dependency, and acceptance state
   cannot be reconciled; see [`current-state.md`](current-state.md);
-- the latest exact-candidate `pnpm hygiene` run found the unrelated
-  `fix/process-runner` worktree `AT RISK` with one uncommitted file. This task
-  did not alter or discard that work;
 - the latest field-only Project query recorded in
   [`current-state.md`](current-state.md) found all 60 managed items were drafts,
   so GitHub issue state did not independently confirm delivery reconciliation;
@@ -168,15 +165,13 @@ Retain command, commit, environment, timestamp, exit status, and sanitized
 output. The placeholder `ADMIN_EMAILS` value above is a local audit fixture,
 not release configuration. `AUTH_SECRET` must be supplied from local
 environment storage and must not be committed. On the final signed candidate,
-check, typecheck, 1,329 unit tests, and the 33-page production build passed.
-Hygiene later became red when the unrelated `fix/process-runner` worktree
-gained one uncommitted file. The browser command passed 15 of 17 cases; Warden
-and legacy chat failed because the database-free cookie fixture cannot satisfy
-server-side `authVersion` revalidation. A tracked secret scan, release
-configuration preflight, 62 roadmap tests, and two byte-identical live roadmap
-applies also passed. The six-gate set remains red until the unrelated work is
-preserved and a database-backed subscriber browser fixture passes without a
-production authorization bypass.
+hygiene, check, typecheck, 1,329 unit tests, and the 33-page production build
+passed. The browser command passed 15 of 17 cases; Warden and legacy chat
+failed because the database-free cookie fixture cannot satisfy server-side
+`authVersion` revalidation. A tracked secret scan, release configuration
+preflight, 62 roadmap tests, and two byte-identical live roadmap applies also
+passed. The six-gate set remains red until a database-backed subscriber browser
+fixture passes without a production authorization bypass.
 
 Because an ordinary local build intentionally does not infer a release
 audience, also retain a successful `pnpm validate:release` with the intended
@@ -337,9 +332,9 @@ or guess at database compatibility.
 | Release audience | An approved candidate record and successful production validation agree. Closed beta has `RELEASE_AUDIENCE=closed-beta`, `BETA_MODE=on`, and a reviewed, nonempty valid `BETA_ALLOWLIST`; public release has separate approval, `RELEASE_AUDIENCE=public`, and `BETA_MODE=off`. | Missing/invalid/case-mismatched audience, default/unset mode, invalid beta allowlist, mismatch, or public mode without separate approval. | **No-go:** no candidate-specific production audience configuration is retained; a local/default-off pass is not approval. |
 | Verification | Every required matrix row is `Verified` or `Certified` for the candidate. | Any required row red or `Blocked`. | **No-go:** subscriber sign-in, conformance, recovery, browser quality, preflight, and production smoke are not `Verified`. |
 | Roadmap freshness | `pnpm roadmap:status check` passes after authoritative reconciliation. | Stale aggregate. | **No-go:** the candidate Project check can pass, but Beads freshness cannot be established. |
-| Worktree safety | `pnpm hygiene` exits zero with no `AT RISK` worktree and the secondary count within the soft cap. | Any `AT RISK` worktree or a secondary count above the soft cap. | **No-go:** the latest exact-candidate run found `fix/process-runner` `AT RISK` with one uncommitted file. There are three secondary worktrees, exactly at the soft cap. |
+| Worktree safety | `pnpm hygiene` exits zero with no `AT RISK` worktree and the secondary count within the soft cap. | Any `AT RISK` worktree or a secondary count above the soft cap. | **Go:** the final exact-candidate run found four worktrees total, three secondary, no `AT RISK` worktree, and the pushed roadmap worktree reapable. |
 | Beads/Project/issues | A second apply and final preview are a complete no-op, and accepted delivery artifacts agree. | Drift, create/update/orphan work, partial or failed sync, or issue contradiction. | **No-go:** authoritative sync cannot run; the latest recorded Project query found managed items were drafts. |
-| Six local gates | All six pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** check, typecheck, 1,329 unit tests, and the 33-page build passed. Hygiene is externally blocked, and the production-browser gate passed 15 of 17 while failing the Warden and legacy-chat subscriber cases at the database-backed session-authority boundary. |
+| Six local gates | All six pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** hygiene, check, typecheck, 1,329 unit tests, and the 33-page build passed. The production-browser gate passed 15 of 17 while failing the Warden and legacy-chat subscriber cases at the database-backed session-authority boundary. |
 | Database | Staging migration, production backup, migration success, schema verification, and recovery record exist. | Missing backup, skipped/failed migration, or unproved recovery. | **No-go:** no candidate-specific production migration and restore artifact is retained. |
 | Smoke and Stripe | Demo, subscriber, bodyless and run-scoped identity minting, cloud lifecycle, and webhook evidence pass; Stripe claim/update recovery is atomic and retry-safe; local runs only if supported. | Any failed required smoke, undeployed token compatibility fix, missing webhook delivery, or claim-before-state behavior that permanently deduplicates failed processing. | **No-go:** the runner-token fix is local-only, only local/unit lifecycle evidence is retained, and current Stripe claim/update ordering is not retry-safe. |
 | Isolation | Tenant, credential, identity, and redaction evidence pass in a release-equivalent environment. | Any cross-tenant or secret-boundary failure. | **No-go:** production-like isolation evidence is not retained. |

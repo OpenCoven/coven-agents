@@ -19,10 +19,9 @@ snapshot.
 > live roadmap applies passed. The production-browser gate passed 15 of 17
 > cases; the Warden and legacy-chat subscriber cases cannot satisfy the new
 > database-backed `authVersion` revalidation with their cookie-only fixture.
-> Hygiene is externally blocked again because the unrelated
-> `fix/process-runner` worktree gained one uncommitted file after the earlier
-> green run. The historical audit below is retained for detailed baseline
-> evidence.
+> Final hygiene passed with four worktrees total, three secondary, no
+> `AT RISK` worktree, and the pushed roadmap worktree reapable. The historical
+> audit below is retained for detailed baseline evidence.
 
 ## Historical snapshot metadata
 
@@ -120,7 +119,7 @@ closure check.
 | --- | --- | --- | --- | --- | --- |
 | Beads access and sync drift | High | BunsDev | Phase 0 planning authority | **Current: open blocker. Dolt/DoltHub returned `PermissionDenied`.** Keep Project and `ROADMAP.md` read-only as projections; do not apply or describe a sync as idempotent until an authenticated Dolt pull succeeds. | Authenticated Dolt pull; private review, update, commit, and push; authorized Project reconciliation; two sync applies; a final preview with 60 unchanged and zero create, update, or orphan; and reconciled shipped GitHub issues, all without private output. |
 | Issue and Project drift | Medium | Joint | Phase 0 planning authority | **Current: open.** All 60 managed Project items are drafts, so no GitHub issue state backs their status. Treat Project fields as a projection only. | Canonical linkage policy is recorded and a field-only check demonstrates that each managed status has an authoritative state source. |
-| Work exists only in another worktree | High | BunsDev | Repository integrity | **Current: open.** The latest exact-candidate hygiene run reported four worktrees total, three secondary, and `fix/process-runner` as `AT RISK` with one uncommitted file. The pushed roadmap worktree is reapable and the secondary count is exactly at the soft cap. This task did not alter the unrelated worktree. | The owning work is committed and pushed, merged, or deliberately removed by its owner; then `pnpm hygiene` exits zero and the roadmap worktree is reaped after this branch is preserved. |
+| Work exists only in another worktree | High | BunsDev | Repository integrity | **Current: mitigated.** The final exact-candidate hygiene run reported four worktrees total, three secondary, no `AT RISK` worktree, and the pushed roadmap worktree as reapable. The secondary count is exactly at the soft cap. | Keep `pnpm hygiene` green and reap the roadmap worktree after this branch is merged or otherwise preserved. |
 | Remote checks are disabled | High | Joint | Evidence baseline | **Current: accepted with partial mitigation.** GitHub Actions remain intentionally off; signed commits plus all local gates are required. The five repository-required gates are green on the candidate, but the additional release browser gate remains red as recorded above. | A signed, retained local release-gate record with every required gate green, or an explicit repository decision that re-enables trusted required checks. |
 | Typechecking depends on generated Next types | Medium | Copilot | Evidence baseline | **Current: partially mitigated.** `.next` is ignored while `tsconfig.json` includes generated `.next` type paths. Typecheck and build passed in this populated worktree, but clean-checkout order independence was not proved. | A clean checkout passes the documented gate order, or the scripts explicitly generate required Next types before typecheck. |
 | Production-path E2E is missing | High | Joint | Certify | **Current: open.** Fifteen of seventeen final-candidate production-browser cases pass. Warden and legacy chat fail because cookie-only subscriber fixtures no longer satisfy database-backed session-version revalidation. Existing fixtures also do not exercise real GitHub OAuth, Stripe, tenant credential lending, a full deployed cloud run lifecycle, or recovery; remote workflows are disabled. | Add a database-backed subscriber fixture that proves `authVersion` and subscription authority without a production bypass, then cover authentication, subscription, tenant credential lending, cloud run lifecycle, and recovery with deterministic service boundaries. |
