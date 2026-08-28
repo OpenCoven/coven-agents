@@ -263,52 +263,59 @@ test("only started sandboxes are ready; Daytona lifecycle methods handle every o
   );
 });
 
-test("shutdown transitions refresh to stable states before starting", async () => {
+test("shutdown transitions refresh to every stable startable state before starting", async () => {
   const available = agent({
     daytonaSandboxId: "stored",
     sandboxLifecycle: "ready",
   });
-  const cases = [
-    [SandboxState.STOPPING, SandboxState.STOPPED],
-    [SandboxState.ARCHIVING, SandboxState.ARCHIVED],
-    [SandboxState.PAUSING, SandboxState.PAUSED],
+  const transitions = [
+    SandboxState.STOPPING,
+    SandboxState.ARCHIVING,
+    SandboxState.PAUSING,
+  ] as const;
+  const stableStates = [
+    SandboxState.STOPPED,
+    SandboxState.ARCHIVED,
+    SandboxState.PAUSED,
   ] as const;
 
   await Promise.all(
-    cases.map(async ([transition, stable]) => {
-      let refreshes = 0;
-      let starts = 0;
-      let waits = 0;
-      const resolved = sandbox(transition, {
-        refreshData: () => {
-          refreshes += 1;
-          resolved.state = stable;
-          return Promise.resolve();
-        },
-        start: () => {
-          starts += 1;
-          assert.equal(resolved.state, stable);
-          return Promise.resolve();
-        },
-        waitUntilStarted: () => {
-          waits += 1;
-          return Promise.resolve();
-        },
-      });
-      await ensureDaytonaSandbox(principal, available, config, {
-        daytona: {
-          create: () => Promise.reject(new Error("must not create")),
-          get: () => Promise.resolve(resolved),
-        },
-        lifecycle: {
-          sleep: () => Promise.reject(new Error("must not sleep")),
-        },
-        store: store({}),
-      });
-      assert.equal(refreshes, 1);
-      assert.equal(starts, 1);
-      assert.equal(waits, 0);
-    })
+    transitions.flatMap((transition) =>
+      stableStates.map(async (stable) => {
+        let refreshes = 0;
+        let starts = 0;
+        let waits = 0;
+        const resolved = sandbox(transition, {
+          refreshData: () => {
+            refreshes += 1;
+            resolved.state = stable;
+            return Promise.resolve();
+          },
+          start: () => {
+            starts += 1;
+            assert.equal(resolved.state, stable);
+            return Promise.resolve();
+          },
+          waitUntilStarted: () => {
+            waits += 1;
+            return Promise.resolve();
+          },
+        });
+        await ensureDaytonaSandbox(principal, available, config, {
+          daytona: {
+            create: () => Promise.reject(new Error("must not create")),
+            get: () => Promise.resolve(resolved),
+          },
+          lifecycle: {
+            sleep: () => Promise.reject(new Error("must not sleep")),
+          },
+          store: store({}),
+        });
+        assert.equal(refreshes, 1);
+        assert.equal(starts, 1);
+        assert.equal(waits, 0);
+      })
+    )
   );
 });
 

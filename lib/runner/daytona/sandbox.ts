@@ -223,15 +223,11 @@ function terminalTransitionError(
   return undefined;
 }
 
-function stableShutdownState(
-  transition: SandboxState,
-  state: SandboxState | undefined
-): boolean {
+function stableShutdownState(state: SandboxState | undefined): boolean {
   return (
-    (transition === SandboxState.STOPPING && state === SandboxState.STOPPED) ||
-    (transition === SandboxState.ARCHIVING &&
-      state === SandboxState.ARCHIVED) ||
-    (transition === SandboxState.PAUSING && state === SandboxState.PAUSED)
+    state === SandboxState.STOPPED ||
+    state === SandboxState.ARCHIVED ||
+    state === SandboxState.PAUSED
   );
 }
 
@@ -241,7 +237,6 @@ function isStartedSandbox(sandbox: Sandbox): boolean {
 
 function waitForShutdownTransition(
   sandbox: Sandbox,
-  transition: SandboxState,
   lifecycle: DaytonaSandboxLifecycleDependencies | undefined
 ): Promise<"started" | "stable"> {
   const now = lifecycle?.now ?? Date.now;
@@ -255,7 +250,7 @@ function waitForShutdownTransition(
     if (isStartedSandbox(sandbox)) {
       return "started";
     }
-    if (stableShutdownState(transition, sandbox.state)) {
+    if (stableShutdownState(sandbox.state)) {
       return "stable";
     }
     const terminalError = terminalTransitionError(sandbox.state);
@@ -272,7 +267,7 @@ function waitForShutdownTransition(
     if (isStartedSandbox(sandbox)) {
       return "started";
     }
-    if (stableShutdownState(transition, sandbox.state)) {
+    if (stableShutdownState(sandbox.state)) {
       return "stable";
     }
     const refreshedTerminalError = terminalTransitionError(sandbox.state);
@@ -338,12 +333,7 @@ async function startOrRecoverSandbox(
     sandbox.state === SandboxState.ARCHIVING ||
     sandbox.state === SandboxState.PAUSING
   ) {
-    const transition = sandbox.state;
-    const result = await waitForShutdownTransition(
-      sandbox,
-      transition,
-      lifecycle
-    );
+    const result = await waitForShutdownTransition(sandbox, lifecycle);
     if (result === "started") {
       return;
     }
