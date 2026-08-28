@@ -39,7 +39,7 @@ CREATE TABLE "RunnerRun" (
 	"logCursor" integer DEFAULT 0 NOT NULL,
 	"operationId" uuid NOT NULL,
 	"output" text DEFAULT '' NOT NULL,
-	"queueSequence" integer NOT NULL,
+	"queueSequence" integer GENERATED ALWAYS AS IDENTITY NOT NULL,
 	"requestHash" varchar(64) NOT NULL,
 	"startedAt" timestamp,
 	"status" varchar(16) DEFAULT 'queued' NOT NULL,
@@ -50,7 +50,7 @@ CREATE TABLE "RunnerRun" (
 	CONSTRAINT "RunnerRun_tenant_valid" CHECK ("RunnerRun"."tenant" ~ '^[A-Za-z0-9_]{1,64}$'),
 	CONSTRAINT "RunnerRun_status_valid" CHECK ("RunnerRun"."status" in ('queued', 'running', 'completed', 'failed', 'cancelled')),
 	CONSTRAINT "RunnerRun_dispatchState_valid" CHECK ("RunnerRun"."dispatchState" in ('queued', 'dispatching', 'running', 'terminal')),
-	CONSTRAINT "RunnerRun_queueSequence_nonnegative" CHECK ("RunnerRun"."queueSequence" >= 0),
+	CONSTRAINT "RunnerRun_queueSequence_positive" CHECK ("RunnerRun"."queueSequence" > 0),
 	CONSTRAINT "RunnerRun_logCursor_nonnegative" CHECK ("RunnerRun"."logCursor" >= 0),
 	CONSTRAINT "RunnerRun_version_nonnegative" CHECK ("RunnerRun"."version" >= 0),
 	CONSTRAINT "RunnerRun_timestamps_valid" CHECK (("RunnerRun"."status" = 'queued' and "RunnerRun"."startedAt" is null and "RunnerRun"."completedAt" is null) or ("RunnerRun"."status" = 'running' and "RunnerRun"."startedAt" is not null and "RunnerRun"."completedAt" is null and "RunnerRun"."startedAt" >= "RunnerRun"."createdAt") or ("RunnerRun"."status" in ('completed', 'failed', 'cancelled') and "RunnerRun"."completedAt" is not null and "RunnerRun"."completedAt" >= "RunnerRun"."createdAt" and ("RunnerRun"."startedAt" is null or ("RunnerRun"."startedAt" >= "RunnerRun"."createdAt" and "RunnerRun"."completedAt" >= "RunnerRun"."startedAt")))),
@@ -86,6 +86,7 @@ ALTER TABLE "RunnerRunEvent" ADD CONSTRAINT "RunnerRunEvent_runId_RunnerRun_id_f
 CREATE INDEX "RunnerAgent_tenant_updatedAt_idx" ON "RunnerAgent" USING btree ("tenant","updatedAt");--> statement-breakpoint
 CREATE INDEX "RunnerRun_agent_createdAt_idx" ON "RunnerRun" USING btree ("agentId","createdAt");--> statement-breakpoint
 CREATE INDEX "RunnerRun_queued_sequence_idx" ON "RunnerRun" USING btree ("queueSequence") WHERE "RunnerRun"."dispatchState" = 'queued';--> statement-breakpoint
+CREATE UNIQUE INDEX "RunnerRun_queueSequence_unique_idx" ON "RunnerRun" USING btree ("queueSequence");--> statement-breakpoint
 CREATE INDEX "RunnerRun_active_tenant_idx" ON "RunnerRun" USING btree ("tenant","status") WHERE "RunnerRun"."status" in ('queued', 'running');--> statement-breakpoint
 CREATE INDEX "RunnerRun_expired_dispatch_lease_idx" ON "RunnerRun" USING btree ("dispatchLeaseExpiresAt") WHERE "RunnerRun"."dispatchLeaseToken" is not null and "RunnerRun"."dispatchState" in ('dispatching', 'running');--> statement-breakpoint
 CREATE INDEX "RunnerRun_terminal_retention_idx" ON "RunnerRun" USING btree ("agentId","completedAt") WHERE "RunnerRun"."status" in ('completed', 'failed', 'cancelled');--> statement-breakpoint

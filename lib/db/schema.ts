@@ -525,7 +525,9 @@ export const runnerRun = pgTable(
     logCursor: integer("logCursor").notNull().default(0),
     operationId: uuid("operationId").notNull(),
     output: text("output").notNull().default(""),
-    queueSequence: integer("queueSequence").notNull(),
+    queueSequence: integer("queueSequence")
+      .generatedAlwaysAsIdentity()
+      .notNull(),
     requestHash: varchar("requestHash", { length: 64 }).notNull(),
     startedAt: timestamp("startedAt"),
     status: varchar("status", {
@@ -551,6 +553,7 @@ export const runnerRun = pgTable(
     index("RunnerRun_queued_sequence_idx")
       .on(table.queueSequence)
       .where(sql`${table.dispatchState} = 'queued'`),
+    uniqueIndex("RunnerRun_queueSequence_unique_idx").on(table.queueSequence),
     index("RunnerRun_active_tenant_idx")
       .on(table.tenant, table.status)
       .where(sql`${table.status} in ('queued', 'running')`),
@@ -588,10 +591,7 @@ export const runnerRun = pgTable(
       "RunnerRun_dispatchState_valid",
       sql`${table.dispatchState} in ('queued', 'dispatching', 'running', 'terminal')`
     ),
-    check(
-      "RunnerRun_queueSequence_nonnegative",
-      sql`${table.queueSequence} >= 0`
-    ),
+    check("RunnerRun_queueSequence_positive", sql`${table.queueSequence} > 0`),
     check("RunnerRun_logCursor_nonnegative", sql`${table.logCursor} >= 0`),
     check("RunnerRun_version_nonnegative", sql`${table.version} >= 0`),
     check(

@@ -990,7 +990,18 @@
           "name": "queueSequence",
           "type": "integer",
           "primaryKey": false,
-          "notNull": true
+          "notNull": true,
+          "identity": {
+            "name": "RunnerRun_queueSequence_seq",
+            "type": "always",
+            "schema": "public",
+            "increment": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "startWith": "1",
+            "cache": "1",
+            "cycle": false
+          }
         },
         "requestHash": {
           "name": "requestHash",
@@ -1072,6 +1083,21 @@
           ],
           "isUnique": false,
           "where": "\"RunnerRun\".\"dispatchState\" = 'queued'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunnerRun_queueSequence_unique_idx": {
+          "name": "RunnerRun_queueSequence_unique_idx",
+          "columns": [
+            {
+              "expression": "queueSequence",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -1217,9 +1243,9 @@
           "name": "RunnerRun_dispatchState_valid",
           "value": "\"RunnerRun\".\"dispatchState\" in ('queued', 'dispatching', 'running', 'terminal')"
         },
-        "RunnerRun_queueSequence_nonnegative": {
-          "name": "RunnerRun_queueSequence_nonnegative",
-          "value": "\"RunnerRun\".\"queueSequence\" >= 0"
+        "RunnerRun_queueSequence_positive": {
+          "name": "RunnerRun_queueSequence_positive",
+          "value": "\"RunnerRun\".\"queueSequence\" > 0"
         },
         "RunnerRun_logCursor_nonnegative": {
           "name": "RunnerRun_logCursor_nonnegative",
