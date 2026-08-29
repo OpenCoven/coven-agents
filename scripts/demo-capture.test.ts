@@ -367,6 +367,7 @@ test("accepts an exactly approved HTTPS origin and explicit loopback development
       recordingEnvironment({
         APP_ORIGIN: "https://preview.example",
         AUTH_URL: undefined,
+        VERCEL_ENV: "preview",
         VERCEL_URL: "preview.example",
       })
     ).appOrigin,

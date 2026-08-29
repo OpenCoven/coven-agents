@@ -298,6 +298,9 @@ export async function validateRuntimeConfig(
     validateProductionDaytonaConfig(env);
   } else {
     validateConfiguredPreviewDaytonaConfig(env);
+    if (env.APP_ORIGIN !== undefined) {
+      approvedApplicationOrigin(env);
+    }
   }
 
   validateAbuseConfig({
