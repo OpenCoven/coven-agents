@@ -683,7 +683,7 @@ test("delete preserves busy, stale version, and permanent provider failures", as
   const outcomes = [
     ["busy", 409, "busy", true],
     ["stale_version", 409, "stale_version", true],
-    ["provider_failure", 502, "provider_failure", false],
+    ["provider_failure", 422, "provider_rejected", false],
   ] as const;
 
   await Promise.all(

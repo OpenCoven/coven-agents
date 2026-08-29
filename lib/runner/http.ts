@@ -585,8 +585,8 @@ export function createRunnerHttpHandlers(
         if (deleted.kind === "provider_failure") {
           return errorResponse(
             dependencies,
-            deleted.retryable ? 503 : 502,
-            deleted.retryable ? "provider_unavailable" : "provider_failure",
+            deleted.retryable ? 503 : 422,
+            deleted.retryable ? "provider_unavailable" : "provider_rejected",
             deleted.retryable
               ? "Runner provider is temporarily unavailable. Try again later."
               : "Runner provider rejected the operation.",
