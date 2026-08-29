@@ -463,36 +463,46 @@ export class BrowserRunnerTransport implements RunnerTransport {
     cursor: number,
     options: StreamRunEventsOptions
   ): Promise<RunSnapshot> {
-    if (options.signal?.aborted) {
-      throw abortedError();
-    }
-    const response = await this.fetch(
-      `/api/runs/${encodeURIComponent(runId)}/events`,
-      {
-        accept: "text/event-stream",
-        lastEventId: cursor,
-        signal: options.signal,
+    let nextCursor = cursor;
+    while (true) {
+      if (options.signal?.aborted) {
+        throw abortedError();
       }
-    );
-    if (
-      !response.headers
-        .get("content-type")
-        ?.toLowerCase()
-        .startsWith("text/event-stream")
-    ) {
-      throw new RunnerApiError(
-        "Runner returned no event stream.",
-        "no_event_stream",
-        response.status
-      );
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: each reconnect must resume from the cursor produced by the previous stream.
+        const response = await this.fetch(
+          `/api/runs/${encodeURIComponent(runId)}/events`,
+          {
+            accept: "text/event-stream",
+            lastEventId: nextCursor,
+            signal: options.signal,
+          }
+        );
+        if (
+          !response.headers
+            .get("content-type")
+            ?.toLowerCase()
+            .startsWith("text/event-stream")
+        ) {
+          throw new RunnerApiError(
+            "Runner returned no event stream.",
+            "no_event_stream",
+            response.status
+          );
+        }
+        nextCursor = await this.readEventStream(response, nextCursor, options);
+      } catch (error) {
+        if (!(error instanceof RunnerApiError && error.retryable)) {
+          throw error;
+        }
+      }
+
+      const snapshot = await this.getRun(runId, options.signal);
+      if (snapshot.status !== "queued" && snapshot.status !== "running") {
+        return snapshot;
+      }
+      await this.waitForReconnect(options.signal);
     }
-    const nextCursor = await this.readEventStream(response, cursor, options);
-    const snapshot = await this.getRun(runId, options.signal);
-    if (snapshot.status !== "queued" && snapshot.status !== "running") {
-      return snapshot;
-    }
-    await this.waitForReconnect(options.signal);
-    return this.followRunEvents(runId, nextCursor, options);
   }
 
   private waitForReconnect(signal?: AbortSignal): Promise<void> {

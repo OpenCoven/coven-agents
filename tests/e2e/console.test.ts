@@ -123,6 +123,45 @@ test.describe("Run console", () => {
     expect(prewarmRequests).toBe(1);
   });
 
+  test("a lapsed authenticated session makes no protected console request", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({
+        json: {
+          expires: "2099-01-01T00:00:00.000Z",
+          user: {
+            authVersion: 0,
+            email: "lapsed@example.invalid",
+            id: "00000000-0000-4000-8000-000000000003",
+            image: null,
+            name: "Lapsed subscriber",
+            type: "demo",
+          },
+        },
+      })
+    );
+    const protectedRequests: string[] = [];
+    page.on("request", (request) => {
+      const { pathname } = new URL(request.url());
+      if (
+        pathname === "/api/agents" ||
+        pathname === "/api/credentials" ||
+        pathname === "/api/tenant/prewarm"
+      ) {
+        protectedRequests.push(pathname);
+      }
+    });
+
+    await page.goto("/agents");
+
+    await expect(page.getByText("no subscription")).toBeVisible();
+    await page.waitForTimeout(100);
+    expect(protectedRequests).toEqual([]);
+  });
+
   test("an account switch aborts stale prewarm and starts one for the new tenant", async ({
     context,
     page,

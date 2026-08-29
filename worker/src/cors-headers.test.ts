@@ -4,7 +4,7 @@ import test from "node:test";
 import { CLIENT_HEADERS, corsHeaders } from "./http.js";
 
 const clientSource = readFileSync(
-  new URL("../../lib/agents/client.ts", import.meta.url),
+  new URL("../../lib/agents/browser-transport.ts", import.meta.url),
   "utf8"
 );
 
@@ -20,11 +20,8 @@ function allowed(origin: string) {
 }
 
 test("every header the client sends is allowed by CORS", () => {
-  // The bug this exists to prevent: `x-runner-token` was added to the client
-  // when identity moved to Authorization, but never to this list. The browser
-  // then failed the preflight and reported "Failed to fetch" -- a message
-  // naming neither the header nor CORS. No server-side test could reproduce
-  // it, because CORS only exists in a browser.
+  // The browser now uses same-origin routes, but the retained rollback Worker
+  // must still accept every protocol header the dedicated transport uses.
   const sent = [...clientSource.matchAll(/"(x-[a-z-]+|last-event-id)":/g)].map(
     (match) => match[1]
   );

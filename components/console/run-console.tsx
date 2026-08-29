@@ -104,7 +104,12 @@ export function RunConsole() {
    * change when someone changes their address.
    */
   const accountId = session.data?.user?.id ?? null;
-  const sessionIdentity = `${session.status}:${accountId ?? ""}`;
+  const sessionIdentity = [
+    session.status,
+    accountId ?? "",
+    session.data?.user?.type ?? "",
+    session.data?.user?.authVersion ?? "",
+  ].join(":");
   const avatarSrc = accountId
     ? avatarFor({ id: accountId, image: session.data?.user?.image })
     : null;
@@ -165,7 +170,7 @@ export function RunConsole() {
   const credentialOwnerRef = useRef<string | null>(null);
   const activeSessionIdentityRef = useRef("");
   const latestSessionIdentityRef = useRef(sessionIdentity);
-  const prewarmIdentityRef = useRef<string | null>(null);
+  const prewarmedIdentitiesRef = useRef(new Set<string>());
   const sessionAbortRef = useRef<AbortController | null>(null);
   const sessionGenerationRef = useRef(0);
   latestSessionIdentityRef.current = sessionIdentity;
@@ -306,7 +311,13 @@ export function RunConsole() {
       setRunnerStatus("signed_out");
       setHasCredential(null);
       credentialOwnerRef.current = null;
-      prewarmIdentityRef.current = null;
+      resetCredentialCache();
+      return () => controller.abort();
+    }
+    if (session.data.user.type !== "subscriber") {
+      setRunnerStatus("subscription_required");
+      setHasCredential(null);
+      credentialOwnerRef.current = null;
       resetCredentialCache();
       return () => controller.abort();
     }
@@ -328,14 +339,9 @@ export function RunConsole() {
         }
       })
       .catch(() => undefined);
-    if (
-      session.data.user.type === "subscriber" &&
-      prewarmIdentityRef.current !== sessionIdentity
-    ) {
-      prewarmIdentityRef.current = sessionIdentity;
+    if (!prewarmedIdentitiesRef.current.has(sessionIdentity)) {
+      prewarmedIdentitiesRef.current.add(sessionIdentity);
       client.prewarmTenant(controller.signal).catch(() => undefined);
-    } else if (session.data.user.type !== "subscriber") {
-      prewarmIdentityRef.current = null;
     }
     refresh(generation, controller.signal).catch(() => undefined);
 
@@ -352,21 +358,29 @@ export function RunConsole() {
 
   const refreshCurrent = useCallback(() => {
     const controller = sessionAbortRef.current;
-    if (!(controller && session.status === "authenticated")) {
+    if (
+      !(
+        controller &&
+        session.status === "authenticated" &&
+        session.data.user.type === "subscriber"
+      )
+    ) {
       return Promise.resolve();
     }
     return refresh(sessionGenerationRef.current, controller.signal);
-  }, [refresh, session.status]);
+  }, [refresh, session.data?.user?.type, session.status]);
 
   const currentSessionContext = useCallback(() => {
     const controller = sessionAbortRef.current;
-    return controller && session.status === "authenticated"
+    return controller &&
+      session.status === "authenticated" &&
+      session.data.user.type === "subscriber"
       ? {
           generation: sessionGenerationRef.current,
           signal: controller.signal,
         }
       : null;
-  }, [session.status]);
+  }, [session.data?.user?.type, session.status]);
 
   useEffect(() => {
     if (session.status !== "authenticated" || runnerStatus !== "rate_limited") {
