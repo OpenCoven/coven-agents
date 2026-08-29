@@ -200,6 +200,11 @@ export type RunnerReconciliationResult = Readonly<{
   terminalized: number;
 }>;
 
+export type RunnerReconciliationExecutionResult =
+  | (RunnerReconciliationResult & Readonly<{ execution: "executed" }>)
+  | (RunnerReconciliationResult &
+      Readonly<{ execution: "skipped"; reason: "overlap" }>);
+
 export type ReconcileAndDispatchDependencies = Readonly<{
   batchSize?: number;
   clock?: () => Date;

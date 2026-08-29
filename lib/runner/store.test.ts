@@ -144,6 +144,100 @@ function scripted(...responses: Record<string, unknown>[][]) {
   return { statements, store };
 }
 
+test("reconciliation lease acquisition uses database time and skips a live holder", async () => {
+  const expiresAt = new Date("2026-08-28T21:40:00.000Z");
+  const acquired = scripted([
+    {
+      reconciliationLeaseExpiresAt: expiresAt,
+      reconciliationLeaseFence: "7",
+      reconciliationLeaseOwner: "owner-a",
+    },
+  ]);
+  const held = scripted([]);
+
+  assert.deepEqual(
+    await acquired.store.acquireReconciliationLease(operator, {
+      ownerToken: "owner-a",
+      ttlSeconds: 360,
+    }),
+    {
+      kind: "acquired",
+      lease: { expiresAt, fence: 7, ownerToken: "owner-a" },
+    }
+  );
+  assert.deepEqual(
+    await held.store.acquireReconciliationLease(operator, {
+      ownerToken: "owner-b",
+      ttlSeconds: 360,
+    }),
+    { kind: "held" }
+  );
+
+  const acquireSql = queryText(acquired.statements[0] as RunnerStoreStatement);
+  assert.match(acquireSql, /ON CONFLICT \("singleton"\) DO UPDATE/u);
+  assert.match(acquireSql, /clock_timestamp\(\)/u);
+  assert.match(acquireSql, /make_interval\(secs => \$\d+\)/u);
+  assert.match(
+    acquireSql,
+    /"reconciliationLeaseExpiresAt" <= clock_timestamp\(\)/u
+  );
+});
+
+test("expired reconciliation lease is reclaimed with a new fence", async () => {
+  const expiresAt = new Date("2026-08-28T21:46:00.000Z");
+  const { statements, store } = scripted([
+    {
+      reconciliationLeaseExpiresAt: expiresAt,
+      reconciliationLeaseFence: 12,
+      reconciliationLeaseOwner: "owner-new",
+    },
+  ]);
+
+  const result = await store.acquireReconciliationLease(operator, {
+    ownerToken: "owner-new",
+    ttlSeconds: 360,
+  });
+
+  assert.deepEqual(result, {
+    kind: "acquired",
+    lease: { expiresAt, fence: 12, ownerToken: "owner-new" },
+  });
+  assert.match(
+    queryText(statements[0] as RunnerStoreStatement),
+    /"reconciliationLeaseFence" = "RunnerScheduler"."reconciliationLeaseFence" \+ 1/u
+  );
+});
+
+test("reconciliation release is fenced by both owner and generation", async () => {
+  const stale = scripted([]);
+  const current = scripted([{ singleton: true }]);
+  const staleLease = {
+    expiresAt: new Date("2026-08-28T21:40:00.000Z"),
+    fence: 3,
+    ownerToken: "owner-old",
+  };
+  const currentLease = {
+    expiresAt: new Date("2026-08-28T21:46:00.000Z"),
+    fence: 4,
+    ownerToken: "owner-current",
+  };
+
+  assert.deepEqual(
+    await stale.store.releaseReconciliationLease(operator, staleLease),
+    { kind: "stale" }
+  );
+  assert.deepEqual(
+    await current.store.releaseReconciliationLease(operator, currentLease),
+    { kind: "released" }
+  );
+
+  const releaseSql = queryText(stale.statements[0] as RunnerStoreStatement);
+  assert.match(releaseSql, /"reconciliationLeaseOwner" = \$\d+/u);
+  assert.match(releaseSql, /"reconciliationLeaseFence" = \$\d+/u);
+  assert.equal(stale.statements[0]?.args.ownerToken, "owner-old");
+  assert.equal(stale.statements[0]?.args.fence, 3);
+});
+
 async function claimedAuthority(value: RunnerRunRecord) {
   const { store } = scripted(
     [

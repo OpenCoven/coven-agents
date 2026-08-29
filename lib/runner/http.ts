@@ -28,7 +28,7 @@ import type {
   RunnerSubscriberAuthorization,
 } from "./auth";
 import { RunnerServiceError } from "./errors";
-import type { RunnerReconciliationResult } from "./reconcile";
+import type { RunnerReconciliationExecutionResult } from "./reconcile";
 import type { RunnerDiagnosticResult, RunnerService } from "./service";
 import { createRunEventStream } from "./sse";
 import {
@@ -240,8 +240,8 @@ function schedule(
 }
 
 function reconciliationCounts(
-  result: RunnerReconciliationResult
-): RunnerReconciliationResult {
+  result: RunnerReconciliationExecutionResult
+): RunnerReconciliationExecutionResult {
   const fields = [
     "adopted",
     "deferred",
@@ -262,7 +262,7 @@ function reconciliationCounts(
       );
     }
   }
-  return {
+  const counts = {
     adopted: result.adopted,
     deferred: result.deferred,
     dispatched: result.dispatched,
@@ -274,6 +274,22 @@ function reconciliationCounts(
     terminalCleaned: result.terminalCleaned,
     terminalized: result.terminalized,
   };
+  if (result.execution === "skipped") {
+    if (result.reason !== "overlap") {
+      throw new RunnerServiceError(
+        "reconcile_unavailable",
+        "Runner reconciliation returned an invalid skip reason."
+      );
+    }
+    return { ...counts, execution: "skipped", reason: "overlap" };
+  }
+  if (result.execution !== "executed") {
+    throw new RunnerServiceError(
+      "reconcile_unavailable",
+      "Runner reconciliation returned an invalid execution indicator."
+    );
+  }
+  return { ...counts, execution: "executed" };
 }
 
 function serviceFailure(

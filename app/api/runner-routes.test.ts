@@ -116,6 +116,7 @@ function service(): RunnerService {
       adopted: 0,
       deferred: 0,
       dispatched: 1,
+      execution: "executed",
       expiredScanned: 0,
       failures: 0,
       logEvents: 0,
@@ -393,10 +394,12 @@ async function executeFixture(): Promise<void> {
         })
       );
       assert.equal(response.status, 200);
-      assert.equal(
-        ((await response.json()) as { dispatched: number }).dispatched,
-        1
-      );
+      const result = (await response.json()) as {
+        dispatched: number;
+        execution: string;
+      };
+      assert.equal(result.dispatched, 1);
+      assert.equal(result.execution, "executed");
     })
   );
 

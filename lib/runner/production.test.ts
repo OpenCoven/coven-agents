@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { runEphemeralDiagnostic } from "./production";
-import { dispatchProductionClaim } from "./runtime";
+import {
+  createProductionRunnerRuntime,
+  dispatchProductionClaim,
+} from "./runtime";
 import { RunnerServiceError } from "./service";
 import type { RunnerStore } from "./store";
 import type {
@@ -279,4 +282,63 @@ test("production releases failed claim setup for durable retry without provider 
   assert.equal(releasedAuthority, current.authority);
   assert.equal(dispatched, 0);
   assert.equal(JSON.stringify(result).includes("private-detail"), false);
+});
+
+test("production reconciliation skips a live lease before provider or scan work", async () => {
+  let databaseCalls = 0;
+  const runtime = createProductionRunnerRuntime({
+    databaseFor: () =>
+      ({
+        transaction: async (
+          callback: (transaction: {
+            execute: () => Promise<Record<string, unknown>[]>;
+          }) => Promise<unknown>
+        ) =>
+          callback({
+            execute: () => {
+              databaseCalls += 1;
+              return Promise.resolve([]);
+            },
+          }),
+      }) as never,
+  });
+  const service = await runtime.createOperatorService();
+
+  const result = await service.reconcileAndDispatch();
+
+  assert.deepEqual(result, {
+    adopted: 0,
+    deferred: 0,
+    dispatched: 0,
+    execution: "skipped",
+    expiredScanned: 0,
+    failures: 0,
+    logEvents: 0,
+    reason: "overlap",
+    requeued: 0,
+    sandboxRecovered: 0,
+    terminalCleaned: 0,
+    terminalized: 0,
+  });
+  assert.equal(databaseCalls, 1);
+});
+
+test("production reconciliation sanitizes lease database failures", async () => {
+  const secret = "database=private-detail";
+  const runtime = createProductionRunnerRuntime({
+    databaseFor: () =>
+      ({
+        transaction: () => Promise.reject(new Error(secret)),
+      }) as never,
+  });
+  const service = await runtime.createOperatorService();
+
+  await assert.rejects(service.reconcileAndDispatch(), (error: unknown) => {
+    assert.ok(error instanceof RunnerServiceError);
+    assert.equal(error.code, "reconcile_unavailable");
+    assert.equal(error.retryable, true);
+    assert.equal(error.message.includes(secret), false);
+    assert.equal(error.message.includes("private-detail"), false);
+    return true;
+  });
 });

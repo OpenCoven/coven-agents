@@ -18,6 +18,10 @@ import type { SubscriberSession } from "@/lib/session";
 import type { RunnerAdmissionLimits, RunnerDispatchResult } from "./admission";
 import { COPILOT_CLI_VERSION } from "./daytona/image";
 import type {
+  RunnerReconciliationExecutionResult,
+  RunnerReconciliationResult,
+} from "./reconcile";
+import type {
   RunnerDeleteAgentResult,
   RunnerService,
   RunnerWarmSandboxResult,
@@ -30,6 +34,19 @@ import type {
 } from "./types";
 
 const OPERATOR: RunnerOperator = { kind: "runner-operator" };
+const RECONCILIATION_LEASE_TTL_SECONDS = 360;
+const EMPTY_RECONCILIATION_COUNTS: RunnerReconciliationResult = {
+  adopted: 0,
+  deferred: 0,
+  dispatched: 0,
+  expiredScanned: 0,
+  failures: 0,
+  logEvents: 0,
+  requeued: 0,
+  sandboxRecovered: 0,
+  terminalCleaned: 0,
+  terminalized: 0,
+};
 
 type ProductionDatabase = ReturnType<typeof databaseFor>;
 
@@ -84,6 +101,59 @@ export type ProductionRunnerRuntime = Readonly<{
     session: SubscriberSession
   ) => Promise<RunnerService>;
 }>;
+
+export type LeasedReconciliationDependencies = Readonly<{
+  ownerToken?: () => string;
+  reconcile: () => Promise<RunnerReconciliationResult>;
+  store: Pick<
+    RunnerStore,
+    "acquireReconciliationLease" | "releaseReconciliationLease"
+  >;
+  ttlSeconds?: number;
+}>;
+
+/**
+ * Vercel cron delivery can overlap or be skipped and is not retried. This
+ * database-time lease makes each cron/manual recovery attempt singleton while
+ * allowing a crashed holder to be reclaimed after the bounded expiry.
+ */
+export async function runLeasedReconciliation(
+  dependencies: LeasedReconciliationDependencies
+): Promise<RunnerReconciliationExecutionResult> {
+  const ownerToken =
+    dependencies.ownerToken?.() ?? randomBytes(32).toString("base64url");
+  const acquired = await dependencies.store.acquireReconciliationLease(
+    OPERATOR,
+    {
+      ownerToken,
+      ttlSeconds: dependencies.ttlSeconds ?? RECONCILIATION_LEASE_TTL_SECONDS,
+    }
+  );
+  if (acquired.kind === "held") {
+    return {
+      ...EMPTY_RECONCILIATION_COUNTS,
+      execution: "skipped",
+      reason: "overlap",
+    };
+  }
+
+  try {
+    return {
+      ...(await dependencies.reconcile()),
+      execution: "executed",
+    };
+  } finally {
+    try {
+      await dependencies.store.releaseReconciliationLease(
+        OPERATOR,
+        acquired.lease
+      );
+    } catch {
+      // A failed release leaves the fenced lease to expire; it cannot clear a
+      // newer owner.
+    }
+  }
+}
 
 async function productionDatabase(
   principal: ProductionDatabasePrincipal
@@ -333,36 +403,52 @@ function productionReconcile(
 ): RunnerService["reconcileAndDispatch"] {
   return async () => {
     try {
-      const [admission, client, credentials, errors, reconciliation, sandbox] =
-        await Promise.all([
-          import("./admission"),
-          import("./daytona/client"),
-          import("@/lib/credentials/runner-credential"),
-          import("./errors"),
-          import("./reconcile"),
-          import("./daytona/sandbox"),
-        ]);
-      const daytona = client.daytonaClient();
-      const credentialDependencies =
-        credentials.drizzleRunnerCredentialDependencies(database);
-      const composition =
-        reconciliation.daytonaRunnerReconciliationDependencies({
-          credentialDependencies,
-          credentialInput: () => {
-            throw new errors.RunnerServiceError(
-              "reconcile_unavailable",
-              "Reconciliation dispatch must resolve account credentials first."
-            );
-          },
-          daytona,
-          limits: admission.admissionLimitsFromEnvironment(),
-          operator: OPERATOR,
-          sandboxConfiguration: sandbox.daytonaSandboxConfiguration(),
-          store,
-        });
-      return await reconciliation.reconcileAndDispatch({
-        ...composition,
-        dispatch: configuredDispatcher(database, store, daytona, findAccount),
+      return await runLeasedReconciliation({
+        reconcile: async () => {
+          const [
+            admission,
+            client,
+            credentials,
+            errors,
+            reconciliation,
+            sandbox,
+          ] = await Promise.all([
+            import("./admission"),
+            import("./daytona/client"),
+            import("@/lib/credentials/runner-credential"),
+            import("./errors"),
+            import("./reconcile"),
+            import("./daytona/sandbox"),
+          ]);
+          const daytona = client.daytonaClient();
+          const credentialDependencies =
+            credentials.drizzleRunnerCredentialDependencies(database);
+          const composition =
+            reconciliation.daytonaRunnerReconciliationDependencies({
+              credentialDependencies,
+              credentialInput: () => {
+                throw new errors.RunnerServiceError(
+                  "reconcile_unavailable",
+                  "Reconciliation dispatch must resolve account credentials first."
+                );
+              },
+              daytona,
+              limits: admission.admissionLimitsFromEnvironment(),
+              operator: OPERATOR,
+              sandboxConfiguration: sandbox.daytonaSandboxConfiguration(),
+              store,
+            });
+          return reconciliation.reconcileAndDispatch({
+            ...composition,
+            dispatch: configuredDispatcher(
+              database,
+              store,
+              daytona,
+              findAccount
+            ),
+          });
+        },
+        store,
       });
     } catch (error) {
       const { RunnerServiceError: RuntimeServiceError } = await import(

@@ -79,6 +79,7 @@ function counts() {
     adopted: 0,
     deferred: 0,
     dispatched: 1,
+    execution: "executed" as const,
     expiredScanned: 0,
     failures: 0,
     logEvents: 0,
@@ -166,6 +167,7 @@ function authorizedAuth(): RunnerAuth {
 function handlers(
   options: {
     admission?: AbuseAdmission;
+    after?: ((callback: () => void | Promise<void>) => void) | null;
     auth?: RunnerAuth;
     service?: RunnerService;
   } = {}
@@ -178,9 +180,15 @@ function handlers(
   let operatorRequests = 0;
   const runner = options.service ?? service();
   const result = createRunnerHttpHandlers({
-    after: (callback) => {
-      after.push(callback);
-    },
+    ...(options.after === null
+      ? {}
+      : {
+          after:
+            options.after ??
+            ((callback) => {
+              after.push(callback);
+            }),
+        }),
     auth: options.auth ?? authorizedAuth(),
     createOperatorService: () => {
       operatorRequests += 1;
@@ -1289,6 +1297,213 @@ test("diagnostics and reconciliation use only their operator service and safe ou
   assert.equal(fixture.diagnosticRequests(), 1);
   assert.equal(fixture.operatorRequests(), 1);
   assert.equal(fixture.serviceRequests(), 0);
+});
+
+test("reconciliation returns validated overlap skips and does not depend on after", async () => {
+  await Promise.all(
+    [
+      null,
+      () => {
+        throw new Error("after unavailable");
+      },
+    ].flatMap((after) =>
+      ["GET", "POST"].map(async (method) => {
+        const fixture = handlers({
+          after,
+          service: service({
+            reconcileAndDispatch: () =>
+              Promise.resolve({
+                ...counts(),
+                dispatched: 0,
+                execution: "skipped",
+                reason: "overlap",
+              }),
+          }),
+        });
+
+        const response = await fixture.handlers.reconcile(
+          new Request("https://app.test/api/internal/runner-reconcile", {
+            method,
+          })
+        );
+
+        assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), {
+          ...counts(),
+          dispatched: 0,
+          execution: "skipped",
+          reason: "overlap",
+        });
+      })
+    )
+  );
+});
+
+test("overlapping GET and POST execute exactly one leased reconciliation", async () => {
+  const { runLeasedReconciliation } = await import("./runtime");
+  let activeLease: Readonly<{
+    expiresAt: Date;
+    fence: number;
+    ownerToken: string;
+  }> | null = null;
+  let owner = 0;
+  let reconcileCalls = 0;
+  let finishFirst: (() => void) | undefined;
+  let signalStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    signalStarted = resolve;
+  });
+  const finish = new Promise<void>((resolve) => {
+    finishFirst = resolve;
+  });
+  const store = {
+    acquireReconciliationLease: (
+      _operator: unknown,
+      input: { ownerToken: string }
+    ) => {
+      if (activeLease) {
+        return Promise.resolve({ kind: "held" as const });
+      }
+      activeLease = {
+        expiresAt: new Date("2026-08-28T21:40:00.000Z"),
+        fence: owner,
+        ownerToken: input.ownerToken,
+      };
+      return Promise.resolve({
+        kind: "acquired" as const,
+        lease: activeLease,
+      });
+    },
+    releaseReconciliationLease: (
+      _operator: unknown,
+      lease: Readonly<{ fence: number; ownerToken: string }>
+    ) => {
+      if (
+        activeLease?.ownerToken !== lease.ownerToken ||
+        activeLease.fence !== lease.fence
+      ) {
+        return Promise.resolve({ kind: "stale" as const });
+      }
+      activeLease = null;
+      return Promise.resolve({ kind: "released" as const });
+    },
+  };
+  const runner = service({
+    reconcileAndDispatch: () =>
+      runLeasedReconciliation({
+        ownerToken: () => {
+          owner += 1;
+          return `request-${owner}`;
+        },
+        reconcile: async () => {
+          reconcileCalls += 1;
+          signalStarted?.();
+          await finish;
+          return counts();
+        },
+        store,
+      }),
+  });
+  const fixture = handlers({ service: runner });
+
+  const get = fixture.handlers.reconcile(
+    new Request("https://app.test/api/internal/runner-reconcile", {
+      method: "GET",
+    })
+  );
+  await started;
+  const post = await fixture.handlers.reconcile(
+    new Request("https://app.test/api/internal/runner-reconcile", {
+      method: "POST",
+    })
+  );
+  finishFirst?.();
+  const getResponse = await get;
+
+  assert.equal(reconcileCalls, 1);
+  assert.equal(getResponse.status, 200);
+  assert.equal(post.status, 200);
+  assert.equal(
+    ((await getResponse.json()) as { execution: string }).execution,
+    "executed"
+  );
+  assert.deepEqual(await post.json(), {
+    ...counts(),
+    dispatched: 0,
+    execution: "skipped",
+    reason: "overlap",
+  });
+});
+
+test("GET and POST apply abuse enforcement before reconciliation secrets", async () => {
+  await Promise.all(
+    ["GET", "POST"].map(async (method) => {
+      const events: string[] = [];
+      const runner = service({
+        reconcileAndDispatch: () =>
+          Promise.reject(new Error("reconciliation must not run")),
+      });
+      const runnerHandlers = createRunnerHttpHandlers({
+        auth: {
+          authorizeDiagnostic: () => ({ kind: "unauthorized" }),
+          authorizeReconcile: () => {
+            events.push("secret");
+            return { kind: "unauthorized" };
+          },
+          authorizeSubscriber: async () => subscriber,
+        },
+        createOperatorService: () => runner,
+        createService: () => runner,
+        diagnoseSandbox: () => runner.diagnoseSandbox(),
+        enforceAbuse: () => {
+          events.push("abuse");
+          return Promise.resolve({ kind: "allowed" });
+        },
+        ipAddress: () => "203.0.113.10",
+      });
+
+      const response = await runnerHandlers.reconcile(
+        new Request("https://app.test/api/internal/runner-reconcile", {
+          method,
+        })
+      );
+
+      assert.equal(response.status, 401);
+      assert.deepEqual(events, ["abuse", "secret"]);
+    })
+  );
+});
+
+test("reconciliation errors never serialize provider or database causes", async () => {
+  await Promise.all(
+    ["provider=private-detail", "database=private-detail"].map(
+      async (cause) => {
+        const fixture = handlers({
+          service: service({
+            reconcileAndDispatch: () =>
+              Promise.reject(
+                new RunnerServiceError(
+                  "reconcile_unavailable",
+                  "Runner reconciliation is unavailable.",
+                  true,
+                  { cause: new Error(cause) }
+                )
+              ),
+          }),
+        });
+        const response = await fixture.handlers.reconcile(
+          new Request("https://app.test/api/internal/runner-reconcile", {
+            method: "POST",
+          })
+        );
+        const serialized = JSON.stringify(await response.json());
+
+        assert.equal(response.status, 503);
+        assert.equal(serialized.includes(cause), false);
+        assert.equal(serialized.includes("private-detail"), false);
+      }
+    )
+  );
 });
 
 test("diagnostic construction failure is isolated from health, CRUD, runs, and reconciliation", async () => {

@@ -29,7 +29,7 @@ import { RunnerServiceError } from "./errors";
 import { hashRunRequest, isTerminalRun } from "./evidence";
 import type {
   CancelRunnerRunResult,
-  RunnerReconciliationResult,
+  RunnerReconciliationExecutionResult,
 } from "./reconcile";
 import type { RunnerStore } from "./store";
 import type {
@@ -100,7 +100,7 @@ export type RunnerServiceDependencies = Readonly<{
     claimed: RunnerClaimedDispatch
   ) => Promise<RunnerDispatchResult>;
   listHarnesses?: () => Promise<readonly HarnessStatus[]>;
-  reconcileAndDispatch?: () => Promise<RunnerReconciliationResult>;
+  reconcileAndDispatch?: () => Promise<RunnerReconciliationExecutionResult>;
   store: RunnerServiceStore;
   warmSandbox?: (
     principal: RunnerPrincipal,
@@ -243,7 +243,7 @@ export type RunnerService = Readonly<{
     runId: string,
     afterEventId: number
   ) => Promise<RunnerEventPageResult>;
-  reconcileAndDispatch: () => Promise<RunnerReconciliationResult>;
+  reconcileAndDispatch: () => Promise<RunnerReconciliationExecutionResult>;
   startRun: (
     principal: RunnerPrincipal,
     authVersion: number,
