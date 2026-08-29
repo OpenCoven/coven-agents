@@ -196,10 +196,26 @@ async function removeCredential(
  * deterministic ID even when its first lookup missed it, then verify absence
  * so a retry cannot attach to a session left by that ambiguous request.
  */
-async function removeSession(
+type SessionCleanupOutcome = Readonly<{
+  targetObserved: boolean;
+}>;
+
+type SessionCleanupSettlement =
+  | Readonly<{
+      outcome: SessionCleanupOutcome;
+      status: "confirmed";
+    }>
+  | Readonly<{
+      status: "settled_failed";
+    }>
+  | Readonly<{
+      status: "pending";
+    }>;
+
+async function removeSessionWithOutcome(
   sandbox: DaytonaProcessSandbox,
   sessionId: string
-): Promise<void> {
+): Promise<SessionCleanupOutcome> {
   // The first lookup provides a bounded view of a session a rejected create
   // may have left behind. A failed lookup must not skip the deterministic
   // delete; a successful empty lookup does not need one.
@@ -224,6 +240,14 @@ async function removeSession(
   if (remaining.some((session) => session.sessionId === sessionId)) {
     throw new Error("Daytona session remained after deletion.");
   }
+  return { targetObserved: exists };
+}
+
+async function removeSession(
+  sandbox: DaytonaProcessSandbox,
+  sessionId: string
+): Promise<void> {
+  await removeSessionWithOutcome(sandbox, sessionId);
 }
 
 export function cleanupDaytonaProbeSession(
@@ -998,6 +1022,47 @@ function settleCleanupWithinDeadline(
   });
 }
 
+function startSessionCleanupWithinDeadline(
+  cleanup: () => Promise<SessionCleanupOutcome>,
+  options: DaytonaProbeOptions
+): Promise<SessionCleanupSettlement> {
+  const remainingMs = cleanupRemainingMs(options);
+  if (remainingMs !== null && remainingMs <= 0) {
+    return Promise.resolve({ status: "pending" });
+  }
+  return settleSessionCleanupWithinDeadline(cleanup(), options);
+}
+
+function settleSessionCleanupWithinDeadline(
+  cleanup: Promise<SessionCleanupOutcome>,
+  options: DaytonaProbeOptions
+): Promise<SessionCleanupSettlement> {
+  cleanup.catch(() => undefined);
+  const remainingMs = cleanupRemainingMs(options);
+  if (remainingMs === null) {
+    return cleanup.then(
+      (outcome) => ({ outcome, status: "confirmed" }),
+      () => ({ status: "settled_failed" })
+    );
+  }
+  if (remainingMs <= 0) {
+    return Promise.resolve({ status: "pending" });
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ status: "pending" }), remainingMs);
+    cleanup.then(
+      (outcome) => {
+        clearTimeout(timer);
+        resolve({ outcome, status: "confirmed" });
+      },
+      () => {
+        clearTimeout(timer);
+        resolve({ status: "settled_failed" });
+      }
+    );
+  });
+}
+
 /**
  * Starts provider cleanup before settling an aborted command.
  *
@@ -1073,10 +1138,10 @@ async function probeDaytonaHarnessesInSession(
   if (!sessionId || !PROBE_SESSION_PATTERN.test(sessionId)) {
     throw new Error("Daytona harness probe requires an owned session id.");
   }
-  let abortCleanup: Promise<void> | undefined;
+  let abortCleanup: Promise<SessionCleanupOutcome> | undefined;
   const cleanupAfterAbort = () => {
-    abortCleanup ??= removeSession(sandbox, sessionId);
-    return abortCleanup;
+    abortCleanup ??= removeSessionWithOutcome(sandbox, sessionId);
+    return abortCleanup.then(() => undefined);
   };
   const onAbort = () => {
     cleanupAfterAbort().catch(() => undefined);
@@ -1086,9 +1151,10 @@ async function probeDaytonaHarnessesInSession(
   let failure: unknown;
   let results: HarnessStatus[] | undefined;
   let cleanupConfirmed = false;
-  let commandStarted = false;
+  let createResolvedSuccessfully = false;
   try {
     await sandbox.process.createSession(sessionId);
+    createResolvedSuccessfully = true;
     if (options.signal.aborted) {
       throw abortReason(options.signal);
     }
@@ -1100,7 +1166,6 @@ async function probeDaytonaHarnessesInSession(
       }
       let observed: { installed: boolean; version: string | null };
       try {
-        commandStarted = true;
         // biome-ignore lint/performance/noAwaitInLoops: one attempt-scoped session executes probes sequentially so commands cannot contend inside the same provider session.
         const result = await awaitCommandAfterAbortCleanup(
           sandbox.process.executeSessionCommand(
@@ -1148,11 +1213,27 @@ async function probeDaytonaHarnessesInSession(
     failure = options.signal.aborted ? abortReason(options.signal) : error;
   } finally {
     options.signal.removeEventListener("abort", onAbort);
-    const cleanup =
-      options.signal.aborted && !commandStarted
-        ? removeSession(sandbox, sessionId)
-        : (abortCleanup ?? removeSession(sandbox, sessionId));
-    cleanupConfirmed = await settleCleanupWithinDeadline(cleanup, options);
+    if (abortCleanup) {
+      const firstCleanup = await settleSessionCleanupWithinDeadline(
+        abortCleanup,
+        options
+      );
+      if (firstCleanup.status !== "pending") {
+        const finalCleanup = await startSessionCleanupWithinDeadline(
+          () => removeSessionWithOutcome(sandbox, sessionId),
+          options
+        );
+        cleanupConfirmed = finalCleanup.status === "confirmed";
+      }
+    } else {
+      const finalCleanup = await startSessionCleanupWithinDeadline(
+        () => removeSessionWithOutcome(sandbox, sessionId),
+        options
+      );
+      cleanupConfirmed =
+        finalCleanup.status === "confirmed" &&
+        (createResolvedSuccessfully || finalCleanup.outcome.targetObserved);
+    }
   }
   if (!cleanupConfirmed) {
     throw new DaytonaProbeCleanupPendingError(sessionId, {
