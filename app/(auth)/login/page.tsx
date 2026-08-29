@@ -26,12 +26,9 @@ export default function Page() {
         in never starts an agent or a run. For subscribers, we begin warming the
         sandbox so the first mission starts fast.
       </p>
-      {/* The boundary, stated where a stranger first meets the product. One
-          line, every claim true: runs execute in Cloudflare's sandbox
-          containers and the container is the blast radius. */}
+      {/* The boundary, stated where a stranger first meets the product. */}
       <p className="font-mono text-[11px] text-muted-foreground/70">
-        Agents run in isolated Cloudflare sandboxes — filesystem and network end
-        with the container.
+        Agents run in isolated Daytona sandboxes — never on your machine.
       </p>
 
       <div className="pt-2">

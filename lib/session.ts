@@ -11,10 +11,10 @@
  * function's parameter type on a runtime flag the way it can on a
  * discriminated union member.
  *
- * This mirrors `worker/src/tenant.ts`, which switches exhaustively over an
- * owner union so an unhandled case is a compile error rather than a runtime
- * surprise. Same idea here: push the tenant/subscriber distinction into the
- * type system so it can't silently decay.
+ * The same principle applies to runner principal unions: an unhandled
+ * authority kind is a compile error rather than a runtime surprise. Push the
+ * tenant/subscriber distinction into the type system so it cannot silently
+ * decay.
  */
 export type DemoSession = { kind: "demo"; tenant: string };
 export type SubscriberSession = {
@@ -25,17 +25,14 @@ export type SubscriberSession = {
 export type Session = DemoSession | SubscriberSession;
 
 /**
- * A tenant id is a sandbox key component, so it must satisfy
- * `worker/src/tenant.ts`'s `/^[A-Za-z0-9_]{1,64}$/`. The previous
- * `user:${uuid}` form satisfied neither half — `:` and the uuid's `-` are both
- * rejected — so every cloud run died at `sandboxKey` before the sandbox
- * started.
+ * A tenant id is a durable database and provider-name component, so it uses a
+ * compact conservative alphabet. The previous `user:${uuid}` form included
+ * punctuation that provider identifiers reject.
  *
- * The worker deliberately refuses to sanitize what it is handed, because
- * rewriting `a-b` to `a_b` would let one tenant forge another's key. Mapping an
- * external identifier onto a safe internal one is therefore this module's job,
- * and the mapping has to be injective: two tenants that collide share a
- * container, and so share a workspace and every file in it.
+ * Rewriting unsafe input is dangerous because `a-b` and `a_b` could collide.
+ * Mapping an external identifier onto a safe internal one is therefore this
+ * module's job, and the mapping has to be injective: two tenants that collide
+ * could share durable state or a provider workspace.
  *
  * Both forms below are a fixed prefix plus exactly 32 hex characters. Fixed
  * width is what makes them unambiguous — with a variable-length body, `u_` +

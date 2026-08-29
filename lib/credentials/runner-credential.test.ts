@@ -390,6 +390,48 @@ test("capacity refusal never issues or decrypts a credential", async () => {
   assert.deepEqual(calls, ["reserve"]);
 });
 
+test("tenant cap refusals preserve bounded accounting metadata", async () => {
+  await Promise.all(
+    (["tenant_daily_cap", "tenant_monthly_cap"] as const).map(
+      async (reason) => {
+        const calls: string[] = [];
+        const service = dependencies(calls);
+        service.reserveRun = async () => {
+          calls.push("reserve");
+          return { cap: 25, kind: "refused", reason, used: 25 };
+        };
+
+        assert.deepEqual(await acquireRunnerCredential(input(), service), {
+          cap: 25,
+          kind: "refused",
+          reason,
+          used: 25,
+        });
+        assert.deepEqual(calls, ["reserve"]);
+      }
+    )
+  );
+});
+
+test("credential issue failures release pre-launch resources without reading plaintext", async () => {
+  const calls: string[] = [];
+  const service = dependencies(calls);
+  service.issueLease = async () => {
+    calls.push("issue");
+    throw new Error("private credential transport detail");
+  };
+
+  const result = await acquireRunnerCredential(input(), service);
+
+  assert.equal(result.kind, "unavailable");
+  assert.equal(
+    result.kind === "unavailable" && result.error.code,
+    "credential_unavailable"
+  );
+  assert.equal(JSON.stringify(result).includes("private credential"), false);
+  assert.deepEqual(calls, ["reserve", "issue", "cleanup:prelaunch"]);
+});
+
 test("an existing reserved run never steals or releases another acquisition", async () => {
   const calls: string[] = [];
   const service = dependencies(calls);

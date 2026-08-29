@@ -3,460 +3,207 @@
 - Status: living document
 - Owner: Security & privacy workstream
 - Companion to: [Execution threat model](execution-threat-model.md)
-- Applies to: every credential in the control plane, the cloud runner, and the
-  operator's own machine
+- Applies to: control-plane, Daytona, database, billing, authentication, and
+  operator credentials
 
-This document is for the moment something has already gone wrong. It assumes
-you are stressed, possibly alone, and possibly wrong about what happened. Every
-runbook is written so it can be followed literally.
-
-## Three rules that decide everything else
-
-**1. Rotate first. Investigate second.** Investigation takes hours and rotation
-takes minutes. A rotated credential makes the investigation calm; an
-un-rotated one makes it a race. The only exception is when rotating destroys
-the evidence you need to know who else is affected — none of the runbooks below
-have that property.
-
-**2. Deleting a secret does not un-leak it.** Once a value has been pushed,
-logged, screenshotted, or pasted, treat it as permanently public. Removing the
-commit changes what is convenient to find, not what is known. `git push
---force` is never a substitute for rotation, and rewriting history *before*
-rotating is the classic way to spend an hour and still be compromised.
-
-**3. Announce the blast radius before you know it is small.** Say "a
-deployment token may have leaked, rotating now" early. Correcting a
-conservative statement later costs nothing; discovering that a quiet incident
-was larger than assumed costs trust.
+Rotate first, investigate second. Deleting a value or rewriting Git history
+does not revoke it. Announce a conservative blast radius early, then narrow it
+with evidence.
 
 ## Severity
 
 | Level | Meaning | Examples | First action |
 | --- | --- | --- | --- |
-| **S1** | Another tenant's data is reachable | Credential KEK ring, `POSTGRES_URL`, a tenant's harness credential | Rotate immediately, then notify affected tenants |
-| **S2** | Our infrastructure is controllable, tenant data is not directly exposed | `AGENT_CONTROL_TOKEN`, `OPERATOR_DIAGNOSTIC_TOKEN`, `RUNNER_SERVICE_TOKEN`, `AUTH_SECRET` | Rotate immediately |
-| **S3** | Cost or availability, no data boundary crossed | endpoint URL known, unauthenticated request flood | Measure, then decide |
+| **S1** | Another tenant's data may be reachable | Credential KEK ring, `POSTGRES_URL`, tenant harness credential | Rotate or revoke immediately; notify affected tenants |
+| **S2** | Infrastructure or product authority is controllable | `AUTH_SECRET`, `DAYTONA_API_KEY`, reconciliation or diagnostic credentials | Rotate immediately |
+| **S3** | Cost or availability without a data boundary crossing | Endpoint discovery, refused request flood | Contain and measure |
 
-An **S1** is the only class that creates an obligation to someone other than
-us. When in doubt about which class you are in, treat it as the higher one
-until you can prove otherwise.
+Treat uncertainty as the higher severity until evidence proves otherwise.
 
 ## Credential inventory
 
-Everything that grants something, where it lives, and what it costs to rotate.
-
 | Secret | Stored in | Grants | Rotation cost |
 | --- | --- | --- | --- |
-| `CREDENTIAL_KEK_CURRENT_VERSION`, `CREDENTIAL_KEK_V1`, `CREDENTIAL_KEK_V2`, and legacy `CREDENTIAL_KEK` | Vercel | Versioned decryption of tenant credential data keys | Rewrap before retiring an old key |
-| `POSTGRES_URL` and the `PG*` family | Vercel (Neon integration) | Full read/write on all tenant data | Brief downtime |
-| `AUTH_SECRET` | Vercel | Forging any signed-in session | Everyone is signed out |
-| `AGENT_CONTROL_TOKEN` | Vercel + worker | Reaching the legacy rollback Worker deployment | Rollback path unavailable during rotation |
-| `OPERATOR_DIAGNOSTIC_TOKEN` | Worker | Running the operator-only Sandbox diagnostic | Seconds of failed diagnostics |
-| `RUNNER_SERVICE_TOKEN` | Vercel + worker | Calling retained internal endpoints from the legacy rollback Worker | Rollback path unavailable during rotation |
-| `AUTH_GITHUB_SECRET` | Vercel | Impersonating our OAuth app | Sign-in breaks until updated |
-| `STRIPE_SECRET_KEY` | Vercel | Charging and refunding | None |
-| `STRIPE_WEBHOOK_SECRET` | Vercel | Forging subscription events | Missed events until updated |
-| Tenant harness credential | Encrypted DB row | Acting as that tenant on GitHub | Theirs to rotate, not ours |
+| `CREDENTIAL_KEK_CURRENT_VERSION`, `CREDENTIAL_KEK_V1`, `CREDENTIAL_KEK_V2`, legacy `CREDENTIAL_KEK` | Vercel | Decrypting wrapped tenant credential data keys | Rewrap and verify before retirement |
+| `POSTGRES_URL` and `PG*` | Vercel/Neon | Full database read/write | Brief downtime |
+| `AUTH_SECRET` | Vercel | Forging application sessions | Everyone signs in again |
+| `DAYTONA_API_KEY` | Vercel | Creating and controlling runner sandboxes | Runner unavailable during rotation |
+| `OPERATOR_DIAGNOSTIC_TOKEN` | Vercel | Running the bounded diagnostic route | Diagnostics unavailable during rotation |
+| `CRON_SECRET` | Vercel | Triggering scheduled reconciliation | Scheduled recovery pauses |
+| `RUNNER_MANUAL_RECONCILE_SECRET` | Vercel/operator store | Triggering manual reconciliation | Manual recovery pauses |
+| `AUTH_GITHUB_SECRET` | Vercel/GitHub | Impersonating the OAuth application | Sign-in pauses |
+| `STRIPE_SECRET_KEY` | Vercel/Stripe | Charging and refunding | Billing operations pause |
+| `STRIPE_WEBHOOK_SECRET` | Vercel/Stripe | Authenticating subscription events | Events retry until updated |
+| Tenant harness credential | Encrypted database row | Acting as that tenant at GitHub | Tenant must revoke it |
 
-Four properties worth internalising before an incident rather than during one:
+The repository has no Cloudflare runtime, runner service token, browser runner
+token, or runner signing/verification-key configuration. A separately deployed
+legacy service, if one still exists during rollout, must be inventoried and
+decommissioned operationally; this document does not claim that has happened.
 
-- **Vercel Sensitive variables are write-only.** `vercel env pull` and the API
-  both withhold the value, returning the literal string `[SENSITIVE]`, and the
-  dashboard hides it too. Nobody can read it back — not the CLI, not you. You
-  cannot check whether a secret matches; you can only set a new one. Plan
-  rotations around that.
-- **`vercel redeploy` reuses the existing build.** A `NEXT_PUBLIC_*` value is
-  inlined at build time, so changing one requires a fresh push, not a
-  redeploy. Server-side variables are picked up by a redeploy.
-- **Never mark a `NEXT_PUBLIC_*` variable Sensitive.** It buys nothing and
-  costs recovery. See below.
-- **Visibility is never the default.** `vercel env add` needs `--sensitive` for
-  a server-side secret and `--no-sensitive` for a public one, and gets it wrong
-  in both directions if you omit it: a secret lands readable, and a public
-  variable is refused outright. Pass the flag every time.
+Platform facts that affect every rotation:
 
-### `NEXT_PUBLIC_*` must never be Sensitive
-
-The two properties above combine into a trap.
-
-A `NEXT_PUBLIC_*` value is inlined into the client bundle, so it is served to
-every browser that loads the page. Marking it Sensitive therefore protects
-nothing: the value is public by construction, and the label only hides it from
-the people who are entitled to see it.
-
-What the label *does* do is make the value unrecoverable. It cannot be read
-from the CLI, the API, or the dashboard, so the only way to change its
-visibility is to delete and re-add it — and the delete destroys the one copy
-anybody could still read.
-
-This happened to the now-retired `NEXT_PUBLIC_CLOUD_RUNNER_URL`, which was
-Sensitive on Preview and Non-sensitive on Production. Aligning them meant
-deleting a value nobody could read first. It was reconstructible only because
-`wrangler.jsonc` defines exactly one worker and no other subdomain resolves, so
-there was exactly one value it could have been. A variable without that
-property would simply have been lost.
-
-Vercel now rejects the combination outright:
-
-> Environment variables with a public framework prefix (NEXT_PUBLIC) cannot use
-> secret visibility on Production or Preview.
-
-Anything still marked that way predates the rule. If you find one:
-
-1. Work out the correct value from a source other than Vercel — the code
-   default, the deployed resource, another environment — **before** deleting.
-2. `vercel env rm <NAME> <environment> --yes`
-3. `printf '%s' "<value>" | vercel env add <NAME> <environment> --no-sensitive`
-
-The `--no-sensitive` flag is required; the add is rejected without it.
-
-If a value turns out to be genuinely unrecoverable, that is the signal it
-should never have carried the `NEXT_PUBLIC_` prefix. Rename it to a
-server-side variable and read it through an API route instead of leaving a
-secret in every visitor's browser.
+- **Vercel Sensitive variables are write-only.** Pull and API operations return
+  `[SENSITIVE]`; you cannot compare the stored value.
+- **`vercel redeploy` reuses the existing build.** Server-side variables are
+  picked up, but build-time public values require a new build.
+- **`NEXT_PUBLIC_*` must never be Sensitive.** Public values are shipped to
+  browsers, and secret visibility only makes the operator copy unreadable.
+- `vercel env add` must pass `--sensitive` for secrets or `--no-sensitive` for
+  public values. **`--sensitive` is required, not decorative.**
+- **A redeploy is what makes the new value live.** Updating stored
+  configuration alone does not change the serving deployment.
+- A copied network trace is a credential disclosure because it includes
+  request headers and cookies.
 
 ## First fifteen minutes
 
-1. **Name the secret.** Not "credentials leaked" — which variable, in which
-   store. If you cannot name it, treat every secret that appeared in the same
-   file or screen as leaked.
-2. **Rotate it** using its runbook below.
-3. **Prove the old value is dead.** Every runbook has a verification step that
-   fails if rotation did not take. Do not skip it: a rotation that silently did
-   not apply is worse than none, because it ends the sense of urgency.
-4. **Only then** work out how it escaped.
+1. Name the exact credential and store. If uncertain, include every credential
+   visible in the same file, terminal, trace, or screen.
+2. Disable the affected route or provider authority when that reduces harm.
+3. Rotate or revoke using the runbook below.
+4. Redeploy or rebuild as required.
+5. Prove the old value is rejected without printing either value.
+6. Preserve sanitized timestamps, request IDs, run IDs, and provider IDs.
+7. Investigate the escape path only after authority is contained.
 
 ## Runbooks
 
-The current browser uses only its Auth.js application session on same-origin
-APIs. It receives no Worker endpoint credential, signed runner identity, or
-runner bearer header. The Worker-specific runbooks below apply only while the
-legacy rollback runtime remains deployed.
+### Credential KEK ring
 
-### `AGENT_CONTROL_TOKEN` — legacy rollback Worker deployment
+Removing the only configured KEK **destroys access to every stored credential**.
+Do not delete a key while any credential or unexpired encrypted idempotency row
+still names it.
 
-**Grants.** Reaching the rollback Worker. It does *not* identify a tenant, is
-not returned to the current browser, and cannot authorize
-`/api/diagnostics/sandbox`. Tenant operations in a rolled-back application also
-require its legacy signed identity.
-
-**Rotate.**
-
-```bash
-NEW="$(openssl rand -hex 32)"
-
-# Worker first: the app fails closed while they disagree, which is the safe
-# direction. The reverse order leaves the worker accepting the old value.
-cd worker && printf '%s' "$NEW" | npx wrangler secret put AGENT_CONTROL_TOKEN
-
-cd .. && npx vercel env rm AGENT_CONTROL_TOKEN production --yes
-
-# `--sensitive` is required, not decorative. Without it the value lands
-# readable, and a secret you can read back from the CLI is one that will be
-# read back into a terminal, a log, or a screen share.
-printf '%s' "$NEW" | npx vercel env add AGENT_CONTROL_TOKEN production --sensitive
-
-# A redeploy is what makes the new value live: setting it changes the stored
-# variable, not the running deployment. `vercel ls` is newest-first, so the
-# first line is the deployment currently serving production.
-LATEST="$(npx vercel ls --yes | head -1)"
-npx vercel redeploy "$LATEST"
-```
-
-**What breaks.** Only the legacy rollback path fails between the two updates.
-The current same-origin Daytona path is unaffected.
-
-**Verify rollback containment.** The old value must be refused by the retained
-Worker:
-
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' \
-  https://coven-agents-runner.opencovenagents.workers.dev/api/agents \
-  -H "X-Runner-Token: <old value>"
-# 401 expected
-```
-
-### `OPERATOR_DIAGNOSTIC_TOKEN` — the rollback Worker diagnostic
-
-**Grants.** Running `POST /api/diagnostics/sandbox` without tenant identity.
-This secret is stored only as a Worker secret, is compared timing-safely, and
-is never returned to the app or browser. The route is rate-limited before
-authentication and fails closed with `503` if the secret is missing.
-
-**Rotate.**
-
-```bash
-NEW="$(openssl rand -hex 32)"
-
-cd worker
-printf '%s' "$NEW" | npx wrangler secret put OPERATOR_DIAGNOSTIC_TOKEN
-```
-
-**Verify.** Do not print either value. The old value must be refused, the
-legacy deployment control token must remain refused, and only the new operator
-value may return the diagnostic result:
-
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' \
-  -X POST https://coven-agents-runner.opencovenagents.workers.dev/api/diagnostics/sandbox \
-  -H "Authorization: Bearer <old value>"
-# 401 expected
-
-curl -s -o /dev/null -w '%{http_code}\n' \
-  -X POST https://coven-agents-runner.opencovenagents.workers.dev/api/diagnostics/sandbox \
-  -H "X-Runner-Token: <AGENT_CONTROL_TOKEN>"
-# 401 expected
-
-curl -s -o /dev/null -w '%{http_code}\n' \
-  -X POST https://coven-agents-runner.opencovenagents.workers.dev/api/diagnostics/sandbox \
-  -H "Authorization: Bearer <new value>"
-# 200 expected
-```
-
-### `RUNNER_SERVICE_TOKEN` — legacy Worker internal access
-
-**Grants.** Calling the retained Worker-facing internal endpoints. The current
-Daytona path does not use this HTTP boundary, but the rollback Worker still
-uses it to authorize and lend a tenant's harness credential.
-
-**Rotate.** Identical shape to the above, in both Vercel and the worker. Same
-order, same reason.
-
-**Verify.** `/api/internal/credential` returns 401 for the old value.
-
-### Runner verification key ring
-
-The current app retains only the public verification ring used by the
-Worker-facing internal authority and credential routes. Public key material
-does not grant minting authority, but changing its ID or value before the
-Worker boundary moves makes already issued rollback tokens fail verification.
-Keep the current and previous public entries aligned with the deployed Worker.
-The full legacy signing-key procedure remains in
-[Runner key rotation](key-rotation.md) for application rollback.
-
-**What breaks.** In the rollback runtime, legacy identity tokens live 15
-minutes (`TOKEN_LIFETIME_SECONDS`), so in-flight rollback runs fail until they
-are re-minted. The current application neither mints nor consumes these browser
-tokens.
-
-### Credential KEK ring — read this before rotating
-
-**Grants.** Unwrapping the per-credential data keys, and therefore every stored
-tenant credential. **S1.** Rows name their exact version; the app encrypts only
-with `CREDENTIAL_KEK_CURRENT_VERSION` and never tries every configured key.
-
-Configure `CREDENTIAL_KEK_CURRENT_VERSION`, `CREDENTIAL_KEK_V1`, and
-`CREDENTIAL_KEK_V2`. During staged migration, the old `CREDENTIAL_KEK` may
-alias only explicit `v1`; it is never a general fallback. If both the legacy
-and `CREDENTIAL_KEK_V1` values are present, they must be identical or the app
-fails closed. Missing, blank, malformed, duplicate, and unknown versions fail
-closed. Rewrap exit `0` means complete, `2` means resumable work remains, and
-`1` means configuration or corruption failure.
-
-Removing the only configured KEK destroys access to every stored credential.
-Do not delete `CREDENTIAL_KEK_V1` while any row still names `v1`.
-
-1. Deploy with the existing secret explicitly configured as `v1`, keeping the
-   legacy alias only until migration is complete.
-2. Add `CREDENTIAL_KEK_V2`, switch the current version to `v2`, and deploy.
-3. Rewrap in bounded, resumable batches:
+1. Configure the existing key explicitly as `CREDENTIAL_KEK_V1`.
+2. Add `CREDENTIAL_KEK_V2`, switch
+   `CREDENTIAL_KEK_CURRENT_VERSION=v2`, retain v1, and deploy.
+3. Bind legacy AAD and rewrap in bounded batches:
 
    ```bash
+   pnpm credentials:rewrap bind-aad --batch 100
    pnpm credentials:rewrap --from v1 --to v2 --batch 100
    ```
 
-4. Use `--dry-run` to verify target rows without writing, then run:
+4. Run the read-only retirement gate:
 
    ```bash
    pnpm credentials:rewrap verify --version v1
    ```
 
-   The gate is successful only with zero `v1` rows and successful read-only
-   unwrap verification for every current-version row. It prints counts and
-   opaque row IDs only; exit `2` is an explicit resumable status, not success.
-5. Remove the legacy alias after zero `v1` rows. Retire `CREDENTIAL_KEK_V1`
-   only after the gate passes in production. If the KEK leaked, also notify
-   affected tenants and have them revoke their GitHub credentials.
+5. Retire v1 only after the gate exits `0` with zero v1/AAD-v0 rows and every
+   current wrapped key verifies. Exit `2` means resumable work remains; exit
+   `1` means configuration or corruption failure.
+6. If the KEK was disclosed, notify tenants and have them revoke their GitHub
+   credentials even after rewrap.
 
-Before retirement, rollback is safe: set the current version back to `v1`,
-retain both versioned keys, and rewrap in the reverse direction:
+See [Credential key rotation](key-rotation.md) for the full staged procedure.
 
-```bash
-pnpm credentials:rewrap --from v2 --to v1 --batch 100
-```
-
-### `AUTH_SECRET` — sessions
-
-**Grants.** Forging a signed-in session as anyone, which is a subscriber
-session and therefore database access. **S2, bordering S1.**
+### `AUTH_SECRET`
 
 ```bash
 npx vercel env rm AUTH_SECRET production --yes
-openssl rand -base64 32 | tr -d '\n' | npx vercel env add AUTH_SECRET production --sensitive
+openssl rand -base64 32 | tr -d '\n' | \
+  npx vercel env add AUTH_SECRET production --sensitive
 ```
 
-**What breaks.** Every session is invalidated; everyone signs in again. That is
-the desired outcome, not a side effect.
+Redeploy. Every existing session should fail and require sign-in.
 
-**Verify.** Your own session is signed out on next request. If it is not, the
-redeploy did not take.
+### `DAYTONA_API_KEY`
+
+Create a replacement in Daytona, update the Vercel secret, redeploy, then
+revoke the old key. Verify a bounded diagnostic and one non-production
+lifecycle only after the new deployment is serving. Do not infer live
+production certification from repository tests.
+
+### `OPERATOR_DIAGNOSTIC_TOKEN`
+
+Replace the Vercel secret with a new random value, redeploy, and verify the old
+bearer receives `401` while the new bearer reaches only the bounded diagnostic.
+Keep it distinct from both reconciliation credentials.
+
+### `CRON_SECRET`
+
+Replace the Vercel cron credential and redeploy. Verify the old bearer is
+rejected and a scheduled `GET /api/internal/runner-reconcile` produces only
+validated aggregate counts. Cron authority must not work on the manual `POST`.
+
+### `RUNNER_MANUAL_RECONCILE_SECRET`
+
+Replace the operator and Vercel copies together, redeploy, and verify the old
+bearer is rejected on `POST /api/internal/runner-reconcile`. Manual authority
+must not work on the cron `GET`.
 
 ### `AUTH_GITHUB_ID` / `AUTH_GITHUB_SECRET`
 
-**Grants.** Impersonating our OAuth application to GitHub users.
-
-Rotate in the GitHub OAuth app settings first (generate a new client secret),
-then update Vercel, then redeploy. GitHub allows both secrets to be valid
-briefly, so this one has no downtime if done in that order.
+Create the new GitHub OAuth client secret, update Vercel, redeploy, verify
+sign-in, then revoke the old value.
 
 ### `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`
 
-Roll the key in the Stripe dashboard; Stripe supports overlapping validity, so
-create the new one, deploy it, then revoke the old.
+Use Stripe's overlap window: create the replacement, deploy it, verify a test
+event returns `{"received":true}`, then revoke the old value.
 
-The webhook secret is separate and rotating it silently breaks event
-verification, which looks like "subscriptions stopped updating" rather than an
-error. After rotating, send a test event and confirm `{"received":true}`.
+### `POSTGRES_URL` and Neon variables
 
-### `POSTGRES_URL` and the Neon variables
+Rotate the database role in Neon and let the Vercel integration resynchronize
+the complete variable family. Redeploy, then verify `/ping`, account reads,
+and a non-production runner store operation.
 
-**Grants.** Everything. **S1.**
+### Tenant harness credential
 
-Rotate the role password in the Neon console. The Vercel integration manages
-around 18 variables; let it re-sync rather than editing them individually, then
-redeploy.
-
-**Verify.** `/ping` still returns 200 and a signed-in `/account` loads. If the
-app is up but `/account` errors, some of the family updated and some did not.
-
-### A tenant's harness credential
-
-**It is not ours to rotate.** The tenant authorised a GitHub OAuth token
-through device flow, or pasted a PAT.
-
-1. Delete the stored row so no run can use it: the tenant can do this from
-   `/account`, or we can remove it directly.
-2. Tell them to revoke it at
-   `https://github.com/settings/applications` (OAuth) or
-   `https://github.com/settings/tokens` (PAT). **Only they can do this.**
-3. Tell them what the token could reach — the scopes are
-   `read:user,read:org,repo,gist`, which includes their private repositories.
-
-Never rotate one tenant's credential using another's, and never substitute the
-owner's own GitHub access to "keep things working". Tenants bring their own
-credentials; the owner's are never a fallback.
+1. Delete the stored row from the tenant account.
+2. Tell the tenant to revoke the OAuth token or PAT in GitHub.
+3. Explain the credential's granted scope and affected time window.
+4. Never substitute an operator or another tenant credential.
 
 ## Scenario: a secret reached git
 
-Order matters here more than anywhere else.
-
-1. **Rotate it.** Now, before touching history. The value is on GitHub's
-   servers, in anyone's clone, and possibly in a fork or an event feed.
-2. **Find every place it exists**, including history:
+1. Rotate it before touching history.
+2. Scan every reachable blob:
 
    ```bash
    pnpm secret:scan:history
    ```
 
-   This walks every blob on every branch, not just the current tree. A value
-   committed and later deleted is invisible to a working-tree scan and is
-   exactly the case that matters.
-3. **Decide about history.** Rewriting is optional and comes *after* rotation.
-   It is worth doing for a value that is embarrassing or personally
-   identifying, and not worth much for a rotated token. If you do rewrite,
-   everyone with a clone must re-clone, and any open PR must be rebased.
-4. **Ask how it got past the hooks.** `pre-commit` and `pre-push` both scan. If
-   neither fired, the pattern is missing — add it to `scripts/secret-scan.ts`
-   with a test, so the next one is caught.
+3. Decide whether history rewriting is worth its coordination cost. Rotation,
+   not rewriting, revokes authority.
+4. Add a scanner regression for the missed shape before restoring access.
 
-Expect `secret:scan:history` to report findings that are **not** leaks: the
-redaction tests deliberately contain credential-shaped fixtures. Triage by
-looking at the value, not the count. As of writing, every finding in this
-repository's history is a fixture, a documentation example, or the
-`DUMMY_PASSWORD` constant from the removed password path.
+Expected scanner findings may include reviewed synthetic fixtures. Triage the
+actual location and category without copying the matched value.
 
 ## Scenario: a credential appeared in run evidence
 
-Harness output is redacted by `packages/agent-contracts/src/evidence.ts` before
-it is stored or shown, but redaction is pattern-based and therefore never
-complete.
+Treat it as disclosed. Revoke it, remove affected stored evidence, add the shape
+to both shared evidence redaction and the repository secret scanner, and add a
+regression using a synthetic marker-approved fixture.
 
-1. Treat the credential as leaked and follow the tenant runbook.
-2. Add the shape to the redaction patterns *and* to `scripts/secret-scan.ts`.
-3. Delete the stored evidence for that run.
+## Scenario: the runner API is being hammered
 
-A credential shape that redaction misses will also be missed by the secret
-scanner, because both are pattern lists. Fixing one without the other leaves
-the same hole in a different wall.
-
-## Scenario: the legacy rollback Worker endpoint is being hammered
-
-The retained Worker endpoint is not a secret. It may remain publicly reachable
-for rollback, but the current browser does not use or bundle it. Legacy requests
-without both the deployment gate and a valid signed identity are refused with
-401.
-
-The exposure is **cost**, not current application access: refused requests
-still bill as Worker invocations.
-
-1. Confirm the requests are actually being refused (they should 401).
-2. If volume is a problem, add a Cloudflare rate-limiting rule on the Worker
-   route. Rotating `AGENT_CONTROL_TOKEN` does not reduce request volume and
-   only disables the rollback path.
+The same-origin runner routes are not secrets. Confirm refusals, inspect abuse
+budget health, and lower deployment limits or disable the affected route if
+cost or availability is threatened. Rotating operator credentials does not
+reduce unauthenticated volume.
 
 ## Scenario: the operator's machine is compromised
 
-This is the worst case, because it holds `.env.local`, `.dev.vars`, an
-authenticated `gh`, an authenticated `vercel`, an authenticated `wrangler`, and
-the commit signing key.
-
-Assume every secret in the inventory leaked, and work down the table in
-severity order. Additionally:
-
-- Revoke the SSH signing key on GitHub, so commits signed with it stop
-  verifying.
-- Revoke `gh`, `vercel`, and `wrangler` sessions.
-- Rotate from a **different, trusted machine**. Rotating from the compromised
-  one hands over the new values too.
+Assume every locally accessible credential, authenticated CLI session, and
+commit-signing key leaked. Rotate from a different trusted machine. Revoke
+`gh`, Vercel, Daytona, Stripe, database, and signing authorities in severity
+order.
 
 ## What we deliberately do not do
 
-- **We do not rely on `.gitignore` to keep secrets out of git.** It is a
-  default, not a control: `git add -f` ignores it, and it listed
-  `.env.production.local` while not listing `.env.production`. The scanner
-  refuses every dotenv file by path.
-- **We do not print secret values in tooling.** The scanner reports a path, a
-  line, and a category, and never the value — an error message is itself a
-  place a secret can leak to.
-- **We do not treat a passing scan as proof of safety.** Both the scanner and
-  the evidence redactor are pattern lists, and a pattern list only knows the
-  shapes someone thought of.
+- We do not rely on `.gitignore` as a secret control.
+- We do not print secret values in scanner, migration, or recovery output.
+- We do not treat a passing pattern scan as proof of safety.
+- We do not claim an external legacy deployment is gone merely because its
+  source was removed from this repository.
 
 ## Keeping this document true
 
-The runbooks above are only useful if the commands still work. Two of them have
-a cheap rehearsal:
-
-- `pnpm secret:scan:history` — run it periodically. It takes about 30 seconds
-  and answers "has anything ever been committed", which is the question every
-  leak starts with.
-- While the rollback Worker remains deployed, rotating `AGENT_CONTROL_TOKEN`
-  is a contained rehearsal of that legacy boundary. It does not exercise the
-  current browser-to-Daytona path.
-
-`AGENT_CONTROL_TOKEN` has been rotated for real, against a live disclosure: the
-legacy token was pasted into a chat transcript inside a copied network trace.
-The ordering held, the app stayed up, and the retained Worker returned the
-expected 401. Two gaps surfaced only by running it -- the `--sensitive` flag
-and the redeploy step -- and both are now written above.
-
-That is the argument for rehearsing the rest. A runbook that has never been
-executed is a guess, and the parts that are wrong are exactly the parts nobody
-thought to write down.
-
-**A copied network trace is a credential disclosure.** Current browser
-devtools traces can carry the Auth.js session cookie. Revoke the affected
-account's sessions; rotate `AUTH_SECRET` if exposure is broad or unbounded. A
-trace from a rolled-back legacy browser path may additionally contain Worker
-deployment or identity headers; only then apply the rollback Worker runbooks
-above.
+Run `pnpm secret:scan:all` and the full repository gates before merging a
+security-boundary change. Periodically rehearse non-destructive rotations in a
+non-production environment and verify both old-value rejection and new-value
+success.

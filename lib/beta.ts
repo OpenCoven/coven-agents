@@ -1,11 +1,10 @@
 /**
  * Paths that stay reachable while the beta gate is closed.
  *
- * `/api/internal` is the important one: the Cloudflare Worker calls it with a
- * service token and a signed Ed25519 identity claim and carries no NextAuth
- * cookie, so gating it would break every run instead of closing the beta. It
- * is not a hole — that route authenticates itself, and more strictly than this
- * gate does.
+ * `/api/internal` contains the cron and manual reconciliation route. Those
+ * machine-triggered requests carry no Auth.js cookie, so gating them would
+ * disable recovery instead of closing the beta. The route authenticates
+ * itself with its dedicated cron or manual-recovery credential.
  *
  * `/api/stripe` is exempt for the same reason and is not optional: Stripe does
  * not follow redirects when delivering a webhook, so a gated endpoint turns

@@ -12,7 +12,6 @@ const manifestPaths = [
   "package.json",
   "packages/agent-contracts/package.json",
   "packages/harness/package.json",
-  "worker/package.json",
 ] as const;
 const allowedWorkspacePackages = new Set([
   "@opencoven/agent-contracts",
@@ -114,14 +113,21 @@ test("repo-local OpenCoven packages stay private workspace dependencies", () => 
   }
 });
 
-test("the same-origin app exposes no browser runner credential boundary", () => {
+test("the same-origin app has no Cloudflare runtime or cross-service runner boundary", () => {
   for (const path of [
     "app/api/runner-connection/route.ts",
     "app/api/runner-token/route.ts",
+    "app/api/internal/credential",
+    "app/api/internal/runner-authority",
     "lib/agents/connection-access.ts",
     "lib/agents/identity.ts",
+    "lib/agents/key-ring.ts",
     "lib/agents/provision.ts",
     "lib/agents/runner-token.ts",
+    "lib/auth/internal-service.ts",
+    "lib/auth/runner-authority.ts",
+    "lib/credentials/lending.ts",
+    "worker",
   ]) {
     assert.equal(
       existsSync(new URL(path, repositoryRoot)),
@@ -135,13 +141,13 @@ test("the same-origin app exposes no browser runner credential boundary", () => 
     "utf8"
   );
   assert.doesNotMatch(envExample, /^NEXT_PUBLIC_CLOUD_RUNNER_URL=/m);
+  assert.doesNotMatch(envExample, /^AGENT_CONTROL_TOKEN=/m);
+  assert.doesNotMatch(envExample, /^CREDENTIAL_LEGACY_LENDING_ENABLED=/m);
+  assert.doesNotMatch(envExample, /^RUNNER_SERVICE_TOKEN=/m);
   assert.doesNotMatch(envExample, /^RUNNER_SIGNING_KEY=/m);
+  assert.doesNotMatch(envExample, /^RUNNER_VERIFY_/m);
   assert.doesNotMatch(envExample, /^RUN_SCOPED_IDENTITY_WRITES_ENABLED=/m);
   assert.doesNotMatch(envExample, /browser bundle drain/i);
-  assert.match(envExample, /^AGENT_CONTROL_TOKEN=$/m);
-  assert.match(envExample, /^RUNNER_SERVICE_TOKEN=$/m);
-  assert.match(envExample, /^RUNNER_VERIFY_KEY_ID=$/m);
-  assert.match(envExample, /^RUNNER_VERIFY_KEY=$/m);
 
   for (const path of [
     "components/console/run-console.tsx",
@@ -152,26 +158,22 @@ test("the same-origin app exposes no browser runner credential boundary", () => 
     assert.doesNotMatch(source, /x-runner-token|authorization:\s*Bearer/i);
   }
 
-  for (const path of [
-    "app/api/internal/credential/route.ts",
-    "app/api/internal/runner-authority/route.ts",
-  ]) {
-    const source = readFileSync(new URL(path, repositoryRoot), "utf8");
-    assert.match(source, /runnerVerificationKeyRingFromEnvironment/);
-    assert.match(source, /RUNNER_SERVICE_TOKEN/);
-  }
-});
+  const manifest = readManifest("package.json");
+  assert.equal(manifest.dependencies?.["@cloudflare/sandbox"], undefined);
+  assert.equal(manifest.dependencies?.agents, undefined);
+  assert.equal(manifest.devDependencies?.wrangler, undefined);
 
-test("the retained Worker harness is explicitly rollback-only", () => {
-  const guide = readFileSync(
-    new URL("worker/harness/README.md", repositoryRoot),
+  const { scripts } = JSON.parse(
+    readFileSync(new URL("package.json", repositoryRoot), "utf8")
+  ) as { scripts?: Record<string, string> };
+  assert.equal(scripts?.["dev:cloud"], undefined);
+  assert.doesNotMatch(scripts?.["test:unit"] ?? "", /cloud-runner|worker/u);
+
+  const workspace = readFileSync(
+    new URL("pnpm-workspace.yaml", repositoryRoot),
     "utf8"
   );
-
-  assert.match(guide, /legacy rollback-only procedure/i);
-  assert.match(guide, /same-origin Next\.js API/i);
-  assert.match(guide, /Daytona runner/i);
-  assert.match(guide, /emergency rollback[\s\S]*Cloudflare Worker/i);
+  assert.doesNotMatch(workspace, /^\s*-\s*worker\s*$/m);
 });
 
 test("the README describes persistent per-agent Daytona isolation accurately", () => {
@@ -198,13 +200,29 @@ test("connection status contains only provider-neutral application states", () =
   assert.doesNotMatch(source, /\btoken:\s*string/);
 });
 
-test("the retained runner key ring is verification-only", () => {
-  const source = readFileSync(
-    new URL("lib/agents/key-ring.ts", repositoryRoot),
+test("server-only credential custody remains after Worker removal", () => {
+  for (const path of [
+    "lib/credentials/key-ring.ts",
+    "lib/credentials/leases.ts",
+    "lib/credentials/runner-credential.ts",
+    "lib/credentials/store.ts",
+  ]) {
+    assert.equal(existsSync(new URL(path, repositoryRoot)), true);
+  }
+
+  const runnerCredential = readFileSync(
+    new URL("lib/credentials/runner-credential.ts", repositoryRoot),
     "utf8"
   );
-
-  assert.doesNotMatch(source, /RUNNER_SIGNING_KEY(?!_(?:ID|PUBLIC_KEY))/);
-  assert.doesNotMatch(source, /privateKey|crypto\.subtle\.sign/);
-  assert.match(source, /runnerVerificationKeyRingFromEnvironment/);
+  const runnerAuth = readFileSync(
+    new URL("lib/runner/auth.ts", repositoryRoot),
+    "utf8"
+  );
+  assert.match(runnerCredential, /^import "server-only";/m);
+  for (const source of [runnerCredential, runnerAuth]) {
+    assert.doesNotMatch(
+      source,
+      /AGENT_CONTROL_TOKEN|RUNNER_SERVICE_TOKEN|RUNNER_VERIFY_|worker\//u
+    );
+  }
 });

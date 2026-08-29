@@ -12,8 +12,7 @@ import { db } from "./queries";
  * A demo code path that tries to pass its session here fails to compile — the
  * ban on the owner's database being available to non-subscribers is
  * unrepresentable rather than something a reviewer has to catch. See
- * `lib/session.ts` and `worker/src/tenant.ts` for the same pattern applied
- * to an owner union.
+ * `lib/session.ts` for the discriminated principal union.
  *
  * The runtime check below is a backstop only, for callers that reach this
  * function through an `any` or a deserialised boundary (e.g. JSON parsed

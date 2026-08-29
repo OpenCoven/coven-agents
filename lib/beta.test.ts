@@ -82,13 +82,13 @@ test("a substring of an allowed address is not allowed", () => {
   assert.equal(betaVerdict(gate, "/", "notme@example.com"), "deny");
 });
 
-test("the worker's credential path is exempt", () => {
-  // The Cloudflare Worker calls this with a service token and a signed
-  // identity claim and carries no NextAuth cookie. Gating it would break every
-  // run rather than close the beta.
-  assert.equal(isBetaExempt("/api/internal/credential"), true);
+test("the machine-triggered reconciliation path is exempt", () => {
+  // Vercel Cron and manual recovery carry dedicated bearer authority rather
+  // than an Auth.js cookie. Gating this path would disable recovery rather than
+  // close the beta.
+  assert.equal(isBetaExempt("/api/internal/runner-reconcile"), true);
   assert.equal(
-    betaVerdict(readBetaGate(ON), "/api/internal/credential", null),
+    betaVerdict(readBetaGate(ON), "/api/internal/runner-reconcile", null),
     "allow"
   );
 });
