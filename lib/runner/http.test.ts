@@ -11,8 +11,12 @@ import type {
   AbuseAdmission,
   AbuseEnforcementInput,
 } from "@/lib/abuse/enforce";
-import type { RunnerAuth, RunnerAuthenticatedSubscriber } from "./auth";
-import { createRunnerHttpHandlers } from "./http";
+import type {
+  RunnerAuth,
+  RunnerAuthenticatedSubscriber,
+  RunnerSecretAuthorization,
+} from "./auth";
+import { createRunnerHttpHandlers, type RunnerHttpHandlers } from "./http";
 import type { RunnerService } from "./service";
 
 const USER_ID = "9c858901-8a57-4791-81fe-4c455b099bc9";
@@ -211,6 +215,99 @@ function validDefinitionBody(overrides: Record<string, unknown> = {}) {
     name: "Runner",
     runtime: "copilot",
     ...overrides,
+  });
+}
+
+const operatorRouteCases: readonly {
+  abuseRoute: "runner_diagnostic" | "runner_reconcile";
+  invoke: (handlers: RunnerHttpHandlers, request: Request) => Promise<Response>;
+  name: string;
+}[] = [
+  {
+    abuseRoute: "runner_diagnostic",
+    invoke: (runnerHandlers, request) =>
+      runnerHandlers.diagnoseSandbox(request),
+    name: "diagnostics",
+  },
+  {
+    abuseRoute: "runner_reconcile",
+    invoke: (runnerHandlers, request) => runnerHandlers.reconcile(request),
+    name: "reconcile",
+  },
+];
+
+function orderedOperatorRequest(events: string[]): Request {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("{}"));
+      controller.close();
+    },
+  });
+  const body = {
+    getReader() {
+      events.push("body");
+      return stream.getReader();
+    },
+  };
+
+  return {
+    body,
+    headers: new Headers(),
+  } as unknown as Request;
+}
+
+function orderedOperatorHandlers(
+  events: string[],
+  abuseRoute: "runner_diagnostic" | "runner_reconcile",
+  authorization: RunnerSecretAuthorization,
+  admission: AbuseAdmission
+): RunnerHttpHandlers {
+  const runner = service({
+    diagnoseSandbox: () => {
+      events.push("provider");
+      return Promise.resolve({
+        exitCode: 0,
+        ok: true,
+        output: "coven-agents",
+      });
+    },
+    reconcileAndDispatch: () => {
+      events.push("provider");
+      return Promise.resolve(counts());
+    },
+  });
+
+  return createRunnerHttpHandlers({
+    auth: {
+      authorizeDiagnostic: () => {
+        events.push("secret");
+        return authorization;
+      },
+      authorizeReconcile: () => {
+        events.push("secret");
+        return authorization;
+      },
+      authorizeSubscriber: async () => subscriber,
+    },
+    createOperatorService: () => {
+      events.push("service");
+      return runner;
+    },
+    createRequestId: () => REQUEST_ID,
+    createService: () => {
+      events.push("subscriber-service");
+      return runner;
+    },
+    enforceAbuse: (input) => {
+      events.push("abuse");
+      assert.deepEqual(input, {
+        failClosed: true,
+        ip: "203.0.113.10",
+        route: abuseRoute,
+      });
+      return Promise.resolve(admission);
+    },
+    ipAddress: () => "203.0.113.10",
   });
 }
 
@@ -940,6 +1037,92 @@ test("diagnostics and reconciliation use only their operator service and safe ou
   assert.deepEqual(await reconcile.json(), counts());
   assert.equal(fixture.operatorRequests(), 2);
   assert.equal(fixture.serviceRequests(), 0);
+});
+
+test("invalid operator bearer probes consume abuse budget before secret validation", async (context) => {
+  await Promise.all(
+    operatorRouteCases.map((route) =>
+      context.test(route.name, async () => {
+        const events: string[] = [];
+        const response = await route.invoke(
+          orderedOperatorHandlers(
+            events,
+            route.abuseRoute,
+            { kind: "unauthorized" },
+            { kind: "allowed" }
+          ),
+          orderedOperatorRequest(events)
+        );
+
+        assert.equal(response.status, 401);
+        assert.deepEqual(await response.json(), {
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          error: {
+            code: "unauthorized",
+            message: "Operator token was rejected.",
+            retryable: false,
+          },
+          requestId: REQUEST_ID,
+        });
+        assert.deepEqual(events, ["abuse", "secret"]);
+      })
+    )
+  );
+});
+
+test("rate-limited invalid operator probes stop before secret validation", async (context) => {
+  await Promise.all(
+    operatorRouteCases.map((route) =>
+      context.test(route.name, async () => {
+        const events: string[] = [];
+        const response = await route.invoke(
+          orderedOperatorHandlers(
+            events,
+            route.abuseRoute,
+            { kind: "unauthorized" },
+            {
+              kind: "denied",
+              responseStatus: 429,
+              retryAfterSeconds: 7,
+            }
+          ),
+          orderedOperatorRequest(events)
+        );
+
+        assert.equal(response.status, 429);
+        assert.equal(response.headers.get("retry-after"), "7");
+        assert.deepEqual(events, ["abuse"]);
+      })
+    )
+  );
+});
+
+test("valid operator requests perform authorized work only after abuse and secret checks", async (context) => {
+  await Promise.all(
+    operatorRouteCases.map((route) =>
+      context.test(route.name, async () => {
+        const events: string[] = [];
+        const response = await route.invoke(
+          orderedOperatorHandlers(
+            events,
+            route.abuseRoute,
+            { kind: "allowed" },
+            { kind: "allowed" }
+          ),
+          orderedOperatorRequest(events)
+        );
+
+        assert.equal(response.status, 200);
+        assert.deepEqual(events, [
+          "abuse",
+          "secret",
+          "body",
+          "service",
+          "provider",
+        ]);
+      })
+    )
+  );
 });
 
 test("secret operator authentication and unavailable abuse fail without provider access", async () => {

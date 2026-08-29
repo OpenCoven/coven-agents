@@ -263,6 +263,13 @@ async function authorizeSecret(
   route: "runner_diagnostic" | "runner_reconcile",
   dependencies: RunnerHttpDependencies
 ): Promise<Response | null> {
+  const admission = await dependencies.enforceAbuse(
+    policyInput(route, dependencies.ipAddress(request))
+  );
+  if (admission.kind !== "allowed") {
+    return abuseFailure(dependencies, admission);
+  }
+
   const authorization =
     route === "runner_diagnostic"
       ? dependencies.auth.authorizeDiagnostic(request)
@@ -276,12 +283,7 @@ async function authorizeSecret(
         : "reconcile_unavailable"
     );
   }
-  const admission = await dependencies.enforceAbuse(
-    policyInput(route, dependencies.ipAddress(request))
-  );
-  return admission.kind === "allowed"
-    ? null
-    : abuseFailure(dependencies, admission);
+  return null;
 }
 
 async function boundedJson<T>(
