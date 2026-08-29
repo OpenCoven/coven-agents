@@ -166,6 +166,10 @@ function lostAcceptedResponseBody(
   );
 }
 
+function isTransientInfrastructureStatus(status: number): boolean {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
 function parseSseFrame(frame: string, status: number): RunEvent | null {
   const data = frame
     .split("\n")
@@ -582,7 +586,8 @@ export class BrowserRunnerTransport implements RunnerTransport {
       throw new RunnerApiError(
         "Runner returned an invalid error envelope.",
         "invalid_error_envelope",
-        response.status
+        response.status,
+        { retryable: isTransientInfrastructureStatus(response.status) }
       );
     }
     throw new RunnerApiError(

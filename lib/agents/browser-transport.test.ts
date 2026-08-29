@@ -313,6 +313,41 @@ test("accepts only the strict v1 error envelope", async () => {
   );
 });
 
+test("valid v1 error envelopes keep their explicit retryability across statuses", async () => {
+  const cases = [
+    { retryable: false, status: 503 },
+    { retryable: true, status: 403 },
+  ] as const;
+
+  await Promise.all(
+    cases.map(async ({ retryable, status }) => {
+      let attempts = 0;
+      const transport = new BrowserRunnerTransport(
+        () => {
+          attempts += 1;
+          return Promise.resolve(
+            runnerError("explicit_retryability", retryable, status)
+          );
+        },
+        { startRetryDelayMs: 0 }
+      );
+
+      await assert.rejects(
+        transport.startRun(AGENT_ID, {
+          operationId: OPERATION_ID,
+          task: "Exercise transport.",
+        }),
+        (error: unknown) =>
+          error instanceof RunnerApiError &&
+          error.code === "explicit_retryability" &&
+          error.retryable === retryable &&
+          error.status === status
+      );
+      assert.equal(attempts, retryable ? 3 : 1);
+    })
+  );
+});
+
 test("rejects malformed success envelopes instead of stripping unknown fields", async () => {
   const transport = new BrowserRunnerTransport(() =>
     Promise.resolve(json({ agents: [agent], legacyEndpoint: "runner.invalid" }))
@@ -419,6 +454,102 @@ test("start retries when a successful response body is lost after headers", asyn
     OPERATION_ID
   );
   assert.equal(snapshot.status, "queued");
+});
+
+test("start retries malformed transient gateway responses with the identical operation id", async () => {
+  const malformedResponses = [
+    () =>
+      new Response("<html>upstream unavailable</html>", {
+        headers: { "content-type": "text/html" },
+        status: 503,
+      }),
+    () => new Response(null, { status: 503 }),
+  ];
+
+  await Promise.all(
+    malformedResponses.map(async (malformedResponse) => {
+      const bodies: string[] = [];
+      let attempts = 0;
+      const transport = new BrowserRunnerTransport(
+        (_requestInput, init) => {
+          attempts += 1;
+          bodies.push(String(init?.body));
+          return Promise.resolve(
+            attempts === 1
+              ? malformedResponse()
+              : json(
+                  {
+                    apiVersion: AGENT_RUNNER_API_VERSION,
+                    run: run(),
+                  },
+                  202
+                )
+          );
+        },
+        { startRetryDelayMs: 0 }
+      );
+
+      const snapshot = await transport.startRun(AGENT_ID, {
+        operationId: OPERATION_ID,
+        task: "Exercise transport.",
+      });
+
+      assert.equal(attempts, 2);
+      assert.deepEqual(bodies, [bodies[0], bodies[0]]);
+      assert.equal(
+        (JSON.parse(bodies[0] ?? "{}") as { operationId?: string }).operationId,
+        OPERATION_ID
+      );
+      assert.equal(snapshot.status, "queued");
+    })
+  );
+});
+
+test("start bounds retries for malformed rate-limit responses", async () => {
+  let attempts = 0;
+  const transport = new BrowserRunnerTransport(
+    () => {
+      attempts += 1;
+      return Promise.resolve(new Response("rate limited", { status: 429 }));
+    },
+    { startRetryDelayMs: 0 }
+  );
+
+  await assert.rejects(
+    transport.startRun(AGENT_ID, {
+      operationId: OPERATION_ID,
+      task: "Exercise transport.",
+    }),
+    (error: unknown) =>
+      error instanceof RunnerApiError &&
+      error.code === "invalid_error_envelope" &&
+      error.retryable === true &&
+      error.status === 429
+  );
+  assert.equal(attempts, 3);
+});
+
+test("start does not retry malformed authorization responses", async () => {
+  let attempts = 0;
+  const transport = new BrowserRunnerTransport(() => {
+    attempts += 1;
+    return Promise.resolve(
+      new Response("<html>forbidden</html>", { status: 403 })
+    );
+  });
+
+  await assert.rejects(
+    transport.startRun(AGENT_ID, {
+      operationId: OPERATION_ID,
+      task: "Exercise transport.",
+    }),
+    (error: unknown) =>
+      error instanceof RunnerApiError &&
+      error.code === "invalid_error_envelope" &&
+      error.retryable === false &&
+      error.status === 403
+  );
+  assert.equal(attempts, 1);
 });
 
 test("start does not retry malformed JSON or schema-invalid success envelopes", async () => {
@@ -741,6 +872,73 @@ test("SSE retries a retryable snapshot failure through the reconnect loop", asyn
   assert.equal(streams, 2);
   assert.deepEqual(events, [1]);
   assert.equal(terminal.status, "completed");
+});
+
+test("SSE recovers from a malformed transient gateway response through a running snapshot", async () => {
+  let snapshots = 0;
+  let streams = 0;
+  const transport = new BrowserRunnerTransport(
+    (requestInput) => {
+      if (String(requestInput).endsWith("/events")) {
+        streams += 1;
+        return Promise.resolve(
+          streams === 1
+            ? new Response("<html>upstream unavailable</html>", { status: 503 })
+            : new Response(
+                `data: ${JSON.stringify({ id: 1, run: run("completed"), type: "completed" })}\n\n`,
+                { headers: { "content-type": "text/event-stream" } }
+              )
+        );
+      }
+      snapshots += 1;
+      return Promise.resolve(
+        json({
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          run: run("running"),
+        })
+      );
+    },
+    { reconnectDelayMs: 0 }
+  );
+  const events: number[] = [];
+
+  const terminal = await transport.streamRunEvents(RUN_ID, {
+    onEvent: (event) => events.push(event.id),
+  });
+
+  assert.equal(streams, 2);
+  assert.equal(snapshots, 1);
+  assert.deepEqual(events, [1]);
+  assert.equal(terminal.status, "completed");
+});
+
+test("SSE surfaces a malformed authorization response immediately", async () => {
+  let snapshots = 0;
+  let streams = 0;
+  const transport = new BrowserRunnerTransport(
+    (requestInput) => {
+      if (String(requestInput).endsWith("/events")) {
+        streams += 1;
+        return Promise.resolve(
+          new Response("<html>forbidden</html>", { status: 403 })
+        );
+      }
+      snapshots += 1;
+      throw new Error("snapshot must not be requested");
+    },
+    { reconnectDelayMs: 0 }
+  );
+
+  await assert.rejects(
+    transport.streamRunEvents(RUN_ID, { onEvent: () => undefined }),
+    (error: unknown) =>
+      error instanceof RunnerApiError &&
+      error.code === "invalid_error_envelope" &&
+      error.retryable === false &&
+      error.status === 403
+  );
+  assert.equal(streams, 1);
+  assert.equal(snapshots, 0);
 });
 
 test("SSE retries a network snapshot failure through the reconnect loop", async () => {
