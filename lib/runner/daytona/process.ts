@@ -1087,10 +1087,8 @@ async function probeDaytonaHarnessesInSession(
   let results: HarnessStatus[] | undefined;
   let cleanupConfirmed = false;
   let commandStarted = false;
-  let sessionCreated = false;
   try {
     await sandbox.process.createSession(sessionId);
-    sessionCreated = true;
     if (options.signal.aborted) {
       throw abortReason(options.signal);
     }
@@ -1147,11 +1145,11 @@ async function probeDaytonaHarnessesInSession(
       throw abortReason(options.signal);
     }
   } catch (error) {
-    failure = error;
+    failure = options.signal.aborted ? abortReason(options.signal) : error;
   } finally {
     options.signal.removeEventListener("abort", onAbort);
     const cleanup =
-      options.signal.aborted && sessionCreated && !commandStarted
+      options.signal.aborted && !commandStarted
         ? removeSession(sandbox, sessionId)
         : (abortCleanup ?? removeSession(sandbox, sessionId));
     cleanupConfirmed = await settleCleanupWithinDeadline(cleanup, options);

@@ -413,6 +413,74 @@ test("abort racing probe completion still deletes the session and reports cancel
   assert.equal(sessions.size, 0);
 });
 
+test("an aborted ambiguous create rechecks cleanup after early absence was confirmed", async () => {
+  const controller = new AbortController();
+  const sessions = new Set<string>();
+  let createdSessionId = "";
+  let createStarted!: () => void;
+  let finishCreate!: () => void;
+  let earlyCleanupFinished!: () => void;
+  const started = new Promise<void>((resolve) => {
+    createStarted = resolve;
+  });
+  const earlyCleanup = new Promise<void>((resolve) => {
+    earlyCleanupFinished = resolve;
+  });
+  const creation = new Promise<void>((_resolve, reject) => {
+    finishCreate = () => {
+      sessions.add(createdSessionId);
+      reject(new Error("create response was ambiguous"));
+    };
+  });
+  let deletes = 0;
+  let lookups = 0;
+  const sandbox = {
+    process: {
+      createSession: (sessionId: string) => {
+        createdSessionId = sessionId;
+        createStarted();
+        return creation;
+      },
+      deleteSession: (sessionId: string) => {
+        deletes += 1;
+        sessions.delete(sessionId);
+        return Promise.resolve();
+      },
+      executeCommand: () =>
+        Promise.reject(new Error("prewarm must use a cancellable session")),
+      executeSessionCommand: () =>
+        Promise.reject(new Error("aborted create must not execute")),
+      getSessionCommand: () => Promise.resolve({}),
+      getSessionCommandLogs: () => Promise.resolve({}),
+      listSessions: () => {
+        lookups += 1;
+        if (lookups === 2) {
+          earlyCleanupFinished();
+        }
+        return Promise.resolve(
+          [...sessions].map((sessionId) => ({ commands: [], sessionId }))
+        );
+      },
+    },
+  } as DaytonaProcessSandbox;
+
+  const pending = probeDaytonaHarnesses(sandbox, {
+    sessionId: PROBE_SESSION_ID,
+    signal: controller.signal,
+    timeoutSeconds: 5,
+  });
+  await started;
+  controller.abort(new Error("prewarm deadline exceeded"));
+  await earlyCleanup;
+  assert.equal(sessions.size, 0);
+  finishCreate();
+
+  await assert.rejects(pending, /prewarm deadline exceeded/);
+  assert.equal(lookups, 4);
+  assert.equal(deletes, 1);
+  assert.equal(sessions.size, 0);
+});
+
 test("abort racing an ambiguous session create leaves a prefixed recovery target", async () => {
   const controller = new AbortController();
   let now = 1000;
@@ -420,8 +488,12 @@ test("abort racing an ambiguous session create leaves a prefixed recovery target
   let createdSessionId = "";
   let createStarted!: () => void;
   let finishCreate!: () => void;
+  let earlyCleanupFinished!: () => void;
   const started = new Promise<void>((resolve) => {
     createStarted = resolve;
+  });
+  const earlyCleanup = new Promise<void>((resolve) => {
+    earlyCleanupFinished = resolve;
   });
   const creation = new Promise<void>((resolve) => {
     finishCreate = () => {
@@ -430,6 +502,7 @@ test("abort racing an ambiguous session create leaves a prefixed recovery target
     };
   });
   let deletes = 0;
+  let lookups = 0;
   const sandbox = {
     process: {
       createSession: (sessionId: string) => {
@@ -447,10 +520,15 @@ test("abort racing an ambiguous session create leaves a prefixed recovery target
         Promise.reject(new Error("aborted create must not execute")),
       getSessionCommand: () => Promise.resolve({}),
       getSessionCommandLogs: () => Promise.resolve({}),
-      listSessions: () =>
-        Promise.resolve(
+      listSessions: () => {
+        lookups += 1;
+        if (lookups === 2) {
+          earlyCleanupFinished();
+        }
+        return Promise.resolve(
           [...sessions].map((sessionId) => ({ commands: [], sessionId }))
-        ),
+        );
+      },
     },
   } as DaytonaProcessSandbox;
 
@@ -463,6 +541,7 @@ test("abort racing an ambiguous session create leaves a prefixed recovery target
   });
   await started;
   controller.abort(new Error("prewarm deadline exceeded"));
+  await earlyCleanup;
   now = 1005;
   finishCreate();
 
@@ -470,6 +549,7 @@ test("abort racing an ambiguous session create leaves a prefixed recovery target
     pending,
     (error: unknown) => error instanceof DaytonaProbeCleanupPendingError
   );
+  assert.equal(lookups, 3);
   assert.equal(deletes, 1);
   assert.equal(sessions.size, 1);
   assert.equal([...sessions][0], PROBE_SESSION_ID);
