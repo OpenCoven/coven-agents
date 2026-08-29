@@ -7,8 +7,10 @@ import {
   AGENT_RUNNER_CAPABILITIES,
   AGENT_RUNNER_LIMITS,
   agentDefinitionSchema,
+  agentEnvelopeSchema,
   agentOwnerSchema,
   agentRunnerHealthSchema,
+  agentsEnvelopeSchema,
   commandEvidenceSchema,
   compareAgentTimestamps,
   createAgentInputSchema,
@@ -66,7 +68,7 @@ test("rejects the retired provider-key cloud runtime on either backend", () => {
   }
 });
 
-test("public definitions represent legacy runtime during read compatibility", () => {
+test("public envelopes represent legacy runtime during read compatibility", () => {
   const legacyDefinition = {
     backend: "cloud",
     createdAt: "2026-08-20T17:00:00.000Z",
@@ -80,17 +82,29 @@ test("public definitions represent legacy runtime during read compatibility", ()
     status: "idle",
     updatedAt: "2026-08-20T17:00:00.000Z",
   };
-  const publicResult = agentDefinitionSchema.safeParse({
+  const legacyAgent = {
     ...legacyDefinition,
     owner: { kind: "standalone" },
     warm: {
       status: "not_started",
       updatedAt: legacyDefinition.updatedAt,
     },
+  };
+  const publicResult = agentDefinitionSchema.safeParse(legacyAgent);
+  const listedResult = agentsEnvelopeSchema.safeParse({
+    agents: [legacyAgent],
   });
+  const readResult = agentEnvelopeSchema.safeParse({ agent: legacyAgent });
   const storedResult = storedAgentDefinitionSchema.safeParse(legacyDefinition);
 
   assert.equal(publicResult.success, true);
+  assert.equal(listedResult.success, true);
+  assert.equal(readResult.success, true);
+  assert.equal(
+    listedResult.success && listedResult.data.agents[0]?.runtime,
+    "cloud"
+  );
+  assert.equal(readResult.success && readResult.data.agent.runtime, "cloud");
   assert.equal(storedResult.success, true);
   assert.deepEqual(storedResult.success && storedResult.data.owner, {
     kind: "standalone",
