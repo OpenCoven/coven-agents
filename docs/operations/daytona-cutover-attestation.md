@@ -1,7 +1,7 @@
 # Daytona Cutover Attestation and Runbook
 
-- Status: repository verification complete; production approval-gated evidence
-  pending
+- Status: repository verification and read-only production inventory complete;
+  production lifecycle and resource mutation approval-gated
 - Prepared: 2026-08-29
 - Scope: same-origin browser access, Daytona lifecycle, durable recovery, and
   provider-resource disposition
@@ -17,6 +17,7 @@ credentials, private planning content, or provider output.
 | [PR #128](https://github.com/OpenCoven/coven-agents/pull/128) | `bd46bece9ea9b33700f3316919c6f035aad7d7d1` | 2026-08-29 |
 | [PR #133](https://github.com/OpenCoven/coven-agents/pull/133) | `acc7ca3fa2dd51f496e1900573f239eb8a158ce6` | 2026-08-29 |
 | [PR #134](https://github.com/OpenCoven/coven-agents/pull/134) | `1bec409b399651d8a115e4518a0f444e9753a728` | 2026-08-29 |
+| [PR #135](https://github.com/OpenCoven/coven-agents/pull/135) | `3345b9d1590764dc3d52082293b8ca2a3f406267` | 2026-08-29 |
 
 The fully gated PR #134 head and its squash-merge commit both have tree
 `a8bb0a82efb6ffb7f754d03519f0d381e72fb88e`. These artifacts and results prove
@@ -72,6 +73,39 @@ Repository evidence checklist:
 - [x] Documentation and tracked-filename residue scan is clean under the
       documented exceptions.
 - [x] Exact local gate results are recorded above.
+
+## Read-only production evidence
+
+The following evidence was collected on 2026-08-29 without deploying,
+promoting, invoking a lifecycle mutation, changing credentials, or deleting a
+resource:
+
+- GitHub recorded a successful production deployment for merge commit
+  `3345b9d1590764dc3d52082293b8ca2a3f406267`.
+- The deployment provider reported that commit's production deployment Ready
+  on the canonical application aliases.
+- `GET /api/health` on the canonical production alias returned HTTP 200 with
+  the expected v1 health descriptor.
+- The deployment was created by the existing external integration after the
+  merge; no manual production deployment was initiated during this audit.
+
+The superseded execution provider still retains resources even though the
+application repository no longer uses that execution path:
+
+- one deployed script service with ten retained versions, most recently
+  updated on 2026-08-27;
+- six secret-text bindings, inspected by name only;
+- four durable state namespace bindings and four corresponding namespaces;
+- three rate-limit bindings and one scheduled trigger;
+- one Ready container application reporting seven instances and two retained
+  image tags;
+- zero key-value namespaces associated with the account inventory;
+- no custom domain, zone route, or enabled public development subdomain for the
+  retired script service.
+
+These observations prove inventory and network detachment, not revocation or
+deletion. The retained resources remain unchanged until an authorized operator
+approves the destructive phase.
 
 ## Zero-residue scan method
 
@@ -147,9 +181,9 @@ the date, environment, artifact location, and approval.
       allowlists, targets, and account roles.
 - [ ] Map every retained provider resource to an active tenant-scoped record or
       approved diagnostic purpose.
-- [ ] Inventory resources from the superseded execution arrangement without
+- [x] Inventory resources from the superseded execution arrangement without
       copying names, credentials, or private output into this document.
-- [ ] Confirm application traffic no longer depends on superseded resources.
+- [x] Confirm application traffic no longer depends on superseded resources.
 - [ ] Revoke superseded credentials.
 - [ ] Remove superseded compute, routes, schedules, and storage only after the
       Daytona observation window passes.
