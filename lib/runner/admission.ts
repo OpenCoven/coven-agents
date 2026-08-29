@@ -3,6 +3,10 @@ import "server-only";
 import { randomBytes } from "node:crypto";
 import type { RunSnapshot } from "@opencoven/agent-contracts";
 import {
+  isRunnableHarness,
+  UNSUPPORTED_HARNESS_RUN_ERROR,
+} from "@opencoven/harness";
+import {
   acquireRunnerCredential,
   type RunnerCredentialAcquireInput,
   type RunnerCredentialAcquireResult,
@@ -145,7 +149,7 @@ export type RunnerDispatchResult =
     }
   | {
       kind: "refused";
-      reason: "authority" | "capacity" | "credential";
+      reason: "authority" | "capacity" | "credential" | "harness";
       runId: string;
     };
 
@@ -451,7 +455,8 @@ export async function terminalizeUnstartedDispatchFailure(
     | "authority_revoked"
     | "capacity_refused"
     | "credential_unavailable"
-    | "dispatch_failed",
+    | "dispatch_failed"
+    | "harness_unsupported",
   message: string,
   retryable: boolean
 ): Promise<boolean> {
@@ -516,6 +521,18 @@ export async function dispatchRunnerClaim(
   );
   if (associated.kind !== "found") {
     return { kind: "retained", reason: "launch_fenced", runId: run.id };
+  }
+  if (!isRunnableHarness(associated.agent.runtime)) {
+    return (await terminalizeUnstartedDispatchFailure(
+      dependencies,
+      authority,
+      run,
+      UNSUPPORTED_HARNESS_RUN_ERROR.code,
+      UNSUPPORTED_HARNESS_RUN_ERROR.message,
+      UNSUPPORTED_HARNESS_RUN_ERROR.retryable
+    ))
+      ? { kind: "refused", reason: "harness", runId: run.id }
+      : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
 
   let ensured: { agent: RunnerAgentRecord; sandbox: DaytonaProcessSandbox };

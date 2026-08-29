@@ -12,9 +12,11 @@ import {
   storedAgentDefinitionSchema,
   type WarmState,
 } from "@opencoven/agent-contracts";
-import type {
-  HarnessStatus,
-  RunEvent as HarnessStreamEvent,
+import {
+  type HarnessStatus,
+  type RunEvent as HarnessStreamEvent,
+  isRunnableHarness,
+  UNSUPPORTED_HARNESS_RUN_ERROR,
 } from "@opencoven/harness";
 import {
   Agent,
@@ -3102,8 +3104,11 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     admissionCapability?: AdmissionCleanupCapability
   ): Promise<boolean> {
     const definition = this.requireActiveDefinition();
-    this.rememberAdmissionCapability(runId, admissionCapability);
-    validateCloudWorkspace(definition);
+    const runnable = isRunnableHarness(definition.runtime);
+    if (runnable) {
+      this.rememberAdmissionCapability(runId, admissionCapability);
+      validateCloudWorkspace(definition);
+    }
     const lifecycleGeneration = this.currentLifecycle().generation;
     if (!dispatchToken) {
       return false;
@@ -3117,6 +3122,17 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         return true;
       }
       return false;
+    }
+    if (!runnable) {
+      if (!this.terminalizeUnsupportedHarness(runId, dispatchToken)) {
+        return false;
+      }
+      await this.reportAdmissionTerminal(
+        runId,
+        dispatchToken,
+        admissionCapability?.admissionSequence
+      );
+      return true;
     }
     const admittedRecord = this.state.runs.find(
       (candidate) => candidate.run.id === runId
@@ -3276,7 +3292,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
   async ensureAdmittedFiber(
     runId: string,
     dispatchToken: string,
-    _admissionCapability?: AdmissionCleanupCapability
+    admissionCapability?: AdmissionCleanupCapability
   ): Promise<boolean> {
     const intent = this.state.dispatchIntents?.[runId];
     if (intent?.phase !== "starting") {
@@ -3295,6 +3311,17 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
       return false;
     }
     const definition = this.requireActiveDefinition();
+    if (!isRunnableHarness(definition.runtime)) {
+      if (!this.terminalizeUnsupportedHarness(runId, dispatchToken)) {
+        return false;
+      }
+      await this.reportAdmissionTerminal(
+        runId,
+        dispatchToken,
+        admissionCapability?.admissionSequence
+      );
+      return false;
+    }
     validateCloudWorkspace(definition);
     const identityToken = await this.readIdentityToken(runId);
     if (!identityToken) {
@@ -3602,6 +3629,26 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         status: "aborted",
       };
     }
+    const definition = this.requireActiveDefinition();
+    if (
+      !isTerminal(current.run.status) &&
+      !isRunnableHarness(definition.runtime)
+    ) {
+      if (!this.terminalizeUnsupportedHarness(runId, recoveredDispatchToken)) {
+        return {
+          reason: "Recovered fiber belongs to an obsolete admission dispatch.",
+          status: "aborted",
+        };
+      }
+      await this.reportAdmissionTerminal(
+        runId,
+        recoveredDispatchToken ?? currentDispatchToken
+      );
+      return {
+        error: UNSUPPORTED_HARNESS_RUN_ERROR.message,
+        status: "error",
+      };
+    }
     // A queued cancellation never created a fiber or sandbox. Recovered
     // fibers from dispatch-claimed work still require the normal cleanup.
     const cancelledBeforeDispatch =
@@ -3638,7 +3685,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
             }
           : this.acquireSandboxOwnership(runId, recoveredDispatchToken);
       const cleaned = await this.cleanupOwnedSandbox(
-        this.requireDefinition(),
+        definition,
         ownership,
         "failed",
         "The cloud run fiber was interrupted before sandbox cleanup completed."
@@ -3765,6 +3812,7 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
     if (!current || isTerminal(current.run.status)) {
       return;
     }
+
     if (dispatchToken && current.dispatchToken !== dispatchToken) {
       return;
     }
@@ -3793,6 +3841,57 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         updatedAt: completedAt,
       });
     }
+  }
+
+  private terminalizeUnsupportedHarness(
+    runId: string,
+    dispatchToken?: string
+  ): boolean {
+    const current = this.state.runs.find(
+      (candidate) => candidate.run.id === runId
+    );
+    if (!current) {
+      return false;
+    }
+    if (isTerminal(current.run.status)) {
+      return current.run.error?.code === UNSUPPORTED_HARNESS_RUN_ERROR.code;
+    }
+    if (
+      rejectsAdmissionToken(
+        this.state.admissionFences?.[runId],
+        dispatchToken
+      ) ||
+      (dispatchToken &&
+        current.dispatchToken &&
+        current.dispatchToken !== dispatchToken)
+    ) {
+      return false;
+    }
+    const completedAt = new Date().toISOString();
+    const failed = finishCloudRunRecord(current, {
+      completedAt,
+      credential: null,
+      error: UNSUPPORTED_HARNESS_RUN_ERROR,
+      output: UNSUPPORTED_HARNESS_RUN_ERROR.message,
+      status: "failed",
+    });
+    if (
+      !this.persistRun(failed, {
+        admissionFence: {
+          ...normalizeAdmissionFence(this.state.admissionFences?.[runId]),
+          cancelled: true,
+        },
+        dispatchClaim: null,
+      })
+    ) {
+      return false;
+    }
+    this.updateDefinition({
+      lastRunAt: completedAt,
+      status: "error",
+      updatedAt: completedAt,
+    });
+    return true;
   }
 
   /** Checks whether this caller still owns the prepared admission. */

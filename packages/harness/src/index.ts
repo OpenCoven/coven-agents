@@ -22,6 +22,7 @@ export {
   isRunnableHarness,
   resolveHarnessAuth,
   SUPPORTED_HARNESS_IDS,
+  UNSUPPORTED_HARNESS_RUN_ERROR,
 } from "./registry";
 export {
   type HarnessId,
