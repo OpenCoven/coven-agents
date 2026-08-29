@@ -17,7 +17,10 @@ import {
   stopDaytonaProcess,
   sweepDaytonaCredentials,
 } from "./process";
-import { classifyDaytonaProviderError } from "./sandbox";
+import {
+  classifyDaytonaProviderError,
+  SANDBOX_WARM_TIMEOUT_MS,
+} from "./sandbox";
 
 const RUN_ID = "53af1a29-4e98-43d6-ac5b-3b9dcba5e730";
 const SECRET = "copilot-credential-9f3b";
@@ -73,8 +76,12 @@ test("normal harness probes retain bounded executeCommand timeout configuration"
 
 test("an in-flight prewarm probe abort deletes its provider session and resolves", async () => {
   const controller = new AbortController();
-  const sessions = new Set<string>();
+  const now = 1_800_000_000_000;
+  const replacement =
+    "coven-probe-1800000000000-11111111-1111-4111-8111-111111111111";
+  const sessions = new Set([replacement]);
   let rejectCommand!: (error: Error) => void;
+  let ownedSession = "";
   let commandStarted!: () => void;
   const started = new Promise<void>((resolve) => {
     commandStarted = resolve;
@@ -83,6 +90,7 @@ test("an in-flight prewarm probe abort deletes its provider session and resolves
   const sandbox = {
     process: {
       createSession: (sessionId: string) => {
+        ownedSession = sessionId;
         sessions.add(sessionId);
         return Promise.resolve();
       },
@@ -114,6 +122,7 @@ test("an in-flight prewarm probe abort deletes its provider session and resolves
   } as DaytonaProcessSandbox;
 
   const pending = probeDaytonaHarnesses(sandbox, {
+    now: () => now,
     signal: controller.signal,
     timeoutSeconds: 5,
   });
@@ -127,7 +136,13 @@ test("an in-flight prewarm probe abort deletes its provider session and resolves
 
   await settlesWithin(assert.rejects(pending, /prewarm deadline exceeded/));
   assert.equal(deletes, 1);
-  assert.equal(sessions.size, 0);
+  assert.equal(sessions.has(ownedSession), false);
+  assert.equal(sessions.has(replacement), true);
+  assert.ok(ownedSession.length <= 63);
+  assert.match(
+    ownedSession,
+    /^coven-probe-1800000000000-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+  );
   rejectCommand(new Error("late SDK command rejection"));
   await Promise.resolve();
 });
@@ -405,11 +420,31 @@ test("abort racing an ambiguous session create leaves a prefixed recovery target
   await assert.rejects(pending, /prewarm deadline exceeded/);
   assert.equal(deletes, 0);
   assert.equal(sessions.size, 1);
-  assert.match([...sessions][0] ?? "", /^coven-probe-/);
+  assert.match(
+    [...sessions][0] ?? "",
+    /^coven-probe-\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+  );
 });
 
 test("a later bounded probe sweeps stale probe sessions without touching other sessions", async () => {
-  const sessions = new Set(["coven-probe-stale", "replacement-session"]);
+  const now = 1_800_000_000_000;
+  const stale = `coven-probe-${now - SANDBOX_WARM_TIMEOUT_MS - 1}-11111111-1111-4111-8111-111111111111`;
+  const recent = `coven-probe-${now - SANDBOX_WARM_TIMEOUT_MS + 1}-22222222-2222-4222-8222-222222222222`;
+  const threshold = `coven-probe-${now - SANDBOX_WARM_TIMEOUT_MS}-33333333-3333-4333-8333-333333333333`;
+  const future =
+    "coven-probe-1800000001000-44444444-4444-4444-8444-444444444444";
+  const malformed = `coven-probe-${now - SANDBOX_WARM_TIMEOUT_MS - 1}-not-a-uuid`;
+  const legacy = "coven-probe-55555555-5555-4555-8555-555555555555";
+  const replacement = "replacement-session";
+  const sessions = new Set([
+    recent,
+    stale,
+    malformed,
+    replacement,
+    future,
+    threshold,
+    legacy,
+  ]);
   const deleted: string[] = [];
   const sandbox = {
     process: {
@@ -440,19 +475,26 @@ test("a later bounded probe sweeps stale probe sessions without touching other s
   } as DaytonaProcessSandbox;
 
   await probeDaytonaHarnesses(sandbox, {
-    deadline: Date.now() + 1000,
+    deadline: now + 1000,
+    now: () => now,
     signal: new AbortController().signal,
     sweepStaleSessions: true,
     timeoutSeconds: 5,
   });
 
-  assert.equal(sessions.has("coven-probe-stale"), false);
-  assert.equal(sessions.has("replacement-session"), true);
-  assert.ok(deleted.includes("coven-probe-stale"));
-  assert.equal(
-    deleted.some((sessionId) => sessionId === "replacement-session"),
-    false
-  );
+  assert.equal(sessions.has(stale), false);
+  for (const protectedSession of [
+    recent,
+    threshold,
+    future,
+    malformed,
+    legacy,
+    replacement,
+  ]) {
+    assert.equal(sessions.has(protectedSession), true, protectedSession);
+    assert.equal(deleted.includes(protectedSession), false, protectedSession);
+  }
+  assert.ok(deleted.includes(stale));
 });
 
 type Call = { command: string; env?: Record<string, string>; kind: string };

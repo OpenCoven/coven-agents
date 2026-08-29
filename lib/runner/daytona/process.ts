@@ -24,9 +24,16 @@ import {
 } from "../harness";
 import type { RunnerDaytonaAttemptId, RunnerDispatchAuthority } from "../types";
 import { daytonaRunCredentialPath, daytonaRunSessionName } from "./names";
-import { classifyDaytonaProviderError } from "./sandbox";
+import {
+  classifyDaytonaProviderError,
+  SANDBOX_WARM_TIMEOUT_MS,
+} from "./sandbox";
 
 const STAGING_TIMEOUT_SECONDS = 15;
+const PROBE_SESSION_PREFIX = "coven-probe-";
+const PROBE_SESSION_PATTERN =
+  /^coven-probe-(\d{13})-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/u;
+const MAX_PROBE_SESSION_EPOCH = 9_999_999_999_999;
 
 /**
  * Daytona's command model has no lifecycle status in SDK 0.207, but it can
@@ -999,6 +1006,27 @@ function settleValueWithinDeadline<T>(
   });
 }
 
+function probeSessionName(now: () => number): string {
+  const createdAt = Math.floor(now());
+  if (
+    !Number.isSafeInteger(createdAt) ||
+    createdAt < 0 ||
+    createdAt > MAX_PROBE_SESSION_EPOCH
+  ) {
+    throw new Error("Daytona probe session requires a valid creation epoch.");
+  }
+  return `${PROBE_SESSION_PREFIX}${String(createdAt).padStart(13, "0")}-${randomUUID()}`;
+}
+
+function staleProbeSession(sessionId: string, now: () => number): boolean {
+  const match = PROBE_SESSION_PATTERN.exec(sessionId);
+  if (!match) {
+    return false;
+  }
+  const createdAt = Number(match[1]);
+  return createdAt < now() - SANDBOX_WARM_TIMEOUT_MS;
+}
+
 async function sweepStaleProbeSessions(
   sandbox: DaytonaProcessSandbox,
   options: DaytonaProbeOptions
@@ -1010,8 +1038,9 @@ async function sweepStaleProbeSessions(
   if (listed.kind !== "settled") {
     throw new Error("Daytona probe-session recovery was not confirmed.");
   }
+  const now = options.now ?? Date.now;
   for (const session of listed.value) {
-    if (!session.sessionId.startsWith("coven-probe-")) {
+    if (!staleProbeSession(session.sessionId, now)) {
       continue;
     }
     // biome-ignore lint/performance/noAwaitInLoops: each deterministic stale probe session must be removed and verified before the next cleanup begins.
@@ -1100,7 +1129,7 @@ async function probeDaytonaHarnessesInSession(
     await sweepStaleProbeSessions(sandbox, options);
   }
 
-  const sessionId = `coven-probe-${randomUUID()}`;
+  const sessionId = probeSessionName(options.now ?? Date.now);
   let abortCleanup: Promise<void> | undefined;
   const cleanupAfterAbort = () => {
     abortCleanup ??= removeSession(sandbox, sessionId);

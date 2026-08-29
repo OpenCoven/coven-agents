@@ -147,7 +147,8 @@ export async function prewarmTenantSandbox(
       return;
     }
     const { session } = access;
-    const runner = await (dependencies.loadRunner ?? loadProductionRunner)(
+    const runner = await awaitUntilAbort(
+      (dependencies.loadRunner ?? loadProductionRunner)(controller.signal),
       controller.signal
     );
     if (

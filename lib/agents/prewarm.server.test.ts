@@ -306,3 +306,20 @@ test("the prewarm wrapper settles at its deadline when cleanup never returns", a
 
   assert.ok(Date.now() - started < 1000);
 });
+
+test("a never-resolving lazy loader is abandoned at the absolute deadline", async () => {
+  let constructed = 0;
+
+  await settlesWithin(
+    prewarmTenantSandbox(subscribedUser(), {
+      authorizeCurrent: () => Promise.resolve(AUTHORIZED),
+      loadRunner: () => {
+        constructed += 1;
+        return new Promise(() => undefined);
+      },
+      timeoutMs: 5,
+    })
+  );
+
+  assert.equal(constructed, 1);
+});
