@@ -17,7 +17,7 @@ import type {
   RunnerSecretAuthorization,
 } from "./auth";
 import { createRunnerHttpHandlers, type RunnerHttpHandlers } from "./http";
-import type { RunnerService } from "./service";
+import { type RunnerService, RunnerServiceError } from "./service";
 
 const USER_ID = "9c858901-8a57-4791-81fe-4c455b099bc9";
 const TENANT = "u_9c8589018a57479181fe4c455b099bc9";
@@ -173,6 +173,7 @@ function handlers(
   const after: (() => void | Promise<void>)[] = [];
   const admissions: AbuseEnforcementInput[] = [];
   const logs: unknown[] = [];
+  let diagnosticRequests = 0;
   let serviceRequests = 0;
   let operatorRequests = 0;
   const runner = options.service ?? service();
@@ -190,6 +191,10 @@ function handlers(
       serviceRequests += 1;
       return runner;
     },
+    diagnoseSandbox: () => {
+      diagnosticRequests += 1;
+      return runner.diagnoseSandbox();
+    },
     enforceAbuse: (input) => {
       admissions.push(input);
       return Promise.resolve(options.admission ?? { kind: "allowed" });
@@ -204,6 +209,7 @@ function handlers(
   return {
     admissions,
     after,
+    diagnosticRequests: () => diagnosticRequests,
     handlers: result,
     logs,
     operatorRequests: () => operatorRequests,
@@ -301,6 +307,10 @@ function orderedOperatorHandlers(
     createService: () => {
       events.push("subscriber-service");
       return runner;
+    },
+    diagnoseSandbox: () => {
+      events.push("service");
+      return runner.diagnoseSandbox();
     },
     enforceAbuse: (input) => {
       events.push("abuse");
@@ -427,6 +437,7 @@ test("subscriber writes preserve identity, abuse, body, service, provider orderi
       events.push("service");
       return runner;
     },
+    diagnoseSandbox: () => runner.diagnoseSandbox(),
     enforceAbuse: () => {
       events.push("abuse");
       return Promise.resolve({ kind: "allowed" });
@@ -1275,8 +1286,64 @@ test("diagnostics and reconciliation use only their operator service and safe ou
   });
   assert.equal(reconcile.status, 200);
   assert.deepEqual(await reconcile.json(), counts());
-  assert.equal(fixture.operatorRequests(), 2);
+  assert.equal(fixture.diagnosticRequests(), 1);
+  assert.equal(fixture.operatorRequests(), 1);
   assert.equal(fixture.serviceRequests(), 0);
+});
+
+test("diagnostic construction failure is isolated from health, CRUD, runs, and reconciliation", async () => {
+  let diagnosticRequests = 0;
+  const runner = service();
+  const runnerHandlers = createRunnerHttpHandlers({
+    auth: authorizedAuth(),
+    createOperatorService: () => runner,
+    createRequestId: () => REQUEST_ID,
+    createService: () => runner,
+    diagnoseSandbox: () => {
+      diagnosticRequests += 1;
+      throw new RunnerServiceError(
+        "diagnostic_unavailable",
+        "Daytona diagnostic is unavailable."
+      );
+    },
+    enforceAbuse: () => Promise.resolve({ kind: "allowed" }),
+    ipAddress: () => "203.0.113.10",
+  });
+
+  const diagnostic = await runnerHandlers.diagnoseSandbox(
+    new Request("https://app.test/api/diagnostics/sandbox", { method: "POST" })
+  );
+  const health = await runnerHandlers.health(
+    new Request("https://app.test/api/health")
+  );
+  const created = await runnerHandlers.createAgent(
+    new Request("https://app.test/api/agents", {
+      body: validDefinitionBody(),
+      method: "POST",
+    })
+  );
+  const started = await runnerHandlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({
+        operationId: OPERATION_ID,
+        task: "Do the thing.",
+      }),
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+  const reconciled = await runnerHandlers.reconcile(
+    new Request("https://app.test/api/internal/runner-reconcile", {
+      method: "POST",
+    })
+  );
+
+  assert.equal(diagnostic.status, 503);
+  assert.equal(health.status, 200);
+  assert.equal(created.status, 201);
+  assert.equal(started.status, 202);
+  assert.equal(reconciled.status, 200);
+  assert.equal(diagnosticRequests, 1);
 });
 
 test("invalid operator bearer probes consume abuse budget before secret validation", async (context) => {
@@ -1383,6 +1450,7 @@ test("secret operator authentication and unavailable abuse fail without provider
 
   assert.equal(unauthorized.status, 401);
   assert.equal(unavailable.status, 503);
+  assert.equal(fixture.diagnosticRequests(), 0);
   assert.equal(fixture.operatorRequests(), 0);
 
   const abuse = handlers({
@@ -1416,6 +1484,7 @@ test("operator abuse refusal happens before parsing or constructing its service"
   assert.equal(response.status, 429);
   assert.equal(response.headers.get("retry-after"), "7");
   assert.equal(request.bodyUsed, false);
+  assert.equal(fixture.diagnosticRequests(), 0);
   assert.equal(fixture.operatorRequests(), 0);
   assert.deepEqual(fixture.admissions, [
     {

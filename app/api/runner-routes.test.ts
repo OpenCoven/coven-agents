@@ -159,6 +159,7 @@ function testHandlers(): RunnerHttpHandlers {
     createOperatorService: () => runner,
     createRequestId: () => "44444444-5555-4666-8777-888888888888",
     createService: () => runner,
+    diagnoseSandbox: () => runner.diagnoseSandbox(),
     enforceAbuse: async () => ({ kind: "allowed" }),
     ipAddress: () => "203.0.113.10",
   });

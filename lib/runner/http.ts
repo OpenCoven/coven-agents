@@ -27,8 +27,9 @@ import type {
   RunnerSecretAuthorization,
   RunnerSubscriberAuthorization,
 } from "./auth";
+import { RunnerServiceError } from "./errors";
 import type { RunnerReconciliationResult } from "./reconcile";
-import { type RunnerService, RunnerServiceError } from "./service";
+import type { RunnerDiagnosticResult, RunnerService } from "./service";
 import { createRunEventStream } from "./sse";
 import {
   readRunnerJson as boundedJson,
@@ -63,6 +64,7 @@ export type RunnerHttpDependencies = Readonly<{
   createService: (
     subscriber: RunnerAuthenticatedSubscriber
   ) => RunnerService | Promise<RunnerService>;
+  diagnoseSandbox: () => Promise<RunnerDiagnosticResult>;
   enforceAbuse: (input: AbuseEnforcementInput) => Promise<AbuseAdmission>;
   ipAddress: (request: Request) => string | null;
   logger?: RunnerHttpLogger;
@@ -425,10 +427,9 @@ export function createRunnerHttpHandlers(
         if (body.kind !== "ok") {
           return body.response;
         }
-        const service = await dependencies.createOperatorService();
         return runnerJsonResponse(
           diagnosticResponseSchema,
-          await service.diagnoseSandbox()
+          await dependencies.diagnoseSandbox()
         );
       }),
 

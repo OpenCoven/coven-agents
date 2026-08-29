@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dispatchProductionClaim, runEphemeralDiagnostic } from "./production";
+import { runEphemeralDiagnostic } from "./production";
+import { dispatchProductionClaim } from "./runtime";
 import { RunnerServiceError } from "./service";
 import type { RunnerStore } from "./store";
 import type {
