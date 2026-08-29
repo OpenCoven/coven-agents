@@ -47,33 +47,33 @@ export type StreamRunEventsOptions = Readonly<{
 }>;
 
 export interface RunnerTransport {
-  createAgent(
+  createAgent: (
     input: CreateAgentInput,
     signal?: AbortSignal
-  ): Promise<AgentDefinition>;
-  deleteAgent(agentId: string, signal?: AbortSignal): Promise<void>;
-  getAgent(agentId: string, signal?: AbortSignal): Promise<AgentDefinition>;
-  getRun(runId: string, signal?: AbortSignal): Promise<RunSnapshot>;
-  health(signal?: AbortSignal): Promise<AgentRunnerHealth>;
-  listAgents(signal?: AbortSignal): Promise<AgentDefinition[]>;
-  listHarnesses(signal?: AbortSignal): Promise<HarnessStatus[]>;
-  listRuns(agentId: string, signal?: AbortSignal): Promise<RunSnapshot[]>;
-  prewarmTenant(signal?: AbortSignal): Promise<void>;
-  startRun(
+  ) => Promise<AgentDefinition>;
+  deleteAgent: (agentId: string, signal?: AbortSignal) => Promise<void>;
+  getAgent: (agentId: string, signal?: AbortSignal) => Promise<AgentDefinition>;
+  getRun: (runId: string, signal?: AbortSignal) => Promise<RunSnapshot>;
+  health: (signal?: AbortSignal) => Promise<AgentRunnerHealth>;
+  listAgents: (signal?: AbortSignal) => Promise<AgentDefinition[]>;
+  listHarnesses: (signal?: AbortSignal) => Promise<HarnessStatus[]>;
+  listRuns: (agentId: string, signal?: AbortSignal) => Promise<RunSnapshot[]>;
+  prewarmTenant: (signal?: AbortSignal) => Promise<void>;
+  startRun: (
     agentId: string,
     input: StartRunInput,
     signal?: AbortSignal
-  ): Promise<RunSnapshot>;
-  stopRun(runId: string, signal?: AbortSignal): Promise<RunSnapshot>;
-  streamRunEvents(
+  ) => Promise<RunSnapshot>;
+  stopRun: (runId: string, signal?: AbortSignal) => Promise<RunSnapshot>;
+  streamRunEvents: (
     runId: string,
     options: StreamRunEventsOptions
-  ): Promise<RunSnapshot>;
-  updateAgent(
+  ) => Promise<RunSnapshot>;
+  updateAgent: (
     agentId: string,
     input: CreateAgentInput,
     signal?: AbortSignal
-  ): Promise<AgentDefinition>;
+  ) => Promise<AgentDefinition>;
 }
 
 export class RunnerApiError extends Error {
@@ -89,11 +89,12 @@ export class RunnerApiError extends Error {
     status: number,
     options: Readonly<{
       details?: string;
+      cause?: unknown;
       requestId?: string;
       retryable?: boolean;
     }> = {}
   ) {
-    super(message);
+    super(message, { cause: options.cause });
     this.name = "RunnerApiError";
     this.code = code;
     this.details = options.details;
@@ -105,6 +106,22 @@ export class RunnerApiError extends Error {
 
 function abortedError(): RunnerApiError {
   return new RunnerApiError("Runner request was aborted.", "aborted", 0);
+}
+
+function networkError(cause: unknown): RunnerApiError {
+  return new RunnerApiError("Could not reach the runner.", "network_error", 0, {
+    cause,
+    retryable: true,
+  });
+}
+
+function eventStreamError(cause: unknown, status: number): RunnerApiError {
+  return new RunnerApiError(
+    "Lost the runner event stream.",
+    "event_stream_error",
+    status,
+    { cause, retryable: true }
+  );
 }
 
 function parseSseFrame(frame: string, status: number): RunEvent | null {
@@ -251,10 +268,9 @@ export class BrowserRunnerTransport implements RunnerTransport {
   ): Promise<RunSnapshot[]> {
     return (
       await this.readJson(
-        await this.fetch(
-          `/api/agents/${encodeURIComponent(agentId)}/runs`,
-          { signal }
-        ),
+        await this.fetch(`/api/agents/${encodeURIComponent(agentId)}/runs`, {
+          signal,
+        }),
         runListEnvelopeSchema
       )
     ).runs;
@@ -267,14 +283,11 @@ export class BrowserRunnerTransport implements RunnerTransport {
   ): Promise<RunSnapshot> {
     return (
       await this.readJson(
-        await this.fetch(
-          `/api/agents/${encodeURIComponent(agentId)}/runs`,
-          {
-            body: JSON.stringify(input),
-            method: "POST",
-            signal,
-          }
-        ),
+        await this.fetch(`/api/agents/${encodeURIComponent(agentId)}/runs`, {
+          body: JSON.stringify(input),
+          method: "POST",
+          signal,
+        }),
         runSnapshotEnvelopeSchema
       )
     ).run;
@@ -289,44 +302,11 @@ export class BrowserRunnerTransport implements RunnerTransport {
     ).run;
   }
 
-  async streamRunEvents(
+  streamRunEvents(
     runId: string,
     options: StreamRunEventsOptions
   ): Promise<RunSnapshot> {
-    let cursor = options.lastEventId ?? 0;
-
-    while (true) {
-      if (options.signal?.aborted) {
-        throw abortedError();
-      }
-      const response = await this.fetch(
-        `/api/runs/${encodeURIComponent(runId)}/events`,
-        {
-          accept: "text/event-stream",
-          lastEventId: cursor,
-          signal: options.signal,
-        }
-      );
-      if (
-        !response.headers
-          .get("content-type")
-          ?.toLowerCase()
-          .startsWith("text/event-stream")
-      ) {
-        throw new RunnerApiError(
-          "Runner returned no event stream.",
-          "no_event_stream",
-          response.status
-        );
-      }
-      cursor = await this.readEventStream(response, cursor, options);
-
-      const snapshot = await this.getRun(runId, options.signal);
-      if (snapshot.status !== "queued" && snapshot.status !== "running") {
-        return snapshot;
-      }
-      await this.waitForReconnect(options.signal);
-    }
+    return this.followRunEvents(runId, options.lastEventId ?? 0, options);
   }
 
   async stopRun(runId: string, signal?: AbortSignal): Promise<RunSnapshot> {
@@ -380,19 +360,11 @@ export class BrowserRunnerTransport implements RunnerTransport {
       if (options.signal?.aborted) {
         throw abortedError();
       }
-      throw new RunnerApiError(
-        "Could not reach the runner.",
-        "network_error",
-        0,
-        { retryable: true }
-      );
+      throw networkError(error);
     }
-    throw new RunnerApiError(
-      "Runner request failed.",
-      "network_error",
-      0,
-      { retryable: true }
-    );
+    throw new RunnerApiError("Runner request failed.", "network_error", 0, {
+      retryable: true,
+    });
   }
 
   private async readEventStream(
@@ -442,12 +414,7 @@ export class BrowserRunnerTransport implements RunnerTransport {
       if (options.signal?.aborted) {
         throw abortedError();
       }
-      throw new RunnerApiError(
-        "Lost the runner event stream.",
-        "event_stream_error",
-        response.status,
-        { retryable: true }
-      );
+      throw eventStreamError(error, response.status);
     } finally {
       reader.cancel().catch(() => undefined);
     }
@@ -489,6 +456,43 @@ export class BrowserRunnerTransport implements RunnerTransport {
         retryable: parsed.data.error.retryable,
       }
     );
+  }
+
+  private async followRunEvents(
+    runId: string,
+    cursor: number,
+    options: StreamRunEventsOptions
+  ): Promise<RunSnapshot> {
+    if (options.signal?.aborted) {
+      throw abortedError();
+    }
+    const response = await this.fetch(
+      `/api/runs/${encodeURIComponent(runId)}/events`,
+      {
+        accept: "text/event-stream",
+        lastEventId: cursor,
+        signal: options.signal,
+      }
+    );
+    if (
+      !response.headers
+        .get("content-type")
+        ?.toLowerCase()
+        .startsWith("text/event-stream")
+    ) {
+      throw new RunnerApiError(
+        "Runner returned no event stream.",
+        "no_event_stream",
+        response.status
+      );
+    }
+    const nextCursor = await this.readEventStream(response, cursor, options);
+    const snapshot = await this.getRun(runId, options.signal);
+    if (snapshot.status !== "queued" && snapshot.status !== "running") {
+      return snapshot;
+    }
+    await this.waitForReconnect(options.signal);
+    return this.followRunEvents(runId, nextCursor, options);
   }
 
   private waitForReconnect(signal?: AbortSignal): Promise<void> {

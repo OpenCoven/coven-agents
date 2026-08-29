@@ -31,9 +31,7 @@ function operationId(): string {
     const bytes = source.getRandomValues(new Uint8Array(16));
     bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
     bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
-    const hex = [...bytes].map((byte) =>
-      byte.toString(16).padStart(2, "0")
-    );
+    const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0"));
     return [
       hex.slice(0, 4).join(""),
       hex.slice(4, 6).join(""),
@@ -80,10 +78,7 @@ export class RunnerClient {
     return this.transport.listAgents(signal);
   }
 
-  getAgent(
-    agentId: string,
-    signal?: AbortSignal
-  ): Promise<AgentDefinition> {
+  getAgent(agentId: string, signal?: AbortSignal): Promise<AgentDefinition> {
     return this.transport.getAgent(agentId, signal);
   }
 
@@ -119,7 +114,7 @@ export class RunnerClient {
     return this.awaitRun(queued, options.signal);
   }
 
-  async startRun(
+  startRun(
     agentId: string,
     task: string,
     options: { harnessId?: string; signal?: AbortSignal } = {}
@@ -131,10 +126,7 @@ export class RunnerClient {
     );
   }
 
-  listRuns(
-    agentId: string,
-    signal?: AbortSignal
-  ): Promise<RunSnapshot[]> {
+  listRuns(agentId: string, signal?: AbortSignal): Promise<RunSnapshot[]> {
     return this.transport.listRuns(agentId, signal);
   }
 
@@ -176,7 +168,6 @@ export class RunnerClient {
       }
       // biome-ignore lint/performance/noAwaitInLoops: polling is sequential by definition.
       await this.wait(signal);
-      // biome-ignore lint/performance/noAwaitInLoops: each read depends on the prior run state.
       snapshot = await this.transport.getRun(snapshot.id, signal);
     }
     return runSnapshotToResult(snapshot);

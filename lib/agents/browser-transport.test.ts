@@ -6,10 +6,7 @@ import {
   type AgentDefinition,
   type RunSnapshot,
 } from "@opencoven/agent-contracts";
-import {
-  BrowserRunnerTransport,
-  RunnerApiError,
-} from "./browser-transport";
+import { BrowserRunnerTransport, RunnerApiError } from "./browser-transport";
 
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const RUN_ID = "22222222-2222-4222-8222-222222222222";
@@ -70,8 +67,8 @@ test("owns every relative same-origin runner path and sends only browser session
     method: string;
     path: string;
   }> = [];
-  const request = ((input: RequestInfo | URL, init?: RequestInit) => {
-    const path = String(input);
+  const request = ((requestInput: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(requestInput);
     const method = init?.method ?? "GET";
     calls.push({
       body: typeof init?.body === "string" ? init.body : null,
@@ -208,7 +205,8 @@ test("owns every relative same-origin runner path and sends only browser session
     assert.doesNotMatch(call.path, /^https?:/);
   }
   assert.equal(
-    calls.find((call) => call.method === "POST" && call.path === "/api/agents")
+    calls
+      .find((call) => call.method === "POST" && call.path === "/api/agents")
       ?.headers.get("content-type"),
     "application/json"
   );
@@ -249,9 +247,7 @@ test("accepts only the strict v1 error envelope", async () => {
   );
 
   const flat = new BrowserRunnerTransport(() =>
-    Promise.resolve(
-      json({ code: "unauthorized", error: "Legacy error." }, 401)
-    )
+    Promise.resolve(json({ code: "unauthorized", error: "Legacy error." }, 401))
   );
   await assert.rejects(
     flat.listAgents(),
@@ -340,6 +336,54 @@ test("SSE reconnects with the last event cursor and resolves at a terminal snaps
   assert.equal(terminal.status, "completed");
 });
 
+test("SSE reconnects after a retryable stream failure without losing its cursor", async () => {
+  let streamAttempts = 0;
+  let snapshotReads = 0;
+  const cursors: Array<string | null> = [];
+  const transport = new BrowserRunnerTransport(
+    (requestInput, init) => {
+      if (String(requestInput).endsWith("/events")) {
+        streamAttempts += 1;
+        cursors.push(new Headers(init?.headers).get("last-event-id"));
+        if (streamAttempts === 1) {
+          return Promise.resolve(
+            new Response(
+              `data: ${JSON.stringify({ id: 1, output: "first", type: "output" })}\n\n`,
+              { headers: { "content-type": "text/event-stream" } }
+            )
+          );
+        }
+        if (streamAttempts === 2) {
+          return Promise.reject(new TypeError("connection reset"));
+        }
+        return Promise.resolve(
+          new Response(
+            `data: ${JSON.stringify({ id: 2, run: run("completed"), type: "completed" })}\n\n`,
+            { headers: { "content-type": "text/event-stream" } }
+          )
+        );
+      }
+      snapshotReads += 1;
+      return Promise.resolve(
+        json({
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          run: run(snapshotReads < 3 ? "running" : "completed"),
+        })
+      );
+    },
+    { reconnectDelayMs: 0 }
+  );
+  const events: number[] = [];
+
+  const terminal = await transport.streamRunEvents(RUN_ID, {
+    onEvent: (event) => events.push(event.id),
+  });
+
+  assert.deepEqual(events, [1, 2]);
+  assert.deepEqual(cursors, [null, "1", "1"]);
+  assert.equal(terminal.status, "completed");
+});
+
 test("SSE aborts a pending reconnect promptly without opening another stream", async () => {
   const controller = new AbortController();
   let streams = 0;
@@ -377,4 +421,3 @@ test("SSE aborts a pending reconnect promptly without opening another stream", a
   );
   assert.equal(streams, 1);
 });
-

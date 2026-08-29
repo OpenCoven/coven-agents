@@ -22,7 +22,7 @@ test.describe("Authentication Pages", () => {
     ).toBeVisible();
     await expect(
       page.getByText(
-        /New accounts start with guest access, and signing in never starts an agent or a run\./
+        /New accounts start with guest access, and signing in never starts an agent, sandbox, or run\./
       )
     ).toBeVisible();
     await expect(

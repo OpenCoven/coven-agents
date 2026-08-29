@@ -84,56 +84,60 @@ test("delegates browser operations to the injected transport", async () => {
   const calls: string[] = [];
   const controller = new AbortController();
   const transport = fakeTransport({
-    createAgent: async (input, signal) => {
-      calls.push(`create:${input.name}:${String(signal === controller.signal)}`);
-      return agent;
+    createAgent: (createInput, signal) => {
+      calls.push(
+        `create:${createInput.name}:${String(signal === controller.signal)}`
+      );
+      return Promise.resolve(agent);
     },
-    deleteAgent: async (id, signal) => {
+    deleteAgent: (id, signal) => {
       calls.push(`delete:${id}:${String(signal === controller.signal)}`);
+      return Promise.resolve();
     },
-    getAgent: async (id, signal) => {
+    getAgent: (id, signal) => {
       calls.push(`agent:${id}:${String(signal === controller.signal)}`);
-      return agent;
+      return Promise.resolve(agent);
     },
-    health: async (signal) => {
+    health: (signal) => {
       calls.push(`health:${String(signal === controller.signal)}`);
-      return {
+      return Promise.resolve({
         apiVersion: AGENT_RUNNER_API_VERSION,
         capabilities: [...AGENT_RUNNER_CAPABILITIES],
         minimumClientVersion: "1.0.0",
         mode: "cloud",
-      };
+      });
     },
-    listAgents: async (signal) => {
+    listAgents: (signal) => {
       calls.push(`agents:${String(signal === controller.signal)}`);
-      return [agent];
+      return Promise.resolve([agent]);
     },
-    listHarnesses: async (signal) => {
+    listHarnesses: (signal) => {
       calls.push(`harnesses:${String(signal === controller.signal)}`);
-      return [];
+      return Promise.resolve([]);
     },
-    listRuns: async (id, signal) => {
+    listRuns: (id, signal) => {
       calls.push(`runs:${id}:${String(signal === controller.signal)}`);
-      return [];
+      return Promise.resolve([]);
     },
-    prewarmTenant: async (signal) => {
+    prewarmTenant: (signal) => {
       calls.push(`prewarm:${String(signal === controller.signal)}`);
+      return Promise.resolve();
     },
-    stopRun: async (id, signal) => {
+    stopRun: (id, signal) => {
       calls.push(`stop:${id}:${String(signal === controller.signal)}`);
-      return snapshot("cancelled");
+      return Promise.resolve(snapshot("cancelled"));
     },
-    streamRunEvents: async (id, options) => {
+    streamRunEvents: (id, options) => {
       calls.push(
         `events:${id}:${options.lastEventId}:${String(options.signal === controller.signal)}`
       );
-      return snapshot("completed");
+      return Promise.resolve(snapshot("completed"));
     },
-    updateAgent: async (id, input, signal) => {
+    updateAgent: (id, updateInput, signal) => {
       calls.push(
-        `update:${id}:${input.name}:${String(signal === controller.signal)}`
+        `update:${id}:${updateInput.name}:${String(signal === controller.signal)}`
       );
-      return agent;
+      return Promise.resolve(agent);
     },
   });
   const client = new RunnerClient(transport);
@@ -180,14 +184,22 @@ test("delegates browser operations to the injected transport", async () => {
 
 test("startRun delegates one v1 start with a generated operation id", async () => {
   let sent:
-    | { agentId: string; operationId: string; signal?: AbortSignal; task: string }
+    | {
+        agentId: string;
+        operationId: string;
+        signal?: AbortSignal;
+        task: string;
+      }
     | undefined;
   const controller = new AbortController();
   const client = new RunnerClient(
     fakeTransport({
-      startRun: async (agentId, input, signal) => {
-        sent = { agentId, signal, ...input };
-        return { ...snapshot("queued"), operationId: input.operationId };
+      startRun: (agentId, startInput, signal) => {
+        sent = { agentId, signal, ...startInput };
+        return Promise.resolve({
+          ...snapshot("queued"),
+          operationId: startInput.operationId,
+        });
       },
     })
   );
@@ -210,11 +222,11 @@ test("runAgent follows an accepted v1 snapshot to completion", async () => {
   let reads = 0;
   const client = new RunnerClient(
     fakeTransport({
-      getRun: async () => {
+      getRun: () => {
         reads += 1;
-        return snapshot(reads === 1 ? "running" : "completed");
+        return Promise.resolve(snapshot(reads === 1 ? "running" : "completed"));
       },
-      startRun: async () => snapshot("queued"),
+      startRun: () => Promise.resolve(snapshot("queued")),
     }),
     { pollIntervalMs: 0 }
   );
@@ -231,7 +243,7 @@ test("run polling aborts promptly", async () => {
   const controller = new AbortController();
   const client = new RunnerClient(
     fakeTransport({
-      startRun: async () => snapshot("running"),
+      startRun: () => Promise.resolve(snapshot("running")),
     }),
     { pollIntervalMs: 30_000 }
   );
@@ -258,9 +270,12 @@ test("operation ids still use secure random bytes when randomUUID is unavailable
     let generated = "";
     const client = new RunnerClient(
       fakeTransport({
-        startRun: async (_agentId, input) => {
-          generated = input.operationId;
-          return { ...snapshot("queued"), operationId: input.operationId };
+        startRun: (_agentId, startInput) => {
+          generated = startInput.operationId;
+          return Promise.resolve({
+            ...snapshot("queued"),
+            operationId: startInput.operationId,
+          });
         },
       })
     );
