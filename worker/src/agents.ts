@@ -9,6 +9,7 @@ import {
   type RunSnapshot,
   runSnapshotToResult,
   startRunInputSchema,
+  storedAgentDefinitionSchema,
   type WarmState,
 } from "@opencoven/agent-contracts";
 import type {
@@ -320,6 +321,7 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
   list(tenantId: string): AgentDefinition[] {
     this.drainPendingUnregisters();
     return this.state.agents
+      .map((agent) => storedAgentDefinitionSchema.parse(agent))
       .filter((agent) => tenantOf(agent) === tenantId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
@@ -1023,7 +1025,9 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
   }
 
   snapshot(): AgentDefinition | null {
-    return this.state.definition;
+    return this.state.definition
+      ? storedAgentDefinitionSchema.parse(this.state.definition)
+      : null;
   }
 
   private requireDefinition(): AgentDefinition {
@@ -1031,7 +1035,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     if (!definition) {
       throw new Error("Agent has not been configured.");
     }
-    return definition;
+    return storedAgentDefinitionSchema.parse(definition);
   }
 
   private requireActiveDefinition(): AgentDefinition {

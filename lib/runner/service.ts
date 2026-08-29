@@ -55,14 +55,21 @@ export type RunnerDeleteAgentResult =
   | Readonly<{ kind: "not_found" }>
   | Readonly<{ kind: "stale_version" }>
   | Readonly<{
-      error: "non_retryable" | "retryable";
-      kind: "failed";
-    }>;
+      kind: "unavailable";
+      source: "database" | "provider";
+    }>
+  | Readonly<{ kind: "provider_rejected" }>;
 
 export type RunnerWarmSandboxResult =
   | Readonly<{ agent: RunnerAgentRecord; kind: "ready" }>
-  | Readonly<{ kind: "in_progress" }>
-  | Readonly<{ error: "non_retryable" | "retryable"; kind: "failed" }>;
+  | Readonly<{ agent: RunnerAgentRecord; kind: "in_progress" }>
+  | Readonly<{ kind: "not_found" }>
+  | Readonly<{ kind: "stale_version" }>
+  | Readonly<{
+      kind: "unavailable";
+      source: "database" | "provider";
+    }>
+  | Readonly<{ kind: "provider_rejected" }>;
 
 export type RunnerDiagnosticResult = Readonly<{
   exitCode: number;
@@ -125,6 +132,7 @@ export type RunnerCreateAgentResult =
   | Readonly<{ agent: AgentDefinition; kind: "created" }>
   | Readonly<{ kind: "conflict" }>
   | Readonly<{ kind: "invalid" }>
+  | Readonly<{ kind: "unavailable"; source: "database" }>
   | Readonly<{ kind: "unsupported_harness" }>;
 
 export type RunnerReadAgentResult =
@@ -134,15 +142,12 @@ export type RunnerReadAgentResult =
 export type RunnerUpdateAgentResult =
   | Readonly<{ agent: AgentDefinition; kind: "updated" }>
   | Readonly<{ kind: "invalid" }>
-  | Readonly<{ kind: "lifecycle_conflict" }>
   | Readonly<{ kind: "not_found" }>
   | Readonly<{ kind: "stale_version" }>
+  | Readonly<{ kind: "unavailable"; source: "database" }>
   | Readonly<{ kind: "unsupported_harness" }>;
 
-export type RunnerDeleteResult =
-  | Readonly<{ kind: "deleted" }>
-  | Readonly<{ kind: "busy" | "not_found" | "stale_version" }>
-  | Readonly<{ kind: "provider_failure"; retryable: boolean }>;
+export type RunnerDeleteResult = RunnerDeleteAgentResult;
 
 export type RunnerListRunsResult =
   | Readonly<{ kind: "found"; runs: readonly RunSnapshot[] }>
@@ -188,14 +193,38 @@ export type RunnerStopResult =
       kind: "not_found";
     }>
   | Readonly<{
+      kind: "in_progress";
+    }>
+  | Readonly<{
       kind: "stopped";
       run: RunSnapshot;
       scheduleReconciliation: true;
-    }>;
+    }>
+  | Readonly<{ kind: "unavailable"; source: "database" }>;
 
 export type RunnerPrewarmResult =
   | Readonly<{ kind: "none" }>
-  | Readonly<{ agentId: string; kind: "warmed"; warm: WarmState }>;
+  | Readonly<{
+      agentId: string;
+      kind: "ready" | "in_progress";
+      warm: WarmState;
+    }>
+  | Readonly<{ kind: "not_found" | "stale_version" }>
+  | Readonly<{
+      kind: "unavailable";
+      source: "database" | "provider";
+    }>
+  | Readonly<{ kind: "provider_rejected" }>;
+
+export type RunnerWarmResult =
+  | RunnerReadAgentResult
+  | Readonly<{ kind: "ready" | "in_progress"; warm: WarmState }>
+  | Readonly<{ kind: "stale_version" }>
+  | Readonly<{
+      kind: "unavailable";
+      source: "database" | "provider";
+    }>
+  | Readonly<{ kind: "provider_rejected" }>;
 
 export type RunnerService = Readonly<{
   createAgent: (
@@ -250,9 +279,7 @@ export type RunnerService = Readonly<{
   warmAgent: (
     principal: RunnerPrincipal,
     agentId: string
-  ) => Promise<
-    RunnerReadAgentResult | Readonly<{ kind: "warmed"; warm: WarmState }>
-  >;
+  ) => Promise<RunnerWarmResult>;
 }>;
 
 function projectAgent(record: RunnerAgentRecord): AgentDefinition {
@@ -277,18 +304,11 @@ function projectAgent(record: RunnerAgentRecord): AgentDefinition {
 }
 
 function projectWarm(
-  result: RunnerWarmSandboxResult,
-  clock: () => Date
+  result: Extract<RunnerWarmSandboxResult, { kind: "in_progress" | "ready" }>
 ): WarmState {
-  if (result.kind === "ready") {
-    return warmStateSchema.parse({
-      status: result.agent.warmStatus,
-      updatedAt: result.agent.warmUpdatedAt.toISOString(),
-    });
-  }
   return warmStateSchema.parse({
-    status: result.kind === "in_progress" ? "provisioning" : "failed",
-    updatedAt: clock().toISOString(),
+    status: result.agent.warmStatus,
+    updatedAt: result.agent.warmUpdatedAt.toISOString(),
   });
 }
 
@@ -301,6 +321,13 @@ function configuredError(operation: string): RunnerServiceError {
 
 function validId(value: string): boolean {
   return agentIdSchema.safeParse(value).success;
+}
+
+function unreachable(_value: never, operation: string): never {
+  throw new RunnerServiceError(
+    "service_unavailable",
+    `Runner ${operation} returned an unsupported outcome.`
+  );
 }
 
 function parsedDefinition(input: unknown):
@@ -349,7 +376,6 @@ function newerAgent(left: RunnerAgentRecord, right: RunnerAgentRecord): number {
 export function createRunnerService(
   dependencies: RunnerServiceDependencies
 ): RunnerService {
-  const clock = dependencies.clock ?? (() => new Date());
   const createId = dependencies.createId ?? randomUUID;
   const admit =
     dependencies.admit ??
@@ -377,21 +403,41 @@ export function createRunnerService(
   async function warmAgent(
     principal: RunnerPrincipal,
     agentId: string
-  ): Promise<
-    RunnerReadAgentResult | Readonly<{ kind: "warmed"; warm: WarmState }>
-  > {
+  ): Promise<RunnerWarmResult> {
     if (!validId(agentId)) {
       return { kind: "not_found" };
     }
-    const agent = await dependencies.store.getAgent(principal, agentId);
+    let agent: RunnerAgentRecord | null;
+    try {
+      agent = await dependencies.store.getAgent(principal, agentId);
+    } catch {
+      return { kind: "unavailable", source: "database" };
+    }
     if (!agent) {
       return { kind: "not_found" };
     }
     if (!dependencies.warmSandbox) {
       throw configuredError("sandbox warming");
     }
-    const result = await dependencies.warmSandbox(principal, agent);
-    return { kind: "warmed", warm: projectWarm(result, clock) };
+    let result: RunnerWarmSandboxResult;
+    try {
+      result = await dependencies.warmSandbox(principal, agent);
+    } catch {
+      return { kind: "unavailable", source: "provider" };
+    }
+    switch (result.kind) {
+      case "ready":
+      case "in_progress":
+        return { kind: result.kind, warm: projectWarm(result) };
+      case "not_found":
+      case "stale_version":
+      case "provider_rejected":
+        return result;
+      case "unavailable":
+        return result;
+      default:
+        return unreachable(result, "sandbox warming");
+    }
   }
 
   return {
@@ -404,14 +450,24 @@ export function createRunnerService(
       if (!validId(id)) {
         throw configuredError("agent creation");
       }
-      const created = await dependencies.store.createAgent(principal, {
-        ...parsed.value,
-        id,
-        workspace: parsed.value.workspace ?? null,
-      });
-      return created.kind === "created"
-        ? { agent: projectAgent(created.agent), kind: "created" }
-        : { kind: "conflict" };
+      let created: Awaited<ReturnType<RunnerServiceStore["createAgent"]>>;
+      try {
+        created = await dependencies.store.createAgent(principal, {
+          ...parsed.value,
+          id,
+          workspace: parsed.value.workspace ?? null,
+        });
+      } catch {
+        return { kind: "unavailable", source: "database" };
+      }
+      switch (created.kind) {
+        case "created":
+          return { agent: projectAgent(created.agent), kind: "created" };
+        case "conflict":
+          return { kind: "conflict" };
+        default:
+          return unreachable(created, "agent creation");
+      }
     },
 
     deleteAgent: async (principal, agentId) => {
@@ -421,20 +477,23 @@ export function createRunnerService(
       if (!dependencies.deleteSandbox) {
         throw configuredError("agent deletion");
       }
-      const deleted = await dependencies.deleteSandbox(principal, agentId);
-      if (deleted.kind === "deleted") {
-        return { kind: "deleted" };
+      let deleted: RunnerDeleteAgentResult;
+      try {
+        deleted = await dependencies.deleteSandbox(principal, agentId);
+      } catch {
+        return { kind: "unavailable", source: "provider" };
       }
-      if (deleted.kind === "not_found") {
-        return { kind: "not_found" };
+      switch (deleted.kind) {
+        case "deleted":
+        case "not_found":
+        case "busy":
+        case "stale_version":
+        case "unavailable":
+        case "provider_rejected":
+          return deleted;
+        default:
+          return unreachable(deleted, "agent deletion");
       }
-      if (deleted.kind === "busy" || deleted.kind === "stale_version") {
-        return deleted;
-      }
-      return {
-        kind: "provider_failure",
-        retryable: deleted.error === "retryable",
-      };
     },
 
     diagnoseSandbox: () => {
@@ -480,7 +539,12 @@ export function createRunnerService(
     },
 
     prewarmMostRecent: async (principal) => {
-      const agents = await dependencies.store.listAgents(principal);
+      let agents: RunnerAgentRecord[];
+      try {
+        agents = await dependencies.store.listAgents(principal);
+      } catch {
+        return { kind: "unavailable", source: "database" };
+      }
       const [target] = [...agents].sort(newerAgent);
       if (!target) {
         return { kind: "none" };
@@ -492,13 +556,24 @@ export function createRunnerService(
       try {
         result = await dependencies.warmSandbox(principal, target);
       } catch {
-        result = { error: "retryable", kind: "failed" };
+        return { kind: "unavailable", source: "provider" };
       }
-      return {
-        agentId: target.id,
-        kind: "warmed",
-        warm: projectWarm(result, clock),
-      };
+      switch (result.kind) {
+        case "ready":
+        case "in_progress":
+          return {
+            agentId: target.id,
+            kind: result.kind,
+            warm: projectWarm(result),
+          };
+        case "not_found":
+        case "stale_version":
+        case "unavailable":
+        case "provider_rejected":
+          return result;
+        default:
+          return unreachable(result, "tenant prewarming");
+      }
     },
 
     readRunEvents: async (principal, runId, afterEventId) => {
@@ -544,64 +619,72 @@ export function createRunnerService(
       if (!validId(id)) {
         throw configuredError("run creation");
       }
-      const admitted = await admit({
-        agentId,
-        authVersion,
-        id,
-        operationId: parsed.data.operationId,
-        principal,
-        requestHash: hashRunRequest(agentId, parsed.data.task),
-        task: parsed.data.task,
-      });
-      if (admitted.kind === "claimed") {
-        try {
-          await dependencies.dispatchClaim?.(admitted.claimed);
-        } catch {
-          // The durable lease and authenticated reconciliation remain the
-          // recovery path; provider details must not change the HTTP result.
-        }
-        return { kind: "accepted", run: requireSnapshot(admitted.run) };
-      }
-      if (admitted.kind === "created") {
+      let admitted: AdmitRunnerRunResult;
+      try {
+        admitted = await admit({
+          agentId,
+          authVersion,
+          id,
+          operationId: parsed.data.operationId,
+          principal,
+          requestHash: hashRunRequest(agentId, parsed.data.task),
+          task: parsed.data.task,
+        });
+      } catch {
         return {
-          kind: "accepted",
-          run: requireSnapshot(admitted.run),
-          scheduleReconciliation: true,
+          code: "admission_unavailable",
+          kind: "refused",
+          retryable: true,
         };
       }
-      if (admitted.kind === "duplicate") {
-        return { kind: "accepted", run: requireSnapshot(admitted.run) };
+      switch (admitted.kind) {
+        case "claimed":
+          try {
+            await dependencies.dispatchClaim?.(admitted.claimed);
+          } catch {
+            // The durable lease and authenticated reconciliation remain the
+            // recovery path; provider details must not change the HTTP result.
+          }
+          return { kind: "accepted", run: requireSnapshot(admitted.run) };
+        case "created":
+          return {
+            kind: "accepted",
+            run: requireSnapshot(admitted.run),
+            scheduleReconciliation: true,
+          };
+        case "duplicate":
+          return { kind: "accepted", run: requireSnapshot(admitted.run) };
+        case "refused":
+          switch (admitted.error.code) {
+            case "agent_not_found":
+              return { kind: "not_found" };
+            case "operation_conflict":
+              return {
+                code: "operation_conflict",
+                kind: "refused",
+                retryable: false,
+              };
+            case "admission_unavailable":
+              return {
+                code: "admission_unavailable",
+                kind: "refused",
+                retryable: true,
+              };
+            case "sandbox_unavailable":
+              return {
+                code: "lifecycle_conflict",
+                kind: "refused",
+                retryable: true,
+              };
+            case "global_busy":
+            case "tenant_queue_full":
+              return { code: "busy", kind: "refused", retryable: true };
+            default:
+              return unreachable(admitted.error.code, "run admission");
+          }
+        default:
+          return unreachable(admitted, "run admission");
       }
-      if (admitted.kind === "refused") {
-        switch (admitted.error.code) {
-          case "agent_not_found":
-            return { kind: "not_found" };
-          case "operation_conflict":
-            return {
-              code: "operation_conflict",
-              kind: "refused",
-              retryable: false,
-            };
-          case "admission_unavailable":
-            return {
-              code: "admission_unavailable",
-              kind: "refused",
-              retryable: true,
-            };
-          case "sandbox_unavailable":
-            return {
-              code: "lifecycle_conflict",
-              kind: "refused",
-              retryable: true,
-            };
-          case "global_busy":
-          case "tenant_queue_full":
-            return { code: "busy", kind: "refused", retryable: true };
-          default:
-            throw configuredError("run admission");
-        }
-      }
-      throw configuredError("run admission");
     },
 
     stopRun: async (principal, runId) => {
@@ -610,7 +693,12 @@ export function createRunnerService(
       }
       // The tenant-scoped read is required before cancellation, whose
       // orchestration primitive intentionally holds operator authority.
-      const owned = await dependencies.store.getRun(principal, runId);
+      let owned: RunSnapshot | null;
+      try {
+        owned = await dependencies.store.getRun(principal, runId);
+      } catch {
+        return { kind: "unavailable", source: "database" };
+      }
       if (!owned) {
         return { kind: "not_found" };
       }
@@ -618,18 +706,43 @@ export function createRunnerService(
         throw configuredError("cancellation");
       }
       const outcome = await dependencies.cancelRun(runId);
-      if (outcome.kind === "not_found") {
-        return { kind: "not_found" };
+      switch (outcome.kind) {
+        case "not_found":
+        case "in_progress":
+          return { kind: outcome.kind };
+        case "already_terminal":
+        case "cancelled":
+        case "cleanup_required":
+        case "sandbox_reset_required":
+          break;
+        default:
+          return unreachable(outcome, "run cancellation");
       }
-      const current = await dependencies.store.getRun(principal, runId);
+      let current: RunSnapshot | null;
+      try {
+        current = await dependencies.store.getRun(principal, runId);
+      } catch {
+        return { kind: "unavailable", source: "database" };
+      }
       if (!current) {
         return { kind: "not_found" };
       }
       const run = requireSnapshot(current);
-      return outcome.kind === "cleanup_required" ||
-        outcome.kind === "sandbox_reset_required"
-        ? { kind: "cleanup_required", run, scheduleReconciliation: true }
-        : { kind: "stopped", run, scheduleReconciliation: true };
+      const outcomeKind = outcome.kind;
+      switch (outcomeKind) {
+        case "cleanup_required":
+        case "sandbox_reset_required":
+          return {
+            kind: "cleanup_required",
+            run,
+            scheduleReconciliation: true,
+          };
+        case "already_terminal":
+        case "cancelled":
+          return { kind: "stopped", run, scheduleReconciliation: true };
+        default:
+          return unreachable(outcomeKind, "run cancellation");
+      }
     },
 
     updateAgent: async (principal, agentId, input) => {
@@ -640,20 +753,35 @@ export function createRunnerService(
       if (parsed.kind !== "ok") {
         return parsed;
       }
-      const current = await dependencies.store.getAgent(principal, agentId);
+      let current: RunnerAgentRecord | null;
+      try {
+        current = await dependencies.store.getAgent(principal, agentId);
+      } catch {
+        return { kind: "unavailable", source: "database" };
+      }
       if (!current) {
         return { kind: "not_found" };
       }
-      const updated = await dependencies.store.updateAgent(principal, {
-        ...parsed.value,
-        expectedVersion: current.version,
-        id: agentId,
-        workspace: parsed.value.workspace ?? null,
-      });
-      if (updated.kind === "updated") {
-        return { agent: projectAgent(updated.value), kind: "updated" };
+      let updated: Awaited<ReturnType<RunnerServiceStore["updateAgent"]>>;
+      try {
+        updated = await dependencies.store.updateAgent(principal, {
+          ...parsed.value,
+          expectedVersion: current.version,
+          id: agentId,
+          workspace: parsed.value.workspace ?? null,
+        });
+      } catch {
+        return { kind: "unavailable", source: "database" };
       }
-      return updated;
+      switch (updated.kind) {
+        case "updated":
+          return { agent: projectAgent(updated.value), kind: "updated" };
+        case "not_found":
+        case "stale_version":
+          return updated;
+        default:
+          return unreachable(updated, "agent update");
+      }
     },
 
     warmAgent,

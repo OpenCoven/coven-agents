@@ -847,6 +847,67 @@ test("warm errors preserve a lifecycle error's retryability", async () => {
   assert.deepEqual(result, { error: "retryable", kind: "failed" });
 });
 
+test("warming preserves store concurrency outcomes and their current records", async () => {
+  const current = agent({
+    daytonaSandboxId: "stored",
+    sandboxLifecycle: "ready",
+    version: 4,
+  });
+  const provisioning = agent({
+    ...current,
+    version: 5,
+    warmStatus: "provisioning",
+  });
+  const outcomes = [
+    [
+      { kind: "in_progress", value: provisioning },
+      { agent: provisioning, kind: "in_progress" },
+    ],
+    [{ kind: "not_found" }, { kind: "not_found" }],
+    [{ kind: "stale_version" }, { kind: "stale_version" }],
+  ] as const;
+
+  await Promise.all(
+    outcomes.map(async ([storeResult, expected]) => {
+      const result = await warmDaytonaSandbox(principal, current, config, {
+        daytona: {
+          create: () => Promise.reject(new Error("must not create")),
+          get: () => Promise.resolve(sandbox(SandboxState.STARTED)),
+        },
+        probe: () => Promise.resolve(),
+        store: store({
+          beginDaytonaSandboxWarm: async () => storeResult as never,
+        }),
+      });
+      assert.deepEqual(result, expected);
+    })
+  );
+});
+
+test("warming distinguishes durable-store failure from provider rejection", async () => {
+  const result = await warmDaytonaSandbox(
+    principal,
+    agent({ sandboxLifecycle: "unprovisioned" }),
+    config,
+    {
+      daytona: {
+        create: () => Promise.reject(new Error("must not create")),
+        get: () => Promise.reject(new Error("must not get")),
+      },
+      probe: () => Promise.resolve(),
+      store: store({
+        reserveDaytonaSandbox: () =>
+          Promise.reject(new Error("database=private-detail")),
+      }),
+    }
+  );
+
+  assert.deepEqual(result, {
+    kind: "unavailable",
+    source: "database",
+  });
+});
+
 test("decommissioning is durable until provider deletion or provider-not-found", async () => {
   const decommissioning = agent({
     daytonaSandboxId: "stored",

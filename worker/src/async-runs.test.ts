@@ -49,6 +49,10 @@ function definition(): AgentDefinition {
     runtime: "copilot",
     status: "idle",
     updatedAt: "2026-08-20T12:00:00.000Z",
+    warm: {
+      status: "not_started",
+      updatedAt: "2026-08-20T12:00:00.000Z",
+    },
   };
 }
 
@@ -1002,6 +1006,20 @@ test("legacy state without decommission fields can still be decommissioned safel
     lifecycle: { status: string };
   };
   assert.equal(state.lifecycle.status, "decommissioned");
+});
+
+test("legacy stored definitions without warm state normalize on snapshot", () => {
+  const yolo = agent();
+  const state = Reflect.get(yolo, "state") as {
+    definition: AgentDefinition;
+  };
+  const { warm: _warm, ...legacyDefinition } = state.definition;
+  yolo.setState({ ...state, definition: legacyDefinition } as never);
+
+  assert.deepEqual(yolo.snapshot()?.warm, {
+    status: "not_started",
+    updatedAt: legacyDefinition.updatedAt,
+  });
 });
 
 test("stopping an absent run does not require a decommissioned definition", async () => {

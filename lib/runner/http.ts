@@ -155,6 +155,52 @@ function runNotFound(dependencies: RunnerHttpDependencies): Response {
   );
 }
 
+function runnerUnavailable(dependencies: RunnerHttpDependencies): Response {
+  return errorResponse(
+    dependencies,
+    503,
+    "runner_unavailable",
+    "Runner service is temporarily unavailable. Try again later.",
+    true
+  );
+}
+
+function providerUnavailable(dependencies: RunnerHttpDependencies): Response {
+  return errorResponse(
+    dependencies,
+    503,
+    "provider_unavailable",
+    "Runner provider is temporarily unavailable. Try again later.",
+    true
+  );
+}
+
+function providerRejected(dependencies: RunnerHttpDependencies): Response {
+  return errorResponse(
+    dependencies,
+    422,
+    "provider_rejected",
+    "Runner provider rejected the operation.",
+    false
+  );
+}
+
+function staleVersion(dependencies: RunnerHttpDependencies): Response {
+  return errorResponse(
+    dependencies,
+    409,
+    "stale_version",
+    "The agent changed concurrently. Try again.",
+    true
+  );
+}
+
+function unreachableResult(value: never): never {
+  throw new Error(
+    `Runner HTTP adapter received an unsupported result: ${JSON.stringify(value)}`
+  );
+}
+
 function subscriberFailure(
   dependencies: RunnerHttpDependencies,
   decision: Exclude<RunnerSubscriberAuthorization, { kind: "allowed" }>
@@ -432,21 +478,23 @@ function serviceFailure(
           true
         );
       case "service_unavailable":
+        return runnerUnavailable(dependencies);
+      default: {
+        const unsupportedCode: never = error.code;
+        dependencies.logger?.error(
+          "Runner service error code is unsupported.",
+          {
+            name: String(unsupportedCode),
+          }
+        );
         return errorResponse(
           dependencies,
-          503,
-          "runner_unavailable",
-          "Runner service is temporarily unavailable. Try again later.",
+          500,
+          "internal_error",
+          "Runner request failed.",
           true
         );
-      default:
-        return errorResponse(
-          dependencies,
-          503,
-          "runner_unavailable",
-          "Runner service is temporarily unavailable. Try again later.",
-          true
-        );
+      }
     }
   }
   dependencies.logger?.error("Runner HTTP request failed.", {
@@ -516,35 +564,39 @@ export function createRunnerHttpHandlers(
           context.principal,
           body.value
         );
-        if (created.kind === "invalid") {
-          return invalidRequest(dependencies);
+        switch (created.kind) {
+          case "invalid":
+            return invalidRequest(dependencies);
+          case "unsupported_harness":
+            return errorResponse(
+              dependencies,
+              400,
+              "harness_unsupported",
+              `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+              false
+            );
+          case "conflict":
+            return errorResponse(
+              dependencies,
+              409,
+              "operation_conflict",
+              "Agent creation conflicted with a concurrent operation.",
+              true
+            );
+          case "unavailable":
+            return runnerUnavailable(dependencies);
+          case "created":
+            schedule(dependencies, async () => {
+              await service.warmAgent(context.principal, created.agent.id);
+              await service.reconcileAndDispatch();
+            });
+            return Response.json(
+              agentEnvelopeSchema.parse({ agent: created.agent }),
+              { status: 201 }
+            );
+          default:
+            return unreachableResult(created);
         }
-        if (created.kind === "unsupported_harness") {
-          return errorResponse(
-            dependencies,
-            400,
-            "harness_unsupported",
-            `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
-            false
-          );
-        }
-        if (created.kind === "conflict") {
-          return errorResponse(
-            dependencies,
-            409,
-            "operation_conflict",
-            "Agent creation conflicted with a concurrent operation.",
-            true
-          );
-        }
-        schedule(dependencies, async () => {
-          await service.warmAgent(context.principal, created.agent.id);
-          await service.reconcileAndDispatch();
-        });
-        return Response.json(
-          agentEnvelopeSchema.parse({ agent: created.agent }),
-          { status: 201 }
-        );
       }),
 
     deleteAgent: (request, agentId) =>
@@ -563,39 +615,30 @@ export function createRunnerHttpHandlers(
         }
         const service = await dependencies.createService(context);
         const deleted = await service.deleteAgent(context.principal, agentId);
-        if (deleted.kind === "not_found") {
-          return agentNotFound(dependencies);
+        switch (deleted.kind) {
+          case "not_found":
+            return agentNotFound(dependencies);
+          case "busy":
+            return errorResponse(
+              dependencies,
+              409,
+              "busy",
+              "The agent is busy. Try again later.",
+              true
+            );
+          case "stale_version":
+            return staleVersion(dependencies);
+          case "unavailable":
+            return deleted.source === "provider"
+              ? providerUnavailable(dependencies)
+              : runnerUnavailable(dependencies);
+          case "provider_rejected":
+            return providerRejected(dependencies);
+          case "deleted":
+            return Response.json(okEnvelopeSchema.parse({ ok: true }));
+          default:
+            return unreachableResult(deleted);
         }
-        if (deleted.kind === "busy") {
-          return errorResponse(
-            dependencies,
-            409,
-            "busy",
-            "The agent is busy. Try again later.",
-            true
-          );
-        }
-        if (deleted.kind === "stale_version") {
-          return errorResponse(
-            dependencies,
-            409,
-            "stale_version",
-            "The agent changed concurrently. Try again.",
-            true
-          );
-        }
-        if (deleted.kind === "provider_failure") {
-          return errorResponse(
-            dependencies,
-            deleted.retryable ? 503 : 422,
-            deleted.retryable ? "provider_unavailable" : "provider_rejected",
-            deleted.retryable
-              ? "Runner provider is temporarily unavailable. Try again later."
-              : "Runner provider rejected the operation.",
-            deleted.retryable
-          );
-        }
-        return Response.json(okEnvelopeSchema.parse({ ok: true }));
       }),
 
     diagnoseSandbox: (request) =>
@@ -818,15 +861,30 @@ export function createRunnerHttpHandlers(
         }
         const service = await dependencies.createService(context);
         const result = await service.prewarmMostRecent(context.principal);
-        return result.kind === "none"
-          ? new Response(null, { status: 204 })
-          : Response.json(
+        switch (result.kind) {
+          case "none":
+          case "not_found":
+            return new Response(null, { status: 204 });
+          case "ready":
+          case "in_progress":
+            return Response.json(
               {
                 agentId: result.agentId,
                 warm: result.warm,
               },
               { status: 202 }
             );
+          case "stale_version":
+            return staleVersion(dependencies);
+          case "unavailable":
+            return result.source === "provider"
+              ? providerUnavailable(dependencies)
+              : runnerUnavailable(dependencies);
+          case "provider_rejected":
+            return providerRejected(dependencies);
+          default:
+            return unreachableResult(result);
+        }
       }),
 
     reconcile: (request) =>
@@ -879,65 +937,64 @@ export function createRunnerHttpHandlers(
           agentId,
           body.value
         );
-        if (result.kind === "invalid") {
-          return invalidRequest(dependencies);
+        switch (result.kind) {
+          case "invalid":
+            return invalidRequest(dependencies);
+          case "not_found":
+            return agentNotFound(dependencies);
+          case "refused":
+            switch (result.code) {
+              case "operation_conflict":
+                return errorResponse(
+                  dependencies,
+                  409,
+                  "operation_conflict",
+                  "Operation ID was already used for a different request.",
+                  false
+                );
+              case "busy":
+                return errorResponse(
+                  dependencies,
+                  409,
+                  "busy",
+                  "The cloud runner is busy. Try again later.",
+                  true
+                );
+              case "lifecycle_conflict":
+                return errorResponse(
+                  dependencies,
+                  409,
+                  "agent_decommissioning",
+                  "Agent decommission is still in progress. Try again later.",
+                  true
+                );
+              case "admission_unavailable":
+                return errorResponse(
+                  dependencies,
+                  503,
+                  "admission_unavailable",
+                  "Run admission is temporarily unavailable. Try again later.",
+                  true
+                );
+              default:
+                return unreachableResult(result.code);
+            }
+          case "accepted":
+            if (result.scheduleReconciliation) {
+              schedule(dependencies, async () => {
+                await service.reconcileAndDispatch();
+              });
+            }
+            return Response.json(
+              runSnapshotEnvelopeSchema.parse({
+                apiVersion: AGENT_RUNNER_API_VERSION,
+                run: result.run,
+              }),
+              { status: 202 }
+            );
+          default:
+            return unreachableResult(result);
         }
-        if (result.kind === "not_found") {
-          return agentNotFound(dependencies);
-        }
-        if (result.kind === "refused") {
-          switch (result.code) {
-            case "operation_conflict":
-              return errorResponse(
-                dependencies,
-                409,
-                "operation_conflict",
-                "Operation ID was already used for a different request.",
-                false
-              );
-            case "busy":
-              return errorResponse(
-                dependencies,
-                409,
-                "busy",
-                "The cloud runner is busy. Try again later.",
-                true
-              );
-            case "lifecycle_conflict":
-              return errorResponse(
-                dependencies,
-                409,
-                "agent_decommissioning",
-                "Agent decommission is still in progress. Try again later.",
-                true
-              );
-            case "admission_unavailable":
-              return errorResponse(
-                dependencies,
-                503,
-                "admission_unavailable",
-                "Run admission is temporarily unavailable. Try again later.",
-                true
-              );
-            default:
-              throw new RunnerServiceError(
-                "service_unavailable",
-                "Runner run admission is unavailable."
-              );
-          }
-        }
-        if (result.scheduleReconciliation) {
-          schedule(dependencies, async () => {
-            await service.reconcileAndDispatch();
-          });
-        }
-        return Response.json(
-          runSnapshotEnvelopeSchema.parse({
-            apiVersion: AGENT_RUNNER_API_VERSION,
-            run: result.run,
-          }),
-          { status: 202 }
-        );
       }),
 
     stopRun: (request, runId) =>
@@ -960,27 +1017,43 @@ export function createRunnerHttpHandlers(
         }
         const service = await dependencies.createService(context);
         const result = await service.stopRun(context.principal, runId);
-        if (result.kind === "not_found") {
-          return runNotFound(dependencies);
+        switch (result.kind) {
+          case "not_found":
+            return runNotFound(dependencies);
+          case "in_progress":
+            return errorResponse(
+              dependencies,
+              409,
+              "busy",
+              "Run cancellation is already in progress. Try again later.",
+              true
+            );
+          case "unavailable":
+            return runnerUnavailable(dependencies);
+          case "cleanup_required":
+            schedule(dependencies, async () => {
+              await service.reconcileAndDispatch();
+            });
+            return errorResponse(
+              dependencies,
+              503,
+              "cleanup_required",
+              "Run cancellation is awaiting cleanup. Try again later.",
+              true
+            );
+          case "stopped":
+            schedule(dependencies, async () => {
+              await service.reconcileAndDispatch();
+            });
+            return Response.json(
+              runSnapshotEnvelopeSchema.parse({
+                apiVersion: AGENT_RUNNER_API_VERSION,
+                run: result.run,
+              })
+            );
+          default:
+            return unreachableResult(result);
         }
-        schedule(dependencies, async () => {
-          await service.reconcileAndDispatch();
-        });
-        if (result.kind === "cleanup_required") {
-          return errorResponse(
-            dependencies,
-            503,
-            "cleanup_required",
-            "Run cancellation is awaiting cleanup. Try again later.",
-            true
-          );
-        }
-        return Response.json(
-          runSnapshotEnvelopeSchema.parse({
-            apiVersion: AGENT_RUNNER_API_VERSION,
-            run: result.run,
-          })
-        );
       }),
 
     updateAgent: (request, agentId) =>
@@ -1012,46 +1085,34 @@ export function createRunnerHttpHandlers(
           agentId,
           body.value
         );
-        if (result.kind === "not_found") {
-          return agentNotFound(dependencies);
+        switch (result.kind) {
+          case "not_found":
+            return agentNotFound(dependencies);
+          case "invalid":
+            return invalidRequest(dependencies);
+          case "unsupported_harness":
+            return errorResponse(
+              dependencies,
+              400,
+              "harness_unsupported",
+              `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+              false
+            );
+          case "stale_version":
+            return staleVersion(dependencies);
+          case "unavailable":
+            return runnerUnavailable(dependencies);
+          case "updated":
+            schedule(dependencies, async () => {
+              await service.warmAgent(context.principal, result.agent.id);
+              await service.reconcileAndDispatch();
+            });
+            return Response.json(
+              agentEnvelopeSchema.parse({ agent: result.agent })
+            );
+          default:
+            return unreachableResult(result);
         }
-        if (result.kind === "invalid") {
-          return invalidRequest(dependencies);
-        }
-        if (result.kind === "unsupported_harness") {
-          return errorResponse(
-            dependencies,
-            400,
-            "harness_unsupported",
-            `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
-            false
-          );
-        }
-        if (result.kind === "lifecycle_conflict") {
-          return errorResponse(
-            dependencies,
-            409,
-            "agent_decommissioning",
-            "Agent decommission is still in progress. Try again later.",
-            true
-          );
-        }
-        if (result.kind === "stale_version") {
-          return errorResponse(
-            dependencies,
-            409,
-            "stale_version",
-            "The agent changed concurrently. Try again.",
-            true
-          );
-        }
-        schedule(dependencies, async () => {
-          await service.warmAgent(context.principal, result.agent.id);
-          await service.reconcileAndDispatch();
-        });
-        return Response.json(
-          agentEnvelopeSchema.parse({ agent: result.agent })
-        );
       }),
   };
 }

@@ -215,8 +215,7 @@ export const createAgentInputSchema = z
  * `provisioning` means a warm-up is booting the container; `ready` means the
  * probe answered and the next run skips the cold start; `failed` is advisory
  * — a run started against a failed warm simply pays the cold start it would
- * have paid anyway. Optional on the definition because agents configured
- * before warming existed have no recorded state, which is `not_started`.
+ * have paid anyway.
  */
 export const warmStateSchema = z
   .object({
@@ -234,9 +233,26 @@ export const agentDefinitionSchema = z
     lastRunAt: datetimeSchema.nullable(),
     status: agentStatusSchema,
     updatedAt: datetimeSchema,
-    warm: warmStateSchema.optional(),
+    warm: warmStateSchema,
   })
   .strict();
+
+/**
+ * Durable worker state predating warm tracking has no `warm` member. Keep
+ * that compatibility at the storage boundary so current API responses remain
+ * strict and always publish the effective warm state.
+ */
+export const storedAgentDefinitionSchema = agentDefinitionSchema
+  .extend({
+    warm: warmStateSchema.optional(),
+  })
+  .transform((definition) => ({
+    ...definition,
+    warm: definition.warm ?? {
+      status: "not_started" as const,
+      updatedAt: definition.updatedAt,
+    },
+  }));
 
 export const runAgentInputSchema = z.object({
   task: z.string().trim().min(1).max(AGENT_RUNNER_LIMITS.maxTaskLength),

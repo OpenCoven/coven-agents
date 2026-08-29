@@ -29,6 +29,12 @@ test("validates every owner and representative example with exported schemas", (
   const fixture = buildAgentRunnerFixture();
   const serializedFixture = JSON.parse(readFileSync(fixturePath, "utf8"));
 
+  assert.equal(
+    fixture.owners.some(
+      (owner) => owner.kind === "tenant" && owner.tenantId === "tenant-123"
+    ),
+    true
+  );
   assert.deepEqual(
     agentOwnerSchema.array().parse(fixture.owners),
     fixture.owners

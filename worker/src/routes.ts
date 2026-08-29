@@ -1308,6 +1308,10 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               owner: { kind: "tenant", tenantId: callerTenant },
               status: "idle",
               updatedAt: now,
+              warm: {
+                status: "not_started",
+                updatedAt: now,
+              },
             };
             const agent = await yoloAgent(definition.id);
             const configured = await agent.configure(definition);
@@ -1392,6 +1396,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               owner: current.owner,
               status: current.status,
               updatedAt: new Date().toISOString(),
+              warm: current.warm,
             });
             await directory.upsert(configured);
             // An edited profile is about to be run — same intent signal as

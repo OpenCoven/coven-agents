@@ -21,6 +21,7 @@ import {
   runSnapshotSchema,
   runStatusSchema,
   startRunInputSchema,
+  storedAgentDefinitionSchema,
 } from "./index";
 
 const contractFixture = JSON.parse(
@@ -64,10 +65,10 @@ test("rejects the retired provider-key cloud runtime on either backend", () => {
   }
 });
 
-test("a stored definition using the retired runtime still parses", () => {
+test("a stored definition using the retired runtime and no warm state still parses", () => {
   // Tightening a create-time rule must not strand an agent already written to
-  // durable state, so the definition schema does not inherit the refinement.
-  const result = agentDefinitionSchema.safeParse({
+  // durable state, so the stored schema owns legacy compatibility.
+  const result = storedAgentDefinitionSchema.safeParse({
     backend: "cloud",
     createdAt: "2026-08-20T17:00:00.000Z",
     description: "",
@@ -82,6 +83,29 @@ test("a stored definition using the retired runtime still parses", () => {
   });
 
   assert.equal(result.success, true);
+  assert.deepEqual(result.success && result.data.warm, {
+    status: "not_started",
+    updatedAt: "2026-08-20T17:00:00.000Z",
+  });
+});
+
+test("public agent definitions require warm state", () => {
+  const result = agentDefinitionSchema.safeParse({
+    backend: "cloud",
+    createdAt: "2026-08-20T17:00:00.000Z",
+    description: "",
+    id: "11111111-2222-4333-8444-555555555555",
+    instructions: "Current agent.",
+    lastRunAt: null,
+    model: "auto",
+    name: "Current",
+    owner: { kind: "tenant", tenantId: "acct_42" },
+    runtime: "copilot",
+    status: "idle",
+    updatedAt: "2026-08-20T17:00:00.000Z",
+  });
+
+  assert.equal(result.success, false);
 });
 
 test("rejects empty tasks", () => {
@@ -146,7 +170,7 @@ test("keeps the exported contract values aligned with the fixture", async () => 
   assert.deepEqual(contractFixture.statuses, contract.AGENT_RUNNER_STATUSES);
 });
 
-test("defaults new and legacy agent definitions to standalone ownership", () => {
+test("defaults legacy stored agent definitions to standalone ownership", () => {
   const result = createAgentInputSchema.parse({
     backend: "cloud",
     instructions: "Run in the cloud.",
@@ -160,7 +184,7 @@ test("defaults new and legacy agent definitions to standalone ownership", () => 
   // parsing records stored before ownership existed.
   assert.equal("owner" in result, false);
   assert.deepEqual(
-    agentDefinitionSchema.parse({
+    storedAgentDefinitionSchema.parse({
       backend: result.backend,
       createdAt: "2026-08-20T19:00:00.000Z",
       description: result.description,

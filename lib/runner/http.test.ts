@@ -48,6 +48,10 @@ function definition(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
     runtime: "copilot",
     status: "idle",
     updatedAt: "2026-08-28T15:00:00.000Z",
+    warm: {
+      status: "not_started",
+      updatedAt: "2026-08-28T15:00:00.000Z",
+    },
     ...overrides,
   };
 }
@@ -111,7 +115,7 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     ],
     prewarmMostRecent: async () => ({
       agentId: AGENT_ID,
-      kind: "warmed",
+      kind: "ready",
       warm: {
         status: "ready",
         updatedAt: "2026-08-28T15:00:00.000Z",
@@ -141,7 +145,7 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
       kind: "updated",
     }),
     warmAgent: async () => ({
-      kind: "warmed",
+      kind: "ready",
       warm: {
         status: "ready",
         updatedAt: "2026-08-28T15:00:00.000Z",
@@ -447,7 +451,7 @@ test("create returns the stamped agent and schedules bounded warm/reconcile work
       warmAgent: () => {
         warmed += 1;
         return Promise.resolve({
-          kind: "warmed",
+          kind: "ready",
           warm: {
             status: "ready",
             updatedAt: "2026-08-28T15:00:00.000Z",
@@ -486,7 +490,7 @@ test("update schedules bounded warm and reconciliation work", async () => {
       warmAgent: () => {
         warmed += 1;
         return Promise.resolve({
-          kind: "warmed",
+          kind: "ready",
           warm: {
             status: "ready",
             updatedAt: "2026-08-28T15:00:00.000Z",
@@ -820,19 +824,28 @@ test("run start passes only the trusted authenticated auth version to the servic
 
 test("delete preserves busy, stale version, and permanent provider failures", async () => {
   const outcomes = [
-    ["busy", 409, "busy", true],
-    ["stale_version", 409, "stale_version", true],
-    ["provider_failure", 422, "provider_rejected", false],
+    [{ kind: "busy" }, 409, "busy", true],
+    [{ kind: "stale_version" }, 409, "stale_version", true],
+    [
+      { kind: "unavailable", source: "provider" },
+      503,
+      "provider_unavailable",
+      true,
+    ],
+    [
+      { kind: "unavailable", source: "database" },
+      503,
+      "runner_unavailable",
+      true,
+    ],
+    [{ kind: "provider_rejected" }, 422, "provider_rejected", false],
   ] as const;
 
   await Promise.all(
-    outcomes.map(async ([kind, status, code, retryable]) => {
+    outcomes.map(async ([outcome, status, code, retryable]) => {
       const fixture = handlers({
         service: service({
-          deleteAgent: () =>
-            Promise.resolve(
-              kind === "provider_failure" ? { kind, retryable } : { kind }
-            ) as ReturnType<RunnerService["deleteAgent"]>,
+          deleteAgent: () => Promise.resolve(outcome as never),
         }),
       });
       const response = await fixture.handlers.deleteAgent(
@@ -850,6 +863,56 @@ test("delete preserves busy, stale version, and permanent provider failures", as
       assert.equal(body.error.retryable, retryable);
     })
   );
+});
+
+test("create and update map retryable database failures without exposing details", async () => {
+  const fixture = handlers({
+    service: service({
+      createAgent: async () => ({
+        kind: "unavailable",
+        source: "database",
+      }),
+      updateAgent: async () => ({
+        kind: "unavailable",
+        source: "database",
+      }),
+    }),
+  });
+
+  const [created, updated] = await Promise.all([
+    fixture.handlers.createAgent(
+      new Request("https://app.test/api/agents", {
+        body: validDefinitionBody(),
+        method: "POST",
+      })
+    ),
+    fixture.handlers.updateAgent(
+      new Request(`https://app.test/api/agents/${AGENT_ID}`, {
+        body: validDefinitionBody(),
+        method: "PUT",
+      }),
+      AGENT_ID
+    ),
+  ]);
+
+  const responses = await Promise.all(
+    [created, updated].map(async (response) => ({
+      body: await response.json(),
+      status: response.status,
+    }))
+  );
+  for (const response of responses) {
+    assert.equal(response.status, 503);
+    assert.deepEqual(response.body, {
+      apiVersion: AGENT_RUNNER_API_VERSION,
+      error: {
+        code: "runner_unavailable",
+        message: "Runner service is temporarily unavailable. Try again later.",
+        retryable: true,
+      },
+      requestId: REQUEST_ID,
+    });
+  }
 });
 
 test("update preserves a stale version conflict", async () => {
@@ -993,6 +1056,34 @@ test("stop accepts an empty body, returns its snapshot, and defers reconciliatio
   assert.equal(reconciled, 1);
 });
 
+test("stop maps in-progress and database-unavailable outcomes fail closed", async () => {
+  const outcomes = [
+    [{ kind: "in_progress" }, 409, "busy"],
+    [{ kind: "unavailable", source: "database" }, 503, "runner_unavailable"],
+  ] as const;
+
+  await Promise.all(
+    outcomes.map(async ([outcome, status, code]) => {
+      const fixture = handlers({
+        service: service({
+          stopRun: async () => outcome as never,
+        }),
+      });
+      const response = await fixture.handlers.stopRun(
+        new Request(`https://app.test/api/runs/${RUN_ID}/stop`, {
+          method: "POST",
+        }),
+        RUN_ID
+      );
+      assert.equal(response.status, status);
+      assert.equal(
+        ((await response.json()) as { error: { code: string } }).error.code,
+        code
+      );
+    })
+  );
+});
+
 test("tenant prewarm returns 204 with no agent and 202 without credential data", async () => {
   const none = handlers({
     service: service({ prewarmMostRecent: async () => ({ kind: "none" }) }),
@@ -1014,6 +1105,56 @@ test("tenant prewarm returns 204 with no agent and 202 without credential data",
       updatedAt: "2026-08-28T15:00:00.000Z",
     },
   });
+});
+
+test("tenant prewarm maps concurrent, stale, provider, and database outcomes", async () => {
+  const outcomes = [
+    [
+      {
+        agentId: AGENT_ID,
+        kind: "in_progress",
+        warm: {
+          status: "provisioning",
+          updatedAt: "2026-08-28T15:00:00.000Z",
+        },
+      },
+      202,
+      null,
+    ],
+    [{ kind: "not_found" }, 204, null],
+    [{ kind: "stale_version" }, 409, "stale_version"],
+    [{ kind: "unavailable", source: "provider" }, 503, "provider_unavailable"],
+    [{ kind: "unavailable", source: "database" }, 503, "runner_unavailable"],
+    [{ kind: "provider_rejected" }, 422, "provider_rejected"],
+  ] as const;
+
+  await Promise.all(
+    outcomes.map(async ([outcome, status, code]) => {
+      const fixture = handlers({
+        service: service({
+          prewarmMostRecent: async () => outcome as never,
+        }),
+      });
+      const response = await fixture.handlers.prewarmTenant(
+        new Request("https://app.test/api/tenant/prewarm", { method: "POST" })
+      );
+      assert.equal(response.status, status);
+      if (code) {
+        assert.equal(
+          ((await response.json()) as { error: { code: string } }).error.code,
+          code
+        );
+      } else if (status === 202) {
+        assert.deepEqual(await response.json(), {
+          agentId: AGENT_ID,
+          warm: {
+            status: "provisioning",
+            updatedAt: "2026-08-28T15:00:00.000Z",
+          },
+        });
+      }
+    })
+  );
 });
 
 test("diagnostics and reconciliation use only their operator service and safe outputs", async () => {

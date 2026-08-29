@@ -136,6 +136,10 @@ function definition(id: string, tenantId: string): AgentDefinition {
     runtime: "copilot",
     status: "idle",
     updatedAt: "2026-08-20T12:00:00.000Z",
+    warm: {
+      status: "not_started",
+      updatedAt: "2026-08-20T12:00:00.000Z",
+    },
   };
 }
 

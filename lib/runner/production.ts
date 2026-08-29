@@ -508,15 +508,13 @@ function createProductionRunnerServiceForPrincipal(
           store,
         });
         if (result.kind === "failed") {
-          return {
-            error:
-              result.error === "non_retryable" ? "non_retryable" : "retryable",
-            kind: "failed",
-          };
+          return result.error === "non_retryable"
+            ? { kind: "provider_rejected" }
+            : { kind: "unavailable", source: "provider" };
         }
         return result;
       } catch {
-        return { error: "retryable", kind: "failed" };
+        return { kind: "unavailable", source: "database" };
       }
     },
     diagnoseSandbox: diagnoseDaytonaSandbox,
@@ -542,15 +540,13 @@ function createProductionRunnerServiceForPrincipal(
           }
         );
         if (result.kind === "failed") {
-          return {
-            error:
-              result.error === "non_retryable" ? "non_retryable" : "retryable",
-            kind: "failed",
-          };
+          return result.error === "non_retryable"
+            ? { kind: "provider_rejected" }
+            : { kind: "unavailable", source: "provider" };
         }
         return result;
       } catch {
-        return { error: "retryable", kind: "failed" };
+        return { kind: "unavailable", source: "database" };
       }
     },
   });

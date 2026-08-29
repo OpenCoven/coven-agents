@@ -836,7 +836,9 @@ export async function warmDaytonaSandbox(
   dependencies: DaytonaSandboxWarmDependencies
 ): Promise<
   | { kind: "ready"; agent: RunnerAgentRecord; sandbox: Sandbox }
-  | { kind: "in_progress" }
+  | { kind: "in_progress"; agent: RunnerAgentRecord }
+  | { kind: "not_found" | "stale_version" }
+  | { kind: "unavailable"; source: "database" }
   | { kind: "failed"; error: DaytonaProviderErrorKind }
 > {
   let ensured: { agent: RunnerAgentRecord; sandbox: Sandbox };
@@ -848,7 +850,10 @@ export async function warmDaytonaSandbox(
       dependencies
     );
   } catch (error) {
-    return { error: classifyDaytonaProviderError(error), kind: "failed" };
+    return error instanceof DaytonaError ||
+      error instanceof DaytonaSandboxLifecycleError
+      ? { error: classifyDaytonaProviderError(error), kind: "failed" }
+      : { kind: "unavailable", source: "database" };
   }
 
   const warm = await dependencies.store.beginDaytonaSandboxWarm(principal, {
@@ -858,21 +863,27 @@ export async function warmDaytonaSandbox(
     warmStaleBefore: new Date(Date.now() - SANDBOX_WARM_TIMEOUT_MS),
   });
   if (warm.kind === "in_progress") {
-    return { kind: "in_progress" };
+    return { agent: warm.value, kind: "in_progress" };
   }
-  if (warm.kind !== "started") {
-    return { error: "non_retryable", kind: "failed" };
+  if (warm.kind === "not_found" || warm.kind === "stale_version") {
+    return warm;
   }
 
   try {
     await dependencies.probe(ensured.sandbox);
   } catch (error) {
-    await dependencies.store.finishDaytonaSandboxWarm(principal, {
-      agentId: warm.value.id,
-      expectedGeneration: warm.value.sandboxGeneration,
-      expectedVersion: warm.value.version,
-      status: "failed",
-    });
+    const failed = await dependencies.store.finishDaytonaSandboxWarm(
+      principal,
+      {
+        agentId: warm.value.id,
+        expectedGeneration: warm.value.sandboxGeneration,
+        expectedVersion: warm.value.version,
+        status: "failed",
+      }
+    );
+    if (failed.kind === "not_found" || failed.kind === "stale_version") {
+      return failed;
+    }
     return { error: classifyDaytonaProviderError(error), kind: "failed" };
   }
   const finished = await dependencies.store.finishDaytonaSandboxWarm(
@@ -884,9 +895,10 @@ export async function warmDaytonaSandbox(
       status: "ready",
     }
   );
-  return finished.kind === "updated"
-    ? { agent: finished.value, kind: "ready", sandbox: ensured.sandbox }
-    : { error: "non_retryable", kind: "failed" };
+  if (finished.kind === "not_found" || finished.kind === "stale_version") {
+    return finished;
+  }
+  return { agent: finished.value, kind: "ready", sandbox: ensured.sandbox };
 }
 
 /**

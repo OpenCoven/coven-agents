@@ -126,6 +126,61 @@ test("agent creation stamps the authenticated tenant and rejects supplied owners
   assert.deepEqual(ownerInjected, { kind: "invalid" });
 });
 
+test("public agent projections require warm state and omit provider records", async () => {
+  const service = createRunnerService({
+    createId: () => AGENT_ID,
+    store: baseStore(),
+  });
+
+  const created = await service.createAgent(PRINCIPAL, definition());
+  assert.equal(created.kind, "created");
+  if (created.kind !== "created") {
+    return;
+  }
+  assert.deepEqual(created.agent.warm, {
+    status: "not_started",
+    updatedAt: "2026-08-28T15:00:00.000Z",
+  });
+  assert.deepEqual(Object.keys(created.agent).sort(), [
+    "backend",
+    "createdAt",
+    "description",
+    "id",
+    "instructions",
+    "lastRunAt",
+    "model",
+    "name",
+    "owner",
+    "runtime",
+    "status",
+    "updatedAt",
+    "warm",
+  ]);
+  const serialized = JSON.stringify(created.agent);
+  for (const internalField of [
+    "daytonaSandboxId",
+    "sandboxGeneration",
+    "sandboxLifecycle",
+    "version",
+  ]) {
+    assert.equal(serialized.includes(internalField), false);
+  }
+});
+
+test("agent creation reports retryable database unavailability", async () => {
+  const service = createRunnerService({
+    createId: () => AGENT_ID,
+    store: baseStore({
+      createAgent: () => Promise.reject(new Error("database=private-detail")),
+    }),
+  });
+
+  assert.deepEqual(await service.createAgent(PRINCIPAL, definition()), {
+    kind: "unavailable",
+    source: "database",
+  });
+});
+
 test("agent creation refuses non-runnable harnesses before persistence", async () => {
   let writes = 0;
   const service = createRunnerService({
@@ -144,7 +199,7 @@ test("agent creation refuses non-runnable harnesses before persistence", async (
   assert.equal(writes, 0);
 });
 
-test("agent updates preserve tenant ownership and expose lifecycle conflicts", async () => {
+test("agent updates preserve tenant ownership and expose stale versions", async () => {
   let updateInput: unknown;
   const service = createRunnerService({
     store: baseStore({
@@ -169,6 +224,22 @@ test("agent updates preserve tenant ownership and expose lifecycle conflicts", a
   );
 });
 
+test("agent updates report retryable database unavailability", async () => {
+  const service = createRunnerService({
+    store: baseStore({
+      updateAgent: () => Promise.reject(new Error("database=private-detail")),
+    }),
+  });
+
+  assert.deepEqual(
+    await service.updateAgent(PRINCIPAL, AGENT_ID, definition()),
+    {
+      kind: "unavailable",
+      source: "database",
+    }
+  );
+});
+
 test("agent deletion delegates provider-first decommissioning", async () => {
   const calls: string[] = [];
   const service = createRunnerService({
@@ -190,19 +261,20 @@ test("agent deletion preserves busy, stale, and provider retryability outcomes",
     [{ kind: "busy" }, { kind: "busy" }],
     [{ kind: "stale_version" }, { kind: "stale_version" }],
     [
-      { error: "retryable", kind: "failed" },
-      { kind: "provider_failure", retryable: true },
+      { kind: "unavailable", source: "provider" },
+      { kind: "unavailable", source: "provider" },
     ],
     [
-      { error: "non_retryable", kind: "failed" },
-      { kind: "provider_failure", retryable: false },
+      { kind: "unavailable", source: "database" },
+      { kind: "unavailable", source: "database" },
     ],
+    [{ kind: "provider_rejected" }, { kind: "provider_rejected" }],
   ] as const;
 
   await Promise.all(
     outcomes.map(async ([providerResult, expected]) => {
       const service = createRunnerService({
-        deleteSandbox: async () => providerResult,
+        deleteSandbox: async () => providerResult as never,
         store: baseStore(),
       });
       assert.deepEqual(
@@ -211,6 +283,19 @@ test("agent deletion preserves busy, stale, and provider retryability outcomes",
       );
     })
   );
+});
+
+test("agent deletion converts thrown provider or database work into retryable unavailability", async () => {
+  const service = createRunnerService({
+    deleteSandbox: () =>
+      Promise.reject(new Error("provider-or-database=private-detail")),
+    store: baseStore(),
+  });
+
+  assert.deepEqual(await service.deleteAgent(PRINCIPAL, AGENT_ID), {
+    kind: "unavailable",
+    source: "provider",
+  });
 });
 
 test("start maps idempotent admission outcomes and preserves a request hash", async () => {
@@ -421,6 +506,26 @@ test("start maps admission conflict, capacity, and unavailable results without p
   );
 });
 
+test("start converts an admission exception into typed retryable unavailability", async () => {
+  const service = createRunnerService({
+    admit: () => Promise.reject(new Error("database=private-detail")),
+    createId: () => RUN_ID,
+    store: baseStore(),
+  });
+
+  assert.deepEqual(
+    await service.startRun(PRINCIPAL, 1, AGENT_ID, {
+      operationId: OPERATION_ID,
+      task: "Do the thing.",
+    }),
+    {
+      code: "admission_unavailable",
+      kind: "refused",
+      retryable: true,
+    }
+  );
+});
+
 test("run reads and event pages remain tenant scoped and terminal-aware", async () => {
   const event = {
     at: "2026-08-28T15:00:00.000Z",
@@ -489,6 +594,39 @@ test("stop verifies tenant ownership before cancellation and returns terminal sn
   assert.equal(cancellationCalls, 1);
 });
 
+test("stop preserves cancellation in-progress and cleanup-required outcomes", async () => {
+  const outcomes = [
+    ["in_progress", "in_progress"],
+    ["cleanup_required", "cleanup_required"],
+    ["sandbox_reset_required", "cleanup_required"],
+  ] as const;
+
+  await Promise.all(
+    outcomes.map(async ([cancelKind, expectedKind]) => {
+      const service = createRunnerService({
+        cancelRun: async () => ({ kind: cancelKind, runId: RUN_ID }),
+        store: baseStore(),
+      });
+      const result = await service.stopRun(PRINCIPAL, RUN_ID);
+      assert.equal(result.kind, expectedKind);
+    })
+  );
+});
+
+test("stop reports retryable database unavailability", async () => {
+  const service = createRunnerService({
+    cancelRun: async () => ({ kind: "cancelled", runId: RUN_ID }),
+    store: baseStore({
+      getRun: () => Promise.reject(new Error("database=private-detail")),
+    }),
+  });
+
+  assert.deepEqual(await service.stopRun(PRINCIPAL, RUN_ID), {
+    kind: "unavailable",
+    source: "database",
+  });
+});
+
 test("prewarm targets the most recently used agent without credential access", async () => {
   const warmed: string[] = [];
   const service = createRunnerService({
@@ -507,17 +645,122 @@ test("prewarm targets the most recently used agent without credential access", a
     }),
     warmSandbox: (_principal, target) => {
       warmed.push(target.id);
-      return Promise.resolve({ kind: "in_progress" as const });
+      return Promise.resolve({
+        agent: agent({
+          id: target.id,
+          warmStatus: "provisioning",
+          warmUpdatedAt: new Date("2026-08-28T16:00:00.000Z"),
+        }),
+        kind: "in_progress" as const,
+      });
     },
   });
 
   assert.deepEqual(await service.prewarmMostRecent(PRINCIPAL), {
     agentId: OTHER_AGENT_ID,
-    kind: "warmed",
+    kind: "in_progress",
     warm: {
       status: "provisioning",
       updatedAt: "2026-08-28T16:00:00.000Z",
     },
   });
   assert.deepEqual(warmed, [OTHER_AGENT_ID]);
+});
+
+test("warm reports ready, in-progress, stale, missing, unavailable, and rejected outcomes", async () => {
+  const readyAgent = agent({
+    warmStatus: "ready",
+    warmUpdatedAt: new Date("2026-08-28T16:00:00.000Z"),
+  });
+  const progressingAgent = agent({
+    warmStatus: "provisioning",
+    warmUpdatedAt: new Date("2026-08-28T16:01:00.000Z"),
+  });
+  const outcomes = [
+    [
+      { agent: readyAgent, kind: "ready" },
+      {
+        kind: "ready",
+        warm: {
+          status: "ready",
+          updatedAt: "2026-08-28T16:00:00.000Z",
+        },
+      },
+    ],
+    [
+      { agent: progressingAgent, kind: "in_progress" },
+      {
+        kind: "in_progress",
+        warm: {
+          status: "provisioning",
+          updatedAt: "2026-08-28T16:01:00.000Z",
+        },
+      },
+    ],
+    [{ kind: "not_found" }, { kind: "not_found" }],
+    [{ kind: "stale_version" }, { kind: "stale_version" }],
+    [
+      { kind: "unavailable", source: "provider" },
+      { kind: "unavailable", source: "provider" },
+    ],
+    [{ kind: "provider_rejected" }, { kind: "provider_rejected" }],
+  ] as const;
+
+  await Promise.all(
+    outcomes.map(async ([providerResult, expected]) => {
+      const service = createRunnerService({
+        store: baseStore(),
+        warmSandbox: async () => providerResult as never,
+      });
+      assert.deepEqual(await service.warmAgent(PRINCIPAL, AGENT_ID), expected);
+    })
+  );
+});
+
+test("prewarm exposes concurrency and typed provider/database failures", async () => {
+  const outcomes = [
+    [
+      {
+        agent: agent({
+          warmStatus: "provisioning",
+          warmUpdatedAt: new Date("2026-08-28T16:01:00.000Z"),
+        }),
+        kind: "in_progress",
+      },
+      {
+        agentId: AGENT_ID,
+        kind: "in_progress",
+        warm: {
+          status: "provisioning",
+          updatedAt: "2026-08-28T16:01:00.000Z",
+        },
+      },
+    ],
+    [{ kind: "stale_version" }, { kind: "stale_version" }],
+    [
+      { kind: "unavailable", source: "provider" },
+      { kind: "unavailable", source: "provider" },
+    ],
+    [{ kind: "provider_rejected" }, { kind: "provider_rejected" }],
+  ] as const;
+
+  await Promise.all(
+    outcomes.map(async ([providerResult, expected]) => {
+      const service = createRunnerService({
+        store: baseStore(),
+        warmSandbox: async () => providerResult as never,
+      });
+      assert.deepEqual(await service.prewarmMostRecent(PRINCIPAL), expected);
+    })
+  );
+
+  const unavailable = createRunnerService({
+    store: baseStore({
+      listAgents: () => Promise.reject(new Error("database=private-detail")),
+    }),
+  });
+  assert.deepEqual(await unavailable.prewarmMostRecent(PRINCIPAL), {
+    kind: "unavailable",
+    source: "database",
+  });
 });
