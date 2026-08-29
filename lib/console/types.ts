@@ -3,10 +3,10 @@ import type { RunEvent, RunSnapshot } from "@opencoven/agent-contracts";
 /**
  * A run the console is holding.
  *
- * Runs live in the worker's durable state, and the runner publishes no route
- * that lists them for an agent — only `GET /api/runs/:id` for one it already
- * knows about. So the rail shows the runs this browser session started or
- * opened, and says so, rather than implying an archive that cannot be fetched.
+ * The runner publishes no route that lists runs for an agent — only
+ * `GET /api/runs/:id` for one the client already knows about. So the rail shows
+ * the runs this browser session started or opened rather than implying an
+ * archive that cannot be fetched.
  */
 export type ConsoleRun = {
   agentId: string;

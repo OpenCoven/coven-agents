@@ -3,10 +3,7 @@ import test from "node:test";
 import {
   base64UrlDecode,
   base64UrlEncode,
-  MAX_RUNNER_TOKEN_BYTES,
-  MAX_RUNNER_TOKEN_SEGMENT_BYTES,
-  runnerClaimsSchema,
-  splitToken,
+  TENANT_ID_PATTERN,
 } from "./identity";
 
 test("base64url round-trips bytes without padding", () => {
@@ -18,85 +15,16 @@ test("base64url round-trips bytes without padding", () => {
   assert.deepEqual(base64UrlDecode(encoded), bytes);
 });
 
-test("claims reject anything the worker must not trust", () => {
-  const valid = {
-    authVersion: 0,
-    exp: 1_800_000_000,
-    kid: "key-2026-08",
-    plan: "subscriber",
-    sub: "user-1",
-    tenant: "acme",
-  };
-  assert.equal(runnerClaimsSchema.parse(valid).tenant, "acme");
-
-  for (const bad of [
-    { ...valid, plan: "admin" },
-    { ...valid, tenant: "" },
-    { ...valid, exp: -1 },
-    { ...valid, extra: "smuggled" },
-    { ...valid, kid: "" },
-    { ...valid, authVersion: -1 },
-  ]) {
-    assert.throws(
-      () => runnerClaimsSchema.parse(bad),
-      `expected ${JSON.stringify(bad)} to be rejected`
-    );
+test("tenant ids retain a bounded provider-safe alphabet", () => {
+  for (const value of ["acme", "u_0123456789abcdef", "t".repeat(64)]) {
+    assert.equal(TENANT_ID_PATTERN.test(value), true, value);
   }
-});
-
-test("a token without exactly two segments is refused", () => {
-  assert.equal(splitToken("only-one-segment"), null);
-  assert.equal(splitToken("a.b.c"), null);
-  assert.equal(splitToken(""), null);
-
-  const parts = splitToken("payload.signature");
-  assert.deepEqual(parts, { payload: "payload", signature: "signature" });
-});
-
-test("a token with an empty segment is refused", () => {
-  // Not covered by the two-segment check: these both split into exactly two
-  // parts, so only the emptiness check rejects them.
-  assert.equal(splitToken(".signature"), null);
-  assert.equal(splitToken("payload."), null);
-  assert.equal(splitToken("."), null);
-});
-
-test("token and segment sizes are bounded before decoding", () => {
-  assert.equal(
-    splitToken(`${"a".repeat(MAX_RUNNER_TOKEN_SEGMENT_BYTES + 1)}.signature`),
-    null
-  );
-  assert.equal(
-    splitToken(`${"a".repeat(MAX_RUNNER_TOKEN_BYTES)}.signature`),
-    null
-  );
-});
-
-test("claims bound the fields the worker trusts for isolation", () => {
-  const valid = {
-    authVersion: 0,
-    exp: 1_800_000_000,
-    kid: "key-2026-08",
-    plan: "subscriber",
-    sub: "user-1",
-    tenant: "acme",
-  };
-
-  // `tenant` is the isolation boundary. An unbounded value must not parse.
-  assert.equal(
-    runnerClaimsSchema.parse({ ...valid, tenant: "t".repeat(64) }).tenant
-      .length,
-    64
-  );
-  assert.throws(() =>
-    runnerClaimsSchema.parse({ ...valid, tenant: "t".repeat(65) })
-  );
-
-  assert.equal(
-    runnerClaimsSchema.parse({ ...valid, sub: "s".repeat(128) }).sub.length,
-    128
-  );
-  assert.throws(() =>
-    runnerClaimsSchema.parse({ ...valid, sub: "s".repeat(129) })
-  );
+  for (const value of [
+    "",
+    "tenant-with-dash",
+    "tenant:colon",
+    "t".repeat(65),
+  ]) {
+    assert.equal(TENANT_ID_PATTERN.test(value), false, value);
+  }
 });

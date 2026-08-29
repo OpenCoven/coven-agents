@@ -11,7 +11,6 @@ import { credentialWhere } from "./scope";
 import {
   type CredentialStoreDatabase,
   prepareCredentialForTenant as prepareCredentialForTenantCore,
-  readCredentialForTenant as readCredentialForTenantCore,
   readCredentialForTenantWithoutRefresh as readCredentialForTenantWithoutRefreshCore,
 } from "./store-core";
 
@@ -26,8 +25,8 @@ export { credentialWhere } from "./scope";
  * Deliberately no bulk read in this module. Every read here is scoped to
  * exactly one tenant and one harness — there is no "all credentials for a
  * tenant" or "all credentials" query anywhere in this file, because the only
- * legitimate consumer (the worker, via the internal route) ever needs
- * exactly one credential for the duration of one run.
+ * legitimate consumer (the server-side runner) ever needs exactly one
+ * credential for the duration of one run.
  */
 
 export async function putCredential(
@@ -70,14 +69,6 @@ export async function putCredential(
       },
       target: [tenantCredential.tenant, tenantCredential.harnessId],
     });
-}
-
-export function readCredentialForTenant(
-  tenant: string,
-  harnessId: string,
-  db: CredentialStoreDatabase
-): Promise<string | null> {
-  return readCredentialForTenantCore(tenant, harnessId, db);
 }
 
 export function prepareCredentialForTenant(

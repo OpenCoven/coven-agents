@@ -226,3 +226,48 @@ test("server-only credential custody remains after Worker removal", () => {
     );
   }
 });
+
+test("retired runner identity and credential-read compatibility surfaces are absent", () => {
+  assert.equal(
+    existsSync(
+      new URL("packages/agent-contracts/src/verify-token.ts", repositoryRoot)
+    ),
+    false
+  );
+
+  const contracts = readFileSync(
+    new URL("packages/agent-contracts/src/index.ts", repositoryRoot),
+    "utf8"
+  );
+  const identity = readFileSync(
+    new URL("packages/agent-contracts/src/identity.ts", repositoryRoot),
+    "utf8"
+  );
+  const entitlements = readFileSync(
+    new URL("lib/ai/entitlements.ts", repositoryRoot),
+    "utf8"
+  );
+  const credentialStore = readFileSync(
+    new URL("lib/credentials/store.ts", repositoryRoot),
+    "utf8"
+  );
+  const credentialStoreCore = readFileSync(
+    new URL("lib/credentials/store-core.ts", repositoryRoot),
+    "utf8"
+  );
+
+  for (const source of [contracts, identity]) {
+    assert.doesNotMatch(
+      source,
+      /RunnerClaims|RunnerRunScope|runnerClaimsSchema|runnerRunScopeSchema|verifyRunnerToken|TOKEN_(?:ALGORITHM|CLOCK_SKEW_SECONDS|LIFETIME_SECONDS)|MAX_RUNNER_(?:PAYLOAD|TOKEN)|KEY_ID_PATTERN|splitToken/u
+    );
+  }
+  assert.match(identity, /base64UrlEncode/);
+  assert.match(identity, /base64UrlDecode/);
+  assert.match(identity, /TENANT_ID_PATTERN/);
+  assert.doesNotMatch(entitlements, /RunnerClaims/);
+  for (const source of [credentialStore, credentialStoreCore]) {
+    assert.doesNotMatch(source, /readCredentialForTenant\s*\(/u);
+    assert.match(source, /readCredentialForTenantWithoutRefresh/u);
+  }
+});

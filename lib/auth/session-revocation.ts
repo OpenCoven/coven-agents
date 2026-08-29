@@ -1,5 +1,6 @@
-import { MAX_AUTH_VERSION } from "@opencoven/agent-contracts";
 import { isSubscribedAt } from "@/lib/subscription";
+
+const MAX_AUTH_VERSION = 2_147_483_647;
 
 export type SessionAuthority = {
   authVersion: number;

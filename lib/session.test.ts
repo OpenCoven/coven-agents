@@ -9,13 +9,11 @@ import {
 } from "./session";
 
 /**
- * Imported, never copied. Every tenant id this module mints becomes part of a
- * sandbox key, and the worker rejects anything that does not match -- which is
- * exactly what happened: `user:${uuid}` failed on both `:` and the uuid's `-`,
- * so every cloud run died before its sandbox started. A local copy of the
- * pattern would pass this suite forever after the worker tightened its own.
+ * Imported, never copied. Every tenant id this module mints becomes part of
+ * durable runner and provider identifiers. A local copy could silently drift
+ * from the shared contract.
  */
-const WORKER_TENANT_PATTERN = TENANT_ID_PATTERN;
+const RUNNER_TENANT_PATTERN = TENANT_ID_PATTERN;
 
 const UUID_A = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
 const UUID_B = "9c858901-8a57-4791-81fe-4c455b099bc9";
@@ -56,7 +54,7 @@ test("every tenant a session can mint is a legal sandbox key component", () => {
   ];
 
   for (const tenant of tenants) {
-    assert.match(tenant, WORKER_TENANT_PATTERN);
+    assert.match(tenant, RUNNER_TENANT_PATTERN);
   }
 });
 
@@ -117,7 +115,7 @@ test("a cookie the server did not mint is not honoured", () => {
   const forged = toSession(null, "d_0000").tenant;
 
   assert.notEqual(forged, "d_0000");
-  assert.match(forged, WORKER_TENANT_PATTERN);
+  assert.match(forged, RUNNER_TENANT_PATTERN);
   assert.notEqual(forged, toSession(null, "d_0000").tenant);
 });
 
