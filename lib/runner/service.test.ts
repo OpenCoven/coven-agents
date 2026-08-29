@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AGENT_RUNNER_API_VERSION,
+  agentEnvelopeSchema,
+  agentsEnvelopeSchema,
   type RunSnapshot,
 } from "@opencoven/agent-contracts";
 import { createRunnerService } from "./service";
@@ -165,6 +167,32 @@ test("public agent projections require warm state and omit provider records", as
   ]) {
     assert.equal(serialized.includes(internalField), false);
   }
+});
+
+test("same-origin projections preserve readable legacy runtime records", async () => {
+  const legacy = agent({ runtime: "cloud" });
+  const service = createRunnerService({
+    store: baseStore({
+      getAgent: async () => legacy,
+      listAgents: async () => [legacy],
+    }),
+  });
+
+  const found = await service.getAgent(PRINCIPAL, AGENT_ID);
+  assert.equal(found.kind, "found");
+  if (found.kind !== "found") {
+    return;
+  }
+  assert.equal(
+    agentEnvelopeSchema.parse({ agent: found.agent }).agent.runtime,
+    "cloud"
+  );
+  assert.equal(
+    agentsEnvelopeSchema.parse({
+      agents: await service.listAgents(PRINCIPAL),
+    }).agents[0]?.runtime,
+    "cloud"
+  );
 });
 
 test("agent creation reports retryable database unavailability", async () => {

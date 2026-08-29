@@ -155,7 +155,6 @@ const agentDefinitionInputShape = {
     .max(AGENT_RUNNER_LIMITS.maxInstructionsLength),
   model: z.string().trim().min(1).max(AGENT_RUNNER_LIMITS.maxModelLength),
   name: z.string().trim().min(1).max(64),
-  owner: agentOwnerSchema.default({ kind: "standalone" }),
   runtime: runtimeSchema,
   workspace: z
     .string()
@@ -199,7 +198,6 @@ const validateAgentBackendRuntime = (
  */
 export const createAgentInputSchema = z
   .object(agentDefinitionInputShape)
-  .omit({ owner: true })
   .strict()
   .superRefine(validateAgentBackendRuntime);
 
@@ -219,32 +217,51 @@ export const warmStateSchema = z
   .strict();
 export type WarmState = z.infer<typeof warmStateSchema>;
 
-const storedAgentDefinitionBaseSchema = z
+const agentDefinitionBaseShape = {
+  ...agentDefinitionInputShape,
+  createdAt: datetimeSchema,
+  id: agentIdSchema,
+  lastRunAt: datetimeSchema.nullable(),
+  owner: agentOwnerSchema,
+  status: agentStatusSchema,
+  updatedAt: datetimeSchema,
+  warm: warmStateSchema,
+};
+
+/**
+ * Public definitions are explicit projections. They always publish ownership
+ * and warm state, while temporarily retaining `runtime: "cloud"` so records
+ * written before the provider-key runtime retirement remain readable through
+ * list/get envelopes until the compatibility sunset.
+ */
+export const agentDefinitionSchema = z
   .object({
-    ...agentDefinitionInputShape,
-    createdAt: datetimeSchema,
-    id: agentIdSchema,
-    lastRunAt: datetimeSchema.nullable(),
-    status: agentStatusSchema,
-    updatedAt: datetimeSchema,
-    warm: warmStateSchema,
+    ...agentDefinitionBaseShape,
   })
   .strict();
 
-export const agentDefinitionSchema =
-  storedAgentDefinitionBaseSchema.superRefine(validateAgentBackendRuntime);
+/**
+ * Full definitions accepted at persistence boundaries. Unlike the public
+ * response schema, this rejects the retired runtime so compatibility reads
+ * cannot become a path for writing new legacy records.
+ */
+export const currentAgentDefinitionSchema = agentDefinitionSchema.superRefine(
+  validateAgentBackendRuntime
+);
 
 /**
- * Deliberately omits `validateAgentBackendRuntime`, so definitions using the
- * retired provider-key runtime remain readable from durable state. Stored
- * definitions predating warm tracking also have no `warm` member. Keep both
- * compatibility rules at the storage boundary so current API responses remain
- * strict and always publish the effective warm state.
+ * Durable definitions predate both ownership and warm tracking. The storage
+ * parser alone supplies those missing fields, and deliberately accepts the
+ * retired runtime; callers must project its normalized output through the
+ * explicit public schema, while every write uses `currentAgentDefinitionSchema`.
  */
-export const storedAgentDefinitionSchema = storedAgentDefinitionBaseSchema
-  .extend({
+export const storedAgentDefinitionSchema = z
+  .object({
+    ...agentDefinitionBaseShape,
+    owner: agentOwnerSchema.optional().default({ kind: "standalone" as const }),
     warm: warmStateSchema.optional(),
   })
+  .strict()
   .transform((definition) => ({
     ...definition,
     warm: definition.warm ?? {

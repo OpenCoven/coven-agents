@@ -1,8 +1,8 @@
 import { getSandbox } from "@cloudflare/sandbox";
 import {
   type AgentDefinition,
-  agentDefinitionSchema,
   type CommandEvidence,
+  currentAgentDefinitionSchema,
   type FileEvidence,
   type RunEvent,
   type RunResult,
@@ -327,7 +327,7 @@ export class AgentDirectory extends Agent<Env, DirectoryState> {
   }
 
   upsert(definition: AgentDefinition): AgentDefinition {
-    const parsed = agentDefinitionSchema.parse(definition);
+    const parsed = currentAgentDefinitionSchema.parse(definition);
     validateCloudWorkspace(parsed);
     this.setState({
       // Spread first: replacing the whole object would drop the run index and
@@ -1008,7 +1008,7 @@ export class YoloAgent extends Agent<Env, YoloAgentState> {
     ) {
       throw new AgentDecommissioningError();
     }
-    const parsed = agentDefinitionSchema.parse(definition);
+    const parsed = currentAgentDefinitionSchema.parse(definition);
     validateCloudWorkspace(parsed);
     this.setState({
       ...this.state,

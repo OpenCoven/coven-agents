@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AGENT_RUNNER_API_VERSION } from "@opencoven/agent-contracts";
+import {
+  AGENT_RUNNER_API_VERSION,
+  agentEnvelopeSchema,
+} from "@opencoven/agent-contracts";
 import { RunnerApiError, RunnerClient } from "./client";
 
 const agent = {
@@ -12,9 +15,14 @@ const agent = {
   lastRunAt: null,
   model: "gpt-5.1",
   name: "Cody",
+  owner: { kind: "standalone" as const },
   runtime: "copilot" as const,
   status: "idle" as const,
   updatedAt: "2026-08-20T12:00:00.000Z",
+  warm: {
+    status: "not_started" as const,
+    updatedAt: "2026-08-20T12:00:00.000Z",
+  },
   workspace: "/workspace",
 };
 
@@ -36,6 +44,19 @@ test("sends bearer authentication and normalizes the endpoint", async () => {
   assert.equal(requestedUrl, "https://runner.example.com/api/agents");
   assert.equal(authorization, "Bearer secret");
   assert.equal(agents[0]?.name, "Cody");
+});
+
+test("parses legacy-runtime agent envelopes during read compatibility", async () => {
+  const legacy = { ...agent, runtime: "cloud" as const };
+  const { instance } = makeClient(() => json({ agents: [legacy] }));
+
+  const listed = await instance.listAgents();
+
+  assert.equal(listed[0]?.runtime, "cloud");
+  assert.equal(
+    agentEnvelopeSchema.parse({ agent: legacy }).agent.runtime,
+    "cloud"
+  );
 });
 
 test("surfaces structured runner errors", async () => {

@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   AGENT_RUNNER_API_VERSION,
   type AgentDefinition,
+  agentEnvelopeSchema,
+  agentsEnvelopeSchema,
   base64UrlEncode,
   type RunnerClaims,
   type RunSnapshot,
@@ -801,6 +803,26 @@ test("a listing only contains the caller's own agents", async () => {
     body.agents.map((agent) => agent.id),
     [MINE]
   );
+});
+
+test("legacy runtime records survive worker list and get envelopes", async () => {
+  const current = agents.get(MINE);
+  assert.ok(current);
+  const legacy = { ...current, runtime: "cloud" as const };
+  agents.set(MINE, legacy);
+  try {
+    const [listedResponse, readResponse] = await Promise.all([
+      call("/api/agents"),
+      call(`/api/agents/${MINE}`),
+    ]);
+
+    const listed = agentsEnvelopeSchema.parse(await listedResponse.json());
+    const read = agentEnvelopeSchema.parse(await readResponse.json());
+    assert.equal(listed.agents[0]?.runtime, "cloud");
+    assert.equal(read.agent.runtime, "cloud");
+  } finally {
+    agents.set(MINE, current);
+  }
 });
 
 test("another tenant's agent reads as absent, not forbidden", async () => {

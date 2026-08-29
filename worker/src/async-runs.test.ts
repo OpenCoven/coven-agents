@@ -1013,13 +1013,21 @@ test("legacy stored definitions without warm state normalize on snapshot", () =>
   const state = Reflect.get(yolo, "state") as {
     definition: AgentDefinition;
   };
-  const { warm: _warm, ...legacyDefinition } = state.definition;
+  const { owner: _owner, warm: _warm, ...legacyDefinition } = state.definition;
   yolo.setState({ ...state, definition: legacyDefinition } as never);
 
+  assert.deepEqual(yolo.snapshot()?.owner, { kind: "standalone" });
   assert.deepEqual(yolo.snapshot()?.warm, {
     status: "not_started",
     updatedAt: legacyDefinition.updatedAt,
   });
+});
+
+test("worker persistence boundaries reject new legacy runtime definitions", () => {
+  const legacy = { ...definition(), runtime: "cloud" as const };
+
+  assert.throws(() => directory().upsert(legacy));
+  assert.throws(() => agent().configure(legacy));
 });
 
 test("stopping an absent run does not require a decommissioned definition", async () => {
@@ -3985,6 +3993,14 @@ function directory(): AgentDirectory {
   instance.upsert(definition());
   return instance;
 }
+
+test("the directory lists a normalized legacy runtime definition", () => {
+  const index = new AgentDirectory(undefined as never, {} as never);
+  const legacy = { ...definition(), runtime: "cloud" as const };
+  index.setState({ agents: [legacy] });
+
+  assert.equal(index.list("acct_1")[0]?.runtime, "cloud");
+});
 
 test("a registered run resolves back to its agent", () => {
   const index = directory();
