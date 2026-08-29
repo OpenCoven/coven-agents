@@ -1846,7 +1846,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
     ): Promise<
       | { kind: "resetting"; value: RunnerAgentRecord }
       | { kind: "in_progress"; value: RunnerAgentRecord }
-      | { kind: "not_found" | "not_live" | "stale_version" }
+      | {
+          kind: "lease_lost" | "not_found" | "not_live" | "stale_version";
+        }
     > =>
       database.transaction(async (transaction) => {
         const run = await lockedOperatorRun(
@@ -1854,6 +1856,13 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           operator,
           authority.runId
         );
+        if (!run) {
+          return { kind: "not_found" };
+        }
+        const rejected = fenceOutcome(run, authority);
+        if (rejected) {
+          return rejected;
+        }
         const liveCancellation =
           Boolean(run?.cancellationRequestedAt) &&
           (run?.dispatchState === "dispatching" ||
@@ -1865,11 +1874,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             ((run?.dispatchState === "dispatching" ||
               run?.dispatchState === "running") &&
               run.daytonaCommandId === null));
-        if (
-          !run ||
-          fenceOutcome(run, authority) ||
-          (!liveCancellation && !exactAttemptCleanup)
-        ) {
+        if (!liveCancellation && !exactAttemptCleanup) {
           return { kind: "not_live" };
         }
         const agent = await lockedDispatchAgent(transaction, run);
@@ -2344,16 +2349,26 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
     deleteAttemptRedaction: (
       operator: RunnerOperator,
       authority: RunnerDispatchAuthority
-    ): Promise<{ kind: "deleted" } | { kind: "not_live" }> =>
+    ): Promise<
+      | { kind: "deleted" }
+      | {
+          kind: "lease_lost" | "not_found" | "not_live" | "stale_version";
+        }
+    > =>
       database.transaction(async (transaction) => {
         const run = await lockedOperatorRun(
           transaction,
           operator,
           authority.runId
         );
+        if (!run) {
+          return { kind: "not_found" };
+        }
+        const rejected = fenceOutcome(run, authority);
+        if (rejected) {
+          return rejected;
+        }
         if (
-          !run ||
-          fenceOutcome(run, authority) ||
           !authority.attemptId ||
           run.daytonaAttemptId !== authority.attemptId
         ) {

@@ -178,7 +178,6 @@ export type RunnerEventPageResult =
 export type RunnerStopResult =
   | Readonly<{
       kind: "cleanup_required";
-      run: RunSnapshot;
       scheduleReconciliation: true;
     }>
   | Readonly<{
@@ -186,13 +185,23 @@ export type RunnerStopResult =
     }>
   | Readonly<{
       kind: "in_progress";
+      run: RunSnapshot;
+      scheduleReconciliation: true;
+    }>
+  | Readonly<{
+      kind: "sandbox_reset_required";
+      scheduleReconciliation: true;
     }>
   | Readonly<{
       kind: "stopped";
       run: RunSnapshot;
       scheduleReconciliation: true;
     }>
-  | Readonly<{ kind: "unavailable"; source: "database" }>;
+  | Readonly<{ kind: "stale_version" }>
+  | Readonly<{
+      kind: "unavailable";
+      source: "database" | "provider";
+    }>;
 
 export type RunnerPrewarmResult =
   | Readonly<{ kind: "none" }>
@@ -737,8 +746,12 @@ export function createRunnerService(
       const outcome = await dependencies.cancelRun(runId);
       switch (outcome.kind) {
         case "not_found":
+          return { kind: "not_found" };
+        case "stale_version":
+          return { kind: "stale_version" };
+        case "unavailable":
+          return { kind: "unavailable", source: outcome.source };
         case "in_progress":
-          return { kind: outcome.kind };
         case "already_terminal":
         case "cancelled":
         case "cleanup_required":
@@ -759,15 +772,34 @@ export function createRunnerService(
       const run = requireSnapshot(current);
       const outcomeKind = outcome.kind;
       switch (outcomeKind) {
+        case "in_progress":
+          return {
+            kind: "in_progress",
+            run,
+            scheduleReconciliation: true,
+          };
         case "cleanup_required":
-        case "sandbox_reset_required":
           return {
             kind: "cleanup_required",
-            run,
+            scheduleReconciliation: true,
+          };
+        case "sandbox_reset_required":
+          return {
+            kind: "sandbox_reset_required",
             scheduleReconciliation: true,
           };
         case "already_terminal":
         case "cancelled":
+          if (
+            run.completedAt === null ||
+            run.status === "queued" ||
+            run.status === "running"
+          ) {
+            return {
+              kind: "cleanup_required",
+              scheduleReconciliation: true,
+            };
+          }
           return { kind: "stopped", run, scheduleReconciliation: true };
         default:
           return unreachable(outcomeKind, "run cancellation");

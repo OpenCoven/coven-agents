@@ -2371,6 +2371,7 @@ test("cancellation intent fences the old dispatcher before remote cleanup", asyn
     dispatchLeaseToken: "cancel-lease",
     version: current.version + 1,
   });
+
   const { statements, store } = scripted([current], [requested]);
 
   const result = await store.requestRunCancellation(operator, {
@@ -2390,6 +2391,34 @@ test("cancellation intent fences the old dispatcher before remote cleanup", asyn
     /"cancellationRequestedAt" = clock_timestamp\(\)/u
   );
   assert.match(queryText(update), /"dispatchLeaseToken" = \$\d+/u);
+});
+
+test("cancellation cleanup stores preserve exact stale version and lease fences", async () => {
+  const current = run();
+  const staleAuthority = {
+    expectedVersion: current.version - 1,
+    leaseToken: current.dispatchLeaseToken as string,
+    runId: current.id,
+  } as RunnerDispatchAuthority;
+  const stale = scripted([current]);
+  assert.deepEqual(
+    await stale.store.deleteAttemptRedaction(operator, staleAuthority),
+    { kind: "stale_version" }
+  );
+
+  const displacedAuthority = {
+    expectedVersion: current.version,
+    leaseToken: "displaced-lease",
+    runId: current.id,
+  } as RunnerDispatchAuthority;
+  const displaced = scripted([current]);
+  assert.deepEqual(
+    await displaced.store.beginDaytonaSandboxResetForCancellation(
+      operator,
+      displacedAuthority
+    ),
+    { kind: "lease_lost" }
+  );
 });
 
 test("queued cancellation enters a schema-valid leased cleanup state", async () => {

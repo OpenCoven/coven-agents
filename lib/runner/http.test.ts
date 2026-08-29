@@ -1311,10 +1311,30 @@ test("stop accepts an empty body, returns its snapshot, and defers reconciliatio
   assert.equal(reconciled, 1);
 });
 
-test("stop maps in-progress and database-unavailable outcomes fail closed", async () => {
+test("stop maps accepted, stale, cleanup, and unavailable outcomes explicitly", async () => {
   const outcomes = [
-    [{ kind: "in_progress" }, 409, "busy"],
+    [
+      {
+        kind: "in_progress",
+        run: run(),
+        scheduleReconciliation: true,
+      },
+      202,
+      null,
+    ],
+    [{ kind: "stale_version" }, 409, "stale_version"],
     [{ kind: "unavailable", source: "database" }, 503, "runner_unavailable"],
+    [{ kind: "unavailable", source: "provider" }, 503, "provider_unavailable"],
+    [
+      { kind: "cleanup_required", scheduleReconciliation: true },
+      503,
+      "cleanup_required",
+    ],
+    [
+      { kind: "sandbox_reset_required", scheduleReconciliation: true },
+      503,
+      "cleanup_required",
+    ],
   ] as const;
 
   await Promise.all(
@@ -1331,10 +1351,17 @@ test("stop maps in-progress and database-unavailable outcomes fail closed", asyn
         RUN_ID
       );
       assert.equal(response.status, status);
-      assert.equal(
-        ((await response.json()) as { error: { code: string } }).error.code,
-        code
-      );
+      const body = (await response.json()) as {
+        error?: { code: string; retryable: boolean };
+        run?: { id: string; status: string };
+      };
+      if (code) {
+        assert.equal(body.error?.code, code);
+        assert.equal(body.error?.retryable, true);
+      } else {
+        assert.equal(body.run?.id, RUN_ID);
+        assert.equal(body.run?.status, "queued");
+      }
     })
   );
 });

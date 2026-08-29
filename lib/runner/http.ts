@@ -827,13 +827,29 @@ export function createRunnerHttpHandlers(
           case "not_found":
             return runNotFound(dependencies);
           case "in_progress":
-            return runnerErrorResponse(dependencies, "busy", {
-              message:
-                "Run cancellation is already in progress. Try again later.",
+            schedule(dependencies, async () => {
+              await service.reconcileAndDispatch();
             });
+            return runnerJsonResponse(
+              runSnapshotEnvelopeSchema,
+              {
+                apiVersion: AGENT_RUNNER_API_VERSION,
+                run: result.run,
+              },
+              { status: 202 }
+            );
+          case "stale_version":
+            return runnerErrorResponse(dependencies, "stale_version");
           case "unavailable":
-            return runnerUnavailable(dependencies);
+            return result.source === "provider"
+              ? runnerErrorResponse(dependencies, "provider_unavailable")
+              : runnerUnavailable(dependencies);
           case "cleanup_required":
+            schedule(dependencies, async () => {
+              await service.reconcileAndDispatch();
+            });
+            return runnerErrorResponse(dependencies, "cleanup_required");
+          case "sandbox_reset_required":
             schedule(dependencies, async () => {
               await service.reconcileAndDispatch();
             });

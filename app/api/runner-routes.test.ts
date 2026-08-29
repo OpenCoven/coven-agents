@@ -156,11 +156,25 @@ type RouteFixtureState = {
   diagnosticAuthorizationCalls: number;
   diagnosticMode: "failure" | "success";
   diagnosticProviderCalls: number;
+  stopMode: "stale" | "success";
   updateCalls: number;
 };
 
 function testHandlers(state: RouteFixtureState): RunnerHttpHandlers {
   const runner = service({
+    stopRun: () =>
+      Promise.resolve(
+        state.stopMode === "stale"
+          ? { kind: "stale_version" as const }
+          : {
+              kind: "stopped" as const,
+              run: run({
+                completedAt: "2026-08-28T15:01:00.000Z",
+                status: "cancelled",
+              }),
+              scheduleReconciliation: true as const,
+            }
+      ),
     updateAgent: () => {
       state.updateCalls += 1;
       return Promise.resolve(
@@ -244,6 +258,7 @@ async function executeFixture(): Promise<void> {
     diagnosticAuthorizationCalls: 0,
     diagnosticMode: "success",
     diagnosticProviderCalls: 0,
+    stopMode: "success",
     updateCalls: 0,
   };
   const handlers = testHandlers(state);
@@ -449,6 +464,18 @@ async function executeFixture(): Promise<void> {
   );
   assert.equal(stopResponse.status, 200);
   runSnapshotEnvelopeSchema.parse(await stopResponse.json());
+
+  state.stopMode = "stale";
+  const staleStopResponse = await stop.POST(
+    new Request(`https://app.test/api/runs/${RUN_ID}/stop`, { method: "POST" }),
+    runContext
+  );
+  assert.equal(staleStopResponse.status, 409);
+  const staleStop = runErrorEnvelopeSchema.parse(
+    await staleStopResponse.json()
+  );
+  assert.equal(staleStop.error.code, "stale_version");
+  assert.equal(staleStop.error.retryable, true);
 
   const prewarmResponse = await prewarm.POST(
     new Request("https://app.test/api/tenant/prewarm", { method: "POST" })

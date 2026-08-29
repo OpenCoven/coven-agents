@@ -169,8 +169,88 @@ test("cancellation reset fences the sandbox before clearing its generation", asy
     }
   );
 
-  assert.equal(reset, true);
+  assert.deepEqual(reset, { kind: "reset" });
   assert.deepEqual(calls, ["begin", "delete", "finish"]);
+});
+
+test("cancellation reset preserves absence, provider outage, and stale fences", async () => {
+  const dispatchAuthority = {
+    expectedVersion: 2,
+    leaseToken: "cancel-lease",
+    runId: "00000000-0000-4000-8000-000000000002",
+  } as never;
+  const resetting = agent({
+    daytonaSandboxId: "sandbox",
+    sandboxGeneration: 2,
+    sandboxLifecycle: "resetting",
+    version: 4,
+  });
+  const cleared = agent({
+    ...resetting,
+    daytonaSandboxId: null,
+    sandboxLifecycle: "unprovisioned",
+    version: 5,
+  });
+
+  const absent = await resetDaytonaSandboxForCancellation(
+    { kind: "runner-operator" },
+    dispatchAuthority,
+    {
+      daytona: {
+        create: () => Promise.reject(new Error("must not create")),
+        get: () => Promise.reject(new DaytonaNotFoundError("absent")),
+      },
+      store: store({
+        beginDaytonaSandboxResetForCancellation: async () => ({
+          kind: "resetting" as const,
+          value: resetting,
+        }),
+        finishDaytonaSandboxResetForRecovery: async () => ({
+          kind: "updated" as const,
+          value: cleared,
+        }),
+      }),
+    }
+  );
+  assert.deepEqual(absent, { kind: "provider_not_found" });
+
+  const unavailable = await resetDaytonaSandboxForCancellation(
+    { kind: "runner-operator" },
+    dispatchAuthority,
+    {
+      daytona: {
+        create: () => Promise.reject(new Error("must not create")),
+        get: () => Promise.reject(new DaytonaTimeoutError("timeout")),
+      },
+      store: store({
+        beginDaytonaSandboxResetForCancellation: async () => ({
+          kind: "resetting" as const,
+          value: resetting,
+        }),
+      }),
+    }
+  );
+  assert.deepEqual(unavailable, {
+    kind: "unavailable",
+    source: "provider",
+  });
+
+  const stale = await resetDaytonaSandboxForCancellation(
+    { kind: "runner-operator" },
+    dispatchAuthority,
+    {
+      daytona: {
+        create: () => Promise.reject(new Error("must not create")),
+        get: () => Promise.reject(new Error("must not resolve")),
+      },
+      store: store({
+        beginDaytonaSandboxResetForCancellation: async () => ({
+          kind: "stale_version" as const,
+        }),
+      }),
+    }
+  );
+  assert.deepEqual(stale, { kind: "stale_version" });
 });
 
 test("only Daytona-reported recoverable errors call recover", async () => {

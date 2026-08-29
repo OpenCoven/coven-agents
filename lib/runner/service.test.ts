@@ -753,7 +753,8 @@ test("stop preserves cancellation in-progress and cleanup-required outcomes", as
   const outcomes = [
     ["in_progress", "in_progress"],
     ["cleanup_required", "cleanup_required"],
-    ["sandbox_reset_required", "cleanup_required"],
+    ["sandbox_reset_required", "sandbox_reset_required"],
+    ["stale_version", "stale_version"],
   ] as const;
 
   await Promise.all(
@@ -764,6 +765,30 @@ test("stop preserves cancellation in-progress and cleanup-required outcomes", as
       });
       const result = await service.stopRun(PRINCIPAL, RUN_ID);
       assert.equal(result.kind, expectedKind);
+      if (result.kind === "in_progress") {
+        assert.equal(result.run.id, RUN_ID);
+        assert.equal(result.scheduleReconciliation, true);
+      }
+    })
+  );
+});
+
+test("stop preserves provider and database cancellation unavailability", async () => {
+  const outcomes = ["provider", "database"] as const;
+  await Promise.all(
+    outcomes.map(async (source) => {
+      const service = createRunnerService({
+        cancelRun: async () => ({
+          kind: "unavailable" as const,
+          runId: RUN_ID,
+          source,
+        }),
+        store: baseStore(),
+      });
+      assert.deepEqual(await service.stopRun(PRINCIPAL, RUN_ID), {
+        kind: "unavailable",
+        source,
+      });
     })
   );
 });
