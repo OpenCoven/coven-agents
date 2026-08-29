@@ -26,6 +26,7 @@ export type PrewarmDependencies = {
     signal: AbortSignal
   ) => Promise<SubscriberAccessDecision>;
   loadRunner?: (signal: AbortSignal) => Promise<RunnerModule>;
+  now?: () => number;
   timeoutMs?: number;
 };
 
@@ -98,16 +99,29 @@ export async function prewarmTenantSandbox(
   },
   dependencies: PrewarmDependencies = {}
 ): Promise<void> {
-  if (!isSubscribedAt(user, new Date())) {
+  const now = dependencies.now ?? Date.now;
+  if (!isSubscribedAt(user, new Date(now()))) {
     return;
   }
 
   const timeoutMs = dependencies.timeoutMs ?? PREWARM_TIMEOUT_MS;
   const controller = new AbortController();
-  const deadline = Date.now() + timeoutMs;
-  const timer = setTimeout(() => {
-    controller.abort(new Error("Sandbox prewarm exceeded its deadline."));
-  }, timeoutMs);
+  const deadlineAt = now() + timeoutMs;
+  const abortIfExpired = () => {
+    if (controller.signal.aborted || now() >= deadlineAt) {
+      if (!controller.signal.aborted) {
+        controller.abort(new Error("Sandbox prewarm exceeded its deadline."));
+      }
+      return true;
+    }
+    return false;
+  };
+  const timer = setTimeout(
+    () => {
+      controller.abort(new Error("Sandbox prewarm exceeded its deadline."));
+    },
+    Math.max(0, deadlineAt - now())
+  );
 
   try {
     const snapshot: SessionLike = {
@@ -125,7 +139,7 @@ export async function prewarmTenantSandbox(
       controller.signal
     );
     if (
-      controller.signal.aborted ||
+      abortIfExpired() ||
       access.kind !== "allowed" ||
       access.authVersion !== user.authVersion ||
       access.userId !== user.id
@@ -137,22 +151,25 @@ export async function prewarmTenantSandbox(
       controller.signal
     );
     if (
-      controller.signal.aborted ||
+      abortIfExpired() ||
       access.authVersion !== user.authVersion ||
       access.userId !== user.id
     ) {
       return;
     }
+    if (abortIfExpired()) {
+      return;
+    }
     const service = runner.createProductionRunnerService(session);
     if (
-      controller.signal.aborted ||
+      abortIfExpired() ||
       access.authVersion !== user.authVersion ||
       access.userId !== user.id
     ) {
       return;
     }
     await service.prewarmMostRecent(session, {
-      deadline,
+      deadline: deadlineAt,
       signal: controller.signal,
     });
   } catch {

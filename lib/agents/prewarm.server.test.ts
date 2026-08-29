@@ -239,3 +239,32 @@ test("a loader resolving at the deadline constructs and invokes no runner servic
   assert.equal(constructed, 0);
   assert.equal(invoked, 0);
 });
+
+test("wall-clock expiry blocks service work before the timer callback can run", async () => {
+  let now = Date.now();
+  let constructed = 0;
+  let invoked = 0;
+
+  await prewarmTenantSandbox(subscribedUser(), {
+    authorizeCurrent: () => Promise.resolve(AUTHORIZED),
+    loadRunner: () => {
+      now += 6000;
+      return Promise.resolve({
+        createProductionRunnerService: () => {
+          constructed += 1;
+          return {
+            prewarmMostRecent: () => {
+              invoked += 1;
+              return Promise.resolve({ kind: "none" });
+            },
+          };
+        },
+      });
+    },
+    now: () => now,
+    timeoutMs: 5000,
+  });
+
+  assert.equal(constructed, 0);
+  assert.equal(invoked, 0);
+});

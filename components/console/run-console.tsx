@@ -51,6 +51,7 @@ import { memberName } from "@/lib/agents/formations";
 import { avatarFor } from "@/lib/avatar";
 import { isTerminal, projectRun } from "@/lib/console/blocks";
 import { formatDuration, glyphFor, spanBetween } from "@/lib/console/format";
+import type { SessionOperationContext } from "@/lib/console/session-operation";
 import type { ConsoleRun } from "@/lib/console/types";
 import {
   fetchHasCredential,
@@ -111,6 +112,8 @@ export function RunConsole() {
   const [runnerStatus, setRunnerStatus] =
     useState<ApplicationRunnerStatusKind>("connecting");
   const [hasCredential, setHasCredential] = useState<boolean | null>(null);
+  const [settingsOperationContext, setSettingsOperationContext] =
+    useState<SessionOperationContext | null>(null);
 
   const [agents, setAgents] = useState<AgentDefinition[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
@@ -291,6 +294,7 @@ export function RunConsole() {
     setBusy(false);
     setRenaming(false);
     setRemoving(false);
+    setSettingsOperationContext(null);
 
     if (session.status === "loading") {
       setRunnerStatus("connecting");
@@ -306,6 +310,11 @@ export function RunConsole() {
     }
 
     setRunnerStatus("connecting");
+    setSettingsOperationContext({
+      generation,
+      isCurrent: () => isCurrentSession(generation, controller.signal),
+      signal: controller.signal,
+    });
     if (credentialOwnerRef.current !== accountId) {
       credentialOwnerRef.current = accountId;
       resetCredentialCache();
@@ -1183,6 +1192,7 @@ export function RunConsole() {
           <Settings
             account={account}
             onCredentialsChange={onCredentialsChange}
+            operationContext={settingsOperationContext}
           />
         ) : view === "create" ? (
           <CreateAgent

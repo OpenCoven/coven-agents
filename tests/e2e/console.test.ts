@@ -256,6 +256,7 @@ test.describe("Run console", () => {
     let harnessIds: string[] = [];
     let delayNextCredentialGet = false;
     let failNextCredentialGet = false;
+    let mutationRequests = 0;
     let releaseCredentialGet: (() => Promise<void>) | undefined;
     await page.route("**/api/credentials", (route) => {
       const request = route.request();
@@ -281,6 +282,7 @@ test.describe("Run console", () => {
         harnessId?: string;
       };
       if (request.method() === "POST") {
+        mutationRequests += 1;
         if (body.credential === "rejected-credential") {
           return route.fulfill({ json: { error: "failed" }, status: 500 });
         }
@@ -322,6 +324,7 @@ test.describe("Run console", () => {
       .getByLabel("GitHub Copilot CLI credential")
       .fill("rejected-credential");
     await page.getByRole("button", { name: "Save" }).click();
+    await expect.poll(() => mutationRequests).toBe(1);
     await expect(
       page.getByText("Could not store the credential.")
     ).toBeVisible();
@@ -599,5 +602,256 @@ test.describe("Run console", () => {
     await expect(page.getByText("Renamed to Stale renamed agent.")).toHaveCount(
       0
     );
+  });
+
+  test("delayed settings list and save cannot publish after an account switch", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies("first@example.invalid"));
+    let sessionOverride: Record<string, unknown> | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      sessionOverride === undefined
+        ? route.continue()
+        : route.fulfill({ json: sessionOverride })
+    );
+    let delayNextList = false;
+    let releaseList!: () => Promise<void>;
+    let releaseSave!: () => Promise<void>;
+    let saveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      saveStarted = resolve;
+    });
+    await page.route("**/api/credentials", (route) => {
+      if (route.request().method() === "GET") {
+        if (!delayNextList) {
+          return route.fulfill({ json: { harnessIds: [] } });
+        }
+        delayNextList = false;
+        return new Promise<void>((resolve) => {
+          releaseList = () => {
+            route
+              .fulfill({ json: { harnessIds: ["copilot"] } })
+              .catch(() => undefined);
+            resolve();
+            return Promise.resolve();
+          };
+        });
+      }
+      saveStarted();
+      return new Promise<void>((resolve) => {
+        releaseSave = () => {
+          route
+            .fulfill({ json: { harnessId: "copilot", stored: true } })
+            .catch(() => undefined);
+          resolve();
+          return Promise.resolve();
+        };
+      });
+    });
+    let agentRequests = 0;
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        agentRequests += 1;
+        return route.fulfill({
+          json: {
+            agents:
+              agentRequests === 1
+                ? [retainedAgent]
+                : [{ ...retainedAgent, id: OTHER_AGENT_ID }],
+          },
+        });
+      }
+      return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+    });
+
+    await page.goto("/agents");
+    await expect(page.getByTitle("first@example.invalid")).toBeVisible();
+    delayNextList = true;
+    await page.getByRole("button", { name: "Account and settings" }).click();
+    await page
+      .getByLabel("GitHub Copilot CLI credential")
+      .fill("old-account-token");
+    await expect(page.getByText("Unsaved credential")).toBeVisible();
+    await page.getByRole("button", { name: "Save" }).click();
+    await started;
+
+    sessionOverride = {
+      expires: "2099-01-01T00:00:00.000Z",
+      user: {
+        email: "second@example.invalid",
+        id: "00000000-0000-4000-8000-000000000002",
+        image: null,
+        name: "Second subscriber",
+        type: "subscriber",
+      },
+    };
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      const body = (await response.json()) as { user?: { email?: string } };
+      return body.user?.email === "second@example.invalid";
+    });
+    await notifySessionChange(page);
+    await sessionRefresh;
+    await expect(page.getByTitle("second@example.invalid")).toBeVisible();
+    await releaseList();
+    await releaseSave();
+    await page.waitForTimeout(100);
+    await expect(page.getByLabel("GitHub Copilot CLI credential")).toHaveValue(
+      ""
+    );
+    await expect(page.getByText("No unsaved changes")).toBeVisible();
+    await expect(page.getByText("not set").first()).toBeVisible();
+    await expect(page.getByText("Credential stored.")).toHaveCount(0);
+  });
+
+  test("a delayed settings delete cannot publish after sign-out", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let sessionOverride: Record<string, unknown> | null | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      sessionOverride === undefined
+        ? route.continue()
+        : route.fulfill({ json: sessionOverride })
+    );
+    let releaseDelete!: () => Promise<void>;
+    let deleteStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      deleteStarted = resolve;
+    });
+    await page.route("**/api/credentials", (route) => {
+      if (route.request().method() === "GET") {
+        return route.fulfill({ json: { harnessIds: ["copilot"] } });
+      }
+      deleteStarted();
+      return new Promise<void>((resolve) => {
+        releaseDelete = () => {
+          route
+            .fulfill({ json: { harnessId: "copilot", removed: true } })
+            .catch(() => undefined);
+          resolve();
+          return Promise.resolve();
+        };
+      });
+    });
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [retainedAgent] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+
+    await page.goto("/agents");
+    await page.getByRole("button", { name: "Account and settings" }).click();
+    await page.getByRole("button", { name: "Remove" }).click();
+    await started;
+
+    sessionOverride = null;
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      return (await response.json()) === null;
+    });
+    await notifySessionChange(page);
+    await sessionRefresh;
+    await expect(
+      page.getByRole("heading", { name: "Sign in to manage your account" })
+    ).toBeVisible();
+
+    await releaseDelete();
+    await page.waitForTimeout(100);
+    await expect(page.getByText("Credential removed.")).toHaveCount(0);
+    await expect(
+      page.getByText("Could not remove the credential.")
+    ).toHaveCount(0);
+  });
+
+  test("a delayed chat wipe cannot publish after an account switch", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies("first@example.invalid"));
+    let sessionOverride: Record<string, unknown> | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      sessionOverride === undefined
+        ? route.continue()
+        : route.fulfill({ json: sessionOverride })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: [] } })
+    );
+    let releaseWipe!: () => Promise<void>;
+    let wipeStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      wipeStarted = resolve;
+    });
+    await page.route("**/api/history", (route) => {
+      wipeStarted();
+      return new Promise<void>((resolve) => {
+        releaseWipe = () => {
+          route.fulfill({ json: { ok: true } }).catch(() => undefined);
+          resolve();
+          return Promise.resolve();
+        };
+      });
+    });
+    let agentRequests = 0;
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        agentRequests += 1;
+        return route.fulfill({
+          json: {
+            agents:
+              agentRequests === 1
+                ? [retainedAgent]
+                : [{ ...retainedAgent, id: OTHER_AGENT_ID }],
+          },
+        });
+      }
+      return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+    });
+
+    await page.goto("/agents");
+    await page.getByRole("button", { name: "Account and settings" }).click();
+    await page.getByRole("button", { name: "Data" }).click();
+    await page.getByRole("button", { name: "Delete all chats…" }).click();
+    await page.getByRole("button", { name: "Yes, delete every chat" }).click();
+    await started;
+
+    sessionOverride = {
+      expires: "2099-01-01T00:00:00.000Z",
+      user: {
+        email: "second@example.invalid",
+        id: "00000000-0000-4000-8000-000000000002",
+        image: null,
+        name: "Second subscriber",
+        type: "subscriber",
+      },
+    };
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      const body = (await response.json()) as { user?: { email?: string } };
+      return body.user?.email === "second@example.invalid";
+    });
+    await notifySessionChange(page);
+    await sessionRefresh;
+    await expect(page.getByTitle("second@example.invalid")).toBeVisible();
+
+    await releaseWipe();
+    await page.waitForTimeout(100);
+    await expect(page.getByText("All chats deleted.")).toHaveCount(0);
+    await expect(page.getByText("Could not delete your chats.")).toHaveCount(0);
+    await expect(page.getByText("No unsaved changes")).toBeVisible();
   });
 });
