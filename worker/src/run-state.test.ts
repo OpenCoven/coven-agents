@@ -37,6 +37,10 @@ const agent: AgentDefinition = {
   runtime: "cloud",
   status: "idle",
   updatedAt: "2026-08-20T20:00:00.000Z",
+  warm: {
+    status: "not_started",
+    updatedAt: "2026-08-20T20:00:00.000Z",
+  },
   workspace: "/workspace",
 };
 

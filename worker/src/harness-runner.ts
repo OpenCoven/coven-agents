@@ -7,6 +7,7 @@ import {
   harnessAuthHint,
   harnessSpec,
   harnessStatus,
+  isRunnableHarness,
   LineAssembler,
   normalizeEvent,
   type RunEvent,
@@ -14,6 +15,7 @@ import {
   shellQuote,
   summarizeRun,
   toShellCommand,
+  UNSUPPORTED_HARNESS_RUN_ERROR,
 } from "@opencoven/harness";
 
 const DEFAULT_WORKSPACE = "/workspace";
@@ -254,14 +256,10 @@ export function requireHarness(
   if (!spec) {
     throw new HarnessError(`Unknown harness: ${runtime}`, "unknown_harness");
   }
-  if (!spec.supported) {
+  if (!isRunnableHarness(runtime)) {
     throw new HarnessError(
-      `${spec.label} is detected but its event translation is not implemented yet. Use one of: ${HARNESS_SPECS.filter(
-        (candidate) => candidate.supported
-      )
-        .map((candidate) => candidate.id)
-        .join(", ")}.`,
-      "harness_unsupported"
+      UNSUPPORTED_HARNESS_RUN_ERROR.message,
+      UNSUPPORTED_HARNESS_RUN_ERROR.code
     );
   }
   // The env var NAME still comes from the harness's own spec — that is what

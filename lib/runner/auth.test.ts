@@ -3,8 +3,10 @@ import test from "node:test";
 import type { SubscriberAccessDecision } from "@/lib/auth/subscriber-access";
 import {
   createRunnerAuth,
+  cronReconcileSecretFromEnvironment,
   diagnosticSecretFromEnvironment,
-  reconcileSecretFromEnvironment,
+  MAX_PRIVILEGED_RUNNER_SECRET_LENGTH,
+  manualReconcileSecretFromEnvironment,
   timingSafeSecretEqual,
 } from "./auth";
 
@@ -31,6 +33,7 @@ function runnerAuth(
   environment = {
     CRON_SECRET: "reconcile-secret",
     OPERATOR_DIAGNOSTIC_TOKEN: "operator-secret",
+    RUNNER_MANUAL_RECONCILE_SECRET: "manual-reconcile-secret",
   }
 ) {
   return createRunnerAuth({
@@ -127,32 +130,28 @@ test("missing and aliased operator configuration is unavailable", () => {
   );
 });
 
-test("reconciliation accepts only its independent bearer secret", () => {
+test("manual reconciliation accepts only its independent bearer secret", () => {
   const auth = runnerAuth();
+  const request = (credential: string) =>
+    new Request("https://app.test/api/internal/runner-reconcile", {
+      headers: { authorization: ["Bearer", credential].join(" ") },
+      method: "POST",
+    });
 
   assert.deepEqual(
-    auth.authorizeReconcile(
-      new Request("https://app.test/api/internal/runner-reconcile", {
-        headers: { authorization: "Bearer reconcile-secret" },
-        method: "POST",
-      })
-    ),
-    { kind: "allowed" }
+    auth.authorizeReconcile(request("manual-reconcile-secret")),
+    {
+      kind: "allowed",
+    }
   );
-  assert.deepEqual(
-    auth.authorizeReconcile(
-      new Request("https://app.test/api/internal/runner-reconcile", {
-        headers: { authorization: "Bearer operator-secret" },
-        method: "POST",
-      })
-    ),
-    { kind: "unauthorized" }
-  );
-  assert.equal(reconcileSecretFromEnvironment({}), null);
+  assert.deepEqual(auth.authorizeReconcile(request("wrong-secret")), {
+    kind: "unauthorized",
+  });
+  assert.equal(manualReconcileSecretFromEnvironment({}), null);
   assert.equal(
-    reconcileSecretFromEnvironment({
-      CRON_SECRET: "same-secret",
+    manualReconcileSecretFromEnvironment({
       OPERATOR_DIAGNOSTIC_TOKEN: "same-secret",
+      RUNNER_MANUAL_RECONCILE_SECRET: "same-secret",
     }),
     null
   );
@@ -160,36 +159,49 @@ test("reconciliation accepts only its independent bearer secret", () => {
 
 test("Vercel Cron GET uses CRON_SECRET and rejects invalid authorization", () => {
   const auth = runnerAuth();
-  const authorization = ["Bearer", "reconcile-secret"].join(" ");
+  const request = (credential: string) =>
+    new Request("https://app.test/api/internal/runner-reconcile", {
+      headers: { authorization: ["Bearer", credential].join(" ") },
+      method: "GET",
+    });
 
-  assert.deepEqual(
-    auth.authorizeReconcile(
-      new Request("https://app.test/api/internal/runner-reconcile", {
-        headers: { authorization },
-        method: "GET",
-      })
-    ),
-    { kind: "allowed" }
-  );
-  assert.deepEqual(
-    auth.authorizeReconcile(
-      new Request("https://app.test/api/internal/runner-reconcile", {
-        headers: { authorization: `${authorization}-invalid` },
-        method: "GET",
-      })
-    ),
-    { kind: "unauthorized" }
-  );
+  assert.deepEqual(auth.authorizeReconcile(request("reconcile-secret")), {
+    kind: "allowed",
+  });
+  assert.deepEqual(auth.authorizeReconcile(request("wrong-secret")), {
+    kind: "unauthorized",
+  });
 });
 
-test("every privileged runner secret must be independent", () => {
+test("GET rejects manual and diagnostic secrets while POST rejects cron and diagnostic secrets", () => {
+  const auth = runnerAuth();
+  const request = (method: "GET" | "POST", credential: string) =>
+    new Request("https://app.test/api/internal/runner-reconcile", {
+      headers: { authorization: ["Bearer", credential].join(" ") },
+      method,
+    });
+
+  for (const credential of ["manual-reconcile-secret", "operator-secret"]) {
+    assert.deepEqual(auth.authorizeReconcile(request("GET", credential)), {
+      kind: "unauthorized",
+    });
+  }
+  for (const credential of ["reconcile-secret", "operator-secret"]) {
+    assert.deepEqual(auth.authorizeReconcile(request("POST", credential)), {
+      kind: "unauthorized",
+    });
+  }
+});
+
+test("every privileged runner secret must be independent and bounded", () => {
   for (const alias of [
     { AGENT_CONTROL_TOKEN: "same-secret" },
     { OPERATOR_DIAGNOSTIC_TOKEN: "same-secret" },
+    { RUNNER_MANUAL_RECONCILE_SECRET: "same-secret" },
     { RUNNER_SERVICE_TOKEN: "same-secret" },
   ]) {
     assert.equal(
-      reconcileSecretFromEnvironment({
+      cronReconcileSecretFromEnvironment({
         CRON_SECRET: "same-secret",
         ...alias,
       }),
@@ -200,6 +212,7 @@ test("every privileged runner secret must be independent", () => {
   for (const alias of [
     { AGENT_CONTROL_TOKEN: "same-secret" },
     { CRON_SECRET: "same-secret" },
+    { RUNNER_MANUAL_RECONCILE_SECRET: "same-secret" },
     { RUNNER_SERVICE_TOKEN: "same-secret" },
   ]) {
     assert.equal(
@@ -210,6 +223,21 @@ test("every privileged runner secret must be independent", () => {
       null
     );
   }
+
+  assert.equal(
+    cronReconcileSecretFromEnvironment({
+      CRON_SECRET: "x".repeat(MAX_PRIVILEGED_RUNNER_SECRET_LENGTH + 1),
+    }),
+    null
+  );
+  assert.equal(
+    manualReconcileSecretFromEnvironment({
+      RUNNER_MANUAL_RECONCILE_SECRET: "x".repeat(
+        MAX_PRIVILEGED_RUNNER_SECRET_LENGTH + 1
+      ),
+    }),
+    null
+  );
 });
 
 test("secret comparison accepts exact values and rejects near misses", () => {

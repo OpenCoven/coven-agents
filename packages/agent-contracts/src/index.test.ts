@@ -7,11 +7,14 @@ import {
   AGENT_RUNNER_CAPABILITIES,
   AGENT_RUNNER_LIMITS,
   agentDefinitionSchema,
+  agentEnvelopeSchema,
   agentOwnerSchema,
   agentRunnerHealthSchema,
+  agentsEnvelopeSchema,
   commandEvidenceSchema,
   compareAgentTimestamps,
   createAgentInputSchema,
+  currentAgentDefinitionSchema,
   fileEvidenceSchema,
   runErrorEnvelopeSchema,
   runEventSchema,
@@ -21,6 +24,7 @@ import {
   runSnapshotSchema,
   runStatusSchema,
   startRunInputSchema,
+  storedAgentDefinitionSchema,
 } from "./index";
 
 const contractFixture = JSON.parse(
@@ -64,10 +68,8 @@ test("rejects the retired provider-key cloud runtime on either backend", () => {
   }
 });
 
-test("a stored definition using the retired runtime still parses", () => {
-  // Tightening a create-time rule must not strand an agent already written to
-  // durable state, so the definition schema does not inherit the refinement.
-  const result = agentDefinitionSchema.safeParse({
+test("public envelopes represent legacy runtime during read compatibility", () => {
+  const legacyDefinition = {
     backend: "cloud",
     createdAt: "2026-08-20T17:00:00.000Z",
     description: "",
@@ -79,9 +81,79 @@ test("a stored definition using the retired runtime still parses", () => {
     runtime: "cloud",
     status: "idle",
     updatedAt: "2026-08-20T17:00:00.000Z",
+  };
+  const legacyAgent = {
+    ...legacyDefinition,
+    owner: { kind: "standalone" },
+    warm: {
+      status: "not_started",
+      updatedAt: legacyDefinition.updatedAt,
+    },
+  };
+  const publicResult = agentDefinitionSchema.safeParse(legacyAgent);
+  const listedResult = agentsEnvelopeSchema.safeParse({
+    agents: [legacyAgent],
+  });
+  const readResult = agentEnvelopeSchema.safeParse({ agent: legacyAgent });
+  const storedResult = storedAgentDefinitionSchema.safeParse(legacyDefinition);
+
+  assert.equal(publicResult.success, true);
+  assert.equal(listedResult.success, true);
+  assert.equal(readResult.success, true);
+  assert.equal(
+    listedResult.success && listedResult.data.agents[0]?.runtime,
+    "cloud"
+  );
+  assert.equal(readResult.success && readResult.data.agent.runtime, "cloud");
+  assert.equal(storedResult.success, true);
+  assert.deepEqual(storedResult.success && storedResult.data.owner, {
+    kind: "standalone",
+  });
+  assert.deepEqual(storedResult.success && storedResult.data.warm, {
+    status: "not_started",
+    updatedAt: "2026-08-20T17:00:00.000Z",
+  });
+});
+
+test("public agent definitions require explicit ownership", () => {
+  const result = agentDefinitionSchema.safeParse({
+    backend: "cloud",
+    createdAt: "2026-08-20T17:00:00.000Z",
+    description: "",
+    id: "11111111-2222-4333-8444-555555555555",
+    instructions: "Current agent.",
+    lastRunAt: null,
+    model: "auto",
+    name: "Current",
+    runtime: "copilot",
+    status: "idle",
+    updatedAt: "2026-08-20T17:00:00.000Z",
+    warm: {
+      status: "not_started",
+      updatedAt: "2026-08-20T17:00:00.000Z",
+    },
   });
 
-  assert.equal(result.success, true);
+  assert.equal(result.success, false);
+});
+
+test("public agent definitions require warm state", () => {
+  const result = agentDefinitionSchema.safeParse({
+    backend: "cloud",
+    createdAt: "2026-08-20T17:00:00.000Z",
+    description: "",
+    id: "11111111-2222-4333-8444-555555555555",
+    instructions: "Current agent.",
+    lastRunAt: null,
+    model: "auto",
+    name: "Current",
+    owner: { kind: "tenant", tenantId: "acct_42" },
+    runtime: "copilot",
+    status: "idle",
+    updatedAt: "2026-08-20T17:00:00.000Z",
+  });
+
+  assert.equal(result.success, false);
 });
 
 test("rejects empty tasks", () => {
@@ -146,7 +218,7 @@ test("keeps the exported contract values aligned with the fixture", async () => 
   assert.deepEqual(contractFixture.statuses, contract.AGENT_RUNNER_STATUSES);
 });
 
-test("defaults new and legacy agent definitions to standalone ownership", () => {
+test("normalizes missing owner and warm on legacy stored definitions", () => {
   const result = createAgentInputSchema.parse({
     backend: "cloud",
     instructions: "Run in the cloud.",
@@ -155,27 +227,27 @@ test("defaults new and legacy agent definitions to standalone ownership", () => 
     runtime: "copilot",
   });
 
-  // Create input carries no owner at all — the server assigns it — so the
-  // default belongs to the definition schema, which is what has to keep
-  // parsing records stored before ownership existed.
   assert.equal("owner" in result, false);
-  assert.deepEqual(
-    agentDefinitionSchema.parse({
-      backend: result.backend,
-      createdAt: "2026-08-20T19:00:00.000Z",
-      description: result.description,
-      id: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
-      instructions: result.instructions,
-      lastRunAt: null,
-      model: result.model,
-      name: result.name,
-      runtime: result.runtime,
-      status: "idle",
-      updatedAt: "2026-08-20T19:00:00.000Z",
-      workspace: result.workspace,
-    }).owner,
-    { kind: "standalone" }
-  );
+  const stored = storedAgentDefinitionSchema.parse({
+    backend: result.backend,
+    createdAt: "2026-08-20T19:00:00.000Z",
+    description: result.description,
+    id: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
+    instructions: result.instructions,
+    lastRunAt: null,
+    model: result.model,
+    name: result.name,
+    runtime: result.runtime,
+    status: "idle",
+    updatedAt: "2026-08-20T19:00:00.000Z",
+    workspace: result.workspace,
+  });
+
+  assert.deepEqual(stored.owner, { kind: "standalone" });
+  assert.deepEqual(stored.warm, {
+    status: "not_started",
+    updatedAt: "2026-08-20T19:00:00.000Z",
+  });
 });
 
 test("refuses a local agent, because nothing can execute one", () => {
@@ -210,6 +282,10 @@ test("rejects unknown fields on agent definitions", () => {
     status: "idle",
     unexpected: true,
     updatedAt: "2026-08-20T19:00:00.000Z",
+    warm: {
+      status: "not_started",
+      updatedAt: "2026-08-20T19:00:00.000Z",
+    },
   });
 
   assert.equal(result.success, false);
@@ -541,4 +617,28 @@ test("a client cannot name its own owner when creating an agent", () => {
   });
 
   assert.equal(result.success, false);
+});
+
+test("current definitions reject legacy runtime at persistence boundaries", () => {
+  assert.equal(
+    currentAgentDefinitionSchema.safeParse({
+      backend: "cloud",
+      createdAt: "2026-08-20T19:00:00.000Z",
+      description: "",
+      id: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
+      instructions: "Do the thing.",
+      lastRunAt: null,
+      model: "auto",
+      name: "Legacy write",
+      owner: { kind: "tenant", tenantId: "acct_42" },
+      runtime: "cloud",
+      status: "idle",
+      updatedAt: "2026-08-20T19:00:00.000Z",
+      warm: {
+        status: "not_started",
+        updatedAt: "2026-08-20T19:00:00.000Z",
+      },
+    }).success,
+    false
+  );
 });

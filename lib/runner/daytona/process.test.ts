@@ -509,6 +509,7 @@ function processDouble(
     deleteError?: Error;
     deleteErrorOnCall?: number;
     deleteLeavesSession?: boolean;
+    listError?: Error;
     listErrorOnCall?: number;
     logs?: Readonly<{ output?: string; stderr?: string; stdout?: string }>;
     sessions?: readonly { commands: []; sessionId: string }[];
@@ -601,7 +602,9 @@ function processDouble(
         listCalls += 1;
         calls.push({ command: SESSION, kind: "list" });
         if (options.listErrorOnCall === listCalls) {
-          return Promise.reject(new Error("lookup unavailable"));
+          return Promise.reject(
+            options.listError ?? new Error("lookup unavailable")
+          );
         }
         return Promise.resolve(sessions);
       },
@@ -1510,12 +1513,16 @@ test("stops sessions only after API absence confirmation and asks caller to rese
     processDouble({ deleteError: new DaytonaTimeoutError("timeout") }).sandbox,
     stopInput
   );
-  assert.equal(retryableDeleteFailed.kind, "sandbox_reset_required");
-  assert.equal(
-    retryableDeleteFailed.kind === "sandbox_reset_required" &&
-      retryableDeleteFailed.error.retryable,
-    true
+  assert.deepEqual(retryableDeleteFailed, { kind: "provider_unavailable" });
+
+  const retryableLookupFailed = await stopDaytonaProcess(
+    processDouble({
+      listError: new DaytonaTimeoutError("timeout"),
+      listErrorOnCall: 1,
+    }).sandbox,
+    stopInput
   );
+  assert.deepEqual(retryableLookupFailed, { kind: "provider_unavailable" });
 });
 
 test("requires deterministic credential cleanup and verification before stopped", async () => {
@@ -1559,10 +1566,10 @@ test("treats Daytona 404 and 410 session deletion responses as stopped only afte
       const { calls, sandbox } = processDouble({ deleteError: error });
 
       assert.deepEqual(await stopDaytonaProcess(sandbox, stopInput), {
-        kind: "stopped",
+        kind: "provider_not_found",
       });
       assert.deepEqual(await stopDaytonaProcess(sandbox, stopInput), {
-        kind: "stopped",
+        kind: "provider_not_found",
       });
       assert.deepEqual(
         calls.map((call) => call.kind),

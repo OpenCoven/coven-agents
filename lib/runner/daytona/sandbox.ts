@@ -291,33 +291,35 @@ function withLifecycleAbort<T>(
   });
 }
 
-function settleCleanupWithinLifecycle(
-  operation: Promise<unknown>,
+function settleCleanupWithinLifecycle<T>(
+  operation: Promise<T>,
   lifecycle: DaytonaSandboxLifecycleDependencies | undefined
-): Promise<boolean> {
+): Promise<
+  Readonly<{ kind: "settled"; value: T }> | Readonly<{ kind: "unsettled" }>
+> {
   operation.catch(() => undefined);
   if (lifecycle?.deadline === undefined) {
     return lifecycle?.signal?.aborted
-      ? Promise.resolve(false)
+      ? Promise.resolve({ kind: "unsettled" })
       : operation.then(
-          () => true,
-          () => false
+          (value) => ({ kind: "settled", value }),
+          () => ({ kind: "unsettled" })
         );
   }
   const remainingMs = lifecycle.deadline - lifecycleNow(lifecycle);
   if (remainingMs <= 0) {
-    return Promise.resolve(false);
+    return Promise.resolve({ kind: "unsettled" });
   }
   return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(false), remainingMs);
+    const timer = setTimeout(() => resolve({ kind: "unsettled" }), remainingMs);
     operation.then(
-      () => {
+      (value) => {
         clearTimeout(timer);
-        resolve(true);
+        resolve({ kind: "settled", value });
       },
       () => {
         clearTimeout(timer);
-        resolve(false);
+        resolve({ kind: "unsettled" });
       }
     );
   });
@@ -740,10 +742,10 @@ async function failSandboxReservation(
 async function deleteFirstDaytonaSandbox(
   identifiers: readonly string[],
   dependencies: DaytonaSandboxDependencies
-): Promise<void> {
+): Promise<"deleted" | "provider_not_found"> {
   const [identifier, ...remaining] = identifiers;
   if (!identifier) {
-    return;
+    return "provider_not_found";
   }
   let sandbox: Sandbox;
   try {
@@ -752,14 +754,16 @@ async function deleteFirstDaytonaSandbox(
     if (classifyDaytonaProviderError(error) !== "not_found") {
       throw error;
     }
-    return deleteFirstDaytonaSandbox(remaining, dependencies);
+    return await deleteFirstDaytonaSandbox(remaining, dependencies);
   }
   try {
     await sandbox.delete(SANDBOX_OPERATION_TIMEOUT_SECONDS, true);
+    return "deleted";
   } catch (error) {
     if (classifyDaytonaProviderError(error) !== "not_found") {
       throw error;
     }
+    return "provider_not_found";
   }
 }
 
@@ -773,36 +777,74 @@ export async function resetDaytonaSandboxForCancellation(
   operator: RunnerOperator,
   authority: RunnerDispatchAuthority,
   dependencies: DaytonaSandboxDependencies
-): Promise<boolean> {
-  const reserved =
-    await dependencies.store.beginDaytonaSandboxResetForCancellation(
+): Promise<
+  | { kind: "reset" | "provider_not_found" }
+  | {
+      kind:
+        | "in_progress"
+        | "not_found"
+        | "sandbox_reset_required"
+        | "stale_version";
+    }
+  | { kind: "unavailable"; source: "database" | "provider" }
+> {
+  let reserved: Awaited<
+    ReturnType<RunnerStore["beginDaytonaSandboxResetForCancellation"]>
+  >;
+  try {
+    reserved = await dependencies.store.beginDaytonaSandboxResetForCancellation(
       operator,
       authority
     );
+  } catch {
+    return { kind: "unavailable", source: "database" };
+  }
   if (reserved.kind !== "resetting") {
-    return false;
+    switch (reserved.kind) {
+      case "in_progress":
+      case "not_found":
+      case "stale_version":
+        return { kind: reserved.kind };
+      case "lease_lost":
+      case "not_live":
+        return { kind: "stale_version" };
+      default:
+        return reserved;
+    }
   }
   const agent = reserved.value;
+  let deleted: "deleted" | "provider_not_found";
   try {
-    await deleteFirstDaytonaSandbox(
+    deleted = await deleteFirstDaytonaSandbox(
       [
         ...(agent.daytonaSandboxId ? [agent.daytonaSandboxId] : []),
         daytonaSandboxName(agent.tenant, agent.id),
       ],
       dependencies
     );
-  } catch {
-    return false;
+  } catch (error) {
+    return classifyDaytonaProviderError(error) === "retryable"
+      ? { kind: "unavailable", source: "provider" }
+      : { kind: "sandbox_reset_required" };
   }
-  const cleared = await dependencies.store.finishDaytonaSandboxResetForRecovery(
-    operator,
-    {
-      agentId: agent.id,
-      expectedGeneration: agent.sandboxGeneration,
-      expectedVersion: agent.version,
-    }
-  );
-  return cleared.kind === "updated";
+  let cleared: Awaited<
+    ReturnType<RunnerStore["finishDaytonaSandboxResetForRecovery"]>
+  >;
+  try {
+    cleared = await dependencies.store.finishDaytonaSandboxResetForRecovery(
+      operator,
+      {
+        agentId: agent.id,
+        expectedGeneration: agent.sandboxGeneration,
+        expectedVersion: agent.version,
+      }
+    );
+  } catch {
+    return { kind: "unavailable", source: "database" };
+  }
+  return cleared.kind === "updated"
+    ? { kind: deleted === "deleted" ? "reset" : "provider_not_found" }
+    : { kind: cleared.kind };
 }
 
 async function reconcileAmbiguousDaytonaSandbox(
@@ -993,7 +1035,9 @@ export async function warmDaytonaSandbox(
   dependencies: DaytonaSandboxWarmDependencies
 ): Promise<
   | { kind: "ready"; agent: RunnerAgentRecord; sandbox: Sandbox }
-  | { kind: "in_progress" }
+  | { kind: "in_progress"; agent: RunnerAgentRecord }
+  | { kind: "not_found" | "stale_version" }
+  | { kind: "unavailable"; source: "database" }
   | { kind: "failed"; error: DaytonaProviderErrorKind }
 > {
   let ensured: { agent: RunnerAgentRecord; sandbox: Sandbox };
@@ -1005,7 +1049,10 @@ export async function warmDaytonaSandbox(
       dependencies
     );
   } catch (error) {
-    return { error: classifyDaytonaProviderError(error), kind: "failed" };
+    return error instanceof DaytonaError ||
+      error instanceof DaytonaSandboxLifecycleError
+      ? { error: classifyDaytonaProviderError(error), kind: "failed" }
+      : { kind: "unavailable", source: "database" };
   }
   if (lifecycleAborted(dependencies.lifecycle)) {
     return { error: "retryable", kind: "failed" };
@@ -1018,10 +1065,10 @@ export async function warmDaytonaSandbox(
     warmStaleBefore: new Date(Date.now() - SANDBOX_WARM_TIMEOUT_MS),
   });
   if (warm.kind === "in_progress") {
-    return { kind: "in_progress" };
+    return { agent: warm.value, kind: "in_progress" };
   }
-  if (warm.kind !== "started") {
-    return { error: "non_retryable", kind: "failed" };
+  if (warm.kind === "not_found" || warm.kind === "stale_version") {
+    return warm;
   }
 
   const finishFailedWarm = () =>
@@ -1046,7 +1093,14 @@ export async function warmDaytonaSandbox(
       providerTimeoutSeconds(dependencies.lifecycle)
     );
   } catch (error) {
-    await settleFailedWarm();
+    const failed = await settleFailedWarm();
+    if (
+      failed.kind === "settled" &&
+      (failed.value.kind === "not_found" ||
+        failed.value.kind === "stale_version")
+    ) {
+      return failed.value;
+    }
     return {
       error: lifecycleAborted(dependencies.lifecycle)
         ? "retryable"
@@ -1067,9 +1121,10 @@ export async function warmDaytonaSandbox(
       status: "ready",
     }
   );
-  return finished.kind === "updated"
-    ? { agent: finished.value, kind: "ready", sandbox: ensured.sandbox }
-    : { error: "non_retryable", kind: "failed" };
+  if (finished.kind === "not_found" || finished.kind === "stale_version") {
+    return finished;
+  }
+  return { agent: finished.value, kind: "ready", sandbox: ensured.sandbox };
 }
 
 /**

@@ -17,7 +17,8 @@ import type {
   RunnerSecretAuthorization,
 } from "./auth";
 import { createRunnerHttpHandlers, type RunnerHttpHandlers } from "./http";
-import type { RunnerService } from "./service";
+import { type RunnerService, RunnerServiceError } from "./service";
+import type { RunnerClaimedDispatch, RunnerDispatchAuthority } from "./types";
 
 const USER_ID = "9c858901-8a57-4791-81fe-4c455b099bc9";
 const TENANT = "u_9c8589018a57479181fe4c455b099bc9";
@@ -25,6 +26,7 @@ const AGENT_ID = "11111111-2222-4333-8444-555555555555";
 const RUN_ID = "22222222-3333-4444-8555-666666666666";
 const OPERATION_ID = "33333333-4444-4555-8666-777777777777";
 const REQUEST_ID = "44444444-5555-4666-8777-888888888888";
+const DIAGNOSTIC_NAME = "coven-diagnostic-precomputed-http-name";
 
 const subscriber: RunnerAuthenticatedSubscriber = {
   authVersion: 4,
@@ -48,6 +50,10 @@ function definition(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
     runtime: "copilot",
     status: "idle",
     updatedAt: "2026-08-28T15:00:00.000Z",
+    warm: {
+      status: "not_started",
+      updatedAt: "2026-08-28T15:00:00.000Z",
+    },
     ...overrides,
   };
 }
@@ -75,6 +81,7 @@ function counts() {
     adopted: 0,
     deferred: 0,
     dispatched: 1,
+    execution: "executed" as const,
     expiredScanned: 0,
     failures: 0,
     logEvents: 0,
@@ -82,6 +89,7 @@ function counts() {
     sandboxRecovered: 0,
     terminalCleaned: 0,
     terminalized: 0,
+    terminalLeaseCleaned: 0,
   };
 }
 
@@ -93,6 +101,10 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
       exitCode: 0,
       ok: true,
       output: "coven-agents",
+    }),
+    dispatchClaim: async (claimed) => ({
+      kind: "started",
+      runId: claimed.run.id,
     }),
     getAgent: async () => ({ agent: definition(), kind: "found" }),
     getRun: async () => ({ kind: "found", run: run() }),
@@ -111,7 +123,7 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     ],
     prewarmMostRecent: async () => ({
       agentId: AGENT_ID,
-      kind: "warmed",
+      kind: "ready",
       warm: {
         status: "ready",
         updatedAt: "2026-08-28T15:00:00.000Z",
@@ -124,9 +136,9 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     }),
     reconcileAndDispatch: async () => counts(),
     startRun: async () => ({
+      admission: "created",
       kind: "accepted",
       run: run(),
-      scheduleReconciliation: true,
     }),
     stopRun: async () => ({
       kind: "stopped",
@@ -141,7 +153,7 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
       kind: "updated",
     }),
     warmAgent: async () => ({
-      kind: "warmed",
+      kind: "ready",
       warm: {
         status: "ready",
         updatedAt: "2026-08-28T15:00:00.000Z",
@@ -162,21 +174,31 @@ function authorizedAuth(): RunnerAuth {
 function handlers(
   options: {
     admission?: AbuseAdmission;
+    after?: ((callback: () => void | Promise<void>) => void) | null;
     auth?: RunnerAuth;
     service?: RunnerService;
   } = {}
 ) {
   const after: (() => void | Promise<void>)[] = [];
   const admissions: AbuseEnforcementInput[] = [];
+  const diagnosticNames: string[] = [];
   const logs: unknown[] = [];
+  let diagnosticRequests = 0;
   let serviceRequests = 0;
   let operatorRequests = 0;
   const runner = options.service ?? service();
   const result = createRunnerHttpHandlers({
-    after: (callback) => {
-      after.push(callback);
-    },
+    ...(options.after === null
+      ? {}
+      : {
+          after:
+            options.after ??
+            ((callback) => {
+              after.push(callback);
+            }),
+        }),
     auth: options.auth ?? authorizedAuth(),
+    createDiagnosticName: () => DIAGNOSTIC_NAME,
     createOperatorService: () => {
       operatorRequests += 1;
       return runner;
@@ -185,6 +207,11 @@ function handlers(
     createService: () => {
       serviceRequests += 1;
       return runner;
+    },
+    diagnoseSandbox: (name) => {
+      diagnosticRequests += 1;
+      diagnosticNames.push(name);
+      return runner.diagnoseSandbox();
     },
     enforceAbuse: (input) => {
       admissions.push(input);
@@ -200,6 +227,8 @@ function handlers(
   return {
     admissions,
     after,
+    diagnosticNames,
+    diagnosticRequests: () => diagnosticRequests,
     handlers: result,
     logs,
     operatorRequests: () => operatorRequests,
@@ -289,6 +318,10 @@ function orderedOperatorHandlers(
       },
       authorizeSubscriber: async () => subscriber,
     },
+    createDiagnosticName: () => {
+      events.push("name");
+      return DIAGNOSTIC_NAME;
+    },
     createOperatorService: () => {
       events.push("service");
       return runner;
@@ -297,6 +330,10 @@ function orderedOperatorHandlers(
     createService: () => {
       events.push("subscriber-service");
       return runner;
+    },
+    diagnoseSandbox: () => {
+      events.push("service");
+      return runner.diagnoseSandbox();
     },
     enforceAbuse: (input) => {
       events.push("abuse");
@@ -386,6 +423,63 @@ test("abuse refusal happens before body parsing and returns v1 retry metadata", 
   );
 });
 
+test("subscriber writes preserve identity, abuse, body, service, provider ordering", async () => {
+  const events: string[] = [];
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(validDefinitionBody()));
+      controller.close();
+    },
+  });
+  const request = {
+    body: {
+      getReader() {
+        events.push("body");
+        return stream.getReader();
+      },
+    },
+    headers: new Headers(),
+  } as unknown as Request;
+  const runner = service({
+    createAgent: () => {
+      events.push("provider");
+      return Promise.resolve({ agent: definition(), kind: "created" });
+    },
+  });
+  const runnerHandlers = createRunnerHttpHandlers({
+    auth: {
+      authorizeDiagnostic: () => ({ kind: "allowed" }),
+      authorizeReconcile: () => ({ kind: "allowed" }),
+      authorizeSubscriber: () => {
+        events.push("identity");
+        return Promise.resolve(subscriber);
+      },
+    },
+    createOperatorService: () => runner,
+    createService: () => {
+      events.push("service");
+      return runner;
+    },
+    diagnoseSandbox: () => runner.diagnoseSandbox(),
+    enforceAbuse: () => {
+      events.push("abuse");
+      return Promise.resolve({ kind: "allowed" });
+    },
+    ipAddress: () => "203.0.113.10",
+  });
+
+  const response = await runnerHandlers.createAgent(request);
+
+  assert.equal(response.status, 201);
+  assert.deepEqual(events, [
+    "identity",
+    "abuse",
+    "body",
+    "service",
+    "provider",
+  ]);
+});
+
 test("create rejects malformed, oversized, unknown, and owner-injected inputs", async () => {
   let creates = 0;
   const fixture = handlers({
@@ -447,7 +541,7 @@ test("create returns the stamped agent and schedules bounded warm/reconcile work
       warmAgent: () => {
         warmed += 1;
         return Promise.resolve({
-          kind: "warmed",
+          kind: "ready",
           warm: {
             status: "ready",
             updatedAt: "2026-08-28T15:00:00.000Z",
@@ -486,7 +580,7 @@ test("update schedules bounded warm and reconciliation work", async () => {
       warmAgent: () => {
         warmed += 1;
         return Promise.resolve({
-          kind: "warmed",
+          kind: "ready",
           warm: {
             status: "ready",
             updatedAt: "2026-08-28T15:00:00.000Z",
@@ -510,6 +604,47 @@ test("update schedules bounded warm and reconciliation work", async () => {
   assert.equal(fixture.after.length, 1);
   await fixture.after[0]();
   assert.equal(warmed, 1);
+  assert.equal(reconciled, 1);
+});
+
+test("scheduled update warming observes failures without rejection or provider leakage", async () => {
+  let reconciled = 0;
+  const typedFailure = handlers({
+    service: service({
+      reconcileAndDispatch: () => {
+        reconciled += 1;
+        return Promise.resolve(counts());
+      },
+      warmAgent: () =>
+        Promise.resolve({ kind: "unavailable", source: "provider" }),
+    }),
+  });
+  const rejectedWarm = handlers({
+    service: service({
+      warmAgent: () =>
+        Promise.reject(new Error("provider=sensitive sandbox=private")),
+    }),
+  });
+
+  await Promise.all(
+    [typedFailure, rejectedWarm].map(async (fixture) => {
+      const response = await fixture.handlers.updateAgent(
+        new Request(`https://app.test/api/agents/${AGENT_ID}`, {
+          body: validDefinitionBody({ name: "Updated" }),
+          method: "PUT",
+        }),
+        AGENT_ID
+      );
+      assert.equal(response.status, 200);
+      assert.equal(
+        JSON.stringify(await response.json()).includes("sensitive"),
+        false
+      );
+      assert.equal(fixture.after.length, 1);
+      await fixture.after[0]();
+      assert.deepEqual(fixture.logs, []);
+    })
+  );
   assert.equal(reconciled, 1);
 });
 
@@ -738,7 +873,7 @@ test("run start returns 202 and schedules bounded recovery for a created run", a
   assert.equal(fixture.admissions.at(-1)?.route, "runner_run_start");
 });
 
-test("run start returns 202 without scheduling duplicate or claimed results", async () => {
+test("run start returns 202 without scheduling duplicate results", async () => {
   let reconciled = 0;
   const fixture = handlers({
     service: service({
@@ -748,6 +883,7 @@ test("run start returns 202 without scheduling duplicate or claimed results", as
       },
       startRun: () =>
         Promise.resolve({
+          admission: "duplicate",
           kind: "accepted",
           run: run({
             id: "55555555-6666-4777-8888-999999999999",
@@ -776,13 +912,86 @@ test("run start returns 202 without scheduling duplicate or claimed results", as
   assert.equal(reconciled, 0);
 });
 
+test("run start returns before a pending claimed dispatch and hides scheduling authority", async () => {
+  const authority = {
+    expectedVersion: 1,
+    leaseToken: "opaque-http-claim",
+    runId: RUN_ID,
+  } as RunnerDispatchAuthority;
+  const claimed = {
+    authority,
+    run: { id: RUN_ID },
+  } as unknown as RunnerClaimedDispatch;
+  let dispatches = 0;
+  let resolveDispatch: (() => void) | undefined;
+  const dispatchPending = new Promise<void>((resolve) => {
+    resolveDispatch = resolve;
+  });
+  let scheduled: void | Promise<void> = Promise.resolve();
+  const fixture = handlers({
+    after: (callback) => {
+      scheduled = callback();
+    },
+    service: service({
+      dispatchClaim: (value) => {
+        dispatches += 1;
+        assert.equal(value, claimed);
+        assert.equal(value.authority, authority);
+        return dispatchPending.then(() => ({
+          kind: "started" as const,
+          runId: RUN_ID,
+        }));
+      },
+      reconcileAndDispatch: () =>
+        Promise.reject(new Error("claimed run must not reconcile")),
+      startRun: () =>
+        Promise.resolve({
+          admission: "claimed" as const,
+          claimed,
+          kind: "accepted" as const,
+          run: run(),
+        }),
+    }),
+  });
+
+  const response = await fixture.handlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({
+        operationId: OPERATION_ID,
+        task: "Do the thing.",
+      }),
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 202);
+  assert.equal(dispatches, 1);
+  const json = await response.json();
+  assert.deepEqual(json, {
+    apiVersion: AGENT_RUNNER_API_VERSION,
+    run: run(),
+  });
+  assert.equal(JSON.stringify(json).includes("authority"), false);
+  assert.equal(JSON.stringify(json).includes("scheduling"), false);
+  assert.equal(JSON.stringify(json).includes("admission"), false);
+  assert.equal(JSON.stringify(json).includes("opaque-http-claim"), false);
+
+  resolveDispatch?.();
+  await scheduled;
+});
+
 test("run start passes only the trusted authenticated auth version to the service", async () => {
   let startArguments: unknown[] = [];
   const fixture = handlers({
     service: service({
       startRun: ((...arguments_: unknown[]) => {
         startArguments = arguments_;
-        return Promise.resolve({ kind: "accepted", run: run() });
+        return Promise.resolve({
+          admission: "duplicate",
+          kind: "accepted",
+          run: run(),
+        });
       }) as RunnerService["startRun"],
     }),
   });
@@ -820,19 +1029,28 @@ test("run start passes only the trusted authenticated auth version to the servic
 
 test("delete preserves busy, stale version, and permanent provider failures", async () => {
   const outcomes = [
-    ["busy", 409, "busy", true],
-    ["stale_version", 409, "stale_version", true],
-    ["provider_failure", 422, "provider_rejected", false],
+    [{ kind: "busy" }, 409, "busy", true],
+    [{ kind: "stale_version" }, 409, "stale_version", true],
+    [
+      { kind: "unavailable", source: "provider" },
+      503,
+      "provider_unavailable",
+      true,
+    ],
+    [
+      { kind: "unavailable", source: "database" },
+      503,
+      "runner_unavailable",
+      true,
+    ],
+    [{ kind: "provider_rejected" }, 422, "provider_rejected", false],
   ] as const;
 
   await Promise.all(
-    outcomes.map(async ([kind, status, code, retryable]) => {
+    outcomes.map(async ([outcome, status, code, retryable]) => {
       const fixture = handlers({
         service: service({
-          deleteAgent: () =>
-            Promise.resolve(
-              kind === "provider_failure" ? { kind, retryable } : { kind }
-            ) as ReturnType<RunnerService["deleteAgent"]>,
+          deleteAgent: () => Promise.resolve(outcome as never),
         }),
       });
       const response = await fixture.handlers.deleteAgent(
@@ -850,6 +1068,56 @@ test("delete preserves busy, stale version, and permanent provider failures", as
       assert.equal(body.error.retryable, retryable);
     })
   );
+});
+
+test("create and update map retryable database failures without exposing details", async () => {
+  const fixture = handlers({
+    service: service({
+      createAgent: async () => ({
+        kind: "unavailable",
+        source: "database",
+      }),
+      updateAgent: async () => ({
+        kind: "unavailable",
+        source: "database",
+      }),
+    }),
+  });
+
+  const [created, updated] = await Promise.all([
+    fixture.handlers.createAgent(
+      new Request("https://app.test/api/agents", {
+        body: validDefinitionBody(),
+        method: "POST",
+      })
+    ),
+    fixture.handlers.updateAgent(
+      new Request(`https://app.test/api/agents/${AGENT_ID}`, {
+        body: validDefinitionBody(),
+        method: "PUT",
+      }),
+      AGENT_ID
+    ),
+  ]);
+
+  const responses = await Promise.all(
+    [created, updated].map(async (response) => ({
+      body: await response.json(),
+      status: response.status,
+    }))
+  );
+  for (const response of responses) {
+    assert.equal(response.status, 503);
+    assert.deepEqual(response.body, {
+      apiVersion: AGENT_RUNNER_API_VERSION,
+      error: {
+        code: "runner_unavailable",
+        message: "Runner service is temporarily unavailable. Try again later.",
+        retryable: true,
+      },
+      requestId: REQUEST_ID,
+    });
+  }
 });
 
 test("update preserves a stale version conflict", async () => {
@@ -871,6 +1139,32 @@ test("update preserves a stale version conflict", async () => {
     ((await response.json()) as { error: { code: string } }).error.code,
     "stale_version"
   );
+});
+
+test("update maps an active-run conflict to the stable busy response", async () => {
+  const fixture = handlers({
+    service: service({
+      updateAgent: async () => ({ kind: "busy" }),
+    }),
+  });
+  const response = await fixture.handlers.updateAgent(
+    new Request(`https://app.test/api/agents/${AGENT_ID}`, {
+      body: validDefinitionBody(),
+      method: "PUT",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    apiVersion: AGENT_RUNNER_API_VERSION,
+    error: {
+      code: "busy",
+      message: "The agent is busy. Try again later.",
+      retryable: true,
+    },
+    requestId: REQUEST_ID,
+  });
 });
 
 test("run start maps operation, capacity, lifecycle, and admission failures", async () => {
@@ -909,6 +1203,31 @@ test("run start maps operation, capacity, lifecycle, and admission failures", as
       );
     })
   );
+});
+
+test("run start maps a legacy runtime fence to the public unsupported harness error", async () => {
+  const fixture = handlers({
+    service: service({
+      startRun: async () => ({ kind: "unsupported_harness" }) as never,
+    }),
+  });
+  const response = await fixture.handlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({
+        operationId: OPERATION_ID,
+        task: "Do the thing.",
+      }),
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "harness_unsupported"
+  );
+  assert.equal(fixture.after.length, 0);
 });
 
 test("SSE validates cursors, resumes without duplicates, and uses exact headers", async () => {
@@ -993,6 +1312,61 @@ test("stop accepts an empty body, returns its snapshot, and defers reconciliatio
   assert.equal(reconciled, 1);
 });
 
+test("stop maps accepted, stale, cleanup, and unavailable outcomes explicitly", async () => {
+  const outcomes = [
+    [
+      {
+        kind: "in_progress",
+        run: run(),
+        scheduleReconciliation: true,
+      },
+      202,
+      null,
+    ],
+    [{ kind: "stale_version" }, 409, "stale_version"],
+    [{ kind: "unavailable", source: "database" }, 503, "runner_unavailable"],
+    [{ kind: "unavailable", source: "provider" }, 503, "provider_unavailable"],
+    [
+      { kind: "cleanup_required", scheduleReconciliation: true },
+      503,
+      "cleanup_required",
+    ],
+    [
+      { kind: "sandbox_reset_required", scheduleReconciliation: true },
+      503,
+      "cleanup_required",
+    ],
+  ] as const;
+
+  await Promise.all(
+    outcomes.map(async ([outcome, status, code]) => {
+      const fixture = handlers({
+        service: service({
+          stopRun: async () => outcome as never,
+        }),
+      });
+      const response = await fixture.handlers.stopRun(
+        new Request(`https://app.test/api/runs/${RUN_ID}/stop`, {
+          method: "POST",
+        }),
+        RUN_ID
+      );
+      assert.equal(response.status, status);
+      const body = (await response.json()) as {
+        error?: { code: string; retryable: boolean };
+        run?: { id: string; status: string };
+      };
+      if (code) {
+        assert.equal(body.error?.code, code);
+        assert.equal(body.error?.retryable, true);
+      } else {
+        assert.equal(body.run?.id, RUN_ID);
+        assert.equal(body.run?.status, "queued");
+      }
+    })
+  );
+});
+
 test("tenant prewarm returns 204 with no agent and 202 without credential data", async () => {
   const none = handlers({
     service: service({ prewarmMostRecent: async () => ({ kind: "none" }) }),
@@ -1016,6 +1390,74 @@ test("tenant prewarm returns 204 with no agent and 202 without credential data",
   });
 });
 
+test("tenant prewarm maps concurrent, stale, provider, and database outcomes", async () => {
+  const outcomes = [
+    [
+      {
+        agentId: AGENT_ID,
+        kind: "in_progress",
+        warm: {
+          status: "provisioning",
+          updatedAt: "2026-08-28T15:00:00.000Z",
+        },
+      },
+      202,
+      null,
+    ],
+    [{ kind: "not_found" }, 204, null],
+    [{ kind: "stale_version" }, 409, "stale_version"],
+    [{ kind: "unavailable", source: "provider" }, 503, "provider_unavailable"],
+    [{ kind: "unavailable", source: "database" }, 503, "runner_unavailable"],
+    [{ kind: "provider_rejected" }, 422, "provider_rejected"],
+  ] as const;
+
+  await Promise.all(
+    outcomes.map(async ([outcome, status, code]) => {
+      const fixture = handlers({
+        service: service({
+          prewarmMostRecent: async () => outcome as never,
+        }),
+      });
+      const response = await fixture.handlers.prewarmTenant(
+        new Request("https://app.test/api/tenant/prewarm", { method: "POST" })
+      );
+      assert.equal(response.status, status);
+      if (code) {
+        assert.equal(
+          ((await response.json()) as { error: { code: string } }).error.code,
+          code
+        );
+      } else if (status === 202) {
+        assert.deepEqual(await response.json(), {
+          agentId: AGENT_ID,
+          warm: {
+            status: "provisioning",
+            updatedAt: "2026-08-28T15:00:00.000Z",
+          },
+        });
+      }
+    })
+  );
+});
+
+test("tenant prewarm maps a legacy runtime fence to the public unsupported harness error", async () => {
+  const fixture = handlers({
+    service: service({
+      prewarmMostRecent: async () => ({ kind: "unsupported_harness" }) as never,
+    }),
+  });
+  const response = await fixture.handlers.prewarmTenant(
+    new Request("https://app.test/api/tenant/prewarm", { method: "POST" })
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "harness_unsupported"
+  );
+  assert.equal(fixture.after.length, 0);
+});
+
 test("diagnostics and reconciliation use only their operator service and safe outputs", async () => {
   const fixture = handlers();
   const diagnostic = await fixture.handlers.diagnoseSandbox(
@@ -1035,8 +1477,273 @@ test("diagnostics and reconciliation use only their operator service and safe ou
   });
   assert.equal(reconcile.status, 200);
   assert.deepEqual(await reconcile.json(), counts());
-  assert.equal(fixture.operatorRequests(), 2);
+  assert.equal(fixture.diagnosticRequests(), 1);
+  assert.deepEqual(fixture.diagnosticNames, [DIAGNOSTIC_NAME]);
+  assert.deepEqual(fixture.logs, []);
+  assert.equal(fixture.operatorRequests(), 1);
   assert.equal(fixture.serviceRequests(), 0);
+});
+
+test("reconciliation returns validated overlap skips and does not depend on after", async () => {
+  await Promise.all(
+    [
+      null,
+      () => {
+        throw new Error("after unavailable");
+      },
+    ].flatMap((after) =>
+      ["GET", "POST"].map(async (method) => {
+        const fixture = handlers({
+          after,
+          service: service({
+            reconcileAndDispatch: () =>
+              Promise.resolve({
+                ...counts(),
+                dispatched: 0,
+                execution: "skipped",
+                reason: "overlap",
+              }),
+          }),
+        });
+
+        const response = await fixture.handlers.reconcile(
+          new Request("https://app.test/api/internal/runner-reconcile", {
+            method,
+          })
+        );
+
+        assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), {
+          ...counts(),
+          dispatched: 0,
+          execution: "skipped",
+          reason: "overlap",
+        });
+      })
+    )
+  );
+});
+
+test("overlapping GET and POST execute exactly one leased reconciliation", async () => {
+  const { runLeasedReconciliation } = await import("./runtime");
+  let activeLease: Readonly<{
+    expiresAt: Date;
+    fence: number;
+    ownerToken: string;
+  }> | null = null;
+  let owner = 0;
+  let reconcileCalls = 0;
+  let finishFirst: (() => void) | undefined;
+  let signalStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    signalStarted = resolve;
+  });
+  const finish = new Promise<void>((resolve) => {
+    finishFirst = resolve;
+  });
+  const store = {
+    acquireReconciliationLease: (
+      _operator: unknown,
+      input: { ownerToken: string }
+    ) => {
+      if (activeLease) {
+        return Promise.resolve({ kind: "held" as const });
+      }
+      activeLease = {
+        expiresAt: new Date("2026-08-28T21:40:00.000Z"),
+        fence: owner,
+        ownerToken: input.ownerToken,
+      };
+      return Promise.resolve({
+        kind: "acquired" as const,
+        lease: activeLease,
+      });
+    },
+    releaseReconciliationLease: (
+      _operator: unknown,
+      lease: Readonly<{ fence: number; ownerToken: string }>
+    ) => {
+      if (
+        activeLease?.ownerToken !== lease.ownerToken ||
+        activeLease.fence !== lease.fence
+      ) {
+        return Promise.resolve({ kind: "stale" as const });
+      }
+      activeLease = null;
+      return Promise.resolve({ kind: "released" as const });
+    },
+  };
+  const runner = service({
+    reconcileAndDispatch: () =>
+      runLeasedReconciliation({
+        ownerToken: () => {
+          owner += 1;
+          return `request-${owner}`;
+        },
+        reconcile: async () => {
+          reconcileCalls += 1;
+          signalStarted?.();
+          await finish;
+          return counts();
+        },
+        store,
+      }),
+  });
+  const fixture = handlers({ service: runner });
+
+  const get = fixture.handlers.reconcile(
+    new Request("https://app.test/api/internal/runner-reconcile", {
+      method: "GET",
+    })
+  );
+  await started;
+  const post = await fixture.handlers.reconcile(
+    new Request("https://app.test/api/internal/runner-reconcile", {
+      method: "POST",
+    })
+  );
+  finishFirst?.();
+  const getResponse = await get;
+
+  assert.equal(reconcileCalls, 1);
+  assert.equal(getResponse.status, 200);
+  assert.equal(post.status, 200);
+  assert.equal(
+    ((await getResponse.json()) as { execution: string }).execution,
+    "executed"
+  );
+  assert.deepEqual(await post.json(), {
+    ...counts(),
+    dispatched: 0,
+    execution: "skipped",
+    reason: "overlap",
+  });
+});
+
+test("GET and POST apply abuse enforcement before reconciliation secrets", async () => {
+  await Promise.all(
+    ["GET", "POST"].map(async (method) => {
+      const events: string[] = [];
+      const runner = service({
+        reconcileAndDispatch: () =>
+          Promise.reject(new Error("reconciliation must not run")),
+      });
+      const runnerHandlers = createRunnerHttpHandlers({
+        auth: {
+          authorizeDiagnostic: () => ({ kind: "unauthorized" }),
+          authorizeReconcile: () => {
+            events.push("secret");
+            return { kind: "unauthorized" };
+          },
+          authorizeSubscriber: async () => subscriber,
+        },
+        createOperatorService: () => runner,
+        createService: () => runner,
+        diagnoseSandbox: () => runner.diagnoseSandbox(),
+        enforceAbuse: () => {
+          events.push("abuse");
+          return Promise.resolve({ kind: "allowed" });
+        },
+        ipAddress: () => "203.0.113.10",
+      });
+
+      const response = await runnerHandlers.reconcile(
+        new Request("https://app.test/api/internal/runner-reconcile", {
+          method,
+        })
+      );
+
+      assert.equal(response.status, 401);
+      assert.deepEqual(events, ["abuse", "secret"]);
+    })
+  );
+});
+
+test("reconciliation errors never serialize provider or database causes", async () => {
+  await Promise.all(
+    ["provider=private-detail", "database=private-detail"].map(
+      async (cause) => {
+        const fixture = handlers({
+          service: service({
+            reconcileAndDispatch: () =>
+              Promise.reject(
+                new RunnerServiceError(
+                  "reconcile_unavailable",
+                  "Runner reconciliation is unavailable.",
+                  true,
+                  { cause: new Error(cause) }
+                )
+              ),
+          }),
+        });
+        const response = await fixture.handlers.reconcile(
+          new Request("https://app.test/api/internal/runner-reconcile", {
+            method: "POST",
+          })
+        );
+        const serialized = JSON.stringify(await response.json());
+
+        assert.equal(response.status, 503);
+        assert.equal(serialized.includes(cause), false);
+        assert.equal(serialized.includes("private-detail"), false);
+      }
+    )
+  );
+});
+
+test("diagnostic construction failure is isolated from health, CRUD, runs, and reconciliation", async () => {
+  let diagnosticRequests = 0;
+  const runner = service();
+  const runnerHandlers = createRunnerHttpHandlers({
+    auth: authorizedAuth(),
+    createOperatorService: () => runner,
+    createRequestId: () => REQUEST_ID,
+    createService: () => runner,
+    diagnoseSandbox: () => {
+      diagnosticRequests += 1;
+      throw new RunnerServiceError(
+        "diagnostic_unavailable",
+        "Daytona diagnostic is unavailable."
+      );
+    },
+    enforceAbuse: () => Promise.resolve({ kind: "allowed" }),
+    ipAddress: () => "203.0.113.10",
+  });
+
+  const diagnostic = await runnerHandlers.diagnoseSandbox(
+    new Request("https://app.test/api/diagnostics/sandbox", { method: "POST" })
+  );
+  const health = await runnerHandlers.health(
+    new Request("https://app.test/api/health")
+  );
+  const created = await runnerHandlers.createAgent(
+    new Request("https://app.test/api/agents", {
+      body: validDefinitionBody(),
+      method: "POST",
+    })
+  );
+  const started = await runnerHandlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({
+        operationId: OPERATION_ID,
+        task: "Do the thing.",
+      }),
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+  const reconciled = await runnerHandlers.reconcile(
+    new Request("https://app.test/api/internal/runner-reconcile", {
+      method: "POST",
+    })
+  );
+
+  assert.equal(diagnostic.status, 503);
+  assert.equal(health.status, 200);
+  assert.equal(created.status, 201);
+  assert.equal(started.status, 202);
+  assert.equal(reconciled.status, 200);
+  assert.equal(diagnosticRequests, 1);
 });
 
 test("invalid operator bearer probes consume abuse budget before secret validation", async (context) => {
@@ -1117,6 +1824,7 @@ test("valid operator requests perform authorized work only after abuse and secre
           "abuse",
           "secret",
           "body",
+          ...(route.abuseRoute === "runner_diagnostic" ? ["name"] : []),
           "service",
           "provider",
         ]);
@@ -1143,6 +1851,7 @@ test("secret operator authentication and unavailable abuse fail without provider
 
   assert.equal(unauthorized.status, 401);
   assert.equal(unavailable.status, 503);
+  assert.equal(fixture.diagnosticRequests(), 0);
   assert.equal(fixture.operatorRequests(), 0);
 
   const abuse = handlers({
@@ -1176,6 +1885,7 @@ test("operator abuse refusal happens before parsing or constructing its service"
   assert.equal(response.status, 429);
   assert.equal(response.headers.get("retry-after"), "7");
   assert.equal(request.bodyUsed, false);
+  assert.equal(fixture.diagnosticRequests(), 0);
   assert.equal(fixture.operatorRequests(), 0);
   assert.deepEqual(fixture.admissions, [
     {
@@ -1192,7 +1902,7 @@ test("reconciliation exposes validated counts only and hides malformed values", 
       reconcileAndDispatch: () =>
         Promise.resolve({
           ...counts(),
-          dispatched: Number.NaN,
+          terminalLeaseCleaned: Number.NaN,
         }),
     }),
   });

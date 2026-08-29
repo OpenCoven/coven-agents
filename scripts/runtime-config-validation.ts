@@ -15,13 +15,16 @@ const REQUIRED_PRODUCTION_VARIABLES = [
   "REDIS_URL",
   "ABUSE_KEY_SECRET",
   "OPERATOR_DIAGNOSTIC_TOKEN",
+  "RUNNER_MANUAL_RECONCILE_SECRET",
 ] as const;
 const PRIVILEGED_RUNNER_SECRETS = [
   "CRON_SECRET",
   "OPERATOR_DIAGNOSTIC_TOKEN",
   "AGENT_CONTROL_TOKEN",
+  "RUNNER_MANUAL_RECONCILE_SECRET",
   "RUNNER_SERVICE_TOKEN",
 ] as const;
+const MAX_PRIVILEGED_RUNNER_SECRET_LENGTH = 1024;
 const DAYTONA_INTERVAL_DEFAULTS = {
   DAYTONA_AUTO_ARCHIVE_MINUTES: "10080",
   DAYTONA_AUTO_STOP_MINUTES: "15",
@@ -118,13 +121,31 @@ function validateProductionDaytonaConfig(environment: NodeJS.ProcessEnv): void {
 }
 
 function validatePrivilegedRunnerSecrets(environment: NodeJS.ProcessEnv): void {
+  const configured = new Map<string, string>();
+  for (const name of PRIVILEGED_RUNNER_SECRETS) {
+    const raw = environment[name];
+    if (raw === undefined) {
+      continue;
+    }
+    const value = raw.trim();
+    if (!value) {
+      throw new Error(`${name} must be nonblank when configured.`);
+    }
+    if (value.length > MAX_PRIVILEGED_RUNNER_SECRET_LENGTH) {
+      throw new Error(
+        `${name} must not exceed ${MAX_PRIVILEGED_RUNNER_SECRET_LENGTH} characters.`
+      );
+    }
+    configured.set(name, value);
+  }
+
   for (
     let leftIndex = 0;
     leftIndex < PRIVILEGED_RUNNER_SECRETS.length;
     leftIndex += 1
   ) {
     const left = PRIVILEGED_RUNNER_SECRETS[leftIndex];
-    const leftValue = environment[left]?.trim();
+    const leftValue = configured.get(left);
     if (!leftValue) {
       continue;
     }
@@ -134,7 +155,7 @@ function validatePrivilegedRunnerSecrets(environment: NodeJS.ProcessEnv): void {
       rightIndex += 1
     ) {
       const right = PRIVILEGED_RUNNER_SECRETS[rightIndex];
-      const rightValue = environment[right]?.trim();
+      const rightValue = configured.get(right);
       if (rightValue && leftValue === rightValue) {
         throw new Error(
           `Privileged runner secrets must be distinct: ${left} aliases ${right}.`

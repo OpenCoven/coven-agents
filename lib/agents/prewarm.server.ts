@@ -17,7 +17,9 @@ type PrewarmService = {
 };
 
 type RunnerModule = {
-  createProductionRunnerService: (session: SubscriberSession) => PrewarmService;
+  createProductionRunnerService: (
+    session: SubscriberSession
+  ) => PrewarmService | Promise<PrewarmService>;
 };
 
 export type PrewarmDependencies = {
@@ -75,7 +77,7 @@ async function loadProductionRunner(
   if (signal.aborted) {
     throw signal.reason;
   }
-  const runner = await import("@/lib/runner/production");
+  const runner = await import("@/lib/runner/runtime");
   if (signal.aborted) {
     throw signal.reason;
   }
@@ -161,7 +163,10 @@ export async function prewarmTenantSandbox(
     if (abortIfExpired()) {
       return;
     }
-    const service = runner.createProductionRunnerService(session);
+    const service = await awaitUntilAbort(
+      Promise.resolve(runner.createProductionRunnerService(session)),
+      controller.signal
+    );
     if (
       abortIfExpired() ||
       access.authVersion !== user.authVersion ||

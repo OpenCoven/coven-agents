@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   AGENT_RUNNER_API_VERSION,
   type AgentDefinition,
+  agentEnvelopeSchema,
+  agentsEnvelopeSchema,
   base64UrlEncode,
   type RunnerClaims,
   type RunSnapshot,
@@ -136,6 +138,10 @@ function definition(id: string, tenantId: string): AgentDefinition {
     runtime: "copilot",
     status: "idle",
     updatedAt: "2026-08-20T12:00:00.000Z",
+    warm: {
+      status: "not_started",
+      updatedAt: "2026-08-20T12:00:00.000Z",
+    },
   };
 }
 
@@ -150,18 +156,27 @@ const agents = new Map<string, AgentDefinition>([
 ]);
 
 let decommissioned: string[] = [];
+let directoryMutations: string[] = [];
+let enqueued: string[] = [];
 let stopped: string[] = [];
 let warmed: string[] = [];
+let instrumentedAdmissionCalls = 0;
+let agentLookups = 0;
 let authorityDirectoryLookups = 0;
 let configureFailure: Error | null = null;
 
 function runner(
   authority: RunnerAuthorityResult = { kind: "allowed" },
-  useDefaultAuthority = false
+  useDefaultAuthority = false,
+  instrumentAdmission = false
 ) {
   decommissioned = [];
+  directoryMutations = [];
+  enqueued = [];
   stopped = [];
   warmed = [];
+  instrumentedAdmissionCalls = 0;
+  agentLookups = 0;
   authorityDirectoryLookups = 0;
 
   const directory: CloudRunnerDirectory = {
@@ -173,14 +188,25 @@ function runner(
     // Resolves to a real owner rather than always the other tenant, so the
     // negative tests cannot pass just because every run route 404s.
     lookupRun: (runId) => (runId === MY_RUN_ID ? MINE : THEIRS),
-    registerRun: () => true,
-    remove: () => undefined,
-    unregisterRun: () => undefined,
-    upsert: (value) => value,
+    registerRun: (_runId, agentId) => {
+      directoryMutations.push(`register:${agentId}`);
+      return true;
+    },
+    remove: (agentId) => {
+      directoryMutations.push(`remove:${agentId}`);
+    },
+    unregisterRun: (runId) => {
+      directoryMutations.push(`unregister:${runId}`);
+    },
+    upsert: (value) => {
+      directoryMutations.push(`upsert:${value.id}`);
+      return value;
+    },
   };
 
-  const getYoloAgent = (_environment: unknown, agentId: string) =>
-    ({
+  const getYoloAgent = (_environment: unknown, agentId: string) => {
+    agentLookups += 1;
+    return {
       configure: (value: AgentDefinition) => {
         if (configureFailure) {
           throw configureFailure;
@@ -190,23 +216,26 @@ function runner(
       decommission: () => {
         decommissioned.push(agentId);
       },
-      enqueue: (_input: unknown, runId: string) => ({
-        created: false,
-        run: {
-          agentId: MINE,
-          apiVersion: "2026-08-01",
-          commandEvidence: [],
-          completedAt: "2026-08-20T12:00:05.000Z",
-          createdAt: "2026-08-20T12:00:00.000Z",
-          fileEvidence: [],
-          id: runId,
-          operationId: MINE,
-          output: "done",
-          startedAt: "2026-08-20T12:00:01.000Z",
-          status: "completed",
-          task: "Do the thing.",
-        },
-      }),
+      enqueue: (_input: unknown, runId: string) => {
+        enqueued.push(runId);
+        return {
+          created: false,
+          run: {
+            agentId: MINE,
+            apiVersion: "2026-08-01",
+            commandEvidence: [],
+            completedAt: "2026-08-20T12:00:05.000Z",
+            createdAt: "2026-08-20T12:00:00.000Z",
+            fileEvidence: [],
+            id: runId,
+            operationId: MINE,
+            output: "done",
+            startedAt: "2026-08-20T12:00:01.000Z",
+            status: "completed",
+            task: "Do the thing.",
+          },
+        };
+      },
       getEventStream: () => ({ events: [], terminal: false }),
       // Returns a real run rather than null. With null the route 404s because
       // the run is missing, so the test would pass whether or not ownership is
@@ -253,10 +282,29 @@ function runner(
           updatedAt: "2026-08-20T12:00:00.000Z",
         };
       },
-    }) as unknown as CloudRunnerAgent;
+    } as unknown as CloudRunnerAgent;
+  };
 
   return createCloudRunner({
     ...(useDefaultAuthority ? {} : { checkAuthority: () => authority }),
+    ...(instrumentAdmission
+      ? {
+          getAdmission: () => {
+            instrumentedAdmissionCalls += 1;
+            return {
+              admit: () => {
+                instrumentedAdmissionCalls += 1;
+                return {
+                  kind: "refused" as const,
+                  reason: "global_busy" as const,
+                };
+              },
+              getByOperationId: () => null,
+              release: () => true,
+            };
+          },
+        }
+      : {}),
     getDirectory: () => {
       authorityDirectoryLookups += 1;
       return directory;
@@ -799,6 +847,115 @@ test("a listing only contains the caller's own agents", async () => {
   );
 });
 
+test("legacy runtime records survive worker list and get envelopes", async () => {
+  const current = agents.get(MINE);
+  assert.ok(current);
+  const legacy = { ...current, runtime: "cloud" as const };
+  agents.set(MINE, legacy);
+  try {
+    const [listedResponse, readResponse] = await Promise.all([
+      call("/api/agents"),
+      call(`/api/agents/${MINE}`),
+    ]);
+
+    const listed = agentsEnvelopeSchema.parse(await listedResponse.json());
+    const read = agentEnvelopeSchema.parse(await readResponse.json());
+    assert.equal(listed.agents[0]?.runtime, "cloud");
+    assert.equal(read.agent.runtime, "cloud");
+  } finally {
+    agents.set(MINE, current);
+  }
+});
+
+test("legacy runtime records cannot start runs before enqueue, admission, or directory mutation", async () => {
+  const current = agents.get(MINE);
+  assert.ok(current);
+  agents.set(MINE, { ...current, runtime: "cloud" });
+  try {
+    const [environment, token] = await Promise.all([
+      environmentPromise,
+      identityToken(),
+    ]);
+    const response = await runner({ kind: "allowed" }, false, true).fetch(
+      new Request(`https://runner.test/api/agents/${MINE}/runs`, {
+        body: JSON.stringify({
+          operationId: "44444444-5555-4666-8777-888888888888",
+          task: "Do the thing.",
+        }),
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "x-runner-token": TOKEN,
+        },
+        method: "POST",
+      }),
+      environment as never
+    );
+
+    assert.equal(response.status, 400);
+    assert.equal(
+      ((await response.json()) as { error: { code: string } }).error.code,
+      "harness_unsupported"
+    );
+    assert.deepEqual(enqueued, []);
+    assert.equal(instrumentedAdmissionCalls, 0);
+    assert.deepEqual(directoryMutations, []);
+    assert.deepEqual(warmed, []);
+  } finally {
+    agents.set(MINE, current);
+  }
+});
+
+test("legacy runtime records can migrate to copilot and remain deletable", async () => {
+  const current = agents.get(MINE);
+  assert.ok(current);
+  agents.set(MINE, { ...current, runtime: "cloud" });
+  try {
+    const [environment, token] = await Promise.all([
+      environmentPromise,
+      identityToken(),
+    ]);
+    const instance = runner();
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-runner-token": TOKEN,
+    };
+    const updated = await instance.fetch(
+      new Request(`https://runner.test/api/agents/${MINE}`, {
+        body: JSON.stringify({
+          backend: "cloud",
+          description: "",
+          instructions: "Do the thing.",
+          model: "auto",
+          name: "Migrated",
+          runtime: "copilot",
+        }),
+        headers,
+        method: "PUT",
+      }),
+      environment as never
+    );
+    assert.equal(updated.status, 200);
+    assert.equal(
+      ((await updated.json()) as { agent: AgentDefinition }).agent.runtime,
+      "copilot"
+    );
+
+    const deleted = await instance.fetch(
+      new Request(`https://runner.test/api/agents/${MINE}`, {
+        headers,
+        method: "DELETE",
+      }),
+      environment as never
+    );
+    assert.equal(deleted.status, 200);
+    assert.deepEqual(decommissioned, [MINE]);
+  } finally {
+    agents.set(MINE, current);
+  }
+});
+
 test("another tenant's agent reads as absent, not forbidden", async () => {
   // 404 rather than 403: a 403 would confirm the id exists for someone else.
   const response = await call(`/api/agents/${THEIRS}`);
@@ -1292,6 +1449,26 @@ test("tenant prewarm boots the most recently used agent", async () => {
   const body = (await response.json()) as { agentId: string };
   assert.equal(body.agentId, MINE);
   assert.deepEqual(warmed, [MINE]);
+});
+
+test("tenant prewarm rejects a legacy runtime before warming or directory mutation", async () => {
+  const current = agents.get(MINE);
+  assert.ok(current);
+  agents.set(MINE, { ...current, runtime: "cloud" });
+  try {
+    const response = await call("/api/tenant/prewarm", "POST");
+
+    assert.equal(response.status, 400);
+    assert.equal(
+      ((await response.json()) as { error: { code: string } }).error.code,
+      "harness_unsupported"
+    );
+    assert.deepEqual(warmed, []);
+    assert.deepEqual(directoryMutations, []);
+    assert.equal(agentLookups, 0);
+  } finally {
+    agents.set(MINE, current);
+  }
 });
 
 test("tenant prewarm with no agents warms nothing", async () => {

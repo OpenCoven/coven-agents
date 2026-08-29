@@ -41,6 +41,7 @@ const jsonName = "agent-runner-v1.json";
 
 const sourceOwners = [
   { kind: "standalone" },
+  { kind: "tenant", tenantId: "tenant-123" },
   {
     caveInstanceId: "cave-123",
     familiarId: "familiar-123",

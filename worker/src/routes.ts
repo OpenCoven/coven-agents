@@ -1308,6 +1308,10 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               owner: { kind: "tenant", tenantId: callerTenant },
               status: "idle",
               updatedAt: now,
+              warm: {
+                status: "not_started",
+                updatedAt: now,
+              },
             };
             const agent = await yoloAgent(definition.id);
             const configured = await agent.configure(definition);
@@ -1352,6 +1356,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
           if (!target) {
             return new Response(null, { headers: cors, status: 204 });
           }
+          assertRunnableHarness(target.runtime);
           const warm = await Promise.resolve(
             (await yoloAgent(target.id)).warm()
           ).catch(() => null);
@@ -1392,6 +1397,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
               owner: current.owner,
               status: current.status,
               updatedAt: new Date().toISOString(),
+              warm: current.warm,
             });
             await directory.upsert(configured);
             // An edited profile is about to be run — same intent signal as
@@ -1435,6 +1441,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 cors
               );
             }
+            assertRunnableHarness(current.runtime);
             const input = startRunInputSchema.parse(await readJson(request));
             if (
               claims.run &&

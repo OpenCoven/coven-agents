@@ -49,6 +49,10 @@ function definition(): AgentDefinition {
     runtime: "copilot",
     status: "idle",
     updatedAt: "2026-08-20T12:00:00.000Z",
+    warm: {
+      status: "not_started",
+      updatedAt: "2026-08-20T12:00:00.000Z",
+    },
   };
 }
 
@@ -105,6 +109,16 @@ function legacyAgent(): YoloAgent {
   } = state;
   instance.setState(legacy as never);
   return instance;
+}
+
+function setLegacyRuntime(instance: YoloAgent): void {
+  const state = Reflect.get(instance, "state") as Record<string, unknown> & {
+    definition: AgentDefinition;
+  };
+  instance.setState({
+    ...state,
+    definition: { ...state.definition, runtime: "cloud" },
+  } as never);
 }
 
 async function admittedStart(
@@ -180,6 +194,59 @@ test("corrupt persisted workspace is rejected before admission confirmation or e
   assert.equal(currentState.admissionTokens?.[prepared.run.id], undefined);
   assert.equal(currentState.dispatchClaims?.[prepared.run.id], undefined);
   assert.equal(record?.dispatchToken, undefined);
+  assert.equal(sandboxGetCount(), 0);
+});
+
+test("direct admitted legacy dispatch fails safely before confirmation or execution", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  let confirmations = 0;
+  let releases = 0;
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          release: () => {
+            releases += 1;
+            return Promise.resolve(true);
+          },
+          validateDispatch: () => Promise.resolve(true),
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+  const prepared = await yolo.enqueue(
+    { operationId: OP_A, task: "Reject the legacy runtime." },
+    "4f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c93",
+    "legacy-runtime-hash",
+    "identity"
+  );
+  const originalConfirm = yolo.confirmAdmission.bind(yolo);
+  yolo.confirmAdmission = (...arguments_) => {
+    confirmations += 1;
+    return originalConfirm(...arguments_);
+  };
+  setLegacyRuntime(yolo);
+
+  assert.equal(
+    await yolo.startAdmitted(prepared.run.id, "1:legacy-runtime"),
+    true
+  );
+
+  const failed = yolo.getRun(prepared.run.id);
+  assert.equal(failed?.status, "failed");
+  assert.deepEqual(failed?.error, {
+    code: "harness_unsupported",
+    message: "Cloud agents must select a supported harness runtime: copilot.",
+    retryable: false,
+  });
+  assert.equal(failed?.startedAt, null);
+  assert.equal(confirmations, 0);
+  assert.equal(releases, 1);
+  assert.equal(fiberLog.started.length, 0);
   assert.equal(sandboxGetCount(), 0);
 });
 
@@ -1002,6 +1069,28 @@ test("legacy state without decommission fields can still be decommissioned safel
     lifecycle: { status: string };
   };
   assert.equal(state.lifecycle.status, "decommissioned");
+});
+
+test("legacy stored definitions without warm state normalize on snapshot", () => {
+  const yolo = agent();
+  const state = Reflect.get(yolo, "state") as {
+    definition: AgentDefinition;
+  };
+  const { owner: _owner, warm: _warm, ...legacyDefinition } = state.definition;
+  yolo.setState({ ...state, definition: legacyDefinition } as never);
+
+  assert.deepEqual(yolo.snapshot()?.owner, { kind: "standalone" });
+  assert.deepEqual(yolo.snapshot()?.warm, {
+    status: "not_started",
+    updatedAt: legacyDefinition.updatedAt,
+  });
+});
+
+test("worker persistence boundaries reject new legacy runtime definitions", () => {
+  const legacy = { ...definition(), runtime: "cloud" as const };
+
+  assert.throws(() => directory().upsert(legacy));
+  assert.throws(() => agent().configure(legacy));
 });
 
 test("stopping an absent run does not require a decommissioned definition", async () => {
@@ -1863,6 +1952,161 @@ test("a persisted starting intent recovers the same fiber exactly once", async (
       .length,
     1
   );
+});
+
+test("legacy starting-intent recovery fails safely before identity, fiber, credential, or provider work", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  let identityReads = 0;
+  let releases = 0;
+  const environment = {
+    RUNNER_SERVICE_TOKEN: "runner-secret",
+    RunAdmission: {
+      getByName: () => ({
+        release: () => {
+          releases += 1;
+          return Promise.resolve(true);
+        },
+      }),
+    },
+  };
+  const yolo = new YoloAgent(undefined as never, environment as never);
+  yolo.configure(definition());
+  const prepared = await yolo.enqueue(
+    { operationId: OP_B, task: "Recover no legacy work." },
+    "8f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c97",
+    "hash-legacy-dispatch-intent",
+    "identity"
+  );
+  const state = Reflect.get(yolo, "state") as { runs: CloudRunRecord[] };
+  const tokenized = state.runs.map((candidate) =>
+    candidate.run.id === prepared.run.id
+      ? { ...candidate, dispatchToken: "1:legacy-dispatch-intent" }
+      : candidate
+  );
+  yolo.setState({ ...state, runs: tokenized } as never);
+  const { claimRunStart } = yolo as unknown as {
+    claimRunStart: (planned: CloudRunRecord) => CloudRunRecord;
+  };
+  claimRunStart.call(
+    yolo,
+    tokenized.find(
+      (candidate) => candidate.run.id === prepared.run.id
+    ) as CloudRunRecord
+  );
+  const originalReadIdentity = Reflect.get(yolo, "readIdentityToken") as (
+    runId: string
+  ) => Promise<string | null>;
+  Reflect.set(yolo, "readIdentityToken", async (runId: string) => {
+    identityReads += 1;
+    return await originalReadIdentity.call(yolo, runId);
+  });
+  setLegacyRuntime(yolo);
+
+  assert.equal(
+    await yolo.ensureAdmittedFiber(prepared.run.id, "1:legacy-dispatch-intent"),
+    false
+  );
+
+  const failed = yolo.getRun(prepared.run.id);
+  assert.equal(failed?.status, "failed");
+  assert.deepEqual(failed?.error, {
+    code: "harness_unsupported",
+    message: "Cloud agents must select a supported harness runtime: copilot.",
+    retryable: false,
+  });
+  assert.equal(identityReads, 0);
+  assert.equal(releases, 1);
+  assert.equal(fiberLog.started.length, 0);
+  assert.equal(sandboxGetCount(), 0);
+});
+
+test("legacy recovered fibers terminalize without sandbox cleanup or provider work", async () => {
+  resetFiberLog();
+  resetDestroyedSandboxes();
+  fiberControl.runFibers = false;
+  const released: string[] = [];
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          getCleanupCapability: testAdmissionCapability,
+          release: (runId: string) => {
+            released.push(runId);
+            return Promise.resolve(true);
+          },
+          validateDispatch: () => Promise.resolve(true),
+        }),
+      },
+    } as never
+  );
+  yolo.configure(definition());
+  const prepared = await yolo.enqueue(
+    { operationId: OP_A, task: "Recover no legacy fiber." },
+    "9f2a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c98",
+    "hash-legacy-recovered-fiber",
+    "identity"
+  );
+  assert.equal(
+    await yolo.startAdmitted(prepared.run.id, "1:legacy-recovered-fiber"),
+    true
+  );
+  let identityReads = 0;
+  const originalReadIdentity = Reflect.get(yolo, "readIdentityToken") as (
+    runId: string
+  ) => Promise<string | null>;
+  Reflect.set(yolo, "readIdentityToken", async (runId: string) => {
+    identityReads += 1;
+    return await originalReadIdentity.call(yolo, runId);
+  });
+  setLegacyRuntime(yolo);
+  const startedFibers = fiberLog.started.length;
+
+  const recovery = {
+    createdAt: Date.now(),
+    id: "legacy-recovered-fiber",
+    metadata: {
+      dispatchToken: "1:legacy-recovered-fiber",
+      runId: prepared.run.id,
+    },
+    name: cloudFiberKey(prepared.run.id),
+    recoveryReason: "interrupted",
+    snapshot: null,
+    status: "interrupted",
+  } as const;
+  const result = await yolo.onFiberRecovered(recovery);
+
+  assert.deepEqual(result, {
+    error: "Cloud agents must select a supported harness runtime: copilot.",
+    status: "error",
+  });
+  const terminalRun = yolo.getRun(prepared.run.id);
+  assert.deepEqual(terminalRun?.error, {
+    code: "harness_unsupported",
+    message: "Cloud agents must select a supported harness runtime: copilot.",
+    retryable: false,
+  });
+  const terminalEvents = yolo.getEventStream(prepared.run.id, 0)?.events;
+  const repeated = await yolo.onFiberRecovered(recovery);
+
+  assert.deepEqual(repeated, { status: "completed" });
+  assert.equal(yolo.getRun(prepared.run.id)?.status, "failed");
+  assert.deepEqual(yolo.getRun(prepared.run.id)?.error, terminalRun?.error);
+  assert.equal(
+    yolo.getRun(prepared.run.id)?.completedAt,
+    terminalRun?.completedAt
+  );
+  assert.deepEqual(
+    yolo.getEventStream(prepared.run.id, 0)?.events,
+    terminalEvents
+  );
+  assert.deepEqual(released, [prepared.run.id]);
+  assert.equal(identityReads, 0);
+  assert.equal(fiberLog.started.length, startedFibers);
+  assert.deepEqual(destroyedSandboxes(), []);
+  assert.equal(sandboxGetCount(), 0);
 });
 
 test("a recovered admitted fiber fails once, releases capacity, and permits the next run", async () => {
@@ -3967,6 +4211,14 @@ function directory(): AgentDirectory {
   instance.upsert(definition());
   return instance;
 }
+
+test("the directory lists a normalized legacy runtime definition", () => {
+  const index = new AgentDirectory(undefined as never, {} as never);
+  const legacy = { ...definition(), runtime: "cloud" as const };
+  index.setState({ agents: [legacy] });
+
+  assert.equal(index.list("acct_1")[0]?.runtime, "cloud");
+});
 
 test("a registered run resolves back to its agent", () => {
   const index = directory();

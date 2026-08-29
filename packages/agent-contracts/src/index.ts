@@ -155,7 +155,6 @@ const agentDefinitionInputShape = {
     .max(AGENT_RUNNER_LIMITS.maxInstructionsLength),
   model: z.string().trim().min(1).max(AGENT_RUNNER_LIMITS.maxModelLength),
   name: z.string().trim().min(1).max(64),
-  owner: agentOwnerSchema.default({ kind: "standalone" }),
   runtime: runtimeSchema,
   workspace: z
     .string()
@@ -199,24 +198,16 @@ const validateAgentBackendRuntime = (
  */
 export const createAgentInputSchema = z
   .object(agentDefinitionInputShape)
-  .omit({ owner: true })
   .strict()
   .superRefine(validateAgentBackendRuntime);
 
-/**
- * Deliberately omits `validateAgentBackendRuntime`, so tightening a create-time
- * rule cannot make already stored definitions unreadable and strand an agent in
- * durable state. Agents created before the provider-key runtime was retired
- * still parse; they simply cannot be recreated.
- */
 /**
  * The sandbox's readiness for this agent's next run.
  *
  * `provisioning` means a warm-up is booting the container; `ready` means the
  * probe answered and the next run skips the cold start; `failed` is advisory
  * — a run started against a failed warm simply pays the cold start it would
- * have paid anyway. Optional on the definition because agents configured
- * before warming existed have no recorded state, which is `not_started`.
+ * have paid anyway.
  */
 export const warmStateSchema = z
   .object({
@@ -226,17 +217,58 @@ export const warmStateSchema = z
   .strict();
 export type WarmState = z.infer<typeof warmStateSchema>;
 
+const agentDefinitionBaseShape = {
+  ...agentDefinitionInputShape,
+  createdAt: datetimeSchema,
+  id: agentIdSchema,
+  lastRunAt: datetimeSchema.nullable(),
+  owner: agentOwnerSchema,
+  status: agentStatusSchema,
+  updatedAt: datetimeSchema,
+  warm: warmStateSchema,
+};
+
+/**
+ * Public definitions are explicit projections. They always publish ownership
+ * and warm state, while temporarily retaining `runtime: "cloud"` so records
+ * written before the provider-key runtime retirement remain readable through
+ * list/get envelopes until the compatibility sunset.
+ */
 export const agentDefinitionSchema = z
   .object({
-    ...agentDefinitionInputShape,
-    createdAt: datetimeSchema,
-    id: agentIdSchema,
-    lastRunAt: datetimeSchema.nullable(),
-    status: agentStatusSchema,
-    updatedAt: datetimeSchema,
-    warm: warmStateSchema.optional(),
+    ...agentDefinitionBaseShape,
   })
   .strict();
+
+/**
+ * Full definitions accepted at persistence boundaries. Unlike the public
+ * response schema, this rejects the retired runtime so compatibility reads
+ * cannot become a path for writing new legacy records.
+ */
+export const currentAgentDefinitionSchema = agentDefinitionSchema.superRefine(
+  validateAgentBackendRuntime
+);
+
+/**
+ * Durable definitions predate both ownership and warm tracking. The storage
+ * parser alone supplies those missing fields, and deliberately accepts the
+ * retired runtime; callers must project its normalized output through the
+ * explicit public schema, while every write uses `currentAgentDefinitionSchema`.
+ */
+export const storedAgentDefinitionSchema = z
+  .object({
+    ...agentDefinitionBaseShape,
+    owner: agentOwnerSchema.optional().default({ kind: "standalone" as const }),
+    warm: warmStateSchema.optional(),
+  })
+  .strict()
+  .transform((definition) => ({
+    ...definition,
+    warm: definition.warm ?? {
+      status: "not_started" as const,
+      updatedAt: definition.updatedAt,
+    },
+  }));
 
 export const runAgentInputSchema = z.object({
   task: z.string().trim().min(1).max(AGENT_RUNNER_LIMITS.maxTaskLength),

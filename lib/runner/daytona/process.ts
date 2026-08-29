@@ -784,6 +784,7 @@ export async function snapshotDaytonaProcess(input: {
 
 export type DaytonaStopResult =
   | Readonly<{ kind: "stopped" }>
+  | Readonly<{ kind: "provider_not_found" | "provider_unavailable" }>
   | Readonly<{
       error: DaytonaProcessError;
       kind: "sandbox_reset_required";
@@ -811,7 +812,11 @@ export async function stopDaytonaProcess(
   try {
     await sandbox.process.deleteSession(sessionId);
   } catch (error) {
-    if (classifyDaytonaProviderError(error) !== "not_found") {
+    const failure = classifyDaytonaProviderError(error);
+    if (failure !== "not_found") {
+      if (failure === "retryable") {
+        return { kind: "provider_unavailable" };
+      }
       return {
         error: providerError(
           "sandbox_reset_required",
@@ -831,6 +836,9 @@ export async function stopDaytonaProcess(
         throw new Error("Daytona session remained after deletion.");
       }
     } catch (error) {
+      if (classifyDaytonaProviderError(error) === "retryable") {
+        return { kind: "provider_unavailable" };
+      }
       return {
         error: providerError(
           "sandbox_reset_required",
@@ -847,8 +855,11 @@ export async function stopDaytonaProcess(
       sandbox,
       daytonaRunCredentialPath(input.runId, input.attemptId)
     );
-    return { kind: "stopped" };
+    return { kind: sessionAbsent ? "provider_not_found" : "stopped" };
   } catch (error) {
+    if (classifyDaytonaProviderError(error) === "retryable") {
+      return { kind: "provider_unavailable" };
+    }
     return {
       error: providerError(
         "sandbox_reset_required",

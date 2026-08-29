@@ -18,6 +18,8 @@ import {
   MAX_PERSISTED_EVENT_BYTES_PER_RUN,
 } from "./evidence";
 import type {
+  AcquireRunnerReconciliationLeaseInput,
+  AcquireRunnerReconciliationLeaseResult,
   AdoptExpiredDaytonaProcessInput,
   AppendRunnerEventBatchInput,
   AppendRunnerEventInput,
@@ -39,6 +41,7 @@ import type {
   PersistRunnerAttemptRedactionInput,
   ReleaseDaytonaAttemptInput,
   ReleaseExpiredDaytonaAttemptInput,
+  ReleaseRunnerReconciliationLeaseResult,
   RequestRunnerCancellationInput,
   ReserveDaytonaSandboxInput,
   RunnerAdmissionLimits,
@@ -51,6 +54,7 @@ import type {
   RunnerMutationOutcome,
   RunnerOperator,
   RunnerPrincipal,
+  RunnerReconciliationLease,
   RunnerRunEventRecord,
   RunnerRunRecord,
   StartRunnerRunInput,
@@ -63,6 +67,8 @@ const CANCELLATION_CLEANUP_DIAGNOSTIC =
   "Cancellation cleanup requires a sandbox reset.";
 const TERMINAL_CLEANUP_RESET_DIAGNOSTIC =
   "Terminal cleanup requires a sandbox reset.";
+const MAX_RECONCILIATION_LEASE_TTL_SECONDS = 600;
+const MAX_RECONCILIATION_LEASE_OWNER_LENGTH = 128;
 
 export type RunnerStoreStatement = {
   args: Readonly<Record<string, unknown>>;
@@ -233,10 +239,59 @@ function asScheduler(row: Record<string, unknown>): RunnerSchedulerRecord {
       'Runner query returned an invalid "lastDispatchedTenantHash".'
     );
   }
+
   return {
     consecutiveDispatchCount: numericColumn(row, "consecutiveDispatchCount"),
     lastDispatchedTenantHash,
   };
+}
+
+function asReconciliationLease(
+  row: Record<string, unknown>
+): RunnerReconciliationLease {
+  const expiresAt = column<unknown>(row, "reconciliationLeaseExpiresAt");
+  const ownerToken = column<unknown>(row, "reconciliationLeaseOwner");
+  if (!(expiresAt instanceof Date) || Number.isNaN(expiresAt.getTime())) {
+    throw new Error(
+      'Runner query returned an invalid "reconciliationLeaseExpiresAt".'
+    );
+  }
+  if (
+    typeof ownerToken !== "string" ||
+    ownerToken.length === 0 ||
+    ownerToken.length > MAX_RECONCILIATION_LEASE_OWNER_LENGTH
+  ) {
+    throw new Error(
+      'Runner query returned an invalid "reconciliationLeaseOwner".'
+    );
+  }
+  return {
+    expiresAt,
+    fence: numericColumn(row, "reconciliationLeaseFence"),
+    ownerToken,
+  };
+}
+
+function validateReconciliationLeaseInput(
+  input: AcquireRunnerReconciliationLeaseInput
+): void {
+  if (
+    !input.ownerToken ||
+    input.ownerToken.length > MAX_RECONCILIATION_LEASE_OWNER_LENGTH
+  ) {
+    throw new Error(
+      `Runner reconciliation lease owner must be between 1 and ${MAX_RECONCILIATION_LEASE_OWNER_LENGTH} characters.`
+    );
+  }
+  if (
+    !Number.isSafeInteger(input.ttlSeconds) ||
+    input.ttlSeconds < 1 ||
+    input.ttlSeconds > MAX_RECONCILIATION_LEASE_TTL_SECONDS
+  ) {
+    throw new Error(
+      `Runner reconciliation lease TTL must be between 1 and ${MAX_RECONCILIATION_LEASE_TTL_SECONDS} seconds.`
+    );
+  }
 }
 
 function admissionLimits(
@@ -692,6 +747,51 @@ export type RunnerStore = ReturnType<typeof createRunnerStore>;
  */
 export function createRunnerStore(database: RunnerStoreDatabase) {
   return {
+    acquireReconciliationLease: (
+      _operator: RunnerOperator,
+      input: AcquireRunnerReconciliationLeaseInput
+    ): Promise<AcquireRunnerReconciliationLeaseResult> => {
+      validateReconciliationLeaseInput(input);
+      return database.transaction(async (transaction) => {
+        const [row] = await transaction.execute(
+          statement(
+            "acquire-reconciliation-lease",
+            {
+              ownerToken: input.ownerToken,
+              ttlSeconds: input.ttlSeconds,
+            },
+            sql`INSERT INTO "RunnerScheduler" (
+                "singleton",
+                "reconciliationLeaseOwner",
+                "reconciliationLeaseFence",
+                "reconciliationLeaseExpiresAt"
+              )
+              VALUES (
+                true,
+                ${input.ownerToken},
+                1,
+                clock_timestamp() + make_interval(secs => ${input.ttlSeconds})
+              )
+              ON CONFLICT ("singleton") DO UPDATE
+                SET "reconciliationLeaseOwner" = EXCLUDED."reconciliationLeaseOwner",
+                    "reconciliationLeaseFence" = "RunnerScheduler"."reconciliationLeaseFence" + 1,
+                    "reconciliationLeaseExpiresAt" =
+                      clock_timestamp() + make_interval(secs => ${input.ttlSeconds}),
+                    "updatedAt" = clock_timestamp()
+                WHERE "RunnerScheduler"."reconciliationLeaseOwner" IS NULL
+                  OR "RunnerScheduler"."reconciliationLeaseExpiresAt" <= clock_timestamp()
+              RETURNING
+                "reconciliationLeaseOwner",
+                "reconciliationLeaseFence",
+                "reconciliationLeaseExpiresAt"`
+          )
+        );
+        return row
+          ? { kind: "acquired", lease: asReconciliationLease(row) }
+          : { kind: "held" };
+      });
+    },
+
     /**
      * A command-bearing attempt is adopted, never requeued blindly. The
      * reconciler snapshots that exact session/command before deciding whether
@@ -1746,7 +1846,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
     ): Promise<
       | { kind: "resetting"; value: RunnerAgentRecord }
       | { kind: "in_progress"; value: RunnerAgentRecord }
-      | { kind: "not_found" | "not_live" | "stale_version" }
+      | {
+          kind: "lease_lost" | "not_found" | "not_live" | "stale_version";
+        }
     > =>
       database.transaction(async (transaction) => {
         const run = await lockedOperatorRun(
@@ -1754,6 +1856,13 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           operator,
           authority.runId
         );
+        if (!run) {
+          return { kind: "not_found" };
+        }
+        const rejected = fenceOutcome(run, authority);
+        if (rejected) {
+          return rejected;
+        }
         const liveCancellation =
           Boolean(run?.cancellationRequestedAt) &&
           (run?.dispatchState === "dispatching" ||
@@ -1765,11 +1874,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             ((run?.dispatchState === "dispatching" ||
               run?.dispatchState === "running") &&
               run.daytonaCommandId === null));
-        if (
-          !run ||
-          fenceOutcome(run, authority) ||
-          (!liveCancellation && !exactAttemptCleanup)
-        ) {
+        if (!liveCancellation && !exactAttemptCleanup) {
           return { kind: "not_live" };
         }
         const agent = await lockedDispatchAgent(transaction, run);
@@ -2137,7 +2242,11 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (rejected) {
           return rejected;
         }
-        if (run.daytonaAttemptId) {
+        if (
+          run.daytonaAttemptId !== null ||
+          run.daytonaCommandId !== null ||
+          run.daytonaSessionId !== null
+        ) {
           return { kind: "not_live" };
         }
         const [updated] = await transaction.execute(
@@ -2153,6 +2262,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "version" = ${input.expectedVersion}
                 AND "dispatchLeaseToken" = ${input.leaseToken}
                 AND "dispatchState" = 'terminal'
+                AND "daytonaAttemptId" IS NULL
+                AND "daytonaCommandId" IS NULL
+                AND "daytonaSessionId" IS NULL
               RETURNING *`
           )
         );
@@ -2244,16 +2356,26 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
     deleteAttemptRedaction: (
       operator: RunnerOperator,
       authority: RunnerDispatchAuthority
-    ): Promise<{ kind: "deleted" } | { kind: "not_live" }> =>
+    ): Promise<
+      | { kind: "deleted" }
+      | {
+          kind: "lease_lost" | "not_found" | "not_live" | "stale_version";
+        }
+    > =>
       database.transaction(async (transaction) => {
         const run = await lockedOperatorRun(
           transaction,
           operator,
           authority.runId
         );
+        if (!run) {
+          return { kind: "not_found" };
+        }
+        const rejected = fenceOutcome(run, authority);
+        if (rejected) {
+          return rejected;
+        }
         if (
-          !run ||
-          fenceOutcome(run, authority) ||
           !authority.attemptId ||
           run.daytonaAttemptId !== authority.attemptId
         ) {
@@ -3179,6 +3301,28 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           : { kind: "not_expired" };
       }),
 
+    releaseReconciliationLease: (
+      _operator: RunnerOperator,
+      lease: RunnerReconciliationLease
+    ): Promise<ReleaseRunnerReconciliationLeaseResult> =>
+      database.transaction(async (transaction) => {
+        const [released] = await transaction.execute(
+          statement(
+            "release-reconciliation-lease",
+            { fence: lease.fence, ownerToken: lease.ownerToken },
+            sql`UPDATE "RunnerScheduler"
+              SET "reconciliationLeaseOwner" = NULL,
+                  "reconciliationLeaseExpiresAt" = NULL,
+                  "updatedAt" = clock_timestamp()
+              WHERE "singleton" = true
+                AND "reconciliationLeaseOwner" = ${lease.ownerToken}
+                AND "reconciliationLeaseFence" = ${lease.fence}
+              RETURNING "singleton"`
+          )
+        );
+        return released ? { kind: "released" } : { kind: "stale" };
+      }),
+
     releaseTerminalDaytonaAttempt: (
       operator: RunnerOperator,
       authority: RunnerDispatchAuthority,
@@ -3826,6 +3970,27 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return rows.map(asRun);
       }),
 
+    scanTerminalLeaseCleanups: (_operator: RunnerOperator, limit: number) =>
+      database.transaction(async (transaction) => {
+        const rows = await transaction.execute(
+          statement(
+            "scan-terminal-lease-cleanups",
+            { limit },
+            sql`SELECT * FROM "RunnerRun"
+              WHERE "dispatchState" = 'terminal'
+                AND "daytonaAttemptId" IS NULL
+                AND "daytonaCommandId" IS NULL
+                AND "daytonaSessionId" IS NULL
+                AND "dispatchLeaseToken" IS NOT NULL
+                AND "dispatchLeaseExpiresAt" <= clock_timestamp()
+              ORDER BY "dispatchLeaseExpiresAt" ASC, "id" ASC
+              LIMIT ${limit}
+              FOR UPDATE SKIP LOCKED`
+          )
+        );
+        return rows.map(asRun);
+      }),
+
     startRun: (
       principal: RunnerPrincipal,
       input: StartRunnerRunInput
@@ -4064,10 +4229,42 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
       input: UpdateRunnerAgentInput
     ): Promise<
       | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "busy" }
       | { kind: "not_found" }
       | { kind: "stale_version" }
     > =>
       database.transaction(async (transaction) => {
+        const [current] = await transaction.execute(
+          statement(
+            "lock-agent-for-update",
+            { agentId: input.id, tenant: principal.tenant },
+            sql`SELECT * FROM "RunnerAgent"
+              WHERE "id" = ${input.id}
+                AND "tenant" = ${principal.tenant}
+              FOR UPDATE`
+          )
+        );
+        if (!current) {
+          return { kind: "not_found" };
+        }
+        const agent = asAgent(current);
+        if (agent.version !== input.expectedVersion) {
+          return { kind: "stale_version" };
+        }
+        const [liveRun] = await transaction.execute(
+          statement(
+            "find-live-run-for-agent-update",
+            { agentId: input.id, tenant: principal.tenant },
+            sql`SELECT "id" FROM "RunnerRun"
+              WHERE "agentId" = ${input.id}
+                AND "tenant" = ${principal.tenant}
+                AND "status" IN ('queued', 'running')
+              LIMIT 1`
+          )
+        );
+        if (liveRun) {
+          return { kind: "busy" };
+        }
         const [updated] = await transaction.execute(
           statement(
             "update-agent",
@@ -4087,17 +4284,10 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               RETURNING *`
           )
         );
-        if (updated) {
-          return { kind: "updated", value: asAgent(updated) };
+        if (!updated) {
+          throw new Error("Locked Runner agent changed before update.");
         }
-        const [current] = await transaction.execute(
-          statement(
-            "get-agent-after-update",
-            { agentId: input.id, tenant: principal.tenant },
-            sql`SELECT "id" FROM "RunnerAgent" WHERE "id" = ${input.id} AND "tenant" = ${principal.tenant} LIMIT 1`
-          )
-        );
-        return current ? { kind: "stale_version" } : { kind: "not_found" };
+        return { kind: "updated", value: asAgent(updated) };
       }),
   };
 }
