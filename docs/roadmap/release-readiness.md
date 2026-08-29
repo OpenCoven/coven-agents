@@ -2,9 +2,8 @@
 
 This is the go/no-go checklist for the current cloud-only product. It covers the
 Next.js app, server-side Daytona runner, database, planning reconciliation,
-smoke evidence, rollback, and recovery. The still-deployed Cloudflare Worker is
-included only as a rollback runtime. Disabled GitHub Actions are not executed
-evidence.
+smoke evidence, application rollback, and recovery. Disabled GitHub Actions are
+not executed evidence.
 
 ## Current release disposition
 
@@ -64,8 +63,8 @@ commit or environment.
 ## Environment prerequisites
 
 Check presence and agreement without printing values. App environment
-variables, Worker secret/value bindings, and Cloudflare platform bindings are
-different configuration surfaces and must not be treated as interchangeable.
+variables and provider configuration are different surfaces and must not be
+treated as interchangeable.
 
 | Area | Required before release | Current repository reality |
 | --- | --- | --- |
@@ -79,8 +78,6 @@ different configuration surfaces and must not be treated as interchangeable.
 | Billing | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, and canonical `APP_ORIGIN`. | Checkout and webhook return `503` when unconfigured. |
 | Release audience | Set `RELEASE_AUDIENCE` exactly to `closed-beta` or `public`. Closed beta additionally requires `BETA_MODE=on` and a reviewed, nonempty `BETA_ALLOWLIST` containing only valid email addresses; public release requires separate approval and `BETA_MODE=off`. | [`scripts/validate-runtime-config.ts`](../../scripts/validate-runtime-config.ts) enforces this automatically for Vercel production and other `NODE_ENV=production` validation. Automatic runtime validation exempts Vercel preview/development builds, while `pnpm validate:release` always enforces. Unset/default-off cannot pass either production path. |
 | Other shipped app paths | `AI_GATEWAY_API_KEY` and `BLOB_READ_WRITE_TOKEN` when chat/model and upload paths remain enabled. | These are app feature dependencies, not runner credentials. |
-| Legacy rollback Worker | Retain matching `AGENT_CONTROL_TOKEN`, `RUNNER_SERVICE_TOKEN`, `APP_ORIGIN`, public current/previous `RUNNER_VERIFY_*` values, `OPERATOR_DIAGNOSTIC_TOKEN`, Worker bindings, and Wrangler access until the Worker-removal PR. | These values support rollback only. The current browser does not receive them or call the Worker, and the current app has no private runner signing key. |
-| Legacy Worker abuse and admission | Retain `EDGE_ABUSE_KEY_SECRET`, Cloudflare Rate Limiting bindings, and reviewed Worker admission values while the rollback runtime remains deployed. | These controls protect the retained Worker only; they are not the current app's runner-access boundary. |
 | Demo recorder | Recorder variables from [`.env.example`](../../.env.example) only when producing a new owner-approved replay. | Guest playback itself is committed, stateless evidence and needs no recorder secret. |
 | Local execution | — | The local runner was removed in `91f21c8`; the shared contract accepts only `cloud`. Local smoke is not a current release gate. |
 
@@ -186,7 +183,7 @@ skipped audience validation is not release evidence.
 | --- | --- | --- | --- |
 | Demo | Deploy/build with `IS_DEMO=1`, load the signed-out root, play the committed replay through completion, and verify sanitized output with no database or runner persistence. | Dated browser trace or recording tied to the candidate and deployment. | A local production replay reached 10/10 sanitized events without console errors on 2026-08-27; no release-equivalent deployment artifact is retained. |
 | Subscriber | Exercise a real GitHub OAuth callback and account creation/adoption, guest refusal, active eligibility, expired/revoked refusal, same-origin agent/run access, and usage display. Verify requests carry only the application session and server-derived tenant authority. | Dated trace plus sanitized account-state evidence for allowed and denied cases. | Eligibility and same-origin boundary tests pass locally; actual OAuth/account creation and a production-equivalent Daytona lifecycle are not retained. |
-| Cloud | Through the same-origin API, create an agent, start and observe a credentialed Daytona run, stream/poll to terminal state, cancel a bounded run, delete the agent, and verify tenant/sandbox cleanup. Separately verify the retained rollback Worker diagnostic without treating it as current browser traffic. | Dated app/Daytona response summary, run identifiers, and cleanup result without credentials or private output; separate rollback diagnostic status. | Local Daytona lifecycle and rollback Worker diagnostic tests pass. No deployed release-equivalent create/run/stream/cancel/delete artifact exists. |
+| Cloud | Through the same-origin API, create an agent, start and observe a credentialed Daytona run, stream/poll to terminal state, cancel a bounded run, delete the agent, and verify tenant/sandbox cleanup. | Dated app/Daytona response summary, run identifiers, and cleanup result without credentials or private output. | Local Daytona lifecycle tests pass. No deployed release-equivalent create/run/stream/cancel/delete artifact exists. |
 | Local, if supported | Create, run, cancel, and delete through the supported local boundary, including host isolation and cleanup checks. | Dated artifact from the declared supported local environment. | Not applicable: no local runner is tracked and `backend` is cloud-only. |
 
 Smoke failure is a no-go. Do not retry until a failure disappears without
@@ -250,15 +247,12 @@ Release evidence must prove:
   credential reaches browser APIs or storage;
 - server-side Daytona dispatch binds tenant, agent, harness, run, operation,
   reservation, and credential access before plaintext exists;
-- in the rollback boundary only, the deployment token grants reach but never
-  tenant identity, public verification keys remain aligned, and the service
-  token cannot select a tenant without legacy claim revalidation;
 - two controlled tenants cannot list, run, stream, stop, delete, or borrow each
   other's resources or credentials;
 - the complete versioned `CREDENTIAL_KEK_CURRENT_VERSION`/
   `CREDENTIAL_KEK_V1`/`CREDENTIAL_KEK_V2` ring is present, AAD binds each
   ciphertext to its tenant and harness, rewrap verification has no old rows,
-  and neither Daytona nor the rollback Worker stores a fallback credential;
+  and Daytona stores no fallback credential;
 - direct and encoded credential shapes are redacted from UI, persisted
   evidence, logs, diagnostics, and errors.
 
@@ -270,19 +264,16 @@ an incident-response trigger.
 
 Before traffic promotion:
 
-1. Confirm Worker observability is enabled for the deployed version.
-2. Run the authenticated `/api/diagnostics/sandbox` probe with the separate
-   `OPERATOR_DIAGNOSTIC_TOKEN` and retain its sanitized result. The
-   browser-visible `AGENT_CONTROL_TOKEN` and subscriber identity must be
-   refused.
-3. Confirm app telemetry initializes and both app and Worker surface actionable
-   failures without request bodies, credentials, private paths, or private
-   planning text.
-4. Correlate one subscriber request through Auth.js session revalidation,
+1. Run the authenticated `/api/diagnostics/sandbox` probe with the separate
+   `OPERATOR_DIAGNOSTIC_TOKEN` and retain its sanitized result. Subscriber
+   sessions and reconciliation credentials must be refused.
+2. Confirm app telemetry initializes and surfaces actionable failures without
+   request bodies, credentials, private paths, or private planning text.
+3. Correlate one subscriber request through Auth.js session revalidation,
    server-derived tenant scope, credential lending, Daytona lifecycle, and
    terminal result.
-5. Confirm operators can distinguish auth, subscription, capacity, harness,
-   sandbox, database, and internal-service failures.
+4. Confirm operators can distinguish auth, subscription, capacity, harness,
+   sandbox, database, and reconciliation failures.
 
 Structured operational telemetry and standardized health/readiness signals are
 not complete. A release that depends on those missing signals remains no-go
@@ -294,7 +285,7 @@ until the affected verification row is raised.
 | --- | --- | --- |
 | Cross-tenant access, credential exposure, forged identity, or subscriber misgrant | Stop new affected work, rotate or revoke first, then follow [incident response](../security/incident-response.md). | Maintainer acting as security incident lead |
 | Migration failure, data corruption, or incompatible schema | Stop promotion and writes where necessary; choose a compatible app rollback, forward fix, or explicit restore from the tested backup. | Release operator with database owner |
-| Sustained unexplained app/Worker failures or failed required smoke | Halt rollout and promote the last known-good app and Worker versions independently. | Release operator |
+| Sustained unexplained app/Daytona failures or failed required smoke | Halt rollout and promote the last known-good compatible application version. | Release operator |
 | Missing diagnostics or inability to establish blast radius | Halt rollout; lack of visibility is itself a rollback trigger. | Release operator |
 | Planning drift, stale roadmap, red verification, or `AT RISK` worktree discovered after go | Freeze further promotion, demote readiness, reconcile, and rerun the complete gate. | Maintainer |
 
@@ -318,7 +309,7 @@ or guess at database compatibility.
   required. Rewrap and AAD binding are resumable and CAS-protected; retain old
   keys until verification reports zero old-version and legacy-AAD rows. Active
   one-run leases remain authority-bound and must not be reconstructed from
-  Worker state.
+  provider state.
 - **Deleted or retained evidence:** no automated purge or restore is authorized.
   Use explicit retention/deletion procedures with tenant and privacy review
   before destructive work.
