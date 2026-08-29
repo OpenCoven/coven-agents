@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  createCredentialRefreshFence,
   fetchHasCredential,
   resetCredentialCache,
   updateCredentialEligibility,
@@ -67,4 +68,28 @@ test("an older in-flight summary cannot overwrite a successful credential update
 
   assert.equal(await pending, true);
   assert.equal(await fetchHasCredential(), true);
+});
+
+test("credential refresh fencing rejects stale epochs, overlapping reads, and unmounted updates", () => {
+  const fence = createCredentialRefreshFence();
+  fence.activate();
+
+  const mountRefresh = fence.beginRefresh();
+  assert.equal(fence.isCurrent(mountRefresh), true);
+
+  fence.advanceMutation();
+  assert.equal(fence.isCurrent(mountRefresh), false);
+  const authoritativeRefresh = fence.beginRefresh();
+  assert.equal(fence.isCurrent(authoritativeRefresh), true);
+
+  const overlappingRefresh = fence.beginRefresh();
+  assert.equal(fence.isCurrent(authoritativeRefresh), false);
+  assert.equal(fence.isCurrent(overlappingRefresh), true);
+
+  fence.deactivate();
+  assert.equal(fence.isCurrent(overlappingRefresh), false);
+
+  fence.activate();
+  const refreshAfterFailedMutation = fence.beginRefresh();
+  assert.equal(fence.isCurrent(refreshAfterFailedMutation), true);
 });

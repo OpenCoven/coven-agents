@@ -239,9 +239,26 @@ test.describe("Run console", () => {
   }) => {
     await context.addCookies(await subscriberCookies());
     let harnessIds: string[] = [];
+    let delayNextCredentialGet = false;
+    let failNextCredentialGet = false;
+    let releaseCredentialGet: (() => Promise<void>) | undefined;
     await page.route("**/api/credentials", (route) => {
       const request = route.request();
       if (request.method() === "GET") {
+        if (delayNextCredentialGet) {
+          delayNextCredentialGet = false;
+          const snapshot = [...harnessIds];
+          return new Promise<void>((resolve) => {
+            releaseCredentialGet = async () => {
+              await route.fulfill({ json: { harnessIds: snapshot } });
+              resolve();
+            };
+          });
+        }
+        if (failNextCredentialGet) {
+          failNextCredentialGet = false;
+          return route.fulfill({ json: { error: "unavailable" }, status: 503 });
+        }
         return route.fulfill({ json: { harnessIds } });
       }
       const body = request.postDataJSON() as {
@@ -255,11 +272,13 @@ test.describe("Run console", () => {
         harnessIds = [...new Set([...harnessIds, body.harnessId ?? ""])]
           .filter(Boolean)
           .sort();
+        failNextCredentialGet = true;
         return route.fulfill({
           json: { harnessId: body.harnessId, stored: true },
         });
       }
       harnessIds = harnessIds.filter((id) => id !== body.harnessId);
+      failNextCredentialGet = true;
       return route.fulfill({
         json: { harnessId: body.harnessId, removed: true },
       });
@@ -294,18 +313,22 @@ test.describe("Run console", () => {
     await page.getByRole("link", { name: "Back to runs" }).click();
     await expect(page.getByText(blocked)).toBeVisible();
 
+    delayNextCredentialGet = true;
     await page.getByRole("button", { name: "Account and settings" }).click();
     await page
       .getByLabel("GitHub Copilot CLI credential")
       .fill("accepted-token");
     await page.getByRole("button", { name: "Save" }).click();
     await expect(page.getByText("Credential stored.")).toBeVisible();
+    await releaseCredentialGet?.();
     await page.getByRole("link", { name: "Back to runs" }).click();
     await expect(page.getByText(blocked)).toHaveCount(0);
 
+    delayNextCredentialGet = true;
     await page.getByRole("button", { name: "Account and settings" }).click();
     await page.getByRole("button", { name: "Remove" }).click();
     await expect(page.getByText("Credential removed.")).toBeVisible();
+    await releaseCredentialGet?.();
     await page.getByRole("link", { name: "Back to runs" }).click();
     await expect(page.getByText(blocked)).toBeVisible();
   });

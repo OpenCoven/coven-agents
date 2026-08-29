@@ -1,5 +1,51 @@
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+export type CredentialRefreshTicket = Readonly<{
+  generation: number;
+  mutationEpoch: number;
+}>;
+
+export type CredentialRefreshFence = Readonly<{
+  activate: () => void;
+  advanceMutation: () => boolean;
+  beginRefresh: () => CredentialRefreshTicket;
+  deactivate: () => void;
+  isCurrent: (ticket: CredentialRefreshTicket) => boolean;
+}>;
+
+export function createCredentialRefreshFence(): CredentialRefreshFence {
+  let active = false;
+  let generation = 0;
+  let mutationEpoch = 0;
+
+  return {
+    activate: () => {
+      active = true;
+      generation += 1;
+    },
+    advanceMutation: () => {
+      if (!active) {
+        return false;
+      }
+      mutationEpoch += 1;
+      generation += 1;
+      return true;
+    },
+    beginRefresh: () => {
+      generation += 1;
+      return { generation, mutationEpoch };
+    },
+    deactivate: () => {
+      active = false;
+      generation += 1;
+    },
+    isCurrent: (ticket) =>
+      active &&
+      ticket.generation === generation &&
+      ticket.mutationEpoch === mutationEpoch,
+  };
+}
+
 let credentialsInFlight: Promise<boolean | null> | null = null;
 let credentialEligibility: boolean | null = null;
 let credentialVersion = 0;

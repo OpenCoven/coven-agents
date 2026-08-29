@@ -5,7 +5,7 @@
 import { HARNESS_SPECS } from "@opencoven/harness";
 import Link from "next/link";
 import { signOut } from "next-auth/react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Btn, Caret, Eyebrow } from "@/components/console/primitives";
 import {
@@ -17,6 +17,7 @@ import {
   well,
 } from "@/components/console/styles";
 import { glyphFor } from "@/lib/console/format";
+import { createCredentialRefreshFence } from "@/lib/credentials/client";
 
 /**
  * Settings, inside the console shell.
@@ -204,6 +205,7 @@ export function Settings({
 
   const [usage, setUsage] = useState<Usage | null>(null);
   const [confirmWipe, setConfirmWipe] = useState(false);
+  const refreshFence = useRef(createCredentialRefreshFence()).current;
 
   const publishCredentials = useCallback(
     (harnessIds: readonly string[]) => {
@@ -216,7 +218,11 @@ export function Settings({
   );
 
   const refreshCredentials = useCallback(async () => {
+    const ticket = refreshFence.beginRefresh();
     const response = await fetch(`${BASE_PATH}/api/credentials`);
+    if (!refreshFence.isCurrent(ticket)) {
+      return null;
+    }
     if (response.status === 403) {
       // A demo session cannot store one, and saying so beats a form that
       // fails on submit.
@@ -227,15 +233,20 @@ export function Settings({
       return null;
     }
     const body = (await response.json()) as { harnessIds?: string[] };
+    if (!refreshFence.isCurrent(ticket)) {
+      return null;
+    }
     return publishCredentials(body.harnessIds ?? []);
-  }, [publishCredentials]);
+  }, [publishCredentials, refreshFence]);
 
   useEffect(() => {
+    refreshFence.activate();
     if (!account) {
-      return;
+      return () => refreshFence.deactivate();
     }
     refreshCredentials().catch(() => undefined);
-  }, [account, refreshCredentials]);
+    return () => refreshFence.deactivate();
+  }, [account, refreshCredentials, refreshFence]);
 
   useEffect(() => {
     if (!account) {
@@ -293,6 +304,9 @@ export function Settings({
         if (!response.ok) {
           throw new Error(String(response.status));
         }
+        if (!refreshFence.advanceMutation()) {
+          return;
+        }
         stored += 1;
         nextConfigured = publishCredentials([...nextConfigured, harnessId]);
       }
@@ -319,6 +333,9 @@ export function Settings({
       });
       if (!response.ok) {
         throw new Error(String(response.status));
+      }
+      if (!refreshFence.advanceMutation()) {
+        return;
       }
       publishCredentials(configured.filter((id) => id !== harnessId));
       await refreshCredentials();
