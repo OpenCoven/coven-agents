@@ -347,3 +347,66 @@ test("a run keeps its operation id without creating runner identity headers", as
   assert.equal(headers.get("authorization"), null);
   assert.equal(headers.get("x-runner-token"), null);
 });
+
+test("every agent and run mutation forwards its optional abort signal", async () => {
+  const controller = new AbortController();
+  const signals: (AbortSignal | null)[] = [];
+  const request: typeof globalThis.fetch = (input, init) => {
+    signals.push(init?.signal ?? null);
+    const url = String(input);
+    if (init?.method === "DELETE") {
+      return Promise.resolve(json({ ok: true }));
+    }
+    if (url.endsWith("/stop")) {
+      return Promise.resolve(
+        json({
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          run: snapshot("cancelled"),
+        })
+      );
+    }
+    return Promise.resolve(json({ agent }));
+  };
+  const client = new RunnerClient(request);
+  const createInput = {
+    backend: agent.backend,
+    description: agent.description,
+    instructions: agent.instructions,
+    model: agent.model,
+    name: agent.name,
+    runtime: agent.runtime,
+    workspace: agent.workspace,
+  };
+
+  await client.createAgent(createInput, controller.signal);
+  await client.updateAgent(agent.id, createInput, controller.signal);
+  await client.stopRun(RUN_ID, controller.signal);
+  await client.deleteAgent(agent.id, controller.signal);
+
+  assert.deepEqual(
+    signals,
+    Array.from({ length: 4 }, () => controller.signal)
+  );
+});
+
+test("an aborted mutation rejects instead of waiting for a delayed response", async () => {
+  const controller = new AbortController();
+  const request: typeof globalThis.fetch = (_input, init) => {
+    if (!init?.signal) {
+      return Promise.reject(new Error("mutation signal missing"));
+    }
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener(
+        "abort",
+        () => reject(new Error("mutation aborted")),
+        { once: true }
+      );
+    });
+  };
+  const client = new RunnerClient(request);
+
+  const pending = client.deleteAgent(agent.id, controller.signal);
+  controller.abort();
+
+  await assert.rejects(pending, /mutation aborted/);
+});

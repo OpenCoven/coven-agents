@@ -157,20 +157,26 @@ export class RunnerClient {
    */
   async updateAgent(
     id: string,
-    input: CreateAgentInput
+    input: CreateAgentInput,
+    signal?: AbortSignal
   ): Promise<AgentDefinition> {
     const response = await this.fetch(`/api/agents/${encodeURIComponent(id)}`, {
       body: JSON.stringify(input),
       method: "PUT",
+      signal,
     });
 
     return agentEnvelopeSchema.parse(await response.json()).agent;
   }
 
-  async createAgent(input: CreateAgentInput): Promise<AgentDefinition> {
+  async createAgent(
+    input: CreateAgentInput,
+    signal?: AbortSignal
+  ): Promise<AgentDefinition> {
     const response = await this.fetch("/api/agents", {
       body: JSON.stringify(input),
       method: "POST",
+      signal,
     });
     return agentEnvelopeSchema.parse(await response.json()).agent;
   }
@@ -397,18 +403,18 @@ export class RunnerClient {
   }
 
   /** Cancels a run in flight. */
-  async stopRun(runId: string): Promise<RunSnapshot> {
+  async stopRun(runId: string, signal?: AbortSignal): Promise<RunSnapshot> {
     const response = await this.fetch(
       `/api/runs/${encodeURIComponent(runId)}/stop`,
-      { method: "POST" }
+      { method: "POST", signal }
     );
     return runSnapshotEnvelopeSchema.parse(await response.json()).run;
   }
 
-  async deleteAgent(agentId: string): Promise<void> {
+  async deleteAgent(agentId: string, signal?: AbortSignal): Promise<void> {
     const response = await this.fetch(
       `/api/agents/${encodeURIComponent(agentId)}`,
-      { method: "DELETE" }
+      { method: "DELETE", signal }
     );
     okEnvelopeSchema.parse(await response.json());
   }

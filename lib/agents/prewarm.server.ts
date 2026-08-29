@@ -136,7 +136,21 @@ export async function prewarmTenantSandbox(
     const runner = await (dependencies.loadRunner ?? loadProductionRunner)(
       controller.signal
     );
+    if (
+      controller.signal.aborted ||
+      access.authVersion !== user.authVersion ||
+      access.userId !== user.id
+    ) {
+      return;
+    }
     const service = runner.createProductionRunnerService(session);
+    if (
+      controller.signal.aborted ||
+      access.authVersion !== user.authVersion ||
+      access.userId !== user.id
+    ) {
+      return;
+    }
     await service.prewarmMostRecent(session, {
       deadline,
       signal: controller.signal,

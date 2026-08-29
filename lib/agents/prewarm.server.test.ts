@@ -207,3 +207,35 @@ test("a cancelled current-authority lookup never reaches runner work", async () 
   assert.equal(loaded, 0);
   assert.ok(Date.now() - started < 1000);
 });
+
+test("a loader resolving at the deadline constructs and invokes no runner service", async () => {
+  let constructed = 0;
+  let invoked = 0;
+
+  await prewarmTenantSandbox(subscribedUser(), {
+    authorizeCurrent: () => Promise.resolve(AUTHORIZED),
+    loadRunner: (signal) =>
+      new Promise((resolve) => {
+        signal.addEventListener(
+          "abort",
+          () =>
+            resolve({
+              createProductionRunnerService: () => {
+                constructed += 1;
+                return {
+                  prewarmMostRecent: () => {
+                    invoked += 1;
+                    return Promise.resolve({ kind: "none" });
+                  },
+                };
+              },
+            }),
+          { once: true }
+        );
+      }),
+    timeoutMs: 5,
+  });
+
+  assert.equal(constructed, 0);
+  assert.equal(invoked, 0);
+});

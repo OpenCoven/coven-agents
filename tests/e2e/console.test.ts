@@ -498,4 +498,106 @@ test.describe("Run console", () => {
     await expect(page.getByText("Stale account run")).toHaveCount(0);
     expect(eventRequests).toBe(0);
   });
+
+  test("a delayed mutation cannot publish success after an account switch", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies("first@example.invalid"));
+    let sessionOverride: Record<string, unknown> | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      sessionOverride === undefined
+        ? route.continue()
+        : route.fulfill({ json: sessionOverride })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    const nextAgent = {
+      ...retainedAgent,
+      id: OTHER_AGENT_ID,
+      name: "New account agent",
+    };
+    let agentRequests = 0;
+    let releaseMutation!: () => Promise<void>;
+    let mutationStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      mutationStarted = resolve;
+    });
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const request = route.request();
+      const { pathname } = new URL(request.url());
+      if (pathname === "/api/agents") {
+        agentRequests += 1;
+        return route.fulfill({
+          json: { agents: agentRequests === 1 ? [retainedAgent] : [nextAgent] },
+        });
+      }
+      if (
+        pathname === `/api/agents/${AGENT_ID}` &&
+        request.method() === "PUT"
+      ) {
+        mutationStarted();
+        return new Promise<void>((resolve) => {
+          releaseMutation = async () => {
+            await route.fulfill({
+              json: {
+                agent: { ...retainedAgent, name: "Stale renamed agent" },
+              },
+            });
+            resolve();
+          };
+        });
+      }
+      if (
+        pathname === `/api/agents/${AGENT_ID}/runs` ||
+        pathname === `/api/agents/${OTHER_AGENT_ID}/runs`
+      ) {
+        return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+    await expect(page.getByText(retainedAgent.name).first()).toBeVisible();
+    const mutationAborted = page.waitForEvent("requestfailed", {
+      predicate: (request) =>
+        request.method() === "PUT" &&
+        new URL(request.url()).pathname === `/api/agents/${AGENT_ID}`,
+    });
+    await page.getByRole("button", { name: "More run actions" }).click();
+    await page.getByRole("menuitem", { name: "Rename this agent" }).click();
+    await page.getByLabel("Agent name").fill("Stale renamed agent");
+    await page.getByRole("button", { name: "Save" }).click();
+    await started;
+
+    sessionOverride = {
+      expires: "2099-01-01T00:00:00.000Z",
+      user: {
+        email: "second@example.invalid",
+        id: "00000000-0000-4000-8000-000000000002",
+        image: null,
+        name: "Second subscriber",
+        type: "subscriber",
+      },
+    };
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      const body = (await response.json()) as { user?: { email?: string } };
+      return body.user?.email === "second@example.invalid";
+    });
+    await notifySessionChange(page);
+    await sessionRefresh;
+    await mutationAborted;
+    await expect(page.getByText(nextAgent.name).first()).toBeVisible();
+
+    await releaseMutation();
+    await page.waitForTimeout(100);
+    await expect(page.getByText("Stale renamed agent")).toHaveCount(0);
+    await expect(page.getByText("Renamed to Stale renamed agent.")).toHaveCount(
+      0
+    );
+  });
 });

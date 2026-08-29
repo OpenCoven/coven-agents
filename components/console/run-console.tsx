@@ -650,7 +650,10 @@ export function RunConsole() {
       return;
     }
     try {
-      const snapshot = await client.stopRun(selectedRun.snapshot.id);
+      const snapshot = await client.stopRun(
+        selectedRun.snapshot.id,
+        context.signal
+      );
       if (!isCurrentSession(context.generation, context.signal)) {
         return;
       }
@@ -674,7 +677,7 @@ export function RunConsole() {
     }
     setBusy(true);
     try {
-      const created = await client.createAgent(input);
+      const created = await client.createAgent(input, context.signal);
       if (!isCurrentSession(context.generation, context.signal)) {
         return;
       }
@@ -714,15 +717,18 @@ export function RunConsole() {
             if (!isCurrentSession(context.generation, context.signal)) {
               return;
             }
-            const agent = await client.createAgent({
-              backend: "cloud",
-              description: template.blurb,
-              instructions: template.instructions,
-              model: "auto",
-              name: memberName(formation, template),
-              runtime: "copilot",
-              workspace: "/workspace",
-            });
+            const agent = await client.createAgent(
+              {
+                backend: "cloud",
+                description: template.blurb,
+                instructions: template.instructions,
+                model: "auto",
+                name: memberName(formation, template),
+                runtime: "copilot",
+                workspace: "/workspace",
+              },
+              context.signal
+            );
             if (!isCurrentSession(context.generation, context.signal)) {
               return;
             }
@@ -778,15 +784,19 @@ export function RunConsole() {
       return;
     }
     try {
-      const updated = await client.updateAgent(selectedAgent.id, {
-        backend: selectedAgent.backend,
-        description: selectedAgent.description,
-        instructions: selectedAgent.instructions,
-        model: selectedAgent.model,
-        name: next,
-        runtime: selectedAgent.runtime,
-        workspace: selectedAgent.workspace,
-      });
+      const updated = await client.updateAgent(
+        selectedAgent.id,
+        {
+          backend: selectedAgent.backend,
+          description: selectedAgent.description,
+          instructions: selectedAgent.instructions,
+          model: selectedAgent.model,
+          name: next,
+          runtime: selectedAgent.runtime,
+          workspace: selectedAgent.workspace,
+        },
+        context.signal
+      );
       if (!isCurrentSession(context.generation, context.signal)) {
         return;
       }
@@ -815,7 +825,7 @@ export function RunConsole() {
     }
     setBusy(true);
     try {
-      await client.deleteAgent(selectedAgent.id);
+      await client.deleteAgent(selectedAgent.id, context.signal);
       if (!isCurrentSession(context.generation, context.signal)) {
         return;
       }
