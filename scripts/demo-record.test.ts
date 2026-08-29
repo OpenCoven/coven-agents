@@ -100,22 +100,21 @@ test("a missing credential refuses before loading capture", async () => {
 
 test("top-level recorder errors redact every configured secret", async () => {
   const fixture = dependencies();
-  const runnerToken = "runner-token-sensitive";
-  const identityToken = "identity-token-sensitive";
+  const authSecret = "auth-secret-sensitive";
+  const sessionCookie = "session-cookie-sensitive";
   const recordingCredential = "recording-credential-sensitive";
 
   const code = await runDemoRecorder(
     ["--name", "parser-test", "--task", "Add a parser test."],
     {
+      AUTH_SECRET: authSecret,
       DEMO_RECORDING_CREDENTIAL: recordingCredential,
-      DEMO_RUNNER_IDENTITY_TOKEN: identityToken,
-      DEMO_RUNNER_TOKEN: runnerToken,
     },
     {
       ...fixture.dependencies,
       loadCapture: () =>
         Promise.reject(
-          new Error(`${runnerToken} ${identityToken} ${recordingCredential}`, {
+          new Error(`${authSecret} ${sessionCookie} ${recordingCredential}`, {
             cause: new Error(`${recordingCredential} in cause`),
           })
         ),
@@ -124,25 +123,23 @@ test("top-level recorder errors redact every configured secret", async () => {
 
   const printed = fixture.errors.join("");
   assert.equal(code, 1);
-  for (const secret of [runnerToken, identityToken, recordingCredential]) {
+  for (const secret of [authSecret, recordingCredential]) {
     assert.equal(printed.includes(secret), false);
   }
 });
 
 test("redacts every configured recorder secret from captured events and results", async () => {
   const fixture = dependencies();
-  const runnerToken = "runner-token-sensitive";
-  const signingKey = "signing-key-sensitive";
+  const authSecret = "auth-secret-sensitive";
   const recorderEmail = "recorder@example.com";
-  const ephemeralIdentity = "minted-identity-sensitive";
+  const ephemeralSession = "session-cookie-sensitive";
 
   const code = await runDemoRecorder(
     ["--name", "parser-test", "--task", "Add a parser test."],
     {
+      AUTH_SECRET: authSecret,
       DEMO_RECORDER_ACCOUNT_EMAIL: recorderEmail,
       DEMO_RECORDING_CREDENTIAL: credential,
-      DEMO_RUNNER_SIGNING_KEY: signingKey,
-      DEMO_RUNNER_TOKEN: runnerToken,
     },
     {
       ...fixture.dependencies,
@@ -152,7 +149,7 @@ test("redacts every configured recorder secret from captured events and results"
             {
               event: {
                 id: 1,
-                output: `${runnerToken} ${ephemeralIdentity}`,
+                output: `${authSecret} ${ephemeralSession}`,
                 type: "output" as const,
               },
               receivedAt: 100,
@@ -160,21 +157,16 @@ test("redacts every configured recorder secret from captured events and results"
           ],
           result: {
             ...result,
-            output: `${signingKey} ${recorderEmail}`,
+            output: `${authSecret} ${recorderEmail}`,
           },
-          secrets: [ephemeralIdentity],
+          secrets: [ephemeralSession],
         })),
     }
   );
 
   assert.equal(code, 0);
   const written = fixture.writes[0]?.contents ?? "";
-  for (const secret of [
-    runnerToken,
-    signingKey,
-    recorderEmail,
-    ephemeralIdentity,
-  ]) {
+  for (const secret of [authSecret, recorderEmail, ephemeralSession]) {
     assert.equal(written.includes(secret), false);
   }
 });

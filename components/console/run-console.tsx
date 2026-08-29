@@ -20,7 +20,6 @@ import {
   type PaletteItem,
 } from "@/components/console/command-palette";
 import { Composer } from "@/components/console/composer";
-import { ConnectRunner } from "@/components/console/connect-runner";
 import { CreateAgent } from "@/components/console/create-agent";
 import {
   AccountAvatar,
@@ -41,72 +40,21 @@ import {
   type as type_,
   well,
 } from "@/components/console/styles";
+import { RunnerApiError, RunnerClient } from "@/lib/agents/client";
 import {
-  RunnerApiError,
-  RunnerClient,
-  type RunnerConnection,
-} from "@/lib/agents/client";
-import {
-  type ConnectionStatusKind,
-  connectionMessage,
+  type ApplicationRunnerStatusKind,
+  applicationRunnerMessage,
+  applicationRunnerStatusFromError,
 } from "@/lib/agents/connection-status";
 import type { Formation } from "@/lib/agents/formations";
 import { memberName } from "@/lib/agents/formations";
-import { createIdentityMinter } from "@/lib/agents/identity";
-import {
-  fetchHasCredential,
-  provisionConnection,
-} from "@/lib/agents/provision";
+import { fetchHasCredential } from "@/lib/agents/provision";
 import { avatarFor } from "@/lib/avatar";
 import { isTerminal, projectRun } from "@/lib/console/blocks";
 import { formatDuration, glyphFor, spanBetween } from "@/lib/console/format";
 import type { ConsoleRun } from "@/lib/console/types";
 
-const CLOUD_ENDPOINT =
-  process.env.NEXT_PUBLIC_CLOUD_RUNNER_URL ?? "http://127.0.0.1:8787";
-
-const EMPTY_CONNECTION: RunnerConnection = {
-  endpoint: CLOUD_ENDPOINT,
-  token: "",
-};
-
 const TICK_MS = 1000;
-
-/**
- * Where a manually entered connection is kept.
- *
- * Session storage, not local storage: the token is a deployment gate and it
- * should not outlive the tab that was told it.
- */
-const CONNECTION_KEY = "opencoven-runner-cloud";
-
-function loadStoredConnection(): RunnerConnection | null {
-  const stored = window.sessionStorage.getItem(CONNECTION_KEY);
-  if (!stored) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(stored) as Partial<RunnerConnection>;
-    if (
-      typeof parsed.endpoint === "string" &&
-      typeof parsed.token === "string"
-    ) {
-      return { endpoint: parsed.endpoint, token: parsed.token };
-    }
-  } catch {
-    // A malformed entry is not worth keeping and would fail the same way on
-    // every load.
-  }
-  window.sessionStorage.removeItem(CONNECTION_KEY);
-  return null;
-}
-
-/** What to say about a connection state, including the one that is fine. */
-function statusMessage(kind: ConnectionStatusKind): string {
-  return kind === "provisioned"
-    ? "The runner answered and this session is authenticated."
-    : connectionMessage(kind);
-}
 
 /**
  * The word the header pill wears.
@@ -115,13 +63,13 @@ function statusMessage(kind: ConnectionStatusKind): string {
  * protocol identifiers, and `SIGNED_OUT` in a pill is an implementation detail
  * leaking into the one place that is supposed to explain the state.
  */
-const CONNECTION_LABELS: Record<ConnectionStatusKind, string> = {
-  provisioned: "connected",
+const CONNECTION_LABELS: Record<ApplicationRunnerStatusKind, string> = {
+  connected: "connected",
+  connecting: "connecting",
   rate_limited: "rate limited",
   signed_out: "signed out",
   subscription_required: "no subscription",
   unavailable: "unreachable",
-  unconfigured: "not configured",
 };
 
 type View = "analytics" | "composer" | "create" | "settings" | "thread";
@@ -155,10 +103,8 @@ export function RunConsole() {
     ? avatarFor({ id: accountId, image: session.data?.user?.image })
     : null;
 
-  const [connection, setConnection] =
-    useState<RunnerConnection>(EMPTY_CONNECTION);
-  const [cloudStatus, setCloudStatus] =
-    useState<ConnectionStatusKind>("unavailable");
+  const [runnerStatus, setRunnerStatus] =
+    useState<ApplicationRunnerStatusKind>("connecting");
   const [hasCredential, setHasCredential] = useState<boolean | null>(null);
 
   const [agents, setAgents] = useState<AgentDefinition[]>([]);
@@ -176,7 +122,6 @@ export function RunConsole() {
   const [timelineCollapsed, setTimelineCollapsed] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [connectOpen, setConnectOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
@@ -211,11 +156,7 @@ export function RunConsole() {
   const runsRef = useRef<ConsoleRun[]>([]);
   runsRef.current = runs;
 
-  const mintIdentity = useMemo(() => createIdentityMinter(), []);
-  const client = useMemo(
-    () => new RunnerClient(connection, undefined, { mintIdentity }),
-    [connection, mintIdentity]
-  );
+  const client = useMemo(() => new RunnerClient(), []);
 
   const selectedAgent =
     agents.find((agent) => agent.id === selectedAgentId) ?? null;
@@ -225,28 +166,31 @@ export function RunConsole() {
     ? (agents.find((agent) => agent.id === selectedRun.agentId) ?? null)
     : selectedAgent;
 
+  const reportRunnerError = useCallback((error: unknown, fallback: string) => {
+    if (error instanceof RunnerApiError) {
+      const status = applicationRunnerStatusFromError(error);
+      if (status) {
+        setRunnerStatus(status);
+      }
+    }
+    toast.error(error instanceof Error ? error.message : fallback);
+  }, []);
+
   /* ---------------------------------------------------------------- wiring */
 
   useEffect(() => {
     if (session.status === "loading") {
+      setRunnerStatus("connecting");
       return;
     }
 
     if (session.status !== "authenticated") {
-      setCloudStatus("signed_out");
-      setConnection(EMPTY_CONNECTION);
+      setRunnerStatus("signed_out");
       setHasCredential(null);
       return;
     }
 
     let cancelled = false;
-
-    // A connection entered by hand is used until the server answers, so a
-    // deployment with no provisioning still reaches its runner immediately.
-    const stored = loadStoredConnection();
-    if (stored) {
-      setConnection(stored);
-    }
 
     fetchHasCredential()
       .then((has) => {
@@ -256,34 +200,19 @@ export function RunConsole() {
       })
       .catch(() => undefined);
 
-    provisionConnection()
-      .then((status) => {
-        if (cancelled) {
-          return;
-        }
-        setCloudStatus(status.kind);
-        if (status.kind === "provisioned") {
-          setConnection({ endpoint: status.endpoint, token: status.token });
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setCloudStatus("unavailable");
-        }
-      });
-
     return () => {
       cancelled = true;
     };
   }, [session.status]);
 
   const refresh = useCallback(async () => {
-    if (!connection.token) {
+    if (session.status !== "authenticated") {
       setAgents([]);
       return;
     }
     try {
       const next = await client.listAgents();
+      setRunnerStatus("connected");
       setAgents(next);
       setSelectedAgentId((current) =>
         next.some((agent) => agent.id === current)
@@ -323,44 +252,32 @@ export function RunConsole() {
         setStreamingRunId((current) => current ?? live);
       }
     } catch (error) {
-      /**
-       * A refused token with a stored connection means the stored one is
-       * stale — the deployment token rotates, session storage does not, and
-       * the console then presents last week's key on every request while
-       * looking merely "rejected". Dropping the stored connection lets the
-       * server-provisioned one take over on the next provision pass instead
-       * of leaving the operator to guess that a hidden cache is the problem.
-       */
-      if (
-        error instanceof RunnerApiError &&
-        error.status === 401 &&
-        window.sessionStorage.getItem(CONNECTION_KEY)
-      ) {
-        window.sessionStorage.removeItem(CONNECTION_KEY);
-        toast.error(
-          "The saved runner connection was rejected and has been cleared. Reconnecting…"
-        );
-        provisionConnection()
-          .then((status) => {
-            if (status.kind === "provisioned") {
-              setConnection({
-                endpoint: status.endpoint,
-                token: status.token,
-              });
-            }
-          })
-          .catch(() => undefined);
-        return;
-      }
-      toast.error(
-        error instanceof Error ? error.message : "Could not reach the runner."
+      setRunnerStatus(
+        error instanceof RunnerApiError
+          ? (applicationRunnerStatusFromError(error) ?? "unavailable")
+          : "unavailable"
       );
+      setAgents([]);
+      reportRunnerError(error, "Could not reach the runner.");
     }
-  }, [client, connection.token]);
+  }, [client, reportRunnerError, session.status]);
 
   useEffect(() => {
-    refresh().catch(() => undefined);
-  }, [refresh]);
+    if (session.status === "authenticated") {
+      setRunnerStatus("connecting");
+      refresh().catch(() => undefined);
+    }
+  }, [refresh, session.status]);
+
+  useEffect(() => {
+    if (session.status !== "authenticated" || runnerStatus !== "rate_limited") {
+      return;
+    }
+    const timer = setTimeout(() => {
+      refresh().catch(() => undefined);
+    }, 60_000);
+    return () => clearTimeout(timer);
+  }, [refresh, runnerStatus, session.status]);
 
   /** Applies one streamed event to the run it belongs to. */
   const applyEvent = useCallback((runId: string, event: RunEvent) => {
@@ -420,7 +337,7 @@ export function RunConsole() {
     /**
      * A loop, not a single pass retriggered through state.
      *
-     * The worker closes an idle stream after sixty seconds, and the first
+     * The runner closes an idle stream after sixty seconds, and the first
      * version of this effect handled that by re-reading the snapshot and
      * calling `setStreamingRunId(streamingRunId)` — the same value, which
      * React treats as no change, so the effect never re-ran and the stream
@@ -466,7 +383,7 @@ export function RunConsole() {
           return;
         }
 
-        // The worker closes an idle stream as well as a finished one, so the
+        // The runner closes an idle stream as well as a finished one, so the
         // close is not an outcome. Re-read the snapshot and let its status
         // decide whether to reconnect.
         try {
@@ -491,7 +408,7 @@ export function RunConsole() {
           return;
         }
 
-        // A pause before reconnecting, so a stream the worker closes
+        // A pause before reconnecting, so a stream the runner closes
         // immediately cannot turn this loop into a request-per-tick hammer.
         await new Promise((resolve) => {
           setTimeout(resolve, RECONNECT_DELAY_MS);
@@ -510,7 +427,7 @@ export function RunConsole() {
   /**
    * Backfills the transcript of a finished run that was hydrated from the
    * runner's history. Hydration carries only the snapshot; the events still
-   * live on the worker, and for a terminal run its stream replays them all
+   * live on the runner, and for a terminal run its stream replays them all
    * and closes, which makes it a one-shot transcript fetch. Live runs are
    * excluded — the streaming effect above owns those.
    */
@@ -562,11 +479,12 @@ export function RunConsole() {
 
   /* --------------------------------------------------------------- actions */
 
-  const blocked = connection.token
-    ? hasCredential === false
-      ? "No harness credential stored — add one in account settings."
-      : null
-    : statusMessage(cloudStatus);
+  const blocked =
+    runnerStatus === "connected"
+      ? hasCredential === false
+        ? "No harness credential stored — add one in account settings."
+        : null
+      : applicationRunnerMessage(runnerStatus);
 
   const startRun = async () => {
     if (!selectedAgent || blocked) {
@@ -595,9 +513,7 @@ export function RunConsole() {
       setDraft("");
       pinnedRef.current = true;
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "The run could not start."
-      );
+      reportRunnerError(error, "The run could not start.");
     } finally {
       setStarting(false);
     }
@@ -616,9 +532,7 @@ export function RunConsole() {
       );
       toast.success("Run cancelled.");
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not stop the run."
-      );
+      reportRunnerError(error, "Could not stop the run.");
     }
   };
 
@@ -631,9 +545,7 @@ export function RunConsole() {
       setView("composer");
       toast.success(`${created.name} is ready.`);
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Agent creation failed."
-      );
+      reportRunnerError(error, "Agent creation failed.");
     } finally {
       setBusy(false);
     }
@@ -671,13 +583,17 @@ export function RunConsole() {
       toast.success(`${formation.name}: ${created} profiles created.`);
       setView("composer");
     } catch (error) {
-      toast.error(
-        created > 0
-          ? `Created ${created} of ${formation.members.length}.`
-          : error instanceof Error
-            ? error.message
-            : "Could not create the crew."
-      );
+      if (created > 0) {
+        if (error instanceof RunnerApiError) {
+          const status = applicationRunnerStatusFromError(error);
+          if (status) {
+            setRunnerStatus(status);
+          }
+        }
+        toast.error(`Created ${created} of ${formation.members.length}.`);
+      } else {
+        reportRunnerError(error, "Could not create the crew.");
+      }
     } finally {
       setBusy(false);
     }
@@ -688,7 +604,7 @@ export function RunConsole() {
    *
    * The endpoint replaces the whole definition, so the stored one is sent back
    * with only the name changed. Owner, `createdAt` and `lastRunAt` are carried
-   * forward by the worker from stored state rather than from this body, so a
+   * forward by the runner from stored state rather than from this body, so a
    * rename cannot move an agent between tenants or rewrite its history.
    */
   const commitRename = async () => {
@@ -712,9 +628,7 @@ export function RunConsole() {
       );
       toast.success(`Renamed to ${updated.name}.`);
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not rename the agent."
-      );
+      reportRunnerError(error, "Could not rename the agent.");
     } finally {
       setRenaming(false);
     }
@@ -737,9 +651,7 @@ export function RunConsole() {
       setView("composer");
       toast.success(`${selectedAgent.name} was removed.`);
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not remove the agent."
-      );
+      reportRunnerError(error, "Could not remove the agent.");
     } finally {
       setBusy(false);
       setRemoving(false);
@@ -906,9 +818,7 @@ export function RunConsole() {
 
   const agentRuns = runs.filter((run) => run.agentId === selectedAgentId);
 
-  const connectionLabel = connection.token
-    ? CONNECTION_LABELS.provisioned
-    : CONNECTION_LABELS[cloudStatus];
+  const connectionLabel = CONNECTION_LABELS[runnerStatus];
 
   /* ---------------------------------------------------------------- render */
 
@@ -1038,18 +948,18 @@ export function RunConsole() {
           }}
         >
           <button
-            onClick={() => setConnectOpen(true)}
+            disabled
             style={{
               ...pill(
-                connection.token
+                runnerStatus === "connected"
                   ? "success"
-                  : cloudStatus === "unavailable"
+                  : runnerStatus === "unavailable"
                     ? "danger"
                     : "warning"
               ),
-              cursor: "pointer",
+              cursor: "default",
             }}
-            title={statusMessage(cloudStatus)}
+            title={applicationRunnerMessage(runnerStatus)}
             type="button"
           >
             {connectionLabel}
@@ -1577,23 +1487,6 @@ export function RunConsole() {
           />
         ) : null}
 
-        {connectOpen ? (
-          <ConnectRunner
-            connection={connection}
-            onCancel={() => setConnectOpen(false)}
-            onSave={(next) => {
-              window.sessionStorage.setItem(
-                CONNECTION_KEY,
-                JSON.stringify(next)
-              );
-              setConnection(next);
-              setConnectOpen(false);
-              toast.success("Runner connected.");
-            }}
-            status={cloudStatus}
-          />
-        ) : null}
-
         {paletteOpen ? (
           <CommandPalette
             items={paletteItems}
@@ -1708,7 +1601,7 @@ function EmptyConsole({
         <Eyebrow
           style={{ color: "var(--text-muted)", letterSpacing: "0.14em" }}
         >
-          Cloud sandboxes
+          Daytona sandboxes
         </Eyebrow>
         <h1 style={{ ...type_.display, fontSize: 30, margin: "12px 0 10px" }}>
           Autonomous agents, bounded by infrastructure.
@@ -1735,12 +1628,9 @@ function EmptyConsole({
           </Btn>
         </div>
 
-        {/* The boundary, published. One quiet line — every claim in it is
-            load-bearing and true: runs execute in Cloudflare's sandbox
-            containers, the container is the blast radius, and the credential
-            is fetched for one run and redacted from evidence. Naming
-            Cloudflare is deliberate; the isolation is their product, and
-            saying so borrows exactly as much trust as it should. */}
+        {/* The boundary, published. One quiet line explains where execution
+            happens and what remains local without exposing provider details
+            that are not part of the runner contract. */}
         <div
           style={{
             alignItems: "center",
@@ -1765,7 +1655,7 @@ function EmptyConsole({
               font: "400 11px/1.6 var(--font-mono)",
             }}
           >
-            isolated Cloudflare sandbox per run · nothing reaches your machine
+            isolated Daytona sandbox per agent · nothing reaches your machine
           </span>
         </div>
         <details style={{ marginTop: 10 }}>
@@ -1790,10 +1680,10 @@ function EmptyConsole({
               maxWidth: "46ch",
             }}
           >
-            Every run gets its own Cloudflare sandbox container. Filesystem and
-            network end with it. Your harness credential is envelope-encrypted,
-            fetched for the duration of one run, and redacted from the evidence.
-            When the run closes, the receipt is what remains.
+            Every agent runs in its own Daytona sandbox. Filesystem and network
+            access stay inside that provider boundary. Your harness credential
+            is envelope-encrypted, staged only for execution, and redacted from
+            the evidence. When the run closes, the receipt is what remains.
           </p>
         </details>
       </div>

@@ -1,22 +1,36 @@
-import { runnerKeyRingFromEnvironment } from "@/lib/agents/key-ring";
-import { claimsForUser, mintRunnerToken } from "@/lib/agents/runner-token";
+import "server-only";
+
+import { type SubscriberSession, tenantForUser } from "@/lib/session";
 import { isSubscribedAt } from "@/lib/subscription";
 
 const PREWARM_TIMEOUT_MS = 5000;
 
+type PrewarmService = {
+  prewarmMostRecent: (
+    principal: SubscriberSession
+  ) => Promise<Readonly<{ kind: string }>>;
+};
+
+type RunnerModule = {
+  createProductionRunnerService: (session: SubscriberSession) => PrewarmService;
+};
+
+export type PrewarmDependencies = {
+  loadRunner?: () => Promise<RunnerModule>;
+  timeoutMs?: number;
+};
+
+function loadProductionRunner(): Promise<RunnerModule> {
+  return import("@/lib/runner/production");
+}
+
 /**
- * Asks the runner to boot the sandbox of the user's most recently run agent,
- * so a returning subscriber's first mission skips the container cold start.
+ * Starts warming the returning subscriber's most recently used agent.
  *
- * Called from the sign-in path via `after()`, which is why every exit here is
- * silent: warming is an optimization, and an optimization that can fail
- * sign-in — or even slow it — has its priorities inverted. A refused or
- * failed warm costs exactly what not calling this costs: one cold start.
- *
- * Gates itself on the subscription rather than trusting the caller, because
- * the worker will 403 a demo claim anyway and the cheapest refusal is the
- * one that skips the network. This is the app's only server-side call to the
- * worker; everything else goes browser-direct.
+ * The sign-in callback invokes this through Next.js `after()`. Every failure
+ * remains silent because warming is only a latency optimization. The runner
+ * dependency is loaded after subscription gating so importing auth does not
+ * initialize the database, Daytona SDK, or tenant credentials.
  */
 export async function prewarmTenantSandbox(
   user: {
@@ -24,38 +38,36 @@ export async function prewarmTenantSandbox(
     id: string;
     subscribedUntil: Date | null;
   },
-  request: typeof fetch = fetch
+  dependencies: PrewarmDependencies = {}
 ): Promise<void> {
-  try {
-    if (!isSubscribedAt(user, new Date())) {
-      return;
-    }
-    const endpoint = (
-      process.env.CLOUD_RUNNER_URL ?? process.env.NEXT_PUBLIC_CLOUD_RUNNER_URL
-    )?.replace(/\/+$/, "");
-    const controlToken = process.env.AGENT_CONTROL_TOKEN;
-    if (!(endpoint && controlToken)) {
-      return;
-    }
-    const keyRing = await runnerKeyRingFromEnvironment();
+  if (!isSubscribedAt(user, new Date())) {
+    return;
+  }
 
-    const identity = await mintRunnerToken(
-      claimsForUser({
-        authVersion: user.authVersion,
-        id: user.id,
-        type: "subscriber",
-      }),
-      keyRing
-    );
-    await request(`${endpoint}/api/tenant/prewarm`, {
-      headers: {
-        authorization: `Bearer ${identity}`,
-        "x-runner-token": controlToken,
-      },
-      method: "POST",
-      signal: AbortSignal.timeout(PREWARM_TIMEOUT_MS),
+  const timeoutMs = dependencies.timeoutMs ?? PREWARM_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    const session: SubscriberSession = {
+      kind: "subscriber",
+      tenant: tenantForUser(user.id),
+      userId: user.id,
+    };
+    const attempt = (async () => {
+      const runner = await (dependencies.loadRunner ?? loadProductionRunner)();
+      const service = runner.createProductionRunnerService(session);
+      await service.prewarmMostRecent(session);
+    })();
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
     });
+
+    await Promise.race([attempt, timeout]);
   } catch {
     // The next run pays the cold start it would have paid anyway.
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
   }
 }

@@ -18,23 +18,24 @@ const agent = {
   workspace: "/workspace",
 };
 
-test("sends bearer authentication and normalizes the endpoint", async () => {
+test("uses the same-origin API with cookies and no runner bearer headers", async () => {
   let requestedUrl = "";
-  let authorization = "";
+  let requestedCredentials: RequestCredentials | undefined;
+  let requestedHeaders = new Headers();
   const request: typeof fetch = (input, init) => {
     requestedUrl = String(input);
-    authorization = new Headers(init?.headers).get("authorization") ?? "";
+    requestedCredentials = init?.credentials;
+    requestedHeaders = new Headers(init?.headers);
     return Promise.resolve(Response.json({ agents: [agent] }));
   };
-  const client = new RunnerClient(
-    { endpoint: "https://runner.example.com/", token: "secret" },
-    request
-  );
+  const client = new RunnerClient(request);
 
   const agents = await client.listAgents();
 
-  assert.equal(requestedUrl, "https://runner.example.com/api/agents");
-  assert.equal(authorization, "Bearer secret");
+  assert.equal(requestedUrl, "/api/agents");
+  assert.equal(requestedCredentials, "same-origin");
+  assert.equal(requestedHeaders.get("authorization"), null);
+  assert.equal(requestedHeaders.get("x-runner-token"), null);
   assert.equal(agents[0]?.name, "Cody");
 });
 
@@ -46,10 +47,7 @@ test("surfaces structured runner errors", async () => {
         { status: 401 }
       )
     );
-  const client = new RunnerClient(
-    { endpoint: "https://runner.example.com", token: "wrong" },
-    request
-  );
+  const client = new RunnerClient(request);
 
   await assert.rejects(
     client.listAgents(),
@@ -90,9 +88,8 @@ function makeClient(
 ) {
   const calls: string[] = [];
   const instance = new RunnerClient(
-    { endpoint: "https://runner.test", token: "t" },
     ((url: string, init?: RequestInit) => {
-      calls.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
+      calls.push(`${init?.method ?? "GET"} ${url}`);
       return Promise.resolve(handler(url, init));
     }) as unknown as typeof globalThis.fetch,
     { pollIntervalMs: pollIntervalMs ?? 0 }
@@ -324,33 +321,12 @@ test("a run starts without crypto.randomUUID", async () => {
   }
 });
 
-test("with an identity minter, the two tokens travel on separate headers", async () => {
-  // Identity and authorization are different questions. The runner token
-  // proves the caller may reach the deployment; the minted claim says which
-  // tenant they are. Collapsing them onto one header is what let every caller
-  // share a tenant.
-  let seen = new Headers();
-  const request: typeof globalThis.fetch = (_input, init) => {
-    seen = new Headers(init?.headers);
-    return Promise.resolve(Response.json({ agents: [] }));
-  };
-
-  const client = new RunnerClient(
-    { endpoint: "https://runner.test", token: "deployment-gate" },
-    request,
-    { mintIdentity: () => Promise.resolve("minted-identity") }
-  );
-  await client.listAgents();
-
-  assert.equal(seen.get("authorization"), "Bearer minted-identity");
-  assert.equal(seen.get("x-runner-token"), "deployment-gate");
-});
-
-test("a cloud run mints identity for its exact agent, harness, and operation", async () => {
+test("a run keeps its operation id without creating runner identity headers", async () => {
   let body: { operationId?: string } = {};
-  let scope: unknown;
+  let headers = new Headers();
   const request: typeof globalThis.fetch = (_input, init) => {
     body = JSON.parse(String(init?.body));
+    headers = new Headers(init?.headers);
     return Promise.resolve(
       json(
         {
@@ -361,42 +337,13 @@ test("a cloud run mints identity for its exact agent, harness, and operation", a
       )
     );
   };
-  const client = new RunnerClient(
-    { endpoint: "https://runner.test", token: "deployment-gate" },
-    request,
-    {
-      mintIdentity: (run) => {
-        scope = run;
-        return Promise.resolve("minted-identity");
-      },
-    }
-  );
+  const client = new RunnerClient(request);
 
   await client.startRun(agent.id, "Fix the tests.", {
     harnessId: agent.runtime,
   });
 
-  assert.deepEqual(scope, {
-    agentId: agent.id,
-    harnessId: agent.runtime,
-    operationId: body.operationId,
-  });
-});
-
-test("without a minter the single token stays on authorization", async () => {
-  // The local runner has no tenancy and must keep working unchanged.
-  let seen = new Headers();
-  const request: typeof globalThis.fetch = (_input, init) => {
-    seen = new Headers(init?.headers);
-    return Promise.resolve(Response.json({ agents: [] }));
-  };
-
-  const client = new RunnerClient(
-    { endpoint: "https://local.test", token: "local-token" },
-    request
-  );
-  await client.listAgents();
-
-  assert.equal(seen.get("authorization"), "Bearer local-token");
-  assert.equal(seen.get("x-runner-token"), null);
+  assert.match(body.operationId ?? "", /^[0-9a-f-]{36}$/);
+  assert.equal(headers.get("authorization"), null);
+  assert.equal(headers.get("x-runner-token"), null);
 });

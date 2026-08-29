@@ -6,7 +6,6 @@ import {
   type CreateAgentInput,
   okEnvelopeSchema,
   type RunEvent,
-  type RunnerRunScope,
   type RunResult,
   type RunSnapshot,
   runEnvelopeSchema,
@@ -17,23 +16,10 @@ import {
   runSnapshotToResult,
 } from "@opencoven/agent-contracts";
 
-/** How often a queued cloud run is re-read while waiting for it to finish. */
+/** How often a queued run is re-read while waiting for it to finish. */
 const RUN_POLL_INTERVAL_MS = 1000;
 
 export type RunnerClientOptions = {
-  /**
-   * Supplies the identity token for the cloud runner.
-   *
-   * When present, `connection.token` stops being identity and becomes only the
-   * deployment gate: it travels as `X-Runner-Token` and proves the caller may
-   * reach the worker, while `Authorization` carries a signed claim naming the
-   * tenant. The two cannot share a header, and identity belongs in the
-   * standard one.
-   *
-   * Absent for the local runner, which has no tenancy and still authenticates
-   * with a single token.
-   */
-  mintIdentity?: (run?: RunnerRunScope) => Promise<string>;
   /** Overridable so tests do not spend real seconds asleep. */
   pollIntervalMs?: number;
 };
@@ -74,11 +60,6 @@ function operationId(): string {
   );
 }
 
-export interface RunnerConnection {
-  endpoint: string;
-  token: string;
-}
-
 export class RunnerApiError extends Error {
   readonly code: string;
   readonly status: number;
@@ -94,14 +75,12 @@ export class RunnerApiError extends Error {
 type Fetch = typeof globalThis.fetch;
 
 /**
- * The two backends report errors differently and this client talks to both.
+ * Runner implementations have historically reported errors in two shapes.
  *
- * The cloud runner answers the contract envelope,
+ * Agent Runner v1 answers the contract envelope,
  * `{ apiVersion, error: { code, message, retryable }, requestId }`, while the
- * local runner still answers the older flat `{ code, error }`. Reading only one
- * of them would not fail loudly — it would quietly degrade every error from the
- * other backend to "Runner request failed (400)", losing `already_running`,
- * `harness_unsupported` and the rest.
+ * older synchronous runner answered `{ code, error }`. Reading only one would
+ * quietly degrade structured errors during compatibility windows.
  *
  * This is a deliberate stopgap. It exists because the local runner has not
  * moved to the async protocol yet; when it does, the flat branch goes.
@@ -153,41 +132,15 @@ function readSseFrame(frame: string): RunEvent | null {
 }
 
 export class RunnerClient {
-  private readonly connection: RunnerConnection;
-  private readonly endpoint: string;
   private readonly request: Fetch;
   private readonly pollIntervalMs: number;
-  private readonly mintIdentity?: (run?: RunnerRunScope) => Promise<string>;
 
   constructor(
-    connection: RunnerConnection,
     request: Fetch = globalThis.fetch,
     options: RunnerClientOptions = {}
   ) {
-    this.connection = connection;
-    this.endpoint = connection.endpoint.replace(/\/+$/, "");
     this.request = request;
     this.pollIntervalMs = options.pollIntervalMs ?? RUN_POLL_INTERVAL_MS;
-    this.mintIdentity = options.mintIdentity;
-  }
-
-  /**
-   * Builds the auth headers for one request.
-   *
-   * With an identity minter the two concerns split across two headers; without
-   * one the single token stays on `Authorization`, which is what the local
-   * runner still expects.
-   */
-  private async authHeaders(
-    run?: RunnerRunScope
-  ): Promise<Record<string, string>> {
-    if (!this.mintIdentity) {
-      return { authorization: `Bearer ${this.connection.token}` };
-    }
-    return {
-      authorization: `Bearer ${await this.mintIdentity(run)}`,
-      "x-runner-token": this.connection.token,
-    };
   }
 
   async listAgents(signal?: AbortSignal): Promise<AgentDefinition[]> {
@@ -198,7 +151,7 @@ export class RunnerClient {
   /**
    * Replaces an agent's definition.
    *
-   * The worker carries `owner`, `createdAt` and `lastRunAt` forward from the
+   * The runner carries `owner`, `createdAt` and `lastRunAt` forward from the
    * stored definition, so a caller cannot move an agent between tenants or
    * rewrite its history by sending different values.
    */
@@ -225,7 +178,7 @@ export class RunnerClient {
   /**
    * Runs a mission and resolves once it has finished, on either backend.
    *
-   * The local runner answers 200 with a finished `RunResult`. The cloud runner
+   * A synchronous runner answers 200 with a finished `RunResult`. Agent Runner
    * answers 202 with a queued `RunSnapshot` and executes in the background, so
    * this follows the run to completion and projects it onto the same shape.
    * Callers see one method with one return type and do not have to know which
@@ -240,14 +193,12 @@ export class RunnerClient {
     const response = await this.fetch(
       `/api/agents/${encodeURIComponent(agentId)}/runs`,
       {
-        // An operation id makes the start idempotent on the cloud runner: a
-        // retried POST resolves to the same run instead of starting a second.
-        // The local runner ignores the extra field.
+        // An operation id makes the start idempotent: a retried POST resolves
+        // to the same run instead of starting a second.
         body: JSON.stringify({ operationId: currentOperationId, task }),
         method: "POST",
         signal: options.signal,
-      },
-      this.runIdentityScope(agentId, currentOperationId, options.harnessId)
+      }
     );
     const body = await response.json();
 
@@ -323,7 +274,7 @@ export class RunnerClient {
   async startRun(
     agentId: string,
     task: string,
-    options: { harnessId?: string } = {}
+    _options: { harnessId?: string } = {}
   ): Promise<RunSnapshot> {
     const currentOperationId = operationId();
     const response = await this.fetch(
@@ -331,8 +282,7 @@ export class RunnerClient {
       {
         body: JSON.stringify({ operationId: currentOperationId, task }),
         method: "POST",
-      },
-      this.runIdentityScope(agentId, currentOperationId, options.harnessId)
+      }
     );
     const body = await response.json();
 
@@ -378,10 +328,10 @@ export class RunnerClient {
   /**
    * Follows a run's event stream, calling back for each event in order.
    *
-   * Read with `fetch` rather than `EventSource` because the runner authenticates
-   * every request with two headers and `EventSource` can set none of them.
+   * Read with `fetch` rather than `EventSource` so resume cursors, aborts, and
+   * structured non-OK responses use the same transport as every other request.
    *
-   * Resolves when the stream closes. The worker closes it on a terminal run and
+   * Resolves when the stream closes. The runner closes it on a terminal run and
    * also on an idle timeout, so a caller that wants to be sure re-reads the
    * snapshot afterwards instead of treating the close as an outcome.
    */
@@ -445,7 +395,7 @@ export class RunnerClient {
     }
   }
 
-  /** Cancels a run in flight. Cloud runner only; the local runner has no such route. */
+  /** Cancels a run in flight. */
   async stopRun(runId: string): Promise<RunSnapshot> {
     const response = await this.fetch(
       `/api/runs/${encodeURIComponent(runId)}/stop`,
@@ -462,53 +412,12 @@ export class RunnerClient {
     okEnvelopeSchema.parse(await response.json());
   }
 
-  private runIdentityScope(
-    agentId: string,
-    currentOperationId: string,
-    harnessId: string | undefined
-  ): RunnerRunScope | undefined {
-    if (!this.mintIdentity) {
-      return undefined;
-    }
-    if (!harnessId) {
-      throw new RunnerApiError(
-        "A harness is required to authorize a cloud run.",
-        "missing_harness",
-        0
-      );
-    }
-    return {
-      agentId,
-      harnessId,
-      operationId: currentOperationId,
-    };
-  }
-
-  private async fetch(
-    path: string,
-    init: RequestInit = {},
-    run?: RunnerRunScope
-  ): Promise<Response> {
-    if (!this.endpoint) {
-      throw new RunnerApiError(
-        "Runner endpoint is required.",
-        "missing_endpoint",
-        0
-      );
-    }
-    if (!this.connection.token) {
-      throw new RunnerApiError(
-        "Runner access token is required.",
-        "missing_token",
-        0
-      );
-    }
-
-    const response = await this.request(`${this.endpoint}${path}`, {
+  private async fetch(path: string, init: RequestInit = {}): Promise<Response> {
+    const response = await this.request(path, {
       ...init,
+      credentials: "same-origin",
       headers: {
         accept: "application/json",
-        ...(await this.authHeaders(run)),
         ...(init.body ? { "content-type": "application/json" } : {}),
         ...init.headers,
       },

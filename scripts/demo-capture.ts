@@ -2,23 +2,18 @@ import {
   agentEnvelopeSchema,
   agentIdSchema,
   agentsEnvelopeSchema,
-  base64UrlDecode,
   createAgentInputSchema,
-  KEY_ID_PATTERN,
   okEnvelopeSchema,
   type RunEvent,
-  type RunnerClaims,
   type RunResult,
   runErrorEnvelopeSchema,
   runEventSchema,
-  runnerClaimsSchema,
   runSnapshotEnvelopeSchema,
   runSnapshotToResult,
   sanitizeEvidenceText,
   startRunInputSchema,
 } from "@opencoven/agent-contracts";
-import type { RunnerKeyRing } from "@/lib/agents/key-ring";
-import { claimsForUser, mintRunnerToken } from "@/lib/agents/runner-token";
+import { encode } from "next-auth/jwt";
 import type { ArrivedEvent } from "@/lib/demo/offsets";
 import { DEMO_REPOSITORY } from "@/lib/demo/recordable";
 import { demoRecordingSecrets } from "@/lib/demo/recording-secrets";
@@ -32,7 +27,6 @@ const SSE_RETRY_MAX_MS = 4000;
 const DEMO_REPOSITORY_URL = "https://github.com/OpenCoven/demo-workspace.git";
 const DEMO_WORKSPACE = "/workspace";
 const DEMO_REPOSITORY_WORKSPACE = "/workspace/repo";
-const recorderClaimsSchema = runnerClaimsSchema.omit({ exp: true, kid: true });
 
 type Environment = Readonly<Record<string, string | undefined>>;
 type FetchLike = (
@@ -46,11 +40,9 @@ type FetchRunnerOptions = {
 
 export type CaptureEnvironment = {
   accountEmail: string;
-  runnerToken: string;
-  runnerUrl: string;
+  appOrigin: string;
+  authSecret: string;
   secrets: string[];
-  signingKeyId: string;
-  signingKey: string;
   timeoutMs: number;
 };
 
@@ -66,15 +58,9 @@ export type CapturedRun = {
 };
 
 export type CaptureDependencies = {
+  createSessionCookie?: (input: RecorderSessionInput) => Promise<string>;
   environment?: Environment;
-  findRecorderUser?: (email: string) => Promise<{
-    authVersion: number;
-    email: string;
-    emailVerified: boolean;
-    id: string;
-    subscribedUntil: Date | null;
-  } | null>;
-  mintIdentity?: IdentityMinter;
+  findRecorderUser?: (email: string) => Promise<RecorderUser | null>;
   now?: () => number;
   randomUUID?: () => string;
   request?: FetchLike;
@@ -87,17 +73,25 @@ async function findRecorderUser(email: string) {
 }
 
 type RunnerConnection = {
-  identityToken: () => Promise<string>;
+  appOrigin: string;
+  cookieName: string;
+  cookieValue: string;
   request: FetchLike;
-  runnerToken: string;
-  runnerUrl: string;
   secrets: string[];
 };
 
-type IdentityMinter = (
-  claims: Omit<RunnerClaims, "exp" | "kid">,
-  signingKey?: Pick<RunnerKeyRing, "current">
-) => Promise<string>;
+type RecorderUser = {
+  authVersion: number;
+  email: string;
+  emailVerified: boolean;
+  id: string;
+  subscribedUntil: Date | null;
+};
+
+export type RecorderSessionInput = Pick<
+  RecorderUser,
+  "authVersion" | "email" | "id" | "subscribedUntil"
+>;
 
 class RetryableSseError extends Error {
   readonly terminalObserved: boolean;
@@ -134,69 +128,25 @@ function nonblank(value: string | undefined): value is string {
   return Boolean(value?.trim());
 }
 
-async function currentSigner(
-  signingKey: string,
-  signingKeyId: string
-): Promise<Pick<RunnerKeyRing, "current">> {
-  const privateKey = await crypto.subtle.importKey(
-    "pkcs8",
-    new Uint8Array(base64UrlDecode(signingKey)),
-    { name: "Ed25519" },
-    true,
-    ["sign"]
-  );
-  const privateJwk = await crypto.subtle.exportKey("jwk", privateKey);
-  if (!(privateJwk.crv && privateJwk.kty && privateJwk.x)) {
-    throw new Error("Demo runner signing key has no public component.");
-  }
-  const publicKey = await crypto.subtle.importKey(
-    "jwk",
-    { crv: privateJwk.crv, kty: privateJwk.kty, x: privateJwk.x },
-    { name: "Ed25519" },
-    false,
-    ["verify"]
-  );
-  return {
-    current: {
-      id: signingKeyId,
-      privateKey,
-      publicKey,
-    },
-  };
-}
-
 export function readCaptureEnvironment(
   environment: Environment
 ): CaptureEnvironment {
-  const runnerUrl =
-    environment.DEMO_RUNNER_URL ?? environment.NEXT_PUBLIC_CLOUD_RUNNER_URL;
-  const runnerToken = environment.DEMO_RUNNER_TOKEN;
-  const signingKey = environment.DEMO_RUNNER_SIGNING_KEY;
-  const signingKeyId = environment.DEMO_RUNNER_SIGNING_KEY_ID;
+  const appOrigin = environment.APP_ORIGIN;
+  const authSecret = environment.AUTH_SECRET;
   const accountEmail = environment.DEMO_RECORDER_ACCOUNT_EMAIL;
   const missing: string[] = [];
-  if (!nonblank(runnerUrl)) {
-    missing.push("DEMO_RUNNER_URL or NEXT_PUBLIC_CLOUD_RUNNER_URL");
+  if (!nonblank(appOrigin)) {
+    missing.push("APP_ORIGIN");
   }
-  if (!nonblank(runnerToken)) {
-    missing.push("DEMO_RUNNER_TOKEN");
-  }
-  if (!nonblank(signingKey)) {
-    missing.push("DEMO_RUNNER_SIGNING_KEY");
-  }
-  if (!nonblank(signingKeyId)) {
-    missing.push("DEMO_RUNNER_SIGNING_KEY_ID");
-  } else if (!KEY_ID_PATTERN.test(signingKeyId)) {
-    throw new Error("DEMO_RUNNER_SIGNING_KEY_ID must be a valid key id.");
+  if (!nonblank(authSecret)) {
+    missing.push("AUTH_SECRET");
   }
   if (!nonblank(accountEmail)) {
     missing.push("DEMO_RECORDER_ACCOUNT_EMAIL");
   }
   if (
-    !nonblank(runnerUrl) ||
-    !nonblank(runnerToken) ||
-    !nonblank(signingKey) ||
-    !nonblank(signingKeyId) ||
+    !nonblank(appOrigin) ||
+    !nonblank(authSecret) ||
     !nonblank(accountEmail)
   ) {
     throw new Error(
@@ -215,15 +165,40 @@ export function readCaptureEnvironment(
     );
   }
 
+  let normalizedOrigin: string;
+  try {
+    normalizedOrigin = new URL(appOrigin.trim()).origin;
+  } catch (error) {
+    throw new Error("APP_ORIGIN must be an absolute application origin.", {
+      cause: error,
+    });
+  }
+
   return {
     accountEmail: accountEmail.trim(),
-    runnerToken,
-    runnerUrl: runnerUrl.trim().replace(/\/+$/, ""),
-    secrets: demoRecordingSecrets(environment),
-    signingKey,
-    signingKeyId: signingKeyId.trim(),
+    appOrigin: normalizedOrigin,
+    authSecret,
+    secrets: [...new Set([...demoRecordingSecrets(environment), authSecret])],
     timeoutMs,
   };
+}
+
+function createRecorderSessionCookie(
+  input: RecorderSessionInput,
+  authSecret: string,
+  cookieName: string
+): Promise<string> {
+  return encode({
+    salt: cookieName,
+    secret: authSecret,
+    token: {
+      authVersion: input.authVersion,
+      email: input.email,
+      id: input.id,
+      subscribedUntil: input.subscribedUntil?.toISOString() ?? null,
+      type: "subscriber",
+    },
+  });
 }
 
 function abortError(signal: AbortSignal): Error {
@@ -294,27 +269,15 @@ async function fetchRunner(
   options: FetchRunnerOptions = {}
 ): Promise<Response> {
   const method = init.method ?? "GET";
-  let identityToken: string;
-  try {
-    identityToken = await connection.identityToken();
-  } catch (error) {
-    throw new Error(
-      `Runner identity could not be minted for ${method} ${path}.`,
-      { cause: error }
-    );
-  }
-  if (nonblank(identityToken) && !connection.secrets.includes(identityToken)) {
-    connection.secrets.push(identityToken);
-  }
 
   let response: Response;
   try {
-    response = await connection.request(`${connection.runnerUrl}${path}`, {
+    response = await connection.request(`${connection.appOrigin}${path}`, {
       ...init,
+      credentials: "same-origin",
       headers: {
         accept: "application/json",
-        authorization: `Bearer ${identityToken}`,
-        "x-runner-token": connection.runnerToken,
+        cookie: `${connection.cookieName}=${connection.cookieValue}`,
         ...(init.body ? { "content-type": "application/json" } : {}),
         ...init.headers,
       },
@@ -790,29 +753,30 @@ export async function captureRun(
       "Demo recording requires an active subscription on the recorder account."
     );
   }
-  const identityClaims = recorderClaimsSchema.parse(
-    claimsForUser({
-      authVersion: recorderUser.authVersion,
-      id: recorderUser.id,
-      type: recorderType,
-    })
-  );
-  const mintIdentity =
-    dependencies.mintIdentity ??
-    ((claims, providedSigner) => {
-      if (!providedSigner) {
-        throw new Error("Runner signer is unavailable.");
-      }
-      return mintRunnerToken(claims, providedSigner);
-    });
-  const signer = dependencies.mintIdentity
-    ? undefined
-    : await currentSigner(configuration.signingKey, configuration.signingKeyId);
+  const cookieName = configuration.appOrigin.startsWith("https:")
+    ? "__Secure-authjs.session-token"
+    : "authjs.session-token";
+  const sessionInput: RecorderSessionInput = {
+    authVersion: recorderUser.authVersion,
+    email: recorderUser.email,
+    id: recorderUser.id,
+    subscribedUntil: recorderUser.subscribedUntil,
+  };
+  const cookieValue = dependencies.createSessionCookie
+    ? await dependencies.createSessionCookie(sessionInput)
+    : await createRecorderSessionCookie(
+        sessionInput,
+        configuration.authSecret,
+        cookieName
+      );
+  if (!configuration.secrets.includes(cookieValue)) {
+    configuration.secrets.push(cookieValue);
+  }
   const connection: RunnerConnection = {
-    identityToken: () => mintIdentity(identityClaims, signer),
+    appOrigin: configuration.appOrigin,
+    cookieName,
+    cookieValue,
     request: dependencies.request ?? globalThis.fetch,
-    runnerToken: configuration.runnerToken,
-    runnerUrl: configuration.runnerUrl,
     secrets: configuration.secrets,
   };
   const now = dependencies.now ?? Date.now;

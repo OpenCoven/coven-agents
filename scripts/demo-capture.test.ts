@@ -4,7 +4,6 @@ import { inspect } from "node:util";
 import {
   AGENT_RUNNER_API_VERSION,
   type RunEvent,
-  type RunnerClaims,
   type RunSnapshot,
 } from "@opencoven/agent-contracts";
 import {
@@ -17,17 +16,16 @@ const AGENT_ID = "53af1a29-4e98-43d6-ac5b-3b9dcba5e730";
 const RUN_ID = "3a3f2c72-9b1b-47f7-8c83-28d5f94bf4ce";
 const OPERATION_ID = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
 const CREATED_AT = "2026-08-24T19:03:49.798Z";
-const RUNNER_TOKEN = "runner-control-sensitive";
-const IDENTITY_TOKEN = "runner-identity-sensitive";
 const RECORDING_CREDENTIAL = "recording-credential-sensitive";
-const SIGNING_KEY = "recorder-signing-key-sensitive";
+const AUTH_SECRET = "application-auth-secret-sensitive";
+const SESSION_COOKIE = "session-cookie-sensitive";
+const APP_ORIGIN = "https://app.example";
 const RECORDER_EMAIL = "Recorder@example.com";
 const RECORDER_ID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 const CONFIGURED_SECRETS = [
-  RUNNER_TOKEN,
-  IDENTITY_TOKEN,
+  AUTH_SECRET,
+  SESSION_COOKIE,
   RECORDING_CREDENTIAL,
-  SIGNING_KEY,
   RECORDER_EMAIL,
 ];
 
@@ -147,12 +145,10 @@ function recordingEnvironment(
   overrides: Record<string, string | undefined> = {}
 ) {
   return {
+    APP_ORIGIN,
+    AUTH_SECRET,
     DEMO_RECORDER_ACCOUNT_EMAIL: RECORDER_EMAIL,
     DEMO_RECORDING_CREDENTIAL: RECORDING_CREDENTIAL,
-    DEMO_RUNNER_SIGNING_KEY: SIGNING_KEY,
-    DEMO_RUNNER_SIGNING_KEY_ID: "recorder-current",
-    DEMO_RUNNER_TOKEN: RUNNER_TOKEN,
-    DEMO_RUNNER_URL: "https://runner.example",
     ...overrides,
   };
 }
@@ -261,39 +257,33 @@ test("rejects every SSE data payload that fails the run event schema", async () 
   );
 });
 
-test("fails closed with the exact missing runner variable names", () => {
+test("fails closed with the exact missing application session variables", () => {
   assert.throws(
     () => readCaptureEnvironment({}),
     (error: Error) => {
-      assert.match(
-        error.message,
-        /DEMO_RUNNER_URL.*NEXT_PUBLIC_CLOUD_RUNNER_URL/
-      );
-      assert.match(error.message, /DEMO_RUNNER_TOKEN/);
-      assert.match(error.message, /DEMO_RUNNER_SIGNING_KEY/);
-      assert.match(error.message, /DEMO_RUNNER_SIGNING_KEY_ID/);
+      assert.match(error.message, /APP_ORIGIN/);
+      assert.match(error.message, /AUTH_SECRET/);
       assert.match(error.message, /DEMO_RECORDER_ACCOUNT_EMAIL/);
+      assert.doesNotMatch(error.message, /DEMO_RUNNER|CLOUD_RUNNER/);
       return true;
     }
   );
 });
 
-test("uses the public runner URL fallback and a finite default timeout", () => {
+test("uses the deployed application origin and a finite default timeout", () => {
   const configuration = readCaptureEnvironment({
+    APP_ORIGIN: "https://app.example/",
+    AUTH_SECRET,
     DEMO_RECORDER_ACCOUNT_EMAIL: RECORDER_EMAIL,
-    DEMO_RUNNER_SIGNING_KEY: SIGNING_KEY,
-    DEMO_RUNNER_SIGNING_KEY_ID: "recorder-current",
-    DEMO_RUNNER_TOKEN: "gate",
-    NEXT_PUBLIC_CLOUD_RUNNER_URL: "https://runner.example/",
   });
 
-  assert.equal(configuration.runnerUrl, "https://runner.example");
+  assert.equal(configuration.appOrigin, APP_ORIGIN);
   assert.equal(configuration.accountEmail, RECORDER_EMAIL);
   assert.equal(configuration.timeoutMs, 15 * 60 * 1000);
 });
 
-test("recorder identity comes from the verified account authority", async () => {
-  const minted: Omit<RunnerClaims, "exp" | "kid">[] = [];
+test("recorder session cookies come from the verified account authority", async () => {
+  let sessionInput: unknown;
 
   await assert.rejects(
     () =>
@@ -301,6 +291,10 @@ test("recorder identity comes from the verified account authority", async () => 
         { repository: "OpenCoven/demo-workspace", task: "Add a parser test." },
         {
           ...recorderLookup,
+          createSessionCookie: (input) => {
+            sessionInput = input;
+            return Promise.resolve(SESSION_COOKIE);
+          },
           environment: recordingEnvironment(),
           findRecorderUser: async () => ({
             authVersion: 12,
@@ -309,10 +303,6 @@ test("recorder identity comes from the verified account authority", async () => 
             id: RECORDER_ID,
             subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
           }),
-          mintIdentity: (claims) => {
-            minted.push(claims);
-            return Promise.resolve(IDENTITY_TOKEN);
-          },
           randomUUID: () => OPERATION_ID,
           request: async () => Response.json({}, { status: 500 }),
         }
@@ -320,11 +310,11 @@ test("recorder identity comes from the verified account authority", async () => 
     /runner request/i
   );
 
-  assert.deepEqual(minted[0], {
+  assert.deepEqual(sessionInput, {
     authVersion: 12,
-    plan: "subscriber",
-    sub: RECORDER_ID,
-    tenant: "u_6ba7b8109dad11d180b400c04fd430c8",
+    email: RECORDER_EMAIL.toLowerCase(),
+    id: RECORDER_ID,
+    subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
   });
 });
 
@@ -345,7 +335,6 @@ test("recorder refuses an account that is not currently subscribed", async () =>
             id: RECORDER_ID,
             subscribedUntil: null,
           }),
-          mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           request: () => {
             requests += 1;
             return Promise.resolve(Response.json({}));
@@ -358,26 +347,23 @@ test("recorder refuses an account that is not currently subscribed", async () =>
   assert.equal(requests, 0);
 });
 
-test("mints a fresh validated subscriber identity for every request including cleanup", async () => {
+test("sends one authenticated same-origin session cookie on every request including cleanup", async () => {
   const terminalStatus: RunEvent = {
     id: 2,
     status: "completed",
     type: "status",
   };
-  const authorizations: string[] = [];
-  const mintedClaims: Omit<RunnerClaims, "exp" | "kid">[] = [];
-  const signingKeys: (
-    | Pick<import("@/lib/agents/key-ring").RunnerKeyRing, "current">
-    | undefined
-  )[] = [];
-  let mintCount = 0;
+  const calls: { credentials?: RequestCredentials; headers: Headers }[] = [];
   // biome-ignore lint/suspicious/useAwait: injected fetch matches the native asynchronous fetch contract.
   const request = async (
     input: string | URL | Request,
     init: RequestInit = {}
   ): Promise<Response> => {
     const path = new URL(String(input)).pathname;
-    authorizations.push(new Headers(init.headers).get("authorization") ?? "");
+    calls.push({
+      credentials: init.credentials,
+      headers: new Headers(init.headers),
+    });
     if (path === "/api/agents" && init.method === "POST") {
       return agentResponse();
     }
@@ -409,10 +395,8 @@ test("mints a fresh validated subscriber identity for every request including cl
     },
     {
       ...recorderLookup,
-      environment: {
-        ...recordingEnvironment(),
-        DEMO_RUNNER_IDENTITY_TOKEN: "legacy-static-token",
-      },
+      createSessionCookie: () => Promise.resolve(SESSION_COOKIE),
+      environment: recordingEnvironment(),
       findRecorderUser: async () => ({
         authVersion: 7,
         email: RECORDER_EMAIL.toLowerCase(),
@@ -420,48 +404,31 @@ test("mints a fresh validated subscriber identity for every request including cl
         id: RECORDER_ID,
         subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
       }),
-      mintIdentity: (claims, signingKey) => {
-        mintedClaims.push(claims);
-        signingKeys.push(signingKey);
-        mintCount += 1;
-        return Promise.resolve(`renewed-${mintCount}`);
-      },
       randomUUID: () => OPERATION_ID,
       request,
     }
   );
 
-  assert.equal(mintCount, 5);
-  assert.deepEqual(authorizations, [
-    "Bearer renewed-1",
-    "Bearer renewed-2",
-    "Bearer renewed-3",
-    "Bearer renewed-4",
-    "Bearer renewed-5",
-  ]);
-  assert.deepEqual(
-    mintedClaims,
-    Array.from({ length: 5 }, () => ({
-      authVersion: 7,
-      plan: "subscriber",
-      sub: RECORDER_ID,
-      tenant: "u_6ba7b8109dad11d180b400c04fd430c8",
-    }))
-  );
-  assert.deepEqual(
-    signingKeys.map((signer) => signer?.current.id),
-    Array.from({ length: 5 }, () => undefined)
-  );
+  assert.equal(calls.length, 5);
+  for (const call of calls) {
+    assert.equal(call.credentials, "same-origin");
+    assert.match(
+      call.headers.get("cookie") ?? "",
+      /^__Secure-authjs\.session-token=session-cookie-sensitive$/
+    );
+    assert.equal(call.headers.get("authorization"), null);
+    assert.equal(call.headers.get("x-runner-token"), null);
+  }
 });
 
-test("an initial runner error cannot expose configured tokens or credentials", async () => {
+test("an initial runner error cannot expose configured session secrets or credentials", async () => {
   const request = async (): Promise<Response> =>
     Response.json(
       {
         apiVersion: AGENT_RUNNER_API_VERSION,
         error: {
           code: "upstream_rejected",
-          message: `${RUNNER_TOKEN} ${IDENTITY_TOKEN} ${RECORDING_CREDENTIAL}`,
+          message: `${AUTH_SECRET} ${SESSION_COOKIE} ${RECORDING_CREDENTIAL}`,
           retryable: false,
         },
         requestId: RUN_ID,
@@ -478,8 +445,8 @@ test("an initial runner error cannot expose configured tokens or credentials", a
         },
         {
           ...recorderLookup,
+          createSessionCookie: () => Promise.resolve(SESSION_COOKIE),
           environment: recordingEnvironment(),
-          mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
           request,
         }
@@ -547,7 +514,6 @@ async function captureAfterRecoverableStream(
     {
       ...recorderLookup,
       environment: recordingEnvironment(),
-      mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
       randomUUID: () => OPERATION_ID,
       request,
       sleep: (milliseconds) => {
@@ -664,7 +630,6 @@ test("a fully framed malformed SSE event is a hard failure", async () => {
         {
           ...recorderLookup,
           environment: recordingEnvironment(),
-          mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
           request,
           sleep: (milliseconds) => {
@@ -717,7 +682,6 @@ test("bounds consecutive SSE recovery attempts with exponential backoff", async 
         {
           ...recorderLookup,
           environment: recordingEnvironment(),
-          mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
           request,
           sleep: (milliseconds) => {
@@ -780,8 +744,7 @@ async function captureTerminalStatus(status: "cancelled" | "failed") {
     },
     {
       ...recorderLookup,
-      environment: recordingEnvironment({ DEMO_RUNNER_TOKEN: "gate" }),
-      mintIdentity: () => Promise.resolve("identity"),
+      environment: recordingEnvironment(),
       randomUUID: () => OPERATION_ID,
       request,
     }
@@ -909,10 +872,7 @@ test("reconnects with a cursor, deduplicates arrivals, and stops at terminal com
       ...recorderLookup,
       environment: recordingEnvironment({
         DEMO_RECORDING_CREDENTIAL: "tenant-harness-secret",
-        DEMO_RUNNER_TOKEN: "gate",
-        DEMO_RUNNER_URL: "https://runner.example/",
       }),
-      mintIdentity: () => Promise.resolve("identity"),
       now: () => times.shift() ?? 999,
       randomUUID: () => OPERATION_ID,
       request,
@@ -937,8 +897,12 @@ test("reconnects with a cursor, deduplicates arrivals, and stops at terminal com
     "the temporary agent is deleted after capture"
   );
   for (const call of calls) {
-    assert.equal(call.headers.get("x-runner-token"), "gate");
-    assert.equal(call.headers.get("authorization"), "Bearer identity");
+    assert.equal(call.headers.get("x-runner-token"), null);
+    assert.equal(call.headers.get("authorization"), null);
+    assert.match(
+      call.headers.get("cookie") ?? "",
+      /^__Secure-authjs\.session-token=/
+    );
   }
   const createInput = JSON.parse(calls[0]?.body ?? "{}") as {
     backend?: string;
@@ -1016,8 +980,7 @@ test("deletes the temporary agent after a capture failure", async () => {
         },
         {
           ...recorderLookup,
-          environment: recordingEnvironment({ DEMO_RUNNER_TOKEN: "gate" }),
-          mintIdentity: () => Promise.resolve("identity"),
+          environment: recordingEnvironment(),
           randomUUID: () => OPERATION_ID,
           request,
         }
@@ -1060,7 +1023,6 @@ test("retains a valid agent id for cleanup when the create envelope is malformed
         {
           ...recorderLookup,
           environment: recordingEnvironment(),
-          mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
           request,
         }
@@ -1091,7 +1053,7 @@ test("a malformed create envelope still surfaces cleanup failure without secrets
           apiVersion: AGENT_RUNNER_API_VERSION,
           error: {
             code: "cleanup_failed",
-            message: `${RUNNER_TOKEN} ${IDENTITY_TOKEN} ${RECORDING_CREDENTIAL}`,
+            message: `${AUTH_SECRET} ${SESSION_COOKIE} ${RECORDING_CREDENTIAL}`,
             retryable: true,
           },
           requestId: RUN_ID,
@@ -1111,8 +1073,8 @@ test("a malformed create envelope still surfaces cleanup failure without secrets
         },
         {
           ...recorderLookup,
+          createSessionCookie: () => Promise.resolve(SESSION_COOKIE),
           environment: recordingEnvironment(),
-          mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
           request,
         }
@@ -1159,7 +1121,6 @@ function captureWithLostCreateResponse(options: {
     {
       ...recorderLookup,
       environment: recordingEnvironment(),
-      mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
       randomUUID: () => OPERATION_ID,
       request,
     }
@@ -1247,7 +1208,7 @@ test("surfaces a safe potential orphan when create recovery listing fails", asyn
           apiVersion: AGENT_RUNNER_API_VERSION,
           error: {
             code: "list_failed",
-            message: `${RUNNER_TOKEN} ${SIGNING_KEY}`,
+            message: `${AUTH_SECRET} ${SESSION_COOKIE}`,
             retryable: true,
           },
           requestId: RUN_ID,
@@ -1266,7 +1227,7 @@ test("surfaces a safe potential orphan when create recovery listing fails", asyn
 test("surfaces a potential orphan when the recovery listing payload is malformed", async () => {
   const { calls, pending } = captureWithLostCreateResponse({
     listResponse: () =>
-      new Response(`${RUNNER_TOKEN} malformed listing payload`),
+      new Response(`${AUTH_SECRET} malformed listing payload`),
   });
 
   await assert.rejects(pending, (error: Error) => {
@@ -1279,10 +1240,9 @@ test("surfaces a potential orphan when the recovery listing payload is malformed
 function captureWithTimedOutCreate(options: {
   listResponse: () => Response | Promise<Response>;
 }) {
-  const authorizations: string[] = [];
+  const authenticationHeaders: Headers[] = [];
   const calls: { method: string; path: string; signalAborted: boolean }[] = [];
   let committed = false;
-  let mintCount = 0;
   const request = async (
     input: string | URL | Request,
     init: RequestInit = {}
@@ -1295,7 +1255,7 @@ function captureWithTimedOutCreate(options: {
       path,
       signalAborted: signal?.aborted ?? false,
     });
-    authorizations.push(new Headers(init.headers).get("authorization") ?? "");
+    authenticationHeaders.push(new Headers(init.headers));
 
     if (path === "/api/agents" && method === "POST") {
       committed = true;
@@ -1303,7 +1263,7 @@ function captureWithTimedOutCreate(options: {
         const fail = () =>
           reject(
             new Error(
-              `${RUNNER_TOKEN} ${IDENTITY_TOKEN} ${RECORDING_CREDENTIAL}`
+              `${AUTH_SECRET} ${SESSION_COOKIE} ${RECORDING_CREDENTIAL}`
             )
           );
         if (signal?.aborted) {
@@ -1330,24 +1290,21 @@ function captureWithTimedOutCreate(options: {
     },
     {
       ...recorderLookup,
+      createSessionCookie: () => Promise.resolve(SESSION_COOKIE),
       environment: recordingEnvironment({
         DEMO_RECORDING_TIMEOUT_MS: "1",
       }),
-      mintIdentity: () => {
-        mintCount += 1;
-        return Promise.resolve(`${IDENTITY_TOKEN}-${mintCount}`);
-      },
       randomUUID: () => OPERATION_ID,
       request,
     }
   );
 
-  return { authorizations, calls, pending };
+  return { authenticationHeaders, calls, pending };
 }
 
 test("recovers and deletes an exact agent after create commits then times out", async () => {
   const temporaryName = `demo-record-${OPERATION_ID}`;
-  const { authorizations, calls, pending } = captureWithTimedOutCreate({
+  const { authenticationHeaders, calls, pending } = captureWithTimedOutCreate({
     listResponse: () =>
       Response.json({ agents: [agentDefinition(temporaryName)] }),
   });
@@ -1365,11 +1322,15 @@ test("recovers and deletes an exact agent after create commits then times out", 
       signalAborted: false,
     },
   ]);
-  assert.deepEqual(authorizations, [
-    `Bearer ${IDENTITY_TOKEN}-1`,
-    `Bearer ${IDENTITY_TOKEN}-2`,
-    `Bearer ${IDENTITY_TOKEN}-3`,
-  ]);
+  assert.equal(authenticationHeaders.length, 3);
+  for (const headers of authenticationHeaders) {
+    assert.equal(headers.get("authorization"), null);
+    assert.equal(headers.get("x-runner-token"), null);
+    assert.equal(
+      headers.get("cookie"),
+      `__Secure-authjs.session-token=${SESSION_COOKIE}`
+    );
+  }
 });
 
 test("surfaces a safe potential orphan when timed-out create has no exact match", async () => {
@@ -1420,7 +1381,7 @@ test("surfaces a safe potential orphan when timed-out create recovery fails", as
           apiVersion: AGENT_RUNNER_API_VERSION,
           error: {
             code: "list_failed",
-            message: `${RUNNER_TOKEN} ${IDENTITY_TOKEN} ${SIGNING_KEY}`,
+            message: `${AUTH_SECRET} ${SESSION_COOKIE}`,
             retryable: true,
           },
           requestId: RUN_ID,
@@ -1480,7 +1441,7 @@ test("surfaces cleanup failure while preserving the primary failure context", as
           apiVersion: AGENT_RUNNER_API_VERSION,
           error: {
             code: "cleanup_failed",
-            message: `${RUNNER_TOKEN} ${IDENTITY_TOKEN} ${RECORDING_CREDENTIAL}`,
+            message: `${AUTH_SECRET} ${SESSION_COOKIE} ${RECORDING_CREDENTIAL}`,
             retryable: true,
           },
           requestId: RUN_ID,
@@ -1500,8 +1461,8 @@ test("surfaces cleanup failure while preserving the primary failure context", as
         },
         {
           ...recorderLookup,
+          createSessionCookie: () => Promise.resolve(SESSION_COOKIE),
           environment: recordingEnvironment(),
-          mintIdentity: () => Promise.resolve(IDENTITY_TOKEN),
           randomUUID: () => OPERATION_ID,
           request,
         }

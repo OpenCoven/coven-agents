@@ -3,10 +3,6 @@ import { subscriberCookies } from "./session";
 
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const RUN_ID = "22222222-2222-4222-8222-222222222222";
-const RUNNER_IDENTITY = `${Buffer.from(
-  JSON.stringify({ exp: 4_102_444_800 })
-).toString("base64url")}.audit-signature`;
-
 const retainedAgent = {
   backend: "cloud",
   createdAt: "2026-08-27T06:00:00.000Z",
@@ -46,10 +42,7 @@ test.describe("Run console", () => {
     const protectedRequests: string[] = [];
     page.on("request", (request) => {
       const { pathname } = new URL(request.url());
-      if (
-        pathname === "/api/credentials" ||
-        pathname === "/api/runner-connection"
-      ) {
+      if (pathname === "/api/credentials" || pathname === "/api/agents") {
         protectedRequests.push(pathname);
       }
     });
@@ -145,17 +138,23 @@ test.describe("Run console", () => {
     await page.route("**/api/credentials", (route) =>
       route.fulfill({ json: { harnessIds: ["copilot"] } })
     );
-    await page.route("**/api/runner-connection", (route) =>
-      route.fulfill({
-        json: { endpoint: "http://127.0.0.1:8787", token: "audit-token" },
-      })
-    );
-    await page.route("**/api/runner-token", (route) =>
-      route.fulfill({ json: { token: RUNNER_IDENTITY } })
-    );
-    await page.route("http://127.0.0.1:8787/**", (route) => {
+    const legacyRequests: string[] = [];
+    page.on("request", (request) => {
+      const { pathname } = new URL(request.url());
+      if (
+        pathname === "/api/runner-connection" ||
+        pathname === "/api/runner-token"
+      ) {
+        legacyRequests.push(pathname);
+      }
+    });
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
       const { pathname } = new URL(route.request().url());
       if (pathname === "/api/agents") {
+        const headers = route.request().headers();
+        expect(headers.authorization).toBeUndefined();
+        expect(headers["x-runner-token"]).toBeUndefined();
+        expect(headers.cookie).toContain("authjs.session-token=");
         return route.fulfill({ json: { agents: [retainedAgent] } });
       }
       if (pathname === `/api/agents/${AGENT_ID}/runs`) {
@@ -197,5 +196,40 @@ test.describe("Run console", () => {
     await expect(
       page.getByRole("button", { exact: true, name: "expand" })
     ).toBeVisible();
+    expect(legacyRequests).toEqual([]);
+  });
+
+  test("a same-origin subscription refusal blocks runs without offering a manual connection", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route("**/api/agents", (route) =>
+      route.fulfill({
+        json: {
+          apiVersion: "1.0",
+          error: {
+            code: "subscription_required",
+            message: "An active subscription is required.",
+            retryable: false,
+          },
+          requestId: "44444444-4444-4444-8444-444444444444",
+        },
+        status: 403,
+      })
+    );
+
+    await page.goto("/agents");
+
+    await expect(page.getByText("no subscription")).toBeVisible();
+    await expect(
+      page.getByText("An active subscription is required to run agents.")
+    ).toBeVisible();
+    await expect(
+      page.getByRole("dialog", { name: "Connect a runner" })
+    ).toHaveCount(0);
   });
 });
