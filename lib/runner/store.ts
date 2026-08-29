@@ -149,6 +149,7 @@ function asAgent(row: Record<string, unknown>): RunnerAgentRecord {
 function asRun(row: Record<string, unknown>): RunnerRunRecord {
   return {
     agentId: column(row, "agentId"),
+    authVersion: column(row, "authVersion"),
     cancellationRequestedAt: column(row, "cancellationRequestedAt"),
     commandEvidence: column(row, "commandEvidence"),
     completedAt: column(row, "completedAt"),
@@ -3916,6 +3917,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             "insert-run",
             {
               agentId: input.agentId,
+              authVersion: input.authVersion,
               id: input.id,
               operationId: input.operationId,
               requestHash: input.requestHash,
@@ -3923,9 +3925,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               tenant: principal.tenant,
             },
             sql`INSERT INTO "RunnerRun" (
-              "id", "agentId", "tenant", "operationId", "requestHash", "task"
+              "id", "agentId", "tenant", "authVersion", "operationId", "requestHash", "task"
             ) VALUES (
-              ${input.id}, ${input.agentId}, ${principal.tenant}, ${input.operationId},
+              ${input.id}, ${input.agentId}, ${principal.tenant}, ${input.authVersion}, ${input.operationId},
               ${input.requestHash}, ${input.task}
             ) ON CONFLICT ("agentId", "operationId") DO NOTHING RETURNING *`
           )

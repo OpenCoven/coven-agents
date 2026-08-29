@@ -564,22 +564,33 @@ export function createRunnerHttpHandlers(
         if (deleted.kind === "not_found") {
           return agentNotFound(dependencies);
         }
-        if (deleted.kind === "lifecycle_conflict") {
+        if (deleted.kind === "busy") {
           return errorResponse(
             dependencies,
             409,
-            "agent_decommissioning",
-            "Agent decommission is still in progress. Try again later.",
+            "busy",
+            "The agent is busy. Try again later.",
             true
           );
         }
-        if (deleted.kind === "provider_unavailable") {
+        if (deleted.kind === "stale_version") {
           return errorResponse(
             dependencies,
-            503,
-            "provider_unavailable",
-            "Runner provider is temporarily unavailable. Try again later.",
+            409,
+            "stale_version",
+            "The agent changed concurrently. Try again.",
             true
+          );
+        }
+        if (deleted.kind === "provider_failure") {
+          return errorResponse(
+            dependencies,
+            deleted.retryable ? 503 : 502,
+            deleted.retryable ? "provider_unavailable" : "provider_failure",
+            deleted.retryable
+              ? "Runner provider is temporarily unavailable. Try again later."
+              : "Runner provider rejected the operation.",
+            deleted.retryable
           );
         }
         return Response.json(okEnvelopeSchema.parse({ ok: true }));
@@ -862,6 +873,7 @@ export function createRunnerHttpHandlers(
         const service = await dependencies.createService(context);
         const result = await service.startRun(
           context.principal,
+          context.authVersion,
           agentId,
           body.value
         );
@@ -1020,6 +1032,19 @@ export function createRunnerHttpHandlers(
             true
           );
         }
+        if (result.kind === "stale_version") {
+          return errorResponse(
+            dependencies,
+            409,
+            "stale_version",
+            "The agent changed concurrently. Try again.",
+            true
+          );
+        }
+        schedule(dependencies, async () => {
+          await service.warmAgent(context.principal, result.agent.id);
+          await service.reconcileAndDispatch();
+        });
         return Response.json(
           agentEnvelopeSchema.parse({ agent: result.agent })
         );

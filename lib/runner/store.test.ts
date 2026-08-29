@@ -40,6 +40,7 @@ function queryText(statement: RunnerStoreStatement): string {
 function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
   return {
     agentId: "00000000-0000-4000-8000-000000000001",
+    authVersion: 1,
     cancellationRequestedAt: null,
     commandEvidence: [],
     completedAt: null,
@@ -184,7 +185,7 @@ test("principal methods bind every read and mutation to its tenant", async () =>
 });
 
 test("duplicate starts return the immutable matching request", async () => {
-  const existing = run();
+  const existing = { ...run(), authVersion: 4 } as RunnerRunRecord;
   const { store } = scripted(
     [{ id: existing.agentId, sandboxLifecycle: "ready" }],
     [existing]
@@ -192,11 +193,12 @@ test("duplicate starts return the immutable matching request", async () => {
 
   const result = await store.startRun(principal, {
     agentId: existing.agentId,
+    authVersion: 9,
     id: existing.id,
     operationId: existing.operationId,
     requestHash: existing.requestHash,
     task: existing.task,
-  });
+  } as never);
 
   assert.equal(result.kind, "duplicate");
   assert.equal(result.kind === "duplicate" && result.run.id, existing.id);
@@ -204,6 +206,54 @@ test("duplicate starts return the immutable matching request", async () => {
     result.kind === "duplicate" && "dispatchLeaseToken" in result.run,
     false
   );
+  assert.equal(
+    result.kind === "duplicate" && "authVersion" in result.run,
+    false
+  );
+  assert.equal(existing.authVersion, 4);
+});
+
+test("new runs persist trusted authority and internal hydration preserves it", async () => {
+  const inserted = { ...run(), authVersion: 8 } as RunnerRunRecord;
+  const accepted = {
+    createdAt: inserted.createdAt,
+    event: {},
+    eventId: 1,
+    runId: inserted.id,
+  };
+  const advanced = {
+    ...inserted,
+    logCursor: 1,
+    version: inserted.version + 1,
+  };
+  const creation = scripted(
+    [{ id: inserted.agentId, sandboxLifecycle: "ready" }],
+    [],
+    [inserted],
+    [accepted],
+    [advanced]
+  );
+
+  const result = await creation.store.startRun(principal, {
+    agentId: inserted.agentId,
+    authVersion: 8,
+    id: inserted.id,
+    operationId: inserted.operationId,
+    requestHash: inserted.requestHash,
+    task: inserted.task,
+  } as never);
+
+  assert.equal(result.kind, "created");
+  assert.equal(result.kind === "created" && "authVersion" in result.run, false);
+  const insert = creation.statements.find(
+    (statement) => statement.name === "insert-run"
+  );
+  assert.equal(insert?.args.authVersion, 8);
+  assert.match(queryText(insert as RunnerStoreStatement), /"authVersion"/);
+
+  const hydration = scripted([advanced]);
+  const [hydrated] = await hydration.store.scanLiveRuns(operator, 1);
+  assert.equal((hydrated as { authVersion?: number }).authVersion, 8);
 });
 
 test("reusing an operation with another request hash conflicts", async () => {
@@ -215,6 +265,7 @@ test("reusing an operation with another request hash conflicts", async () => {
 
   const result = await store.startRun(principal, {
     agentId: existing.agentId,
+    authVersion: 9,
     id: existing.id,
     operationId: existing.operationId,
     requestHash: "b".repeat(64),
@@ -241,6 +292,7 @@ test("operation retries win over reset or decommission lifecycle rejection", asy
       const [duplicate, conflict] = await Promise.all([
         matching.store.startRun(principal, {
           agentId: existing.agentId,
+          authVersion: 1,
           id: existing.id,
           operationId: existing.operationId,
           requestHash: existing.requestHash,
@@ -248,6 +300,7 @@ test("operation retries win over reset or decommission lifecycle rejection", asy
         }),
         conflicting.store.startRun(principal, {
           agentId: existing.agentId,
+          authVersion: 2,
           id: existing.id,
           operationId: existing.operationId,
           requestHash: "b".repeat(64),
@@ -1664,6 +1717,7 @@ test("principal mutations bind every affected row to the principal tenant", asyn
   await remove.store.deleteAgent(principal, current.agentId);
   await start.store.startRun(principal, {
     agentId: current.agentId,
+    authVersion: 1,
     id: current.id,
     operationId: current.operationId,
     requestHash: current.requestHash,
@@ -2480,6 +2534,7 @@ test("agent deletion and starts serialize through the same agent lock", async ()
   );
   await start.store.startRun(principal, {
     agentId: current.agentId,
+    authVersion: 1,
     id: current.id,
     operationId: current.operationId,
     requestHash: current.requestHash,
@@ -2814,6 +2869,7 @@ test("a new operation is rejected only after lifecycle idempotency lookup", asyn
         );
         const result = await store.startRun(principal, {
           agentId: current.id,
+          authVersion: 1,
           id: "00000000-0000-4000-8000-000000000099",
           operationId: "00000000-0000-4000-8000-000000000098",
           requestHash: "a".repeat(64),
@@ -2843,6 +2899,7 @@ test("normal, unprovisioned, and provisioning agents remain eligible for run adm
         );
         const result = await store.startRun(principal, {
           agentId: current.agentId,
+          authVersion: 1,
           id: current.id,
           operationId: current.operationId,
           requestHash: current.requestHash,
@@ -2888,6 +2945,7 @@ test("admission-aware starts serialize tenant depth and preserve queue refusal",
       tenantQueuedRuns: 10,
     },
     agentId: current.agentId,
+    authVersion: 1,
     id: current.id,
     operationId: current.operationId,
     requestHash: current.requestHash,
@@ -2961,6 +3019,7 @@ test("zero queue capacity atomically claims an immediately eligible run", async 
       tenantQueuedRuns: 0,
     },
     agentId: current.agentId,
+    authVersion: 1,
     id: current.id,
     initialDispatch: {
       leaseExpiresAt: claimed.dispatchLeaseExpiresAt as Date,

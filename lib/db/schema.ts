@@ -526,6 +526,7 @@ export const runnerRun = pgTable(
   "RunnerRun",
   {
     agentId: uuid("agentId").notNull(),
+    authVersion: integer("authVersion"),
     cancellationRequestedAt: timestamp("cancellationRequestedAt"),
     commandEvidence: jsonb("commandEvidence")
       .$type<CommandEvidence[]>()
@@ -634,6 +635,10 @@ export const runnerRun = pgTable(
       sql`${table.daytonaLogCursor} >= 0`
     ),
     check("RunnerRun_version_nonnegative", sql`${table.version} >= 0`),
+    check(
+      "RunnerRun_authVersion_valid",
+      sql`${table.authVersion} is null or ${table.authVersion} >= 0`
+    ),
     check(
       "RunnerRun_timestamps_valid",
       sql`(${table.status} = 'queued' and ${table.startedAt} is null and ${table.completedAt} is null) or (${table.status} = 'running' and ${table.startedAt} is not null and ${table.completedAt} is null and ${table.startedAt} >= ${table.createdAt}) or (${table.status} in ('completed', 'failed', 'cancelled') and ${table.completedAt} is not null and ${table.completedAt} >= ${table.createdAt} and (${table.startedAt} is null or (${table.startedAt} >= ${table.createdAt} and ${table.completedAt} >= ${table.startedAt})))`

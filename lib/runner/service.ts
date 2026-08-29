@@ -46,7 +46,9 @@ type RunnerServiceStore = Pick<
 
 export type RunnerDeleteAgentResult =
   | Readonly<{ kind: "deleted" }>
-  | Readonly<{ kind: "busy" | "not_found" | "stale_version" }>
+  | Readonly<{ kind: "busy" }>
+  | Readonly<{ kind: "not_found" }>
+  | Readonly<{ kind: "stale_version" }>
   | Readonly<{
       error: "non_retryable" | "retryable";
       kind: "failed";
@@ -126,13 +128,13 @@ export type RunnerUpdateAgentResult =
   | Readonly<{ kind: "invalid" }>
   | Readonly<{ kind: "lifecycle_conflict" }>
   | Readonly<{ kind: "not_found" }>
+  | Readonly<{ kind: "stale_version" }>
   | Readonly<{ kind: "unsupported_harness" }>;
 
 export type RunnerDeleteResult =
   | Readonly<{ kind: "deleted" }>
-  | Readonly<{
-      kind: "lifecycle_conflict" | "not_found" | "provider_unavailable";
-    }>;
+  | Readonly<{ kind: "busy" | "not_found" | "stale_version" }>
+  | Readonly<{ kind: "provider_failure"; retryable: boolean }>;
 
 export type RunnerListRunsResult =
   | Readonly<{ kind: "found"; runs: readonly RunSnapshot[] }>
@@ -220,6 +222,7 @@ export type RunnerService = Readonly<{
   reconcileAndDispatch: () => Promise<RunnerReconciliationResult>;
   startRun: (
     principal: RunnerPrincipal,
+    authVersion: number,
     agentId: string,
     input: unknown
   ) => Promise<RunnerStartResult>;
@@ -414,9 +417,12 @@ export function createRunnerService(
         return { kind: "not_found" };
       }
       if (deleted.kind === "busy" || deleted.kind === "stale_version") {
-        return { kind: "lifecycle_conflict" };
+        return deleted;
       }
-      return { kind: "provider_unavailable" };
+      return {
+        kind: "provider_failure",
+        retryable: deleted.error === "retryable",
+      };
     },
 
     diagnoseSandbox: () => {
@@ -514,7 +520,7 @@ export function createRunnerService(
       return dependencies.reconcileAndDispatch();
     },
 
-    startRun: async (principal, agentId, input) => {
+    startRun: async (principal, authVersion, agentId, input) => {
       if (!validId(agentId)) {
         return { kind: "invalid" };
       }
@@ -528,6 +534,7 @@ export function createRunnerService(
       }
       const admitted = await admit({
         agentId,
+        authVersion,
         id,
         operationId: parsed.data.operationId,
         principal,
@@ -622,9 +629,7 @@ export function createRunnerService(
       if (updated.kind === "updated") {
         return { agent: projectAgent(updated.value), kind: "updated" };
       }
-      return updated.kind === "not_found"
-        ? { kind: "not_found" }
-        : { kind: "lifecycle_conflict" };
+      return updated;
     },
 
     warmAgent,

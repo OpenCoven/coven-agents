@@ -14,7 +14,9 @@ import type {
   RunnerDaytonaAttemptId,
   RunnerDispatchAuthority,
   RunnerOperator,
+  RunnerPrincipal,
   RunnerRunRecord,
+  StartRunnerRunInput,
 } from "./types";
 
 const operator: RunnerOperator = { kind: "runner-operator" };
@@ -24,6 +26,7 @@ const attemptId =
 function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
   return {
     agentId: "00000000-0000-4000-8000-000000000001",
+    authVersion: 1,
     cancellationRequestedAt: null,
     commandEvidence: [],
     completedAt: null,
@@ -116,6 +119,7 @@ test("operation reuse with another immutable hash is a typed conflict", async ()
   const result = await admitRunnerRun(
     {
       agentId: current.agentId,
+      authVersion: 1,
       id: current.id,
       operationId: current.operationId,
       principal: { kind: "subscriber", tenant: current.tenant, userId: "user" },
@@ -142,11 +146,45 @@ test("operation reuse with another immutable hash is a typed conflict", async ()
   );
 });
 
+test("admission passes the trusted authority version to storage", async () => {
+  const current = run();
+  let storedInput: unknown;
+
+  await admitRunnerRun(
+    {
+      agentId: current.agentId,
+      authVersion: 8,
+      id: current.id,
+      operationId: current.operationId,
+      principal: { kind: "subscriber", tenant: current.tenant, userId: "user" },
+      requestHash: current.requestHash,
+      task: current.task,
+    } as never,
+    {
+      clock: () => new Date("2026-08-28T15:00:00.000Z"),
+      limits: admissionLimitsFromEnvironment({}),
+      randomToken: () => "lease",
+      store: {
+        startRun: async (
+          _principal: RunnerPrincipal,
+          input: StartRunnerRunInput
+        ) => {
+          storedInput = input;
+          return { kind: "duplicate" as const, run: run() };
+        },
+      } as never,
+    }
+  );
+
+  assert.equal((storedInput as { authVersion?: number }).authVersion, 8);
+});
+
 test("admission store outages return a typed retryable error without a database cause", async () => {
   const current = run();
   const result = await admitRunnerRun(
     {
       agentId: current.agentId,
+      authVersion: 1,
       id: current.id,
       operationId: current.operationId,
       principal: { kind: "subscriber", tenant: current.tenant, userId: "user" },

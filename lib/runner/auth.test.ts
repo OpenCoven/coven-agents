@@ -29,8 +29,8 @@ function runnerAuth(
     | SubscriberAccessDecision
     | Promise<SubscriberAccessDecision> = () => allowedAccess(),
   environment = {
+    CRON_SECRET: "reconcile-secret",
     OPERATOR_DIAGNOSTIC_TOKEN: "operator-secret",
-    RUNNER_RECONCILE_SECRET: "reconcile-secret",
   }
 ) {
   return createRunnerAuth({
@@ -120,8 +120,8 @@ test("missing and aliased operator configuration is unavailable", () => {
   );
   assert.equal(
     diagnosticSecretFromEnvironment({
+      CRON_SECRET: "same-secret",
       OPERATOR_DIAGNOSTIC_TOKEN: "same-secret",
-      RUNNER_RECONCILE_SECRET: "same-secret",
     }),
     null
   );
@@ -151,11 +151,65 @@ test("reconciliation accepts only its independent bearer secret", () => {
   assert.equal(reconcileSecretFromEnvironment({}), null);
   assert.equal(
     reconcileSecretFromEnvironment({
+      CRON_SECRET: "same-secret",
       OPERATOR_DIAGNOSTIC_TOKEN: "same-secret",
-      RUNNER_RECONCILE_SECRET: "same-secret",
     }),
     null
   );
+});
+
+test("Vercel Cron GET uses CRON_SECRET and rejects invalid authorization", () => {
+  const auth = runnerAuth();
+  const authorization = ["Bearer", "reconcile-secret"].join(" ");
+
+  assert.deepEqual(
+    auth.authorizeReconcile(
+      new Request("https://app.test/api/internal/runner-reconcile", {
+        headers: { authorization },
+        method: "GET",
+      })
+    ),
+    { kind: "allowed" }
+  );
+  assert.deepEqual(
+    auth.authorizeReconcile(
+      new Request("https://app.test/api/internal/runner-reconcile", {
+        headers: { authorization: `${authorization}-invalid` },
+        method: "GET",
+      })
+    ),
+    { kind: "unauthorized" }
+  );
+});
+
+test("every privileged runner secret must be independent", () => {
+  for (const alias of [
+    { AGENT_CONTROL_TOKEN: "same-secret" },
+    { OPERATOR_DIAGNOSTIC_TOKEN: "same-secret" },
+    { RUNNER_SERVICE_TOKEN: "same-secret" },
+  ]) {
+    assert.equal(
+      reconcileSecretFromEnvironment({
+        CRON_SECRET: "same-secret",
+        ...alias,
+      }),
+      null
+    );
+  }
+
+  for (const alias of [
+    { AGENT_CONTROL_TOKEN: "same-secret" },
+    { CRON_SECRET: "same-secret" },
+    { RUNNER_SERVICE_TOKEN: "same-secret" },
+  ]) {
+    assert.equal(
+      diagnosticSecretFromEnvironment({
+        OPERATOR_DIAGNOSTIC_TOKEN: "same-secret",
+        ...alias,
+      }),
+      null
+    );
+  }
 });
 
 test("secret comparison accepts exact values and rejects near misses", () => {

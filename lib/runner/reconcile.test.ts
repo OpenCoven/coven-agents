@@ -21,6 +21,7 @@ const attemptId =
 function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
   return {
     agentId: "00000000-0000-4000-8000-000000000001",
+    authVersion: 1,
     cancellationRequestedAt: null,
     commandEvidence: [],
     completedAt: null,

@@ -156,7 +156,7 @@ test("agent updates preserve tenant ownership and expose lifecycle conflicts", a
       AGENT_ID,
       definition({ name: "Next" })
     ),
-    { kind: "lifecycle_conflict" }
+    { kind: "stale_version" }
   );
   assert.equal(
     (updateInput as { expectedVersion: number }).expectedVersion,
@@ -180,6 +180,34 @@ test("agent deletion delegates provider-first decommissioning", async () => {
   assert.deepEqual(calls, [`${PRINCIPAL.tenant}:${AGENT_ID}`]);
 });
 
+test("agent deletion preserves busy, stale, and provider retryability outcomes", async () => {
+  const outcomes = [
+    [{ kind: "busy" }, { kind: "busy" }],
+    [{ kind: "stale_version" }, { kind: "stale_version" }],
+    [
+      { error: "retryable", kind: "failed" },
+      { kind: "provider_failure", retryable: true },
+    ],
+    [
+      { error: "non_retryable", kind: "failed" },
+      { kind: "provider_failure", retryable: false },
+    ],
+  ] as const;
+
+  await Promise.all(
+    outcomes.map(async ([providerResult, expected]) => {
+      const service = createRunnerService({
+        deleteSandbox: async () => providerResult,
+        store: baseStore(),
+      });
+      assert.deepEqual(
+        await service.deleteAgent(PRINCIPAL, AGENT_ID),
+        expected
+      );
+    })
+  );
+});
+
 test("start maps idempotent admission outcomes and preserves a request hash", async () => {
   let admission: unknown;
   const service = createRunnerService({
@@ -191,7 +219,14 @@ test("start maps idempotent admission outcomes and preserves a request hash", as
     store: baseStore(),
   });
 
-  const started = await service.startRun(PRINCIPAL, AGENT_ID, {
+  const started = await (
+    service.startRun as unknown as (
+      principal: RunnerPrincipal,
+      authVersion: number,
+      agentId: string,
+      input: unknown
+    ) => ReturnType<typeof service.startRun>
+  )(PRINCIPAL, 7, AGENT_ID, {
     operationId: OPERATION_ID,
     task: "Do the thing.",
   });
@@ -203,6 +238,7 @@ test("start maps idempotent admission outcomes and preserves a request hash", as
     "string"
   );
   assert.equal((admission as { requestHash: string }).requestHash.length, 64);
+  assert.equal((admission as { authVersion: number }).authVersion, 7);
 });
 
 test("start maps admission conflict, capacity, and unavailable results without provider work", async () => {
@@ -254,7 +290,7 @@ test("start maps admission conflict, capacity, and unavailable results without p
         store: baseStore(),
       });
       assert.deepEqual(
-        await service.startRun(PRINCIPAL, AGENT_ID, {
+        await service.startRun(PRINCIPAL, 1, AGENT_ID, {
           operationId: OPERATION_ID,
           task: "Do the thing.",
         }),

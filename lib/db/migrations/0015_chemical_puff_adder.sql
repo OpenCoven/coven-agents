@@ -1,0 +1,2 @@
+ALTER TABLE "RunnerRun" ADD COLUMN "authVersion" integer;--> statement-breakpoint
+ALTER TABLE "RunnerRun" ADD CONSTRAINT "RunnerRun_authVersion_valid" CHECK ("RunnerRun"."authVersion" is null or "RunnerRun"."authVersion" >= 0);

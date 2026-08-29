@@ -373,6 +373,45 @@ test("create returns the stamped agent and schedules bounded warm/reconcile work
   assert.equal(reconciled, 1);
 });
 
+test("update schedules bounded warm and reconciliation work", async () => {
+  let warmed = 0;
+  let reconciled = 0;
+  const fixture = handlers({
+    service: service({
+      reconcileAndDispatch: () => {
+        reconciled += 1;
+        return Promise.resolve(counts());
+      },
+      warmAgent: () => {
+        warmed += 1;
+        return Promise.resolve({
+          kind: "warmed",
+          warm: {
+            status: "ready",
+            updatedAt: "2026-08-28T15:00:00.000Z",
+          },
+        });
+      },
+    }),
+  });
+
+  const response = await fixture.handlers.updateAgent(
+    new Request(`https://app.test/api/agents/${AGENT_ID}`, {
+      body: validDefinitionBody({ name: "Updated" }),
+      method: "PUT",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(warmed, 0);
+  assert.equal(reconciled, 0);
+  assert.equal(fixture.after.length, 1);
+  await fixture.after[0]();
+  assert.equal(warmed, 1);
+  assert.equal(reconciled, 1);
+});
+
 test("agent, run, and harness reads preserve their v1 envelopes", async () => {
   const fixture = handlers();
   const [agents, agent, updated, deleted, runs, runRead, harnesses] =
@@ -596,6 +635,103 @@ test("run start returns 202 for created/replayed requests and schedules reconcil
   await fixture.after[0]();
   assert.equal(reconciled, 1);
   assert.equal(fixture.admissions.at(-1)?.route, "runner_run_start");
+});
+
+test("run start passes only the trusted authenticated auth version to the service", async () => {
+  let startArguments: unknown[] = [];
+  const fixture = handlers({
+    service: service({
+      startRun: ((...arguments_: unknown[]) => {
+        startArguments = arguments_;
+        return Promise.resolve({ kind: "accepted", run: run() });
+      }) as RunnerService["startRun"],
+    }),
+  });
+
+  const response = await fixture.handlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({
+        authVersion: 999,
+        operationId: OPERATION_ID,
+        task: "Do the thing.",
+      }),
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal(startArguments.length, 0);
+
+  const accepted = await fixture.handlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({
+        operationId: OPERATION_ID,
+        task: "Do the thing.",
+      }),
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(accepted.status, 202);
+  assert.equal(startArguments[1], subscriber.authVersion);
+  assert.equal(startArguments.includes(999), false);
+});
+
+test("delete preserves busy, stale version, and permanent provider failures", async () => {
+  const outcomes = [
+    ["busy", 409, "busy", true],
+    ["stale_version", 409, "stale_version", true],
+    ["provider_failure", 502, "provider_failure", false],
+  ] as const;
+
+  await Promise.all(
+    outcomes.map(async ([kind, status, code, retryable]) => {
+      const fixture = handlers({
+        service: service({
+          deleteAgent: () =>
+            Promise.resolve(
+              kind === "provider_failure" ? { kind, retryable } : { kind }
+            ) as ReturnType<RunnerService["deleteAgent"]>,
+        }),
+      });
+      const response = await fixture.handlers.deleteAgent(
+        new Request(`https://app.test/api/agents/${AGENT_ID}`, {
+          method: "DELETE",
+        }),
+        AGENT_ID
+      );
+      const body = (await response.json()) as {
+        error: { code: string; retryable: boolean };
+      };
+
+      assert.equal(response.status, status);
+      assert.equal(body.error.code, code);
+      assert.equal(body.error.retryable, retryable);
+    })
+  );
+});
+
+test("update preserves a stale version conflict", async () => {
+  const fixture = handlers({
+    service: service({
+      updateAgent: async () => ({ kind: "stale_version" }) as never,
+    }),
+  });
+  const response = await fixture.handlers.updateAgent(
+    new Request(`https://app.test/api/agents/${AGENT_ID}`, {
+      body: validDefinitionBody(),
+      method: "PUT",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 409);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "stale_version"
+  );
 });
 
 test("run start maps operation, capacity, lifecycle, and admission failures", async () => {

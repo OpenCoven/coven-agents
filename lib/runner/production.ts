@@ -11,18 +11,19 @@ import {
   globalDailyRunCapFromEnv,
   requireNonemptyAbuseKeySecret,
 } from "@/lib/abuse/config";
+import { sessionAuthorityMatches } from "@/lib/auth/session-revocation";
 import { periodStart } from "@/lib/billing/period";
 import { drizzleRunnerCredentialDependencies } from "@/lib/credentials/runner-credential";
 import { databaseFor } from "@/lib/db/access";
 import { findUserById } from "@/lib/db/queries";
 import type { SubscriberSession } from "@/lib/session";
-import { isSubscribedAt } from "@/lib/subscription";
 import {
   admissionLimitsFromEnvironment,
   DEFAULT_DISPATCH_LEASE_MS,
   daytonaRunnerDispatchDependencies,
   dispatchRunnerClaim,
   type RunnerDispatchResult,
+  terminalizeUnstartedDispatchFailure,
 } from "./admission";
 import { daytonaClient } from "./daytona/client";
 import { COPILOT_CLI_VERSION } from "./daytona/image";
@@ -68,6 +69,32 @@ type CredentialContext = Readonly<{
   periodStart: Date;
 }>;
 
+type CredentialContextDecision =
+  | Readonly<{ context: CredentialContext; kind: "allowed" }>
+  | Readonly<{ kind: "authority_revoked" }>
+  | Readonly<{ kind: "unavailable" }>;
+
+type ProductionDispatchAccount = Readonly<{
+  authVersion: number;
+  billingPeriodStart: Date | null;
+  subscribedUntil: Date | null;
+}>;
+
+export type ProductionClaimDependencies = Readonly<{
+  clock?: () => Date;
+  dispatch: (
+    claimed: RunnerClaimedDispatch,
+    context: CredentialContext
+  ) => Promise<RunnerDispatchResult>;
+  environment?: Readonly<Record<string, string | undefined>>;
+  findAccount?: (userId: string) => Promise<ProductionDispatchAccount | null>;
+  operator: RunnerOperator;
+  store: Pick<
+    RunnerStore,
+    "cleanupTerminalLease" | "finalizeRun" | "releaseUnstartedDispatch"
+  >;
+}>;
+
 export type RunnerDiagnosticSandbox = Readonly<{
   delete: () => Promise<void>;
   execute: () => Promise<Readonly<{ exitCode: number; result: string | null }>>;
@@ -108,45 +135,62 @@ function userIdForTenant(tenant: string): string | null {
   ].join("-");
 }
 
-async function credentialContextForTenant(
-  tenant: string
-): Promise<CredentialContext | null> {
-  const userId = userIdForTenant(tenant);
+async function credentialContextForRun(
+  run: RunnerRunRecord,
+  dependencies: Pick<
+    ProductionClaimDependencies,
+    "clock" | "environment" | "findAccount"
+  >
+): Promise<CredentialContextDecision> {
+  const userId = userIdForTenant(run.tenant);
   if (!userId) {
-    return null;
+    return { kind: "authority_revoked" };
   }
-  const account = await findUserById(userId);
-  const now = new Date();
-  if (!account || !isSubscribedAt(account, now)) {
-    return null;
+  const account = await (dependencies.findAccount ?? findUserById)(userId);
+  const now = (dependencies.clock ?? (() => new Date()))();
+  if (
+    run.authVersion === null ||
+    !account ||
+    !sessionAuthorityMatches({
+      database: account,
+      now,
+      tokenAuthVersion: run.authVersion,
+    })
+  ) {
+    return { kind: "authority_revoked" };
   }
   const currentPeriod = periodStart(
     account.subscribedUntil,
     account.billingPeriodStart
   );
   if (!currentPeriod) {
-    return null;
+    return { kind: "authority_revoked" };
   }
+  const environment = dependencies.environment ?? process.env;
   try {
     return {
-      globalDailyCap: globalDailyRunCapFromEnv(
-        process.env.GLOBAL_DAILY_RUN_CAP
-      ),
-      keySecret: requireNonemptyAbuseKeySecret(process.env.ABUSE_KEY_SECRET),
-      periodStart: currentPeriod,
+      context: {
+        globalDailyCap: globalDailyRunCapFromEnv(
+          environment.GLOBAL_DAILY_RUN_CAP
+        ),
+        keySecret: requireNonemptyAbuseKeySecret(environment.ABUSE_KEY_SECRET),
+        periodStart: currentPeriod,
+      },
+      kind: "allowed",
     };
   } catch {
-    return null;
+    return { kind: "unavailable" };
   }
 }
 
 async function releaseUnstartedClaim(
-  store: RunnerStore,
-  claimed: RunnerClaimedDispatch
+  store: Pick<RunnerStore, "releaseUnstartedDispatch">,
+  claimed: RunnerClaimedDispatch,
+  operator: RunnerOperator = OPERATOR
 ): Promise<RunnerDispatchResult> {
   try {
     const released = await store.releaseUnstartedDispatch(
-      OPERATOR,
+      operator,
       claimed.authority
     );
     return released.kind === "released"
@@ -163,6 +207,47 @@ async function releaseUnstartedClaim(
       runId: claimed.run.id,
     };
   }
+}
+
+export async function dispatchProductionClaim(
+  claimed: RunnerClaimedDispatch,
+  dependencies: ProductionClaimDependencies
+): Promise<RunnerDispatchResult> {
+  let decision: CredentialContextDecision;
+  try {
+    decision = await credentialContextForRun(claimed.run, dependencies);
+  } catch {
+    return releaseUnstartedClaim(
+      dependencies.store,
+      claimed,
+      dependencies.operator
+    );
+  }
+  if (decision.kind === "authority_revoked") {
+    const terminalized = await terminalizeUnstartedDispatchFailure(
+      dependencies,
+      claimed.authority,
+      claimed.run,
+      "authority_revoked",
+      "Run authority is no longer valid.",
+      false
+    );
+    return terminalized
+      ? { kind: "refused", reason: "authority", runId: claimed.run.id }
+      : {
+          kind: "retained",
+          reason: "cleanup_pending",
+          runId: claimed.run.id,
+        };
+  }
+  if (decision.kind === "unavailable") {
+    return releaseUnstartedClaim(
+      dependencies.store,
+      claimed,
+      dependencies.operator
+    );
+  }
+  return dependencies.dispatch(claimed, decision.context);
 }
 
 function nextDispatchLease(): Readonly<{
@@ -196,34 +281,30 @@ function configuredDispatcher(
       return { kind: "idle" };
     }
 
-    let context: CredentialContext | null;
-    try {
-      context = await credentialContextForTenant(claimed.run.tenant);
-    } catch {
-      return releaseUnstartedClaim(store, claimed);
-    }
-    if (!context) {
-      return releaseUnstartedClaim(store, claimed);
-    }
-
-    const credentialDependencies =
-      drizzleRunnerCredentialDependencies(database);
-    const dependencies = daytonaRunnerDispatchDependencies({
-      credentialDependencies,
-      credentialInput: (run, agent) => ({
-        ...context,
-        harnessId: agent.runtime,
-        operationId: run.operationId,
-        runId: run.id,
-        tenant: run.tenant,
-      }),
-      limits,
+    return dispatchProductionClaim(claimed, {
+      dispatch: (authorized, context) => {
+        const credentialDependencies =
+          drizzleRunnerCredentialDependencies(database);
+        const dependencies = daytonaRunnerDispatchDependencies({
+          credentialDependencies,
+          credentialInput: (run, agent) => ({
+            ...context,
+            harnessId: agent.runtime,
+            operationId: run.operationId,
+            runId: run.id,
+            tenant: run.tenant,
+          }),
+          limits,
+          operator: OPERATOR,
+          sandboxConfiguration: daytonaSandboxConfiguration(),
+          sandboxDependencies: { daytona },
+          store,
+        });
+        return dispatchRunnerClaim(authorized, dependencies);
+      },
       operator: OPERATOR,
-      sandboxConfiguration: daytonaSandboxConfiguration(),
-      sandboxDependencies: { daytona },
       store,
     });
-    return dispatchRunnerClaim(claimed, dependencies);
   };
 }
 

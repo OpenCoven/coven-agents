@@ -7,10 +7,10 @@ import { enforceAbusePolicy } from "@/lib/abuse/enforce";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { createRunnerAuth } from "./auth";
 import { createRunnerHttpHandlers, type RunnerHttpHandlers } from "./http";
-import {
-  createProductionRunnerOperatorService,
-  createProductionRunnerService,
-} from "./production";
+
+function productionServices() {
+  return import("./production");
+}
 
 /**
  * Constructed per request so importing a route remains side-effect free:
@@ -24,9 +24,14 @@ export function productionRunnerHttpHandlers(): RunnerHttpHandlers {
       authenticate: auth,
       authorizeSubscriberAccess,
     }),
-    createOperatorService: createProductionRunnerOperatorService,
-    createService: (subscriber) =>
-      createProductionRunnerService(subscriber.session),
+    createOperatorService: async () => {
+      const production = await productionServices();
+      return production.createProductionRunnerOperatorService();
+    },
+    createService: async (subscriber) => {
+      const production = await productionServices();
+      return production.createProductionRunnerService(subscriber.session);
+    },
     enforceAbuse: enforceAbusePolicy,
     ipAddress: (request) => ipAddress(request) ?? null,
   });

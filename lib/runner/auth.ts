@@ -10,8 +10,8 @@ import type { RunnerPrincipal } from "./types";
 
 export type RunnerSecretEnvironment = Readonly<{
   AGENT_CONTROL_TOKEN?: string;
+  CRON_SECRET?: string;
   OPERATOR_DIAGNOSTIC_TOKEN?: string;
-  RUNNER_RECONCILE_SECRET?: string;
   RUNNER_SERVICE_TOKEN?: string;
   [name: string]: string | undefined;
 }>;
@@ -85,7 +85,7 @@ export function diagnosticSecretFromEnvironment(
   }
   return isAliased(secret, [
     environment.AGENT_CONTROL_TOKEN,
-    environment.RUNNER_RECONCILE_SECRET,
+    environment.CRON_SECRET,
     environment.RUNNER_SERVICE_TOKEN,
   ])
     ? null
@@ -99,7 +99,7 @@ export function diagnosticSecretFromEnvironment(
 export function reconcileSecretFromEnvironment(
   environment: RunnerSecretEnvironment = process.env
 ): string | null {
-  const secret = configuredSecret(environment.RUNNER_RECONCILE_SECRET);
+  const secret = configuredSecret(environment.CRON_SECRET);
   if (!secret) {
     return null;
   }

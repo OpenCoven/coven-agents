@@ -12,6 +12,7 @@ const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const TEST_KEK = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
   ABUSE_KEY_SECRET: "subprocess-test-abuse-key-secret",
+  CRON_SECRET: "subprocess-test-reconcile-secret",
   DAYTONA_API_KEY: "subprocess-test-daytona-api-key",
   DAYTONA_API_URL: "https://app.daytona.io/api",
   DAYTONA_AUTO_ARCHIVE_MINUTES: "10080",
@@ -26,16 +27,15 @@ const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
   RUN_ADMISSION_MODE: "queue",
   RUN_ADMISSION_TENANT_ACTIVE_MAX: "2",
   RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
-  RUNNER_RECONCILE_SECRET: "subprocess-test-reconcile-secret",
 };
 const REQUIRED_PRODUCTION_VARIABLES = [
   "ABUSE_KEY_SECRET",
+  "CRON_SECRET",
   "DAYTONA_API_KEY",
   "DAYTONA_DOMAIN_ALLOW_LIST",
   "DAYTONA_SNAPSHOT",
   "OPERATOR_DIAGNOSTIC_TOKEN",
   "REDIS_URL",
-  "RUNNER_RECONCILE_SECRET",
 ] as const;
 const DAYTONA_NON_NEGATIVE_SAFE_INTEGER_VARIABLES = [
   "DAYTONA_AUTO_ARCHIVE_MINUTES",
@@ -67,6 +67,7 @@ function runValidator(
       | "CREDENTIAL_KEK_CURRENT_VERSION"
       | "CREDENTIAL_KEK_V1"
       | "CREDENTIAL_KEK_V2"
+      | "CRON_SECRET"
       | "DAYTONA_API_KEY"
       | "DAYTONA_API_URL"
       | "DAYTONA_AUTO_ARCHIVE_MINUTES"
@@ -77,10 +78,11 @@ function runValidator(
       | "DAYTONA_TARGET"
       | "GLOBAL_DAILY_RUN_CAP"
       | "NODE_ENV"
+      | "AGENT_CONTROL_TOKEN"
       | "OPERATOR_DIAGNOSTIC_TOKEN"
       | "REDIS_URL"
       | "RELEASE_AUDIENCE"
-      | "RUNNER_RECONCILE_SECRET"
+      | "RUNNER_SERVICE_TOKEN"
       | "RUN_ADMISSION_CONSECUTIVE_MAX"
       | "RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX"
       | "RUN_ADMISSION_MODE"
@@ -95,12 +97,14 @@ function runValidator(
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     ABUSE_KEY_SECRET: undefined,
+    AGENT_CONTROL_TOKEN: undefined,
     BETA_ALLOWLIST: undefined,
     BETA_MODE: "off",
     CREDENTIAL_KEK: undefined,
     CREDENTIAL_KEK_CURRENT_VERSION: undefined,
     CREDENTIAL_KEK_V1: undefined,
     CREDENTIAL_KEK_V2: undefined,
+    CRON_SECRET: undefined,
     DAYTONA_API_KEY: undefined,
     DAYTONA_API_URL: undefined,
     DAYTONA_AUTO_ARCHIVE_MINUTES: undefined,
@@ -119,7 +123,7 @@ function runValidator(
     RUN_ADMISSION_MODE: undefined,
     RUN_ADMISSION_TENANT_ACTIVE_MAX: undefined,
     RUN_ADMISSION_TENANT_QUEUE_MAX: undefined,
-    RUNNER_RECONCILE_SECRET: undefined,
+    RUNNER_SERVICE_TOKEN: undefined,
     VERCEL_ENV: undefined,
     ...VALID_ENV,
   };
@@ -188,6 +192,29 @@ test("rejects blank required production configuration", () => {
   }
 });
 
+test("rejects aliases among privileged runner secrets", () => {
+  const aliases = [
+    ["CRON_SECRET", "OPERATOR_DIAGNOSTIC_TOKEN"],
+    ["CRON_SECRET", "AGENT_CONTROL_TOKEN"],
+    ["CRON_SECRET", "RUNNER_SERVICE_TOKEN"],
+    ["OPERATOR_DIAGNOSTIC_TOKEN", "AGENT_CONTROL_TOKEN"],
+    ["OPERATOR_DIAGNOSTIC_TOKEN", "RUNNER_SERVICE_TOKEN"],
+    ["AGENT_CONTROL_TOKEN", "RUNNER_SERVICE_TOKEN"],
+  ] as const;
+
+  for (const [left, right] of aliases) {
+    const result = runValidator({
+      [left]: "shared-privileged-secret",
+      [right]: "shared-privileged-secret",
+    });
+
+    assertRejectedWithMessage(
+      result,
+      `Privileged runner secrets must be distinct: ${left} aliases ${right}.`
+    );
+  }
+});
+
 test("rejects production Redis when the abuse key secret is missing or empty", () => {
   for (const abuseKeySecret of [undefined, ""]) {
     const result = runValidator({ ABUSE_KEY_SECRET: abuseKeySecret });
@@ -241,6 +268,7 @@ test("rejects a production configuration without Redis", () => {
 test("permits preview validation without production Daytona secrets or Redis", () => {
   const result = runValidator({
     ABUSE_KEY_SECRET: undefined,
+    CRON_SECRET: undefined,
     DAYTONA_API_KEY: undefined,
     DAYTONA_DOMAIN_ALLOW_LIST: undefined,
     DAYTONA_SNAPSHOT: undefined,
@@ -248,7 +276,6 @@ test("permits preview validation without production Daytona secrets or Redis", (
     OPERATOR_DIAGNOSTIC_TOKEN: undefined,
     REDIS_URL: undefined,
     RELEASE_AUDIENCE: undefined,
-    RUNNER_RECONCILE_SECRET: undefined,
     VERCEL_ENV: "preview",
   });
 
@@ -257,6 +284,7 @@ test("permits preview validation without production Daytona secrets or Redis", (
 
 test("accepts valid run reservation configuration without Redis in preview", () => {
   const result = runValidator({
+    CRON_SECRET: undefined,
     DAYTONA_API_KEY: undefined,
     DAYTONA_DOMAIN_ALLOW_LIST: undefined,
     DAYTONA_SNAPSHOT: undefined,
@@ -265,7 +293,6 @@ test("accepts valid run reservation configuration without Redis in preview", () 
     OPERATOR_DIAGNOSTIC_TOKEN: undefined,
     REDIS_URL: undefined,
     RELEASE_AUDIENCE: undefined,
-    RUNNER_RECONCILE_SECRET: undefined,
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -298,6 +325,7 @@ test("rejects malformed explicitly configured Daytona settings in preview", () =
   ]) {
     const result = runValidator({
       ABUSE_KEY_SECRET: undefined,
+      CRON_SECRET: undefined,
       DAYTONA_API_KEY: undefined,
       DAYTONA_DOMAIN_ALLOW_LIST: undefined,
       DAYTONA_SNAPSHOT: undefined,
@@ -305,7 +333,6 @@ test("rejects malformed explicitly configured Daytona settings in preview", () =
       OPERATOR_DIAGNOSTIC_TOKEN: undefined,
       REDIS_URL: undefined,
       RELEASE_AUDIENCE: undefined,
-      RUNNER_RECONCILE_SECRET: undefined,
       ...overrides,
     });
 

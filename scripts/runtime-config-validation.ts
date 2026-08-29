@@ -8,13 +8,19 @@ import {
 
 const BETA_EMAIL = /^[^\s@,]+@[^\s@,]+$/;
 const REQUIRED_PRODUCTION_VARIABLES = [
+  "CRON_SECRET",
   "DAYTONA_API_KEY",
   "DAYTONA_DOMAIN_ALLOW_LIST",
   "DAYTONA_SNAPSHOT",
   "REDIS_URL",
   "ABUSE_KEY_SECRET",
-  "RUNNER_RECONCILE_SECRET",
   "OPERATOR_DIAGNOSTIC_TOKEN",
+] as const;
+const PRIVILEGED_RUNNER_SECRETS = [
+  "CRON_SECRET",
+  "OPERATOR_DIAGNOSTIC_TOKEN",
+  "AGENT_CONTROL_TOKEN",
+  "RUNNER_SERVICE_TOKEN",
 ] as const;
 const DAYTONA_INTERVAL_DEFAULTS = {
   DAYTONA_AUTO_ARCHIVE_MINUTES: "10080",
@@ -102,12 +108,40 @@ function validateProductionDaytonaConfig(environment: NodeJS.ProcessEnv): void {
       `Missing required production environment variables: ${missing.join(", ")}.`
     );
   }
+  validatePrivilegedRunnerSecrets(environment);
 
   daytonaRequestTimeout(environment);
   daytonaDomainAllowList(environment);
   daytonaSnapshotConfiguration(environment);
   validateDaytonaIntervals(environment);
   validateAdmissionSettings(environment);
+}
+
+function validatePrivilegedRunnerSecrets(environment: NodeJS.ProcessEnv): void {
+  for (
+    let leftIndex = 0;
+    leftIndex < PRIVILEGED_RUNNER_SECRETS.length;
+    leftIndex += 1
+  ) {
+    const left = PRIVILEGED_RUNNER_SECRETS[leftIndex];
+    const leftValue = environment[left]?.trim();
+    if (!leftValue) {
+      continue;
+    }
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < PRIVILEGED_RUNNER_SECRETS.length;
+      rightIndex += 1
+    ) {
+      const right = PRIVILEGED_RUNNER_SECRETS[rightIndex];
+      const rightValue = environment[right]?.trim();
+      if (rightValue && leftValue === rightValue) {
+        throw new Error(
+          `Privileged runner secrets must be distinct: ${left} aliases ${right}.`
+        );
+      }
+    }
+  }
 }
 
 function validateConfiguredPreviewDaytonaConfig(
