@@ -93,6 +93,44 @@ test("closed beta keeps reconciliation reachable with a query string", async () 
   assert.equal(response.headers.get("location"), null);
 });
 
+test("closed beta keeps exact runner machine routes reachable with query strings", async () => {
+  await withClosedBeta(async () => {
+    await Promise.all(
+      [
+        "/api/health?probe=runner",
+        "/api/diagnostics/sandbox?probe=operator",
+      ].map(async (path) => {
+        const response = await visit(undefined, path);
+
+        assert.equal(response.headers.get("location"), null, path);
+      })
+    );
+  });
+});
+
+test("closed beta redirects runner machine-route descendants and lookalikes", async () => {
+  await withClosedBeta(async () => {
+    await Promise.all(
+      [
+        "/api/health/ready?probe=runner",
+        "/api/healthcheck?probe=runner",
+        "/api/diagnostics/future?probe=operator",
+        "/api/diagnostics/sandbox/extra?probe=operator",
+        "/api/diagnostics/sandbox-check?probe=operator",
+      ].map(async (path) => {
+        const response = await visit(undefined, path);
+
+        assert.equal(response.status, 307, path);
+        assert.match(
+          response.headers.get("location") ?? "",
+          /\/login\?beta=1$/u,
+          path
+        );
+      })
+    );
+  });
+});
+
 test("closed beta does not bypass retired internal routes", async () => {
   const response = await withClosedBeta(() =>
     visit(undefined, "/api/internal/credential?phase=issue")
