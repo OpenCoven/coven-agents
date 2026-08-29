@@ -119,7 +119,11 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
       terminal: true,
     }),
     reconcileAndDispatch: async () => counts(),
-    startRun: async () => ({ kind: "accepted", run: run() }),
+    startRun: async () => ({
+      kind: "accepted",
+      run: run(),
+      scheduleReconciliation: true,
+    }),
     stopRun: async () => ({
       kind: "stopped",
       run: run({
@@ -605,7 +609,7 @@ test("cross-tenant/missing resources remain nondisclosing 404s", async () => {
   assert.equal(stops, 1);
 });
 
-test("run start returns 202 for created/replayed requests and schedules reconciliation", async () => {
+test("run start returns 202 and schedules bounded recovery for a created run", async () => {
   let reconciled = 0;
   const fixture = handlers({
     service: service({
@@ -635,6 +639,44 @@ test("run start returns 202 for created/replayed requests and schedules reconcil
   await fixture.after[0]();
   assert.equal(reconciled, 1);
   assert.equal(fixture.admissions.at(-1)?.route, "runner_run_start");
+});
+
+test("run start returns 202 without scheduling duplicate or claimed results", async () => {
+  let reconciled = 0;
+  const fixture = handlers({
+    service: service({
+      reconcileAndDispatch: () => {
+        reconciled += 1;
+        return Promise.resolve(counts());
+      },
+      startRun: () =>
+        Promise.resolve({
+          kind: "accepted",
+          run: run({
+            id: "55555555-6666-4777-8888-999999999999",
+          }),
+        }),
+    }),
+  });
+
+  const response = await fixture.handlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({
+        operationId: OPERATION_ID,
+        task: "Do the thing.",
+      }),
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 202);
+  assert.equal(
+    ((await response.json()) as { run: { id: string } }).run.id,
+    "55555555-6666-4777-8888-999999999999"
+  );
+  assert.equal(fixture.after.length, 0);
+  assert.equal(reconciled, 0);
 });
 
 test("run start passes only the trusted authenticated auth version to the service", async () => {

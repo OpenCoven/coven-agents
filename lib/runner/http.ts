@@ -924,9 +924,11 @@ export function createRunnerHttpHandlers(
               );
           }
         }
-        schedule(dependencies, async () => {
-          await service.reconcileAndDispatch();
-        });
+        if (result.scheduleReconciliation) {
+          schedule(dependencies, async () => {
+            await service.reconcileAndDispatch();
+          });
+        }
         return Response.json(
           runSnapshotEnvelopeSchema.parse({
             apiVersion: AGENT_RUNNER_API_VERSION,

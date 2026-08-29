@@ -23,6 +23,7 @@ import {
   type AdmitRunnerRunResult,
   admitRunnerRun,
   type RunnerAdmissionLimits,
+  type RunnerDispatchResult,
 } from "./admission";
 import { hashRunRequest, isTerminalRun } from "./evidence";
 import type {
@@ -30,7 +31,11 @@ import type {
   RunnerReconciliationResult,
 } from "./reconcile";
 import type { RunnerStore } from "./store";
-import type { RunnerAgentRecord, RunnerPrincipal } from "./types";
+import type {
+  RunnerAgentRecord,
+  RunnerClaimedDispatch,
+  RunnerPrincipal,
+} from "./types";
 
 type RunnerServiceStore = Pick<
   RunnerStore,
@@ -104,6 +109,9 @@ export type RunnerServiceDependencies = Readonly<{
     agentId: string
   ) => Promise<RunnerDeleteAgentResult>;
   diagnoseSandbox?: () => Promise<RunnerDiagnosticResult>;
+  dispatchClaim?: (
+    claimed: RunnerClaimedDispatch
+  ) => Promise<RunnerDispatchResult>;
   listHarnesses?: () => Promise<readonly HarnessStatus[]>;
   reconcileAndDispatch?: () => Promise<RunnerReconciliationResult>;
   store: RunnerServiceStore;
@@ -141,7 +149,11 @@ export type RunnerListRunsResult =
   | Readonly<{ kind: "not_found" }>;
 
 export type RunnerStartResult =
-  | Readonly<{ kind: "accepted"; run: RunSnapshot }>
+  | Readonly<{
+      kind: "accepted";
+      run: RunSnapshot;
+      scheduleReconciliation?: true;
+    }>
   | Readonly<{ kind: "not_found" }>
   | Readonly<{
       code:
@@ -541,11 +553,23 @@ export function createRunnerService(
         requestHash: hashRunRequest(agentId, parsed.data.task),
         task: parsed.data.task,
       });
-      if (
-        admitted.kind === "created" ||
-        admitted.kind === "duplicate" ||
-        admitted.kind === "claimed"
-      ) {
+      if (admitted.kind === "claimed") {
+        try {
+          await dependencies.dispatchClaim?.(admitted.claimed);
+        } catch {
+          // The durable lease and authenticated reconciliation remain the
+          // recovery path; provider details must not change the HTTP result.
+        }
+        return { kind: "accepted", run: requireSnapshot(admitted.run) };
+      }
+      if (admitted.kind === "created") {
+        return {
+          kind: "accepted",
+          run: requireSnapshot(admitted.run),
+          scheduleReconciliation: true,
+        };
+      }
+      if (admitted.kind === "duplicate") {
         return { kind: "accepted", run: requireSnapshot(admitted.run) };
       }
       if (admitted.kind === "refused") {

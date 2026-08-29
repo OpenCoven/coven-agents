@@ -211,10 +211,12 @@ test("production terminalizes revoked, legacy, and unsubscribed authority before
 
 test("production dispatches only a currently subscribed matching authority", async () => {
   const current = claimed(5);
+  let dispatchedClaim: RunnerClaimedDispatch | undefined;
   let context: unknown;
 
   const result = await dispatchProductionClaim(current, {
-    dispatch: (_claimed, value) => {
+    dispatch: (actualClaim, value) => {
+      dispatchedClaim = actualClaim;
       context = value;
       return Promise.resolve({ kind: "started", runId: current.run.id });
     },
@@ -233,9 +235,47 @@ test("production dispatches only a currently subscribed matching authority", asy
   });
 
   assert.deepEqual(result, { kind: "started", runId: current.run.id });
+  assert.equal(dispatchedClaim, current);
+  assert.equal(dispatchedClaim.authority, current.authority);
   assert.deepEqual(context, {
     globalDailyCap: 500,
     keySecret: "production-test-key",
     periodStart: new Date("2026-08-01T00:00:00.000Z"),
   });
+});
+
+test("production releases failed claim setup for durable retry without provider leakage", async () => {
+  const current = claimed(5);
+  let dispatched = 0;
+  let releasedAuthority: RunnerDispatchAuthority | undefined;
+
+  const result = await dispatchProductionClaim(current, {
+    dispatch: () => {
+      dispatched += 1;
+      return Promise.reject(new Error("provider must not run"));
+    },
+    findAccount: () => Promise.reject(new Error("database=private-detail")),
+    operator,
+    store: {
+      releaseUnstartedDispatch: (
+        _operator: RunnerOperator,
+        authority: RunnerDispatchAuthority
+      ) => {
+        releasedAuthority = authority;
+        return Promise.resolve({
+          kind: "released" as const,
+          value: current.run,
+        });
+      },
+    } as never,
+  });
+
+  assert.deepEqual(result, {
+    kind: "retryable",
+    reason: "credential_unavailable",
+    runId: current.run.id,
+  });
+  assert.equal(releasedAuthority, current.authority);
+  assert.equal(dispatched, 0);
+  assert.equal(JSON.stringify(result).includes("private-detail"), false);
 });

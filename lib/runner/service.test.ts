@@ -5,7 +5,12 @@ import {
   type RunSnapshot,
 } from "@opencoven/agent-contracts";
 import { createRunnerService } from "./service";
-import type { RunnerAgentRecord, RunnerPrincipal } from "./types";
+import type {
+  RunnerAgentRecord,
+  RunnerClaimedDispatch,
+  RunnerDispatchAuthority,
+  RunnerPrincipal,
+} from "./types";
 
 const AGENT_ID = "11111111-2222-4333-8444-555555555555";
 const OTHER_AGENT_ID = "22222222-3333-4444-8555-666666666666";
@@ -239,6 +244,122 @@ test("start maps idempotent admission outcomes and preserves a request hash", as
   );
   assert.equal((admission as { requestHash: string }).requestHash.length, 64);
   assert.equal((admission as { authVersion: number }).authVersion, 7);
+});
+
+test("start dispatches an admitted claim once with its exact authority", async () => {
+  const authority = {
+    expectedVersion: 1,
+    leaseToken: "opaque-claim",
+    runId: RUN_ID,
+  } as RunnerDispatchAuthority;
+  const claim = {
+    authority,
+    run: run(),
+  } as unknown as RunnerClaimedDispatch;
+  const dispatched: RunnerClaimedDispatch[] = [];
+  const service = createRunnerService({
+    admit: () =>
+      Promise.resolve({
+        claimed: claim,
+        kind: "claimed" as const,
+        run: run(),
+      }),
+    createId: () => RUN_ID,
+    dispatchClaim: (claimed) => {
+      dispatched.push(claimed);
+      return Promise.resolve({ kind: "started", runId: RUN_ID });
+    },
+    store: baseStore(),
+  });
+
+  const started = await service.startRun(PRINCIPAL, 7, AGENT_ID, {
+    operationId: OPERATION_ID,
+    task: "Do the thing.",
+  });
+
+  assert.deepEqual(started, { kind: "accepted", run: run() });
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0], claim);
+  assert.equal(dispatched[0]?.authority, authority);
+});
+
+test("start preserves duplicates without dispatch or recovery scheduling", async () => {
+  const existing = run({
+    id: "55555555-6666-4777-8888-999999999999",
+  });
+  let dispatched = 0;
+  const service = createRunnerService({
+    admit: () => Promise.resolve({ kind: "duplicate" as const, run: existing }),
+    createId: () => RUN_ID,
+    dispatchClaim: () => {
+      dispatched += 1;
+      return Promise.resolve({ kind: "idle" });
+    },
+    store: baseStore(),
+  });
+
+  assert.deepEqual(
+    await service.startRun(PRINCIPAL, 7, AGENT_ID, {
+      operationId: OPERATION_ID,
+      task: "Do the thing.",
+    }),
+    { kind: "accepted", run: existing }
+  );
+  assert.equal(dispatched, 0);
+});
+
+test("start marks only newly queued runs for bounded recovery", async () => {
+  const service = createRunnerService({
+    admit: () => Promise.resolve({ kind: "created" as const, run: run() }),
+    createId: () => RUN_ID,
+    dispatchClaim: () =>
+      Promise.reject(new Error("created runs must not dispatch directly")),
+    store: baseStore(),
+  });
+
+  assert.deepEqual(
+    await service.startRun(PRINCIPAL, 7, AGENT_ID, {
+      operationId: OPERATION_ID,
+      task: "Do the thing.",
+    }),
+    { kind: "accepted", run: run(), scheduleReconciliation: true }
+  );
+});
+
+test("claimed dispatch failures stay sanitized and defer to durable recovery", async () => {
+  const claim = {
+    authority: {
+      expectedVersion: 1,
+      leaseToken: "opaque-secret-claim",
+      runId: RUN_ID,
+    } as RunnerDispatchAuthority,
+    run: run(),
+  } as unknown as RunnerClaimedDispatch;
+  let dispatches = 0;
+  const service = createRunnerService({
+    admit: () =>
+      Promise.resolve({
+        claimed: claim,
+        kind: "claimed" as const,
+        run: run(),
+      }),
+    createId: () => RUN_ID,
+    dispatchClaim: () => {
+      dispatches += 1;
+      return Promise.reject(new Error("provider=private-detail"));
+    },
+    store: baseStore(),
+  });
+
+  const started = await service.startRun(PRINCIPAL, 7, AGENT_ID, {
+    operationId: OPERATION_ID,
+    task: "Do the thing.",
+  });
+
+  assert.deepEqual(started, { kind: "accepted", run: run() });
+  assert.equal(dispatches, 1);
+  assert.equal(JSON.stringify(started).includes("private-detail"), false);
+  assert.equal(JSON.stringify(started).includes("opaque-secret-claim"), false);
 });
 
 test("start maps admission conflict, capacity, and unavailable results without provider work", async () => {

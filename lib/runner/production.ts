@@ -281,7 +281,18 @@ function configuredDispatcher(
       return { kind: "idle" };
     }
 
-    return dispatchProductionClaim(claimed, {
+    return configuredClaimDispatcher(database, store, daytona, limits)(claimed);
+  };
+}
+
+function configuredClaimDispatcher(
+  database: ProductionDatabase,
+  store: RunnerStore,
+  daytona: Daytona,
+  limits = admissionLimitsFromEnvironment()
+): (claimed: RunnerClaimedDispatch) => Promise<RunnerDispatchResult> {
+  return (claimed) =>
+    dispatchProductionClaim(claimed, {
       dispatch: (authorized, context) => {
         const credentialDependencies =
           drizzleRunnerCredentialDependencies(database);
@@ -305,7 +316,6 @@ function configuredDispatcher(
       operator: OPERATOR,
       store,
     });
-  };
 }
 
 function registryHarnesses(): readonly HarnessStatus[] {
@@ -510,6 +520,10 @@ function createProductionRunnerServiceForPrincipal(
       }
     },
     diagnoseSandbox: diagnoseDaytonaSandbox,
+    dispatchClaim: (claimed) => {
+      const daytona = daytonaClient();
+      return configuredClaimDispatcher(database, store, daytona)(claimed);
+    },
     listHarnesses: async () => registryHarnesses(),
     reconcileAndDispatch: productionReconcile(database, store),
     store,
