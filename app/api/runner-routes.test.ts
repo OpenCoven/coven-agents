@@ -171,7 +171,7 @@ function exportedVerbs(module: Record<string, unknown>): string[] {
 }
 
 function assertMetadata(module: Record<string, unknown>): void {
-  assert.equal(module.runtime, "nodejs");
+  assert.equal("runtime" in module, false);
   assert.equal("dynamic" in module, false);
   assert.equal(module.maxDuration, 300);
 }
@@ -428,7 +428,7 @@ if (fixtureMode) {
     process.exitCode = 1;
   });
 } else {
-  test("actual runner route modules preserve methods, metadata, params, and envelopes", () => {
+  test("actual runner route modules import and invoke with supported metadata", () => {
     assert.deepEqual(runFixture(), { ok: true });
   });
 }
