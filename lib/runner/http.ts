@@ -173,7 +173,7 @@ function policyInput(
 }
 
 /**
- * Cookie mutations deliberately run auth → origin/media type → abuse before
+ * Cookie mutations deliberately run origin/media type → auth → abuse before
  * any body read, service construction, provider call, or scheduled work.
  */
 async function authorizeSubscriber(
@@ -182,10 +182,6 @@ async function authorizeSubscriber(
   dependencies: RunnerHttpDependencies,
   mutation?: "empty" | "json"
 ): Promise<Response | RunnerAuthenticatedSubscriber> {
-  const subscriber = await dependencies.auth.authorizeSubscriber();
-  if (subscriber.kind !== "allowed") {
-    return subscriberFailure(dependencies, subscriber);
-  }
   if (mutation) {
     const rejected = validateRunnerMutationRequest(request, dependencies, {
       jsonBody: mutation === "json",
@@ -193,6 +189,10 @@ async function authorizeSubscriber(
     if (rejected) {
       return rejected;
     }
+  }
+  const subscriber = await dependencies.auth.authorizeSubscriber();
+  if (subscriber.kind !== "allowed") {
+    return subscriberFailure(dependencies, subscriber);
   }
   const admission = await dependencies.enforceAbuse(
     policyInput(route, dependencies.ipAddress(request), subscriber)
