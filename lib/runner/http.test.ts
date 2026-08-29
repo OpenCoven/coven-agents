@@ -390,6 +390,62 @@ test("abuse refusal happens before body parsing and returns v1 retry metadata", 
   );
 });
 
+test("subscriber writes preserve identity, abuse, body, service, provider ordering", async () => {
+  const events: string[] = [];
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(validDefinitionBody()));
+      controller.close();
+    },
+  });
+  const request = {
+    body: {
+      getReader() {
+        events.push("body");
+        return stream.getReader();
+      },
+    },
+    headers: new Headers(),
+  } as unknown as Request;
+  const runner = service({
+    createAgent: () => {
+      events.push("provider");
+      return Promise.resolve({ agent: definition(), kind: "created" });
+    },
+  });
+  const runnerHandlers = createRunnerHttpHandlers({
+    auth: {
+      authorizeDiagnostic: () => ({ kind: "allowed" }),
+      authorizeReconcile: () => ({ kind: "allowed" }),
+      authorizeSubscriber: () => {
+        events.push("identity");
+        return Promise.resolve(subscriber);
+      },
+    },
+    createOperatorService: () => runner,
+    createService: () => {
+      events.push("service");
+      return runner;
+    },
+    enforceAbuse: () => {
+      events.push("abuse");
+      return Promise.resolve({ kind: "allowed" });
+    },
+    ipAddress: () => "203.0.113.10",
+  });
+
+  const response = await runnerHandlers.createAgent(request);
+
+  assert.equal(response.status, 201);
+  assert.deepEqual(events, [
+    "identity",
+    "abuse",
+    "body",
+    "service",
+    "provider",
+  ]);
+});
+
 test("create rejects malformed, oversized, unknown, and owner-injected inputs", async () => {
   let creates = 0;
   const fixture = handlers({

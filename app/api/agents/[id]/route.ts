@@ -1,6 +1,7 @@
 import { productionRunnerHttpHandlers } from "@/lib/runner/route-dependencies";
 
 export const maxDuration = 300;
+export const runtime = "nodejs";
 
 type AgentRouteContext = { params: Promise<{ id: string }> };
 
