@@ -14,6 +14,7 @@ import {
   startRunInputSchema,
 } from "@opencoven/agent-contracts";
 import { encode } from "next-auth/jwt";
+import { approvedApplicationOrigin } from "@/lib/auth/application-origin";
 import type { ArrivedEvent } from "@/lib/demo/offsets";
 import { DEMO_REPOSITORY } from "@/lib/demo/recordable";
 import { demoRecordingSecrets } from "@/lib/demo/recording-secrets";
@@ -128,95 +129,6 @@ function nonblank(value: string | undefined): value is string {
   return Boolean(value?.trim());
 }
 
-function isLoopbackHostname(hostname: string): boolean {
-  return (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "::1" ||
-    hostname === "[::1]"
-  );
-}
-
-function parseApplicationOrigin(name: string, value: string): URL {
-  const configured = value.trim();
-  let parsed: URL;
-  try {
-    parsed = new URL(configured);
-  } catch (error) {
-    throw new Error(`${name} must be an absolute application origin.`, {
-      cause: error,
-    });
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error(`${name} must use https.`);
-  }
-  if (parsed.username || parsed.password) {
-    throw new Error(`${name} must not contain credentials.`);
-  }
-  if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
-    throw new Error(`${name} must contain only an origin.`);
-  }
-  if (configured !== parsed.origin && configured !== `${parsed.origin}/`) {
-    throw new Error(`${name} must be a canonical application origin.`);
-  }
-  if (parsed.protocol === "http:" && !isLoopbackHostname(parsed.hostname)) {
-    throw new Error(`${name} must use https outside loopback development.`);
-  }
-  return parsed;
-}
-
-function vercelOrigin(name: string, value: string | undefined): string | null {
-  if (!nonblank(value)) {
-    return null;
-  }
-  if (
-    value.includes("://") ||
-    /[/@?#]/u.test(value) ||
-    value.trim() !== value
-  ) {
-    throw new Error(`${name} must contain only a deployment host.`);
-  }
-  return parseApplicationOrigin(name, `https://${value}`).origin;
-}
-
-function approvedApplicationOrigin(
-  environment: Environment,
-  configured: string
-): string {
-  const candidate = parseApplicationOrigin("APP_ORIGIN", configured);
-  let approved: string | null = null;
-  for (const name of ["AUTH_URL", "NEXTAUTH_URL"] as const) {
-    const value = environment[name];
-    if (nonblank(value)) {
-      const { origin } = parseApplicationOrigin(name, value);
-      if (approved && approved !== origin) {
-        throw new Error(
-          "AUTH_URL and NEXTAUTH_URL must identify the same application authority."
-        );
-      }
-      approved = origin;
-    }
-  }
-  if (!approved) {
-    approved =
-      vercelOrigin("VERCEL_URL", environment.VERCEL_URL) ??
-      vercelOrigin(
-        "VERCEL_PROJECT_PRODUCTION_URL",
-        environment.VERCEL_PROJECT_PRODUCTION_URL
-      );
-  }
-
-  if (!approved && isLoopbackHostname(candidate.hostname)) {
-    return candidate.origin;
-  }
-  if (approved !== candidate.origin) {
-    throw new Error(
-      "APP_ORIGIN must exactly match an approved application authority."
-    );
-  }
-  return candidate.origin;
-}
-
 export function readCaptureEnvironment(
   environment: Environment
 ): CaptureEnvironment {
@@ -254,7 +166,7 @@ export function readCaptureEnvironment(
     );
   }
 
-  const normalizedOrigin = approvedApplicationOrigin(environment, appOrigin);
+  const normalizedOrigin = approvedApplicationOrigin(environment);
 
   return {
     accountEmail: accountEmail.trim(),
@@ -360,6 +272,7 @@ async function fetchRunner(
       headers: {
         accept: "application/json",
         cookie: `${connection.cookieName}=${connection.cookieValue}`,
+        origin: connection.appOrigin,
         ...(init.body ? { "content-type": "application/json" } : {}),
         ...init.headers,
       },

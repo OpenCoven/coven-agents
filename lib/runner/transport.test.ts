@@ -24,6 +24,7 @@ const expectedErrors = {
   invalid_request: [400, false],
   not_found: [404, false],
   operation_conflict: [409, true],
+  origin_rejected: [403, false],
   provider_rejected: [422, false],
   provider_unavailable: [503, true],
   rate_limited: [429, true],
@@ -33,6 +34,7 @@ const expectedErrors = {
   stale_version: [409, true],
   subscription_required: [403, false],
   unauthorized: [401, false],
+  unsupported_media_type: [400, false],
 } as const;
 
 test("transport publishes strict versioned envelopes for every status mapping", async () => {
@@ -128,6 +130,196 @@ test("transport integrates bounded strict JSON parsing with fail-closed errors",
   if (oversized.kind === "response") {
     assert.equal(oversized.response.status, 413);
   }
+});
+
+test("transport accepts only exact same-origin JSON mutations", async () => {
+  const transport = await import("./transport");
+  const dependencies = {
+    appOrigin: "https://app.test",
+    createRequestId: () => REQUEST_ID,
+  };
+
+  for (const contentType of [
+    "application/json",
+    "application/json; charset=utf-8",
+  ]) {
+    assert.equal(
+      transport.validateRunnerMutationRequest(
+        new Request("https://app.test/api/agents", {
+          headers: {
+            "content-type": contentType,
+            origin: "https://app.test",
+          },
+          method: "POST",
+        }),
+        dependencies,
+        { jsonBody: true }
+      ),
+      null
+    );
+  }
+});
+
+test("transport rejects missing, null, malformed, and mismatched mutation origins", async () => {
+  const transport = await import("./transport");
+  const dependencies = {
+    appOrigin: "https://app.test",
+    createRequestId: () => REQUEST_ID,
+  };
+  const rejectedOrigins = [
+    undefined,
+    "null",
+    "not an origin",
+    "ftp://app.test",
+    "https://sibling.app.test",
+    "http://app.test",
+    "https://app.test:444",
+  ];
+
+  await Promise.all(
+    rejectedOrigins.map(async (origin) => {
+      const headers = new Headers({ "content-type": "application/json" });
+      if (origin !== undefined) {
+        headers.set("origin", origin);
+      }
+      const response = transport.validateRunnerMutationRequest(
+        new Request("https://app.test/api/agents", {
+          headers,
+          method: "POST",
+        }),
+        dependencies,
+        { jsonBody: true }
+      );
+      assert.ok(response instanceof Response);
+      assert.equal(response.status, 403);
+      const envelope = runErrorEnvelopeSchema.parse(await response.json());
+      assert.equal(envelope.error.code, "origin_rejected");
+      assert.equal(
+        JSON.stringify(envelope).includes(origin ?? "missing"),
+        false
+      );
+    })
+  );
+});
+
+test("transport rejects a request URL outside configured APP_ORIGIN", async () => {
+  const transport = await import("./transport");
+  const response = transport.validateRunnerMutationRequest(
+    new Request("https://forwarded-host.example/api/agents", {
+      headers: {
+        "content-type": "application/json",
+        origin: "https://forwarded-host.example",
+      },
+      method: "POST",
+    }),
+    {
+      appOrigin: "https://app.test",
+      createRequestId: () => REQUEST_ID,
+    },
+    { jsonBody: true }
+  );
+
+  assert.ok(response instanceof Response);
+  assert.equal(response.status, 403);
+  assert.equal(
+    runErrorEnvelopeSchema.parse(await response.json()).error.code,
+    "origin_rejected"
+  );
+});
+
+test("transport rejects cleartext non-loopback application origins", async () => {
+  const transport = await import("./transport");
+  const response = transport.validateRunnerMutationRequest(
+    new Request("http://app.test/api/agents", {
+      headers: {
+        "content-type": "application/json",
+        origin: "http://app.test",
+      },
+      method: "POST",
+    }),
+    {
+      appOrigin: "http://app.test",
+      createRequestId: () => REQUEST_ID,
+    },
+    { jsonBody: true }
+  );
+
+  assert.ok(response instanceof Response);
+  assert.equal(response.status, 403);
+  assert.equal(
+    runErrorEnvelopeSchema.parse(await response.json()).error.code,
+    "origin_rejected"
+  );
+});
+
+test("transport fails closed when production APP_ORIGIN is missing", async () => {
+  const transport = await import("./transport");
+  const response = transport.validateRunnerMutationRequest(
+    new Request("https://forwarded-host.example/api/agents", {
+      headers: {
+        "content-type": "application/json",
+        origin: "https://forwarded-host.example",
+      },
+      method: "POST",
+    }),
+    {
+      appOrigin: undefined,
+      createRequestId: () => REQUEST_ID,
+    },
+    { jsonBody: true }
+  );
+
+  assert.ok(response instanceof Response);
+  assert.equal(response.status, 403);
+  assert.equal(
+    runErrorEnvelopeSchema.parse(await response.json()).error.code,
+    "origin_rejected"
+  );
+});
+
+test("transport requires JSON media type only for JSON mutations", async () => {
+  const transport = await import("./transport");
+  const dependencies = {
+    appOrigin: "https://app.test",
+    createRequestId: () => REQUEST_ID,
+  };
+
+  await Promise.all(
+    [undefined, "text/plain", "application/problem+json"].map(
+      async (contentType) => {
+        const headers = new Headers({ origin: "https://app.test" });
+        if (contentType) {
+          headers.set("content-type", contentType);
+        }
+        const response = transport.validateRunnerMutationRequest(
+          new Request("https://app.test/api/agents", {
+            headers,
+            method: "POST",
+          }),
+          dependencies,
+          { jsonBody: true }
+        );
+        assert.ok(response instanceof Response);
+        assert.equal(response.status, 400);
+        assert.equal(
+          runErrorEnvelopeSchema.parse(await response.json()).error.code,
+          "unsupported_media_type"
+        );
+      }
+    )
+  );
+
+  assert.equal(
+    transport.validateRunnerMutationRequest(
+      new Request("https://app.test/api/tenant/prewarm", {
+        headers: { origin: "https://app.test" },
+        method: "POST",
+      }),
+      dependencies,
+      { jsonBody: false }
+    ),
+    null
+  );
 });
 
 test("transport parses IDs, empty bodies, and event cursors before services", async () => {

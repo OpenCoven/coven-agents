@@ -41,6 +41,7 @@ import {
   runnerErrorResponse,
   runnerJsonResponse,
   unreachableRunnerResult as unreachableResult,
+  validateRunnerMutationRequest,
 } from "./transport";
 
 const diagnosticResponseSchema = z
@@ -59,6 +60,7 @@ type After = (callback: () => void | Promise<void>) => void;
 
 export type RunnerHttpDependencies = Readonly<{
   after?: After;
+  appOrigin?: string | (() => string | null);
   auth: RunnerAuth;
   createDiagnosticName?: () => string;
   createEventStream?: typeof createRunEventStream;
@@ -170,14 +172,27 @@ function policyInput(
   };
 }
 
+/**
+ * Cookie mutations deliberately run auth → origin/media type → abuse before
+ * any body read, service construction, provider call, or scheduled work.
+ */
 async function authorizeSubscriber(
   request: Request,
   route: AbuseEnforcementInput["route"],
-  dependencies: RunnerHttpDependencies
+  dependencies: RunnerHttpDependencies,
+  mutation?: "empty" | "json"
 ): Promise<Response | RunnerAuthenticatedSubscriber> {
   const subscriber = await dependencies.auth.authorizeSubscriber();
   if (subscriber.kind !== "allowed") {
     return subscriberFailure(dependencies, subscriber);
+  }
+  if (mutation) {
+    const rejected = validateRunnerMutationRequest(request, dependencies, {
+      jsonBody: mutation === "json",
+    });
+    if (rejected) {
+      return rejected;
+    }
   }
   const admission = await dependencies.enforceAbuse(
     policyInput(route, dependencies.ipAddress(request), subscriber)
@@ -378,7 +393,8 @@ export function createRunnerHttpHandlers(
         const context = await authorizeSubscriber(
           request,
           "runner_write",
-          dependencies
+          dependencies,
+          "json"
         );
         if (isResponse(context)) {
           return context;
@@ -431,7 +447,8 @@ export function createRunnerHttpHandlers(
         const context = await authorizeSubscriber(
           request,
           "runner_write",
-          dependencies
+          dependencies,
+          "empty"
         );
         if (isResponse(context)) {
           return context;
@@ -661,7 +678,8 @@ export function createRunnerHttpHandlers(
         const context = await authorizeSubscriber(
           request,
           "runner_write",
-          dependencies
+          dependencies,
+          "empty"
         );
         if (isResponse(context)) {
           return context;
@@ -729,7 +747,8 @@ export function createRunnerHttpHandlers(
         const context = await authorizeSubscriber(
           request,
           "runner_run_start",
-          dependencies
+          dependencies,
+          "json"
         );
         if (isResponse(context)) {
           return context;
@@ -812,7 +831,8 @@ export function createRunnerHttpHandlers(
         const context = await authorizeSubscriber(
           request,
           "runner_stop",
-          dependencies
+          dependencies,
+          "empty"
         );
         if (isResponse(context)) {
           return context;
@@ -876,7 +896,8 @@ export function createRunnerHttpHandlers(
         const context = await authorizeSubscriber(
           request,
           "runner_write",
-          dependencies
+          dependencies,
+          "json"
         );
         if (isResponse(context)) {
           return context;

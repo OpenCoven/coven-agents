@@ -592,6 +592,7 @@ test("sends one authenticated same-origin session cookie on every request includ
     );
     assert.equal(call.headers.get("authorization"), null);
     assert.equal(call.headers.get("x-runner-token"), null);
+    assert.equal(call.headers.get("origin"), APP_ORIGIN);
   }
 });
 

@@ -12,6 +12,8 @@ const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const TEST_KEK = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
   ABUSE_KEY_SECRET: "subprocess-test-abuse-key-secret",
+  APP_ORIGIN: "https://app.example",
+  AUTH_URL: "https://app.example",
   CRON_SECRET: "subprocess-test-reconcile-secret",
   DAYTONA_API_KEY: "subprocess-test-daytona-api-key",
   DAYTONA_API_URL: "https://app.daytona.io/api",
@@ -31,6 +33,7 @@ const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
 };
 const REQUIRED_PRODUCTION_VARIABLES = [
   "ABUSE_KEY_SECRET",
+  "APP_ORIGIN",
   "CRON_SECRET",
   "DAYTONA_API_KEY",
   "DAYTONA_DOMAIN_ALLOW_LIST",
@@ -63,6 +66,8 @@ function runValidator(
     Pick<
       NodeJS.ProcessEnv,
       | "ABUSE_KEY_SECRET"
+      | "APP_ORIGIN"
+      | "AUTH_URL"
       | "BETA_ALLOWLIST"
       | "BETA_MODE"
       | "CREDENTIAL_KEK"
@@ -101,6 +106,8 @@ function runValidator(
     ...process.env,
     ABUSE_KEY_SECRET: undefined,
     AGENT_CONTROL_TOKEN: undefined,
+    APP_ORIGIN: undefined,
+    AUTH_URL: undefined,
     BETA_ALLOWLIST: undefined,
     BETA_MODE: "off",
     CREDENTIAL_KEK: undefined,
@@ -197,6 +204,27 @@ test("rejects blank required production configuration", () => {
         `Missing required production environment variables: ${variableName}.`
       );
     }
+  }
+});
+
+test("rejects unsafe or unapproved production application origins", () => {
+  for (const overrides of [
+    {
+      APP_ORIGIN: "http://app.example",
+      AUTH_URL: "http://app.example",
+    },
+    {
+      APP_ORIGIN: "https://sibling.example",
+      AUTH_URL: "https://app.example",
+    },
+    {
+      APP_ORIGIN: "https://app.example/path",
+      AUTH_URL: "https://app.example",
+    },
+  ]) {
+    const result = runValidator(overrides);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /APP_ORIGIN|application authority|https/u);
   }
 });
 

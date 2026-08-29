@@ -1,4 +1,5 @@
 import { validateAbuseConfig } from "../lib/abuse/config";
+import { approvedApplicationOrigin } from "../lib/auth/application-origin";
 import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
 import {
   daytonaDomainAllowList,
@@ -8,6 +9,7 @@ import {
 
 const BETA_EMAIL = /^[^\s@,]+@[^\s@,]+$/;
 const REQUIRED_PRODUCTION_VARIABLES = [
+  "APP_ORIGIN",
   "CRON_SECRET",
   "DAYTONA_API_KEY",
   "DAYTONA_DOMAIN_ALLOW_LIST",
@@ -112,6 +114,7 @@ function validateProductionDaytonaConfig(environment: NodeJS.ProcessEnv): void {
     );
   }
   validatePrivilegedRunnerSecrets(environment);
+  approvedApplicationOrigin(environment);
 
   daytonaRequestTimeout(environment);
   daytonaDomainAllowList(environment);

@@ -44,6 +44,28 @@ test("uses the same-origin API with cookies and no runner bearer headers", async
   assert.equal(agents[0]?.name, "Cody");
 });
 
+test("browser mutations use JSON and leave Origin generation to the browser", async () => {
+  let requestedHeaders = new Headers();
+  let requestedCredentials: RequestCredentials | undefined;
+  const request: typeof fetch = (_input, init) => {
+    requestedHeaders = new Headers(init?.headers);
+    requestedCredentials = init?.credentials;
+    return Promise.resolve(Response.json({ agent }));
+  };
+
+  await new RunnerClient(request).createAgent({
+    backend: "cloud",
+    instructions: agent.instructions,
+    model: agent.model,
+    name: agent.name,
+    runtime: "copilot",
+  });
+
+  assert.equal(requestedCredentials, "same-origin");
+  assert.equal(requestedHeaders.get("content-type"), "application/json");
+  assert.equal(requestedHeaders.get("origin"), null);
+});
+
 test("surfaces structured runner errors", async () => {
   const request: typeof fetch = () =>
     Promise.resolve(

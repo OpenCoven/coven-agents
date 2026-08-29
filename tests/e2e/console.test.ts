@@ -550,6 +550,8 @@ test.describe("Run console", () => {
         pathname === `/api/agents/${AGENT_ID}` &&
         request.method() === "PUT"
       ) {
+        expect(request.headers().origin).toBe(new URL(request.url()).origin);
+        expect(request.headers()["content-type"]).toContain("application/json");
         mutationStarted();
         return new Promise<void>((resolve) => {
           releaseMutation = async () => {
