@@ -16,11 +16,7 @@
       "!components/elements",
       "!components/ui",
       "!lib/utils.ts",
-      "!hooks/use-mobile.ts",
-      "!worker/worker-configuration.d.ts",
-      // wrangler dev writes generated bundles here while running; linting
-      // them fails `pnpm check` on any machine with a live dev worker.
-      "!worker/.wrangler"
+      "!hooks/use-mobile.ts"
     ]
   },
   "linter": {
@@ -36,8 +32,7 @@
         // The demo/subscriber database ban is a type, and a type is only as
         // strong as the absence of a way around it. Importing the raw handle
         // bypasses `databaseFor(session: SubscriberSession)` entirely, so the
-        // import itself has to be blocked. Exempted below: the
-        // service-to-service credential route, which has no session to gate on.
+        // import itself has to be blocked.
         "noRestrictedImports": {
           "level": "error",
           "options": {
@@ -72,15 +67,9 @@
   },
   "overrides": [
     {
-      // Both of these reach the database without a session to gate on: the
-      // service-to-service credential route, whose caller is the worker, and
-      // the admin CLI, which has no request at all. Each exemption is a hole
-      // in the rule, so they are listed individually rather than by glob.
-      "includes": [
-        "app/api/internal/credential/route.ts",
-        "scripts/account.ts",
-        "scripts/subscription.ts"
-      ],
+      // These admin CLIs have no request session to gate on. Each exemption is
+      // a hole in the rule, so they are listed individually rather than by glob.
+      "includes": ["scripts/account.ts", "scripts/subscription.ts"],
       "linter": {
         "rules": {
           "style": {

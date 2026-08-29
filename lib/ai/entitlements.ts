@@ -1,6 +1,6 @@
-import type { RunnerClaims } from "@opencoven/agent-contracts";
+import type { Session } from "@/lib/session";
 
-type Plan = RunnerClaims["plan"];
+type Plan = Session["kind"];
 
 type Entitlements = {
   canRunHarness: boolean;

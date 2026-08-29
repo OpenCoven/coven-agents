@@ -112,21 +112,41 @@ test("operator diagnostics accept only their separate timing-safe bearer secret"
   });
 });
 
-test("missing and aliased operator configuration is unavailable", () => {
+test("missing and currently aliased operator configuration is unavailable", () => {
   assert.equal(diagnosticSecretFromEnvironment({}), null);
-  assert.equal(
-    diagnosticSecretFromEnvironment({
-      AGENT_CONTROL_TOKEN: "same-secret",
-      OPERATOR_DIAGNOSTIC_TOKEN: "same-secret",
-    }),
-    null
-  );
   assert.equal(
     diagnosticSecretFromEnvironment({
       CRON_SECRET: "same-secret",
       OPERATOR_DIAGNOSTIC_TOKEN: "same-secret",
     }),
     null
+  );
+});
+
+test("retired Worker secrets do not participate in current operator authority", () => {
+  assert.equal(
+    diagnosticSecretFromEnvironment({
+      AGENT_CONTROL_TOKEN: "same-secret",
+      OPERATOR_DIAGNOSTIC_TOKEN: "same-secret",
+      RUNNER_SERVICE_TOKEN: "same-secret",
+    }),
+    "same-secret"
+  );
+  assert.equal(
+    cronReconcileSecretFromEnvironment({
+      AGENT_CONTROL_TOKEN: "same-secret",
+      CRON_SECRET: "same-secret",
+      RUNNER_SERVICE_TOKEN: "same-secret",
+    }),
+    "same-secret"
+  );
+  assert.equal(
+    manualReconcileSecretFromEnvironment({
+      AGENT_CONTROL_TOKEN: "same-secret",
+      RUNNER_MANUAL_RECONCILE_SECRET: "same-secret",
+      RUNNER_SERVICE_TOKEN: "same-secret",
+    }),
+    "same-secret"
   );
 });
 
@@ -195,10 +215,8 @@ test("GET rejects manual and diagnostic secrets while POST rejects cron and diag
 
 test("every privileged runner secret must be independent and bounded", () => {
   for (const alias of [
-    { AGENT_CONTROL_TOKEN: "same-secret" },
     { OPERATOR_DIAGNOSTIC_TOKEN: "same-secret" },
     { RUNNER_MANUAL_RECONCILE_SECRET: "same-secret" },
-    { RUNNER_SERVICE_TOKEN: "same-secret" },
   ]) {
     assert.equal(
       cronReconcileSecretFromEnvironment({
@@ -210,10 +228,8 @@ test("every privileged runner secret must be independent and bounded", () => {
   }
 
   for (const alias of [
-    { AGENT_CONTROL_TOKEN: "same-secret" },
     { CRON_SECRET: "same-secret" },
     { RUNNER_MANUAL_RECONCILE_SECRET: "same-secret" },
-    { RUNNER_SERVICE_TOKEN: "same-secret" },
   ]) {
     assert.equal(
       diagnosticSecretFromEnvironment({

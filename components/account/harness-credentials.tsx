@@ -26,7 +26,7 @@ import { Label } from "@/components/ui/label";
  *
  * Derived from the registry rather than listed here, because offering a slot
  * for an unsupported harness stores a credential that looks like a working
- * setup and behaves like a missing one -- the worker refuses the run with
+ * setup and behaves like a missing one -- the runner refuses the run with
  * `harness_unsupported` long after the person thought they were done. Codex
  * and Claude Code are present in the registry but not yet supported, so they
  * are deliberately absent from this form.

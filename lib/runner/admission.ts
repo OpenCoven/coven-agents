@@ -456,7 +456,8 @@ export async function terminalizeUnstartedDispatchFailure(
     | "capacity_refused"
     | "credential_unavailable"
     | "dispatch_failed"
-    | "harness_unsupported",
+    | "harness_unsupported"
+    | "no_credential",
   message: string,
   retryable: boolean
 ): Promise<boolean> {
@@ -591,6 +592,18 @@ export async function dispatchRunnerClaim(
     if (credential.kind === "unavailable") {
       if (credential.error.code === "cleanup_pending") {
         return { kind: "retained", reason: "cleanup_pending", runId: run.id };
+      }
+      if (credential.error.code === "no_credential") {
+        return (await terminalizeUnstartedDispatchFailure(
+          dependencies,
+          authority,
+          run,
+          "no_credential",
+          "No credential is configured for this runner.",
+          false
+        ))
+          ? { kind: "refused", reason: "credential", runId: run.id }
+          : { kind: "retained", reason: "cleanup_pending", runId: run.id };
       }
       if (credential.error.code !== "capacity_unavailable") {
         return (await terminalizeUnstartedDispatchFailure(

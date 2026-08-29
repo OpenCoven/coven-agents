@@ -18,9 +18,9 @@ export interface HarnessSpec {
    *
    * `auto` means no flag is passed and the harness chooses. The rest are
    * passed through verbatim, so this list must mirror what the pinned CLI
-   * version actually accepts — it is maintained alongside `installPackage`'s
-   * pin in worker/Dockerfile, and a stale entry fails a run at the harness
-   * rather than anywhere recoverable. The console offers exactly this list
+   * version actually accepts — it is maintained alongside the Daytona
+   * snapshot definition, and a stale entry fails a run at the harness rather
+   * than anywhere recoverable. The console offers exactly this list
    * and nothing free-typed, because a typo here used to be a failed run with
    * a model error the user had no reason to expect.
    */

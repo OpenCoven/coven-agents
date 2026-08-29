@@ -579,9 +579,9 @@ test("bounds command and file evidence arrays in snapshots and legacy results", 
   );
 });
 
-test("the owner union accepts every kind the worker resolves a tenant for", () => {
-  // tenantOf switches exhaustively over these, so a kind that stops parsing
-  // here would strand definitions the worker still has to authorise.
+test("the owner union accepts every server-supported ownership kind", () => {
+  // Ownership projection switches exhaustively over these, so a kind that
+  // stops parsing here would strand existing definitions.
   const owners = [
     { kind: "standalone" },
     { kind: "tenant", tenantId: "acct_42" },

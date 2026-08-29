@@ -164,19 +164,27 @@ test("a secret with no vendor prefix is still caught, by its name", () => {
   /**
    * The gap this closes. Every vendor pattern keys on a prefix, and this
    * project's own secrets have none -- AUTH_SECRET, the versioned credential
-   * KEK ring, and service tokens are raw base64. The most damaging values in
+   * KEK ring, and operator tokens are raw base64. The most damaging values in
    * the repository were the ones the scanner could not see.
    */
   for (const name of [
     "AUTH_SECRET",
     "CREDENTIAL_KEK",
-    "AGENT_CONTROL_TOKEN",
     "OPERATOR_DIAGNOSTIC_TOKEN",
-    "RUNNER_SERVICE_TOKEN",
+    "RUNNER_MANUAL_RECONCILE_SECRET",
     "STRIPE_WEBHOOK_SECRET",
     "AUTH_GITHUB_SECRET",
     "PGPASSWORD",
   ]) {
+    const findings = scanText(".env", `${name}=${RANDOM_BASE64}`);
+
+    assert.equal(findings.length, 1, `${name} was not caught`);
+    assert.match(findings[0].category, new RegExp(name));
+  }
+});
+
+test("retired Worker token names remain detectable in history", () => {
+  for (const name of ["AGENT_CONTROL_TOKEN", "RUNNER_SERVICE_TOKEN"]) {
     const findings = scanText(".env", `${name}=${RANDOM_BASE64}`);
 
     assert.equal(findings.length, 1, `${name} was not caught`);
@@ -339,7 +347,7 @@ test("no dotenv file may be committed except the documented examples", () => {
     ".env.local",
     ".env.production",
     ".env.development.local",
-    "worker/.dev.env",
+    "service/.dev.env",
     "nested/dir/.env.staging",
   ]) {
     assert.equal(isForbiddenDotenvPath(candidate), true, candidate);

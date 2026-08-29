@@ -87,11 +87,14 @@ function runValidator(
       | "GLOBAL_DAILY_RUN_CAP"
       | "NODE_ENV"
       | "AGENT_CONTROL_TOKEN"
+      | "CREDENTIAL_LEGACY_LENDING_ENABLED"
       | "OPERATOR_DIAGNOSTIC_TOKEN"
       | "REDIS_URL"
       | "RELEASE_AUDIENCE"
       | "RUNNER_MANUAL_RECONCILE_SECRET"
       | "RUNNER_SERVICE_TOKEN"
+      | "RUNNER_VERIFY_KEY"
+      | "RUNNER_VERIFY_KEY_ID"
       | "RUN_ADMISSION_CONSECUTIVE_MAX"
       | "RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX"
       | "RUN_ADMISSION_MODE"
@@ -117,6 +120,7 @@ function runValidator(
     CREDENTIAL_KEK_CURRENT_VERSION: undefined,
     CREDENTIAL_KEK_V1: undefined,
     CREDENTIAL_KEK_V2: undefined,
+    CREDENTIAL_LEGACY_LENDING_ENABLED: undefined,
     CRON_SECRET: undefined,
     DAYTONA_API_KEY: undefined,
     DAYTONA_API_URL: undefined,
@@ -140,9 +144,8 @@ function runValidator(
     RUN_ADMISSION_TENANT_QUEUE_MAX: undefined,
     RUNNER_MANUAL_RECONCILE_SECRET: undefined,
     RUNNER_SERVICE_TOKEN: undefined,
-    RUNNER_SIGNING_KEY: undefined,
-    RUNNER_SIGNING_KEY_ID: undefined,
-    RUNNER_SIGNING_PUBLIC_KEY: undefined,
+    RUNNER_VERIFY_KEY: undefined,
+    RUNNER_VERIFY_KEY_ID: undefined,
     VERCEL_ENV: undefined,
     VERCEL_PROJECT_PRODUCTION_URL: undefined,
     VERCEL_URL: undefined,
@@ -335,15 +338,8 @@ test("explicit Auth.js origin overrides Vercel environment authorities", () => {
 test("rejects aliases among privileged runner secrets", () => {
   const aliases = [
     ["CRON_SECRET", "OPERATOR_DIAGNOSTIC_TOKEN"],
-    ["CRON_SECRET", "AGENT_CONTROL_TOKEN"],
     ["CRON_SECRET", "RUNNER_MANUAL_RECONCILE_SECRET"],
-    ["CRON_SECRET", "RUNNER_SERVICE_TOKEN"],
-    ["OPERATOR_DIAGNOSTIC_TOKEN", "AGENT_CONTROL_TOKEN"],
     ["OPERATOR_DIAGNOSTIC_TOKEN", "RUNNER_MANUAL_RECONCILE_SECRET"],
-    ["OPERATOR_DIAGNOSTIC_TOKEN", "RUNNER_SERVICE_TOKEN"],
-    ["AGENT_CONTROL_TOKEN", "RUNNER_MANUAL_RECONCILE_SECRET"],
-    ["AGENT_CONTROL_TOKEN", "RUNNER_SERVICE_TOKEN"],
-    ["RUNNER_MANUAL_RECONCILE_SECRET", "RUNNER_SERVICE_TOKEN"],
   ] as const;
 
   for (const [left, right] of aliases) {
@@ -361,8 +357,8 @@ test("rejects aliases among privileged runner secrets", () => {
 
 test("rejects blank or oversized configured privileged runner secrets", () => {
   for (const [name, value] of [
-    ["AGENT_CONTROL_TOKEN", "  "],
-    ["RUNNER_SERVICE_TOKEN", ""],
+    ["CRON_SECRET", "  "],
+    ["OPERATOR_DIAGNOSTIC_TOKEN", ""],
     ["RUNNER_MANUAL_RECONCILE_SECRET", "x".repeat(1025)],
   ] as const) {
     const result = runValidator({ [name]: value });
@@ -381,7 +377,7 @@ test("rejects production Redis when the abuse key secret is missing or empty", (
   }
 });
 
-test("accepts production without browser runner provisioning or signing config", () => {
+test("accepts current production runner configuration", () => {
   const result = runValidator();
 
   assert.equal(result.status, 0, result.stderr);
@@ -389,6 +385,18 @@ test("accepts production without browser runner provisioning or signing config",
     `${result.stdout}${result.stderr}`,
     new RegExp(VALID_ENV.ABUSE_KEY_SECRET ?? "")
   );
+});
+
+test("retired Worker-only configuration is not a runtime validator input", () => {
+  const result = runValidator({
+    AGENT_CONTROL_TOKEN: " ",
+    CREDENTIAL_LEGACY_LENDING_ENABLED: "true",
+    RUNNER_SERVICE_TOKEN: "",
+    RUNNER_VERIFY_KEY: "retired",
+    RUNNER_VERIFY_KEY_ID: "retired",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("rejects configured run reservations without a nonempty abuse key secret", () => {

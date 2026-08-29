@@ -6,22 +6,10 @@ export {
   sanitizeEvidencePath,
   sanitizeEvidenceText,
 } from "./evidence";
-export type { RunnerClaims, RunnerRunScope } from "./identity";
 export {
   base64UrlDecode,
   base64UrlEncode,
-  KEY_ID_PATTERN,
-  MAX_AUTH_VERSION,
-  MAX_RUNNER_PAYLOAD_BYTES,
-  MAX_RUNNER_TOKEN_BYTES,
-  MAX_RUNNER_TOKEN_SEGMENT_BYTES,
-  runnerClaimsSchema,
-  runnerRunScopeSchema,
-  splitToken,
   TENANT_ID_PATTERN,
-  TOKEN_ALGORITHM,
-  TOKEN_CLOCK_SKEW_SECONDS,
-  TOKEN_LIFETIME_SECONDS,
 } from "./identity";
 
 if (contractDescriptor.apiVersions.length !== 1) {
@@ -44,10 +32,8 @@ const boundedString = (max: number) => z.string().trim().min(1).max(max);
 const datetimeSchema = z.string().datetime();
 
 /**
- * Cloud only. The local runner is gone: it had no tenancy, authenticated
- * with a shared access token rather than a per-tenant identity, and the
- * cloud worker already refused every agent that named it. Keeping the
- * enum open would let a client mint a definition nothing can execute.
+ * Cloud only. The local runner is gone, and keeping the enum open would let a
+ * client mint a definition nothing can execute.
  */
 export const backendSchema = z.enum(["cloud"]);
 export const runtimeSchema = z.enum(["cloud", "codex", "claude", "copilot"]);
@@ -125,7 +111,7 @@ const caveFamiliarAgentOwnerSchema = z
  * Without this member the union could not express ownership at all for
  * API-created agents. They would fall back to `standalone`, which carries no
  * identifier, and every one of them would resolve to the same tenant — turning
- * the ownership check in the worker into a no-op across accounts.
+ * the runner ownership check into a no-op across accounts.
  */
 const tenantAgentOwnerSchema = z
   .object({
@@ -164,9 +150,8 @@ const agentDefinitionInputShape = {
 };
 
 /**
- * Both backends now execute a harness. The cloud backend runs it inside a
- * sandbox container and the local backend runs it on the operator's machine,
- * but neither holds a model provider API key.
+ * The cloud backend executes a harness inside a sandbox and holds no model
+ * provider API key.
  *
  * This branch originally required the inverse — `backend: "cloud"` had to pair
  * with `runtime: "cloud"` — because it predates the move to keyless harness
@@ -192,9 +177,9 @@ const validateAgentBackendRuntime = (
  * the caller, never one the caller makes about itself, and `.strict()` means a
  * submitted `owner` is rejected outright rather than silently dropped.
  *
- * Today the worker would win anyway, because it spreads its own owner after the
- * parsed input. That ordering is not something to rely on: reversing the spread
- * would hand agent ownership to whoever asked for it, with nothing failing.
+ * The server stamps its own owner after parsing. That ordering is not something
+ * to rely on: accepting caller ownership would hand the agent to whoever asked
+ * for it, with nothing failing.
  */
 export const createAgentInputSchema = z
   .object(agentDefinitionInputShape)
@@ -552,11 +537,9 @@ export const agentEnvelopeSchema = z.object({
 /**
  * Projects a run snapshot onto the older `RunResult` shape.
  *
- * Two callers need this and they must agree: the cloud worker, which still
- * answers `RunResult` on its synchronous route, and the browser client, which
- * polls a snapshot to completion and hands the caller a result. Defining it
- * twice would let the two drift over something as small as how a cancelled run
- * is reported.
+ * The browser client polls a snapshot to completion and hands the caller a
+ * result. Keeping the projection beside the contract prevents drift over
+ * details such as how a cancelled run is reported.
  *
  * `RunResult` has no cancelled state, so a cancelled run reports as failed —
  * which is what a caller waiting on an outcome needs to know.
@@ -632,13 +615,3 @@ export type RunErrorEnvelope = z.infer<typeof runErrorEnvelopeSchema>;
 export type RunEventType = z.infer<typeof runEventTypeSchema>;
 export type RunEventsEnvelope = z.infer<typeof runEventsEnvelopeSchema>;
 export type RunSnapshotEnvelope = z.infer<typeof runSnapshotEnvelopeSchema>;
-
-export type {
-  RunnerVerificationKeyConfig,
-  RunnerVerificationKeyRing,
-} from "./verify-token";
-export {
-  importVerifyKey,
-  importVerifyKeyRing,
-  verifyRunnerToken,
-} from "./verify-token";

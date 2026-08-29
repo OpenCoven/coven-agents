@@ -1219,15 +1219,11 @@ async function probeDaytonaHarnessesInSession(
         options
       );
       if (firstCleanup.status !== "pending") {
-        if (createResolvedSuccessfully) {
-          const finalCleanup = await startSessionCleanupWithinDeadline(
-            () => removeSessionWithOutcome(sandbox, sessionId),
-            options
-          );
-          cleanupConfirmed = finalCleanup.status === "confirmed";
-        } else if (firstCleanup.status === "confirmed") {
-          cleanupConfirmed = firstCleanup.outcome.targetObserved;
-        }
+        const finalCleanup = await startSessionCleanupWithinDeadline(
+          () => removeSessionWithOutcome(sandbox, sessionId),
+          options
+        );
+        cleanupConfirmed = finalCleanup.status === "confirmed";
       }
     } else {
       const finalCleanup = await startSessionCleanupWithinDeadline(

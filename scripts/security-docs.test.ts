@@ -16,6 +16,12 @@ const keyRotationUrl = new URL(
   "../docs/security/key-rotation.md",
   import.meta.url
 );
+const securityPageUrl = new URL("../app/security/page.tsx", import.meta.url);
+const loginPageUrl = new URL("../app/(auth)/login/page.tsx", import.meta.url);
+const runtimeInspectorUrl = new URL(
+  "../components/console/runtime-inspector.tsx",
+  import.meta.url
+);
 
 test("the execution threat model covers every required security surface", () => {
   assert.equal(existsSync(threatModelUrl), true);
@@ -35,9 +41,10 @@ test("the execution threat model covers every required security surface", () => 
   }
 
   for (const reference of [
-    "worker/src/routes.ts",
     "packages/agent-contracts/src/evidence.ts",
     "lib/credentials/store.ts",
+    "lib/credentials/runner-credential.ts",
+    "lib/runner/production.ts",
     "coven-agents-cloud.4",
     "coven-agents-security.3",
   ]) {
@@ -52,6 +59,28 @@ test("the README links reviewers to the living threat model", () => {
     readme,
     /\[Execution threat model\]\(docs\/security\/execution-threat-model\.md\)/
   );
+});
+
+test("public security claims describe the same-origin Daytona boundary", () => {
+  const page = readFileSync(securityPageUrl, "utf8");
+  const login = readFileSync(loginPageUrl, "utf8");
+
+  assert.match(page, /Daytona sandbox/u);
+  assert.match(page, /same-origin/u);
+  assert.doesNotMatch(
+    page,
+    /Cloudflare|deployment gate|signed identity claim/u
+  );
+  assert.match(login, /Daytona sandbox/u);
+  assert.doesNotMatch(login, /Cloudflare/u);
+});
+
+test("the runtime inspector describes the current provider boundary", () => {
+  const inspector = readFileSync(runtimeInspectorUrl, "utf8");
+
+  assert.match(inspector, /Daytona sandbox/u);
+  assert.match(inspector, /persistent workspace/u);
+  assert.doesNotMatch(inspector, /Cloudflare/u);
 });
 
 test("the incident runbooks name every secret that exists", () => {
@@ -70,9 +99,10 @@ test("the incident runbooks name every secret that exists", () => {
     "CREDENTIAL_KEK_V2",
     "POSTGRES_URL",
     "AUTH_SECRET",
-    "AGENT_CONTROL_TOKEN",
     "OPERATOR_DIAGNOSTIC_TOKEN",
-    "RUNNER_SERVICE_TOKEN",
+    "RUNNER_MANUAL_RECONCILE_SECRET",
+    "CRON_SECRET",
+    "DAYTONA_API_KEY",
     "AUTH_GITHUB_SECRET",
     "STRIPE_SECRET_KEY",
     "STRIPE_WEBHOOK_SECRET",
@@ -127,28 +157,27 @@ test("the runbooks state the two facts that break a rotation", () => {
   assert.match(runbooks, /copied network trace is a credential disclosure/);
 });
 
-test("local cloud-runner setup shares distinct control and service tokens", () => {
+test("current runner setup has no Worker control or service tokens", () => {
   const envExample = readFileSync(envExampleUrl, "utf8");
   const readme = readFileSync(readmeUrl, "utf8");
 
-  assert.match(envExample, /^AGENT_CONTROL_TOKEN=$/m);
-  assert.match(
-    readme,
-    /console\.log\("AGENT_CONTROL_TOKEN=" \+ randomBytes\(32\)\.toString\("base64url"\)\);/
-  );
-  assert.match(readme, /Copy the same\s+`AGENT_CONTROL_TOKEN`/);
-  assert.match(
-    readme,
-    /`AGENT_CONTROL_TOKEN` and `RUNNER_SERVICE_TOKEN` are separate/
-  );
+  assert.doesNotMatch(envExample, /^AGENT_CONTROL_TOKEN=/m);
+  assert.doesNotMatch(envExample, /^RUNNER_SERVICE_TOKEN=/m);
+  assert.doesNotMatch(envExample, /^RUNNER_VERIFY_/m);
+  assert.doesNotMatch(readme, /AGENT_CONTROL_TOKEN|RUNNER_SERVICE_TOKEN/u);
 });
 
-test("the README diagnostic uses the separate operator credential", () => {
-  const readme = readFileSync(readmeUrl, "utf8");
-  const operatorVariable = "$OPERATOR_DIAGNOSTIC_TOKEN";
+test("the runner diagnostic uses the separate operator credential", () => {
+  const auth = readFileSync(
+    new URL("../lib/runner/auth.ts", import.meta.url),
+    "utf8"
+  );
 
-  assert.ok(readme.includes(`-H "Authorization: Bearer ${operatorVariable}"`));
-  assert.equal(readme.includes("$RUNNER_IDENTITY_TOKEN"), false);
+  assert.match(auth, /OPERATOR_DIAGNOSTIC_TOKEN/);
+  assert.doesNotMatch(
+    auth,
+    /AGENT_CONTROL_TOKEN|RUNNER_SERVICE_TOKEN|RUNNER_VERIFY_/u
+  );
 });
 
 test("the README points to the incident runbooks", () => {
@@ -160,20 +189,11 @@ test("the README points to the incident runbooks", () => {
   );
 });
 
-test("the runner key runbook documents bounded rotation and rollback", () => {
+test("the key runbook no longer documents retired runner verification keys", () => {
   assert.equal(existsSync(keyRotationUrl), true);
   const runbook = readFileSync(keyRotationUrl, "utf8");
 
-  for (const marker of [
-    "RUNNER_VERIFY_KEY_ID",
-    "RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT",
-    "RUNNER_VERIFY_PREVIOUS_RETIRE_AT",
-    "15 minutes plus",
-    "Rollback",
-    "never commit or log",
-  ]) {
-    assert.match(runbook, new RegExp(marker.replaceAll("*", "\\*")));
-  }
+  assert.doesNotMatch(runbook, /RUNNER_VERIFY_|runner verification key/iu);
 });
 
 test("the credential key runbook documents staged rewrap and retirement", () => {

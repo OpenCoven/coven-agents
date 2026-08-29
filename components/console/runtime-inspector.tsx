@@ -191,10 +191,11 @@ export function RuntimeInspector({
             />
             <Eyebrow>Boundary</Eyebrow>
             <div style={{ flex: 1 }} />
-            <span style={type_.meta}>cloudflare sandbox</span>
+            <span style={type_.meta}>Daytona sandbox</span>
           </div>
           <p style={{ ...type_.body, font: "400 11px/1.55 var(--font-ui)" }}>
-            Filesystem and network end with the container. Nothing reaches your
+            Each agent has one tenant-scoped persistent workspace. Runs use
+            short-lived process sessions inside it; nothing executes on your
             machine.
           </p>
         </div>
