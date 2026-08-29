@@ -59,6 +59,7 @@ export type DaytonaSandboxConfiguration = Readonly<{
 }>;
 
 export type DaytonaSandboxLifecycleDependencies = Readonly<{
+  deadline?: number;
   now?: () => number;
   signal?: AbortSignal;
   sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
@@ -73,7 +74,11 @@ export type DaytonaSandboxDependencies = Readonly<{
 
 export type DaytonaSandboxWarmDependencies = DaytonaSandboxDependencies &
   Readonly<{
-    probe: (sandbox: Sandbox) => Promise<void>;
+    probe: (
+      sandbox: Sandbox,
+      signal?: AbortSignal,
+      timeoutSeconds?: number
+    ) => Promise<void>;
   }>;
 
 export class DaytonaSandboxLifecycleError extends Error {
@@ -220,10 +225,70 @@ function transitionAbortedError(): DaytonaSandboxLifecycleError {
   );
 }
 
-function throwIfTransitionAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) {
+function lifecycleNow(
+  lifecycle: DaytonaSandboxLifecycleDependencies | undefined
+): number {
+  return (lifecycle?.now ?? Date.now)();
+}
+
+function lifecycleAborted(
+  lifecycle: DaytonaSandboxLifecycleDependencies | undefined
+): boolean {
+  return (
+    lifecycle?.signal?.aborted === true ||
+    (lifecycle?.deadline !== undefined &&
+      lifecycleNow(lifecycle) >= lifecycle.deadline)
+  );
+}
+
+function throwIfTransitionAborted(
+  lifecycle: DaytonaSandboxLifecycleDependencies | undefined
+): void {
+  if (lifecycleAborted(lifecycle)) {
     throw transitionAbortedError();
   }
+}
+
+function providerTimeoutSeconds(
+  lifecycle: DaytonaSandboxLifecycleDependencies | undefined
+): number {
+  if (lifecycle?.deadline === undefined) {
+    return SANDBOX_OPERATION_TIMEOUT_SECONDS;
+  }
+  const remainingMs = lifecycle.deadline - lifecycleNow(lifecycle);
+  if (remainingMs <= 0) {
+    throw transitionAbortedError();
+  }
+  return Math.max(1, Math.ceil(remainingMs / 1000));
+}
+
+function withLifecycleAbort<T>(
+  operation: () => Promise<T>,
+  lifecycle: DaytonaSandboxLifecycleDependencies | undefined
+): Promise<T> {
+  // Daytona 0.207 does not accept AbortSignal on sandbox lookup/lifecycle
+  // methods. The deadline-scoped SDK client and per-operation timeouts bound
+  // the transport; this guard stops our control flow so the caller can release
+  // or mark its durable lifecycle fence immediately.
+  throwIfTransitionAborted(lifecycle);
+  const signal = lifecycle?.signal;
+  if (!signal) {
+    return operation();
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(transitionAbortedError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation().then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
 }
 
 function sleepForTransition(
@@ -290,7 +355,7 @@ function waitForShutdownTransition(
   const deadline = now() + timeoutMs;
 
   async function poll(): Promise<"started" | "stable"> {
-    throwIfTransitionAborted(lifecycle?.signal);
+    throwIfTransitionAborted(lifecycle);
     if (isStartedSandbox(sandbox)) {
       return "started";
     }
@@ -305,9 +370,9 @@ function waitForShutdownTransition(
       throw transitionTimeoutError();
     }
 
-    await sandbox.refreshData();
+    await withLifecycleAbort(() => sandbox.refreshData(), lifecycle);
 
-    throwIfTransitionAborted(lifecycle?.signal);
+    throwIfTransitionAborted(lifecycle);
     if (isStartedSandbox(sandbox)) {
       return "started";
     }
@@ -336,11 +401,15 @@ async function startOrRecoverSandbox(
   sandbox: Sandbox,
   lifecycle?: DaytonaSandboxLifecycleDependencies
 ): Promise<void> {
+  throwIfTransitionAborted(lifecycle);
   if (sandbox.state === SandboxState.STARTED) {
     return;
   }
   if (sandbox.state === SandboxState.ERROR && sandbox.recoverable === true) {
-    await sandbox.recover(SANDBOX_OPERATION_TIMEOUT_SECONDS);
+    await withLifecycleAbort(
+      () => sandbox.recover(providerTimeoutSeconds(lifecycle)),
+      lifecycle
+    );
     return;
   }
   if (
@@ -348,7 +417,10 @@ async function startOrRecoverSandbox(
     sandbox.state === SandboxState.ARCHIVED ||
     sandbox.state === SandboxState.PAUSED
   ) {
-    await sandbox.start(SANDBOX_OPERATION_TIMEOUT_SECONDS);
+    await withLifecycleAbort(
+      () => sandbox.start(providerTimeoutSeconds(lifecycle)),
+      lifecycle
+    );
     return;
   }
   if (
@@ -382,10 +454,16 @@ async function startOrRecoverSandbox(
       return;
     }
     // Daytona's start operation waits for readiness, including resuming PAUSED.
-    await sandbox.start(SANDBOX_OPERATION_TIMEOUT_SECONDS);
+    await withLifecycleAbort(
+      () => sandbox.start(providerTimeoutSeconds(lifecycle)),
+      lifecycle
+    );
     return;
   }
-  await sandbox.waitUntilStarted(SANDBOX_OPERATION_TIMEOUT_SECONDS);
+  await withLifecycleAbort(
+    () => sandbox.waitUntilStarted(providerTimeoutSeconds(lifecycle)),
+    lifecycle
+  );
 }
 
 type DaytonaSandboxPersistence = Readonly<{
@@ -505,25 +583,54 @@ async function createSandbox(
       { retryable: true }
     );
   }
+  if (lifecycleAborted(dependencies.lifecycle)) {
+    await failSandboxReservation(reserved.value, persistence);
+    throw transitionAbortedError();
+  }
 
   let sandbox: Sandbox;
   let created = false;
   try {
-    sandbox = await dependencies.daytona.get(
-      daytonaSandboxName(reserved.value.tenant, reserved.value.id)
+    sandbox = await withLifecycleAbort(
+      () =>
+        dependencies.daytona.get(
+          daytonaSandboxName(reserved.value.tenant, reserved.value.id)
+        ),
+      dependencies.lifecycle
     );
   } catch (error) {
+    if (
+      error instanceof DaytonaSandboxLifecycleError &&
+      lifecycleAborted(dependencies.lifecycle)
+    ) {
+      await failSandboxReservation(reserved.value, persistence);
+      throw error;
+    }
     if (classifyDaytonaProviderError(error) !== "not_found") {
       await failSandboxReservation(reserved.value, persistence);
       throw error;
     }
     try {
-      sandbox = await dependencies.daytona.create(
-        sandboxCreateParameters(reserved.value, configuration),
-        { timeout: SANDBOX_OPERATION_TIMEOUT_SECONDS }
+      sandbox = await withLifecycleAbort(
+        () =>
+          dependencies.daytona.create(
+            sandboxCreateParameters(reserved.value, configuration),
+            { timeout: providerTimeoutSeconds(dependencies.lifecycle) }
+          ),
+        dependencies.lifecycle
       );
       created = true;
     } catch (createError) {
+      if (
+        createError instanceof DaytonaSandboxLifecycleError &&
+        lifecycleAborted(dependencies.lifecycle)
+      ) {
+        return markSandboxReservationAmbiguous(
+          reserved.value,
+          persistence,
+          createError
+        );
+      }
       if (
         classifyDaytonaSandboxCreateError(createError) === "definite_rejection"
       ) {
@@ -536,6 +643,18 @@ async function createSandbox(
         createError
       );
     }
+  }
+
+  if (lifecycleAborted(dependencies.lifecycle)) {
+    if (created) {
+      return markSandboxReservationAmbiguous(
+        reserved.value,
+        persistence,
+        transitionAbortedError()
+      );
+    }
+    await failSandboxReservation(reserved.value, persistence);
+    throw transitionAbortedError();
   }
 
   async function markSandboxReservationAmbiguous(
@@ -568,6 +687,7 @@ async function createSandbox(
     persistence,
     created
   );
+  throwIfTransitionAborted(dependencies.lifecycle);
   await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
   return { agent: persisted, sandbox };
 }
@@ -659,8 +779,10 @@ async function reconcileAmbiguousDaytonaSandbox(
   persistence: DaytonaSandboxPersistence
 ): Promise<{ agent: RunnerAgentRecord; sandbox: Sandbox }> {
   try {
-    const sandbox = await dependencies.daytona.get(
-      daytonaSandboxName(agent.tenant, agent.id)
+    const sandbox = await withLifecycleAbort(
+      () =>
+        dependencies.daytona.get(daytonaSandboxName(agent.tenant, agent.id)),
+      dependencies.lifecycle
     );
     const persisted = await persistSandbox(agent, sandbox, persistence, false);
     return { agent: persisted, sandbox };
@@ -710,7 +832,10 @@ async function ensureDaytonaSandboxWithPersistence(
 
   let sandbox: Sandbox;
   try {
-    sandbox = await dependencies.daytona.get(agent.daytonaSandboxId);
+    sandbox = await withLifecycleAbort(
+      () => dependencies.daytona.get(agent.daytonaSandboxId as string),
+      dependencies.lifecycle
+    );
   } catch (error) {
     if (classifyDaytonaProviderError(error) !== "not_found") {
       throw error;
@@ -850,6 +975,9 @@ export async function warmDaytonaSandbox(
   } catch (error) {
     return { error: classifyDaytonaProviderError(error), kind: "failed" };
   }
+  if (lifecycleAborted(dependencies.lifecycle)) {
+    return { error: "retryable", kind: "failed" };
+  }
 
   const warm = await dependencies.store.beginDaytonaSandboxWarm(principal, {
     agentId: ensured.agent.id,
@@ -864,16 +992,37 @@ export async function warmDaytonaSandbox(
     return { error: "non_retryable", kind: "failed" };
   }
 
-  try {
-    await dependencies.probe(ensured.sandbox);
-  } catch (error) {
-    await dependencies.store.finishDaytonaSandboxWarm(principal, {
+  const finishFailedWarm = () =>
+    dependencies.store.finishDaytonaSandboxWarm(principal, {
       agentId: warm.value.id,
       expectedGeneration: warm.value.sandboxGeneration,
       expectedVersion: warm.value.version,
       status: "failed",
     });
-    return { error: classifyDaytonaProviderError(error), kind: "failed" };
+
+  if (lifecycleAborted(dependencies.lifecycle)) {
+    await finishFailedWarm();
+    return { error: "retryable", kind: "failed" };
+  }
+
+  try {
+    await dependencies.probe(
+      ensured.sandbox,
+      dependencies.lifecycle?.signal,
+      providerTimeoutSeconds(dependencies.lifecycle)
+    );
+  } catch (error) {
+    await finishFailedWarm();
+    return {
+      error: lifecycleAborted(dependencies.lifecycle)
+        ? "retryable"
+        : classifyDaytonaProviderError(error),
+      kind: "failed",
+    };
+  }
+  if (lifecycleAborted(dependencies.lifecycle)) {
+    await finishFailedWarm();
+    return { error: "retryable", kind: "failed" };
   }
   const finished = await dependencies.store.finishDaytonaSandboxWarm(
     principal,

@@ -7,8 +7,9 @@ const PREWARM_TIMEOUT_MS = 5000;
 
 type PrewarmService = {
   prewarmMostRecent: (
-    principal: SubscriberSession
-  ) => Promise<Readonly<{ kind: string }>>;
+    principal: SubscriberSession,
+    options: Readonly<{ deadline: number; signal: AbortSignal }>
+  ) => Promise<unknown>;
 };
 
 type RunnerModule = {
@@ -16,12 +17,21 @@ type RunnerModule = {
 };
 
 export type PrewarmDependencies = {
-  loadRunner?: () => Promise<RunnerModule>;
+  loadRunner?: (signal: AbortSignal) => Promise<RunnerModule>;
   timeoutMs?: number;
 };
 
-function loadProductionRunner(): Promise<RunnerModule> {
-  return import("@/lib/runner/production");
+async function loadProductionRunner(
+  signal: AbortSignal
+): Promise<RunnerModule> {
+  if (signal.aborted) {
+    throw signal.reason;
+  }
+  const runner = await import("@/lib/runner/production");
+  if (signal.aborted) {
+    throw signal.reason;
+  }
+  return runner;
 }
 
 /**
@@ -45,7 +55,11 @@ export async function prewarmTenantSandbox(
   }
 
   const timeoutMs = dependencies.timeoutMs ?? PREWARM_TIMEOUT_MS;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  const controller = new AbortController();
+  const deadline = Date.now() + timeoutMs;
+  const timer = setTimeout(() => {
+    controller.abort(new Error("Sandbox prewarm exceeded its deadline."));
+  }, timeoutMs);
 
   try {
     const session: SubscriberSession = {
@@ -53,21 +67,17 @@ export async function prewarmTenantSandbox(
       tenant: tenantForUser(user.id),
       userId: user.id,
     };
-    const attempt = (async () => {
-      const runner = await (dependencies.loadRunner ?? loadProductionRunner)();
-      const service = runner.createProductionRunnerService(session);
-      await service.prewarmMostRecent(session);
-    })();
-    const timeout = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, timeoutMs);
+    const runner = await (dependencies.loadRunner ?? loadProductionRunner)(
+      controller.signal
+    );
+    const service = runner.createProductionRunnerService(session);
+    await service.prewarmMostRecent(session, {
+      deadline,
+      signal: controller.signal,
     });
-
-    await Promise.race([attempt, timeout]);
   } catch {
     // The next run pays the cold start it would have paid anyway.
   } finally {
-    if (timer) {
-      clearTimeout(timer);
-    }
+    clearTimeout(timer);
   }
 }

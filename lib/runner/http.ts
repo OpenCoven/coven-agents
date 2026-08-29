@@ -817,7 +817,9 @@ export function createRunnerHttpHandlers(
           return body.response;
         }
         const service = await dependencies.createService(context);
-        const result = await service.prewarmMostRecent(context.principal);
+        const result = await service.prewarmMostRecent(context.principal, {
+          signal: request.signal,
+        });
         return result.kind === "none"
           ? new Response(null, { status: 204 })
           : Response.json(

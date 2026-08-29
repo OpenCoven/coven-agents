@@ -12,18 +12,22 @@ function subscribedUser() {
 
 test("a subscriber warms in-process with the exact authenticated session and principal", async () => {
   let loaded = 0;
+  let loadSignal: AbortSignal | undefined;
   let receivedSession: unknown;
   let receivedPrincipal: unknown;
+  let receivedOptions: unknown;
 
   await prewarmTenantSandbox(subscribedUser(), {
-    loadRunner: () => {
+    loadRunner: (signal) => {
       loaded += 1;
+      loadSignal = signal;
       return Promise.resolve({
         createProductionRunnerService: (session) => {
           receivedSession = session;
           return {
-            prewarmMostRecent: (principal) => {
+            prewarmMostRecent: (principal, prewarmOptions) => {
               receivedPrincipal = principal;
+              receivedOptions = prewarmOptions;
               return Promise.resolve({ kind: "none" as const });
             },
           };
@@ -33,6 +37,7 @@ test("a subscriber warms in-process with the exact authenticated session and pri
   });
 
   assert.equal(loaded, 1);
+  assert.equal(loadSignal?.aborted, false);
   assert.deepEqual(receivedSession, {
     kind: "subscriber",
     tenant: TENANT,
@@ -43,6 +48,13 @@ test("a subscriber warms in-process with the exact authenticated session and pri
     tenant: TENANT,
     userId: USER_ID,
   });
+  const options = receivedOptions as {
+    deadline: number;
+    signal: AbortSignal;
+  };
+  assert.equal(options.signal, loadSignal);
+  assert.equal(options.signal.aborted, false);
+  assert.ok(options.deadline > Date.now());
 });
 
 test("lapsed and missing subscriptions do not load the runner dependency", async () => {
@@ -83,16 +95,36 @@ test("runner failures are swallowed so sign-in cannot fail", async () => {
   });
 });
 
-test("the in-process warm attempt is bounded without eagerly loading dependencies", async () => {
+test("the deadline aborts the in-process warm and waits for its cleanup", async () => {
   let attempted = false;
+  let aborted = false;
+  let released = false;
   const started = Date.now();
 
   await prewarmTenantSandbox(subscribedUser(), {
-    loadRunner: async () => ({
+    loadRunner: async (loadSignal) => ({
       createProductionRunnerService: () => ({
-        prewarmMostRecent: () => {
+        prewarmMostRecent: (_principal, options) => {
           attempted = true;
-          return new Promise(() => undefined);
+          assert.equal(options?.signal, loadSignal);
+          return new Promise((resolve) => {
+            options?.signal.addEventListener(
+              "abort",
+              () => {
+                aborted = true;
+                released = true;
+                resolve({
+                  agentId: "11111111-1111-4111-8111-111111111111",
+                  kind: "warmed" as const,
+                  warm: {
+                    status: "failed" as const,
+                    updatedAt: new Date().toISOString(),
+                  },
+                });
+              },
+              { once: true }
+            );
+          });
         },
       }),
     }),
@@ -100,5 +132,7 @@ test("the in-process warm attempt is bounded without eagerly loading dependencie
   });
 
   assert.equal(attempted, true);
+  assert.equal(aborted, true);
+  assert.equal(released, true);
   assert.ok(Date.now() - started < 1000);
 });

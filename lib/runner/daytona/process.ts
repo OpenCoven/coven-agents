@@ -874,16 +874,29 @@ export async function sweepDaytonaCredentials(
 }
 
 export function probeDaytonaHarnesses(
-  sandbox: DaytonaProcessSandbox
+  sandbox: DaytonaProcessSandbox,
+  options: Readonly<{
+    signal?: AbortSignal;
+    timeoutSeconds?: number;
+  }> = {}
 ): Promise<HarnessStatus[]> {
   return harnessesFromProbe(async (spec) => {
+    if (options.signal?.aborted) {
+      throw options.signal.reason;
+    }
     try {
       const result = await sandbox.process.executeCommand(
         [spec.command, ...spec.versionArgs].map(shellQuote).join(" "),
         undefined,
         undefined,
-        STAGING_TIMEOUT_SECONDS
+        Math.min(
+          STAGING_TIMEOUT_SECONDS,
+          options.timeoutSeconds ?? STAGING_TIMEOUT_SECONDS
+        )
       );
+      if (options.signal?.aborted) {
+        throw options.signal.reason;
+      }
       return {
         installed: result.exitCode === 0,
         version:
@@ -891,7 +904,10 @@ export function probeDaytonaHarnesses(
             ? result.result?.trim().split("\n")[0]?.trim() || null
             : null,
       };
-    } catch {
+    } catch (error) {
+      if (options.signal?.aborted) {
+        throw error;
+      }
       return { installed: false, version: null };
     }
   });

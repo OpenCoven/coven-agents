@@ -147,6 +147,7 @@ function recordingEnvironment(
   return {
     APP_ORIGIN,
     AUTH_SECRET,
+    AUTH_URL: APP_ORIGIN,
     DEMO_RECORDER_ACCOUNT_EMAIL: RECORDER_EMAIL,
     DEMO_RECORDING_CREDENTIAL: RECORDING_CREDENTIAL,
     ...overrides,
@@ -274,12 +275,183 @@ test("uses the deployed application origin and a finite default timeout", () => 
   const configuration = readCaptureEnvironment({
     APP_ORIGIN: "https://app.example/",
     AUTH_SECRET,
+    AUTH_URL: APP_ORIGIN,
     DEMO_RECORDER_ACCOUNT_EMAIL: RECORDER_EMAIL,
   });
 
   assert.equal(configuration.appOrigin, APP_ORIGIN);
   assert.equal(configuration.accountEmail, RECORDER_EMAIL);
   assert.equal(configuration.timeoutMs, 15 * 60 * 1000);
+});
+
+test("rejects unsafe or noncanonical application origins", () => {
+  const unsafe = [
+    {
+      APP_ORIGIN: "http://app.example",
+      AUTH_URL: "http://app.example",
+    },
+    {
+      APP_ORIGIN: "https://other.example",
+      AUTH_URL: APP_ORIGIN,
+    },
+    {
+      APP_ORIGIN: "https://other.example",
+      AUTH_URL: APP_ORIGIN,
+      VERCEL_URL: "other.example",
+    },
+    {
+      APP_ORIGIN: "https://app.example:444",
+      AUTH_URL: APP_ORIGIN,
+    },
+    {
+      APP_ORIGIN: "https://user:password@app.example",
+      AUTH_URL: APP_ORIGIN,
+    },
+    {
+      APP_ORIGIN: "ftp://app.example",
+      AUTH_URL: "ftp://app.example",
+    },
+    {
+      APP_ORIGIN: "https://app.example/path",
+      AUTH_URL: APP_ORIGIN,
+    },
+    {
+      APP_ORIGIN: "https://app.example/path/..",
+      AUTH_URL: APP_ORIGIN,
+    },
+    {
+      APP_ORIGIN: "https://app.example?query=1",
+      AUTH_URL: APP_ORIGIN,
+    },
+    {
+      APP_ORIGIN: "https://app.example#fragment",
+      AUTH_URL: APP_ORIGIN,
+    },
+    {
+      APP_ORIGIN: "https://app.example",
+      AUTH_URL: undefined,
+      NEXTAUTH_URL: undefined,
+      VERCEL_PROJECT_PRODUCTION_URL: undefined,
+      VERCEL_URL: undefined,
+    },
+  ];
+
+  for (const environment of unsafe) {
+    assert.throws(
+      () =>
+        readCaptureEnvironment(
+          recordingEnvironment(
+            environment as Record<string, string | undefined>
+          )
+        ),
+      /APP_ORIGIN|application origin|https|authority/i,
+      JSON.stringify(environment)
+    );
+  }
+});
+
+test("accepts an exactly approved HTTPS origin and explicit loopback development origins", () => {
+  assert.equal(
+    readCaptureEnvironment(
+      recordingEnvironment({
+        APP_ORIGIN: "https://preview.example",
+        AUTH_URL: "https://preview.example",
+      })
+    ).appOrigin,
+    "https://preview.example"
+  );
+  assert.equal(
+    readCaptureEnvironment(
+      recordingEnvironment({
+        APP_ORIGIN: "https://preview.example",
+        AUTH_URL: undefined,
+        VERCEL_URL: "preview.example",
+      })
+    ).appOrigin,
+    "https://preview.example"
+  );
+
+  for (const appOrigin of [
+    "http://localhost:3000",
+    "http://127.0.0.1:3100",
+    "http://[::1]:3200",
+  ]) {
+    assert.equal(
+      readCaptureEnvironment(
+        recordingEnvironment({
+          APP_ORIGIN: appOrigin,
+          AUTH_URL: undefined,
+        })
+      ).appOrigin,
+      appOrigin
+    );
+  }
+});
+
+test("an unapproved origin is rejected before account lookup or any request", async () => {
+  let lookups = 0;
+  let requests = 0;
+
+  await assert.rejects(
+    () =>
+      captureRun(
+        { repository: "OpenCoven/demo-workspace", task: "Add a parser test." },
+        {
+          environment: recordingEnvironment({
+            APP_ORIGIN: "https://other.example",
+            AUTH_URL: APP_ORIGIN,
+          }),
+          findRecorderUser: () => {
+            lookups += 1;
+            return Promise.resolve(null);
+          },
+          request: () => {
+            requests += 1;
+            return Promise.resolve(Response.json({}));
+          },
+        }
+      ),
+    /application origin|authority/i
+  );
+
+  assert.equal(lookups, 0);
+  assert.equal(requests, 0);
+});
+
+test("loopback development capture sends the session cookie only to that origin", async () => {
+  const calls: { headers: Headers; url: string }[] = [];
+
+  await assert.rejects(
+    () =>
+      captureRun(
+        { repository: "OpenCoven/demo-workspace", task: "Add a parser test." },
+        {
+          ...recorderLookup,
+          createSessionCookie: () => Promise.resolve(SESSION_COOKIE),
+          environment: recordingEnvironment({
+            APP_ORIGIN: "http://127.0.0.1:3100",
+            AUTH_URL: undefined,
+          }),
+          randomUUID: () => OPERATION_ID,
+          request: (input, init) => {
+            calls.push({
+              headers: new Headers(init?.headers),
+              url: String(input),
+            });
+            return Promise.resolve(Response.json({}, { status: 500 }));
+          },
+        }
+      ),
+    /runner request/i
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.url, "http://127.0.0.1:3100/api/agents");
+  assert.equal(
+    calls[0]?.headers.get("cookie"),
+    `authjs.session-token=${SESSION_COOKIE}`
+  );
+  assert.equal(calls[0]?.headers.get("authorization"), null);
 });
 
 test("recorder session cookies come from the verified account authority", async () => {

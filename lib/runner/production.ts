@@ -25,7 +25,7 @@ import {
   type RunnerDispatchResult,
   terminalizeUnstartedDispatchFailure,
 } from "./admission";
-import { daytonaClient } from "./daytona/client";
+import { daytonaClient, daytonaClientForDeadline } from "./daytona/client";
 import { COPILOT_CLI_VERSION } from "./daytona/image";
 import { probeDaytonaHarnesses } from "./daytona/process";
 import {
@@ -43,6 +43,7 @@ import {
   createRunnerService,
   type RunnerDeleteAgentResult,
   type RunnerDiagnosticResult,
+  type RunnerPrewarmOptions,
   RunnerServiceError,
   type RunnerWarmSandboxResult,
 } from "./service";
@@ -527,16 +528,30 @@ function createProductionRunnerServiceForPrincipal(
     listHarnesses: async () => registryHarnesses(),
     reconcileAndDispatch: productionReconcile(database, store),
     store,
-    warmSandbox: async (principal, agent): Promise<RunnerWarmSandboxResult> => {
+    warmSandbox: async (
+      principal,
+      agent,
+      options?: RunnerPrewarmOptions
+    ): Promise<RunnerWarmSandboxResult> => {
       try {
+        const daytona = options?.deadline
+          ? daytonaClientForDeadline(options.deadline)
+          : daytonaClient();
         const result = await warmDaytonaSandbox(
           principal,
           agent,
           daytonaSandboxConfiguration(),
           {
-            daytona: daytonaClient(),
-            probe: async (sandbox) => {
-              await probeDaytonaHarnesses(sandbox);
+            daytona,
+            lifecycle: {
+              deadline: options?.deadline,
+              signal: options?.signal,
+            },
+            probe: async (sandbox, signal, timeoutSeconds) => {
+              await probeDaytonaHarnesses(sandbox, {
+                signal,
+                timeoutSeconds,
+              });
             },
             store,
           }

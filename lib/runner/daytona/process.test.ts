@@ -11,6 +11,7 @@ import { daytonaRunCredentialPath, daytonaRunSessionName } from "./names";
 import type { DaytonaAttemptId, DaytonaProcessSandbox } from "./process";
 import {
   DaytonaProcessError,
+  probeDaytonaHarnesses,
   snapshotDaytonaProcess,
   startDaytonaProcess,
   stopDaytonaProcess,
@@ -29,6 +30,36 @@ const LAUNCH_AUTHORITY = {
   leaseToken: "lease-a",
   runId: RUN_ID,
 } as RunnerDispatchAuthority;
+
+test("harness probes honor the prewarm deadline and refuse work after abort", async () => {
+  const timeouts: number[] = [];
+  const sandbox = {
+    process: {
+      executeCommand: (
+        _command: string,
+        _cwd?: string,
+        _env?: Record<string, string>,
+        timeout?: number
+      ) => {
+        timeouts.push(timeout ?? 0);
+        return Promise.resolve({ exitCode: 0, result: "1.0.0" });
+      },
+    },
+  } as DaytonaProcessSandbox;
+
+  await probeDaytonaHarnesses(sandbox, { timeoutSeconds: 2 });
+  assert.ok(timeouts.length > 0);
+  assert.ok(timeouts.every((timeout) => timeout === 2));
+
+  const controller = new AbortController();
+  controller.abort(new Error("prewarm deadline exceeded"));
+  const callsBeforeAbort = timeouts.length;
+  await assert.rejects(
+    probeDaytonaHarnesses(sandbox, { signal: controller.signal }),
+    /prewarm deadline exceeded/
+  );
+  assert.equal(timeouts.length, callsBeforeAbort);
+});
 
 type Call = { command: string; env?: Record<string, string>; kind: string };
 
