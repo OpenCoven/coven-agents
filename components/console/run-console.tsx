@@ -52,7 +52,11 @@ import { avatarFor } from "@/lib/avatar";
 import { isTerminal, projectRun } from "@/lib/console/blocks";
 import { formatDuration, glyphFor, spanBetween } from "@/lib/console/format";
 import type { ConsoleRun } from "@/lib/console/types";
-import { fetchHasCredential } from "@/lib/credentials/client";
+import {
+  fetchHasCredential,
+  resetCredentialCache,
+  updateCredentialEligibility,
+} from "@/lib/credentials/client";
 
 const TICK_MS = 1000;
 
@@ -154,6 +158,7 @@ export function RunConsole() {
 
   const threadRef = useRef<HTMLDivElement>(null);
   const runsRef = useRef<ConsoleRun[]>([]);
+  const credentialOwnerRef = useRef<string | null>(null);
   runsRef.current = runs;
 
   const client = useMemo(() => new RunnerClient(), []);
@@ -187,10 +192,16 @@ export function RunConsole() {
     if (session.status !== "authenticated") {
       setRunnerStatus("signed_out");
       setHasCredential(null);
+      credentialOwnerRef.current = null;
+      resetCredentialCache();
       return;
     }
 
     let cancelled = false;
+    if (credentialOwnerRef.current !== accountId) {
+      credentialOwnerRef.current = accountId;
+      resetCredentialCache();
+    }
 
     fetchHasCredential()
       .then((has) => {
@@ -203,7 +214,11 @@ export function RunConsole() {
     return () => {
       cancelled = true;
     };
-  }, [session.status]);
+  }, [accountId, session.status]);
+
+  const onCredentialsChange = useCallback((harnessIds: readonly string[]) => {
+    setHasCredential(updateCredentialEligibility(harnessIds));
+  }, []);
 
   const refresh = useCallback(async () => {
     if (session.status !== "authenticated") {
@@ -988,7 +1003,10 @@ export function RunConsole() {
         {view === "analytics" ? (
           <Analytics />
         ) : view === "settings" ? (
-          <Settings account={account} />
+          <Settings
+            account={account}
+            onCredentialsChange={onCredentialsChange}
+          />
         ) : view === "create" ? (
           <CreateAgent
             busy={busy}

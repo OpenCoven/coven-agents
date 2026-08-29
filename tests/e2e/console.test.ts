@@ -232,4 +232,81 @@ test.describe("Run console", () => {
       page.getByRole("dialog", { name: "Connect a runner" })
     ).toHaveCount(0);
   });
+
+  test("credential writes immediately refresh run eligibility without trusting failures", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let harnessIds: string[] = [];
+    await page.route("**/api/credentials", (route) => {
+      const request = route.request();
+      if (request.method() === "GET") {
+        return route.fulfill({ json: { harnessIds } });
+      }
+      const body = request.postDataJSON() as {
+        credential?: string;
+        harnessId?: string;
+      };
+      if (request.method() === "POST") {
+        if (body.credential === "rejected-credential") {
+          return route.fulfill({ json: { error: "failed" }, status: 500 });
+        }
+        harnessIds = [...new Set([...harnessIds, body.harnessId ?? ""])]
+          .filter(Boolean)
+          .sort();
+        return route.fulfill({
+          json: { harnessId: body.harnessId, stored: true },
+        });
+      }
+      harnessIds = harnessIds.filter((id) => id !== body.harnessId);
+      return route.fulfill({
+        json: { harnessId: body.harnessId, removed: true },
+      });
+    });
+    await page.route("**/api/usage", (route) =>
+      route.fulfill({ json: { cap: 10, resetsAt: null, used: 0 } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({ json: { agents: [retainedAgent] } });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    const blocked =
+      "No harness credential stored — add one in account settings.";
+    await page.goto("/agents");
+    await expect(page.getByText(blocked)).toBeVisible();
+
+    await page.getByRole("button", { name: "Account and settings" }).click();
+    await page
+      .getByLabel("GitHub Copilot CLI credential")
+      .fill("rejected-credential");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(
+      page.getByText("Could not store the credential.")
+    ).toBeVisible();
+    await page.getByRole("link", { name: "Back to runs" }).click();
+    await expect(page.getByText(blocked)).toBeVisible();
+
+    await page.getByRole("button", { name: "Account and settings" }).click();
+    await page
+      .getByLabel("GitHub Copilot CLI credential")
+      .fill("accepted-token");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(page.getByText("Credential stored.")).toBeVisible();
+    await page.getByRole("link", { name: "Back to runs" }).click();
+    await expect(page.getByText(blocked)).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Account and settings" }).click();
+    await page.getByRole("button", { name: "Remove" }).click();
+    await expect(page.getByText("Credential removed.")).toBeVisible();
+    await page.getByRole("link", { name: "Back to runs" }).click();
+    await expect(page.getByText(blocked)).toBeVisible();
+  });
 });

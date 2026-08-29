@@ -86,6 +86,25 @@ function store(methods: Record<string, unknown>): RunnerStore {
   return methods as RunnerStore;
 }
 
+function settlesWithin<T>(promise: Promise<T>, milliseconds = 100): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("operation did not settle promptly")),
+      milliseconds
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 test("stored provider IDs are resolved and stopped or archived sandboxes start", async () => {
   await Promise.all(
     [SandboxState.STOPPED, SandboxState.ARCHIVED].map(async (state) => {
@@ -847,7 +866,6 @@ test("an aborted warm propagates to the probe and releases its durable warm fenc
   const controller = new AbortController();
   const statuses: string[] = [];
   const sessions = new Set<string>();
-  const commandRejectors: ((error: Error) => void)[] = [];
   let probeStarted!: () => void;
   const started = new Promise<void>((resolve) => {
     probeStarted = resolve;
@@ -863,18 +881,13 @@ test("an aborted warm propagates to the probe and releases its durable warm fenc
       deleteSession: (sessionId: string) => {
         probeDeletes += 1;
         sessions.delete(sessionId);
-        for (const reject of commandRejectors) {
-          reject(new Error("probe session deleted"));
-        }
         return Promise.resolve();
       },
       executeCommand: () =>
         Promise.reject(new Error("prewarm probe must use a session")),
       executeSessionCommand: () => {
         probeStarted();
-        return new Promise((_resolve, reject) => {
-          commandRejectors.push(reject);
-        });
+        return new Promise(() => undefined);
       },
       getSessionCommand: () => Promise.resolve({}),
       getSessionCommandLogs: () => Promise.resolve({}),
@@ -916,7 +929,7 @@ test("an aborted warm propagates to the probe and releases its durable warm fenc
 
   await started;
   controller.abort(new Error("prewarm deadline exceeded"));
-  const result = await pending;
+  const result = await settlesWithin(pending);
 
   assert.equal(probeDeletes, 1);
   assert.equal(sessions.size, 0);

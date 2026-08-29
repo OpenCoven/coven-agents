@@ -922,6 +922,66 @@ function abortReason(signal: AbortSignal): Error {
     : new Error("Daytona harness probe was aborted.");
 }
 
+/**
+ * Settles an aborted command only after its provider session is confirmed gone.
+ *
+ * The losing SDK promise keeps both handlers attached so a later provider
+ * response or rejection cannot become an unhandled process error.
+ */
+function awaitCommandAfterAbortCleanup<T>(
+  command: Promise<T>,
+  signal: AbortSignal,
+  cleanup: () => Promise<void>
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (complete: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      complete();
+    };
+    const rejectAfterCleanup = () => {
+      cleanup().then(
+        () => finish(() => reject(abortReason(signal))),
+        (error: unknown) =>
+          finish(() =>
+            reject(
+              new Error("Daytona probe session cleanup failed after abort.", {
+                cause: error,
+              })
+            )
+          )
+      );
+    };
+    const onAbort = () => rejectAfterCleanup();
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    command.then(
+      (value) => {
+        if (signal.aborted) {
+          rejectAfterCleanup();
+          return;
+        }
+        finish(() => resolve(value));
+      },
+      (error: unknown) => {
+        if (signal.aborted) {
+          rejectAfterCleanup();
+          return;
+        }
+        finish(() => reject(error));
+      }
+    );
+
+    if (signal.aborted) {
+      rejectAfterCleanup();
+    }
+  });
+}
+
 async function probeDaytonaHarnessesInSession(
   sandbox: DaytonaProcessSandbox,
   options: Readonly<{ signal: AbortSignal; timeoutSeconds: number }>
@@ -938,9 +998,12 @@ async function probeDaytonaHarnessesInSession(
 
   const sessionId = `coven-probe-${randomUUID()}`;
   let abortCleanup: Promise<void> | undefined;
-  const onAbort = () => {
+  const cleanupAfterAbort = () => {
     abortCleanup ??= removeSession(sandbox, sessionId);
-    abortCleanup.catch(() => undefined);
+    return abortCleanup;
+  };
+  const onAbort = () => {
+    cleanupAfterAbort().catch(() => undefined);
   };
   options.signal.addEventListener("abort", onAbort, { once: true });
 
@@ -958,16 +1021,20 @@ async function probeDaytonaHarnessesInSession(
       let observed: { installed: boolean; version: string | null };
       try {
         // biome-ignore lint/performance/noAwaitInLoops: one attempt-scoped session executes probes sequentially so commands cannot contend inside the same provider session.
-        const result = await sandbox.process.executeSessionCommand(
-          sessionId,
-          {
-            command: [spec.command, ...spec.versionArgs]
-              .map(shellQuote)
-              .join(" "),
-            runAsync: false,
-            suppressInputEcho: true,
-          },
-          options.timeoutSeconds
+        const result = await awaitCommandAfterAbortCleanup(
+          sandbox.process.executeSessionCommand(
+            sessionId,
+            {
+              command: [spec.command, ...spec.versionArgs]
+                .map(shellQuote)
+                .join(" "),
+              runAsync: false,
+              suppressInputEcho: true,
+            },
+            options.timeoutSeconds
+          ),
+          options.signal,
+          cleanupAfterAbort
         );
         if (options.signal.aborted) {
           throw abortReason(options.signal);

@@ -31,7 +31,26 @@ const LAUNCH_AUTHORITY = {
   runId: RUN_ID,
 } as RunnerDispatchAuthority;
 
-test("normal harness probes retain native bounded executeCommand behavior", async () => {
+function settlesWithin<T>(promise: Promise<T>, milliseconds = 100): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("operation did not settle promptly")),
+      milliseconds
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
+test("normal harness probes retain bounded executeCommand timeout configuration", async () => {
   const timeouts: number[] = [];
   const sandbox = {
     process: {
@@ -55,7 +74,7 @@ test("normal harness probes retain native bounded executeCommand behavior", asyn
 test("an in-flight prewarm probe abort deletes its provider session and resolves", async () => {
   const controller = new AbortController();
   const sessions = new Set<string>();
-  const commandRejectors: ((error: Error) => void)[] = [];
+  let rejectCommand!: (error: Error) => void;
   let commandStarted!: () => void;
   const started = new Promise<void>((resolve) => {
     commandStarted = resolve;
@@ -70,9 +89,6 @@ test("an in-flight prewarm probe abort deletes its provider session and resolves
       deleteSession: (sessionId: string) => {
         deletes += 1;
         sessions.delete(sessionId);
-        for (const reject of commandRejectors) {
-          reject(new Error("probe session deleted"));
-        }
         return Promise.resolve();
       },
       executeCommand: () =>
@@ -85,7 +101,7 @@ test("an in-flight prewarm probe abort deletes its provider session and resolves
         assert.ok(timeout && timeout > 0 && timeout <= 5);
         commandStarted();
         return new Promise((_resolve, reject) => {
-          commandRejectors.push(reject);
+          rejectCommand = reject;
         });
       },
       getSessionCommand: () => Promise.resolve({}),
@@ -109,9 +125,105 @@ test("an in-flight prewarm probe abort deletes its provider session and resolves
   ]);
   controller.abort(new Error("prewarm deadline exceeded"));
 
-  await assert.rejects(pending, /prewarm deadline exceeded/);
+  await settlesWithin(assert.rejects(pending, /prewarm deadline exceeded/));
   assert.equal(deletes, 1);
   assert.equal(sessions.size, 0);
+  rejectCommand(new Error("late SDK command rejection"));
+  await Promise.resolve();
+});
+
+test("abort cleanup retries a transient delete failure before settling", async () => {
+  const controller = new AbortController();
+  const sessions = new Set<string>();
+  let commandStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    commandStarted = resolve;
+  });
+  let deletes = 0;
+  const sandbox = {
+    process: {
+      createSession: (sessionId: string) => {
+        sessions.add(sessionId);
+        return Promise.resolve();
+      },
+      deleteSession: (sessionId: string) => {
+        deletes += 1;
+        if (deletes === 1) {
+          return Promise.reject(new Error("transient delete failure"));
+        }
+        sessions.delete(sessionId);
+        return Promise.resolve();
+      },
+      executeCommand: () =>
+        Promise.reject(new Error("prewarm must use a cancellable session")),
+      executeSessionCommand: () => {
+        commandStarted();
+        return new Promise(() => undefined);
+      },
+      getSessionCommand: () => Promise.resolve({}),
+      getSessionCommandLogs: () => Promise.resolve({}),
+      listSessions: () =>
+        Promise.resolve(
+          [...sessions].map((sessionId) => ({ commands: [], sessionId }))
+        ),
+    },
+  } as DaytonaProcessSandbox;
+
+  const pending = probeDaytonaHarnesses(sandbox, {
+    signal: controller.signal,
+    timeoutSeconds: 5,
+  });
+  await started;
+  controller.abort(new Error("prewarm deadline exceeded"));
+
+  await settlesWithin(assert.rejects(pending, /prewarm deadline exceeded/));
+  assert.equal(deletes, 2);
+  assert.equal(sessions.size, 0);
+});
+
+test("abort cleanup fails closed when session deletion cannot be verified", async () => {
+  const controller = new AbortController();
+  const sessions = new Set<string>();
+  let commandStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    commandStarted = resolve;
+  });
+  let deletes = 0;
+  const sandbox = {
+    process: {
+      createSession: (sessionId: string) => {
+        sessions.add(sessionId);
+        return Promise.resolve();
+      },
+      deleteSession: () => {
+        deletes += 1;
+        return Promise.reject(new Error("persistent delete failure"));
+      },
+      executeCommand: () =>
+        Promise.reject(new Error("prewarm must use a cancellable session")),
+      executeSessionCommand: () => {
+        commandStarted();
+        return new Promise(() => undefined);
+      },
+      getSessionCommand: () => Promise.resolve({}),
+      getSessionCommandLogs: () => Promise.resolve({}),
+      listSessions: () =>
+        Promise.resolve(
+          [...sessions].map((sessionId) => ({ commands: [], sessionId }))
+        ),
+    },
+  } as DaytonaProcessSandbox;
+
+  const pending = probeDaytonaHarnesses(sandbox, {
+    signal: controller.signal,
+    timeoutSeconds: 5,
+  });
+  await started;
+  controller.abort(new Error("prewarm deadline exceeded"));
+
+  await settlesWithin(assert.rejects(pending, /persistent delete failure/));
+  assert.equal(deletes, 2);
+  assert.equal(sessions.size, 1);
 });
 
 test("a successful cancellable prewarm probe cleans its attempt session", async () => {

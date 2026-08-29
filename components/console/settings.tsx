@@ -186,11 +186,13 @@ function HarnessCard({
 
 export function Settings({
   account,
+  onCredentialsChange,
 }: {
   /** The signed-in email, or null. Not a display string — the panel decides
    *  how to render "nobody", so a fallback sentence can never be mistaken for
    *  an account name or have an initial derived from it. */
   account: string | null;
+  onCredentialsChange: (harnessIds: readonly string[]) => void;
 }) {
   const [tab, setTab] = useState<Tab>("harness");
 
@@ -203,20 +205,30 @@ export function Settings({
   const [usage, setUsage] = useState<Usage | null>(null);
   const [confirmWipe, setConfirmWipe] = useState(false);
 
+  const publishCredentials = useCallback(
+    (harnessIds: readonly string[]) => {
+      const next = [...new Set(harnessIds)].sort();
+      setConfigured(next);
+      onCredentialsChange(next);
+      return next;
+    },
+    [onCredentialsChange]
+  );
+
   const refreshCredentials = useCallback(async () => {
     const response = await fetch(`${BASE_PATH}/api/credentials`);
     if (response.status === 403) {
       // A demo session cannot store one, and saying so beats a form that
       // fails on submit.
       setLocked(true);
-      return;
+      return publishCredentials([]);
     }
     if (!response.ok) {
-      return;
+      return null;
     }
     const body = (await response.json()) as { harnessIds?: string[] };
-    setConfigured(body.harnessIds ?? []);
-  }, []);
+    return publishCredentials(body.harnessIds ?? []);
+  }, [publishCredentials]);
 
   useEffect(() => {
     if (!account) {
@@ -254,6 +266,7 @@ export function Settings({
   const save = async () => {
     setBusy(true);
     let stored = 0;
+    let nextConfigured = configured;
     try {
       for (const [harnessId, value] of Object.entries(drafts)) {
         const credential = value.trim();
@@ -281,6 +294,7 @@ export function Settings({
           throw new Error(String(response.status));
         }
         stored += 1;
+        nextConfigured = publishCredentials([...nextConfigured, harnessId]);
       }
 
       setDrafts({});
@@ -306,6 +320,7 @@ export function Settings({
       if (!response.ok) {
         throw new Error(String(response.status));
       }
+      publishCredentials(configured.filter((id) => id !== harnessId));
       await refreshCredentials();
       toast.success("Credential removed.");
     } catch {
