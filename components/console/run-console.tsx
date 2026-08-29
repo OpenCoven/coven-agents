@@ -104,7 +104,12 @@ export function RunConsole() {
    * change when someone changes their address.
    */
   const accountId = session.data?.user?.id ?? null;
-  const sessionIdentity = `${session.status}:${accountId ?? ""}`;
+  const sessionIdentity = [
+    session.status,
+    accountId ?? "",
+    session.data?.user?.type ?? "",
+    session.data?.user?.authVersion ?? "",
+  ].join(":");
   const avatarSrc = accountId
     ? avatarFor({ id: accountId, image: session.data?.user?.image })
     : null;
@@ -165,6 +170,7 @@ export function RunConsole() {
   const credentialOwnerRef = useRef<string | null>(null);
   const activeSessionIdentityRef = useRef("");
   const latestSessionIdentityRef = useRef(sessionIdentity);
+  const prewarmedIdentitiesRef = useRef(new Set<string>());
   const sessionAbortRef = useRef<AbortController | null>(null);
   const sessionGenerationRef = useRef(0);
   latestSessionIdentityRef.current = sessionIdentity;
@@ -189,6 +195,21 @@ export function RunConsole() {
     }
     toast.error(error instanceof Error ? error.message : fallback);
   }, []);
+
+  const reconcileTerminalAgent = useCallback(
+    (snapshot: Pick<RunSnapshot, "agentId" | "status">) => {
+      if (!isTerminal(snapshot.status)) {
+        return;
+      }
+      const status = snapshot.status === "failed" ? "error" : "idle";
+      setAgents((current) =>
+        current.map((agent) =>
+          agent.id === snapshot.agentId ? { ...agent, status } : agent
+        )
+      );
+    },
+    []
+  );
 
   /* ---------------------------------------------------------------- wiring */
 
@@ -308,6 +329,13 @@ export function RunConsole() {
       resetCredentialCache();
       return () => controller.abort();
     }
+    if (session.data.user.type !== "subscriber") {
+      setRunnerStatus("subscription_required");
+      setHasCredential(null);
+      credentialOwnerRef.current = null;
+      resetCredentialCache();
+      return () => controller.abort();
+    }
 
     setRunnerStatus("connecting");
     setSettingsOperationContext({
@@ -326,28 +354,48 @@ export function RunConsole() {
         }
       })
       .catch(() => undefined);
+    if (!prewarmedIdentitiesRef.current.has(sessionIdentity)) {
+      prewarmedIdentitiesRef.current.add(sessionIdentity);
+      client.prewarmTenant(controller.signal).catch(() => undefined);
+    }
     refresh(generation, controller.signal).catch(() => undefined);
 
     return () => controller.abort();
-  }, [accountId, isCurrentSession, refresh, session.status, sessionIdentity]);
+  }, [
+    accountId,
+    client,
+    isCurrentSession,
+    refresh,
+    session.data?.user?.type,
+    session.status,
+    sessionIdentity,
+  ]);
 
   const refreshCurrent = useCallback(() => {
     const controller = sessionAbortRef.current;
-    if (!(controller && session.status === "authenticated")) {
+    if (
+      !(
+        controller &&
+        session.status === "authenticated" &&
+        session.data.user.type === "subscriber"
+      )
+    ) {
       return Promise.resolve();
     }
     return refresh(sessionGenerationRef.current, controller.signal);
-  }, [refresh, session.status]);
+  }, [refresh, session.data?.user?.type, session.status]);
 
   const currentSessionContext = useCallback(() => {
     const controller = sessionAbortRef.current;
-    return controller && session.status === "authenticated"
+    return controller &&
+      session.status === "authenticated" &&
+      session.data.user.type === "subscriber"
       ? {
           generation: sessionGenerationRef.current,
           signal: controller.signal,
         }
       : null;
-  }, [session.status]);
+  }, [session.data?.user?.type, session.status]);
 
   useEffect(() => {
     if (session.status !== "authenticated" || runnerStatus !== "rate_limited") {
@@ -360,44 +408,57 @@ export function RunConsole() {
   }, [refreshCurrent, runnerStatus, session.status]);
 
   /** Applies one streamed event to the run it belongs to. */
-  const applyEvent = useCallback((runId: string, event: RunEvent) => {
-    setRuns((current) =>
-      current.map((run) => {
-        if (run.snapshot.id !== runId || event.id <= run.lastEventId) {
-          return run;
-        }
-        const snapshot: RunSnapshot =
-          event.type === "completed"
-            ? event.run
-            : event.type === "status"
-              ? { ...run.snapshot, status: event.status }
-              : run.snapshot;
-
-        return {
-          ...run,
-          events: [...run.events, event],
-          lastEventId: event.id,
-          snapshot,
-        };
-      })
-    );
-
-    if (event.type === "completed" || event.type === "failed") {
-      // The rail's dot is read off the agent, not the run, so it has to be
-      // told as well or a finished run leaves its profile spinning.
-      setAgents((current) =>
-        current.map((agent) =>
-          agent.id ===
-          runsRef.current.find((r) => r.snapshot.id === runId)?.agentId
-            ? {
-                ...agent,
-                status: event.type === "failed" ? "error" : "idle",
-              }
-            : agent
-        )
+  const applyEvent = useCallback(
+    (
+      runId: string,
+      event: RunEvent,
+      options: Readonly<{ reconcileAgent?: boolean }> = {}
+    ) => {
+      const currentRun = runsRef.current.find(
+        (run) => run.snapshot.id === runId
       );
-    }
-  }, []);
+      if (!currentRun || event.id <= currentRun.lastEventId) {
+        return;
+      }
+
+      setRuns((current) =>
+        current.map((run) => {
+          if (run.snapshot.id !== runId || event.id <= run.lastEventId) {
+            return run;
+          }
+          const snapshot =
+            event.type === "completed"
+              ? event.run
+              : event.type === "status"
+                ? { ...run.snapshot, status: event.status }
+                : event.type === "failed"
+                  ? { ...run.snapshot, status: "failed" as const }
+                  : run.snapshot;
+          return {
+            ...run,
+            events: [...run.events, event],
+            lastEventId: event.id,
+            snapshot,
+          };
+        })
+      );
+      if (options.reconcileAgent) {
+        reconcileTerminalAgent({
+          agentId:
+            event.type === "completed" ? event.run.agentId : currentRun.agentId,
+          status:
+            event.type === "completed"
+              ? event.run.status
+              : event.type === "status"
+                ? event.status
+                : event.type === "failed"
+                  ? "failed"
+                  : currentRun.snapshot.status,
+        });
+      }
+    },
+    [reconcileTerminalAgent]
+  );
 
   useEffect(() => {
     if (!streamingRunId || session.status !== "authenticated") {
@@ -427,93 +488,40 @@ export function RunConsole() {
     });
     let cancelled = false;
 
-    /**
-     * A loop, not a single pass retriggered through state.
-     *
-     * The runner closes an idle stream after sixty seconds, and the first
-     * version of this effect handled that by re-reading the snapshot and
-     * calling `setStreamingRunId(streamingRunId)` — the same value, which
-     * React treats as no change, so the effect never re-ran and the stream
-     * never reopened. A quiet minute mid-run left the console permanently
-     * blind to a run that was still executing; the first real cloud run
-     * demonstrated it live. Looping inside the effect makes the reconnect a
-     * fact of control flow instead of a hope about state identity.
-     *
-     * The cursor is re-read from `runsRef` each pass, so a reconnect resumes
-     * after the last applied event rather than replaying from the start.
-     */
-    const RECONNECT_DELAY_MS = 1000;
-
     const follow = async () => {
-      while (!cancelled) {
-        if (!sessionIsCurrent()) {
-          return;
-        }
-        const cursor =
-          runsRef.current.find((run) => run.snapshot.id === streamingRunId)
-            ?.lastEventId ?? 0;
-
-        try {
-          // biome-ignore lint/performance/noAwaitInLoops: each stream must end before the snapshot re-read that decides whether to open the next one.
-          await client.streamRunEvents(streamingRunId, {
-            lastEventId: cursor,
-            onEvent: (event) => {
-              if (!cancelled && sessionIsCurrent()) {
-                applyEvent(streamingRunId, event);
-              }
-            },
-            signal: controller.signal,
-          });
-        } catch (error) {
-          if (cancelled || controller.signal.aborted || !sessionIsCurrent()) {
-            return;
-          }
-          toast.error(
-            error instanceof Error
-              ? error.message
-              : "Lost the run's event stream."
-          );
-        }
-
+      const cursor =
+        runsRef.current.find((run) => run.snapshot.id === streamingRunId)
+          ?.lastEventId ?? 0;
+      try {
+        const snapshot = await client.streamRunEvents(streamingRunId, {
+          lastEventId: cursor,
+          onEvent: (event) => {
+            if (!cancelled && sessionIsCurrent()) {
+              applyEvent(streamingRunId, event, { reconcileAgent: true });
+            }
+          },
+          signal: controller.signal,
+        });
         if (cancelled || !sessionIsCurrent()) {
           return;
         }
-
-        // The runner closes an idle stream as well as a finished one, so the
-        // close is not an outcome. Re-read the snapshot and let its status
-        // decide whether to reconnect.
-        try {
-          const snapshot = await client.getRun(
-            streamingRunId,
-            controller.signal
-          );
-          if (cancelled || !sessionIsCurrent()) {
-            return;
-          }
-          setRuns((current) =>
-            current.map((run) =>
-              run.snapshot.id === streamingRunId ? { ...run, snapshot } : run
-            )
-          );
-          if (isTerminal(snapshot.status)) {
-            setStreamingRunId(null);
-            return;
-          }
-        } catch {
-          if (sessionIsCurrent()) {
-            setStreamingRunId(null);
-          }
+        setRuns((current) =>
+          current.map((run) =>
+            run.snapshot.id === streamingRunId ? { ...run, snapshot } : run
+          )
+        );
+        reconcileTerminalAgent(snapshot);
+        setStreamingRunId(null);
+      } catch (error) {
+        if (cancelled || controller.signal.aborted || !sessionIsCurrent()) {
           return;
         }
-
-        // A pause before reconnecting, so a stream the runner closes
-        // immediately cannot turn this loop into a request-per-tick hammer.
-        await new Promise((resolve) => {
-          setTimeout(resolve, RECONNECT_DELAY_MS);
-        });
-        if (!sessionIsCurrent()) {
-          return;
-        }
+        setStreamingRunId(null);
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : "Lost the run's event stream."
+        );
       }
     };
 
@@ -524,7 +532,14 @@ export function RunConsole() {
       controller.abort();
       sessionController.signal.removeEventListener("abort", abortForSession);
     };
-  }, [applyEvent, client, isCurrentSession, session.status, streamingRunId]);
+  }, [
+    applyEvent,
+    client,
+    isCurrentSession,
+    reconcileTerminalAgent,
+    session.status,
+    streamingRunId,
+  ]);
 
   /**
    * Backfills the transcript of a finished run that was hydrated from the
@@ -562,6 +577,16 @@ export function RunConsole() {
           }
         },
         signal: controller.signal,
+      })
+      .then((snapshot) => {
+        if (!isCurrentSession(generation, sessionController.signal)) {
+          return;
+        }
+        setRuns((current) =>
+          current.map((run) =>
+            run.snapshot.id === runId ? { ...run, snapshot } : run
+          )
+        );
       })
       .catch(() => undefined);
     return () => {
@@ -671,6 +696,7 @@ export function RunConsole() {
           run.snapshot.id === snapshot.id ? { ...run, snapshot } : run
         )
       );
+      reconcileTerminalAgent(snapshot);
       toast.success("Run cancelled.");
     } catch (error) {
       if (isCurrentSession(context.generation, context.signal)) {

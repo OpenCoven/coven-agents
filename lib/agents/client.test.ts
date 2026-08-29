@@ -1,95 +1,40 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AGENT_RUNNER_API_VERSION } from "@opencoven/agent-contracts";
+import {
+  AGENT_RUNNER_API_VERSION,
+  AGENT_RUNNER_CAPABILITIES,
+  type AgentDefinition,
+  type RunSnapshot,
+} from "@opencoven/agent-contracts";
+import type { RunnerTransport } from "./browser-transport";
 import { RunnerApiError, RunnerClient } from "./client";
 
-const agent = {
-  backend: "cloud" as const,
-  createdAt: "2026-08-20T12:00:00.000Z",
-  description: "Code familiar",
-  id: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
-  instructions: "Implement with evidence.",
+const AGENT_ID = "11111111-1111-4111-8111-111111111111";
+const RUN_ID = "22222222-2222-4222-8222-222222222222";
+
+const agent: AgentDefinition = {
+  backend: "cloud",
+  createdAt: "2026-08-29T00:00:00.000Z",
+  description: "Client fixture",
+  id: AGENT_ID,
+  instructions: "Delegate protocol work.",
   lastRunAt: null,
-  model: "gpt-5.1",
-  name: "Cody",
-  owner: { kind: "standalone" as const },
-  runtime: "copilot" as const,
-  status: "idle" as const,
-  updatedAt: "2026-08-20T12:00:00.000Z",
+  model: "auto",
+  name: "Client",
+  owner: { kind: "standalone" },
+  runtime: "copilot",
+  status: "idle",
+  updatedAt: "2026-08-29T00:00:00.000Z",
   warm: {
-    status: "not_started" as const,
-    updatedAt: "2026-08-20T12:00:00.000Z",
+    status: "ready",
+    updatedAt: "2026-08-29T00:00:00.000Z",
   },
   workspace: "/workspace",
 };
 
-test("uses the same-origin API with cookies and no runner bearer headers", async () => {
-  let requestedUrl = "";
-  let requestedCredentials: RequestCredentials | undefined;
-  let requestedHeaders = new Headers();
-  const request: typeof fetch = (input, init) => {
-    requestedUrl = String(input);
-    requestedCredentials = init?.credentials;
-    requestedHeaders = new Headers(init?.headers);
-    return Promise.resolve(Response.json({ agents: [agent] }));
-  };
-  const client = new RunnerClient(request);
-
-  const agents = await client.listAgents();
-
-  assert.equal(requestedUrl, "/api/agents");
-  assert.equal(requestedCredentials, "same-origin");
-  assert.equal(requestedHeaders.get("authorization"), null);
-  assert.equal(requestedHeaders.get("x-runner-token"), null);
-  assert.equal(agents[0]?.name, "Cody");
-});
-
-test("browser mutations use JSON and leave Origin generation to the browser", async () => {
-  let requestedHeaders = new Headers();
-  let requestedCredentials: RequestCredentials | undefined;
-  const request: typeof fetch = (_input, init) => {
-    requestedHeaders = new Headers(init?.headers);
-    requestedCredentials = init?.credentials;
-    return Promise.resolve(Response.json({ agent }));
-  };
-
-  await new RunnerClient(request).createAgent({
-    backend: "cloud",
-    instructions: agent.instructions,
-    model: agent.model,
-    name: agent.name,
-    runtime: "copilot",
-  });
-
-  assert.equal(requestedCredentials, "same-origin");
-  assert.equal(requestedHeaders.get("content-type"), "application/json");
-  assert.equal(requestedHeaders.get("origin"), null);
-});
-
-test("surfaces structured runner errors", async () => {
-  const request: typeof fetch = () =>
-    Promise.resolve(
-      Response.json(
-        { code: "unauthorized", error: "Token rejected." },
-        { status: 401 }
-      )
-    );
-  const client = new RunnerClient(request);
-
-  await assert.rejects(
-    client.listAgents(),
-    (error: unknown) =>
-      error instanceof RunnerApiError &&
-      error.code === "unauthorized" &&
-      error.status === 401
-  );
-});
-
-const RUN_ID = "9c1b7d2f-5a6b-4c90-8f1a-0f4e1f4d4a2e";
-
-function snapshot(status: string) {
+function snapshot(status: RunSnapshot["status"]): RunSnapshot {
   return {
-    agentId: agent.id,
+    agentId: AGENT_ID,
     apiVersion: AGENT_RUNNER_API_VERSION,
     commandEvidence: [
       { command: "pnpm test", exitCode: 0, stderr: "", stdout: "ok" },
@@ -97,305 +42,106 @@ function snapshot(status: string) {
     completedAt:
       status === "queued" || status === "running"
         ? null
-        : "2026-08-20T12:00:05.000Z",
-    createdAt: "2026-08-20T12:00:00.000Z",
+        : "2026-08-29T00:01:00.000Z",
+    createdAt: "2026-08-29T00:00:00.000Z",
     fileEvidence: [],
     id: RUN_ID,
-    operationId: "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90",
+    operationId: "33333333-3333-4333-8333-333333333333",
     output: status === "completed" ? "done" : "",
-    startedAt: "2026-08-20T12:00:01.000Z",
+    startedAt: "2026-08-29T00:00:01.000Z",
     status,
-    task: "Fix the tests.",
+    task: "Delegate protocol work.",
   };
 }
 
-function makeClient(
-  handler: (url: string, init?: RequestInit) => Response,
-  pollIntervalMs?: number
-) {
+function fakeTransport(
+  overrides: Partial<RunnerTransport> = {}
+): RunnerTransport {
+  return {
+    createAgent: async () => agent,
+    deleteAgent: async () => undefined,
+    getAgent: async () => agent,
+    getRun: async () => snapshot("completed"),
+    health: async () => ({
+      apiVersion: AGENT_RUNNER_API_VERSION,
+      capabilities: [...AGENT_RUNNER_CAPABILITIES],
+      minimumClientVersion: "1.0.0",
+      mode: "cloud",
+    }),
+    listAgents: async () => [agent],
+    listHarnesses: async () => [],
+    listRuns: async () => [],
+    prewarmTenant: async () => undefined,
+    startRun: async () => snapshot("queued"),
+    stopRun: async () => snapshot("cancelled"),
+    streamRunEvents: async () => snapshot("completed"),
+    updateAgent: async () => agent,
+    ...overrides,
+  };
+}
+
+test("delegates browser operations to the injected transport", async () => {
   const calls: string[] = [];
-  const instance = new RunnerClient(
-    ((url: string, init?: RequestInit) => {
-      calls.push(`${init?.method ?? "GET"} ${url}`);
-      return Promise.resolve(handler(url, init));
-    }) as unknown as typeof globalThis.fetch,
-    { pollIntervalMs: pollIntervalMs ?? 0 }
-  );
-  return { calls, instance };
-}
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    headers: { "content-type": "application/json" },
-    status,
-  });
-}
-
-test("a synchronous local run is returned as-is", async () => {
-  // The local runner answers 200 with a finished RunResult and no run route to
-  // poll, so the client must not try to follow it.
-  const result = {
-    agentId: agent.id,
-    commandResults: [],
-    completedAt: "2026-08-20T12:00:05.000Z",
-    fileOperations: [],
-    id: RUN_ID,
-    output: "done",
-    startedAt: "2026-08-20T12:00:01.000Z",
-    status: "completed" as const,
-  };
-  const { calls, instance } = makeClient(() => json({ run: result }));
-
-  const run = await instance.runAgent(agent.id, "Fix the tests.");
-
-  assert.equal(run.output, "done");
-  assert.deepEqual(calls, [`POST /api/agents/${agent.id}/runs`]);
-});
-
-test("an accepted cloud run is followed to completion", async () => {
-  // 202 carries a queued snapshot, so the client polls the run route until the
-  // run is terminal and hands back the same RunResult shape either way.
-  let polls = 0;
-  const { calls, instance } = makeClient((url) => {
-    if (url.includes("/api/runs/")) {
-      polls += 1;
-      return json({
-        apiVersion: AGENT_RUNNER_API_VERSION,
-        run: snapshot(polls === 1 ? "running" : "completed"),
-      });
-    }
-    return json(
-      { apiVersion: AGENT_RUNNER_API_VERSION, run: snapshot("queued") },
-      202
-    );
-  });
-
-  const run = await instance.runAgent(agent.id, "Fix the tests.");
-
-  assert.equal(run.status, "completed");
-  assert.equal(run.output, "done");
-  assert.equal(run.commandResults.length, 1);
-  assert.equal(polls, 2, "polling continues while the run is still running");
-  assert.equal(calls.at(-1), `GET /api/runs/${RUN_ID}`);
-});
-
-test("a cancelled cloud run reports as failed rather than completed", async () => {
-  const { instance } = makeClient((url) =>
-    url.includes("/api/runs/")
-      ? json({
-          apiVersion: AGENT_RUNNER_API_VERSION,
-          run: snapshot("cancelled"),
-        })
-      : json(
-          { apiVersion: AGENT_RUNNER_API_VERSION, run: snapshot("queued") },
-          202
-        )
-  );
-
-  const run = await instance.runAgent(agent.id, "Fix the tests.");
-
-  assert.equal(run.status, "failed");
-});
-
-test("the nested cloud error envelope is surfaced, not flattened away", async () => {
-  const { instance } = makeClient(() =>
-    json(
-      {
-        apiVersion: AGENT_RUNNER_API_VERSION,
-        error: {
-          code: "already_running",
-          message: "An agent already has an active run.",
-          retryable: false,
-        },
-        requestId: "11111111-2222-4333-8444-555555555555",
-      },
-      409
-    )
-  );
-
-  await assert.rejects(
-    () => instance.runAgent(agent.id, "Fix the tests."),
-    (error: RunnerApiError) => {
-      assert.equal(error.code, "already_running");
-      assert.equal(error.message, "An agent already has an active run.");
-      return true;
-    }
-  );
-});
-
-test("the flat local error shape is still understood", async () => {
-  // Reading only the cloud envelope would degrade every local error to a
-  // generic "Runner request failed (400)".
-  const { instance } = makeClient(() =>
-    json(
-      {
-        code: "backend_mismatch",
-        error: "Local runner only accepts local agents.",
-      },
-      400
-    )
-  );
-
-  await assert.rejects(
-    () => instance.runAgent(agent.id, "Fix the tests."),
-    (error: RunnerApiError) => {
-      assert.equal(error.code, "backend_mismatch");
-      assert.equal(error.message, "Local runner only accepts local agents.");
-      return true;
-    }
-  );
-});
-
-test("an unrecognised run payload is reported rather than silently accepted", async () => {
-  const { instance } = makeClient(() => json({ unexpected: true }, 202));
-
-  await assert.rejects(
-    () => instance.runAgent(agent.id, "Fix the tests."),
-    (error: RunnerApiError) => error.code === "unexpected_run_payload"
-  );
-});
-
-test("aborting a poll rejects promptly instead of waiting out the interval", async () => {
-  // The loop checks `aborted` at the top, so a sleep that ignored the signal
-  // would leave a cancel sitting for up to a full interval. The interval here
-  // is 30s: if the wait were not abort-aware this test would not finish.
   const controller = new AbortController();
-  const { instance } = makeClient(
-    () =>
-      json(
-        { apiVersion: AGENT_RUNNER_API_VERSION, run: snapshot("running") },
-        202
-      ),
-    30_000
-  );
-
-  const started = Date.now();
-  const pending = instance.runAgent(agent.id, "Fix the tests.", {
-    signal: controller.signal,
-  });
-  controller.abort();
-
-  await assert.rejects(
-    () => pending,
-    (error: RunnerApiError) => error.code === "aborted"
-  );
-  assert.ok(
-    Date.now() - started < 5000,
-    "abort must not block on the poll interval"
-  );
-});
-
-test("a run still in flight cannot be projected onto a result", async () => {
-  const { runSnapshotToResult } = await import("@opencoven/agent-contracts");
-
-  for (const status of ["queued", "running"]) {
-    assert.throws(
-      () => runSnapshotToResult(snapshot(status) as never),
-      /Cannot project a (queued|running) run/,
-      `${status} must not silently report as failed`
-    );
-  }
-  // Terminal statuses still project.
-  assert.equal(
-    runSnapshotToResult(snapshot("completed") as never).status,
-    "completed"
-  );
-  assert.equal(
-    runSnapshotToResult(snapshot("cancelled") as never).status,
-    "failed"
-  );
-});
-
-test("a run starts without crypto.randomUUID", async () => {
-  // Browsers only expose randomUUID in a secure context, so a local runner
-  // reached over plain HTTP on a LAN address has none.
-  const original = globalThis.crypto;
-  Object.defineProperty(globalThis, "crypto", {
-    configurable: true,
-    value: { getRandomValues: original.getRandomValues.bind(original) },
-  });
-  try {
-    let sentBody: string | undefined;
-    const { instance } = makeClient((_url, init) => {
-      sentBody = init?.body as string;
-      return json({
-        run: {
-          agentId: agent.id,
-          commandResults: [],
-          completedAt: "2026-08-20T12:00:05.000Z",
-          fileOperations: [],
-          id: RUN_ID,
-          output: "done",
-          startedAt: "2026-08-20T12:00:01.000Z",
-          status: "completed",
-        },
-      });
-    });
-
-    await instance.runAgent(agent.id, "Fix the tests.");
-
-    const sent = JSON.parse(sentBody ?? "{}") as { operationId: string };
-    assert.match(
-      sent.operationId,
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-      "the fallback must still produce a valid v4 uuid"
-    );
-  } finally {
-    Object.defineProperty(globalThis, "crypto", {
-      configurable: true,
-      value: original,
-    });
-  }
-});
-
-test("a run keeps its operation id without creating runner identity headers", async () => {
-  let body: { operationId?: string } = {};
-  let headers = new Headers();
-  const request: typeof globalThis.fetch = (_input, init) => {
-    body = JSON.parse(String(init?.body));
-    headers = new Headers(init?.headers);
-    return Promise.resolve(
-      json(
-        {
-          apiVersion: AGENT_RUNNER_API_VERSION,
-          run: { ...snapshot("queued"), operationId: body.operationId },
-        },
-        202
-      )
-    );
-  };
-  const client = new RunnerClient(request);
-
-  await client.startRun(agent.id, "Fix the tests.", {
-    harnessId: agent.runtime,
-  });
-
-  assert.match(body.operationId ?? "", /^[0-9a-f-]{36}$/);
-  assert.equal(headers.get("authorization"), null);
-  assert.equal(headers.get("x-runner-token"), null);
-});
-
-test("every agent and run mutation forwards its optional abort signal", async () => {
-  const controller = new AbortController();
-  const signals: (AbortSignal | null)[] = [];
-  const request: typeof globalThis.fetch = (input, init) => {
-    signals.push(init?.signal ?? null);
-    const url = String(input);
-    if (init?.method === "DELETE") {
-      return Promise.resolve(json({ ok: true }));
-    }
-    if (url.endsWith("/stop")) {
-      return Promise.resolve(
-        json({
-          apiVersion: AGENT_RUNNER_API_VERSION,
-          run: snapshot("cancelled"),
-        })
+  const transport = fakeTransport({
+    createAgent: (createInput, signal) => {
+      calls.push(
+        `create:${createInput.name}:${String(signal === controller.signal)}`
       );
-    }
-    return Promise.resolve(json({ agent }));
-  };
-  const client = new RunnerClient(request);
-  const createInput = {
+      return Promise.resolve(agent);
+    },
+    deleteAgent: (id, signal) => {
+      calls.push(`delete:${id}:${String(signal === controller.signal)}`);
+      return Promise.resolve();
+    },
+    getAgent: (id, signal) => {
+      calls.push(`agent:${id}:${String(signal === controller.signal)}`);
+      return Promise.resolve(agent);
+    },
+    health: (signal) => {
+      calls.push(`health:${String(signal === controller.signal)}`);
+      return Promise.resolve({
+        apiVersion: AGENT_RUNNER_API_VERSION,
+        capabilities: [...AGENT_RUNNER_CAPABILITIES],
+        minimumClientVersion: "1.0.0",
+        mode: "cloud",
+      });
+    },
+    listAgents: (signal) => {
+      calls.push(`agents:${String(signal === controller.signal)}`);
+      return Promise.resolve([agent]);
+    },
+    listHarnesses: (signal) => {
+      calls.push(`harnesses:${String(signal === controller.signal)}`);
+      return Promise.resolve([]);
+    },
+    listRuns: (id, signal) => {
+      calls.push(`runs:${id}:${String(signal === controller.signal)}`);
+      return Promise.resolve([]);
+    },
+    prewarmTenant: (signal) => {
+      calls.push(`prewarm:${String(signal === controller.signal)}`);
+      return Promise.resolve();
+    },
+    stopRun: (id, signal) => {
+      calls.push(`stop:${id}:${String(signal === controller.signal)}`);
+      return Promise.resolve(snapshot("cancelled"));
+    },
+    streamRunEvents: (id, options) => {
+      calls.push(
+        `events:${id}:${options.lastEventId}:${String(options.signal === controller.signal)}`
+      );
+      return Promise.resolve(snapshot("completed"));
+    },
+    updateAgent: (id, updateInput, signal) => {
+      calls.push(
+        `update:${id}:${updateInput.name}:${String(signal === controller.signal)}`
+      );
+      return Promise.resolve(agent);
+    },
+  });
+  const client = new RunnerClient(transport);
+  const input = {
     backend: agent.backend,
     description: agent.description,
     instructions: agent.instructions,
@@ -405,35 +151,190 @@ test("every agent and run mutation forwards its optional abort signal", async ()
     workspace: agent.workspace,
   };
 
-  await client.createAgent(createInput, controller.signal);
-  await client.updateAgent(agent.id, createInput, controller.signal);
+  await client.health(controller.signal);
+  await client.listHarnesses(controller.signal);
+  await client.listAgents(controller.signal);
+  await client.getAgent(AGENT_ID, controller.signal);
+  await client.createAgent(input, controller.signal);
+  await client.updateAgent(AGENT_ID, input, controller.signal);
+  await client.deleteAgent(AGENT_ID, controller.signal);
+  await client.prewarmTenant(controller.signal);
+  await client.listRuns(AGENT_ID, controller.signal);
+  await client.streamRunEvents(RUN_ID, {
+    lastEventId: 7,
+    onEvent: () => undefined,
+    signal: controller.signal,
+  });
   await client.stopRun(RUN_ID, controller.signal);
-  await client.deleteAgent(agent.id, controller.signal);
 
-  assert.deepEqual(
-    signals,
-    Array.from({ length: 4 }, () => controller.signal)
+  assert.deepEqual(calls, [
+    "health:true",
+    "harnesses:true",
+    "agents:true",
+    `agent:${AGENT_ID}:true`,
+    `create:${agent.name}:true`,
+    `update:${AGENT_ID}:${agent.name}:true`,
+    `delete:${AGENT_ID}:true`,
+    "prewarm:true",
+    `runs:${AGENT_ID}:true`,
+    `events:${RUN_ID}:7:true`,
+    `stop:${RUN_ID}:true`,
+  ]);
+});
+
+test("startRun delegates one v1 start with a generated operation id", async () => {
+  let sent:
+    | {
+        agentId: string;
+        operationId: string;
+        signal?: AbortSignal;
+        task: string;
+      }
+    | undefined;
+  const controller = new AbortController();
+  const client = new RunnerClient(
+    fakeTransport({
+      startRun: (agentId, startInput, signal) => {
+        sent = { agentId, signal, ...startInput };
+        return Promise.resolve({
+          ...snapshot("queued"),
+          operationId: startInput.operationId,
+        });
+      },
+    })
+  );
+
+  await client.startRun(AGENT_ID, "Do the work.", {
+    harnessId: "copilot",
+    signal: controller.signal,
+  });
+
+  assert.equal(sent?.agentId, AGENT_ID);
+  assert.equal(sent?.task, "Do the work.");
+  assert.equal(sent?.signal, controller.signal);
+  assert.match(
+    sent?.operationId ?? "",
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
   );
 });
 
-test("an aborted mutation rejects instead of waiting for a delayed response", async () => {
-  const controller = new AbortController();
-  const request: typeof globalThis.fetch = (_input, init) => {
-    if (!init?.signal) {
-      return Promise.reject(new Error("mutation signal missing"));
-    }
-    return new Promise((_resolve, reject) => {
-      init?.signal?.addEventListener(
-        "abort",
-        () => reject(new Error("mutation aborted")),
-        { once: true }
-      );
-    });
-  };
-  const client = new RunnerClient(request);
+test("client start methods generate one operation id per logical invocation", async () => {
+  const original = globalThis.crypto;
+  let generated = 0;
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: {
+      getRandomValues: original.getRandomValues.bind(original),
+      randomUUID: () => {
+        generated += 1;
+        return generated === 1
+          ? "44444444-4444-4444-8444-444444444444"
+          : "55555555-5555-4555-8555-555555555555";
+      },
+    },
+  });
+  try {
+    const sent: string[] = [];
+    const client = new RunnerClient(
+      fakeTransport({
+        startRun: (_agentId, startInput) => {
+          sent.push(startInput.operationId);
+          return Promise.resolve({
+            ...snapshot("completed"),
+            operationId: startInput.operationId,
+          });
+        },
+      })
+    );
 
-  const pending = client.deleteAgent(agent.id, controller.signal);
+    await client.startRun(AGENT_ID, "Do the work.");
+    await client.runAgent(AGENT_ID, "Do the work again.");
+
+    assert.equal(generated, 2);
+    assert.deepEqual(sent, [
+      "44444444-4444-4444-8444-444444444444",
+      "55555555-5555-4555-8555-555555555555",
+    ]);
+  } finally {
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      value: original,
+    });
+  }
+});
+
+test("runAgent follows an accepted v1 snapshot to completion", async () => {
+  let reads = 0;
+  const client = new RunnerClient(
+    fakeTransport({
+      getRun: () => {
+        reads += 1;
+        return Promise.resolve(snapshot(reads === 1 ? "running" : "completed"));
+      },
+      startRun: () => Promise.resolve(snapshot("queued")),
+    }),
+    { pollIntervalMs: 0 }
+  );
+
+  const result = await client.runAgent(AGENT_ID, "Do the work.");
+
+  assert.equal(reads, 2);
+  assert.equal(result.status, "completed");
+  assert.equal(result.output, "done");
+  assert.equal(result.commandResults.length, 1);
+});
+
+test("run polling aborts promptly", async () => {
+  const controller = new AbortController();
+  const client = new RunnerClient(
+    fakeTransport({
+      startRun: () => Promise.resolve(snapshot("running")),
+    }),
+    { pollIntervalMs: 30_000 }
+  );
+
+  const pending = client.runAgent(AGENT_ID, "Do the work.", {
+    signal: controller.signal,
+  });
   controller.abort();
 
-  await assert.rejects(pending, /mutation aborted/);
+  await assert.rejects(
+    pending,
+    (error: unknown) =>
+      error instanceof RunnerApiError && error.code === "aborted"
+  );
+});
+
+test("operation ids still use secure random bytes when randomUUID is unavailable", async () => {
+  const original = globalThis.crypto;
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: { getRandomValues: original.getRandomValues.bind(original) },
+  });
+  try {
+    let generated = "";
+    const client = new RunnerClient(
+      fakeTransport({
+        startRun: (_agentId, startInput) => {
+          generated = startInput.operationId;
+          return Promise.resolve({
+            ...snapshot("queued"),
+            operationId: startInput.operationId,
+          });
+        },
+      })
+    );
+
+    await client.startRun(AGENT_ID, "Do the work.");
+
+    assert.match(
+      generated,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    );
+  } finally {
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      value: original,
+    });
+  }
 });

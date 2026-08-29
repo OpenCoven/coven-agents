@@ -23,8 +23,8 @@ export default function Page() {
       </h1>
       <p className="text-muted-foreground text-sm">
         Continue with GitHub. New accounts start with guest access, and signing
-        in never starts an agent or a run. For subscribers, we begin warming the
-        sandbox so the first mission starts fast.
+        in never starts an agent or a run. Sandbox warming begins only from an
+        authenticated subscriber console.
       </p>
       {/* The boundary, stated where a stranger first meets the product. */}
       <p className="font-mono text-[11px] text-muted-foreground/70">

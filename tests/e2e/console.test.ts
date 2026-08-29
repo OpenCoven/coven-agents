@@ -42,6 +42,25 @@ const retainedRun = {
   task: "Verify timeline output",
 };
 
+function liveRun(
+  status: "cancelled" | "completed" | "failed" | "running" = "running"
+) {
+  return {
+    ...retainedRun,
+    completedAt: status === "running" ? null : "2026-08-27T06:02:00.000Z",
+    output: status === "completed" ? "Timeline verified." : "",
+    status,
+  };
+}
+
+function historicalRun(status: "cancelled" | "completed" | "failed") {
+  return {
+    ...retainedRun,
+    output: status === "completed" ? "Historical completion output." : "",
+    status,
+  };
+}
+
 async function notifySessionChange(page: Page): Promise<void> {
   await page.evaluate(async () => {
     const channel = new BroadcastChannel("next-auth");
@@ -64,7 +83,11 @@ test.describe("Run console", () => {
     const protectedRequests: string[] = [];
     page.on("request", (request) => {
       const { pathname } = new URL(request.url());
-      if (pathname === "/api/credentials" || pathname === "/api/agents") {
+      if (
+        pathname === "/api/credentials" ||
+        pathname === "/api/agents" ||
+        pathname === "/api/tenant/prewarm"
+      ) {
         protectedRequests.push(pathname);
       }
     });
@@ -80,6 +103,165 @@ test.describe("Run console", () => {
       page.getByRole("dialog", { name: "Search runs, agents, and commands" })
     ).toBeVisible();
     expect(protectedRequests).toEqual([]);
+  });
+
+  test("an authenticated subscriber prewarms once through the same-origin API", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let prewarmRequests = 0;
+    await page.route("**/api/tenant/prewarm", (route) => {
+      prewarmRequests += 1;
+      const request = route.request();
+      expect(request.method()).toBe("POST");
+      expect(new URL(request.url()).pathname).toBe("/api/tenant/prewarm");
+      expect(request.headers().authorization).toBeUndefined();
+      expect(request.headers()["x-runner-token"]).toBeUndefined();
+      expect(request.headers().cookie).toContain("authjs.session-token=");
+      return route.fulfill({ status: 204 });
+    });
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [retainedAgent] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+
+    await page.goto("/agents");
+    await expect(page.getByText(retainedAgent.name).first()).toBeVisible();
+    await expect.poll(() => prewarmRequests).toBe(1);
+
+    await notifySessionChange(page);
+    await page.waitForTimeout(100);
+    expect(prewarmRequests).toBe(1);
+  });
+
+  test("a lapsed authenticated session makes no protected console request", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({
+        json: {
+          expires: "2099-01-01T00:00:00.000Z",
+          user: {
+            authVersion: 0,
+            email: "lapsed@example.invalid",
+            id: "00000000-0000-4000-8000-000000000003",
+            image: null,
+            name: "Lapsed subscriber",
+            type: "demo",
+          },
+        },
+      })
+    );
+    const protectedRequests: string[] = [];
+    page.on("request", (request) => {
+      const { pathname } = new URL(request.url());
+      if (
+        pathname === "/api/agents" ||
+        pathname === "/api/credentials" ||
+        pathname === "/api/tenant/prewarm"
+      ) {
+        protectedRequests.push(pathname);
+      }
+    });
+
+    await page.goto("/agents");
+
+    await expect(page.getByText("no subscription")).toBeVisible();
+    await page.waitForTimeout(100);
+    expect(protectedRequests).toEqual([]);
+  });
+
+  test("an account switch aborts stale prewarm and starts one for the new tenant", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies("first@example.invalid"));
+    let sessionOverride: Record<string, unknown> | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      sessionOverride === undefined
+        ? route.continue()
+        : route.fulfill({ json: sessionOverride })
+    );
+    let prewarmRequests = 0;
+    let firstPrewarmStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstPrewarmStarted = resolve;
+    });
+    let releaseFirst!: () => Promise<void>;
+    await page.route("**/api/tenant/prewarm", (route) => {
+      prewarmRequests += 1;
+      if (prewarmRequests > 1) {
+        return route.fulfill({ status: 204 });
+      }
+      firstPrewarmStarted();
+      return new Promise<void>((resolve) => {
+        releaseFirst = async () => {
+          await route.fulfill({ status: 204 }).catch(() => undefined);
+          resolve();
+        };
+      });
+    });
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    let agentRequests = 0;
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        agentRequests += 1;
+        return route.fulfill({
+          json: {
+            agents: [
+              {
+                ...retainedAgent,
+                id: agentRequests === 1 ? AGENT_ID : OTHER_AGENT_ID,
+                name:
+                  agentRequests === 1
+                    ? "First account agent"
+                    : "Second account agent",
+              },
+            ],
+          },
+        });
+      }
+      return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+    });
+
+    await page.goto("/agents");
+    await started;
+    const stalePrewarmAborted = page.waitForEvent("requestfailed", {
+      predicate: (request) =>
+        new URL(request.url()).pathname === "/api/tenant/prewarm",
+    });
+    sessionOverride = {
+      expires: "2099-01-01T00:00:00.000Z",
+      user: {
+        authVersion: 0,
+        email: "second@example.invalid",
+        id: "00000000-0000-4000-8000-000000000002",
+        image: null,
+        name: "Second subscriber",
+        type: "subscriber",
+      },
+    };
+    await notifySessionChange(page);
+
+    await stalePrewarmAborted;
+    await expect.poll(() => prewarmRequests).toBe(2);
+    await expect(page.getByText("Second account agent").first()).toBeVisible();
+    await releaseFirst();
+    await page.waitForTimeout(100);
+    expect(prewarmRequests).toBe(2);
   });
 
   test("signed-out profile actions lead to sign-in instead of a doomed write flow", async ({
@@ -219,6 +401,316 @@ test.describe("Run console", () => {
       page.getByRole("button", { exact: true, name: "expand" })
     ).toBeVisible();
     expect(legacyRequests).toEqual([]);
+  });
+
+  for (const scenario of [
+    {
+      agentStatus: "idle",
+      event: {
+        error: {
+          code: "historical_failure",
+          message: "Historical failure transcript.",
+          retryable: false,
+        },
+        id: 1,
+        type: "failed",
+      },
+      historicalStatus: "failed",
+      transcript: "Historical failure transcript.",
+    },
+    {
+      agentStatus: "error",
+      event: {
+        id: 1,
+        run: historicalRun("completed"),
+        type: "completed",
+      },
+      historicalStatus: "completed",
+      transcript: "Historical completion output.",
+    },
+    {
+      agentStatus: "running",
+      event: {
+        id: 1,
+        status: "cancelled",
+        type: "status",
+      },
+      historicalStatus: "cancelled",
+      transcript: "Run cancelled",
+    },
+  ] as const) {
+    test(`a historical ${scenario.historicalStatus} transcript does not overwrite a newer ${scenario.agentStatus} agent lifecycle`, async ({
+      context,
+      page,
+    }) => {
+      await context.addCookies(await subscriberCookies());
+      await page.route("**/api/tenant/prewarm", (route) =>
+        route.fulfill({ status: 204 })
+      );
+      await page.route("**/api/credentials", (route) =>
+        route.fulfill({ json: { harnessIds: ["copilot"] } })
+      );
+      await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+        const { pathname } = new URL(route.request().url());
+        if (pathname === "/api/agents") {
+          return route.fulfill({
+            json: {
+              agents: [{ ...retainedAgent, status: scenario.agentStatus }],
+            },
+          });
+        }
+        if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+          return route.fulfill({
+            json: {
+              apiVersion: "1.0",
+              runs: [historicalRun(scenario.historicalStatus)],
+            },
+          });
+        }
+        if (pathname === `/api/runs/${RUN_ID}/events`) {
+          return route.fulfill({
+            body: `data: ${JSON.stringify(scenario.event)}\n\n`,
+            contentType: "text/event-stream",
+          });
+        }
+        if (pathname === `/api/runs/${RUN_ID}`) {
+          return route.fulfill({
+            json: {
+              apiVersion: "1.0",
+              run: historicalRun(scenario.historicalStatus),
+            },
+          });
+        }
+        return route.fulfill({ json: {}, status: 404 });
+      });
+
+      await page.goto("/agents");
+      await page
+        .getByRole("complementary")
+        .getByRole("button", {
+          name: new RegExp(`${scenario.historicalStatus} Verify timeline`, "u"),
+        })
+        .click();
+
+      await expect(page.getByText(scenario.transcript).first()).toBeVisible();
+      await expect(
+        page
+          .getByRole("button", { name: retainedAgent.name })
+          .getByRole("img", { name: scenario.agentStatus })
+      ).toBeVisible();
+    });
+  }
+
+  test("a direct cancelled stop leaves only the owning agent idle", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    const otherAgent = {
+      ...retainedAgent,
+      id: OTHER_AGENT_ID,
+      name: "Other running agent",
+      status: "running",
+    };
+    let releaseEvents!: () => Promise<void>;
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const request = route.request();
+      const { pathname } = new URL(request.url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({
+          json: {
+            agents: [{ ...retainedAgent, status: "running" }, otherAgent],
+          },
+        });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", runs: [liveRun()] },
+        });
+      }
+      if (pathname === `/api/agents/${OTHER_AGENT_ID}/runs`) {
+        return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+      }
+      if (pathname === `/api/runs/${RUN_ID}/events`) {
+        return new Promise<void>((resolve) => {
+          releaseEvents = async () => {
+            await route.fulfill({
+              body: "",
+              contentType: "text/event-stream",
+            });
+            resolve();
+          };
+        });
+      }
+      if (
+        pathname === `/api/runs/${RUN_ID}/stop` &&
+        request.method() === "POST"
+      ) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", run: liveRun("cancelled") },
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", run: liveRun("cancelled") },
+        });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+    await page
+      .getByRole("complementary")
+      .getByRole("button", { name: /running Verify timeline/ })
+      .click();
+    await page.getByRole("button", { exact: true, name: "Stop" }).click();
+
+    await expect(page.getByText("Run cancelled.")).toBeVisible();
+    await expect(page.getByRole("img", { name: "idle" })).toBeVisible();
+    await expect(page.getByRole("img", { name: "running" })).toBeVisible();
+    await releaseEvents();
+  });
+
+  test("a completed live event leaves the owning agent idle", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({
+          json: { agents: [{ ...retainedAgent, status: "running" }] },
+        });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", runs: [liveRun()] },
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}/events`) {
+        return route.fulfill({
+          body: `data: ${JSON.stringify({
+            id: 1,
+            run: liveRun("completed"),
+            type: "completed",
+          })}\n\n`,
+          contentType: "text/event-stream",
+        });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+
+    await expect(
+      page
+        .getByRole("button", { name: retainedAgent.name })
+        .getByRole("img", { name: "idle" })
+    ).toBeVisible();
+    await expect(
+      page
+        .getByRole("complementary")
+        .getByRole("button", { name: /completed Verify timeline/ })
+    ).toBeVisible();
+  });
+
+  test("a cancelled terminal snapshot recovery leaves the owning agent idle", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({
+          json: { agents: [{ ...retainedAgent, status: "running" }] },
+        });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", runs: [liveRun()] },
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}/events`) {
+        return route.fulfill({
+          body: "",
+          contentType: "text/event-stream",
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", run: liveRun("cancelled") },
+        });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+
+    await expect(page.getByRole("img", { name: "idle" })).toBeVisible();
+    await expect(page.getByRole("img", { name: "error" })).toHaveCount(0);
+  });
+
+  test("a failed terminal snapshot recovery leaves the owning agent in error", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({
+          json: { agents: [{ ...retainedAgent, status: "running" }] },
+        });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", runs: [liveRun()] },
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}/events`) {
+        return route.fulfill({
+          body: "",
+          contentType: "text/event-stream",
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", run: liveRun("failed") },
+        });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+
+    await expect(page.getByRole("img", { name: "error" })).toBeVisible();
+    await expect(page.getByRole("img", { name: "idle" })).toHaveCount(0);
   });
 
   test("a same-origin subscription refusal blocks runs without offering a manual connection", async ({
