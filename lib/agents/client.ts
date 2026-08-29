@@ -274,7 +274,7 @@ export class RunnerClient {
   async startRun(
     agentId: string,
     task: string,
-    _options: { harnessId?: string } = {}
+    options: { harnessId?: string; signal?: AbortSignal } = {}
   ): Promise<RunSnapshot> {
     const currentOperationId = operationId();
     const response = await this.fetch(
@@ -282,6 +282,7 @@ export class RunnerClient {
       {
         body: JSON.stringify({ operationId: currentOperationId, task }),
         method: "POST",
+        signal: options.signal,
       }
     );
     const body = await response.json();

@@ -103,6 +103,7 @@ export function RunConsole() {
    * change when someone changes their address.
    */
   const accountId = session.data?.user?.id ?? null;
+  const sessionIdentity = `${session.status}:${accountId ?? ""}`;
   const avatarSrc = accountId
     ? avatarFor({ id: accountId, image: session.data?.user?.image })
     : null;
@@ -159,6 +160,11 @@ export function RunConsole() {
   const threadRef = useRef<HTMLDivElement>(null);
   const runsRef = useRef<ConsoleRun[]>([]);
   const credentialOwnerRef = useRef<string | null>(null);
+  const activeSessionIdentityRef = useRef("");
+  const latestSessionIdentityRef = useRef(sessionIdentity);
+  const sessionAbortRef = useRef<AbortController | null>(null);
+  const sessionGenerationRef = useRef(0);
+  latestSessionIdentityRef.current = sessionIdentity;
   runsRef.current = runs;
 
   const client = useMemo(() => new RunnerClient(), []);
@@ -183,116 +189,166 @@ export function RunConsole() {
 
   /* ---------------------------------------------------------------- wiring */
 
-  useEffect(() => {
-    if (session.status === "loading") {
-      setRunnerStatus("connecting");
-      return;
-    }
-
-    if (session.status !== "authenticated") {
-      setRunnerStatus("signed_out");
-      setHasCredential(null);
-      credentialOwnerRef.current = null;
-      resetCredentialCache();
-      return;
-    }
-
-    let cancelled = false;
-    if (credentialOwnerRef.current !== accountId) {
-      credentialOwnerRef.current = accountId;
-      resetCredentialCache();
-    }
-
-    fetchHasCredential()
-      .then((has) => {
-        if (!cancelled && has !== null) {
-          setHasCredential(has);
-        }
-      })
-      .catch(() => undefined);
-
-    return () => {
-      cancelled = true;
-    };
-  }, [accountId, session.status]);
-
   const onCredentialsChange = useCallback((harnessIds: readonly string[]) => {
     setHasCredential(updateCredentialEligibility(harnessIds));
   }, []);
 
-  const refresh = useCallback(async () => {
-    if (session.status !== "authenticated") {
-      setAgents([]);
-      return;
-    }
-    try {
-      const next = await client.listAgents();
-      setRunnerStatus("connected");
-      setAgents(next);
-      setSelectedAgentId((current) =>
-        next.some((agent) => agent.id === current)
-          ? current
-          : (next[0]?.id ?? null)
-      );
+  const isCurrentSession = useCallback(
+    (generation: number, signal?: AbortSignal) =>
+      sessionGenerationRef.current === generation &&
+      activeSessionIdentityRef.current === latestSessionIdentityRef.current &&
+      !signal?.aborted,
+    []
+  );
 
-      // The runner remembers a bounded history per agent; without this a
-      // reload shows an empty session list while the runs still exist. Each
-      // agent's listing fails soft — a runner without the route (or one
-      // agent's directory hiccup) costs history, never the console.
-      const discovered = (
-        await Promise.all(
-          next.map((agent) =>
-            client.listRuns(agent.id).then(
-              (snapshots) =>
-                snapshots.map((snapshot) => ({ agentId: agent.id, snapshot })),
-              () => []
+  const refresh = useCallback(
+    async (generation: number, signal: AbortSignal) => {
+      try {
+        const next = await client.listAgents(signal);
+        if (!isCurrentSession(generation, signal)) {
+          return;
+        }
+        setRunnerStatus("connected");
+        setAgents(next);
+        setSelectedAgentId((current) =>
+          next.some((agent) => agent.id === current)
+            ? current
+            : (next[0]?.id ?? null)
+        );
+
+        // The runner remembers a bounded history per agent; without this a
+        // reload shows an empty session list while the runs still exist. Each
+        // agent's listing fails soft — a runner without the route (or one
+        // agent's directory hiccup) costs history, never the console.
+        const discovered = (
+          await Promise.all(
+            next.map((agent) =>
+              client.listRuns(agent.id, signal).then(
+                (snapshots) =>
+                  snapshots.map((snapshot) => ({
+                    agentId: agent.id,
+                    snapshot,
+                  })),
+                (error: unknown) => {
+                  if (signal.aborted) {
+                    throw error;
+                  }
+                  return [];
+                }
+              )
             )
           )
-        )
-      ).flat();
-      setRuns((current) => {
-        const known = new Set(current.map((run) => run.snapshot.id));
-        return [
-          ...current,
-          ...discovered
-            .filter((run) => !known.has(run.snapshot.id))
-            .map((run) => ({ ...run, events: [], lastEventId: 0 })),
-        ];
-      });
-      // A run that survived the refresh mid-flight resumes streaming; its
-      // events replay from the start, so the transcript rebuilds itself.
-      const live = discovered.find((run) => !isTerminal(run.snapshot.status))
-        ?.snapshot.id;
-      if (live) {
-        setStreamingRunId((current) => current ?? live);
+        ).flat();
+        if (!isCurrentSession(generation, signal)) {
+          return;
+        }
+        setRuns((current) => {
+          const known = new Set(current.map((run) => run.snapshot.id));
+          return [
+            ...current,
+            ...discovered
+              .filter((run) => !known.has(run.snapshot.id))
+              .map((run) => ({ ...run, events: [], lastEventId: 0 })),
+          ];
+        });
+        // A run that survived the refresh mid-flight resumes streaming; its
+        // events replay from the start, so the transcript rebuilds itself.
+        const live = discovered.find((run) => !isTerminal(run.snapshot.status))
+          ?.snapshot.id;
+        if (live && isCurrentSession(generation, signal)) {
+          setStreamingRunId((current) => current ?? live);
+        }
+      } catch (error) {
+        if (!isCurrentSession(generation, signal)) {
+          return;
+        }
+        setRunnerStatus(
+          error instanceof RunnerApiError
+            ? (applicationRunnerStatusFromError(error) ?? "unavailable")
+            : "unavailable"
+        );
+        setAgents([]);
+        reportRunnerError(error, "Could not reach the runner.");
       }
-    } catch (error) {
-      setRunnerStatus(
-        error instanceof RunnerApiError
-          ? (applicationRunnerStatusFromError(error) ?? "unavailable")
-          : "unavailable"
-      );
-      setAgents([]);
-      reportRunnerError(error, "Could not reach the runner.");
-    }
-  }, [client, reportRunnerError, session.status]);
+    },
+    [client, isCurrentSession, reportRunnerError]
+  );
 
   useEffect(() => {
-    if (session.status === "authenticated") {
+    sessionGenerationRef.current += 1;
+    const generation = sessionGenerationRef.current;
+    activeSessionIdentityRef.current = sessionIdentity;
+    sessionAbortRef.current?.abort();
+    const controller = new AbortController();
+    sessionAbortRef.current = controller;
+
+    setAgents([]);
+    setSelectedAgentId(null);
+    setRuns([]);
+    setSelectedRunId(null);
+    setStreamingRunId(null);
+    setStarting(false);
+    setBusy(false);
+    setRenaming(false);
+    setRemoving(false);
+
+    if (session.status === "loading") {
       setRunnerStatus("connecting");
-      refresh().catch(() => undefined);
+      setHasCredential(null);
+      return () => controller.abort();
     }
+    if (session.status !== "authenticated" || !accountId) {
+      setRunnerStatus("signed_out");
+      setHasCredential(null);
+      credentialOwnerRef.current = null;
+      resetCredentialCache();
+      return () => controller.abort();
+    }
+
+    setRunnerStatus("connecting");
+    if (credentialOwnerRef.current !== accountId) {
+      credentialOwnerRef.current = accountId;
+      resetCredentialCache();
+    }
+    fetchHasCredential()
+      .then((has) => {
+        if (has !== null && isCurrentSession(generation, controller.signal)) {
+          setHasCredential(has);
+        }
+      })
+      .catch(() => undefined);
+    refresh(generation, controller.signal).catch(() => undefined);
+
+    return () => controller.abort();
+  }, [accountId, isCurrentSession, refresh, session.status, sessionIdentity]);
+
+  const refreshCurrent = useCallback(() => {
+    const controller = sessionAbortRef.current;
+    if (!(controller && session.status === "authenticated")) {
+      return Promise.resolve();
+    }
+    return refresh(sessionGenerationRef.current, controller.signal);
   }, [refresh, session.status]);
+
+  const currentSessionContext = useCallback(() => {
+    const controller = sessionAbortRef.current;
+    return controller && session.status === "authenticated"
+      ? {
+          generation: sessionGenerationRef.current,
+          signal: controller.signal,
+        }
+      : null;
+  }, [session.status]);
 
   useEffect(() => {
     if (session.status !== "authenticated" || runnerStatus !== "rate_limited") {
       return;
     }
     const timer = setTimeout(() => {
-      refresh().catch(() => undefined);
+      refreshCurrent().catch(() => undefined);
     }, 60_000);
     return () => clearTimeout(timer);
-  }, [refresh, runnerStatus, session.status]);
+  }, [refreshCurrent, runnerStatus, session.status]);
 
   /** Applies one streamed event to the run it belongs to. */
   const applyEvent = useCallback((runId: string, event: RunEvent) => {
@@ -335,18 +391,31 @@ export function RunConsole() {
   }, []);
 
   useEffect(() => {
-    if (!streamingRunId) {
+    if (!streamingRunId || session.status !== "authenticated") {
       return;
     }
+    const generation = sessionGenerationRef.current;
+    const sessionController = sessionAbortRef.current;
+    if (!sessionController || sessionController.signal.aborted) {
+      return;
+    }
+    const sessionIsCurrent = () =>
+      isCurrentSession(generation, sessionController.signal);
     const start = runsRef.current.find(
       (run) => run.snapshot.id === streamingRunId
     );
     if (!start || isTerminal(start.snapshot.status)) {
-      setStreamingRunId(null);
+      if (sessionIsCurrent()) {
+        setStreamingRunId(null);
+      }
       return;
     }
 
     const controller = new AbortController();
+    const abortForSession = () => controller.abort();
+    sessionController.signal.addEventListener("abort", abortForSession, {
+      once: true,
+    });
     let cancelled = false;
 
     /**
@@ -368,6 +437,9 @@ export function RunConsole() {
 
     const follow = async () => {
       while (!cancelled) {
+        if (!sessionIsCurrent()) {
+          return;
+        }
         const cursor =
           runsRef.current.find((run) => run.snapshot.id === streamingRunId)
             ?.lastEventId ?? 0;
@@ -377,14 +449,14 @@ export function RunConsole() {
           await client.streamRunEvents(streamingRunId, {
             lastEventId: cursor,
             onEvent: (event) => {
-              if (!cancelled) {
+              if (!cancelled && sessionIsCurrent()) {
                 applyEvent(streamingRunId, event);
               }
             },
             signal: controller.signal,
           });
         } catch (error) {
-          if (cancelled || controller.signal.aborted) {
+          if (cancelled || controller.signal.aborted || !sessionIsCurrent()) {
             return;
           }
           toast.error(
@@ -394,7 +466,7 @@ export function RunConsole() {
           );
         }
 
-        if (cancelled) {
+        if (cancelled || !sessionIsCurrent()) {
           return;
         }
 
@@ -406,7 +478,7 @@ export function RunConsole() {
             streamingRunId,
             controller.signal
           );
-          if (cancelled) {
+          if (cancelled || !sessionIsCurrent()) {
             return;
           }
           setRuns((current) =>
@@ -419,7 +491,9 @@ export function RunConsole() {
             return;
           }
         } catch {
-          setStreamingRunId(null);
+          if (sessionIsCurrent()) {
+            setStreamingRunId(null);
+          }
           return;
         }
 
@@ -428,6 +502,9 @@ export function RunConsole() {
         await new Promise((resolve) => {
           setTimeout(resolve, RECONNECT_DELAY_MS);
         });
+        if (!sessionIsCurrent()) {
+          return;
+        }
       }
     };
 
@@ -436,8 +513,9 @@ export function RunConsole() {
     return () => {
       cancelled = true;
       controller.abort();
+      sessionController.signal.removeEventListener("abort", abortForSession);
     };
-  }, [applyEvent, client, streamingRunId]);
+  }, [applyEvent, client, isCurrentSession, session.status, streamingRunId]);
 
   /**
    * Backfills the transcript of a finished run that was hydrated from the
@@ -448,6 +526,7 @@ export function RunConsole() {
    */
   useEffect(() => {
     if (
+      session.status !== "authenticated" ||
       !selectedRun ||
       selectedRun.events.length > 0 ||
       selectedRun.lastEventId > 0 ||
@@ -455,16 +534,32 @@ export function RunConsole() {
     ) {
       return;
     }
+    const generation = sessionGenerationRef.current;
+    const sessionController = sessionAbortRef.current;
+    if (!sessionController || sessionController.signal.aborted) {
+      return;
+    }
     const runId = selectedRun.snapshot.id;
     const controller = new AbortController();
+    const abortForSession = () => controller.abort();
+    sessionController.signal.addEventListener("abort", abortForSession, {
+      once: true,
+    });
     client
       .streamRunEvents(runId, {
-        onEvent: (event) => applyEvent(runId, event),
+        onEvent: (event) => {
+          if (isCurrentSession(generation, sessionController.signal)) {
+            applyEvent(runId, event);
+          }
+        },
         signal: controller.signal,
       })
       .catch(() => undefined);
-    return () => controller.abort();
-  }, [applyEvent, client, selectedRun]);
+    return () => {
+      controller.abort();
+      sessionController.signal.removeEventListener("abort", abortForSession);
+    };
+  }, [applyEvent, client, isCurrentSession, selectedRun, session.status]);
 
   const running = selectedRun
     ? !isTerminal(selectedRun.snapshot.status)
@@ -505,12 +600,20 @@ export function RunConsole() {
     if (!selectedAgent || blocked) {
       return;
     }
+    const context = currentSessionContext();
+    if (!context) {
+      return;
+    }
     const task = draft.trim();
     setStarting(true);
     try {
       const snapshot = await client.startRun(selectedAgent.id, task, {
         harnessId: selectedAgent.runtime,
+        signal: context.signal,
       });
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
       setRuns((current) => [
         { agentId: selectedAgent.id, events: [], lastEventId: 0, snapshot },
         ...current,
@@ -528,9 +631,13 @@ export function RunConsole() {
       setDraft("");
       pinnedRef.current = true;
     } catch (error) {
-      reportRunnerError(error, "The run could not start.");
+      if (isCurrentSession(context.generation, context.signal)) {
+        reportRunnerError(error, "The run could not start.");
+      }
     } finally {
-      setStarting(false);
+      if (isCurrentSession(context.generation, context.signal)) {
+        setStarting(false);
+      }
     }
   };
 
@@ -538,8 +645,15 @@ export function RunConsole() {
     if (!selectedRun) {
       return;
     }
+    const context = currentSessionContext();
+    if (!context) {
+      return;
+    }
     try {
       const snapshot = await client.stopRun(selectedRun.snapshot.id);
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
       setRuns((current) =>
         current.map((run) =>
           run.snapshot.id === snapshot.id ? { ...run, snapshot } : run
@@ -547,22 +661,35 @@ export function RunConsole() {
       );
       toast.success("Run cancelled.");
     } catch (error) {
-      reportRunnerError(error, "Could not stop the run.");
+      if (isCurrentSession(context.generation, context.signal)) {
+        reportRunnerError(error, "Could not stop the run.");
+      }
     }
   };
 
   const createAgent = async (input: CreateAgentInput) => {
+    const context = currentSessionContext();
+    if (!context) {
+      return;
+    }
     setBusy(true);
     try {
       const created = await client.createAgent(input);
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
       setAgents((current) => [created, ...current]);
       setSelectedAgentId(created.id);
       setView("composer");
       toast.success(`${created.name} is ready.`);
     } catch (error) {
-      reportRunnerError(error, "Agent creation failed.");
+      if (isCurrentSession(context.generation, context.signal)) {
+        reportRunnerError(error, "Agent creation failed.");
+      }
     } finally {
-      setBusy(false);
+      if (isCurrentSession(context.generation, context.signal)) {
+        setBusy(false);
+      }
     }
   };
 
@@ -574,12 +701,19 @@ export function RunConsole() {
    * already created, which is the right outcome — they are independently useful.
    */
   const createFormation = async (formation: Formation) => {
+    const context = currentSessionContext();
+    if (!context) {
+      return;
+    }
     setBusy(true);
     let created = 0;
     try {
       await formation.members.reduce(
         (previous, template) =>
           previous.then(async () => {
+            if (!isCurrentSession(context.generation, context.signal)) {
+              return;
+            }
             const agent = await client.createAgent({
               backend: "cloud",
               description: template.blurb,
@@ -589,15 +723,24 @@ export function RunConsole() {
               runtime: "copilot",
               workspace: "/workspace",
             });
+            if (!isCurrentSession(context.generation, context.signal)) {
+              return;
+            }
             setAgents((current) => [...current, agent]);
             setSelectedAgentId(agent.id);
             created += 1;
           }),
         Promise.resolve()
       );
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
       toast.success(`${formation.name}: ${created} profiles created.`);
       setView("composer");
     } catch (error) {
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
       if (created > 0) {
         if (error instanceof RunnerApiError) {
           const status = applicationRunnerStatusFromError(error);
@@ -610,7 +753,9 @@ export function RunConsole() {
         reportRunnerError(error, "Could not create the crew.");
       }
     } finally {
-      setBusy(false);
+      if (isCurrentSession(context.generation, context.signal)) {
+        setBusy(false);
+      }
     }
   };
 
@@ -628,6 +773,10 @@ export function RunConsole() {
       setRenaming(false);
       return;
     }
+    const context = currentSessionContext();
+    if (!context) {
+      return;
+    }
     try {
       const updated = await client.updateAgent(selectedAgent.id, {
         backend: selectedAgent.backend,
@@ -638,14 +787,21 @@ export function RunConsole() {
         runtime: selectedAgent.runtime,
         workspace: selectedAgent.workspace,
       });
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
       setAgents((current) =>
         current.map((agent) => (agent.id === updated.id ? updated : agent))
       );
       toast.success(`Renamed to ${updated.name}.`);
     } catch (error) {
-      reportRunnerError(error, "Could not rename the agent.");
+      if (isCurrentSession(context.generation, context.signal)) {
+        reportRunnerError(error, "Could not rename the agent.");
+      }
     } finally {
-      setRenaming(false);
+      if (isCurrentSession(context.generation, context.signal)) {
+        setRenaming(false);
+      }
     }
   };
 
@@ -653,9 +809,16 @@ export function RunConsole() {
     if (!selectedAgent) {
       return;
     }
+    const context = currentSessionContext();
+    if (!context) {
+      return;
+    }
     setBusy(true);
     try {
       await client.deleteAgent(selectedAgent.id);
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
       const remaining = agents.filter((agent) => agent.id !== selectedAgent.id);
       setAgents(remaining);
       setRuns((current) =>
@@ -666,10 +829,14 @@ export function RunConsole() {
       setView("composer");
       toast.success(`${selectedAgent.name} was removed.`);
     } catch (error) {
-      reportRunnerError(error, "Could not remove the agent.");
+      if (isCurrentSession(context.generation, context.signal)) {
+        reportRunnerError(error, "Could not remove the agent.");
+      }
     } finally {
-      setBusy(false);
-      setRemoving(false);
+      if (isCurrentSession(context.generation, context.signal)) {
+        setBusy(false);
+        setRemoving(false);
+      }
     }
   };
 
@@ -1258,7 +1425,7 @@ export function RunConsole() {
                             {
                               go: () => {
                                 setRunMenuOpen(false);
-                                refresh().catch(() => undefined);
+                                refreshCurrent().catch(() => undefined);
                               },
                               label: "Reload profiles",
                             },

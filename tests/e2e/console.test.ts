@@ -1,8 +1,10 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import { subscriberCookies } from "./session";
 
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const RUN_ID = "22222222-2222-4222-8222-222222222222";
+const OTHER_AGENT_ID = "55555555-5555-4555-8555-555555555555";
+const OTHER_RUN_ID = "66666666-6666-4666-8666-666666666666";
 const retainedAgent = {
   backend: "cloud",
   createdAt: "2026-08-27T06:00:00.000Z",
@@ -32,6 +34,19 @@ const retainedRun = {
   status: "completed",
   task: "Verify timeline output",
 };
+
+async function notifySessionChange(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const channel = new BroadcastChannel("next-auth");
+    channel.postMessage({ event: "session" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    channel.postMessage({ event: "session" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    channel.postMessage({ event: "session" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    channel.close();
+  });
+}
 
 test.describe("Run console", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
@@ -331,5 +346,156 @@ test.describe("Run console", () => {
     await releaseCredentialGet?.();
     await page.getByRole("link", { name: "Back to runs" }).click();
     await expect(page.getByText(blocked)).toBeVisible();
+  });
+
+  test("a delayed authenticated agent response cannot restore state after sign-out", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let sessionOverride: Record<string, unknown> | null | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      sessionOverride === undefined
+        ? route.continue()
+        : route.fulfill({ json: sessionOverride })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    let releaseAgents!: () => Promise<void>;
+    let agentRequestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      agentRequestStarted = resolve;
+    });
+    let eventRequests = 0;
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        agentRequestStarted();
+        return new Promise<void>((resolve) => {
+          releaseAgents = async () => {
+            await route.fulfill({ json: { agents: [retainedAgent] } });
+            resolve();
+          };
+        });
+      }
+      if (pathname.endsWith("/events")) {
+        eventRequests += 1;
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+    await started;
+    await expect(page.getByTitle("e2e-user@example.invalid")).toBeVisible();
+    sessionOverride = null;
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      return (await response.json()) === null;
+    });
+    await notifySessionChange(page);
+    await sessionRefresh;
+    await expect(
+      page.getByRole("button", { name: "signed out" })
+    ).toBeVisible();
+
+    await releaseAgents();
+    await expect(page.getByText(retainedAgent.name)).toHaveCount(0);
+    expect(eventRequests).toBe(0);
+  });
+
+  test("a delayed run response cannot start a stale stream after an account switch", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies("first@example.invalid"));
+    let sessionOverride: Record<string, unknown> | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      sessionOverride === undefined
+        ? route.continue()
+        : route.fulfill({ json: sessionOverride })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    const nextAgent = {
+      ...retainedAgent,
+      id: OTHER_AGENT_ID,
+      name: "New account agent",
+    };
+    const staleLiveRun = {
+      ...retainedRun,
+      agentId: AGENT_ID,
+      completedAt: null,
+      id: OTHER_RUN_ID,
+      output: "",
+      status: "running",
+      task: "Stale account run",
+    };
+    let releaseRuns!: () => Promise<void>;
+    let runRequestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      runRequestStarted = resolve;
+    });
+    let agentRequests = 0;
+    let eventRequests = 0;
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        agentRequests += 1;
+        return route.fulfill({
+          json: { agents: agentRequests === 1 ? [retainedAgent] : [nextAgent] },
+        });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        runRequestStarted();
+        return new Promise<void>((resolve) => {
+          releaseRuns = async () => {
+            await route.fulfill({
+              json: { apiVersion: "1.0", runs: [staleLiveRun] },
+            });
+            resolve();
+          };
+        });
+      }
+      if (pathname === `/api/agents/${OTHER_AGENT_ID}/runs`) {
+        return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+      }
+      if (pathname.endsWith("/events")) {
+        eventRequests += 1;
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+    await started;
+    await expect(page.getByTitle("first@example.invalid")).toBeVisible();
+    sessionOverride = {
+      expires: "2099-01-01T00:00:00.000Z",
+      user: {
+        email: "second@example.invalid",
+        id: "00000000-0000-4000-8000-000000000002",
+        image: null,
+        name: "Second subscriber",
+        type: "subscriber",
+      },
+    };
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      const body = (await response.json()) as { user?: { email?: string } };
+      return body.user?.email === "second@example.invalid";
+    });
+    await notifySessionChange(page);
+    await sessionRefresh;
+    await expect(page.getByText(nextAgent.name).first()).toBeVisible();
+
+    await releaseRuns();
+    await page.waitForTimeout(100);
+    await expect(page.getByText("Stale account run")).toHaveCount(0);
+    expect(eventRequests).toBe(0);
   });
 });

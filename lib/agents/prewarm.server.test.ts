@@ -10,14 +10,32 @@ function subscribedUser() {
   return { authVersion: 7, id: USER_ID, subscribedUntil: FUTURE };
 }
 
+const AUTHORIZED = {
+  authVersion: 7,
+  kind: "allowed" as const,
+  session: {
+    kind: "subscriber" as const,
+    tenant: TENANT,
+    userId: USER_ID,
+  },
+  userId: USER_ID,
+};
+
 test("a subscriber warms in-process with the exact authenticated session and principal", async () => {
   let loaded = 0;
   let loadSignal: AbortSignal | undefined;
+  let authorityInput: unknown;
+  let authoritySignal: AbortSignal | undefined;
   let receivedSession: unknown;
   let receivedPrincipal: unknown;
   let receivedOptions: unknown;
 
   await prewarmTenantSandbox(subscribedUser(), {
+    authorizeCurrent: (session, signal) => {
+      authorityInput = session;
+      authoritySignal = signal;
+      return Promise.resolve(AUTHORIZED);
+    },
     loadRunner: (signal) => {
       loaded += 1;
       loadSignal = signal;
@@ -38,6 +56,10 @@ test("a subscriber warms in-process with the exact authenticated session and pri
 
   assert.equal(loaded, 1);
   assert.equal(loadSignal?.aborted, false);
+  assert.equal(authoritySignal, loadSignal);
+  assert.deepEqual(authorityInput, {
+    user: { authVersion: 7, id: USER_ID, type: "subscriber" },
+  });
   assert.deepEqual(receivedSession, {
     kind: "subscriber",
     tenant: TENANT,
@@ -59,6 +81,11 @@ test("a subscriber warms in-process with the exact authenticated session and pri
 
 test("lapsed and missing subscriptions do not load the runner dependency", async () => {
   let loaded = 0;
+  let authorityChecks = 0;
+  const authorizeCurrent = () => {
+    authorityChecks += 1;
+    return Promise.resolve(AUTHORIZED);
+  };
   const loadRunner = () => {
     loaded += 1;
     return Promise.reject(new Error("must not load"));
@@ -70,22 +97,25 @@ test("lapsed and missing subscriptions do not load the runner dependency", async
       id: USER_ID,
       subscribedUntil: new Date(Date.now() - 1000),
     },
-    { loadRunner }
+    { authorizeCurrent, loadRunner }
   );
   await prewarmTenantSandbox(
     { authVersion: 7, id: USER_ID, subscribedUntil: null },
-    { loadRunner }
+    { authorizeCurrent, loadRunner }
   );
 
   assert.equal(loaded, 0);
+  assert.equal(authorityChecks, 0);
 });
 
 test("runner failures are swallowed so sign-in cannot fail", async () => {
   await prewarmTenantSandbox(subscribedUser(), {
+    authorizeCurrent: () => Promise.resolve(AUTHORIZED),
     loadRunner: () => Promise.reject(new Error("module unavailable")),
   });
 
   await prewarmTenantSandbox(subscribedUser(), {
+    authorizeCurrent: () => Promise.resolve(AUTHORIZED),
     loadRunner: async () => ({
       createProductionRunnerService: () => ({
         prewarmMostRecent: () =>
@@ -102,6 +132,7 @@ test("the deadline aborts the in-process warm and waits for its cleanup", async 
   const started = Date.now();
 
   await prewarmTenantSandbox(subscribedUser(), {
+    authorizeCurrent: () => Promise.resolve(AUTHORIZED),
     loadRunner: async (loadSignal) => ({
       createProductionRunnerService: () => ({
         prewarmMostRecent: (_principal, options) => {
@@ -134,5 +165,45 @@ test("the deadline aborts the in-process warm and waits for its cleanup", async 
   assert.equal(attempted, true);
   assert.equal(aborted, true);
   assert.equal(released, true);
+  assert.ok(Date.now() - started < 1000);
+});
+
+test("stale, cancelled, missing, and unavailable current authority skip runner work", async () => {
+  const decisions = [
+    () => Promise.resolve({ ...AUTHORIZED, authVersion: 8 }),
+    () => Promise.resolve({ kind: "subscription_required" as const }),
+    () => Promise.resolve({ kind: "unauthorized" as const }),
+    () => Promise.reject(new Error("account lookup failed")),
+  ];
+
+  await Promise.all(
+    decisions.map(async (decision) => {
+      let loaded = 0;
+      await prewarmTenantSandbox(subscribedUser(), {
+        authorizeCurrent: decision,
+        loadRunner: () => {
+          loaded += 1;
+          return Promise.reject(new Error("must not load"));
+        },
+      });
+      assert.equal(loaded, 0);
+    })
+  );
+});
+
+test("a cancelled current-authority lookup never reaches runner work", async () => {
+  let loaded = 0;
+  const started = Date.now();
+
+  await prewarmTenantSandbox(subscribedUser(), {
+    authorizeCurrent: () => new Promise(() => undefined),
+    loadRunner: () => {
+      loaded += 1;
+      return Promise.reject(new Error("must not load"));
+    },
+    timeoutMs: 5,
+  });
+
+  assert.equal(loaded, 0);
   assert.ok(Date.now() - started < 1000);
 });

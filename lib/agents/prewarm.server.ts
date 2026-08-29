@@ -1,6 +1,10 @@
 import "server-only";
 
-import { type SubscriberSession, tenantForUser } from "@/lib/session";
+import type {
+  SessionLike,
+  SubscriberAccessDecision,
+} from "@/lib/auth/subscriber-access";
+import type { SubscriberSession } from "@/lib/session";
 import { isSubscribedAt } from "@/lib/subscription";
 
 const PREWARM_TIMEOUT_MS = 5000;
@@ -17,9 +21,52 @@ type RunnerModule = {
 };
 
 export type PrewarmDependencies = {
+  authorizeCurrent?: (
+    session: SessionLike,
+    signal: AbortSignal
+  ) => Promise<SubscriberAccessDecision>;
   loadRunner?: (signal: AbortSignal) => Promise<RunnerModule>;
   timeoutMs?: number;
 };
+
+function awaitUntilAbort<T>(
+  operation: Promise<T>,
+  signal: AbortSignal
+): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason);
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
+async function authorizeCurrentSubscriber(
+  session: SessionLike,
+  signal: AbortSignal
+): Promise<SubscriberAccessDecision> {
+  if (signal.aborted) {
+    throw signal.reason;
+  }
+  const { authorizeSubscriberAccess } = await import(
+    "@/lib/auth/subscriber-authorization.server"
+  );
+  if (signal.aborted) {
+    throw signal.reason;
+  }
+  return authorizeSubscriberAccess(session);
+}
 
 async function loadProductionRunner(
   signal: AbortSignal
@@ -39,8 +86,9 @@ async function loadProductionRunner(
  *
  * The sign-in callback invokes this through Next.js `after()`. Every failure
  * remains silent because warming is only a latency optimization. The runner
- * dependency is loaded after subscription gating so importing auth does not
- * initialize the database, Daytona SDK, or tenant credentials.
+ * dependency is loaded only after the scheduled OAuth snapshot is revalidated
+ * against current subscriber authority, so importing auth does not initialize
+ * the database, Daytona SDK, or tenant credentials.
  */
 export async function prewarmTenantSandbox(
   user: {
@@ -62,11 +110,29 @@ export async function prewarmTenantSandbox(
   }, timeoutMs);
 
   try {
-    const session: SubscriberSession = {
-      kind: "subscriber",
-      tenant: tenantForUser(user.id),
-      userId: user.id,
+    const snapshot: SessionLike = {
+      user: {
+        authVersion: user.authVersion,
+        id: user.id,
+        type: "subscriber",
+      },
     };
+    const access = await awaitUntilAbort(
+      (dependencies.authorizeCurrent ?? authorizeCurrentSubscriber)(
+        snapshot,
+        controller.signal
+      ),
+      controller.signal
+    );
+    if (
+      controller.signal.aborted ||
+      access.kind !== "allowed" ||
+      access.authVersion !== user.authVersion ||
+      access.userId !== user.id
+    ) {
+      return;
+    }
+    const { session } = access;
     const runner = await (dependencies.loadRunner ?? loadProductionRunner)(
       controller.signal
     );
