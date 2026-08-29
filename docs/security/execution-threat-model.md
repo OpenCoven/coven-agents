@@ -200,21 +200,23 @@ credential, agent, or run data. Tenant credentials are scoped by tenant and
 harness and sealed before storage in `lib/credentials/store.ts`; each row names
 one configured KEK version, and the ring has no default or brute-force
 fallback. The internal credential route is the documented service-to-service
-exception and replaces the session gate with service and signed-identity
-checks. Credential-lease audit events contain only tenant hash, harness ID, run
-ID, operation, outcome, and timestamp.
+exception retained for the rollback Worker; it replaces the session gate with
+legacy service-token and signed-identity checks. The current Daytona path uses
+server-side credential lending directly. Credential-lease audit events contain
+only tenant hash, harness ID, run ID, operation, outcome, and timestamp.
 
-### B5. Worker to Durable Objects and sandboxes
+### B5. Legacy Worker to Durable Objects and sandboxes (rollback only)
 
-Every cloud operation is filtered by the verified tenant.
+Every rollback Worker operation is filtered by the verified legacy tenant.
 `worker/src/tenant.ts` derives unambiguous sandbox keys and rejects unsafe
 tenant identifiers. `worker/src/routes.ts` and the directory interface require
 tenant-scoped listing and ownership checks.
 
 ### B6. Sandbox to external networks
 
-Container isolation exists, but a declared outbound network policy does not.
-Cloud egress is therefore a residual risk tracked by `coven-agents-cloud.4`.
+Current Daytona sandbox isolation and rollback Cloudflare container isolation
+exist, but a declared outbound network policy does not. Cloud egress is
+therefore a residual risk tracked by `coven-agents-cloud.4`.
 
 ### B7. Evidence to storage, UI, guest preview, and Git
 
@@ -305,7 +307,7 @@ new work rather than fall back to shared authority.
 | Legacy runner signing-key compromise | Disable the rollback browser path, rotate the legacy versioned key ring using [the runbook](key-rotation.md), and reject claims signed by the retired key. The current application has no private runner signing key. | Run `lib/agents/key-ring.test.ts`, `packages/agent-contracts/src/verify-token.test.ts`, internal authority tests, and Worker route tests; verify retired claims fail. |
 | Control or service-token compromise | Rotate the affected token on both sides of the retained Worker boundary. The control token grants legacy deployment reach but not tenant identity; the service token grants internal endpoint reach but not tenant selection. | Re-run `lib/runner/auth.test.ts` and `app/api/internal/credential/*.test.ts`; verify empty and previous tokens fail. |
 | Tenant harness-credential compromise | Revoke at the harness provider, stop affected runs, destroy or recycle affected sandboxes, and replace the encrypted tenant/harness row through `lib/credentials/store.ts`. | Verify the old credential no longer works and cross-tenant tests still pass without recording the credential value. |
-| Suspected cross-tenant cloud access | Suspend affected execution, preserve sanitized ownership and operation identifiers, stop the run, and destroy the implicated sandbox. Do not expose another tenant's record while notifying users. | Reproduce with `worker/src/routes.test.ts` and `worker/src/tenant.test.ts`; repair ownership before restoring service. |
+| Suspected cross-tenant cloud access | Suspend affected execution, preserve sanitized ownership and operation identifiers, stop the run, and destroy the implicated sandbox. Do not expose another tenant's record while notifying users. | Reproduce current behavior with runner service/store/Daytona tests; if the rollback Worker was involved, also run `worker/src/routes.test.ts` and `worker/src/tenant.test.ts`. Repair ownership before restoring service. |
 | Resource-exhaustion or orphaned execution | Refuse new work, stop bounded runs, and prefer explicit busy or recovery states over silently starting duplicates. | Cloud fairness is completed through `coven-agents-cloud.3`. |
 | Evidence-redaction failure | Stop publication or persistence of the affected evidence, revoke any exposed credential, sanitize already published artifacts, and add the missed shape as a regression. | Run shared evidence, guest fixture, and recorder tests. End-to-end redaction remains `coven-agents-security.3`. |
 
@@ -317,9 +319,9 @@ run the narrow tests for the affected boundary plus the repository gates.
 | Boundary | Required evidence |
 | --- | --- |
 | Sessions and entitlement | `lib/auth/session-revocation.test.ts`, `lib/auth/subscriber-access.test.ts`, `lib/auth/subscriber-authorization.test.ts`, `lib/session.test.ts`, `lib/subscription.test.ts`, `lib/session-claims.test.ts` |
-| Database and credential custody | `lib/db/access.test.ts`, `lib/credentials/envelope.test.ts`, `lib/credentials/authorize.test.ts`, `app/api/internal/credential/*.test.ts` |
+| Database and credential custody | `lib/db/access.test.ts`, `lib/credentials/envelope.test.ts`, `lib/credentials/authorize.test.ts`; `app/api/internal/credential/*.test.ts` covers the rollback Worker boundary |
 | Legacy Worker identity and tenancy | `lib/agents/key-ring.test.ts`, `app/api/internal/runner-authority/route.test.ts`, `app/api/internal/credential/binding.test.ts`, `packages/agent-contracts/src/verify-token.test.ts`, `worker/src/routes.test.ts`, `worker/src/tenant.test.ts`, `worker/src/tenant-credentials.test.ts` |
-| Cloud execution and evidence | `worker/src/harness-runner.test.ts`, `worker/src/run-state.test.ts`, `worker/src/agents.test.ts` |
+| Cloud execution and evidence | `lib/runner/service.test.ts`, `lib/runner/store.test.ts`, `lib/runner/daytona/*.test.ts`; rollback Worker coverage remains in `worker/src/harness-runner.test.ts`, `worker/src/run-state.test.ts`, and `worker/src/agents.test.ts` |
 | Shared contracts and redaction | `packages/agent-contracts/src/*.test.ts`, especially evidence-safety and guest-transcript compatibility tests |
 | Guest publication | `scripts/demo-record.test.ts`, `scripts/demo-capture.test.ts`, `lib/demo/fixtures.test.ts` |
 | Source-control boundary | `scripts/secret-scan.test.ts`, `pnpm secret:scan`, `pnpm secret:scan:all` |

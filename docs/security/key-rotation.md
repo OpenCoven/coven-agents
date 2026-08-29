@@ -1,50 +1,51 @@
 # Runner key rotation
 
-Runner identity keys are versioned. The app keeps the current Ed25519 private
-key and the Worker keeps only public verification keys. Key IDs are part of the
-signed claims and are routing hints, never authority.
+The current app does not mint browser runner identities and holds no runner
+signing private key. It retains only the public current/previous verification
+ring used by the still-deployed rollback Worker's internal authority and
+credential calls. Key IDs are routing hints, never authority.
 
-## Configuration
+## Current verification configuration
 
-On the app, configure `RUNNER_SIGNING_KEY_ID`, `RUNNER_SIGNING_KEY`, and
-`RUNNER_SIGNING_PUBLIC_KEY`. During a rotation, also configure
-`RUNNER_VERIFY_PREVIOUS_KEY_ID`, `RUNNER_VERIFY_PREVIOUS_KEY`,
+On the app and rollback Worker, configure the matching public
+`RUNNER_VERIFY_KEY_ID` and `RUNNER_VERIFY_KEY`. During a legacy overlap, also
+configure `RUNNER_VERIFY_PREVIOUS_KEY_ID`, `RUNNER_VERIFY_PREVIOUS_KEY`,
 `RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT`, and
-`RUNNER_VERIFY_PREVIOUS_RETIRE_AT`. On the Worker, configure
-`RUNNER_VERIFY_KEY_ID`, `RUNNER_VERIFY_KEY`, and the same previous-key
-variables. Set values through Vercel and Wrangler secrets; never commit or log
-key material.
+`RUNNER_VERIFY_PREVIOUS_RETIRE_AT`. Set retained values through Vercel and
+Wrangler configuration; never commit or log key material.
 
-The legacy `RUNNER_SIGNING_KEY` plus `RUNNER_VERIFY_KEY` pair is accepted only
-when no versioned current ID/public-key variables are present. It is a
-fail-closed migration path, not a reason to overwrite a key in place.
+Do not rotate or remove these public values independently while the rollback
+Worker is deployed. A mismatch makes its internal calls fail verification. The
+current same-origin Daytona path does not use this key ring.
 
-## Rotation
+## Rollback-only private signing rotation
 
-1. Generate a new Ed25519 pair.
-2. Deploy the new public key as the Worker's current key, retaining the old
-   public key as `previous`.
-3. Switch the app's signing ID, private key, and matching public key. Record
-   the exact UTC timestamp of that switch as
-   `RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT`; this is the last instant the old
-   signer could mint a token.
+This procedure applies only after restoring an older application release that
+contains the browser connection and token-minting routes. It is not current app
+configuration.
+
+1. Generate a new Ed25519 pair in the rollback environment.
+2. Deploy the new public key as the rollback Worker's current key, retaining
+   the old public key as `previous`.
+3. Switch the rolled-back app's signing ID, private key, and matching public
+   key. Record the exact UTC timestamp as
+   `RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT`.
 4. Set `RUNNER_VERIFY_PREVIOUS_RETIRE_AT` to at least that timestamp plus
    `TOKEN_LIFETIME_SECONDS` and `TOKEN_CLOCK_SKEW_SECONDS` (15 minutes plus
-   configured clock skew). The app and Worker reject an earlier retirement,
-   while restarts remain safe even after the retirement instant has passed.
-5. After retirement, remove the previous key variables.
+   configured clock skew).
+5. After every token from the retired signer has expired, remove the previous
+   public-key variables.
 
-The Worker cache is keyed by the complete configuration, so an environment
-change is picked up immediately. Unknown IDs, mismatched key pairs, duplicate
-IDs, and retired keys fail closed.
+Unknown IDs, duplicate IDs, invalid retirement windows, and retired keys fail
+closed. The current app can verify this legacy ring but cannot mint a claim.
 
 ## Rollback
 
-If the new signer is unhealthy, switch the app back to the old private key and
-ID while both public keys remain configured. Keep the new key as previous with
-its own last-signed timestamp and retirement boundary until all tokens it could
-have issued have expired. Never shorten a previous retirement window while
-tokens may still be queued or in flight.
+If a rollback signer is unhealthy, switch the rolled-back app back to the old
+private key and ID while both public keys remain configured. Keep the new key
+as previous until all tokens it could have issued have expired. Never shorten a
+previous retirement window while legacy tokens may still be queued or in
+flight. Returning to the current app removes the browser minting path entirely.
 
 ## Credential KEK rotation
 

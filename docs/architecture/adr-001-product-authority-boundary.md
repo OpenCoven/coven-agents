@@ -39,10 +39,11 @@ memory, familiar mutation authority, durable cross-surface orchestration, local
 session history, or the ecosystem runtime registry. It consumes those owners
 through versioned references and adapters when integrations are added.
 
-The browser and Next.js app remain the product control plane. The cloud Worker
-remains the product's tenant-isolated execution plane. The local runner remains
-a narrow product adapter for launching one host-trusted mission; it must not
-grow into a competing durable local runtime.
+The browser and Next.js app remain the product control plane. Browser runner
+access uses same-origin Auth.js session APIs, and server-side runner composition
+derives the tenant before dispatching to Daytona. The Cloudflare Worker remains
+deployed only as a rollback execution plane until its removal PR. No supported
+local runner is tracked.
 
 `packages/agent-contracts` and `packages/harness` remain private workspace
 packages:
@@ -59,7 +60,7 @@ packages:
 | Human account and subscription | Coven Agents control plane | Own GitHub account linkage, product user ID, tenant derivation, subscription state, run cap, and product session | Product entitlement never implies familiar identity or familiar mutation authority. |
 | Familiar identity and belonging | [`OpenCoven/familiar-contract`](https://github.com/OpenCoven/familiar-contract) | Carry an opaque, versioned familiar reference when an upstream client supplies one | Do not author or become source of truth for `SOUL.md`, `IDENTITY.md`, `MEMORY.md`, human belonging, or Familiar Contract conformance. |
 | Protected familiar mutation authority | [`OpenCoven/coven-threads`](https://github.com/OpenCoven/coven-threads), enforced through the trusted Coven daemon | Respect upstream approval outcomes and return execution evidence | Do not evaluate Ward gates, mutate protected surfaces directly, or infer permission from a Coven Agents subscription. |
-| Local project and harness-session authority | [`OpenCoven/coven`](https://github.com/OpenCoven/coven) | The current loopback runner provides a narrow compatibility path for one bounded mission | Do not evolve the loopback runner into a second durable session daemon, local memory store, or general client authority boundary. Future deep local integration should adapt to Coven's versioned API. |
+| Local project and harness-session authority | [`OpenCoven/coven`](https://github.com/OpenCoven/coven) | No current local runner integration; future bounded local execution may consume Coven's versioned authority | Do not create a second durable session daemon, local memory store, or general client authority boundary inside Coven Agents. |
 | Familiar orchestration and durable intent state | [`OpenCoven/psyche`](https://github.com/OpenCoven/psyche) | Execute one accepted mission and return a bounded result | Do not own canonical intent graphs, delegation, budgets, approvals, recovery, delivery, verdicts, or cross-surface retention. A product run is an attempt, not an orchestration decision. |
 | Accepted runtime definitions | [`OpenCoven/coven-runtimes`](https://github.com/OpenCoven/coven-runtimes) | Implement product-specific launch and event adapters for accepted runtimes | Do not create a competing public registry. New ecosystem runtime acceptance starts upstream; this product pins and adapts a version. |
 | Product execution profile | Coven Agents | Own name, instructions, model selection, backend selection, workspace reference, and product run status | A profile is not a familiar. Labels such as name or role do not create identity continuity or protected memory. |
@@ -119,10 +120,10 @@ the other.
    happened in its bounded attempt. Psyche or another canonical orchestrator
    decides whether that evidence satisfies an intent, budget, approval, or
    recovery policy.
-7. **Keep local and cloud trust boundaries explicit.** Cloud execution is a
-   Coven Agents product service. Local execution is host-trusted compatibility
-   until it delegates to, or is isolated consistently with, the canonical local
-   runtime.
+7. **Keep current and rollback trust boundaries explicit.** Current cloud
+   execution is a same-origin Coven Agents service backed by Daytona. The
+   retained Cloudflare Worker is rollback-only, and no local execution path is
+   currently supported.
 8. **Make caches disposable.** A derived upstream view must record its source
    revision and be safe to discard and rebuild. A cache never grants authority
    when the owner is unavailable.
@@ -135,8 +136,9 @@ An upstream-independent product run:
    authority from server-owned state.
 2. The caller chooses a product-local execution profile and submits one
    mission.
-3. The control plane mints short-lived runner identity for the product tenant.
-4. The selected runner executes the bounded mission.
+3. The control plane revalidates the application session, derives the product
+   tenant, and dispatches through the server-side runner service.
+4. Daytona executes the bounded mission.
 5. Coven Agents returns normalized, redacted product evidence and accounts for
    usage.
 

@@ -1,9 +1,10 @@
 # Release Readiness
 
 This is the go/no-go checklist for the current cloud-only product. It covers the
-Next.js app, Cloudflare Worker, database, planning reconciliation, smoke
-evidence, rollback, and recovery. It does not treat disabled GitHub Actions as
-executed evidence.
+Next.js app, server-side Daytona runner, database, planning reconciliation,
+smoke evidence, rollback, and recovery. The still-deployed Cloudflare Worker is
+included only as a rollback runtime. Disabled GitHub Actions are not executed
+evidence.
 
 ## Current release disposition
 
@@ -22,9 +23,8 @@ Current blockers are factual and fail closed:
 - the Stripe webhook claims an event before owner lookup and subscription
   mutation, so a post-claim failure or ignored owner is permanently deduplicated
   instead of recoverable by provider redelivery;
-- the deployed app returns `400 invalid_request` when the existing browser
-  identity minter sends a zero-byte `POST /api/runner-token`; the candidate
-  compatibility fix has local route evidence but is not deployed;
+- no retained production-equivalent artifact yet proves the same-origin
+  application-session runner path and server-derived tenant boundary;
 - the final production-browser gate passed 15 of 17 cases. Warden and legacy
   chat cannot authenticate because their cookie-only fixtures do not provide
   the database-backed session authority required after `authVersion`
@@ -51,8 +51,9 @@ Stop the release without exception when any of these is true:
 - Beads and Project are drifted or cannot be shown to agree;
 - Stripe event claim and subscription-state mutation are not atomic and
   retry-safe; or
-- the deployed browser identity minter cannot obtain both unscoped and
-  run-scoped runner tokens from the candidate API; or
+- the deployed same-origin agent and run APIs do not prove Auth.js session
+  revalidation, server-derived tenant ownership, and a complete Daytona
+  lifecycle; or
 - `RELEASE_AUDIENCE` is absent or invalid, or its approved audience does not
   match the beta configuration.
 
@@ -71,15 +72,15 @@ different configuration surfaces and must not be treated as interchangeable.
 | Toolchain | Node.js 22 or newer, pnpm 10, frozen dependency install, Git, Docker for Sandbox image work, and authenticated deployment CLIs. | Declared in [`README.md`](../../README.md) and package metadata. |
 | App identity and data | `AUTH_SECRET`, `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET`, `POSTGRES_URL`, and canonical `APP_ORIGIN`. | GitHub is the only sign-in provider; production data requires PostgreSQL. |
 | Owner directory | `ADMIN_EMAILS` containing the exact normalized owner email allowlist when `/admin` is enabled. | Unauthorized page and API requests fail closed as non-cacheable `404` responses. Because the proxy participates in the production build, set this consistently for build and runtime. |
-| Production app abuse and run admission | Require all three app environment variables: `REDIS_URL`, a nonempty `ABUSE_KEY_SECRET`, and a positive-integer `GLOBAL_DAILY_RUN_CAP`. `ABUSE_CONTROL=off` is an emergency bypass for app request-policy enforcement only; normal releases require it unset or not `off`. It does not bypass run reservations, global or tenant cap enforcement, or Worker rate limiters. | Protected app routes fail closed with `503` when Redis is unconfigured in production. Credential lending fails closed with `503` and `capacity_unavailable` when the global cap or abuse key is unavailable. See [`.env.example`](../../.env.example), [`lib/abuse/enforce.ts`](../../lib/abuse/enforce.ts), and [`app/api/internal/credential/route.ts`](../../app/api/internal/credential/route.ts). |
-| App-to-runner connection | `NEXT_PUBLIC_CLOUD_RUNNER_URL` or server-side `CLOUD_RUNNER_URL`, plus matching `AGENT_CONTROL_TOKEN`. | The browser receives the connection from the app; the public URL requires a fresh app build when changed. |
-| Runner identity | App `RUNNER_SIGNING_KEY_ID`/`RUNNER_SIGNING_KEY`/`RUNNER_SIGNING_PUBLIC_KEY`; Worker `RUNNER_VERIFY_KEY_ID`/`RUNNER_VERIFY_KEY` plus an optional previous key ring with last-signed and retirement timestamps. | Claims carry `authVersion` and optional run scope, fail closed when either side is absent or mismatched, and are re-authorized against current account state before credential access. Rotate with the [key runbook](../security/key-rotation.md). |
-| Credential lending | App and Worker `RUNNER_SERVICE_TOKEN`; app `CREDENTIAL_KEK_CURRENT_VERSION` with the required `CREDENTIAL_KEK_V1`/`CREDENTIAL_KEK_V2` ring; Worker `APP_ORIGIN`. | The Worker has no operator or fallback harness credential. Production rollout must complete AAD binding, versioned rewrap, run-scoped identity, authority revalidation, and one-run credential lease gates before retiring compatibility keys or flags. |
+| Production app abuse and run admission | Require all three app environment variables: `REDIS_URL`, a nonempty `ABUSE_KEY_SECRET`, and a positive-integer `GLOBAL_DAILY_RUN_CAP`. `ABUSE_CONTROL=off` is an emergency bypass for app request-policy enforcement only; normal releases require it unset or not `off`. It does not bypass run reservations or global and tenant cap enforcement. | Protected app routes fail closed with `503` when Redis is unconfigured in production. Current server-side credential lending fails closed with `capacity_unavailable` when its cap or abuse key is unavailable. |
+| Same-origin runner access | `AUTH_SECRET`, canonical `APP_ORIGIN`, database-backed subscriber state, and Daytona configuration. | The browser calls relative `/api` agent and run routes with its httpOnly Auth.js cookie. The server revalidates authority and derives the tenant; no endpoint, deployment token, signed runner identity, or app private signing key is provisioned. |
+| Daytona execution | `DAYTONA_API_KEY`, `DAYTONA_SNAPSHOT`, `DAYTONA_DOMAIN_ALLOW_LIST`, optional reviewed endpoint/target settings, and bounded timeout/lifecycle values. | Current runs dispatch from the server-side runner service to tenant-scoped Daytona sandboxes. Runtime validation covers required production settings and bounded values. |
+| Credential lending | App `CREDENTIAL_KEK_CURRENT_VERSION` with the required `CREDENTIAL_KEK_V1`/`CREDENTIAL_KEK_V2` ring and server-side reservation/lease configuration. | Current lending stays inside the app runner composition, binds tenant and run before plaintext, and exposes no credential to browser APIs. |
 | Billing | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, and canonical `APP_ORIGIN`. | Checkout and webhook return `503` when unconfigured. |
 | Release audience | Set `RELEASE_AUDIENCE` exactly to `closed-beta` or `public`. Closed beta additionally requires `BETA_MODE=on` and a reviewed, nonempty `BETA_ALLOWLIST` containing only valid email addresses; public release requires separate approval and `BETA_MODE=off`. | [`scripts/validate-runtime-config.ts`](../../scripts/validate-runtime-config.ts) enforces this automatically for Vercel production and other `NODE_ENV=production` validation. Automatic runtime validation exempts Vercel preview/development builds, while `pnpm validate:release` always enforces. Unset/default-off cannot pass either production path. |
 | Other shipped app paths | `AI_GATEWAY_API_KEY` and `BLOB_READ_WRITE_TOKEN` when chat/model and upload paths remain enabled. | These are app feature dependencies, not runner credentials. |
-| Worker service bindings | Secret bindings for `AGENT_CONTROL_TOKEN`, `OPERATOR_DIAGNOSTIC_TOKEN`, current and optional previous `RUNNER_VERIFY_*` key-ring values, `RUNNER_SERVICE_TOKEN`, and `APP_ORIGIN`; plain Worker variable `ALLOWED_ORIGIN`; Durable Object/container bindings and migrations; container image; and Wrangler authentication. | [`worker/.dev.vars.example`](../../worker/.dev.vars.example), [`worker/src/worker-secrets.d.ts`](../../worker/src/worker-secrets.d.ts), and [`worker/wrangler.jsonc`](../../worker/wrangler.jsonc) define the current topology. The diagnostic token is separate from browser-visible deployment and identity credentials. |
-| Worker abuse and admission controls | Secret binding `EDGE_ABUSE_KEY_SECRET`; Cloudflare Rate Limiting bindings `EDGE_REQUEST_LIMITER`, `TENANT_MUTATION_LIMITER`, and `TENANT_RUN_LIMITER`; and reviewed `RUN_ADMISSION_*` queue/capacity values. | Rate limiters are platform bindings under `ratelimits`; admission values are plain Wrangler variables. Neither is an app environment variable or bypassed by `ABUSE_CONTROL=off`. |
+| Legacy rollback Worker | Retain matching `AGENT_CONTROL_TOKEN`, `RUNNER_SERVICE_TOKEN`, `APP_ORIGIN`, public current/previous `RUNNER_VERIFY_*` values, `OPERATOR_DIAGNOSTIC_TOKEN`, Worker bindings, and Wrangler access until the Worker-removal PR. | These values support rollback only. The current browser does not receive them or call the Worker, and the current app has no private runner signing key. |
+| Legacy Worker abuse and admission | Retain `EDGE_ABUSE_KEY_SECRET`, Cloudflare Rate Limiting bindings, and reviewed Worker admission values while the rollback runtime remains deployed. | These controls protect the retained Worker only; they are not the current app's runner-access boundary. |
 | Demo recorder | Recorder variables from [`.env.example`](../../.env.example) only when producing a new owner-approved replay. | Guest playback itself is committed, stateless evidence and needs no recorder secret. |
 | Local execution | — | The local runner was removed in `91f21c8`; the shared contract accepts only `cloud`. Local smoke is not a current release gate. |
 
@@ -184,33 +185,28 @@ skipped audience validation is not release evidence.
 | Path | Required smoke | Evidence required | Current state |
 | --- | --- | --- | --- |
 | Demo | Deploy/build with `IS_DEMO=1`, load the signed-out root, play the committed replay through completion, and verify sanitized output with no database or runner persistence. | Dated browser trace or recording tied to the candidate and deployment. | A local production replay reached 10/10 sanitized events without console errors on 2026-08-27; no release-equivalent deployment artifact is retained. |
-| Subscriber | Exercise a real GitHub OAuth callback and account creation/adoption, guest refusal, active eligibility, expired/revoked refusal, connection retrieval, bodyless unscoped identity minting, strict run-scoped identity minting, and usage display. | Dated trace plus sanitized account-state evidence for allowed and denied cases. | Eligibility and runner-token compatibility have local tests; actual OAuth/account creation and the candidate token fix are not verified in deployment. |
-| Cloud | Run the authenticated deployment diagnostic, create an agent, start and observe a credentialed run, stream/poll to terminal state, cancel a bounded run, delete the agent, and verify tenant/sandbox cleanup. | Dated Worker/app logs, response summary, run identifiers, and cleanup result without credentials or private output. | The local Docker-backed diagnostic passes with the SDK-matched image. No deployed release-equivalent create/run/stream/cancel/delete lifecycle artifact exists. |
+| Subscriber | Exercise a real GitHub OAuth callback and account creation/adoption, guest refusal, active eligibility, expired/revoked refusal, same-origin agent/run access, and usage display. Verify requests carry only the application session and server-derived tenant authority. | Dated trace plus sanitized account-state evidence for allowed and denied cases. | Eligibility and same-origin boundary tests pass locally; actual OAuth/account creation and a production-equivalent Daytona lifecycle are not retained. |
+| Cloud | Through the same-origin API, create an agent, start and observe a credentialed Daytona run, stream/poll to terminal state, cancel a bounded run, delete the agent, and verify tenant/sandbox cleanup. Separately verify the retained rollback Worker diagnostic without treating it as current browser traffic. | Dated app/Daytona response summary, run identifiers, and cleanup result without credentials or private output; separate rollback diagnostic status. | Local Daytona lifecycle and rollback Worker diagnostic tests pass. No deployed release-equivalent create/run/stream/cancel/delete artifact exists. |
 | Local, if supported | Create, run, cancel, and delete through the supported local boundary, including host isolation and cleanup checks. | Dated artifact from the declared supported local environment. | Not applicable: no local runner is tracked and `backend` is cloud-only. |
 
 Smoke failure is a no-go. Do not retry until a failure disappears without
 recording the first failure and its disposition.
 
-## Runner token compatibility
+## Same-origin runner session boundary
 
-**Current deployment blocker:** the browser identity minter intentionally sends
-a bodyless `POST /api/runner-token` for unscoped calls. The deployed route tests
-`request.body` and then parses any non-null stream as JSON. In production the
-runtime exposes a zero-byte stream rather than `null`, so the shared strict JSON
-reader returns `invalid` and the route responds `400 {"error":"invalid_request"}`.
+The browser runner client uses relative application routes and the Auth.js
+session cookie. There is no browser runner connection endpoint, token mint, or
+deployment bearer. Before go:
 
-The candidate treats only absent or zero-byte bodies as an empty strict request.
-Valid `{}` and a valid `run` scope pass; malformed JSON, unknown fields, and
-oversized input retain `400` and `413` responses. Local route-level evidence is
-not deployment evidence. Before go:
-
-1. Deploy the signed candidate without changing the browser minter contract.
-2. From an authenticated active-subscriber browser, prove a bodyless mint
-   succeeds and can authorize an unscoped Worker request.
-3. Start a run and prove the JSON scope binds the exact agent, harness, and
-   operation through Worker authority and credential lease checks.
-4. Retain sanitized request status, candidate/deployment identifiers, and
-   timestamps without recording tokens or request bodies.
+1. Deploy the signed candidate with the intended Auth.js, database, and Daytona
+   configuration.
+2. Prove anonymous and lapsed sessions are refused before runner work.
+3. Prove an active subscriber can create, read, run, stream, stop, and delete
+   only tenant-owned resources through same-origin `/api` routes.
+4. Confirm request traces contain no `X-Runner-Token`, runner bearer, external
+   runner endpoint, raw credential, or app signing private key.
+5. Retain sanitized status, candidate/deployment identifiers, and timestamps
+   without recording session cookies or request bodies.
 
 ## Stripe webhook delivery
 
@@ -248,21 +244,23 @@ recovery implementation or current production delivery artifact is retained.
 
 Release evidence must prove:
 
-- the deployment token grants reach but never tenant identity;
-- current and previous signing/verification key IDs agree, retirement windows
-  are bounded, stale `authVersion` claims fail, and run-scoped claims bind the
-  agent, harness, and operation;
-- the service token cannot select a tenant without authority revalidation,
-  matching run scope, a valid reservation, and a one-run credential lease;
+- current browser requests carry only an Auth.js application session, and
+  tenant identity is derived from revalidated server-owned account state;
+- no runner endpoint, deployment token, bearer identity, signing key, or raw
+  credential reaches browser APIs or storage;
+- server-side Daytona dispatch binds tenant, agent, harness, run, operation,
+  reservation, and credential access before plaintext exists;
+- in the rollback boundary only, the deployment token grants reach but never
+  tenant identity, public verification keys remain aligned, and the service
+  token cannot select a tenant without legacy claim revalidation;
 - two controlled tenants cannot list, run, stream, stop, delete, or borrow each
   other's resources or credentials;
 - the complete versioned `CREDENTIAL_KEK_CURRENT_VERSION`/
   `CREDENTIAL_KEK_V1`/`CREDENTIAL_KEK_V2` ring is present, AAD binds each
   ciphertext to its tenant and harness, rewrap verification has no old rows,
-  and the Worker stores no fallback credential;
+  and neither Daytona nor the rollback Worker stores a fallback credential;
 - direct and encoded credential shapes are redacted from UI, persisted
-  evidence, logs, diagnostics, and errors; and
-- browser connection material is not placed in persistent local storage.
+  evidence, logs, diagnostics, and errors.
 
 Use synthetic credentials and sanitized identifiers. Any cross-tenant access,
 unredacted credential, or shared-authority fallback is an automatic no-go and
@@ -280,8 +278,9 @@ Before traffic promotion:
 3. Confirm app telemetry initializes and both app and Worker surface actionable
    failures without request bodies, credentials, private paths, or private
    planning text.
-4. Correlate one subscriber request through connection, signed identity,
-   credential lending, run lifecycle, and terminal result.
+4. Correlate one subscriber request through Auth.js session revalidation,
+   server-derived tenant scope, credential lending, Daytona lifecycle, and
+   terminal result.
 5. Confirm operators can distinguish auth, subscription, capacity, harness,
    sandbox, database, and internal-service failures.
 
@@ -336,7 +335,7 @@ or guess at database compatibility.
 | Beads/Project/issues | A second apply and final preview are a complete no-op, and accepted delivery artifacts agree. | Drift, create/update/orphan work, partial or failed sync, or issue contradiction. | **No-go:** authoritative sync cannot run; the latest recorded Project query found managed items were drafts. |
 | Six local gates | All six pass on the exact candidate with retained output. | Any failure or evidence from another commit. | **No-go:** hygiene, check, typecheck, 1,329 unit tests, and the 33-page build passed. The production-browser gate passed 15 of 17 while failing the Warden and legacy-chat subscriber cases at the database-backed session-authority boundary. |
 | Database | Staging migration, production backup, migration success, schema verification, and recovery record exist. | Missing backup, skipped/failed migration, or unproved recovery. | **No-go:** no candidate-specific production migration and restore artifact is retained. |
-| Smoke and Stripe | Demo, subscriber, bodyless and run-scoped identity minting, cloud lifecycle, and webhook evidence pass; Stripe claim/update recovery is atomic and retry-safe; local runs only if supported. | Any failed required smoke, undeployed token compatibility fix, missing webhook delivery, or claim-before-state behavior that permanently deduplicates failed processing. | **No-go:** the runner-token fix is local-only, only local/unit lifecycle evidence is retained, and current Stripe claim/update ordering is not retry-safe. |
+| Smoke and Stripe | Demo, subscriber same-origin session access, Daytona lifecycle, and webhook evidence pass; Stripe claim/update recovery is atomic and retry-safe; local runs only if supported. | Any failed required smoke, missing same-origin/Daytona evidence, missing webhook delivery, or claim-before-state behavior that permanently deduplicates failed processing. | **No-go:** only local/unit lifecycle evidence is retained, and current Stripe claim/update ordering is not retry-safe. |
 | Isolation | Tenant, credential, identity, and redaction evidence pass in a release-equivalent environment. | Any cross-tenant or secret-boundary failure. | **No-go:** production-like isolation evidence is not retained. |
 | Observability, rollback, recovery | Diagnostics pass and a dated rollback/recovery rehearsal is retained with named operators. | Blind operation, missing owner, or unproved recovery for affected data. | **No-go:** health/readiness and persisted-run recovery remain incomplete. |
 | Actions policy | All evidence is local and retained while Actions remain intentionally disabled. If CI is separately restored, refresh the roadmap and replace this evidence policy before counting remote checks. | Treating an unrun workflow as evidence or re-enabling Actions without separate approval. | **Accepted constraint:** not a go signal; every other gate still applies. |
