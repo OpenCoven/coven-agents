@@ -12,9 +12,14 @@ const agent = {
   lastRunAt: null,
   model: "gpt-5.1",
   name: "Cody",
+  owner: { kind: "standalone" as const },
   runtime: "copilot" as const,
   status: "idle" as const,
   updatedAt: "2026-08-20T12:00:00.000Z",
+  warm: {
+    status: "not_started" as const,
+    updatedAt: "2026-08-20T12:00:00.000Z",
+  },
   workspace: "/workspace",
 };
 

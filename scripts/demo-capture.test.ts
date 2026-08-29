@@ -117,6 +117,7 @@ function agentResponse(): Response {
       runtime: "copilot",
       status: "idle",
       updatedAt: CREATED_AT,
+      warm: { status: "not_started", updatedAt: CREATED_AT },
       workspace: "/workspace",
     },
   });
@@ -139,6 +140,7 @@ function agentDefinition(
     runtime: "copilot",
     status: "idle",
     updatedAt: CREATED_AT,
+    warm: { status: "not_started", updatedAt: CREATED_AT },
     workspace: "/workspace",
   };
 }
@@ -854,6 +856,7 @@ test("reconnects with a cursor, deduplicates arrivals, and stops at terminal com
             runtime: "copilot",
             status: "idle",
             updatedAt: CREATED_AT,
+            warm: { status: "not_started", updatedAt: CREATED_AT },
             workspace: "/workspace",
           },
         },
@@ -988,6 +991,7 @@ test("deletes the temporary agent after a capture failure", async () => {
           runtime: "copilot",
           status: "idle",
           updatedAt: CREATED_AT,
+          warm: { status: "not_started", updatedAt: CREATED_AT },
           workspace: "/workspace",
         },
       });
@@ -1461,6 +1465,7 @@ test("surfaces cleanup failure while preserving the primary failure context", as
           runtime: "copilot",
           status: "idle",
           updatedAt: CREATED_AT,
+          warm: { status: "not_started", updatedAt: CREATED_AT },
           workspace: "/workspace",
         },
       });
