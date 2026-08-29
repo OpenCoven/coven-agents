@@ -1,140 +1,59 @@
 # Current Repository State
 
-This is an evidence snapshot, not a completion claim. Repository behavior is
-described from tracked source and fresh local commands. Planning status remains
-subject to the private Beads authority, which was unavailable during this
-snapshot.
+- Snapshot date: 2026-08-29
+- Candidate base: `acc7ca3fa2dd51f496e1900573f239eb8a158ce6`
+- Evidence class: implemented source; verification pending current candidate
 
-> **Correction — 2026-08-29, candidate HEAD:** The browser uses
-> same-origin agent and run APIs with its Auth.js application session. The
-> server revalidates subscriber authority, derives tenant ownership, and
-> dispatches through the Daytona runner; no browser connection endpoint,
-> deployment token, signed runner identity, or app private runner signing key
-> remains. The repository no longer contains the Cloudflare Worker, its
-> internal authority/credential endpoints, or its service/signing/verification
-> configuration. This source change does not certify a live Daytona lifecycle
-> or prove that any separately deployed legacy service has been decommissioned.
-> The historical audit below remains baseline evidence, not current
-> architecture guidance.
-
-## Historical snapshot metadata
-
-| Field | Value |
-| --- | --- |
-| Snapshot captured | `2026-08-27T02:06:28-05:00` |
-| Audit candidate | `main` at `a8c197639c599c67132e73b376859dc4d6d48124`, plus the staged documentation refresh |
-| Merged `origin/main` SHA | `a8c197639c599c67132e73b376859dc4d6d48124` |
-| Project refresh timestamp | `2026-08-26T01:35:14.947Z` |
-| Working-tree state before documentation edits | Clean at `a8c1976`; unrelated worktrees were not modified |
-
-The original UI audit landed as `d63d40a`. Subsequent Worker and console changes
-through `d32609a` were included in this refresh; `a8c1976` is the merged,
-verified SDK/container alignment commit.
+This snapshot does not claim a production deployment, provider cleanup, or
+private planning update.
 
 ## Implemented surfaces
 
 | Surface | Current repository reality | Evidence |
 | --- | --- | --- |
-| Next control plane and console | Next.js 16 serves the agent console at `/agents`. The console creates, edits, lists, runs, streams, stops, and deletes cloud execution profiles, with run receipts, runtime inspection, analytics, and settings surfaces. | [`app/agents/page.tsx`](../../app/agents/page.tsx), [`components/console/run-console.tsx`](../../components/console/run-console.tsx), [`lib/agents/client.ts`](../../lib/agents/client.ts) |
-| GitHub authentication, account, and setup | GitHub is the only sign-in provider. A verified GitHub email is mapped to a local product account; account settings expose Copilot setup, profile, usage, and data controls. Credential setup supports direct validation and GitHub device flow. Direct signed-out entry is gated before protected controls mount. | `app/(auth)/auth.ts`, [`app/account/page.tsx`](../../app/account/page.tsx), [`components/account/harness-credentials.tsx`](../../components/account/harness-credentials.tsx), [`app/api/credentials/device/route.ts`](../../app/api/credentials/device/route.ts) |
-| Owner Warden directory | `/admin` exposes aggregate account/run telemetry only to exact normalized emails in `ADMIN_EMAILS`. Unauthorized page and API requests return a non-cacheable 404, and the page keeps its own authorization check as defense in depth. | [`app/admin/page.tsx`](../../app/admin/page.tsx), [`app/api/admin/route.ts`](../../app/api/admin/route.ts), [`components/admin/warden.tsx`](../../components/admin/warden.tsx), [`lib/admin/access.ts`](../../lib/admin/access.ts), [`proxy.ts`](../../proxy.ts) |
-| Guest demo | `IS_DEMO=1` publishes a deterministic replay of committed, schema-validated, sanitized evidence at `/demo`; the default root routes to `/agents`. Playback does not start a runner or require authentication or database access. | [`components/demo/demo-root.tsx`](../../components/demo/demo-root.tsx), [`components/demo/replay-player.tsx`](../../components/demo/replay-player.tsx), [`lib/demo/fixtures.test.ts`](../../lib/demo/fixtures.test.ts), [guest boundary](../security/guest-access.md) |
-| Shared contracts and harness | Two private workspace packages define Agent Runner v1 schemas, bounded evidence, normalized harness events, invocation construction, run summaries, base64 helpers, and the tenant identifier pattern. The retired Worker token-verification surface is removed. GitHub Copilot CLI is runnable; Codex CLI and Claude Code are detected but refused because their event translation is not implemented. | [`packages/agent-contracts/src/index.ts`](../../packages/agent-contracts/src/index.ts), [`packages/agent-contracts/contract-descriptor.ts`](../../packages/agent-contracts/contract-descriptor.ts), [`packages/harness/src/registry.ts`](../../packages/harness/src/registry.ts), [`packages/harness/src/invocation.ts`](../../packages/harness/src/invocation.ts) |
-| Current runner reality | The browser calls relative same-origin `/api` routes with its Auth.js session. Server-side runner composition derives the tenant and dispatches to Daytona; the contract remains cloud-only and no local runner is tracked. | [`lib/agents/client.ts`](../../lib/agents/client.ts), [`lib/runner/production.ts`](../../lib/runner/production.ts), [`lib/runner/service.ts`](../../lib/runner/service.ts), [`lib/runner/daytona`](../../lib/runner/daytona) |
-| Retired Cloudflare runtime | Worker sources, workspace configuration, rollback-only internal authority/credential endpoints, and Worker secrets are removed from the repository. External deployment removal remains an operator action and is not certified by source deletion. | [`scripts/product-boundary.test.ts`](../../scripts/product-boundary.test.ts), [`pnpm-workspace.yaml`](../../pnpm-workspace.yaml), [threat model](../security/execution-threat-model.md) |
-| Tenant credentials | Subscriber-owned harness credentials are tenant/harness scoped, encrypted under a versioned KEK ring, AAD-bound and resumably rewrapped. Server-only acquisition reserves capacity and binds the run before Daytona launch; no browser or cross-service endpoint returns plaintext. | [`lib/credentials/key-ring.ts`](../../lib/credentials/key-ring.ts), [`lib/credentials/leases.ts`](../../lib/credentials/leases.ts), [`lib/credentials/runner-credential.ts`](../../lib/credentials/runner-credential.ts), [`lib/credentials/store.ts`](../../lib/credentials/store.ts), [`lib/runner/production.ts`](../../lib/runner/production.ts) |
-| Subscriptions and usage | Stripe Checkout creates or reuses one customer per product account. Signed, deduplicated webhook events update server-owned `subscribedUntil`; session authority is recomputed from that value. Run usage is tenant- and period-scoped, deduplicated by run ID, shown through `/api/usage`, and enforced before a credential is lent. | [`app/api/checkout/route.ts`](../../app/api/checkout/route.ts), [`app/api/stripe/webhook/route.ts`](../../app/api/stripe/webhook/route.ts), [`lib/subscription.ts`](../../lib/subscription.ts), [`lib/billing/usage.ts`](../../lib/billing/usage.ts), [`app/api/usage/route.ts`](../../app/api/usage/route.ts) |
-| Security and abuse controls | Product-data and runner access fail closed on Auth.js session revalidation, subscriber authority, server-derived tenant scope, canonical-origin mutation checks, reviewed route policies, and run admission. Cron, manual reconcile, and diagnostics retain separate operator credentials. | [`lib/auth/session-revocation.ts`](../../lib/auth/session-revocation.ts), [`lib/auth/subscriber-authorization.server.ts`](../../lib/auth/subscriber-authorization.server.ts), [`lib/runner/auth.ts`](../../lib/runner/auth.ts), [`lib/runner/http.ts`](../../lib/runner/http.ts), [`lib/abuse/enforce.ts`](../../lib/abuse/enforce.ts), [threat model](../security/execution-threat-model.md) |
-| Planning automation | The repository can read only approved Project fields, validate a 60-item managed inventory, render a canonical aggregate block, and fail when `ROADMAP.md` is stale. Beads seed/sync and Project reconciliation code exists, but no fresh canonical reconciliation was possible in this snapshot. | [`scripts/roadmap-project-status.ts`](../../scripts/roadmap-project-status.ts), [`scripts/roadmap-status.ts`](../../scripts/roadmap-status.ts), [`scripts/beads-project-sync.ts`](../../scripts/beads-project-sync.ts), [`ROADMAP.md`](../../ROADMAP.md), [sync boundary](../beads-project-sync.md) |
+| Product application | Next.js 16 serves authenticated account, agent, run, analytics, settings, and administration surfaces. | `app/`, `components/` |
+| Browser execution access | Browser code calls relative same-origin `/api` routes with the Auth.js session. | `lib/agents/browser-transport.ts`, `lib/agents/client.ts` |
+| Authority | Protected routes revalidate subscriber state and derive tenant ownership on the server. | `lib/auth/subscriber-authorization.server.ts`, `lib/runner/http.ts`, `lib/runner/runtime.ts` |
+| Daytona execution | Daytona is the sole execution provider. Each agent owns a persistent tenant-scoped sandbox; attempts use short-lived process sessions. | `lib/runner/daytona/`, `lib/runner/service.ts` |
+| Durable ownership | PostgreSQL stores agent, run, event, admission, dispatch, attempt, cancellation, and reconciliation state. | `lib/runner/store.ts`, `lib/db/schema.ts` |
+| Credential custody | Tenant harness credentials are encrypted, AAD-bound, acquired server-side, and compensated on failed launch. | `lib/credentials/`, `lib/runner/runtime.ts` |
+| Run reliability | Starts are operation-idempotent, SSE resumes from numeric cursors, and reconciliation uses database-time leases and exact fences. | `lib/runner/admission.ts`, `lib/runner/sse.ts`, `lib/runner/reconcile.ts` |
+| Guest replay | A committed sanitized replay can render without starting an agent, creating a sandbox, or using subscriber resources. | `lib/demo/`, `components/demo/` |
+| Security operations | Separate credentials protect diagnostics, scheduled reconciliation, and manual reconciliation. | `lib/runner/auth.ts`, `docs/security/incident-response.md` |
 
-The accepted [product authority boundary](../architecture/adr-001-product-authority-boundary.md)
-and the living [execution threat model](../security/execution-threat-model.md)
-are present on merged main. Their implementation evidence is real; their
-canonical Beads completion cannot be re-asserted while Beads is inaccessible.
+## Public delivery evidence
 
-## Historical validation evidence
+- [PR #128](https://github.com/OpenCoven/coven-agents/pull/128) merged as
+  `bd46bece9ea9b33700f3316919c6f035aad7d7d1`.
+- [PR #133](https://github.com/OpenCoven/coven-agents/pull/133) merged as
+  `acc7ca3fa2dd51f496e1900573f239eb8a158ce6`.
 
-These commands were run against the audit candidate after fast-forwarding to
-the latest available `origin/main`. Detailed UI evidence and limitations are in
-the [dated functionality audit](ui-functionality-audit-2026-08-26.md).
+These commits establish repository state. The
+[cutover attestation](../operations/daytona-cutover-attestation.md) keeps
+production evidence pending until an authorized operator records it.
 
-| Gate | Result | Exact observed evidence |
-| --- | --- | --- |
-| `pnpm hygiene` | **Failed, exit 1** | Five worktrees total, four secondary. `feat/admission-queue-rebased` is `AT RISK` with one unpushed commit and is not merged; `fix/process-runner` is `AT RISK` because it is not on origin and is not merged. `docs/repository-roadmap` is reapable. |
-| `pnpm check` | **Passed, exit 0** | Ultracite checked 404 files; no fixes or warnings were reported. |
-| `pnpm typecheck` | **Passed, exit 0** | Root `tsc --noEmit` completed, followed by successful typechecks for `@opencoven/agent-contracts`, `@opencoven/harness`, and `@opencoven/cloud-runner`. |
-| `pnpm test:unit` | **Passed, exit 0** | Five test groups passed: 288, 438, 38, 32, and 151 tests; 947 total, zero failures, cancellations, skips, or todos. |
-| `pnpm build` | **Passed, exit 0** | Runtime validation passed; migrations were skipped because `POSTGRES_URL` was absent; Next.js 16.3.1 compiled, typechecked, and generated all 32 static pages without the prior metadata warning. |
-| Browser suite | **Passed, exit 0** | Seventeen authentication, console, retained-run timeline, account, Warden, chat, and security Playwright cases passed against both development and local production servers, including signed-out request gating, keyboard navigation, rich-step collapse/expand behavior, and a `390 × 844` viewport. |
-| Demo production build and replay | **Passed, exit 0** | `IS_DEMO=1 pnpm build` generated 32/32 static pages. A local production browser reached 10/10 sanitized replay events with no console errors. |
-| Local Worker/Sandbox diagnostic | **Passed, exit 0** | Wrangler local mode returned the cloud health contract; an ephemeral signed subscriber identity reached the Docker-backed diagnostic and returned `200`, `exitCode: 0`, `ok: true`, and `coven-agents`. The SDK-matched image emitted no `version_mismatch`. |
-| `pnpm roadmap:status check` | **Passed, exit 0** | `roadmap status: unchanged` |
+## Known gaps
 
-GitHub Actions are intentionally disabled. The local gates are therefore the
-only executed merge evidence. The build-quality, browser, demo, and roadmap
-checks were green; the complete gate set was not green because hygiene detected
-worktree-only state outside this task.
+- No retained production-equivalent create, run, stream, stop, delete, and
+  reconciliation artifact exists.
+- Complete outbound policy evidence remains open.
+- End-to-end evidence redaction, restart recovery, retention, export, and
+  deletion require broader certification.
+- Only GitHub Copilot CLI has implemented event translation.
+- GitHub Actions remain intentionally disabled, so local gates are the only
+  repository verification boundary.
+- Private planning reconciliation must be performed only by an authorized
+  maintainer and is not asserted here.
 
-## Planning evidence
+## Verification commands
 
-`ROADMAP.md` and a fresh approved-field Project query agreed on this aggregate:
+```bash
+pnpm hygiene
+pnpm check
+pnpm typecheck
+pnpm test:unit
+pnpm build
+```
 
-| Project status | Count |
-| --- | ---: |
-| Todo | 47 |
-| In Progress | 6 |
-| In review | 1 |
-| Done | 6 |
-| **Managed total** | **60** |
-| **Blocked** | **35** |
-
-| Wave | Total | Done | In Progress | In review | Todo | Blocked |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 - Delivered | 2 | 2 | 0 | 0 | 0 | 0 |
-| 1 - Now | 9 | 4 | 4 | 1 | 0 | 0 |
-| 2 - Next | 15 | 0 | 1 | 0 | 14 | 6 |
-| 3 - Certify | 13 | 0 | 1 | 0 | 12 | 11 |
-| 4 - Platform | 7 | 0 | 0 | 0 | 7 | 5 |
-| 5 - Product data | 6 | 0 | 0 | 0 | 6 | 6 |
-| 6 - Operations | 8 | 0 | 0 | 0 | 8 | 7 |
-
-The authenticated planning attempt reached the private authority, but
-**Dolt/DoltHub returned `PermissionDenied`** despite configured credentials.
-Beads is the planning authority, so this snapshot cannot establish that the 60
-Project items are reconciled to their canonical records, cannot verify
-dependency changes, and cannot claim a current idempotent sync. A field-only
-Project query also found that all 60 managed items are `DraftIssue` items
-rather than linked GitHub issues; issue state cannot provide an independent
-closure check.
-
-## Risk register
-
-| Risk | Severity | Owner role | Blocking gate | Mitigation | Closure evidence |
-| --- | --- | --- | --- | --- | --- |
-| Beads access and sync drift | High | BunsDev | Phase 0 planning authority | **Current: open blocker. Dolt/DoltHub returned `PermissionDenied`.** Keep Project and `ROADMAP.md` read-only as projections; do not apply or describe a sync as idempotent until an authenticated Dolt pull succeeds. | Authenticated Dolt pull; private review, update, commit, and push; authorized Project reconciliation; two sync applies; a final preview with 60 unchanged and zero create, update, or orphan; and reconciled shipped GitHub issues, all without private output. |
-| Issue and Project drift | Medium | Joint | Phase 0 planning authority | **Current: open.** All 60 managed Project items are drafts, so no GitHub issue state backs their status. Treat Project fields as a projection only. | Canonical linkage policy is recorded and a field-only check demonstrates that each managed status has an authoritative state source. |
-| Work exists only in another worktree | High | BunsDev | Repository integrity | **Current: mitigated.** The final exact-candidate hygiene run reported four worktrees total, three secondary, no `AT RISK` worktree, and the pushed roadmap worktree as reapable. The secondary count is exactly at the soft cap. | Keep `pnpm hygiene` green and reap the roadmap worktree after this branch is merged or otherwise preserved. |
-| Remote checks are disabled | High | Joint | Evidence baseline | **Current: accepted with partial mitigation.** GitHub Actions remain intentionally off; signed commits plus all local gates are required. The five repository-required gates are green on the candidate, but the additional release browser gate remains red as recorded above. | A signed, retained local release-gate record with every required gate green, or an explicit repository decision that re-enables trusted required checks. |
-| Typechecking depends on generated Next types | Medium | Copilot | Evidence baseline | **Current: partially mitigated.** `.next` is ignored while `tsconfig.json` includes generated `.next` type paths. Typecheck and build passed in this populated worktree, but clean-checkout order independence was not proved. | A clean checkout passes the documented gate order, or the scripts explicitly generate required Next types before typecheck. |
-| Production-path E2E is missing | High | Joint | Certify | **Current: open.** Fifteen of seventeen final-candidate production-browser cases pass. Warden and legacy chat fail because cookie-only subscriber fixtures no longer satisfy database-backed session-version revalidation. Existing fixtures also do not exercise real GitHub OAuth, Stripe, tenant credential lending, a full deployed cloud run lifecycle, or recovery; remote workflows are disabled. | Add a database-backed subscriber fixture that proves `authVersion` and subscription authority without a production bypass, then cover authentication, subscription, tenant credential lending, cloud run lifecycle, and recovery with deterministic service boundaries. |
-| Cloud egress and network policy are incomplete | High | Joint | Wave 2 execution safety | **Current: partially mitigated.** Per-agent containers isolate execution, but cloud outbound behavior is not yet declared and enforced. | An enforced outbound policy, deployed denial tests, operator-visible failures, and recovery evidence after a policy violation. |
-| Cloud fairness and concurrency controls need release evidence | High | Joint | Wave 4 platform | **Current: partially mitigated.** Global capacity admission, bounded tenant-aware fair queueing, dispatch fencing, expiration, cancellation, and cleanup are implemented with deterministic unit coverage. Operator-visible deployed behavior and recovery under real platform exhaustion are not certified. | Dated staging or production-like capacity, fairness, cancellation, expiry, and recovery evidence with operator-visible queue state and no leaked capacity. |
-| Output redaction is incomplete end to end | High | Joint | Wave 2 execution safety | **Current: partially mitigated.** Shared pattern-based redaction exists and selected cloud and guest boundaries use it, but complete boundary coverage is not proved. | Cross-boundary leak tests cover direct and encoded values and prove sanitized display, persistence, logs, and errors. |
-| Crash-safe journaling and shared persistent records are incomplete | High | Joint | Wave 2 durability | **Current: partially mitigated.** Bounded records and lifecycle state exist, but restart and partial-write recovery are not proved end to end. | Restart and partial-write tests prove idempotent journal replay, duplicate suppression, tenant isolation, and shared-record consistency. |
-| Retention and deletion policy are incomplete | High | Joint | Wave 5 product data | **Current: partially mitigated.** Existing stores are bounded by implementation behavior, but explicit tenant-scoped retention, export, deletion, and archive behavior is not complete. | Documented policy and tests prove retention limits, export scope, deletion boundaries, privacy-safe archive movement, and evidence for destructive paths. |
-
-## Evidence-backed known gaps
-
-- The tracked workspace and product code expose only the cloud execution
-  backend. Local-roadmap records still require canonical retirement or
-  re-scoping before promotion.
-- Only GitHub Copilot CLI has implemented event translation. Codex CLI and
-  Claude Code remain non-runnable in
-  [`packages/harness/src/registry.ts`](../../packages/harness/src/registry.ts).
-- The threat model explicitly leaves cloud outbound-network policy,
-  platform-wide fairness, complete evidence redaction, crash-safe recovery, and
-  formal retention and deletion open.
-- Current console/authentication browser coverage is local and does not make
-  the suite CI-ready for live service-bound paths; Actions are disabled.
-- No Chrome DevTools performance trace was available for the audit, so Core Web
-  Vitals remain unverified.
+See the [verification matrix](verification-matrix.md) for evidence states and
+the [release readiness runbook](release-readiness.md) for approval-gated work.

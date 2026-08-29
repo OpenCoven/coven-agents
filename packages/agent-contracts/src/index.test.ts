@@ -7,10 +7,8 @@ import {
   AGENT_RUNNER_CAPABILITIES,
   AGENT_RUNNER_LIMITS,
   agentDefinitionSchema,
-  agentEnvelopeSchema,
   agentOwnerSchema,
   agentRunnerHealthSchema,
-  agentsEnvelopeSchema,
   commandEvidenceSchema,
   compareAgentTimestamps,
   createAgentInputSchema,
@@ -41,78 +39,50 @@ const contractFixture = JSON.parse(
   statuses: string[];
 };
 
-test("accepts a cloud agent that selects a harness runtime", () => {
+test("accepts the v1 cloud deployment class with a harness runtime", () => {
   const result = createAgentInputSchema.safeParse({
     backend: "cloud",
     description: "Ships code in an isolated sandbox.",
     instructions: "Inspect, implement, and verify.",
     model: "auto",
-    name: "Cody Cloud",
+    name: "Cody",
     runtime: "copilot",
   });
 
   assert.equal(result.success, true);
 });
 
-test("rejects the retired provider-key cloud runtime on either backend", () => {
-  for (const backend of ["cloud", "local"] as const) {
-    const result = createAgentInputSchema.safeParse({
-      backend,
-      description: "",
-      instructions: "Run something.",
-      model: "auto",
-      name: "Invalid",
-      runtime: "cloud",
-    });
-    assert.equal(result.success, false, `${backend} must reject cloud runtime`);
-  }
-});
-
-test("public envelopes represent legacy runtime during read compatibility", () => {
-  const legacyDefinition = {
+test("definition schemas accept only the supported runtime set", () => {
+  const definition = {
     backend: "cloud",
     createdAt: "2026-08-20T17:00:00.000Z",
     description: "",
     id: "11111111-2222-4333-8444-555555555555",
-    instructions: "Legacy agent.",
+    instructions: "Current agent.",
     lastRunAt: null,
-    model: "gpt-5.1",
-    name: "Legacy",
-    runtime: "cloud",
+    model: "auto",
+    name: "Current",
+    owner: { kind: "standalone" as const },
+    runtime: "copilot" as const,
     status: "idle",
     updatedAt: "2026-08-20T17:00:00.000Z",
-  };
-  const legacyAgent = {
-    ...legacyDefinition,
-    owner: { kind: "standalone" },
     warm: {
-      status: "not_started",
-      updatedAt: legacyDefinition.updatedAt,
+      status: "not_started" as const,
+      updatedAt: "2026-08-20T17:00:00.000Z",
     },
   };
-  const publicResult = agentDefinitionSchema.safeParse(legacyAgent);
-  const listedResult = agentsEnvelopeSchema.safeParse({
-    agents: [legacyAgent],
-  });
-  const readResult = agentEnvelopeSchema.safeParse({ agent: legacyAgent });
-  const storedResult = storedAgentDefinitionSchema.safeParse(legacyDefinition);
 
-  assert.equal(publicResult.success, true);
-  assert.equal(listedResult.success, true);
-  assert.equal(readResult.success, true);
-  assert.equal(
-    listedResult.success && listedResult.data.agents[0]?.runtime,
-    "cloud"
-  );
-  assert.equal(readResult.success && readResult.data.agent.runtime, "cloud");
-  assert.equal(storedResult.success, true);
-  assert.deepEqual(storedResult.success && storedResult.data.owner, {
-    kind: "standalone",
-  });
-  assert.deepEqual(storedResult.success && storedResult.data.warm, {
-    status: "not_started",
-    updatedAt: "2026-08-20T17:00:00.000Z",
-  });
+  for (const schema of [
+    agentDefinitionSchema,
+    currentAgentDefinitionSchema,
+    storedAgentDefinitionSchema,
+  ]) {
+    assert.equal(schema.safeParse(definition).success, true);
+    assert.equal(
+      schema.safeParse({ ...definition, runtime: "unsupported" }).success,
+      false
+    );
+  }
 });
 
 test("public agent definitions require explicit ownership", () => {
@@ -218,10 +188,10 @@ test("keeps the exported contract values aligned with the fixture", async () => 
   assert.deepEqual(contractFixture.statuses, contract.AGENT_RUNNER_STATUSES);
 });
 
-test("normalizes missing owner and warm on legacy stored definitions", () => {
+test("normalizes missing owner and warm on stored definitions", () => {
   const result = createAgentInputSchema.parse({
     backend: "cloud",
-    instructions: "Run in the cloud.",
+    instructions: "Run in Daytona.",
     model: "auto",
     name: "Standalone",
     runtime: "copilot",
@@ -250,30 +220,28 @@ test("normalizes missing owner and warm on legacy stored definitions", () => {
   });
 });
 
-test("refuses a local agent, because nothing can execute one", () => {
-  // The local runner is gone. Keeping `local` parseable would let a client
-  // store a definition that no runner will ever pick up: the cloud worker
-  // refused it even while the local runner existed, so it would fail at run
-  // time instead of at creation, after the agent already appeared in the list.
-  assert.equal(
-    createAgentInputSchema.safeParse({
-      backend: "local",
-      instructions: "Run locally.",
-      model: "auto",
-      name: "Orphan",
-      runtime: "copilot",
-    }).success,
-    false
-  );
+test("refuses non-v1 deployment-class backend values", () => {
+  for (const backend of ["daytona", "unsupported"]) {
+    assert.equal(
+      createAgentInputSchema.safeParse({
+        backend,
+        instructions: "Run the task.",
+        model: "auto",
+        name: "Orphan",
+        runtime: "copilot",
+      }).success,
+      false
+    );
+  }
 });
 
 test("rejects unknown fields on agent definitions", () => {
   const result = agentDefinitionSchema.safeParse({
     backend: "cloud",
     createdAt: "2026-08-20T19:00:00.000Z",
-    description: "Run in the cloud.",
+    description: "Run in Daytona.",
     id: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
-    instructions: "Run in the cloud.",
+    instructions: "Run in Daytona.",
     lastRunAt: null,
     model: "auto",
     name: "Strict",
@@ -315,7 +283,7 @@ test("validates the versioned health response", () => {
       apiVersion: "1.0",
       capabilities: [...AGENT_RUNNER_CAPABILITIES],
       minimumClientVersion: "1.0.0",
-      mode: "local",
+      mode: "cloud",
     }).success,
     true
   );
@@ -324,7 +292,16 @@ test("validates the versioned health response", () => {
       apiVersion: "0.9",
       capabilities: [],
       minimumClientVersion: "1.0.0",
-      mode: "local",
+      mode: "cloud",
+    }).success,
+    false
+  );
+  assert.equal(
+    agentRunnerHealthSchema.safeParse({
+      apiVersion: "1.0",
+      capabilities: [...AGENT_RUNNER_CAPABILITIES],
+      minimumClientVersion: "1.0.0",
+      mode: "daytona",
     }).success,
     false
   );
@@ -617,28 +594,4 @@ test("a client cannot name its own owner when creating an agent", () => {
   });
 
   assert.equal(result.success, false);
-});
-
-test("current definitions reject legacy runtime at persistence boundaries", () => {
-  assert.equal(
-    currentAgentDefinitionSchema.safeParse({
-      backend: "cloud",
-      createdAt: "2026-08-20T19:00:00.000Z",
-      description: "",
-      id: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
-      instructions: "Do the thing.",
-      lastRunAt: null,
-      model: "auto",
-      name: "Legacy write",
-      owner: { kind: "tenant", tenantId: "acct_42" },
-      runtime: "cloud",
-      status: "idle",
-      updatedAt: "2026-08-20T19:00:00.000Z",
-      warm: {
-        status: "not_started",
-        updatedAt: "2026-08-20T19:00:00.000Z",
-      },
-    }).success,
-    false
-  );
 });

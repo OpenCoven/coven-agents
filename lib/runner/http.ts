@@ -418,7 +418,7 @@ export function createRunnerHttpHandlers(
             return invalidRequest(dependencies);
           case "unsupported_harness":
             return runnerErrorResponse(dependencies, "harness_unsupported", {
-              message: `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+              message: `Daytona agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
             });
           case "conflict":
             return runnerErrorResponse(dependencies, "operation_conflict");
@@ -698,7 +698,7 @@ export function createRunnerHttpHandlers(
             return new Response(null, { status: 204 });
           case "unsupported_harness":
             return runnerErrorResponse(dependencies, "harness_unsupported", {
-              message: `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+              message: `Daytona agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
             });
           case "ready":
           case "in_progress":
@@ -785,7 +785,7 @@ export function createRunnerHttpHandlers(
             return agentNotFound(dependencies);
           case "unsupported_harness":
             return runnerErrorResponse(dependencies, "harness_unsupported", {
-              message: `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+              message: `Daytona agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
             });
           case "refused":
             switch (scheduled.code) {
@@ -797,7 +797,7 @@ export function createRunnerHttpHandlers(
                 });
               case "busy":
                 return runnerErrorResponse(dependencies, "busy", {
-                  message: "The cloud runner is busy. Try again later.",
+                  message: "Daytona execution is busy. Try again later.",
                 });
               case "lifecycle_conflict":
                 return runnerErrorResponse(
@@ -930,7 +930,7 @@ export function createRunnerHttpHandlers(
             return invalidRequest(dependencies);
           case "unsupported_harness":
             return runnerErrorResponse(dependencies, "harness_unsupported", {
-              message: `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+              message: `Daytona agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
             });
           case "stale_version":
             return staleVersion(dependencies);

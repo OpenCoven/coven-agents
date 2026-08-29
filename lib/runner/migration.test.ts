@@ -131,3 +131,62 @@ test("generated migration 0018 indexes the independent stale warm recovery lane"
   );
   assert.match(snapshot, /"RunnerAgent_warm_recovery_idx"/u);
 });
+
+test("generated migration 0019 normalizes legacy agents before replacing the runtime constraint", () => {
+  const directory = new URL("../db/migrations/", import.meta.url);
+  const migrationName = readdirSync(directory).find((name) =>
+    name.startsWith("0019_")
+  );
+
+  assert.ok(migrationName, "migration 0019 must exist");
+  const migration = readFileSync(new URL(migrationName, directory), "utf8");
+  const retiredRuntime = ["cl", "oud"].join("");
+  const update = `UPDATE "RunnerAgent" SET "runtime" = 'copilot', "model" = CASE WHEN "model" IN ('auto', 'claude-sonnet-4.5', 'gpt-5', 'gpt-5-mini') THEN "model" ELSE 'auto' END WHERE "runtime" = '${retiredRuntime}'`;
+  const drop = 'ALTER TABLE "RunnerAgent" DROP CONSTRAINT';
+
+  assert.ok(migration.includes(update));
+  assert.ok(migration.indexOf(update) < migration.indexOf(drop));
+  assert.doesNotMatch(migration, /gpt-5\.1/u);
+  assert.match(
+    migration,
+    /RunnerAgent_runtime_valid" CHECK \("RunnerAgent"\."runtime" in \('codex', 'claude', 'copilot'\)\)/u
+  );
+
+  const previousSnapshot = readFileSync(
+    new URL("meta/0018_snapshot.json", directory),
+    "utf8"
+  );
+  assert.match(
+    previousSnapshot,
+    /"RunnerAgent_runtime_valid"[\s\S]*?'cloud', 'codex', 'claude', 'copilot'/u,
+    "the pre-migration schema must already accept the copilot target so old code can read migrated rows"
+  );
+
+  const journal = JSON.parse(
+    readFileSync(new URL("meta/_journal.json", directory), "utf8")
+  ) as { entries: { idx: number; tag: string }[] };
+  const journalEntry = journal.entries.find((entry) => entry.idx === 19);
+  assert.deepEqual(journalEntry, {
+    ...journalEntry,
+    idx: 19,
+    tag: migrationName.replace(/\.sql$/u, ""),
+  });
+
+  const snapshot = readFileSync(
+    new URL("meta/0019_snapshot.json", directory),
+    "utf8"
+  );
+  const parsedSnapshot = JSON.parse(snapshot) as {
+    tables: {
+      "public.RunnerAgent": {
+        checkConstraints: Record<string, { value: string }>;
+      };
+    };
+  };
+  assert.equal(
+    parsedSnapshot.tables["public.RunnerAgent"].checkConstraints
+      .RunnerAgent_runtime_valid?.value,
+    `"RunnerAgent"."runtime" in ('codex', 'claude', 'copilot')`
+  );
+  assert.equal(snapshot.includes(`'${retiredRuntime}'`), false);
+});

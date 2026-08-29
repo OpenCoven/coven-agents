@@ -147,16 +147,6 @@ function authorizeSecret(
     return { kind: "unavailable" };
   }
 
-  // These are retired bearer channels. Rejecting their presence prevents a
-  // request from appearing to be operator-authenticated while it carries an
-  // unrelated browser or service authority.
-  if (
-    request.headers.has("x-runner-token") ||
-    request.headers.has("x-service-token")
-  ) {
-    return { kind: "unauthorized" };
-  }
-
   const credential = bearerCredential(request);
   if (!credential || !timingSafeSecretEqual(credential, expected)) {
     return { kind: "unauthorized" };

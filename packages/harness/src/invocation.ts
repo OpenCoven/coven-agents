@@ -81,9 +81,8 @@ const ARG_BUILDERS: Record<string, (request: InvocationRequest) => string[]> = {
 };
 
 /**
- * The single definition of how each harness is driven. Both the local runner
- * and the cloud sandbox call this, so the CLI subset cannot drift between the
- * two backends.
+ * The single definition of how each harness is driven. Daytona launch paths
+ * share this builder so the supported CLI subset cannot drift.
  */
 export function buildInvocation(request: InvocationRequest): Invocation {
   const spec: HarnessSpec | null = harnessSpec(request.harness);

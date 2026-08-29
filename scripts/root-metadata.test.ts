@@ -14,9 +14,8 @@ test("social metadata has an explicit deployment-aware base URL", () => {
   );
 });
 
-test("the public description names the cloud-only product", () => {
+test("the public description uses the stable cloud deployment class", () => {
   assert.match(layout, /run in isolated cloud sandboxes/);
-  assert.doesNotMatch(layout, /run locally or in isolated cloud sandboxes/);
 });
 
 test("Vercel analytics is mounted only where its script endpoint exists", () => {

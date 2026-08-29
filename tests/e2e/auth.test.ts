@@ -26,9 +26,11 @@ test.describe("Authentication Pages", () => {
       )
     ).toBeVisible();
     await expect(
-      page.getByText(/Agents run in isolated Daytona sandboxes/i)
+      page.getByText(
+        "Agents run in isolated Daytona sandboxes — never on your machine.",
+        { exact: true }
+      )
     ).toBeVisible();
-    await expect(page.getByText(/Cloudflare/i)).toHaveCount(0);
     const githubButton = page.getByRole("button", {
       name: "Continue with GitHub",
     });

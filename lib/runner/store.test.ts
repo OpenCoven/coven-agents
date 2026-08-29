@@ -86,7 +86,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     lastRunAt: null,
     model: "test-model",
     name: "test",
-    runtime: "cloud",
+    runtime: "copilot",
     sandboxGeneration: 0,
     sandboxLifecycle: "unprovisioned",
     sandboxUpdatedAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -2083,7 +2083,7 @@ test("principal mutations bind every affected row to the principal tenant", asyn
     instructions: "test instructions",
     model: "test-model",
     name: "test",
-    runtime: "cloud",
+    runtime: "copilot",
   });
   await update.store.updateAgent(principal, {
     description: "",
@@ -2092,7 +2092,7 @@ test("principal mutations bind every affected row to the principal tenant", asyn
     instructions: "test instructions",
     model: "test-model",
     name: "test",
-    runtime: "cloud",
+    runtime: "copilot",
     workspace: null,
   });
   await remove.store.deleteAgent(principal, current.agentId);

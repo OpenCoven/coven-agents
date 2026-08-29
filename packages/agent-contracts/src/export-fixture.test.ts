@@ -102,7 +102,7 @@ test("fails export when an owner or example violates its schema", () => {
             apiVersion: AGENT_RUNNER_API_VERSION,
             capabilities: ["not-a-capability"],
             minimumClientVersion: "1.0.0",
-            mode: "local",
+            mode: "cloud",
           },
         },
       }),

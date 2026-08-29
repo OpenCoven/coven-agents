@@ -91,7 +91,7 @@ export const SUPPORTED_HARNESS_IDS: readonly HarnessId[] = HARNESS_SPECS.filter(
 
 export const UNSUPPORTED_HARNESS_RUN_ERROR = Object.freeze({
   code: "harness_unsupported" as const,
-  message: `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+  message: `Daytona agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
   retryable: false as const,
 });
 

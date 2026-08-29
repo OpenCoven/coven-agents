@@ -52,6 +52,41 @@ const ADMISSION_LIMIT_MAXIMUMS = {
   RUN_ADMISSION_TENANT_ACTIVE_MAX: "2",
   RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
 } as const;
+const RUNTIME_CONFIGURATION_KEYS = [
+  "ABUSE_KEY_SECRET",
+  "APP_ORIGIN",
+  "AUTH_URL",
+  "BETA_ALLOWLIST",
+  "BETA_MODE",
+  "CREDENTIAL_KEK",
+  "CREDENTIAL_KEK_CURRENT_VERSION",
+  "CREDENTIAL_KEK_V1",
+  "CREDENTIAL_KEK_V2",
+  "CRON_SECRET",
+  "DAYTONA_API_KEY",
+  "DAYTONA_API_URL",
+  "DAYTONA_AUTO_ARCHIVE_MINUTES",
+  "DAYTONA_AUTO_STOP_MINUTES",
+  "DAYTONA_DOMAIN_ALLOW_LIST",
+  "DAYTONA_REQUEST_TIMEOUT_MS",
+  "DAYTONA_SNAPSHOT",
+  "DAYTONA_TARGET",
+  "GLOBAL_DAILY_RUN_CAP",
+  "NEXTAUTH_URL",
+  "NODE_ENV",
+  "OPERATOR_DIAGNOSTIC_TOKEN",
+  "REDIS_URL",
+  "RELEASE_AUDIENCE",
+  "RUN_ADMISSION_CONSECUTIVE_MAX",
+  "RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX",
+  "RUN_ADMISSION_MODE",
+  "RUN_ADMISSION_TENANT_ACTIVE_MAX",
+  "RUN_ADMISSION_TENANT_QUEUE_MAX",
+  "RUNNER_MANUAL_RECONCILE_SECRET",
+  "VERCEL_ENV",
+  "VERCEL_PROJECT_PRODUCTION_URL",
+  "VERCEL_URL",
+] as const;
 
 function assertRejectedWithMessage(
   result: ReturnType<typeof runValidator>,
@@ -62,93 +97,18 @@ function assertRejectedWithMessage(
 }
 
 function runValidator(
-  overrides: Partial<
-    Pick<
-      NodeJS.ProcessEnv,
-      | "ABUSE_KEY_SECRET"
-      | "APP_ORIGIN"
-      | "AUTH_URL"
-      | "NEXTAUTH_URL"
-      | "BETA_ALLOWLIST"
-      | "BETA_MODE"
-      | "CREDENTIAL_KEK"
-      | "CREDENTIAL_KEK_CURRENT_VERSION"
-      | "CREDENTIAL_KEK_V1"
-      | "CREDENTIAL_KEK_V2"
-      | "CRON_SECRET"
-      | "DAYTONA_API_KEY"
-      | "DAYTONA_API_URL"
-      | "DAYTONA_AUTO_ARCHIVE_MINUTES"
-      | "DAYTONA_AUTO_STOP_MINUTES"
-      | "DAYTONA_DOMAIN_ALLOW_LIST"
-      | "DAYTONA_REQUEST_TIMEOUT_MS"
-      | "DAYTONA_SNAPSHOT"
-      | "DAYTONA_TARGET"
-      | "GLOBAL_DAILY_RUN_CAP"
-      | "NODE_ENV"
-      | "AGENT_CONTROL_TOKEN"
-      | "CREDENTIAL_LEGACY_LENDING_ENABLED"
-      | "OPERATOR_DIAGNOSTIC_TOKEN"
-      | "REDIS_URL"
-      | "RELEASE_AUDIENCE"
-      | "RUNNER_MANUAL_RECONCILE_SECRET"
-      | "RUNNER_SERVICE_TOKEN"
-      | "RUNNER_VERIFY_KEY"
-      | "RUNNER_VERIFY_KEY_ID"
-      | "RUN_ADMISSION_CONSECUTIVE_MAX"
-      | "RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX"
-      | "RUN_ADMISSION_MODE"
-      | "RUN_ADMISSION_TENANT_ACTIVE_MAX"
-      | "RUN_ADMISSION_TENANT_QUEUE_MAX"
-      | "VERCEL_ENV"
-      | "VERCEL_PROJECT_PRODUCTION_URL"
-      | "VERCEL_URL"
-    >
-  > = {},
+  overrides: Partial<NodeJS.ProcessEnv> = {},
   arguments_: string[] = [],
   cwd = repositoryRoot
 ) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    ABUSE_KEY_SECRET: undefined,
-    AGENT_CONTROL_TOKEN: undefined,
-    APP_ORIGIN: undefined,
-    AUTH_URL: undefined,
-    BETA_ALLOWLIST: undefined,
+    ...Object.fromEntries(
+      RUNTIME_CONFIGURATION_KEYS.map((name) => [name, undefined])
+    ),
     BETA_MODE: "off",
-    CREDENTIAL_KEK: undefined,
-    CREDENTIAL_KEK_CURRENT_VERSION: undefined,
-    CREDENTIAL_KEK_V1: undefined,
-    CREDENTIAL_KEK_V2: undefined,
-    CREDENTIAL_LEGACY_LENDING_ENABLED: undefined,
-    CRON_SECRET: undefined,
-    DAYTONA_API_KEY: undefined,
-    DAYTONA_API_URL: undefined,
-    DAYTONA_AUTO_ARCHIVE_MINUTES: undefined,
-    DAYTONA_AUTO_STOP_MINUTES: undefined,
-    DAYTONA_DOMAIN_ALLOW_LIST: undefined,
-    DAYTONA_REQUEST_TIMEOUT_MS: undefined,
-    DAYTONA_SNAPSHOT: undefined,
-    DAYTONA_TARGET: undefined,
-    GLOBAL_DAILY_RUN_CAP: undefined,
-    NEXT_PUBLIC_CLOUD_RUNNER_URL: undefined,
-    NEXTAUTH_URL: undefined,
     NODE_ENV: "production",
-    OPERATOR_DIAGNOSTIC_TOKEN: undefined,
-    REDIS_URL: undefined,
     RELEASE_AUDIENCE: "public",
-    RUN_ADMISSION_CONSECUTIVE_MAX: undefined,
-    RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: undefined,
-    RUN_ADMISSION_MODE: undefined,
-    RUN_ADMISSION_TENANT_ACTIVE_MAX: undefined,
-    RUN_ADMISSION_TENANT_QUEUE_MAX: undefined,
-    RUNNER_MANUAL_RECONCILE_SECRET: undefined,
-    RUNNER_SERVICE_TOKEN: undefined,
-    RUNNER_VERIFY_KEY: undefined,
-    RUNNER_VERIFY_KEY_ID: undefined,
-    VERCEL_ENV: undefined,
-    VERCEL_PROJECT_PRODUCTION_URL: undefined,
-    VERCEL_URL: undefined,
     ...VALID_ENV,
   };
   Object.assign(env, overrides);
@@ -387,13 +347,9 @@ test("accepts current production runner configuration", () => {
   );
 });
 
-test("retired Worker-only configuration is not a runtime validator input", () => {
+test("unknown environment settings are ignored by the runtime validator", () => {
   const result = runValidator({
-    AGENT_CONTROL_TOKEN: " ",
-    CREDENTIAL_LEGACY_LENDING_ENABLED: "true",
-    RUNNER_SERVICE_TOKEN: "",
-    RUNNER_VERIFY_KEY: "retired",
-    RUNNER_VERIFY_KEY_ID: "retired",
+    UNRELATED_RUNTIME_SETTING: "not-part-of-the-runtime-contract",
   });
 
   assert.equal(result.status, 0, result.stderr);

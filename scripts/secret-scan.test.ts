@@ -183,13 +183,12 @@ test("a secret with no vendor prefix is still caught, by its name", () => {
   }
 });
 
-test("retired Worker token names remain detectable in history", () => {
-  for (const name of ["AGENT_CONTROL_TOKEN", "RUNNER_SERVICE_TOKEN"]) {
-    const findings = scanText(".env", `${name}=${RANDOM_BASE64}`);
+test("a synthetic historical secret name remains detectable", () => {
+  const name = "HISTORICAL_ACCESS_TOKEN";
+  const findings = scanText(".env", `${name}=${RANDOM_BASE64}`);
 
-    assert.equal(findings.length, 1, `${name} was not caught`);
-    assert.match(findings[0].category, new RegExp(name));
-  }
+  assert.equal(findings.length, 1, `${name} was not caught`);
+  assert.match(findings[0].category, new RegExp(name));
 });
 
 test("versioned credential KEKs are caught in assignments and JSON", () => {
@@ -314,7 +313,7 @@ test("placeholders and references are not mistaken for secrets", () => {
     "recordingCredential",
     "RECORDING_CREDENTIAL",
     "runner-control-sensitive",
-    "opencoven-runner-cloud",
+    "opencoven-daytona-sensitive",
     "short",
     "aaaaaaaaaaaaaaaaaaaa",
   ]) {

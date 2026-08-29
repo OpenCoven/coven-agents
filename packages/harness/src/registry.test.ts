@@ -15,7 +15,6 @@ test("copilot is the supported harness subset", () => {
   assert.ok(isRunnableHarness("copilot"));
   assert.ok(!isRunnableHarness("codex"));
   assert.ok(!isRunnableHarness("claude"));
-  assert.ok(!isRunnableHarness("cloud"));
 });
 
 test("no harness authenticates with a model provider API key", () => {

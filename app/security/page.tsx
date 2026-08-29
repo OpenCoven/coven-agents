@@ -31,7 +31,7 @@ const SECTIONS: { body: string[]; title: string }[] = [
   {
     body: [
       "A caller cannot act as another tenant or reach another tenant's agents, sandboxes, credentials, or runs. Durable records and provider identifiers are tenant-scoped and fenced before use.",
-      "Browser requests reach the runner only through the same-origin Next.js API. Current Auth.js account authority is revalidated before runner work; no browser runner token or cross-service credential boundary exists.",
+      "Browser requests reach Daytona only through the same-origin Next.js API. Current Auth.js account authority is revalidated before execution, and provider credentials remain server-side.",
     ],
     title: "Tenants are isolated by construction",
   },

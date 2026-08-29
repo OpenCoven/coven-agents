@@ -14,7 +14,7 @@ const validOptions: RecordableOptions = {
   status: "completed",
 };
 
-test("a valid cloud demo recording is allowed", () => {
+test("a valid Daytona demo recording is allowed", () => {
   assert.doesNotThrow(() => assertRecordable(validOptions));
 });
 
@@ -30,13 +30,6 @@ test("repositories other than the exact demo workspace are refused", () => {
       /refus.*demo-workspace/i
     );
   }
-});
-
-test("local recordings are refused", () => {
-  assert.throws(
-    () => assertRecordable({ ...validOptions, backend: "local" }),
-    /refus.*cloud/i
-  );
 });
 
 test("empty or whitespace credentials are refused", () => {
@@ -57,26 +50,15 @@ test("failed recordings are refused unless failure is explicitly allowed", () =>
   );
 });
 
-test("allowing failure does not bypass repository or backend checks", () => {
+test("allowing failure does not bypass repository checks", () => {
   assert.throws(
     () =>
       assertRecordable({
         ...validOptions,
         allowFailure: true,
-        backend: "local",
         repository: "OpenCoven/not-demo-workspace",
         status: "failed",
       }),
     /refus.*demo-workspace/i
-  );
-  assert.throws(
-    () =>
-      assertRecordable({
-        ...validOptions,
-        allowFailure: true,
-        backend: "local",
-        status: "failed",
-      }),
-    /cloud/i
   );
 });

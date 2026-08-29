@@ -56,7 +56,7 @@ and prove every required local quality gate on the current source tree.
 
 - Clarify how Coven Agents fits within OpenCoven.
 - Prevent secrets from entering version control.
-- Document local and cloud trust boundaries.
+- Document application and Daytona trust boundaries.
 - Establish the recorded demo as the public evaluation path.
 - Make private planning and its generated view dependable.
 - Make operator and contributor workflows repeatable.
@@ -66,15 +66,15 @@ and prove every required local quality gate on the current source tree.
 - Stabilize and version the shared runner contract.
 - Expose only supported execution capabilities.
 - Enforce subscriber access and output-safety boundaries.
-- Make cloud sandbox ownership and network access explicit.
-- Make local process ownership, streaming, and cancellation reliable.
+- Make Daytona sandbox ownership and network access explicit.
+- Make process ownership, streaming, and cancellation reliable.
 - Establish durable agent and run records with crash recovery.
 - Produce structured operational telemetry.
 
 ### Wave 3: Certify
 
 - Prove contract conformance across runner implementations.
-- Exercise cloud, local, browser, demo, and subscriber paths in realistic
+- Exercise Daytona, application, browser, demo, and subscriber paths in realistic
   environments.
 - Preflight deployment configuration and dependencies.
 - Trace requests through execution and expose reliability metrics.
@@ -84,8 +84,8 @@ and prove every required local quality gate on the current source tree.
 ### Wave 4: Platform
 
 - Normalize support for additional coding harnesses.
-- Enforce fair cloud capacity allocation.
-- Offer a more isolated local execution option.
+- Enforce fair Daytona capacity allocation.
+- Expand application-managed Daytona execution controls.
 - Continuously inspect dependencies and source for known risks.
 - Make contributor setup repeatable.
 - Enforce ownership for sensitive repository surfaces.
@@ -102,7 +102,7 @@ and prove every required local quality gate on the current source tree.
 ### Wave 6: Operations
 
 - Migrate persisted data safely.
-- Stage and gate cloud releases.
+- Stage and gate application releases.
 - Publish compatibility expectations for runner-facing changes.
 - Standardize health and readiness signals.
 - Document day-two operation and expected-failure recovery.
@@ -128,13 +128,16 @@ constraints.
 
 - [Repository setup and architecture](README.md)
 - [Current-state audit](docs/roadmap/current-state.md)
+- [Daytona cutover audit](docs/roadmap/daytona-cutover-audit-2026-08-29.md)
 - [Implementation sequence](docs/roadmap/implementation-sequence.md)
 - [Delivery governance](docs/roadmap/delivery-governance.md)
 - [Verification matrix](docs/roadmap/verification-matrix.md)
 - [Release readiness](docs/roadmap/release-readiness.md)
+- [Product authority ADR](docs/architecture/adr-001-product-authority-boundary.md)
+- [Daytona execution ADR](docs/architecture/adr-002-daytona-execution-boundary.md)
+- [Daytona cutover attestation](docs/operations/daytona-cutover-attestation.md)
+- [Historical specification tombstone index](docs/superpowers/README.md)
 - [Private planning sync operations](docs/beads-project-sync.md)
-- [Tenant identity and credential-isolation design](docs/superpowers/specs/2026-08-24-tenant-identity-and-credential-isolation-design.md)
-- [Git lifecycle automation design](docs/superpowers/specs/2026-08-22-git-lifecycle-automation-design.md)
 
 ## Refreshing status
 

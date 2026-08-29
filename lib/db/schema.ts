@@ -446,7 +446,7 @@ export const runnerAgent = pgTable(
     }).notNull(),
     name: varchar("name", { length: 64 }).notNull(),
     runtime: varchar("runtime", {
-      enum: ["cloud", "codex", "claude", "copilot"],
+      enum: ["codex", "claude", "copilot"],
       length: 16,
     }).notNull(),
     sandboxGeneration: integer("sandboxGeneration").notNull().default(0),
@@ -505,7 +505,7 @@ export const runnerAgent = pgTable(
     ),
     check(
       "RunnerAgent_runtime_valid",
-      sql`${table.runtime} in ('cloud', 'codex', 'claude', 'copilot')`
+      sql`${table.runtime} in ('codex', 'claude', 'copilot')`
     ),
     check(
       "RunnerAgent_status_valid",
