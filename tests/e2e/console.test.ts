@@ -14,10 +14,17 @@ const retainedAgent = {
   lastRunAt: "2026-08-27T06:01:00.000Z",
   model: "auto",
   name: "Timeline auditor",
+  owner: {
+    kind: "tenant",
+    tenantId: "u_00000000000040008000000000000001",
+  },
   runtime: "copilot",
   status: "idle",
   updatedAt: "2026-08-27T06:01:00.000Z",
-  workspace: "/workspace",
+  warm: {
+    status: "ready",
+    updatedAt: "2026-08-27T06:01:00.000Z",
+  },
 };
 
 const retainedRun = {
@@ -342,11 +349,14 @@ test.describe("Run console", () => {
     await page.getByRole("link", { name: "Back to runs" }).click();
     await expect(page.getByText(blocked)).toHaveCount(0);
 
-    delayNextCredentialGet = true;
     await page.getByRole("button", { name: "Account and settings" }).click();
-    await page.getByRole("button", { name: "Remove" }).click();
-    await expect(page.getByText("Credential removed.")).toBeVisible();
+    const remove = page.getByRole("button", { name: "Remove" });
+    await expect(remove).toBeVisible();
+    delayNextCredentialGet = true;
+    await remove.click();
+    await expect(remove).toHaveCount(0);
     await releaseCredentialGet?.();
+    await expect(page.getByText("Credential removed.")).toBeVisible();
     await page.getByRole("link", { name: "Back to runs" }).click();
     await expect(page.getByText(blocked)).toBeVisible();
   });
