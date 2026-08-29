@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runEphemeralDiagnostic } from "./production";
+import { diagnoseDaytonaSandbox, runEphemeralDiagnostic } from "./production";
 import {
   createProductionRunnerRuntime,
   dispatchProductionClaim,
@@ -130,6 +130,96 @@ test("ephemeral diagnostics bound malformed provider exit codes and output", asy
   });
 
   assert.deepEqual(result, { exitCode: 1, ok: false, output: "" });
+});
+
+test("ephemeral diagnostics return retryable failure when provider deletion fails", async () => {
+  const calls: string[] = [];
+
+  await assert.rejects(
+    runEphemeralDiagnostic({
+      create: () =>
+        Promise.resolve({
+          delete: () => {
+            calls.push("delete");
+            return Promise.reject(
+              new Error("sandbox-id=private provider-delete-detail")
+            );
+          },
+          execute: () => {
+            calls.push("execute");
+            return Promise.resolve({ exitCode: 0, result: "coven-agents" });
+          },
+        }),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof RunnerServiceError);
+      assert.equal(error.code, "diagnostic_unavailable");
+      assert.equal(error.retryable, true);
+      assert.equal(error.message.includes("private"), false);
+      assert.equal(error.message.includes("sandbox-id"), false);
+      return true;
+    }
+  );
+
+  assert.deepEqual(calls, ["execute", "delete"]);
+});
+
+test("Daytona diagnostics use fixed auto-deleting sandbox and bounded operations", async () => {
+  let createParameters: Record<string, unknown> | undefined;
+  let createOptions: Record<string, unknown> | undefined;
+  let executeArguments: unknown[] | undefined;
+  let deleteArguments: unknown[] | undefined;
+
+  const result = await diagnoseDaytonaSandbox({
+    client: () => ({
+      create: (parameters, options) => {
+        createParameters = parameters;
+        createOptions = options;
+        return Promise.resolve({
+          delete: (...args: unknown[]) => {
+            deleteArguments = args;
+            return Promise.resolve();
+          },
+          process: {
+            executeCommand: (...args: unknown[]) => {
+              executeArguments = args;
+              return Promise.resolve({
+                exitCode: 0,
+                result: "coven-agents",
+              });
+            },
+          },
+        });
+      },
+    }),
+    configuration: () => ({ snapshotName: "diagnostic-snapshot" }),
+    createName: () => "coven-diagnostic-fixed",
+  });
+
+  assert.deepEqual(result, {
+    exitCode: 0,
+    ok: true,
+    output: "coven-agents",
+  });
+  assert.deepEqual(createParameters, {
+    autoArchiveInterval: 0,
+    autoDeleteInterval: 0,
+    autoStopInterval: 0,
+    ephemeral: true,
+    name: "coven-diagnostic-fixed",
+    networkBlockAll: true,
+    public: false,
+    snapshot: "diagnostic-snapshot",
+    ttlMinutes: 5,
+  });
+  assert.deepEqual(createOptions, { timeout: 60 });
+  assert.deepEqual(executeArguments, [
+    "printf coven-agents",
+    undefined,
+    undefined,
+    30,
+  ]);
+  assert.deepEqual(deleteArguments, [60, true]);
 });
 
 test("production terminalizes revoked, legacy, and unsubscribed authority before provider or credential work", async () => {

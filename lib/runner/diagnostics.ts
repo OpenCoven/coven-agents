@@ -1,8 +1,12 @@
 import "server-only";
 
 import { randomUUID } from "node:crypto";
+import type { CreateSandboxFromSnapshotParams } from "@daytona/sdk";
 import { daytonaClient } from "./daytona/client";
-import { daytonaSandboxConfiguration } from "./daytona/sandbox";
+import {
+  type DaytonaSandboxConfiguration,
+  daytonaSandboxConfiguration,
+} from "./daytona/sandbox";
 import { RunnerServiceError } from "./errors";
 import type { RunnerDiagnosticResult } from "./service";
 
@@ -16,6 +20,31 @@ export type RunnerDiagnosticSandbox = Readonly<{
 
 export type EphemeralDiagnosticDependencies = Readonly<{
   create: () => Promise<RunnerDiagnosticSandbox>;
+}>;
+
+type DaytonaDiagnosticSdkSandbox = Readonly<{
+  delete: (timeout?: number, wait?: boolean) => Promise<void>;
+  process: Readonly<{
+    executeCommand: (
+      command: string,
+      cwd?: string,
+      env?: Record<string, string>,
+      timeout?: number
+    ) => Promise<Readonly<{ exitCode: number; result?: string | null }>>;
+  }>;
+}>;
+
+type DaytonaDiagnosticClient = Readonly<{
+  create: (
+    parameters: CreateSandboxFromSnapshotParams,
+    options?: Readonly<{ timeout?: number }>
+  ) => Promise<DaytonaDiagnosticSdkSandbox>;
+}>;
+
+export type DaytonaDiagnosticDependencies = Readonly<{
+  client?: () => DaytonaDiagnosticClient;
+  configuration?: () => Pick<DaytonaSandboxConfiguration, "snapshotName">;
+  createName?: () => string;
 }>;
 
 function retryableServiceError(
@@ -81,17 +110,25 @@ export async function runEphemeralDiagnostic(
   return result;
 }
 
-export async function diagnoseDaytonaSandbox(): Promise<RunnerDiagnosticResult> {
+export async function diagnoseDaytonaSandbox(
+  dependencies: DaytonaDiagnosticDependencies = {}
+): Promise<RunnerDiagnosticResult> {
   try {
-    const configuration = daytonaSandboxConfiguration();
+    const configuration =
+      dependencies.configuration?.() ?? daytonaSandboxConfiguration();
+    const client = dependencies.client?.() ?? daytonaClient();
+    const name =
+      dependencies.createName?.() ??
+      `coven-diagnostic-${randomUUID().replaceAll("-", "")}`;
     return await runEphemeralDiagnostic({
       create: async () => {
-        const sandbox = await daytonaClient().create(
+        const sandbox = await client.create(
           {
             autoArchiveInterval: 0,
+            autoDeleteInterval: 0,
             autoStopInterval: 0,
             ephemeral: true,
-            name: `coven-diagnostic-${randomUUID().replaceAll("-", "")}`,
+            name,
             networkBlockAll: true,
             public: false,
             snapshot: configuration.snapshotName,

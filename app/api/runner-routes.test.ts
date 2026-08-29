@@ -20,7 +20,7 @@ import {
   createRunnerHttpHandlers,
   type RunnerHttpHandlers,
 } from "@/lib/runner/http";
-import type { RunnerService } from "@/lib/runner/service";
+import { type RunnerService, RunnerServiceError } from "@/lib/runner/service";
 
 const fixtureMode = process.env.RUNNER_ROUTES_FIXTURE;
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -142,11 +142,24 @@ function service(): RunnerService {
   };
 }
 
-function testHandlers(): RunnerHttpHandlers {
+type RouteFixtureState = {
+  diagnosticAbuseCalls: number;
+  diagnosticAuthorizationCalls: number;
+  diagnosticMode: "failure" | "success";
+  diagnosticProviderCalls: number;
+};
+
+function testHandlers(state: RouteFixtureState): RunnerHttpHandlers {
   const runner = service();
   return createRunnerHttpHandlers({
     auth: {
-      authorizeDiagnostic: () => ({ kind: "allowed" }),
+      authorizeDiagnostic: (request) => {
+        state.diagnosticAuthorizationCalls += 1;
+        const decision = request.headers.get("x-test-authorization");
+        return decision === "unauthorized" || decision === "unavailable"
+          ? { kind: decision }
+          : { kind: "allowed" };
+      },
       authorizeReconcile: () => ({ kind: "allowed" }),
       authorizeSubscriber: async () => subscriber,
     },
@@ -160,9 +173,32 @@ function testHandlers(): RunnerHttpHandlers {
     createOperatorService: () => runner,
     createRequestId: () => "44444444-5555-4666-8777-888888888888",
     createService: () => runner,
-    diagnoseSandbox: () => runner.diagnoseSandbox(),
-    enforceAbuse: async () => ({ kind: "allowed" }),
-    ipAddress: () => "203.0.113.10",
+    diagnoseSandbox: () => {
+      state.diagnosticProviderCalls += 1;
+      if (state.diagnosticMode === "failure") {
+        throw new RunnerServiceError(
+          "diagnostic_unavailable",
+          "provider=private-detail sandbox-id=private"
+        );
+      }
+      return runner.diagnoseSandbox();
+    },
+    enforceAbuse: (input) => {
+      if (input.route !== "runner_diagnostic") {
+        return Promise.resolve({ kind: "allowed" });
+      }
+      state.diagnosticAbuseCalls += 1;
+      return Promise.resolve(
+        input.ip === "rate-limited"
+          ? {
+              kind: "denied",
+              responseStatus: 429,
+              retryAfterSeconds: 7,
+            }
+          : { kind: "allowed" }
+      );
+    },
+    ipAddress: (request) => request.headers.get("x-test-ip") ?? "203.0.113.10",
   });
 }
 
@@ -179,7 +215,13 @@ function assertMetadata(module: Record<string, unknown>): void {
 }
 
 async function executeFixture(): Promise<void> {
-  const handlers = testHandlers();
+  const state: RouteFixtureState = {
+    diagnosticAbuseCalls: 0,
+    diagnosticAuthorizationCalls: 0,
+    diagnosticMode: "success",
+    diagnosticProviderCalls: 0,
+  };
+  const handlers = testHandlers(state);
   await mock.module("@/lib/runner/route-dependencies", {
     namedExports: {
       productionRunnerHttpHandlers: () => handlers,
@@ -382,6 +424,63 @@ async function executeFixture(): Promise<void> {
     ok: true,
     output: "coven-agents",
   });
+  assert.equal(state.diagnosticAbuseCalls, 1);
+  assert.equal(state.diagnosticAuthorizationCalls, 1);
+  assert.equal(state.diagnosticProviderCalls, 1);
+
+  const unauthorizedDiagnostic = await diagnostic.POST(
+    new Request("https://app.test/api/diagnostics/sandbox", {
+      headers: { "x-test-authorization": "unauthorized" },
+      method: "POST",
+    })
+  );
+  assert.equal(unauthorizedDiagnostic.status, 401);
+  assert.equal(
+    runErrorEnvelopeSchema.parse(await unauthorizedDiagnostic.json()).error
+      .code,
+    "unauthorized"
+  );
+  assert.equal(state.diagnosticAbuseCalls, 2);
+  assert.equal(state.diagnosticAuthorizationCalls, 2);
+  assert.equal(state.diagnosticProviderCalls, 1);
+
+  const rateLimitedDiagnostic = await diagnostic.POST(
+    new Request("https://app.test/api/diagnostics/sandbox", {
+      headers: {
+        "x-test-authorization": "unauthorized",
+        "x-test-ip": "rate-limited",
+      },
+      method: "POST",
+    })
+  );
+  assert.equal(rateLimitedDiagnostic.status, 429);
+  assert.equal(rateLimitedDiagnostic.headers.get("retry-after"), "7");
+  assert.equal(
+    runErrorEnvelopeSchema.parse(await rateLimitedDiagnostic.json()).error.code,
+    "rate_limited"
+  );
+  assert.equal(state.diagnosticAbuseCalls, 3);
+  assert.equal(state.diagnosticAuthorizationCalls, 2);
+  assert.equal(state.diagnosticProviderCalls, 1);
+
+  state.diagnosticMode = "failure";
+  const failedDiagnostic = await diagnostic.POST(
+    new Request("https://app.test/api/diagnostics/sandbox", { method: "POST" })
+  );
+  assert.equal(failedDiagnostic.status, 503);
+  const failedDiagnosticBody = runErrorEnvelopeSchema.parse(
+    await failedDiagnostic.json()
+  );
+  assert.equal(failedDiagnosticBody.error.code, "diagnostic_unavailable");
+  assert.equal(failedDiagnosticBody.error.retryable, true);
+  assert.equal(JSON.stringify(failedDiagnosticBody).includes("private"), false);
+  assert.equal(
+    JSON.stringify(failedDiagnosticBody).includes("sandbox-id"),
+    false
+  );
+  assert.equal(state.diagnosticAbuseCalls, 4);
+  assert.equal(state.diagnosticAuthorizationCalls, 3);
+  assert.equal(state.diagnosticProviderCalls, 2);
 
   await Promise.all(
     [
