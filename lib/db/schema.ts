@@ -246,9 +246,9 @@ export type TenantCredential = InferSelectModel<typeof tenantCredential>;
  * One row per counted run.
  *
  * The unique index is the counter's correctness, not an optimisation. The
- * worker may fetch a credential more than once for one run -- a retried start,
- * a resumed stream -- and counting per fetch would bill a customer for the
- * runner's internal behaviour.
+ * runner may prepare a credential more than once for one run during retry or
+ * recovery, and counting per preparation would bill a customer for internal
+ * behavior.
  */
 export const runUsage = pgTable(
   "RunUsage",

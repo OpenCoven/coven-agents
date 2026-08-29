@@ -8,8 +8,8 @@ import { base64UrlDecode, base64UrlEncode } from "@opencoven/agent-contracts";
  * is then a rewrap of small values instead of re-encrypting every stored
  * credential.
  *
- * WebCrypto only (`crypto.subtle`) — no Node `crypto`, no `Buffer` — so this
- * stays portable to the Cloudflare Worker that later borrows the plaintext.
+ * WebCrypto only (`crypto.subtle`) — no Node `crypto`, no `Buffer` — so the
+ * envelope format remains runtime-neutral and testable.
  */
 
 const DEK_ALGORITHM = "AES-GCM";

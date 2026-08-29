@@ -41,9 +41,8 @@ through versioned references and adapters when integrations are added.
 
 The browser and Next.js app remain the product control plane. Browser runner
 access uses same-origin Auth.js session APIs, and server-side runner composition
-derives the tenant before dispatching to Daytona. The Cloudflare Worker remains
-deployed only as a rollback execution plane until its removal PR. No supported
-local runner is tracked.
+derives the tenant before dispatching to Daytona. No Cloudflare Worker or
+supported local runner is tracked in this repository.
 
 `packages/agent-contracts` and `packages/harness` remain private workspace
 packages:
@@ -120,10 +119,10 @@ the other.
    happened in its bounded attempt. Psyche or another canonical orchestrator
    decides whether that evidence satisfies an intent, budget, approval, or
    recovery policy.
-7. **Keep current and rollback trust boundaries explicit.** Current cloud
-   execution is a same-origin Coven Agents service backed by Daytona. The
-   retained Cloudflare Worker is rollback-only, and no local execution path is
-   currently supported.
+7. **Keep execution trust boundaries explicit.** Current cloud execution is a
+   same-origin Coven Agents service backed by Daytona. Browser identity never
+   becomes a separate runner token, and no local execution path is currently
+   supported.
 8. **Make caches disposable.** A derived upstream view must record its source
    revision and be safe to discard and rebuild. A cache never grants authority
    when the owner is unavailable.
@@ -206,10 +205,10 @@ Current code-level boundaries:
 - `lib/session.ts` defines product tenant and subscriber authority;
 - `packages/agent-contracts/src/index.ts` distinguishes tenant,
   `cave-familiar`, and standalone owner references;
-- `worker/src/tenant.ts` maps each owner kind exhaustively and fails closed on
-  unknown kinds;
-- `worker/src/routes.ts` assigns API-created agent ownership from the verified
-  caller rather than request input;
+- `lib/runner/http.ts` derives agent and run authority from the authenticated
+  same-origin subscriber rather than request input;
+- `lib/runner/production.ts` revalidates queued authority before credential or
+  provider work;
 - `lib/credentials/store.ts` scopes product cloud credentials to tenant and
   harness;
 - `packages/agent-contracts/package.json` and

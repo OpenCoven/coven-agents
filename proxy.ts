@@ -46,9 +46,9 @@ export async function proxy(request: NextRequest) {
 
   // Closed beta. Checked before the demo cookie is minted, because the demo
   // session needs no sign-in — gating only the sign-in path would leave the
-  // beta wide open to anyone holding the URL. `/api/internal` is exempt: the
-  // worker authenticates itself with a service token and a signed identity
-  // claim, and gating it would break runs rather than close the beta.
+  // beta wide open to anyone holding the URL. Only the authenticated
+  // reconciliation endpoint bypasses the beta gate so cron and manual recovery
+  // remain available; other internal paths are gated like ordinary requests.
   const gate = readBetaGate({
     BETA_ALLOWLIST: process.env.BETA_ALLOWLIST,
     BETA_MODE: process.env.BETA_MODE,

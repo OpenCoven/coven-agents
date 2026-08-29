@@ -1,51 +1,8 @@
-# Runner key rotation
+# Credential key rotation
 
-The current app does not mint browser runner identities and holds no runner
-signing private key. It retains only the public current/previous verification
-ring used by the still-deployed rollback Worker's internal authority and
-credential calls. Key IDs are routing hints, never authority.
-
-## Current verification configuration
-
-On the app and rollback Worker, configure the matching public
-`RUNNER_VERIFY_KEY_ID` and `RUNNER_VERIFY_KEY`. During a legacy overlap, also
-configure `RUNNER_VERIFY_PREVIOUS_KEY_ID`, `RUNNER_VERIFY_PREVIOUS_KEY`,
-`RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT`, and
-`RUNNER_VERIFY_PREVIOUS_RETIRE_AT`. Set retained values through Vercel and
-Wrangler configuration; never commit or log key material.
-
-Do not rotate or remove these public values independently while the rollback
-Worker is deployed. A mismatch makes its internal calls fail verification. The
-current same-origin Daytona path does not use this key ring.
-
-## Rollback-only private signing rotation
-
-This procedure applies only after restoring an older application release that
-contains the browser connection and token-minting routes. It is not current app
-configuration.
-
-1. Generate a new Ed25519 pair in the rollback environment.
-2. Deploy the new public key as the rollback Worker's current key, retaining
-   the old public key as `previous`.
-3. Switch the rolled-back app's signing ID, private key, and matching public
-   key. Record the exact UTC timestamp as
-   `RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT`.
-4. Set `RUNNER_VERIFY_PREVIOUS_RETIRE_AT` to at least that timestamp plus
-   `TOKEN_LIFETIME_SECONDS` and `TOKEN_CLOCK_SKEW_SECONDS` (15 minutes plus
-   configured clock skew).
-5. After every token from the retired signer has expired, remove the previous
-   public-key variables.
-
-Unknown IDs, duplicate IDs, invalid retirement windows, and retired keys fail
-closed. The current app can verify this legacy ring but cannot mint a claim.
-
-## Rollback
-
-If a rollback signer is unhealthy, switch the rolled-back app back to the old
-private key and ID while both public keys remain configured. Keep the new key
-as previous until all tokens it could have issued have expired. Never shorten a
-previous retirement window while legacy tokens may still be queued or in
-flight. Returning to the current app removes the browser minting path entirely.
+This runbook covers the application credential-encryption KEK ring. The retired
+Cloudflare runner signing and verification keys are no longer runtime
+configuration and require no application rotation procedure.
 
 ## Credential KEK rotation
 

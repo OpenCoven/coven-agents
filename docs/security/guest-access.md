@@ -20,7 +20,6 @@ cookie, module, and fixture identifiers:
 
 - `User.type = "demo"`;
 - `Session.kind = "demo"`;
-- `RunnerClaims.plan = "demo"`;
 - `IS_DEMO`, `DEMO_TRANSCRIPT`, and `coven-demo`;
 - `lib/demo`, `components/demo`, and `OpenCoven/demo-workspace`.
 
@@ -171,7 +170,6 @@ identity token. The pure session decision lives in
 | File/blob upload | Deny | 403 before body or blob storage | Allow within file limits | Shared subscriber gate, upload schema |
 | Harness credential list/write/delete/device flow | Deny | 403 | Allow | Credential routes and `databaseFor` |
 | Agent and run APIs | Deny | Deny | Tenant-scoped | Same-origin session authorization |
-| Legacy rollback Worker credential loan | No route authority | No route authority | Server-to-server only | Service token, verified legacy claim, subscriber plan |
 
 The checkout and usage surfaces are narrow account-management exceptions. They
 exist so a guest can understand and intentionally change their access. They
@@ -225,7 +223,7 @@ must not be reused as a general guest database path.
   malformed, forged, or unknown values fail closed to guest access.
 - A guest cannot store credentials, call same-origin agent or run APIs, call a
   model, upload a file, or read/write persistent chat data. No browser account
-  receives a Worker deployment token or runner identity from the current app.
+  receives a runner deployment token or separate runner identity.
 - `app/api/credentials/route.ts` and the same-origin agent/run routes enforce
   their product gates independently.
 
@@ -238,9 +236,7 @@ must not be reused as a general guest database path.
   guest claim.
 - A lapsed account cannot start a run even if an old credential row exists.
   Same-origin agent and run routes reject its revalidated application session
-  before execution. If the application is rolled back to the legacy Worker
-  path, the Worker and retained internal credential endpoint independently
-  reject a non-subscriber claim.
+  before admission, credential acquisition, or provider execution.
 
 ## Safety precautions
 
@@ -265,9 +261,9 @@ must not be reused as a general guest database path.
    only their application session; no account receives a deployment gate or
    signed runner identity.
 8. **Repeat checks across active trust boundaries.** Browser refusal is UX,
-   not the security boundary. Same-origin routes revalidate session authority
-   and server-owned tenant scope. The retained Worker and internal endpoint
-   checks are additional rollback-only boundaries.
+   not the security boundary. `lib/runner/http.ts` revalidates session
+   authority and server-owned tenant scope; `lib/runner/production.ts`
+   rechecks authority before credential or provider work.
 9. **Treat checkout as explicit consent.** Stripe work occurs only after the
    signed-in guest chooses upgrade; page load and account creation do not
    create a checkout session.
@@ -288,15 +284,13 @@ Before publishing a guest deployment:
   unless the same deployment also serves subscribers;
 - confirm `/api/agents`, `/api/runs`, `/api/credentials`, `/api/chat`, and
   upload/persistence routes return 401 or 403 for non-subscribers;
-- confirm the replay renders without auth, database, Worker, or network
+- confirm the replay renders without auth, database, runner, or network
   requests.
 
 After suspected guest-boundary bypass:
 
 1. disable the affected resource route or deployment;
-2. rotate any exposed session, tenant credential, or active service secret;
-   rotate Worker deployment or signing material only if the rollback runtime
-   was involved;
+2. rotate any exposed session, tenant credential, or active operator secret;
 3. preserve sanitized request identity and operation metadata;
 4. add the bypass as a regression before restoring access;
 5. follow [Security incident response](incident-response.md).
@@ -311,12 +305,8 @@ After suspected guest-boundary bypass:
 | Resource routes share one gate | `lib/auth/subscriber-access.test.ts`, `lib/auth/subscriber-authorization.test.ts`, `scripts/guest-access-docs.test.ts` |
 | Guest cannot store a credential | `lib/credentials/authorize.test.ts`, credential route tests |
 | Guest cannot reach runner execution | same-origin agent/run route tests and browser boundary regression |
-| Legacy rollback Worker refuses guest execution | `worker/src/routes.test.ts`, internal credential binding tests |
+| Server dispatch revalidates guest authority before provider work | `lib/runner/production.test.ts`, `lib/runner/http.test.ts` |
 | Guest fixtures contain no recognized secrets | `lib/demo/fixtures.test.ts`, `scripts/secret-scan.test.ts` |
-
-The still-deployed rollback Worker keeps its independent enforcement in
-`worker/src/routes.ts`; its internal authority and credential calls remain
-server-to-server until that boundary moves atomically.
 
 Run the full repository gates before merging a guest-boundary change:
 

@@ -37,9 +37,9 @@ const credentialDeleteSchema = z
 /**
  * Where a tenant supplies their own harness credential.
  *
- * This is the counterpart to `/api/internal/credential`, which the worker
- * reads from. Without this route the store has a writer nothing calls, and a
- * run refused for a missing credential has no path to recovery.
+ * The Daytona runner reads this store only through the server-only credential
+ * acquisition service. Without this route, a run refused for a missing
+ * credential would have no path to recovery.
  *
  * The authorization decision lives in `decideCredentialWrite` rather than
  * here, because logic inside a route handler cannot be unit tested and this is

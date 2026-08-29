@@ -1,6 +1,7 @@
 // biome-ignore-all lint/suspicious/useAwait: Dependency doubles keep async signatures for readability.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { acquireRunnerCredential } from "@/lib/credentials/runner-credential";
 import {
   admissionLimitsFromEnvironment,
   admitRunnerRun,
@@ -676,6 +677,131 @@ test("an accounting commit outage never starts an unaccounted provider command",
     runId: claimedRun.id,
   });
   assert.deepEqual(calls, ["commit", "compensate", "release"]);
+});
+
+test("missing credentials clean pre-launch state and terminalize without provider work", async () => {
+  const calls: string[] = [];
+  const claimedRun = run();
+  const authority = {
+    expectedVersion: claimedRun.version,
+    leaseToken: claimedRun.dispatchLeaseToken as string,
+    runId: claimedRun.id,
+  } as RunnerDispatchAuthority;
+  const terminal = run({
+    ...claimedRun,
+    completedAt: new Date("2026-08-28T15:00:01.000Z"),
+    dispatchState: "terminal",
+    status: "failed",
+    version: authority.expectedVersion + 1,
+  });
+  let finalError: unknown;
+
+  const result = await dispatchNextRunnerRun({
+    acquireCredential: (input) =>
+      acquireRunnerCredential(input, {
+        cleanupResources: async () => {
+          calls.push("cleanup-prelaunch");
+          return { kind: "cleaned" };
+        },
+        consumeReservation: async () => {
+          throw new Error("must not consume");
+        },
+        issueLease: async () => {
+          calls.push("issue");
+          return { kind: "issued" } as never;
+        },
+        leaseCredential: async (_input, prepare, operation) => {
+          calls.push("lease");
+          await prepare();
+          return await operation({} as never);
+        },
+        prepareCredential: async () => {
+          calls.push("prepare");
+          return false;
+        },
+        readCredential: async () => {
+          calls.push("read");
+          throw new Error("must not read");
+        },
+        reserveRun: async () => {
+          calls.push("reserve");
+          return { kind: "reserved" } as never;
+        },
+      }),
+    credentialInput: () =>
+      ({
+        globalDailyCap: 500,
+        harnessId: "copilot",
+        keySecret: "test-key",
+        operationId: claimedRun.operationId,
+        periodStart: new Date("2026-08-01T00:00:00.000Z"),
+        runId: claimedRun.id,
+        tenant: claimedRun.tenant,
+      }) as never,
+    ensureSandbox: async () => {
+      calls.push("sandbox");
+      return { agent: agent(), sandbox: {} as never };
+    },
+    limits: admissionLimitsFromEnvironment({}),
+    operator,
+    startProcess: async () => {
+      calls.push("start");
+      throw new Error("provider must not start");
+    },
+    store: {
+      claimNextDispatch: async () => {
+        calls.push("claim");
+        return { authority, run: claimedRun };
+      },
+      cleanupTerminalLease: async () => {
+        calls.push("cleanup-terminal");
+        return { kind: "updated" as const, value: terminal };
+      },
+      finalizeRun: async (
+        _operator: RunnerOperator,
+        input: { error: unknown }
+      ) => {
+        calls.push("finalize");
+        finalError = input.error;
+        return {
+          kind: "finalized" as const,
+          prunedRunIds: [],
+          run: terminal,
+        };
+      },
+      getDispatchAgent: async () => {
+        calls.push("get-agent");
+        return {
+          agent: agent(),
+          kind: "found" as const,
+          run: claimedRun,
+        };
+      },
+    } as never,
+  });
+
+  assert.deepEqual(result, {
+    kind: "refused",
+    reason: "credential",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(finalError, {
+    code: "no_credential",
+    message: "No credential is configured for this runner.",
+    retryable: false,
+  });
+  assert.deepEqual(calls, [
+    "claim",
+    "get-agent",
+    "sandbox",
+    "reserve",
+    "issue",
+    "lease",
+    "prepare",
+    "cleanup-prelaunch",
+    "finalize",
+    "cleanup-terminal",
+  ]);
 });
 
 test("capacity refusal terminalizes the claimed run before freeing its lease", async () => {

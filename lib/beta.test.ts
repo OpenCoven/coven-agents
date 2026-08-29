@@ -82,15 +82,27 @@ test("a substring of an allowed address is not allowed", () => {
   assert.equal(betaVerdict(gate, "/", "notme@example.com"), "deny");
 });
 
-test("the worker's credential path is exempt", () => {
-  // The Cloudflare Worker calls this with a service token and a signed
-  // identity claim and carries no NextAuth cookie. Gating it would break every
-  // run rather than close the beta.
-  assert.equal(isBetaExempt("/api/internal/credential"), true);
+test("the machine-triggered reconciliation path is exempt", () => {
+  // Vercel Cron and manual recovery carry dedicated bearer authority rather
+  // than an Auth.js cookie. Gating this path would disable recovery rather than
+  // close the beta.
+  assert.equal(isBetaExempt("/api/internal/runner-reconcile"), true);
   assert.equal(
-    betaVerdict(readBetaGate(ON), "/api/internal/credential", null),
+    betaVerdict(readBetaGate(ON), "/api/internal/runner-reconcile", null),
     "allow"
   );
+});
+
+test("retired and future internal routes are not exempt", () => {
+  for (const pathname of [
+    "/api/internal",
+    "/api/internal/credential",
+    "/api/internal/future-service",
+    "/api/internal/runner-reconcile/extra",
+  ]) {
+    assert.equal(isBetaExempt(pathname), false, pathname);
+    assert.equal(betaVerdict(readBetaGate(ON), pathname, null), "deny");
+  }
 });
 
 test("sign-in stays reachable so the gate is escapable", () => {
@@ -107,8 +119,9 @@ test("registration is closed during the beta", () => {
 });
 
 test("an exempt prefix does not leak to lookalike paths", () => {
-  // `/api/internalise` must not inherit `/api/internal`'s exemption.
+  // Lookalike paths must not inherit an exact route's exemption.
   assert.equal(isBetaExempt("/api/internalish"), false);
+  assert.equal(isBetaExempt("/api/internal/runner-reconcile-now"), false);
   assert.equal(isBetaExempt("/loginish"), false);
 });
 

@@ -19,7 +19,7 @@ export type RunnerPrincipal = {
 };
 
 /**
- * Authority used by the scheduler, cron reconciliation, and Daytona worker.
+ * Authority used by the scheduler, cron reconciliation, and Daytona dispatcher.
  * It is intentionally a separate capability from a subscriber identity.
  */
 export type RunnerOperator = { kind: "runner-operator" };

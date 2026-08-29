@@ -179,7 +179,7 @@ function HarnessCard({
           </>
         ) : (
           <p style={{ ...type_.body, font: "400 11px/1.5 var(--font-ui)" }}>
-            The worker refuses a run on this harness, so there is no slot to
+            The runner refuses a run on this harness, so there is no slot to
             store a credential in. Storing one would look like a working setup
             and behave like a missing one.
           </p>
@@ -641,7 +641,7 @@ export function Settings({
                   </span>
                   <span style={{ ...type_.meta, flex: 1, ...truncate }}>
                     {REFUSED.map((spec) => spec.label).join(", ")} — refused by
-                    the worker
+                    the runner
                   </span>
                 </button>
 

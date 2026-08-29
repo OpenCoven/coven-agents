@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 
 export const metadata: Metadata = {
   description:
-    "How OpenCoven bounds autonomous agent execution: per-run Cloudflare sandboxes, tenant isolation, and credentials that never outlive a run.",
+    "How OpenCoven bounds autonomous agent execution: tenant-scoped Daytona sandboxes, same-origin authority, and transient credentials.",
   title: "Security · OpenCoven",
 };
 
@@ -23,21 +23,21 @@ export const metadata: Metadata = {
 const SECTIONS: { body: string[]; title: string }[] = [
   {
     body: [
-      "Every run executes in its own Cloudflare sandbox container. Filesystem and network end with the container: when the run closes, the environment is gone, and nothing it did reaches your machine.",
+      "Each agent executes in one tenant-scoped persistent Daytona sandbox. Runs reuse that isolated workspace through short-lived process sessions; nothing executes on your machine.",
       "Approval prompts are disabled by design. The boundary is not “the model cannot run a dangerous command” — it is which identity may request execution, which tenant receives it, which credentials enter it, and what evidence may leave it.",
     ],
     title: "The container is the blast radius",
   },
   {
     body: [
-      "A caller cannot act as another tenant or reach another tenant's agents, sandboxes, credentials, or runs. Sandbox identity is derived from the tenant, so two tenants can never share a container — the isolation is in the key derivation, not in a check a bug could skip.",
-      "Requests to the runner carry two things: a deployment gate and a signed identity claim naming the tenant. Neither alone is enough.",
+      "A caller cannot act as another tenant or reach another tenant's agents, sandboxes, credentials, or runs. Durable records and provider identifiers are tenant-scoped and fenced before use.",
+      "Browser requests reach the runner only through the same-origin Next.js API. Current Auth.js account authority is revalidated before runner work; no browser runner token or cross-service credential boundary exists.",
     ],
     title: "Tenants are isolated by construction",
   },
   {
     body: [
-      "Your harness credential is envelope-encrypted at rest, fetched for the duration of one run, and never shared with another account. The platform holds no model-provider API keys of its own — agents run under your credential or not at all.",
+      "Your harness credential is envelope-encrypted at rest, acquired only by the server for one fenced launch, staged in a mode-0600 file, and removed before the harness process starts. It is never returned to the browser or shared with another account.",
       "Secret-shaped output is redacted before evidence is persisted or shown. A credential that appears in a command's output does not survive into the record.",
     ],
     title: "Credentials never outlive a run",
@@ -51,7 +51,7 @@ const SECTIONS: { body: string[]; title: string }[] = [
   },
   {
     body: [
-      "The internal security of GitHub, Cloudflare, Stripe, and model providers — we build on their guarantees and say so rather than restating them as our own.",
+      "The internal security of GitHub, Daytona, Stripe, and model providers — we build on their guarantees and say so rather than restating them as our own.",
       "Preventing an authorized agent from changing files inside the workspace it was granted — that is what a run is for. And natural-language prompts are never treated as trusted instructions.",
     ],
     title: "What this does not claim",

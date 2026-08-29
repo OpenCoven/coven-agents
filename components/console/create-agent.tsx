@@ -490,7 +490,7 @@ export function CreateAgent({
                 </Field>
                 <div style={{ display: "flex", gap: 14 }}>
                   <Field
-                    hint={`Refused by the worker: ${REFUSED.map((spec) => spec.label).join(", ")}.`}
+                    hint={`Refused by the runner: ${REFUSED.map((spec) => spec.label).join(", ")}.`}
                     label="Harness"
                   >
                     <select

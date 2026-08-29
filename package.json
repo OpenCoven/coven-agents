@@ -19,7 +19,6 @@
     "db:up": "drizzle-kit up",
     "demo:record": "tsx --env-file-if-exists=.env.local --conditions=react-server scripts/demo-record.ts",
     "dev": "next dev --turbo",
-    "dev:cloud": "pnpm --filter @opencoven/cloud-runner dev",
     "fix": "ultracite fix",
     "hygiene": "tsx scripts/hygiene.ts",
     "prepare": "husky",
@@ -30,7 +29,7 @@
     "start": "pnpm validate:release && next start",
     "subscription": "tsx --env-file-if-exists=.env.local --conditions=react-server scripts/subscription.ts",
     "test": "export PLAYWRIGHT=True && pnpm exec playwright test",
-    "test:unit": "tsx --test scripts/*.test.ts && tsx --conditions=react-server --test 'lib/**/*.test.ts' 'app/**/*.test.ts' && pnpm --filter @opencoven/agent-contracts test && pnpm --filter @opencoven/harness test && pnpm --filter @opencoven/cloud-runner test",
+    "test:unit": "tsx --test scripts/*.test.ts && tsx --conditions=react-server --test 'lib/**/*.test.ts' 'app/**/*.test.ts' && pnpm --filter @opencoven/agent-contracts test && pnpm --filter @opencoven/harness test",
     "typecheck": "tsc --noEmit && pnpm -r typecheck",
     "validate:release": "tsx scripts/validate-runtime-config.ts --release",
     "validate:runtime": "tsx scripts/validate-runtime-config.ts"

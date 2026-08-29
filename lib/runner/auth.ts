@@ -9,11 +9,9 @@ import type { SubscriberSession } from "@/lib/session";
 import type { RunnerPrincipal } from "./types";
 
 export type RunnerSecretEnvironment = Readonly<{
-  AGENT_CONTROL_TOKEN?: string;
   CRON_SECRET?: string;
   OPERATOR_DIAGNOSTIC_TOKEN?: string;
   RUNNER_MANUAL_RECONCILE_SECRET?: string;
-  RUNNER_SERVICE_TOKEN?: string;
   [name: string]: string | undefined;
 }>;
 
@@ -77,9 +75,9 @@ function isAliased(
 }
 
 /**
- * An operator diagnostic credential must not be interchangeable with a
- * browser-visible or runner-internal credential. Empty configuration is also
- * unavailable instead of silently falling back to another authority.
+ * An operator diagnostic credential must not be interchangeable with another
+ * active privileged channel. Empty configuration is unavailable instead of
+ * silently falling back to another authority.
  */
 export function diagnosticSecretFromEnvironment(
   environment: RunnerSecretEnvironment = process.env
@@ -89,10 +87,8 @@ export function diagnosticSecretFromEnvironment(
     return null;
   }
   return isAliased(secret, [
-    environment.AGENT_CONTROL_TOKEN,
     environment.CRON_SECRET,
     environment.RUNNER_MANUAL_RECONCILE_SECRET,
-    environment.RUNNER_SERVICE_TOKEN,
   ])
     ? null
     : secret;
@@ -100,7 +96,7 @@ export function diagnosticSecretFromEnvironment(
 
 /**
  * Cron has one credential. It is intentionally distinct from diagnostics and
- * all retired service/browser tokens so none can become an implicit fallback.
+ * manual recovery so neither can become an implicit fallback.
  */
 export function cronReconcileSecretFromEnvironment(
   environment: RunnerSecretEnvironment = process.env
@@ -110,10 +106,8 @@ export function cronReconcileSecretFromEnvironment(
     return null;
   }
   return isAliased(secret, [
-    environment.AGENT_CONTROL_TOKEN,
     environment.OPERATOR_DIAGNOSTIC_TOKEN,
     environment.RUNNER_MANUAL_RECONCILE_SECRET,
-    environment.RUNNER_SERVICE_TOKEN,
   ])
     ? null
     : secret;
@@ -131,10 +125,8 @@ export function manualReconcileSecretFromEnvironment(
     return null;
   }
   return isAliased(secret, [
-    environment.AGENT_CONTROL_TOKEN,
     environment.CRON_SECRET,
     environment.OPERATOR_DIAGNOSTIC_TOKEN,
-    environment.RUNNER_SERVICE_TOKEN,
   ])
     ? null
     : secret;

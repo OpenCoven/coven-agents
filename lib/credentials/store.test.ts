@@ -13,7 +13,10 @@ import {
 } from "./envelope";
 import { credentialWhere } from "./scope";
 import { parseStoredCredential, serializeCredential } from "./shape";
-import { readCredentialForTenant } from "./store-core";
+import {
+  prepareCredentialForTenant,
+  readCredentialForTenantWithoutRefresh,
+} from "./store-core";
 
 function sqlFor(tenant: string, harnessId: string) {
   return new QueryBuilder()
@@ -291,6 +294,16 @@ test("OAuth refresh returns the authoritative replacement after a CAS loss", asy
           return {
             where() {
               return {
+                for() {
+                  return {
+                    limit() {
+                      selectCalls += 1;
+                      return Promise.resolve([
+                        selectCalls === 1 ? staleRow : authoritativeRow,
+                      ]);
+                    },
+                  };
+                },
                 limit() {
                   selectCalls += 1;
                   return Promise.resolve([
@@ -331,10 +344,7 @@ test("OAuth refresh returns the authoritative replacement after a CAS loss", asy
     );
 
   try {
-    assert.equal(
-      await readCredentialForTenant("acme", "copilot", db),
-      "authoritative-token"
-    );
+    assert.equal(await prepareCredentialForTenant("acme", "copilot", db), true);
     assert.equal(selectCalls, 2);
   } finally {
     globalThis.fetch = previousFetch;
@@ -407,6 +417,13 @@ test("OAuth refresh wins after an envelope-only rewrap and keeps the rotated tok
           return {
             where() {
               return {
+                for() {
+                  return {
+                    limit() {
+                      return Promise.resolve([{ ...row }]);
+                    },
+                  };
+                },
                 limit() {
                   return Promise.resolve([{ ...row }]);
                 },
@@ -453,8 +470,9 @@ test("OAuth refresh wins after an envelope-only rewrap and keeps the rotated tok
   };
 
   try {
+    assert.equal(await prepareCredentialForTenant("acme", "copilot", db), true);
     assert.equal(
-      await readCredentialForTenant("acme", "copilot", db),
+      await readCredentialForTenantWithoutRefresh("acme", "copilot", db),
       "fresh-access"
     );
     assert.equal(row.kekVersion, "v2");

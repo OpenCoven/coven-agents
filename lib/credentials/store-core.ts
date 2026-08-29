@@ -18,59 +18,6 @@ export type CredentialStoreDatabase = Pick<
   "delete" | "select" | "update"
 >;
 
-export async function readCredentialForTenant(
-  tenant: string,
-  harnessId: string,
-  db: CredentialStoreDatabase
-): Promise<string | null> {
-  const rows = await db
-    .select()
-    .from(tenantCredential)
-    .where(credentialWhere(tenant, harnessId))
-    .limit(1);
-
-  const [row] = rows;
-  if (!row) {
-    return null;
-  }
-
-  const ring = await credentialKekRingFromEnvironment();
-  const raw = await decryptCredential(
-    {
-      aadVersion: row.aadVersion,
-      ciphertext: row.ciphertext,
-      iv: row.iv,
-      kekVersion: row.kekVersion,
-      wrappedKey: row.wrappedKey,
-    },
-    ring.keyFor(row.kekVersion),
-    { harnessId, kind: "credential", tenant }
-  );
-
-  const stored = parseStoredCredential(raw);
-
-  if (!stored) {
-    return null;
-  }
-
-  if (!needsRefresh(stored, Date.now())) {
-    return stored.kind === "pat" ? stored.token : stored.access;
-  }
-
-  // Refreshed here because this is the single point every run reads through,
-  // so a run that starts always holds a live token. A device-flow token lives
-  // eight hours; without this a subscriber's agents would work in the morning
-  // and fail silently by evening.
-  return await refreshStoredCredential(
-    stored,
-    tenant,
-    harnessId,
-    row.id,
-    row.credentialRevision,
-    db
-  );
-}
-
 export async function prepareCredentialForTenant(
   tenant: string,
   harnessId: string,

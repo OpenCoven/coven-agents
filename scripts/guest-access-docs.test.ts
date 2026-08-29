@@ -63,7 +63,8 @@ test("the guest guide documents states, flows, gates, and precautions", () => {
     "lib/auth/subscriber-access.ts",
     "lib/auth/subscriber-authorization.server.ts",
     "app/api/credentials/route.ts",
-    "worker/src/routes.ts",
+    "lib/runner/http.ts",
+    "lib/runner/production.ts",
   ]) {
     assert.ok(guide.includes(reference), `${reference} must remain documented`);
   }
