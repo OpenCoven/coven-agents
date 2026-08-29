@@ -157,6 +157,7 @@ test("reconciliation claims exact expired preparation cleanup before requeue", a
     sandboxRecovered: 0,
     terminalCleaned: 0,
     terminalized: 0,
+    terminalLeaseCleaned: 0,
   });
 });
 
@@ -175,7 +176,7 @@ test("command-free recovery resets a fenced sandbox before requeueing", async ()
       resetSandbox: async (_run, resetAuthority) => {
         calls.push("reset");
         assert.equal(resetAuthority, authority);
-        return true;
+        return { kind: "reset" as const };
       },
       resolveSandbox: async () => {
         calls.push("resolve");
@@ -231,6 +232,58 @@ test("command-free recovery resets a fenced sandbox before requeueing", async ()
   ]);
   assert.equal(result.deferred, 0);
   assert.equal(result.requeued, 1);
+});
+
+test("retryable provider stop failure defers without resetting the sandbox", async () => {
+  const calls: string[] = [];
+  const expired = run();
+  const authority = {
+    attemptId,
+    expectedVersion: expired.version + 1,
+    leaseToken: "cleanup-lease",
+    runId: expired.id,
+  } as RunnerDispatchAuthority;
+  const result = await reconcileAndDispatch({
+    operator,
+    provider: {
+      resetSandbox: async () => {
+        calls.push("reset");
+        return { kind: "reset" as const };
+      },
+      resolveSandbox: async () => {
+        calls.push("resolve");
+        return {} as never;
+      },
+      stop: async () => {
+        calls.push("stop");
+        return { kind: "provider_unavailable" as const };
+      },
+    },
+    randomToken: () => "cleanup-lease",
+    store: {
+      claimExpiredDaytonaAttemptCleanup: async () => {
+        calls.push("claim-cleanup");
+        return {
+          authority,
+          kind: "claimed" as const,
+          run: {
+            ...expired,
+            dispatchLeaseToken: authority.leaseToken,
+            version: authority.expectedVersion,
+          },
+        };
+      },
+      requeueExpiredDispatch: async () => ({ kind: "not_live" as const }),
+      scanExpiredDispatchLeases: async () => {
+        calls.push("scan");
+        return [expired];
+      },
+    } as never,
+  });
+
+  assert.deepEqual(calls, ["scan", "claim-cleanup", "resolve", "stop"]);
+  assert.equal(result.deferred, 1);
+  assert.equal(result.requeued, 0);
 });
 
 test("an absent attached sandbox resets accounting before fresh redispatch", async () => {
@@ -426,7 +479,7 @@ test("terminal cleanup retries only after claiming the exact expired attempt", a
     provider: {
       resetSandbox: async () => {
         calls.push("reset");
-        return true;
+        return { kind: "reset" as const };
       },
       resolveSandbox: async () => {
         calls.push("resolve");
@@ -515,7 +568,7 @@ test("terminal cleanup resets a fenced sandbox before releasing its exact attemp
     provider: {
       resetSandbox: async () => {
         calls.push("reset");
-        return true;
+        return { kind: "reset" as const };
       },
       resolveSandbox: async () => {
         calls.push("resolve");
@@ -601,7 +654,7 @@ test("terminal reset failure records one safe diagnostic and defers later recove
     provider: {
       resetSandbox: async () => {
         calls.push("reset");
-        return false;
+        return { kind: "sandbox_reset_required" as const };
       },
       resolveSandbox: async () => {
         calls.push("resolve");
@@ -656,6 +709,82 @@ test("terminal reset failure records one safe diagnostic and defers later recove
   ]);
   assert.equal(result.terminalCleaned, 0);
   assert.equal(result.deferred, 1);
+});
+
+test("reconciliation cleans only exact expired terminal residual leases without provider work", async () => {
+  const calls: string[] = [];
+  const valid = run({
+    completedAt: new Date("2026-08-28T14:59:00.000Z"),
+    daytonaAttemptId: null,
+    dispatchState: "terminal",
+    status: "cancelled",
+    version: 8,
+  });
+  const unresolved = run({
+    ...valid,
+    daytonaAttemptId: attemptId,
+    id: "00000000-0000-4000-8000-000000000004",
+  });
+  const providerOwned = run({
+    ...valid,
+    daytonaCommandId: "command",
+    id: "00000000-0000-4000-8000-000000000005",
+  });
+  const live = run({
+    ...valid,
+    dispatchState: "running",
+    id: "00000000-0000-4000-8000-000000000006",
+    status: "running",
+  });
+  const stale = run({
+    ...valid,
+    dispatchLeaseToken: "stale-lease",
+    id: "00000000-0000-4000-8000-000000000007",
+  });
+  const result = await reconcileAndDispatch({
+    operator,
+    provider: {
+      resolveSandbox: async () => {
+        throw new Error("must not resolve");
+      },
+      stop: async () => {
+        throw new Error("must not stop");
+      },
+    },
+    releaseCredentialResources: async () => {
+      throw new Error("must not release credentials");
+    },
+    rollbackCredentialResources: async () => {
+      throw new Error("must not roll back credentials");
+    },
+    store: {
+      cleanupTerminalLease: async (
+        _operator: RunnerOperator,
+        authority: RunnerDispatchAuthority
+      ) => {
+        calls.push(
+          `cleanup:${authority.runId}:${authority.leaseToken}:${authority.expectedVersion}`
+        );
+        return authority.runId === valid.id
+          ? { kind: "updated" as const, value: valid }
+          : { kind: "stale_version" as const };
+      },
+      scanExpiredDispatchLeases: async () => [],
+      scanTerminalLeaseCleanups: async () => {
+        calls.push("scan");
+        return [valid, unresolved, providerOwned, live, stale];
+      },
+    } as never,
+  });
+
+  assert.deepEqual(calls, [
+    "scan",
+    `cleanup:${valid.id}:${valid.dispatchLeaseToken}:${valid.version}`,
+    `cleanup:${stale.id}:${stale.dispatchLeaseToken}:${stale.version}`,
+  ]);
+  assert.equal(result.terminalLeaseCleaned, 1);
+  assert.equal(result.deferred, 1);
+  assert.equal(result.failures, 0);
 });
 
 test("a provider outage for one expired run does not abort unrelated recovery", async () => {
@@ -1099,7 +1228,7 @@ test("cancellation keeps durable intent and records a safe diagnostic when reset
     provider: {
       resetSandbox: async () => {
         calls.push("reset");
-        return false;
+        return { kind: "sandbox_reset_required" as const };
       },
       resolveSandbox: async () => {
         calls.push("resolve");
@@ -1181,6 +1310,399 @@ test("cancellation fails closed for an unfenced provider identifier", async () =
   assert.deepEqual(result, { kind: "cleanup_required", runId: active.id });
 });
 
+test("cancellation preserves database and provider unavailability", async () => {
+  const databaseResult = await cancelRunnerRun(run().id, {
+    operator,
+    provider: {
+      resolveSandbox: async () => null,
+      stop: async () => ({ kind: "stopped" as const }),
+    },
+    store: {
+      requestRunCancellation: async () => {
+        throw new Error("database=private-detail");
+      },
+    } as never,
+  });
+  assert.deepEqual(databaseResult, {
+    kind: "unavailable",
+    runId: run().id,
+    source: "database",
+  });
+
+  const active = run({
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+    dispatchState: "running",
+    status: "running",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: active.version + 1,
+    leaseToken: "cancel-lease",
+    runId: active.id,
+  } as RunnerDispatchAuthority;
+  const providerResult = await cancelRunnerRun(active.id, {
+    operator,
+    provider: {
+      resolveSandbox: async () => {
+        throw new Error("provider=private-detail");
+      },
+      stop: async () => ({ kind: "stopped" as const }),
+    },
+    store: {
+      requestRunCancellation: async () => ({
+        authority,
+        kind: "requested" as const,
+        run: {
+          ...active,
+          cancellationRequestedAt: new Date(),
+          dispatchLeaseToken: authority.leaseToken,
+          version: authority.expectedVersion,
+        },
+      }),
+    } as never,
+  });
+  assert.deepEqual(providerResult, {
+    kind: "unavailable",
+    runId: active.id,
+    source: "provider",
+  });
+  assert.doesNotMatch(JSON.stringify(providerResult), /private-detail/u);
+});
+
+test("confirmed provider command absence continues exact cancellation cleanup", async () => {
+  const calls: string[] = [];
+  const active = run({
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+    dispatchState: "running",
+    status: "running",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: active.version + 1,
+    leaseToken: "cancel-lease",
+    runId: active.id,
+  } as RunnerDispatchAuthority;
+  const terminalAuthority = {
+    ...authority,
+    expectedVersion: authority.expectedVersion + 1,
+  } as RunnerDispatchAuthority;
+  const result = await cancelRunnerRun(active.id, {
+    operator,
+    provider: {
+      resolveSandbox: async () => {
+        calls.push("resolve");
+        return {} as never;
+      },
+      stop: async () => {
+        calls.push("stop");
+        return { kind: "provider_not_found" as const };
+      },
+    },
+    releaseCredentialResources: async () => {
+      calls.push("release-credential");
+    },
+    store: {
+      cleanupTerminalLease: async () => {
+        calls.push("cleanup-lease");
+        return { kind: "updated" as const, value: active };
+      },
+      deleteAttemptRedaction: async () => {
+        calls.push("delete-redaction");
+        return { kind: "deleted" as const };
+      },
+      finalizeRun: async () => {
+        calls.push("finalize");
+        return {
+          kind: "finalized" as const,
+          prunedRunIds: [],
+          run: {
+            ...active,
+            completedAt: new Date(),
+            dispatchState: "terminal",
+            status: "cancelled",
+            version: terminalAuthority.expectedVersion,
+          },
+        };
+      },
+      releaseTerminalDaytonaAttempt: async () => {
+        calls.push("release");
+        return { authority: terminalAuthority, kind: "released" as const };
+      },
+      requestRunCancellation: async () => {
+        calls.push("intent");
+        return {
+          authority,
+          kind: "requested" as const,
+          run: {
+            ...active,
+            cancellationRequestedAt: new Date(),
+            dispatchLeaseToken: authority.leaseToken,
+            version: authority.expectedVersion,
+          },
+        };
+      },
+    } as never,
+  });
+
+  assert.deepEqual(result, { kind: "cancelled", runId: active.id });
+  assert.deepEqual(calls, [
+    "intent",
+    "resolve",
+    "stop",
+    "delete-redaction",
+    "release-credential",
+    "finalize",
+    "release",
+    "cleanup-lease",
+  ]);
+});
+
+test("a cancelled attempt without an attached command rolls back accounting", async () => {
+  const calls: string[] = [];
+  const active = run({
+    daytonaCommandId: null,
+    daytonaSessionId: null,
+    dispatchState: "dispatching",
+    status: "queued",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: active.version + 1,
+    leaseToken: "cancel-lease",
+    runId: active.id,
+  } as RunnerDispatchAuthority;
+  const result = await cancelRunnerRun(active.id, {
+    operator,
+    provider: {
+      resolveSandbox: async () => null,
+      stop: async () => {
+        throw new Error("must not stop an absent sandbox");
+      },
+    },
+    releaseCredentialResources: async () => {
+      calls.push("release-credential");
+    },
+    rollbackCredentialResources: async () => {
+      calls.push("rollback-credential");
+    },
+    store: {
+      deleteAttemptRedaction: async () => ({
+        kind: "deleted" as const,
+      }),
+      finalizeRun: async () => ({ kind: "stale_version" as const }),
+      requestRunCancellation: async () => ({
+        authority,
+        kind: "requested" as const,
+        run: {
+          ...active,
+          cancellationRequestedAt: new Date(),
+          dispatchLeaseToken: authority.leaseToken,
+          version: authority.expectedVersion,
+        },
+      }),
+    } as never,
+  });
+
+  assert.deepEqual(result, { kind: "stale_version", runId: active.id });
+  assert.deepEqual(calls, ["rollback-credential"]);
+});
+
+test("cancellation cleanup failure keeps intent durable without terminalizing", async () => {
+  const calls: string[] = [];
+  const active = run({
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+    dispatchState: "running",
+    status: "running",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: active.version + 1,
+    leaseToken: "cancel-lease",
+    runId: active.id,
+  } as RunnerDispatchAuthority;
+  const result = await cancelRunnerRun(active.id, {
+    operator,
+    provider: {
+      resolveSandbox: async () => ({}) as never,
+      stop: async () => ({ kind: "stopped" as const }),
+    },
+    releaseCredentialResources: async () => {
+      calls.push("release-credential");
+      throw new Error("database=private-detail");
+    },
+    store: {
+      deleteAttemptRedaction: async () => {
+        calls.push("delete-redaction");
+        return { kind: "deleted" as const };
+      },
+      finalizeRun: async () => {
+        calls.push("finalize");
+        throw new Error("must not terminalize");
+      },
+      requestRunCancellation: async () => {
+        calls.push("intent");
+        return {
+          authority,
+          kind: "requested" as const,
+          run: {
+            ...active,
+            cancellationRequestedAt: new Date(),
+            dispatchLeaseToken: authority.leaseToken,
+            version: authority.expectedVersion,
+          },
+        };
+      },
+    } as never,
+  });
+
+  assert.deepEqual(result, {
+    kind: "cleanup_required",
+    runId: active.id,
+  });
+  assert.deepEqual(calls, ["intent", "delete-redaction", "release-credential"]);
+  assert.doesNotMatch(JSON.stringify(result), /private-detail/u);
+});
+
+test("cancellation preserves a stale sandbox reset fence", async () => {
+  const active = run({
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+    dispatchState: "running",
+    status: "running",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: active.version + 1,
+    leaseToken: "cancel-lease",
+    runId: active.id,
+  } as RunnerDispatchAuthority;
+  const result = await cancelRunnerRun(active.id, {
+    operator,
+    provider: {
+      resetSandbox: async () => ({ kind: "stale_version" as const }),
+      resolveSandbox: async () => ({}) as never,
+      stop: async () => ({ kind: "sandbox_reset_required" as const }),
+    },
+    store: {
+      requestRunCancellation: async () => ({
+        authority,
+        kind: "requested" as const,
+        run: {
+          ...active,
+          cancellationRequestedAt: new Date(),
+          dispatchLeaseToken: authority.leaseToken,
+          version: authority.expectedVersion,
+        },
+      }),
+    } as never,
+  });
+
+  assert.deepEqual(result, { kind: "stale_version", runId: active.id });
+});
+
+test("cancellation preserves stale finalization fences without false success", async () => {
+  const queued = run({
+    daytonaAttemptId: null,
+    dispatchLeaseExpiresAt: null,
+    dispatchLeaseToken: null,
+    dispatchState: "queued",
+  });
+  const authority = {
+    expectedVersion: queued.version + 1,
+    leaseToken: "cancel-lease",
+    runId: queued.id,
+  } as RunnerDispatchAuthority;
+  const result = await cancelRunnerRun(queued.id, {
+    operator,
+    provider: {
+      resolveSandbox: async () => null,
+      stop: async () => ({ kind: "stopped" as const }),
+    },
+    rollbackCredentialResources: async () => undefined,
+    store: {
+      finalizeRun: async () => ({ kind: "stale_version" as const }),
+      requestRunCancellation: async () => ({
+        authority,
+        kind: "requested" as const,
+        run: {
+          ...queued,
+          cancellationRequestedAt: new Date(),
+          dispatchLeaseExpiresAt: new Date(Date.now() + 60_000),
+          dispatchLeaseToken: authority.leaseToken,
+          dispatchState: "dispatching",
+          version: authority.expectedVersion,
+        },
+      }),
+    } as never,
+  });
+
+  assert.deepEqual(result, { kind: "stale_version", runId: queued.id });
+});
+
+test("dirty terminal cancellation is cleanup-required, not stopped", async () => {
+  const terminal = run({
+    cancellationRequestedAt: new Date(),
+    completedAt: new Date(),
+    dispatchState: "terminal",
+    status: "cancelled",
+  });
+  const result = await cancelRunnerRun(terminal.id, {
+    operator,
+    provider: {
+      resolveSandbox: async () => {
+        throw new Error("must not resolve");
+      },
+      stop: async () => {
+        throw new Error("must not stop");
+      },
+    },
+    store: {
+      requestRunCancellation: async () => ({
+        kind: "already_terminal" as const,
+        run: terminal,
+      }),
+    } as never,
+  });
+
+  assert.deepEqual(result, {
+    kind: "cleanup_required",
+    runId: terminal.id,
+  });
+
+  const clean = {
+    ...terminal,
+    daytonaAttemptId: null,
+    daytonaCommandId: null,
+    daytonaSessionId: null,
+    dispatchLeaseExpiresAt: null,
+    dispatchLeaseToken: null,
+  };
+  const idempotent = await cancelRunnerRun(clean.id, {
+    operator,
+    provider: {
+      resolveSandbox: async () => {
+        throw new Error("must not resolve");
+      },
+      stop: async () => {
+        throw new Error("must not stop");
+      },
+    },
+    store: {
+      requestRunCancellation: async () => ({
+        kind: "already_terminal" as const,
+        run: clean,
+      }),
+    } as never,
+  });
+  assert.deepEqual(idempotent, {
+    kind: "already_terminal",
+    runId: clean.id,
+  });
+});
+
 test("reconciliation appends only fresh logs and terminalizes a settled command", async () => {
   const calls: string[] = [];
   const credential = "attempt-redaction-secret";
@@ -1217,7 +1739,7 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
     provider: {
       resetSandbox: async () => {
         calls.push("reset");
-        return true;
+        return { kind: "reset" as const };
       },
       resolveSandbox: async () => {
         calls.push("resolve");
@@ -1400,5 +1922,6 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
     sandboxRecovered: 0,
     terminalCleaned: 0,
     terminalized: 1,
+    terminalLeaseCleaned: 0,
   });
 });

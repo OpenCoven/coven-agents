@@ -89,6 +89,12 @@ export const SUPPORTED_HARNESS_IDS: readonly HarnessId[] = HARNESS_SPECS.filter(
   (spec) => spec.supported
 ).map((spec) => spec.id);
 
+export const UNSUPPORTED_HARNESS_RUN_ERROR = Object.freeze({
+  code: "harness_unsupported" as const,
+  message: `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+  retryable: false as const,
+});
+
 /**
  * Resolves the harness credential from an environment-like bag, honouring the
  * CLI's documented precedence. Returns null when nothing is configured, which

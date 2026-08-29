@@ -1,0 +1,280 @@
+import "server-only";
+
+import { randomUUID } from "node:crypto";
+import {
+  AGENT_RUNNER_API_VERSION,
+  AGENT_RUNNER_LIMITS,
+  agentIdSchema,
+  type RunErrorEnvelope,
+  runErrorEnvelopeSchema,
+} from "@opencoven/agent-contracts";
+import { z } from "zod";
+import { readBoundedJson } from "@/lib/abuse/body";
+import type { AbuseEnforcementInput } from "@/lib/abuse/enforce";
+import { abusePolicyFor } from "@/lib/abuse/policy";
+
+export const RUNNER_ERROR_CODES = [
+  "abuse_control_unavailable",
+  "admission_unavailable",
+  "agent_decommissioning",
+  "body_too_large",
+  "busy",
+  "cleanup_required",
+  "diagnostic_unavailable",
+  "harness_unsupported",
+  "internal_error",
+  "invalid_event_cursor",
+  "invalid_request",
+  "not_found",
+  "operation_conflict",
+  "provider_rejected",
+  "provider_unavailable",
+  "rate_limited",
+  "reconcile_unavailable",
+  "run_not_found",
+  "runner_unavailable",
+  "stale_version",
+  "subscription_required",
+  "unauthorized",
+] as const;
+
+export type RunnerErrorCode = (typeof RUNNER_ERROR_CODES)[number];
+
+type RunnerErrorDefinition = Readonly<{
+  message: string;
+  retryable: boolean;
+  status: number;
+}>;
+
+const RUNNER_ERROR_DEFINITIONS = {
+  abuse_control_unavailable: {
+    message: "Please try again later.",
+    retryable: true,
+    status: 503,
+  },
+  admission_unavailable: {
+    message: "Run admission is temporarily unavailable. Try again later.",
+    retryable: true,
+    status: 503,
+  },
+  agent_decommissioning: {
+    message: "Agent decommission is still in progress. Try again later.",
+    retryable: true,
+    status: 409,
+  },
+  body_too_large: {
+    message: "Request body is too large.",
+    retryable: false,
+    status: 413,
+  },
+  busy: {
+    message: "The agent is busy. Try again later.",
+    retryable: true,
+    status: 409,
+  },
+  cleanup_required: {
+    message: "Run cancellation is awaiting cleanup. Try again later.",
+    retryable: true,
+    status: 503,
+  },
+  diagnostic_unavailable: {
+    message: "Please try again later.",
+    retryable: true,
+    status: 503,
+  },
+  harness_unsupported: {
+    message: "The selected harness runtime is unsupported.",
+    retryable: false,
+    status: 400,
+  },
+  internal_error: {
+    message: "Runner request failed.",
+    retryable: true,
+    status: 500,
+  },
+  invalid_event_cursor: {
+    message: "Last-Event-ID must be a non-negative integer.",
+    retryable: false,
+    status: 400,
+  },
+  invalid_request: {
+    message: "Request validation failed.",
+    retryable: false,
+    status: 400,
+  },
+  not_found: {
+    message: "Agent was not found.",
+    retryable: false,
+    status: 404,
+  },
+  operation_conflict: {
+    message: "Agent creation conflicted with a concurrent operation.",
+    retryable: true,
+    status: 409,
+  },
+  provider_rejected: {
+    message: "Runner provider rejected the operation.",
+    retryable: false,
+    status: 422,
+  },
+  provider_unavailable: {
+    message: "Runner provider is temporarily unavailable. Try again later.",
+    retryable: true,
+    status: 503,
+  },
+  rate_limited: {
+    message: "Too many requests. Try again later.",
+    retryable: true,
+    status: 429,
+  },
+  reconcile_unavailable: {
+    message: "Please try again later.",
+    retryable: true,
+    status: 503,
+  },
+  run_not_found: {
+    message: "Run was not found.",
+    retryable: false,
+    status: 404,
+  },
+  runner_unavailable: {
+    message: "Runner service is temporarily unavailable. Try again later.",
+    retryable: true,
+    status: 503,
+  },
+  stale_version: {
+    message: "The agent changed concurrently. Try again.",
+    retryable: true,
+    status: 409,
+  },
+  subscription_required: {
+    message: "An active subscription is required.",
+    retryable: false,
+    status: 403,
+  },
+  unauthorized: {
+    message: "Identity was rejected.",
+    retryable: false,
+    status: 401,
+  },
+} as const satisfies Record<RunnerErrorCode, RunnerErrorDefinition>;
+
+export type RunnerTransportDependencies = Readonly<{
+  createRequestId?: () => string;
+}>;
+
+export type RunnerJsonResult<T> =
+  | Readonly<{ kind: "ok"; value: T }>
+  | Readonly<{ kind: "response"; response: Response }>;
+
+type RunnerErrorOptions = Readonly<{
+  message?: string;
+  retryable?: boolean;
+}>;
+
+const emptyObjectSchema = z.object({}).strict();
+
+function requestId(dependencies: RunnerTransportDependencies): string {
+  const candidate = dependencies.createRequestId?.() ?? randomUUID();
+  const normalized =
+    typeof candidate === "string"
+      ? candidate.trim().slice(0, AGENT_RUNNER_LIMITS.maxRequestIdLength)
+      : "";
+  return normalized || randomUUID();
+}
+
+export function runnerErrorResponse(
+  dependencies: RunnerTransportDependencies,
+  code: RunnerErrorCode,
+  options: RunnerErrorOptions = {}
+): Response {
+  const definition = RUNNER_ERROR_DEFINITIONS[code];
+  const body: RunErrorEnvelope = runErrorEnvelopeSchema.parse({
+    apiVersion: AGENT_RUNNER_API_VERSION,
+    error: {
+      code,
+      message: options.message ?? definition.message,
+      retryable: options.retryable ?? definition.retryable,
+    },
+    requestId: requestId(dependencies),
+  });
+  return Response.json(body, {
+    headers: { "cache-control": "no-store" },
+    status: definition.status,
+  });
+}
+
+export function runnerJsonResponse<T>(
+  schema: z.ZodType<T>,
+  value: unknown,
+  init?: ResponseInit
+): Response {
+  return Response.json(schema.parse(value), init);
+}
+
+export function invalidRunnerId(
+  dependencies: RunnerTransportDependencies,
+  value: string
+): Response | null {
+  return agentIdSchema.safeParse(value).success
+    ? null
+    : runnerErrorResponse(dependencies, "invalid_request");
+}
+
+export async function readRunnerJson<T>(
+  request: Request,
+  route: AbuseEnforcementInput["route"],
+  schema: z.ZodType<T>,
+  dependencies: RunnerTransportDependencies,
+  options?: { emptyBody?: unknown }
+): Promise<RunnerJsonResult<T>> {
+  const body = await readBoundedJson(
+    request,
+    abusePolicyFor(route).bodyBytes,
+    schema,
+    options
+  );
+  if (body.kind === "ok") {
+    return body;
+  }
+  return {
+    kind: "response",
+    response: runnerErrorResponse(
+      dependencies,
+      body.kind === "too_large" ? "body_too_large" : "invalid_request"
+    ),
+  };
+}
+
+export function readEmptyRunnerJson(
+  request: Request,
+  route: AbuseEnforcementInput["route"],
+  dependencies: RunnerTransportDependencies
+): Promise<RunnerJsonResult<Record<string, never>>> {
+  return readRunnerJson(request, route, emptyObjectSchema, dependencies, {
+    emptyBody: {},
+  });
+}
+
+export function parseRunnerEventCursor(
+  request: Request,
+  dependencies: RunnerTransportDependencies
+): number | Response {
+  const raw = request.headers.get("last-event-id");
+  if (raw === null) {
+    return 0;
+  }
+  if (!/^(?:0|[1-9]\d*)$/u.test(raw)) {
+    return runnerErrorResponse(dependencies, "invalid_event_cursor");
+  }
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed)
+    ? parsed
+    : runnerErrorResponse(dependencies, "invalid_event_cursor");
+}
+
+export function unreachableRunnerResult(value: never): never {
+  throw new Error(
+    `Runner HTTP adapter received an unsupported result: ${JSON.stringify(value)}`
+  );
+}

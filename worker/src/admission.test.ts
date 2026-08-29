@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import type { AgentDefinition } from "@opencoven/agent-contracts";
-import { fiberControl, resetFiberLog } from "../test-support/agents";
+import { fiberControl, fiberLog, resetFiberLog } from "../test-support/agents";
 import {
   destroyedSandboxes,
   resetDestroyedSandboxes,
@@ -2914,8 +2914,135 @@ function yoloDefinition(): AgentDefinition {
     runtime: "copilot",
     status: "idle",
     updatedAt: "2026-08-20T12:00:00.000Z",
+    warm: {
+      status: "not_started",
+      updatedAt: "2026-08-20T12:00:00.000Z",
+    },
   };
 }
+
+test("admission alarm terminalizes a legacy definition and keeps queue progress", async () => {
+  resetFiberLog();
+  fiberControl.runFibers = false;
+  resetDestroyedSandboxes();
+  let confirmations = 0;
+  let admission!: RunAdmission;
+  const yolo = new YoloAgent(
+    undefined as never,
+    {
+      RunAdmission: {
+        getByName: () => ({
+          getRecord: (runId: string) => admission.getRecord(runId),
+          release: (
+            runId: string,
+            dispatchToken?: string,
+            admissionSequence?: number
+          ) => admission.release(runId, dispatchToken, admissionSequence),
+          validateDispatch: (runId: string, dispatchToken: string) =>
+            admission.validateDispatch(runId, dispatchToken),
+        }),
+      },
+    } as never
+  );
+  yolo.configure(yoloDefinition());
+  const originalConfirm = yolo.confirmAdmission.bind(yolo);
+  yolo.confirmAdmission = (...arguments_) => {
+    confirmations += 1;
+    return originalConfirm(...arguments_);
+  };
+  const queuedRequest = {
+    ...request(801),
+    agentId: yoloDefinition().id,
+    operationId: "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb",
+    runId: "cccccccc-4444-4555-8666-dddddddddddd",
+  };
+  const nextRequest = {
+    ...request(802),
+    agentId: yoloDefinition().id,
+    operationId: "eeeeeeee-7777-4888-8999-ffffffffffff",
+    runId: "11111111-aaaa-4bbb-8ccc-222222222222",
+  };
+  await yolo.enqueue(
+    {
+      operationId: queuedRequest.operationId,
+      task: "Reject legacy alarm work.",
+    },
+    queuedRequest.runId,
+    queuedRequest.requestHash,
+    "identity"
+  );
+  await yolo.enqueue(
+    { operationId: nextRequest.operationId, task: "Keep the queue moving." },
+    nextRequest.runId,
+    nextRequest.requestHash,
+    "identity"
+  );
+  const state = Reflect.get(yolo, "state") as Record<string, unknown> & {
+    definition: AgentDefinition;
+  };
+  yolo.setState({
+    ...state,
+    definition: { ...state.definition, runtime: "cloud" },
+  } as never);
+  const harness = runAdmissionHarness(
+    () => ({
+      getRun: (runId) => yolo.getRun(runId),
+      rejectAdmitted: (runId, capability) =>
+        yolo.rejectAdmitted(runId, capability),
+      startAdmitted: (runId, dispatchToken, capability) =>
+        yolo.startAdmitted(runId, dispatchToken ?? "", capability),
+      stop: (runId, dispatchToken, reason, guard) =>
+        yolo.stop(runId, dispatchToken, reason, guard),
+    }),
+    {
+      RUN_ADMISSION_TENANT_ACTIVE_MAX: "1",
+      RUN_ADMISSION_TENANT_QUEUE_MAX: "1",
+    }
+  );
+  ({ admission } = harness);
+  await admission.getRecord("initialize");
+  seedAdmissionRecord(
+    harness,
+    {
+      ...queuedRequest,
+      enqueuedAt: new Date(Date.now()).toISOString(),
+      state: "queued",
+    },
+    1
+  );
+  seedAdmissionRecord(
+    harness,
+    {
+      ...nextRequest,
+      enqueuedAt: new Date(Date.now() + 1).toISOString(),
+      state: "queued",
+    },
+    2
+  );
+
+  await admission.alarm();
+  await Promise.all(harness.background);
+
+  assert.equal(
+    (await admission.getRecord(queuedRequest.runId))?.state,
+    "terminal"
+  );
+  assert.equal(
+    (await admission.getRecord(nextRequest.runId))?.state,
+    "terminal"
+  );
+  for (const candidate of [queuedRequest, nextRequest]) {
+    assert.deepEqual(yolo.getRun(candidate.runId)?.error, {
+      code: "harness_unsupported",
+      message: "Cloud agents must select a supported harness runtime: copilot.",
+      retryable: false,
+    });
+    assert.equal(yolo.getRun(candidate.runId)?.startedAt, null);
+  }
+  assert.equal(confirmations, 0);
+  assert.equal(fiberLog.started.length, 0);
+  assert.deepEqual(destroyedSandboxes(), []);
+});
 
 test("a proven agent-busy dispatch is requeued and release dispatches it promptly", async () => {
   resetFiberLog();

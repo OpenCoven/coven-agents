@@ -48,6 +48,25 @@ export type RunnerDaytonaAttemptId = string & {
   readonly [runnerDaytonaAttemptIdBrand]: "RunnerDaytonaAttemptId";
 };
 
+export type RunnerReconciliationLease = Readonly<{
+  expiresAt: Date;
+  fence: number;
+  ownerToken: string;
+}>;
+
+export type AcquireRunnerReconciliationLeaseInput = Readonly<{
+  ownerToken: string;
+  ttlSeconds: number;
+}>;
+
+export type AcquireRunnerReconciliationLeaseResult =
+  | Readonly<{ kind: "acquired"; lease: RunnerReconciliationLease }>
+  | Readonly<{ kind: "held" }>;
+
+export type ReleaseRunnerReconciliationLeaseResult =
+  | Readonly<{ kind: "released" }>
+  | Readonly<{ kind: "stale" }>;
+
 export type RunnerRuntime = "cloud" | "codex" | "claude" | "copilot";
 export type RunnerAgentStatus = "idle" | "running" | "error";
 export type RunnerSandboxLifecycle =

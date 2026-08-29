@@ -588,10 +588,10 @@ async function failSandboxReservation(
 async function deleteFirstDaytonaSandbox(
   identifiers: readonly string[],
   dependencies: DaytonaSandboxDependencies
-): Promise<void> {
+): Promise<"deleted" | "provider_not_found"> {
   const [identifier, ...remaining] = identifiers;
   if (!identifier) {
-    return;
+    return "provider_not_found";
   }
   let sandbox: Sandbox;
   try {
@@ -600,14 +600,16 @@ async function deleteFirstDaytonaSandbox(
     if (classifyDaytonaProviderError(error) !== "not_found") {
       throw error;
     }
-    return deleteFirstDaytonaSandbox(remaining, dependencies);
+    return await deleteFirstDaytonaSandbox(remaining, dependencies);
   }
   try {
     await sandbox.delete(SANDBOX_OPERATION_TIMEOUT_SECONDS, true);
+    return "deleted";
   } catch (error) {
     if (classifyDaytonaProviderError(error) !== "not_found") {
       throw error;
     }
+    return "provider_not_found";
   }
 }
 
@@ -621,36 +623,74 @@ export async function resetDaytonaSandboxForCancellation(
   operator: RunnerOperator,
   authority: RunnerDispatchAuthority,
   dependencies: DaytonaSandboxDependencies
-): Promise<boolean> {
-  const reserved =
-    await dependencies.store.beginDaytonaSandboxResetForCancellation(
+): Promise<
+  | { kind: "reset" | "provider_not_found" }
+  | {
+      kind:
+        | "in_progress"
+        | "not_found"
+        | "sandbox_reset_required"
+        | "stale_version";
+    }
+  | { kind: "unavailable"; source: "database" | "provider" }
+> {
+  let reserved: Awaited<
+    ReturnType<RunnerStore["beginDaytonaSandboxResetForCancellation"]>
+  >;
+  try {
+    reserved = await dependencies.store.beginDaytonaSandboxResetForCancellation(
       operator,
       authority
     );
+  } catch {
+    return { kind: "unavailable", source: "database" };
+  }
   if (reserved.kind !== "resetting") {
-    return false;
+    switch (reserved.kind) {
+      case "in_progress":
+      case "not_found":
+      case "stale_version":
+        return { kind: reserved.kind };
+      case "lease_lost":
+      case "not_live":
+        return { kind: "stale_version" };
+      default:
+        return reserved;
+    }
   }
   const agent = reserved.value;
+  let deleted: "deleted" | "provider_not_found";
   try {
-    await deleteFirstDaytonaSandbox(
+    deleted = await deleteFirstDaytonaSandbox(
       [
         ...(agent.daytonaSandboxId ? [agent.daytonaSandboxId] : []),
         daytonaSandboxName(agent.tenant, agent.id),
       ],
       dependencies
     );
-  } catch {
-    return false;
+  } catch (error) {
+    return classifyDaytonaProviderError(error) === "retryable"
+      ? { kind: "unavailable", source: "provider" }
+      : { kind: "sandbox_reset_required" };
   }
-  const cleared = await dependencies.store.finishDaytonaSandboxResetForRecovery(
-    operator,
-    {
-      agentId: agent.id,
-      expectedGeneration: agent.sandboxGeneration,
-      expectedVersion: agent.version,
-    }
-  );
-  return cleared.kind === "updated";
+  let cleared: Awaited<
+    ReturnType<RunnerStore["finishDaytonaSandboxResetForRecovery"]>
+  >;
+  try {
+    cleared = await dependencies.store.finishDaytonaSandboxResetForRecovery(
+      operator,
+      {
+        agentId: agent.id,
+        expectedGeneration: agent.sandboxGeneration,
+        expectedVersion: agent.version,
+      }
+    );
+  } catch {
+    return { kind: "unavailable", source: "database" };
+  }
+  return cleared.kind === "updated"
+    ? { kind: deleted === "deleted" ? "reset" : "provider_not_found" }
+    : { kind: cleared.kind };
 }
 
 async function reconcileAmbiguousDaytonaSandbox(
@@ -836,7 +876,9 @@ export async function warmDaytonaSandbox(
   dependencies: DaytonaSandboxWarmDependencies
 ): Promise<
   | { kind: "ready"; agent: RunnerAgentRecord; sandbox: Sandbox }
-  | { kind: "in_progress" }
+  | { kind: "in_progress"; agent: RunnerAgentRecord }
+  | { kind: "not_found" | "stale_version" }
+  | { kind: "unavailable"; source: "database" }
   | { kind: "failed"; error: DaytonaProviderErrorKind }
 > {
   let ensured: { agent: RunnerAgentRecord; sandbox: Sandbox };
@@ -848,7 +890,10 @@ export async function warmDaytonaSandbox(
       dependencies
     );
   } catch (error) {
-    return { error: classifyDaytonaProviderError(error), kind: "failed" };
+    return error instanceof DaytonaError ||
+      error instanceof DaytonaSandboxLifecycleError
+      ? { error: classifyDaytonaProviderError(error), kind: "failed" }
+      : { kind: "unavailable", source: "database" };
   }
 
   const warm = await dependencies.store.beginDaytonaSandboxWarm(principal, {
@@ -858,21 +903,27 @@ export async function warmDaytonaSandbox(
     warmStaleBefore: new Date(Date.now() - SANDBOX_WARM_TIMEOUT_MS),
   });
   if (warm.kind === "in_progress") {
-    return { kind: "in_progress" };
+    return { agent: warm.value, kind: "in_progress" };
   }
-  if (warm.kind !== "started") {
-    return { error: "non_retryable", kind: "failed" };
+  if (warm.kind === "not_found" || warm.kind === "stale_version") {
+    return warm;
   }
 
   try {
     await dependencies.probe(ensured.sandbox);
   } catch (error) {
-    await dependencies.store.finishDaytonaSandboxWarm(principal, {
-      agentId: warm.value.id,
-      expectedGeneration: warm.value.sandboxGeneration,
-      expectedVersion: warm.value.version,
-      status: "failed",
-    });
+    const failed = await dependencies.store.finishDaytonaSandboxWarm(
+      principal,
+      {
+        agentId: warm.value.id,
+        expectedGeneration: warm.value.sandboxGeneration,
+        expectedVersion: warm.value.version,
+        status: "failed",
+      }
+    );
+    if (failed.kind === "not_found" || failed.kind === "stale_version") {
+      return failed;
+    }
     return { error: classifyDaytonaProviderError(error), kind: "failed" };
   }
   const finished = await dependencies.store.finishDaytonaSandboxWarm(
@@ -884,9 +935,10 @@ export async function warmDaytonaSandbox(
       status: "ready",
     }
   );
-  return finished.kind === "updated"
-    ? { agent: finished.value, kind: "ready", sandbox: ensured.sandbox }
-    : { error: "non_retryable", kind: "failed" };
+  if (finished.kind === "not_found" || finished.kind === "stale_version") {
+    return finished;
+  }
+  return { agent: finished.value, kind: "ready", sandbox: ensured.sandbox };
 }
 
 /**

@@ -25,6 +25,10 @@ const AGENT: AgentDefinition = {
   runtime: "copilot",
   status: "running",
   updatedAt: "2026-08-25T11:00:00.000Z",
+  warm: {
+    status: "ready",
+    updatedAt: "2026-08-25T11:00:00.000Z",
+  },
   workspace: "/workspace",
 };
 

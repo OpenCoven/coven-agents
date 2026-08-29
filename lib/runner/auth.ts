@@ -12,6 +12,7 @@ export type RunnerSecretEnvironment = Readonly<{
   AGENT_CONTROL_TOKEN?: string;
   CRON_SECRET?: string;
   OPERATOR_DIAGNOSTIC_TOKEN?: string;
+  RUNNER_MANUAL_RECONCILE_SECRET?: string;
   RUNNER_SERVICE_TOKEN?: string;
   [name: string]: string | undefined;
 }>;
@@ -46,9 +47,13 @@ export type RunnerAuthDependencies = Readonly<{
   environment?: RunnerSecretEnvironment;
 }>;
 
+export const MAX_PRIVILEGED_RUNNER_SECRET_LENGTH = 1024;
+
 function configuredSecret(value: string | undefined): string | null {
   const secret = value?.trim();
-  return secret ? secret : null;
+  return secret && secret.length <= MAX_PRIVILEGED_RUNNER_SECRET_LENGTH
+    ? secret
+    : null;
 }
 
 /**
@@ -86,6 +91,7 @@ export function diagnosticSecretFromEnvironment(
   return isAliased(secret, [
     environment.AGENT_CONTROL_TOKEN,
     environment.CRON_SECRET,
+    environment.RUNNER_MANUAL_RECONCILE_SECRET,
     environment.RUNNER_SERVICE_TOKEN,
   ])
     ? null
@@ -96,7 +102,7 @@ export function diagnosticSecretFromEnvironment(
  * Cron has one credential. It is intentionally distinct from diagnostics and
  * all retired service/browser tokens so none can become an implicit fallback.
  */
-export function reconcileSecretFromEnvironment(
+export function cronReconcileSecretFromEnvironment(
   environment: RunnerSecretEnvironment = process.env
 ): string | null {
   const secret = configuredSecret(environment.CRON_SECRET);
@@ -105,6 +111,28 @@ export function reconcileSecretFromEnvironment(
   }
   return isAliased(secret, [
     environment.AGENT_CONTROL_TOKEN,
+    environment.OPERATOR_DIAGNOSTIC_TOKEN,
+    environment.RUNNER_MANUAL_RECONCILE_SECRET,
+    environment.RUNNER_SERVICE_TOKEN,
+  ])
+    ? null
+    : secret;
+}
+
+/**
+ * Manual reconciliation is a recovery channel, not a substitute for Vercel's
+ * native cron credential or the diagnostic operator credential.
+ */
+export function manualReconcileSecretFromEnvironment(
+  environment: RunnerSecretEnvironment = process.env
+): string | null {
+  const secret = configuredSecret(environment.RUNNER_MANUAL_RECONCILE_SECRET);
+  if (!secret) {
+    return null;
+  }
+  return isAliased(secret, [
+    environment.AGENT_CONTROL_TOKEN,
+    environment.CRON_SECRET,
     environment.OPERATOR_DIAGNOSTIC_TOKEN,
     environment.RUNNER_SERVICE_TOKEN,
   ])
@@ -152,8 +180,15 @@ export function createRunnerAuth(
   return {
     authorizeDiagnostic: (request) =>
       authorizeSecret(request, diagnosticSecretFromEnvironment(environment)),
-    authorizeReconcile: (request) =>
-      authorizeSecret(request, reconcileSecretFromEnvironment(environment)),
+    authorizeReconcile: (request) => {
+      const expected =
+        request.method === "GET"
+          ? cronReconcileSecretFromEnvironment(environment)
+          : request.method === "POST"
+            ? manualReconcileSecretFromEnvironment(environment)
+            : null;
+      return authorizeSecret(request, expected);
+    },
     authorizeSubscriber: async () => {
       let session: SessionLike;
       try {

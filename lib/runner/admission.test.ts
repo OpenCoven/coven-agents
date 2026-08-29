@@ -5,6 +5,7 @@ import {
   admissionLimitsFromEnvironment,
   admitRunnerRun,
   dispatchNextRunnerRun,
+  dispatchRunnerClaim,
   RunnerAdmissionConfigurationError,
 } from "./admission";
 import { DaytonaProcessError } from "./daytona/process";
@@ -414,6 +415,115 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
   ]);
   assert.equal(JSON.stringify(result).includes("secret"), false);
   assert.equal(JSON.stringify(persistedRedaction).includes("secret"), false);
+});
+
+test("legacy dispatch claims terminalize before sandbox, credential, accounting, or provider work", async () => {
+  const calls: string[] = [];
+  const claimedRun = run();
+  const authority = {
+    expectedVersion: claimedRun.version,
+    leaseToken: claimedRun.dispatchLeaseToken as string,
+    runId: claimedRun.id,
+  } as RunnerDispatchAuthority;
+  const terminal = run({
+    ...claimedRun,
+    completedAt: new Date("2026-08-28T15:00:01.000Z"),
+    dispatchLeaseExpiresAt: null,
+    dispatchLeaseToken: null,
+    dispatchState: "terminal",
+    error: {
+      code: "harness_unsupported",
+      message: "Cloud agents must select a supported harness runtime: copilot.",
+      retryable: false,
+    },
+    status: "failed",
+    version: authority.expectedVersion + 2,
+  });
+  let terminalized = false;
+  const dependencies = {
+    acquireCredential: async () => {
+      calls.push("credential");
+      throw new Error("must not acquire a credential");
+    },
+    credentialInput: () => {
+      calls.push("credential-input");
+      throw new Error("must not build credential input");
+    },
+    ensureSandbox: async () => {
+      calls.push("sandbox");
+      throw new Error("must not ensure a sandbox");
+    },
+    limits: admissionLimitsFromEnvironment({}),
+    operator,
+    startProcess: async () => {
+      calls.push("provider");
+      throw new Error("must not start provider work");
+    },
+    store: {
+      cleanupTerminalLease: async (
+        _operator: RunnerOperator,
+        cleanupAuthority: RunnerDispatchAuthority
+      ) => {
+        calls.push("cleanup");
+        assert.equal(cleanupAuthority.runId, authority.runId);
+        assert.equal(cleanupAuthority.leaseToken, authority.leaseToken);
+        assert.equal(
+          cleanupAuthority.expectedVersion,
+          authority.expectedVersion + 1
+        );
+        terminalized = true;
+        return { kind: "updated" as const, value: terminal };
+      },
+      finalizeRun: async (
+        _operator: RunnerOperator,
+        input: {
+          error: { code: string; message: string; retryable: boolean };
+          expectedVersion: number;
+          leaseToken: string;
+          runId: string;
+        }
+      ) => {
+        calls.push("finalize");
+        assert.equal(input.runId, authority.runId);
+        assert.equal(input.leaseToken, authority.leaseToken);
+        assert.equal(input.expectedVersion, authority.expectedVersion);
+        assert.deepEqual(input.error, {
+          code: "harness_unsupported",
+          message:
+            "Cloud agents must select a supported harness runtime: copilot.",
+          retryable: false,
+        });
+        return {
+          kind: "finalized" as const,
+          prunedRunIds: [],
+          run: { ...terminal, version: authority.expectedVersion + 1 },
+        };
+      },
+      getDispatchAgent: async () => {
+        calls.push("get-agent");
+        return terminalized
+          ? { kind: "not_live" as const }
+          : {
+              agent: agent({ runtime: "cloud" as never }),
+              kind: "found" as const,
+              run: claimedRun,
+            };
+      },
+    },
+  } as never;
+  const claimed = { authority, run: claimedRun };
+
+  assert.deepEqual(await dispatchRunnerClaim(claimed, dependencies), {
+    kind: "refused",
+    reason: "harness",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(await dispatchRunnerClaim(claimed, dependencies), {
+    kind: "retained",
+    reason: "launch_fenced",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(calls, ["get-agent", "finalize", "cleanup", "get-agent"]);
 });
 
 test("a proven failed launch compensates accounting with the callback's current fence", async () => {

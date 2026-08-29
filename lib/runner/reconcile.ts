@@ -79,6 +79,7 @@ type ReconciliationStore = Pick<
       | "appendTerminalCleanupDiagnostic"
       | "claimTerminalDaytonaAttemptCleanup"
       | "scanTerminalDaytonaAttemptCleanups"
+      | "scanTerminalLeaseCleanups"
     >
   >;
 
@@ -97,26 +98,42 @@ export type RunnerReconciliationProvider = Readonly<{
       attemptId: NonNullable<RunnerRunRecord["daytonaAttemptId"]>;
       runId: string;
     }>
-  ) => Promise<Readonly<{ kind: "sandbox_reset_required" | "stopped" }>>;
+  ) => Promise<
+    Readonly<{
+      kind:
+        | "provider_not_found"
+        | "provider_unavailable"
+        | "sandbox_reset_required"
+        | "stopped";
+    }>
+  >;
   snapshot?: (
     input: Parameters<typeof snapshotDaytonaProcess>[0]
   ) => Promise<DaytonaLogSnapshot>;
-  /**
-   * A caller may wire this to the fenced sandbox lifecycle when session
-   * deletion cannot be confirmed. `true` confirms process/file removal.
-   */
+  /** Fenced reset outcome after a stop cannot confirm exact cleanup. */
   resetSandbox?: (
     run: RunnerRunRecord,
     authority: RunnerDispatchAuthority
-  ) => Promise<boolean>;
+  ) => Promise<RunnerSandboxResetResult>;
 }>;
+
+export type RunnerSandboxResetResult =
+  | Readonly<{ kind: "provider_not_found" | "reset" }>
+  | Readonly<{
+      kind:
+        | "in_progress"
+        | "not_found"
+        | "sandbox_reset_required"
+        | "stale_version";
+    }>
+  | Readonly<{
+      kind: "unavailable";
+      source: "database" | "provider";
+    }>;
 
 export type DaytonaReconciliationProviderDependencies = Readonly<{
   daytona: DaytonaSandboxService;
-  resetSandbox?: (
-    run: RunnerRunRecord,
-    authority: RunnerDispatchAuthority
-  ) => Promise<boolean>;
+  resetSandbox?: NonNullable<RunnerReconciliationProvider["resetSandbox"]>;
 }>;
 
 export function daytonaCancellationResetter(input: {
@@ -197,8 +214,14 @@ export type RunnerReconciliationResult = Readonly<{
   requeued: number;
   sandboxRecovered: number;
   terminalCleaned: number;
+  terminalLeaseCleaned: number;
   terminalized: number;
 }>;
+
+export type RunnerReconciliationExecutionResult =
+  | (RunnerReconciliationResult & Readonly<{ execution: "executed" }>)
+  | (RunnerReconciliationResult &
+      Readonly<{ execution: "skipped"; reason: "overlap" }>);
 
 export type ReconcileAndDispatchDependencies = Readonly<{
   batchSize?: number;
@@ -319,7 +342,15 @@ export type CancelRunnerRunDependencies = Readonly<{
 export type CancelRunnerRunResult =
   | { kind: "already_terminal" | "in_progress" | "not_found"; runId: string }
   | { kind: "cancelled"; runId: string }
-  | { kind: "cleanup_required" | "sandbox_reset_required"; runId: string };
+  | {
+      kind: "cleanup_required" | "sandbox_reset_required" | "stale_version";
+      runId: string;
+    }
+  | {
+      kind: "unavailable";
+      runId: string;
+      source: "database" | "provider";
+    };
 
 export type DaytonaRunnerCancellationDependencies = Readonly<{
   clock?: () => Date;
@@ -523,10 +554,17 @@ async function resetSandboxAfterStopFailure(
   >
 ): Promise<boolean> {
   try {
-    return Boolean(await dependencies.provider.resetSandbox?.(run, authority));
+    const reset = await dependencies.provider.resetSandbox?.(run, authority);
+    return reset?.kind === "reset" || reset?.kind === "provider_not_found";
   } catch {
     return false;
   }
+}
+
+function providerStopConfirmed(
+  stopped: Awaited<ReturnType<RunnerReconciliationProvider["stop"]>>
+): boolean {
+  return stopped.kind === "stopped" || stopped.kind === "provider_not_found";
 }
 
 async function stopTerminalAttempt(
@@ -542,11 +580,17 @@ async function stopTerminalAttempt(
     attemptId: authority.attemptId,
     runId: run.id,
   });
-  if (stopped.kind === "stopped") {
+  if (providerStopConfirmed(stopped)) {
     return true;
   }
-  if (await resetSandboxAfterStopFailure(run, authority, dependencies)) {
+  if (
+    stopped.kind === "sandbox_reset_required" &&
+    (await resetSandboxAfterStopFailure(run, authority, dependencies))
+  ) {
     return true;
+  }
+  if (stopped.kind === "provider_unavailable") {
+    return false;
   }
   try {
     await dependencies.store.appendTerminalCleanupDiagnostic?.(
@@ -840,13 +884,17 @@ async function reconcileAttachedProcess(
         runId: run.id,
       });
       if (
-        stopped.kind !== "stopped" &&
-        !(await resetSandboxAfterStopFailure(
-          adopted.run,
-          adopted.authority,
-          dependencies
-        ))
+        !providerStopConfirmed(stopped) &&
+        (stopped.kind !== "sandbox_reset_required" ||
+          !(await resetSandboxAfterStopFailure(
+            adopted.run,
+            adopted.authority,
+            dependencies
+          )))
       ) {
+        if (stopped.kind === "provider_unavailable") {
+          return { adopted: true, kind: "deferred" };
+        }
         try {
           await dependencies.store.appendCancellationDiagnostic?.(
             dependencies.operator,
@@ -1121,8 +1169,11 @@ async function recoverExpiredDispatch(
       attemptId: run.daytonaAttemptId,
       runId: run.id,
     });
+    if (stopped.kind === "provider_unavailable") {
+      return { kind: "deferred" };
+    }
     if (
-      stopped.kind !== "stopped" &&
+      !providerStopConfirmed(stopped) &&
       !(await resetSandboxAfterStopFailure(
         claimed.run,
         claimed.authority,
@@ -1224,9 +1275,11 @@ async function finalizeCancellation(
   }>,
   clock: () => Date
 ): Promise<CancelRunnerRunResult> {
-  const finalized = await dependencies.store.finalizeRun(
-    dependencies.operator,
-    {
+  let finalized: Awaited<
+    ReturnType<CancellationFinalizationStore["finalizeRun"]>
+  >;
+  try {
+    finalized = await dependencies.store.finalizeRun(dependencies.operator, {
       commandEvidence: [],
       completedAt: clock(),
       error: null,
@@ -1236,23 +1289,45 @@ async function finalizeCancellation(
       output: "",
       runId: run.id,
       status: "cancelled",
-    }
-  );
+    });
+  } catch {
+    return { kind: "unavailable", runId: run.id, source: "database" };
+  }
   if (finalized.kind !== "finalized") {
-    return { kind: "cleanup_required", runId: run.id };
+    return finalized.kind === "not_found"
+      ? { kind: "not_found", runId: run.id }
+      : { kind: "stale_version", runId: run.id };
   }
   if (!run.daytonaAttemptId) {
-    const cleaned = await dependencies.store.cleanupTerminalLease(
-      dependencies.operator,
-      {
-        expectedVersion: finalized.run.version,
-        leaseToken: authority.leaseToken,
-        runId: run.id,
-      } as RunnerDispatchAuthority
-    );
-    return cleaned.kind === "updated"
-      ? { kind: "cancelled", runId: run.id }
-      : { kind: "cleanup_required", runId: run.id };
+    let cleaned: Awaited<
+      ReturnType<CancellationFinalizationStore["cleanupTerminalLease"]>
+    >;
+    try {
+      cleaned = await dependencies.store.cleanupTerminalLease(
+        dependencies.operator,
+        {
+          expectedVersion: finalized.run.version,
+          leaseToken: authority.leaseToken,
+          runId: run.id,
+        } as RunnerDispatchAuthority
+      );
+    } catch {
+      return { kind: "unavailable", runId: run.id, source: "database" };
+    }
+    switch (cleaned.kind) {
+      case "updated":
+        return { kind: "cancelled", runId: run.id };
+      case "not_found":
+        return { kind: "not_found", runId: run.id };
+      case "lease_lost":
+      case "stale_version":
+        return { kind: "stale_version", runId: run.id };
+      case "generation_mismatch":
+      case "not_live":
+        return { kind: "cleanup_required", runId: run.id };
+      default:
+        return cleaned;
+    }
   }
   const terminalAuthority = {
     attemptId: run.daytonaAttemptId,
@@ -1260,21 +1335,154 @@ async function finalizeCancellation(
     leaseToken: authority.leaseToken,
     runId: run.id,
   } as RunnerDispatchAuthority;
-  const released = await dependencies.store.releaseTerminalDaytonaAttempt(
-    dependencies.operator,
-    terminalAuthority,
-    { attemptId: run.daytonaAttemptId }
-  );
+  let released: Awaited<
+    ReturnType<CancellationFinalizationStore["releaseTerminalDaytonaAttempt"]>
+  >;
+  try {
+    released = await dependencies.store.releaseTerminalDaytonaAttempt(
+      dependencies.operator,
+      terminalAuthority,
+      { attemptId: run.daytonaAttemptId }
+    );
+  } catch {
+    return { kind: "unavailable", runId: run.id, source: "database" };
+  }
   if (released.kind !== "released") {
-    return { kind: "cleanup_required", runId: run.id };
+    return released.kind === "not_found"
+      ? { kind: "not_found", runId: run.id }
+      : { kind: "stale_version", runId: run.id };
+  }
+  let cleaned: Awaited<
+    ReturnType<CancellationFinalizationStore["cleanupTerminalLease"]>
+  >;
+  try {
+    cleaned = await dependencies.store.cleanupTerminalLease(
+      dependencies.operator,
+      released.authority
+    );
+  } catch {
+    return { kind: "unavailable", runId: run.id, source: "database" };
+  }
+  switch (cleaned.kind) {
+    case "updated":
+      return { kind: "cancelled", runId: run.id };
+    case "not_found":
+      return { kind: "not_found", runId: run.id };
+    case "lease_lost":
+    case "stale_version":
+      return { kind: "stale_version", runId: run.id };
+    case "generation_mismatch":
+    case "not_live":
+      return { kind: "cleanup_required", runId: run.id };
+    default:
+      return cleaned;
+  }
+}
+
+function terminalCleanupConfirmed(run: RunnerRunRecord): boolean {
+  return (
+    run.dispatchState === "terminal" &&
+    run.daytonaAttemptId === null &&
+    run.daytonaCommandId === null &&
+    run.daytonaSessionId === null &&
+    run.dispatchLeaseExpiresAt === null &&
+    run.dispatchLeaseToken === null
+  );
+}
+
+async function recoverTerminalLease(
+  run: RunnerRunRecord,
+  dependencies: Pick<ReconcileAndDispatchDependencies, "operator" | "store">
+): Promise<"cleaned" | "deferred" | "skipped"> {
+  if (
+    run.dispatchState !== "terminal" ||
+    run.daytonaAttemptId !== null ||
+    run.daytonaCommandId !== null ||
+    run.daytonaSessionId !== null ||
+    run.dispatchLeaseToken === null ||
+    run.dispatchLeaseExpiresAt === null
+  ) {
+    return "skipped";
   }
   const cleaned = await dependencies.store.cleanupTerminalLease(
     dependencies.operator,
-    released.authority
+    {
+      expectedVersion: run.version,
+      leaseToken: run.dispatchLeaseToken,
+      runId: run.id,
+    } as RunnerDispatchAuthority
   );
-  return cleaned.kind === "updated"
-    ? { kind: "cancelled", runId: run.id }
-    : { kind: "cleanup_required", runId: run.id };
+  return cleaned.kind === "updated" ? "cleaned" : "deferred";
+}
+
+async function retireCancellationAttemptRedaction(
+  authority: RunnerDispatchAuthority,
+  dependencies: CancelRunnerRunDependencies
+): Promise<CancelRunnerRunResult | null> {
+  let retired: Awaited<ReturnType<CancellationStore["deleteAttemptRedaction"]>>;
+  try {
+    retired = await dependencies.store.deleteAttemptRedaction(
+      dependencies.operator,
+      authority
+    );
+  } catch {
+    return {
+      kind: "unavailable",
+      runId: authority.runId,
+      source: "database",
+    };
+  }
+  switch (retired.kind) {
+    case "deleted":
+      return null;
+    case "not_found":
+      return { kind: "not_found", runId: authority.runId };
+    case "lease_lost":
+    case "stale_version":
+      return { kind: "stale_version", runId: authority.runId };
+    case "not_live":
+      return { kind: "stale_version", runId: authority.runId };
+    default:
+      return retired;
+  }
+}
+
+async function resetSandboxForCancellation(
+  run: RunnerRunRecord,
+  authority: RunnerDispatchAuthority,
+  dependencies: CancelRunnerRunDependencies
+): Promise<CancelRunnerRunResult | null> {
+  let reset: RunnerSandboxResetResult;
+  try {
+    reset = (await dependencies.provider.resetSandbox?.(run, authority)) ?? {
+      kind: "sandbox_reset_required",
+    };
+  } catch {
+    return { kind: "unavailable", runId: run.id, source: "provider" };
+  }
+  switch (reset.kind) {
+    case "provider_not_found":
+    case "reset":
+      return null;
+    case "in_progress":
+    case "not_found":
+    case "sandbox_reset_required":
+    case "stale_version":
+      return { kind: reset.kind, runId: run.id };
+    case "unavailable":
+      return { ...reset, runId: run.id };
+    default:
+      return reset;
+  }
+}
+
+async function cleanupCancellationAccounting(
+  run: RunnerRunRecord,
+  dependencies: CancelRunnerRunDependencies
+): Promise<boolean> {
+  return run.daytonaCommandId
+    ? await releaseCredentialResources(run, dependencies)
+    : await rollbackCredentialResources(run, dependencies);
 }
 
 /**
@@ -1296,9 +1504,15 @@ export async function cancelRunnerRun(
       { ...nextLease(clock, dependencies.randomToken ?? secureToken), runId }
     );
   } catch {
-    return { kind: "cleanup_required", runId };
+    return { kind: "unavailable", runId, source: "database" };
   }
   if (requested.kind !== "requested") {
+    if (
+      requested.kind === "already_terminal" &&
+      !terminalCleanupConfirmed(requested.run)
+    ) {
+      return { kind: "cleanup_required", runId };
+    }
     return { kind: requested.kind, runId };
   }
   const { authority, run } = requested;
@@ -1312,7 +1526,7 @@ export async function cancelRunnerRun(
       }
       return await finalizeCancellation(run, authority, dependencies, clock);
     } catch {
-      return { kind: "cleanup_required", runId };
+      return { kind: "unavailable", runId, source: "database" };
     }
   }
 
@@ -1320,7 +1534,7 @@ export async function cancelRunnerRun(
   try {
     sandbox = await dependencies.provider.resolveSandbox(run, authority);
   } catch {
-    return { kind: "cleanup_required", runId };
+    return { kind: "unavailable", runId, source: "provider" };
   }
   if (sandbox) {
     let stopped: Awaited<ReturnType<RunnerReconciliationProvider["stop"]>>;
@@ -1330,34 +1544,44 @@ export async function cancelRunnerRun(
         runId,
       });
     } catch {
-      return { kind: "cleanup_required", runId };
+      return { kind: "unavailable", runId, source: "provider" };
     }
-    if (
-      stopped.kind !== "stopped" &&
-      !(await resetSandboxAfterStopFailure(run, authority, dependencies))
-    ) {
-      try {
-        await dependencies.store.appendCancellationDiagnostic(
-          dependencies.operator,
-          authority
-        );
-      } catch {
-        // The durable cancellation intent remains the retry record.
+    if (stopped.kind === "provider_unavailable") {
+      return { kind: "unavailable", runId, source: "provider" };
+    }
+    if (stopped.kind === "sandbox_reset_required") {
+      const reset = await resetSandboxForCancellation(
+        run,
+        authority,
+        dependencies
+      );
+      if (reset?.kind === "sandbox_reset_required") {
+        try {
+          await dependencies.store.appendCancellationDiagnostic(
+            dependencies.operator,
+            authority
+          );
+        } catch {
+          // The durable cancellation intent remains the retry record.
+        }
+        return reset;
       }
-      return { kind: "sandbox_reset_required", runId };
+      if (reset) {
+        return reset;
+      }
     }
   }
-  try {
-    if (!(await retireAttemptRedaction(authority, dependencies))) {
-      return { kind: "cleanup_required", runId };
-    }
-    if (!(await releaseCredentialResources(run, dependencies))) {
-      return { kind: "cleanup_required", runId };
-    }
-    return await finalizeCancellation(run, authority, dependencies, clock);
-  } catch {
+  const redactionFailure = await retireCancellationAttemptRedaction(
+    authority,
+    dependencies
+  );
+  if (redactionFailure) {
+    return redactionFailure;
+  }
+  if (!(await cleanupCancellationAccounting(run, dependencies))) {
     return { kind: "cleanup_required", runId };
   }
+  return await finalizeCancellation(run, authority, dependencies, clock);
 }
 
 /**
@@ -1397,6 +1621,7 @@ export async function reconcileAndDispatch(
     sandboxRecovered: 0,
     terminalCleaned: 0,
     terminalized: 0,
+    terminalLeaseCleaned: 0,
   };
 
   let expired: RunnerRunRecord[];
@@ -1438,6 +1663,39 @@ export async function reconcileAndDispatch(
       result.failures += 1;
     } else {
       result.deferred += 1;
+    }
+  }
+
+  if (dependencies.store.scanTerminalLeaseCleanups) {
+    let terminalLeases: RunnerRunRecord[];
+    try {
+      terminalLeases = await dependencies.store.scanTerminalLeaseCleanups(
+        dependencies.operator,
+        batchSize
+      );
+    } catch {
+      result.failures += 1;
+      terminalLeases = [];
+    }
+    const leaseCleanup = await mapBounded(
+      terminalLeases,
+      providerConcurrency,
+      async (run) => {
+        try {
+          return await recoverTerminalLease(run, dependencies);
+        } catch {
+          return "failed" as const;
+        }
+      }
+    );
+    for (const outcome of leaseCleanup) {
+      if (outcome === "cleaned") {
+        result.terminalLeaseCleaned += 1;
+      } else if (outcome === "failed") {
+        result.failures += 1;
+      } else if (outcome === "deferred") {
+        result.deferred += 1;
+      }
     }
   }
 
