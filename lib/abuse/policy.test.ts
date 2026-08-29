@@ -34,6 +34,13 @@ const EXPECTED_ROUTES = [
   "stripe_webhook",
   "run_start",
   "internal_credential",
+  "runner_public_read",
+  "runner_read",
+  "runner_write",
+  "runner_run_start",
+  "runner_stop",
+  "runner_diagnostic",
+  "runner_reconcile",
 ] as const satisfies readonly AbuseRoute[];
 
 const EXPECTED_POLICIES = {
@@ -67,7 +74,14 @@ const EXPECTED_POLICIES = {
   model_list: expectedPolicy(["ip"], 0, 120, 60, 1200, 3600),
   run_start: expectedPolicy(["ip", "tenant"], 64_000, 5, 60, 25, 86_400),
   runner_connection: expectedPolicy(["ip", "user"], 0, 10, 60, 60, 3600),
+  runner_diagnostic: expectedPolicy(["ip"], 1024, 2, 300, 10, 86_400),
+  runner_public_read: expectedPolicy(["ip"], 0, 120, 60, 1200, 3600),
+  runner_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
+  runner_reconcile: expectedPolicy(["ip"], 1024, 120, 60, 1200, 3600),
+  runner_run_start: expectedPolicy(["ip", "tenant"], 64_000, 5, 60, 25, 86_400),
+  runner_stop: expectedPolicy(["ip", "tenant"], 1024, 5, 60, 20, 3600),
   runner_token: expectedPolicy(["ip", "user"], 0, 10, 60, 60, 3600),
+  runner_write: expectedPolicy(["ip", "user"], 64_000, 10, 60, 40, 3600),
   stripe_webhook: expectedPolicy(["ip"], 262_144, 60, 60, 600, 3600),
   suggestions_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   upload: expectedPolicy(["ip", "user"], 5_250_000, 2, 60, 20, 3600),

@@ -31,7 +31,10 @@ export async function readBoundedJson<T>(
     return preflight;
   }
 
-  const body = await readBoundedBytes(request, maximumBytes);
+  const body =
+    request.body === null
+      ? { kind: "ok" as const, value: new Uint8Array() }
+      : await readBoundedBytes(request, maximumBytes);
   if (body.kind !== "ok") {
     return body;
   }

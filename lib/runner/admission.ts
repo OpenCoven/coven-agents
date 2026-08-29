@@ -143,7 +143,11 @@ export type RunnerDispatchResult =
         | "sandbox_unavailable";
       runId: string;
     }
-  | { kind: "refused"; reason: "capacity" | "credential"; runId: string };
+  | {
+      kind: "refused";
+      reason: "authority" | "capacity" | "credential";
+      runId: string;
+    };
 
 export type RunnerDispatchDependencies = Readonly<{
   acquireCredential: (
@@ -343,6 +347,7 @@ export async function admitRunnerRun(
     result = await dependencies.store.startRun(input.principal, {
       admission: limits,
       agentId: input.agentId,
+      authVersion: input.authVersion,
       id: input.id,
       ...(initialDispatch ? { initialDispatch } : {}),
       operationId: input.operationId,
@@ -434,11 +439,19 @@ async function releaseUnstarted(
   }
 }
 
-async function terminalizeUnstartedFailure(
-  dependencies: RunnerDispatchDependencies,
+export async function terminalizeUnstartedDispatchFailure(
+  dependencies: Readonly<{
+    clock?: () => Date;
+    operator: RunnerOperator;
+    store: Partial<Pick<RunnerStore, "cleanupTerminalLease" | "finalizeRun">>;
+  }>,
   authority: RunnerDispatchAuthority,
   run: RunnerRunRecord,
-  code: "capacity_refused" | "credential_unavailable" | "dispatch_failed",
+  code:
+    | "authority_revoked"
+    | "capacity_refused"
+    | "credential_unavailable"
+    | "dispatch_failed",
   message: string,
   retryable: boolean
 ): Promise<boolean> {
@@ -519,7 +532,7 @@ export async function dispatchRunnerClaim(
   );
   if (credential.kind !== "acquired") {
     if (credential.kind === "refused") {
-      return (await terminalizeUnstartedFailure(
+      return (await terminalizeUnstartedDispatchFailure(
         dependencies,
         authority,
         run,
@@ -538,7 +551,7 @@ export async function dispatchRunnerClaim(
       credential.kind === "already_consumed" ||
       credential.kind === "released"
     ) {
-      return (await terminalizeUnstartedFailure(
+      return (await terminalizeUnstartedDispatchFailure(
         dependencies,
         authority,
         run,
@@ -563,7 +576,7 @@ export async function dispatchRunnerClaim(
         return { kind: "retained", reason: "cleanup_pending", runId: run.id };
       }
       if (credential.error.code !== "capacity_unavailable") {
-        return (await terminalizeUnstartedFailure(
+        return (await terminalizeUnstartedDispatchFailure(
           dependencies,
           authority,
           run,
@@ -661,7 +674,7 @@ export async function dispatchRunnerClaim(
       return { kind: "retained", reason: "cleanup_pending", runId: run.id };
     }
     const cleanupAuthority = callbacks.currentAuthority();
-    return (await terminalizeUnstartedFailure(
+    return (await terminalizeUnstartedDispatchFailure(
       dependencies,
       cleanupAuthority,
       run,

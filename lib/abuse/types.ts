@@ -29,6 +29,13 @@ export const ABUSE_ROUTES = Object.freeze([
   "stripe_webhook",
   "run_start",
   "internal_credential",
+  "runner_public_read",
+  "runner_read",
+  "runner_write",
+  "runner_run_start",
+  "runner_stop",
+  "runner_diagnostic",
+  "runner_reconcile",
 ] as const);
 
 export type AbuseRoute = (typeof ABUSE_ROUTES)[number];

@@ -24,5 +24,9 @@ test("a demo session is refused at runtime as well as at compile time", () => {
   // where the type has already been erased.
   const demo = toSession(null);
 
-  assert.throws(() => databaseFor(demo as never), /demo session/i);
+  assert.throws(() => databaseFor(demo as never), /untrusted principal/i);
+});
+
+test("the server-only runner operator can obtain its scheduler database", () => {
+  assert.ok(databaseFor({ kind: "runner-operator" }));
 });

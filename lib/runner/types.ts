@@ -109,6 +109,7 @@ export type RunnerRunRecord = Omit<
   RunSnapshot,
   "apiVersion" | "completedAt" | "createdAt" | "error" | "startedAt"
 > & {
+  authVersion: number | null;
   cancellationRequestedAt: Date | null;
   completedAt: Date | null;
   createdAt: Date;
@@ -179,6 +180,7 @@ export type UpdateRunnerAgentInput = {
 export type StartRunnerRunInput = {
   agentId: string;
   admission?: RunnerAdmissionLimits;
+  authVersion: number;
   id: string;
   initialDispatch?: Pick<DispatchClaimInput, "leaseExpiresAt" | "leaseToken">;
   operationId: string;
