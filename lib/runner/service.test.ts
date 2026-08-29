@@ -2,14 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AGENT_RUNNER_API_VERSION,
+  agentEnvelopeSchema,
+  agentsEnvelopeSchema,
   type RunSnapshot,
 } from "@opencoven/agent-contracts";
+import { cancelRunnerRun, reconcileAndDispatch } from "./reconcile";
 import { createRunnerService } from "./service";
 import type {
   RunnerAgentRecord,
   RunnerClaimedDispatch,
   RunnerDispatchAuthority,
+  RunnerOperator,
   RunnerPrincipal,
+  RunnerRunRecord,
 } from "./types";
 
 const AGENT_ID = "11111111-2222-4333-8444-555555555555";
@@ -21,6 +26,7 @@ const PRINCIPAL: RunnerPrincipal = {
   tenant: "u_9c8589018a57479181fe4c455b099bc9",
   userId: "9c858901-8a57-4791-81fe-4c455b099bc9",
 };
+const OPERATOR: RunnerOperator = { kind: "runner-operator" };
 
 function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
   return {
@@ -126,6 +132,87 @@ test("agent creation stamps the authenticated tenant and rejects supplied owners
   assert.deepEqual(ownerInjected, { kind: "invalid" });
 });
 
+test("public agent projections require warm state and omit provider records", async () => {
+  const service = createRunnerService({
+    createId: () => AGENT_ID,
+    store: baseStore(),
+  });
+
+  const created = await service.createAgent(PRINCIPAL, definition());
+  assert.equal(created.kind, "created");
+  if (created.kind !== "created") {
+    return;
+  }
+  assert.deepEqual(created.agent.warm, {
+    status: "not_started",
+    updatedAt: "2026-08-28T15:00:00.000Z",
+  });
+  assert.deepEqual(Object.keys(created.agent).sort(), [
+    "backend",
+    "createdAt",
+    "description",
+    "id",
+    "instructions",
+    "lastRunAt",
+    "model",
+    "name",
+    "owner",
+    "runtime",
+    "status",
+    "updatedAt",
+    "warm",
+  ]);
+  const serialized = JSON.stringify(created.agent);
+  for (const internalField of [
+    "daytonaSandboxId",
+    "sandboxGeneration",
+    "sandboxLifecycle",
+    "version",
+  ]) {
+    assert.equal(serialized.includes(internalField), false);
+  }
+});
+
+test("same-origin projections preserve readable legacy runtime records", async () => {
+  const legacy = agent({ runtime: "cloud" });
+  const service = createRunnerService({
+    store: baseStore({
+      getAgent: async () => legacy,
+      listAgents: async () => [legacy],
+    }),
+  });
+
+  const found = await service.getAgent(PRINCIPAL, AGENT_ID);
+  assert.equal(found.kind, "found");
+  if (found.kind !== "found") {
+    return;
+  }
+  assert.equal(
+    agentEnvelopeSchema.parse({ agent: found.agent }).agent.runtime,
+    "cloud"
+  );
+  assert.equal(
+    agentsEnvelopeSchema.parse({
+      agents: await service.listAgents(PRINCIPAL),
+    }).agents[0]?.runtime,
+    "cloud"
+  );
+});
+
+test("agent creation reports retryable database unavailability", async () => {
+  const service = createRunnerService({
+    createId: () => AGENT_ID,
+    store: baseStore({
+      createAgent: () => Promise.reject(new Error("database=private-detail")),
+    }),
+  });
+
+  assert.deepEqual(await service.createAgent(PRINCIPAL, definition()), {
+    kind: "unavailable",
+    source: "database",
+  });
+});
+
 test("agent creation refuses non-runnable harnesses before persistence", async () => {
   let writes = 0;
   const service = createRunnerService({
@@ -144,7 +231,7 @@ test("agent creation refuses non-runnable harnesses before persistence", async (
   assert.equal(writes, 0);
 });
 
-test("agent updates preserve tenant ownership and expose lifecycle conflicts", async () => {
+test("agent updates preserve tenant ownership and expose stale versions", async () => {
   let updateInput: unknown;
   const service = createRunnerService({
     store: baseStore({
@@ -169,6 +256,108 @@ test("agent updates preserve tenant ownership and expose lifecycle conflicts", a
   );
 });
 
+test("agent updates preserve the explicit busy outcome", async () => {
+  const service = createRunnerService({
+    store: baseStore({
+      updateAgent: () => Promise.resolve({ kind: "busy" as const }),
+    }),
+  });
+
+  assert.deepEqual(
+    await service.updateAgent(PRINCIPAL, AGENT_ID, definition()),
+    { kind: "busy" }
+  );
+});
+
+test("agent updates reject unsupported runtimes before reading or mutating storage", async () => {
+  let reads = 0;
+  let writes = 0;
+  const service = createRunnerService({
+    store: baseStore({
+      getAgent: () => {
+        reads += 1;
+        return Promise.resolve(agent({ runtime: "cloud" }));
+      },
+      updateAgent: () => {
+        writes += 1;
+        return Promise.resolve({
+          kind: "updated" as const,
+          value: agent({ runtime: "copilot", version: 5 }),
+        });
+      },
+    }),
+  });
+
+  assert.deepEqual(
+    await service.updateAgent(
+      PRINCIPAL,
+      AGENT_ID,
+      definition({ runtime: "codex" })
+    ),
+    { kind: "unsupported_harness" }
+  );
+  assert.equal(reads, 0);
+  assert.equal(writes, 0);
+});
+
+test("legacy agents can migrate to a runnable runtime and remain deletable", async () => {
+  const legacy = agent({ runtime: "cloud" });
+  let updatedInput: unknown;
+  let deletions = 0;
+  const service = createRunnerService({
+    deleteSandbox: () => {
+      deletions += 1;
+      return Promise.resolve({ kind: "deleted" as const });
+    },
+    store: baseStore({
+      getAgent: async () => legacy,
+      updateAgent: (_principal: RunnerPrincipal, input: unknown) => {
+        updatedInput = input;
+        return Promise.resolve({
+          kind: "updated" as const,
+          value: agent({ runtime: "copilot", version: 5 }),
+        });
+      },
+    }),
+  });
+
+  const updated = await service.updateAgent(
+    PRINCIPAL,
+    AGENT_ID,
+    definition({ runtime: "copilot" })
+  );
+  assert.equal(updated.kind, "updated");
+  assert.equal(
+    (updatedInput as { runtime: string; expectedVersion: number }).runtime,
+    "copilot"
+  );
+  assert.equal(
+    (updatedInput as { runtime: string; expectedVersion: number })
+      .expectedVersion,
+    legacy.version
+  );
+  assert.deepEqual(await service.deleteAgent(PRINCIPAL, AGENT_ID), {
+    kind: "deleted",
+  });
+  assert.equal(deletions, 1);
+});
+
+test("agent updates report retryable database unavailability", async () => {
+  const service = createRunnerService({
+    store: baseStore({
+      updateAgent: () => Promise.reject(new Error("database=private-detail")),
+    }),
+  });
+
+  assert.deepEqual(
+    await service.updateAgent(PRINCIPAL, AGENT_ID, definition()),
+    {
+      kind: "unavailable",
+      source: "database",
+    }
+  );
+});
+
 test("agent deletion delegates provider-first decommissioning", async () => {
   const calls: string[] = [];
   const service = createRunnerService({
@@ -190,19 +379,20 @@ test("agent deletion preserves busy, stale, and provider retryability outcomes",
     [{ kind: "busy" }, { kind: "busy" }],
     [{ kind: "stale_version" }, { kind: "stale_version" }],
     [
-      { error: "retryable", kind: "failed" },
-      { kind: "provider_failure", retryable: true },
+      { kind: "unavailable", source: "provider" },
+      { kind: "unavailable", source: "provider" },
     ],
     [
-      { error: "non_retryable", kind: "failed" },
-      { kind: "provider_failure", retryable: false },
+      { kind: "unavailable", source: "database" },
+      { kind: "unavailable", source: "database" },
     ],
+    [{ kind: "provider_rejected" }, { kind: "provider_rejected" }],
   ] as const;
 
   await Promise.all(
     outcomes.map(async ([providerResult, expected]) => {
       const service = createRunnerService({
-        deleteSandbox: async () => providerResult,
+        deleteSandbox: async () => providerResult as never,
         store: baseStore(),
       });
       assert.deepEqual(
@@ -211,6 +401,19 @@ test("agent deletion preserves busy, stale, and provider retryability outcomes",
       );
     })
   );
+});
+
+test("agent deletion converts thrown provider or database work into retryable unavailability", async () => {
+  const service = createRunnerService({
+    deleteSandbox: () =>
+      Promise.reject(new Error("provider-or-database=private-detail")),
+    store: baseStore(),
+  });
+
+  assert.deepEqual(await service.deleteAgent(PRINCIPAL, AGENT_ID), {
+    kind: "unavailable",
+    source: "provider",
+  });
 });
 
 test("start maps idempotent admission outcomes and preserves a request hash", async () => {
@@ -246,7 +449,7 @@ test("start maps idempotent admission outcomes and preserves a request hash", as
   assert.equal((admission as { authVersion: number }).authVersion, 7);
 });
 
-test("start dispatches an admitted claim once with its exact authority", async () => {
+test("start preserves an admitted claim as opaque scheduling intent", async () => {
   const authority = {
     expectedVersion: 1,
     leaseToken: "opaque-claim",
@@ -277,10 +480,13 @@ test("start dispatches an admitted claim once with its exact authority", async (
     task: "Do the thing.",
   });
 
-  assert.deepEqual(started, { kind: "accepted", run: run() });
-  assert.equal(dispatched.length, 1);
-  assert.equal(dispatched[0], claim);
-  assert.equal(dispatched[0]?.authority, authority);
+  assert.deepEqual(started, {
+    admission: "claimed",
+    claimed: claim,
+    kind: "accepted",
+    run: run(),
+  });
+  assert.equal(dispatched.length, 0);
 });
 
 test("start preserves duplicates without dispatch or recovery scheduling", async () => {
@@ -303,7 +509,7 @@ test("start preserves duplicates without dispatch or recovery scheduling", async
       operationId: OPERATION_ID,
       task: "Do the thing.",
     }),
-    { kind: "accepted", run: existing }
+    { admission: "duplicate", kind: "accepted", run: existing }
   );
   assert.equal(dispatched, 0);
 });
@@ -322,11 +528,11 @@ test("start marks only newly queued runs for bounded recovery", async () => {
       operationId: OPERATION_ID,
       task: "Do the thing.",
     }),
-    { kind: "accepted", run: run(), scheduleReconciliation: true }
+    { admission: "created", kind: "accepted", run: run() }
   );
 });
 
-test("claimed dispatch failures stay sanitized and defer to durable recovery", async () => {
+test("start does not begin claimed provider dispatch before scheduling", async () => {
   const claim = {
     authority: {
       expectedVersion: 1,
@@ -346,7 +552,7 @@ test("claimed dispatch failures stay sanitized and defer to durable recovery", a
     createId: () => RUN_ID,
     dispatchClaim: () => {
       dispatches += 1;
-      return Promise.reject(new Error("provider=private-detail"));
+      return new Promise(() => undefined);
     },
     store: baseStore(),
   });
@@ -356,10 +562,13 @@ test("claimed dispatch failures stay sanitized and defer to durable recovery", a
     task: "Do the thing.",
   });
 
-  assert.deepEqual(started, { kind: "accepted", run: run() });
-  assert.equal(dispatches, 1);
-  assert.equal(JSON.stringify(started).includes("private-detail"), false);
-  assert.equal(JSON.stringify(started).includes("opaque-secret-claim"), false);
+  assert.deepEqual(started, {
+    admission: "claimed",
+    claimed: claim,
+    kind: "accepted",
+    run: run(),
+  });
+  assert.equal(dispatches, 0);
 });
 
 test("start maps admission conflict, capacity, and unavailable results without provider work", async () => {
@@ -419,6 +628,61 @@ test("start maps admission conflict, capacity, and unavailable results without p
       );
     })
   );
+});
+
+test("start converts an admission exception into typed retryable unavailability", async () => {
+  const service = createRunnerService({
+    admit: () => Promise.reject(new Error("database=private-detail")),
+    createId: () => RUN_ID,
+    store: baseStore(),
+  });
+
+  assert.deepEqual(
+    await service.startRun(PRINCIPAL, 1, AGENT_ID, {
+      operationId: OPERATION_ID,
+      task: "Do the thing.",
+    }),
+    {
+      code: "admission_unavailable",
+      kind: "refused",
+      retryable: true,
+    }
+  );
+});
+
+test("start rejects legacy runtimes before admission, persistence, dispatch, or scheduling", async () => {
+  let admissions = 0;
+  let dispatches = 0;
+  let runWrites = 0;
+  const service = createRunnerService({
+    admit: () => {
+      admissions += 1;
+      return Promise.resolve({ kind: "created" as const, run: run() });
+    },
+    createId: () => RUN_ID,
+    dispatchClaim: () => {
+      dispatches += 1;
+      return Promise.resolve({ kind: "idle" });
+    },
+    store: baseStore({
+      getAgent: async () => agent({ runtime: "cloud" }),
+      startRun: () => {
+        runWrites += 1;
+        return Promise.resolve({ kind: "created" as const, run: run() });
+      },
+    }),
+  });
+
+  assert.deepEqual(
+    await service.startRun(PRINCIPAL, 1, AGENT_ID, {
+      operationId: OPERATION_ID,
+      task: "Do the thing.",
+    }),
+    { kind: "unsupported_harness" }
+  );
+  assert.equal(admissions, 0);
+  assert.equal(runWrites, 0);
+  assert.equal(dispatches, 0);
 });
 
 test("run reads and event pages remain tenant scoped and terminal-aware", async () => {
@@ -489,6 +753,224 @@ test("stop verifies tenant ownership before cancellation and returns terminal sn
   assert.equal(cancellationCalls, 1);
 });
 
+test("reconciliation recovers a cancelled terminal row after lease cleanup failed", async () => {
+  let cleanupAttempts = 0;
+  let persisted: RunnerRunRecord = {
+    agentId: AGENT_ID,
+    authVersion: 1,
+    cancellationRequestedAt: null,
+    commandEvidence: [],
+    completedAt: null,
+    createdAt: new Date("2026-08-28T15:00:00.000Z"),
+    daytonaAttemptId: null,
+    daytonaCommandId: null,
+    daytonaLogCursor: 0,
+    daytonaSessionId: null,
+    dispatchLeaseExpiresAt: new Date("2026-08-28T14:59:00.000Z"),
+    dispatchLeaseToken: "initial-lease",
+    dispatchState: "dispatching",
+    error: null,
+    fileEvidence: [],
+    id: RUN_ID,
+    logCursor: 1,
+    operationId: OPERATION_ID,
+    output: "",
+    queueSequence: 1,
+    requestHash: "a".repeat(64),
+    startedAt: null,
+    status: "queued",
+    task: "Do the thing.",
+    tenant: PRINCIPAL.tenant,
+    version: 1,
+  };
+  const snapshot = (): RunSnapshot => ({
+    agentId: persisted.agentId,
+    apiVersion: AGENT_RUNNER_API_VERSION,
+    commandEvidence: persisted.commandEvidence,
+    completedAt: persisted.completedAt?.toISOString() ?? null,
+    createdAt: persisted.createdAt.toISOString(),
+    error: persisted.error,
+    fileEvidence: persisted.fileEvidence,
+    id: persisted.id,
+    operationId: persisted.operationId,
+    output: persisted.output,
+    startedAt: persisted.startedAt?.toISOString() ?? null,
+    status: persisted.status,
+    task: persisted.task,
+  });
+  const cleanupTerminalLease = (
+    _operator: RunnerOperator,
+    authority: RunnerDispatchAuthority
+  ) => {
+    cleanupAttempts += 1;
+    if (cleanupAttempts === 1) {
+      return Promise.reject(new Error("simulated cleanup database failure"));
+    }
+    if (
+      persisted.id !== authority.runId ||
+      persisted.version !== authority.expectedVersion ||
+      persisted.dispatchLeaseToken !== authority.leaseToken
+    ) {
+      return Promise.resolve({ kind: "stale_version" as const });
+    }
+    persisted = {
+      ...persisted,
+      dispatchLeaseExpiresAt: null,
+      dispatchLeaseToken: null,
+      version: persisted.version + 1,
+    };
+    return Promise.resolve({ kind: "updated" as const, value: persisted });
+  };
+  const cancellationStore = {
+    cleanupTerminalLease,
+    finalizeRun: (
+      _operator: RunnerOperator,
+      input: {
+        completedAt: Date;
+        expectedVersion: number;
+        leaseToken: string;
+      }
+    ) => {
+      persisted = {
+        ...persisted,
+        completedAt: input.completedAt,
+        dispatchState: "terminal",
+        status: "cancelled",
+        version: persisted.version + 1,
+      };
+      return Promise.resolve({
+        kind: "finalized" as const,
+        prunedRunIds: [],
+        run: persisted,
+      });
+    },
+    requestRunCancellation: () => {
+      if (persisted.dispatchState === "terminal") {
+        return Promise.resolve({
+          kind: "already_terminal" as const,
+          run: persisted,
+        });
+      }
+      persisted = {
+        ...persisted,
+        cancellationRequestedAt: new Date("2026-08-28T15:00:00.000Z"),
+        dispatchLeaseExpiresAt: new Date("2026-08-28T15:01:00.000Z"),
+        dispatchLeaseToken: "cancel-lease",
+        version: persisted.version + 1,
+      };
+      return Promise.resolve({
+        authority: {
+          expectedVersion: persisted.version,
+          leaseToken: persisted.dispatchLeaseToken,
+          runId: persisted.id,
+        } as RunnerDispatchAuthority,
+        kind: "requested" as const,
+        run: persisted,
+      });
+    },
+  };
+  const cancelRun = (runId: string) =>
+    cancelRunnerRun(runId, {
+      clock: () => new Date("2026-08-28T15:00:00.000Z"),
+      operator: OPERATOR,
+      provider: {
+        resolveSandbox: () => Promise.reject(new Error("must not resolve")),
+        stop: () => Promise.reject(new Error("must not stop")),
+      },
+      rollbackCredentialResources: () => Promise.resolve(),
+      store: cancellationStore as never,
+    });
+  const service = createRunnerService({
+    cancelRun,
+    store: baseStore({ getRun: async () => snapshot() }),
+  });
+
+  assert.deepEqual(await service.stopRun(PRINCIPAL, RUN_ID), {
+    kind: "unavailable",
+    source: "database",
+  });
+  assert.equal(persisted.dispatchState, "terminal");
+  assert.equal(persisted.daytonaAttemptId, null);
+  assert.equal(persisted.dispatchLeaseToken, "cancel-lease");
+
+  const reconciliation = await reconcileAndDispatch({
+    operator: OPERATOR,
+    provider: {
+      resolveSandbox: () => Promise.reject(new Error("must not resolve")),
+      stop: () => Promise.reject(new Error("must not stop")),
+    },
+    store: {
+      cleanupTerminalLease,
+      scanExpiredDispatchLeases: async () => [],
+      scanTerminalLeaseCleanups: async () => [persisted],
+    } as never,
+  });
+
+  assert.equal(reconciliation.terminalLeaseCleaned, 1);
+  assert.equal(persisted.dispatchLeaseToken, null);
+  const stopped = await service.stopRun(PRINCIPAL, RUN_ID);
+  assert.equal(stopped.kind, "stopped");
+  assert.equal(stopped.kind === "stopped" && stopped.run.status, "cancelled");
+});
+
+test("stop preserves cancellation in-progress and cleanup-required outcomes", async () => {
+  const outcomes = [
+    ["in_progress", "in_progress"],
+    ["cleanup_required", "cleanup_required"],
+    ["sandbox_reset_required", "sandbox_reset_required"],
+    ["stale_version", "stale_version"],
+  ] as const;
+
+  await Promise.all(
+    outcomes.map(async ([cancelKind, expectedKind]) => {
+      const service = createRunnerService({
+        cancelRun: async () => ({ kind: cancelKind, runId: RUN_ID }),
+        store: baseStore(),
+      });
+      const result = await service.stopRun(PRINCIPAL, RUN_ID);
+      assert.equal(result.kind, expectedKind);
+      if (result.kind === "in_progress") {
+        assert.equal(result.run.id, RUN_ID);
+        assert.equal(result.scheduleReconciliation, true);
+      }
+    })
+  );
+});
+
+test("stop preserves provider and database cancellation unavailability", async () => {
+  const outcomes = ["provider", "database"] as const;
+  await Promise.all(
+    outcomes.map(async (source) => {
+      const service = createRunnerService({
+        cancelRun: async () => ({
+          kind: "unavailable" as const,
+          runId: RUN_ID,
+          source,
+        }),
+        store: baseStore(),
+      });
+      assert.deepEqual(await service.stopRun(PRINCIPAL, RUN_ID), {
+        kind: "unavailable",
+        source,
+      });
+    })
+  );
+});
+
+test("stop reports retryable database unavailability", async () => {
+  const service = createRunnerService({
+    cancelRun: async () => ({ kind: "cancelled", runId: RUN_ID }),
+    store: baseStore({
+      getRun: () => Promise.reject(new Error("database=private-detail")),
+    }),
+  });
+
+  assert.deepEqual(await service.stopRun(PRINCIPAL, RUN_ID), {
+    kind: "unavailable",
+    source: "database",
+  });
+});
+
 test("prewarm targets the most recently used agent without credential access", async () => {
   const warmed: string[] = [];
   const service = createRunnerService({
@@ -507,17 +989,148 @@ test("prewarm targets the most recently used agent without credential access", a
     }),
     warmSandbox: (_principal, target) => {
       warmed.push(target.id);
-      return Promise.resolve({ kind: "in_progress" as const });
+      return Promise.resolve({
+        agent: agent({
+          id: target.id,
+          warmStatus: "provisioning",
+          warmUpdatedAt: new Date("2026-08-28T16:00:00.000Z"),
+        }),
+        kind: "in_progress" as const,
+      });
     },
   });
 
   assert.deepEqual(await service.prewarmMostRecent(PRINCIPAL), {
     agentId: OTHER_AGENT_ID,
-    kind: "warmed",
+    kind: "in_progress",
     warm: {
       status: "provisioning",
       updatedAt: "2026-08-28T16:00:00.000Z",
     },
   });
   assert.deepEqual(warmed, [OTHER_AGENT_ID]);
+});
+
+test("prewarm and warm reject legacy runtimes before sandbox mutation or provider work", async () => {
+  let warmCalls = 0;
+  const legacy = agent({ runtime: "cloud" });
+  const service = createRunnerService({
+    store: baseStore({
+      getAgent: async () => legacy,
+      listAgents: async () => [legacy],
+    }),
+    warmSandbox: () => {
+      warmCalls += 1;
+      return Promise.resolve({
+        agent: legacy,
+        kind: "in_progress" as const,
+      });
+    },
+  });
+
+  assert.deepEqual(await service.prewarmMostRecent(PRINCIPAL), {
+    kind: "unsupported_harness",
+  });
+  assert.deepEqual(await service.warmAgent(PRINCIPAL, AGENT_ID), {
+    kind: "unsupported_harness",
+  });
+  assert.equal(warmCalls, 0);
+});
+
+test("warm reports ready, in-progress, stale, missing, unavailable, and rejected outcomes", async () => {
+  const readyAgent = agent({
+    warmStatus: "ready",
+    warmUpdatedAt: new Date("2026-08-28T16:00:00.000Z"),
+  });
+  const progressingAgent = agent({
+    warmStatus: "provisioning",
+    warmUpdatedAt: new Date("2026-08-28T16:01:00.000Z"),
+  });
+  const outcomes = [
+    [
+      { agent: readyAgent, kind: "ready" },
+      {
+        kind: "ready",
+        warm: {
+          status: "ready",
+          updatedAt: "2026-08-28T16:00:00.000Z",
+        },
+      },
+    ],
+    [
+      { agent: progressingAgent, kind: "in_progress" },
+      {
+        kind: "in_progress",
+        warm: {
+          status: "provisioning",
+          updatedAt: "2026-08-28T16:01:00.000Z",
+        },
+      },
+    ],
+    [{ kind: "not_found" }, { kind: "not_found" }],
+    [{ kind: "stale_version" }, { kind: "stale_version" }],
+    [
+      { kind: "unavailable", source: "provider" },
+      { kind: "unavailable", source: "provider" },
+    ],
+    [{ kind: "provider_rejected" }, { kind: "provider_rejected" }],
+  ] as const;
+
+  await Promise.all(
+    outcomes.map(async ([providerResult, expected]) => {
+      const service = createRunnerService({
+        store: baseStore(),
+        warmSandbox: async () => providerResult as never,
+      });
+      assert.deepEqual(await service.warmAgent(PRINCIPAL, AGENT_ID), expected);
+    })
+  );
+});
+
+test("prewarm exposes concurrency and typed provider/database failures", async () => {
+  const outcomes = [
+    [
+      {
+        agent: agent({
+          warmStatus: "provisioning",
+          warmUpdatedAt: new Date("2026-08-28T16:01:00.000Z"),
+        }),
+        kind: "in_progress",
+      },
+      {
+        agentId: AGENT_ID,
+        kind: "in_progress",
+        warm: {
+          status: "provisioning",
+          updatedAt: "2026-08-28T16:01:00.000Z",
+        },
+      },
+    ],
+    [{ kind: "stale_version" }, { kind: "stale_version" }],
+    [
+      { kind: "unavailable", source: "provider" },
+      { kind: "unavailable", source: "provider" },
+    ],
+    [{ kind: "provider_rejected" }, { kind: "provider_rejected" }],
+  ] as const;
+
+  await Promise.all(
+    outcomes.map(async ([providerResult, expected]) => {
+      const service = createRunnerService({
+        store: baseStore(),
+        warmSandbox: async () => providerResult as never,
+      });
+      assert.deepEqual(await service.prewarmMostRecent(PRINCIPAL), expected);
+    })
+  );
+
+  const unavailable = createRunnerService({
+    store: baseStore({
+      listAgents: () => Promise.reject(new Error("database=private-detail")),
+    }),
+  });
+  assert.deepEqual(await unavailable.prewarmMostRecent(PRINCIPAL), {
+    kind: "unavailable",
+    source: "database",
+  });
 });

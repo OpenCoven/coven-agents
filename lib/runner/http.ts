@@ -4,15 +4,11 @@ import { randomUUID } from "node:crypto";
 import {
   AGENT_RUNNER_API_VERSION,
   AGENT_RUNNER_CAPABILITIES,
-  AGENT_RUNNER_LIMITS,
   agentEnvelopeSchema,
-  agentIdSchema,
   agentRunnerHealthSchema,
   agentsEnvelopeSchema,
   createAgentInputSchema,
   okEnvelopeSchema,
-  type RunErrorEnvelope,
-  runErrorEnvelopeSchema,
   runListEnvelopeSchema,
   runSnapshotEnvelopeSchema,
   startRunInputSchema,
@@ -22,23 +18,31 @@ import {
   SUPPORTED_HARNESS_IDS,
 } from "@opencoven/harness";
 import { z } from "zod";
-import { readBoundedJson } from "@/lib/abuse/body";
 import type {
   AbuseAdmission,
   AbuseEnforcementInput,
 } from "@/lib/abuse/enforce";
-import { abusePolicyFor } from "@/lib/abuse/policy";
+import { admitAndScheduleRunnerRun } from "./admit-and-schedule";
 import type {
   RunnerAuth,
   RunnerAuthenticatedSubscriber,
   RunnerSecretAuthorization,
   RunnerSubscriberAuthorization,
 } from "./auth";
-import type { RunnerReconciliationResult } from "./reconcile";
-import { type RunnerService, RunnerServiceError } from "./service";
+import { RunnerServiceError } from "./errors";
+import type { RunnerReconciliationExecutionResult } from "./reconcile";
+import type { RunnerDiagnosticResult, RunnerService } from "./service";
 import { createRunEventStream } from "./sse";
+import {
+  readRunnerJson as boundedJson,
+  readEmptyRunnerJson as emptyBody,
+  invalidRunnerId as invalidId,
+  parseRunnerEventCursor as parseLastEventId,
+  runnerErrorResponse,
+  runnerJsonResponse,
+  unreachableRunnerResult as unreachableResult,
+} from "./transport";
 
-const emptyObjectSchema = z.object({}).strict();
 const diagnosticResponseSchema = z
   .object({
     exitCode: z.number().int().min(0).max(255),
@@ -56,12 +60,14 @@ type After = (callback: () => void | Promise<void>) => void;
 export type RunnerHttpDependencies = Readonly<{
   after?: After;
   auth: RunnerAuth;
+  createDiagnosticName?: () => string;
   createEventStream?: typeof createRunEventStream;
   createRequestId?: () => string;
   createOperatorService: () => RunnerService | Promise<RunnerService>;
   createService: (
     subscriber: RunnerAuthenticatedSubscriber
   ) => RunnerService | Promise<RunnerService>;
+  diagnoseSandbox: (name: string) => Promise<RunnerDiagnosticResult>;
   enforceAbuse: (input: AbuseEnforcementInput) => Promise<AbuseAdmission>;
   ipAddress: (request: Request) => string | null;
   logger?: RunnerHttpLogger;
@@ -85,74 +91,32 @@ export type RunnerHttpHandlers = Readonly<{
   updateAgent: (request: Request, agentId: string) => Promise<Response>;
 }>;
 
-type BoundedJsonResult<T> =
-  | Readonly<{ kind: "ok"; value: T }>
-  | Readonly<{ kind: "response"; response: Response }>;
-
-function requestId(dependencies: RunnerHttpDependencies): string {
-  const candidate = dependencies.createRequestId?.() ?? randomUUID();
-  const normalized =
-    typeof candidate === "string"
-      ? candidate.trim().slice(0, AGENT_RUNNER_LIMITS.maxRequestIdLength)
-      : "";
-  return normalized || randomUUID();
-}
-
-function errorResponse(
-  dependencies: RunnerHttpDependencies,
-  status: number,
-  code: string,
-  message: string,
-  retryable: boolean
-): Response {
-  const body: RunErrorEnvelope = runErrorEnvelopeSchema.parse({
-    apiVersion: AGENT_RUNNER_API_VERSION,
-    error: { code, message, retryable },
-    requestId: requestId(dependencies),
-  });
-  return Response.json(body, {
-    headers: { "cache-control": "no-store" },
-    status,
-  });
-}
-
 function invalidRequest(dependencies: RunnerHttpDependencies): Response {
-  return errorResponse(
-    dependencies,
-    400,
-    "invalid_request",
-    "Request validation failed.",
-    false
-  );
-}
-
-function invalidId(
-  dependencies: RunnerHttpDependencies,
-  value: string
-): Response | null {
-  return agentIdSchema.safeParse(value).success
-    ? null
-    : invalidRequest(dependencies);
+  return runnerErrorResponse(dependencies, "invalid_request");
 }
 
 function agentNotFound(dependencies: RunnerHttpDependencies): Response {
-  return errorResponse(
-    dependencies,
-    404,
-    "not_found",
-    "Agent was not found.",
-    false
-  );
+  return runnerErrorResponse(dependencies, "not_found");
 }
 
 function runNotFound(dependencies: RunnerHttpDependencies): Response {
-  return errorResponse(
-    dependencies,
-    404,
-    "run_not_found",
-    "Run was not found.",
-    false
-  );
+  return runnerErrorResponse(dependencies, "run_not_found");
+}
+
+function runnerUnavailable(dependencies: RunnerHttpDependencies): Response {
+  return runnerErrorResponse(dependencies, "runner_unavailable");
+}
+
+function providerUnavailable(dependencies: RunnerHttpDependencies): Response {
+  return runnerErrorResponse(dependencies, "provider_unavailable");
+}
+
+function providerRejected(dependencies: RunnerHttpDependencies): Response {
+  return runnerErrorResponse(dependencies, "provider_rejected");
+}
+
+function staleVersion(dependencies: RunnerHttpDependencies): Response {
+  return runnerErrorResponse(dependencies, "stale_version");
 }
 
 function subscriberFailure(
@@ -160,20 +124,8 @@ function subscriberFailure(
   decision: Exclude<RunnerSubscriberAuthorization, { kind: "allowed" }>
 ): Response {
   return decision.kind === "unauthorized"
-    ? errorResponse(
-        dependencies,
-        401,
-        "unauthorized",
-        "Identity was rejected.",
-        false
-      )
-    : errorResponse(
-        dependencies,
-        403,
-        "subscription_required",
-        "An active subscription is required.",
-        false
-      );
+    ? runnerErrorResponse(dependencies, "unauthorized")
+    : runnerErrorResponse(dependencies, "subscription_required");
 }
 
 function secretFailure(
@@ -182,20 +134,10 @@ function secretFailure(
   unavailableCode: "diagnostic_unavailable" | "reconcile_unavailable"
 ): Response {
   return decision.kind === "unavailable"
-    ? errorResponse(
-        dependencies,
-        503,
-        unavailableCode,
-        "Please try again later.",
-        true
-      )
-    : errorResponse(
-        dependencies,
-        401,
-        "unauthorized",
-        "Operator token was rejected.",
-        false
-      );
+    ? runnerErrorResponse(dependencies, unavailableCode)
+    : runnerErrorResponse(dependencies, "unauthorized", {
+        message: "Operator token was rejected.",
+      });
 }
 
 function abuseFailure(
@@ -203,23 +145,11 @@ function abuseFailure(
   admission: Exclude<AbuseAdmission, { kind: "allowed" }>
 ): Response {
   if (admission.kind === "denied") {
-    const response = errorResponse(
-      dependencies,
-      429,
-      "rate_limited",
-      "Too many requests. Try again later.",
-      true
-    );
+    const response = runnerErrorResponse(dependencies, "rate_limited");
     response.headers.set("retry-after", String(admission.retryAfterSeconds));
     return response;
   }
-  return errorResponse(
-    dependencies,
-    503,
-    "abuse_control_unavailable",
-    "Please try again later.",
-    true
-  );
+  return runnerErrorResponse(dependencies, "abuse_control_unavailable");
 }
 
 function policyInput(
@@ -286,70 +216,17 @@ async function authorizeSecret(
   return null;
 }
 
-async function boundedJson<T>(
-  request: Request,
-  route: AbuseEnforcementInput["route"],
-  schema: z.ZodType<T>,
-  dependencies: RunnerHttpDependencies,
-  options?: { emptyBody?: unknown }
-): Promise<BoundedJsonResult<T>> {
-  const body = await readBoundedJson(
-    request,
-    abusePolicyFor(route).bodyBytes,
-    schema,
-    options
-  );
-  if (body.kind === "ok") {
-    return body;
-  }
-  return {
-    kind: "response",
-    response:
-      body.kind === "too_large"
-        ? errorResponse(
-            dependencies,
-            413,
-            "body_too_large",
-            "Request body is too large.",
-            false
-          )
-        : invalidRequest(dependencies),
-  };
-}
-
 function isResponse(
   value: Response | RunnerAuthenticatedSubscriber
 ): value is Response {
   return value instanceof Response;
 }
 
-function parseLastEventId(
-  request: Request,
-  dependencies: RunnerHttpDependencies
-): number | Response {
-  const raw = request.headers.get("last-event-id");
-  if (raw === null) {
-    return 0;
-  }
-  if (!/^(?:0|[1-9]\d*)$/u.test(raw)) {
-    return errorResponse(
-      dependencies,
-      400,
-      "invalid_event_cursor",
-      "Last-Event-ID must be a non-negative integer.",
-      false
-    );
-  }
-  const parsed = Number(raw);
-  return Number.isSafeInteger(parsed)
-    ? parsed
-    : errorResponse(
-        dependencies,
-        400,
-        "invalid_event_cursor",
-        "Last-Event-ID must be a non-negative integer.",
-        false
-      );
+function diagnosticName(dependencies: RunnerHttpDependencies): string {
+  return (
+    dependencies.createDiagnosticName?.() ??
+    `coven-diagnostic-${randomUUID().replaceAll("-", "")}`
+  );
 }
 
 function schedule(
@@ -372,9 +249,31 @@ function schedule(
   }
 }
 
+async function warmAndReconcile(
+  service: RunnerService,
+  principal: RunnerAuthenticatedSubscriber["principal"],
+  agentId: string
+): Promise<void> {
+  const warm = await service.warmAgent(principal, agentId);
+  switch (warm.kind) {
+    case "found":
+    case "in_progress":
+    case "not_found":
+    case "provider_rejected":
+    case "ready":
+    case "stale_version":
+    case "unavailable":
+    case "unsupported_harness":
+      break;
+    default:
+      unreachableResult(warm);
+  }
+  await service.reconcileAndDispatch();
+}
+
 function reconciliationCounts(
-  result: RunnerReconciliationResult
-): RunnerReconciliationResult {
+  result: RunnerReconciliationExecutionResult
+): RunnerReconciliationExecutionResult {
   const fields = [
     "adopted",
     "deferred",
@@ -385,6 +284,7 @@ function reconciliationCounts(
     "requeued",
     "sandboxRecovered",
     "terminalCleaned",
+    "terminalLeaseCleaned",
     "terminalized",
   ] as const;
   for (const field of fields) {
@@ -395,7 +295,7 @@ function reconciliationCounts(
       );
     }
   }
-  return {
+  const counts = {
     adopted: result.adopted,
     deferred: result.deferred,
     dispatched: result.dispatched,
@@ -406,7 +306,24 @@ function reconciliationCounts(
     sandboxRecovered: result.sandboxRecovered,
     terminalCleaned: result.terminalCleaned,
     terminalized: result.terminalized,
+    terminalLeaseCleaned: result.terminalLeaseCleaned,
   };
+  if (result.execution === "skipped") {
+    if (result.reason !== "overlap") {
+      throw new RunnerServiceError(
+        "reconcile_unavailable",
+        "Runner reconciliation returned an invalid skip reason."
+      );
+    }
+    return { ...counts, execution: "skipped", reason: "overlap" };
+  }
+  if (result.execution !== "executed") {
+    throw new RunnerServiceError(
+      "reconcile_unavailable",
+      "Runner reconciliation returned an invalid execution indicator."
+    );
+  }
+  return { ...counts, execution: "executed" };
 }
 
 function serviceFailure(
@@ -416,49 +333,27 @@ function serviceFailure(
   if (error instanceof RunnerServiceError) {
     switch (error.code) {
       case "diagnostic_unavailable":
-        return errorResponse(
-          dependencies,
-          503,
-          "diagnostic_unavailable",
-          "Please try again later.",
-          true
-        );
+        return runnerErrorResponse(dependencies, "diagnostic_unavailable");
       case "reconcile_unavailable":
-        return errorResponse(
-          dependencies,
-          503,
-          "reconcile_unavailable",
-          "Please try again later.",
-          true
-        );
+        return runnerErrorResponse(dependencies, "reconcile_unavailable");
       case "service_unavailable":
-        return errorResponse(
-          dependencies,
-          503,
-          "runner_unavailable",
-          "Runner service is temporarily unavailable. Try again later.",
-          true
+        return runnerUnavailable(dependencies);
+      default: {
+        const unsupportedCode: never = error.code;
+        dependencies.logger?.error(
+          "Runner service error code is unsupported.",
+          {
+            name: String(unsupportedCode),
+          }
         );
-      default:
-        return errorResponse(
-          dependencies,
-          503,
-          "runner_unavailable",
-          "Runner service is temporarily unavailable. Try again later.",
-          true
-        );
+        return runnerErrorResponse(dependencies, "internal_error");
+      }
     }
   }
   dependencies.logger?.error("Runner HTTP request failed.", {
     name: error instanceof Error ? error.name : typeof error,
   });
-  return errorResponse(
-    dependencies,
-    500,
-    "internal_error",
-    "Runner request failed.",
-    true
-  );
+  return runnerErrorResponse(dependencies, "internal_error");
 }
 
 async function safely(
@@ -470,20 +365,6 @@ async function safely(
   } catch (error) {
     return serviceFailure(dependencies, error);
   }
-}
-
-function emptyBody(
-  request: Request,
-  route:
-    | "runner_diagnostic"
-    | "runner_reconcile"
-    | "runner_stop"
-    | "runner_write",
-  dependencies: RunnerHttpDependencies
-): Promise<BoundedJsonResult<Record<string, never>>> {
-  return boundedJson(request, route, emptyObjectSchema, dependencies, {
-    emptyBody: {},
-  });
 }
 
 export function createRunnerHttpHandlers(
@@ -516,35 +397,33 @@ export function createRunnerHttpHandlers(
           context.principal,
           body.value
         );
-        if (created.kind === "invalid") {
-          return invalidRequest(dependencies);
+        switch (created.kind) {
+          case "invalid":
+            return invalidRequest(dependencies);
+          case "unsupported_harness":
+            return runnerErrorResponse(dependencies, "harness_unsupported", {
+              message: `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+            });
+          case "conflict":
+            return runnerErrorResponse(dependencies, "operation_conflict");
+          case "unavailable":
+            return runnerUnavailable(dependencies);
+          case "created":
+            schedule(dependencies, async () => {
+              await warmAndReconcile(
+                service,
+                context.principal,
+                created.agent.id
+              );
+            });
+            return runnerJsonResponse(
+              agentEnvelopeSchema,
+              { agent: created.agent },
+              { status: 201 }
+            );
+          default:
+            return unreachableResult(created);
         }
-        if (created.kind === "unsupported_harness") {
-          return errorResponse(
-            dependencies,
-            400,
-            "harness_unsupported",
-            `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
-            false
-          );
-        }
-        if (created.kind === "conflict") {
-          return errorResponse(
-            dependencies,
-            409,
-            "operation_conflict",
-            "Agent creation conflicted with a concurrent operation.",
-            true
-          );
-        }
-        schedule(dependencies, async () => {
-          await service.warmAgent(context.principal, created.agent.id);
-          await service.reconcileAndDispatch();
-        });
-        return Response.json(
-          agentEnvelopeSchema.parse({ agent: created.agent }),
-          { status: 201 }
-        );
       }),
 
     deleteAgent: (request, agentId) =>
@@ -563,39 +442,24 @@ export function createRunnerHttpHandlers(
         }
         const service = await dependencies.createService(context);
         const deleted = await service.deleteAgent(context.principal, agentId);
-        if (deleted.kind === "not_found") {
-          return agentNotFound(dependencies);
+        switch (deleted.kind) {
+          case "not_found":
+            return agentNotFound(dependencies);
+          case "busy":
+            return runnerErrorResponse(dependencies, "busy");
+          case "stale_version":
+            return staleVersion(dependencies);
+          case "unavailable":
+            return deleted.source === "provider"
+              ? providerUnavailable(dependencies)
+              : runnerUnavailable(dependencies);
+          case "provider_rejected":
+            return providerRejected(dependencies);
+          case "deleted":
+            return runnerJsonResponse(okEnvelopeSchema, { ok: true });
+          default:
+            return unreachableResult(deleted);
         }
-        if (deleted.kind === "busy") {
-          return errorResponse(
-            dependencies,
-            409,
-            "busy",
-            "The agent is busy. Try again later.",
-            true
-          );
-        }
-        if (deleted.kind === "stale_version") {
-          return errorResponse(
-            dependencies,
-            409,
-            "stale_version",
-            "The agent changed concurrently. Try again.",
-            true
-          );
-        }
-        if (deleted.kind === "provider_failure") {
-          return errorResponse(
-            dependencies,
-            deleted.retryable ? 503 : 422,
-            deleted.retryable ? "provider_unavailable" : "provider_rejected",
-            deleted.retryable
-              ? "Runner provider is temporarily unavailable. Try again later."
-              : "Runner provider rejected the operation.",
-            deleted.retryable
-          );
-        }
-        return Response.json(okEnvelopeSchema.parse({ ok: true }));
       }),
 
     diagnoseSandbox: (request) =>
@@ -616,9 +480,9 @@ export function createRunnerHttpHandlers(
         if (body.kind !== "ok") {
           return body.response;
         }
-        const service = await dependencies.createOperatorService();
-        return Response.json(
-          diagnosticResponseSchema.parse(await service.diagnoseSandbox())
+        return runnerJsonResponse(
+          diagnosticResponseSchema,
+          await dependencies.diagnoseSandbox(diagnosticName(dependencies))
         );
       }),
 
@@ -639,7 +503,7 @@ export function createRunnerHttpHandlers(
         const service = await dependencies.createService(context);
         const result = await service.getAgent(context.principal, agentId);
         return result.kind === "found"
-          ? Response.json(agentEnvelopeSchema.parse({ agent: result.agent }))
+          ? runnerJsonResponse(agentEnvelopeSchema, { agent: result.agent })
           : agentNotFound(dependencies);
       }),
 
@@ -654,11 +518,9 @@ export function createRunnerHttpHandlers(
           return context;
         }
         const service = await dependencies.createService(context);
-        return Response.json(
-          harnessesEnvelopeSchema.parse({
-            harnesses: await service.listHarnesses(),
-          })
-        );
+        return runnerJsonResponse(harnessesEnvelopeSchema, {
+          harnesses: await service.listHarnesses(),
+        });
       }),
 
     getRun: (request, runId) =>
@@ -678,12 +540,10 @@ export function createRunnerHttpHandlers(
         const service = await dependencies.createService(context);
         const result = await service.getRun(context.principal, runId);
         return result.kind === "found"
-          ? Response.json(
-              runSnapshotEnvelopeSchema.parse({
-                apiVersion: AGENT_RUNNER_API_VERSION,
-                run: result.run,
-              })
-            )
+          ? runnerJsonResponse(runSnapshotEnvelopeSchema, {
+              apiVersion: AGENT_RUNNER_API_VERSION,
+              run: result.run,
+            })
           : runNotFound(dependencies);
       }),
 
@@ -748,14 +608,12 @@ export function createRunnerHttpHandlers(
         if (admission.kind !== "allowed") {
           return abuseFailure(dependencies, admission);
         }
-        return Response.json(
-          agentRunnerHealthSchema.parse({
-            apiVersion: AGENT_RUNNER_API_VERSION,
-            capabilities: [...AGENT_RUNNER_CAPABILITIES],
-            minimumClientVersion: "1.0.0",
-            mode: "cloud",
-          })
-        );
+        return runnerJsonResponse(agentRunnerHealthSchema, {
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          capabilities: [...AGENT_RUNNER_CAPABILITIES],
+          minimumClientVersion: "1.0.0",
+          mode: "cloud",
+        });
       }),
 
     listAgentRuns: (request, agentId) =>
@@ -775,12 +633,10 @@ export function createRunnerHttpHandlers(
         const service = await dependencies.createService(context);
         const result = await service.listAgentRuns(context.principal, agentId);
         return result.kind === "found"
-          ? Response.json(
-              runListEnvelopeSchema.parse({
-                apiVersion: AGENT_RUNNER_API_VERSION,
-                runs: result.runs,
-              })
-            )
+          ? runnerJsonResponse(runListEnvelopeSchema, {
+              apiVersion: AGENT_RUNNER_API_VERSION,
+              runs: result.runs,
+            })
           : agentNotFound(dependencies);
       }),
 
@@ -795,11 +651,9 @@ export function createRunnerHttpHandlers(
           return context;
         }
         const service = await dependencies.createService(context);
-        return Response.json(
-          agentsEnvelopeSchema.parse({
-            agents: await service.listAgents(context.principal),
-          })
-        );
+        return runnerJsonResponse(agentsEnvelopeSchema, {
+          agents: await service.listAgents(context.principal),
+        });
       }),
 
     prewarmTenant: (request) =>
@@ -818,15 +672,34 @@ export function createRunnerHttpHandlers(
         }
         const service = await dependencies.createService(context);
         const result = await service.prewarmMostRecent(context.principal);
-        return result.kind === "none"
-          ? new Response(null, { status: 204 })
-          : Response.json(
+        switch (result.kind) {
+          case "none":
+          case "not_found":
+            return new Response(null, { status: 204 });
+          case "unsupported_harness":
+            return runnerErrorResponse(dependencies, "harness_unsupported", {
+              message: `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+            });
+          case "ready":
+          case "in_progress":
+            return Response.json(
               {
                 agentId: result.agentId,
                 warm: result.warm,
               },
               { status: 202 }
             );
+          case "stale_version":
+            return staleVersion(dependencies);
+          case "unavailable":
+            return result.source === "provider"
+              ? providerUnavailable(dependencies)
+              : runnerUnavailable(dependencies);
+          case "provider_rejected":
+            return providerRejected(dependencies);
+          default:
+            return unreachableResult(result);
+        }
       }),
 
     reconcile: (request) =>
@@ -879,65 +752,57 @@ export function createRunnerHttpHandlers(
           agentId,
           body.value
         );
-        if (result.kind === "invalid") {
-          return invalidRequest(dependencies);
+        const scheduled = admitAndScheduleRunnerRun(result, {
+          dispatchClaim: service.dispatchClaim,
+          reconcile: service.reconcileAndDispatch,
+          schedule: dependencies.after ?? (() => undefined),
+        });
+        switch (scheduled.kind) {
+          case "invalid":
+            return invalidRequest(dependencies);
+          case "not_found":
+            return agentNotFound(dependencies);
+          case "unsupported_harness":
+            return runnerErrorResponse(dependencies, "harness_unsupported", {
+              message: `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+            });
+          case "refused":
+            switch (scheduled.code) {
+              case "operation_conflict":
+                return runnerErrorResponse(dependencies, "operation_conflict", {
+                  message:
+                    "Operation ID was already used for a different request.",
+                  retryable: false,
+                });
+              case "busy":
+                return runnerErrorResponse(dependencies, "busy", {
+                  message: "The cloud runner is busy. Try again later.",
+                });
+              case "lifecycle_conflict":
+                return runnerErrorResponse(
+                  dependencies,
+                  "agent_decommissioning"
+                );
+              case "admission_unavailable":
+                return runnerErrorResponse(
+                  dependencies,
+                  "admission_unavailable"
+                );
+              default:
+                return unreachableResult(scheduled.code);
+            }
+          case "accepted":
+            return runnerJsonResponse(
+              runSnapshotEnvelopeSchema,
+              {
+                apiVersion: AGENT_RUNNER_API_VERSION,
+                run: scheduled.run,
+              },
+              { status: 202 }
+            );
+          default:
+            return unreachableResult(scheduled);
         }
-        if (result.kind === "not_found") {
-          return agentNotFound(dependencies);
-        }
-        if (result.kind === "refused") {
-          switch (result.code) {
-            case "operation_conflict":
-              return errorResponse(
-                dependencies,
-                409,
-                "operation_conflict",
-                "Operation ID was already used for a different request.",
-                false
-              );
-            case "busy":
-              return errorResponse(
-                dependencies,
-                409,
-                "busy",
-                "The cloud runner is busy. Try again later.",
-                true
-              );
-            case "lifecycle_conflict":
-              return errorResponse(
-                dependencies,
-                409,
-                "agent_decommissioning",
-                "Agent decommission is still in progress. Try again later.",
-                true
-              );
-            case "admission_unavailable":
-              return errorResponse(
-                dependencies,
-                503,
-                "admission_unavailable",
-                "Run admission is temporarily unavailable. Try again later.",
-                true
-              );
-            default:
-              throw new RunnerServiceError(
-                "service_unavailable",
-                "Runner run admission is unavailable."
-              );
-          }
-        }
-        if (result.scheduleReconciliation) {
-          schedule(dependencies, async () => {
-            await service.reconcileAndDispatch();
-          });
-        }
-        return Response.json(
-          runSnapshotEnvelopeSchema.parse({
-            apiVersion: AGENT_RUNNER_API_VERSION,
-            run: result.run,
-          }),
-          { status: 202 }
-        );
       }),
 
     stopRun: (request, runId) =>
@@ -960,27 +825,48 @@ export function createRunnerHttpHandlers(
         }
         const service = await dependencies.createService(context);
         const result = await service.stopRun(context.principal, runId);
-        if (result.kind === "not_found") {
-          return runNotFound(dependencies);
+        switch (result.kind) {
+          case "not_found":
+            return runNotFound(dependencies);
+          case "in_progress":
+            schedule(dependencies, async () => {
+              await service.reconcileAndDispatch();
+            });
+            return runnerJsonResponse(
+              runSnapshotEnvelopeSchema,
+              {
+                apiVersion: AGENT_RUNNER_API_VERSION,
+                run: result.run,
+              },
+              { status: 202 }
+            );
+          case "stale_version":
+            return runnerErrorResponse(dependencies, "stale_version");
+          case "unavailable":
+            return result.source === "provider"
+              ? runnerErrorResponse(dependencies, "provider_unavailable")
+              : runnerUnavailable(dependencies);
+          case "cleanup_required":
+            schedule(dependencies, async () => {
+              await service.reconcileAndDispatch();
+            });
+            return runnerErrorResponse(dependencies, "cleanup_required");
+          case "sandbox_reset_required":
+            schedule(dependencies, async () => {
+              await service.reconcileAndDispatch();
+            });
+            return runnerErrorResponse(dependencies, "cleanup_required");
+          case "stopped":
+            schedule(dependencies, async () => {
+              await service.reconcileAndDispatch();
+            });
+            return runnerJsonResponse(runSnapshotEnvelopeSchema, {
+              apiVersion: AGENT_RUNNER_API_VERSION,
+              run: result.run,
+            });
+          default:
+            return unreachableResult(result);
         }
-        schedule(dependencies, async () => {
-          await service.reconcileAndDispatch();
-        });
-        if (result.kind === "cleanup_required") {
-          return errorResponse(
-            dependencies,
-            503,
-            "cleanup_required",
-            "Run cancellation is awaiting cleanup. Try again later.",
-            true
-          );
-        }
-        return Response.json(
-          runSnapshotEnvelopeSchema.parse({
-            apiVersion: AGENT_RUNNER_API_VERSION,
-            run: result.run,
-          })
-        );
       }),
 
     updateAgent: (request, agentId) =>
@@ -1012,46 +898,35 @@ export function createRunnerHttpHandlers(
           agentId,
           body.value
         );
-        if (result.kind === "not_found") {
-          return agentNotFound(dependencies);
+        switch (result.kind) {
+          case "not_found":
+            return agentNotFound(dependencies);
+          case "busy":
+            return runnerErrorResponse(dependencies, "busy");
+          case "invalid":
+            return invalidRequest(dependencies);
+          case "unsupported_harness":
+            return runnerErrorResponse(dependencies, "harness_unsupported", {
+              message: `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+            });
+          case "stale_version":
+            return staleVersion(dependencies);
+          case "unavailable":
+            return runnerUnavailable(dependencies);
+          case "updated":
+            schedule(dependencies, async () => {
+              await warmAndReconcile(
+                service,
+                context.principal,
+                result.agent.id
+              );
+            });
+            return runnerJsonResponse(agentEnvelopeSchema, {
+              agent: result.agent,
+            });
+          default:
+            return unreachableResult(result);
         }
-        if (result.kind === "invalid") {
-          return invalidRequest(dependencies);
-        }
-        if (result.kind === "unsupported_harness") {
-          return errorResponse(
-            dependencies,
-            400,
-            "harness_unsupported",
-            `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
-            false
-          );
-        }
-        if (result.kind === "lifecycle_conflict") {
-          return errorResponse(
-            dependencies,
-            409,
-            "agent_decommissioning",
-            "Agent decommission is still in progress. Try again later.",
-            true
-          );
-        }
-        if (result.kind === "stale_version") {
-          return errorResponse(
-            dependencies,
-            409,
-            "stale_version",
-            "The agent changed concurrently. Try again.",
-            true
-          );
-        }
-        schedule(dependencies, async () => {
-          await service.warmAgent(context.principal, result.agent.id);
-          await service.reconcileAndDispatch();
-        });
-        return Response.json(
-          agentEnvelopeSchema.parse({ agent: result.agent })
-        );
       }),
   };
 }

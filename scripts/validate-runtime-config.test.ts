@@ -27,6 +27,7 @@ const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
   RUN_ADMISSION_MODE: "queue",
   RUN_ADMISSION_TENANT_ACTIVE_MAX: "2",
   RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+  RUNNER_MANUAL_RECONCILE_SECRET: "subprocess-test-manual-reconcile-secret",
 };
 const REQUIRED_PRODUCTION_VARIABLES = [
   "ABUSE_KEY_SECRET",
@@ -36,6 +37,7 @@ const REQUIRED_PRODUCTION_VARIABLES = [
   "DAYTONA_SNAPSHOT",
   "OPERATOR_DIAGNOSTIC_TOKEN",
   "REDIS_URL",
+  "RUNNER_MANUAL_RECONCILE_SECRET",
 ] as const;
 const DAYTONA_NON_NEGATIVE_SAFE_INTEGER_VARIABLES = [
   "DAYTONA_AUTO_ARCHIVE_MINUTES",
@@ -82,6 +84,7 @@ function runValidator(
       | "OPERATOR_DIAGNOSTIC_TOKEN"
       | "REDIS_URL"
       | "RELEASE_AUDIENCE"
+      | "RUNNER_MANUAL_RECONCILE_SECRET"
       | "RUNNER_SERVICE_TOKEN"
       | "RUN_ADMISSION_CONSECUTIVE_MAX"
       | "RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX"
@@ -123,6 +126,7 @@ function runValidator(
     RUN_ADMISSION_MODE: undefined,
     RUN_ADMISSION_TENANT_ACTIVE_MAX: undefined,
     RUN_ADMISSION_TENANT_QUEUE_MAX: undefined,
+    RUNNER_MANUAL_RECONCILE_SECRET: undefined,
     RUNNER_SERVICE_TOKEN: undefined,
     VERCEL_ENV: undefined,
     ...VALID_ENV,
@@ -196,10 +200,14 @@ test("rejects aliases among privileged runner secrets", () => {
   const aliases = [
     ["CRON_SECRET", "OPERATOR_DIAGNOSTIC_TOKEN"],
     ["CRON_SECRET", "AGENT_CONTROL_TOKEN"],
+    ["CRON_SECRET", "RUNNER_MANUAL_RECONCILE_SECRET"],
     ["CRON_SECRET", "RUNNER_SERVICE_TOKEN"],
     ["OPERATOR_DIAGNOSTIC_TOKEN", "AGENT_CONTROL_TOKEN"],
+    ["OPERATOR_DIAGNOSTIC_TOKEN", "RUNNER_MANUAL_RECONCILE_SECRET"],
     ["OPERATOR_DIAGNOSTIC_TOKEN", "RUNNER_SERVICE_TOKEN"],
+    ["AGENT_CONTROL_TOKEN", "RUNNER_MANUAL_RECONCILE_SECRET"],
     ["AGENT_CONTROL_TOKEN", "RUNNER_SERVICE_TOKEN"],
+    ["RUNNER_MANUAL_RECONCILE_SECRET", "RUNNER_SERVICE_TOKEN"],
   ] as const;
 
   for (const [left, right] of aliases) {
@@ -212,6 +220,19 @@ test("rejects aliases among privileged runner secrets", () => {
       result,
       `Privileged runner secrets must be distinct: ${left} aliases ${right}.`
     );
+  }
+});
+
+test("rejects blank or oversized configured privileged runner secrets", () => {
+  for (const [name, value] of [
+    ["AGENT_CONTROL_TOKEN", "  "],
+    ["RUNNER_SERVICE_TOKEN", ""],
+    ["RUNNER_MANUAL_RECONCILE_SECRET", "x".repeat(1025)],
+  ] as const) {
+    const result = runValidator({ [name]: value });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(name));
   }
 });
 

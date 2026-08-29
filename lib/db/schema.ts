@@ -7,6 +7,7 @@ import {
 } from "@opencoven/agent-contracts";
 import { type InferSelectModel, sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   check,
   date,
@@ -750,6 +751,15 @@ export const runnerScheduler = pgTable(
     lastDispatchedTenantHash: varchar("lastDispatchedTenantHash", {
       length: 67,
     }),
+    reconciliationLeaseExpiresAt: timestamp("reconciliationLeaseExpiresAt"),
+    reconciliationLeaseFence: bigint("reconciliationLeaseFence", {
+      mode: "number",
+    })
+      .notNull()
+      .default(0),
+    reconciliationLeaseOwner: varchar("reconciliationLeaseOwner", {
+      length: 128,
+    }),
     singleton: boolean("singleton").primaryKey().notNull().default(true),
     updatedAt: timestamp("updatedAt").notNull().defaultNow(),
   },
@@ -758,6 +768,14 @@ export const runnerScheduler = pgTable(
     check(
       "RunnerScheduler_consecutiveDispatchCount_nonnegative",
       sql`${table.consecutiveDispatchCount} >= 0`
+    ),
+    check(
+      "RunnerScheduler_reconciliationLeaseFence_nonnegative",
+      sql`${table.reconciliationLeaseFence} >= 0`
+    ),
+    check(
+      "RunnerScheduler_reconciliationLease_pair",
+      sql`(${table.reconciliationLeaseOwner} is null and ${table.reconciliationLeaseExpiresAt} is null) or (${table.reconciliationLeaseOwner} is not null and ${table.reconciliationLeaseExpiresAt} is not null)`
     ),
   ]
 );

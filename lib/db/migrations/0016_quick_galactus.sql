@@ -1,0 +1,5 @@
+ALTER TABLE "RunnerScheduler" ADD COLUMN "reconciliationLeaseExpiresAt" timestamp;--> statement-breakpoint
+ALTER TABLE "RunnerScheduler" ADD COLUMN "reconciliationLeaseFence" bigint DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE "RunnerScheduler" ADD COLUMN "reconciliationLeaseOwner" varchar(128);--> statement-breakpoint
+ALTER TABLE "RunnerScheduler" ADD CONSTRAINT "RunnerScheduler_reconciliationLeaseFence_nonnegative" CHECK ("RunnerScheduler"."reconciliationLeaseFence" >= 0);--> statement-breakpoint
+ALTER TABLE "RunnerScheduler" ADD CONSTRAINT "RunnerScheduler_reconciliationLease_pair" CHECK (("RunnerScheduler"."reconciliationLeaseOwner" is null and "RunnerScheduler"."reconciliationLeaseExpiresAt" is null) or ("RunnerScheduler"."reconciliationLeaseOwner" is not null and "RunnerScheduler"."reconciliationLeaseExpiresAt" is not null));
