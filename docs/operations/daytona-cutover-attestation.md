@@ -1,7 +1,7 @@
 # Daytona Cutover Attestation and Runbook
 
-- Status: repository verification pending until the final branch gates;
-  production approval-gated evidence pending
+- Status: repository verification complete; production approval-gated evidence
+  pending
 - Prepared: 2026-08-29
 - Scope: same-origin browser access, Daytona lifecycle, durable recovery, and
   provider-resource disposition
@@ -16,9 +16,11 @@ credentials, private planning content, or provider output.
 | --- | --- | --- |
 | [PR #128](https://github.com/OpenCoven/coven-agents/pull/128) | `bd46bece9ea9b33700f3316919c6f035aad7d7d1` | 2026-08-29 |
 | [PR #133](https://github.com/OpenCoven/coven-agents/pull/133) | `acc7ca3fa2dd51f496e1900573f239eb8a158ce6` | 2026-08-29 |
+| [PR #134](https://github.com/OpenCoven/coven-agents/pull/134) | `1bec409b399651d8a115e4518a0f444e9753a728` | 2026-08-29 |
 
-The current documentation branch is based at the PR #133 merge commit. These
-artifacts prove repository delivery only.
+The fully gated PR #134 head and its squash-merge commit both have tree
+`a8bb0a82efb6ffb7f754d03519f0d381e72fb88e`. These artifacts and results prove
+repository delivery only.
 
 ## Pending taxonomy follow-up
 
@@ -29,37 +31,47 @@ across Beads, Project #10, and repository validation. That work is outside this
 repository-only cleanup and remains pending; this record neither accesses nor
 reproduces private records.
 
-## Pending repository verification
+## Verified repository evidence
 
-Record each command, commit, timestamp, and exit status without pasting secret
-values or private output.
+The final PR head `67f7f8ce6fca0799a6c8688eb85103c6e92ca647`
+was verified locally on 2026-08-29. Its tree is identical to merge commit
+`1bec409b399651d8a115e4518a0f444e9753a728`.
 
 ```bash
 pnpm hygiene
+pnpm validate:platform-residue
+pnpm validate:platform-residue:index
 pnpm check
 pnpm typecheck
 pnpm test:unit
 pnpm build
 ```
 
-Targeted documentation and boundary checks:
+Results:
 
-```bash
-pnpm exec tsx --test scripts/product-boundary.test.ts \
-  scripts/security-docs.test.ts scripts/guest-access-docs.test.ts \
-  scripts/wave-one-report.test.ts
-```
+- hygiene passed with no `AT RISK` worktree;
+- worktree and index residue validation passed with only the documented
+  generated lockfile metadata exception;
+- formatting and static analysis checked 458 files with no fixes;
+- application and workspace typechecks passed;
+- unit suites passed 404 + 903 + 37 + 33 = 1,377 tests with zero failures;
+- the production-safe build compiled and generated 35 of 35 pages while
+  database variables were intentionally absent;
+- the authenticated browser contracts passed 28 of 28 cases on the same
+  application and end-to-end test trees before the evidence correction;
+- `pnpm db:check` passed after migration 0019 was generated.
 
 Repository evidence checklist:
 
-- [ ] Browser execution uses only relative same-origin `/api` routes.
-- [ ] Auth.js session revalidation and server-derived tenant scope are covered.
-- [ ] Credential acquisition and Daytona dispatch remain server-only.
-- [ ] PostgreSQL owns durable run, event, attempt, and recovery records.
-- [ ] Start idempotency, SSE cursor replay, cancellation, and reconciliation
+- [x] Browser execution uses only relative same-origin `/api` routes.
+- [x] Auth.js session revalidation and server-derived tenant scope are covered.
+- [x] Credential acquisition and Daytona dispatch remain server-only.
+- [x] PostgreSQL owns durable run, event, attempt, and recovery records.
+- [x] Start idempotency, SSE cursor replay, cancellation, and reconciliation
       tests pass.
-- [ ] Documentation and tracked-filename residue scan is clean.
-- [ ] Exact local gate results are attached to the change record.
+- [x] Documentation and tracked-filename residue scan is clean under the
+      documented exceptions.
+- [x] Exact local gate results are recorded above.
 
 ## Zero-residue scan method
 

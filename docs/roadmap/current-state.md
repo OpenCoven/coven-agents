@@ -1,8 +1,8 @@
 # Current Repository State
 
 - Snapshot date: 2026-08-29
-- Candidate base: `acc7ca3fa2dd51f496e1900573f239eb8a158ce6`
-- Evidence class: implemented source; verification pending current candidate
+- Candidate: `1bec409b399651d8a115e4518a0f444e9753a728`
+- Evidence class: verified repository and local contract evidence
 
 This snapshot does not claim a production deployment, provider cleanup, or
 private planning update.
@@ -27,8 +27,11 @@ private planning update.
   `bd46bece9ea9b33700f3316919c6f035aad7d7d1`.
 - [PR #133](https://github.com/OpenCoven/coven-agents/pull/133) merged as
   `acc7ca3fa2dd51f496e1900573f239eb8a158ce6`.
+- [PR #134](https://github.com/OpenCoven/coven-agents/pull/134) merged as
+  `1bec409b399651d8a115e4518a0f444e9753a728`.
 
-These commits establish repository state. The
+The PR #134 merge tree is identical to its fully gated head. These commits
+establish repository state and local verification. The
 [cutover attestation](../operations/daytona-cutover-attestation.md) keeps
 production evidence pending until an authorized operator records it.
 

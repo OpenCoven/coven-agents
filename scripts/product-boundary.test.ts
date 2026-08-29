@@ -441,7 +441,7 @@ test("the cutover attestation separates repository and production evidence", () 
 
   for (const heading of [
     "# Daytona Cutover Attestation and Runbook",
-    "## Pending repository verification",
+    "## Verified repository evidence",
     "## Production approval-gated evidence",
     "## Resource inventory and revocation",
     "## Rollback",
@@ -454,6 +454,12 @@ test("the cutover attestation separates repository and production evidence", () 
   assert.match(attestation, /production.*pending/is);
   assert.match(attestation, /PR #128/);
   assert.match(attestation, /PR #133/);
+  assert.match(attestation, /PR #134/);
+  assert.match(attestation, /1bec409b399651d8a115e4518a0f444e9753a728/);
+  assert.match(attestation, /a8bb0a82efb6ffb7f754d03519f0d381e72fb88e/);
+  assert.match(attestation, /1,377 tests with zero failures/);
+  assert.match(attestation, /28 of 28 cases/);
+  assert.match(attestation, /application and end-to-end test trees/);
   assert.match(attestation, /pnpm validate:platform-residue/);
   assert.match(attestation, /pnpm validate:platform-residue:index/);
   assert.match(attestation, /worktree.*untracked/is);
