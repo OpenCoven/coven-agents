@@ -1,6 +1,15 @@
 /**
  * Paths that stay reachable while the beta gate is closed.
  *
+ * `/api/health` is the unauthenticated Agent Runner v1 health contract. It
+ * serves a static capability descriptor under its own IP policy, so an Auth.js
+ * login redirect would violate the machine-client contract.
+ *
+ * `/api/diagnostics/sandbox` is an operator route authorized by its dedicated
+ * `OPERATOR_DIAGNOSTIC_TOKEN`, not an Auth.js cookie. Its exact exemption lets
+ * the route enforce that authority itself without opening descendants or
+ * future `/api/diagnostics/*` routes.
+ *
  * `/api/internal/runner-reconcile` is the one machine-triggered route that
  * carries no Auth.js cookie. Gating it would disable recovery instead of
  * closing the beta. The route authenticates itself with its dedicated cron or
@@ -29,7 +38,11 @@ const EXEMPT_PREFIXES = [
   "/ping",
   "/security",
 ];
-const EXEMPT_PATHS = new Set(["/api/internal/runner-reconcile"]);
+const EXEMPT_PATHS = new Set([
+  "/api/diagnostics/sandbox",
+  "/api/health",
+  "/api/internal/runner-reconcile",
+]);
 
 export type BetaGate = {
   allowlist: string[];

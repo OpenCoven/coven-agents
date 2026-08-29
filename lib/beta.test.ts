@@ -93,6 +93,26 @@ test("the machine-triggered reconciliation path is exempt", () => {
   );
 });
 
+test("the runner health and operator diagnostic paths are exactly exempt", () => {
+  for (const pathname of ["/api/health", "/api/diagnostics/sandbox"]) {
+    assert.equal(isBetaExempt(pathname), true, pathname);
+    assert.equal(betaVerdict(readBetaGate(ON), pathname, null), "allow");
+  }
+});
+
+test("runner machine-route descendants and lookalikes are not exempt", () => {
+  for (const pathname of [
+    "/api/health/ready",
+    "/api/healthcheck",
+    "/api/diagnostics/future",
+    "/api/diagnostics/sandbox/extra",
+    "/api/diagnostics/sandbox-check",
+  ]) {
+    assert.equal(isBetaExempt(pathname), false, pathname);
+    assert.equal(betaVerdict(readBetaGate(ON), pathname, null), "deny");
+  }
+});
+
 test("retired and future internal routes are not exempt", () => {
   for (const pathname of [
     "/api/internal",
