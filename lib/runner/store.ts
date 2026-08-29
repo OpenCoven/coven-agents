@@ -3936,19 +3936,35 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             "scan-daytona-sandbox-recoveries",
             { limit },
             sql`SELECT * FROM "RunnerAgent"
-              WHERE (
-                "sandboxLifecycle" IN (
-                  'provisioning',
-                  'provisioning_ambiguous',
-                  'resetting',
-                  'decommissioning'
-                )
-                OR (
-                  "sandboxLifecycle" = 'ready'
-                  AND "warmStatus" = 'provisioning'
-                )
+              WHERE "sandboxLifecycle" IN (
+                'provisioning',
+                'provisioning_ambiguous',
+                'resetting',
+                'decommissioning'
               )
               ORDER BY "sandboxUpdatedAt" ASC, "id" ASC
+              LIMIT ${limit}
+              FOR UPDATE SKIP LOCKED`
+          )
+        );
+        return rows.map(asAgent);
+      }),
+
+    scanDaytonaWarmRecoveries: (
+      _operator: RunnerOperator,
+      staleBefore: Date,
+      limit: number
+    ) =>
+      database.transaction(async (transaction) => {
+        const rows = await transaction.execute(
+          statement(
+            "scan-daytona-warm-recoveries",
+            { limit, staleBefore },
+            sql`SELECT * FROM "RunnerAgent"
+              WHERE "sandboxLifecycle" = 'ready'
+                AND "warmStatus" = 'provisioning'
+                AND "warmUpdatedAt" <= ${staleBefore}
+              ORDER BY "warmUpdatedAt" ASC, "id" ASC
               LIMIT ${limit}
               FOR UPDATE SKIP LOCKED`
           )

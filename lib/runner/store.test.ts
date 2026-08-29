@@ -1911,8 +1911,26 @@ test("sandbox recovery scans durable ambiguous lifecycle rows with skip locking"
   assert.equal(scan.name, "scan-daytona-sandbox-recoveries");
   assert.match(queryText(scan), /'provisioning_ambiguous'/u);
   assert.match(queryText(scan), /'decommissioning'/u);
-  assert.match(queryText(scan), /"warmStatus" = 'provisioning'/u);
+  assert.doesNotMatch(queryText(scan), /"warmStatus"/u);
   assert.match(queryText(scan), /FOR UPDATE SKIP LOCKED/u);
+});
+
+test("warm recovery has an independent bounded oldest-first scan", async () => {
+  const { statements, store } = scripted([]);
+  const staleBefore = new Date("2026-08-28T15:00:00.000Z");
+  await store.scanDaytonaWarmRecoveries(operator, staleBefore, 10);
+
+  const [scan] = statements;
+  assert.ok(scan);
+  assert.equal(scan.name, "scan-daytona-warm-recoveries");
+  const query = queryText(scan);
+  assert.match(query, /"sandboxLifecycle" = 'ready'/u);
+  assert.match(query, /"warmStatus" = 'provisioning'/u);
+  assert.match(query, /"warmUpdatedAt" <= \$/u);
+  assert.match(query, /ORDER BY "warmUpdatedAt" ASC, "id" ASC/u);
+  assert.match(query, /LIMIT \$\d+/u);
+  assert.match(query, /FOR UPDATE SKIP LOCKED/u);
+  assert.deepEqual(scan.args, { limit: 10, staleBefore });
 });
 
 test("operator warm recovery fails only its exact fenced warm attempt", async () => {

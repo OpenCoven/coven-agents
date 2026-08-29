@@ -127,6 +127,13 @@
       "when": 1787979828853,
       "tag": "0017_nebulous_marten_broadcloak",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1787980865374,
+      "tag": "0018_natural_junta",
+      "breakpoints": true
     }
   ]
 }

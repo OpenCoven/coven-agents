@@ -1,0 +1,2134 @@
+{
+  "id": "2e199b7e-03ad-4cfc-9795-fcc4b9820780",
+  "prevId": "f550c472-4ddc-4ff0-8d65-5e28d6d0e2b2",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "public.Chat": {
+      "name": "Chat",
+      "schema": "",
+      "columns": {
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "visibility": {
+          "name": "visibility",
+          "type": "varchar",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'private'"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "Chat_userId_User_id_fk": {
+          "name": "Chat_userId_User_id_fk",
+          "tableFrom": "Chat",
+          "tableTo": "User",
+          "columnsFrom": ["userId"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.CredentialLease": {
+      "name": "CredentialLease",
+      "schema": "",
+      "columns": {
+        "consumedAt": {
+          "name": "consumedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expiresAt": {
+          "name": "expiresAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "harnessId": {
+          "name": "harnessId",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "issuedAt": {
+          "name": "issuedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "operationIdHash": {
+          "name": "operationIdHash",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requestIdHash": {
+          "name": "requestIdHash",
+          "type": "varchar(64)",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "runId": {
+          "name": "runId",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tenantHash": {
+          "name": "tenantHash",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "CredentialLease_run_idx": {
+          "name": "CredentialLease_run_idx",
+          "columns": [
+            {
+              "expression": "runId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "CredentialLease_expiry_idx": {
+          "name": "CredentialLease_expiry_idx",
+          "columns": [
+            {
+              "expression": "expiresAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "CredentialLease_operationIdHash_unique": {
+          "name": "CredentialLease_operationIdHash_unique",
+          "nullsNotDistinct": false,
+          "columns": ["operationIdHash"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "CredentialLease_expiry_valid": {
+          "name": "CredentialLease_expiry_valid",
+          "value": "\"CredentialLease\".\"expiresAt\" > \"CredentialLease\".\"issuedAt\""
+        },
+        "CredentialLease_consumption_valid": {
+          "name": "CredentialLease_consumption_valid",
+          "value": "\"CredentialLease\".\"consumedAt\" is null or (\"CredentialLease\".\"consumedAt\" >= \"CredentialLease\".\"issuedAt\" and \"CredentialLease\".\"consumedAt\" < \"CredentialLease\".\"expiresAt\")"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.Document": {
+      "name": "Document",
+      "schema": "",
+      "columns": {
+        "content": {
+          "name": "content",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "text": {
+          "name": "text",
+          "type": "varchar",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'text'"
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "Document_userId_User_id_fk": {
+          "name": "Document_userId_User_id_fk",
+          "tableFrom": "Document",
+          "tableTo": "User",
+          "columnsFrom": ["userId"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "Document_id_createdAt_pk": {
+          "name": "Document_id_createdAt_pk",
+          "columns": ["id", "createdAt"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.IdempotencyRecord": {
+      "name": "IdempotencyRecord",
+      "schema": "",
+      "columns": {
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "expiresAt": {
+          "name": "expiresAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "keyHash": {
+          "name": "keyHash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "operation": {
+          "name": "operation",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ownerId": {
+          "name": "ownerId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requestHash": {
+          "name": "requestHash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "responseJson": {
+          "name": "responseJson",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "responseStatus": {
+          "name": "responseStatus",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "state": {
+          "name": "state",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'in_progress'"
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "IdempotencyRecord_owner_operation_key_idx": {
+          "name": "IdempotencyRecord_owner_operation_key_idx",
+          "columns": [
+            {
+              "expression": "ownerId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "operation",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "keyHash",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "IdempotencyRecord_expiresAt_idx": {
+          "name": "IdempotencyRecord_expiresAt_idx",
+          "columns": [
+            {
+              "expression": "expiresAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "IdempotencyRecord_ownerId_User_id_fk": {
+          "name": "IdempotencyRecord_ownerId_User_id_fk",
+          "tableFrom": "IdempotencyRecord",
+          "tableTo": "User",
+          "columnsFrom": ["ownerId"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "IdempotencyRecord_state_check": {
+          "name": "IdempotencyRecord_state_check",
+          "value": "\"IdempotencyRecord\".\"state\" in ('in_progress', 'completed')"
+        },
+        "IdempotencyRecord_response_state_check": {
+          "name": "IdempotencyRecord_response_state_check",
+          "value": "(\"IdempotencyRecord\".\"state\" = 'in_progress' and \"IdempotencyRecord\".\"responseJson\" is null and \"IdempotencyRecord\".\"responseStatus\" is null) or (\"IdempotencyRecord\".\"state\" = 'completed' and \"IdempotencyRecord\".\"responseJson\" is not null and jsonb_typeof(\"IdempotencyRecord\".\"responseJson\") = 'object' and \"IdempotencyRecord\".\"responseJson\"->>'kind' in ('plain_json', 'encrypted_json') and \"IdempotencyRecord\".\"responseStatus\" is not null and \"IdempotencyRecord\".\"responseStatus\" between 200 and 299)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.Message_v2": {
+      "name": "Message_v2",
+      "schema": "",
+      "columns": {
+        "attachments": {
+          "name": "attachments",
+          "type": "json",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "chatId": {
+          "name": "chatId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "parts": {
+          "name": "parts",
+          "type": "json",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "role": {
+          "name": "role",
+          "type": "varchar",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "Message_v2_chatId_Chat_id_fk": {
+          "name": "Message_v2_chatId_Chat_id_fk",
+          "tableFrom": "Message_v2",
+          "tableTo": "Chat",
+          "columnsFrom": ["chatId"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.RunReservation": {
+      "name": "RunReservation",
+      "schema": "",
+      "columns": {
+        "consumedAt": {
+          "name": "consumedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "costUnits": {
+          "name": "costUnits",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expiresAt": {
+          "name": "expiresAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "periodDay": {
+          "name": "periodDay",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "periodMonth": {
+          "name": "periodMonth",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "releasedAt": {
+          "name": "releasedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reservedAt": {
+          "name": "reservedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "runId": {
+          "name": "runId",
+          "type": "varchar(64)",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "state": {
+          "name": "state",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'reserved'"
+        },
+        "tenantHash": {
+          "name": "tenantHash",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "RunReservation_tenant_day_state_idx": {
+          "name": "RunReservation_tenant_day_state_idx",
+          "columns": [
+            {
+              "expression": "tenantHash",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "periodDay",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "state",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunReservation_day_state_idx": {
+          "name": "RunReservation_day_state_idx",
+          "columns": [
+            {
+              "expression": "periodDay",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "state",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunReservation_tenant_period_state_idx": {
+          "name": "RunReservation_tenant_period_state_idx",
+          "columns": [
+            {
+              "expression": "tenantHash",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "periodMonth",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "state",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunReservation_reserved_expiry_idx": {
+          "name": "RunReservation_reserved_expiry_idx",
+          "columns": [
+            {
+              "expression": "expiresAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"RunReservation\".\"state\" = 'reserved'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "RunReservation_costUnits_positive": {
+          "name": "RunReservation_costUnits_positive",
+          "value": "\"RunReservation\".\"costUnits\" > 0"
+        },
+        "RunReservation_state_valid": {
+          "name": "RunReservation_state_valid",
+          "value": "\"RunReservation\".\"state\" in ('reserved', 'consumed', 'released')"
+        },
+        "RunReservation_state_timestamps_valid": {
+          "name": "RunReservation_state_timestamps_valid",
+          "value": "(\"RunReservation\".\"state\" = 'reserved' and \"RunReservation\".\"consumedAt\" is null and \"RunReservation\".\"releasedAt\" is null) or (\"RunReservation\".\"state\" = 'consumed' and \"RunReservation\".\"consumedAt\" is not null and \"RunReservation\".\"releasedAt\" is null) or (\"RunReservation\".\"state\" = 'released' and \"RunReservation\".\"consumedAt\" is null and \"RunReservation\".\"releasedAt\" is not null)"
+        },
+        "RunReservation_expiry_valid": {
+          "name": "RunReservation_expiry_valid",
+          "value": "\"RunReservation\".\"expiresAt\" > \"RunReservation\".\"reservedAt\""
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.RunUsage": {
+      "name": "RunUsage",
+      "schema": "",
+      "columns": {
+        "countedAt": {
+          "name": "countedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "runId": {
+          "name": "runId",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tenant": {
+          "name": "tenant",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "RunUsage_tenant_run_idx": {
+          "name": "RunUsage_tenant_run_idx",
+          "columns": [
+            {
+              "expression": "tenant",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "runId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunUsage_countedAt_idx": {
+          "name": "RunUsage_countedAt_idx",
+          "columns": [
+            {
+              "expression": "countedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunUsage_tenant_countedAt_idx": {
+          "name": "RunUsage_tenant_countedAt_idx",
+          "columns": [
+            {
+              "expression": "tenant",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "countedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.RunnerAgent": {
+      "name": "RunnerAgent",
+      "schema": "",
+      "columns": {
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "daytonaSandboxId": {
+          "name": "daytonaSandboxId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "description": {
+          "name": "description",
+          "type": "varchar(240)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "instructions": {
+          "name": "instructions",
+          "type": "varchar(12000)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "lastRunAt": {
+          "name": "lastRunAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "model": {
+          "name": "model",
+          "type": "varchar(120)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "runtime": {
+          "name": "runtime",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sandboxGeneration": {
+          "name": "sandboxGeneration",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "sandboxLifecycle": {
+          "name": "sandboxLifecycle",
+          "type": "varchar(24)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'unprovisioned'"
+        },
+        "sandboxUpdatedAt": {
+          "name": "sandboxUpdatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'idle'"
+        },
+        "tenant": {
+          "name": "tenant",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "warmAttemptVersion": {
+          "name": "warmAttemptVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "warmStatus": {
+          "name": "warmStatus",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'not_started'"
+        },
+        "warmUpdatedAt": {
+          "name": "warmUpdatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "workspace": {
+          "name": "workspace",
+          "type": "varchar(1024)",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "RunnerAgent_tenant_updatedAt_idx": {
+          "name": "RunnerAgent_tenant_updatedAt_idx",
+          "columns": [
+            {
+              "expression": "tenant",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "updatedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunnerAgent_sandbox_recovery_idx": {
+          "name": "RunnerAgent_sandbox_recovery_idx",
+          "columns": [
+            {
+              "expression": "sandboxLifecycle",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sandboxUpdatedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"RunnerAgent\".\"sandboxLifecycle\" in ('provisioning', 'provisioning_ambiguous', 'resetting', 'decommissioning')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunnerAgent_warm_recovery_idx": {
+          "name": "RunnerAgent_warm_recovery_idx",
+          "columns": [
+            {
+              "expression": "warmUpdatedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"RunnerAgent\".\"sandboxLifecycle\" = 'ready' and \"RunnerAgent\".\"warmStatus\" = 'provisioning'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "RunnerAgent_id_tenant_key": {
+          "name": "RunnerAgent_id_tenant_key",
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "RunnerAgent_tenant_valid": {
+          "name": "RunnerAgent_tenant_valid",
+          "value": "\"RunnerAgent\".\"tenant\" ~ '^[A-Za-z0-9_]{1,64}$'"
+        },
+        "RunnerAgent_runtime_valid": {
+          "name": "RunnerAgent_runtime_valid",
+          "value": "\"RunnerAgent\".\"runtime\" in ('cloud', 'codex', 'claude', 'copilot')"
+        },
+        "RunnerAgent_status_valid": {
+          "name": "RunnerAgent_status_valid",
+          "value": "\"RunnerAgent\".\"status\" in ('idle', 'running', 'error')"
+        },
+        "RunnerAgent_sandboxLifecycle_valid": {
+          "name": "RunnerAgent_sandboxLifecycle_valid",
+          "value": "\"RunnerAgent\".\"sandboxLifecycle\" in ('unprovisioned', 'provisioning', 'provisioning_ambiguous', 'ready', 'resetting', 'decommissioning', 'decommission_failed')"
+        },
+        "RunnerAgent_warmStatus_valid": {
+          "name": "RunnerAgent_warmStatus_valid",
+          "value": "\"RunnerAgent\".\"warmStatus\" in ('not_started', 'provisioning', 'ready', 'failed')"
+        },
+        "RunnerAgent_sandboxGeneration_nonnegative": {
+          "name": "RunnerAgent_sandboxGeneration_nonnegative",
+          "value": "\"RunnerAgent\".\"sandboxGeneration\" >= 0"
+        },
+        "RunnerAgent_version_nonnegative": {
+          "name": "RunnerAgent_version_nonnegative",
+          "value": "\"RunnerAgent\".\"version\" >= 0"
+        },
+        "RunnerAgent_warmAttemptVersion_nonnegative": {
+          "name": "RunnerAgent_warmAttemptVersion_nonnegative",
+          "value": "\"RunnerAgent\".\"warmAttemptVersion\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.RunnerAttemptRedaction": {
+      "name": "RunnerAttemptRedaction",
+      "schema": "",
+      "columns": {
+        "aadVersion": {
+          "name": "aadVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "attemptId": {
+          "name": "attemptId",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ciphertext": {
+          "name": "ciphertext",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "iv": {
+          "name": "iv",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kekVersion": {
+          "name": "kekVersion",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "runId": {
+          "name": "runId",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "wrappedKey": {
+          "name": "wrappedKey",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "RunnerAttemptRedaction_runId_RunnerRun_id_fk": {
+          "name": "RunnerAttemptRedaction_runId_RunnerRun_id_fk",
+          "tableFrom": "RunnerAttemptRedaction",
+          "tableTo": "RunnerRun",
+          "columnsFrom": ["runId"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "RunnerAttemptRedaction_attemptId_unique": {
+          "name": "RunnerAttemptRedaction_attemptId_unique",
+          "nullsNotDistinct": false,
+          "columns": ["attemptId"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "RunnerAttemptRedaction_aadVersion_valid": {
+          "name": "RunnerAttemptRedaction_aadVersion_valid",
+          "value": "\"RunnerAttemptRedaction\".\"aadVersion\" = 1"
+        },
+        "RunnerAttemptRedaction_attemptId_valid": {
+          "name": "RunnerAttemptRedaction_attemptId_valid",
+          "value": "\"RunnerAttemptRedaction\".\"attemptId\" ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'"
+        },
+        "RunnerAttemptRedaction_envelope_nonempty": {
+          "name": "RunnerAttemptRedaction_envelope_nonempty",
+          "value": "char_length(\"RunnerAttemptRedaction\".\"ciphertext\") > 0 and char_length(\"RunnerAttemptRedaction\".\"iv\") > 0 and char_length(\"RunnerAttemptRedaction\".\"kekVersion\") > 0 and char_length(\"RunnerAttemptRedaction\".\"wrappedKey\") > 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.RunnerRun": {
+      "name": "RunnerRun",
+      "schema": "",
+      "columns": {
+        "agentId": {
+          "name": "agentId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "authVersion": {
+          "name": "authVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cancellationRequestedAt": {
+          "name": "cancellationRequestedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "commandEvidence": {
+          "name": "commandEvidence",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "completedAt": {
+          "name": "completedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "daytonaAttemptId": {
+          "name": "daytonaAttemptId",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "daytonaCommandId": {
+          "name": "daytonaCommandId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "daytonaLogCursor": {
+          "name": "daytonaLogCursor",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "daytonaSessionId": {
+          "name": "daytonaSessionId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "dispatchLeaseExpiresAt": {
+          "name": "dispatchLeaseExpiresAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "dispatchLeaseToken": {
+          "name": "dispatchLeaseToken",
+          "type": "varchar(80)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "dispatchState": {
+          "name": "dispatchState",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'queued'"
+        },
+        "error": {
+          "name": "error",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fileEvidence": {
+          "name": "fileEvidence",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "logCursor": {
+          "name": "logCursor",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "operationId": {
+          "name": "operationId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "output": {
+          "name": "output",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "queueSequence": {
+          "name": "queueSequence",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "RunnerRun_queueSequence_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "requestHash": {
+          "name": "requestHash",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "startedAt": {
+          "name": "startedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'queued'"
+        },
+        "task": {
+          "name": "task",
+          "type": "varchar(40000)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tenant": {
+          "name": "tenant",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        }
+      },
+      "indexes": {
+        "RunnerRun_agent_createdAt_idx": {
+          "name": "RunnerRun_agent_createdAt_idx",
+          "columns": [
+            {
+              "expression": "agentId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunnerRun_queued_sequence_idx": {
+          "name": "RunnerRun_queued_sequence_idx",
+          "columns": [
+            {
+              "expression": "queueSequence",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"RunnerRun\".\"dispatchState\" = 'queued'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunnerRun_queueSequence_unique_idx": {
+          "name": "RunnerRun_queueSequence_unique_idx",
+          "columns": [
+            {
+              "expression": "queueSequence",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunnerRun_active_tenant_idx": {
+          "name": "RunnerRun_active_tenant_idx",
+          "columns": [
+            {
+              "expression": "tenant",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"RunnerRun\".\"status\" in ('queued', 'running')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunnerRun_expired_dispatch_lease_idx": {
+          "name": "RunnerRun_expired_dispatch_lease_idx",
+          "columns": [
+            {
+              "expression": "dispatchLeaseExpiresAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"RunnerRun\".\"dispatchLeaseToken\" is not null and \"RunnerRun\".\"dispatchState\" in ('dispatching', 'running')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunnerRun_terminal_retention_idx": {
+          "name": "RunnerRun_terminal_retention_idx",
+          "columns": [
+            {
+              "expression": "agentId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "completedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"RunnerRun\".\"status\" in ('completed', 'failed', 'cancelled')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunnerRun_terminal_attempt_cleanup_idx": {
+          "name": "RunnerRun_terminal_attempt_cleanup_idx",
+          "columns": [
+            {
+              "expression": "dispatchLeaseExpiresAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"RunnerRun\".\"dispatchState\" = 'terminal' and \"RunnerRun\".\"daytonaAttemptId\" is not null and \"RunnerRun\".\"dispatchLeaseToken\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunnerRun_agent_operation_idx": {
+          "name": "RunnerRun_agent_operation_idx",
+          "columns": [
+            {
+              "expression": "agentId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "operationId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunnerRun_daytonaSessionId_live_idx": {
+          "name": "RunnerRun_daytonaSessionId_live_idx",
+          "columns": [
+            {
+              "expression": "daytonaSessionId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"RunnerRun\".\"daytonaSessionId\" is not null and \"RunnerRun\".\"status\" in ('queued', 'running')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RunnerRun_daytonaCommandId_live_idx": {
+          "name": "RunnerRun_daytonaCommandId_live_idx",
+          "columns": [
+            {
+              "expression": "daytonaCommandId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"RunnerRun\".\"daytonaCommandId\" is not null and \"RunnerRun\".\"status\" in ('queued', 'running')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "RunnerRun_agentId_tenant_RunnerAgent_id_tenant_fk": {
+          "name": "RunnerRun_agentId_tenant_RunnerAgent_id_tenant_fk",
+          "tableFrom": "RunnerRun",
+          "tableTo": "RunnerAgent",
+          "columnsFrom": ["agentId", "tenant"],
+          "columnsTo": ["id", "tenant"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "RunnerRun_tenant_valid": {
+          "name": "RunnerRun_tenant_valid",
+          "value": "\"RunnerRun\".\"tenant\" ~ '^[A-Za-z0-9_]{1,64}$'"
+        },
+        "RunnerRun_status_valid": {
+          "name": "RunnerRun_status_valid",
+          "value": "\"RunnerRun\".\"status\" in ('queued', 'running', 'completed', 'failed', 'cancelled')"
+        },
+        "RunnerRun_dispatchState_valid": {
+          "name": "RunnerRun_dispatchState_valid",
+          "value": "\"RunnerRun\".\"dispatchState\" in ('queued', 'dispatching', 'running', 'terminal')"
+        },
+        "RunnerRun_queueSequence_positive": {
+          "name": "RunnerRun_queueSequence_positive",
+          "value": "\"RunnerRun\".\"queueSequence\" > 0"
+        },
+        "RunnerRun_logCursor_nonnegative": {
+          "name": "RunnerRun_logCursor_nonnegative",
+          "value": "\"RunnerRun\".\"logCursor\" >= 0"
+        },
+        "RunnerRun_daytonaLogCursor_nonnegative": {
+          "name": "RunnerRun_daytonaLogCursor_nonnegative",
+          "value": "\"RunnerRun\".\"daytonaLogCursor\" >= 0"
+        },
+        "RunnerRun_version_nonnegative": {
+          "name": "RunnerRun_version_nonnegative",
+          "value": "\"RunnerRun\".\"version\" >= 0"
+        },
+        "RunnerRun_authVersion_valid": {
+          "name": "RunnerRun_authVersion_valid",
+          "value": "\"RunnerRun\".\"authVersion\" is null or \"RunnerRun\".\"authVersion\" >= 0"
+        },
+        "RunnerRun_timestamps_valid": {
+          "name": "RunnerRun_timestamps_valid",
+          "value": "(\"RunnerRun\".\"status\" = 'queued' and \"RunnerRun\".\"startedAt\" is null and \"RunnerRun\".\"completedAt\" is null) or (\"RunnerRun\".\"status\" = 'running' and \"RunnerRun\".\"startedAt\" is not null and \"RunnerRun\".\"completedAt\" is null and \"RunnerRun\".\"startedAt\" >= \"RunnerRun\".\"createdAt\") or (\"RunnerRun\".\"status\" in ('completed', 'failed', 'cancelled') and \"RunnerRun\".\"completedAt\" is not null and \"RunnerRun\".\"completedAt\" >= \"RunnerRun\".\"createdAt\" and (\"RunnerRun\".\"startedAt\" is null or (\"RunnerRun\".\"startedAt\" >= \"RunnerRun\".\"createdAt\" and \"RunnerRun\".\"completedAt\" >= \"RunnerRun\".\"startedAt\")))"
+        },
+        "RunnerRun_dispatchLease_valid": {
+          "name": "RunnerRun_dispatchLease_valid",
+          "value": "(\"RunnerRun\".\"dispatchState\" = 'queued' and \"RunnerRun\".\"status\" = 'queued' and \"RunnerRun\".\"dispatchLeaseToken\" is null and \"RunnerRun\".\"dispatchLeaseExpiresAt\" is null) or (\"RunnerRun\".\"dispatchState\" = 'dispatching' and \"RunnerRun\".\"status\" = 'queued' and \"RunnerRun\".\"dispatchLeaseToken\" is not null and \"RunnerRun\".\"dispatchLeaseExpiresAt\" is not null and \"RunnerRun\".\"dispatchLeaseExpiresAt\" > \"RunnerRun\".\"createdAt\") or (\"RunnerRun\".\"dispatchState\" = 'running' and \"RunnerRun\".\"status\" = 'running' and \"RunnerRun\".\"dispatchLeaseToken\" is not null and \"RunnerRun\".\"dispatchLeaseExpiresAt\" is not null and \"RunnerRun\".\"dispatchLeaseExpiresAt\" > \"RunnerRun\".\"createdAt\") or (\"RunnerRun\".\"dispatchState\" = 'terminal' and \"RunnerRun\".\"status\" in ('completed', 'failed', 'cancelled') and ((\"RunnerRun\".\"dispatchLeaseToken\" is null and \"RunnerRun\".\"dispatchLeaseExpiresAt\" is null) or (\"RunnerRun\".\"dispatchLeaseToken\" is not null and \"RunnerRun\".\"dispatchLeaseExpiresAt\" is not null)))"
+        },
+        "RunnerRun_output_bounded": {
+          "name": "RunnerRun_output_bounded",
+          "value": "char_length(\"RunnerRun\".\"output\") <= 100000"
+        },
+        "RunnerRun_error_bounded": {
+          "name": "RunnerRun_error_bounded",
+          "value": "\"RunnerRun\".\"error\" is null or (jsonb_typeof(\"RunnerRun\".\"error\") = 'object' and \"RunnerRun\".\"error\" ?& array['code', 'message', 'retryable'] and (\"RunnerRun\".\"error\" - 'code' - 'message' - 'retryable' - 'details') = '{}'::jsonb and jsonb_typeof(\"RunnerRun\".\"error\"->'code') = 'string' and (\"RunnerRun\".\"error\"->>'code') = btrim(\"RunnerRun\".\"error\"->>'code') and char_length(\"RunnerRun\".\"error\"->>'code') between 1 and 64 and jsonb_typeof(\"RunnerRun\".\"error\"->'message') = 'string' and (\"RunnerRun\".\"error\"->>'message') = btrim(\"RunnerRun\".\"error\"->>'message') and char_length(\"RunnerRun\".\"error\"->>'message') between 1 and 500 and jsonb_typeof(\"RunnerRun\".\"error\"->'retryable') = 'boolean' and (not (\"RunnerRun\".\"error\" ? 'details') or (jsonb_typeof(\"RunnerRun\".\"error\"->'details') = 'string' and (\"RunnerRun\".\"error\"->>'details') = btrim(\"RunnerRun\".\"error\"->>'details') and char_length(\"RunnerRun\".\"error\"->>'details') between 1 and 2000)))"
+        },
+        "RunnerRun_commandEvidence_bounded": {
+          "name": "RunnerRun_commandEvidence_bounded",
+          "value": "jsonb_typeof(\"RunnerRun\".\"commandEvidence\") = 'array' and jsonb_array_length(\"RunnerRun\".\"commandEvidence\") <= 256"
+        },
+        "RunnerRun_fileEvidence_bounded": {
+          "name": "RunnerRun_fileEvidence_bounded",
+          "value": "jsonb_typeof(\"RunnerRun\".\"fileEvidence\") = 'array' and jsonb_array_length(\"RunnerRun\".\"fileEvidence\") <= 256"
+        },
+        "RunnerRun_daytonaCommand_requires_session": {
+          "name": "RunnerRun_daytonaCommand_requires_session",
+          "value": "\"RunnerRun\".\"daytonaCommandId\" is null or \"RunnerRun\".\"daytonaSessionId\" is not null"
+        },
+        "RunnerRun_daytonaSession_requires_attempt": {
+          "name": "RunnerRun_daytonaSession_requires_attempt",
+          "value": "\"RunnerRun\".\"daytonaSessionId\" is null or \"RunnerRun\".\"daytonaAttemptId\" is not null"
+        },
+        "RunnerRun_daytonaAttempt_valid": {
+          "name": "RunnerRun_daytonaAttempt_valid",
+          "value": "\"RunnerRun\".\"daytonaAttemptId\" is null or \"RunnerRun\".\"daytonaAttemptId\" ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.RunnerRunEvent": {
+      "name": "RunnerRunEvent",
+      "schema": "",
+      "columns": {
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "event": {
+          "name": "event",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "eventId": {
+          "name": "eventId",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "runId": {
+          "name": "runId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "RunnerRunEvent_runId_RunnerRun_id_fk": {
+          "name": "RunnerRunEvent_runId_RunnerRun_id_fk",
+          "tableFrom": "RunnerRunEvent",
+          "tableTo": "RunnerRun",
+          "columnsFrom": ["runId"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "RunnerRunEvent_runId_eventId_pk": {
+          "name": "RunnerRunEvent_runId_eventId_pk",
+          "columns": ["runId", "eventId"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "RunnerRunEvent_eventId_nonnegative": {
+          "name": "RunnerRunEvent_eventId_nonnegative",
+          "value": "\"RunnerRunEvent\".\"eventId\" >= 0"
+        },
+        "RunnerRunEvent_event_object": {
+          "name": "RunnerRunEvent_event_object",
+          "value": "jsonb_typeof(\"RunnerRunEvent\".\"event\") = 'object'"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.RunnerScheduler": {
+      "name": "RunnerScheduler",
+      "schema": "",
+      "columns": {
+        "consecutiveDispatchCount": {
+          "name": "consecutiveDispatchCount",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "lastDispatchedTenantHash": {
+          "name": "lastDispatchedTenantHash",
+          "type": "varchar(67)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reconciliationLeaseExpiresAt": {
+          "name": "reconciliationLeaseExpiresAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reconciliationLeaseFence": {
+          "name": "reconciliationLeaseFence",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "reconciliationLeaseOwner": {
+          "name": "reconciliationLeaseOwner",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "singleton": {
+          "name": "singleton",
+          "type": "boolean",
+          "primaryKey": true,
+          "notNull": true,
+          "default": true
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "RunnerScheduler_singleton": {
+          "name": "RunnerScheduler_singleton",
+          "value": "\"RunnerScheduler\".\"singleton\" = true"
+        },
+        "RunnerScheduler_consecutiveDispatchCount_nonnegative": {
+          "name": "RunnerScheduler_consecutiveDispatchCount_nonnegative",
+          "value": "\"RunnerScheduler\".\"consecutiveDispatchCount\" >= 0"
+        },
+        "RunnerScheduler_reconciliationLeaseFence_nonnegative": {
+          "name": "RunnerScheduler_reconciliationLeaseFence_nonnegative",
+          "value": "\"RunnerScheduler\".\"reconciliationLeaseFence\" >= 0"
+        },
+        "RunnerScheduler_reconciliationLease_pair": {
+          "name": "RunnerScheduler_reconciliationLease_pair",
+          "value": "(\"RunnerScheduler\".\"reconciliationLeaseOwner\" is null and \"RunnerScheduler\".\"reconciliationLeaseExpiresAt\" is null) or (\"RunnerScheduler\".\"reconciliationLeaseOwner\" is not null and \"RunnerScheduler\".\"reconciliationLeaseExpiresAt\" is not null)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.Stream": {
+      "name": "Stream",
+      "schema": "",
+      "columns": {
+        "chatId": {
+          "name": "chatId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "Stream_chatId_Chat_id_fk": {
+          "name": "Stream_chatId_Chat_id_fk",
+          "tableFrom": "Stream",
+          "tableTo": "Chat",
+          "columnsFrom": ["chatId"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "Stream_id_pk": {
+          "name": "Stream_id_pk",
+          "columns": ["id"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.StripeEvent": {
+      "name": "StripeEvent",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "varchar(64)",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "processedAt": {
+          "name": "processedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.Suggestion": {
+      "name": "Suggestion",
+      "schema": "",
+      "columns": {
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "documentCreatedAt": {
+          "name": "documentCreatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "documentId": {
+          "name": "documentId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "isResolved": {
+          "name": "isResolved",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "originalText": {
+          "name": "originalText",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "suggestedText": {
+          "name": "suggestedText",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "Suggestion_userId_User_id_fk": {
+          "name": "Suggestion_userId_User_id_fk",
+          "tableFrom": "Suggestion",
+          "tableTo": "User",
+          "columnsFrom": ["userId"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "Suggestion_documentId_documentCreatedAt_Document_id_createdAt_fk": {
+          "name": "Suggestion_documentId_documentCreatedAt_Document_id_createdAt_fk",
+          "tableFrom": "Suggestion",
+          "tableTo": "Document",
+          "columnsFrom": ["documentId", "documentCreatedAt"],
+          "columnsTo": ["id", "createdAt"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "Suggestion_id_pk": {
+          "name": "Suggestion_id_pk",
+          "columns": ["id"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.TenantCredential": {
+      "name": "TenantCredential",
+      "schema": "",
+      "columns": {
+        "aadVersion": {
+          "name": "aadVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "ciphertext": {
+          "name": "ciphertext",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "credentialRevision": {
+          "name": "credentialRevision",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "envelopeRevision": {
+          "name": "envelopeRevision",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "harnessId": {
+          "name": "harnessId",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "iv": {
+          "name": "iv",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kekVersion": {
+          "name": "kekVersion",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'v1'"
+        },
+        "tenant": {
+          "name": "tenant",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "wrappedKey": {
+          "name": "wrappedKey",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "TenantCredential_tenant_harness_idx": {
+          "name": "TenantCredential_tenant_harness_idx",
+          "columns": [
+            {
+              "expression": "tenant",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "harnessId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "TenantCredential_kekVersion_valid": {
+          "name": "TenantCredential_kekVersion_valid",
+          "value": "\"TenantCredential\".\"kekVersion\" ~ '^[A-Za-z0-9_-]{1,32}$'"
+        },
+        "TenantCredential_aadVersion_valid": {
+          "name": "TenantCredential_aadVersion_valid",
+          "value": "\"TenantCredential\".\"aadVersion\" in (0, 1)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.User": {
+      "name": "User",
+      "schema": "",
+      "columns": {
+        "authVersion": {
+          "name": "authVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "billingPeriodStart": {
+          "name": "billingPeriodStart",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "email": {
+          "name": "email",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "emailVerified": {
+          "name": "emailVerified",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "image": {
+          "name": "image",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "isAnonymous": {
+          "name": "isAnonymous",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "password": {
+          "name": "password",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "stripeCustomerId": {
+          "name": "stripeCustomerId",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "stripeSubscriptionId": {
+          "name": "stripeSubscriptionId",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "subscribedUntil": {
+          "name": "subscribedUntil",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "User_stripeCustomerId_idx": {
+          "name": "User_stripeCustomerId_idx",
+          "columns": [
+            {
+              "expression": "stripeCustomerId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.Vote_v2": {
+      "name": "Vote_v2",
+      "schema": "",
+      "columns": {
+        "chatId": {
+          "name": "chatId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "isUpvoted": {
+          "name": "isUpvoted",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "messageId": {
+          "name": "messageId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "Vote_v2_chatId_Chat_id_fk": {
+          "name": "Vote_v2_chatId_Chat_id_fk",
+          "tableFrom": "Vote_v2",
+          "tableTo": "Chat",
+          "columnsFrom": ["chatId"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "Vote_v2_messageId_Message_v2_id_fk": {
+          "name": "Vote_v2_messageId_Message_v2_id_fk",
+          "tableFrom": "Vote_v2",
+          "tableTo": "Message_v2",
+          "columnsFrom": ["messageId"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "Vote_v2_chatId_messageId_pk": {
+          "name": "Vote_v2_chatId_messageId_pk",
+          "columns": ["chatId", "messageId"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    }
+  },
+  "enums": {},
+  "schemas": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
+  "_meta": {
+    "columns": {},
+    "schemas": {},
+    "tables": {}
+  }
+}

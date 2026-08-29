@@ -189,6 +189,7 @@ type SandboxRecoveryStore = Pick<
   | "finishDaytonaSandboxResetForRecovery"
   | "resetDaytonaSandboxRecovery"
   | "scanDaytonaSandboxRecoveries"
+  | "scanDaytonaWarmRecoveries"
 >;
 
 export type ReconcileDaytonaSandboxesDependencies = Readonly<{
@@ -784,38 +785,50 @@ export async function reconcileDaytonaSandboxes(
   const warmStaleBefore =
     dependencies.warmStaleBefore ??
     new Date(clock().getTime() - SANDBOX_WARM_TIMEOUT_MS);
-  let agents: RunnerAgentRecord[];
+  let failures = 0;
+  let agents: RunnerAgentRecord[] = [];
   try {
     agents = await dependencies.store.scanDaytonaSandboxRecoveries(
       dependencies.operator,
       batchSize
     );
   } catch {
-    return { deferred: 0, failures: 1, recovered: 0 };
+    failures += 1;
   }
-  const outcomes = await mapBounded(
-    agents,
-    providerConcurrency,
-    async (agent) => {
-      try {
-        return await recoverSandbox(
-          agent,
-          dependencies,
-          provisioningStaleBefore,
-          warmStaleBefore
-        );
-      } catch {
-        return "failed" as const;
-      }
+  let warmAgents: RunnerAgentRecord[] = [];
+  try {
+    warmAgents = await dependencies.store.scanDaytonaWarmRecoveries(
+      dependencies.operator,
+      warmStaleBefore,
+      batchSize
+    );
+  } catch {
+    failures += 1;
+  }
+  const recover = async (agent: RunnerAgentRecord) => {
+    try {
+      return await recoverSandbox(
+        agent,
+        dependencies,
+        provisioningStaleBefore,
+        warmStaleBefore
+      );
+    } catch {
+      return "failed" as const;
     }
-  );
+  };
+  const [lifecycleOutcomes, warmOutcomes] = await Promise.all([
+    mapBounded(agents, providerConcurrency, recover),
+    mapBounded(warmAgents, providerConcurrency, recover),
+  ]);
+  const outcomes = [...lifecycleOutcomes, ...warmOutcomes];
   return outcomes.reduce<DaytonaSandboxReconciliationResult>(
     (result, outcome) => ({
       deferred: result.deferred + (outcome === "deferred" ? 1 : 0),
       failures: result.failures + (outcome === "failed" ? 1 : 0),
       recovered: result.recovered + (outcome === "recovered" ? 1 : 0),
     }),
-    { deferred: 0, failures: 0, recovered: 0 }
+    { deferred: 0, failures, recovered: 0 }
   );
 }
 

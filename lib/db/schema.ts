@@ -494,6 +494,11 @@ export const runnerAgent = pgTable(
       .where(
         sql`${table.sandboxLifecycle} in ('provisioning', 'provisioning_ambiguous', 'resetting', 'decommissioning')`
       ),
+    index("RunnerAgent_warm_recovery_idx")
+      .on(table.warmUpdatedAt, table.id)
+      .where(
+        sql`${table.sandboxLifecycle} = 'ready' and ${table.warmStatus} = 'provisioning'`
+      ),
     check(
       "RunnerAgent_tenant_valid",
       sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`
