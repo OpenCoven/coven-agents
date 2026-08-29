@@ -204,12 +204,6 @@ export const createAgentInputSchema = z
   .superRefine(validateAgentBackendRuntime);
 
 /**
- * Deliberately omits `validateAgentBackendRuntime`, so tightening a create-time
- * rule cannot make already stored definitions unreadable and strand an agent in
- * durable state. Agents created before the provider-key runtime was retired
- * still parse; they simply cannot be recreated.
- */
-/**
  * The sandbox's readiness for this agent's next run.
  *
  * `provisioning` means a warm-up is booting the container; `ready` means the
@@ -225,7 +219,7 @@ export const warmStateSchema = z
   .strict();
 export type WarmState = z.infer<typeof warmStateSchema>;
 
-export const agentDefinitionSchema = z
+const storedAgentDefinitionBaseSchema = z
   .object({
     ...agentDefinitionInputShape,
     createdAt: datetimeSchema,
@@ -237,12 +231,17 @@ export const agentDefinitionSchema = z
   })
   .strict();
 
+export const agentDefinitionSchema =
+  storedAgentDefinitionBaseSchema.superRefine(validateAgentBackendRuntime);
+
 /**
- * Durable worker state predating warm tracking has no `warm` member. Keep
- * that compatibility at the storage boundary so current API responses remain
+ * Deliberately omits `validateAgentBackendRuntime`, so definitions using the
+ * retired provider-key runtime remain readable from durable state. Stored
+ * definitions predating warm tracking also have no `warm` member. Keep both
+ * compatibility rules at the storage boundary so current API responses remain
  * strict and always publish the effective warm state.
  */
-export const storedAgentDefinitionSchema = agentDefinitionSchema
+export const storedAgentDefinitionSchema = storedAgentDefinitionBaseSchema
   .extend({
     warm: warmStateSchema.optional(),
   })

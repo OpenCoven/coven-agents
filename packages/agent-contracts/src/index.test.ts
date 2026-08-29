@@ -65,10 +65,10 @@ test("rejects the retired provider-key cloud runtime on either backend", () => {
   }
 });
 
-test("a stored definition using the retired runtime and no warm state still parses", () => {
+test("isolates retired runtime compatibility to stored definitions", () => {
   // Tightening a create-time rule must not strand an agent already written to
   // durable state, so the stored schema owns legacy compatibility.
-  const result = storedAgentDefinitionSchema.safeParse({
+  const legacyDefinition = {
     backend: "cloud",
     createdAt: "2026-08-20T17:00:00.000Z",
     description: "",
@@ -80,10 +80,20 @@ test("a stored definition using the retired runtime and no warm state still pars
     runtime: "cloud",
     status: "idle",
     updatedAt: "2026-08-20T17:00:00.000Z",
+  };
+  const publicResult = agentDefinitionSchema.safeParse({
+    ...legacyDefinition,
+    owner: { kind: "standalone" },
+    warm: {
+      status: "not_started",
+      updatedAt: legacyDefinition.updatedAt,
+    },
   });
+  const storedResult = storedAgentDefinitionSchema.safeParse(legacyDefinition);
 
-  assert.equal(result.success, true);
-  assert.deepEqual(result.success && result.data.warm, {
+  assert.equal(publicResult.success, false);
+  assert.equal(storedResult.success, true);
+  assert.deepEqual(storedResult.success && storedResult.data.warm, {
     status: "not_started",
     updatedAt: "2026-08-20T17:00:00.000Z",
   });
