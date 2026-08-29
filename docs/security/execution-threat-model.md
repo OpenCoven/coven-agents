@@ -131,21 +131,23 @@ Assumptions:
 
 The browser is untrusted input. GitHub authentication establishes a user, but
 subscriber authority is recomputed from server-owned subscription state.
-`lib/session.ts`, `lib/db/access.ts`, and `lib/agents/connection-access.ts`
-separate guest (internally `demo`), subscriber, database, and runner-connection
-authority. Authenticated server helpers re-read the user row and compare its
-`authVersion` before allowing access, so an operator revocation is immediate.
+`lib/session.ts`, `lib/auth/subscriber-access.ts`, and `lib/db/access.ts`
+separate guest (internally `demo`), subscriber, and database authority.
+Same-origin agent and run routes authenticate the application session and
+re-read the user row before tenant-scoped work, so an operator revocation is
+immediate. The browser receives neither a runner connection credential nor a
+minted runner identity token.
 
-### B2. Browser to cloud runner
+### B2. Browser to legacy cloud runner (rollback only)
 
-The cloud control token is a deployment gate, not identity. Identity comes from
-the signed claim minted in `lib/agents/runner-token.ts` and verified in
-`worker/src/routes.ts`. The Worker routes by the bounded `kid` hint, verifies
-the raw payload, and only then trusts claims. CORS narrows browser origins but
-is not treated as authentication. `/api/diagnostics/sandbox` is operator-only:
-it accepts only the separate `OPERATOR_DIAGNOSTIC_TOKEN` as a timing-safe
-credential and refuses control-token and runner-identity headers, so a revoked
-claim cannot authorize a paid probe.
+The current browser-to-runner boundary is same-origin and application-session
+authenticated; it does not use the Cloudflare Worker. The still-deployed Worker
+is retained only for rollback and continues to verify legacy signed claims in
+`worker/src/routes.ts`. The app keeps the matching public verification ring for
+the Worker-facing internal routes, but no current app module holds the private
+signing key or mints claims. CORS remains defense in depth rather than
+authentication. `/api/diagnostics/sandbox` remains operator-only through the
+separate `OPERATOR_DIAGNOSTIC_TOKEN`.
 
 ### B3. Control plane to internal credential endpoint
 
@@ -289,9 +291,9 @@ class explicitly.
 
 | ID | Threat and impact | Current controls and verification | Residual risk or follow-up |
 | --- | --- | --- | --- |
-| T1 | A forged cloud identity reads or mutates another tenant's agents or runs. | Ed25519 claims are minted only in `lib/agents/runner-token.ts`; bounded `kid` routing selects a configured key before raw-payload verification, and tenant-scoped routes are in `worker/src/routes.ts`. Cross-tenant read, run, stream, stop, and delete refusals are covered by `worker/src/routes.test.ts`. | Signing-key compromise remains critical. Rotation and deployment procedure must keep the private key control-plane-only. |
-| T2 | The shared cloud control token becomes a master tenant credential. | The token only gates deployment access. Tenant identity comes from the signed claim; the internal credential endpoint independently verifies that claim and the database `authVersion` before reservation or decryption. | Browser compromise can use the current user's authority until session revocation or runner-claim expiry. |
-| T3 | A guest, lapsed, forged, or unknown entitlement gains subscriber persistence or execution. | `lib/session.ts` fails closed to internal plan `demo`; `lib/auth/subscriber-access.ts` gates model and persistent routes; `lib/db/access.ts` requires `SubscriberSession`; runner connection and identity routes refuse guest accounts; the Worker and internal credential binding require `plan === "subscriber"`. | The complete provider-ingestion state machine and adversarial transition coverage remain tracked by `coven-agents-security.2`. |
+| T1 | A forged identity reads or mutates another tenant's agents or runs. | Current agent and run routes derive identity from the same-origin application session and enforce tenant ownership. For rollback only, the Worker verifies legacy Ed25519 claims and the retained internal authority and credential routes validate them against the public key ring and current database authority. | Compromise of a private signing key in a rollback application release remains critical until the legacy Worker boundary is removed. |
+| T2 | A shared infrastructure token becomes a master tenant credential. | The current browser receives no deployment or service token. In the rollback Worker boundary, the control token gates deployment access only; the internal credential endpoint independently verifies the signed claim, tenant binding, and database `authVersion` before reservation or decryption. | Browser compromise can use the current user's application session until revocation. Legacy runner claims remain bounded by expiry when the rollback runtime is active. |
+| T3 | A guest, lapsed, forged, or unknown entitlement gains subscriber persistence or execution. | `lib/session.ts` fails closed to internal plan `demo`; `lib/auth/subscriber-access.ts` gates model and persistent routes; `lib/db/access.ts` requires `SubscriberSession`; same-origin runner routes revalidate application-session authority. The rollback Worker and internal credential binding still require `plan === "subscriber"`. | The complete provider-ingestion state machine and adversarial transition coverage remain tracked by `coven-agents-security.2`. |
 | T4 | A tenant or harness receives another tenant's credential. | `lib/credentials/store.ts` scopes by tenant plus harness. The internal endpoint binds tenant to a verified claim, refuses mismatch, and lends one credential for one run. Isolation and binding tests cover cross-tenant and cross-harness cases. | Plaintext exists in control-plane and Worker memory during a run. Process compromise during that window can expose it. |
 | T5 | Credential storage is copied or read at rest. | Per-credential AES-GCM data keys are wrapped by the exact versioned `CREDENTIAL_KEK_CURRENT_VERSION` ring named in each row; imported KEKs are non-extractable, and bounded rewrap changes only the wrapped DEK. The Worker stores no harness credential between runs. | Database plus the configured KEK ring compromise defeats encryption. Retiring v1 before the zero-row verification gate makes rows unreadable. |
 | T6 | Crafted tenant identifiers collide and share a cloud sandbox. | `worker/src/tenant.ts` rejects ambiguous identifiers and centralizes sandbox-key derivation. `worker/src/tenant.test.ts` covers collisions, missing owners, and create/delete consistency. | New owner kinds must preserve the exhaustive mapping and tests. |
@@ -313,8 +315,8 @@ new work rather than fall back to shared authority.
 | Incident | Immediate response | Recovery evidence |
 | --- | --- | --- |
 | Committed credential or private evidence | Revoke or rotate the credential first; disable affected access; remove public artifacts; use `pnpm secret:scan:all` to bound repository exposure. Deleting a line is not revocation. | Record affected paths and categories without copying values. Complete recurring detection and triage through `coven-agents-security.4`. |
-| Runner signing-key compromise | Stop cloud issuance, rotate the versioned key ring using [the runbook](key-rotation.md), redeploy the control plane and Worker, and reject claims signed by the retired key. | Run `lib/agents/key-ring.test.ts`, `packages/agent-contracts/src/verify-token.test.ts`, and cloud route tests, then verify a fresh claim succeeds and an old claim fails. |
-| Control or service-token compromise | Rotate the affected token on both sides of its boundary. The control token grants deployment reach but not tenant identity; the service token grants endpoint reach but not tenant selection. | Re-run `lib/agents/connection-access.test.ts` and `app/api/internal/credential/*.test.ts`; verify empty and previous tokens fail. |
+| Legacy runner signing-key compromise | Disable the rollback browser path, rotate the legacy versioned key ring using [the runbook](key-rotation.md), and reject claims signed by the retired key. The current application has no private runner signing key. | Run `lib/agents/key-ring.test.ts`, `packages/agent-contracts/src/verify-token.test.ts`, internal authority tests, and Worker route tests; verify retired claims fail. |
+| Control or service-token compromise | Rotate the affected token on both sides of the retained Worker boundary. The control token grants legacy deployment reach but not tenant identity; the service token grants internal endpoint reach but not tenant selection. | Re-run `lib/runner/auth.test.ts` and `app/api/internal/credential/*.test.ts`; verify empty and previous tokens fail. |
 | Tenant harness-credential compromise | Revoke at the harness provider, stop affected runs, destroy or recycle affected sandboxes, and replace the encrypted tenant/harness row through `lib/credentials/store.ts`. | Verify the old credential no longer works and cross-tenant tests still pass without recording the credential value. |
 | Suspected cross-tenant cloud access | Suspend affected execution, preserve sanitized ownership and operation identifiers, stop the run, and destroy the implicated sandbox. Do not expose another tenant's record while notifying users. | Reproduce with `worker/src/routes.test.ts` and `worker/src/tenant.test.ts`; repair ownership before restoring service. |
 | Resource-exhaustion or orphaned execution | Refuse new work, stop bounded runs, and prefer explicit busy or recovery states over silently starting duplicates. | Cloud fairness is completed through `coven-agents-cloud.3`. |
@@ -327,9 +329,9 @@ run the narrow tests for the affected boundary plus the repository gates.
 
 | Boundary | Required evidence |
 | --- | --- |
-| Sessions and entitlement | `lib/auth/session-revocation.test.ts`, `lib/session.test.ts`, `lib/subscription.test.ts`, `lib/session-claims.test.ts`, `lib/agents/connection-access.test.ts` |
+| Sessions and entitlement | `lib/auth/session-revocation.test.ts`, `lib/auth/subscriber-access.test.ts`, `lib/auth/subscriber-authorization.test.ts`, `lib/session.test.ts`, `lib/subscription.test.ts`, `lib/session-claims.test.ts` |
 | Database and credential custody | `lib/db/access.test.ts`, `lib/credentials/envelope.test.ts`, `lib/credentials/authorize.test.ts`, `app/api/internal/credential/*.test.ts` |
-| Cloud identity and tenancy | `lib/agents/key-ring.test.ts`, `lib/agents/runner-token.test.ts`, `packages/agent-contracts/src/verify-token.test.ts`, `worker/src/routes.test.ts`, `worker/src/tenant.test.ts`, `worker/src/tenant-credentials.test.ts` |
+| Legacy Worker identity and tenancy | `lib/agents/key-ring.test.ts`, `app/api/internal/runner-authority/route.test.ts`, `app/api/internal/credential/binding.test.ts`, `packages/agent-contracts/src/verify-token.test.ts`, `worker/src/routes.test.ts`, `worker/src/tenant.test.ts`, `worker/src/tenant-credentials.test.ts` |
 | Cloud execution and evidence | `worker/src/harness-runner.test.ts`, `worker/src/run-state.test.ts`, `worker/src/agents.test.ts` |
 | Shared contracts and redaction | `packages/agent-contracts/src/*.test.ts`, especially evidence-safety and guest-transcript compatibility tests |
 | Guest publication | `scripts/demo-record.test.ts`, `scripts/demo-capture.test.ts`, `lib/demo/fixtures.test.ts` |

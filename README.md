@@ -99,38 +99,35 @@ pnpm install
 cp .env.example .env.local
 ```
 
-Generate the local app's versioned runner identity, deployment gate, internal
-service credential, and credential-encryption key in a private terminal. Copy
-the assignments into `.env.local`; each random call deliberately creates a
+Generate the local app's rollback Worker deployment gate, internal service
+credential, and credential-encryption key in a private terminal. Copy the
+assignments into `.env.local`; each random call deliberately creates a
 different credential.
 
 ```bash
 node --input-type=module -e '
-import { randomBytes, webcrypto } from "node:crypto";
-const pair = await webcrypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
-const pkcs8 = await webcrypto.subtle.exportKey("pkcs8", pair.privateKey);
-const spki = await webcrypto.subtle.exportKey("spki", pair.publicKey);
+import { randomBytes } from "node:crypto";
 console.log("AGENT_CONTROL_TOKEN=" + randomBytes(32).toString("base64url"));
 console.log("RUNNER_SERVICE_TOKEN=" + randomBytes(32).toString("base64url"));
-console.log("RUNNER_SIGNING_KEY_ID=key-local");
-console.log("RUNNER_SIGNING_KEY=" + Buffer.from(pkcs8).toString("base64url"));
-console.log("RUNNER_SIGNING_PUBLIC_KEY=" + Buffer.from(spki).toString("base64url"));
 console.log("CREDENTIAL_KEK_CURRENT_VERSION=v1");
 console.log("CREDENTIAL_KEK=" + randomBytes(32).toString("base64url"));
 '
 ```
 
-Do not copy the output into logs, issues, or tracked files. The signing key and
-credential KEK stay app-only. Copy the same
-`AGENT_CONTROL_TOKEN` and `RUNNER_SERVICE_TOKEN` values to the Worker.
+Do not copy the output into logs, issues, or tracked files. The credential KEK
+stays app-only. Browser runner requests now use the authenticated same-origin
+application API; the app exposes no runner-connection endpoint, browser token
+minter, or private runner signing key.
+
+The Worker values below are rollback/legacy runtime configuration until the
+Worker-removal change. Copy the same `AGENT_CONTROL_TOKEN` and
+`RUNNER_SERVICE_TOKEN` values to that Worker.
 `AGENT_CONTROL_TOKEN` and `RUNNER_SERVICE_TOKEN` are separate credentials:
 the first gates app-to-Worker requests, while the second authenticates
-Worker-to-app internal calls. Copy `RUNNER_SIGNING_KEY_ID` to
-Worker `RUNNER_VERIFY_KEY_ID` and copy the SPKI
-`RUNNER_SIGNING_PUBLIC_KEY` value to Worker `RUNNER_VERIFY_KEY`. Generate a
-separate `OPERATOR_DIAGNOSTIC_TOKEN`; it must never reuse either app-to-Worker
-credential. The legacy app `RUNNER_VERIFY_KEY`/`RUNNER_SIGNING_KEY` pair is
-supported only while migrating to the explicit key ID and public-key fields.
+Worker-to-app internal calls. Keep the existing public
+`RUNNER_VERIFY_KEY_ID`/`RUNNER_VERIFY_KEY` ring aligned between the app's
+internal verification routes and the rollback Worker. Generate a separate
+`OPERATOR_DIAGNOSTIC_TOKEN`; it must never reuse either Worker credential.
 
 ## Run the control plane
 
@@ -161,8 +158,8 @@ Create `worker/.dev.vars`:
 AGENT_CONTROL_TOKEN=copy-the-exact-app-env-local-value
 OPERATOR_DIAGNOSTIC_TOKEN=replace-with-a-different-long-random-token
 EDGE_ABUSE_KEY_SECRET=replace-with-a-long-random-secret
-RUNNER_VERIFY_KEY_ID=copy-the-app-runner-signing-key-id
-RUNNER_VERIFY_KEY=copy-the-app-runner-signing-public-key
+RUNNER_VERIFY_KEY_ID=copy-the-retained-legacy-verification-key-id
+RUNNER_VERIFY_KEY=copy-the-retained-legacy-public-key
 RUNNER_AUTH_VERSION=0
 # Optional during rotation; retire only after token expiry plus skew.
 RUNNER_VERIFY_PREVIOUS_KEY_ID=key-2026-07
@@ -173,22 +170,19 @@ RUNNER_SERVICE_TOKEN=copy-the-exact-app-env-local-value
 APP_ORIGIN=http://localhost:3000
 ```
 
-The app uses the matching versioned signing configuration:
-`RUNNER_SIGNING_KEY_ID`, `RUNNER_SIGNING_KEY`, and
-`RUNNER_SIGNING_PUBLIC_KEY`. New tokens are minted only with the current key;
-the Worker accepts the current key and an unexpired previous public key.
-Deploy rotation in this order: add the new Worker current key while retaining
-the old key as previous, switch the app signing key, wait 15 minutes plus
-clock skew, then remove the old key. Roll back by switching the app signer
-back while retaining both verification keys until the original expiry window
-has elapsed. Never log or commit key material; use Vercel and Wrangler
-secrets. The legacy `RUNNER_VERIFY_KEY`/`RUNNER_SIGNING_KEY` pair remains
-supported only as an explicit migration compatibility path.
+This Worker configuration is rollback/legacy runtime guidance. The current
+browser does not call the Worker: it sends its application session cookie to
+same-origin agent and run routes, which revalidate subscriber authority and
+tenant ownership server-side. The current app neither provisions a browser
+runner connection nor mints a runner bearer token.
 
-The browser identity minter intentionally keeps the original bodyless
-`POST /api/runner-token` request for unscoped calls. Run starts send a strict
-JSON `run` scope instead. The endpoint treats an absent or zero-byte body as
-unscoped, while malformed, unknown-field, and oversized JSON remains rejected.
+The Worker may remain deployed until its removal PR. Its internal authority and
+credential calls continue to use `RUNNER_SERVICE_TOKEN`, and the app retains
+only the public current/previous verification ring needed to validate legacy
+claims on those internal routes. The current app holds no private runner
+signing key. Restoring the old browser-to-Worker path requires an application
+rollback to the release that still contains the signer and token routes; follow
+the [runner key runbook](docs/security/key-rotation.md) for that legacy runtime.
 
 **The worker holds no harness credential.** It used to read
 `COPILOT_GITHUB_TOKEN` from its own environment, which meant every tenant ran
