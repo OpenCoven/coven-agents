@@ -1356,6 +1356,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
           if (!target) {
             return new Response(null, { headers: cors, status: 204 });
           }
+          assertRunnableHarness(target.runtime);
           const warm = await Promise.resolve(
             (await yoloAgent(target.id)).warm()
           ).catch(() => null);
@@ -1440,6 +1441,7 @@ export function createCloudRunner<Environment extends CloudRunnerEnvironment>(
                 cors
               );
             }
+            assertRunnableHarness(current.runtime);
             const input = startRunInputSchema.parse(await readJson(request));
             if (
               claims.run &&

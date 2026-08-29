@@ -974,6 +974,31 @@ test("run start maps operation, capacity, lifecycle, and admission failures", as
   );
 });
 
+test("run start maps a legacy runtime fence to the public unsupported harness error", async () => {
+  const fixture = handlers({
+    service: service({
+      startRun: async () => ({ kind: "unsupported_harness" }) as never,
+    }),
+  });
+  const response = await fixture.handlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({
+        operationId: OPERATION_ID,
+        task: "Do the thing.",
+      }),
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "harness_unsupported"
+  );
+  assert.equal(fixture.after.length, 0);
+});
+
 test("SSE validates cursors, resumes without duplicates, and uses exact headers", async () => {
   const first: RunEvent = {
     at: "2026-08-28T15:00:00.000Z",
@@ -1155,6 +1180,24 @@ test("tenant prewarm maps concurrent, stale, provider, and database outcomes", a
       }
     })
   );
+});
+
+test("tenant prewarm maps a legacy runtime fence to the public unsupported harness error", async () => {
+  const fixture = handlers({
+    service: service({
+      prewarmMostRecent: async () => ({ kind: "unsupported_harness" }) as never,
+    }),
+  });
+  const response = await fixture.handlers.prewarmTenant(
+    new Request("https://app.test/api/tenant/prewarm", { method: "POST" })
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "harness_unsupported"
+  );
+  assert.equal(fixture.after.length, 0);
 });
 
 test("diagnostics and reconciliation use only their operator service and safe outputs", async () => {

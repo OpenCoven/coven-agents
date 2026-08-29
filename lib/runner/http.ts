@@ -865,6 +865,14 @@ export function createRunnerHttpHandlers(
           case "none":
           case "not_found":
             return new Response(null, { status: 204 });
+          case "unsupported_harness":
+            return errorResponse(
+              dependencies,
+              400,
+              "harness_unsupported",
+              `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+              false
+            );
           case "ready":
           case "in_progress":
             return Response.json(
@@ -942,6 +950,14 @@ export function createRunnerHttpHandlers(
             return invalidRequest(dependencies);
           case "not_found":
             return agentNotFound(dependencies);
+          case "unsupported_harness":
+            return errorResponse(
+              dependencies,
+              400,
+              "harness_unsupported",
+              `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+              false
+            );
           case "refused":
             switch (result.code) {
               case "operation_conflict":

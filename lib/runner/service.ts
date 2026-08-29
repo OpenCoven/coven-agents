@@ -160,6 +160,7 @@ export type RunnerStartResult =
       scheduleReconciliation?: true;
     }>
   | Readonly<{ kind: "not_found" }>
+  | Readonly<{ kind: "unsupported_harness" }>
   | Readonly<{
       code:
         | "admission_unavailable"
@@ -214,6 +215,7 @@ export type RunnerPrewarmResult =
       kind: "unavailable";
       source: "database" | "provider";
     }>
+  | Readonly<{ kind: "unsupported_harness" }>
   | Readonly<{ kind: "provider_rejected" }>;
 
 export type RunnerWarmResult =
@@ -224,6 +226,7 @@ export type RunnerWarmResult =
       kind: "unavailable";
       source: "database" | "provider";
     }>
+  | Readonly<{ kind: "unsupported_harness" }>
   | Readonly<{ kind: "provider_rejected" }>;
 
 export type RunnerService = Readonly<{
@@ -416,6 +419,9 @@ export function createRunnerService(
     if (!agent) {
       return { kind: "not_found" };
     }
+    if (!isRunnableHarness(agent.runtime)) {
+      return { kind: "unsupported_harness" };
+    }
     if (!dependencies.warmSandbox) {
       throw configuredError("sandbox warming");
     }
@@ -549,6 +555,9 @@ export function createRunnerService(
       if (!target) {
         return { kind: "none" };
       }
+      if (!isRunnableHarness(target.runtime)) {
+        return { kind: "unsupported_harness" };
+      }
       if (!dependencies.warmSandbox) {
         throw configuredError("sandbox warming");
       }
@@ -614,6 +623,22 @@ export function createRunnerService(
       const parsed = startRunInputSchema.safeParse(input);
       if (!parsed.success) {
         return { kind: "invalid" };
+      }
+      let agent: RunnerAgentRecord | null;
+      try {
+        agent = await dependencies.store.getAgent(principal, agentId);
+      } catch {
+        return {
+          code: "admission_unavailable",
+          kind: "refused",
+          retryable: true,
+        };
+      }
+      if (!agent) {
+        return { kind: "not_found" };
+      }
+      if (!isRunnableHarness(agent.runtime)) {
+        return { kind: "unsupported_harness" };
       }
       const id = createId();
       if (!validId(id)) {
