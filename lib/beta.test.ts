@@ -93,6 +93,18 @@ test("the machine-triggered reconciliation path is exempt", () => {
   );
 });
 
+test("retired and future internal routes are not exempt", () => {
+  for (const pathname of [
+    "/api/internal",
+    "/api/internal/credential",
+    "/api/internal/future-service",
+    "/api/internal/runner-reconcile/extra",
+  ]) {
+    assert.equal(isBetaExempt(pathname), false, pathname);
+    assert.equal(betaVerdict(readBetaGate(ON), pathname, null), "deny");
+  }
+});
+
 test("sign-in stays reachable so the gate is escapable", () => {
   for (const pathname of ["/login", "/api/auth/session", "/ping"]) {
     assert.equal(isBetaExempt(pathname), true, `${pathname} must be exempt`);
@@ -107,8 +119,9 @@ test("registration is closed during the beta", () => {
 });
 
 test("an exempt prefix does not leak to lookalike paths", () => {
-  // `/api/internalise` must not inherit `/api/internal`'s exemption.
+  // Lookalike paths must not inherit an exact route's exemption.
   assert.equal(isBetaExempt("/api/internalish"), false);
+  assert.equal(isBetaExempt("/api/internal/runner-reconcile-now"), false);
   assert.equal(isBetaExempt("/loginish"), false);
 });
 

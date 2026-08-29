@@ -1,10 +1,11 @@
 /**
  * Paths that stay reachable while the beta gate is closed.
  *
- * `/api/internal` contains the cron and manual reconciliation route. Those
- * machine-triggered requests carry no Auth.js cookie, so gating them would
- * disable recovery instead of closing the beta. The route authenticates
- * itself with its dedicated cron or manual-recovery credential.
+ * `/api/internal/runner-reconcile` is the one machine-triggered route that
+ * carries no Auth.js cookie. Gating it would disable recovery instead of
+ * closing the beta. The route authenticates itself with its dedicated cron or
+ * manual-recovery credential. No other `/api/internal/*` route inherits this
+ * exemption.
  *
  * `/api/stripe` is exempt for the same reason and is not optional: Stripe does
  * not follow redirects when delivering a webhook, so a gated endpoint turns
@@ -23,12 +24,12 @@
  */
 const EXEMPT_PREFIXES = [
   "/api/auth",
-  "/api/internal",
   "/api/stripe",
   "/login",
   "/ping",
   "/security",
 ];
+const EXEMPT_PATHS = new Set(["/api/internal/runner-reconcile"]);
 
 export type BetaGate = {
   allowlist: string[];
@@ -63,12 +64,15 @@ export function readBetaGate(env: {
 }
 
 /**
- * Prefix match anchored on a segment boundary, so `/api/internalish` does not
- * inherit `/api/internal`'s exemption.
+ * Prefix exemptions are anchored on a segment boundary; exact exemptions do
+ * not authorize descendants or lookalike paths.
  */
 export function isBetaExempt(pathname: string): boolean {
-  return EXEMPT_PREFIXES.some(
-    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
+  return (
+    EXEMPT_PATHS.has(pathname) ||
+    EXEMPT_PREFIXES.some(
+      (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
+    )
   );
 }
 

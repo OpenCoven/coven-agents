@@ -18,6 +18,10 @@ const keyRotationUrl = new URL(
 );
 const securityPageUrl = new URL("../app/security/page.tsx", import.meta.url);
 const loginPageUrl = new URL("../app/(auth)/login/page.tsx", import.meta.url);
+const runtimeInspectorUrl = new URL(
+  "../components/console/runtime-inspector.tsx",
+  import.meta.url
+);
 
 test("the execution threat model covers every required security surface", () => {
   assert.equal(existsSync(threatModelUrl), true);
@@ -69,6 +73,14 @@ test("public security claims describe the same-origin Daytona boundary", () => {
   );
   assert.match(login, /Daytona sandbox/u);
   assert.doesNotMatch(login, /Cloudflare/u);
+});
+
+test("the runtime inspector describes the current provider boundary", () => {
+  const inspector = readFileSync(runtimeInspectorUrl, "utf8");
+
+  assert.match(inspector, /Daytona sandbox/u);
+  assert.match(inspector, /persistent workspace/u);
+  assert.doesNotMatch(inspector, /Cloudflare/u);
 });
 
 test("the incident runbooks name every secret that exists", () => {

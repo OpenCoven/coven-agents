@@ -10,6 +10,27 @@ function visit(cookie?: string, path = "/"): Promise<Response> {
   return proxy(request) as Promise<Response>;
 }
 
+async function withClosedBeta<T>(operation: () => Promise<T>): Promise<T> {
+  const previousMode = process.env.BETA_MODE;
+  const previousAllowlist = process.env.BETA_ALLOWLIST;
+  process.env.BETA_MODE = "on";
+  delete process.env.BETA_ALLOWLIST;
+  try {
+    return await operation();
+  } finally {
+    if (previousMode === undefined) {
+      delete process.env.BETA_MODE;
+    } else {
+      process.env.BETA_MODE = previousMode;
+    }
+    if (previousAllowlist === undefined) {
+      delete process.env.BETA_ALLOWLIST;
+    } else {
+      process.env.BETA_ALLOWLIST = previousAllowlist;
+    }
+  }
+}
+
 test("a first-time anonymous visitor is given a demo cookie", async () => {
   const response = await visit();
 
@@ -62,4 +83,21 @@ test("the admin page refuses before rendering or minting a demo identity", async
   assert.equal(response.status, 404);
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.equal(response.headers.get("set-cookie"), null);
+});
+
+test("closed beta keeps reconciliation reachable with a query string", async () => {
+  const response = await withClosedBeta(() =>
+    visit(undefined, "/api/internal/runner-reconcile?source=cron")
+  );
+
+  assert.equal(response.headers.get("location"), null);
+});
+
+test("closed beta does not bypass retired internal routes", async () => {
+  const response = await withClosedBeta(() =>
+    visit(undefined, "/api/internal/credential?phase=issue")
+  );
+
+  assert.equal(response.status, 307);
+  assert.match(response.headers.get("location") ?? "", /\/login\?beta=1$/u);
 });
