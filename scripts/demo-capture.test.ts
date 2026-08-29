@@ -29,6 +29,28 @@ const CONFIGURED_SECRETS = [
   RECORDER_EMAIL,
 ];
 
+function assertCaptureRequestHeaders(
+  headers: Headers,
+  options: Readonly<{
+    contentType?: boolean;
+    cookie?: string;
+    lastEventId?: string;
+  }> = {}
+): void {
+  assert.deepEqual(Object.fromEntries(headers), {
+    accept:
+      options.lastEventId === undefined
+        ? "application/json"
+        : "text/event-stream",
+    ...(options.contentType ? { "content-type": "application/json" } : {}),
+    cookie: `__Secure-authjs.session-token=${options.cookie ?? SESSION_COOKIE}`,
+    ...(options.lastEventId === undefined
+      ? {}
+      : { "last-event-id": options.lastEventId }),
+    origin: APP_ORIGIN,
+  });
+}
+
 const acceptedEvent: RunEvent = {
   id: 1,
   operationId: OPERATION_ID,
@@ -267,7 +289,10 @@ test("fails closed with the exact missing application session variables", () => 
       assert.match(error.message, /APP_ORIGIN/);
       assert.match(error.message, /AUTH_SECRET/);
       assert.match(error.message, /DEMO_RECORDER_ACCOUNT_EMAIL/);
-      assert.doesNotMatch(error.message, /DEMO_RUNNER|CLOUD_RUNNER/);
+      assert.doesNotMatch(
+        error.message,
+        /DAYTONA_API_KEY|OPERATOR_DIAGNOSTIC_TOKEN/
+      );
       return true;
     }
   );
@@ -528,7 +553,12 @@ test("sends one authenticated same-origin session cookie on every request includ
     status: "completed",
     type: "status",
   };
-  const calls: { credentials?: RequestCredentials; headers: Headers }[] = [];
+  const calls: {
+    body: string | null;
+    credentials?: RequestCredentials;
+    headers: Headers;
+    path: string;
+  }[] = [];
   // biome-ignore lint/suspicious/useAwait: injected fetch matches the native asynchronous fetch contract.
   const request = async (
     input: string | URL | Request,
@@ -536,8 +566,10 @@ test("sends one authenticated same-origin session cookie on every request includ
   ): Promise<Response> => {
     const path = new URL(String(input)).pathname;
     calls.push({
+      body: typeof init.body === "string" ? init.body : null,
       credentials: init.credentials,
       headers: new Headers(init.headers),
+      path,
     });
     if (path === "/api/agents" && init.method === "POST") {
       return agentResponse();
@@ -587,13 +619,10 @@ test("sends one authenticated same-origin session cookie on every request includ
   assert.equal(calls.length, 5);
   for (const call of calls) {
     assert.equal(call.credentials, "same-origin");
-    assert.match(
-      call.headers.get("cookie") ?? "",
-      /^__Secure-authjs\.session-token=session-cookie-sensitive$/
-    );
-    assert.equal(call.headers.get("authorization"), null);
-    assert.equal(call.headers.get("x-runner-token"), null);
-    assert.equal(call.headers.get("origin"), APP_ORIGIN);
+    assertCaptureRequestHeaders(call.headers, {
+      contentType: call.body !== null,
+      lastEventId: call.path.endsWith("/events") ? "0" : undefined,
+    });
   }
 });
 
@@ -1073,13 +1102,18 @@ test("reconnects with a cursor, deduplicates arrivals, and stops at terminal com
     `/api/agents/${AGENT_ID}`,
     "the temporary agent is deleted after capture"
   );
+  const eventCalls = calls.filter((call) => call.path.endsWith("/events"));
+  const sessionCookie = calls[0]?.headers
+    .get("cookie")
+    ?.replace(/^__Secure-authjs\.session-token=/u, "");
+  assert.ok(sessionCookie);
   for (const call of calls) {
-    assert.equal(call.headers.get("x-runner-token"), null);
-    assert.equal(call.headers.get("authorization"), null);
-    assert.match(
-      call.headers.get("cookie") ?? "",
-      /^__Secure-authjs\.session-token=/
-    );
+    const eventIndex = eventCalls.indexOf(call);
+    assertCaptureRequestHeaders(call.headers, {
+      contentType: call.body.length > 0,
+      cookie: sessionCookie,
+      lastEventId: eventIndex === -1 ? undefined : eventIndex === 0 ? "0" : "1",
+    });
   }
   const createInput = JSON.parse(calls[0]?.body ?? "{}") as {
     backend?: string;
@@ -1501,13 +1535,10 @@ test("recovers and deletes an exact agent after create commits then times out", 
     },
   ]);
   assert.equal(authenticationHeaders.length, 3);
-  for (const headers of authenticationHeaders) {
-    assert.equal(headers.get("authorization"), null);
-    assert.equal(headers.get("x-runner-token"), null);
-    assert.equal(
-      headers.get("cookie"),
-      `__Secure-authjs.session-token=${SESSION_COOKIE}`
-    );
+  for (const [index, headers] of authenticationHeaders.entries()) {
+    assertCaptureRequestHeaders(headers, {
+      contentType: calls[index]?.method === "POST",
+    });
   }
 });
 

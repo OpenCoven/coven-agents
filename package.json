@@ -31,6 +31,8 @@
     "test": "export PLAYWRIGHT=True && pnpm exec playwright test",
     "test:unit": "tsx --test scripts/*.test.ts && tsx --conditions=react-server --test 'lib/**/*.test.ts' 'app/**/*.test.ts' && pnpm --filter @opencoven/agent-contracts test && pnpm --filter @opencoven/harness test",
     "typecheck": "tsc --noEmit && pnpm -r typecheck",
+    "validate:platform-residue": "tsx scripts/platform-residue-scan.ts",
+    "validate:platform-residue:index": "tsx scripts/platform-residue-scan.ts --index",
     "validate:release": "tsx scripts/validate-runtime-config.ts --release",
     "validate:runtime": "tsx scripts/validate-runtime-config.ts"
   },

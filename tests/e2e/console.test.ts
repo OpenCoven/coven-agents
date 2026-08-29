@@ -5,6 +5,24 @@ const AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const RUN_ID = "22222222-2222-4222-8222-222222222222";
 const OTHER_AGENT_ID = "55555555-5555-4555-8555-555555555555";
 const OTHER_RUN_ID = "66666666-6666-4666-8666-666666666666";
+const ALLOWED_BROWSER_REQUEST_HEADERS = new Set([
+  "accept",
+  "accept-encoding",
+  "accept-language",
+  "content-length",
+  "content-type",
+  "cookie",
+  "origin",
+  "priority",
+  "referer",
+  "sec-ch-ua",
+  "sec-ch-ua-mobile",
+  "sec-ch-ua-platform",
+  "sec-fetch-dest",
+  "sec-fetch-mode",
+  "sec-fetch-site",
+  "user-agent",
+]);
 const retainedAgent = {
   backend: "cloud",
   createdAt: "2026-08-27T06:00:00.000Z",
@@ -74,6 +92,29 @@ async function notifySessionChange(page: Page): Promise<void> {
   });
 }
 
+function expectCurrentBrowserRequestHeaders(
+  headers: Record<string, string>,
+  url: string,
+  options: Readonly<{ contentType?: string; sendsOrigin?: boolean }> = {}
+): void {
+  expect(
+    Object.keys(headers)
+      .filter((name) => !ALLOWED_BROWSER_REQUEST_HEADERS.has(name))
+      .sort()
+  ).toEqual([]);
+  expect({
+    accept: headers.accept,
+    ...(options.contentType ? { "content-type": headers["content-type"] } : {}),
+    cookie: headers.cookie,
+    ...(options.sendsOrigin ? { origin: headers.origin } : {}),
+  }).toEqual({
+    accept: "application/json",
+    ...(options.contentType ? { "content-type": options.contentType } : {}),
+    cookie: expect.stringContaining("authjs.session-token="),
+    ...(options.sendsOrigin ? { origin: new URL(url).origin } : {}),
+  });
+}
+
 test.describe("Run console", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
@@ -116,9 +157,9 @@ test.describe("Run console", () => {
       const request = route.request();
       expect(request.method()).toBe("POST");
       expect(new URL(request.url()).pathname).toBe("/api/tenant/prewarm");
-      expect(request.headers().authorization).toBeUndefined();
-      expect(request.headers()["x-runner-token"]).toBeUndefined();
-      expect(request.headers().cookie).toContain("authjs.session-token=");
+      expectCurrentBrowserRequestHeaders(request.headers(), request.url(), {
+        sendsOrigin: true,
+      });
       return route.fulfill({ status: 204 });
     });
     await page.route("**/api/credentials", (route) =>
@@ -342,23 +383,13 @@ test.describe("Run console", () => {
     await page.route("**/api/credentials", (route) =>
       route.fulfill({ json: { harnessIds: ["copilot"] } })
     );
-    const legacyRequests: string[] = [];
-    page.on("request", (request) => {
-      const { pathname } = new URL(request.url());
-      if (
-        pathname === "/api/runner-connection" ||
-        pathname === "/api/runner-token"
-      ) {
-        legacyRequests.push(pathname);
-      }
-    });
+    const applicationRequests: string[] = [];
     await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
-      const { pathname } = new URL(route.request().url());
+      const request = route.request();
+      const { pathname } = new URL(request.url());
+      applicationRequests.push(`${request.method()} ${pathname}`);
       if (pathname === "/api/agents") {
-        const headers = route.request().headers();
-        expect(headers.authorization).toBeUndefined();
-        expect(headers["x-runner-token"]).toBeUndefined();
-        expect(headers.cookie).toContain("authjs.session-token=");
+        expectCurrentBrowserRequestHeaders(request.headers(), request.url());
         return route.fulfill({ json: { agents: [retainedAgent] } });
       }
       if (pathname === `/api/agents/${AGENT_ID}/runs`) {
@@ -400,7 +431,12 @@ test.describe("Run console", () => {
     await expect(
       page.getByRole("button", { exact: true, name: "expand" })
     ).toBeVisible();
-    expect(legacyRequests).toEqual([]);
+    expect(applicationRequests).toEqual([
+      "GET /api/agents",
+      `GET /api/agents/${AGENT_ID}/runs`,
+      `GET /api/runs/${RUN_ID}/events`,
+      `GET /api/runs/${RUN_ID}`,
+    ]);
   });
 
   for (const scenario of [

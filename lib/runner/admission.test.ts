@@ -419,7 +419,7 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
   assert.equal(JSON.stringify(persistedRedaction).includes("secret"), false);
 });
 
-test("legacy dispatch claims terminalize before sandbox, credential, accounting, or provider work", async () => {
+test("unsupported harness dispatch claims terminalize before sandbox, credential, accounting, or provider work", async () => {
   const calls: string[] = [];
   const claimedRun = run();
   const authority = {
@@ -435,7 +435,8 @@ test("legacy dispatch claims terminalize before sandbox, credential, accounting,
     dispatchState: "terminal",
     error: {
       code: "harness_unsupported",
-      message: "Cloud agents must select a supported harness runtime: copilot.",
+      message:
+        "Daytona agents must select a supported harness runtime: copilot.",
       retryable: false,
     },
     status: "failed",
@@ -492,7 +493,7 @@ test("legacy dispatch claims terminalize before sandbox, credential, accounting,
         assert.deepEqual(input.error, {
           code: "harness_unsupported",
           message:
-            "Cloud agents must select a supported harness runtime: copilot.",
+            "Daytona agents must select a supported harness runtime: copilot.",
           retryable: false,
         });
         return {
@@ -506,7 +507,7 @@ test("legacy dispatch claims terminalize before sandbox, credential, accounting,
         return terminalized
           ? { kind: "not_live" as const }
           : {
-              agent: agent({ runtime: "cloud" as never }),
+              agent: agent({ runtime: "codex" }),
               kind: "found" as const,
               run: claimedRun,
             };

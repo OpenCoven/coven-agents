@@ -41,7 +41,7 @@
         "file-evidence"
       ],
       "minimumClientVersion": "1.0.0",
-      "mode": "local"
+      "mode": "cloud"
     },
     "success": {
       "apiVersion": "1.0",

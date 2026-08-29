@@ -144,6 +144,28 @@ operational documents directly. Security or privacy removal is the exception:
 redact exposed sensitive material promptly, follow incident response, and
 leave a safe note that a redaction occurred.
 
+### Supersession policy evolution — 2026-08-29
+
+Normal accepted specifications remain tracked with correction notes. For a
+mixed-content historical document only, a reviewed migration may instead
+delete the obsolete tracked document and replace it with a sanitized tombstone
+when all of these conditions hold:
+
+1. the tombstone maps every deleted document to specific current documents
+   that preserve every decision that remains applicable;
+2. Git history preserves each original;
+3. every active link is updated to current guidance or the tombstone index;
+4. the removal and its sanitized tombstone are explicitly reviewed; and
+5. no private or sensitive detail is copied into the tombstone.
+
+The tombstone must identify recoverable history without reproducing retired
+vendor markers, credentials, private planning records, or executable obsolete
+topology. This exception does not permit deleting a historical document merely
+because its conclusions changed; the document must mix still-applicable
+decisions with implementation detail whose continued presence creates a
+material risk of being followed as current guidance. The current index is
+[`docs/superpowers/README.md`](../superpowers/README.md).
+
 ## Actions policy
 
 GitHub Actions are intentionally disabled for private pre-release cost control.

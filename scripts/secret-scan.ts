@@ -112,7 +112,7 @@ const MIN_DISTINCT_CHARACTERS = 8;
 
 /**
  * Words joined by `-` or `_`: `runner-control-sensitive`, `access-key-value`,
- * `opencoven-runner-cloud`. Every false positive this rule produced on the
+ * `opencoven-daytona-sensitive`. Every false positive this rule produced on the
  * existing repository had exactly this shape -- test fixtures and identifiers,
  * all of them deliberately fake.
  *

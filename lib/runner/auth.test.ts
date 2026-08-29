@@ -97,17 +97,13 @@ test("operator diagnostics accept only their separate timing-safe bearer secret"
     headers: { authorization: "Bearer reconcile-secret" },
     method: "POST",
   });
-  const legacy = new Request("https://app.test/api/diagnostics/sandbox", {
-    headers: {
-      authorization: "Bearer operator-secret",
-      "x-runner-token": "retired-browser-token",
-    },
+  const missing = new Request("https://app.test/api/diagnostics/sandbox", {
     method: "POST",
   });
 
   assert.deepEqual(auth.authorizeDiagnostic(allowed), { kind: "allowed" });
   assert.deepEqual(auth.authorizeDiagnostic(wrong), { kind: "unauthorized" });
-  assert.deepEqual(auth.authorizeDiagnostic(legacy), {
+  assert.deepEqual(auth.authorizeDiagnostic(missing), {
     kind: "unauthorized",
   });
 });
@@ -123,28 +119,28 @@ test("missing and currently aliased operator configuration is unavailable", () =
   );
 });
 
-test("retired Worker secrets do not participate in current operator authority", () => {
+test("unrelated environment settings do not participate in operator authority", () => {
   assert.equal(
     diagnosticSecretFromEnvironment({
-      AGENT_CONTROL_TOKEN: "same-secret",
       OPERATOR_DIAGNOSTIC_TOKEN: "same-secret",
-      RUNNER_SERVICE_TOKEN: "same-secret",
+      UNRELATED_PRIMARY_SECRET: "same-secret",
+      UNRELATED_SECONDARY_SECRET: "same-secret",
     }),
     "same-secret"
   );
   assert.equal(
     cronReconcileSecretFromEnvironment({
-      AGENT_CONTROL_TOKEN: "same-secret",
       CRON_SECRET: "same-secret",
-      RUNNER_SERVICE_TOKEN: "same-secret",
+      UNRELATED_PRIMARY_SECRET: "same-secret",
+      UNRELATED_SECONDARY_SECRET: "same-secret",
     }),
     "same-secret"
   );
   assert.equal(
     manualReconcileSecretFromEnvironment({
-      AGENT_CONTROL_TOKEN: "same-secret",
       RUNNER_MANUAL_RECONCILE_SECRET: "same-secret",
-      RUNNER_SERVICE_TOKEN: "same-secret",
+      UNRELATED_PRIMARY_SECRET: "same-secret",
+      UNRELATED_SECONDARY_SECRET: "same-secret",
     }),
     "same-secret"
   );

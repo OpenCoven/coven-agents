@@ -22,6 +22,23 @@ const runtimeInspectorUrl = new URL(
   "../components/console/runtime-inspector.tsx",
   import.meta.url
 );
+const currentCredentialEnvironment = [
+  "ABUSE_KEY_SECRET",
+  "AI_GATEWAY_API_KEY",
+  "AUTH_GITHUB_SECRET",
+  "AUTH_SECRET",
+  "BLOB_READ_WRITE_TOKEN",
+  "CREDENTIAL_KEK",
+  "CREDENTIAL_KEK_CURRENT_VERSION",
+  "CREDENTIAL_KEK_V1",
+  "CREDENTIAL_KEK_V2",
+  "CRON_SECRET",
+  "DAYTONA_API_KEY",
+  "OPERATOR_DIAGNOSTIC_TOKEN",
+  "RUNNER_MANUAL_RECONCILE_SECRET",
+  "STRIPE_SECRET_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+] as const;
 
 test("the execution threat model covers every required security surface", () => {
   assert.equal(existsSync(threatModelUrl), true);
@@ -44,7 +61,7 @@ test("the execution threat model covers every required security surface", () => 
     "packages/agent-contracts/src/evidence.ts",
     "lib/credentials/store.ts",
     "lib/credentials/runner-credential.ts",
-    "lib/runner/production.ts",
+    "lib/runner/runtime.ts",
     "coven-agents-cloud.4",
     "coven-agents-security.3",
   ]) {
@@ -65,22 +82,39 @@ test("public security claims describe the same-origin Daytona boundary", () => {
   const page = readFileSync(securityPageUrl, "utf8");
   const login = readFileSync(loginPageUrl, "utf8");
 
-  assert.match(page, /Daytona sandbox/u);
-  assert.match(page, /same-origin/u);
-  assert.doesNotMatch(
-    page,
-    /Cloudflare|deployment gate|signed identity claim/u
+  assert.equal(
+    page.includes(
+      "Each agent executes in one tenant-scoped persistent Daytona sandbox."
+    ),
+    true
   );
-  assert.match(login, /Daytona sandbox/u);
-  assert.doesNotMatch(login, /Cloudflare/u);
+  assert.equal(
+    page.includes(
+      "Browser requests reach Daytona only through the same-origin Next.js API."
+    ),
+    true
+  );
+  assert.equal(
+    login.includes(
+      "Agents run in isolated Daytona sandboxes — never on your machine."
+    ),
+    true
+  );
 });
 
 test("the runtime inspector describes the current provider boundary", () => {
   const inspector = readFileSync(runtimeInspectorUrl, "utf8");
 
-  assert.match(inspector, /Daytona sandbox/u);
-  assert.match(inspector, /persistent workspace/u);
-  assert.doesNotMatch(inspector, /Cloudflare/u);
+  assert.equal(
+    inspector.includes("<span style={type_.meta}>Daytona sandbox</span>"),
+    true
+  );
+  assert.equal(
+    inspector.includes(
+      "Each agent has one tenant-scoped persistent workspace. Runs use"
+    ),
+    true
+  );
 });
 
 test("the incident runbooks name every secret that exists", () => {
@@ -157,14 +191,18 @@ test("the runbooks state the two facts that break a rotation", () => {
   assert.match(runbooks, /copied network trace is a credential disclosure/);
 });
 
-test("current runner setup has no Worker control or service tokens", () => {
+test("the environment example exposes the current credential allowlist", () => {
   const envExample = readFileSync(envExampleUrl, "utf8");
-  const readme = readFileSync(readmeUrl, "utf8");
+  const observed = [...envExample.matchAll(/^([A-Z][A-Z0-9_]*)=/gmu)]
+    .map((match) => match[1] ?? "")
+    .filter(
+      (name) =>
+        name.startsWith("CREDENTIAL_KEK") ||
+        /(?:KEY|SECRET|TOKEN)(?:_|$)/u.test(name)
+    )
+    .sort();
 
-  assert.doesNotMatch(envExample, /^AGENT_CONTROL_TOKEN=/m);
-  assert.doesNotMatch(envExample, /^RUNNER_SERVICE_TOKEN=/m);
-  assert.doesNotMatch(envExample, /^RUNNER_VERIFY_/m);
-  assert.doesNotMatch(readme, /AGENT_CONTROL_TOKEN|RUNNER_SERVICE_TOKEN/u);
+  assert.deepEqual(observed, [...currentCredentialEnvironment]);
 });
 
 test("the runner diagnostic uses the separate operator credential", () => {
@@ -173,10 +211,19 @@ test("the runner diagnostic uses the separate operator credential", () => {
     "utf8"
   );
 
-  assert.match(auth, /OPERATOR_DIAGNOSTIC_TOKEN/);
-  assert.doesNotMatch(
-    auth,
-    /AGENT_CONTROL_TOKEN|RUNNER_SERVICE_TOKEN|RUNNER_VERIFY_/u
+  assert.deepEqual(
+    [
+      ...new Set(
+        [...auth.matchAll(/environment\.([A-Z][A-Z0-9_]*)/gu)].map(
+          (match) => match[1] ?? ""
+        )
+      ),
+    ].sort(),
+    [
+      "CRON_SECRET",
+      "OPERATOR_DIAGNOSTIC_TOKEN",
+      "RUNNER_MANUAL_RECONCILE_SECRET",
+    ]
   );
 });
 
@@ -189,14 +236,7 @@ test("the README points to the incident runbooks", () => {
   );
 });
 
-test("the key runbook no longer documents retired runner verification keys", () => {
-  assert.equal(existsSync(keyRotationUrl), true);
-  const runbook = readFileSync(keyRotationUrl, "utf8");
-
-  assert.doesNotMatch(runbook, /RUNNER_VERIFY_|runner verification key/iu);
-});
-
-test("the credential key runbook documents staged rewrap and retirement", () => {
+test("the credential key runbook documents the current staged rewrap contract", () => {
   const runbook = readFileSync(keyRotationUrl, "utf8");
 
   for (const marker of [

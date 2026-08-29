@@ -1477,7 +1477,7 @@ test("run start maps operation, capacity, lifecycle, and admission failures", as
   );
 });
 
-test("run start maps a legacy runtime fence to the public unsupported harness error", async () => {
+test("run start maps an unsupported harness fence to the public error", async () => {
   const fixture = handlers({
     service: service({
       startRun: async () => ({ kind: "unsupported_harness" }) as never,
@@ -1712,7 +1712,7 @@ test("tenant prewarm maps concurrent, stale, provider, and database outcomes", a
   );
 });
 
-test("tenant prewarm maps a legacy runtime fence to the public unsupported harness error", async () => {
+test("tenant prewarm maps an unsupported harness fence to the public error", async () => {
   const fixture = handlers({
     service: service({
       prewarmMostRecent: async () => ({ kind: "unsupported_harness" }) as never,

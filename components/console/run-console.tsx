@@ -734,9 +734,10 @@ export function RunConsole() {
   /**
    * Creates every member of a formation, one at a time.
    *
-   * Sequential rather than parallel: each create is a durable-object write and
-   * a burst of them races the directory. A failure halfway leaves the members
-   * already created, which is the right outcome — they are independently useful.
+   * Sequential rather than parallel: each create writes the PostgreSQL-backed
+   * agent catalog, and a burst of them races catalog updates. A failure halfway
+   * leaves the members already created, which is the right outcome — they are
+   * independently useful.
    */
   const createFormation = async (formation: Formation) => {
     const context = currentSessionContext();

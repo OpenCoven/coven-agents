@@ -253,9 +253,17 @@ test("owns every relative same-origin runner path and sends only browser session
   );
   for (const call of calls) {
     assert.equal(call.credentials, "same-origin");
-    assert.equal(call.headers.get("authorization"), null);
-    assert.equal(call.headers.get("x-runner-token"), null);
-    assert.equal(call.headers.get("x-vercel-protection-bypass"), null);
+    assert.deepEqual(
+      Object.fromEntries(call.headers),
+      call.path.endsWith("/events")
+        ? { accept: "text/event-stream" }
+        : call.body
+          ? {
+              accept: "application/json",
+              "content-type": "application/json",
+            }
+          : { accept: "application/json" }
+    );
     assert.ok(call.path.startsWith("/api/"));
     assert.doesNotMatch(call.path, /^https?:/);
   }

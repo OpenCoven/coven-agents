@@ -67,7 +67,7 @@ export type ReleaseRunnerReconciliationLeaseResult =
   | Readonly<{ kind: "released" }>
   | Readonly<{ kind: "stale" }>;
 
-export type RunnerRuntime = "cloud" | "codex" | "claude" | "copilot";
+export type RunnerRuntime = "codex" | "claude" | "copilot";
 export type RunnerAgentStatus = "idle" | "running" | "error";
 export type RunnerSandboxLifecycle =
   | "unprovisioned"

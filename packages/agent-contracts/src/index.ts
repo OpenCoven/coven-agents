@@ -32,11 +32,12 @@ const boundedString = (max: number) => z.string().trim().min(1).max(max);
 const datetimeSchema = z.string().datetime();
 
 /**
- * Cloud only. The local runner is gone, and keeping the enum open would let a
- * client mint a definition nothing can execute.
+ * Stable Agent Runner v1 deployment-class discriminator. `cloud` means the
+ * runner is remotely deployed; it is not an execution-provider identity or
+ * provider-selection control.
  */
-export const backendSchema = z.enum(["cloud"]);
-export const runtimeSchema = z.enum(["cloud", "codex", "claude", "copilot"]);
+export const backendSchema = z.literal("cloud");
+export const runtimeSchema = z.enum(["codex", "claude", "copilot"]);
 export const agentStatusSchema = z.enum(["idle", "running", "error"]);
 export const agentIdSchema = z.string().uuid();
 
@@ -150,29 +151,6 @@ const agentDefinitionInputShape = {
 };
 
 /**
- * The cloud backend executes a harness inside a sandbox and holds no model
- * provider API key.
- *
- * This branch originally required the inverse — `backend: "cloud"` had to pair
- * with `runtime: "cloud"` — because it predates the move to keyless harness
- * execution. That rule is replaced here rather than carried over; keeping it
- * would have reintroduced the retired provider-key runtime.
- */
-const validateAgentBackendRuntime = (
-  value: { backend: Backend; runtime: Runtime },
-  context: z.RefinementCtx
-) => {
-  if (value.runtime === "cloud") {
-    context.addIssue({
-      code: "custom",
-      message:
-        "The provider-key `cloud` runtime is retired. Select a harness runtime such as `copilot`.",
-      path: ["runtime"],
-    });
-  }
-};
-
-/**
  * `owner` is omitted deliberately. Ownership is a claim the server makes about
  * the caller, never one the caller makes about itself, and `.strict()` means a
  * submitted `owner` is rejected outright rather than silently dropped.
@@ -183,8 +161,7 @@ const validateAgentBackendRuntime = (
  */
 export const createAgentInputSchema = z
   .object(agentDefinitionInputShape)
-  .strict()
-  .superRefine(validateAgentBackendRuntime);
+  .strict();
 
 /**
  * The sandbox's readiness for this agent's next run.
@@ -213,32 +190,17 @@ const agentDefinitionBaseShape = {
   warm: warmStateSchema,
 };
 
-/**
- * Public definitions are explicit projections. They always publish ownership
- * and warm state, while temporarily retaining `runtime: "cloud"` so records
- * written before the provider-key runtime retirement remain readable through
- * list/get envelopes until the compatibility sunset.
- */
 export const agentDefinitionSchema = z
   .object({
     ...agentDefinitionBaseShape,
   })
   .strict();
 
-/**
- * Full definitions accepted at persistence boundaries. Unlike the public
- * response schema, this rejects the retired runtime so compatibility reads
- * cannot become a path for writing new legacy records.
- */
-export const currentAgentDefinitionSchema = agentDefinitionSchema.superRefine(
-  validateAgentBackendRuntime
-);
+export const currentAgentDefinitionSchema = agentDefinitionSchema;
 
 /**
  * Durable definitions predate both ownership and warm tracking. The storage
- * parser alone supplies those missing fields, and deliberately accepts the
- * retired runtime; callers must project its normalized output through the
- * explicit public schema, while every write uses `currentAgentDefinitionSchema`.
+ * parser alone supplies those missing fields.
  */
 export const storedAgentDefinitionSchema = z
   .object({
@@ -518,7 +480,7 @@ export const agentRunnerHealthSchema = z
     apiVersion: agentRunnerApiVersionSchema,
     capabilities: agentRunnerCapabilitiesSchema,
     minimumClientVersion: boundedString(32),
-    mode: z.enum(["local", "cloud"]),
+    mode: backendSchema,
   })
   .strict();
 export const healthResponseSchema = agentRunnerHealthSchema;

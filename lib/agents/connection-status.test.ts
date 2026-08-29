@@ -34,23 +34,32 @@ test("same-origin runner refusals retain actionable application states", () => {
   );
 });
 
-test("same-origin runner status copy is provider-neutral and actionable", () => {
-  assert.match(applicationRunnerMessage("signed_out"), /sign in/i);
-  assert.match(
-    applicationRunnerMessage("subscription_required"),
-    /subscription/i
-  );
-  assert.match(applicationRunnerMessage("rate_limited"), /automatically/i);
-  assert.match(applicationRunnerMessage("unavailable"), /Daytona runner/i);
-  assert.doesNotMatch(
-    [
-      applicationRunnerMessage("connected"),
-      applicationRunnerMessage("connecting"),
-      applicationRunnerMessage("signed_out"),
-      applicationRunnerMessage("subscription_required"),
-      applicationRunnerMessage("rate_limited"),
-      applicationRunnerMessage("unavailable"),
-    ].join(" "),
-    /Cloudflare|cloud runner/i
+test("same-origin runner status copy matches the current application contract", () => {
+  assert.deepEqual(
+    Object.fromEntries(
+      [
+        "connected",
+        "connecting",
+        "rate_limited",
+        "signed_out",
+        "subscription_required",
+        "unavailable",
+      ].map((kind) => [
+        kind,
+        applicationRunnerMessage(
+          kind as Parameters<typeof applicationRunnerMessage>[0]
+        ),
+      ])
+    ),
+    {
+      connected: "The Daytona runner answered for this authenticated session.",
+      connecting: "Connecting to the Daytona runner…",
+      rate_limited: "Rate limited — access will be retried automatically.",
+      signed_out: "Sign in to use the Daytona runner.",
+      subscription_required:
+        "An active subscription is required to run agents.",
+      unavailable:
+        "The Daytona runner is temporarily unavailable. Try again shortly.",
+    }
   );
 });

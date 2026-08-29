@@ -14,8 +14,8 @@ import { Label } from "@/components/ui/label";
  *
  * `/api/credentials` shipped with no caller at all, so the only way to store a
  * credential was a hand-written fetch from devtools — the same "route with no
- * caller" gap that made the runner token so painful. A run refused for a
- * missing credential otherwise has no path to recovery from inside the app.
+ * caller" gap that previously broke account-scoped execution. A run refused
+ * for a missing credential otherwise has no path to recovery inside the app.
  *
  * The value is never read back. The endpoint returns configured ids only, so
  * this shows "Configured" rather than a masked secret: a status check has no

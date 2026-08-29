@@ -26,8 +26,7 @@ const APPLICATION_RUNNER_MESSAGES: Record<ApplicationRunnerStatusKind, string> =
   {
     connected: "The Daytona runner answered for this authenticated session.",
     connecting: "Connecting to the Daytona runner…",
-    rate_limited:
-      "Rate limited — access will be retried automatically. No runner token is needed.",
+    rate_limited: "Rate limited — access will be retried automatically.",
     signed_out: "Sign in to use the Daytona runner.",
     subscription_required: "An active subscription is required to run agents.",
     unavailable:

@@ -66,7 +66,7 @@ test("replaces complete environment dumps without discarding adjacent non-secret
 });
 
 test("redacts an isolated sensitive environment assignment", () => {
-  const secret = "isolated-cloud-secret";
+  const secret = "isolated-daytona-secret";
   const sanitized = sanitizeEvidenceText(`OPENAI_API_KEY=${secret}`);
 
   assert.equal(sanitized.includes(secret), false);

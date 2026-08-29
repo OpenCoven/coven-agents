@@ -65,7 +65,7 @@ const sourceExamples = {
     apiVersion: AGENT_RUNNER_API_VERSION,
     capabilities: [...AGENT_RUNNER_CAPABILITIES],
     minimumClientVersion: "1.0.0",
-    mode: "local",
+    mode: "cloud",
   },
   success: {
     apiVersion: AGENT_RUNNER_API_VERSION,

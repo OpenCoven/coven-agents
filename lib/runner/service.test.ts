@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AGENT_RUNNER_API_VERSION,
-  agentEnvelopeSchema,
-  agentsEnvelopeSchema,
   type RunSnapshot,
 } from "@opencoven/agent-contracts";
 import { cancelRunnerRun, reconcileAndDispatch } from "./reconcile";
@@ -174,32 +172,6 @@ test("public agent projections require warm state and omit provider records", as
   }
 });
 
-test("same-origin projections preserve readable legacy runtime records", async () => {
-  const legacy = agent({ runtime: "cloud" });
-  const service = createRunnerService({
-    store: baseStore({
-      getAgent: async () => legacy,
-      listAgents: async () => [legacy],
-    }),
-  });
-
-  const found = await service.getAgent(PRINCIPAL, AGENT_ID);
-  assert.equal(found.kind, "found");
-  if (found.kind !== "found") {
-    return;
-  }
-  assert.equal(
-    agentEnvelopeSchema.parse({ agent: found.agent }).agent.runtime,
-    "cloud"
-  );
-  assert.equal(
-    agentsEnvelopeSchema.parse({
-      agents: await service.listAgents(PRINCIPAL),
-    }).agents[0]?.runtime,
-    "cloud"
-  );
-});
-
 test("agent creation reports retryable database unavailability", async () => {
   const service = createRunnerService({
     createId: () => AGENT_ID,
@@ -277,7 +249,7 @@ test("agent updates reject unsupported runtimes before reading or mutating stora
     store: baseStore({
       getAgent: () => {
         reads += 1;
-        return Promise.resolve(agent({ runtime: "cloud" }));
+        return Promise.resolve(agent());
       },
       updateAgent: () => {
         writes += 1;
@@ -299,48 +271,6 @@ test("agent updates reject unsupported runtimes before reading or mutating stora
   );
   assert.equal(reads, 0);
   assert.equal(writes, 0);
-});
-
-test("legacy agents can migrate to a runnable runtime and remain deletable", async () => {
-  const legacy = agent({ runtime: "cloud" });
-  let updatedInput: unknown;
-  let deletions = 0;
-  const service = createRunnerService({
-    deleteSandbox: () => {
-      deletions += 1;
-      return Promise.resolve({ kind: "deleted" as const });
-    },
-    store: baseStore({
-      getAgent: async () => legacy,
-      updateAgent: (_principal: RunnerPrincipal, input: unknown) => {
-        updatedInput = input;
-        return Promise.resolve({
-          kind: "updated" as const,
-          value: agent({ runtime: "copilot", version: 5 }),
-        });
-      },
-    }),
-  });
-
-  const updated = await service.updateAgent(
-    PRINCIPAL,
-    AGENT_ID,
-    definition({ runtime: "copilot" })
-  );
-  assert.equal(updated.kind, "updated");
-  assert.equal(
-    (updatedInput as { runtime: string; expectedVersion: number }).runtime,
-    "copilot"
-  );
-  assert.equal(
-    (updatedInput as { runtime: string; expectedVersion: number })
-      .expectedVersion,
-    legacy.version
-  );
-  assert.deepEqual(await service.deleteAgent(PRINCIPAL, AGENT_ID), {
-    kind: "deleted",
-  });
-  assert.equal(deletions, 1);
 });
 
 test("agent updates report retryable database unavailability", async () => {
@@ -651,7 +581,7 @@ test("start converts an admission exception into typed retryable unavailability"
   );
 });
 
-test("start rejects legacy runtimes before admission, persistence, dispatch, or scheduling", async () => {
+test("start rejects unsupported harnesses before admission, persistence, dispatch, or scheduling", async () => {
   let admissions = 0;
   let dispatches = 0;
   let runWrites = 0;
@@ -666,7 +596,7 @@ test("start rejects legacy runtimes before admission, persistence, dispatch, or 
       return Promise.resolve({ kind: "idle" });
     },
     store: baseStore({
-      getAgent: async () => agent({ runtime: "cloud" }),
+      getAgent: async () => agent({ runtime: "codex" }),
       startRun: () => {
         runWrites += 1;
         return Promise.resolve({ kind: "created" as const, run: run() });
@@ -1026,18 +956,18 @@ test("prewarm targets the most recently used agent without credential access", a
   });
 });
 
-test("prewarm and warm reject legacy runtimes before sandbox mutation or provider work", async () => {
+test("prewarm and warm reject unsupported harnesses before sandbox mutation or provider work", async () => {
   let warmCalls = 0;
-  const legacy = agent({ runtime: "cloud" });
+  const unsupported = agent({ runtime: "codex" });
   const service = createRunnerService({
     store: baseStore({
-      getAgent: async () => legacy,
-      listAgents: async () => [legacy],
+      getAgent: async () => unsupported,
+      listAgents: async () => [unsupported],
     }),
     warmSandbox: () => {
       warmCalls += 1;
       return Promise.resolve({
-        agent: legacy,
+        agent: unsupported,
         kind: "in_progress" as const,
       });
     },
