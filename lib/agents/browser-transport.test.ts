@@ -59,6 +59,43 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+function interruptedEventStream(body: string): Response {
+  const encoded = new TextEncoder().encode(body);
+  let reads = 0;
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        reads += 1;
+        if (reads === 1) {
+          controller.enqueue(encoded);
+          return;
+        }
+        controller.error(new TypeError("connection reset"));
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } }
+  );
+}
+
+function runnerError(
+  code: string,
+  retryable: boolean,
+  status: number
+): Response {
+  return json(
+    {
+      apiVersion: AGENT_RUNNER_API_VERSION,
+      error: {
+        code,
+        message: code,
+        retryable,
+      },
+      requestId: "request-1",
+    },
+    status
+  );
+}
+
 test("owns every relative same-origin runner path and sends only browser session credentials", async () => {
   const calls: Array<{
     body: string | null;
@@ -384,6 +421,350 @@ test("SSE reconnects after a retryable stream failure without losing its cursor"
   assert.equal(terminal.status, "completed");
 });
 
+test("SSE persists a delivered cursor before a reader failure and ignores replayed or lower ids", async () => {
+  const cursors: Array<string | null> = [];
+  let snapshots = 0;
+  let streams = 0;
+  const transport = new BrowserRunnerTransport(
+    (requestInput, init) => {
+      if (String(requestInput).endsWith("/events")) {
+        streams += 1;
+        cursors.push(new Headers(init?.headers).get("last-event-id"));
+        if (streams === 1) {
+          return Promise.resolve(
+            interruptedEventStream(
+              `data: ${JSON.stringify({ id: 1, output: "first", type: "output" })}\n\n`
+            )
+          );
+        }
+        return Promise.resolve(
+          new Response(
+            [
+              `data: ${JSON.stringify({ id: 1, output: "duplicate", type: "output" })}`,
+              "",
+              `data: ${JSON.stringify({ id: 0, output: "lower", type: "output" })}`,
+              "",
+              `data: ${JSON.stringify({ id: 2, run: run("completed"), type: "completed" })}`,
+              "",
+              "",
+            ].join("\n"),
+            { headers: { "content-type": "text/event-stream" } }
+          )
+        );
+      }
+      snapshots += 1;
+      return Promise.resolve(
+        json({
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          run: run("running"),
+        })
+      );
+    },
+    { reconnectDelayMs: 0 }
+  );
+  const events: number[] = [];
+
+  const terminal = await transport.streamRunEvents(RUN_ID, {
+    onEvent: (event) => events.push(event.id),
+  });
+
+  assert.deepEqual(cursors, [null, "1"]);
+  assert.deepEqual(events, [1, 2]);
+  assert.equal(snapshots, 1);
+  assert.equal(terminal.status, "completed");
+});
+
+test("SSE retries a retryable snapshot failure through the reconnect loop", async () => {
+  let snapshots = 0;
+  let streams = 0;
+  const transport = new BrowserRunnerTransport(
+    (requestInput) => {
+      if (String(requestInput).endsWith("/events")) {
+        streams += 1;
+        return Promise.resolve(
+          streams === 1
+            ? new Response("", {
+                headers: { "content-type": "text/event-stream" },
+              })
+            : new Response(
+                `data: ${JSON.stringify({ id: 1, run: run("completed"), type: "completed" })}\n\n`,
+                { headers: { "content-type": "text/event-stream" } }
+              )
+        );
+      }
+      snapshots += 1;
+      return Promise.resolve(runnerError("runner_unavailable", true, 503));
+    },
+    { reconnectDelayMs: 0 }
+  );
+  const events: number[] = [];
+
+  const terminal = await transport.streamRunEvents(RUN_ID, {
+    onEvent: (event) => events.push(event.id),
+  });
+
+  assert.equal(snapshots, 1);
+  assert.equal(streams, 2);
+  assert.deepEqual(events, [1]);
+  assert.equal(terminal.status, "completed");
+});
+
+test("SSE retries a network snapshot failure through the reconnect loop", async () => {
+  let snapshots = 0;
+  let streams = 0;
+  const transport = new BrowserRunnerTransport(
+    (requestInput) => {
+      if (String(requestInput).endsWith("/events")) {
+        streams += 1;
+        return Promise.resolve(
+          streams === 1
+            ? new Response("", {
+                headers: { "content-type": "text/event-stream" },
+              })
+            : new Response(
+                `data: ${JSON.stringify({ id: 1, run: run("completed"), type: "completed" })}\n\n`,
+                { headers: { "content-type": "text/event-stream" } }
+              )
+        );
+      }
+      snapshots += 1;
+      return Promise.reject(new TypeError("network down"));
+    },
+    { reconnectDelayMs: 0 }
+  );
+
+  const terminal = await transport.streamRunEvents(RUN_ID, {
+    onEvent: () => undefined,
+  });
+
+  assert.equal(snapshots, 1);
+  assert.equal(streams, 2);
+  assert.equal(terminal.status, "completed");
+});
+
+test("SSE surfaces a non-retryable snapshot failure", async () => {
+  let streams = 0;
+  const transport = new BrowserRunnerTransport(
+    (requestInput) => {
+      if (String(requestInput).endsWith("/events")) {
+        streams += 1;
+        return Promise.resolve(
+          new Response("", {
+            headers: { "content-type": "text/event-stream" },
+          })
+        );
+      }
+      return Promise.resolve(runnerError("run_forbidden", false, 403));
+    },
+    { reconnectDelayMs: 0 }
+  );
+
+  await assert.rejects(
+    transport.streamRunEvents(RUN_ID, { onEvent: () => undefined }),
+    (error: unknown) =>
+      error instanceof RunnerApiError &&
+      error.code === "run_forbidden" &&
+      error.retryable === false &&
+      error.status === 403
+  );
+  assert.equal(streams, 1);
+});
+
+test("SSE aborts a pending snapshot promptly", async () => {
+  const controller = new AbortController();
+  let snapshots = 0;
+  let streams = 0;
+  const transport = new BrowserRunnerTransport(
+    (requestInput, init) => {
+      if (String(requestInput).endsWith("/events")) {
+        streams += 1;
+        return Promise.resolve(
+          new Response("", {
+            headers: { "content-type": "text/event-stream" },
+          })
+        );
+      }
+      snapshots += 1;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason ?? new Error("aborted")),
+          { once: true }
+        );
+      });
+    },
+    { reconnectDelayMs: 30_000 }
+  );
+
+  const pending = transport.streamRunEvents(RUN_ID, {
+    onEvent: () => undefined,
+    signal: controller.signal,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  controller.abort();
+
+  await assert.rejects(
+    pending,
+    (error: unknown) =>
+      error instanceof RunnerApiError && error.code === "aborted"
+  );
+  assert.equal(streams, 1);
+  assert.equal(snapshots, 1);
+});
+
+test("SSE returns a terminal event once without reading or reconnecting again", async () => {
+  let snapshots = 0;
+  let streams = 0;
+  const transport = new BrowserRunnerTransport(
+    (requestInput) => {
+      if (String(requestInput).endsWith("/events")) {
+        streams += 1;
+        return Promise.resolve(
+          interruptedEventStream(
+            `data: ${JSON.stringify({ id: 1, run: run("completed"), type: "completed" })}\n\n`
+          )
+        );
+      }
+      snapshots += 1;
+      return Promise.resolve(
+        json({
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          run: run("completed"),
+        })
+      );
+    },
+    { reconnectDelayMs: 0 }
+  );
+  const events: number[] = [];
+
+  const terminal = await transport.streamRunEvents(RUN_ID, {
+    onEvent: (event) => events.push(event.id),
+  });
+
+  assert.deepEqual(events, [1]);
+  assert.equal(streams, 1);
+  assert.equal(snapshots, 0);
+  assert.equal(terminal.status, "completed");
+});
+
+test("SSE retries snapshots without reopening after a terminal event", async () => {
+  let snapshots = 0;
+  let streams = 0;
+  const transport = new BrowserRunnerTransport(
+    (requestInput) => {
+      if (String(requestInput).endsWith("/events")) {
+        streams += 1;
+        return Promise.resolve(
+          interruptedEventStream(
+            `data: ${JSON.stringify({
+              error: {
+                code: "runner_failed",
+                message: "Runner failed.",
+                retryable: false,
+              },
+              id: 1,
+              type: "failed",
+            })}\n\n`
+          )
+        );
+      }
+      snapshots += 1;
+      return Promise.resolve(
+        snapshots === 1
+          ? runnerError("runner_unavailable", true, 503)
+          : json({
+              apiVersion: AGENT_RUNNER_API_VERSION,
+              run: run("failed"),
+            })
+      );
+    },
+    { reconnectDelayMs: 0 }
+  );
+  const events: number[] = [];
+
+  const terminal = await transport.streamRunEvents(RUN_ID, {
+    onEvent: (event) => events.push(event.id),
+  });
+
+  assert.deepEqual(events, [1]);
+  assert.equal(streams, 1);
+  assert.equal(snapshots, 2);
+  assert.equal(terminal.status, "failed");
+});
+
+test("SSE preserves the last valid cursor when a later frame is truncated", async () => {
+  const cursors: Array<string | null> = [];
+  let snapshots = 0;
+  let streams = 0;
+  const transport = new BrowserRunnerTransport(
+    (requestInput, init) => {
+      if (String(requestInput).endsWith("/events")) {
+        streams += 1;
+        cursors.push(new Headers(init?.headers).get("last-event-id"));
+        if (streams === 1) {
+          return Promise.resolve(
+            new Response(
+              `data: ${JSON.stringify({ id: 1, output: "valid", type: "output" })}\n\ndata: {"id":2`,
+              { headers: { "content-type": "text/event-stream" } }
+            )
+          );
+        }
+        return Promise.resolve(
+          new Response(
+            `data: ${JSON.stringify({ id: 2, run: run("completed"), type: "completed" })}\n\n`,
+            { headers: { "content-type": "text/event-stream" } }
+          )
+        );
+      }
+      snapshots += 1;
+      return Promise.resolve(
+        json({
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          run: run("running"),
+        })
+      );
+    },
+    { reconnectDelayMs: 0 }
+  );
+  const events: number[] = [];
+
+  const terminal = await transport.streamRunEvents(RUN_ID, {
+    onEvent: (event) => events.push(event.id),
+  });
+
+  assert.deepEqual(cursors, [null, "1"]);
+  assert.deepEqual(events, [1, 2]);
+  assert.equal(snapshots, 1);
+  assert.equal(terminal.status, "completed");
+});
+
+test("SSE rejects a malformed frame without advancing past the last valid event", async () => {
+  const transport = new BrowserRunnerTransport(
+    (requestInput) => {
+      if (String(requestInput).endsWith("/events")) {
+        return Promise.resolve(
+          new Response(
+            `data: ${JSON.stringify({ id: 1, output: "valid", type: "output" })}\n\ndata: {"id":2}\n\n`,
+            { headers: { "content-type": "text/event-stream" } }
+          )
+        );
+      }
+      throw new Error("snapshot must not be requested");
+    },
+    { reconnectDelayMs: 0 }
+  );
+  const events: number[] = [];
+
+  await assert.rejects(
+    transport.streamRunEvents(RUN_ID, {
+      onEvent: (event) => events.push(event.id),
+    }),
+    (error: unknown) =>
+      error instanceof RunnerApiError && error.code === "invalid_event"
+  );
+  assert.deepEqual(events, [1]);
+});
+
 test("SSE aborts a pending reconnect promptly without opening another stream", async () => {
   const controller = new AbortController();
   let streams = 0;
@@ -420,4 +801,42 @@ test("SSE aborts a pending reconnect promptly without opening another stream", a
       error instanceof RunnerApiError && error.code === "aborted"
   );
   assert.equal(streams, 1);
+});
+
+test("SSE aborts a pending stream read promptly without requesting a snapshot", async () => {
+  const controller = new AbortController();
+  let snapshots = 0;
+  const transport = new BrowserRunnerTransport((requestInput) => {
+    if (String(requestInput).endsWith("/events")) {
+      return Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({ start: () => undefined }),
+          {
+            headers: { "content-type": "text/event-stream" },
+          }
+        )
+      );
+    }
+    snapshots += 1;
+    return Promise.resolve(
+      json({
+        apiVersion: AGENT_RUNNER_API_VERSION,
+        run: run("running"),
+      })
+    );
+  });
+
+  const pending = transport.streamRunEvents(RUN_ID, {
+    onEvent: () => undefined,
+    signal: controller.signal,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  controller.abort();
+
+  await assert.rejects(
+    pending,
+    (error: unknown) =>
+      error instanceof RunnerApiError && error.code === "aborted"
+  );
+  assert.equal(snapshots, 0);
 });

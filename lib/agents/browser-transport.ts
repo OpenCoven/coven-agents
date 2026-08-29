@@ -22,6 +22,7 @@ import {
 import { z } from "zod";
 
 const DEFAULT_RECONNECT_DELAY_MS = 1000;
+const MAX_RECONNECT_DELAY_MS = 30_000;
 
 const strictAgentsEnvelopeSchema = agentsEnvelopeSchema.strict();
 const strictAgentEnvelopeSchema = agentEnvelopeSchema.strict();
@@ -45,6 +46,12 @@ export type StreamRunEventsOptions = Readonly<{
   onEvent: (event: RunEvent) => void;
   signal?: AbortSignal;
 }>;
+
+type EventStreamProgress = {
+  cursor: number;
+  terminal: boolean;
+  terminalSnapshot?: RunSnapshot;
+};
 
 export interface RunnerTransport {
   createAgent: (
@@ -146,6 +153,16 @@ function parseSseFrame(frame: string, status: number): RunEvent | null {
     "Runner returned an invalid event stream frame.",
     "invalid_event",
     status
+  );
+}
+
+function isTerminalEvent(event: RunEvent): boolean {
+  return (
+    event.type === "completed" ||
+    event.type === "failed" ||
+    (event.type === "status" &&
+      event.status !== "queued" &&
+      event.status !== "running")
   );
 }
 
@@ -369,9 +386,9 @@ export class BrowserRunnerTransport implements RunnerTransport {
 
   private async readEventStream(
     response: Response,
-    initialCursor: number,
+    progress: EventStreamProgress,
     options: StreamRunEventsOptions
-  ): Promise<number> {
+  ): Promise<void> {
     if (!response.body) {
       throw new RunnerApiError(
         "Runner returned no event stream.",
@@ -384,7 +401,10 @@ export class BrowserRunnerTransport implements RunnerTransport {
       .pipeThrough(new TextDecoderStream())
       .getReader();
     let buffer = "";
-    let cursor = initialCursor;
+    const cancelOnAbort = () => {
+      reader.cancel(options.signal?.reason).catch(() => undefined);
+    };
+    options.signal?.addEventListener("abort", cancelOnAbort, { once: true });
 
     try {
       while (true) {
@@ -393,17 +413,34 @@ export class BrowserRunnerTransport implements RunnerTransport {
         }
         // biome-ignore lint/performance/noAwaitInLoops: stream chunks are ordered and must be consumed sequentially.
         const chunk = await reader.read();
+        if (options.signal?.aborted) {
+          throw abortedError();
+        }
         if (chunk.done) {
-          return cursor;
+          if (buffer.trim().length > 0) {
+            throw eventStreamError(
+              new Error("Runner event stream ended with an incomplete frame."),
+              response.status
+            );
+          }
+          return;
         }
         buffer += chunk.value.replaceAll("\r\n", "\n");
         const frames = buffer.split("\n\n");
         buffer = frames.pop() ?? "";
         for (const frame of frames) {
           const event = parseSseFrame(frame, response.status);
-          if (event && event.id > cursor) {
-            cursor = event.id;
-            options.onEvent(event);
+          if (!event || event.id <= progress.cursor) {
+            continue;
+          }
+          progress.cursor = event.id;
+          progress.terminal ||= isTerminalEvent(event);
+          if (event.type === "completed") {
+            progress.terminalSnapshot = event.run;
+          }
+          options.onEvent(event);
+          if (progress.terminal) {
+            return;
           }
         }
       }
@@ -416,6 +453,7 @@ export class BrowserRunnerTransport implements RunnerTransport {
       }
       throw eventStreamError(error, response.status);
     } finally {
+      options.signal?.removeEventListener("abort", cancelOnAbort);
       reader.cancel().catch(() => undefined);
     }
   }
@@ -463,57 +501,105 @@ export class BrowserRunnerTransport implements RunnerTransport {
     cursor: number,
     options: StreamRunEventsOptions
   ): Promise<RunSnapshot> {
-    let nextCursor = cursor;
+    const progress: EventStreamProgress = {
+      cursor,
+      terminal: false,
+    };
+    let recoveryAttempts = 0;
     while (true) {
       if (options.signal?.aborted) {
         throw abortedError();
       }
-      try {
-        // biome-ignore lint/performance/noAwaitInLoops: each reconnect must resume from the cursor produced by the previous stream.
-        const response = await this.fetch(
-          `/api/runs/${encodeURIComponent(runId)}/events`,
-          {
-            accept: "text/event-stream",
-            lastEventId: nextCursor,
-            signal: options.signal,
-          }
-        );
-        if (
-          !response.headers
-            .get("content-type")
-            ?.toLowerCase()
-            .startsWith("text/event-stream")
-        ) {
-          throw new RunnerApiError(
-            "Runner returned no event stream.",
-            "no_event_stream",
-            response.status
+      const cursorBeforeAttempt = progress.cursor;
+      let retryableFailure = false;
+
+      if (!progress.terminal) {
+        try {
+          // biome-ignore lint/performance/noAwaitInLoops: each reconnect must resume from the cursor produced by the previous stream.
+          const response = await this.fetch(
+            `/api/runs/${encodeURIComponent(runId)}/events`,
+            {
+              accept: "text/event-stream",
+              lastEventId: progress.cursor,
+              signal: options.signal,
+            }
           );
+          if (
+            !response.headers
+              .get("content-type")
+              ?.toLowerCase()
+              .startsWith("text/event-stream")
+          ) {
+            throw new RunnerApiError(
+              "Runner returned no event stream.",
+              "no_event_stream",
+              response.status
+            );
+          }
+          await this.readEventStream(response, progress, options);
+        } catch (error) {
+          if (!(error instanceof RunnerApiError && error.retryable)) {
+            throw error;
+          }
+          retryableFailure = true;
         }
-        nextCursor = await this.readEventStream(response, nextCursor, options);
+      }
+
+      if (progress.terminalSnapshot) {
+        return progress.terminalSnapshot;
+      }
+
+      let snapshot: RunSnapshot;
+      try {
+        snapshot = await this.getRun(runId, options.signal);
       } catch (error) {
         if (!(error instanceof RunnerApiError && error.retryable)) {
           throw error;
         }
+        retryableFailure = true;
+        if (progress.cursor > cursorBeforeAttempt) {
+          recoveryAttempts = 0;
+        }
+        recoveryAttempts += 1;
+        await this.waitForReconnect(recoveryAttempts - 1, options.signal);
+        continue;
       }
 
-      const snapshot = await this.getRun(runId, options.signal);
       if (snapshot.status !== "queued" && snapshot.status !== "running") {
         return snapshot;
       }
-      await this.waitForReconnect(options.signal);
+
+      if (progress.cursor > cursorBeforeAttempt) {
+        recoveryAttempts = 0;
+      }
+      if (retryableFailure) {
+        recoveryAttempts += 1;
+      } else {
+        recoveryAttempts = 0;
+      }
+      await this.waitForReconnect(
+        Math.max(recoveryAttempts - 1, 0),
+        options.signal
+      );
     }
   }
 
-  private waitForReconnect(signal?: AbortSignal): Promise<void> {
+  private waitForReconnect(
+    attempt: number,
+    signal?: AbortSignal
+  ): Promise<void> {
     if (signal?.aborted) {
       return Promise.reject(abortedError());
     }
+    const delay = Math.min(
+      this.reconnectDelayMs * 2 ** Math.min(attempt, 30),
+      MAX_RECONNECT_DELAY_MS
+    );
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         signal?.removeEventListener("abort", onAbort);
         resolve();
-      }, this.reconnectDelayMs);
+      }, delay);
       const onAbort = () => {
         clearTimeout(timer);
         reject(abortedError());
