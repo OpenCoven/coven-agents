@@ -23,7 +23,9 @@ The still-applicable evidence retained from the audit is:
   errors.
 
 This evidence was repository-local and was never production certification. The
-audit's disposition remained **no-go** because release-equivalent identity,
-billing, execution lifecycle, isolation, observability, rollback, recovery,
-and performance evidence had not been retained. Current promotion decisions
-must use the linked living documents rather than this historical snapshot.
+retained results were captured on 2026-08-27 against commit
+`a8c197639c599c67132e73b376859dc4d6d48124`. The audit's disposition remained
+**no-go** because release-equivalent identity, billing, execution lifecycle,
+isolation, observability, rollback, recovery, and performance evidence had not
+been retained. Current promotion decisions must use the linked living
+documents rather than this historical snapshot.

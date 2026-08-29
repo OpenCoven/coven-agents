@@ -696,7 +696,13 @@ test("the prior UI audit retains its evidence and explicit correction", () => {
   assert.match(audit, /390 x 844/);
   assert.match(audit, /collapse\/expand control worked/);
   assert.match(audit, /10 sanitized events/);
-  assert.match(audit, /disposition remained \*\*no-go\*\*/);
+  assert.match(audit, /captured on 2026-08-27/);
+  assert.match(audit, /a8c197639c599c67132e73b376859dc4d6d48124/);
+  assert.match(
+    audit,
+    /repository-local and was never production certification/
+  );
+  assert.match(audit, /disposition remained\s+\*\*no-go\*\*/);
   assert.match(audit, /\[Daytona cutover audit\]/);
   assert.match(audit, /\[release-readiness runbook\]/);
 });
