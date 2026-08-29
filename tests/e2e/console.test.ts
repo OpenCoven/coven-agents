@@ -42,11 +42,21 @@ const retainedRun = {
   task: "Verify timeline output",
 };
 
-function liveRun(status: "cancelled" | "failed" | "running" = "running") {
+function liveRun(
+  status: "cancelled" | "completed" | "failed" | "running" = "running"
+) {
   return {
     ...retainedRun,
     completedAt: status === "running" ? null : "2026-08-27T06:02:00.000Z",
-    output: "",
+    output: status === "completed" ? "Timeline verified." : "",
+    status,
+  };
+}
+
+function historicalRun(status: "cancelled" | "completed" | "failed") {
+  return {
+    ...retainedRun,
+    output: status === "completed" ? "Historical completion output." : "",
     status,
   };
 }
@@ -393,6 +403,104 @@ test.describe("Run console", () => {
     expect(legacyRequests).toEqual([]);
   });
 
+  for (const scenario of [
+    {
+      agentStatus: "idle",
+      event: {
+        error: {
+          code: "historical_failure",
+          message: "Historical failure transcript.",
+          retryable: false,
+        },
+        id: 1,
+        type: "failed",
+      },
+      historicalStatus: "failed",
+      transcript: "Historical failure transcript.",
+    },
+    {
+      agentStatus: "error",
+      event: {
+        id: 1,
+        run: historicalRun("completed"),
+        type: "completed",
+      },
+      historicalStatus: "completed",
+      transcript: "Historical completion output.",
+    },
+    {
+      agentStatus: "running",
+      event: {
+        id: 1,
+        status: "cancelled",
+        type: "status",
+      },
+      historicalStatus: "cancelled",
+      transcript: "Run cancelled",
+    },
+  ] as const) {
+    test(`a historical ${scenario.historicalStatus} transcript does not overwrite a newer ${scenario.agentStatus} agent lifecycle`, async ({
+      context,
+      page,
+    }) => {
+      await context.addCookies(await subscriberCookies());
+      await page.route("**/api/tenant/prewarm", (route) =>
+        route.fulfill({ status: 204 })
+      );
+      await page.route("**/api/credentials", (route) =>
+        route.fulfill({ json: { harnessIds: ["copilot"] } })
+      );
+      await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+        const { pathname } = new URL(route.request().url());
+        if (pathname === "/api/agents") {
+          return route.fulfill({
+            json: {
+              agents: [{ ...retainedAgent, status: scenario.agentStatus }],
+            },
+          });
+        }
+        if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+          return route.fulfill({
+            json: {
+              apiVersion: "1.0",
+              runs: [historicalRun(scenario.historicalStatus)],
+            },
+          });
+        }
+        if (pathname === `/api/runs/${RUN_ID}/events`) {
+          return route.fulfill({
+            body: `data: ${JSON.stringify(scenario.event)}\n\n`,
+            contentType: "text/event-stream",
+          });
+        }
+        if (pathname === `/api/runs/${RUN_ID}`) {
+          return route.fulfill({
+            json: {
+              apiVersion: "1.0",
+              run: historicalRun(scenario.historicalStatus),
+            },
+          });
+        }
+        return route.fulfill({ json: {}, status: 404 });
+      });
+
+      await page.goto("/agents");
+      await page
+        .getByRole("complementary")
+        .getByRole("button", {
+          name: new RegExp(`${scenario.historicalStatus} Verify timeline`, "u"),
+        })
+        .click();
+
+      await expect(page.getByText(scenario.transcript).first()).toBeVisible();
+      await expect(
+        page
+          .getByRole("button", { name: retainedAgent.name })
+          .getByRole("img", { name: scenario.agentStatus })
+      ).toBeVisible();
+    });
+  }
+
   test("a direct cancelled stop leaves only the owning agent idle", async ({
     context,
     page,
@@ -467,6 +575,56 @@ test.describe("Run console", () => {
     await expect(page.getByRole("img", { name: "idle" })).toBeVisible();
     await expect(page.getByRole("img", { name: "running" })).toBeVisible();
     await releaseEvents();
+  });
+
+  test("a completed live event leaves the owning agent idle", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({
+          json: { agents: [{ ...retainedAgent, status: "running" }] },
+        });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", runs: [liveRun()] },
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}/events`) {
+        return route.fulfill({
+          body: `data: ${JSON.stringify({
+            id: 1,
+            run: liveRun("completed"),
+            type: "completed",
+          })}\n\n`,
+          contentType: "text/event-stream",
+        });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+
+    await expect(
+      page
+        .getByRole("button", { name: retainedAgent.name })
+        .getByRole("img", { name: "idle" })
+    ).toBeVisible();
+    await expect(
+      page
+        .getByRole("complementary")
+        .getByRole("button", { name: /completed Verify timeline/ })
+    ).toBeVisible();
   });
 
   test("a cancelled terminal snapshot recovery leaves the owning agent idle", async ({

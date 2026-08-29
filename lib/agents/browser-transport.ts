@@ -57,6 +57,11 @@ type EventStreamProgress = {
   terminalSnapshot?: RunSnapshot;
 };
 
+type ReadJsonOptions = Readonly<{
+  retryableBodyReadFailure?: boolean;
+  signal?: AbortSignal;
+}>;
+
 export interface RunnerTransport {
   createAgent: (
     input: CreateAgentInput,
@@ -135,6 +140,32 @@ function eventStreamError(cause: unknown, status: number): RunnerApiError {
   );
 }
 
+function invalidResponseEnvelope(
+  status: number,
+  options: Readonly<{ cause?: unknown; unreadable?: boolean }> = {}
+): RunnerApiError {
+  return new RunnerApiError(
+    options.unreadable
+      ? "Runner returned an unreadable response envelope."
+      : "Runner returned an invalid response envelope.",
+    "invalid_response_envelope",
+    status,
+    { cause: options.cause }
+  );
+}
+
+function lostAcceptedResponseBody(
+  cause: unknown,
+  status: number
+): RunnerApiError {
+  return new RunnerApiError(
+    "Runner response body was lost after the request was accepted.",
+    "network_error",
+    status,
+    { cause, retryable: true }
+  );
+}
+
 function parseSseFrame(frame: string, status: number): RunEvent | null {
   const data = frame
     .split("\n")
@@ -189,7 +220,8 @@ export class BrowserRunnerTransport implements RunnerTransport {
   async health(signal?: AbortSignal): Promise<AgentRunnerHealth> {
     return this.readJson(
       await this.fetch("/api/health", { signal }),
-      agentRunnerHealthSchema
+      agentRunnerHealthSchema,
+      { signal }
     );
   }
 
@@ -197,7 +229,8 @@ export class BrowserRunnerTransport implements RunnerTransport {
     return (
       await this.readJson(
         await this.fetch("/api/harnesses", { signal }),
-        strictHarnessesEnvelopeSchema
+        strictHarnessesEnvelopeSchema,
+        { signal }
       )
     ).harnesses;
   }
@@ -206,7 +239,8 @@ export class BrowserRunnerTransport implements RunnerTransport {
     return (
       await this.readJson(
         await this.fetch("/api/agents", { signal }),
-        strictAgentsEnvelopeSchema
+        strictAgentsEnvelopeSchema,
+        { signal }
       )
     ).agents;
   }
@@ -220,7 +254,8 @@ export class BrowserRunnerTransport implements RunnerTransport {
         await this.fetch(`/api/agents/${encodeURIComponent(agentId)}`, {
           signal,
         }),
-        strictAgentEnvelopeSchema
+        strictAgentEnvelopeSchema,
+        { signal }
       )
     ).agent;
   }
@@ -236,7 +271,8 @@ export class BrowserRunnerTransport implements RunnerTransport {
           method: "POST",
           signal,
         }),
-        strictAgentEnvelopeSchema
+        strictAgentEnvelopeSchema,
+        { signal }
       )
     ).agent;
   }
@@ -253,7 +289,8 @@ export class BrowserRunnerTransport implements RunnerTransport {
           method: "PUT",
           signal,
         }),
-        strictAgentEnvelopeSchema
+        strictAgentEnvelopeSchema,
+        { signal }
       )
     ).agent;
   }
@@ -264,7 +301,8 @@ export class BrowserRunnerTransport implements RunnerTransport {
         method: "DELETE",
         signal,
       }),
-      strictOkEnvelopeSchema
+      strictOkEnvelopeSchema,
+      { signal }
     );
   }
 
@@ -283,7 +321,7 @@ export class BrowserRunnerTransport implements RunnerTransport {
         response.status
       );
     }
-    await this.readJson(response, prewarmEnvelopeSchema);
+    await this.readJson(response, prewarmEnvelopeSchema, { signal });
   }
 
   async listRuns(
@@ -295,7 +333,8 @@ export class BrowserRunnerTransport implements RunnerTransport {
         await this.fetch(`/api/agents/${encodeURIComponent(agentId)}/runs`, {
           signal,
         }),
-        runListEnvelopeSchema
+        runListEnvelopeSchema,
+        { signal }
       )
     ).runs;
   }
@@ -346,7 +385,8 @@ export class BrowserRunnerTransport implements RunnerTransport {
           method: "POST",
           signal,
         }),
-        runSnapshotEnvelopeSchema
+        runSnapshotEnvelopeSchema,
+        { retryableBodyReadFailure: true, signal }
       )
     ).run;
   }
@@ -355,7 +395,8 @@ export class BrowserRunnerTransport implements RunnerTransport {
     return (
       await this.readJson(
         await this.fetch(`/api/runs/${encodeURIComponent(runId)}`, { signal }),
-        runSnapshotEnvelopeSchema
+        runSnapshotEnvelopeSchema,
+        { signal }
       )
     ).run;
   }
@@ -374,7 +415,8 @@ export class BrowserRunnerTransport implements RunnerTransport {
           method: "POST",
           signal,
         }),
-        runSnapshotEnvelopeSchema
+        runSnapshotEnvelopeSchema,
+        { signal }
       )
     ).run;
   }
@@ -501,16 +543,34 @@ export class BrowserRunnerTransport implements RunnerTransport {
 
   private async readJson<T>(
     response: Response,
-    schema: z.ZodType<T>
+    schema: z.ZodType<T>,
+    options: ReadJsonOptions = {}
   ): Promise<T> {
-    const body = await response.json().catch(() => undefined);
+    let source: string;
+    try {
+      source = await response.text();
+    } catch (error) {
+      if (options.signal?.aborted) {
+        throw abortedError();
+      }
+      if (options.retryableBodyReadFailure) {
+        throw lostAcceptedResponseBody(error, response.status);
+      }
+      throw invalidResponseEnvelope(response.status, {
+        cause: error,
+        unreadable: true,
+      });
+    }
+
+    let body: unknown;
+    try {
+      body = JSON.parse(source);
+    } catch (error) {
+      throw invalidResponseEnvelope(response.status, { cause: error });
+    }
     const parsed = schema.safeParse(body);
     if (!parsed.success) {
-      throw new RunnerApiError(
-        "Runner returned an invalid response envelope.",
-        "invalid_response_envelope",
-        response.status
-      );
+      throw invalidResponseEnvelope(response.status);
     }
     return parsed.data;
   }

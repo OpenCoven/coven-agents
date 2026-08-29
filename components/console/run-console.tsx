@@ -409,7 +409,11 @@ export function RunConsole() {
 
   /** Applies one streamed event to the run it belongs to. */
   const applyEvent = useCallback(
-    (runId: string, event: RunEvent) => {
+    (
+      runId: string,
+      event: RunEvent,
+      options: Readonly<{ reconcileAgent?: boolean }> = {}
+    ) => {
       const currentRun = runsRef.current.find(
         (run) => run.snapshot.id === runId
       );
@@ -438,18 +442,20 @@ export function RunConsole() {
           };
         })
       );
-      reconcileTerminalAgent({
-        agentId:
-          event.type === "completed" ? event.run.agentId : currentRun.agentId,
-        status:
-          event.type === "completed"
-            ? event.run.status
-            : event.type === "status"
-              ? event.status
-              : event.type === "failed"
-                ? "failed"
-                : currentRun.snapshot.status,
-      });
+      if (options.reconcileAgent) {
+        reconcileTerminalAgent({
+          agentId:
+            event.type === "completed" ? event.run.agentId : currentRun.agentId,
+          status:
+            event.type === "completed"
+              ? event.run.status
+              : event.type === "status"
+                ? event.status
+                : event.type === "failed"
+                  ? "failed"
+                  : currentRun.snapshot.status,
+        });
+      }
     },
     [reconcileTerminalAgent]
   );
@@ -491,7 +497,7 @@ export function RunConsole() {
           lastEventId: cursor,
           onEvent: (event) => {
             if (!cancelled && sessionIsCurrent()) {
-              applyEvent(streamingRunId, event);
+              applyEvent(streamingRunId, event, { reconcileAgent: true });
             }
           },
           signal: controller.signal,
@@ -571,6 +577,16 @@ export function RunConsole() {
           }
         },
         signal: controller.signal,
+      })
+      .then((snapshot) => {
+        if (!isCurrentSession(generation, sessionController.signal)) {
+          return;
+        }
+        setRuns((current) =>
+          current.map((run) =>
+            run.snapshot.id === runId ? { ...run, snapshot } : run
+          )
+        );
       })
       .catch(() => undefined);
     return () => {

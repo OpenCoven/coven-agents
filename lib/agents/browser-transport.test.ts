@@ -77,6 +77,24 @@ function interruptedEventStream(body: string): Response {
   );
 }
 
+function interruptedJson(body: unknown, status = 202): Response {
+  const encoded = new TextEncoder().encode(JSON.stringify(body));
+  let reads = 0;
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        reads += 1;
+        if (reads === 1) {
+          controller.enqueue(encoded);
+          return;
+        }
+        controller.error(new TypeError("response body reset"));
+      },
+    }),
+    { headers: { "content-type": "application/json" }, status }
+  );
+}
+
 function runnerError(
   code: string,
   retryable: boolean,
@@ -369,6 +387,97 @@ test("start retries an ambiguous response with the identical operation id and re
   assert.equal(created, 1);
   assert.equal(committed.size, 1);
   assert.equal(snapshot.id, RUN_ID);
+});
+
+test("start retries when a successful response body is lost after headers", async () => {
+  const bodies: string[] = [];
+  let attempts = 0;
+  const accepted = {
+    apiVersion: AGENT_RUNNER_API_VERSION,
+    run: run(),
+  };
+  const transport = new BrowserRunnerTransport(
+    (_requestInput, init) => {
+      attempts += 1;
+      bodies.push(String(init?.body));
+      return Promise.resolve(
+        attempts === 1 ? interruptedJson(accepted) : json(accepted, 202)
+      );
+    },
+    { startRetryDelayMs: 0 }
+  );
+
+  const snapshot = await transport.startRun(AGENT_ID, {
+    operationId: OPERATION_ID,
+    task: "Exercise transport.",
+  });
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(bodies, [bodies[0], bodies[0]]);
+  assert.equal(
+    (JSON.parse(bodies[0] ?? "{}") as { operationId?: string }).operationId,
+    OPERATION_ID
+  );
+  assert.equal(snapshot.status, "queued");
+});
+
+test("start does not retry malformed JSON or schema-invalid success envelopes", async () => {
+  const responses = [
+    () =>
+      new Response('{"apiVersion":', {
+        headers: { "content-type": "application/json" },
+        status: 202,
+      }),
+    () => json({ apiVersion: AGENT_RUNNER_API_VERSION, run: {} }, 202),
+  ];
+
+  await Promise.all(
+    responses.map(async (response) => {
+      let attempts = 0;
+      const transport = new BrowserRunnerTransport(
+        () => {
+          attempts += 1;
+          return Promise.resolve(response());
+        },
+        { startRetryDelayMs: 0 }
+      );
+
+      await assert.rejects(
+        transport.startRun(AGENT_ID, {
+          operationId: OPERATION_ID,
+          task: "Exercise transport.",
+        }),
+        (error: unknown) =>
+          error instanceof RunnerApiError &&
+          error.code === "invalid_response_envelope" &&
+          error.retryable === false &&
+          error.status === 202
+      );
+      assert.equal(attempts, 1);
+    })
+  );
+});
+
+test("non-start response body failures remain strict and nonretryable", async () => {
+  const transport = new BrowserRunnerTransport(() =>
+    Promise.resolve(
+      interruptedJson({
+        apiVersion: AGENT_RUNNER_API_VERSION,
+        capabilities: [...AGENT_RUNNER_CAPABILITIES],
+        minimumClientVersion: "1.0.0",
+        mode: "cloud",
+      })
+    )
+  );
+
+  await assert.rejects(
+    transport.health(),
+    (error: unknown) =>
+      error instanceof RunnerApiError &&
+      error.code === "invalid_response_envelope" &&
+      error.retryable === false &&
+      error.status === 202
+  );
 });
 
 test("start retries with bounded exponential backoff", async () => {
