@@ -200,6 +200,18 @@ type SessionCleanupOutcome = Readonly<{
   targetObserved: boolean;
 }>;
 
+type SessionCleanupSettlement =
+  | Readonly<{
+      outcome: SessionCleanupOutcome;
+      status: "confirmed";
+    }>
+  | Readonly<{
+      status: "settled_failed";
+    }>
+  | Readonly<{
+      status: "pending";
+    }>;
+
 async function removeSessionWithOutcome(
   sandbox: DaytonaProcessSandbox,
   sessionId: string
@@ -1010,39 +1022,45 @@ function settleCleanupWithinDeadline(
   });
 }
 
-async function startSessionCleanupWithinDeadline(
+function startSessionCleanupWithinDeadline(
   cleanup: () => Promise<SessionCleanupOutcome>,
   options: DaytonaProbeOptions
-): Promise<SessionCleanupOutcome | undefined> {
+): Promise<SessionCleanupSettlement> {
   const remainingMs = cleanupRemainingMs(options);
   if (remainingMs !== null && remainingMs <= 0) {
-    return undefined;
+    return Promise.resolve({ status: "pending" });
   }
-  const pending = cleanup();
-  if (
-    !(await settleCleanupWithinDeadline(
-      pending.then(() => undefined),
-      options
-    ))
-  ) {
-    return undefined;
-  }
-  return pending;
+  return settleSessionCleanupWithinDeadline(cleanup(), options);
 }
 
-async function settleSessionCleanupWithinDeadline(
+function settleSessionCleanupWithinDeadline(
   cleanup: Promise<SessionCleanupOutcome>,
   options: DaytonaProbeOptions
-): Promise<SessionCleanupOutcome | undefined> {
-  if (
-    !(await settleCleanupWithinDeadline(
-      cleanup.then(() => undefined),
-      options
-    ))
-  ) {
-    return undefined;
+): Promise<SessionCleanupSettlement> {
+  cleanup.catch(() => undefined);
+  const remainingMs = cleanupRemainingMs(options);
+  if (remainingMs === null) {
+    return cleanup.then(
+      (outcome) => ({ outcome, status: "confirmed" }),
+      () => ({ status: "settled_failed" })
+    );
   }
-  return cleanup;
+  if (remainingMs <= 0) {
+    return Promise.resolve({ status: "pending" });
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ status: "pending" }), remainingMs);
+    cleanup.then(
+      (outcome) => {
+        clearTimeout(timer);
+        resolve({ outcome, status: "confirmed" });
+      },
+      () => {
+        clearTimeout(timer);
+        resolve({ status: "settled_failed" });
+      }
+    );
+  });
 }
 
 /**
@@ -1200,15 +1218,15 @@ async function probeDaytonaHarnessesInSession(
         abortCleanup,
         options
       );
-      if (firstCleanup) {
+      if (firstCleanup.status !== "pending") {
         if (createResolvedSuccessfully) {
-          cleanupConfirmed =
-            (await startSessionCleanupWithinDeadline(
-              () => removeSessionWithOutcome(sandbox, sessionId),
-              options
-            )) !== undefined;
-        } else {
-          cleanupConfirmed = firstCleanup.targetObserved;
+          const finalCleanup = await startSessionCleanupWithinDeadline(
+            () => removeSessionWithOutcome(sandbox, sessionId),
+            options
+          );
+          cleanupConfirmed = finalCleanup.status === "confirmed";
+        } else if (firstCleanup.status === "confirmed") {
+          cleanupConfirmed = firstCleanup.outcome.targetObserved;
         }
       }
     } else {
@@ -1217,8 +1235,8 @@ async function probeDaytonaHarnessesInSession(
         options
       );
       cleanupConfirmed =
-        finalCleanup !== undefined &&
-        (createResolvedSuccessfully || finalCleanup.targetObserved);
+        finalCleanup.status === "confirmed" &&
+        (createResolvedSuccessfully || finalCleanup.outcome.targetObserved);
     }
   }
   if (!cleanupConfirmed) {

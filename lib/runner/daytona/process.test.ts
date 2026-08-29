@@ -187,7 +187,7 @@ test("an aborted probe settles by its deadline when cleanup requests never retur
   assert.equal(cleanupLookups, 1);
 });
 
-test("abort cleanup leaves a transient delete failure recoverable", async () => {
+test("abort cleanup retries a settled transient delete failure", async () => {
   const controller = new AbortController();
   const sessions = new Set<string>();
   let commandStarted!: () => void;
@@ -232,14 +232,9 @@ test("abort cleanup leaves a transient delete failure recoverable", async () => 
   await started;
   controller.abort(new Error("prewarm deadline exceeded"));
 
-  await settlesWithin(
-    assert.rejects(
-      pending,
-      (error: unknown) => error instanceof DaytonaProbeCleanupPendingError
-    )
-  );
-  assert.equal(deletes, 1);
-  assert.equal(sessions.size, 1);
+  await settlesWithin(assert.rejects(pending, /prewarm deadline exceeded/));
+  assert.equal(deletes, 2);
+  assert.equal(sessions.size, 0);
 });
 
 test("abort cleanup fails closed when session deletion cannot be verified", async () => {
@@ -289,7 +284,7 @@ test("abort cleanup fails closed when session deletion cannot be verified", asyn
       (error: unknown) => error instanceof DaytonaProbeCleanupPendingError
     )
   );
-  assert.equal(deletes, 1);
+  assert.equal(deletes, 2);
   assert.equal(sessions.size, 1);
 });
 
@@ -624,7 +619,7 @@ test("a pending first delete prevents a concurrent late delete", async () => {
   assert.deepEqual([...sessions], [PROBE_SESSION_ID]);
 });
 
-test("a failed first delete prevents a duplicate late delete", async () => {
+test("a late successful create retries a settled failed delete", async () => {
   const controller = new AbortController();
   const sessions = new Set([PROBE_SESSION_ID]);
   let createStarted!: () => void;
@@ -649,7 +644,66 @@ test("a failed first delete prevents a duplicate late delete", async () => {
       deleteSession: () => {
         deletes += 1;
         deleteStarted();
-        return Promise.reject(new Error("delete failed"));
+        if (deletes === 1) {
+          return Promise.reject(new Error("transient delete failure"));
+        }
+        sessions.delete(PROBE_SESSION_ID);
+        return Promise.resolve();
+      },
+      executeCommand: () =>
+        Promise.reject(new Error("prewarm must use a cancellable session")),
+      executeSessionCommand: () =>
+        Promise.reject(new Error("aborted create must not execute")),
+      getSessionCommand: () => Promise.resolve({}),
+      getSessionCommandLogs: () => Promise.resolve({}),
+      listSessions: () =>
+        Promise.resolve(
+          [...sessions].map((sessionId) => ({ commands: [], sessionId }))
+        ),
+    },
+  } as DaytonaProcessSandbox;
+
+  const pending = probeDaytonaHarnesses(sandbox, {
+    sessionId: PROBE_SESSION_ID,
+    signal: controller.signal,
+    timeoutSeconds: 5,
+  });
+  await started;
+  controller.abort(new Error("prewarm deadline exceeded"));
+  await deleteStartedPromise;
+  finishCreate();
+
+  await settlesWithin(assert.rejects(pending, /prewarm deadline exceeded/));
+  assert.equal(deletes, 2);
+  assert.equal(sessions.size, 0);
+});
+
+test("a late successful create retains cleanup pending after repeated delete failure", async () => {
+  const controller = new AbortController();
+  const sessions = new Set([PROBE_SESSION_ID]);
+  let createStarted!: () => void;
+  let finishCreate!: () => void;
+  let deleteStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    createStarted = resolve;
+  });
+  const creation = new Promise<void>((resolve) => {
+    finishCreate = resolve;
+  });
+  const deleteStartedPromise = new Promise<void>((resolve) => {
+    deleteStarted = resolve;
+  });
+  let deletes = 0;
+  const sandbox = {
+    process: {
+      createSession: () => {
+        createStarted();
+        return creation;
+      },
+      deleteSession: () => {
+        deletes += 1;
+        deleteStarted();
+        return Promise.reject(new Error("persistent delete failure"));
       },
       executeCommand: () =>
         Promise.reject(new Error("prewarm must use a cancellable session")),
@@ -680,7 +734,7 @@ test("a failed first delete prevents a duplicate late delete", async () => {
       (error: unknown) => error instanceof DaytonaProbeCleanupPendingError
     )
   );
-  assert.equal(deletes, 1);
+  assert.equal(deletes, 2);
   assert.deepEqual([...sessions], [PROBE_SESSION_ID]);
 });
 
