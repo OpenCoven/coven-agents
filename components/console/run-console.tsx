@@ -48,11 +48,11 @@ import {
 } from "@/lib/agents/connection-status";
 import type { Formation } from "@/lib/agents/formations";
 import { memberName } from "@/lib/agents/formations";
-import { fetchHasCredential } from "@/lib/agents/provision";
 import { avatarFor } from "@/lib/avatar";
 import { isTerminal, projectRun } from "@/lib/console/blocks";
 import { formatDuration, glyphFor, spanBetween } from "@/lib/console/format";
 import type { ConsoleRun } from "@/lib/console/types";
+import { fetchHasCredential } from "@/lib/credentials/client";
 
 const TICK_MS = 1000;
 

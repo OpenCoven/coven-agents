@@ -71,9 +71,9 @@ const SECRET_PATTERNS: ReadonlyArray<{
  * Every pattern above keys on a vendor prefix, which is exactly why none of
  * them can see this project's own secrets: `AUTH_SECRET`, the versioned
  * `CREDENTIAL_KEK_V1`/`CREDENTIAL_KEK_V2` ring,
- * `RUNNER_SIGNING_KEY`, and `AGENT_CONTROL_TOKEN` are raw base64 or hex with
- * no marker at all. The most damaging values in the repository were the ones
- * the scanner was structurally unable to detect.
+ * and `AGENT_CONTROL_TOKEN` are raw base64 or hex with no marker at all. The
+ * most damaging values in the repository were the ones the scanner was
+ * structurally unable to detect.
  *
  * These rules key on the *name* instead. Matched generically rather than from
  * a list, so a secret added next year is covered without anyone remembering to

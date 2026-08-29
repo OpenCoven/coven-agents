@@ -17,8 +17,6 @@ const protectedRoutes = new Map([
   ["app/api/account/avatar/route.ts", 2],
   ["app/api/credentials/device/route.ts", 2],
   ["app/api/credentials/route.ts", 3],
-  ["app/api/runner-connection/route.ts", 1],
-  ["app/api/runner-token/route.ts", 1],
 ]);
 
 const guestFacingCopy = new Map([
@@ -64,8 +62,6 @@ test("the guest guide documents states, flows, gates, and precautions", () => {
     "lib/session.ts",
     "lib/auth/subscriber-access.ts",
     "lib/auth/subscriber-authorization.server.ts",
-    "app/api/runner-connection/route.ts",
-    "app/api/runner-token/route.ts",
     "app/api/credentials/route.ts",
     "worker/src/routes.ts",
   ]) {

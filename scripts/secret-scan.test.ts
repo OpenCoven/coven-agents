@@ -164,14 +164,12 @@ test("a secret with no vendor prefix is still caught, by its name", () => {
   /**
    * The gap this closes. Every vendor pattern keys on a prefix, and this
    * project's own secrets have none -- AUTH_SECRET, the versioned credential
-   * KEK ring, and RUNNER_SIGNING_KEY are raw base64. The most damaging values
-   * in the
-   * repository were the ones the scanner could not see.
+   * KEK ring, and service tokens are raw base64. The most damaging values in
+   * the repository were the ones the scanner could not see.
    */
   for (const name of [
     "AUTH_SECRET",
     "CREDENTIAL_KEK",
-    "RUNNER_SIGNING_KEY",
     "AGENT_CONTROL_TOKEN",
     "OPERATOR_DIAGNOSTIC_TOKEN",
     "RUNNER_SERVICE_TOKEN",

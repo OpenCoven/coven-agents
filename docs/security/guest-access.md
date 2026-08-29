@@ -169,9 +169,7 @@ check before execution. The pure token decision lives in
 | Chat history/messages/documents/votes/suggestions | Deny | 403 before database access | Allow with ownership checks | Shared subscriber gate in each route |
 | File/blob upload | Deny | 403 before body or blob storage | Allow within file limits | Shared subscriber gate, upload schema |
 | Harness credential list/write/delete/device flow | Deny | 403 | Allow | Credential routes and `databaseFor` |
-| Cloud runner connection gate | Deny | 403 | Allow when configured | `app/api/runner-connection/route.ts` |
-| Signed runner identity | Deny | 403 | Allow | `app/api/runner-token/route.ts` |
-| Agent and run APIs | No connection authority | No connection authority | Tenant-scoped | Browser gate plus `worker/src/routes.ts` |
+| Agent and run APIs | Deny | Deny | Tenant-scoped | Same-origin session authorization |
 | Internal credential loan | No route authority | No route authority | One credential for one counted run | Service token, signed claim, subscriber plan |
 
 The checkout and usage surfaces are narrow account-management exceptions. They
@@ -227,10 +225,8 @@ must not be reused as a general guest database path.
 - A guest cannot store credentials, receive the cloud control token, mint
   runner identity, call a model, upload a file, or read/write persistent chat
   data.
-- `app/api/credentials/route.ts`,
-  `app/api/runner-connection/route.ts`, and
-  `app/api/runner-token/route.ts` enforce those three product gates
-  independently.
+- `app/api/credentials/route.ts` and the same-origin agent/run routes enforce
+  their product gates independently.
 
 ### Subscriber and downgrade conditions
 
@@ -286,9 +282,8 @@ Before publishing a guest deployment:
 - verify the selected fixture exists and passes schema and secret scans;
 - leave runner, credential, and billing secrets out of the guest deployment
   unless the same deployment also serves subscribers;
-- confirm `/api/runner-connection`, `/api/runner-token`, `/api/credentials`,
-  `/api/chat`, and upload/persistence routes return 401 or 403 for non-
-  subscribers;
+- confirm `/api/agents`, `/api/runs`, `/api/credentials`, `/api/chat`, and
+  upload/persistence routes return 401 or 403 for non-subscribers;
 - confirm the replay renders without auth, database, Worker, or network
   requests.
 
@@ -309,9 +304,13 @@ After suspected guest-boundary bypass:
 | Subscriber classification fails closed | `lib/session.test.ts`, `lib/subscription.test.ts`, `lib/session-claims.test.ts` |
 | Resource routes share one gate | `lib/auth/subscriber-access.test.ts`, `lib/auth/subscriber-authorization.test.ts`, `scripts/guest-access-docs.test.ts` |
 | Guest cannot store a credential | `lib/credentials/authorize.test.ts`, credential route tests |
-| Guest cannot receive runner connection or identity | `lib/agents/connection-access.test.ts`, runner-token tests, route guard regression |
+| Guest cannot reach runner execution | same-origin agent/run route tests and browser boundary regression |
 | Worker refuses guest execution | `worker/src/routes.test.ts`, internal credential binding tests |
 | Guest fixtures contain no recognized secrets | `lib/demo/fixtures.test.ts`, `scripts/secret-scan.test.ts` |
+
+The still-deployed rollback Worker keeps its independent enforcement in
+`worker/src/routes.ts`; its internal authority and credential calls remain
+server-to-server until that boundary moves atomically.
 
 Run the full repository gates before merging a guest-boundary change:
 

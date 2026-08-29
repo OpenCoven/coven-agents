@@ -93,20 +93,6 @@ const protectedHandlers: RouteExpectation[] = [
     "credential_delete"
   ),
   route(
-    "app/api/runner-connection/route.ts",
-    "GET",
-    "authorizeSubscriberAccess(",
-    ["connectionDecision("],
-    "runner_connection"
-  ),
-  route(
-    "app/api/runner-token/route.ts",
-    "POST",
-    "authorizeSubscriberAccess(",
-    ["mintRunnerToken("],
-    "runner_token"
-  ),
-  route(
     "app/(chat)/api/document/route.ts",
     "GET",
     "authorizeSubscriberAccess(",

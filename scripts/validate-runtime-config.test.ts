@@ -114,6 +114,7 @@ function runValidator(
     DAYTONA_SNAPSHOT: undefined,
     DAYTONA_TARGET: undefined,
     GLOBAL_DAILY_RUN_CAP: undefined,
+    NEXT_PUBLIC_CLOUD_RUNNER_URL: undefined,
     NODE_ENV: "production",
     OPERATOR_DIAGNOSTIC_TOKEN: undefined,
     REDIS_URL: undefined,
@@ -124,6 +125,9 @@ function runValidator(
     RUN_ADMISSION_TENANT_ACTIVE_MAX: undefined,
     RUN_ADMISSION_TENANT_QUEUE_MAX: undefined,
     RUNNER_SERVICE_TOKEN: undefined,
+    RUNNER_SIGNING_KEY: undefined,
+    RUNNER_SIGNING_KEY_ID: undefined,
+    RUNNER_SIGNING_PUBLIC_KEY: undefined,
     VERCEL_ENV: undefined,
     ...VALID_ENV,
   };
@@ -224,7 +228,7 @@ test("rejects production Redis when the abuse key secret is missing or empty", (
   }
 });
 
-test("accepts production Redis when the abuse key secret is valid", () => {
+test("accepts production without browser runner provisioning or signing config", () => {
   const result = runValidator();
 
   assert.equal(result.status, 0, result.stderr);

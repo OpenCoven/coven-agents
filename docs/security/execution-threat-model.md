@@ -272,8 +272,6 @@ with thresholds chosen before enforcement.
 | `credential_delete` | IP, user | 8,192 | 10 / 60 s | 40 / 1 h | closed |
 | `credential_device_start` | IP, user | 0 | 2 / 5 min | 5 / 1 h | closed |
 | `credential_device_poll` | IP, user | 8,192 | 12 / 60 s | 60 / 1 h | closed |
-| `runner_connection` | IP, user | 0 | 10 / 60 s | 60 / 1 h | closed |
-| `runner_token` | IP, user | 0 | 10 / 60 s | 60 / 1 h | closed |
 | `usage_read` | IP, user | 0 | 60 / 60 s | 600 / 1 h | closed |
 | `analytics_read` | IP, user | 0 | 20 / 60 s | 100 / 1 h | closed |
 | `model_list` | IP | 0 | 120 / 60 s | 1,200 / 1 h | closed |

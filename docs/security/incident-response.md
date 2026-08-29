@@ -34,7 +34,7 @@ was larger than assumed costs trust.
 | Level | Meaning | Examples | First action |
 | --- | --- | --- | --- |
 | **S1** | Another tenant's data is reachable | Credential KEK ring, `POSTGRES_URL`, a tenant's harness credential | Rotate immediately, then notify affected tenants |
-| **S2** | Our infrastructure is controllable, tenant data is not directly exposed | `RUNNER_SIGNING_KEY`, `AGENT_CONTROL_TOKEN`, `OPERATOR_DIAGNOSTIC_TOKEN`, `RUNNER_SERVICE_TOKEN`, `AUTH_SECRET` | Rotate immediately |
+| **S2** | Our infrastructure is controllable, tenant data is not directly exposed | `AGENT_CONTROL_TOKEN`, `OPERATOR_DIAGNOSTIC_TOKEN`, `RUNNER_SERVICE_TOKEN`, `AUTH_SECRET` | Rotate immediately |
 | **S3** | Cost or availability, no data boundary crossed | endpoint URL known, unauthenticated request flood | Measure, then decide |
 
 An **S1** is the only class that creates an obligation to someone other than
@@ -50,7 +50,6 @@ Everything that grants something, where it lives, and what it costs to rotate.
 | `CREDENTIAL_KEK_CURRENT_VERSION`, `CREDENTIAL_KEK_V1`, `CREDENTIAL_KEK_V2`, and legacy `CREDENTIAL_KEK` | Vercel | Versioned decryption of tenant credential data keys | Rewrap before retiring an old key |
 | `POSTGRES_URL` and the `PG*` family | Vercel (Neon integration) | Full read/write on all tenant data | Brief downtime |
 | `AUTH_SECRET` | Vercel | Forging any signed-in session | Everyone is signed out |
-| `RUNNER_SIGNING_KEY_ID`, `RUNNER_SIGNING_KEY`, `RUNNER_SIGNING_PUBLIC_KEY`, and Worker `RUNNER_VERIFY_*` ring | Vercel / Vercel + worker | Minting an identity for any tenant | ≤15 min of failed runs |
 | `AGENT_CONTROL_TOKEN` | Vercel + worker | Reaching the worker deployment for browser requests | Seconds of failed runs |
 | `OPERATOR_DIAGNOSTIC_TOKEN` | Worker | Running the operator-only Sandbox diagnostic | Seconds of failed diagnostics |
 | `RUNNER_SERVICE_TOKEN` | Vercel + worker | Calling the internal credential endpoint | Seconds of failed runs |
@@ -218,35 +217,15 @@ order, same reason.
 
 **Verify.** `/api/internal/credential` returns 401 for the old value.
 
-### Runner signing and verification key ring
+### Runner verification key ring
 
-**Grants.** The signing key mints an identity claiming to be *any* tenant.
-This is the closest thing to a master key that does not touch the database.
-
-**The current ID and key pair must change together. The Worker verifies with
-`RUNNER_VERIFY_KEY_ID`/`RUNNER_VERIFY_KEY`; the app signs with
-`RUNNER_SIGNING_KEY_ID`/`RUNNER_SIGNING_KEY`. A mismatch means every run
-fails. Keep the old public key configured as `RUNNER_VERIFY_PREVIOUS_KEY` until
-15 minutes plus clock skew have elapsed; never overwrite an unversioned key in
-place.
-
-```bash
-# Generate an Ed25519 pair; export the PKCS8 private key and the SPKI public key
-# base64url-encoded, matching what mintRunnerToken and importVerifyKey expect.
-node --input-type=module -e '
-const { subtle } = crypto;
-const pair = await subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
-const pkcs8 = await subtle.exportKey("pkcs8", pair.privateKey);
-const spki = await subtle.exportKey("spki", pair.publicKey);
-console.log("SIGNING", Buffer.from(pkcs8).toString("base64url"));
-console.log("VERIFY", Buffer.from(spki).toString("base64url"));
-'
-```
-
-Set the Worker current/previous public-key ring through Wrangler and the app's
-current signing ring through Vercel, then redeploy both. The complete procedure
-and rollback are in [Runner key rotation](key-rotation.md). Never log key
-material.
+The current app retains only the public verification ring used by the
+Worker-facing internal authority and credential routes. Public key material
+does not grant minting authority, but changing its ID or value before the
+Worker boundary moves makes already issued rollback tokens fail verification.
+Keep the current and previous public entries aligned with the deployed Worker.
+The full legacy signing-key procedure remains in
+[Runner key rotation](key-rotation.md) for application rollback.
 
 **What breaks.** Identity tokens live 15 minutes (`TOKEN_LIFETIME_SECONDS`), so
 in-flight runs fail until they are re-minted. There is no revocation list —
