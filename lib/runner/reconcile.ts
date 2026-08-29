@@ -79,6 +79,7 @@ type ReconciliationStore = Pick<
       | "appendTerminalCleanupDiagnostic"
       | "claimTerminalDaytonaAttemptCleanup"
       | "scanTerminalDaytonaAttemptCleanups"
+      | "scanTerminalLeaseCleanups"
     >
   >;
 
@@ -213,6 +214,7 @@ export type RunnerReconciliationResult = Readonly<{
   requeued: number;
   sandboxRecovered: number;
   terminalCleaned: number;
+  terminalLeaseCleaned: number;
   terminalized: number;
 }>;
 
@@ -1388,6 +1390,31 @@ function terminalCleanupConfirmed(run: RunnerRunRecord): boolean {
   );
 }
 
+async function recoverTerminalLease(
+  run: RunnerRunRecord,
+  dependencies: Pick<ReconcileAndDispatchDependencies, "operator" | "store">
+): Promise<"cleaned" | "deferred" | "skipped"> {
+  if (
+    run.dispatchState !== "terminal" ||
+    run.daytonaAttemptId !== null ||
+    run.daytonaCommandId !== null ||
+    run.daytonaSessionId !== null ||
+    run.dispatchLeaseToken === null ||
+    run.dispatchLeaseExpiresAt === null
+  ) {
+    return "skipped";
+  }
+  const cleaned = await dependencies.store.cleanupTerminalLease(
+    dependencies.operator,
+    {
+      expectedVersion: run.version,
+      leaseToken: run.dispatchLeaseToken,
+      runId: run.id,
+    } as RunnerDispatchAuthority
+  );
+  return cleaned.kind === "updated" ? "cleaned" : "deferred";
+}
+
 async function retireCancellationAttemptRedaction(
   authority: RunnerDispatchAuthority,
   dependencies: CancelRunnerRunDependencies
@@ -1594,6 +1621,7 @@ export async function reconcileAndDispatch(
     sandboxRecovered: 0,
     terminalCleaned: 0,
     terminalized: 0,
+    terminalLeaseCleaned: 0,
   };
 
   let expired: RunnerRunRecord[];
@@ -1635,6 +1663,39 @@ export async function reconcileAndDispatch(
       result.failures += 1;
     } else {
       result.deferred += 1;
+    }
+  }
+
+  if (dependencies.store.scanTerminalLeaseCleanups) {
+    let terminalLeases: RunnerRunRecord[];
+    try {
+      terminalLeases = await dependencies.store.scanTerminalLeaseCleanups(
+        dependencies.operator,
+        batchSize
+      );
+    } catch {
+      result.failures += 1;
+      terminalLeases = [];
+    }
+    const leaseCleanup = await mapBounded(
+      terminalLeases,
+      providerConcurrency,
+      async (run) => {
+        try {
+          return await recoverTerminalLease(run, dependencies);
+        } catch {
+          return "failed" as const;
+        }
+      }
+    );
+    for (const outcome of leaseCleanup) {
+      if (outcome === "cleaned") {
+        result.terminalLeaseCleaned += 1;
+      } else if (outcome === "failed") {
+        result.failures += 1;
+      } else if (outcome === "deferred") {
+        result.deferred += 1;
+      }
     }
   }
 

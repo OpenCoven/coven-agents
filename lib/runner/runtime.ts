@@ -46,6 +46,7 @@ const EMPTY_RECONCILIATION_COUNTS: RunnerReconciliationResult = {
   sandboxRecovered: 0,
   terminalCleaned: 0,
   terminalized: 0,
+  terminalLeaseCleaned: 0,
 };
 
 type ProductionDatabase = ReturnType<typeof databaseFor>;

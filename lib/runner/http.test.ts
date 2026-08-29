@@ -89,6 +89,7 @@ function counts() {
     sandboxRecovered: 0,
     terminalCleaned: 0,
     terminalized: 0,
+    terminalLeaseCleaned: 0,
   };
 }
 
@@ -1901,7 +1902,7 @@ test("reconciliation exposes validated counts only and hides malformed values", 
       reconcileAndDispatch: () =>
         Promise.resolve({
           ...counts(),
-          dispatched: Number.NaN,
+          terminalLeaseCleaned: Number.NaN,
         }),
     }),
   });

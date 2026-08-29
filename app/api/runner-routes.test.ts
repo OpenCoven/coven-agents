@@ -128,6 +128,7 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
       sandboxRecovered: 0,
       terminalCleaned: 0,
       terminalized: 0,
+      terminalLeaseCleaned: 0,
     }),
     startRun: async () => ({
       admission: "duplicate",

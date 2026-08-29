@@ -284,6 +284,7 @@ function reconciliationCounts(
     "requeued",
     "sandboxRecovered",
     "terminalCleaned",
+    "terminalLeaseCleaned",
     "terminalized",
   ] as const;
   for (const field of fields) {
@@ -305,6 +306,7 @@ function reconciliationCounts(
     sandboxRecovered: result.sandboxRecovered,
     terminalCleaned: result.terminalCleaned,
     terminalized: result.terminalized,
+    terminalLeaseCleaned: result.terminalLeaseCleaned,
   };
   if (result.execution === "skipped") {
     if (result.reason !== "overlap") {

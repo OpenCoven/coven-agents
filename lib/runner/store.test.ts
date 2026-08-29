@@ -1696,6 +1696,90 @@ test("terminal cleanup retains ownership until the exact attempt is released", a
   assert.match(releaseQuery, /"daytonaCommandId" = NULL/);
 });
 
+test("terminal lease cleanup refuses unresolved provider ownership", async () => {
+  const attemptId =
+    "53af1a29-4e98-43d6-ac5b-3b9dcba5e738" as RunnerDaytonaAttemptId;
+  const terminal = run({
+    completedAt: new Date("2026-01-01T00:00:01.000Z"),
+    dispatchState: "terminal",
+    status: "cancelled",
+  });
+  const authority = {
+    expectedVersion: terminal.version,
+    leaseToken: terminal.dispatchLeaseToken as string,
+    runId: terminal.id,
+  } as RunnerDispatchAuthority;
+
+  await Promise.all(
+    [
+      run({ ...terminal, daytonaAttemptId: attemptId }),
+      run({ ...terminal, daytonaCommandId: "command" }),
+      run({ ...terminal, daytonaSessionId: "session" }),
+    ].map(async (unresolved) => {
+      const blocked = scripted([unresolved]);
+      assert.deepEqual(
+        await blocked.store.cleanupTerminalLease(operator, authority),
+        { kind: "not_live" }
+      );
+      assert.equal(blocked.statements.length, 1);
+    })
+  );
+});
+
+test("terminal lease cleanup clears only its exact provider-free lease fence", async () => {
+  const terminal = run({
+    completedAt: new Date("2026-01-01T00:00:01.000Z"),
+    dispatchState: "terminal",
+    status: "cancelled",
+  });
+  const cleaned = run({
+    ...terminal,
+    dispatchLeaseExpiresAt: null,
+    dispatchLeaseToken: null,
+    version: terminal.version + 1,
+  });
+  const authority = {
+    expectedVersion: terminal.version,
+    leaseToken: terminal.dispatchLeaseToken as string,
+    runId: terminal.id,
+  } as RunnerDispatchAuthority;
+  const exact = scripted([terminal], [cleaned]);
+
+  assert.deepEqual(
+    await exact.store.cleanupTerminalLease(operator, authority),
+    { kind: "updated", value: cleaned }
+  );
+  const update = queryText(exact.statements[1] as RunnerStoreStatement);
+  assert.match(update, /"version" = \$\d+/u);
+  assert.match(update, /"dispatchLeaseToken" = \$\d+/u);
+  assert.match(update, /"dispatchState" = 'terminal'/u);
+  assert.match(update, /"daytonaAttemptId" IS NULL/u);
+  assert.match(update, /"daytonaCommandId" IS NULL/u);
+  assert.match(update, /"daytonaSessionId" IS NULL/u);
+
+  const replaced = scripted([
+    run({
+      ...terminal,
+      dispatchLeaseToken: "replacement-lease",
+      version: terminal.version + 1,
+    }),
+  ]);
+  assert.deepEqual(
+    await replaced.store.cleanupTerminalLease(operator, authority),
+    { kind: "stale_version" }
+  );
+  assert.equal(replaced.statements.length, 1);
+
+  const displaced = scripted([
+    run({ ...terminal, dispatchLeaseToken: "replacement-lease" }),
+  ]);
+  assert.deepEqual(
+    await displaced.store.cleanupTerminalLease(operator, authority),
+    { kind: "lease_lost" }
+  );
+  assert.equal(displaced.statements.length, 1);
+});
+
 test("terminal cleanup reacquires an expired exact attempt before retrying provider cleanup", async () => {
   const attemptId =
     "53af1a29-4e98-43d6-ac5b-3b9dcba5e739" as RunnerDaytonaAttemptId;
@@ -1771,14 +1855,34 @@ test("terminal retention prunes cleanup-free runs beyond capacity", async () => 
 });
 
 test("global scans require the operator authority and do not manufacture tenant scope", async () => {
-  const { statements, store } = scripted([], []);
+  const { statements, store } = scripted([], [], []);
   await store.scanLiveRuns(operator, 10);
   await store.scanExpiredDispatchLeases(operator, new Date(), 10);
+  await store.scanTerminalLeaseCleanups(operator, 10);
 
   for (const statement of statements) {
     assert.equal("tenant" in statement.args, false);
     assert.doesNotMatch(queryText(statement), /"tenant"\s*=\s*\$\d+/);
   }
+});
+
+test("terminal residual lease scans are bounded, database-timed, and skip locked", async () => {
+  const { statements, store } = scripted([]);
+  await store.scanTerminalLeaseCleanups(operator, 10);
+
+  const [scan] = statements;
+  assert.ok(scan);
+  assert.equal(scan.name, "scan-terminal-lease-cleanups");
+  const query = queryText(scan);
+  assert.match(query, /"dispatchState" = 'terminal'/u);
+  assert.match(query, /"daytonaAttemptId" IS NULL/u);
+  assert.match(query, /"daytonaCommandId" IS NULL/u);
+  assert.match(query, /"daytonaSessionId" IS NULL/u);
+  assert.match(query, /"dispatchLeaseToken" IS NOT NULL/u);
+  assert.match(query, /"dispatchLeaseExpiresAt" <= clock_timestamp\(\)/u);
+  assert.match(query, /LIMIT \$\d+/u);
+  assert.match(query, /FOR UPDATE SKIP LOCKED/u);
+  assert.equal(scan.args.limit, 10);
 });
 
 test("terminal cleanup scans are bounded and skip locked rows", async () => {

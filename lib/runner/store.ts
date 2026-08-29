@@ -2242,7 +2242,11 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (rejected) {
           return rejected;
         }
-        if (run.daytonaAttemptId) {
+        if (
+          run.daytonaAttemptId !== null ||
+          run.daytonaCommandId !== null ||
+          run.daytonaSessionId !== null
+        ) {
           return { kind: "not_live" };
         }
         const [updated] = await transaction.execute(
@@ -2258,6 +2262,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "version" = ${input.expectedVersion}
                 AND "dispatchLeaseToken" = ${input.leaseToken}
                 AND "dispatchState" = 'terminal'
+                AND "daytonaAttemptId" IS NULL
+                AND "daytonaCommandId" IS NULL
+                AND "daytonaSessionId" IS NULL
               RETURNING *`
           )
         );
@@ -3956,6 +3963,27 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "dispatchLeaseToken" IS NOT NULL
                 AND "dispatchLeaseExpiresAt" <= clock_timestamp()
               ORDER BY "dispatchLeaseExpiresAt" ASC
+              LIMIT ${limit}
+              FOR UPDATE SKIP LOCKED`
+          )
+        );
+        return rows.map(asRun);
+      }),
+
+    scanTerminalLeaseCleanups: (_operator: RunnerOperator, limit: number) =>
+      database.transaction(async (transaction) => {
+        const rows = await transaction.execute(
+          statement(
+            "scan-terminal-lease-cleanups",
+            { limit },
+            sql`SELECT * FROM "RunnerRun"
+              WHERE "dispatchState" = 'terminal'
+                AND "daytonaAttemptId" IS NULL
+                AND "daytonaCommandId" IS NULL
+                AND "daytonaSessionId" IS NULL
+                AND "dispatchLeaseToken" IS NOT NULL
+                AND "dispatchLeaseExpiresAt" <= clock_timestamp()
+              ORDER BY "dispatchLeaseExpiresAt" ASC, "id" ASC
               LIMIT ${limit}
               FOR UPDATE SKIP LOCKED`
           )

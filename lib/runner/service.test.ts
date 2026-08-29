@@ -6,12 +6,15 @@ import {
   agentsEnvelopeSchema,
   type RunSnapshot,
 } from "@opencoven/agent-contracts";
+import { cancelRunnerRun, reconcileAndDispatch } from "./reconcile";
 import { createRunnerService } from "./service";
 import type {
   RunnerAgentRecord,
   RunnerClaimedDispatch,
   RunnerDispatchAuthority,
+  RunnerOperator,
   RunnerPrincipal,
+  RunnerRunRecord,
 } from "./types";
 
 const AGENT_ID = "11111111-2222-4333-8444-555555555555";
@@ -23,6 +26,7 @@ const PRINCIPAL: RunnerPrincipal = {
   tenant: "u_9c8589018a57479181fe4c455b099bc9",
   userId: "9c858901-8a57-4791-81fe-4c455b099bc9",
 };
+const OPERATOR: RunnerOperator = { kind: "runner-operator" };
 
 function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
   return {
@@ -747,6 +751,166 @@ test("stop verifies tenant ownership before cancellation and returns terminal sn
   assert.equal(stopped.kind, "stopped");
   assert.equal(stopped.kind === "stopped" && stopped.run.status, "cancelled");
   assert.equal(cancellationCalls, 1);
+});
+
+test("reconciliation recovers a cancelled terminal row after lease cleanup failed", async () => {
+  let cleanupAttempts = 0;
+  let persisted: RunnerRunRecord = {
+    agentId: AGENT_ID,
+    authVersion: 1,
+    cancellationRequestedAt: null,
+    commandEvidence: [],
+    completedAt: null,
+    createdAt: new Date("2026-08-28T15:00:00.000Z"),
+    daytonaAttemptId: null,
+    daytonaCommandId: null,
+    daytonaLogCursor: 0,
+    daytonaSessionId: null,
+    dispatchLeaseExpiresAt: new Date("2026-08-28T14:59:00.000Z"),
+    dispatchLeaseToken: "initial-lease",
+    dispatchState: "dispatching",
+    error: null,
+    fileEvidence: [],
+    id: RUN_ID,
+    logCursor: 1,
+    operationId: OPERATION_ID,
+    output: "",
+    queueSequence: 1,
+    requestHash: "a".repeat(64),
+    startedAt: null,
+    status: "queued",
+    task: "Do the thing.",
+    tenant: PRINCIPAL.tenant,
+    version: 1,
+  };
+  const snapshot = (): RunSnapshot => ({
+    agentId: persisted.agentId,
+    apiVersion: AGENT_RUNNER_API_VERSION,
+    commandEvidence: persisted.commandEvidence,
+    completedAt: persisted.completedAt?.toISOString() ?? null,
+    createdAt: persisted.createdAt.toISOString(),
+    error: persisted.error,
+    fileEvidence: persisted.fileEvidence,
+    id: persisted.id,
+    operationId: persisted.operationId,
+    output: persisted.output,
+    startedAt: persisted.startedAt?.toISOString() ?? null,
+    status: persisted.status,
+    task: persisted.task,
+  });
+  const cleanupTerminalLease = (
+    _operator: RunnerOperator,
+    authority: RunnerDispatchAuthority
+  ) => {
+    cleanupAttempts += 1;
+    if (cleanupAttempts === 1) {
+      return Promise.reject(new Error("simulated cleanup database failure"));
+    }
+    if (
+      persisted.id !== authority.runId ||
+      persisted.version !== authority.expectedVersion ||
+      persisted.dispatchLeaseToken !== authority.leaseToken
+    ) {
+      return Promise.resolve({ kind: "stale_version" as const });
+    }
+    persisted = {
+      ...persisted,
+      dispatchLeaseExpiresAt: null,
+      dispatchLeaseToken: null,
+      version: persisted.version + 1,
+    };
+    return Promise.resolve({ kind: "updated" as const, value: persisted });
+  };
+  const cancellationStore = {
+    cleanupTerminalLease,
+    finalizeRun: (
+      _operator: RunnerOperator,
+      input: {
+        completedAt: Date;
+        expectedVersion: number;
+        leaseToken: string;
+      }
+    ) => {
+      persisted = {
+        ...persisted,
+        completedAt: input.completedAt,
+        dispatchState: "terminal",
+        status: "cancelled",
+        version: persisted.version + 1,
+      };
+      return Promise.resolve({
+        kind: "finalized" as const,
+        prunedRunIds: [],
+        run: persisted,
+      });
+    },
+    requestRunCancellation: () => {
+      if (persisted.dispatchState === "terminal") {
+        return Promise.resolve({
+          kind: "already_terminal" as const,
+          run: persisted,
+        });
+      }
+      persisted = {
+        ...persisted,
+        cancellationRequestedAt: new Date("2026-08-28T15:00:00.000Z"),
+        dispatchLeaseExpiresAt: new Date("2026-08-28T15:01:00.000Z"),
+        dispatchLeaseToken: "cancel-lease",
+        version: persisted.version + 1,
+      };
+      return Promise.resolve({
+        authority: {
+          expectedVersion: persisted.version,
+          leaseToken: persisted.dispatchLeaseToken,
+          runId: persisted.id,
+        } as RunnerDispatchAuthority,
+        kind: "requested" as const,
+        run: persisted,
+      });
+    },
+  };
+  const cancelRun = (runId: string) =>
+    cancelRunnerRun(runId, {
+      clock: () => new Date("2026-08-28T15:00:00.000Z"),
+      operator: OPERATOR,
+      provider: {
+        resolveSandbox: () => Promise.reject(new Error("must not resolve")),
+        stop: () => Promise.reject(new Error("must not stop")),
+      },
+      rollbackCredentialResources: () => Promise.resolve(),
+      store: cancellationStore as never,
+    });
+  const service = createRunnerService({
+    cancelRun,
+    store: baseStore({ getRun: async () => snapshot() }),
+  });
+
+  assert.deepEqual(await service.stopRun(PRINCIPAL, RUN_ID), {
+    kind: "unavailable",
+    source: "database",
+  });
+  assert.equal(persisted.dispatchState, "terminal");
+  assert.equal(persisted.daytonaAttemptId, null);
+  assert.equal(persisted.dispatchLeaseToken, "cancel-lease");
+
+  const reconciliation = await reconcileAndDispatch({
+    operator: OPERATOR,
+    provider: {
+      resolveSandbox: () => Promise.reject(new Error("must not resolve")),
+      stop: () => Promise.reject(new Error("must not stop")),
+    },
+    store: {
+      cleanupTerminalLease,
+      scanExpiredDispatchLeases: async () => [],
+      scanTerminalLeaseCleanups: async () => [persisted],
+    } as never,
+  });
+
+  assert.equal(reconciliation.terminalLeaseCleaned, 1);
+  assert.equal(persisted.dispatchLeaseToken, null);
+  const stopped = await service.stopRun(PRINCIPAL, RUN_ID);
+  assert.equal(stopped.kind, "stopped");
+  assert.equal(stopped.kind === "stopped" && stopped.run.status, "cancelled");
 });
 
 test("stop preserves cancellation in-progress and cleanup-required outcomes", async () => {

@@ -141,6 +141,7 @@ test("concurrent leased reconciliation skips before reconciliation work", async 
       sandboxRecovered: 0,
       terminalCleaned: 0,
       terminalized: 0,
+      terminalLeaseCleaned: 0,
     };
   };
 
@@ -169,6 +170,7 @@ test("concurrent leased reconciliation skips before reconciliation work", async 
     sandboxRecovered: 0,
     terminalCleaned: 0,
     terminalized: 0,
+    terminalLeaseCleaned: 0,
   });
   assert.equal(reconcileCalls, 1);
 

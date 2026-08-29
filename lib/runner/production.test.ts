@@ -725,6 +725,7 @@ test("production reconciliation skips a live lease before provider or scan work"
     sandboxRecovered: 0,
     terminalCleaned: 0,
     terminalized: 0,
+    terminalLeaseCleaned: 0,
   });
   assert.equal(databaseCalls, 1);
 });

@@ -157,6 +157,7 @@ test("reconciliation claims exact expired preparation cleanup before requeue", a
     sandboxRecovered: 0,
     terminalCleaned: 0,
     terminalized: 0,
+    terminalLeaseCleaned: 0,
   });
 });
 
@@ -708,6 +709,82 @@ test("terminal reset failure records one safe diagnostic and defers later recove
   ]);
   assert.equal(result.terminalCleaned, 0);
   assert.equal(result.deferred, 1);
+});
+
+test("reconciliation cleans only exact expired terminal residual leases without provider work", async () => {
+  const calls: string[] = [];
+  const valid = run({
+    completedAt: new Date("2026-08-28T14:59:00.000Z"),
+    daytonaAttemptId: null,
+    dispatchState: "terminal",
+    status: "cancelled",
+    version: 8,
+  });
+  const unresolved = run({
+    ...valid,
+    daytonaAttemptId: attemptId,
+    id: "00000000-0000-4000-8000-000000000004",
+  });
+  const providerOwned = run({
+    ...valid,
+    daytonaCommandId: "command",
+    id: "00000000-0000-4000-8000-000000000005",
+  });
+  const live = run({
+    ...valid,
+    dispatchState: "running",
+    id: "00000000-0000-4000-8000-000000000006",
+    status: "running",
+  });
+  const stale = run({
+    ...valid,
+    dispatchLeaseToken: "stale-lease",
+    id: "00000000-0000-4000-8000-000000000007",
+  });
+  const result = await reconcileAndDispatch({
+    operator,
+    provider: {
+      resolveSandbox: async () => {
+        throw new Error("must not resolve");
+      },
+      stop: async () => {
+        throw new Error("must not stop");
+      },
+    },
+    releaseCredentialResources: async () => {
+      throw new Error("must not release credentials");
+    },
+    rollbackCredentialResources: async () => {
+      throw new Error("must not roll back credentials");
+    },
+    store: {
+      cleanupTerminalLease: async (
+        _operator: RunnerOperator,
+        authority: RunnerDispatchAuthority
+      ) => {
+        calls.push(
+          `cleanup:${authority.runId}:${authority.leaseToken}:${authority.expectedVersion}`
+        );
+        return authority.runId === valid.id
+          ? { kind: "updated" as const, value: valid }
+          : { kind: "stale_version" as const };
+      },
+      scanExpiredDispatchLeases: async () => [],
+      scanTerminalLeaseCleanups: async () => {
+        calls.push("scan");
+        return [valid, unresolved, providerOwned, live, stale];
+      },
+    } as never,
+  });
+
+  assert.deepEqual(calls, [
+    "scan",
+    `cleanup:${valid.id}:${valid.dispatchLeaseToken}:${valid.version}`,
+    `cleanup:${stale.id}:${stale.dispatchLeaseToken}:${stale.version}`,
+  ]);
+  assert.equal(result.terminalLeaseCleaned, 1);
+  assert.equal(result.deferred, 1);
+  assert.equal(result.failures, 0);
 });
 
 test("a provider outage for one expired run does not abort unrelated recovery", async () => {
@@ -1845,5 +1922,6 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
     sandboxRecovered: 0,
     terminalCleaned: 0,
     terminalized: 1,
+    terminalLeaseCleaned: 0,
   });
 });
