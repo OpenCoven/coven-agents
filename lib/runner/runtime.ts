@@ -566,11 +566,11 @@ async function createProductionRunnerServiceForPrincipal(
               deadline: options?.deadline,
               signal: options?.signal,
             },
-            probe: async (sandboxHandle, signal, timeoutSeconds) => {
+            probe: async (sandboxHandle, signal, timeoutSeconds, sessionId) => {
               await process.probeDaytonaHarnesses(sandboxHandle, {
                 deadline: options?.deadline,
+                sessionId,
                 signal,
-                sweepStaleSessions: true,
                 timeoutSeconds,
               });
             },

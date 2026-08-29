@@ -2779,6 +2779,47 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return current ? { kind: "stale_version" } : { kind: "not_found" };
       }),
 
+    finishDaytonaSandboxWarmForRecovery: (
+      _operator: RunnerOperator,
+      input: DaytonaSandboxFence
+    ): Promise<
+      | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "not_found" }
+      | { kind: "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const [updated] = await transaction.execute(
+          statement(
+            "finish-daytona-sandbox-warm-for-recovery",
+            input,
+            sql`UPDATE "RunnerAgent"
+              SET "warmStatus" = 'failed',
+                  "warmUpdatedAt" = now(),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${input.agentId}
+                AND "version" = ${input.expectedVersion}
+                AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "sandboxLifecycle" = 'ready'
+                AND "warmStatus" = 'provisioning'
+              RETURNING *`
+          )
+        );
+        if (updated) {
+          return { kind: "updated", value: asAgent(updated) };
+        }
+        const [current] = await transaction.execute(
+          statement(
+            "get-agent-after-daytona-warm-recovery",
+            { agentId: input.agentId },
+            sql`SELECT "id" FROM "RunnerAgent"
+              WHERE "id" = ${input.agentId}
+              LIMIT 1`
+          )
+        );
+        return current ? { kind: "stale_version" } : { kind: "not_found" };
+      }),
+
     getAgent: (principal: RunnerPrincipal, agentId: string) =>
       database.transaction(async (transaction) => {
         const [agent] = await transaction.execute(
@@ -3897,11 +3938,17 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             "scan-daytona-sandbox-recoveries",
             { limit },
             sql`SELECT * FROM "RunnerAgent"
-              WHERE "sandboxLifecycle" IN (
-                'provisioning',
-                'provisioning_ambiguous',
-                'resetting',
-                'decommissioning'
+              WHERE (
+                "sandboxLifecycle" IN (
+                  'provisioning',
+                  'provisioning_ambiguous',
+                  'resetting',
+                  'decommissioning'
+                )
+                OR (
+                  "sandboxLifecycle" = 'ready'
+                  AND "warmStatus" = 'provisioning'
+                )
               )
               ORDER BY "sandboxUpdatedAt" ASC, "id" ASC
               LIMIT ${limit}

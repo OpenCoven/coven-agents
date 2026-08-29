@@ -133,11 +133,10 @@ export async function prewarmTenantSandbox(
         type: "subscriber",
       },
     };
+    const authorize =
+      dependencies.authorizeCurrent ?? authorizeCurrentSubscriber;
     const access = await awaitUntilAbort(
-      (dependencies.authorizeCurrent ?? authorizeCurrentSubscriber)(
-        snapshot,
-        controller.signal
-      ),
+      authorize(snapshot, controller.signal),
       controller.signal
     );
     if (
@@ -148,29 +147,34 @@ export async function prewarmTenantSandbox(
     ) {
       return;
     }
-    const { session } = access;
     const runner = await awaitUntilAbort(
       (dependencies.loadRunner ?? loadProductionRunner)(controller.signal),
       controller.signal
     );
-    if (
-      abortIfExpired() ||
-      access.authVersion !== user.authVersion ||
-      access.userId !== user.id
-    ) {
-      return;
-    }
     if (abortIfExpired()) {
       return;
     }
+    const currentAccess = await awaitUntilAbort(
+      authorize(snapshot, controller.signal),
+      controller.signal
+    );
+    if (
+      abortIfExpired() ||
+      currentAccess.kind !== "allowed" ||
+      currentAccess.authVersion !== user.authVersion ||
+      currentAccess.userId !== user.id
+    ) {
+      return;
+    }
+    const { session } = currentAccess;
     const service = await awaitUntilAbort(
       Promise.resolve(runner.createProductionRunnerService(session)),
       controller.signal
     );
     if (
       abortIfExpired() ||
-      access.authVersion !== user.authVersion ||
-      access.userId !== user.id
+      currentAccess.authVersion !== user.authVersion ||
+      currentAccess.userId !== user.id
     ) {
       return;
     }

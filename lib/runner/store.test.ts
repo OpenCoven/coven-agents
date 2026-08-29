@@ -1907,7 +1907,39 @@ test("sandbox recovery scans durable ambiguous lifecycle rows with skip locking"
   assert.equal(scan.name, "scan-daytona-sandbox-recoveries");
   assert.match(queryText(scan), /'provisioning_ambiguous'/u);
   assert.match(queryText(scan), /'decommissioning'/u);
+  assert.match(queryText(scan), /"warmStatus" = 'provisioning'/u);
   assert.match(queryText(scan), /FOR UPDATE SKIP LOCKED/u);
+});
+
+test("operator warm recovery fails only its exact fenced warm attempt", async () => {
+  const current = agent({
+    sandboxGeneration: 2,
+    sandboxLifecycle: "ready",
+    version: 4,
+    warmStatus: "provisioning",
+  });
+  const failed = agent({
+    ...current,
+    version: 5,
+    warmStatus: "failed",
+  });
+  const updated = scripted([failed]);
+
+  const result = await updated.store.finishDaytonaSandboxWarmForRecovery(
+    operator,
+    {
+      agentId: current.id,
+      expectedGeneration: current.sandboxGeneration,
+      expectedVersion: current.version,
+    }
+  );
+
+  assert.equal(result.kind, "updated");
+  const query = queryText(updated.statements[0] as RunnerStoreStatement);
+  assert.match(query, /"warmStatus" = 'failed'/u);
+  assert.match(query, /"version" = \$\d+/u);
+  assert.match(query, /"sandboxGeneration" = \$\d+/u);
+  assert.match(query, /"warmStatus" = 'provisioning'/u);
 });
 
 test("operator sandbox recovery attaches or resets only its fenced generation", async () => {

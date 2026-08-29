@@ -24,8 +24,9 @@ import {
   type RunnerAttemptRedactionEnvelope,
   type RunnerAttemptRedactionScope,
 } from "./attempt-redaction";
-import { daytonaSandboxName } from "./daytona/names";
+import { daytonaProbeSessionName, daytonaSandboxName } from "./daytona/names";
 import {
+  cleanupDaytonaProbeSession,
   type DaytonaLogSnapshot,
   type DaytonaProcessSandbox,
   snapshotDaytonaProcess,
@@ -37,6 +38,7 @@ import {
   type DaytonaSandboxService,
   resetDaytonaSandboxForCancellation,
   SANDBOX_PROVISIONING_TIMEOUT_MS,
+  SANDBOX_WARM_TIMEOUT_MS,
 } from "./daytona/sandbox";
 import {
   projectHarnessRunEvent,
@@ -183,6 +185,7 @@ type SandboxRecoveryStore = Pick<
   RunnerStore,
   | "attachDaytonaSandboxForRecovery"
   | "deleteDecommissionedAgentForRecovery"
+  | "finishDaytonaSandboxWarmForRecovery"
   | "finishDaytonaSandboxResetForRecovery"
   | "resetDaytonaSandboxRecovery"
   | "scanDaytonaSandboxRecoveries"
@@ -196,6 +199,7 @@ export type ReconcileDaytonaSandboxesDependencies = Readonly<{
   providerConcurrency?: number;
   provisioningStaleBefore?: Date;
   store: SandboxRecoveryStore;
+  warmStaleBefore?: Date;
 }>;
 
 export type DaytonaSandboxReconciliationResult = Readonly<{
@@ -637,13 +641,48 @@ async function findSandboxForRecovery(
 async function recoverSandbox(
   agent: RunnerAgentRecord,
   dependencies: ReconcileDaytonaSandboxesDependencies,
-  provisioningStaleBefore: Date
+  provisioningStaleBefore: Date,
+  warmStaleBefore: Date
 ): Promise<SandboxRecoveryOutcome> {
   const fence = {
     agentId: agent.id,
     expectedGeneration: agent.sandboxGeneration,
     expectedVersion: agent.version,
   };
+  if (
+    agent.sandboxLifecycle === "ready" &&
+    agent.warmStatus === "provisioning"
+  ) {
+    if (agent.warmUpdatedAt > warmStaleBefore) {
+      return "deferred";
+    }
+    let sandbox: Sandbox | null;
+    try {
+      sandbox = await findSandboxForRecovery(agent, dependencies.daytona);
+      if (sandbox) {
+        await cleanupDaytonaProbeSession(
+          sandbox as unknown as DaytonaProcessSandbox,
+          daytonaProbeSessionName(
+            agent.id,
+            agent.sandboxGeneration,
+            agent.warmUpdatedAt
+          )
+        );
+      }
+    } catch {
+      return "deferred";
+    }
+    try {
+      const finished =
+        await dependencies.store.finishDaytonaSandboxWarmForRecovery(
+          dependencies.operator,
+          fence
+        );
+      return finished.kind === "updated" ? "recovered" : "deferred";
+    } catch {
+      return "deferred";
+    }
+  }
   if (
     agent.sandboxLifecycle === "provisioning" &&
     agent.sandboxUpdatedAt > provisioningStaleBefore
@@ -741,6 +780,9 @@ export async function reconcileDaytonaSandboxes(
   const provisioningStaleBefore =
     dependencies.provisioningStaleBefore ??
     new Date(clock().getTime() - SANDBOX_PROVISIONING_TIMEOUT_MS);
+  const warmStaleBefore =
+    dependencies.warmStaleBefore ??
+    new Date(clock().getTime() - SANDBOX_WARM_TIMEOUT_MS);
   let agents: RunnerAgentRecord[];
   try {
     agents = await dependencies.store.scanDaytonaSandboxRecoveries(
@@ -758,7 +800,8 @@ export async function reconcileDaytonaSandboxes(
         return await recoverSandbox(
           agent,
           dependencies,
-          provisioningStaleBefore
+          provisioningStaleBefore,
+          warmStaleBefore
         );
       } catch {
         return "failed" as const;

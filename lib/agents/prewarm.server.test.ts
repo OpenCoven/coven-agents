@@ -43,6 +43,7 @@ function settlesWithin<T>(promise: Promise<T>, milliseconds = 100): Promise<T> {
 test("a subscriber warms in-process with the exact authenticated session and principal", async () => {
   let loaded = 0;
   let loadSignal: AbortSignal | undefined;
+  let authorityChecks = 0;
   let authorityInput: unknown;
   let authoritySignal: AbortSignal | undefined;
   let receivedSession: unknown;
@@ -51,6 +52,7 @@ test("a subscriber warms in-process with the exact authenticated session and pri
 
   await prewarmTenantSandbox(subscribedUser(), {
     authorizeCurrent: (session, signal) => {
+      authorityChecks += 1;
       authorityInput = session;
       authoritySignal = signal;
       return Promise.resolve(AUTHORIZED);
@@ -74,6 +76,7 @@ test("a subscriber warms in-process with the exact authenticated session and pri
   });
 
   assert.equal(loaded, 1);
+  assert.equal(authorityChecks, 2);
   assert.equal(loadSignal?.aborted, false);
   assert.equal(authoritySignal, loadSignal);
   assert.deepEqual(authorityInput, {
@@ -322,4 +325,39 @@ test("a never-resolving lazy loader is abandoned at the absolute deadline", asyn
   );
 
   assert.equal(constructed, 1);
+});
+
+test("authority revoked during lazy loading prevents all runner service work", async () => {
+  await Promise.all(
+    [
+      { kind: "subscription_required" as const },
+      { ...AUTHORIZED, authVersion: 8 },
+    ].map(async (secondDecision) => {
+      let checks = 0;
+      let constructed = 0;
+      let invoked = 0;
+      await prewarmTenantSandbox(subscribedUser(), {
+        authorizeCurrent: () => {
+          checks += 1;
+          return Promise.resolve(checks === 1 ? AUTHORIZED : secondDecision);
+        },
+        loadRunner: () =>
+          Promise.resolve({
+            createProductionRunnerService: () => {
+              constructed += 1;
+              return {
+                prewarmMostRecent: () => {
+                  invoked += 1;
+                  return Promise.resolve({ kind: "none" });
+                },
+              };
+            },
+          }),
+      });
+
+      assert.equal(checks, 2);
+      assert.equal(constructed, 0);
+      assert.equal(invoked, 0);
+    })
+  );
 });

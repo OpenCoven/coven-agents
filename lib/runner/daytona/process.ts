@@ -1,6 +1,5 @@
 import "server-only";
 
-import { randomUUID } from "node:crypto";
 import type {
   Sandbox,
   SessionCommandLogsResponse,
@@ -24,16 +23,10 @@ import {
 } from "../harness";
 import type { RunnerDaytonaAttemptId, RunnerDispatchAuthority } from "../types";
 import { daytonaRunCredentialPath, daytonaRunSessionName } from "./names";
-import {
-  classifyDaytonaProviderError,
-  SANDBOX_WARM_TIMEOUT_MS,
-} from "./sandbox";
+import { classifyDaytonaProviderError } from "./sandbox";
 
 const STAGING_TIMEOUT_SECONDS = 15;
-const PROBE_SESSION_PREFIX = "coven-probe-";
-const PROBE_SESSION_PATTERN =
-  /^coven-probe-(\d{13})-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/u;
-const MAX_PROBE_SESSION_EPOCH = 9_999_999_999_999;
+const PROBE_SESSION_PATTERN = /^coven-probe-[0-9a-f]{40}$/u;
 
 /**
  * Daytona's command model has no lifecycle status in SDK 0.207, but it can
@@ -86,8 +79,8 @@ export type DaytonaProcessSandbox = Readonly<{
 export type DaytonaProbeOptions = Readonly<{
   deadline?: number;
   now?: () => number;
+  sessionId?: string;
   signal?: AbortSignal;
-  sweepStaleSessions?: boolean;
   timeoutSeconds?: number;
 }>;
 
@@ -220,6 +213,16 @@ async function removeSession(
   if (remaining.some((session) => session.sessionId === sessionId)) {
     throw new Error("Daytona session remained after deletion.");
   }
+}
+
+export function cleanupDaytonaProbeSession(
+  sandbox: DaytonaProcessSandbox,
+  sessionId: string
+): Promise<void> {
+  if (!PROBE_SESSION_PATTERN.test(sessionId)) {
+    return Promise.reject(new Error("Invalid Daytona probe session id."));
+  }
+  return removeSession(sandbox, sessionId);
 }
 
 async function cleanupFailedStart(
@@ -910,8 +913,8 @@ export function probeDaytonaHarnesses(
     return probeDaytonaHarnessesInSession(sandbox, {
       deadline: options.deadline,
       now: options.now,
+      sessionId: options.sessionId,
       signal: options.signal,
-      sweepStaleSessions: options.sweepStaleSessions,
       timeoutSeconds: Math.min(
         STAGING_TIMEOUT_SECONDS,
         options.timeoutSeconds ?? STAGING_TIMEOUT_SECONDS
@@ -982,87 +985,6 @@ function settleCleanupWithinDeadline(
       }
     );
   });
-}
-
-function settleValueWithinDeadline<T>(
-  operation: Promise<T>,
-  options: DaytonaProbeOptions
-): Promise<{ kind: "settled"; value: T } | { kind: "unconfirmed" }> {
-  operation.catch(() => undefined);
-  const remainingMs = cleanupRemainingMs(options);
-  if (remainingMs === null) {
-    return operation.then(
-      (value) => ({ kind: "settled" as const, value }),
-      () => ({ kind: "unconfirmed" as const })
-    );
-  }
-  if (remainingMs <= 0) {
-    return Promise.resolve({ kind: "unconfirmed" });
-  }
-  return new Promise((resolve) => {
-    const timer = setTimeout(
-      () => resolve({ kind: "unconfirmed" }),
-      remainingMs
-    );
-    operation.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve({ kind: "settled", value });
-      },
-      () => {
-        clearTimeout(timer);
-        resolve({ kind: "unconfirmed" });
-      }
-    );
-  });
-}
-
-function probeSessionName(now: () => number): string {
-  const createdAt = Math.floor(now());
-  if (
-    !Number.isSafeInteger(createdAt) ||
-    createdAt < 0 ||
-    createdAt > MAX_PROBE_SESSION_EPOCH
-  ) {
-    throw new Error("Daytona probe session requires a valid creation epoch.");
-  }
-  return `${PROBE_SESSION_PREFIX}${String(createdAt).padStart(13, "0")}-${randomUUID()}`;
-}
-
-function staleProbeSession(sessionId: string, now: () => number): boolean {
-  const match = PROBE_SESSION_PATTERN.exec(sessionId);
-  if (!match) {
-    return false;
-  }
-  const createdAt = Number(match[1]);
-  return createdAt < now() - SANDBOX_WARM_TIMEOUT_MS;
-}
-
-async function sweepStaleProbeSessions(
-  sandbox: DaytonaProcessSandbox,
-  options: DaytonaProbeOptions
-): Promise<void> {
-  const listed = await settleValueWithinDeadline(
-    sandbox.process.listSessions(),
-    options
-  );
-  if (listed.kind !== "settled") {
-    throw new Error("Daytona probe-session recovery was not confirmed.");
-  }
-  const now = options.now ?? Date.now;
-  for (const session of listed.value) {
-    if (!staleProbeSession(session.sessionId, now)) {
-      continue;
-    }
-    // biome-ignore lint/performance/noAwaitInLoops: each deterministic stale probe session must be removed and verified before the next cleanup begins.
-    const confirmed = await settleCleanupWithinDeadline(
-      removeSession(sandbox, session.sessionId),
-      options
-    );
-    if (!confirmed) {
-      throw new Error("Daytona probe-session recovery was not confirmed.");
-    }
-  }
 }
 
 /**
@@ -1136,11 +1058,10 @@ async function probeDaytonaHarnessesInSession(
     throw new Error("Daytona harness probe requires a positive timeout.");
   }
 
-  if (options.sweepStaleSessions) {
-    await sweepStaleProbeSessions(sandbox, options);
+  const { sessionId } = options;
+  if (!sessionId || !PROBE_SESSION_PATTERN.test(sessionId)) {
+    throw new Error("Daytona harness probe requires an owned session id.");
   }
-
-  const sessionId = probeSessionName(options.now ?? Date.now);
   let abortCleanup: Promise<void> | undefined;
   const cleanupAfterAbort = () => {
     abortCleanup ??= removeSession(sandbox, sessionId);

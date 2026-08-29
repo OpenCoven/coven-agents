@@ -27,7 +27,11 @@ import type {
   RunnerPrincipal,
 } from "../types";
 import { daytonaDomainAllowList, daytonaSnapshotConfiguration } from "./config";
-import { daytonaSandboxLabels, daytonaSandboxName } from "./names";
+import {
+  daytonaProbeSessionName,
+  daytonaSandboxLabels,
+  daytonaSandboxName,
+} from "./names";
 
 const DEFAULT_AUTO_ARCHIVE_MINUTES = 10_080;
 const DEFAULT_AUTO_STOP_MINUTES = 15;
@@ -77,7 +81,8 @@ export type DaytonaSandboxWarmDependencies = DaytonaSandboxDependencies &
     probe: (
       sandbox: Sandbox,
       signal?: AbortSignal,
-      timeoutSeconds?: number
+      timeoutSeconds?: number,
+      sessionId?: string
     ) => Promise<void>;
   }>;
 
@@ -1070,6 +1075,11 @@ export async function warmDaytonaSandbox(
   if (warm.kind === "not_found" || warm.kind === "stale_version") {
     return warm;
   }
+  const probeSessionId = daytonaProbeSessionName(
+    warm.value.id,
+    warm.value.sandboxGeneration,
+    warm.value.warmUpdatedAt
+  );
 
   const finishFailedWarm = () =>
     dependencies.store.finishDaytonaSandboxWarm(principal, {
@@ -1090,7 +1100,8 @@ export async function warmDaytonaSandbox(
     await dependencies.probe(
       ensured.sandbox,
       dependencies.lifecycle?.signal,
-      providerTimeoutSeconds(dependencies.lifecycle)
+      providerTimeoutSeconds(dependencies.lifecycle),
+      probeSessionId
     );
   } catch (error) {
     const failed = await settleFailedWarm();

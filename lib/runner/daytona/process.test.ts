@@ -17,10 +17,7 @@ import {
   stopDaytonaProcess,
   sweepDaytonaCredentials,
 } from "./process";
-import {
-  classifyDaytonaProviderError,
-  SANDBOX_WARM_TIMEOUT_MS,
-} from "./sandbox";
+import { classifyDaytonaProviderError } from "./sandbox";
 
 const RUN_ID = "53af1a29-4e98-43d6-ac5b-3b9dcba5e730";
 const SECRET = "copilot-credential-9f3b";
@@ -28,6 +25,7 @@ const PREPARATION_CLAIM =
   "53af1a29-4e98-43d6-ac5b-3b9dcba5e731" as DaytonaAttemptId;
 const SESSION = daytonaRunSessionName(RUN_ID, PREPARATION_CLAIM);
 const PATH = daytonaRunCredentialPath(RUN_ID, PREPARATION_CLAIM);
+const PROBE_SESSION_ID = `coven-probe-${"a".repeat(40)}`;
 const LAUNCH_AUTHORITY = {
   expectedVersion: 9,
   leaseToken: "lease-a",
@@ -77,8 +75,7 @@ test("normal harness probes retain bounded executeCommand timeout configuration"
 test("an in-flight prewarm probe abort deletes its provider session and resolves", async () => {
   const controller = new AbortController();
   const now = 1_800_000_000_000;
-  const replacement =
-    "coven-probe-1800000000000-11111111-1111-4111-8111-111111111111";
+  const replacement = `coven-probe-${"b".repeat(40)}`;
   const sessions = new Set([replacement]);
   let rejectCommand!: (error: Error) => void;
   let ownedSession = "";
@@ -123,6 +120,7 @@ test("an in-flight prewarm probe abort deletes its provider session and resolves
 
   const pending = probeDaytonaHarnesses(sandbox, {
     now: () => now,
+    sessionId: PROBE_SESSION_ID,
     signal: controller.signal,
     timeoutSeconds: 5,
   });
@@ -139,10 +137,7 @@ test("an in-flight prewarm probe abort deletes its provider session and resolves
   assert.equal(sessions.has(ownedSession), false);
   assert.equal(sessions.has(replacement), true);
   assert.ok(ownedSession.length <= 63);
-  assert.match(
-    ownedSession,
-    /^coven-probe-1800000000000-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
-  );
+  assert.equal(ownedSession, PROBE_SESSION_ID);
   rejectCommand(new Error("late SDK command rejection"));
   await Promise.resolve();
 });
@@ -175,6 +170,7 @@ test("an aborted probe settles by its deadline when cleanup requests never retur
 
   const pending = probeDaytonaHarnesses(sandbox, {
     deadline: Date.now() + 5,
+    sessionId: PROBE_SESSION_ID,
     signal: controller.signal,
     timeoutSeconds: 5,
   });
@@ -225,6 +221,7 @@ test("abort cleanup leaves a transient delete failure recoverable", async () => 
   } as DaytonaProcessSandbox;
 
   const pending = probeDaytonaHarnesses(sandbox, {
+    sessionId: PROBE_SESSION_ID,
     signal: controller.signal,
     timeoutSeconds: 5,
   });
@@ -270,6 +267,7 @@ test("abort cleanup fails closed when session deletion cannot be verified", asyn
   } as DaytonaProcessSandbox;
 
   const pending = probeDaytonaHarnesses(sandbox, {
+    sessionId: PROBE_SESSION_ID,
     signal: controller.signal,
     timeoutSeconds: 5,
   });
@@ -313,6 +311,7 @@ test("a successful cancellable prewarm probe cleans its attempt session", async 
   } as DaytonaProcessSandbox;
 
   const result = await probeDaytonaHarnesses(sandbox, {
+    sessionId: PROBE_SESSION_ID,
     signal: new AbortController().signal,
     timeoutSeconds: 5,
   });
@@ -358,6 +357,7 @@ test("abort racing probe completion still deletes the session and reports cancel
 
   await assert.rejects(
     probeDaytonaHarnesses(sandbox, {
+      sessionId: PROBE_SESSION_ID,
       signal: controller.signal,
       timeoutSeconds: 5,
     }),
@@ -410,6 +410,7 @@ test("abort racing an ambiguous session create leaves a prefixed recovery target
   } as DaytonaProcessSandbox;
 
   const pending = probeDaytonaHarnesses(sandbox, {
+    sessionId: PROBE_SESSION_ID,
     signal: controller.signal,
     timeoutSeconds: 5,
   });
@@ -420,81 +421,7 @@ test("abort racing an ambiguous session create leaves a prefixed recovery target
   await assert.rejects(pending, /prewarm deadline exceeded/);
   assert.equal(deletes, 0);
   assert.equal(sessions.size, 1);
-  assert.match(
-    [...sessions][0] ?? "",
-    /^coven-probe-\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
-  );
-});
-
-test("a later bounded probe sweeps stale probe sessions without touching other sessions", async () => {
-  const now = 1_800_000_000_000;
-  const stale = `coven-probe-${now - SANDBOX_WARM_TIMEOUT_MS - 1}-11111111-1111-4111-8111-111111111111`;
-  const recent = `coven-probe-${now - SANDBOX_WARM_TIMEOUT_MS + 1}-22222222-2222-4222-8222-222222222222`;
-  const threshold = `coven-probe-${now - SANDBOX_WARM_TIMEOUT_MS}-33333333-3333-4333-8333-333333333333`;
-  const future =
-    "coven-probe-1800000001000-44444444-4444-4444-8444-444444444444";
-  const malformed = `coven-probe-${now - SANDBOX_WARM_TIMEOUT_MS - 1}-not-a-uuid`;
-  const legacy = "coven-probe-55555555-5555-4555-8555-555555555555";
-  const replacement = "replacement-session";
-  const sessions = new Set([
-    recent,
-    stale,
-    malformed,
-    replacement,
-    future,
-    threshold,
-    legacy,
-  ]);
-  const deleted: string[] = [];
-  const sandbox = {
-    process: {
-      createSession: (sessionId: string) => {
-        sessions.add(sessionId);
-        return Promise.resolve();
-      },
-      deleteSession: (sessionId: string) => {
-        deleted.push(sessionId);
-        sessions.delete(sessionId);
-        return Promise.resolve();
-      },
-      executeCommand: () =>
-        Promise.reject(new Error("prewarm must use a cancellable session")),
-      executeSessionCommand: () =>
-        Promise.resolve({
-          cmdId: "probe-command",
-          exitCode: 0,
-          stdout: "1.0.0",
-        }),
-      getSessionCommand: () => Promise.resolve({}),
-      getSessionCommandLogs: () => Promise.resolve({}),
-      listSessions: () =>
-        Promise.resolve(
-          [...sessions].map((sessionId) => ({ commands: [], sessionId }))
-        ),
-    },
-  } as DaytonaProcessSandbox;
-
-  await probeDaytonaHarnesses(sandbox, {
-    deadline: now + 1000,
-    now: () => now,
-    signal: new AbortController().signal,
-    sweepStaleSessions: true,
-    timeoutSeconds: 5,
-  });
-
-  assert.equal(sessions.has(stale), false);
-  for (const protectedSession of [
-    recent,
-    threshold,
-    future,
-    malformed,
-    legacy,
-    replacement,
-  ]) {
-    assert.equal(sessions.has(protectedSession), true, protectedSession);
-    assert.equal(deleted.includes(protectedSession), false, protectedSession);
-  }
-  assert.ok(deleted.includes(stale));
+  assert.equal([...sessions][0], PROBE_SESSION_ID);
 });
 
 type Call = { command: string; env?: Record<string, string>; kind: string };

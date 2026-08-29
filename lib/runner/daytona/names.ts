@@ -58,6 +58,13 @@ function requireAttemptId(attemptId: string): string {
   return attemptId.toLowerCase();
 }
 
+function requireProbeFence(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`Daytona probe names require a non-negative ${name}.`);
+  }
+  return value;
+}
+
 /**
  * An attempt owns one short-lived Daytona process session. The digest keeps
  * provider IDs below Daytona's 63-character limit while binding the name to
@@ -68,6 +75,24 @@ export function daytonaRunSessionName(
   attemptId: string
 ): string {
   return `coven-run-${sha256(`${requireRunId(runId)}\0${requireAttemptId(attemptId)}`).slice(0, DAYTONA_RUN_ATTEMPT_DIGEST_LENGTH)}`;
+}
+
+export function daytonaProbeSessionName(
+  agentId: string,
+  sandboxGeneration: number,
+  warmUpdatedAt: Date
+): string {
+  if (!RUN_ID_PATTERN.test(agentId)) {
+    throw new Error("Daytona probe names require a UUID agent id.");
+  }
+  const generation = requireProbeFence(sandboxGeneration, "generation");
+  const warmEpoch = warmUpdatedAt.getTime();
+  if (!Number.isSafeInteger(warmEpoch) || warmEpoch < 0) {
+    throw new Error("Daytona probe names require a valid warm timestamp.");
+  }
+  return `coven-probe-${sha256(
+    `${agentId.toLowerCase()}\0${generation}\0${warmEpoch}`
+  ).slice(0, DAYTONA_RUN_ATTEMPT_DIGEST_LENGTH)}`;
 }
 
 /** The only credential-file path an attempt is permitted to address. */

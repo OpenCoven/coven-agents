@@ -9,7 +9,7 @@ import {
 } from "@daytona/sdk";
 import type { RunnerStore } from "../store";
 import type { RunnerAgentRecord, RunnerPrincipal } from "../types";
-import { daytonaSandboxName } from "./names";
+import { daytonaProbeSessionName, daytonaSandboxName } from "./names";
 import { probeDaytonaHarnesses } from "./process";
 import {
   classifyDaytonaProviderError,
@@ -880,13 +880,15 @@ test("warming probes only the sandbox and persists success or failure through fe
   const warming = agent({ ...current, version: 5, warmStatus: "provisioning" });
   const completed = agent({ ...warming, version: 6, warmStatus: "ready" });
   const calls: string[] = [];
+  let probeSessionId = "";
   const success = await warmDaytonaSandbox(principal, current, config, {
     daytona: {
       create: () => Promise.reject(new Error("no create")),
       get: () => Promise.resolve(sandbox(SandboxState.STARTED)),
     },
-    probe: (value) => {
+    probe: (value, _signal, _timeoutSeconds, sessionId) => {
       calls.push(value.id);
+      probeSessionId = sessionId ?? "";
       return Promise.resolve();
     },
     store: store({
@@ -906,6 +908,14 @@ test("warming probes only the sandbox and persists success or failure through fe
   });
   assert.equal(success.kind, "ready");
   assert.deepEqual(calls, ["sandbox-id"]);
+  assert.equal(
+    probeSessionId,
+    daytonaProbeSessionName(
+      warming.id,
+      warming.sandboxGeneration,
+      warming.warmUpdatedAt
+    )
+  );
 
   let failed = false;
   const failure = await warmDaytonaSandbox(principal, current, config, {
@@ -987,8 +997,8 @@ test("an aborted warm propagates to the probe and releases its durable warm fenc
       deadline: Date.now() + 5000,
       signal: controller.signal,
     },
-    probe: (value, signal, timeoutSeconds) =>
-      probeDaytonaHarnesses(value, { signal, timeoutSeconds }).then(
+    probe: (value, signal, timeoutSeconds, sessionId) =>
+      probeDaytonaHarnesses(value, { sessionId, signal, timeoutSeconds }).then(
         () => undefined
       ),
     store: store({
@@ -1057,9 +1067,10 @@ test("an aborted warm stays recoverable when probe and fence cleanup never retur
       deadline,
       signal: controller.signal,
     },
-    probe: (value, signal, timeoutSeconds) =>
+    probe: (value, signal, timeoutSeconds, sessionId) =>
       probeDaytonaHarnesses(value, {
         deadline,
+        sessionId,
         signal,
         timeoutSeconds,
       }).then(() => undefined),
