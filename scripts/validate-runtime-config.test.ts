@@ -68,6 +68,7 @@ function runValidator(
       | "ABUSE_KEY_SECRET"
       | "APP_ORIGIN"
       | "AUTH_URL"
+      | "NEXTAUTH_URL"
       | "BETA_ALLOWLIST"
       | "BETA_MODE"
       | "CREDENTIAL_KEK"
@@ -97,6 +98,8 @@ function runValidator(
       | "RUN_ADMISSION_TENANT_ACTIVE_MAX"
       | "RUN_ADMISSION_TENANT_QUEUE_MAX"
       | "VERCEL_ENV"
+      | "VERCEL_PROJECT_PRODUCTION_URL"
+      | "VERCEL_URL"
     >
   > = {},
   arguments_: string[] = [],
@@ -125,6 +128,7 @@ function runValidator(
     DAYTONA_TARGET: undefined,
     GLOBAL_DAILY_RUN_CAP: undefined,
     NEXT_PUBLIC_CLOUD_RUNNER_URL: undefined,
+    NEXTAUTH_URL: undefined,
     NODE_ENV: "production",
     OPERATOR_DIAGNOSTIC_TOKEN: undefined,
     REDIS_URL: undefined,
@@ -140,6 +144,8 @@ function runValidator(
     RUNNER_SIGNING_KEY_ID: undefined,
     RUNNER_SIGNING_PUBLIC_KEY: undefined,
     VERCEL_ENV: undefined,
+    VERCEL_PROJECT_PRODUCTION_URL: undefined,
+    VERCEL_URL: undefined,
     ...VALID_ENV,
   };
   Object.assign(env, overrides);
@@ -225,6 +231,104 @@ test("rejects unsafe or unapproved production application origins", () => {
     const result = runValidator(overrides);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /APP_ORIGIN|application authority|https/u);
+  }
+});
+
+test("production Vercel validation requires the project production authority", () => {
+  const accepted = runValidator({
+    APP_ORIGIN: "https://app.example",
+    AUTH_URL: undefined,
+    VERCEL_ENV: "production",
+    VERCEL_PROJECT_PRODUCTION_URL: "app.example",
+    VERCEL_URL: "generated-project.vercel.app",
+  });
+  assert.equal(accepted.status, 0, accepted.stderr);
+
+  for (const overrides of [
+    {
+      APP_ORIGIN: "https://generated-project.vercel.app",
+      AUTH_URL: undefined,
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: "app.example",
+      VERCEL_URL: "generated-project.vercel.app",
+    },
+    {
+      APP_ORIGIN: "https://app.example",
+      AUTH_URL: undefined,
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: undefined,
+      VERCEL_URL: "generated-project.vercel.app",
+    },
+    {
+      APP_ORIGIN: "https://app.example:444",
+      AUTH_URL: undefined,
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: "app.example",
+      VERCEL_URL: "generated-project.vercel.app",
+    },
+  ]) {
+    const result = runValidator(overrides);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /APP_ORIGIN|application authority|production/u);
+  }
+});
+
+test("preview Vercel validation uses the current deployment authority", () => {
+  const accepted = runValidator({
+    APP_ORIGIN: "https://project-git-feature-team.vercel.app",
+    AUTH_URL: undefined,
+    NODE_ENV: "production",
+    VERCEL_ENV: "preview",
+    VERCEL_PROJECT_PRODUCTION_URL: "app.example",
+    VERCEL_URL: "project-git-feature-team.vercel.app",
+  });
+  assert.equal(accepted.status, 0, accepted.stderr);
+
+  for (const overrides of [
+    {
+      APP_ORIGIN: "https://app.example",
+      VERCEL_PROJECT_PRODUCTION_URL: "app.example",
+      VERCEL_URL: "project-git-feature-team.vercel.app",
+    },
+    {
+      APP_ORIGIN: "https://project-git-feature-team.vercel.app",
+      VERCEL_PROJECT_PRODUCTION_URL: "app.example",
+      VERCEL_URL: undefined,
+    },
+    {
+      APP_ORIGIN: "https://project-git-feature-team.vercel.app:444",
+      VERCEL_PROJECT_PRODUCTION_URL: "app.example",
+      VERCEL_URL: "project-git-feature-team.vercel.app:444",
+    },
+  ]) {
+    const rejected = runValidator({
+      AUTH_URL: undefined,
+      NEXTAUTH_URL: undefined,
+      NODE_ENV: "production",
+      VERCEL_ENV: "preview",
+      ...overrides,
+    });
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /APP_ORIGIN|application authority|host/u);
+  }
+});
+
+test("explicit Auth.js origin overrides Vercel environment authorities", () => {
+  for (const override of [
+    { AUTH_URL: "https://auth.example" },
+    { NEXTAUTH_URL: "https://auth.example" },
+  ]) {
+    const result = runValidator({
+      APP_ORIGIN: "https://auth.example",
+      AUTH_URL: undefined,
+      NEXTAUTH_URL: undefined,
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: undefined,
+      VERCEL_URL: "generated-project.vercel.app",
+      ...override,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
   }
 });
 

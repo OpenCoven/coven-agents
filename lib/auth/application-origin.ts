@@ -56,12 +56,39 @@ function vercelOrigin(name: string, value: string | undefined): string | null {
   }
   if (
     value.includes("://") ||
-    /[/@?#]/u.test(value) ||
+    /[/:\\@?#]/u.test(value) ||
     value.trim() !== value
   ) {
     throw new Error(`${name} must contain only a deployment host.`);
   }
   return parseCanonicalApplicationOrigin(name, `https://${value}`);
+}
+
+function selectedVercelOrigin(
+  environment: ApplicationOriginEnvironment
+): string | null {
+  if (environment.VERCEL_ENV === "production") {
+    const origin = vercelOrigin(
+      "VERCEL_PROJECT_PRODUCTION_URL",
+      environment.VERCEL_PROJECT_PRODUCTION_URL
+    );
+    if (!origin) {
+      throw new Error(
+        "VERCEL_PROJECT_PRODUCTION_URL must identify the production application authority."
+      );
+    }
+    return origin;
+  }
+  if (environment.VERCEL_ENV === "preview") {
+    const origin = vercelOrigin("VERCEL_URL", environment.VERCEL_URL);
+    if (!origin) {
+      throw new Error(
+        "VERCEL_URL must identify the preview application authority."
+      );
+    }
+    return origin;
+  }
+  return null;
 }
 
 export function approvedApplicationOrigin(
@@ -91,12 +118,7 @@ export function approvedApplicationOrigin(
     }
   }
   if (!approved) {
-    approved =
-      vercelOrigin("VERCEL_URL", environment.VERCEL_URL) ??
-      vercelOrigin(
-        "VERCEL_PROJECT_PRODUCTION_URL",
-        environment.VERCEL_PROJECT_PRODUCTION_URL
-      );
+    approved = selectedVercelOrigin(environment);
   }
 
   if (!approved && isLoopbackHostname(new URL(candidate).hostname)) {

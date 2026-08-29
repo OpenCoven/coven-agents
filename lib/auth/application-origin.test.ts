@@ -62,18 +62,96 @@ test("application origins reject unsafe, ambiguous, and unapproved authorities",
   }
 });
 
-test("application origins bind Vercel hosts without accepting host syntax tricks", () => {
+test("production Vercel origins bind only the project production authority", () => {
   assert.equal(
     approvedApplicationOrigin({
       APP_ORIGIN: "https://app.example",
+      VERCEL_ENV: "production",
       VERCEL_PROJECT_PRODUCTION_URL: "app.example",
+      VERCEL_URL: "generated-project.vercel.app",
     }),
     "https://app.example"
   );
   assert.throws(() =>
     approvedApplicationOrigin({
+      APP_ORIGIN: "https://generated-project.vercel.app",
+      VERCEL_ENV: "production",
+      VERCEL_PROJECT_PRODUCTION_URL: "app.example",
+      VERCEL_URL: "generated-project.vercel.app",
+    })
+  );
+  assert.throws(() =>
+    approvedApplicationOrigin({
       APP_ORIGIN: "https://app.example",
-      VERCEL_URL: "https://app.example",
+      VERCEL_ENV: "production",
+      VERCEL_URL: "generated-project.vercel.app",
+    })
+  );
+});
+
+test("preview Vercel origins bind only the current deployment authority", () => {
+  assert.equal(
+    approvedApplicationOrigin({
+      APP_ORIGIN: "https://project-git-feature-team.vercel.app",
+      VERCEL_ENV: "preview",
+      VERCEL_PROJECT_PRODUCTION_URL: "app.example",
+      VERCEL_URL: "project-git-feature-team.vercel.app",
+    }),
+    "https://project-git-feature-team.vercel.app"
+  );
+  assert.throws(() =>
+    approvedApplicationOrigin({
+      APP_ORIGIN: "https://app.example",
+      VERCEL_ENV: "preview",
+      VERCEL_PROJECT_PRODUCTION_URL: "app.example",
+      VERCEL_URL: "project-git-feature-team.vercel.app",
+    })
+  );
+  assert.throws(() =>
+    approvedApplicationOrigin({
+      APP_ORIGIN: "https://project-git-feature-team.vercel.app",
+      VERCEL_ENV: "preview",
+      VERCEL_PROJECT_PRODUCTION_URL: "app.example",
+    })
+  );
+});
+
+test("explicit Auth.js origins take precedence over Vercel authorities", () => {
+  for (const override of [
+    { AUTH_URL: "https://auth.example" },
+    { NEXTAUTH_URL: "https://auth.example" },
+  ]) {
+    assert.equal(
+      approvedApplicationOrigin({
+        APP_ORIGIN: "https://auth.example",
+        VERCEL_ENV: "production",
+        ...override,
+      }),
+      "https://auth.example"
+    );
+  }
+});
+
+test("Vercel origins reject host syntax tricks and scheme or port mismatches", () => {
+  for (const productionUrl of [
+    "https://app.example",
+    "app.example:444",
+    "app.example/path",
+    "app.example\\@attacker.example",
+  ]) {
+    assert.throws(() =>
+      approvedApplicationOrigin({
+        APP_ORIGIN: "https://app.example",
+        VERCEL_ENV: "production",
+        VERCEL_PROJECT_PRODUCTION_URL: productionUrl,
+      })
+    );
+  }
+  assert.throws(() =>
+    approvedApplicationOrigin({
+      APP_ORIGIN: "https://project-git-feature-team.vercel.app:444",
+      VERCEL_ENV: "preview",
+      VERCEL_URL: "project-git-feature-team.vercel.app:444",
     })
   );
   assert.throws(() =>
