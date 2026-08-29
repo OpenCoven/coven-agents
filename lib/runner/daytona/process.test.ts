@@ -31,7 +31,7 @@ const LAUNCH_AUTHORITY = {
   runId: RUN_ID,
 } as RunnerDispatchAuthority;
 
-test("harness probes honor the prewarm deadline and refuse work after abort", async () => {
+test("normal harness probes retain native bounded executeCommand behavior", async () => {
   const timeouts: number[] = [];
   const sandbox = {
     process: {
@@ -50,15 +50,209 @@ test("harness probes honor the prewarm deadline and refuse work after abort", as
   await probeDaytonaHarnesses(sandbox, { timeoutSeconds: 2 });
   assert.ok(timeouts.length > 0);
   assert.ok(timeouts.every((timeout) => timeout === 2));
+});
 
+test("an in-flight prewarm probe abort deletes its provider session and resolves", async () => {
   const controller = new AbortController();
+  const sessions = new Set<string>();
+  const commandRejectors: ((error: Error) => void)[] = [];
+  let commandStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    commandStarted = resolve;
+  });
+  let deletes = 0;
+  const sandbox = {
+    process: {
+      createSession: (sessionId: string) => {
+        sessions.add(sessionId);
+        return Promise.resolve();
+      },
+      deleteSession: (sessionId: string) => {
+        deletes += 1;
+        sessions.delete(sessionId);
+        for (const reject of commandRejectors) {
+          reject(new Error("probe session deleted"));
+        }
+        return Promise.resolve();
+      },
+      executeCommand: () =>
+        Promise.reject(new Error("prewarm must use a cancellable session")),
+      executeSessionCommand: (
+        _sessionId: string,
+        _request: unknown,
+        timeout?: number
+      ) => {
+        assert.ok(timeout && timeout > 0 && timeout <= 5);
+        commandStarted();
+        return new Promise((_resolve, reject) => {
+          commandRejectors.push(reject);
+        });
+      },
+      getSessionCommand: () => Promise.resolve({}),
+      getSessionCommandLogs: () => Promise.resolve({}),
+      listSessions: () =>
+        Promise.resolve(
+          [...sessions].map((sessionId) => ({ commands: [], sessionId }))
+        ),
+    },
+  } as DaytonaProcessSandbox;
+
+  const pending = probeDaytonaHarnesses(sandbox, {
+    signal: controller.signal,
+    timeoutSeconds: 5,
+  });
+  await Promise.race([
+    started,
+    pending.then(() => {
+      throw new Error("cancellable probe session was not started");
+    }),
+  ]);
   controller.abort(new Error("prewarm deadline exceeded"));
-  const callsBeforeAbort = timeouts.length;
+
+  await assert.rejects(pending, /prewarm deadline exceeded/);
+  assert.equal(deletes, 1);
+  assert.equal(sessions.size, 0);
+});
+
+test("a successful cancellable prewarm probe cleans its attempt session", async () => {
+  const sessions = new Set<string>();
+  let deletes = 0;
+  const sandbox = {
+    process: {
+      createSession: (sessionId: string) => {
+        sessions.add(sessionId);
+        return Promise.resolve();
+      },
+      deleteSession: (sessionId: string) => {
+        deletes += 1;
+        sessions.delete(sessionId);
+        return Promise.resolve();
+      },
+      executeCommand: () =>
+        Promise.reject(new Error("prewarm must use a cancellable session")),
+      executeSessionCommand: () =>
+        Promise.resolve({
+          cmdId: "probe-command",
+          exitCode: 0,
+          stdout: "1.0.0",
+        }),
+      getSessionCommand: () => Promise.resolve({}),
+      getSessionCommandLogs: () => Promise.resolve({}),
+      listSessions: () =>
+        Promise.resolve(
+          [...sessions].map((sessionId) => ({ commands: [], sessionId }))
+        ),
+    },
+  } as DaytonaProcessSandbox;
+
+  const result = await probeDaytonaHarnesses(sandbox, {
+    signal: new AbortController().signal,
+    timeoutSeconds: 5,
+  });
+
+  assert.ok(result.every(({ installed }) => installed));
+  assert.equal(deletes, 1);
+  assert.equal(sessions.size, 0);
+});
+
+test("abort racing probe completion still deletes the session and reports cancellation", async () => {
+  const controller = new AbortController();
+  const sessions = new Set<string>();
+  let deletes = 0;
+  const sandbox = {
+    process: {
+      createSession: (sessionId: string) => {
+        sessions.add(sessionId);
+        return Promise.resolve();
+      },
+      deleteSession: (sessionId: string) => {
+        deletes += 1;
+        sessions.delete(sessionId);
+        return Promise.resolve();
+      },
+      executeCommand: () =>
+        Promise.reject(new Error("prewarm must use a cancellable session")),
+      executeSessionCommand: () => {
+        controller.abort(new Error("prewarm deadline exceeded"));
+        return Promise.resolve({
+          cmdId: "probe-command",
+          exitCode: 0,
+          stdout: "1.0.0",
+        });
+      },
+      getSessionCommand: () => Promise.resolve({}),
+      getSessionCommandLogs: () => Promise.resolve({}),
+      listSessions: () =>
+        Promise.resolve(
+          [...sessions].map((sessionId) => ({ commands: [], sessionId }))
+        ),
+    },
+  } as DaytonaProcessSandbox;
+
   await assert.rejects(
-    probeDaytonaHarnesses(sandbox, { signal: controller.signal }),
+    probeDaytonaHarnesses(sandbox, {
+      signal: controller.signal,
+      timeoutSeconds: 5,
+    }),
     /prewarm deadline exceeded/
   );
-  assert.equal(timeouts.length, callsBeforeAbort);
+
+  assert.equal(deletes, 1);
+  assert.equal(sessions.size, 0);
+});
+
+test("abort racing an ambiguous session create removes the late session", async () => {
+  const controller = new AbortController();
+  const sessions = new Set<string>();
+  let createdSessionId = "";
+  let createStarted!: () => void;
+  let finishCreate!: () => void;
+  const started = new Promise<void>((resolve) => {
+    createStarted = resolve;
+  });
+  const creation = new Promise<void>((resolve) => {
+    finishCreate = () => {
+      sessions.add(createdSessionId);
+      resolve();
+    };
+  });
+  let deletes = 0;
+  const sandbox = {
+    process: {
+      createSession: (sessionId: string) => {
+        createdSessionId = sessionId;
+        createStarted();
+        return creation;
+      },
+      deleteSession: (sessionId: string) => {
+        deletes += 1;
+        sessions.delete(sessionId);
+        return Promise.resolve();
+      },
+      executeCommand: () =>
+        Promise.reject(new Error("prewarm must use a cancellable session")),
+      executeSessionCommand: () =>
+        Promise.reject(new Error("aborted create must not execute")),
+      getSessionCommand: () => Promise.resolve({}),
+      getSessionCommandLogs: () => Promise.resolve({}),
+      listSessions: () =>
+        Promise.resolve(
+          [...sessions].map((sessionId) => ({ commands: [], sessionId }))
+        ),
+    },
+  } as DaytonaProcessSandbox;
+
+  const pending = probeDaytonaHarnesses(sandbox, {
+    signal: controller.signal,
+    timeoutSeconds: 5,
+  });
+  await started;
+  controller.abort(new Error("prewarm deadline exceeded"));
+  finishCreate();
+
+  await assert.rejects(pending, /prewarm deadline exceeded/);
+  assert.equal(deletes, 1);
+  assert.equal(sessions.size, 0);
 });
 
 type Call = { command: string; env?: Record<string, string>; kind: string };

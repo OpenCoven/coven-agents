@@ -136,6 +136,8 @@ test("the same-origin app exposes no browser runner credential boundary", () => 
   );
   assert.doesNotMatch(envExample, /^NEXT_PUBLIC_CLOUD_RUNNER_URL=/m);
   assert.doesNotMatch(envExample, /^RUNNER_SIGNING_KEY=/m);
+  assert.doesNotMatch(envExample, /^RUN_SCOPED_IDENTITY_WRITES_ENABLED=/m);
+  assert.doesNotMatch(envExample, /browser bundle drain/i);
   assert.match(envExample, /^AGENT_CONTROL_TOKEN=$/m);
   assert.match(envExample, /^RUNNER_SERVICE_TOKEN=$/m);
   assert.match(envExample, /^RUNNER_VERIFY_KEY_ID=$/m);
@@ -158,6 +160,18 @@ test("the same-origin app exposes no browser runner credential boundary", () => 
     assert.match(source, /runnerVerificationKeyRingFromEnvironment/);
     assert.match(source, /RUNNER_SERVICE_TOKEN/);
   }
+});
+
+test("the retained Worker harness is explicitly rollback-only", () => {
+  const guide = readFileSync(
+    new URL("worker/harness/README.md", repositoryRoot),
+    "utf8"
+  );
+
+  assert.match(guide, /legacy rollback-only procedure/i);
+  assert.match(guide, /same-origin Next\.js API/i);
+  assert.match(guide, /Daytona runner/i);
+  assert.match(guide, /emergency rollback[\s\S]*Cloudflare Worker/i);
 });
 
 test("connection status contains only provider-neutral application states", () => {

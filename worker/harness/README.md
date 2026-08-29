@@ -1,16 +1,19 @@
-# Local run harness
+# Legacy Worker rollback harness
 
-The full worker stack against a real local container, driven end to end
+> **Legacy rollback-only procedure.** Current agent execution uses the
+> authenticated same-origin Next.js API and the in-process Daytona runner.
+> This harness is retained only to validate an emergency rollback to the
+> Cloudflare Worker while that runtime remains in the repository.
+
+The legacy Worker stack runs against a real local container, driven end to end
 without a browser, a deploy, or another person's session. One iteration is
-~15 seconds; the production loop it replaces was ten minutes of someone
-else's time.
+~15 seconds.
 
-It exists because one night this project validated seven consecutive worker
-fixes by asking the operator to click Run in production and watch. Do not do
-that again. Nothing ships to the worker until this loop has run the exact
-code.
+Do not use this procedure to validate or configure the current Daytona path.
+If a rollback is authorized, run this loop against the exact Worker rollback
+code before deploying it.
 
-## One-time setup
+## Legacy rollback setup
 
 ```bash
 cd worker
@@ -32,7 +35,7 @@ APP_ORIGIN=http://127.0.0.1:9797
 ALLOWED_ORIGIN=*
 ```
 
-## Each session
+## Each rollback validation session
 
 ```bash
 cd worker
@@ -50,7 +53,7 @@ Missing control or service tokens fail before a request is made.
 Exit 0 is a completed run, 2 is a terminal failure (printed with its error),
 3 is the driver's own ten-minute patience running out.
 
-## What it proves and what it cannot
+## What the rollback harness proves and what it cannot
 
 Proves: routes, identity verification, run lifecycle, container boot, the
 version probe, process-polling transport, event persistence, evidence

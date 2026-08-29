@@ -1,11 +1,13 @@
 import "server-only";
 
+import { randomUUID } from "node:crypto";
 import type {
   Sandbox,
   SessionCommandLogsResponse,
   SessionExecuteResponse,
 } from "@daytona/sdk";
 import { sanitizeEvidenceText } from "@opencoven/agent-contracts";
+import { harnessStatus } from "@opencoven/harness";
 import {
   buildHarnessCommand,
   HARNESS_SPECS,
@@ -54,9 +56,10 @@ export type DaytonaProcessService = Readonly<{
     sessionId: string,
     request: Readonly<{
       command: string;
-      runAsync: true;
+      runAsync: boolean;
       suppressInputEcho: true;
-    }>
+    }>,
+    timeout?: number
   ) => Promise<DaytonaSessionExecute>;
   getSessionCommand: (
     sessionId: string,
@@ -880,10 +883,16 @@ export function probeDaytonaHarnesses(
     timeoutSeconds?: number;
   }> = {}
 ): Promise<HarnessStatus[]> {
+  if (options.signal) {
+    return probeDaytonaHarnessesInSession(sandbox, {
+      signal: options.signal,
+      timeoutSeconds: Math.min(
+        STAGING_TIMEOUT_SECONDS,
+        options.timeoutSeconds ?? STAGING_TIMEOUT_SECONDS
+      ),
+    });
+  }
   return harnessesFromProbe(async (spec) => {
-    if (options.signal?.aborted) {
-      throw options.signal.reason;
-    }
     try {
       const result = await sandbox.process.executeCommand(
         [spec.command, ...spec.versionArgs].map(shellQuote).join(" "),
@@ -894,9 +903,6 @@ export function probeDaytonaHarnesses(
           options.timeoutSeconds ?? STAGING_TIMEOUT_SECONDS
         )
       );
-      if (options.signal?.aborted) {
-        throw options.signal.reason;
-      }
       return {
         installed: result.exitCode === 0,
         version:
@@ -904,13 +910,100 @@ export function probeDaytonaHarnesses(
             ? result.result?.trim().split("\n")[0]?.trim() || null
             : null,
       };
-    } catch (error) {
-      if (options.signal?.aborted) {
-        throw error;
-      }
+    } catch {
       return { installed: false, version: null };
     }
   });
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("Daytona harness probe was aborted.");
+}
+
+async function probeDaytonaHarnessesInSession(
+  sandbox: DaytonaProcessSandbox,
+  options: Readonly<{ signal: AbortSignal; timeoutSeconds: number }>
+): Promise<HarnessStatus[]> {
+  if (options.signal.aborted) {
+    throw abortReason(options.signal);
+  }
+  if (
+    !Number.isSafeInteger(options.timeoutSeconds) ||
+    options.timeoutSeconds <= 0
+  ) {
+    throw new Error("Daytona harness probe requires a positive timeout.");
+  }
+
+  const sessionId = `coven-probe-${randomUUID()}`;
+  let abortCleanup: Promise<void> | undefined;
+  const onAbort = () => {
+    abortCleanup ??= removeSession(sandbox, sessionId);
+    abortCleanup.catch(() => undefined);
+  };
+  options.signal.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    await sandbox.process.createSession(sessionId);
+    if (options.signal.aborted) {
+      throw abortReason(options.signal);
+    }
+
+    const results: HarnessStatus[] = [];
+    for (const spec of HARNESS_SPECS) {
+      if (options.signal.aborted) {
+        throw abortReason(options.signal);
+      }
+      let observed: { installed: boolean; version: string | null };
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: one attempt-scoped session executes probes sequentially so commands cannot contend inside the same provider session.
+        const result = await sandbox.process.executeSessionCommand(
+          sessionId,
+          {
+            command: [spec.command, ...spec.versionArgs]
+              .map(shellQuote)
+              .join(" "),
+            runAsync: false,
+            suppressInputEcho: true,
+          },
+          options.timeoutSeconds
+        );
+        if (options.signal.aborted) {
+          throw abortReason(options.signal);
+        }
+        observed = {
+          installed: result.exitCode === 0,
+          version:
+            result.exitCode === 0
+              ? (result.stdout ?? result.output)
+                  ?.trim()
+                  .split("\n")[0]
+                  ?.trim() || null
+              : null,
+        };
+      } catch (error) {
+        if (options.signal.aborted) {
+          throw new Error(abortReason(options.signal).message, {
+            cause: error,
+          });
+        }
+        observed = { installed: false, version: null };
+      }
+      results.push(harnessStatus(spec, observed));
+    }
+    if (options.signal.aborted) {
+      throw abortReason(options.signal);
+    }
+    return results;
+  } finally {
+    options.signal.removeEventListener("abort", onAbort);
+    await abortCleanup?.catch(() => undefined);
+    // Verify again after the provider request settles. An abort can race an
+    // ambiguous create, so the first deletion may have arrived before the
+    // session existed.
+    await removeSession(sandbox, sessionId);
+  }
 }
 
 /** A final defensive check for error payloads that cross this module boundary. */

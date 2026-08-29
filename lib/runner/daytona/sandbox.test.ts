@@ -10,6 +10,7 @@ import {
 import type { RunnerStore } from "../store";
 import type { RunnerAgentRecord, RunnerPrincipal } from "../types";
 import { daytonaSandboxName } from "./names";
+import { probeDaytonaHarnesses } from "./process";
 import {
   classifyDaytonaProviderError,
   classifyDaytonaSandboxCreateError,
@@ -845,28 +846,58 @@ test("an aborted warm propagates to the probe and releases its durable warm fenc
   const warming = agent({ ...current, version: 5, warmStatus: "provisioning" });
   const controller = new AbortController();
   const statuses: string[] = [];
-  let probeSignal: AbortSignal | undefined;
+  const sessions = new Set<string>();
+  const commandRejectors: ((error: Error) => void)[] = [];
   let probeStarted!: () => void;
   const started = new Promise<void>((resolve) => {
     probeStarted = resolve;
   });
+  let probeDeletes = 0;
+  const providerSandbox = {
+    ...sandbox(SandboxState.STARTED),
+    process: {
+      createSession: (sessionId: string) => {
+        sessions.add(sessionId);
+        return Promise.resolve();
+      },
+      deleteSession: (sessionId: string) => {
+        probeDeletes += 1;
+        sessions.delete(sessionId);
+        for (const reject of commandRejectors) {
+          reject(new Error("probe session deleted"));
+        }
+        return Promise.resolve();
+      },
+      executeCommand: () =>
+        Promise.reject(new Error("prewarm probe must use a session")),
+      executeSessionCommand: () => {
+        probeStarted();
+        return new Promise((_resolve, reject) => {
+          commandRejectors.push(reject);
+        });
+      },
+      getSessionCommand: () => Promise.resolve({}),
+      getSessionCommandLogs: () => Promise.resolve({}),
+      listSessions: () =>
+        Promise.resolve(
+          [...sessions].map((sessionId) => ({ commands: [], sessionId }))
+        ),
+    },
+  } as unknown as Sandbox;
 
   const pending = warmDaytonaSandbox(principal, current, config, {
     daytona: {
       create: () => Promise.reject(new Error("must not create")),
-      get: () => Promise.resolve(sandbox(SandboxState.STARTED)),
+      get: () => Promise.resolve(providerSandbox),
     },
     lifecycle: {
       deadline: Date.now() + 5000,
       signal: controller.signal,
     },
-    probe: (_sandbox, signal) => {
-      probeSignal = signal;
-      probeStarted();
-      return new Promise((resolve) => {
-        signal?.addEventListener("abort", () => resolve(), { once: true });
-      });
-    },
+    probe: (value, signal, timeoutSeconds) =>
+      probeDaytonaHarnesses(value, { signal, timeoutSeconds }).then(
+        () => undefined
+      ),
     store: store({
       beginDaytonaSandboxWarm: () =>
         Promise.resolve({ kind: "started", value: warming }),
@@ -887,7 +918,8 @@ test("an aborted warm propagates to the probe and releases its durable warm fenc
   controller.abort(new Error("prewarm deadline exceeded"));
   const result = await pending;
 
-  assert.equal(probeSignal, controller.signal);
+  assert.equal(probeDeletes, 1);
+  assert.equal(sessions.size, 0);
   assert.deepEqual(statuses, ["failed"]);
   assert.deepEqual(result, { error: "retryable", kind: "failed" });
 });
