@@ -119,6 +119,7 @@ export type RunnerAgentRecord = {
   tenant: string;
   updatedAt: Date;
   version: number;
+  warmAttemptVersion: number;
   warmStatus: RunnerWarmStatus;
   warmUpdatedAt: Date;
   workspace: string | null;
@@ -272,9 +273,7 @@ export type DaytonaSandboxFence = {
   expectedVersion: number;
 };
 
-export type BeginDaytonaSandboxWarmInput = DaytonaSandboxFence & {
-  warmStaleBefore: Date;
-};
+export type BeginDaytonaSandboxWarmInput = DaytonaSandboxFence;
 
 export type BeginDaytonaSandboxDecommissionInput = {
   agentId: string;

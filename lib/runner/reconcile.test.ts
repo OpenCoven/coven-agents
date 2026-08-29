@@ -69,6 +69,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     tenant: "tenant_a",
     updatedAt: new Date("2026-08-28T14:00:00.000Z"),
     version: 1,
+    warmAttemptVersion: 0,
     warmStatus: "not_started",
     warmUpdatedAt: new Date("2026-08-28T14:00:00.000Z"),
     workspace: null,
@@ -428,11 +429,13 @@ test("cron removes only the exact stale warm probe and fenced-finishes it", asyn
   const owned = daytonaProbeSessionName(
     stale.id,
     stale.sandboxGeneration,
+    stale.warmAttemptVersion,
     stale.warmUpdatedAt
   );
   const replacement = daytonaProbeSessionName(
     stale.id,
     stale.sandboxGeneration,
+    stale.warmAttemptVersion + 1,
     new Date(stale.warmUpdatedAt.getTime() + 1)
   );
   const sessions = new Set([owned, replacement]);
@@ -549,6 +552,7 @@ test("recent and provider-failed warm recovery remains deferred and retryable", 
                 sessionId: daytonaProbeSessionName(
                   stale.id,
                   stale.sandboxGeneration,
+                  stale.warmAttemptVersion,
                   stale.warmUpdatedAt
                 ),
               },
@@ -584,6 +588,7 @@ test("overlapping warm recovery is idempotent under the version fence", async ()
   const owned = daytonaProbeSessionName(
     stale.id,
     stale.sandboxGeneration,
+    stale.warmAttemptVersion,
     stale.warmUpdatedAt
   );
   const sessions = new Set([owned]);

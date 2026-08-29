@@ -84,6 +84,17 @@ export type DaytonaProbeOptions = Readonly<{
   timeoutSeconds?: number;
 }>;
 
+export class DaytonaProbeCleanupPendingError extends Error {
+  readonly code = "probe_cleanup_pending";
+  readonly sessionId: string;
+
+  constructor(sessionId: string, options?: ErrorOptions) {
+    super("Daytona probe session cleanup remains pending.", options);
+    this.name = "DaytonaProbeCleanupPendingError";
+    this.sessionId = sessionId;
+  }
+}
+
 export class DaytonaProcessError extends Error {
   readonly code:
     | "credential_cleanup_failed"
@@ -1072,19 +1083,26 @@ async function probeDaytonaHarnessesInSession(
   };
   options.signal.addEventListener("abort", onAbort, { once: true });
 
+  let failure: unknown;
+  let results: HarnessStatus[] | undefined;
+  let cleanupConfirmed = false;
+  let commandStarted = false;
+  let sessionCreated = false;
   try {
     await sandbox.process.createSession(sessionId);
+    sessionCreated = true;
     if (options.signal.aborted) {
       throw abortReason(options.signal);
     }
 
-    const results: HarnessStatus[] = [];
+    results = [];
     for (const spec of HARNESS_SPECS) {
       if (options.signal.aborted) {
         throw abortReason(options.signal);
       }
       let observed: { installed: boolean; version: string | null };
       try {
+        commandStarted = true;
         // biome-ignore lint/performance/noAwaitInLoops: one attempt-scoped session executes probes sequentially so commands cannot contend inside the same provider session.
         const result = await awaitCommandAfterAbortCleanup(
           sandbox.process.executeSessionCommand(
@@ -1128,12 +1146,25 @@ async function probeDaytonaHarnessesInSession(
     if (options.signal.aborted) {
       throw abortReason(options.signal);
     }
-    return results;
+  } catch (error) {
+    failure = error;
   } finally {
     options.signal.removeEventListener("abort", onAbort);
-    const cleanup = abortCleanup ?? removeSession(sandbox, sessionId);
-    await settleCleanupWithinDeadline(cleanup, options);
+    const cleanup =
+      options.signal.aborted && sessionCreated && !commandStarted
+        ? removeSession(sandbox, sessionId)
+        : (abortCleanup ?? removeSession(sandbox, sessionId));
+    cleanupConfirmed = await settleCleanupWithinDeadline(cleanup, options);
   }
+  if (!cleanupConfirmed) {
+    throw new DaytonaProbeCleanupPendingError(sessionId, {
+      cause: failure,
+    });
+  }
+  if (failure !== undefined) {
+    throw failure;
+  }
+  return results ?? [];
 }
 
 /** A final defensive check for error payloads that cross this module boundary. */

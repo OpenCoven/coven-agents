@@ -665,6 +665,7 @@ async function recoverSandbox(
           daytonaProbeSessionName(
             agent.id,
             agent.sandboxGeneration,
+            agent.warmAttemptVersion,
             agent.warmUpdatedAt
           )
         );

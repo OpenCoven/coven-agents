@@ -46,6 +46,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     tenant: PRINCIPAL.tenant,
     updatedAt: new Date("2026-08-28T15:00:00.000Z"),
     version: 4,
+    warmAttemptVersion: 0,
     warmStatus: "not_started",
     warmUpdatedAt: new Date("2026-08-28T15:00:00.000Z"),
     workspace: null,

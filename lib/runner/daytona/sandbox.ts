@@ -180,6 +180,7 @@ export function classifyDaytonaSandboxCreateError(
   if (error instanceof DaytonaSandboxLifecycleError) {
     return error.retryable ? "ambiguous" : "definite_rejection";
   }
+
   if (
     error instanceof DaytonaBadRequestError ||
     error instanceof DaytonaAuthenticationError ||
@@ -196,6 +197,17 @@ export function classifyDaytonaSandboxCreateError(
     return "definite_rejection";
   }
   return "ambiguous";
+}
+
+function isProbeCleanupPending(
+  error: unknown
+): error is Readonly<{ code: "probe_cleanup_pending" }> {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "probe_cleanup_pending"
+  );
 }
 
 function sandboxCreateParameters(
@@ -1067,7 +1079,6 @@ export async function warmDaytonaSandbox(
     agentId: ensured.agent.id,
     expectedGeneration: ensured.agent.sandboxGeneration,
     expectedVersion: ensured.agent.version,
-    warmStaleBefore: new Date(Date.now() - SANDBOX_WARM_TIMEOUT_MS),
   });
   if (warm.kind === "in_progress") {
     return { agent: warm.value, kind: "in_progress" };
@@ -1078,6 +1089,7 @@ export async function warmDaytonaSandbox(
   const probeSessionId = daytonaProbeSessionName(
     warm.value.id,
     warm.value.sandboxGeneration,
+    warm.value.warmAttemptVersion,
     warm.value.warmUpdatedAt
   );
 
@@ -1104,6 +1116,9 @@ export async function warmDaytonaSandbox(
       probeSessionId
     );
   } catch (error) {
+    if (isProbeCleanupPending(error)) {
+      return { agent: warm.value, kind: "in_progress" };
+    }
     const failed = await settleFailedWarm();
     if (
       failed.kind === "settled" &&

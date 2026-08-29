@@ -48,23 +48,28 @@ test("Daytona process names are deterministic, legal, and attempt-scoped", () =>
 test("Daytona probe sessions derive exact ownership from the fenced warm record", () => {
   const startedAt = new Date("2026-08-28T15:00:00.000Z");
   const replacementAt = new Date("2026-08-28T15:05:00.000Z");
-  const first = daytonaProbeSessionName(agentId, 3, startedAt);
+  const first = daytonaProbeSessionName(agentId, 3, 8, startedAt);
 
-  assert.equal(first, daytonaProbeSessionName(agentId, 3, startedAt));
+  assert.equal(first, daytonaProbeSessionName(agentId, 3, 8, startedAt));
   assert.match(first, /^coven-probe-[a-f0-9]{40}$/u);
   assert.ok(first.length <= 63);
-  assert.notEqual(first, daytonaProbeSessionName(agentId, 4, startedAt));
-  assert.notEqual(first, daytonaProbeSessionName(agentId, 3, replacementAt));
+  assert.notEqual(first, daytonaProbeSessionName(agentId, 4, 8, startedAt));
+  assert.notEqual(first, daytonaProbeSessionName(agentId, 3, 9, startedAt));
+  assert.notEqual(first, daytonaProbeSessionName(agentId, 3, 8, replacementAt));
   assert.throws(
-    () => daytonaProbeSessionName("../unsafe", 3, startedAt),
+    () => daytonaProbeSessionName("../unsafe", 3, 8, startedAt),
     /UUID agent id/u
   );
   assert.throws(
-    () => daytonaProbeSessionName(agentId, -1, startedAt),
+    () => daytonaProbeSessionName(agentId, -1, 8, startedAt),
     /generation/u
   );
   assert.throws(
-    () => daytonaProbeSessionName(agentId, 3, new Date("invalid")),
+    () => daytonaProbeSessionName(agentId, 3, -1, startedAt),
+    /warm attempt version/u
+  );
+  assert.throws(
+    () => daytonaProbeSessionName(agentId, 3, 8, new Date("invalid")),
     /warm timestamp/u
   );
 });

@@ -146,6 +146,7 @@ function asAgent(row: Record<string, unknown>): RunnerAgentRecord {
     tenant: column(row, "tenant"),
     updatedAt: column(row, "updatedAt"),
     version: column(row, "version"),
+    warmAttemptVersion: column(row, "warmAttemptVersion"),
     warmStatus: column(row, "warmStatus"),
     warmUpdatedAt: column(row, "warmUpdatedAt"),
     workspace: column(row, "workspace"),
@@ -1985,8 +1986,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         const agent = asAgent(current);
         if (
           agent.sandboxLifecycle === "ready" &&
-          agent.warmStatus === "provisioning" &&
-          agent.warmUpdatedAt > input.warmStaleBefore
+          agent.warmStatus === "provisioning"
         ) {
           return { kind: "in_progress", value: agent };
         }
@@ -2003,6 +2003,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             { ...input, tenant: principal.tenant },
             sql`UPDATE "RunnerAgent"
               SET "warmStatus" = 'provisioning',
+                  "warmAttemptVersion" = "warmAttemptVersion" + 1,
                   "warmUpdatedAt" = now(),
                   "updatedAt" = now(),
                   "version" = "version" + 1
@@ -2011,10 +2012,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "version" = ${input.expectedVersion}
                 AND "sandboxGeneration" = ${input.expectedGeneration}
                 AND "sandboxLifecycle" = 'ready'
-                AND (
-                  "warmStatus" <> 'provisioning'
-                  OR "warmUpdatedAt" <= ${input.warmStaleBefore}
-                )
+                AND "warmStatus" <> 'provisioning'
               RETURNING *`
           )
         );

@@ -77,21 +77,24 @@ export function daytonaRunSessionName(
   return `coven-run-${sha256(`${requireRunId(runId)}\0${requireAttemptId(attemptId)}`).slice(0, DAYTONA_RUN_ATTEMPT_DIGEST_LENGTH)}`;
 }
 
+/** One exact process session owned by a persisted sandbox warm attempt. */
 export function daytonaProbeSessionName(
   agentId: string,
   sandboxGeneration: number,
+  warmAttemptVersion: number,
   warmUpdatedAt: Date
 ): string {
   if (!RUN_ID_PATTERN.test(agentId)) {
     throw new Error("Daytona probe names require a UUID agent id.");
   }
   const generation = requireProbeFence(sandboxGeneration, "generation");
+  const version = requireProbeFence(warmAttemptVersion, "warm attempt version");
   const warmEpoch = warmUpdatedAt.getTime();
   if (!Number.isSafeInteger(warmEpoch) || warmEpoch < 0) {
     throw new Error("Daytona probe names require a valid warm timestamp.");
   }
   return `coven-probe-${sha256(
-    `${agentId.toLowerCase()}\0${generation}\0${warmEpoch}`
+    `${agentId.toLowerCase()}\0${generation}\0${version}\0${warmEpoch}`
   ).slice(0, DAYTONA_RUN_ATTEMPT_DIGEST_LENGTH)}`;
 }
 

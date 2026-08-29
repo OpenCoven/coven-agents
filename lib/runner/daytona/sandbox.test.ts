@@ -51,6 +51,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     tenant: principal.tenant,
     updatedAt: new Date(),
     version: 0,
+    warmAttemptVersion: 0,
     warmStatus: "not_started",
     warmUpdatedAt: new Date(),
     workspace: null,
@@ -913,6 +914,7 @@ test("warming probes only the sandbox and persists success or failure through fe
     daytonaProbeSessionName(
       warming.id,
       warming.sandboxGeneration,
+      warming.warmAttemptVersion,
       warming.warmUpdatedAt
     )
   );
@@ -944,6 +946,65 @@ test("warming probes only the sandbox and persists success or failure through fe
   });
   assert.deepEqual(failure, { error: "retryable", kind: "failed" });
   assert.equal(failed, true);
+});
+
+test("successful probe work with unconfirmed cleanup remains durably provisioning", async () => {
+  const current = agent({
+    daytonaSandboxId: "stored",
+    sandboxLifecycle: "ready",
+    version: 4,
+  });
+  const warming = agent({ ...current, version: 5, warmStatus: "provisioning" });
+  let finishes = 0;
+  const providerSandbox = {
+    ...sandbox(SandboxState.STARTED),
+    process: {
+      createSession: () => Promise.resolve(),
+      deleteSession: () => new Promise(() => undefined),
+      executeCommand: () =>
+        Promise.reject(new Error("prewarm probe must use a session")),
+      executeSessionCommand: () =>
+        Promise.resolve({
+          cmdId: "probe-command",
+          exitCode: 0,
+          stdout: "1.0.0",
+        }),
+      getSessionCommand: () => Promise.resolve({}),
+      getSessionCommandLogs: () => Promise.resolve({}),
+      listSessions: () => new Promise(() => undefined),
+    },
+  } as unknown as Sandbox;
+  const result = await warmDaytonaSandbox(principal, current, config, {
+    daytona: {
+      create: () => Promise.reject(new Error("must not create")),
+      get: () => Promise.resolve(providerSandbox),
+    },
+    lifecycle: {
+      deadline: Date.now() + 5,
+      signal: new AbortController().signal,
+    },
+    probe: (value, signal, timeoutSeconds, sessionId) =>
+      probeDaytonaHarnesses(value, {
+        deadline: Date.now() + 5,
+        sessionId,
+        signal,
+        timeoutSeconds,
+      }).then(() => undefined),
+    store: store({
+      beginDaytonaSandboxWarm: () =>
+        Promise.resolve({ kind: "started", value: warming }),
+      finishDaytonaSandboxWarm: () => {
+        finishes += 1;
+        return Promise.resolve({
+          kind: "updated",
+          value: agent({ ...warming, version: 6, warmStatus: "ready" }),
+        });
+      },
+    }),
+  });
+
+  assert.deepEqual(result, { agent: warming, kind: "in_progress" });
+  assert.equal(finishes, 0);
 });
 
 test("an aborted warm propagates to the probe and releases its durable warm fence", async () => {
@@ -1040,7 +1101,7 @@ test("an aborted warm stays recoverable when probe and fence cleanup never retur
   const started = new Promise<void>((resolve) => {
     probeStarted = resolve;
   });
-  let readyFinishes = 0;
+  let finishes = 0;
   const providerSandbox = {
     ...sandbox(SandboxState.STARTED),
     process: {
@@ -1079,11 +1140,9 @@ test("an aborted warm stays recoverable when probe and fence cleanup never retur
         Promise.resolve({ kind: "started", value: warming }),
       finishDaytonaSandboxWarm: (
         _p: unknown,
-        input: { status: "failed" | "ready" }
+        _input: { status: "failed" | "ready" }
       ) => {
-        if (input.status === "ready") {
-          readyFinishes += 1;
-        }
+        finishes += 1;
         return new Promise(() => undefined);
       },
     }),
@@ -1093,8 +1152,8 @@ test("an aborted warm stays recoverable when probe and fence cleanup never retur
   controller.abort(new Error("prewarm deadline exceeded"));
   const result = await settlesWithin(pending);
 
-  assert.deepEqual(result, { error: "retryable", kind: "failed" });
-  assert.equal(readyFinishes, 0);
+  assert.deepEqual(result, { agent: warming, kind: "in_progress" });
+  assert.equal(finishes, 0);
   assert.equal(warming.warmStatus, "provisioning");
 });
 
