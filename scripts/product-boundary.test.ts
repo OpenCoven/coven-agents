@@ -28,6 +28,10 @@ const historicalTombstoneUrl = new URL(
   "docs/superpowers/README.md",
   repositoryRoot
 );
+const historicalUiAuditUrl = new URL(
+  "docs/roadmap/ui-functionality-audit-2026-08-26.md",
+  repositoryRoot
+);
 const subscriptionPolicyUrl = new URL(
   "docs/product/subscription-billing-policy.md",
   repositoryRoot
@@ -682,6 +686,19 @@ test("the historical tombstone maps every removed document to specific current g
     assert.match(row, /signature-verified/);
     assert.match(row, /idempotent/);
   }
+});
+
+test("the prior UI audit retains its evidence and explicit correction", () => {
+  const audit = readFileSync(historicalUiAuditUrl, "utf8");
+
+  assert.match(audit, /Correction note - 2026-08-29/);
+  assert.match(audit, /17 of 17 local browser contract cases passed/);
+  assert.match(audit, /390 x 844/);
+  assert.match(audit, /collapse\/expand control worked/);
+  assert.match(audit, /10 sanitized events/);
+  assert.match(audit, /disposition remained \*\*no-go\*\*/);
+  assert.match(audit, /\[Daytona cutover audit\]/);
+  assert.match(audit, /\[release-readiness runbook\]/);
 });
 
 test("repo-local OpenCoven packages stay private workspace dependencies", () => {
