@@ -22,7 +22,10 @@ import {
 import { z } from "zod";
 
 const DEFAULT_RECONNECT_DELAY_MS = 1000;
+const DEFAULT_START_RETRY_DELAY_MS = 250;
 const MAX_RECONNECT_DELAY_MS = 30_000;
+const MAX_START_RETRY_DELAY_MS = 2000;
+const START_MAX_ATTEMPTS = 3;
 
 const strictAgentsEnvelopeSchema = agentsEnvelopeSchema.strict();
 const strictAgentEnvelopeSchema = agentEnvelopeSchema.strict();
@@ -39,6 +42,7 @@ type Fetch = typeof globalThis.fetch;
 
 export type BrowserRunnerTransportOptions = Readonly<{
   reconnectDelayMs?: number;
+  startRetryDelayMs?: number;
 }>;
 
 export type StreamRunEventsOptions = Readonly<{
@@ -169,6 +173,7 @@ function isTerminalEvent(event: RunEvent): boolean {
 export class BrowserRunnerTransport implements RunnerTransport {
   private readonly reconnectDelayMs: number;
   private readonly request: Fetch;
+  private readonly startRetryDelayMs: number;
 
   constructor(
     request: Fetch = globalThis.fetch,
@@ -177,6 +182,8 @@ export class BrowserRunnerTransport implements RunnerTransport {
     this.request = request;
     this.reconnectDelayMs =
       options.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS;
+    this.startRetryDelayMs =
+      options.startRetryDelayMs ?? DEFAULT_START_RETRY_DELAY_MS;
   }
 
   async health(signal?: AbortSignal): Promise<AgentRunnerHealth> {
@@ -298,10 +305,44 @@ export class BrowserRunnerTransport implements RunnerTransport {
     input: StartRunInput,
     signal?: AbortSignal
   ): Promise<RunSnapshot> {
+    const body = JSON.stringify(input);
+    for (let attempt = 0; attempt < START_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: retries must remain sequential so one logical operation is admitted at a time.
+        const snapshot = await this.startRunAttempt(agentId, body, signal);
+        return snapshot;
+      } catch (error) {
+        if (
+          !(
+            error instanceof RunnerApiError &&
+            error.retryable &&
+            attempt < START_MAX_ATTEMPTS - 1
+          )
+        ) {
+          throw error;
+        }
+        await this.waitForBackoff(
+          this.startRetryDelayMs,
+          MAX_START_RETRY_DELAY_MS,
+          attempt,
+          signal
+        );
+      }
+    }
+    throw new RunnerApiError("Runner request failed.", "network_error", 0, {
+      retryable: true,
+    });
+  }
+
+  private async startRunAttempt(
+    agentId: string,
+    body: string,
+    signal?: AbortSignal
+  ): Promise<RunSnapshot> {
     return (
       await this.readJson(
         await this.fetch(`/api/agents/${encodeURIComponent(agentId)}/runs`, {
-          body: JSON.stringify(input),
+          body,
           method: "POST",
           signal,
         }),
@@ -588,12 +629,26 @@ export class BrowserRunnerTransport implements RunnerTransport {
     attempt: number,
     signal?: AbortSignal
   ): Promise<void> {
+    return this.waitForBackoff(
+      this.reconnectDelayMs,
+      MAX_RECONNECT_DELAY_MS,
+      attempt,
+      signal
+    );
+  }
+
+  private waitForBackoff(
+    baseDelayMs: number,
+    maxDelayMs: number,
+    attempt: number,
+    signal?: AbortSignal
+  ): Promise<void> {
     if (signal?.aborted) {
       return Promise.reject(abortedError());
     }
     const delay = Math.min(
-      this.reconnectDelayMs * 2 ** Math.min(attempt, 30),
-      MAX_RECONNECT_DELAY_MS
+      Math.max(0, baseDelayMs) * 2 ** Math.min(attempt, 30),
+      maxDelayMs
     );
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {

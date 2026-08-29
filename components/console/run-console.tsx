@@ -196,6 +196,21 @@ export function RunConsole() {
     toast.error(error instanceof Error ? error.message : fallback);
   }, []);
 
+  const reconcileTerminalAgent = useCallback(
+    (snapshot: Pick<RunSnapshot, "agentId" | "status">) => {
+      if (!isTerminal(snapshot.status)) {
+        return;
+      }
+      const status = snapshot.status === "failed" ? "error" : "idle";
+      setAgents((current) =>
+        current.map((agent) =>
+          agent.id === snapshot.agentId ? { ...agent, status } : agent
+        )
+      );
+    },
+    []
+  );
+
   /* ---------------------------------------------------------------- wiring */
 
   const onCredentialsChange = useCallback((harnessIds: readonly string[]) => {
@@ -393,44 +408,51 @@ export function RunConsole() {
   }, [refreshCurrent, runnerStatus, session.status]);
 
   /** Applies one streamed event to the run it belongs to. */
-  const applyEvent = useCallback((runId: string, event: RunEvent) => {
-    setRuns((current) =>
-      current.map((run) => {
-        if (run.snapshot.id !== runId || event.id <= run.lastEventId) {
-          return run;
-        }
-        const snapshot: RunSnapshot =
-          event.type === "completed"
-            ? event.run
-            : event.type === "status"
-              ? { ...run.snapshot, status: event.status }
-              : run.snapshot;
-
-        return {
-          ...run,
-          events: [...run.events, event],
-          lastEventId: event.id,
-          snapshot,
-        };
-      })
-    );
-
-    if (event.type === "completed" || event.type === "failed") {
-      // The rail's dot is read off the agent, not the run, so it has to be
-      // told as well or a finished run leaves its profile spinning.
-      setAgents((current) =>
-        current.map((agent) =>
-          agent.id ===
-          runsRef.current.find((r) => r.snapshot.id === runId)?.agentId
-            ? {
-                ...agent,
-                status: event.type === "failed" ? "error" : "idle",
-              }
-            : agent
-        )
+  const applyEvent = useCallback(
+    (runId: string, event: RunEvent) => {
+      const currentRun = runsRef.current.find(
+        (run) => run.snapshot.id === runId
       );
-    }
-  }, []);
+      if (!currentRun || event.id <= currentRun.lastEventId) {
+        return;
+      }
+
+      setRuns((current) =>
+        current.map((run) => {
+          if (run.snapshot.id !== runId || event.id <= run.lastEventId) {
+            return run;
+          }
+          const snapshot =
+            event.type === "completed"
+              ? event.run
+              : event.type === "status"
+                ? { ...run.snapshot, status: event.status }
+                : event.type === "failed"
+                  ? { ...run.snapshot, status: "failed" as const }
+                  : run.snapshot;
+          return {
+            ...run,
+            events: [...run.events, event],
+            lastEventId: event.id,
+            snapshot,
+          };
+        })
+      );
+      reconcileTerminalAgent({
+        agentId:
+          event.type === "completed" ? event.run.agentId : currentRun.agentId,
+        status:
+          event.type === "completed"
+            ? event.run.status
+            : event.type === "status"
+              ? event.status
+              : event.type === "failed"
+                ? "failed"
+                : currentRun.snapshot.status,
+      });
+    },
+    [reconcileTerminalAgent]
+  );
 
   useEffect(() => {
     if (!streamingRunId || session.status !== "authenticated") {
@@ -482,6 +504,7 @@ export function RunConsole() {
             run.snapshot.id === streamingRunId ? { ...run, snapshot } : run
           )
         );
+        reconcileTerminalAgent(snapshot);
         setStreamingRunId(null);
       } catch (error) {
         if (cancelled || controller.signal.aborted || !sessionIsCurrent()) {
@@ -503,7 +526,14 @@ export function RunConsole() {
       controller.abort();
       sessionController.signal.removeEventListener("abort", abortForSession);
     };
-  }, [applyEvent, client, isCurrentSession, session.status, streamingRunId]);
+  }, [
+    applyEvent,
+    client,
+    isCurrentSession,
+    reconcileTerminalAgent,
+    session.status,
+    streamingRunId,
+  ]);
 
   /**
    * Backfills the transcript of a finished run that was hydrated from the
@@ -650,6 +680,7 @@ export function RunConsole() {
           run.snapshot.id === snapshot.id ? { ...run, snapshot } : run
         )
       );
+      reconcileTerminalAgent(snapshot);
       toast.success("Run cancelled.");
     } catch (error) {
       if (isCurrentSession(context.generation, context.signal)) {

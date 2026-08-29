@@ -218,6 +218,51 @@ test("startRun delegates one v1 start with a generated operation id", async () =
   );
 });
 
+test("client start methods generate one operation id per logical invocation", async () => {
+  const original = globalThis.crypto;
+  let generated = 0;
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: {
+      getRandomValues: original.getRandomValues.bind(original),
+      randomUUID: () => {
+        generated += 1;
+        return generated === 1
+          ? "44444444-4444-4444-8444-444444444444"
+          : "55555555-5555-4555-8555-555555555555";
+      },
+    },
+  });
+  try {
+    const sent: string[] = [];
+    const client = new RunnerClient(
+      fakeTransport({
+        startRun: (_agentId, startInput) => {
+          sent.push(startInput.operationId);
+          return Promise.resolve({
+            ...snapshot("completed"),
+            operationId: startInput.operationId,
+          });
+        },
+      })
+    );
+
+    await client.startRun(AGENT_ID, "Do the work.");
+    await client.runAgent(AGENT_ID, "Do the work again.");
+
+    assert.equal(generated, 2);
+    assert.deepEqual(sent, [
+      "44444444-4444-4444-8444-444444444444",
+      "55555555-5555-4555-8555-555555555555",
+    ]);
+  } finally {
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      value: original,
+    });
+  }
+});
+
 test("runAgent follows an accepted v1 snapshot to completion", async () => {
   let reads = 0;
   const client = new RunnerClient(

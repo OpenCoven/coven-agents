@@ -42,6 +42,15 @@ const retainedRun = {
   task: "Verify timeline output",
 };
 
+function liveRun(status: "cancelled" | "failed" | "running" = "running") {
+  return {
+    ...retainedRun,
+    completedAt: status === "running" ? null : "2026-08-27T06:02:00.000Z",
+    output: "",
+    status,
+  };
+}
+
 async function notifySessionChange(page: Page): Promise<void> {
   await page.evaluate(async () => {
     const channel = new BroadcastChannel("next-auth");
@@ -382,6 +391,168 @@ test.describe("Run console", () => {
       page.getByRole("button", { exact: true, name: "expand" })
     ).toBeVisible();
     expect(legacyRequests).toEqual([]);
+  });
+
+  test("a direct cancelled stop leaves only the owning agent idle", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    const otherAgent = {
+      ...retainedAgent,
+      id: OTHER_AGENT_ID,
+      name: "Other running agent",
+      status: "running",
+    };
+    let releaseEvents!: () => Promise<void>;
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const request = route.request();
+      const { pathname } = new URL(request.url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({
+          json: {
+            agents: [{ ...retainedAgent, status: "running" }, otherAgent],
+          },
+        });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", runs: [liveRun()] },
+        });
+      }
+      if (pathname === `/api/agents/${OTHER_AGENT_ID}/runs`) {
+        return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+      }
+      if (pathname === `/api/runs/${RUN_ID}/events`) {
+        return new Promise<void>((resolve) => {
+          releaseEvents = async () => {
+            await route.fulfill({
+              body: "",
+              contentType: "text/event-stream",
+            });
+            resolve();
+          };
+        });
+      }
+      if (
+        pathname === `/api/runs/${RUN_ID}/stop` &&
+        request.method() === "POST"
+      ) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", run: liveRun("cancelled") },
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", run: liveRun("cancelled") },
+        });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+    await page
+      .getByRole("complementary")
+      .getByRole("button", { name: /running Verify timeline/ })
+      .click();
+    await page.getByRole("button", { exact: true, name: "Stop" }).click();
+
+    await expect(page.getByText("Run cancelled.")).toBeVisible();
+    await expect(page.getByRole("img", { name: "idle" })).toBeVisible();
+    await expect(page.getByRole("img", { name: "running" })).toBeVisible();
+    await releaseEvents();
+  });
+
+  test("a cancelled terminal snapshot recovery leaves the owning agent idle", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({
+          json: { agents: [{ ...retainedAgent, status: "running" }] },
+        });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", runs: [liveRun()] },
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}/events`) {
+        return route.fulfill({
+          body: "",
+          contentType: "text/event-stream",
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", run: liveRun("cancelled") },
+        });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+
+    await expect(page.getByRole("img", { name: "idle" })).toBeVisible();
+    await expect(page.getByRole("img", { name: "error" })).toHaveCount(0);
+  });
+
+  test("a failed terminal snapshot recovery leaves the owning agent in error", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({
+          json: { agents: [{ ...retainedAgent, status: "running" }] },
+        });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", runs: [liveRun()] },
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}/events`) {
+        return route.fulfill({
+          body: "",
+          contentType: "text/event-stream",
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", run: liveRun("failed") },
+        });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+
+    await expect(page.getByRole("img", { name: "error" })).toBeVisible();
+    await expect(page.getByRole("img", { name: "idle" })).toHaveCount(0);
   });
 
   test("a same-origin subscription refusal blocks runs without offering a manual connection", async ({

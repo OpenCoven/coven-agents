@@ -323,6 +323,131 @@ test("wraps fetch failures in a typed transport error", async () => {
   );
 });
 
+test("start retries an ambiguous response with the identical operation id and returns one logical run", async () => {
+  const bodies: string[] = [];
+  const committed = new Map<string, RunSnapshot>();
+  let created = 0;
+  const transport = new BrowserRunnerTransport(
+    (_requestInput, init) => {
+      const body = String(init?.body);
+      bodies.push(body);
+      const input = JSON.parse(body) as {
+        operationId: string;
+        task: string;
+      };
+      let snapshot = committed.get(input.operationId);
+      if (!snapshot) {
+        created += 1;
+        snapshot = {
+          ...run(),
+          operationId: input.operationId,
+          task: input.task,
+        };
+        committed.set(input.operationId, snapshot);
+      }
+      if (bodies.length === 1) {
+        return Promise.reject(new TypeError("response was lost"));
+      }
+      return Promise.resolve(
+        json({ apiVersion: AGENT_RUNNER_API_VERSION, run: snapshot }, 202)
+      );
+    },
+    { startRetryDelayMs: 0 }
+  );
+
+  const snapshot = await transport.startRun(AGENT_ID, {
+    operationId: OPERATION_ID,
+    task: "Exercise transport.",
+  });
+
+  assert.equal(bodies.length, 2);
+  assert.equal(new Set(bodies).size, 1);
+  assert.equal(
+    (JSON.parse(bodies[0] ?? "{}") as { operationId?: string }).operationId,
+    OPERATION_ID
+  );
+  assert.equal(created, 1);
+  assert.equal(committed.size, 1);
+  assert.equal(snapshot.id, RUN_ID);
+});
+
+test("start retries with bounded exponential backoff", async () => {
+  const attempts: number[] = [];
+  const transport = new BrowserRunnerTransport(
+    () => {
+      attempts.push(Date.now());
+      return Promise.reject(new TypeError("network down"));
+    },
+    { startRetryDelayMs: 10 }
+  );
+
+  await assert.rejects(
+    transport.startRun(AGENT_ID, {
+      operationId: OPERATION_ID,
+      task: "Exercise transport.",
+    }),
+    (error: unknown) =>
+      error instanceof RunnerApiError &&
+      error.code === "network_error" &&
+      error.retryable
+  );
+
+  assert.equal(attempts.length, 3);
+  assert.ok((attempts[1] ?? 0) - (attempts[0] ?? 0) >= 8);
+  assert.ok((attempts[2] ?? 0) - (attempts[1] ?? 0) >= 18);
+});
+
+test("start aborts during retry backoff without another request", async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const transport = new BrowserRunnerTransport(
+    () => {
+      attempts += 1;
+      return Promise.reject(new TypeError("network down"));
+    },
+    { startRetryDelayMs: 30_000 }
+  );
+
+  const pending = transport.startRun(
+    AGENT_ID,
+    {
+      operationId: OPERATION_ID,
+      task: "Exercise transport.",
+    },
+    controller.signal
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  controller.abort();
+
+  await assert.rejects(
+    pending,
+    (error: unknown) =>
+      error instanceof RunnerApiError && error.code === "aborted"
+  );
+  assert.equal(attempts, 1);
+});
+
+test("start surfaces definitive nonretryable errors without retrying", async () => {
+  let attempts = 0;
+  const transport = new BrowserRunnerTransport(() => {
+    attempts += 1;
+    return Promise.resolve(runnerError("invalid_request", false, 400));
+  });
+
+  await assert.rejects(
+    transport.startRun(AGENT_ID, {
+      operationId: OPERATION_ID,
+      task: "Exercise transport.",
+    }),
+    (error: unknown) =>
+      error instanceof RunnerApiError &&
+      error.code === "invalid_request" &&
+      error.retryable === false &&
+      error.status === 400
+  );
+  assert.equal(attempts, 1);
+});
+
 test("SSE reconnects with the last event cursor and resolves at a terminal snapshot", async () => {
   const eventHeaders: Array<string | null> = [];
   let streams = 0;
