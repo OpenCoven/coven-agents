@@ -47,9 +47,9 @@ export function productionRunnerHttpHandlers(): RunnerHttpHandlers {
       const runtime = await productionRuntime();
       return runtime.createProductionRunnerService(subscriber.session);
     },
-    diagnoseSandbox: async () => {
+    diagnoseSandbox: async (name) => {
       const diagnostics = await productionDiagnostics();
-      return diagnostics.diagnoseDaytonaSandbox();
+      return diagnostics.diagnoseDaytonaSandbox(name);
     },
     enforceAbuse: enforceAbusePolicy,
     ipAddress: (request) => ipAddress(request) ?? null,

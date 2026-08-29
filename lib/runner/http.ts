@@ -1,5 +1,6 @@
 import "server-only";
 
+import { randomUUID } from "node:crypto";
 import {
   AGENT_RUNNER_API_VERSION,
   AGENT_RUNNER_CAPABILITIES,
@@ -58,13 +59,14 @@ type After = (callback: () => void | Promise<void>) => void;
 export type RunnerHttpDependencies = Readonly<{
   after?: After;
   auth: RunnerAuth;
+  createDiagnosticName?: () => string;
   createEventStream?: typeof createRunEventStream;
   createRequestId?: () => string;
   createOperatorService: () => RunnerService | Promise<RunnerService>;
   createService: (
     subscriber: RunnerAuthenticatedSubscriber
   ) => RunnerService | Promise<RunnerService>;
-  diagnoseSandbox: () => Promise<RunnerDiagnosticResult>;
+  diagnoseSandbox: (name: string) => Promise<RunnerDiagnosticResult>;
   enforceAbuse: (input: AbuseEnforcementInput) => Promise<AbuseAdmission>;
   ipAddress: (request: Request) => string | null;
   logger?: RunnerHttpLogger;
@@ -217,6 +219,13 @@ function isResponse(
   value: Response | RunnerAuthenticatedSubscriber
 ): value is Response {
   return value instanceof Response;
+}
+
+function diagnosticName(dependencies: RunnerHttpDependencies): string {
+  return (
+    dependencies.createDiagnosticName?.() ??
+    `coven-diagnostic-${randomUUID().replaceAll("-", "")}`
+  );
 }
 
 function schedule(
@@ -445,7 +454,7 @@ export function createRunnerHttpHandlers(
         }
         return runnerJsonResponse(
           diagnosticResponseSchema,
-          await dependencies.diagnoseSandbox()
+          await dependencies.diagnoseSandbox(diagnosticName(dependencies))
         );
       }),
 

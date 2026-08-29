@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { diagnoseDaytonaSandbox, runEphemeralDiagnostic } from "./production";
 import {
@@ -186,13 +187,13 @@ test("ephemeral diagnostics return retryable failure when provider deletion fail
   assert.deepEqual(calls, ["execute", "delete"]);
 });
 
-test("Daytona diagnostics use fixed auto-deleting sandbox and bounded operations", async () => {
+test("Daytona diagnostics use the exact precomputed name and bounded operations", async () => {
   let createParameters: Record<string, unknown> | undefined;
   let createOptions: Record<string, unknown> | undefined;
   let executeArguments: unknown[] | undefined;
   let deleteArguments: unknown[] | undefined;
 
-  const result = await diagnoseDaytonaSandbox({
+  const result = await diagnoseDaytonaSandbox("coven-diagnostic-precomputed", {
     client: () => ({
       create: (parameters, options) => {
         createParameters = parameters;
@@ -215,7 +216,6 @@ test("Daytona diagnostics use fixed auto-deleting sandbox and bounded operations
       },
     }),
     configuration: () => ({ snapshotName: "diagnostic-snapshot" }),
-    createName: () => "coven-diagnostic-fixed",
   });
 
   assert.deepEqual(result, {
@@ -228,7 +228,7 @@ test("Daytona diagnostics use fixed auto-deleting sandbox and bounded operations
     autoDeleteInterval: 0,
     autoStopInterval: 0,
     ephemeral: true,
-    name: "coven-diagnostic-fixed",
+    name: "coven-diagnostic-precomputed",
     networkBlockAll: true,
     public: false,
     snapshot: "diagnostic-snapshot",
@@ -244,6 +244,15 @@ test("Daytona diagnostics use fixed auto-deleting sandbox and bounded operations
   assert.deepEqual(deleteArguments, [60, true]);
 });
 
+test("Daytona diagnostics have no provider-internal random name fallback", () => {
+  const source = readFileSync(
+    new URL("./diagnostics.ts", import.meta.url),
+    "utf8"
+  );
+
+  assert.doesNotMatch(source, /randomUUID|createName/u);
+});
+
 test("Daytona diagnostics bound create when the adapter ignores its timeout", async () => {
   const deadline = fakeDiagnosticDeadline(45_000);
   let createParameters: Record<string, unknown> | undefined;
@@ -251,7 +260,7 @@ test("Daytona diagnostics bound create when the adapter ignores its timeout", as
   let rejectCreate: ((reason: unknown) => void) | undefined;
 
   await assert.rejects(
-    diagnoseDaytonaSandbox({
+    diagnoseDaytonaSandbox("coven-diagnostic-create-timeout", {
       client: () => ({
         create: (parameters, options) => {
           createParameters = parameters;
@@ -262,7 +271,6 @@ test("Daytona diagnostics bound create when the adapter ignores its timeout", as
         },
       }),
       configuration: () => ({ snapshotName: "diagnostic-snapshot" }),
-      createName: () => "coven-diagnostic-create-timeout",
       deadline: deadline.dependencies,
     }),
     (error: unknown) => {
@@ -304,13 +312,155 @@ test("Daytona diagnostics bound create when the adapter ignores its timeout", as
   }
 });
 
+test("Daytona diagnostics delete a sandbox whose create resolves after the deadline", async () => {
+  const deadline = fakeDiagnosticDeadline(45_000);
+  let deleteCalls = 0;
+  let deleteArguments: unknown[] | undefined;
+  let resolveCreate:
+    | ((sandbox: {
+        delete: (timeout?: number, wait?: boolean) => Promise<void>;
+        process: {
+          executeCommand: () => Promise<{ exitCode: number; result: string }>;
+        };
+      }) => void)
+    | undefined;
+
+  await assert.rejects(
+    diagnoseDaytonaSandbox("coven-diagnostic-late-create", {
+      client: () => ({
+        create: () =>
+          new Promise((resolve) => {
+            resolveCreate = resolve;
+          }),
+      }),
+      configuration: () => ({ snapshotName: "diagnostic-snapshot" }),
+      deadline: deadline.dependencies,
+    }),
+    RunnerServiceError
+  );
+
+  assert.ok(resolveCreate);
+  resolveCreate({
+    delete: (...args: unknown[]) => {
+      deleteCalls += 1;
+      deleteArguments = args;
+      return Promise.resolve();
+    },
+    process: {
+      executeCommand: () =>
+        Promise.resolve({ exitCode: 0, result: "coven-agents" }),
+    },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(deleteCalls, 1);
+  assert.deepEqual(deleteArguments, [60, true]);
+});
+
+test("Daytona diagnostics observe and swallow a late cleanup rejection", async () => {
+  const deadline = fakeDiagnosticDeadline(45_000);
+  let deleteCalls = 0;
+  let resolveCreate:
+    | ((sandbox: {
+        delete: (timeout?: number, wait?: boolean) => Promise<void>;
+        process: {
+          executeCommand: () => Promise<{ exitCode: number; result: string }>;
+        };
+      }) => void)
+    | undefined;
+  const unhandledRejections: unknown[] = [];
+  const recordUnhandledRejection = (reason: unknown) => {
+    unhandledRejections.push(reason);
+  };
+  process.on("unhandledRejection", recordUnhandledRejection);
+
+  try {
+    await assert.rejects(
+      diagnoseDaytonaSandbox("coven-diagnostic-late-delete-rejection", {
+        client: () => ({
+          create: () =>
+            new Promise((resolve) => {
+              resolveCreate = resolve;
+            }),
+        }),
+        configuration: () => ({ snapshotName: "diagnostic-snapshot" }),
+        deadline: deadline.dependencies,
+      }),
+      RunnerServiceError
+    );
+
+    assert.ok(resolveCreate);
+    resolveCreate({
+      delete: () => {
+        deleteCalls += 1;
+        return Promise.reject(new Error("provider-secret-late-delete"));
+      },
+      process: {
+        executeCommand: () =>
+          Promise.resolve({ exitCode: 0, result: "coven-agents" }),
+      },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.equal(deleteCalls, 1);
+    assert.deepEqual(unhandledRejections, []);
+  } finally {
+    process.off("unhandledRejection", recordUnhandledRejection);
+  }
+});
+
+test("Daytona diagnostics bound late cleanup when delete ignores its timeout", async () => {
+  const deadline = fakeDiagnosticDeadline(45_000);
+  let deleteArguments: unknown[] | undefined;
+  let resolveCreate:
+    | ((sandbox: {
+        delete: (timeout?: number, wait?: boolean) => Promise<void>;
+        process: {
+          executeCommand: () => Promise<{ exitCode: number; result: string }>;
+        };
+      }) => void)
+    | undefined;
+
+  await assert.rejects(
+    diagnoseDaytonaSandbox("coven-diagnostic-late-delete-timeout", {
+      client: () => ({
+        create: () =>
+          new Promise((resolve) => {
+            resolveCreate = resolve;
+          }),
+      }),
+      configuration: () => ({ snapshotName: "diagnostic-snapshot" }),
+      deadline: deadline.dependencies,
+    }),
+    RunnerServiceError
+  );
+
+  assert.ok(resolveCreate);
+  resolveCreate({
+    delete: (...args: unknown[]) => {
+      deleteArguments = args;
+      return new Promise(() => undefined);
+    },
+    process: {
+      executeCommand: () =>
+        Promise.resolve({ exitCode: 0, result: "coven-agents" }),
+    },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(deleteArguments, [60, true]);
+  assert.equal(deadline.nowMilliseconds(), 105_000);
+});
+
 test("Daytona diagnostics bound a command that ignores its timeout and clean up", async () => {
   const deadline = fakeDiagnosticDeadline();
   let executeArguments: unknown[] | undefined;
   let deleteArguments: unknown[] | undefined;
 
   await assert.rejects(
-    diagnoseDaytonaSandbox({
+    diagnoseDaytonaSandbox("coven-diagnostic-command-timeout", {
       client: () => ({
         create: () =>
           Promise.resolve({
@@ -327,7 +477,6 @@ test("Daytona diagnostics bound a command that ignores its timeout and clean up"
           }),
       }),
       configuration: () => ({ snapshotName: "diagnostic-snapshot" }),
-      createName: () => "coven-diagnostic-command-timeout",
       deadline: deadline.dependencies,
     }),
     (error: unknown) => {
@@ -355,7 +504,7 @@ test("Daytona diagnostics bound delete when the adapter ignores its timeout", as
   let deleteArguments: unknown[] | undefined;
 
   await assert.rejects(
-    diagnoseDaytonaSandbox({
+    diagnoseDaytonaSandbox("coven-diagnostic-delete-timeout", {
       client: () => ({
         create: () =>
           Promise.resolve({
@@ -373,7 +522,6 @@ test("Daytona diagnostics bound delete when the adapter ignores its timeout", as
           }),
       }),
       configuration: () => ({ snapshotName: "diagnostic-snapshot" }),
-      createName: () => "coven-diagnostic-delete-timeout",
       deadline: deadline.dependencies,
     }),
     (error: unknown) => {

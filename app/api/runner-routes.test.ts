@@ -163,6 +163,7 @@ function testHandlers(state: RouteFixtureState): RunnerHttpHandlers {
       authorizeReconcile: () => ({ kind: "allowed" }),
       authorizeSubscriber: async () => subscriber,
     },
+    createDiagnosticName: () => "coven-diagnostic-route-precomputed",
     createEventStream: () =>
       new ReadableStream({
         start(controller) {
@@ -173,7 +174,8 @@ function testHandlers(state: RouteFixtureState): RunnerHttpHandlers {
     createOperatorService: () => runner,
     createRequestId: () => "44444444-5555-4666-8777-888888888888",
     createService: () => runner,
-    diagnoseSandbox: () => {
+    diagnoseSandbox: (name) => {
+      assert.equal(name, "coven-diagnostic-route-precomputed");
       state.diagnosticProviderCalls += 1;
       if (state.diagnosticMode === "failure") {
         throw new RunnerServiceError(

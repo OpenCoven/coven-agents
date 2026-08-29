@@ -25,6 +25,7 @@ const AGENT_ID = "11111111-2222-4333-8444-555555555555";
 const RUN_ID = "22222222-3333-4444-8555-666666666666";
 const OPERATION_ID = "33333333-4444-4555-8666-777777777777";
 const REQUEST_ID = "44444444-5555-4666-8777-888888888888";
+const DIAGNOSTIC_NAME = "coven-diagnostic-precomputed-http-name";
 
 const subscriber: RunnerAuthenticatedSubscriber = {
   authVersion: 4,
@@ -174,6 +175,7 @@ function handlers(
 ) {
   const after: (() => void | Promise<void>)[] = [];
   const admissions: AbuseEnforcementInput[] = [];
+  const diagnosticNames: string[] = [];
   const logs: unknown[] = [];
   let diagnosticRequests = 0;
   let serviceRequests = 0;
@@ -190,6 +192,7 @@ function handlers(
             }),
         }),
     auth: options.auth ?? authorizedAuth(),
+    createDiagnosticName: () => DIAGNOSTIC_NAME,
     createOperatorService: () => {
       operatorRequests += 1;
       return runner;
@@ -199,8 +202,9 @@ function handlers(
       serviceRequests += 1;
       return runner;
     },
-    diagnoseSandbox: () => {
+    diagnoseSandbox: (name) => {
       diagnosticRequests += 1;
+      diagnosticNames.push(name);
       return runner.diagnoseSandbox();
     },
     enforceAbuse: (input) => {
@@ -217,6 +221,7 @@ function handlers(
   return {
     admissions,
     after,
+    diagnosticNames,
     diagnosticRequests: () => diagnosticRequests,
     handlers: result,
     logs,
@@ -306,6 +311,10 @@ function orderedOperatorHandlers(
         return authorization;
       },
       authorizeSubscriber: async () => subscriber,
+    },
+    createDiagnosticName: () => {
+      events.push("name");
+      return DIAGNOSTIC_NAME;
     },
     createOperatorService: () => {
       events.push("service");
@@ -1295,6 +1304,8 @@ test("diagnostics and reconciliation use only their operator service and safe ou
   assert.equal(reconcile.status, 200);
   assert.deepEqual(await reconcile.json(), counts());
   assert.equal(fixture.diagnosticRequests(), 1);
+  assert.deepEqual(fixture.diagnosticNames, [DIAGNOSTIC_NAME]);
+  assert.deepEqual(fixture.logs, []);
   assert.equal(fixture.operatorRequests(), 1);
   assert.equal(fixture.serviceRequests(), 0);
 });
@@ -1639,6 +1650,7 @@ test("valid operator requests perform authorized work only after abuse and secre
           "abuse",
           "secret",
           "body",
+          ...(route.abuseRoute === "runner_diagnostic" ? ["name"] : []),
           "service",
           "provider",
         ]);

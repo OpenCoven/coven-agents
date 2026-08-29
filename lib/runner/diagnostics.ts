@@ -1,6 +1,5 @@
 import "server-only";
 
-import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { CreateSandboxFromSnapshotParams } from "@daytona/sdk";
 import { daytonaClient } from "./daytona/client";
@@ -60,7 +59,6 @@ type DaytonaDiagnosticClient = Readonly<{
 export type DaytonaDiagnosticDependencies = Readonly<{
   client?: () => DaytonaDiagnosticClient;
   configuration?: () => Pick<DaytonaSandboxConfiguration, "snapshotName">;
-  createName?: () => string;
   deadline?: DiagnosticDeadlineDependencies;
 }>;
 
@@ -108,7 +106,8 @@ class DiagnosticDeadline {
 
   async run<T>(
     maximumAttemptMilliseconds: number,
-    operation: (timeoutSeconds: number) => Promise<T>
+    operation: (timeoutSeconds: number) => Promise<T>,
+    onLateFulfillment?: (value: T) => void
   ): Promise<T> {
     const remainingMilliseconds = Math.min(
       maximumAttemptMilliseconds,
@@ -118,21 +117,31 @@ class DiagnosticDeadline {
       throw new DiagnosticDeadlineExceededError();
     }
 
-    const operationPromise = Promise.resolve().then(() =>
-      operation(remainingMilliseconds / 1000)
-    );
-    const observedOperationPromise = operationPromise.catch(
-      (error: unknown) => {
-        throw error;
-      }
-    );
+    let timedOut = false;
+    const observedOperationPromise = Promise.resolve()
+      .then(() => operation(remainingMilliseconds / 1000))
+      .then(
+        (value) => {
+          if (timedOut) {
+            try {
+              onLateFulfillment?.(value);
+            } catch {
+              // Late cleanup is best effort and must not affect the completed response.
+            }
+          }
+          return value;
+        },
+        (error: unknown) => {
+          throw error;
+        }
+      );
 
     let timeoutHandle: unknown;
     const timeoutPromise = new Promise<never>((_resolve, reject) => {
-      timeoutHandle = this.#scheduleTimeout(
-        () => reject(new DiagnosticDeadlineExceededError()),
-        remainingMilliseconds
-      );
+      timeoutHandle = this.#scheduleTimeout(() => {
+        timedOut = true;
+        reject(new DiagnosticDeadlineExceededError());
+      }, remainingMilliseconds);
     });
 
     try {
@@ -146,6 +155,24 @@ class DiagnosticDeadline {
 
   #remainingMilliseconds(): number {
     return Math.max(0, this.#deadlineMilliseconds - this.#nowMilliseconds());
+  }
+}
+
+async function deleteLateDiagnosticSandbox(
+  sandbox: RunnerDiagnosticSandbox,
+  dependencies: DiagnosticDeadlineDependencies | undefined
+): Promise<void> {
+  const cleanupDeadline = new DiagnosticDeadline({
+    ...dependencies,
+    timeoutMilliseconds: DIAGNOSTIC_DELETE_TIMEOUT_MILLISECONDS,
+  });
+  try {
+    await cleanupDeadline.run(
+      DIAGNOSTIC_DELETE_TIMEOUT_MILLISECONDS,
+      (timeout) => sandbox.delete(timeout)
+    );
+  } catch {
+    // Provider cleanup details are intentionally swallowed.
   }
 }
 
@@ -180,7 +207,12 @@ export async function runEphemeralDiagnostic(
   try {
     const createdSandbox = await deadline.run(
       DIAGNOSTIC_CREATE_TIMEOUT_MILLISECONDS,
-      dependencies.create
+      dependencies.create,
+      (lateSandbox) => {
+        deleteLateDiagnosticSandbox(lateSandbox, dependencies.deadline).catch(
+          () => undefined
+        );
+      }
     );
     sandbox = createdSandbox;
     const command = await deadline.run(
@@ -216,15 +248,13 @@ export async function runEphemeralDiagnostic(
 }
 
 export async function diagnoseDaytonaSandbox(
+  name: string,
   dependencies: DaytonaDiagnosticDependencies = {}
 ): Promise<RunnerDiagnosticResult> {
   try {
     const configuration =
       dependencies.configuration?.() ?? daytonaSandboxConfiguration();
     const client = dependencies.client?.() ?? daytonaClient();
-    const name =
-      dependencies.createName?.() ??
-      `coven-diagnostic-${randomUUID().replaceAll("-", "")}`;
     return await runEphemeralDiagnostic({
       create: async (timeoutSeconds) => {
         const sandbox = await client.create(
