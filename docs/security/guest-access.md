@@ -4,7 +4,7 @@
 - Product term: **guest**
 - Internal compatibility term: `demo`
 - Applies to: public replay, GitHub account creation, subscription gating,
-  control-plane APIs, cloud runner access, and guest-facing copy
+  same-origin runner APIs, and guest-facing copy
 
 ## Vocabulary
 
@@ -39,7 +39,7 @@ persistent product authority has not been granted.
 | --- | --- | --- |
 | Anonymous guest | Server-minted httpOnly cookie; no user row | View the committed safe replay and choose whether to create an account |
 | Signed-in guest | GitHub identity mapped to one local user row; internal type `demo` | Account access, generated avatar, usage/subscription status, and explicit checkout |
-| Subscriber | Same account with server-authoritative active subscription | Credential custody, cloud connection, runner identity, live runs, and persistent product features |
+| Subscriber | Same account with server-authoritative active subscription | Credential custody, same-origin agent and run access, live runs, and persistent product features |
 | Lapsed account | Existing user row; authority recomputed to internal type `demo` | Returns immediately to signed-in guest restrictions |
 
 Creating a guest account is intentionally small, but it is not literally
@@ -141,17 +141,18 @@ flowchart TD
     Resource --> Blob[File/blob upload]
     Resource --> DB[History, documents, votes, suggestions]
     Resource --> Credential[Encrypted harness credential]
-    Resource --> Runner[Cloud gate and signed runner identity]
-    Runner --> Worker[Worker verifies identity and tenant]
-    Worker -->|plan is not subscriber| F2[403 before run starts]
-    Worker -->|subscriber| Sandbox[Per-agent sandbox run]
+    Resource --> Runner[Same-origin agent and run APIs]
+    Runner --> Session[Revalidate Auth.js session]
+    Session -->|not subscriber| F2[403 before run starts]
+    Session -->|subscriber| Tenant[Derive tenant server-side]
+    Tenant --> Sandbox[Daytona sandbox run]
 ```
 
 The shared gate rejects guest claims without a database lookup. A session that
 claims subscriber authority is then checked against the current server-owned
 `subscribedUntil` value before database reads, uploads, model calls, credential
-flows, connection secrets, or token minting. The Worker repeats the subscriber
-check before execution. The pure token decision lives in
+flows, or runner dispatch. The browser receives no connection secret or runner
+identity token. The pure session decision lives in
 `lib/auth/subscriber-access.ts`; the server-owned revalidation wrapper lives in
 `lib/auth/subscriber-authorization.server.ts`.
 
@@ -170,7 +171,7 @@ check before execution. The pure token decision lives in
 | File/blob upload | Deny | 403 before body or blob storage | Allow within file limits | Shared subscriber gate, upload schema |
 | Harness credential list/write/delete/device flow | Deny | 403 | Allow | Credential routes and `databaseFor` |
 | Agent and run APIs | Deny | Deny | Tenant-scoped | Same-origin session authorization |
-| Internal credential loan | No route authority | No route authority | One credential for one counted run | Service token, signed claim, subscriber plan |
+| Legacy rollback Worker credential loan | No route authority | No route authority | Server-to-server only | Service token, verified legacy claim, subscriber plan |
 
 The checkout and usage surfaces are narrow account-management exceptions. They
 exist so a guest can understand and intentionally change their access. They
@@ -222,9 +223,9 @@ must not be reused as a general guest database path.
   session union used by downstream authorization.
 - The exact internal subscriber value is required. Missing, expired,
   malformed, forged, or unknown values fail closed to guest access.
-- A guest cannot store credentials, receive the cloud control token, mint
-  runner identity, call a model, upload a file, or read/write persistent chat
-  data.
+- A guest cannot store credentials, call same-origin agent or run APIs, call a
+  model, upload a file, or read/write persistent chat data. No browser account
+  receives a Worker deployment token or runner identity from the current app.
 - `app/api/credentials/route.ts` and the same-origin agent/run routes enforce
   their product gates independently.
 
@@ -236,9 +237,10 @@ must not be reused as a general guest database path.
 - Previously stored credentials remain encrypted but cannot be borrowed by a
   guest claim.
 - A lapsed account cannot start a run even if an old credential row exists.
-  The app refuses connection and runner identity, the Worker refuses a
-  non-subscriber plan before execution, and the internal credential endpoint
-  independently requires a subscriber claim.
+  Same-origin agent and run routes reject its revalidated application session
+  before execution. If the application is rolled back to the legacy Worker
+  path, the Worker and retained internal credential endpoint independently
+  reject a non-subscriber claim.
 
 ## Safety precautions
 
@@ -259,11 +261,13 @@ must not be reused as a general guest database path.
    guest replay tree.
 6. **Keep secrets out of guest-visible evidence.** Recorder output is redacted
    before publication; committed fixtures are scanned in raw and parsed form.
-7. **Do not expose deployment gates.** Guest accounts receive neither the
-   cloud control token nor a signed runner identity.
-8. **Repeat checks across trust boundaries.** Browser refusal is UX, not the
-   security boundary. The app, Worker, and internal credential endpoint each
-   enforce their own authority requirement.
+7. **Do not create browser runner credentials.** Current browser accounts use
+   only their application session; no account receives a deployment gate or
+   signed runner identity.
+8. **Repeat checks across active trust boundaries.** Browser refusal is UX,
+   not the security boundary. Same-origin routes revalidate session authority
+   and server-owned tenant scope. The retained Worker and internal endpoint
+   checks are additional rollback-only boundaries.
 9. **Treat checkout as explicit consent.** Stripe work occurs only after the
    signed-in guest chooses upgrade; page load and account creation do not
    create a checkout session.
@@ -290,7 +294,9 @@ Before publishing a guest deployment:
 After suspected guest-boundary bypass:
 
 1. disable the affected resource route or deployment;
-2. rotate any exposed deployment, service, signing, or tenant credential;
+2. rotate any exposed session, tenant credential, or active service secret;
+   rotate Worker deployment or signing material only if the rollback runtime
+   was involved;
 3. preserve sanitized request identity and operation metadata;
 4. add the bypass as a regression before restoring access;
 5. follow [Security incident response](incident-response.md).
@@ -305,7 +311,7 @@ After suspected guest-boundary bypass:
 | Resource routes share one gate | `lib/auth/subscriber-access.test.ts`, `lib/auth/subscriber-authorization.test.ts`, `scripts/guest-access-docs.test.ts` |
 | Guest cannot store a credential | `lib/credentials/authorize.test.ts`, credential route tests |
 | Guest cannot reach runner execution | same-origin agent/run route tests and browser boundary regression |
-| Worker refuses guest execution | `worker/src/routes.test.ts`, internal credential binding tests |
+| Legacy rollback Worker refuses guest execution | `worker/src/routes.test.ts`, internal credential binding tests |
 | Guest fixtures contain no recognized secrets | `lib/demo/fixtures.test.ts`, `scripts/secret-scan.test.ts` |
 
 The still-deployed rollback Worker keeps its independent enforcement in

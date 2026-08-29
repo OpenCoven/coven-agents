@@ -15,9 +15,10 @@ before expanding product state or adding an OpenCoven dependency.
 Wave 1 results and the dependency-ordered next priorities are recorded in the
 [Wave 1 delivery report](docs/roadmap/wave-1-delivery.md).
 
-Agents run on the cloud runner: Cloudflare Workers + Agents SDK + Sandbox SDK.
-Every agent receives persistent Durable Object state and a stable isolated
-container.
+Agents run through authenticated same-origin APIs backed by the server-side
+Daytona runner. Browser requests carry only the Auth.js application session;
+tenant identity and subscriber authority are derived and revalidated on the
+server.
 
 ## Security model
 
@@ -43,22 +44,22 @@ rotate first, investigate second.
 
 **Execution**
 
-- Every agent executes in its own per-agent Cloudflare sandbox container.
+- Every current run executes in its own Daytona sandbox through the server-side
+  runner service.
 
-**Two tokens, two jobs.** Reaching the worker at all and being someone are
-deliberately separate. `X-Runner-Token` is a coarse deployment gate and no
-tenant is ever derived from it. Identity travels on `Authorization` as an
-Ed25519-signed claim the worker can verify but not mint, so it can trust the
-`tenant` inside without being able to forge one. Signatures are raw Ed25519
-rather than JWT: there is no `alg` field, so there is no `alg:none` or
-HS256-for-RS256 confusion to get wrong.
+**Browser authority stays in the application session.** The browser calls the
+same-origin `/api` surface with its Auth.js cookie. Agent and run routes
+revalidate subscriber status, derive the tenant from server-owned identity,
+and never return a runner connection, deployment token, signed runner identity,
+or private signing material.
 
 **Credentials belong to tenants.** The operator's credentials are never lent
 out. Each tenant supplies their own harness credential; it is stored under
 envelope encryption (a per-credential AES-GCM data key wrapped by
 the versioned `CREDENTIAL_KEK_V1`/`CREDENTIAL_KEK_V2` ring), fetched for the
-duration of one run, and redacted from run evidence. The worker holds no key
-material of its own. See the [credential KEK rotation runbook](docs/security/key-rotation.md).
+duration of one run, and redacted from run evidence. The Daytona sandbox and
+the legacy rollback Worker hold no stored harness credential of their own. See
+the [credential KEK rotation runbook](docs/security/key-rotation.md).
 
 **Product data is subscriber-gated.** New browser-facing product data access
 uses `databaseFor`, which accepts a `SubscriberSession` and nothing else.
@@ -76,9 +77,9 @@ current database `authVersion` before resource access. Guests are rejected
 without that lookup; expiry or revocation cannot wait for the browser token to
 expire. The internal compatibility label remains `demo`.
 
-**Browser storage.** Runner connection details live in session storage, not
-persistent local storage, and the console is served its connection by the app
-rather than asking a human to paste a token.
+**Browser storage.** The console stores no runner endpoint, deployment
+credential, or runner bearer token. Its runner client uses relative same-origin
+URLs and relies on the httpOnly application session cookie.
 
 **Commit scanning.** The pre-commit hook scans staged Git content for recognized
 credential shapes before formatting runs. Findings identify only the file,
@@ -92,7 +93,7 @@ Requirements:
 
 - Node.js 22 or newer
 - pnpm 10
-- Docker for local Cloudflare Sandbox development and deployment
+- Docker only for legacy rollback Worker development and deployment
 
 ```bash
 pnpm install
@@ -150,7 +151,7 @@ To invalidate all existing sessions for an account, run
 version and prints only the account ID and new version; an unknown address is a
 nonzero failure.
 
-## Run the runner
+## Run the legacy rollback Worker
 
 Create `worker/.dev.vars`:
 
@@ -211,10 +212,10 @@ Accepted values for a Copilot harness are a fine-grained PAT with the
 "Copilot Requests" permission, or an OAuth token from the Copilot CLI or `gh`
 app. Classic `ghp_` tokens are not supported.
 
-`RUNNER_SERVICE_TOKEN` and `APP_ORIGIN` are how the worker asks the app for
-that credential. Both must be set, and the service token must match the app's.
-Missing either throws rather than running uncredentialed, because a silent
-fallback is how a run would quietly use the wrong identity.
+The remaining Worker configuration in this section is rollback-only until the
+Worker-removal PR. `RUNNER_SERVICE_TOKEN` and `APP_ORIGIN` are how that legacy
+runtime asks the app for a credential. Both must be set, and the service token
+must match the app's. Missing either throws rather than running uncredentialed.
 
 Then:
 
@@ -232,7 +233,7 @@ Docker-backed harness and its stub app, follow
 [`worker/harness/README.md`](worker/harness/README.md), which uses its own local
 `APP_ORIGIN`.
 
-For deployment, set the secrets without committing them:
+For a retained rollback deployment, set the secrets without committing them:
 
 ```bash
 cd worker
@@ -256,7 +257,9 @@ is absent, the Worker fails closed with `503` before serving non-preflight
 requests.
 
 Confirm the committed `ALLOWED_ORIGIN` in `worker/wrangler.jsonc` matches the
-deployed web origin and set `NEXT_PUBLIC_CLOUD_RUNNER_URL` on the web deployment.
+rollback application's deployed origin. The current web application needs no
+public Worker URL. Restoring the old browser path requires rolling the
+application back and configuring its legacy public Worker URL.
 
 `AGENT_CONTROL_TOKEN` and `OPERATOR_DIAGNOSTIC_TOKEN` are read from the `env`
 binding, not from `process.env`. A Worker only exposes `vars` on `process.env`,
@@ -264,10 +267,10 @@ and only under `nodejs_compat`; secrets never appear there. Reading a secret
 from `process.env` yields `undefined`. `worker/src/worker-secrets.d.ts`
 declares both secrets on `Env` so this stays type-checked.
 
-After deployment, `POST /api/diagnostics/sandbox` performs an authenticated,
-one-shot command in a dedicated Cloudflare container. It accepts only the
-separate `OPERATOR_DIAGNOSTIC_TOKEN` as a timing-safe bearer credential; the
-browser-visible `AGENT_CONTROL_TOKEN` and subscriber identities are denied.
+On the retained rollback Worker, `POST /api/diagnostics/sandbox` performs an
+authenticated, one-shot command in a dedicated Cloudflare container. It accepts
+only the separate `OPERATOR_DIAGNOSTIC_TOKEN` as a timing-safe bearer
+credential; the legacy deployment gate and subscriber identities are denied.
 The fixed diagnostic sandbox is reused and automatically sleeps after 30
 seconds of inactivity, which bounds container allocation without keeping it
 alive. Use it as the deployment smoke test:
@@ -297,9 +300,9 @@ commands in [`worker/harness/README.md`](worker/harness/README.md). The
 - `packages/harness` is the single definition of the CLI subset, the JSONL event
   normalizer, and the run summarizer. The sandbox calls it, so normalization
   cannot drift from the contract.
-- The runner runs the harness inside the per-agent Cloudflare sandbox
-  container. `worker/Dockerfile` installs `@github/copilot`, and
-  `worker/wrangler.jsonc` builds the container from that Dockerfile.
+- The current runner executes the harness inside the per-run Daytona sandbox.
+  The retained rollback Worker uses the separate image built from
+  `worker/Dockerfile` and `worker/wrangler.jsonc`.
 - `GET /api/harnesses` probes the sandbox and reports which harnesses are
   installed, their versions, and whether their event translation is implemented.
 - GitHub Copilot CLI is the supported subset today. Codex CLI and Claude Code
