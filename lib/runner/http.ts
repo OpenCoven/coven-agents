@@ -249,6 +249,28 @@ function schedule(
   }
 }
 
+async function warmAndReconcile(
+  service: RunnerService,
+  principal: RunnerAuthenticatedSubscriber["principal"],
+  agentId: string
+): Promise<void> {
+  const warm = await service.warmAgent(principal, agentId);
+  switch (warm.kind) {
+    case "found":
+    case "in_progress":
+    case "not_found":
+    case "provider_rejected":
+    case "ready":
+    case "stale_version":
+    case "unavailable":
+    case "unsupported_harness":
+      break;
+    default:
+      unreachableResult(warm);
+  }
+  await service.reconcileAndDispatch();
+}
+
 function reconciliationCounts(
   result: RunnerReconciliationExecutionResult
 ): RunnerReconciliationExecutionResult {
@@ -386,8 +408,11 @@ export function createRunnerHttpHandlers(
             return runnerUnavailable(dependencies);
           case "created":
             schedule(dependencies, async () => {
-              await service.warmAgent(context.principal, created.agent.id);
-              await service.reconcileAndDispatch();
+              await warmAndReconcile(
+                service,
+                context.principal,
+                created.agent.id
+              );
             });
             return runnerJsonResponse(
               agentEnvelopeSchema,
@@ -858,6 +883,8 @@ export function createRunnerHttpHandlers(
         switch (result.kind) {
           case "not_found":
             return agentNotFound(dependencies);
+          case "busy":
+            return runnerErrorResponse(dependencies, "busy");
           case "invalid":
             return invalidRequest(dependencies);
           case "unsupported_harness":
@@ -870,8 +897,11 @@ export function createRunnerHttpHandlers(
             return runnerUnavailable(dependencies);
           case "updated":
             schedule(dependencies, async () => {
-              await service.warmAgent(context.principal, result.agent.id);
-              await service.reconcileAndDispatch();
+              await warmAndReconcile(
+                service,
+                context.principal,
+                result.agent.id
+              );
             });
             return runnerJsonResponse(agentEnvelopeSchema, {
               agent: result.agent,

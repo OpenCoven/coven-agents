@@ -4186,10 +4186,42 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
       input: UpdateRunnerAgentInput
     ): Promise<
       | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "busy" }
       | { kind: "not_found" }
       | { kind: "stale_version" }
     > =>
       database.transaction(async (transaction) => {
+        const [current] = await transaction.execute(
+          statement(
+            "lock-agent-for-update",
+            { agentId: input.id, tenant: principal.tenant },
+            sql`SELECT * FROM "RunnerAgent"
+              WHERE "id" = ${input.id}
+                AND "tenant" = ${principal.tenant}
+              FOR UPDATE`
+          )
+        );
+        if (!current) {
+          return { kind: "not_found" };
+        }
+        const agent = asAgent(current);
+        if (agent.version !== input.expectedVersion) {
+          return { kind: "stale_version" };
+        }
+        const [liveRun] = await transaction.execute(
+          statement(
+            "find-live-run-for-agent-update",
+            { agentId: input.id, tenant: principal.tenant },
+            sql`SELECT "id" FROM "RunnerRun"
+              WHERE "agentId" = ${input.id}
+                AND "tenant" = ${principal.tenant}
+                AND "status" IN ('queued', 'running')
+              LIMIT 1`
+          )
+        );
+        if (liveRun) {
+          return { kind: "busy" };
+        }
         const [updated] = await transaction.execute(
           statement(
             "update-agent",
@@ -4209,17 +4241,10 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               RETURNING *`
           )
         );
-        if (updated) {
-          return { kind: "updated", value: asAgent(updated) };
+        if (!updated) {
+          throw new Error("Locked Runner agent changed before update.");
         }
-        const [current] = await transaction.execute(
-          statement(
-            "get-agent-after-update",
-            { agentId: input.id, tenant: principal.tenant },
-            sql`SELECT "id" FROM "RunnerAgent" WHERE "id" = ${input.id} AND "tenant" = ${principal.tenant} LIMIT 1`
-          )
-        );
-        return current ? { kind: "stale_version" } : { kind: "not_found" };
+        return { kind: "updated", value: asAgent(updated) };
       }),
   };
 }

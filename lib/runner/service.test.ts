@@ -252,6 +252,50 @@ test("agent updates preserve tenant ownership and expose stale versions", async 
   );
 });
 
+test("agent updates preserve the explicit busy outcome", async () => {
+  const service = createRunnerService({
+    store: baseStore({
+      updateAgent: () => Promise.resolve({ kind: "busy" as const }),
+    }),
+  });
+
+  assert.deepEqual(
+    await service.updateAgent(PRINCIPAL, AGENT_ID, definition()),
+    { kind: "busy" }
+  );
+});
+
+test("agent updates reject unsupported runtimes before reading or mutating storage", async () => {
+  let reads = 0;
+  let writes = 0;
+  const service = createRunnerService({
+    store: baseStore({
+      getAgent: () => {
+        reads += 1;
+        return Promise.resolve(agent({ runtime: "cloud" }));
+      },
+      updateAgent: () => {
+        writes += 1;
+        return Promise.resolve({
+          kind: "updated" as const,
+          value: agent({ runtime: "copilot", version: 5 }),
+        });
+      },
+    }),
+  });
+
+  assert.deepEqual(
+    await service.updateAgent(
+      PRINCIPAL,
+      AGENT_ID,
+      definition({ runtime: "codex" })
+    ),
+    { kind: "unsupported_harness" }
+  );
+  assert.equal(reads, 0);
+  assert.equal(writes, 0);
+});
+
 test("legacy agents can migrate to a runnable runtime and remain deletable", async () => {
   const legacy = agent({ runtime: "cloud" });
   let updatedInput: unknown;

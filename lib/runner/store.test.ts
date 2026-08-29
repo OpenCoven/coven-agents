@@ -15,7 +15,11 @@ import {
   MAX_EVENTS_PER_RUN,
   MAX_PERSISTED_EVENT_BYTES_PER_RUN,
 } from "./evidence";
-import { createRunnerStore, type RunnerStoreStatement } from "./store";
+import {
+  createRunnerStore,
+  type RunnerStoreDatabase,
+  type RunnerStoreStatement,
+} from "./store";
 import type {
   RunnerAgentRecord,
   RunnerDaytonaAttemptId,
@@ -142,6 +146,130 @@ function scripted(...responses: Record<string, unknown>[][]) {
       }),
   });
   return { statements, store };
+}
+
+function resultRows<Row extends Record<string, unknown>>(
+  values: readonly unknown[]
+): Promise<Row[]> {
+  return Promise.resolve(values as Row[]);
+}
+
+function serializedAgentStore() {
+  let currentAgent = agent({ runtime: "copilot", version: 4 });
+  const currentRuns: RunnerRunRecord[] = [];
+  let transactionTail = Promise.resolve();
+  const database: RunnerStoreDatabase = {
+    transaction: async (callback) => {
+      const previous = transactionTail;
+      let release: () => void = () => undefined;
+      transactionTail = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await callback({
+          execute: <Row extends Record<string, unknown>>(
+            currentStatement: RunnerStoreStatement
+          ): Promise<Row[]> => {
+            switch (currentStatement.name) {
+              case "lock-agent-for-run-start":
+                return resultRows<Row>([
+                  {
+                    id: currentAgent.id,
+                    sandboxLifecycle: currentAgent.sandboxLifecycle,
+                  },
+                ]);
+              case "lock-agent-for-update":
+                return resultRows<Row>([currentAgent]);
+              case "get-operation-run-before-admission":
+              case "get-operation-run":
+                return resultRows<Row>(
+                  currentRuns.filter(
+                    (currentRun) =>
+                      currentRun.agentId === currentStatement.args.agentId &&
+                      currentRun.operationId ===
+                        currentStatement.args.operationId &&
+                      currentRun.tenant === currentStatement.args.tenant
+                  )
+                );
+              case "find-live-run-for-agent-update":
+                return resultRows<Row>(
+                  currentRuns
+                    .filter(
+                      (currentRun) =>
+                        currentRun.agentId === currentStatement.args.agentId &&
+                        currentRun.tenant === currentStatement.args.tenant &&
+                        (currentRun.status === "queued" ||
+                          currentRun.status === "running")
+                    )
+                    .map(({ id }) => ({ id }))
+                );
+              case "insert-run": {
+                const inserted = run({
+                  agentId: String(currentStatement.args.agentId),
+                  authVersion: Number(currentStatement.args.authVersion),
+                  id: String(currentStatement.args.id),
+                  operationId: String(currentStatement.args.operationId),
+                  requestHash: String(currentStatement.args.requestHash),
+                  task: String(currentStatement.args.task),
+                  tenant: String(currentStatement.args.tenant),
+                });
+                currentRuns.push(inserted);
+                return resultRows<Row>([inserted]);
+              }
+              case "insert-accepted-event":
+                return resultRows<Row>([{ eventId: 1 }]);
+              case "advance-run-after-acceptance": {
+                const index = currentRuns.findIndex(
+                  (candidate) =>
+                    candidate.id === currentStatement.args.runId &&
+                    candidate.tenant === currentStatement.args.tenant
+                );
+                const currentRun = currentRuns[index];
+                assert.ok(currentRun);
+                const advanced = {
+                  ...currentRun,
+                  logCursor: 1,
+                  version: currentRun.version + 1,
+                };
+                currentRuns[index] = advanced;
+                return resultRows<Row>([advanced]);
+              }
+              case "update-agent":
+                currentAgent = {
+                  ...currentAgent,
+                  description: String(currentStatement.args.description),
+                  instructions: String(currentStatement.args.instructions),
+                  model: String(currentStatement.args.model),
+                  name: String(currentStatement.args.name),
+                  runtime: String(
+                    currentStatement.args.runtime
+                  ) as RunnerAgentRecord["runtime"],
+                  updatedAt: new Date("2026-01-01T00:00:01.000Z"),
+                  version: currentAgent.version + 1,
+                  workspace:
+                    currentStatement.args.workspace === null
+                      ? null
+                      : String(currentStatement.args.workspace),
+                };
+                return resultRows<Row>([currentAgent]);
+              default:
+                throw new Error(
+                  `Unexpected serialized statement: ${currentStatement.name}`
+                );
+            }
+          },
+        });
+      } finally {
+        release();
+      }
+    },
+  };
+  return {
+    agent: () => currentAgent,
+    runs: () => [...currentRuns],
+    store: createRunnerStore(database),
+  };
 }
 
 test("reconciliation lease acquisition uses database time and skips a live holder", async () => {
@@ -2510,10 +2638,50 @@ test("a proven unstarted dispatch releases its exact lease for the next queue cl
   );
 });
 
-test("agent updates use integer versions", async () => {
+test("active queued, dispatching, running, and cancelling runs block agent updates without mutation", async () => {
+  const current = agent({ runtime: "copilot", version: 4 });
+  const activeRuns = [
+    run({ dispatchState: "queued", status: "queued" }),
+    run({ dispatchState: "dispatching", status: "queued" }),
+    run({ dispatchState: "running", status: "running" }),
+    run({
+      cancellationRequestedAt: new Date("2026-01-01T00:00:01.000Z"),
+      dispatchState: "running",
+      status: "running",
+    }),
+  ];
+
+  await Promise.all(
+    activeRuns.map(async (activeRun) => {
+      const blocked = scripted([current], [{ id: activeRun.id }]);
+      assert.deepEqual(
+        await blocked.store.updateAgent(principal, {
+          description: "changed",
+          expectedVersion: current.version,
+          id: current.id,
+          instructions: "changed",
+          model: "changed",
+          name: "changed",
+          runtime: "copilot",
+          workspace: "/changed",
+        }),
+        { kind: "busy" },
+        activeRun.dispatchState
+      );
+      assert.deepEqual(
+        blocked.statements.map((currentStatement) => currentStatement.name),
+        ["lock-agent-for-update", "find-live-run-for-agent-update"]
+      );
+      assert.equal(current.version, 4);
+      assert.equal(current.warmStatus, "not_started");
+    })
+  );
+});
+
+test("terminal runs do not block agent updates and versions use database time", async () => {
   const current = agent({ version: 4 });
   const updated = agent({ version: 5 });
-  const update = scripted([updated]);
+  const update = scripted([current], [], [updated]);
 
   const result = await update.store.updateAgent(principal, {
     description: "updated",
@@ -2528,10 +2696,97 @@ test("agent updates use integer versions", async () => {
 
   assert.equal(result.kind, "updated");
   assert.equal(result.kind === "updated" && result.value.version, 5);
-  const query = queryText(update.statements[0] as RunnerStoreStatement);
+  assert.deepEqual(
+    update.statements.map((currentStatement) => currentStatement.name),
+    ["lock-agent-for-update", "find-live-run-for-agent-update", "update-agent"]
+  );
+  const activeQuery = queryText(update.statements[1] as RunnerStoreStatement);
+  assert.match(activeQuery, /"status" IN \('queued', 'running'\)/u);
+  const query = queryText(update.statements[2] as RunnerStoreStatement);
   assert.match(query, /"version" = "version" \+ 1/);
   assert.match(query, /AND "version" = \$\d+/);
   assert.doesNotMatch(query, /"updatedAt" = \$\d+/);
+});
+
+test("agent update keeps stale and tenant-scoped not-found outcomes nondisclosing", async () => {
+  const current = agent({ version: 5 });
+  const stale = scripted([current]);
+  const missing = scripted([]);
+  const input = {
+    description: current.description,
+    expectedVersion: 4,
+    id: current.id,
+    instructions: current.instructions,
+    model: current.model,
+    name: current.name,
+    runtime: current.runtime,
+    workspace: current.workspace,
+  };
+
+  assert.deepEqual(await stale.store.updateAgent(principal, input), {
+    kind: "stale_version",
+  });
+  assert.deepEqual(
+    await missing.store.updateAgent(
+      { ...principal, tenant: "tenant_b" },
+      input
+    ),
+    { kind: "not_found" }
+  );
+  assert.deepEqual(
+    stale.statements.map((currentStatement) => currentStatement.name),
+    ["lock-agent-for-update"]
+  );
+  assert.deepEqual(
+    missing.statements.map((currentStatement) => currentStatement.name),
+    ["lock-agent-for-update"]
+  );
+  assert.match(
+    queryText(missing.statements[0] as RunnerStoreStatement),
+    /"tenant"\s*=\s*\$\d+/u
+  );
+});
+
+test("agent starts and updates serialize so admission either follows the update or makes it busy", async () => {
+  const updateInput = {
+    description: "updated",
+    expectedVersion: 4,
+    id: agent().id,
+    instructions: "updated instructions",
+    model: "updated-model",
+    name: "updated",
+    runtime: "copilot" as const,
+    workspace: null,
+  };
+  const startInput = {
+    agentId: agent().id,
+    authVersion: 1,
+    id: run().id,
+    operationId: run().operationId,
+    requestHash: run().requestHash,
+    task: run().task,
+  };
+
+  const updateFirst = serializedAgentStore();
+  const [updated, admittedAfterUpdate] = await Promise.all([
+    updateFirst.store.updateAgent(principal, updateInput),
+    updateFirst.store.startRun(principal, startInput),
+  ]);
+  assert.equal(updated.kind, "updated");
+  assert.equal(admittedAfterUpdate.kind, "created");
+  assert.equal(updateFirst.agent().name, "updated");
+  assert.equal(updateFirst.runs().length, 1);
+
+  const startFirst = serializedAgentStore();
+  const [admittedBeforeUpdate, blocked] = await Promise.all([
+    startFirst.store.startRun(principal, startInput),
+    startFirst.store.updateAgent(principal, updateInput),
+  ]);
+  assert.equal(admittedBeforeUpdate.kind, "created");
+  assert.deepEqual(blocked, { kind: "busy" });
+  assert.equal(startFirst.agent().name, "test");
+  assert.equal(startFirst.agent().version, 4);
+  assert.equal(startFirst.runs().length, 1);
 });
 
 test("raw database rows serialize nullable errors in canonical snapshots", async () => {

@@ -121,6 +121,7 @@ export type RunnerReadAgentResult =
 
 export type RunnerUpdateAgentResult =
   | Readonly<{ agent: AgentDefinition; kind: "updated" }>
+  | Readonly<{ kind: "busy" }>
   | Readonly<{ kind: "invalid" }>
   | Readonly<{ kind: "not_found" }>
   | Readonly<{ kind: "stale_version" }>
@@ -804,6 +805,7 @@ export function createRunnerService(
       switch (updated.kind) {
         case "updated":
           return { agent: projectAgent(updated.value), kind: "updated" };
+        case "busy":
         case "not_found":
         case "stale_version":
           return updated;

@@ -606,6 +606,47 @@ test("update schedules bounded warm and reconciliation work", async () => {
   assert.equal(reconciled, 1);
 });
 
+test("scheduled update warming observes failures without rejection or provider leakage", async () => {
+  let reconciled = 0;
+  const typedFailure = handlers({
+    service: service({
+      reconcileAndDispatch: () => {
+        reconciled += 1;
+        return Promise.resolve(counts());
+      },
+      warmAgent: () =>
+        Promise.resolve({ kind: "unavailable", source: "provider" }),
+    }),
+  });
+  const rejectedWarm = handlers({
+    service: service({
+      warmAgent: () =>
+        Promise.reject(new Error("provider=sensitive sandbox=private")),
+    }),
+  });
+
+  await Promise.all(
+    [typedFailure, rejectedWarm].map(async (fixture) => {
+      const response = await fixture.handlers.updateAgent(
+        new Request(`https://app.test/api/agents/${AGENT_ID}`, {
+          body: validDefinitionBody({ name: "Updated" }),
+          method: "PUT",
+        }),
+        AGENT_ID
+      );
+      assert.equal(response.status, 200);
+      assert.equal(
+        JSON.stringify(await response.json()).includes("sensitive"),
+        false
+      );
+      assert.equal(fixture.after.length, 1);
+      await fixture.after[0]();
+      assert.deepEqual(fixture.logs, []);
+    })
+  );
+  assert.equal(reconciled, 1);
+});
+
 test("agent, run, and harness reads preserve their v1 envelopes", async () => {
   const fixture = handlers();
   const [agents, agent, updated, deleted, runs, runRead, harnesses] =
@@ -1097,6 +1138,32 @@ test("update preserves a stale version conflict", async () => {
     ((await response.json()) as { error: { code: string } }).error.code,
     "stale_version"
   );
+});
+
+test("update maps an active-run conflict to the stable busy response", async () => {
+  const fixture = handlers({
+    service: service({
+      updateAgent: async () => ({ kind: "busy" }),
+    }),
+  });
+  const response = await fixture.handlers.updateAgent(
+    new Request(`https://app.test/api/agents/${AGENT_ID}`, {
+      body: validDefinitionBody(),
+      method: "PUT",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    apiVersion: AGENT_RUNNER_API_VERSION,
+    error: {
+      code: "busy",
+      message: "The agent is busy. Try again later.",
+      retryable: true,
+    },
+    requestId: REQUEST_ID,
+  });
 });
 
 test("run start maps operation, capacity, lifecycle, and admission failures", async () => {

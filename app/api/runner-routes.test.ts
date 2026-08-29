@@ -78,7 +78,7 @@ function run(overrides: Partial<RunSnapshot> = {}): RunSnapshot {
   };
 }
 
-function service(): RunnerService {
+function service(overrides: Partial<RunnerService> = {}): RunnerService {
   return {
     createAgent: async () => ({ agent: definition(), kind: "created" }),
     deleteAgent: async () => ({ kind: "deleted" }),
@@ -147,6 +147,7 @@ function service(): RunnerService {
       kind: "updated",
     }),
     warmAgent: async () => ({ kind: "ready", warm: definition().warm }),
+    ...overrides,
   };
 }
 
@@ -155,10 +156,23 @@ type RouteFixtureState = {
   diagnosticAuthorizationCalls: number;
   diagnosticMode: "failure" | "success";
   diagnosticProviderCalls: number;
+  updateCalls: number;
 };
 
 function testHandlers(state: RouteFixtureState): RunnerHttpHandlers {
-  const runner = service();
+  const runner = service({
+    updateAgent: () => {
+      state.updateCalls += 1;
+      return Promise.resolve(
+        state.updateCalls > 1
+          ? { kind: "busy" }
+          : {
+              agent: definition({ name: "Updated" }),
+              kind: "updated",
+            }
+      );
+    },
+  });
   return createRunnerHttpHandlers({
     auth: {
       authorizeDiagnostic: (request) => {
@@ -230,6 +244,7 @@ async function executeFixture(): Promise<void> {
     diagnosticAuthorizationCalls: 0,
     diagnosticMode: "success",
     diagnosticProviderCalls: 0,
+    updateCalls: 0,
   };
   const handlers = testHandlers(state);
   await mock.module("@/lib/runner/route-dependencies", {
@@ -361,6 +376,25 @@ async function executeFixture(): Promise<void> {
   assert.equal(
     agentEnvelopeSchema.parse(await updateResponse.json()).agent.name,
     "Updated"
+  );
+
+  const busyUpdateResponse = await agent.PUT(
+    new Request(`https://app.test/api/agents/${AGENT_ID}`, {
+      body: JSON.stringify({
+        backend: "cloud",
+        instructions: "Do the thing.",
+        model: "auto",
+        name: "Blocked",
+        runtime: "copilot",
+      }),
+      method: "PUT",
+    }),
+    context
+  );
+  assert.equal(busyUpdateResponse.status, 409);
+  assert.equal(
+    runErrorEnvelopeSchema.parse(await busyUpdateResponse.json()).error.code,
+    "busy"
   );
 
   const deleteResponse = await agent.DELETE(
