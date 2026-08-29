@@ -401,7 +401,7 @@ test("start maps idempotent admission outcomes and preserves a request hash", as
   assert.equal((admission as { authVersion: number }).authVersion, 7);
 });
 
-test("start dispatches an admitted claim once with its exact authority", async () => {
+test("start preserves an admitted claim as opaque scheduling intent", async () => {
   const authority = {
     expectedVersion: 1,
     leaseToken: "opaque-claim",
@@ -432,10 +432,13 @@ test("start dispatches an admitted claim once with its exact authority", async (
     task: "Do the thing.",
   });
 
-  assert.deepEqual(started, { kind: "accepted", run: run() });
-  assert.equal(dispatched.length, 1);
-  assert.equal(dispatched[0], claim);
-  assert.equal(dispatched[0]?.authority, authority);
+  assert.deepEqual(started, {
+    admission: "claimed",
+    claimed: claim,
+    kind: "accepted",
+    run: run(),
+  });
+  assert.equal(dispatched.length, 0);
 });
 
 test("start preserves duplicates without dispatch or recovery scheduling", async () => {
@@ -458,7 +461,7 @@ test("start preserves duplicates without dispatch or recovery scheduling", async
       operationId: OPERATION_ID,
       task: "Do the thing.",
     }),
-    { kind: "accepted", run: existing }
+    { admission: "duplicate", kind: "accepted", run: existing }
   );
   assert.equal(dispatched, 0);
 });
@@ -477,11 +480,11 @@ test("start marks only newly queued runs for bounded recovery", async () => {
       operationId: OPERATION_ID,
       task: "Do the thing.",
     }),
-    { kind: "accepted", run: run(), scheduleReconciliation: true }
+    { admission: "created", kind: "accepted", run: run() }
   );
 });
 
-test("claimed dispatch failures stay sanitized and defer to durable recovery", async () => {
+test("start does not begin claimed provider dispatch before scheduling", async () => {
   const claim = {
     authority: {
       expectedVersion: 1,
@@ -501,7 +504,7 @@ test("claimed dispatch failures stay sanitized and defer to durable recovery", a
     createId: () => RUN_ID,
     dispatchClaim: () => {
       dispatches += 1;
-      return Promise.reject(new Error("provider=private-detail"));
+      return new Promise(() => undefined);
     },
     store: baseStore(),
   });
@@ -511,10 +514,13 @@ test("claimed dispatch failures stay sanitized and defer to durable recovery", a
     task: "Do the thing.",
   });
 
-  assert.deepEqual(started, { kind: "accepted", run: run() });
-  assert.equal(dispatches, 1);
-  assert.equal(JSON.stringify(started).includes("private-detail"), false);
-  assert.equal(JSON.stringify(started).includes("opaque-secret-claim"), false);
+  assert.deepEqual(started, {
+    admission: "claimed",
+    claimed: claim,
+    kind: "accepted",
+    run: run(),
+  });
+  assert.equal(dispatches, 0);
 });
 
 test("start maps admission conflict, capacity, and unavailable results without provider work", async () => {

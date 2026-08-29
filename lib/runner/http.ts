@@ -22,6 +22,7 @@ import type {
   AbuseAdmission,
   AbuseEnforcementInput,
 } from "@/lib/abuse/enforce";
+import { admitAndScheduleRunnerRun } from "./admit-and-schedule";
 import type {
   RunnerAuth,
   RunnerAuthenticatedSubscriber,
@@ -724,7 +725,12 @@ export function createRunnerHttpHandlers(
           agentId,
           body.value
         );
-        switch (result.kind) {
+        const scheduled = admitAndScheduleRunnerRun(result, {
+          dispatchClaim: service.dispatchClaim,
+          reconcile: service.reconcileAndDispatch,
+          schedule: dependencies.after ?? (() => undefined),
+        });
+        switch (scheduled.kind) {
           case "invalid":
             return invalidRequest(dependencies);
           case "not_found":
@@ -734,7 +740,7 @@ export function createRunnerHttpHandlers(
               message: `Cloud agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
             });
           case "refused":
-            switch (result.code) {
+            switch (scheduled.code) {
               case "operation_conflict":
                 return runnerErrorResponse(dependencies, "operation_conflict", {
                   message:
@@ -756,24 +762,19 @@ export function createRunnerHttpHandlers(
                   "admission_unavailable"
                 );
               default:
-                return unreachableResult(result.code);
+                return unreachableResult(scheduled.code);
             }
           case "accepted":
-            if (result.scheduleReconciliation) {
-              schedule(dependencies, async () => {
-                await service.reconcileAndDispatch();
-              });
-            }
             return runnerJsonResponse(
               runSnapshotEnvelopeSchema,
               {
                 apiVersion: AGENT_RUNNER_API_VERSION,
-                run: result.run,
+                run: scheduled.run,
               },
               { status: 202 }
             );
           default:
-            return unreachableResult(result);
+            return unreachableResult(scheduled);
         }
       }),
 

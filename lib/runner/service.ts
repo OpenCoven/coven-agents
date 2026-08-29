@@ -135,9 +135,15 @@ export type RunnerListRunsResult =
 
 export type RunnerStartResult =
   | Readonly<{
+      admission: "claimed";
+      claimed: RunnerClaimedDispatch;
       kind: "accepted";
       run: RunSnapshot;
-      scheduleReconciliation?: true;
+    }>
+  | Readonly<{
+      admission: "created" | "duplicate";
+      kind: "accepted";
+      run: RunSnapshot;
     }>
   | Readonly<{ kind: "not_found" }>
   | Readonly<{ kind: "unsupported_harness" }>
@@ -151,6 +157,10 @@ export type RunnerStartResult =
       retryable: boolean;
     }>
   | Readonly<{ kind: "invalid" }>;
+
+export type RunnerScheduledStartResult =
+  | Readonly<{ kind: "accepted"; run: RunSnapshot }>
+  | Exclude<RunnerStartResult, { kind: "accepted" }>;
 
 export type RunnerReadRunResult =
   | Readonly<{ kind: "found"; run: RunSnapshot }>
@@ -219,6 +229,9 @@ export type RunnerService = Readonly<{
     agentId: string
   ) => Promise<RunnerDeleteResult>;
   diagnoseSandbox: () => Promise<RunnerDiagnosticResult>;
+  dispatchClaim: (
+    claimed: RunnerClaimedDispatch
+  ) => Promise<RunnerDispatchResult>;
   getAgent: (
     principal: RunnerPrincipal,
     agentId: string
@@ -489,6 +502,13 @@ export function createRunnerService(
       return dependencies.diagnoseSandbox();
     },
 
+    dispatchClaim: (claimed) => {
+      if (!dependencies.dispatchClaim) {
+        throw configuredError("dispatch");
+      }
+      return dependencies.dispatchClaim(claimed);
+    },
+
     getAgent,
 
     getRun: async (principal, runId) => {
@@ -644,21 +664,24 @@ export function createRunnerService(
       }
       switch (admitted.kind) {
         case "claimed":
-          try {
-            await dependencies.dispatchClaim?.(admitted.claimed);
-          } catch {
-            // The durable lease and authenticated reconciliation remain the
-            // recovery path; provider details must not change the HTTP result.
-          }
-          return { kind: "accepted", run: requireSnapshot(admitted.run) };
-        case "created":
           return {
+            admission: "claimed",
+            claimed: admitted.claimed,
             kind: "accepted",
             run: requireSnapshot(admitted.run),
-            scheduleReconciliation: true,
+          };
+        case "created":
+          return {
+            admission: "created",
+            kind: "accepted",
+            run: requireSnapshot(admitted.run),
           };
         case "duplicate":
-          return { kind: "accepted", run: requireSnapshot(admitted.run) };
+          return {
+            admission: "duplicate",
+            kind: "accepted",
+            run: requireSnapshot(admitted.run),
+          };
         case "refused":
           switch (admitted.error.code) {
             case "agent_not_found":

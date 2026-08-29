@@ -29,6 +29,7 @@ test("core runtime composes subscriber and operator services without diagnostics
   ]);
 
   assert.equal(typeof subscriberService.createAgent, "function");
+  assert.equal(typeof subscriberService.dispatchClaim, "function");
   assert.equal(typeof operatorService.reconcileAndDispatch, "function");
   assert.throws(
     () => subscriberService.diagnoseSandbox(),

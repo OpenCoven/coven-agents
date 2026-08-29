@@ -18,6 +18,7 @@ import type {
 } from "./auth";
 import { createRunnerHttpHandlers, type RunnerHttpHandlers } from "./http";
 import { type RunnerService, RunnerServiceError } from "./service";
+import type { RunnerClaimedDispatch, RunnerDispatchAuthority } from "./types";
 
 const USER_ID = "9c858901-8a57-4791-81fe-4c455b099bc9";
 const TENANT = "u_9c8589018a57479181fe4c455b099bc9";
@@ -100,6 +101,10 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
       ok: true,
       output: "coven-agents",
     }),
+    dispatchClaim: async (claimed) => ({
+      kind: "started",
+      runId: claimed.run.id,
+    }),
     getAgent: async () => ({ agent: definition(), kind: "found" }),
     getRun: async () => ({ kind: "found", run: run() }),
     listAgentRuns: async () => ({ kind: "found", runs: [run()] }),
@@ -130,9 +135,9 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     }),
     reconcileAndDispatch: async () => counts(),
     startRun: async () => ({
+      admission: "created",
       kind: "accepted",
       run: run(),
-      scheduleReconciliation: true,
     }),
     stopRun: async () => ({
       kind: "stopped",
@@ -826,7 +831,7 @@ test("run start returns 202 and schedules bounded recovery for a created run", a
   assert.equal(fixture.admissions.at(-1)?.route, "runner_run_start");
 });
 
-test("run start returns 202 without scheduling duplicate or claimed results", async () => {
+test("run start returns 202 without scheduling duplicate results", async () => {
   let reconciled = 0;
   const fixture = handlers({
     service: service({
@@ -836,6 +841,7 @@ test("run start returns 202 without scheduling duplicate or claimed results", as
       },
       startRun: () =>
         Promise.resolve({
+          admission: "duplicate",
           kind: "accepted",
           run: run({
             id: "55555555-6666-4777-8888-999999999999",
@@ -864,13 +870,86 @@ test("run start returns 202 without scheduling duplicate or claimed results", as
   assert.equal(reconciled, 0);
 });
 
+test("run start returns before a pending claimed dispatch and hides scheduling authority", async () => {
+  const authority = {
+    expectedVersion: 1,
+    leaseToken: "opaque-http-claim",
+    runId: RUN_ID,
+  } as RunnerDispatchAuthority;
+  const claimed = {
+    authority,
+    run: { id: RUN_ID },
+  } as unknown as RunnerClaimedDispatch;
+  let dispatches = 0;
+  let resolveDispatch: (() => void) | undefined;
+  const dispatchPending = new Promise<void>((resolve) => {
+    resolveDispatch = resolve;
+  });
+  let scheduled: void | Promise<void> = Promise.resolve();
+  const fixture = handlers({
+    after: (callback) => {
+      scheduled = callback();
+    },
+    service: service({
+      dispatchClaim: (value) => {
+        dispatches += 1;
+        assert.equal(value, claimed);
+        assert.equal(value.authority, authority);
+        return dispatchPending.then(() => ({
+          kind: "started" as const,
+          runId: RUN_ID,
+        }));
+      },
+      reconcileAndDispatch: () =>
+        Promise.reject(new Error("claimed run must not reconcile")),
+      startRun: () =>
+        Promise.resolve({
+          admission: "claimed" as const,
+          claimed,
+          kind: "accepted" as const,
+          run: run(),
+        }),
+    }),
+  });
+
+  const response = await fixture.handlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({
+        operationId: OPERATION_ID,
+        task: "Do the thing.",
+      }),
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 202);
+  assert.equal(dispatches, 1);
+  const json = await response.json();
+  assert.deepEqual(json, {
+    apiVersion: AGENT_RUNNER_API_VERSION,
+    run: run(),
+  });
+  assert.equal(JSON.stringify(json).includes("authority"), false);
+  assert.equal(JSON.stringify(json).includes("scheduling"), false);
+  assert.equal(JSON.stringify(json).includes("admission"), false);
+  assert.equal(JSON.stringify(json).includes("opaque-http-claim"), false);
+
+  resolveDispatch?.();
+  await scheduled;
+});
+
 test("run start passes only the trusted authenticated auth version to the service", async () => {
   let startArguments: unknown[] = [];
   const fixture = handlers({
     service: service({
       startRun: ((...arguments_: unknown[]) => {
         startArguments = arguments_;
-        return Promise.resolve({ kind: "accepted", run: run() });
+        return Promise.resolve({
+          admission: "duplicate",
+          kind: "accepted",
+          run: run(),
+        });
       }) as RunnerService["startRun"],
     }),
   });

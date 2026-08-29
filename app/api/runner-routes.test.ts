@@ -87,6 +87,10 @@ function service(): RunnerService {
       ok: true,
       output: "coven-agents",
     }),
+    dispatchClaim: async (claimed) => ({
+      kind: "started",
+      runId: claimed.run.id,
+    }),
     getAgent: async () => ({ agent: definition(), kind: "found" }),
     getRun: async () => ({ kind: "found", run: run() }),
     listAgentRuns: async () => ({ kind: "found", runs: [run()] }),
@@ -125,7 +129,11 @@ function service(): RunnerService {
       terminalCleaned: 0,
       terminalized: 0,
     }),
-    startRun: async () => ({ kind: "accepted", run: run() }),
+    startRun: async () => ({
+      admission: "duplicate",
+      kind: "accepted",
+      run: run(),
+    }),
     stopRun: async () => ({
       kind: "stopped",
       run: run({
