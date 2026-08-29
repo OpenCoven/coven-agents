@@ -222,8 +222,9 @@ test("credential acquisition releases reservation and lease when preparation fai
   ]);
   assert.equal(
     result.kind === "unavailable" && result.error.code,
-    "credential_unavailable"
+    "no_credential"
   );
+  assert.equal(result.kind === "unavailable" && result.error.retryable, false);
 });
 
 test("pre-launch compensation locks before lease revocation and discards atomically", async () => {
@@ -430,6 +431,32 @@ test("credential issue failures release pre-launch resources without reading pla
   );
   assert.equal(JSON.stringify(result).includes("private credential"), false);
   assert.deepEqual(calls, ["reserve", "issue", "cleanup:prelaunch"]);
+});
+
+test("blank credential reads are non-retryable and clean pre-launch resources", async () => {
+  const calls: string[] = [];
+  const service = dependencies(calls);
+  service.readCredential = async () => {
+    calls.push("read");
+    return " \n\t";
+  };
+
+  const result = await acquireRunnerCredential(input(), service);
+
+  assert.equal(result.kind, "unavailable");
+  assert.equal(
+    result.kind === "unavailable" && result.error.code,
+    "no_credential"
+  );
+  assert.equal(result.kind === "unavailable" && result.error.retryable, false);
+  assert.deepEqual(calls, [
+    "reserve",
+    "issue",
+    "lease",
+    "prepare",
+    "read",
+    "cleanup:prelaunch",
+  ]);
 });
 
 test("an existing reserved run never steals or releases another acquisition", async () => {

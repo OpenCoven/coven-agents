@@ -435,6 +435,9 @@ function reservationOutcome(
 }
 
 function leaseDeniedError(error: unknown): RunnerCredentialServiceError {
+  if (error instanceof RunnerCredentialServiceError) {
+    return error;
+  }
   if (error instanceof CredentialLeaseDeniedError) {
     return new RunnerCredentialServiceError(
       "credential_lease_unavailable",
