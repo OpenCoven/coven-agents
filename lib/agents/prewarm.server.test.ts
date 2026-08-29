@@ -21,6 +21,25 @@ const AUTHORIZED = {
   userId: USER_ID,
 };
 
+function settlesWithin<T>(promise: Promise<T>, milliseconds = 100): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("operation did not settle promptly")),
+      milliseconds
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 test("a subscriber warms in-process with the exact authenticated session and principal", async () => {
   let loaded = 0;
   let loadSignal: AbortSignal | undefined;
@@ -267,4 +286,23 @@ test("wall-clock expiry blocks service work before the timer callback can run", 
 
   assert.equal(constructed, 0);
   assert.equal(invoked, 0);
+});
+
+test("the prewarm wrapper settles at its deadline when cleanup never returns", async () => {
+  const started = Date.now();
+
+  await settlesWithin(
+    prewarmTenantSandbox(subscribedUser(), {
+      authorizeCurrent: () => Promise.resolve(AUTHORIZED),
+      loadRunner: () =>
+        Promise.resolve({
+          createProductionRunnerService: () => ({
+            prewarmMostRecent: () => new Promise(() => undefined),
+          }),
+        }),
+      timeoutMs: 5,
+    })
+  );
+
+  assert.ok(Date.now() - started < 1000);
 });

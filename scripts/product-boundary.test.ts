@@ -174,6 +174,20 @@ test("the retained Worker harness is explicitly rollback-only", () => {
   assert.match(guide, /emergency rollback[\s\S]*Cloudflare Worker/i);
 });
 
+test("the README describes persistent per-agent Daytona isolation accurately", () => {
+  const readme = readFileSync(readmeUrl, "utf8");
+
+  assert.match(readme, /one tenant-scoped persistent Daytona sandbox/i);
+  assert.match(readme, /Runs reuse that sandbox/i);
+  assert.match(readme, /short-lived process session/i);
+  assert.match(readme, /mode-`0600` credential file/i);
+  assert.match(
+    readme,
+    /deleting a run record does not delete[\s\S]*sandbox or its workspace/i
+  );
+  assert.doesNotMatch(readme, /per-run Daytona sandbox/i);
+});
+
 test("connection status contains only provider-neutral application states", () => {
   const source = readFileSync(
     new URL("lib/agents/connection-status.ts", repositoryRoot),

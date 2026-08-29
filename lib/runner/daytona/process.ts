@@ -76,6 +76,14 @@ export type DaytonaProcessSandbox = Readonly<{
   process: DaytonaProcessService;
 }>;
 
+export type DaytonaProbeOptions = Readonly<{
+  deadline?: number;
+  now?: () => number;
+  signal?: AbortSignal;
+  sweepStaleSessions?: boolean;
+  timeoutSeconds?: number;
+}>;
+
 export class DaytonaProcessError extends Error {
   readonly code:
     | "credential_cleanup_failed"
@@ -878,14 +886,14 @@ export async function sweepDaytonaCredentials(
 
 export function probeDaytonaHarnesses(
   sandbox: DaytonaProcessSandbox,
-  options: Readonly<{
-    signal?: AbortSignal;
-    timeoutSeconds?: number;
-  }> = {}
+  options: DaytonaProbeOptions = {}
 ): Promise<HarnessStatus[]> {
   if (options.signal) {
     return probeDaytonaHarnessesInSession(sandbox, {
+      deadline: options.deadline,
+      now: options.now,
       signal: options.signal,
+      sweepStaleSessions: options.sweepStaleSessions,
       timeoutSeconds: Math.min(
         STAGING_TIMEOUT_SECONDS,
         options.timeoutSeconds ?? STAGING_TIMEOUT_SECONDS
@@ -922,16 +930,113 @@ function abortReason(signal: AbortSignal): Error {
     : new Error("Daytona harness probe was aborted.");
 }
 
+function cleanupRemainingMs(options: DaytonaProbeOptions): number | null {
+  return options.deadline === undefined
+    ? null
+    : options.deadline - (options.now ?? Date.now)();
+}
+
+function settleCleanupWithinDeadline(
+  cleanup: Promise<void>,
+  options: DaytonaProbeOptions
+): Promise<boolean> {
+  cleanup.catch(() => undefined);
+  const remainingMs = cleanupRemainingMs(options);
+  if (remainingMs === null) {
+    return cleanup.then(
+      () => true,
+      () => false
+    );
+  }
+  if (remainingMs <= 0) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), remainingMs);
+    cleanup.then(
+      () => {
+        clearTimeout(timer);
+        resolve(true);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(false);
+      }
+    );
+  });
+}
+
+function settleValueWithinDeadline<T>(
+  operation: Promise<T>,
+  options: DaytonaProbeOptions
+): Promise<{ kind: "settled"; value: T } | { kind: "unconfirmed" }> {
+  operation.catch(() => undefined);
+  const remainingMs = cleanupRemainingMs(options);
+  if (remainingMs === null) {
+    return operation.then(
+      (value) => ({ kind: "settled" as const, value }),
+      () => ({ kind: "unconfirmed" as const })
+    );
+  }
+  if (remainingMs <= 0) {
+    return Promise.resolve({ kind: "unconfirmed" });
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(
+      () => resolve({ kind: "unconfirmed" }),
+      remainingMs
+    );
+    operation.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve({ kind: "settled", value });
+      },
+      () => {
+        clearTimeout(timer);
+        resolve({ kind: "unconfirmed" });
+      }
+    );
+  });
+}
+
+async function sweepStaleProbeSessions(
+  sandbox: DaytonaProcessSandbox,
+  options: DaytonaProbeOptions
+): Promise<void> {
+  const listed = await settleValueWithinDeadline(
+    sandbox.process.listSessions(),
+    options
+  );
+  if (listed.kind !== "settled") {
+    throw new Error("Daytona probe-session recovery was not confirmed.");
+  }
+  for (const session of listed.value) {
+    if (!session.sessionId.startsWith("coven-probe-")) {
+      continue;
+    }
+    // biome-ignore lint/performance/noAwaitInLoops: each deterministic stale probe session must be removed and verified before the next cleanup begins.
+    const confirmed = await settleCleanupWithinDeadline(
+      removeSession(sandbox, session.sessionId),
+      options
+    );
+    if (!confirmed) {
+      throw new Error("Daytona probe-session recovery was not confirmed.");
+    }
+  }
+}
+
 /**
- * Settles an aborted command only after its provider session is confirmed gone.
+ * Starts provider cleanup before settling an aborted command.
  *
- * The losing SDK promise keeps both handlers attached so a later provider
- * response or rejection cannot become an unhandled process error.
+ * Cleanup is observed only through the remaining absolute deadline. The losing
+ * SDK and cleanup promises keep handlers attached so later provider outcomes
+ * cannot become unhandled process errors.
  */
 function awaitCommandAfterAbortCleanup<T>(
   command: Promise<T>,
   signal: AbortSignal,
-  cleanup: () => Promise<void>
+  cleanup: () => Promise<void>,
+  options: DaytonaProbeOptions
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -944,16 +1049,8 @@ function awaitCommandAfterAbortCleanup<T>(
       complete();
     };
     const rejectAfterCleanup = () => {
-      cleanup().then(
-        () => finish(() => reject(abortReason(signal))),
-        (error: unknown) =>
-          finish(() =>
-            reject(
-              new Error("Daytona probe session cleanup failed after abort.", {
-                cause: error,
-              })
-            )
-          )
+      settleCleanupWithinDeadline(cleanup(), options).then(() =>
+        finish(() => reject(abortReason(signal)))
       );
     };
     const onAbort = () => rejectAfterCleanup();
@@ -984,7 +1081,10 @@ function awaitCommandAfterAbortCleanup<T>(
 
 async function probeDaytonaHarnessesInSession(
   sandbox: DaytonaProcessSandbox,
-  options: Readonly<{ signal: AbortSignal; timeoutSeconds: number }>
+  options: DaytonaProbeOptions & {
+    signal: AbortSignal;
+    timeoutSeconds: number;
+  }
 ): Promise<HarnessStatus[]> {
   if (options.signal.aborted) {
     throw abortReason(options.signal);
@@ -994,6 +1094,10 @@ async function probeDaytonaHarnessesInSession(
     options.timeoutSeconds <= 0
   ) {
     throw new Error("Daytona harness probe requires a positive timeout.");
+  }
+
+  if (options.sweepStaleSessions) {
+    await sweepStaleProbeSessions(sandbox, options);
   }
 
   const sessionId = `coven-probe-${randomUUID()}`;
@@ -1034,7 +1138,8 @@ async function probeDaytonaHarnessesInSession(
             options.timeoutSeconds
           ),
           options.signal,
-          cleanupAfterAbort
+          cleanupAfterAbort,
+          options
         );
         if (options.signal.aborted) {
           throw abortReason(options.signal);
@@ -1065,11 +1170,8 @@ async function probeDaytonaHarnessesInSession(
     return results;
   } finally {
     options.signal.removeEventListener("abort", onAbort);
-    await abortCleanup?.catch(() => undefined);
-    // Verify again after the provider request settles. An abort can race an
-    // ambiguous create, so the first deletion may have arrived before the
-    // session existed.
-    await removeSession(sandbox, sessionId);
+    const cleanup = abortCleanup ?? removeSession(sandbox, sessionId);
+    await settleCleanupWithinDeadline(cleanup, options);
   }
 }
 

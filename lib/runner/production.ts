@@ -549,7 +549,9 @@ function createProductionRunnerServiceForPrincipal(
             },
             probe: async (sandbox, signal, timeoutSeconds) => {
               await probeDaytonaHarnesses(sandbox, {
+                deadline: options?.deadline,
                 signal,
+                sweepStaleSessions: true,
                 timeoutSeconds,
               });
             },

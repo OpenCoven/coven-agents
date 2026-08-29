@@ -44,8 +44,11 @@ rotate first, investigate second.
 
 **Execution**
 
-- Every current run executes in its own Daytona sandbox through the server-side
-  runner service.
+- Each agent owns one tenant-scoped persistent Daytona sandbox through the
+  server-side runner service. Runs reuse that sandbox; each execution attempt
+  gets its own short-lived process session and mode-`0600` credential file,
+  both cleaned after the attempt. The agent workspace persists with its sandbox
+  until the agent is deleted or the sandbox lifecycle explicitly resets it.
 
 **Browser authority stays in the application session.** The browser calls the
 same-origin `/api` surface with its Auth.js cookie. Agent and run routes
@@ -300,8 +303,10 @@ commands in [`worker/harness/README.md`](worker/harness/README.md). The
 - `packages/harness` is the single definition of the CLI subset, the JSONL event
   normalizer, and the run summarizer. The sandbox calls it, so normalization
   cannot drift from the contract.
-- The current runner executes the harness inside the per-run Daytona sandbox.
-  The retained rollback Worker uses the separate image built from
+- The current runner executes the harness inside the agent's persistent,
+  tenant-scoped Daytona sandbox. Each run attempt uses a separate process
+  session and temporary credential file; deleting a run record does not delete
+  the sandbox or its workspace. The retained rollback Worker uses the separate image built from
   `worker/Dockerfile` and `worker/wrangler.jsonc`.
 - `GET /api/harnesses` probes the sandbox and reports which harnesses are
   installed, their versions, and whether their event translation is implemented.

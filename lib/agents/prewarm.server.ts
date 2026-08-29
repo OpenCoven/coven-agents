@@ -168,10 +168,13 @@ export async function prewarmTenantSandbox(
     ) {
       return;
     }
-    await service.prewarmMostRecent(session, {
-      deadline: deadlineAt,
-      signal: controller.signal,
-    });
+    await awaitUntilAbort(
+      service.prewarmMostRecent(session, {
+        deadline: deadlineAt,
+        signal: controller.signal,
+      }),
+      controller.signal
+    );
   } catch {
     // The next run pays the cold start it would have paid anyway.
   } finally {

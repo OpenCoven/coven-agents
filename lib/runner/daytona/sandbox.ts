@@ -291,6 +291,38 @@ function withLifecycleAbort<T>(
   });
 }
 
+function settleCleanupWithinLifecycle(
+  operation: Promise<unknown>,
+  lifecycle: DaytonaSandboxLifecycleDependencies | undefined
+): Promise<boolean> {
+  operation.catch(() => undefined);
+  if (lifecycle?.deadline === undefined) {
+    return lifecycle?.signal?.aborted
+      ? Promise.resolve(false)
+      : operation.then(
+          () => true,
+          () => false
+        );
+  }
+  const remainingMs = lifecycle.deadline - lifecycleNow(lifecycle);
+  if (remainingMs <= 0) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), remainingMs);
+    operation.then(
+      () => {
+        clearTimeout(timer);
+        resolve(true);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(false);
+      }
+    );
+  });
+}
+
 function sleepForTransition(
   milliseconds: number,
   signal: AbortSignal | undefined
@@ -999,9 +1031,11 @@ export async function warmDaytonaSandbox(
       expectedVersion: warm.value.version,
       status: "failed",
     });
+  const settleFailedWarm = () =>
+    settleCleanupWithinLifecycle(finishFailedWarm(), dependencies.lifecycle);
 
   if (lifecycleAborted(dependencies.lifecycle)) {
-    await finishFailedWarm();
+    await settleFailedWarm();
     return { error: "retryable", kind: "failed" };
   }
 
@@ -1012,7 +1046,7 @@ export async function warmDaytonaSandbox(
       providerTimeoutSeconds(dependencies.lifecycle)
     );
   } catch (error) {
-    await finishFailedWarm();
+    await settleFailedWarm();
     return {
       error: lifecycleAborted(dependencies.lifecycle)
         ? "retryable"
@@ -1021,7 +1055,7 @@ export async function warmDaytonaSandbox(
     };
   }
   if (lifecycleAborted(dependencies.lifecycle)) {
-    await finishFailedWarm();
+    await settleFailedWarm();
     return { error: "retryable", kind: "failed" };
   }
   const finished = await dependencies.store.finishDaytonaSandboxWarm(
