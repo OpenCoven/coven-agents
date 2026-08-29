@@ -3629,6 +3629,12 @@ You are running in a dedicated cloud sandbox. Tool calls are pre-approved. Work 
         status: "aborted",
       };
     }
+    if (
+      isTerminal(current.run.status) &&
+      current.run.error?.code === UNSUPPORTED_HARNESS_RUN_ERROR.code
+    ) {
+      return { status: "completed" };
+    }
     const definition = this.requireActiveDefinition();
     if (
       !isTerminal(current.run.status) &&

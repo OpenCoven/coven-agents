@@ -2053,10 +2053,18 @@ test("legacy recovered fibers terminalize without sandbox cleanup or provider wo
     await yolo.startAdmitted(prepared.run.id, "1:legacy-recovered-fiber"),
     true
   );
+  let identityReads = 0;
+  const originalReadIdentity = Reflect.get(yolo, "readIdentityToken") as (
+    runId: string
+  ) => Promise<string | null>;
+  Reflect.set(yolo, "readIdentityToken", async (runId: string) => {
+    identityReads += 1;
+    return await originalReadIdentity.call(yolo, runId);
+  });
   setLegacyRuntime(yolo);
   const startedFibers = fiberLog.started.length;
 
-  const result = await yolo.onFiberRecovered({
+  const recovery = {
     createdAt: Date.now(),
     id: "legacy-recovered-fiber",
     metadata: {
@@ -2067,18 +2075,35 @@ test("legacy recovered fibers terminalize without sandbox cleanup or provider wo
     recoveryReason: "interrupted",
     snapshot: null,
     status: "interrupted",
-  });
+  } as const;
+  const result = await yolo.onFiberRecovered(recovery);
 
   assert.deepEqual(result, {
     error: "Cloud agents must select a supported harness runtime: copilot.",
     status: "error",
   });
-  assert.deepEqual(yolo.getRun(prepared.run.id)?.error, {
+  const terminalRun = yolo.getRun(prepared.run.id);
+  assert.deepEqual(terminalRun?.error, {
     code: "harness_unsupported",
     message: "Cloud agents must select a supported harness runtime: copilot.",
     retryable: false,
   });
+  const terminalEvents = yolo.getEventStream(prepared.run.id, 0)?.events;
+  const repeated = await yolo.onFiberRecovered(recovery);
+
+  assert.deepEqual(repeated, { status: "completed" });
+  assert.equal(yolo.getRun(prepared.run.id)?.status, "failed");
+  assert.deepEqual(yolo.getRun(prepared.run.id)?.error, terminalRun?.error);
+  assert.equal(
+    yolo.getRun(prepared.run.id)?.completedAt,
+    terminalRun?.completedAt
+  );
+  assert.deepEqual(
+    yolo.getEventStream(prepared.run.id, 0)?.events,
+    terminalEvents
+  );
   assert.deepEqual(released, [prepared.run.id]);
+  assert.equal(identityReads, 0);
   assert.equal(fiberLog.started.length, startedFibers);
   assert.deepEqual(destroyedSandboxes(), []);
   assert.equal(sandboxGetCount(), 0);
