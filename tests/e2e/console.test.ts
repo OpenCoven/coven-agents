@@ -64,7 +64,11 @@ test.describe("Run console", () => {
     const protectedRequests: string[] = [];
     page.on("request", (request) => {
       const { pathname } = new URL(request.url());
-      if (pathname === "/api/credentials" || pathname === "/api/agents") {
+      if (
+        pathname === "/api/credentials" ||
+        pathname === "/api/agents" ||
+        pathname === "/api/tenant/prewarm"
+      ) {
         protectedRequests.push(pathname);
       }
     });
@@ -80,6 +84,126 @@ test.describe("Run console", () => {
       page.getByRole("dialog", { name: "Search runs, agents, and commands" })
     ).toBeVisible();
     expect(protectedRequests).toEqual([]);
+  });
+
+  test("an authenticated subscriber prewarms once through the same-origin API", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let prewarmRequests = 0;
+    await page.route("**/api/tenant/prewarm", (route) => {
+      prewarmRequests += 1;
+      const request = route.request();
+      expect(request.method()).toBe("POST");
+      expect(new URL(request.url()).pathname).toBe("/api/tenant/prewarm");
+      expect(request.headers().authorization).toBeUndefined();
+      expect(request.headers()["x-runner-token"]).toBeUndefined();
+      expect(request.headers().cookie).toContain("authjs.session-token=");
+      return route.fulfill({ status: 204 });
+    });
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [retainedAgent] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+
+    await page.goto("/agents");
+    await expect(page.getByText(retainedAgent.name).first()).toBeVisible();
+    await expect.poll(() => prewarmRequests).toBe(1);
+
+    await notifySessionChange(page);
+    await page.waitForTimeout(100);
+    expect(prewarmRequests).toBe(1);
+  });
+
+  test("an account switch aborts stale prewarm and starts one for the new tenant", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies("first@example.invalid"));
+    let sessionOverride: Record<string, unknown> | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      sessionOverride === undefined
+        ? route.continue()
+        : route.fulfill({ json: sessionOverride })
+    );
+    let prewarmRequests = 0;
+    let firstPrewarmStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstPrewarmStarted = resolve;
+    });
+    let releaseFirst!: () => Promise<void>;
+    await page.route("**/api/tenant/prewarm", (route) => {
+      prewarmRequests += 1;
+      if (prewarmRequests > 1) {
+        return route.fulfill({ status: 204 });
+      }
+      firstPrewarmStarted();
+      return new Promise<void>((resolve) => {
+        releaseFirst = async () => {
+          await route.fulfill({ status: 204 }).catch(() => undefined);
+          resolve();
+        };
+      });
+    });
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    let agentRequests = 0;
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        agentRequests += 1;
+        return route.fulfill({
+          json: {
+            agents: [
+              {
+                ...retainedAgent,
+                id: agentRequests === 1 ? AGENT_ID : OTHER_AGENT_ID,
+                name:
+                  agentRequests === 1
+                    ? "First account agent"
+                    : "Second account agent",
+              },
+            ],
+          },
+        });
+      }
+      return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+    });
+
+    await page.goto("/agents");
+    await started;
+    const stalePrewarmAborted = page.waitForEvent("requestfailed", {
+      predicate: (request) =>
+        new URL(request.url()).pathname === "/api/tenant/prewarm",
+    });
+    sessionOverride = {
+      expires: "2099-01-01T00:00:00.000Z",
+      user: {
+        authVersion: 0,
+        email: "second@example.invalid",
+        id: "00000000-0000-4000-8000-000000000002",
+        image: null,
+        name: "Second subscriber",
+        type: "subscriber",
+      },
+    };
+    await notifySessionChange(page);
+
+    await stalePrewarmAborted;
+    await expect.poll(() => prewarmRequests).toBe(2);
+    await expect(page.getByText("Second account agent").first()).toBeVisible();
+    await releaseFirst();
+    await page.waitForTimeout(100);
+    expect(prewarmRequests).toBe(2);
   });
 
   test("signed-out profile actions lead to sign-in instead of a doomed write flow", async ({

@@ -145,12 +145,31 @@ test("the same-origin app exposes no browser runner credential boundary", () => 
 
   for (const path of [
     "components/console/run-console.tsx",
+    "lib/agents/browser-transport.ts",
     "lib/agents/client.ts",
   ]) {
     const source = readFileSync(new URL(path, repositoryRoot), "utf8");
     assert.doesNotMatch(source, /\/api\/runner-(?:connection|token)/);
     assert.doesNotMatch(source, /x-runner-token|authorization:\s*Bearer/i);
+    assert.doesNotMatch(
+      source,
+      /https?:\/\/|localStorage|sessionStorage|NEXT_PUBLIC_CLOUD_RUNNER_URL|7331/
+    );
   }
+
+  const authSource = readFileSync(
+    new URL("app/(auth)/auth.ts", repositoryRoot),
+    "utf8"
+  );
+  assert.doesNotMatch(authSource, /prewarmTenantSandbox|from "next\/server"/);
+  assert.equal(
+    existsSync(new URL("lib/agents/prewarm.server.ts", repositoryRoot)),
+    false
+  );
+  assert.equal(
+    existsSync(new URL("lib/agents/prewarm.server.test.ts", repositoryRoot)),
+    false
+  );
 
   for (const path of [
     "app/api/internal/credential/route.ts",

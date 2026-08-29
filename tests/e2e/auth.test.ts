@@ -9,6 +9,13 @@ test.describe("Authentication Pages", () => {
   });
 
   test("login offers GitHub-only guest account creation", async ({ page }) => {
+    const prewarmRequests: string[] = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/api/tenant/prewarm") {
+        prewarmRequests.push(request.method());
+      }
+    });
+
     await page.goto("/login");
     await expect(
       page.getByRole("heading", { name: "Create or access your account" })
@@ -19,10 +26,9 @@ test.describe("Authentication Pages", () => {
       )
     ).toBeVisible();
     await expect(
-      page.getByText(
-        /we begin warming the sandbox so the first mission starts fast/i
-      )
+      page.getByText(/Agents run in isolated Daytona sandboxes/i)
     ).toBeVisible();
+    await expect(page.getByText(/Cloudflare/i)).toHaveCount(0);
     const githubButton = page.getByRole("button", {
       name: "Continue with GitHub",
     });
@@ -30,6 +36,7 @@ test.describe("Authentication Pages", () => {
     await expect(githubButton).toBeEnabled();
     await expect(page.getByLabel("Email")).toHaveCount(0);
     await expect(page.getByLabel("Password")).toHaveCount(0);
+    expect(prewarmRequests).toEqual([]);
   });
 
   test("rate-limited POST GitHub sign-in stays on login and offers a retry", async ({
