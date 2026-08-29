@@ -21,6 +21,10 @@ test("warming routes declare the duration required by after and synchronous work
     /maxDuration\s*=\s*300/
   );
   assert.match(
+    source("../../app/api/agents/[id]/route.ts"),
+    /maxDuration\s*=\s*300/
+  );
+  assert.match(
     source("../../app/api/tenant/prewarm/route.ts"),
     /maxDuration\s*=\s*300/
   );
