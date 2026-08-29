@@ -50,11 +50,6 @@ const POLICIES = Object.freeze({
     64_000,
     rateClass(5, 60, 25, 86_400)
   ),
-  runner_connection: closedPolicy(
-    ["ip", "user"],
-    0,
-    rateClass(10, 60, 60, 3600)
-  ),
   runner_diagnostic: closedPolicy(["ip"], 1024, rateClass(2, 300, 10, 86_400)),
   runner_public_read: closedPolicy(["ip"], 0, PUBLIC_READ),
   runner_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
@@ -65,7 +60,6 @@ const POLICIES = Object.freeze({
     rateClass(5, 60, 25, 86_400)
   ),
   runner_stop: closedPolicy(["ip", "tenant"], 1024, DESTRUCTIVE_WRITE),
-  runner_token: closedPolicy(["ip", "user"], 0, rateClass(10, 60, 60, 3600)),
   runner_write: closedPolicy(["ip", "user"], 64_000, SENSITIVE_WRITE),
   stripe_webhook: closedPolicy(["ip"], 262_144, WEBHOOK_WRITE),
   suggestions_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),

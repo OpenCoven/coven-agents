@@ -29,6 +29,26 @@ const TENANT = "u_9c8589018a57479181fe4c455b099bc9";
 const AGENT_ID = "11111111-2222-4333-8444-555555555555";
 const RUN_ID = "22222222-3333-4444-8555-666666666666";
 const OPERATION_ID = "33333333-4444-4555-8666-777777777777";
+const NativeRequest = globalThis.Request;
+
+class Request extends NativeRequest {
+  constructor(
+    input: ConstructorParameters<typeof NativeRequest>[0],
+    init: RequestInit = {}
+  ) {
+    const method = (init.method ?? "GET").toUpperCase();
+    const headers = new Headers(init.headers);
+    if (method === "POST" || method === "PUT" || method === "DELETE") {
+      if (!headers.has("origin")) {
+        headers.set("origin", new URL(String(input)).origin);
+      }
+      if (init.body !== undefined && !headers.has("content-type")) {
+        headers.set("content-type", "application/json");
+      }
+    }
+    super(input, { ...init, headers });
+  }
+}
 
 const subscriber: RunnerAuthenticatedSubscriber = {
   authVersion: 4,
@@ -342,6 +362,51 @@ async function executeFixture(): Promise<void> {
   );
   assert.equal(listResponse.status, 200);
   agentsEnvelopeSchema.parse(await listResponse.json());
+
+  const crossOriginResponse = await agents.POST(
+    new Request("https://app.test/api/agents", {
+      body: JSON.stringify({
+        backend: "cloud",
+        instructions: "Do the thing.",
+        model: "auto",
+        name: "Runner",
+        runtime: "copilot",
+      }),
+      headers: {
+        "content-type": "application/json",
+        origin: "https://sibling.app.test",
+      },
+      method: "POST",
+    })
+  );
+  assert.equal(crossOriginResponse.status, 403);
+  assert.equal(
+    runErrorEnvelopeSchema.parse(await crossOriginResponse.json()).error.code,
+    "origin_rejected"
+  );
+
+  const wrongMediaTypeResponse = await agents.POST(
+    new Request("https://app.test/api/agents", {
+      body: JSON.stringify({
+        backend: "cloud",
+        instructions: "Do the thing.",
+        model: "auto",
+        name: "Runner",
+        runtime: "copilot",
+      }),
+      headers: {
+        "content-type": "text/plain",
+        origin: "https://app.test",
+      },
+      method: "POST",
+    })
+  );
+  assert.equal(wrongMediaTypeResponse.status, 400);
+  assert.equal(
+    runErrorEnvelopeSchema.parse(await wrongMediaTypeResponse.json()).error
+      .code,
+    "unsupported_media_type"
+  );
 
   const createResponse = await agents.POST(
     new Request("https://app.test/api/agents", {

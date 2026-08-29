@@ -12,6 +12,7 @@ import { z } from "zod";
 import { readBoundedJson } from "@/lib/abuse/body";
 import type { AbuseEnforcementInput } from "@/lib/abuse/enforce";
 import { abusePolicyFor } from "@/lib/abuse/policy";
+import { parseCanonicalApplicationOrigin } from "@/lib/auth/application-origin";
 
 export const RUNNER_ERROR_CODES = [
   "abuse_control_unavailable",
@@ -27,6 +28,7 @@ export const RUNNER_ERROR_CODES = [
   "invalid_request",
   "not_found",
   "operation_conflict",
+  "origin_rejected",
   "provider_rejected",
   "provider_unavailable",
   "rate_limited",
@@ -36,6 +38,7 @@ export const RUNNER_ERROR_CODES = [
   "stale_version",
   "subscription_required",
   "unauthorized",
+  "unsupported_media_type",
 ] as const;
 
 export type RunnerErrorCode = (typeof RUNNER_ERROR_CODES)[number];
@@ -112,6 +115,11 @@ const RUNNER_ERROR_DEFINITIONS = {
     retryable: true,
     status: 409,
   },
+  origin_rejected: {
+    message: "Request origin was rejected.",
+    retryable: false,
+    status: 403,
+  },
   provider_rejected: {
     message: "Runner provider rejected the operation.",
     retryable: false,
@@ -157,9 +165,15 @@ const RUNNER_ERROR_DEFINITIONS = {
     retryable: false,
     status: 401,
   },
+  unsupported_media_type: {
+    message: "Request content type must be application/json.",
+    retryable: false,
+    status: 400,
+  },
 } as const satisfies Record<RunnerErrorCode, RunnerErrorDefinition>;
 
 export type RunnerTransportDependencies = Readonly<{
+  appOrigin?: string | (() => string | null);
   createRequestId?: () => string;
 }>;
 
@@ -173,6 +187,31 @@ type RunnerErrorOptions = Readonly<{
 }>;
 
 const emptyObjectSchema = z.object({}).strict();
+
+function canonicalOrigin(value: string): string | null {
+  try {
+    return parseCanonicalApplicationOrigin("Origin", value);
+  } catch {
+    return null;
+  }
+}
+
+function configuredOrigin(
+  dependencies: RunnerTransportDependencies
+): string | null {
+  if (!Object.hasOwn(dependencies, "appOrigin")) {
+    return null;
+  }
+  try {
+    const value =
+      typeof dependencies.appOrigin === "function"
+        ? dependencies.appOrigin()
+        : dependencies.appOrigin;
+    return value ? canonicalOrigin(value) : null;
+  } catch {
+    return null;
+  }
+}
 
 function requestId(dependencies: RunnerTransportDependencies): string {
   const candidate = dependencies.createRequestId?.() ?? randomUUID();
@@ -210,6 +249,42 @@ export function runnerJsonResponse<T>(
   init?: ResponseInit
 ): Response {
   return Response.json(schema.parse(value), init);
+}
+
+export function validateRunnerMutationRequest(
+  request: Request,
+  dependencies: RunnerTransportDependencies,
+  options: Readonly<{ jsonBody: boolean }>
+): Response | null {
+  const requestOrigin = canonicalOrigin(new URL(request.url).origin);
+  const suppliedOrigin = request.headers.get("origin");
+  const origin = suppliedOrigin ? canonicalOrigin(suppliedOrigin) : null;
+  const expectedOrigin = Object.hasOwn(dependencies, "appOrigin")
+    ? configuredOrigin(dependencies)
+    : requestOrigin;
+
+  if (
+    requestOrigin === null ||
+    expectedOrigin === null ||
+    origin === null ||
+    origin !== requestOrigin ||
+    requestOrigin !== expectedOrigin
+  ) {
+    return runnerErrorResponse(dependencies, "origin_rejected");
+  }
+
+  if (options.jsonBody) {
+    const mediaType = request.headers
+      .get("content-type")
+      ?.split(";", 1)[0]
+      ?.trim()
+      .toLowerCase();
+    if (mediaType !== "application/json") {
+      return runnerErrorResponse(dependencies, "unsupported_media_type");
+    }
+  }
+
+  return null;
 }
 
 export function invalidRunnerId(

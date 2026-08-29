@@ -24,8 +24,9 @@ import {
   type RunnerAttemptRedactionEnvelope,
   type RunnerAttemptRedactionScope,
 } from "./attempt-redaction";
-import { daytonaSandboxName } from "./daytona/names";
+import { daytonaProbeSessionName, daytonaSandboxName } from "./daytona/names";
 import {
+  cleanupDaytonaProbeSession,
   type DaytonaLogSnapshot,
   type DaytonaProcessSandbox,
   snapshotDaytonaProcess,
@@ -37,6 +38,7 @@ import {
   type DaytonaSandboxService,
   resetDaytonaSandboxForCancellation,
   SANDBOX_PROVISIONING_TIMEOUT_MS,
+  SANDBOX_WARM_TIMEOUT_MS,
 } from "./daytona/sandbox";
 import {
   projectHarnessRunEvent,
@@ -183,9 +185,11 @@ type SandboxRecoveryStore = Pick<
   RunnerStore,
   | "attachDaytonaSandboxForRecovery"
   | "deleteDecommissionedAgentForRecovery"
+  | "finishDaytonaSandboxWarmForRecovery"
   | "finishDaytonaSandboxResetForRecovery"
   | "resetDaytonaSandboxRecovery"
   | "scanDaytonaSandboxRecoveries"
+  | "scanDaytonaWarmRecoveries"
 >;
 
 export type ReconcileDaytonaSandboxesDependencies = Readonly<{
@@ -196,6 +200,7 @@ export type ReconcileDaytonaSandboxesDependencies = Readonly<{
   providerConcurrency?: number;
   provisioningStaleBefore?: Date;
   store: SandboxRecoveryStore;
+  warmStaleBefore?: Date;
 }>;
 
 export type DaytonaSandboxReconciliationResult = Readonly<{
@@ -637,13 +642,49 @@ async function findSandboxForRecovery(
 async function recoverSandbox(
   agent: RunnerAgentRecord,
   dependencies: ReconcileDaytonaSandboxesDependencies,
-  provisioningStaleBefore: Date
+  provisioningStaleBefore: Date,
+  warmStaleBefore: Date
 ): Promise<SandboxRecoveryOutcome> {
   const fence = {
     agentId: agent.id,
     expectedGeneration: agent.sandboxGeneration,
     expectedVersion: agent.version,
   };
+  if (
+    agent.sandboxLifecycle === "ready" &&
+    agent.warmStatus === "provisioning"
+  ) {
+    if (agent.warmUpdatedAt > warmStaleBefore) {
+      return "deferred";
+    }
+    let sandbox: Sandbox | null;
+    try {
+      sandbox = await findSandboxForRecovery(agent, dependencies.daytona);
+      if (sandbox) {
+        await cleanupDaytonaProbeSession(
+          sandbox as unknown as DaytonaProcessSandbox,
+          daytonaProbeSessionName(
+            agent.id,
+            agent.sandboxGeneration,
+            agent.warmAttemptVersion,
+            agent.warmUpdatedAt
+          )
+        );
+      }
+    } catch {
+      return "deferred";
+    }
+    try {
+      const finished =
+        await dependencies.store.finishDaytonaSandboxWarmForRecovery(
+          dependencies.operator,
+          fence
+        );
+      return finished.kind === "updated" ? "recovered" : "deferred";
+    } catch {
+      return "deferred";
+    }
+  }
   if (
     agent.sandboxLifecycle === "provisioning" &&
     agent.sandboxUpdatedAt > provisioningStaleBefore
@@ -741,37 +782,53 @@ export async function reconcileDaytonaSandboxes(
   const provisioningStaleBefore =
     dependencies.provisioningStaleBefore ??
     new Date(clock().getTime() - SANDBOX_PROVISIONING_TIMEOUT_MS);
-  let agents: RunnerAgentRecord[];
+  const warmStaleBefore =
+    dependencies.warmStaleBefore ??
+    new Date(clock().getTime() - SANDBOX_WARM_TIMEOUT_MS);
+  let failures = 0;
+  let agents: RunnerAgentRecord[] = [];
   try {
     agents = await dependencies.store.scanDaytonaSandboxRecoveries(
       dependencies.operator,
       batchSize
     );
   } catch {
-    return { deferred: 0, failures: 1, recovered: 0 };
+    failures += 1;
   }
-  const outcomes = await mapBounded(
-    agents,
-    providerConcurrency,
-    async (agent) => {
-      try {
-        return await recoverSandbox(
-          agent,
-          dependencies,
-          provisioningStaleBefore
-        );
-      } catch {
-        return "failed" as const;
-      }
+  let warmAgents: RunnerAgentRecord[] = [];
+  try {
+    warmAgents = await dependencies.store.scanDaytonaWarmRecoveries(
+      dependencies.operator,
+      warmStaleBefore,
+      batchSize
+    );
+  } catch {
+    failures += 1;
+  }
+  const recover = async (agent: RunnerAgentRecord) => {
+    try {
+      return await recoverSandbox(
+        agent,
+        dependencies,
+        provisioningStaleBefore,
+        warmStaleBefore
+      );
+    } catch {
+      return "failed" as const;
     }
-  );
+  };
+  const [lifecycleOutcomes, warmOutcomes] = await Promise.all([
+    mapBounded(agents, providerConcurrency, recover),
+    mapBounded(warmAgents, providerConcurrency, recover),
+  ]);
+  const outcomes = [...lifecycleOutcomes, ...warmOutcomes];
   return outcomes.reduce<DaytonaSandboxReconciliationResult>(
     (result, outcome) => ({
       deferred: result.deferred + (outcome === "deferred" ? 1 : 0),
       failures: result.failures + (outcome === "failed" ? 1 : 0),
       recovered: result.recovered + (outcome === "recovered" ? 1 : 0),
     }),
-    { deferred: 0, failures: 0, recovered: 0 }
+    { deferred: 0, failures, recovered: 0 }
   );
 }
 

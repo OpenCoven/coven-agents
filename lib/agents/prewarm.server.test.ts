@@ -3,160 +3,361 @@ import test from "node:test";
 import { prewarmTenantSandbox } from "./prewarm.server";
 
 const USER_ID = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
+const TENANT = "u_3f1a0f4e1f4d4a2e9c1b7d2f5a6b8c90";
 const FUTURE = new Date(Date.now() + 86_400_000);
 
-async function signingKeys(): Promise<{
-  privateKey: string;
-  publicKey: string;
-}> {
-  const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
-    "sign",
-    "verify",
-  ])) as CryptoKeyPair;
-  const raw = await crypto.subtle.exportKey("pkcs8", pair.privateKey);
-  const publicKey = await crypto.subtle.exportKey("spki", pair.publicKey);
-  return {
-    privateKey: Buffer.from(raw).toString("base64url"),
-    publicKey: Buffer.from(publicKey).toString("base64url"),
-  };
+function subscribedUser() {
+  return { authVersion: 7, id: USER_ID, subscribedUntil: FUTURE };
 }
 
-type Recorded = { headers: Record<string, string>; url: string };
+const AUTHORIZED = {
+  authVersion: 7,
+  kind: "allowed" as const,
+  session: {
+    kind: "subscriber" as const,
+    tenant: TENANT,
+    userId: USER_ID,
+  },
+  userId: USER_ID,
+};
 
-function recordingFetch(calls: Recorded[]): typeof fetch {
-  return ((url: string, init?: RequestInit) => {
-    calls.push({
-      headers: (init?.headers ?? {}) as Record<string, string>,
-      url,
-    });
-    return Promise.resolve(new Response(null, { status: 202 }));
-  }) as typeof fetch;
-}
-
-async function withEnv(
-  env: Record<string, string | undefined>,
-  run: () => Promise<void>
-): Promise<void> {
-  const saved = new Map<string, string | undefined>();
-  for (const [name, value] of Object.entries(env)) {
-    saved.set(name, process.env[name]);
-    if (value === undefined) {
-      delete process.env[name];
-    } else {
-      process.env[name] = value;
-    }
-  }
-  try {
-    await run();
-  } finally {
-    for (const [name, value] of saved) {
-      if (value === undefined) {
-        delete process.env[name];
-      } else {
-        process.env[name] = value;
+function settlesWithin<T>(promise: Promise<T>, milliseconds = 100): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("operation did not settle promptly")),
+      milliseconds
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
       }
-    }
-  }
+    );
+  });
 }
 
-test("a subscriber's sign-in warms through the prewarm route", async () => {
-  const calls: Recorded[] = [];
-  const keys = await signingKeys();
-  await withEnv(
-    {
-      AGENT_CONTROL_TOKEN: "control-token",
-      CLOUD_RUNNER_URL: "https://runner.test/",
-      RUNNER_SIGNING_KEY: keys.privateKey,
-      RUNNER_VERIFY_KEY: keys.publicKey,
-    },
-    async () => {
-      await prewarmTenantSandbox(
-        { authVersion: 0, id: USER_ID, subscribedUntil: FUTURE },
-        recordingFetch(calls)
-      );
-    }
-  );
+test("a subscriber warms in-process with the exact authenticated session and principal", async () => {
+  let loaded = 0;
+  let loadSignal: AbortSignal | undefined;
+  let authorityChecks = 0;
+  let authorityInput: unknown;
+  let authoritySignal: AbortSignal | undefined;
+  let receivedSession: unknown;
+  let receivedPrincipal: unknown;
+  let receivedOptions: unknown;
 
-  assert.equal(calls.length, 1);
-  const [request] = calls;
-  assert.ok(request);
-  // Trailing slash stripped, so the endpoint join cannot double it.
-  assert.equal(request.url, "https://runner.test/api/tenant/prewarm");
-  assert.equal(request.headers["x-runner-token"], "control-token");
-  assert.match(request.headers.authorization ?? "", /^Bearer .+/);
-});
-
-test("a lapsed subscription warms nothing and touches no network", async () => {
-  const calls: Recorded[] = [];
-  const keys = await signingKeys();
-  await withEnv(
-    {
-      AGENT_CONTROL_TOKEN: "control-token",
-      CLOUD_RUNNER_URL: "https://runner.test",
-      RUNNER_SIGNING_KEY: keys.privateKey,
-      RUNNER_VERIFY_KEY: keys.publicKey,
+  await prewarmTenantSandbox(subscribedUser(), {
+    authorizeCurrent: (session, signal) => {
+      authorityChecks += 1;
+      authorityInput = session;
+      authoritySignal = signal;
+      return Promise.resolve(AUTHORIZED);
     },
-    async () => {
-      await prewarmTenantSandbox(
-        {
-          authVersion: 0,
-          id: USER_ID,
-          subscribedUntil: new Date(Date.now() - 1000),
+    loadRunner: (signal) => {
+      loaded += 1;
+      loadSignal = signal;
+      return Promise.resolve({
+        createProductionRunnerService: (session) => {
+          receivedSession = session;
+          return {
+            prewarmMostRecent: (principal, prewarmOptions) => {
+              receivedPrincipal = principal;
+              receivedOptions = prewarmOptions;
+              return Promise.resolve({ kind: "none" as const });
+            },
+          };
         },
-        recordingFetch(calls)
-      );
-      await prewarmTenantSandbox(
-        { authVersion: 0, id: USER_ID, subscribedUntil: null },
-        recordingFetch(calls)
-      );
-    }
-  );
+      });
+    },
+  });
 
-  assert.deepEqual(calls, []);
+  assert.equal(loaded, 1);
+  assert.equal(authorityChecks, 2);
+  assert.equal(loadSignal?.aborted, false);
+  assert.equal(authoritySignal, loadSignal);
+  assert.deepEqual(authorityInput, {
+    user: { authVersion: 7, id: USER_ID, type: "subscriber" },
+  });
+  assert.deepEqual(receivedSession, {
+    kind: "subscriber",
+    tenant: TENANT,
+    userId: USER_ID,
+  });
+  assert.deepEqual(receivedPrincipal, {
+    kind: "subscriber",
+    tenant: TENANT,
+    userId: USER_ID,
+  });
+  const options = receivedOptions as {
+    deadline: number;
+    signal: AbortSignal;
+  };
+  assert.equal(options.signal, loadSignal);
+  assert.equal(options.signal.aborted, false);
+  assert.ok(options.deadline > Date.now());
 });
 
-test("missing configuration skips the warm instead of throwing", async () => {
-  const calls: Recorded[] = [];
-  await withEnv(
+test("lapsed and missing subscriptions do not load the runner dependency", async () => {
+  let loaded = 0;
+  let authorityChecks = 0;
+  const authorizeCurrent = () => {
+    authorityChecks += 1;
+    return Promise.resolve(AUTHORIZED);
+  };
+  const loadRunner = () => {
+    loaded += 1;
+    return Promise.reject(new Error("must not load"));
+  };
+
+  await prewarmTenantSandbox(
     {
-      AGENT_CONTROL_TOKEN: undefined,
-      CLOUD_RUNNER_URL: undefined,
-      NEXT_PUBLIC_CLOUD_RUNNER_URL: undefined,
-      RUNNER_SIGNING_KEY: undefined,
-      RUNNER_VERIFY_KEY: undefined,
+      authVersion: 7,
+      id: USER_ID,
+      subscribedUntil: new Date(Date.now() - 1000),
     },
-    async () => {
-      await prewarmTenantSandbox(
-        { authVersion: 0, id: USER_ID, subscribedUntil: FUTURE },
-        recordingFetch(calls)
-      );
-    }
+    { authorizeCurrent, loadRunner }
+  );
+  await prewarmTenantSandbox(
+    { authVersion: 7, id: USER_ID, subscribedUntil: null },
+    { authorizeCurrent, loadRunner }
   );
 
-  assert.deepEqual(calls, []);
+  assert.equal(loaded, 0);
+  assert.equal(authorityChecks, 0);
 });
 
-test("every failure inside the warm is swallowed", async () => {
-  // Sign-in must never inherit the warmer's problems: a throwing transport
-  // and a non-uuid user id both resolve silently.
-  const keys = await signingKeys();
-  await withEnv(
-    {
-      AGENT_CONTROL_TOKEN: "control-token",
-      CLOUD_RUNNER_URL: "https://runner.test",
-      RUNNER_SIGNING_KEY: keys.privateKey,
-      RUNNER_VERIFY_KEY: keys.publicKey,
+test("runner failures are swallowed so sign-in cannot fail", async () => {
+  await prewarmTenantSandbox(subscribedUser(), {
+    authorizeCurrent: () => Promise.resolve(AUTHORIZED),
+    loadRunner: () => Promise.reject(new Error("module unavailable")),
+  });
+
+  await prewarmTenantSandbox(subscribedUser(), {
+    authorizeCurrent: () => Promise.resolve(AUTHORIZED),
+    loadRunner: async () => ({
+      createProductionRunnerService: () => ({
+        prewarmMostRecent: () =>
+          Promise.reject(new Error("Daytona unavailable")),
+      }),
+    }),
+  });
+});
+
+test("the deadline aborts the in-process warm and waits for its cleanup", async () => {
+  let attempted = false;
+  let aborted = false;
+  let released = false;
+  const started = Date.now();
+
+  await prewarmTenantSandbox(subscribedUser(), {
+    authorizeCurrent: () => Promise.resolve(AUTHORIZED),
+    loadRunner: async (loadSignal) => ({
+      createProductionRunnerService: () => ({
+        prewarmMostRecent: (_principal, options) => {
+          attempted = true;
+          assert.equal(options?.signal, loadSignal);
+          return new Promise((resolve) => {
+            options?.signal.addEventListener(
+              "abort",
+              () => {
+                aborted = true;
+                released = true;
+                resolve({
+                  agentId: "11111111-1111-4111-8111-111111111111",
+                  kind: "warmed" as const,
+                  warm: {
+                    status: "failed" as const,
+                    updatedAt: new Date().toISOString(),
+                  },
+                });
+              },
+              { once: true }
+            );
+          });
+        },
+      }),
+    }),
+    timeoutMs: 5,
+  });
+
+  assert.equal(attempted, true);
+  assert.equal(aborted, true);
+  assert.equal(released, true);
+  assert.ok(Date.now() - started < 1000);
+});
+
+test("stale, cancelled, missing, and unavailable current authority skip runner work", async () => {
+  const decisions = [
+    () => Promise.resolve({ ...AUTHORIZED, authVersion: 8 }),
+    () => Promise.resolve({ kind: "subscription_required" as const }),
+    () => Promise.resolve({ kind: "unauthorized" as const }),
+    () => Promise.reject(new Error("account lookup failed")),
+  ];
+
+  await Promise.all(
+    decisions.map(async (decision) => {
+      let loaded = 0;
+      await prewarmTenantSandbox(subscribedUser(), {
+        authorizeCurrent: decision,
+        loadRunner: () => {
+          loaded += 1;
+          return Promise.reject(new Error("must not load"));
+        },
+      });
+      assert.equal(loaded, 0);
+    })
+  );
+});
+
+test("a cancelled current-authority lookup never reaches runner work", async () => {
+  let loaded = 0;
+  const started = Date.now();
+
+  await prewarmTenantSandbox(subscribedUser(), {
+    authorizeCurrent: () => new Promise(() => undefined),
+    loadRunner: () => {
+      loaded += 1;
+      return Promise.reject(new Error("must not load"));
     },
-    async () => {
-      await prewarmTenantSandbox(
-        { authVersion: 0, id: USER_ID, subscribedUntil: FUTURE },
-        (() =>
-          Promise.reject(new Error("socket closed"))) as unknown as typeof fetch
-      );
-      await prewarmTenantSandbox(
-        { authVersion: 0, id: "not-a-uuid", subscribedUntil: FUTURE },
-        recordingFetch([])
-      );
-    }
+    timeoutMs: 5,
+  });
+
+  assert.equal(loaded, 0);
+  assert.ok(Date.now() - started < 1000);
+});
+
+test("a loader resolving at the deadline constructs and invokes no runner service", async () => {
+  let constructed = 0;
+  let invoked = 0;
+
+  await prewarmTenantSandbox(subscribedUser(), {
+    authorizeCurrent: () => Promise.resolve(AUTHORIZED),
+    loadRunner: (signal) =>
+      new Promise((resolve) => {
+        signal.addEventListener(
+          "abort",
+          () =>
+            resolve({
+              createProductionRunnerService: () => {
+                constructed += 1;
+                return {
+                  prewarmMostRecent: () => {
+                    invoked += 1;
+                    return Promise.resolve({ kind: "none" });
+                  },
+                };
+              },
+            }),
+          { once: true }
+        );
+      }),
+    timeoutMs: 5,
+  });
+
+  assert.equal(constructed, 0);
+  assert.equal(invoked, 0);
+});
+
+test("wall-clock expiry blocks service work before the timer callback can run", async () => {
+  let now = Date.now();
+  let constructed = 0;
+  let invoked = 0;
+
+  await prewarmTenantSandbox(subscribedUser(), {
+    authorizeCurrent: () => Promise.resolve(AUTHORIZED),
+    loadRunner: () => {
+      now += 6000;
+      return Promise.resolve({
+        createProductionRunnerService: () => {
+          constructed += 1;
+          return {
+            prewarmMostRecent: () => {
+              invoked += 1;
+              return Promise.resolve({ kind: "none" });
+            },
+          };
+        },
+      });
+    },
+    now: () => now,
+    timeoutMs: 5000,
+  });
+
+  assert.equal(constructed, 0);
+  assert.equal(invoked, 0);
+});
+
+test("the prewarm wrapper settles at its deadline when cleanup never returns", async () => {
+  const started = Date.now();
+
+  await settlesWithin(
+    prewarmTenantSandbox(subscribedUser(), {
+      authorizeCurrent: () => Promise.resolve(AUTHORIZED),
+      loadRunner: () =>
+        Promise.resolve({
+          createProductionRunnerService: () => ({
+            prewarmMostRecent: () => new Promise(() => undefined),
+          }),
+        }),
+      timeoutMs: 5,
+    })
+  );
+
+  assert.ok(Date.now() - started < 1000);
+});
+
+test("a never-resolving lazy loader is abandoned at the absolute deadline", async () => {
+  let constructed = 0;
+
+  await settlesWithin(
+    prewarmTenantSandbox(subscribedUser(), {
+      authorizeCurrent: () => Promise.resolve(AUTHORIZED),
+      loadRunner: () => {
+        constructed += 1;
+        return new Promise(() => undefined);
+      },
+      timeoutMs: 5,
+    })
+  );
+
+  assert.equal(constructed, 1);
+});
+
+test("authority revoked during lazy loading prevents all runner service work", async () => {
+  await Promise.all(
+    [
+      { kind: "subscription_required" as const },
+      { ...AUTHORIZED, authVersion: 8 },
+    ].map(async (secondDecision) => {
+      let checks = 0;
+      let constructed = 0;
+      let invoked = 0;
+      await prewarmTenantSandbox(subscribedUser(), {
+        authorizeCurrent: () => {
+          checks += 1;
+          return Promise.resolve(checks === 1 ? AUTHORIZED : secondDecision);
+        },
+        loadRunner: () =>
+          Promise.resolve({
+            createProductionRunnerService: () => {
+              constructed += 1;
+              return {
+                prewarmMostRecent: () => {
+                  invoked += 1;
+                  return Promise.resolve({ kind: "none" });
+                },
+              };
+            },
+          }),
+      });
+
+      assert.equal(checks, 2);
+      assert.equal(constructed, 0);
+      assert.equal(invoked, 0);
+    })
   );
 });

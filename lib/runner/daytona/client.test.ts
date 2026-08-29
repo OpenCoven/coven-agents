@@ -3,6 +3,7 @@ import test from "node:test";
 import type { DaytonaConfig } from "@daytona/sdk";
 import {
   daytonaClient,
+  daytonaClientForDeadline,
   daytonaRunnerConfiguration,
   resetDaytonaClientForTest,
 } from "./client";
@@ -95,4 +96,40 @@ test("Daytona client caches production construction and permits injected factori
   const cachedSecond = daytonaClient(environment());
   assert.equal(cachedFirst, cachedSecond);
   resetDaytonaClientForTest();
+});
+
+test("deadline-scoped clients bound provider requests without changing the shared client", () => {
+  const configurations: DaytonaConfig[] = [];
+  const factory = (configuration: DaytonaConfig) => {
+    configurations.push(configuration);
+    return {} as never;
+  };
+
+  daytonaClientForDeadline(10_000, {
+    environment: {
+      ...environment(),
+      DAYTONA_REQUEST_TIMEOUT_MS: "30000",
+    },
+    factory,
+    now: () => 6000,
+  });
+  daytonaClientForDeadline(10_000, {
+    environment: environment(),
+    factory,
+    now: () => 9500,
+  });
+
+  assert.deepEqual(
+    configurations.map(({ requestTimeoutMs }) => requestTimeoutMs),
+    [4000, 1000]
+  );
+  assert.throws(
+    () =>
+      daytonaClientForDeadline(10_000, {
+        environment: environment(),
+        factory,
+        now: () => 10_000,
+      }),
+    /deadline/i
+  );
 });

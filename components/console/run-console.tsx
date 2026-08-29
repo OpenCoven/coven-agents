@@ -20,7 +20,6 @@ import {
   type PaletteItem,
 } from "@/components/console/command-palette";
 import { Composer } from "@/components/console/composer";
-import { ConnectRunner } from "@/components/console/connect-runner";
 import { CreateAgent } from "@/components/console/create-agent";
 import {
   AccountAvatar,
@@ -41,72 +40,26 @@ import {
   type as type_,
   well,
 } from "@/components/console/styles";
+import { RunnerApiError, RunnerClient } from "@/lib/agents/client";
 import {
-  RunnerApiError,
-  RunnerClient,
-  type RunnerConnection,
-} from "@/lib/agents/client";
-import {
-  type ConnectionStatusKind,
-  connectionMessage,
+  type ApplicationRunnerStatusKind,
+  applicationRunnerMessage,
+  applicationRunnerStatusFromError,
 } from "@/lib/agents/connection-status";
 import type { Formation } from "@/lib/agents/formations";
 import { memberName } from "@/lib/agents/formations";
-import { createIdentityMinter } from "@/lib/agents/identity";
-import {
-  fetchHasCredential,
-  provisionConnection,
-} from "@/lib/agents/provision";
 import { avatarFor } from "@/lib/avatar";
 import { isTerminal, projectRun } from "@/lib/console/blocks";
 import { formatDuration, glyphFor, spanBetween } from "@/lib/console/format";
+import type { SessionOperationContext } from "@/lib/console/session-operation";
 import type { ConsoleRun } from "@/lib/console/types";
-
-const CLOUD_ENDPOINT =
-  process.env.NEXT_PUBLIC_CLOUD_RUNNER_URL ?? "http://127.0.0.1:8787";
-
-const EMPTY_CONNECTION: RunnerConnection = {
-  endpoint: CLOUD_ENDPOINT,
-  token: "",
-};
+import {
+  fetchHasCredential,
+  resetCredentialCache,
+  updateCredentialEligibility,
+} from "@/lib/credentials/client";
 
 const TICK_MS = 1000;
-
-/**
- * Where a manually entered connection is kept.
- *
- * Session storage, not local storage: the token is a deployment gate and it
- * should not outlive the tab that was told it.
- */
-const CONNECTION_KEY = "opencoven-runner-cloud";
-
-function loadStoredConnection(): RunnerConnection | null {
-  const stored = window.sessionStorage.getItem(CONNECTION_KEY);
-  if (!stored) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(stored) as Partial<RunnerConnection>;
-    if (
-      typeof parsed.endpoint === "string" &&
-      typeof parsed.token === "string"
-    ) {
-      return { endpoint: parsed.endpoint, token: parsed.token };
-    }
-  } catch {
-    // A malformed entry is not worth keeping and would fail the same way on
-    // every load.
-  }
-  window.sessionStorage.removeItem(CONNECTION_KEY);
-  return null;
-}
-
-/** What to say about a connection state, including the one that is fine. */
-function statusMessage(kind: ConnectionStatusKind): string {
-  return kind === "provisioned"
-    ? "The runner answered and this session is authenticated."
-    : connectionMessage(kind);
-}
 
 /**
  * The word the header pill wears.
@@ -115,13 +68,13 @@ function statusMessage(kind: ConnectionStatusKind): string {
  * protocol identifiers, and `SIGNED_OUT` in a pill is an implementation detail
  * leaking into the one place that is supposed to explain the state.
  */
-const CONNECTION_LABELS: Record<ConnectionStatusKind, string> = {
-  provisioned: "connected",
+const CONNECTION_LABELS: Record<ApplicationRunnerStatusKind, string> = {
+  connected: "connected",
+  connecting: "connecting",
   rate_limited: "rate limited",
   signed_out: "signed out",
   subscription_required: "no subscription",
   unavailable: "unreachable",
-  unconfigured: "not configured",
 };
 
 type View = "analytics" | "composer" | "create" | "settings" | "thread";
@@ -151,15 +104,16 @@ export function RunConsole() {
    * change when someone changes their address.
    */
   const accountId = session.data?.user?.id ?? null;
+  const sessionIdentity = `${session.status}:${accountId ?? ""}`;
   const avatarSrc = accountId
     ? avatarFor({ id: accountId, image: session.data?.user?.image })
     : null;
 
-  const [connection, setConnection] =
-    useState<RunnerConnection>(EMPTY_CONNECTION);
-  const [cloudStatus, setCloudStatus] =
-    useState<ConnectionStatusKind>("unavailable");
+  const [runnerStatus, setRunnerStatus] =
+    useState<ApplicationRunnerStatusKind>("connecting");
   const [hasCredential, setHasCredential] = useState<boolean | null>(null);
+  const [settingsOperationContext, setSettingsOperationContext] =
+    useState<SessionOperationContext | null>(null);
 
   const [agents, setAgents] = useState<AgentDefinition[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
@@ -176,7 +130,6 @@ export function RunConsole() {
   const [timelineCollapsed, setTimelineCollapsed] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [connectOpen, setConnectOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
@@ -209,13 +162,15 @@ export function RunConsole() {
 
   const threadRef = useRef<HTMLDivElement>(null);
   const runsRef = useRef<ConsoleRun[]>([]);
+  const credentialOwnerRef = useRef<string | null>(null);
+  const activeSessionIdentityRef = useRef("");
+  const latestSessionIdentityRef = useRef(sessionIdentity);
+  const sessionAbortRef = useRef<AbortController | null>(null);
+  const sessionGenerationRef = useRef(0);
+  latestSessionIdentityRef.current = sessionIdentity;
   runsRef.current = runs;
 
-  const mintIdentity = useMemo(() => createIdentityMinter(), []);
-  const client = useMemo(
-    () => new RunnerClient(connection, undefined, { mintIdentity }),
-    [connection, mintIdentity]
-  );
+  const client = useMemo(() => new RunnerClient(), []);
 
   const selectedAgent =
     agents.find((agent) => agent.id === selectedAgentId) ?? null;
@@ -225,142 +180,184 @@ export function RunConsole() {
     ? (agents.find((agent) => agent.id === selectedRun.agentId) ?? null)
     : selectedAgent;
 
+  const reportRunnerError = useCallback((error: unknown, fallback: string) => {
+    if (error instanceof RunnerApiError) {
+      const status = applicationRunnerStatusFromError(error);
+      if (status) {
+        setRunnerStatus(status);
+      }
+    }
+    toast.error(error instanceof Error ? error.message : fallback);
+  }, []);
+
   /* ---------------------------------------------------------------- wiring */
 
+  const onCredentialsChange = useCallback((harnessIds: readonly string[]) => {
+    setHasCredential(updateCredentialEligibility(harnessIds));
+  }, []);
+
+  const isCurrentSession = useCallback(
+    (generation: number, signal?: AbortSignal) =>
+      sessionGenerationRef.current === generation &&
+      activeSessionIdentityRef.current === latestSessionIdentityRef.current &&
+      !signal?.aborted,
+    []
+  );
+
+  const refresh = useCallback(
+    async (generation: number, signal: AbortSignal) => {
+      try {
+        const next = await client.listAgents(signal);
+        if (!isCurrentSession(generation, signal)) {
+          return;
+        }
+        setRunnerStatus("connected");
+        setAgents(next);
+        setSelectedAgentId((current) =>
+          next.some((agent) => agent.id === current)
+            ? current
+            : (next[0]?.id ?? null)
+        );
+
+        // The runner remembers a bounded history per agent; without this a
+        // reload shows an empty session list while the runs still exist. Each
+        // agent's listing fails soft — a runner without the route (or one
+        // agent's directory hiccup) costs history, never the console.
+        const discovered = (
+          await Promise.all(
+            next.map((agent) =>
+              client.listRuns(agent.id, signal).then(
+                (snapshots) =>
+                  snapshots.map((snapshot) => ({
+                    agentId: agent.id,
+                    snapshot,
+                  })),
+                (error: unknown) => {
+                  if (signal.aborted) {
+                    throw error;
+                  }
+                  return [];
+                }
+              )
+            )
+          )
+        ).flat();
+        if (!isCurrentSession(generation, signal)) {
+          return;
+        }
+        setRuns((current) => {
+          const known = new Set(current.map((run) => run.snapshot.id));
+          return [
+            ...current,
+            ...discovered
+              .filter((run) => !known.has(run.snapshot.id))
+              .map((run) => ({ ...run, events: [], lastEventId: 0 })),
+          ];
+        });
+        // A run that survived the refresh mid-flight resumes streaming; its
+        // events replay from the start, so the transcript rebuilds itself.
+        const live = discovered.find((run) => !isTerminal(run.snapshot.status))
+          ?.snapshot.id;
+        if (live && isCurrentSession(generation, signal)) {
+          setStreamingRunId((current) => current ?? live);
+        }
+      } catch (error) {
+        if (!isCurrentSession(generation, signal)) {
+          return;
+        }
+        setRunnerStatus(
+          error instanceof RunnerApiError
+            ? (applicationRunnerStatusFromError(error) ?? "unavailable")
+            : "unavailable"
+        );
+        setAgents([]);
+        reportRunnerError(error, "Could not reach the runner.");
+      }
+    },
+    [client, isCurrentSession, reportRunnerError]
+  );
+
   useEffect(() => {
+    sessionGenerationRef.current += 1;
+    const generation = sessionGenerationRef.current;
+    activeSessionIdentityRef.current = sessionIdentity;
+    sessionAbortRef.current?.abort();
+    const controller = new AbortController();
+    sessionAbortRef.current = controller;
+
+    setAgents([]);
+    setSelectedAgentId(null);
+    setRuns([]);
+    setSelectedRunId(null);
+    setStreamingRunId(null);
+    setStarting(false);
+    setBusy(false);
+    setRenaming(false);
+    setRemoving(false);
+    setSettingsOperationContext(null);
+
     if (session.status === "loading") {
-      return;
-    }
-
-    if (session.status !== "authenticated") {
-      setCloudStatus("signed_out");
-      setConnection(EMPTY_CONNECTION);
+      setRunnerStatus("connecting");
       setHasCredential(null);
-      return;
+      return () => controller.abort();
+    }
+    if (session.status !== "authenticated" || !accountId) {
+      setRunnerStatus("signed_out");
+      setHasCredential(null);
+      credentialOwnerRef.current = null;
+      resetCredentialCache();
+      return () => controller.abort();
     }
 
-    let cancelled = false;
-
-    // A connection entered by hand is used until the server answers, so a
-    // deployment with no provisioning still reaches its runner immediately.
-    const stored = loadStoredConnection();
-    if (stored) {
-      setConnection(stored);
+    setRunnerStatus("connecting");
+    setSettingsOperationContext({
+      generation,
+      isCurrent: () => isCurrentSession(generation, controller.signal),
+      signal: controller.signal,
+    });
+    if (credentialOwnerRef.current !== accountId) {
+      credentialOwnerRef.current = accountId;
+      resetCredentialCache();
     }
-
     fetchHasCredential()
       .then((has) => {
-        if (!cancelled && has !== null) {
+        if (has !== null && isCurrentSession(generation, controller.signal)) {
           setHasCredential(has);
         }
       })
       .catch(() => undefined);
+    refresh(generation, controller.signal).catch(() => undefined);
 
-    provisionConnection()
-      .then((status) => {
-        if (cancelled) {
-          return;
-        }
-        setCloudStatus(status.kind);
-        if (status.kind === "provisioned") {
-          setConnection({ endpoint: status.endpoint, token: status.token });
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setCloudStatus("unavailable");
-        }
-      });
+    return () => controller.abort();
+  }, [accountId, isCurrentSession, refresh, session.status, sessionIdentity]);
 
-    return () => {
-      cancelled = true;
-    };
+  const refreshCurrent = useCallback(() => {
+    const controller = sessionAbortRef.current;
+    if (!(controller && session.status === "authenticated")) {
+      return Promise.resolve();
+    }
+    return refresh(sessionGenerationRef.current, controller.signal);
+  }, [refresh, session.status]);
+
+  const currentSessionContext = useCallback(() => {
+    const controller = sessionAbortRef.current;
+    return controller && session.status === "authenticated"
+      ? {
+          generation: sessionGenerationRef.current,
+          signal: controller.signal,
+        }
+      : null;
   }, [session.status]);
 
-  const refresh = useCallback(async () => {
-    if (!connection.token) {
-      setAgents([]);
+  useEffect(() => {
+    if (session.status !== "authenticated" || runnerStatus !== "rate_limited") {
       return;
     }
-    try {
-      const next = await client.listAgents();
-      setAgents(next);
-      setSelectedAgentId((current) =>
-        next.some((agent) => agent.id === current)
-          ? current
-          : (next[0]?.id ?? null)
-      );
-
-      // The runner remembers a bounded history per agent; without this a
-      // reload shows an empty session list while the runs still exist. Each
-      // agent's listing fails soft — a runner without the route (or one
-      // agent's directory hiccup) costs history, never the console.
-      const discovered = (
-        await Promise.all(
-          next.map((agent) =>
-            client.listRuns(agent.id).then(
-              (snapshots) =>
-                snapshots.map((snapshot) => ({ agentId: agent.id, snapshot })),
-              () => []
-            )
-          )
-        )
-      ).flat();
-      setRuns((current) => {
-        const known = new Set(current.map((run) => run.snapshot.id));
-        return [
-          ...current,
-          ...discovered
-            .filter((run) => !known.has(run.snapshot.id))
-            .map((run) => ({ ...run, events: [], lastEventId: 0 })),
-        ];
-      });
-      // A run that survived the refresh mid-flight resumes streaming; its
-      // events replay from the start, so the transcript rebuilds itself.
-      const live = discovered.find((run) => !isTerminal(run.snapshot.status))
-        ?.snapshot.id;
-      if (live) {
-        setStreamingRunId((current) => current ?? live);
-      }
-    } catch (error) {
-      /**
-       * A refused token with a stored connection means the stored one is
-       * stale — the deployment token rotates, session storage does not, and
-       * the console then presents last week's key on every request while
-       * looking merely "rejected". Dropping the stored connection lets the
-       * server-provisioned one take over on the next provision pass instead
-       * of leaving the operator to guess that a hidden cache is the problem.
-       */
-      if (
-        error instanceof RunnerApiError &&
-        error.status === 401 &&
-        window.sessionStorage.getItem(CONNECTION_KEY)
-      ) {
-        window.sessionStorage.removeItem(CONNECTION_KEY);
-        toast.error(
-          "The saved runner connection was rejected and has been cleared. Reconnecting…"
-        );
-        provisionConnection()
-          .then((status) => {
-            if (status.kind === "provisioned") {
-              setConnection({
-                endpoint: status.endpoint,
-                token: status.token,
-              });
-            }
-          })
-          .catch(() => undefined);
-        return;
-      }
-      toast.error(
-        error instanceof Error ? error.message : "Could not reach the runner."
-      );
-    }
-  }, [client, connection.token]);
-
-  useEffect(() => {
-    refresh().catch(() => undefined);
-  }, [refresh]);
+    const timer = setTimeout(() => {
+      refreshCurrent().catch(() => undefined);
+    }, 60_000);
+    return () => clearTimeout(timer);
+  }, [refreshCurrent, runnerStatus, session.status]);
 
   /** Applies one streamed event to the run it belongs to. */
   const applyEvent = useCallback((runId: string, event: RunEvent) => {
@@ -403,24 +400,37 @@ export function RunConsole() {
   }, []);
 
   useEffect(() => {
-    if (!streamingRunId) {
+    if (!streamingRunId || session.status !== "authenticated") {
       return;
     }
+    const generation = sessionGenerationRef.current;
+    const sessionController = sessionAbortRef.current;
+    if (!sessionController || sessionController.signal.aborted) {
+      return;
+    }
+    const sessionIsCurrent = () =>
+      isCurrentSession(generation, sessionController.signal);
     const start = runsRef.current.find(
       (run) => run.snapshot.id === streamingRunId
     );
     if (!start || isTerminal(start.snapshot.status)) {
-      setStreamingRunId(null);
+      if (sessionIsCurrent()) {
+        setStreamingRunId(null);
+      }
       return;
     }
 
     const controller = new AbortController();
+    const abortForSession = () => controller.abort();
+    sessionController.signal.addEventListener("abort", abortForSession, {
+      once: true,
+    });
     let cancelled = false;
 
     /**
      * A loop, not a single pass retriggered through state.
      *
-     * The worker closes an idle stream after sixty seconds, and the first
+     * The runner closes an idle stream after sixty seconds, and the first
      * version of this effect handled that by re-reading the snapshot and
      * calling `setStreamingRunId(streamingRunId)` — the same value, which
      * React treats as no change, so the effect never re-ran and the stream
@@ -436,6 +446,9 @@ export function RunConsole() {
 
     const follow = async () => {
       while (!cancelled) {
+        if (!sessionIsCurrent()) {
+          return;
+        }
         const cursor =
           runsRef.current.find((run) => run.snapshot.id === streamingRunId)
             ?.lastEventId ?? 0;
@@ -445,14 +458,14 @@ export function RunConsole() {
           await client.streamRunEvents(streamingRunId, {
             lastEventId: cursor,
             onEvent: (event) => {
-              if (!cancelled) {
+              if (!cancelled && sessionIsCurrent()) {
                 applyEvent(streamingRunId, event);
               }
             },
             signal: controller.signal,
           });
         } catch (error) {
-          if (cancelled || controller.signal.aborted) {
+          if (cancelled || controller.signal.aborted || !sessionIsCurrent()) {
             return;
           }
           toast.error(
@@ -462,11 +475,11 @@ export function RunConsole() {
           );
         }
 
-        if (cancelled) {
+        if (cancelled || !sessionIsCurrent()) {
           return;
         }
 
-        // The worker closes an idle stream as well as a finished one, so the
+        // The runner closes an idle stream as well as a finished one, so the
         // close is not an outcome. Re-read the snapshot and let its status
         // decide whether to reconnect.
         try {
@@ -474,7 +487,7 @@ export function RunConsole() {
             streamingRunId,
             controller.signal
           );
-          if (cancelled) {
+          if (cancelled || !sessionIsCurrent()) {
             return;
           }
           setRuns((current) =>
@@ -487,15 +500,20 @@ export function RunConsole() {
             return;
           }
         } catch {
-          setStreamingRunId(null);
+          if (sessionIsCurrent()) {
+            setStreamingRunId(null);
+          }
           return;
         }
 
-        // A pause before reconnecting, so a stream the worker closes
+        // A pause before reconnecting, so a stream the runner closes
         // immediately cannot turn this loop into a request-per-tick hammer.
         await new Promise((resolve) => {
           setTimeout(resolve, RECONNECT_DELAY_MS);
         });
+        if (!sessionIsCurrent()) {
+          return;
+        }
       }
     };
 
@@ -504,18 +522,20 @@ export function RunConsole() {
     return () => {
       cancelled = true;
       controller.abort();
+      sessionController.signal.removeEventListener("abort", abortForSession);
     };
-  }, [applyEvent, client, streamingRunId]);
+  }, [applyEvent, client, isCurrentSession, session.status, streamingRunId]);
 
   /**
    * Backfills the transcript of a finished run that was hydrated from the
    * runner's history. Hydration carries only the snapshot; the events still
-   * live on the worker, and for a terminal run its stream replays them all
+   * live on the runner, and for a terminal run its stream replays them all
    * and closes, which makes it a one-shot transcript fetch. Live runs are
    * excluded — the streaming effect above owns those.
    */
   useEffect(() => {
     if (
+      session.status !== "authenticated" ||
       !selectedRun ||
       selectedRun.events.length > 0 ||
       selectedRun.lastEventId > 0 ||
@@ -523,16 +543,32 @@ export function RunConsole() {
     ) {
       return;
     }
+    const generation = sessionGenerationRef.current;
+    const sessionController = sessionAbortRef.current;
+    if (!sessionController || sessionController.signal.aborted) {
+      return;
+    }
     const runId = selectedRun.snapshot.id;
     const controller = new AbortController();
+    const abortForSession = () => controller.abort();
+    sessionController.signal.addEventListener("abort", abortForSession, {
+      once: true,
+    });
     client
       .streamRunEvents(runId, {
-        onEvent: (event) => applyEvent(runId, event),
+        onEvent: (event) => {
+          if (isCurrentSession(generation, sessionController.signal)) {
+            applyEvent(runId, event);
+          }
+        },
         signal: controller.signal,
       })
       .catch(() => undefined);
-    return () => controller.abort();
-  }, [applyEvent, client, selectedRun]);
+    return () => {
+      controller.abort();
+      sessionController.signal.removeEventListener("abort", abortForSession);
+    };
+  }, [applyEvent, client, isCurrentSession, selectedRun, session.status]);
 
   const running = selectedRun
     ? !isTerminal(selectedRun.snapshot.status)
@@ -562,14 +598,19 @@ export function RunConsole() {
 
   /* --------------------------------------------------------------- actions */
 
-  const blocked = connection.token
-    ? hasCredential === false
-      ? "No harness credential stored — add one in account settings."
-      : null
-    : statusMessage(cloudStatus);
+  const blocked =
+    runnerStatus === "connected"
+      ? hasCredential === false
+        ? "No harness credential stored — add one in account settings."
+        : null
+      : applicationRunnerMessage(runnerStatus);
 
   const startRun = async () => {
     if (!selectedAgent || blocked) {
+      return;
+    }
+    const context = currentSessionContext();
+    if (!context) {
       return;
     }
     const task = draft.trim();
@@ -577,7 +618,11 @@ export function RunConsole() {
     try {
       const snapshot = await client.startRun(selectedAgent.id, task, {
         harnessId: selectedAgent.runtime,
+        signal: context.signal,
       });
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
       setRuns((current) => [
         { agentId: selectedAgent.id, events: [], lastEventId: 0, snapshot },
         ...current,
@@ -595,11 +640,13 @@ export function RunConsole() {
       setDraft("");
       pinnedRef.current = true;
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "The run could not start."
-      );
+      if (isCurrentSession(context.generation, context.signal)) {
+        reportRunnerError(error, "The run could not start.");
+      }
     } finally {
-      setStarting(false);
+      if (isCurrentSession(context.generation, context.signal)) {
+        setStarting(false);
+      }
     }
   };
 
@@ -607,8 +654,18 @@ export function RunConsole() {
     if (!selectedRun) {
       return;
     }
+    const context = currentSessionContext();
+    if (!context) {
+      return;
+    }
     try {
-      const snapshot = await client.stopRun(selectedRun.snapshot.id);
+      const snapshot = await client.stopRun(
+        selectedRun.snapshot.id,
+        context.signal
+      );
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
       setRuns((current) =>
         current.map((run) =>
           run.snapshot.id === snapshot.id ? { ...run, snapshot } : run
@@ -616,26 +673,35 @@ export function RunConsole() {
       );
       toast.success("Run cancelled.");
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not stop the run."
-      );
+      if (isCurrentSession(context.generation, context.signal)) {
+        reportRunnerError(error, "Could not stop the run.");
+      }
     }
   };
 
   const createAgent = async (input: CreateAgentInput) => {
+    const context = currentSessionContext();
+    if (!context) {
+      return;
+    }
     setBusy(true);
     try {
-      const created = await client.createAgent(input);
+      const created = await client.createAgent(input, context.signal);
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
       setAgents((current) => [created, ...current]);
       setSelectedAgentId(created.id);
       setView("composer");
       toast.success(`${created.name} is ready.`);
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Agent creation failed."
-      );
+      if (isCurrentSession(context.generation, context.signal)) {
+        reportRunnerError(error, "Agent creation failed.");
+      }
     } finally {
-      setBusy(false);
+      if (isCurrentSession(context.generation, context.signal)) {
+        setBusy(false);
+      }
     }
   };
 
@@ -647,39 +713,64 @@ export function RunConsole() {
    * already created, which is the right outcome — they are independently useful.
    */
   const createFormation = async (formation: Formation) => {
+    const context = currentSessionContext();
+    if (!context) {
+      return;
+    }
     setBusy(true);
     let created = 0;
     try {
       await formation.members.reduce(
         (previous, template) =>
           previous.then(async () => {
-            const agent = await client.createAgent({
-              backend: "cloud",
-              description: template.blurb,
-              instructions: template.instructions,
-              model: "auto",
-              name: memberName(formation, template),
-              runtime: "copilot",
-              workspace: "/workspace",
-            });
+            if (!isCurrentSession(context.generation, context.signal)) {
+              return;
+            }
+            const agent = await client.createAgent(
+              {
+                backend: "cloud",
+                description: template.blurb,
+                instructions: template.instructions,
+                model: "auto",
+                name: memberName(formation, template),
+                runtime: "copilot",
+                workspace: "/workspace",
+              },
+              context.signal
+            );
+            if (!isCurrentSession(context.generation, context.signal)) {
+              return;
+            }
             setAgents((current) => [...current, agent]);
             setSelectedAgentId(agent.id);
             created += 1;
           }),
         Promise.resolve()
       );
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
       toast.success(`${formation.name}: ${created} profiles created.`);
       setView("composer");
     } catch (error) {
-      toast.error(
-        created > 0
-          ? `Created ${created} of ${formation.members.length}.`
-          : error instanceof Error
-            ? error.message
-            : "Could not create the crew."
-      );
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
+      if (created > 0) {
+        if (error instanceof RunnerApiError) {
+          const status = applicationRunnerStatusFromError(error);
+          if (status) {
+            setRunnerStatus(status);
+          }
+        }
+        toast.error(`Created ${created} of ${formation.members.length}.`);
+      } else {
+        reportRunnerError(error, "Could not create the crew.");
+      }
     } finally {
-      setBusy(false);
+      if (isCurrentSession(context.generation, context.signal)) {
+        setBusy(false);
+      }
     }
   };
 
@@ -688,7 +779,7 @@ export function RunConsole() {
    *
    * The endpoint replaces the whole definition, so the stored one is sent back
    * with only the name changed. Owner, `createdAt` and `lastRunAt` are carried
-   * forward by the worker from stored state rather than from this body, so a
+   * forward by the runner from stored state rather than from this body, so a
    * rename cannot move an agent between tenants or rewrite its history.
    */
   const commitRename = async () => {
@@ -697,26 +788,39 @@ export function RunConsole() {
       setRenaming(false);
       return;
     }
+    const context = currentSessionContext();
+    if (!context) {
+      return;
+    }
     try {
-      const updated = await client.updateAgent(selectedAgent.id, {
-        backend: selectedAgent.backend,
-        description: selectedAgent.description,
-        instructions: selectedAgent.instructions,
-        model: selectedAgent.model,
-        name: next,
-        runtime: selectedAgent.runtime,
-        workspace: selectedAgent.workspace,
-      });
+      const updated = await client.updateAgent(
+        selectedAgent.id,
+        {
+          backend: selectedAgent.backend,
+          description: selectedAgent.description,
+          instructions: selectedAgent.instructions,
+          model: selectedAgent.model,
+          name: next,
+          runtime: selectedAgent.runtime,
+          workspace: selectedAgent.workspace,
+        },
+        context.signal
+      );
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
       setAgents((current) =>
         current.map((agent) => (agent.id === updated.id ? updated : agent))
       );
       toast.success(`Renamed to ${updated.name}.`);
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not rename the agent."
-      );
+      if (isCurrentSession(context.generation, context.signal)) {
+        reportRunnerError(error, "Could not rename the agent.");
+      }
     } finally {
-      setRenaming(false);
+      if (isCurrentSession(context.generation, context.signal)) {
+        setRenaming(false);
+      }
     }
   };
 
@@ -724,9 +828,16 @@ export function RunConsole() {
     if (!selectedAgent) {
       return;
     }
+    const context = currentSessionContext();
+    if (!context) {
+      return;
+    }
     setBusy(true);
     try {
-      await client.deleteAgent(selectedAgent.id);
+      await client.deleteAgent(selectedAgent.id, context.signal);
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
       const remaining = agents.filter((agent) => agent.id !== selectedAgent.id);
       setAgents(remaining);
       setRuns((current) =>
@@ -737,12 +848,14 @@ export function RunConsole() {
       setView("composer");
       toast.success(`${selectedAgent.name} was removed.`);
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not remove the agent."
-      );
+      if (isCurrentSession(context.generation, context.signal)) {
+        reportRunnerError(error, "Could not remove the agent.");
+      }
     } finally {
-      setBusy(false);
-      setRemoving(false);
+      if (isCurrentSession(context.generation, context.signal)) {
+        setBusy(false);
+        setRemoving(false);
+      }
     }
   };
 
@@ -906,9 +1019,7 @@ export function RunConsole() {
 
   const agentRuns = runs.filter((run) => run.agentId === selectedAgentId);
 
-  const connectionLabel = connection.token
-    ? CONNECTION_LABELS.provisioned
-    : CONNECTION_LABELS[cloudStatus];
+  const connectionLabel = CONNECTION_LABELS[runnerStatus];
 
   /* ---------------------------------------------------------------- render */
 
@@ -1038,18 +1149,18 @@ export function RunConsole() {
           }}
         >
           <button
-            onClick={() => setConnectOpen(true)}
+            disabled
             style={{
               ...pill(
-                connection.token
+                runnerStatus === "connected"
                   ? "success"
-                  : cloudStatus === "unavailable"
+                  : runnerStatus === "unavailable"
                     ? "danger"
                     : "warning"
               ),
-              cursor: "pointer",
+              cursor: "default",
             }}
-            title={statusMessage(cloudStatus)}
+            title={applicationRunnerMessage(runnerStatus)}
             type="button"
           >
             {connectionLabel}
@@ -1078,7 +1189,11 @@ export function RunConsole() {
         {view === "analytics" ? (
           <Analytics />
         ) : view === "settings" ? (
-          <Settings account={account} />
+          <Settings
+            account={account}
+            onCredentialsChange={onCredentialsChange}
+            operationContext={settingsOperationContext}
+          />
         ) : view === "create" ? (
           <CreateAgent
             busy={busy}
@@ -1330,7 +1445,7 @@ export function RunConsole() {
                             {
                               go: () => {
                                 setRunMenuOpen(false);
-                                refresh().catch(() => undefined);
+                                refreshCurrent().catch(() => undefined);
                               },
                               label: "Reload profiles",
                             },
@@ -1577,23 +1692,6 @@ export function RunConsole() {
           />
         ) : null}
 
-        {connectOpen ? (
-          <ConnectRunner
-            connection={connection}
-            onCancel={() => setConnectOpen(false)}
-            onSave={(next) => {
-              window.sessionStorage.setItem(
-                CONNECTION_KEY,
-                JSON.stringify(next)
-              );
-              setConnection(next);
-              setConnectOpen(false);
-              toast.success("Runner connected.");
-            }}
-            status={cloudStatus}
-          />
-        ) : null}
-
         {paletteOpen ? (
           <CommandPalette
             items={paletteItems}
@@ -1708,7 +1806,7 @@ function EmptyConsole({
         <Eyebrow
           style={{ color: "var(--text-muted)", letterSpacing: "0.14em" }}
         >
-          Cloud sandboxes
+          Daytona sandboxes
         </Eyebrow>
         <h1 style={{ ...type_.display, fontSize: 30, margin: "12px 0 10px" }}>
           Autonomous agents, bounded by infrastructure.
@@ -1735,12 +1833,9 @@ function EmptyConsole({
           </Btn>
         </div>
 
-        {/* The boundary, published. One quiet line — every claim in it is
-            load-bearing and true: runs execute in Cloudflare's sandbox
-            containers, the container is the blast radius, and the credential
-            is fetched for one run and redacted from evidence. Naming
-            Cloudflare is deliberate; the isolation is their product, and
-            saying so borrows exactly as much trust as it should. */}
+        {/* The boundary, published. One quiet line explains where execution
+            happens and what remains local without exposing provider details
+            that are not part of the runner contract. */}
         <div
           style={{
             alignItems: "center",
@@ -1765,7 +1860,7 @@ function EmptyConsole({
               font: "400 11px/1.6 var(--font-mono)",
             }}
           >
-            isolated Cloudflare sandbox per run · nothing reaches your machine
+            isolated Daytona sandbox per agent · nothing reaches your machine
           </span>
         </div>
         <details style={{ marginTop: 10 }}>
@@ -1790,10 +1885,10 @@ function EmptyConsole({
               maxWidth: "46ch",
             }}
           >
-            Every run gets its own Cloudflare sandbox container. Filesystem and
-            network end with it. Your harness credential is envelope-encrypted,
-            fetched for the duration of one run, and redacted from the evidence.
-            When the run closes, the receipt is what remains.
+            Every agent runs in its own Daytona sandbox. Filesystem and network
+            access stay inside that provider boundary. Your harness credential
+            is envelope-encrypted, staged only for execution, and redacted from
+            the evidence. When the run closes, the receipt is what remains.
           </p>
         </details>
       </div>

@@ -15,25 +15,25 @@ async function publicKey(): Promise<string> {
 
 async function withEnvironment<T>(run: () => Promise<T>): Promise<T> {
   const previous = {
-    key: process.env.RUNNER_SIGNING_PUBLIC_KEY,
-    keyId: process.env.RUNNER_SIGNING_KEY_ID,
+    key: process.env.RUNNER_VERIFY_KEY,
+    keyId: process.env.RUNNER_VERIFY_KEY_ID,
     service: process.env.RUNNER_SERVICE_TOKEN,
   };
-  process.env.RUNNER_SIGNING_KEY_ID = "current";
-  process.env.RUNNER_SIGNING_PUBLIC_KEY = await publicKey();
+  process.env.RUNNER_VERIFY_KEY_ID = "current";
+  process.env.RUNNER_VERIFY_KEY = await publicKey();
   process.env.RUNNER_SERVICE_TOKEN = "service-secret";
   try {
     return await run();
   } finally {
     if (previous.key === undefined) {
-      delete process.env.RUNNER_SIGNING_PUBLIC_KEY;
+      delete process.env.RUNNER_VERIFY_KEY;
     } else {
-      process.env.RUNNER_SIGNING_PUBLIC_KEY = previous.key;
+      process.env.RUNNER_VERIFY_KEY = previous.key;
     }
     if (previous.keyId === undefined) {
-      delete process.env.RUNNER_SIGNING_KEY_ID;
+      delete process.env.RUNNER_VERIFY_KEY_ID;
     } else {
-      process.env.RUNNER_SIGNING_KEY_ID = previous.keyId;
+      process.env.RUNNER_VERIFY_KEY_ID = previous.keyId;
     }
     if (previous.service === undefined) {
       delete process.env.RUNNER_SERVICE_TOKEN;

@@ -1,0 +1,2 @@
+ALTER TABLE "RunnerAgent" ADD COLUMN "warmAttemptVersion" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE "RunnerAgent" ADD CONSTRAINT "RunnerAgent_warmAttemptVersion_nonnegative" CHECK ("RunnerAgent"."warmAttemptVersion" >= 0);

@@ -9,7 +9,8 @@ import {
 } from "@daytona/sdk";
 import type { RunnerStore } from "../store";
 import type { RunnerAgentRecord, RunnerPrincipal } from "../types";
-import { daytonaSandboxName } from "./names";
+import { daytonaProbeSessionName, daytonaSandboxName } from "./names";
+import { probeDaytonaHarnesses } from "./process";
 import {
   classifyDaytonaProviderError,
   classifyDaytonaSandboxCreateError,
@@ -50,6 +51,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     tenant: principal.tenant,
     updatedAt: new Date(),
     version: 0,
+    warmAttemptVersion: 0,
     warmStatus: "not_started",
     warmUpdatedAt: new Date(),
     workspace: null,
@@ -83,6 +85,25 @@ function sandbox(
 
 function store(methods: Record<string, unknown>): RunnerStore {
   return methods as RunnerStore;
+}
+
+function settlesWithin<T>(promise: Promise<T>, milliseconds = 100): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("operation did not settle promptly")),
+      milliseconds
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 }
 
 test("stored provider IDs are resolved and stopped or archived sandboxes start", async () => {
@@ -860,13 +881,15 @@ test("warming probes only the sandbox and persists success or failure through fe
   const warming = agent({ ...current, version: 5, warmStatus: "provisioning" });
   const completed = agent({ ...warming, version: 6, warmStatus: "ready" });
   const calls: string[] = [];
+  let probeSessionId = "";
   const success = await warmDaytonaSandbox(principal, current, config, {
     daytona: {
       create: () => Promise.reject(new Error("no create")),
       get: () => Promise.resolve(sandbox(SandboxState.STARTED)),
     },
-    probe: (value) => {
+    probe: (value, _signal, _timeoutSeconds, sessionId) => {
       calls.push(value.id);
+      probeSessionId = sessionId ?? "";
       return Promise.resolve();
     },
     store: store({
@@ -875,7 +898,10 @@ test("warming probes only the sandbox and persists success or failure through fe
           kind: "started",
           value: warming,
         }),
-      finishDaytonaSandboxWarm: (_p: unknown, input: { status: string }) => {
+      finishDaytonaSandboxWarm: (
+        _p: unknown,
+        input: { status: "failed" | "ready" }
+      ) => {
         assert.equal(input.status, "ready");
         return Promise.resolve({ kind: "updated", value: completed });
       },
@@ -883,6 +909,15 @@ test("warming probes only the sandbox and persists success or failure through fe
   });
   assert.equal(success.kind, "ready");
   assert.deepEqual(calls, ["sandbox-id"]);
+  assert.equal(
+    probeSessionId,
+    daytonaProbeSessionName(
+      warming.id,
+      warming.sandboxGeneration,
+      warming.warmAttemptVersion,
+      warming.warmUpdatedAt
+    )
+  );
 
   let failed = false;
   const failure = await warmDaytonaSandbox(principal, current, config, {
@@ -897,7 +932,10 @@ test("warming probes only the sandbox and persists success or failure through fe
           kind: "started",
           value: warming,
         }),
-      finishDaytonaSandboxWarm: (_p: unknown, input: { status: string }) => {
+      finishDaytonaSandboxWarm: (
+        _p: unknown,
+        input: { status: "failed" | "ready" }
+      ) => {
         failed = input.status === "failed";
         return Promise.resolve({
           kind: "updated",
@@ -908,6 +946,352 @@ test("warming probes only the sandbox and persists success or failure through fe
   });
   assert.deepEqual(failure, { error: "retryable", kind: "failed" });
   assert.equal(failed, true);
+});
+
+test("successful probe work with unconfirmed cleanup remains durably provisioning", async () => {
+  const current = agent({
+    daytonaSandboxId: "stored",
+    sandboxLifecycle: "ready",
+    version: 4,
+  });
+  const warming = agent({ ...current, version: 5, warmStatus: "provisioning" });
+  let finishes = 0;
+  const providerSandbox = {
+    ...sandbox(SandboxState.STARTED),
+    process: {
+      createSession: () => Promise.resolve(),
+      deleteSession: () => new Promise(() => undefined),
+      executeCommand: () =>
+        Promise.reject(new Error("prewarm probe must use a session")),
+      executeSessionCommand: () =>
+        Promise.resolve({
+          cmdId: "probe-command",
+          exitCode: 0,
+          stdout: "1.0.0",
+        }),
+      getSessionCommand: () => Promise.resolve({}),
+      getSessionCommandLogs: () => Promise.resolve({}),
+      listSessions: () => new Promise(() => undefined),
+    },
+  } as unknown as Sandbox;
+  const result = await warmDaytonaSandbox(principal, current, config, {
+    daytona: {
+      create: () => Promise.reject(new Error("must not create")),
+      get: () => Promise.resolve(providerSandbox),
+    },
+    lifecycle: {
+      deadline: Date.now() + 5,
+      signal: new AbortController().signal,
+    },
+    probe: (value, signal, timeoutSeconds, sessionId) =>
+      probeDaytonaHarnesses(value, {
+        deadline: Date.now() + 5,
+        sessionId,
+        signal,
+        timeoutSeconds,
+      }).then(() => undefined),
+    store: store({
+      beginDaytonaSandboxWarm: () =>
+        Promise.resolve({ kind: "started", value: warming }),
+      finishDaytonaSandboxWarm: () => {
+        finishes += 1;
+        return Promise.resolve({
+          kind: "updated",
+          value: agent({ ...warming, version: 6, warmStatus: "ready" }),
+        });
+      },
+    }),
+  });
+
+  assert.deepEqual(result, { agent: warming, kind: "in_progress" });
+  assert.equal(finishes, 0);
+});
+
+test("an aborted warm propagates to the probe and releases its durable warm fence", async () => {
+  const current = agent({
+    daytonaSandboxId: "stored",
+    sandboxLifecycle: "ready",
+    version: 4,
+  });
+  const warming = agent({ ...current, version: 5, warmStatus: "provisioning" });
+  const controller = new AbortController();
+  const statuses: string[] = [];
+  const sessions = new Set<string>();
+  let probeStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    probeStarted = resolve;
+  });
+  let probeDeletes = 0;
+  const providerSandbox = {
+    ...sandbox(SandboxState.STARTED),
+    process: {
+      createSession: (sessionId: string) => {
+        sessions.add(sessionId);
+        return Promise.resolve();
+      },
+      deleteSession: (sessionId: string) => {
+        probeDeletes += 1;
+        sessions.delete(sessionId);
+        return Promise.resolve();
+      },
+      executeCommand: () =>
+        Promise.reject(new Error("prewarm probe must use a session")),
+      executeSessionCommand: () => {
+        probeStarted();
+        return new Promise(() => undefined);
+      },
+      getSessionCommand: () => Promise.resolve({}),
+      getSessionCommandLogs: () => Promise.resolve({}),
+      listSessions: () =>
+        Promise.resolve(
+          [...sessions].map((sessionId) => ({ commands: [], sessionId }))
+        ),
+    },
+  } as unknown as Sandbox;
+
+  const pending = warmDaytonaSandbox(principal, current, config, {
+    daytona: {
+      create: () => Promise.reject(new Error("must not create")),
+      get: () => Promise.resolve(providerSandbox),
+    },
+    lifecycle: {
+      deadline: Date.now() + 5000,
+      signal: controller.signal,
+    },
+    probe: (value, signal, timeoutSeconds, sessionId) =>
+      probeDaytonaHarnesses(value, { sessionId, signal, timeoutSeconds }).then(
+        () => undefined
+      ),
+    store: store({
+      beginDaytonaSandboxWarm: () =>
+        Promise.resolve({ kind: "started", value: warming }),
+      finishDaytonaSandboxWarm: (
+        _p: unknown,
+        input: { status: "failed" | "ready" }
+      ) => {
+        statuses.push(input.status);
+        return Promise.resolve({
+          kind: "updated",
+          value: agent({ ...warming, warmStatus: input.status }),
+        });
+      },
+    }),
+  });
+
+  await started;
+  controller.abort(new Error("prewarm deadline exceeded"));
+  const result = await settlesWithin(pending);
+
+  assert.equal(probeDeletes, 1);
+  assert.equal(sessions.size, 0);
+  assert.deepEqual(statuses, ["failed"]);
+  assert.deepEqual(result, { error: "retryable", kind: "failed" });
+});
+
+test("an aborted warm stays recoverable when probe and fence cleanup never return", async () => {
+  const current = agent({
+    daytonaSandboxId: "stored",
+    sandboxLifecycle: "ready",
+    version: 4,
+  });
+  const warming = agent({ ...current, version: 5, warmStatus: "provisioning" });
+  const controller = new AbortController();
+  const deadline = Date.now() + 5;
+  let probeStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    probeStarted = resolve;
+  });
+  let finishes = 0;
+  const providerSandbox = {
+    ...sandbox(SandboxState.STARTED),
+    process: {
+      createSession: () => Promise.resolve(),
+      deleteSession: () => new Promise(() => undefined),
+      executeCommand: () =>
+        Promise.reject(new Error("prewarm probe must use a session")),
+      executeSessionCommand: () => {
+        probeStarted();
+        return new Promise(() => undefined);
+      },
+      getSessionCommand: () => Promise.resolve({}),
+      getSessionCommandLogs: () => Promise.resolve({}),
+      listSessions: () => new Promise(() => undefined),
+    },
+  } as unknown as Sandbox;
+
+  const pending = warmDaytonaSandbox(principal, current, config, {
+    daytona: {
+      create: () => Promise.reject(new Error("must not create")),
+      get: () => Promise.resolve(providerSandbox),
+    },
+    lifecycle: {
+      deadline,
+      signal: controller.signal,
+    },
+    probe: (value, signal, timeoutSeconds, sessionId) =>
+      probeDaytonaHarnesses(value, {
+        deadline,
+        sessionId,
+        signal,
+        timeoutSeconds,
+      }).then(() => undefined),
+    store: store({
+      beginDaytonaSandboxWarm: () =>
+        Promise.resolve({ kind: "started", value: warming }),
+      finishDaytonaSandboxWarm: (
+        _p: unknown,
+        _input: { status: "failed" | "ready" }
+      ) => {
+        finishes += 1;
+        return new Promise(() => undefined);
+      },
+    }),
+  });
+
+  await started;
+  controller.abort(new Error("prewarm deadline exceeded"));
+  const result = await settlesWithin(pending);
+
+  assert.deepEqual(result, { agent: warming, kind: "in_progress" });
+  assert.equal(finishes, 0);
+  assert.equal(warming.warmStatus, "provisioning");
+});
+
+test("aborting provider lookup releases provisioning and prevents post-timeout continuation", async () => {
+  const reserved = agent({
+    sandboxGeneration: 1,
+    sandboxLifecycle: "provisioning",
+    version: 1,
+  });
+  const controller = new AbortController();
+  let releaseLookup!: (value: Sandbox) => void;
+  let lookupStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    lookupStarted = resolve;
+  });
+  const lookup = new Promise<Sandbox>((resolve) => {
+    releaseLookup = resolve;
+  });
+  let attachCalls = 0;
+  let beginWarmCalls = 0;
+  let createCalls = 0;
+  let failCalls = 0;
+
+  const pending = warmDaytonaSandbox(principal, agent(), config, {
+    daytona: {
+      create: () => {
+        createCalls += 1;
+        return Promise.reject(new Error("must not create"));
+      },
+      get: () => {
+        lookupStarted();
+        return lookup;
+      },
+    },
+    lifecycle: {
+      deadline: Date.now() + 5000,
+      signal: controller.signal,
+    },
+    probe: () => Promise.resolve(),
+    store: store({
+      attachDaytonaSandbox: () => {
+        attachCalls += 1;
+        return Promise.resolve({ kind: "updated", value: reserved });
+      },
+      beginDaytonaSandboxWarm: () => {
+        beginWarmCalls += 1;
+        return Promise.resolve({ kind: "in_progress", value: reserved });
+      },
+      failDaytonaSandboxReservation: () => {
+        failCalls += 1;
+        return Promise.resolve({
+          kind: "updated",
+          value: agent({ sandboxLifecycle: "unprovisioned", version: 2 }),
+        });
+      },
+      reserveDaytonaSandbox: () =>
+        Promise.resolve({ kind: "reserved", value: reserved }),
+    }),
+  });
+
+  await started;
+  controller.abort(new Error("prewarm deadline exceeded"));
+  releaseLookup(sandbox(SandboxState.STARTED));
+  const result = await pending;
+  await Promise.resolve();
+
+  assert.deepEqual(result, { error: "retryable", kind: "failed" });
+  assert.equal(failCalls, 1);
+  assert.equal(attachCalls, 0);
+  assert.equal(beginWarmCalls, 0);
+  assert.equal(createCalls, 0);
+});
+
+test("aborting an ambiguous provider create fences reconciliation and prevents attachment", async () => {
+  const reserved = agent({
+    sandboxGeneration: 1,
+    sandboxLifecycle: "provisioning",
+    version: 1,
+  });
+  const ambiguous = agent({
+    ...reserved,
+    sandboxLifecycle: "provisioning_ambiguous",
+    version: 2,
+  });
+  const controller = new AbortController();
+  let createStarted!: () => void;
+  let releaseCreate!: (value: Sandbox) => void;
+  const started = new Promise<void>((resolve) => {
+    createStarted = resolve;
+  });
+  const create = new Promise<Sandbox>((resolve) => {
+    releaseCreate = resolve;
+  });
+  let attachCalls = 0;
+  let failCalls = 0;
+  let markAmbiguousCalls = 0;
+
+  const pending = warmDaytonaSandbox(principal, agent(), config, {
+    daytona: {
+      create: () => {
+        createStarted();
+        return create;
+      },
+      get: () => Promise.reject(new DaytonaNotFoundError("absent")),
+    },
+    lifecycle: {
+      deadline: Date.now() + 5000,
+      signal: controller.signal,
+    },
+    probe: () => Promise.resolve(),
+    store: store({
+      attachDaytonaSandbox: () => {
+        attachCalls += 1;
+        return Promise.resolve({ kind: "updated", value: ambiguous });
+      },
+      failDaytonaSandboxReservation: () => {
+        failCalls += 1;
+        return Promise.resolve({ kind: "updated", value: agent() });
+      },
+      markDaytonaSandboxReservationAmbiguous: () => {
+        markAmbiguousCalls += 1;
+        return Promise.resolve({ kind: "updated", value: ambiguous });
+      },
+      reserveDaytonaSandbox: () =>
+        Promise.resolve({ kind: "reserved", value: reserved }),
+    }),
+  });
+
+  await started;
+  controller.abort(new Error("prewarm deadline exceeded"));
+  const result = await pending;
+  releaseCreate(sandbox(SandboxState.STARTED));
+  await Promise.resolve();
+
+  assert.deepEqual(result, { error: "retryable", kind: "failed" });
+  assert.equal(markAmbiguousCalls, 1);
+  assert.equal(failCalls, 0);
+  assert.equal(attachCalls, 0);
 });
 
 test("warm errors preserve a lifecycle error's retryability", async () => {

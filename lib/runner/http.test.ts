@@ -27,6 +27,26 @@ const RUN_ID = "22222222-3333-4444-8555-666666666666";
 const OPERATION_ID = "33333333-4444-4555-8666-777777777777";
 const REQUEST_ID = "44444444-5555-4666-8777-888888888888";
 const DIAGNOSTIC_NAME = "coven-diagnostic-precomputed-http-name";
+const NativeRequest = globalThis.Request;
+
+class Request extends NativeRequest {
+  constructor(
+    input: ConstructorParameters<typeof NativeRequest>[0],
+    init: RequestInit = {}
+  ) {
+    const method = (init.method ?? "GET").toUpperCase();
+    const headers = new Headers(init.headers);
+    if (method === "POST" || method === "PUT" || method === "DELETE") {
+      if (!headers.has("origin")) {
+        headers.set("origin", new URL(String(input)).origin);
+      }
+      if (init.body !== undefined && !headers.has("content-type")) {
+        headers.set("content-type", "application/json");
+      }
+    }
+    super(input, { ...init, headers });
+  }
+}
 
 const subscriber: RunnerAuthenticatedSubscriber = {
   authVersion: 4,
@@ -175,7 +195,9 @@ function handlers(
   options: {
     admission?: AbuseAdmission;
     after?: ((callback: () => void | Promise<void>) => void) | null;
+    appOrigin?: string | (() => string | null);
     auth?: RunnerAuth;
+    onAbuse?: (input: AbuseEnforcementInput) => void;
     service?: RunnerService;
   } = {}
 ) {
@@ -197,6 +219,9 @@ function handlers(
               after.push(callback);
             }),
         }),
+    ...(Object.hasOwn(options, "appOrigin")
+      ? { appOrigin: options.appOrigin }
+      : {}),
     auth: options.auth ?? authorizedAuth(),
     createDiagnosticName: () => DIAGNOSTIC_NAME,
     createOperatorService: () => {
@@ -214,6 +239,7 @@ function handlers(
       return runner.diagnoseSandbox();
     },
     enforceAbuse: (input) => {
+      options.onAbuse?.(input);
       admissions.push(input);
       return Promise.resolve(options.admission ?? { kind: "allowed" });
     },
@@ -398,12 +424,212 @@ test("subscriber failures fail closed before abuse admission or service construc
   assert.equal(fixture.serviceRequests(), 0);
 });
 
+test("cookie mutations reject invalid origins before auth with zero side effects", async () => {
+  let authorizations = 0;
+  const cases: {
+    body?: string;
+    origin?: string;
+    invoke: (runner: RunnerHttpHandlers, request: Request) => Promise<Response>;
+    method: string;
+    url: string;
+  }[] = [
+    {
+      body: validDefinitionBody(),
+      invoke: (runner: RunnerHttpHandlers, request: Request) =>
+        runner.createAgent(request),
+      method: "POST",
+      origin: "https://sibling.app.test",
+      url: "https://app.test/api/agents",
+    },
+    {
+      body: validDefinitionBody({ name: "Updated" }),
+      invoke: (runner: RunnerHttpHandlers, request: Request) =>
+        runner.updateAgent(request, AGENT_ID),
+      method: "PUT",
+      origin: "",
+      url: `https://app.test/api/agents/${AGENT_ID}`,
+    },
+    {
+      invoke: (runner: RunnerHttpHandlers, request: Request) =>
+        runner.deleteAgent(request, AGENT_ID),
+      method: "DELETE",
+      origin: "not-an-origin",
+      url: `https://app.test/api/agents/${AGENT_ID}`,
+    },
+    {
+      body: JSON.stringify({
+        operationId: OPERATION_ID,
+        task: "Do the thing.",
+      }),
+      invoke: (runner: RunnerHttpHandlers, request: Request) =>
+        runner.startAgentRun(request, AGENT_ID),
+      method: "POST",
+      origin: "https://sibling.app.test",
+      url: `https://app.test/api/agents/${AGENT_ID}/runs`,
+    },
+    {
+      invoke: (runner: RunnerHttpHandlers, request: Request) =>
+        runner.stopRun(request, RUN_ID),
+      method: "POST",
+      origin: "",
+      url: `https://app.test/api/runs/${RUN_ID}/stop`,
+    },
+    {
+      invoke: (runner: RunnerHttpHandlers, request: Request) =>
+        runner.prewarmTenant(request),
+      method: "POST",
+      origin: "not-an-origin",
+      url: "https://app.test/api/tenant/prewarm",
+    },
+  ];
+
+  await Promise.all(
+    cases.map(async (testCase) => {
+      const fixture = handlers({
+        auth: {
+          authorizeDiagnostic: () => ({ kind: "allowed" }),
+          authorizeReconcile: () => ({ kind: "allowed" }),
+          authorizeSubscriber: () => {
+            authorizations += 1;
+            return Promise.resolve(subscriber);
+          },
+        },
+      });
+      const request = new NativeRequest(testCase.url, {
+        body: testCase.body,
+        headers: {
+          ...(testCase.body ? { "content-type": "application/json" } : {}),
+          ...(testCase.origin ? { origin: testCase.origin } : {}),
+        },
+        method: testCase.method,
+      });
+
+      const response = await testCase.invoke(fixture.handlers, request);
+
+      assert.equal(response.status, 403);
+      assert.equal(
+        ((await response.json()) as { error: { code: string } }).error.code,
+        "origin_rejected"
+      );
+      assert.equal(request.bodyUsed, false);
+      assert.equal(fixture.admissions.length, 0);
+      assert.equal(fixture.serviceRequests(), 0);
+      assert.equal(fixture.after.length, 0);
+    })
+  );
+  assert.equal(authorizations, 0);
+});
+
+test("cookie JSON mutations reject non-JSON media types before auth, abuse, or parsing", async () => {
+  let authorizations = 0;
+  const fixture = handlers({
+    auth: {
+      authorizeDiagnostic: () => ({ kind: "allowed" }),
+      authorizeReconcile: () => ({ kind: "allowed" }),
+      authorizeSubscriber: () => {
+        authorizations += 1;
+        return Promise.resolve(subscriber);
+      },
+    },
+  });
+  const request = new Request("https://app.test/api/agents", {
+    body: validDefinitionBody(),
+    headers: {
+      "content-type": "text/plain",
+      origin: "https://app.test",
+    },
+    method: "POST",
+  });
+
+  const response = await fixture.handlers.createAgent(request);
+
+  assert.equal(response.status, 400);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "unsupported_media_type"
+  );
+  assert.equal(request.bodyUsed, false);
+  assert.equal(authorizations, 0);
+  assert.equal(fixture.admissions.length, 0);
+  assert.equal(fixture.serviceRequests(), 0);
+  assert.equal(fixture.after.length, 0);
+});
+
+test("cookie mutations fail closed when the configured application origin is unavailable", async () => {
+  let authorizations = 0;
+  const fixture = handlers({
+    appOrigin: () => null,
+    auth: {
+      authorizeDiagnostic: () => ({ kind: "allowed" }),
+      authorizeReconcile: () => ({ kind: "allowed" }),
+      authorizeSubscriber: () => {
+        authorizations += 1;
+        return Promise.resolve(subscriber);
+      },
+    },
+  });
+  const request = new Request("https://app.test/api/agents", {
+    body: validDefinitionBody(),
+    headers: {
+      "content-type": "application/json",
+      origin: "https://app.test",
+    },
+    method: "POST",
+  });
+
+  const response = await fixture.handlers.createAgent(request);
+
+  assert.equal(response.status, 403);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "origin_rejected"
+  );
+  assert.equal(request.bodyUsed, false);
+  assert.equal(authorizations, 0);
+  assert.equal(fixture.admissions.length, 0);
+  assert.equal(fixture.serviceRequests(), 0);
+});
+
+test("subscriber GET and SSE reads do not require an Origin header", async () => {
+  const fixture = handlers();
+
+  const [agentResponse, eventsResponse] = await Promise.all([
+    fixture.handlers.getAgent(
+      new Request(`https://app.test/api/agents/${AGENT_ID}`),
+      AGENT_ID
+    ),
+    fixture.handlers.getRunEvents(
+      new Request(`https://app.test/api/runs/${RUN_ID}/events`),
+      RUN_ID
+    ),
+  ]);
+
+  assert.equal(agentResponse.status, 200);
+  assert.equal(eventsResponse.status, 200);
+  assert.match(
+    eventsResponse.headers.get("content-type") ?? "",
+    /^text\/event-stream/u
+  );
+});
+
 test("abuse refusal happens before body parsing and returns v1 retry metadata", async () => {
+  const events: string[] = [];
   const fixture = handlers({
     admission: {
       kind: "denied",
       responseStatus: 429,
       retryAfterSeconds: 42,
+    },
+    auth: {
+      authorizeDiagnostic: () => ({ kind: "allowed" }),
+      authorizeReconcile: () => ({ kind: "allowed" }),
+      authorizeSubscriber: () => {
+        events.push("auth");
+        return Promise.resolve(subscriber);
+      },
+    },
+    onAbuse: () => {
+      events.push("abuse");
     },
   });
   const request = new Request("https://app.test/api/agents", {
@@ -416,6 +642,8 @@ test("abuse refusal happens before body parsing and returns v1 retry metadata", 
   assert.equal(response.status, 429);
   assert.equal(response.headers.get("retry-after"), "42");
   assert.equal(request.bodyUsed, false);
+  assert.deepEqual(events, ["auth", "abuse"]);
+  assert.equal(fixture.admissions.length, 1);
   assert.equal(fixture.serviceRequests(), 0);
   assert.equal(
     ((await response.json()) as { error: { code: string } }).error.code,
@@ -423,7 +651,34 @@ test("abuse refusal happens before body parsing and returns v1 retry metadata", 
   );
 });
 
-test("subscriber writes preserve identity, abuse, body, service, provider ordering", async () => {
+test("unauthenticated cookie mutations stop after one auth lookup", async () => {
+  const events: string[] = [];
+  const fixture = handlers({
+    auth: {
+      authorizeDiagnostic: () => ({ kind: "allowed" }),
+      authorizeReconcile: () => ({ kind: "allowed" }),
+      authorizeSubscriber: () => {
+        events.push("auth");
+        return Promise.resolve({ kind: "unauthorized" });
+      },
+    },
+  });
+  const request = new Request("https://app.test/api/agents", {
+    body: validDefinitionBody(),
+    method: "POST",
+  });
+
+  const response = await fixture.handlers.createAgent(request);
+
+  assert.equal(response.status, 401);
+  assert.deepEqual(events, ["auth"]);
+  assert.equal(request.bodyUsed, false);
+  assert.equal(fixture.admissions.length, 0);
+  assert.equal(fixture.serviceRequests(), 0);
+  assert.equal(fixture.after.length, 0);
+});
+
+test("valid subscriber writes preserve preflight, auth, abuse, body, service, provider ordering", async () => {
   const events: string[] = [];
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -438,7 +693,22 @@ test("subscriber writes preserve identity, abuse, body, service, provider orderi
         return stream.getReader();
       },
     },
-    headers: new Headers(),
+    headers: {
+      get(name: string) {
+        if (name === "origin" || name === "content-type") {
+          events.push(name);
+        }
+        if (name === "origin") {
+          return "https://app.test";
+        }
+        if (name === "content-type") {
+          return "application/json";
+        }
+        return null;
+      },
+    } as Headers,
+    method: "POST",
+    url: "https://app.test/api/agents",
   } as unknown as Request;
   const runner = service({
     createAgent: () => {
@@ -472,6 +742,8 @@ test("subscriber writes preserve identity, abuse, body, service, provider orderi
 
   assert.equal(response.status, 201);
   assert.deepEqual(events, [
+    "origin",
+    "content-type",
     "identity",
     "abuse",
     "body",

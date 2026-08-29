@@ -1,8 +1,10 @@
 # Proposal: run diagnostics, sanitized export, and recovery
 
-Status: proposed, not implemented. Companion: `prewarm.md`.
+Status: historical proposal, superseded by the same-origin Daytona cutover.
+Companion: `prewarm.md`. The connection, token-minting, Worker dispatch, and
+Durable Object details below describe the pre-cutover system only.
 
-## The run state machine as it exists
+## Historical pre-cutover run state machine
 
 Contract states (`packages/agent-contracts/fixtures/agent-runner-v1.json`):
 `queued → running → completed | failed | cancelled`. Terminal is decided by

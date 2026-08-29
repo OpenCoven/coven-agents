@@ -3,6 +3,7 @@ import "server-only";
 import { ipAddress } from "@vercel/functions";
 import { after } from "next/server";
 import { enforceAbusePolicy } from "@/lib/abuse/enforce";
+import { configuredApplicationOrigin } from "@/lib/auth/application-origin";
 import type { SessionLike } from "@/lib/auth/subscriber-access";
 import { createRunnerAuth } from "./auth";
 import { createRunnerHttpHandlers, type RunnerHttpHandlers } from "./http";
@@ -35,6 +36,7 @@ async function authorizeSubscriberAccess(session: SessionLike) {
 export function productionRunnerHttpHandlers(): RunnerHttpHandlers {
   return createRunnerHttpHandlers({
     after,
+    appOrigin: () => configuredApplicationOrigin(process.env),
     auth: createRunnerAuth({
       authenticate,
       authorizeSubscriberAccess,

@@ -34,7 +34,7 @@ was larger than assumed costs trust.
 | Level | Meaning | Examples | First action |
 | --- | --- | --- | --- |
 | **S1** | Another tenant's data is reachable | Credential KEK ring, `POSTGRES_URL`, a tenant's harness credential | Rotate immediately, then notify affected tenants |
-| **S2** | Our infrastructure is controllable, tenant data is not directly exposed | `RUNNER_SIGNING_KEY`, `AGENT_CONTROL_TOKEN`, `OPERATOR_DIAGNOSTIC_TOKEN`, `RUNNER_SERVICE_TOKEN`, `AUTH_SECRET` | Rotate immediately |
+| **S2** | Our infrastructure is controllable, tenant data is not directly exposed | `AGENT_CONTROL_TOKEN`, `OPERATOR_DIAGNOSTIC_TOKEN`, `RUNNER_SERVICE_TOKEN`, `AUTH_SECRET` | Rotate immediately |
 | **S3** | Cost or availability, no data boundary crossed | endpoint URL known, unauthenticated request flood | Measure, then decide |
 
 An **S1** is the only class that creates an obligation to someone other than
@@ -50,10 +50,9 @@ Everything that grants something, where it lives, and what it costs to rotate.
 | `CREDENTIAL_KEK_CURRENT_VERSION`, `CREDENTIAL_KEK_V1`, `CREDENTIAL_KEK_V2`, and legacy `CREDENTIAL_KEK` | Vercel | Versioned decryption of tenant credential data keys | Rewrap before retiring an old key |
 | `POSTGRES_URL` and the `PG*` family | Vercel (Neon integration) | Full read/write on all tenant data | Brief downtime |
 | `AUTH_SECRET` | Vercel | Forging any signed-in session | Everyone is signed out |
-| `RUNNER_SIGNING_KEY_ID`, `RUNNER_SIGNING_KEY`, `RUNNER_SIGNING_PUBLIC_KEY`, and Worker `RUNNER_VERIFY_*` ring | Vercel / Vercel + worker | Minting an identity for any tenant | ≤15 min of failed runs |
-| `AGENT_CONTROL_TOKEN` | Vercel + worker | Reaching the worker deployment for browser requests | Seconds of failed runs |
+| `AGENT_CONTROL_TOKEN` | Vercel + worker | Reaching the legacy rollback Worker deployment | Rollback path unavailable during rotation |
 | `OPERATOR_DIAGNOSTIC_TOKEN` | Worker | Running the operator-only Sandbox diagnostic | Seconds of failed diagnostics |
-| `RUNNER_SERVICE_TOKEN` | Vercel + worker | Calling the internal credential endpoint | Seconds of failed runs |
+| `RUNNER_SERVICE_TOKEN` | Vercel + worker | Calling retained internal endpoints from the legacy rollback Worker | Rollback path unavailable during rotation |
 | `AUTH_GITHUB_SECRET` | Vercel | Impersonating our OAuth app | Sign-in breaks until updated |
 | `STRIPE_SECRET_KEY` | Vercel | Charging and refunding | None |
 | `STRIPE_WEBHOOK_SECRET` | Vercel | Forging subscription events | Missed events until updated |
@@ -90,12 +89,12 @@ from the CLI, the API, or the dashboard, so the only way to change its
 visibility is to delete and re-add it — and the delete destroys the one copy
 anybody could still read.
 
-This happened to `NEXT_PUBLIC_CLOUD_RUNNER_URL`, which was Sensitive on Preview
-and Non-sensitive on Production. Aligning them meant deleting a value nobody
-could read first. It was reconstructible only because `wrangler.jsonc` defines
-exactly one worker and no other subdomain resolves, so there was exactly one
-value it could have been. A variable without that property would simply have
-been lost.
+This happened to the now-retired `NEXT_PUBLIC_CLOUD_RUNNER_URL`, which was
+Sensitive on Preview and Non-sensitive on Production. Aligning them meant
+deleting a value nobody could read first. It was reconstructible only because
+`wrangler.jsonc` defines exactly one worker and no other subdomain resolves, so
+there was exactly one value it could have been. A variable without that
+property would simply have been lost.
 
 Vercel now rejects the combination outright:
 
@@ -129,11 +128,17 @@ secret in every visitor's browser.
 
 ## Runbooks
 
-### `AGENT_CONTROL_TOKEN` — the worker's front door
+The current browser uses only its Auth.js application session on same-origin
+APIs. It receives no Worker endpoint credential, signed runner identity, or
+runner bearer header. The Worker-specific runbooks below apply only while the
+legacy rollback runtime remains deployed.
 
-**Grants.** Reaching the worker at all. It does *not* identify a tenant: all
-reads, runs, and other tenant operations still need an Ed25519 identity minted
-from a signed-in session. It cannot authorize `/api/diagnostics/sandbox`.
+### `AGENT_CONTROL_TOKEN` — legacy rollback Worker deployment
+
+**Grants.** Reaching the rollback Worker. It does *not* identify a tenant, is
+not returned to the current browser, and cannot authorize
+`/api/diagnostics/sandbox`. Tenant operations in a rolled-back application also
+require its legacy signed identity.
 
 **Rotate.**
 
@@ -158,10 +163,11 @@ LATEST="$(npx vercel ls --yes | head -1)"
 npx vercel redeploy "$LATEST"
 ```
 
-**What breaks.** Runs started between the two updates fail with a 401. Seconds,
-and they are retryable.
+**What breaks.** Only the legacy rollback path fails between the two updates.
+The current same-origin Daytona path is unaffected.
 
-**Verify.** The old value must be refused:
+**Verify rollback containment.** The old value must be refused by the retained
+Worker:
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' \
@@ -170,7 +176,7 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 # 401 expected
 ```
 
-### `OPERATOR_DIAGNOSTIC_TOKEN` — the deployment diagnostic
+### `OPERATOR_DIAGNOSTIC_TOKEN` — the rollback Worker diagnostic
 
 **Grants.** Running `POST /api/diagnostics/sandbox` without tenant identity.
 This secret is stored only as a Worker secret, is compared timing-safely, and
@@ -187,7 +193,7 @@ printf '%s' "$NEW" | npx wrangler secret put OPERATOR_DIAGNOSTIC_TOKEN
 ```
 
 **Verify.** Do not print either value. The old value must be refused, the
-browser-visible control token must remain refused, and only the new operator
+legacy deployment control token must remain refused, and only the new operator
 value may return the diagnostic result:
 
 ```bash
@@ -207,50 +213,31 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 # 200 expected
 ```
 
-### `RUNNER_SERVICE_TOKEN` — the internal credential endpoint
+### `RUNNER_SERVICE_TOKEN` — legacy Worker internal access
 
-**Grants.** Calling `/api/internal/credential`, which lends a tenant's harness
-credential to a run. Higher consequence than it looks: this is the path a
-credential travels.
+**Grants.** Calling the retained Worker-facing internal endpoints. The current
+Daytona path does not use this HTTP boundary, but the rollback Worker still
+uses it to authorize and lend a tenant's harness credential.
 
 **Rotate.** Identical shape to the above, in both Vercel and the worker. Same
 order, same reason.
 
 **Verify.** `/api/internal/credential` returns 401 for the old value.
 
-### Runner signing and verification key ring
+### Runner verification key ring
 
-**Grants.** The signing key mints an identity claiming to be *any* tenant.
-This is the closest thing to a master key that does not touch the database.
+The current app retains only the public verification ring used by the
+Worker-facing internal authority and credential routes. Public key material
+does not grant minting authority, but changing its ID or value before the
+Worker boundary moves makes already issued rollback tokens fail verification.
+Keep the current and previous public entries aligned with the deployed Worker.
+The full legacy signing-key procedure remains in
+[Runner key rotation](key-rotation.md) for application rollback.
 
-**The current ID and key pair must change together. The Worker verifies with
-`RUNNER_VERIFY_KEY_ID`/`RUNNER_VERIFY_KEY`; the app signs with
-`RUNNER_SIGNING_KEY_ID`/`RUNNER_SIGNING_KEY`. A mismatch means every run
-fails. Keep the old public key configured as `RUNNER_VERIFY_PREVIOUS_KEY` until
-15 minutes plus clock skew have elapsed; never overwrite an unversioned key in
-place.
-
-```bash
-# Generate an Ed25519 pair; export the PKCS8 private key and the SPKI public key
-# base64url-encoded, matching what mintRunnerToken and importVerifyKey expect.
-node --input-type=module -e '
-const { subtle } = crypto;
-const pair = await subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
-const pkcs8 = await subtle.exportKey("pkcs8", pair.privateKey);
-const spki = await subtle.exportKey("spki", pair.publicKey);
-console.log("SIGNING", Buffer.from(pkcs8).toString("base64url"));
-console.log("VERIFY", Buffer.from(spki).toString("base64url"));
-'
-```
-
-Set the Worker current/previous public-key ring through Wrangler and the app's
-current signing ring through Vercel, then redeploy both. The complete procedure
-and rollback are in [Runner key rotation](key-rotation.md). Never log key
-material.
-
-**What breaks.** Identity tokens live 15 minutes (`TOKEN_LIFETIME_SECONDS`), so
-in-flight runs fail until they are re-minted. There is no revocation list —
-short expiry *is* the revocation mechanism, which is why the lifetime is short.
+**What breaks.** In the rollback runtime, legacy identity tokens live 15
+minutes (`TOKEN_LIFETIME_SECONDS`), so in-flight rollback runs fail until they
+are re-minted. The current application neither mints nor consumes these browser
+tokens.
 
 ### Credential KEK ring — read this before rotating
 
@@ -402,19 +389,20 @@ A credential shape that redaction misses will also be missed by the secret
 scanner, because both are pattern lists. Fixing one without the other leaves
 the same hole in a different wall.
 
-## Scenario: the worker endpoint is known and being hammered
+## Scenario: the legacy rollback Worker endpoint is being hammered
 
-The endpoint is not a secret — the browser needs it, so it ships in the client
-bundle. Every request without both a valid runner token and a valid identity is
-refused with 401, and the error does not distinguish which check failed.
+The retained Worker endpoint is not a secret. It may remain publicly reachable
+for rollback, but the current browser does not use or bundle it. Legacy requests
+without both the deployment gate and a valid signed identity are refused with
+401.
 
-The exposure is **cost**, not access: refused requests still bill as Workers
-invocations.
+The exposure is **cost**, not current application access: refused requests
+still bill as Worker invocations.
 
 1. Confirm the requests are actually being refused (they should 401).
-2. If volume is a problem, add a Cloudflare rate-limiting rule on the worker
-   route. Do not respond by rotating `AGENT_CONTROL_TOKEN` — that does not
-   reduce request volume, it just breaks your own app.
+2. If volume is a problem, add a Cloudflare rate-limiting rule on the Worker
+   route. Rotating `AGENT_CONTROL_TOKEN` does not reduce request volume and
+   only disables the rollback path.
 
 ## Scenario: the operator's machine is compromised
 
@@ -452,21 +440,23 @@ a cheap rehearsal:
 - `pnpm secret:scan:history` — run it periodically. It takes about 30 seconds
   and answers "has anything ever been committed", which is the question every
   leak starts with.
-- Rotating `AGENT_CONTROL_TOKEN` is the lowest-cost rotation in the table.
-  Doing it deliberately once proves the runbook, the ordering, and the
-  verification step, at the cost of a few seconds of failed runs.
+- While the rollback Worker remains deployed, rotating `AGENT_CONTROL_TOKEN`
+  is a contained rehearsal of that legacy boundary. It does not exercise the
+  current browser-to-Daytona path.
 
 `AGENT_CONTROL_TOKEN` has been rotated for real, against a live disclosure: the
-token was pasted into a chat transcript inside a copied network trace. The
-ordering held, the app stayed up, and the verification step returned the 401 it
-promised. Two gaps surfaced only by running it -- the `--sensitive` flag and the
-redeploy step -- and both are now written above.
+legacy token was pasted into a chat transcript inside a copied network trace.
+The ordering held, the app stayed up, and the retained Worker returned the
+expected 401. Two gaps surfaced only by running it -- the `--sensitive` flag
+and the redeploy step -- and both are now written above.
 
 That is the argument for rehearsing the rest. A runbook that has never been
 executed is a guess, and the parts that are wrong are exactly the parts nobody
 thought to write down.
 
-**A copied network trace is a credential disclosure.** Browser devtools'
-"copy as fetch" and HAR exports include every request header, which means the
-runner token and session cookies travel with them. Treat pasting one -- into a
-chat, an issue, a bug report -- as an S2 and rotate.
+**A copied network trace is a credential disclosure.** Current browser
+devtools traces can carry the Auth.js session cookie. Revoke the affected
+account's sessions; rotate `AUTH_SECRET` if exposure is broad or unbounded. A
+trace from a rolled-back legacy browser path may additionally contain Worker
+deployment or identity headers; only then apply the rollback Worker runbooks
+above.

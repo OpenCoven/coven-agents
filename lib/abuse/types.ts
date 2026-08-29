@@ -21,8 +21,6 @@ export const ABUSE_ROUTES = Object.freeze([
   "credential_delete",
   "credential_device_start",
   "credential_device_poll",
-  "runner_connection",
-  "runner_token",
   "usage_read",
   "analytics_read",
   "model_list",

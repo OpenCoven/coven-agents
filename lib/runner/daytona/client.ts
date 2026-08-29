@@ -2,6 +2,7 @@ import "server-only";
 
 import { Daytona, type DaytonaConfig } from "@daytona/sdk";
 import {
+  DAYTONA_MIN_REQUEST_TIMEOUT_MS,
   type DaytonaSnapshotConfiguration,
   daytonaRequestTimeout,
   daytonaSnapshotConfiguration,
@@ -53,6 +54,33 @@ export function daytonaClient(
   }
   cachedClient ??= new Daytona(configuration);
   return cachedClient;
+}
+
+export function daytonaClientForDeadline(
+  deadline: number,
+  options: Readonly<{
+    environment?: NodeJS.ProcessEnv;
+    factory?: DaytonaClientFactory;
+    now?: () => number;
+  }> = {}
+): Daytona {
+  const environment = options.environment ?? process.env;
+  const configuration = daytonaRunnerConfiguration(environment);
+  const remainingMs = deadline - (options.now ?? Date.now)();
+  if (remainingMs <= 0) {
+    throw new Error("Daytona request deadline has elapsed.");
+  }
+  const requestTimeoutMs = Math.min(
+    configuration.requestTimeoutMs,
+    Math.max(DAYTONA_MIN_REQUEST_TIMEOUT_MS, Math.ceil(remainingMs))
+  );
+  const factory = options.factory ?? ((value) => new Daytona(value));
+  return factory(
+    daytonaRunnerClientConfiguration({
+      ...configuration,
+      requestTimeoutMs,
+    })
+  );
 }
 
 /** Test-only cache reset; production code must retain one client per process. */

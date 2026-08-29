@@ -1,22 +1,97 @@
-import { runnerKeyRingFromEnvironment } from "@/lib/agents/key-ring";
-import { claimsForUser, mintRunnerToken } from "@/lib/agents/runner-token";
+import "server-only";
+
+import type {
+  SessionLike,
+  SubscriberAccessDecision,
+} from "@/lib/auth/subscriber-access";
+import type { SubscriberSession } from "@/lib/session";
 import { isSubscribedAt } from "@/lib/subscription";
 
 const PREWARM_TIMEOUT_MS = 5000;
 
+type PrewarmService = {
+  prewarmMostRecent: (
+    principal: SubscriberSession,
+    options: Readonly<{ deadline: number; signal: AbortSignal }>
+  ) => Promise<unknown>;
+};
+
+type RunnerModule = {
+  createProductionRunnerService: (
+    session: SubscriberSession
+  ) => PrewarmService | Promise<PrewarmService>;
+};
+
+export type PrewarmDependencies = {
+  authorizeCurrent?: (
+    session: SessionLike,
+    signal: AbortSignal
+  ) => Promise<SubscriberAccessDecision>;
+  loadRunner?: (signal: AbortSignal) => Promise<RunnerModule>;
+  now?: () => number;
+  timeoutMs?: number;
+};
+
+function awaitUntilAbort<T>(
+  operation: Promise<T>,
+  signal: AbortSignal
+): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason);
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
+async function authorizeCurrentSubscriber(
+  session: SessionLike,
+  signal: AbortSignal
+): Promise<SubscriberAccessDecision> {
+  if (signal.aborted) {
+    throw signal.reason;
+  }
+  const { authorizeSubscriberAccess } = await import(
+    "@/lib/auth/subscriber-authorization.server"
+  );
+  if (signal.aborted) {
+    throw signal.reason;
+  }
+  return authorizeSubscriberAccess(session);
+}
+
+async function loadProductionRunner(
+  signal: AbortSignal
+): Promise<RunnerModule> {
+  if (signal.aborted) {
+    throw signal.reason;
+  }
+  const runner = await import("@/lib/runner/runtime");
+  if (signal.aborted) {
+    throw signal.reason;
+  }
+  return runner;
+}
+
 /**
- * Asks the runner to boot the sandbox of the user's most recently run agent,
- * so a returning subscriber's first mission skips the container cold start.
+ * Starts warming the returning subscriber's most recently used agent.
  *
- * Called from the sign-in path via `after()`, which is why every exit here is
- * silent: warming is an optimization, and an optimization that can fail
- * sign-in — or even slow it — has its priorities inverted. A refused or
- * failed warm costs exactly what not calling this costs: one cold start.
- *
- * Gates itself on the subscription rather than trusting the caller, because
- * the worker will 403 a demo claim anyway and the cheapest refusal is the
- * one that skips the network. This is the app's only server-side call to the
- * worker; everything else goes browser-direct.
+ * The sign-in callback invokes this through Next.js `after()`. Every failure
+ * remains silent because warming is only a latency optimization. The runner
+ * dependency is loaded only after the scheduled OAuth snapshot is revalidated
+ * against current subscriber authority, so importing auth does not initialize
+ * the database, Daytona SDK, or tenant credentials.
  */
 export async function prewarmTenantSandbox(
   user: {
@@ -24,38 +99,95 @@ export async function prewarmTenantSandbox(
     id: string;
     subscribedUntil: Date | null;
   },
-  request: typeof fetch = fetch
+  dependencies: PrewarmDependencies = {}
 ): Promise<void> {
-  try {
-    if (!isSubscribedAt(user, new Date())) {
-      return;
-    }
-    const endpoint = (
-      process.env.CLOUD_RUNNER_URL ?? process.env.NEXT_PUBLIC_CLOUD_RUNNER_URL
-    )?.replace(/\/+$/, "");
-    const controlToken = process.env.AGENT_CONTROL_TOKEN;
-    if (!(endpoint && controlToken)) {
-      return;
-    }
-    const keyRing = await runnerKeyRingFromEnvironment();
+  const now = dependencies.now ?? Date.now;
+  if (!isSubscribedAt(user, new Date(now()))) {
+    return;
+  }
 
-    const identity = await mintRunnerToken(
-      claimsForUser({
+  const timeoutMs = dependencies.timeoutMs ?? PREWARM_TIMEOUT_MS;
+  const controller = new AbortController();
+  const deadlineAt = now() + timeoutMs;
+  const abortIfExpired = () => {
+    if (controller.signal.aborted || now() >= deadlineAt) {
+      if (!controller.signal.aborted) {
+        controller.abort(new Error("Sandbox prewarm exceeded its deadline."));
+      }
+      return true;
+    }
+    return false;
+  };
+  const timer = setTimeout(
+    () => {
+      controller.abort(new Error("Sandbox prewarm exceeded its deadline."));
+    },
+    Math.max(0, deadlineAt - now())
+  );
+
+  try {
+    const snapshot: SessionLike = {
+      user: {
         authVersion: user.authVersion,
         id: user.id,
         type: "subscriber",
-      }),
-      keyRing
-    );
-    await request(`${endpoint}/api/tenant/prewarm`, {
-      headers: {
-        authorization: `Bearer ${identity}`,
-        "x-runner-token": controlToken,
       },
-      method: "POST",
-      signal: AbortSignal.timeout(PREWARM_TIMEOUT_MS),
-    });
+    };
+    const authorize =
+      dependencies.authorizeCurrent ?? authorizeCurrentSubscriber;
+    const access = await awaitUntilAbort(
+      authorize(snapshot, controller.signal),
+      controller.signal
+    );
+    if (
+      abortIfExpired() ||
+      access.kind !== "allowed" ||
+      access.authVersion !== user.authVersion ||
+      access.userId !== user.id
+    ) {
+      return;
+    }
+    const runner = await awaitUntilAbort(
+      (dependencies.loadRunner ?? loadProductionRunner)(controller.signal),
+      controller.signal
+    );
+    if (abortIfExpired()) {
+      return;
+    }
+    const currentAccess = await awaitUntilAbort(
+      authorize(snapshot, controller.signal),
+      controller.signal
+    );
+    if (
+      abortIfExpired() ||
+      currentAccess.kind !== "allowed" ||
+      currentAccess.authVersion !== user.authVersion ||
+      currentAccess.userId !== user.id
+    ) {
+      return;
+    }
+    const { session } = currentAccess;
+    const service = await awaitUntilAbort(
+      Promise.resolve(runner.createProductionRunnerService(session)),
+      controller.signal
+    );
+    if (
+      abortIfExpired() ||
+      currentAccess.authVersion !== user.authVersion ||
+      currentAccess.userId !== user.id
+    ) {
+      return;
+    }
+    await awaitUntilAbort(
+      service.prewarmMostRecent(session, {
+        deadline: deadlineAt,
+        signal: controller.signal,
+      }),
+      controller.signal
+    );
   } catch {
     // The next run pays the cold start it would have paid anyway.
+  } finally {
+    clearTimeout(timer);
   }
 }

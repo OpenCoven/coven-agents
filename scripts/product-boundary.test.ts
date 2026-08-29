@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 const repositoryRoot = new URL("../", import.meta.url);
@@ -112,4 +112,99 @@ test("repo-local OpenCoven packages stay private workspace dependencies", () => 
       `${path} is a product-internal adapter, not a canonical ecosystem package`
     );
   }
+});
+
+test("the same-origin app exposes no browser runner credential boundary", () => {
+  for (const path of [
+    "app/api/runner-connection/route.ts",
+    "app/api/runner-token/route.ts",
+    "lib/agents/connection-access.ts",
+    "lib/agents/identity.ts",
+    "lib/agents/provision.ts",
+    "lib/agents/runner-token.ts",
+  ]) {
+    assert.equal(
+      existsSync(new URL(path, repositoryRoot)),
+      false,
+      `${path} must remain deleted`
+    );
+  }
+
+  const envExample = readFileSync(
+    new URL(".env.example", repositoryRoot),
+    "utf8"
+  );
+  assert.doesNotMatch(envExample, /^NEXT_PUBLIC_CLOUD_RUNNER_URL=/m);
+  assert.doesNotMatch(envExample, /^RUNNER_SIGNING_KEY=/m);
+  assert.doesNotMatch(envExample, /^RUN_SCOPED_IDENTITY_WRITES_ENABLED=/m);
+  assert.doesNotMatch(envExample, /browser bundle drain/i);
+  assert.match(envExample, /^AGENT_CONTROL_TOKEN=$/m);
+  assert.match(envExample, /^RUNNER_SERVICE_TOKEN=$/m);
+  assert.match(envExample, /^RUNNER_VERIFY_KEY_ID=$/m);
+  assert.match(envExample, /^RUNNER_VERIFY_KEY=$/m);
+
+  for (const path of [
+    "components/console/run-console.tsx",
+    "lib/agents/client.ts",
+  ]) {
+    const source = readFileSync(new URL(path, repositoryRoot), "utf8");
+    assert.doesNotMatch(source, /\/api\/runner-(?:connection|token)/);
+    assert.doesNotMatch(source, /x-runner-token|authorization:\s*Bearer/i);
+  }
+
+  for (const path of [
+    "app/api/internal/credential/route.ts",
+    "app/api/internal/runner-authority/route.ts",
+  ]) {
+    const source = readFileSync(new URL(path, repositoryRoot), "utf8");
+    assert.match(source, /runnerVerificationKeyRingFromEnvironment/);
+    assert.match(source, /RUNNER_SERVICE_TOKEN/);
+  }
+});
+
+test("the retained Worker harness is explicitly rollback-only", () => {
+  const guide = readFileSync(
+    new URL("worker/harness/README.md", repositoryRoot),
+    "utf8"
+  );
+
+  assert.match(guide, /legacy rollback-only procedure/i);
+  assert.match(guide, /same-origin Next\.js API/i);
+  assert.match(guide, /Daytona runner/i);
+  assert.match(guide, /emergency rollback[\s\S]*Cloudflare Worker/i);
+});
+
+test("the README describes persistent per-agent Daytona isolation accurately", () => {
+  const readme = readFileSync(readmeUrl, "utf8");
+
+  assert.match(readme, /one tenant-scoped persistent Daytona sandbox/i);
+  assert.match(readme, /Runs reuse that sandbox/i);
+  assert.match(readme, /short-lived process session/i);
+  assert.match(readme, /mode-`0600` credential file/i);
+  assert.match(
+    readme,
+    /deleting a run record does not delete[\s\S]*sandbox or its workspace/i
+  );
+  assert.doesNotMatch(readme, /per-run Daytona sandbox/i);
+});
+
+test("connection status contains only provider-neutral application states", () => {
+  const source = readFileSync(
+    new URL("lib/agents/connection-status.ts", repositoryRoot),
+    "utf8"
+  );
+
+  assert.doesNotMatch(source, /readConnectionResponse|provisioned/);
+  assert.doesNotMatch(source, /\btoken:\s*string/);
+});
+
+test("the retained runner key ring is verification-only", () => {
+  const source = readFileSync(
+    new URL("lib/agents/key-ring.ts", repositoryRoot),
+    "utf8"
+  );
+
+  assert.doesNotMatch(source, /RUNNER_SIGNING_KEY(?!_(?:ID|PUBLIC_KEY))/);
+  assert.doesNotMatch(source, /privateKey|crypto\.subtle\.sign/);
+  assert.match(source, /runnerVerificationKeyRingFromEnvironment/);
 });

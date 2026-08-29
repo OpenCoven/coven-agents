@@ -51,8 +51,9 @@ test("generated migration 0016 adds the fenced reconciliation lease consistently
   const journal = JSON.parse(
     readFileSync(new URL("meta/_journal.json", directory), "utf8")
   ) as { entries: { idx: number; tag: string }[] };
-  assert.deepEqual(journal.entries.at(-1), {
-    ...journal.entries.at(-1),
+  const journalEntry = journal.entries.find((entry) => entry.idx === 16);
+  assert.deepEqual(journalEntry, {
+    ...journalEntry,
     idx: 16,
     tag: migrationName.replace(/\.sql$/u, ""),
   });
@@ -68,4 +69,65 @@ test("generated migration 0016 adds the fenced reconciliation lease consistently
   ]) {
     assert.match(snapshot, new RegExp(`"${field}"`, "u"));
   }
+});
+
+test("generated migration 0017 persists the exact sandbox warm attempt version", () => {
+  const directory = new URL("../db/migrations/", import.meta.url);
+  const migrationName = readdirSync(directory).find((name) =>
+    name.startsWith("0017_")
+  );
+
+  assert.ok(migrationName, "migration 0017 must exist");
+  const migration = readFileSync(new URL(migrationName, directory), "utf8");
+  assert.match(
+    migration,
+    /ADD COLUMN "warmAttemptVersion" integer DEFAULT 0 NOT NULL/
+  );
+  assert.match(migration, /RunnerAgent_warmAttemptVersion_nonnegative/);
+
+  const journal = JSON.parse(
+    readFileSync(new URL("meta/_journal.json", directory), "utf8")
+  ) as { entries: { idx: number; tag: string }[] };
+  const journalEntry = journal.entries.find((entry) => entry.idx === 17);
+  assert.deepEqual(journalEntry, {
+    ...journalEntry,
+    idx: 17,
+    tag: migrationName.replace(/\.sql$/u, ""),
+  });
+
+  const snapshot = readFileSync(
+    new URL("meta/0017_snapshot.json", directory),
+    "utf8"
+  );
+  assert.match(snapshot, /"warmAttemptVersion"/u);
+});
+
+test("generated migration 0018 indexes the independent stale warm recovery lane", () => {
+  const directory = new URL("../db/migrations/", import.meta.url);
+  const migrationName = readdirSync(directory).find((name) =>
+    name.startsWith("0018_")
+  );
+
+  assert.ok(migrationName, "migration 0018 must exist");
+  const migration = readFileSync(new URL(migrationName, directory), "utf8");
+  assert.match(migration, /RunnerAgent_warm_recovery_idx/u);
+  assert.match(migration, /"warmUpdatedAt","id"/u);
+  assert.match(migration, /"sandboxLifecycle" = 'ready'/u);
+  assert.match(migration, /"warmStatus" = 'provisioning'/u);
+
+  const journal = JSON.parse(
+    readFileSync(new URL("meta/_journal.json", directory), "utf8")
+  ) as { entries: { idx: number; tag: string }[] };
+  const journalEntry = journal.entries.find((entry) => entry.idx === 18);
+  assert.deepEqual(journalEntry, {
+    ...journalEntry,
+    idx: 18,
+    tag: migrationName.replace(/\.sql$/u, ""),
+  });
+
+  const snapshot = readFileSync(
+    new URL("meta/0018_snapshot.json", directory),
+    "utf8"
+  );
+  assert.match(snapshot, /"RunnerAgent_warm_recovery_idx"/u);
 });

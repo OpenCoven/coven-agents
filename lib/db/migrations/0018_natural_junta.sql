@@ -1,0 +1,1 @@
+CREATE INDEX "RunnerAgent_warm_recovery_idx" ON "RunnerAgent" USING btree ("warmUpdatedAt","id") WHERE "RunnerAgent"."sandboxLifecycle" = 'ready' and "RunnerAgent"."warmStatus" = 'provisioning';

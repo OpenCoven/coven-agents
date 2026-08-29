@@ -46,6 +46,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     tenant: PRINCIPAL.tenant,
     updatedAt: new Date("2026-08-28T15:00:00.000Z"),
     version: 4,
+    warmAttemptVersion: 0,
     warmStatus: "not_started",
     warmUpdatedAt: new Date("2026-08-28T15:00:00.000Z"),
     workspace: null,
@@ -973,6 +974,9 @@ test("stop reports retryable database unavailability", async () => {
 
 test("prewarm targets the most recently used agent without credential access", async () => {
   const warmed: string[] = [];
+  const controller = new AbortController();
+  const deadline = Date.now() + 5000;
+  let receivedOptions: unknown;
   const service = createRunnerService({
     clock: () => new Date("2026-08-28T16:00:00.000Z"),
     store: baseStore({
@@ -987,8 +991,9 @@ test("prewarm targets the most recently used agent without credential access", a
         }),
       ],
     }),
-    warmSandbox: (_principal, target) => {
+    warmSandbox: (_principal, target, options) => {
       warmed.push(target.id);
+      receivedOptions = options;
       return Promise.resolve({
         agent: agent({
           id: target.id,
@@ -1000,15 +1005,25 @@ test("prewarm targets the most recently used agent without credential access", a
     },
   });
 
-  assert.deepEqual(await service.prewarmMostRecent(PRINCIPAL), {
-    agentId: OTHER_AGENT_ID,
-    kind: "in_progress",
-    warm: {
-      status: "provisioning",
-      updatedAt: "2026-08-28T16:00:00.000Z",
-    },
-  });
+  assert.deepEqual(
+    await service.prewarmMostRecent(PRINCIPAL, {
+      deadline,
+      signal: controller.signal,
+    }),
+    {
+      agentId: OTHER_AGENT_ID,
+      kind: "in_progress",
+      warm: {
+        status: "provisioning",
+        updatedAt: "2026-08-28T16:00:00.000Z",
+      },
+    }
+  );
   assert.deepEqual(warmed, [OTHER_AGENT_ID]);
+  assert.deepEqual(receivedOptions, {
+    deadline,
+    signal: controller.signal,
+  });
 });
 
 test("prewarm and warm reject legacy runtimes before sandbox mutation or provider work", async () => {

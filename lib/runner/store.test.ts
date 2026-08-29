@@ -8,7 +8,10 @@ import {
 import { sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { daytonaDispatchAuthorizers } from "./daytona/dispatch";
-import { daytonaRunSessionName } from "./daytona/names";
+import {
+  daytonaProbeSessionName,
+  daytonaRunSessionName,
+} from "./daytona/names";
 import {
   MAX_EVENT_PAGE_BYTES,
   MAX_EVENTS_PER_PAGE,
@@ -91,6 +94,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     tenant: principal.tenant,
     updatedAt: new Date("2026-01-01T00:00:00.000Z"),
     version: 0,
+    warmAttemptVersion: 0,
     warmStatus: "not_started",
     warmUpdatedAt: new Date("2026-01-01T00:00:00.000Z"),
     workspace: null,
@@ -1907,7 +1911,58 @@ test("sandbox recovery scans durable ambiguous lifecycle rows with skip locking"
   assert.equal(scan.name, "scan-daytona-sandbox-recoveries");
   assert.match(queryText(scan), /'provisioning_ambiguous'/u);
   assert.match(queryText(scan), /'decommissioning'/u);
+  assert.doesNotMatch(queryText(scan), /"warmStatus"/u);
   assert.match(queryText(scan), /FOR UPDATE SKIP LOCKED/u);
+});
+
+test("warm recovery has an independent bounded oldest-first scan", async () => {
+  const { statements, store } = scripted([]);
+  const staleBefore = new Date("2026-08-28T15:00:00.000Z");
+  await store.scanDaytonaWarmRecoveries(operator, staleBefore, 10);
+
+  const [scan] = statements;
+  assert.ok(scan);
+  assert.equal(scan.name, "scan-daytona-warm-recoveries");
+  const query = queryText(scan);
+  assert.match(query, /"sandboxLifecycle" = 'ready'/u);
+  assert.match(query, /"warmStatus" = 'provisioning'/u);
+  assert.match(query, /"warmUpdatedAt" <= \$/u);
+  assert.match(query, /ORDER BY "warmUpdatedAt" ASC, "id" ASC/u);
+  assert.match(query, /LIMIT \$\d+/u);
+  assert.match(query, /FOR UPDATE SKIP LOCKED/u);
+  assert.deepEqual(scan.args, { limit: 10, staleBefore });
+});
+
+test("operator warm recovery fails only its exact fenced warm attempt", async () => {
+  const current = agent({
+    sandboxGeneration: 2,
+    sandboxLifecycle: "ready",
+    version: 4,
+    warmAttemptVersion: 2,
+    warmStatus: "provisioning",
+  });
+  const failed = agent({
+    ...current,
+    version: 5,
+    warmStatus: "failed",
+  });
+  const updated = scripted([failed]);
+
+  const result = await updated.store.finishDaytonaSandboxWarmForRecovery(
+    operator,
+    {
+      agentId: current.id,
+      expectedGeneration: current.sandboxGeneration,
+      expectedVersion: current.version,
+    }
+  );
+
+  assert.equal(result.kind, "updated");
+  const query = queryText(updated.statements[0] as RunnerStoreStatement);
+  assert.match(query, /"warmStatus" = 'failed'/u);
+  assert.match(query, /"version" = \$\d+/u);
+  assert.match(query, /"sandboxGeneration" = \$\d+/u);
+  assert.match(query, /"warmStatus" = 'provisioning'/u);
 });
 
 test("operator sandbox recovery attaches or resets only its fenced generation", async () => {
@@ -3087,7 +3142,12 @@ test("warm and decommission transitions retain generation and version fences", a
     sandboxLifecycle: "ready",
     version: 3,
   });
-  const warming = agent({ ...current, version: 4, warmStatus: "provisioning" });
+  const warming = agent({
+    ...current,
+    version: 4,
+    warmAttemptVersion: current.warmAttemptVersion + 1,
+    warmStatus: "provisioning",
+  });
   const decommissioning = agent({
     ...warming,
     sandboxLifecycle: "decommissioning",
@@ -3108,7 +3168,6 @@ test("warm and decommission transitions retain generation and version fences", a
         agentId: current.id,
         expectedGeneration: current.sandboxGeneration,
         expectedVersion: current.version,
-        warmStaleBefore: new Date("2026-01-01T00:00:00.000Z"),
       })
     ).kind,
     "started"
@@ -3137,6 +3196,7 @@ test("warm and decommission transitions retain generation and version fences", a
   const decommissionQuery = queryText(statements[4] as RunnerStoreStatement);
   const deleteQuery = queryText(statements[5] as RunnerStoreStatement);
   assert.match(warmQuery, /"warmStatus" = 'provisioning'/u);
+  assert.match(warmQuery, /"warmAttemptVersion" = "warmAttemptVersion" \+ 1/u);
   assert.match(warmQuery, /"sandboxGeneration" = \$/u);
   assert.match(decommissionQuery, /"sandboxLifecycle" = 'decommissioning'/u);
   assert.match(deleteQuery, /"sandboxLifecycle" = 'decommissioning'/u);
@@ -3252,8 +3312,7 @@ test("stale provisioning reservations are taken over while live leases remain in
   assert.match(query, /"sandboxGeneration" = "sandboxGeneration" \+ 1/u);
 });
 
-test("stale warm operations are fenced and reclaimed while live warming remains in progress", async () => {
-  const cutoff = new Date("2026-01-01T00:00:00.000Z");
+test("subscriber warming never reclaims a provisioning warm before cron cleanup", async () => {
   const live = agent({
     daytonaSandboxId: "sandbox",
     sandboxGeneration: 2,
@@ -3266,13 +3325,14 @@ test("stale warm operations are fenced and reclaimed while live warming remains 
     ...live,
     warmUpdatedAt: new Date("2025-12-31T23:59:59.000Z"),
   });
-  const reclaimed = agent({
-    ...stale,
-    version: 5,
-    warmUpdatedAt: cutoff,
-  });
   const liveStore = scripted([live]);
-  const staleStore = scripted([stale], [reclaimed]);
+  const staleStore = scripted([stale]);
+  const staleProbeSessionId = daytonaProbeSessionName(
+    stale.id,
+    stale.sandboxGeneration,
+    stale.warmAttemptVersion,
+    stale.warmUpdatedAt
+  );
 
   assert.equal(
     (
@@ -3280,23 +3340,67 @@ test("stale warm operations are fenced and reclaimed while live warming remains 
         agentId: live.id,
         expectedGeneration: live.sandboxGeneration,
         expectedVersion: 0,
-        warmStaleBefore: cutoff,
       })
     ).kind,
     "in_progress"
   );
-  assert.deepEqual(
-    await staleStore.store.beginDaytonaSandboxWarm(principal, {
+  const staleResult = await staleStore.store.beginDaytonaSandboxWarm(
+    principal,
+    {
       agentId: stale.id,
       expectedGeneration: stale.sandboxGeneration,
       expectedVersion: stale.version,
-      warmStaleBefore: cutoff,
-    }),
-    { kind: "started", value: reclaimed }
+    }
   );
-  assert.match(
-    queryText(staleStore.statements[1] as RunnerStoreStatement),
-    /"warmUpdatedAt" <= \$/u
+  assert.deepEqual(staleResult, { kind: "in_progress", value: stale });
+  assert.equal(staleStore.statements.length, 1);
+  assert.equal(stale.version, live.version);
+  assert.equal(stale.warmUpdatedAt.toISOString(), "2025-12-31T23:59:59.000Z");
+  assert.equal(
+    staleResult.kind === "in_progress"
+      ? daytonaProbeSessionName(
+          staleResult.value.id,
+          staleResult.value.sandboxGeneration,
+          staleResult.value.warmAttemptVersion,
+          staleResult.value.warmUpdatedAt
+        )
+      : undefined,
+    staleProbeSessionId
+  );
+
+  const failed = agent({
+    ...stale,
+    version: stale.version + 1,
+    warmStatus: "failed",
+  });
+  const restarted = agent({
+    ...failed,
+    version: failed.version + 1,
+    warmAttemptVersion: failed.warmAttemptVersion + 1,
+    warmStatus: "provisioning",
+  });
+  const restartedStore = scripted([failed], [restarted]);
+  assert.deepEqual(
+    await restartedStore.store.beginDaytonaSandboxWarm(principal, {
+      agentId: failed.id,
+      expectedGeneration: failed.sandboxGeneration,
+      expectedVersion: failed.version,
+    }),
+    { kind: "started", value: restarted }
+  );
+  assert.notEqual(
+    daytonaProbeSessionName(
+      stale.id,
+      stale.sandboxGeneration,
+      stale.warmAttemptVersion,
+      stale.warmUpdatedAt
+    ),
+    daytonaProbeSessionName(
+      restarted.id,
+      restarted.sandboxGeneration,
+      restarted.warmAttemptVersion,
+      restarted.warmUpdatedAt
+    )
   );
 });
 

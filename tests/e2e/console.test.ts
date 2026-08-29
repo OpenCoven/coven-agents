@@ -1,12 +1,10 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import { subscriberCookies } from "./session";
 
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const RUN_ID = "22222222-2222-4222-8222-222222222222";
-const RUNNER_IDENTITY = `${Buffer.from(
-  JSON.stringify({ exp: 4_102_444_800 })
-).toString("base64url")}.audit-signature`;
-
+const OTHER_AGENT_ID = "55555555-5555-4555-8555-555555555555";
+const OTHER_RUN_ID = "66666666-6666-4666-8666-666666666666";
 const retainedAgent = {
   backend: "cloud",
   createdAt: "2026-08-27T06:00:00.000Z",
@@ -16,10 +14,17 @@ const retainedAgent = {
   lastRunAt: "2026-08-27T06:01:00.000Z",
   model: "auto",
   name: "Timeline auditor",
+  owner: {
+    kind: "tenant",
+    tenantId: "u_00000000000040008000000000000001",
+  },
   runtime: "copilot",
   status: "idle",
   updatedAt: "2026-08-27T06:01:00.000Z",
-  workspace: "/workspace",
+  warm: {
+    status: "ready",
+    updatedAt: "2026-08-27T06:01:00.000Z",
+  },
 };
 
 const retainedRun = {
@@ -37,6 +42,19 @@ const retainedRun = {
   task: "Verify timeline output",
 };
 
+async function notifySessionChange(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const channel = new BroadcastChannel("next-auth");
+    channel.postMessage({ event: "session" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    channel.postMessage({ event: "session" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    channel.postMessage({ event: "session" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    channel.close();
+  });
+}
+
 test.describe("Run console", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
@@ -46,10 +64,7 @@ test.describe("Run console", () => {
     const protectedRequests: string[] = [];
     page.on("request", (request) => {
       const { pathname } = new URL(request.url());
-      if (
-        pathname === "/api/credentials" ||
-        pathname === "/api/runner-connection"
-      ) {
+      if (pathname === "/api/credentials" || pathname === "/api/agents") {
         protectedRequests.push(pathname);
       }
     });
@@ -145,17 +160,23 @@ test.describe("Run console", () => {
     await page.route("**/api/credentials", (route) =>
       route.fulfill({ json: { harnessIds: ["copilot"] } })
     );
-    await page.route("**/api/runner-connection", (route) =>
-      route.fulfill({
-        json: { endpoint: "http://127.0.0.1:8787", token: "audit-token" },
-      })
-    );
-    await page.route("**/api/runner-token", (route) =>
-      route.fulfill({ json: { token: RUNNER_IDENTITY } })
-    );
-    await page.route("http://127.0.0.1:8787/**", (route) => {
+    const legacyRequests: string[] = [];
+    page.on("request", (request) => {
+      const { pathname } = new URL(request.url());
+      if (
+        pathname === "/api/runner-connection" ||
+        pathname === "/api/runner-token"
+      ) {
+        legacyRequests.push(pathname);
+      }
+    });
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
       const { pathname } = new URL(route.request().url());
       if (pathname === "/api/agents") {
+        const headers = route.request().headers();
+        expect(headers.authorization).toBeUndefined();
+        expect(headers["x-runner-token"]).toBeUndefined();
+        expect(headers.cookie).toContain("authjs.session-token=");
         return route.fulfill({ json: { agents: [retainedAgent] } });
       }
       if (pathname === `/api/agents/${AGENT_ID}/runs`) {
@@ -197,5 +218,652 @@ test.describe("Run console", () => {
     await expect(
       page.getByRole("button", { exact: true, name: "expand" })
     ).toBeVisible();
+    expect(legacyRequests).toEqual([]);
+  });
+
+  test("a same-origin subscription refusal blocks runs without offering a manual connection", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route("**/api/agents", (route) =>
+      route.fulfill({
+        json: {
+          apiVersion: "1.0",
+          error: {
+            code: "subscription_required",
+            message: "An active subscription is required.",
+            retryable: false,
+          },
+          requestId: "44444444-4444-4444-8444-444444444444",
+        },
+        status: 403,
+      })
+    );
+
+    await page.goto("/agents");
+
+    await expect(page.getByText("no subscription")).toBeVisible();
+    await expect(
+      page.getByText("An active subscription is required to run agents.")
+    ).toBeVisible();
+    await expect(
+      page.getByRole("dialog", { name: "Connect a runner" })
+    ).toHaveCount(0);
+  });
+
+  test("credential writes immediately refresh run eligibility without trusting failures", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let harnessIds: string[] = [];
+    let delayNextCredentialGet = false;
+    let failNextCredentialGet = false;
+    let mutationRequests = 0;
+    let releaseCredentialGet: (() => Promise<void>) | undefined;
+    await page.route("**/api/credentials", (route) => {
+      const request = route.request();
+      if (request.method() === "GET") {
+        if (delayNextCredentialGet) {
+          delayNextCredentialGet = false;
+          const snapshot = [...harnessIds];
+          return new Promise<void>((resolve) => {
+            releaseCredentialGet = async () => {
+              await route.fulfill({ json: { harnessIds: snapshot } });
+              resolve();
+            };
+          });
+        }
+        if (failNextCredentialGet) {
+          failNextCredentialGet = false;
+          return route.fulfill({ json: { error: "unavailable" }, status: 503 });
+        }
+        return route.fulfill({ json: { harnessIds } });
+      }
+      const body = request.postDataJSON() as {
+        credential?: string;
+        harnessId?: string;
+      };
+      if (request.method() === "POST") {
+        mutationRequests += 1;
+        if (body.credential === "rejected-credential") {
+          return route.fulfill({ json: { error: "failed" }, status: 500 });
+        }
+        harnessIds = [...new Set([...harnessIds, body.harnessId ?? ""])]
+          .filter(Boolean)
+          .sort();
+        failNextCredentialGet = true;
+        return route.fulfill({
+          json: { harnessId: body.harnessId, stored: true },
+        });
+      }
+      harnessIds = harnessIds.filter((id) => id !== body.harnessId);
+      failNextCredentialGet = true;
+      return route.fulfill({
+        json: { harnessId: body.harnessId, removed: true },
+      });
+    });
+    await page.route("**/api/usage", (route) =>
+      route.fulfill({ json: { cap: 10, resetsAt: null, used: 0 } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({ json: { agents: [retainedAgent] } });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    const blocked =
+      "No harness credential stored — add one in account settings.";
+    await page.goto("/agents");
+    await expect(page.getByText(blocked)).toBeVisible();
+
+    await page.getByRole("button", { name: "Account and settings" }).click();
+    await page
+      .getByLabel("GitHub Copilot CLI credential")
+      .fill("rejected-credential");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect.poll(() => mutationRequests).toBe(1);
+    await expect(
+      page.getByText("Could not store the credential.")
+    ).toBeVisible();
+    await page.getByRole("link", { name: "Back to runs" }).click();
+    await expect(page.getByText(blocked)).toBeVisible();
+
+    delayNextCredentialGet = true;
+    await page.getByRole("button", { name: "Account and settings" }).click();
+    await page
+      .getByLabel("GitHub Copilot CLI credential")
+      .fill("accepted-token");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(page.getByText("Credential stored.")).toBeVisible();
+    await releaseCredentialGet?.();
+    await page.getByRole("link", { name: "Back to runs" }).click();
+    await expect(page.getByText(blocked)).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Account and settings" }).click();
+    const remove = page.getByRole("button", { name: "Remove" });
+    await expect(remove).toBeVisible();
+    delayNextCredentialGet = true;
+    await remove.click();
+    await expect(remove).toHaveCount(0);
+    await releaseCredentialGet?.();
+    await expect(page.getByText("Credential removed.")).toBeVisible();
+    await page.getByRole("link", { name: "Back to runs" }).click();
+    await expect(page.getByText(blocked)).toBeVisible();
+  });
+
+  test("a delayed authenticated agent response cannot restore state after sign-out", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let sessionOverride: Record<string, unknown> | null | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      sessionOverride === undefined
+        ? route.continue()
+        : route.fulfill({ json: sessionOverride })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    let releaseAgents!: () => Promise<void>;
+    let agentRequestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      agentRequestStarted = resolve;
+    });
+    let eventRequests = 0;
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        agentRequestStarted();
+        return new Promise<void>((resolve) => {
+          releaseAgents = async () => {
+            await route.fulfill({ json: { agents: [retainedAgent] } });
+            resolve();
+          };
+        });
+      }
+      if (pathname.endsWith("/events")) {
+        eventRequests += 1;
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+    await started;
+    await expect(page.getByTitle("e2e-user@example.invalid")).toBeVisible();
+    sessionOverride = null;
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      return (await response.json()) === null;
+    });
+    await notifySessionChange(page);
+    await sessionRefresh;
+    await expect(
+      page.getByRole("button", { name: "signed out" })
+    ).toBeVisible();
+
+    await releaseAgents();
+    await expect(page.getByText(retainedAgent.name)).toHaveCount(0);
+    expect(eventRequests).toBe(0);
+  });
+
+  test("a delayed run response cannot start a stale stream after an account switch", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies("first@example.invalid"));
+    let sessionOverride: Record<string, unknown> | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      sessionOverride === undefined
+        ? route.continue()
+        : route.fulfill({ json: sessionOverride })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    const nextAgent = {
+      ...retainedAgent,
+      id: OTHER_AGENT_ID,
+      name: "New account agent",
+    };
+    const staleLiveRun = {
+      ...retainedRun,
+      agentId: AGENT_ID,
+      completedAt: null,
+      id: OTHER_RUN_ID,
+      output: "",
+      status: "running",
+      task: "Stale account run",
+    };
+    let releaseRuns!: () => Promise<void>;
+    let runRequestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      runRequestStarted = resolve;
+    });
+    let agentRequests = 0;
+    let eventRequests = 0;
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        agentRequests += 1;
+        return route.fulfill({
+          json: { agents: agentRequests === 1 ? [retainedAgent] : [nextAgent] },
+        });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        runRequestStarted();
+        return new Promise<void>((resolve) => {
+          releaseRuns = async () => {
+            await route.fulfill({
+              json: { apiVersion: "1.0", runs: [staleLiveRun] },
+            });
+            resolve();
+          };
+        });
+      }
+      if (pathname === `/api/agents/${OTHER_AGENT_ID}/runs`) {
+        return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+      }
+      if (pathname.endsWith("/events")) {
+        eventRequests += 1;
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+    await started;
+    await expect(page.getByTitle("first@example.invalid")).toBeVisible();
+    sessionOverride = {
+      expires: "2099-01-01T00:00:00.000Z",
+      user: {
+        email: "second@example.invalid",
+        id: "00000000-0000-4000-8000-000000000002",
+        image: null,
+        name: "Second subscriber",
+        type: "subscriber",
+      },
+    };
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      const body = (await response.json()) as { user?: { email?: string } };
+      return body.user?.email === "second@example.invalid";
+    });
+    await notifySessionChange(page);
+    await sessionRefresh;
+    await expect(page.getByText(nextAgent.name).first()).toBeVisible();
+
+    await releaseRuns();
+    await page.waitForTimeout(100);
+    await expect(page.getByText("Stale account run")).toHaveCount(0);
+    expect(eventRequests).toBe(0);
+  });
+
+  test("a delayed mutation cannot publish success after an account switch", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies("first@example.invalid"));
+    let sessionOverride: Record<string, unknown> | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      sessionOverride === undefined
+        ? route.continue()
+        : route.fulfill({ json: sessionOverride })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    const nextAgent = {
+      ...retainedAgent,
+      id: OTHER_AGENT_ID,
+      name: "New account agent",
+    };
+    let agentRequests = 0;
+    let releaseMutation!: () => Promise<void>;
+    let mutationStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      mutationStarted = resolve;
+    });
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const request = route.request();
+      const { pathname } = new URL(request.url());
+      if (pathname === "/api/agents") {
+        agentRequests += 1;
+        return route.fulfill({
+          json: { agents: agentRequests === 1 ? [retainedAgent] : [nextAgent] },
+        });
+      }
+      if (
+        pathname === `/api/agents/${AGENT_ID}` &&
+        request.method() === "PUT"
+      ) {
+        expect(request.headers().origin).toBe(new URL(request.url()).origin);
+        expect(request.headers()["content-type"]).toContain("application/json");
+        mutationStarted();
+        return new Promise<void>((resolve) => {
+          releaseMutation = async () => {
+            await route.fulfill({
+              json: {
+                agent: { ...retainedAgent, name: "Stale renamed agent" },
+              },
+            });
+            resolve();
+          };
+        });
+      }
+      if (
+        pathname === `/api/agents/${AGENT_ID}/runs` ||
+        pathname === `/api/agents/${OTHER_AGENT_ID}/runs`
+      ) {
+        return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+    await expect(page.getByText(retainedAgent.name).first()).toBeVisible();
+    const mutationAborted = page.waitForEvent("requestfailed", {
+      predicate: (request) =>
+        request.method() === "PUT" &&
+        new URL(request.url()).pathname === `/api/agents/${AGENT_ID}`,
+    });
+    await page.getByRole("button", { name: "More run actions" }).click();
+    await page.getByRole("menuitem", { name: "Rename this agent" }).click();
+    await page.getByLabel("Agent name").fill("Stale renamed agent");
+    await page.getByRole("button", { name: "Save" }).click();
+    await started;
+
+    sessionOverride = {
+      expires: "2099-01-01T00:00:00.000Z",
+      user: {
+        email: "second@example.invalid",
+        id: "00000000-0000-4000-8000-000000000002",
+        image: null,
+        name: "Second subscriber",
+        type: "subscriber",
+      },
+    };
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      const body = (await response.json()) as { user?: { email?: string } };
+      return body.user?.email === "second@example.invalid";
+    });
+    await notifySessionChange(page);
+    await sessionRefresh;
+    await mutationAborted;
+    await expect(page.getByText(nextAgent.name).first()).toBeVisible();
+
+    await releaseMutation();
+    await page.waitForTimeout(100);
+    await expect(page.getByText("Stale renamed agent")).toHaveCount(0);
+    await expect(page.getByText("Renamed to Stale renamed agent.")).toHaveCount(
+      0
+    );
+  });
+
+  test("delayed settings list and save cannot publish after an account switch", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies("first@example.invalid"));
+    let sessionOverride: Record<string, unknown> | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      sessionOverride === undefined
+        ? route.continue()
+        : route.fulfill({ json: sessionOverride })
+    );
+    let delayNextList = false;
+    let releaseList!: () => Promise<void>;
+    let releaseSave!: () => Promise<void>;
+    let saveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      saveStarted = resolve;
+    });
+    await page.route("**/api/credentials", (route) => {
+      if (route.request().method() === "GET") {
+        if (!delayNextList) {
+          return route.fulfill({ json: { harnessIds: [] } });
+        }
+        delayNextList = false;
+        return new Promise<void>((resolve) => {
+          releaseList = () => {
+            route
+              .fulfill({ json: { harnessIds: ["copilot"] } })
+              .catch(() => undefined);
+            resolve();
+            return Promise.resolve();
+          };
+        });
+      }
+      saveStarted();
+      return new Promise<void>((resolve) => {
+        releaseSave = () => {
+          route
+            .fulfill({ json: { harnessId: "copilot", stored: true } })
+            .catch(() => undefined);
+          resolve();
+          return Promise.resolve();
+        };
+      });
+    });
+    let agentRequests = 0;
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        agentRequests += 1;
+        return route.fulfill({
+          json: {
+            agents:
+              agentRequests === 1
+                ? [retainedAgent]
+                : [{ ...retainedAgent, id: OTHER_AGENT_ID }],
+          },
+        });
+      }
+      return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+    });
+
+    await page.goto("/agents");
+    await expect(page.getByTitle("first@example.invalid")).toBeVisible();
+    delayNextList = true;
+    await page.getByRole("button", { name: "Account and settings" }).click();
+    await page
+      .getByLabel("GitHub Copilot CLI credential")
+      .fill("old-account-token");
+    await expect(page.getByText("Unsaved credential")).toBeVisible();
+    await page.getByRole("button", { name: "Save" }).click();
+    await started;
+
+    sessionOverride = {
+      expires: "2099-01-01T00:00:00.000Z",
+      user: {
+        email: "second@example.invalid",
+        id: "00000000-0000-4000-8000-000000000002",
+        image: null,
+        name: "Second subscriber",
+        type: "subscriber",
+      },
+    };
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      const body = (await response.json()) as { user?: { email?: string } };
+      return body.user?.email === "second@example.invalid";
+    });
+    await notifySessionChange(page);
+    await sessionRefresh;
+    await expect(page.getByTitle("second@example.invalid")).toBeVisible();
+    await releaseList();
+    await releaseSave();
+    await page.waitForTimeout(100);
+    await expect(page.getByLabel("GitHub Copilot CLI credential")).toHaveValue(
+      ""
+    );
+    await expect(page.getByText("No unsaved changes")).toBeVisible();
+    await expect(page.getByText("not set").first()).toBeVisible();
+    await expect(page.getByText("Credential stored.")).toHaveCount(0);
+  });
+
+  test("a delayed settings delete cannot publish after sign-out", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let sessionOverride: Record<string, unknown> | null | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      sessionOverride === undefined
+        ? route.continue()
+        : route.fulfill({ json: sessionOverride })
+    );
+    let releaseDelete!: () => Promise<void>;
+    let deleteStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      deleteStarted = resolve;
+    });
+    await page.route("**/api/credentials", (route) => {
+      if (route.request().method() === "GET") {
+        return route.fulfill({ json: { harnessIds: ["copilot"] } });
+      }
+      deleteStarted();
+      return new Promise<void>((resolve) => {
+        releaseDelete = () => {
+          route
+            .fulfill({ json: { harnessId: "copilot", removed: true } })
+            .catch(() => undefined);
+          resolve();
+          return Promise.resolve();
+        };
+      });
+    });
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [retainedAgent] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+
+    await page.goto("/agents");
+    await page.getByRole("button", { name: "Account and settings" }).click();
+    await page.getByRole("button", { name: "Remove" }).click();
+    await started;
+
+    sessionOverride = null;
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      return (await response.json()) === null;
+    });
+    await notifySessionChange(page);
+    await sessionRefresh;
+    await expect(
+      page.getByRole("heading", { name: "Sign in to manage your account" })
+    ).toBeVisible();
+
+    await releaseDelete();
+    await page.waitForTimeout(100);
+    await expect(page.getByText("Credential removed.")).toHaveCount(0);
+    await expect(
+      page.getByText("Could not remove the credential.")
+    ).toHaveCount(0);
+  });
+
+  test("a delayed chat wipe cannot publish after an account switch", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies("first@example.invalid"));
+    let sessionOverride: Record<string, unknown> | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      sessionOverride === undefined
+        ? route.continue()
+        : route.fulfill({ json: sessionOverride })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: [] } })
+    );
+    let releaseWipe!: () => Promise<void>;
+    let wipeStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      wipeStarted = resolve;
+    });
+    await page.route("**/api/history", (route) => {
+      wipeStarted();
+      return new Promise<void>((resolve) => {
+        releaseWipe = () => {
+          route.fulfill({ json: { ok: true } }).catch(() => undefined);
+          resolve();
+          return Promise.resolve();
+        };
+      });
+    });
+    let agentRequests = 0;
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        agentRequests += 1;
+        return route.fulfill({
+          json: {
+            agents:
+              agentRequests === 1
+                ? [retainedAgent]
+                : [{ ...retainedAgent, id: OTHER_AGENT_ID }],
+          },
+        });
+      }
+      return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+    });
+
+    await page.goto("/agents");
+    await page.getByRole("button", { name: "Account and settings" }).click();
+    await page.getByRole("button", { name: "Data" }).click();
+    await page.getByRole("button", { name: "Delete all chats…" }).click();
+    await page.getByRole("button", { name: "Yes, delete every chat" }).click();
+    await started;
+
+    sessionOverride = {
+      expires: "2099-01-01T00:00:00.000Z",
+      user: {
+        email: "second@example.invalid",
+        id: "00000000-0000-4000-8000-000000000002",
+        image: null,
+        name: "Second subscriber",
+        type: "subscriber",
+      },
+    };
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      const body = (await response.json()) as { user?: { email?: string } };
+      return body.user?.email === "second@example.invalid";
+    });
+    await notifySessionChange(page);
+    await sessionRefresh;
+    await expect(page.getByTitle("second@example.invalid")).toBeVisible();
+
+    await releaseWipe();
+    await page.waitForTimeout(100);
+    await expect(page.getByText("All chats deleted.")).toHaveCount(0);
+    await expect(page.getByText("Could not delete your chats.")).toHaveCount(0);
+    await expect(page.getByText("No unsaved changes")).toBeVisible();
   });
 });

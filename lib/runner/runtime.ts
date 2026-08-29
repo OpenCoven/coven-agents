@@ -23,6 +23,7 @@ import type {
 } from "./reconcile";
 import type {
   RunnerDeleteAgentResult,
+  RunnerPrewarmOptions,
   RunnerService,
   RunnerWarmSandboxResult,
 } from "./service";
@@ -546,16 +547,32 @@ async function createProductionRunnerServiceForPrincipal(
       dependencies.findAccount
     ),
     store,
-    warmSandbox: async (principal, agent): Promise<RunnerWarmSandboxResult> => {
+    warmSandbox: async (
+      principal,
+      agent,
+      options?: RunnerPrewarmOptions
+    ): Promise<RunnerWarmSandboxResult> => {
       try {
+        const daytona = options?.deadline
+          ? client.daytonaClientForDeadline(options.deadline)
+          : client.daytonaClient();
         const result = await sandbox.warmDaytonaSandbox(
           principal,
           agent,
           sandbox.daytonaSandboxConfiguration(),
           {
-            daytona: client.daytonaClient(),
-            probe: async (sandboxHandle) => {
-              await process.probeDaytonaHarnesses(sandboxHandle);
+            daytona,
+            lifecycle: {
+              deadline: options?.deadline,
+              signal: options?.signal,
+            },
+            probe: async (sandboxHandle, signal, timeoutSeconds, sessionId) => {
+              await process.probeDaytonaHarnesses(sandboxHandle, {
+                deadline: options?.deadline,
+                sessionId,
+                signal,
+                timeoutSeconds,
+              });
             },
             store,
           }

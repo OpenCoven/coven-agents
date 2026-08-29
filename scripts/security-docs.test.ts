@@ -70,8 +70,6 @@ test("the incident runbooks name every secret that exists", () => {
     "CREDENTIAL_KEK_V2",
     "POSTGRES_URL",
     "AUTH_SECRET",
-    "RUNNER_SIGNING_KEY",
-    "RUNNER_VERIFY_KEY",
     "AGENT_CONTROL_TOKEN",
     "OPERATOR_DIAGNOSTIC_TOKEN",
     "RUNNER_SERVICE_TOKEN",
@@ -129,21 +127,6 @@ test("the runbooks state the two facts that break a rotation", () => {
   assert.match(runbooks, /copied network trace is a credential disclosure/);
 });
 
-test("identity rotation exports PKCS8 private and SPKI public key material", () => {
-  const runbooks = readFileSync(incidentUrl, "utf8");
-
-  assert.match(
-    runbooks,
-    /const pkcs8 = await subtle\.exportKey\("pkcs8", pair\.privateKey\)/
-  );
-  assert.match(
-    runbooks,
-    /const spki = await subtle\.exportKey\("spki", pair\.publicKey\)/
-  );
-  assert.doesNotMatch(runbooks, /exportKey\("raw", pair\.publicKey\)/);
-  assert.match(runbooks, /PKCS8 private key and the SPKI public key/);
-});
-
 test("local cloud-runner setup shares distinct control and service tokens", () => {
   const envExample = readFileSync(envExampleUrl, "utf8");
   const readme = readFileSync(readmeUrl, "utf8");
@@ -168,14 +151,6 @@ test("the README diagnostic uses the separate operator credential", () => {
   assert.equal(readme.includes("$RUNNER_IDENTITY_TOKEN"), false);
 });
 
-test("the README preserves bodyless runner-token compatibility", () => {
-  const readme = readFileSync(readmeUrl, "utf8");
-
-  assert.match(readme, /bodyless\s+`POST \/api\/runner-token`/);
-  assert.match(readme, /absent or zero-byte body as\s+unscoped/);
-  assert.match(readme, /malformed, unknown-field, and oversized JSON/);
-});
-
 test("the README points to the incident runbooks", () => {
   const readme = readFileSync(readmeUrl, "utf8");
 
@@ -190,7 +165,6 @@ test("the runner key runbook documents bounded rotation and rollback", () => {
   const runbook = readFileSync(keyRotationUrl, "utf8");
 
   for (const marker of [
-    "RUNNER_SIGNING_KEY_ID",
     "RUNNER_VERIFY_KEY_ID",
     "RUNNER_VERIFY_PREVIOUS_LAST_SIGNED_AT",
     "RUNNER_VERIFY_PREVIOUS_RETIRE_AT",

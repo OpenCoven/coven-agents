@@ -1,6 +1,8 @@
 # Proposal: prewarm the sandbox before the first prompt
 
-Status: proposed, not implemented. Companion: `run-diagnostics.md`.
+Status: historical proposal, superseded by server-side Daytona prewarm.
+Companion: `run-diagnostics.md`. Worker identity minting and sandbox details
+below describe the pre-cutover design, not current application behavior.
 
 ## What the inspection found
 

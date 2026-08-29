@@ -1,6 +1,8 @@
 // biome-ignore-all lint/suspicious/useAwait: Dependency doubles keep async signatures for readability.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { DaytonaNotFoundError } from "@daytona/sdk";
+import { daytonaProbeSessionName } from "./daytona/names";
 import {
   cancelRunnerRun,
   reconcileAndDispatch,
@@ -68,6 +70,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     tenant: "tenant_a",
     updatedAt: new Date("2026-08-28T14:00:00.000Z"),
     version: 1,
+    warmAttemptVersion: 0,
     warmStatus: "not_started",
     warmUpdatedAt: new Date("2026-08-28T14:00:00.000Z"),
     workspace: null,
@@ -408,11 +411,353 @@ test("ambiguous sandbox provisioning attaches only the scanned generation", asyn
         calls.push("scan");
         return [pending];
       },
+      scanDaytonaWarmRecoveries: async () => [],
     } as never,
   });
 
   assert.deepEqual(calls, ["scan", "get", "attach"]);
   assert.deepEqual(result, { deferred: 0, failures: 0, recovered: 1 });
+});
+
+test("cron removes only the exact stale warm probe and fenced-finishes it", async () => {
+  const stale = agent({
+    daytonaSandboxId: "sandbox",
+    sandboxGeneration: 2,
+    sandboxLifecycle: "ready",
+    version: 7,
+    warmStatus: "provisioning",
+    warmUpdatedAt: new Date("2026-08-28T15:00:00.000Z"),
+  });
+  const owned = daytonaProbeSessionName(
+    stale.id,
+    stale.sandboxGeneration,
+    stale.warmAttemptVersion,
+    stale.warmUpdatedAt
+  );
+  const replacement = daytonaProbeSessionName(
+    stale.id,
+    stale.sandboxGeneration,
+    stale.warmAttemptVersion + 1,
+    new Date(stale.warmUpdatedAt.getTime() + 1)
+  );
+  const sessions = new Set([owned, replacement]);
+  const deleted: string[] = [];
+  const result = await reconcileDaytonaSandboxes({
+    clock: () => new Date("2026-08-28T16:00:00.000Z"),
+    daytona: {
+      create: async () => {
+        throw new Error("must not create");
+      },
+      get: async () =>
+        ({
+          id: "sandbox",
+          process: {
+            deleteSession: async (sessionId: string) => {
+              deleted.push(sessionId);
+              sessions.delete(sessionId);
+            },
+            listSessions: async () =>
+              [...sessions].map((sessionId) => ({
+                commands: [],
+                sessionId,
+              })),
+          },
+        }) as never,
+    },
+    operator,
+    store: {
+      finishDaytonaSandboxWarmForRecovery: async (
+        _operator: RunnerOperator,
+        fence: {
+          agentId: string;
+          expectedGeneration: number;
+          expectedVersion: number;
+        }
+      ) => {
+        assert.deepEqual(fence, {
+          agentId: stale.id,
+          expectedGeneration: stale.sandboxGeneration,
+          expectedVersion: stale.version,
+        });
+        return {
+          kind: "updated" as const,
+          value: agent({ ...stale, version: 8, warmStatus: "failed" }),
+        };
+      },
+      scanDaytonaSandboxRecoveries: async () => [],
+      scanDaytonaWarmRecoveries: async () => [stale],
+    } as never,
+  });
+
+  assert.deepEqual(deleted, [owned]);
+  assert.equal(sessions.has(replacement), true);
+  assert.deepEqual(result, { deferred: 0, failures: 0, recovered: 1 });
+});
+
+test("stale warm recovery runs even when lifecycle recovery fills its batch", async () => {
+  const recentLifecycle = Array.from({ length: 3 }, (_, index) =>
+    agent({
+      id: `00000000-0000-4000-8000-00000000000${index + 2}`,
+      sandboxLifecycle: "provisioning",
+      sandboxUpdatedAt: new Date("2026-08-28T15:59:00.000Z"),
+    })
+  );
+  const staleWarm = agent({
+    daytonaSandboxId: "sandbox",
+    sandboxLifecycle: "ready",
+    version: 7,
+    warmAttemptVersion: 3,
+    warmStatus: "provisioning",
+    warmUpdatedAt: new Date("2026-08-28T15:00:00.000Z"),
+  });
+  const owned = daytonaProbeSessionName(
+    staleWarm.id,
+    staleWarm.sandboxGeneration,
+    staleWarm.warmAttemptVersion,
+    staleWarm.warmUpdatedAt
+  );
+  const sessions = new Set([owned]);
+  const scans: string[] = [];
+
+  const result = await reconcileDaytonaSandboxes({
+    batchSize: 2,
+    clock: () => new Date("2026-08-28T16:00:00.000Z"),
+    daytona: {
+      create: async () => {
+        throw new Error("must not create");
+      },
+      get: async () =>
+        ({
+          id: "sandbox",
+          process: {
+            deleteSession: async (sessionId: string) => {
+              sessions.delete(sessionId);
+            },
+            listSessions: async () =>
+              [...sessions].map((sessionId) => ({
+                commands: [],
+                sessionId,
+              })),
+          },
+        }) as never,
+    },
+    operator,
+    store: {
+      finishDaytonaSandboxWarmForRecovery: async () => ({
+        kind: "updated" as const,
+        value: agent({ ...staleWarm, version: 8, warmStatus: "failed" }),
+      }),
+      scanDaytonaSandboxRecoveries: async (
+        _operator: RunnerOperator,
+        limit: number
+      ) => {
+        scans.push("lifecycle");
+        assert.equal(limit, 2);
+        return recentLifecycle.slice(0, limit);
+      },
+      scanDaytonaWarmRecoveries: async (
+        _operator: RunnerOperator,
+        staleBefore: Date,
+        limit: number
+      ) => {
+        scans.push("warm");
+        assert.equal(limit, 2);
+        assert.equal(staleBefore.toISOString(), "2026-08-28T15:55:00.000Z");
+        return [staleWarm];
+      },
+    } as never,
+  });
+
+  assert.deepEqual(scans, ["lifecycle", "warm"]);
+  assert.equal(sessions.size, 0);
+  assert.deepEqual(result, { deferred: 2, failures: 0, recovered: 1 });
+});
+
+test("a lifecycle scan outage does not block the stale warm lane", async () => {
+  const staleWarm = agent({
+    daytonaSandboxId: "missing-sandbox",
+    sandboxLifecycle: "ready",
+    version: 7,
+    warmAttemptVersion: 3,
+    warmStatus: "provisioning",
+    warmUpdatedAt: new Date("2026-08-28T15:00:00.000Z"),
+  });
+  let finishes = 0;
+
+  const result = await reconcileDaytonaSandboxes({
+    clock: () => new Date("2026-08-28T16:00:00.000Z"),
+    daytona: {
+      create: async () => {
+        throw new Error("must not create");
+      },
+      get: async () => {
+        throw new DaytonaNotFoundError("missing");
+      },
+    },
+    operator,
+    store: {
+      finishDaytonaSandboxWarmForRecovery: async () => {
+        finishes += 1;
+        return {
+          kind: "updated" as const,
+          value: agent({ ...staleWarm, version: 8, warmStatus: "failed" }),
+        };
+      },
+      scanDaytonaSandboxRecoveries: async () => {
+        throw new Error("database unavailable");
+      },
+      scanDaytonaWarmRecoveries: async () => [staleWarm],
+    } as never,
+  });
+
+  assert.equal(finishes, 1);
+  assert.deepEqual(result, { deferred: 0, failures: 1, recovered: 1 });
+});
+
+test("recent and provider-failed warm recovery remains deferred and retryable", async () => {
+  const recent = agent({
+    daytonaSandboxId: "sandbox",
+    sandboxLifecycle: "ready",
+    version: 7,
+    warmStatus: "provisioning",
+    warmUpdatedAt: new Date("2026-08-28T15:59:00.000Z"),
+  });
+  let gets = 0;
+  let finishes = 0;
+  const recentResult = await reconcileDaytonaSandboxes({
+    clock: () => new Date("2026-08-28T16:00:00.000Z"),
+    daytona: {
+      create: async () => {
+        throw new Error("must not create");
+      },
+      get: async () => {
+        gets += 1;
+        throw new Error("must not get");
+      },
+    },
+    operator,
+    store: {
+      finishDaytonaSandboxWarmForRecovery: async () => {
+        finishes += 1;
+        return { kind: "stale_version" as const };
+      },
+      scanDaytonaSandboxRecoveries: async () => [],
+      scanDaytonaWarmRecoveries: async () => [recent],
+    } as never,
+  });
+  assert.deepEqual(recentResult, {
+    deferred: 1,
+    failures: 0,
+    recovered: 0,
+  });
+  assert.equal(gets, 0);
+  assert.equal(finishes, 0);
+
+  const stale = agent({
+    ...recent,
+    warmUpdatedAt: new Date("2026-08-28T15:00:00.000Z"),
+  });
+  const failedResult = await reconcileDaytonaSandboxes({
+    clock: () => new Date("2026-08-28T16:00:00.000Z"),
+    daytona: {
+      create: async () => {
+        throw new Error("must not create");
+      },
+      get: async () =>
+        ({
+          id: "sandbox",
+          process: {
+            deleteSession: async () => {
+              throw new Error("provider unavailable");
+            },
+            listSessions: async () => [
+              {
+                commands: [],
+                sessionId: daytonaProbeSessionName(
+                  stale.id,
+                  stale.sandboxGeneration,
+                  stale.warmAttemptVersion,
+                  stale.warmUpdatedAt
+                ),
+              },
+            ],
+          },
+        }) as never,
+    },
+    operator,
+    store: {
+      finishDaytonaSandboxWarmForRecovery: async () => {
+        finishes += 1;
+        return { kind: "stale_version" as const };
+      },
+      scanDaytonaSandboxRecoveries: async () => [],
+      scanDaytonaWarmRecoveries: async () => [stale],
+    } as never,
+  });
+  assert.deepEqual(failedResult, {
+    deferred: 1,
+    failures: 0,
+    recovered: 0,
+  });
+  assert.equal(finishes, 0);
+});
+
+test("overlapping warm recovery is idempotent under the version fence", async () => {
+  const stale = agent({
+    daytonaSandboxId: "sandbox",
+    sandboxLifecycle: "ready",
+    version: 7,
+    warmStatus: "provisioning",
+    warmUpdatedAt: new Date("2026-08-28T15:00:00.000Z"),
+  });
+  const owned = daytonaProbeSessionName(
+    stale.id,
+    stale.sandboxGeneration,
+    stale.warmAttemptVersion,
+    stale.warmUpdatedAt
+  );
+  const sessions = new Set([owned]);
+  let finishes = 0;
+  const result = await reconcileDaytonaSandboxes({
+    clock: () => new Date("2026-08-28T16:00:00.000Z"),
+    daytona: {
+      create: async () => {
+        throw new Error("must not create");
+      },
+      get: async () =>
+        ({
+          id: "sandbox",
+          process: {
+            deleteSession: async (sessionId: string) => {
+              sessions.delete(sessionId);
+            },
+            listSessions: async () =>
+              [...sessions].map((sessionId) => ({
+                commands: [],
+                sessionId,
+              })),
+          },
+        }) as never,
+    },
+    operator,
+    providerConcurrency: 2,
+    store: {
+      finishDaytonaSandboxWarmForRecovery: async () => {
+        finishes += 1;
+        return finishes === 1
+          ? {
+              kind: "updated" as const,
+              value: agent({ ...stale, version: 8, warmStatus: "failed" }),
+            }
+          : { kind: "stale_version" as const };
+      },
+      scanDaytonaSandboxRecoveries: async () => [],
+      scanDaytonaWarmRecoveries: async () => [stale, stale],
+    } as never,
+  });
+
+  assert.deepEqual(result, { deferred: 1, failures: 0, recovered: 1 });
+  assert.equal(sessions.size, 0);
 });
 
 test("decommissioning retry deletes provider state before fenced agent removal", async () => {
@@ -446,6 +791,7 @@ test("decommissioning retry deletes provider state before fenced agent removal",
         calls.push("scan");
         return [deleting];
       },
+      scanDaytonaWarmRecoveries: async () => [],
     } as never,
   });
 

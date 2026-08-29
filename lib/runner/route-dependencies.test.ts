@@ -30,6 +30,10 @@ test("route imports leave core runtime and diagnostics behind separate async sea
   assert.match(dependencies, /diagnoseSandbox:\s*async/);
   assert.match(dependencies, /createOperatorService:\s*async/);
   assert.match(dependencies, /createService:\s*async/);
+  assert.match(
+    dependencies,
+    /appOrigin:\s*\(\)\s*=>\s*configuredApplicationOrigin\(process\.env\)/
+  );
 });
 
 test("importing route dependencies constructs no database or Daytona client", () => {

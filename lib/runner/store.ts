@@ -146,6 +146,7 @@ function asAgent(row: Record<string, unknown>): RunnerAgentRecord {
     tenant: column(row, "tenant"),
     updatedAt: column(row, "updatedAt"),
     version: column(row, "version"),
+    warmAttemptVersion: column(row, "warmAttemptVersion"),
     warmStatus: column(row, "warmStatus"),
     warmUpdatedAt: column(row, "warmUpdatedAt"),
     workspace: column(row, "workspace"),
@@ -1985,8 +1986,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         const agent = asAgent(current);
         if (
           agent.sandboxLifecycle === "ready" &&
-          agent.warmStatus === "provisioning" &&
-          agent.warmUpdatedAt > input.warmStaleBefore
+          agent.warmStatus === "provisioning"
         ) {
           return { kind: "in_progress", value: agent };
         }
@@ -2003,6 +2003,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             { ...input, tenant: principal.tenant },
             sql`UPDATE "RunnerAgent"
               SET "warmStatus" = 'provisioning',
+                  "warmAttemptVersion" = "warmAttemptVersion" + 1,
                   "warmUpdatedAt" = now(),
                   "updatedAt" = now(),
                   "version" = "version" + 1
@@ -2011,10 +2012,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "version" = ${input.expectedVersion}
                 AND "sandboxGeneration" = ${input.expectedGeneration}
                 AND "sandboxLifecycle" = 'ready'
-                AND (
-                  "warmStatus" <> 'provisioning'
-                  OR "warmUpdatedAt" <= ${input.warmStaleBefore}
-                )
+                AND "warmStatus" <> 'provisioning'
               RETURNING *`
           )
         );
@@ -2773,6 +2771,47 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             sql`SELECT "id" FROM "RunnerAgent"
               WHERE "id" = ${input.agentId}
                 AND "tenant" = ${principal.tenant}
+              LIMIT 1`
+          )
+        );
+        return current ? { kind: "stale_version" } : { kind: "not_found" };
+      }),
+
+    finishDaytonaSandboxWarmForRecovery: (
+      _operator: RunnerOperator,
+      input: DaytonaSandboxFence
+    ): Promise<
+      | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "not_found" }
+      | { kind: "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const [updated] = await transaction.execute(
+          statement(
+            "finish-daytona-sandbox-warm-for-recovery",
+            input,
+            sql`UPDATE "RunnerAgent"
+              SET "warmStatus" = 'failed',
+                  "warmUpdatedAt" = now(),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${input.agentId}
+                AND "version" = ${input.expectedVersion}
+                AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "sandboxLifecycle" = 'ready'
+                AND "warmStatus" = 'provisioning'
+              RETURNING *`
+          )
+        );
+        if (updated) {
+          return { kind: "updated", value: asAgent(updated) };
+        }
+        const [current] = await transaction.execute(
+          statement(
+            "get-agent-after-daytona-warm-recovery",
+            { agentId: input.agentId },
+            sql`SELECT "id" FROM "RunnerAgent"
+              WHERE "id" = ${input.agentId}
               LIMIT 1`
           )
         );
@@ -3904,6 +3943,28 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 'decommissioning'
               )
               ORDER BY "sandboxUpdatedAt" ASC, "id" ASC
+              LIMIT ${limit}
+              FOR UPDATE SKIP LOCKED`
+          )
+        );
+        return rows.map(asAgent);
+      }),
+
+    scanDaytonaWarmRecoveries: (
+      _operator: RunnerOperator,
+      staleBefore: Date,
+      limit: number
+    ) =>
+      database.transaction(async (transaction) => {
+        const rows = await transaction.execute(
+          statement(
+            "scan-daytona-warm-recoveries",
+            { limit, staleBefore },
+            sql`SELECT * FROM "RunnerAgent"
+              WHERE "sandboxLifecycle" = 'ready'
+                AND "warmStatus" = 'provisioning'
+                AND "warmUpdatedAt" <= ${staleBefore}
+              ORDER BY "warmUpdatedAt" ASC, "id" ASC
               LIMIT ${limit}
               FOR UPDATE SKIP LOCKED`
           )

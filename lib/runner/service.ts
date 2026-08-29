@@ -104,8 +104,14 @@ export type RunnerServiceDependencies = Readonly<{
   store: RunnerServiceStore;
   warmSandbox?: (
     principal: RunnerPrincipal,
-    agent: RunnerAgentRecord
+    agent: RunnerAgentRecord,
+    options?: RunnerPrewarmOptions
   ) => Promise<RunnerWarmSandboxResult>;
+}>;
+
+export type RunnerPrewarmOptions = Readonly<{
+  deadline?: number;
+  signal?: AbortSignal;
 }>;
 
 export type RunnerCreateAgentResult =
@@ -259,7 +265,8 @@ export type RunnerService = Readonly<{
   ) => Promise<readonly AgentDefinition[]>;
   listHarnesses: () => Promise<readonly HarnessStatus[]>;
   prewarmMostRecent: (
-    principal: RunnerPrincipal
+    principal: RunnerPrincipal,
+    options?: RunnerPrewarmOptions
   ) => Promise<RunnerPrewarmResult>;
   readRunEvents: (
     principal: RunnerPrincipal,
@@ -554,7 +561,7 @@ export function createRunnerService(
       return harnessesEnvelopeSchema.parse({ harnesses }).harnesses;
     },
 
-    prewarmMostRecent: async (principal) => {
+    prewarmMostRecent: async (principal, options) => {
       let agents: RunnerAgentRecord[];
       try {
         agents = await dependencies.store.listAgents(principal);
@@ -573,7 +580,7 @@ export function createRunnerService(
       }
       let result: RunnerWarmSandboxResult;
       try {
-        result = await dependencies.warmSandbox(principal, target);
+        result = await dependencies.warmSandbox(principal, target, options);
       } catch {
         return { kind: "unavailable", source: "provider" };
       }

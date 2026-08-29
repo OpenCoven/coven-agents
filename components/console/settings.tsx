@@ -5,7 +5,7 @@
 import { HARNESS_SPECS } from "@opencoven/harness";
 import Link from "next/link";
 import { signOut } from "next-auth/react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Btn, Caret, Eyebrow } from "@/components/console/primitives";
 import {
@@ -17,6 +17,11 @@ import {
   well,
 } from "@/components/console/styles";
 import { glyphFor } from "@/lib/console/format";
+import {
+  isSessionOperationCurrent,
+  type SessionOperationContext,
+} from "@/lib/console/session-operation";
+import { createCredentialRefreshFence } from "@/lib/credentials/client";
 
 /**
  * Settings, inside the console shell.
@@ -186,11 +191,15 @@ function HarnessCard({
 
 export function Settings({
   account,
+  onCredentialsChange,
+  operationContext,
 }: {
   /** The signed-in email, or null. Not a display string — the panel decides
    *  how to render "nobody", so a fallback sentence can never be mistaken for
    *  an account name or have an initial derived from it. */
   account: string | null;
+  onCredentialsChange: (harnessIds: readonly string[]) => void;
+  operationContext: SessionOperationContext | null;
 }) {
   const [tab, setTab] = useState<Tab>("harness");
 
@@ -202,48 +211,102 @@ export function Settings({
 
   const [usage, setUsage] = useState<Usage | null>(null);
   const [confirmWipe, setConfirmWipe] = useState(false);
+  const refreshFence = useRef(createCredentialRefreshFence()).current;
+  const operationContextRef = useRef(operationContext);
+  operationContextRef.current = operationContext;
 
-  const refreshCredentials = useCallback(async () => {
-    const response = await fetch(`${BASE_PATH}/api/credentials`);
-    if (response.status === 403) {
-      // A demo session cannot store one, and saying so beats a form that
-      // fails on submit.
-      setLocked(true);
-      return;
-    }
-    if (!response.ok) {
-      return;
-    }
-    const body = (await response.json()) as { harnessIds?: string[] };
-    setConfigured(body.harnessIds ?? []);
-  }, []);
+  const isCurrentOperation = useCallback(
+    (context: SessionOperationContext | null) =>
+      isSessionOperationCurrent(context, operationContextRef.current),
+    []
+  );
+
+  const publishCredentials = useCallback(
+    (
+      harnessIds: readonly string[],
+      context: SessionOperationContext | null
+    ) => {
+      if (!isCurrentOperation(context)) {
+        return null;
+      }
+      const next = [...new Set(harnessIds)].sort();
+      setConfigured(next);
+      onCredentialsChange(next);
+      return next;
+    },
+    [isCurrentOperation, onCredentialsChange]
+  );
+
+  const refreshCredentials = useCallback(
+    async (context: SessionOperationContext | null) => {
+      if (!context || !isCurrentOperation(context)) {
+        return null;
+      }
+      const ticket = refreshFence.beginRefresh();
+      const response = await fetch(`${BASE_PATH}/api/credentials`, {
+        signal: context.signal,
+      });
+      if (!isCurrentOperation(context) || !refreshFence.isCurrent(ticket)) {
+        return null;
+      }
+      if (response.status === 403) {
+        // A demo session cannot store one, and saying so beats a form that
+        // fails on submit.
+        setLocked(true);
+        return publishCredentials([], context);
+      }
+      if (!response.ok) {
+        return null;
+      }
+      const body = (await response.json()) as { harnessIds?: string[] };
+      if (!isCurrentOperation(context) || !refreshFence.isCurrent(ticket)) {
+        return null;
+      }
+      return publishCredentials(body.harnessIds ?? [], context);
+    },
+    [isCurrentOperation, publishCredentials, refreshFence]
+  );
 
   useEffect(() => {
-    if (!account) {
-      return;
+    refreshFence.activate();
+    setTab("harness");
+    setConfigured([]);
+    setDrafts({});
+    setLocked(false);
+    setBusy(false);
+    setRefusedOpen(false);
+    setUsage(null);
+    setConfirmWipe(false);
+    if (!account || !operationContext) {
+      return () => refreshFence.deactivate();
     }
-    refreshCredentials().catch(() => undefined);
-  }, [account, refreshCredentials]);
+    refreshCredentials(operationContext).catch(() => undefined);
+    return () => refreshFence.deactivate();
+  }, [account, operationContext, refreshCredentials, refreshFence]);
 
   useEffect(() => {
-    if (!account) {
+    const context = operationContext;
+    if (!account || !context || !isCurrentOperation(context)) {
       return;
     }
-    let cancelled = false;
-    fetch(`${BASE_PATH}/api/usage`)
-      .then(async (response) =>
-        response.ok ? ((await response.json()) as Usage) : null
-      )
-      .then((next) => {
-        if (!cancelled && next) {
+    const load = async () => {
+      try {
+        const response = await fetch(`${BASE_PATH}/api/usage`, {
+          signal: context.signal,
+        });
+        if (!isCurrentOperation(context) || !response.ok) {
+          return;
+        }
+        const next = (await response.json()) as Usage;
+        if (isCurrentOperation(context)) {
           setUsage(next);
         }
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
+      } catch {
+        // Session transitions abort this best-effort summary.
+      }
     };
-  }, [account]);
+    load().catch(() => undefined);
+  }, [account, isCurrentOperation, operationContext]);
 
   const dirty = Object.values(drafts).some((value) => value.trim().length > 0);
 
@@ -252,8 +315,13 @@ export function Settings({
   };
 
   const save = async () => {
+    const context = operationContextRef.current;
+    if (!context || !isCurrentOperation(context)) {
+      return;
+    }
     setBusy(true);
     let stored = 0;
+    let nextConfigured = configured;
     try {
       for (const [harnessId, value] of Object.entries(drafts)) {
         const credential = value.trim();
@@ -267,69 +335,125 @@ export function Settings({
           body: JSON.stringify({ credential, harnessId }),
           headers: { "content-type": "application/json" },
           method: "POST",
+          signal: context.signal,
         });
+        if (!isCurrentOperation(context)) {
+          return;
+        }
 
         if (response.status === 422) {
           // A rejected token is the person's to fix, so it is shown verbatim
           // and the typed value is kept — that is the only state it can be
           // corrected from.
           const body = (await response.json()) as { message?: string };
-          toast.error(body.message ?? "That token was rejected.");
+          if (isCurrentOperation(context)) {
+            toast.error(body.message ?? "That token was rejected.");
+          }
           return;
         }
         if (!response.ok) {
           throw new Error(String(response.status));
         }
+        if (!refreshFence.advanceMutation()) {
+          return;
+        }
         stored += 1;
+        nextConfigured =
+          publishCredentials([...nextConfigured, harnessId], context) ??
+          nextConfigured;
       }
 
+      if (!isCurrentOperation(context)) {
+        return;
+      }
       setDrafts({});
-      await refreshCredentials();
+      await refreshCredentials(context);
+      if (!isCurrentOperation(context)) {
+        return;
+      }
       toast.success(
         stored === 1 ? "Credential stored." : `${stored} credentials stored.`
       );
     } catch {
-      toast.error("Could not store the credential.");
+      if (isCurrentOperation(context)) {
+        toast.error("Could not store the credential.");
+      }
     } finally {
-      setBusy(false);
+      if (isCurrentOperation(context)) {
+        setBusy(false);
+      }
     }
   };
 
   const remove = async (harnessId: string) => {
+    const context = operationContextRef.current;
+    if (!context || !isCurrentOperation(context)) {
+      return;
+    }
     setBusy(true);
     try {
       const response = await fetch(`${BASE_PATH}/api/credentials`, {
         body: JSON.stringify({ harnessId }),
         headers: { "content-type": "application/json" },
         method: "DELETE",
+        signal: context.signal,
       });
+      if (!isCurrentOperation(context)) {
+        return;
+      }
       if (!response.ok) {
         throw new Error(String(response.status));
       }
-      await refreshCredentials();
+      if (!refreshFence.advanceMutation()) {
+        return;
+      }
+      publishCredentials(
+        configured.filter((id) => id !== harnessId),
+        context
+      );
+      await refreshCredentials(context);
+      if (!isCurrentOperation(context)) {
+        return;
+      }
       toast.success("Credential removed.");
     } catch {
-      toast.error("Could not remove the credential.");
+      if (isCurrentOperation(context)) {
+        toast.error("Could not remove the credential.");
+      }
     } finally {
-      setBusy(false);
+      if (isCurrentOperation(context)) {
+        setBusy(false);
+      }
     }
   };
 
   const wipeChats = async () => {
+    const context = operationContextRef.current;
+    if (!context || !isCurrentOperation(context)) {
+      return;
+    }
     setBusy(true);
     try {
       const response = await fetch(`${BASE_PATH}/api/history`, {
         method: "DELETE",
+        signal: context.signal,
       });
+      if (!isCurrentOperation(context)) {
+        return;
+      }
       if (!response.ok) {
         throw new Error(String(response.status));
       }
       toast.success("All chats deleted.");
       setConfirmWipe(false);
     } catch {
-      toast.error("Could not delete your chats.");
+      if (isCurrentOperation(context)) {
+        toast.error("Could not delete your chats.");
+      }
     } finally {
-      setBusy(false);
+      if (isCurrentOperation(context)) {
+        setBusy(false);
+      }
     }
   };
 
