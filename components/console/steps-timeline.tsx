@@ -2,7 +2,7 @@
 
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Caret } from "@/components/console/primitives";
 import {
   hairline,
@@ -60,29 +60,11 @@ export function StepsTimeline({
    * happened, not for how compact the list can be.
    */
   const [rich, setRich] = useState(true);
-  const dragFrom = useRef<{ startWidth: number; startX: number } | null>(null);
-
-  const onPointerMove = useCallback((event: PointerEvent) => {
-    const from = dragFrom.current;
-    if (!from) {
-      return;
-    }
-    // The panel is on the right, so dragging left widens it.
-    const next = from.startWidth + (from.startX - event.clientX);
-    setWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, next)));
-  }, []);
-
-  useEffect(() => {
-    const stop = () => {
-      dragFrom.current = null;
-    };
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", stop);
-    return () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", stop);
-    };
-  }, [onPointerMove]);
+  const dragFrom = useRef<{
+    pointerId: number;
+    startWidth: number;
+    startX: number;
+  } | null>(null);
 
   if (collapsed) {
     return (
@@ -133,6 +115,8 @@ export function StepsTimeline({
 
   return (
     <aside
+      aria-label="Steps"
+      id="steps-timeline"
       style={{
         background: "var(--bg-panel)",
         borderLeft: hairline,
@@ -145,12 +129,19 @@ export function StepsTimeline({
     >
       {/* biome-ignore lint/a11y/useSemanticElements: role="separator" here is the ARIA splitter pattern — a focusable, resizable divider — not the thematic break an <hr> means. */}
       <div
+        aria-controls="steps-timeline"
         aria-label="Resize the steps panel"
         aria-orientation="vertical"
         aria-valuemax={MAX_WIDTH}
         aria-valuemin={MIN_WIDTH}
         aria-valuenow={width}
         onKeyDown={(event) => {
+          if (event.key === "Home") {
+            setWidth(MIN_WIDTH);
+          }
+          if (event.key === "End") {
+            setWidth(MAX_WIDTH);
+          }
           if (event.key === "ArrowLeft") {
             setWidth((value) => Math.min(MAX_WIDTH, value + KEY_STEP));
           }
@@ -158,8 +149,41 @@ export function StepsTimeline({
             setWidth((value) => Math.max(MIN_WIDTH, value - KEY_STEP));
           }
         }}
+        onLostPointerCapture={(event) => {
+          if (dragFrom.current?.pointerId === event.pointerId) {
+            dragFrom.current = null;
+          }
+        }}
+        onPointerCancel={(event) => {
+          if (dragFrom.current?.pointerId === event.pointerId) {
+            dragFrom.current = null;
+          }
+        }}
         onPointerDown={(event) => {
-          dragFrom.current = { startWidth: width, startX: event.clientX };
+          if (!event.isPrimary || event.button !== 0) {
+            return;
+          }
+          event.currentTarget.setPointerCapture(event.pointerId);
+          dragFrom.current = {
+            pointerId: event.pointerId,
+            startWidth: width,
+            startX: event.clientX,
+          };
+        }}
+        onPointerMove={(event) => {
+          const from = dragFrom.current;
+          if (!from || from.pointerId !== event.pointerId) {
+            return;
+          }
+          // The panel is on the right, so dragging left widens it.
+          const next = from.startWidth + (from.startX - event.clientX);
+          setWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, next)));
+        }}
+        onPointerUp={(event) => {
+          if (dragFrom.current?.pointerId === event.pointerId) {
+            dragFrom.current = null;
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
         }}
         role="separator"
         style={{
@@ -168,6 +192,7 @@ export function StepsTimeline({
           left: -3,
           position: "absolute",
           top: 0,
+          touchAction: "none",
           width: 7,
           zIndex: 6,
         }}

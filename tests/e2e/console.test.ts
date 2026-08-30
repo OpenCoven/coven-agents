@@ -368,6 +368,19 @@ test.describe("Run console", () => {
     await expect(
       page.getByRole("button", { name: "Collapse the navigation" })
     ).toBeVisible();
+    const navigationRail = page.locator(".oc-agent-rail");
+    await expect(navigationRail).toHaveCSS("position", "absolute");
+    const resizeHandle = page.getByRole("separator", {
+      name: "Resize the navigation rail",
+    });
+    await resizeHandle.press("End");
+    const renderedWidth = await navigationRail.evaluate((element) =>
+      Math.round(element.getBoundingClientRect().width)
+    );
+    await expect(resizeHandle).toHaveAttribute(
+      "aria-valuenow",
+      String(renderedWidth)
+    );
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth
@@ -375,10 +388,15 @@ test.describe("Run console", () => {
     ).toBe(true);
   });
 
-  test("a retained run exposes rich steps and the global collapse control", async ({
+  test("a retained run exposes resizable rich side rails and the global collapse control", async ({
     context,
     page,
   }) => {
+    const markdownRun = {
+      ...retainedRun,
+      output:
+        "## Verification\n\n**Timeline verified.**\n\n- Events stayed ordered\n- Evidence stayed bounded",
+    };
     await context.addCookies(await subscriberCookies());
     await page.route("**/api/credentials", (route) =>
       route.fulfill({ json: { harnessIds: ["copilot"] } })
@@ -394,7 +412,7 @@ test.describe("Run console", () => {
       }
       if (pathname === `/api/agents/${AGENT_ID}/runs`) {
         return route.fulfill({
-          json: { apiVersion: "1.0", runs: [retainedRun] },
+          json: { apiVersion: "1.0", runs: [markdownRun] },
         });
       }
       if (pathname === `/api/runs/${RUN_ID}/events`) {
@@ -425,7 +443,57 @@ test.describe("Run console", () => {
       .getByRole("button", { name: /completed Verify timeline/ })
       .click();
 
+    const navigationRail = page.locator(".oc-agent-rail");
+    const navigationWidth = await navigationRail.evaluate(
+      (element) => element.getBoundingClientRect().width
+    );
+    const navigationResizeHandle = page.getByRole("separator", {
+      name: "Resize the navigation rail",
+    });
+    const navigationHandleBox = await navigationResizeHandle.boundingBox();
+    expect(navigationHandleBox).not.toBeNull();
+    await page.mouse.move(
+      (navigationHandleBox?.x ?? 0) + (navigationHandleBox?.width ?? 0) / 2,
+      (navigationHandleBox?.y ?? 0) + 20
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      (navigationHandleBox?.x ?? 0) +
+        (navigationHandleBox?.width ?? 0) / 2 +
+        32,
+      (navigationHandleBox?.y ?? 0) + 20
+    );
+    await page.mouse.up();
+    await expect
+      .poll(() =>
+        navigationRail.evaluate(
+          (element) => element.getBoundingClientRect().width
+        )
+      )
+      .toBeGreaterThan(navigationWidth);
+
+    const stepsResizeHandle = page.getByRole("separator", {
+      name: "Resize the steps panel",
+    });
+    const stepsRail = stepsResizeHandle.locator("..");
+    const stepsWidth = await stepsRail.evaluate(
+      (element) => element.getBoundingClientRect().width
+    );
+    await stepsResizeHandle.press("ArrowLeft");
+    await expect
+      .poll(() =>
+        stepsRail.evaluate((element) => element.getBoundingClientRect().width)
+      )
+      .toBeGreaterThan(stepsWidth);
+
     await expect(page.getByText("second output line")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { level: 2, name: "Verification" })
+    ).toBeVisible();
+    await expect(
+      page.locator(".oc-markdown strong", { hasText: "Timeline verified." })
+    ).toBeVisible();
+    await expect(page.getByText("Events stayed ordered")).toBeVisible();
     await page.getByRole("button", { exact: true, name: "collapse" }).click();
     await expect(page.getByText("second output line")).toHaveCount(0);
     await expect(
