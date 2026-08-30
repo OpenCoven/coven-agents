@@ -95,6 +95,12 @@ export type ProductionClaimDependencies = Readonly<{
 export type ProductionRunnerRuntimeDependencies = Readonly<{
   databaseFor?: ProductionDatabaseFactory;
   findAccount?: ProductionAccountFinder;
+  reportReconciliationFailure?: (failure: RunnerReconciliationFailure) => void;
+}>;
+
+export type RunnerReconciliationFailure = Readonly<{
+  category: "runner" | "unknown";
+  stage: "composition" | "lease" | "reconcile";
 }>;
 
 export type ProductionRunnerRuntime = Readonly<{
@@ -401,12 +407,15 @@ function registryHarnesses(): readonly HarnessStatus[] {
 function productionReconcile(
   database: ProductionDatabase,
   store: RunnerStore,
-  findAccount?: ProductionAccountFinder
+  findAccount?: ProductionAccountFinder,
+  reportFailure?: (failure: RunnerReconciliationFailure) => void
 ): RunnerService["reconcileAndDispatch"] {
   return async () => {
+    let stage: RunnerReconciliationFailure["stage"] = "lease";
     try {
       return await runLeasedReconciliation({
         reconcile: async () => {
+          stage = "composition";
           const [
             admission,
             client,
@@ -440,6 +449,7 @@ function productionReconcile(
               sandboxConfiguration: sandbox.daytonaSandboxConfiguration(),
               store,
             });
+          stage = "reconcile";
           return reconciliation.reconcileAndDispatch({
             ...composition,
             dispatch: configuredDispatcher(
@@ -456,6 +466,10 @@ function productionReconcile(
       const { RunnerServiceError: RuntimeServiceError } = await import(
         "./errors"
       );
+      reportFailure?.({
+        category: error instanceof RuntimeServiceError ? "runner" : "unknown",
+        stage,
+      });
       if (error instanceof RuntimeServiceError) {
         throw error;
       }
@@ -544,7 +558,8 @@ async function createProductionRunnerServiceForPrincipal(
     reconcileAndDispatch: productionReconcile(
       database,
       store,
-      dependencies.findAccount
+      dependencies.findAccount,
+      dependencies.reportReconciliationFailure
     ),
     store,
     warmSandbox: async (
@@ -601,7 +616,11 @@ export function createProductionRunnerRuntime(
   };
 }
 
-const productionRunnerRuntime = createProductionRunnerRuntime();
+const productionRunnerRuntime = createProductionRunnerRuntime({
+  reportReconciliationFailure: (failure) => {
+    console.error("Runner reconciliation failed.", failure);
+  },
+});
 
 export function createProductionRunnerService(session: SubscriberSession) {
   return productionRunnerRuntime.createSubscriberService(session);
