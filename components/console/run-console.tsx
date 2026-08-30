@@ -1819,105 +1819,90 @@ function EmptyConsole({
   signedOut: boolean;
 }) {
   return (
-    <div
-      className="oc-empty-console"
-      style={{
-        alignItems: "center",
-        display: "flex",
-        flex: 1,
-        justifyContent: "center",
-        padding: 48,
-      }}
-    >
-      <div style={{ maxWidth: 460, textAlign: "center" }}>
-        <Eyebrow
-          style={{ color: "var(--text-muted)", letterSpacing: "0.14em" }}
-        >
-          Daytona sandboxes
-        </Eyebrow>
-        <h1 style={{ ...type_.display, fontSize: 30, margin: "12px 0 10px" }}>
-          Autonomous agents, bounded by infrastructure.
-        </h1>
-        <p style={{ ...type_.body, margin: "0 auto", maxWidth: "44ch" }}>
-          {blocked ??
-            "Forge an execution profile, hand it a mission, and read the receipt it proves itself with."}
-        </p>
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            justifyContent: "center",
-            marginTop: 22,
-          }}
-        >
-          <Btn
-            disabled={blocked !== null && !signedOut}
-            onClick={onCreate}
-            size="md"
-            variant="primary"
+    <div className="oc-empty-console">
+      <div className="oc-empty-console-shell">
+        <section className="oc-empty-console-copy">
+          <Eyebrow
+            style={{ color: "var(--text-muted)", letterSpacing: "0.14em" }}
           >
-            {signedOut ? "Sign in to forge" : "Forge an agent"}
-          </Btn>
-        </div>
-
-        {/* The boundary, published. One quiet line explains where execution
-            happens and what remains local without exposing provider details
-            that are not part of the runner contract. */}
-        <div
-          style={{
-            alignItems: "center",
-            display: "flex",
-            gap: 8,
-            justifyContent: "center",
-            marginTop: 26,
-          }}
-        >
-          <span
-            aria-hidden="true"
-            style={{
-              background: "var(--color-success)",
-              borderRadius: 999,
-              height: 5,
-              width: 5,
-            }}
-          />
-          <span
-            style={{
-              color: "var(--text-faint)",
-              font: "400 11px/1.6 var(--font-mono)",
-            }}
-          >
-            isolated Daytona sandbox per agent · nothing reaches your machine
-          </span>
-        </div>
-        <details style={{ marginTop: 10 }}>
-          <summary
-            style={{
-              color: "var(--text-faint)",
-              cursor: "pointer",
-              display: "inline-block",
-              font: "500 10px/1 var(--font-mono)",
-              letterSpacing: "0.1em",
-              listStyle: "none",
-              textTransform: "uppercase",
-            }}
-          >
-            How a run is bounded
-          </summary>
-          <p
-            style={{
-              ...type_.body,
-              font: "400 12px/1.7 var(--font-ui)",
-              margin: "10px auto 0",
-              maxWidth: "46ch",
-            }}
-          >
-            Every agent runs in its own Daytona sandbox. Filesystem and network
-            access stay inside that provider boundary. Your harness credential
-            is envelope-encrypted, staged only for execution, and redacted from
-            the evidence. When the run closes, the receipt is what remains.
+            Daytona sandboxes
+          </Eyebrow>
+          <h1 className="oc-empty-console-heading" style={type_.display}>
+            Autonomous agents, bounded by infrastructure.
+          </h1>
+          <p className="oc-empty-console-intro" style={type_.body}>
+            {blocked ??
+              "Forge an execution profile, hand it a mission, and read the receipt it proves itself with."}
           </p>
-        </details>
+          <div className="oc-empty-console-actions">
+            <Btn
+              disabled={blocked !== null && !signedOut}
+              onClick={onCreate}
+              size="md"
+              variant="primary"
+            >
+              {signedOut ? "Sign in to forge" : "Forge an agent"}
+            </Btn>
+          </div>
+
+          <div className="oc-empty-console-trust">
+            <span
+              aria-hidden="true"
+              style={{
+                background: "var(--color-success)",
+                borderRadius: 999,
+                height: 5,
+                width: 5,
+              }}
+            />
+            <span>isolated per agent · nothing reaches your machine</span>
+          </div>
+        </section>
+
+        <aside
+          aria-label="How a run is bounded"
+          className="oc-empty-console-boundary"
+        >
+          <div className="oc-empty-console-boundary-head">
+            <Eyebrow>Execution boundary</Eyebrow>
+            <span>Daytona</span>
+          </div>
+          <ol className="oc-empty-console-boundary-list">
+            <li>
+              <span>01</span>
+              <div>
+                <strong>Constrain</strong>
+                <p>
+                  Profile, credentials, and mission are scoped before launch.
+                </p>
+              </div>
+            </li>
+            <li>
+              <span>02</span>
+              <div>
+                <strong>Execute</strong>
+                <p>Work stays inside one isolated sandbox for the agent.</p>
+              </div>
+            </li>
+            <li>
+              <span>03</span>
+              <div>
+                <strong>Prove</strong>
+                <p>The environment closes; a redacted receipt remains.</p>
+              </div>
+            </li>
+          </ol>
+          <details className="oc-empty-console-details">
+            <summary>Boundary details</summary>
+            <p style={type_.body}>
+              Every agent runs in its own Daytona sandbox. Filesystem and
+              network access stay inside that provider boundary. Your harness
+              credential is envelope-encrypted, staged only for execution, and
+              redacted from the evidence. When the run closes, the receipt is
+              what remains.
+            </p>
+          </details>
+        </aside>
       </div>
     </div>
   );
