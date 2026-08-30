@@ -7,6 +7,7 @@ import {
   DaytonaError,
   DaytonaTimeoutError,
 } from "@daytona/sdk";
+import { DrizzleQueryError } from "drizzle-orm/errors";
 import { diagnoseDaytonaSandbox, runEphemeralDiagnostic } from "./production";
 import {
   createProductionRunnerRuntime,
@@ -859,10 +860,15 @@ test("production reconciliation sanitizes lease database failures", async () => 
     code: "42P01",
     name: "PostgresError",
   });
+  const queryError = new DrizzleQueryError(
+    `SELECT '${secret}'`,
+    [secret],
+    databaseError
+  );
   const runtime = createProductionRunnerRuntime({
     databaseFor: () =>
       ({
-        transaction: () => Promise.reject(databaseError),
+        transaction: () => Promise.reject(queryError),
       }) as never,
     reportReconciliationFailure: (failure) => {
       failures.push(failure);

@@ -417,20 +417,37 @@ function reconciliationFailure(
     "PostgresError",
     "TypeError",
   ]);
-  const candidate =
-    typeof error === "object" && error !== null
-      ? (error as Readonly<{ code?: unknown; name?: unknown }>)
-      : undefined;
+  let candidate = error;
+  let code: string | undefined;
+  let name: RunnerReconciliationFailure["name"];
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (typeof candidate !== "object" || candidate === null) {
+      break;
+    }
+    const current = candidate as Readonly<{
+      cause?: unknown;
+      code?: unknown;
+      name?: unknown;
+    }>;
+    const { cause, code: currentCode, name: currentName } = current;
+    if (typeof currentCode === "string" && /^[0-9A-Z]{5}$/u.test(currentCode)) {
+      code = currentCode;
+    }
+    if (
+      typeof currentName === "string" &&
+      safeNames.has(currentName as RunnerReconciliationFailure["name"])
+    ) {
+      name = currentName as RunnerReconciliationFailure["name"];
+    }
+    if (cause === candidate) {
+      break;
+    }
+    candidate = cause;
+  }
   return {
     category: runnerError ? "runner" : "unknown",
-    ...(typeof candidate?.code === "string" &&
-    /^[0-9A-Z]{5}$/u.test(candidate.code)
-      ? { code: candidate.code }
-      : {}),
-    ...(typeof candidate?.name === "string" &&
-    safeNames.has(candidate.name as RunnerReconciliationFailure["name"])
-      ? { name: candidate.name as RunnerReconciliationFailure["name"] }
-      : {}),
+    ...(code ? { code } : {}),
+    ...(name ? { name } : {}),
     stage,
   };
 }
