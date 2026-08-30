@@ -768,6 +768,59 @@ test.describe("Run console", () => {
       page.getByRole("button", { exact: true, name: "expand" })
     ).toBeVisible();
 
+    await page.setViewportSize({ height: 844, width: 1440 });
+    await navigationResizeHandle.press("End");
+    await stepsResizeHandle.press("End");
+    await page.setViewportSize({ height: 844, width: 981 });
+    const resizeFrames = await page.evaluate(async () => {
+      const samples: {
+        agentMax: number;
+        agentNow: number;
+        mainWidth: number;
+        stepsMax: number;
+        stepsNow: number;
+      }[] = [];
+
+      const captureFrame = () => {
+        const main = document.querySelector(".oc-console-main-pane");
+        const agentHandle = document.querySelector(
+          '[aria-label="Resize the navigation rail"]'
+        );
+        const stepsHandle = document.querySelector(
+          '[aria-label="Resize the steps panel"]'
+        );
+        if (!(main && agentHandle && stepsHandle)) {
+          throw new Error("Console panes were not rendered");
+        }
+        samples.push({
+          agentMax: Number(agentHandle.getAttribute("aria-valuemax")),
+          agentNow: Number(agentHandle.getAttribute("aria-valuenow")),
+          mainWidth: main.getBoundingClientRect().width,
+          stepsMax: Number(stepsHandle.getAttribute("aria-valuemax")),
+          stepsNow: Number(stepsHandle.getAttribute("aria-valuenow")),
+        });
+      };
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => {
+          captureFrame();
+          requestAnimationFrame(() => {
+            captureFrame();
+            requestAnimationFrame(() => {
+              captureFrame();
+              resolve();
+            });
+          });
+        });
+      });
+
+      return samples;
+    });
+    for (const frame of resizeFrames) {
+      expect(frame.mainWidth).toBeGreaterThanOrEqual(359);
+      expect(frame.agentNow).toBeLessThanOrEqual(frame.agentMax);
+      expect(frame.stepsNow).toBeLessThanOrEqual(frame.stepsMax);
+    }
+
     await page.setViewportSize({ height: 844, width: 390 });
     await expect(
       page.getByRole("button", { name: "Expand the steps panel" })
