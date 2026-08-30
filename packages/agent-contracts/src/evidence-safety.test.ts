@@ -116,6 +116,10 @@ test("redacts complete structured credential collections", () => {
     "multiline-sensitive-value",
     "yaml-first-sensitive-value",
     "yaml-second-sensitive-value",
+    "commented-sensitive-value",
+    "block-sensitive-value",
+    "anchored-sensitive-value",
+    "indentless-sensitive-value",
   ];
   const sanitized = sanitizeEvidenceText(
     [
@@ -133,6 +137,17 @@ test("redacts complete structured credential collections", () => {
         "apiKeys:",
         `  - ${secrets[5]}`,
         `  - ${secrets[6]}`,
+        "safe: metadata",
+      ].join("\n"),
+      [
+        "credentials: # production",
+        `  primary: ${secrets[7]}`,
+        "apiKey: |2",
+        `    ${secrets[8]}`,
+        "credentials: &prod",
+        `  primary: ${secrets[9]}`,
+        "apiKeys:",
+        `- ${secrets[10]}`,
         "safe: metadata",
       ].join("\n"),
     ].join("\n")

@@ -28,6 +28,7 @@ function plainHeading(value: string): string {
 
 function reportSections(source: string): ReportSection[] {
   const sections: ReportSection[] = [];
+  let fence: Readonly<{ character: string; length: number }> | null = null;
   let lines: string[] = [];
   let title = "Overview";
 
@@ -44,6 +45,28 @@ function reportSections(source: string): ReportSection[] {
   };
 
   for (const line of source.split("\n")) {
+    const fenceMatch = /^\s{0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+    if (fence) {
+      lines.push(line);
+      const marker = fenceMatch?.[1] ?? "";
+      if (
+        marker.startsWith(fence.character) &&
+        marker.length >= fence.length &&
+        !(fenceMatch?.[2] ?? "").trim()
+      ) {
+        fence = null;
+      }
+      continue;
+    }
+    if (fenceMatch) {
+      const marker = fenceMatch[1] ?? "";
+      fence = {
+        character: marker[0] ?? "`",
+        length: marker.length,
+      };
+      lines.push(line);
+      continue;
+    }
     const heading = /^(#{1,6})\s+(.+?)\s*$/u.exec(line);
     if (!heading) {
       lines.push(line);
@@ -69,6 +92,7 @@ export function ReportReader({
   onClose: () => void;
   title: string;
 }) {
+  const backdropRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
@@ -104,6 +128,19 @@ export function ReportReader({
         ? document.activeElement
         : null;
     const previousOverflow = document.body.style.overflow;
+    const backgroundSiblings = [
+      ...(backdropRef.current?.parentElement?.children ?? []),
+    ].filter(
+      (element): element is HTMLElement =>
+        element instanceof HTMLElement && element !== backdropRef.current
+    );
+    const previousInert = backgroundSiblings.map((element) => ({
+      element,
+      inert: element.inert,
+    }));
+    for (const element of backgroundSiblings) {
+      element.inert = true;
+    }
     document.body.style.overflow = "hidden";
     closeRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
@@ -127,7 +164,10 @@ export function ReportReader({
         event.preventDefault();
         return;
       }
-      if (event.shiftKey && document.activeElement === first) {
+      if (!dialogRef.current?.contains(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
         last.focus();
       } else if (!event.shiftKey && document.activeElement === last) {
@@ -139,6 +179,9 @@ export function ReportReader({
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       document.body.style.overflow = previousOverflow;
+      for (const previous of previousInert) {
+        previous.element.inert = previous.inert;
+      }
       if (previousFocus?.isConnected) {
         previousFocus.focus();
       }
@@ -146,7 +189,7 @@ export function ReportReader({
   }, []);
 
   return (
-    <div className="oc-report-reader-backdrop">
+    <div className="oc-report-reader-backdrop" ref={backdropRef}>
       <button
         aria-hidden="true"
         className="oc-report-reader-backdrop__dismiss"

@@ -120,12 +120,20 @@ test("a running run exposes useful public-safe activity without copying event pa
 });
 
 test("the projected record redacts complete structured credential collections", () => {
-  const secrets = ["first-sensitive-value", "backup-sensitive-value"];
+  const secrets = [
+    "first-sensitive-value",
+    "backup-sensitive-value",
+    "commented-sensitive-value",
+  ];
   const { blocks } = project([
     {
       at: "2026-08-25T12:00:01.000Z",
       id: 1,
-      output: `{"credentials":{"primary":"${secrets[0]}","backup":"${secrets[1]}"}}`,
+      output: [
+        `{"credentials":{"primary":"${secrets[0]}","backup":"${secrets[1]}"}}`,
+        "credentials: # production",
+        `  primary: ${secrets[2]}`,
+      ].join("\n"),
       type: "output",
     },
   ]);

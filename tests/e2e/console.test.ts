@@ -605,7 +605,7 @@ test.describe("Run console", () => {
     const markdownRun = {
       ...retainedRun,
       output:
-        "## Verification\n\n**Timeline verified.**\n\n- Events stayed ordered\n- Evidence stayed bounded",
+        "## Verification\n\n**Timeline verified.**\n\n```bash\n# install dependencies\npnpm install\n```\n\n- Events stayed ordered\n- Evidence stayed bounded",
     };
     const retainedRuns = Array.from({ length: 20 }, (_, index) =>
       index === 0
@@ -831,7 +831,7 @@ test.describe("Run console", () => {
     const reportStep = stepsRail.getByRole("button", {
       name: /Reported Markdown report/u,
     });
-    await expect(reportStep).toContainText("4 lines");
+    await expect(reportStep).toContainText("8 lines");
     await reportStep.click();
     const reportReader = page.getByRole("dialog", {
       name: "Verify timeline output",
@@ -844,8 +844,21 @@ test.describe("Run console", () => {
       reportReader.getByRole("button", { name: "01 Verification" })
     ).toBeVisible();
     await expect(
+      reportReader.getByRole("button", { name: /02 install dependencies/iu })
+    ).toHaveCount(0);
+    await expect(
+      reportReader.getByText("# install dependencies")
+    ).toBeVisible();
+    await expect(
       reportReader.getByRole("heading", { level: 2, name: "Verification" })
     ).toBeVisible();
+    await page.keyboard.press("Meta+K");
+    await expect(
+      page.getByRole("dialog", { name: "Search runs, agents, and commands" })
+    ).toHaveCount(0);
+    await expect(
+      reportReader.getByRole("button", { name: "Close report reader" })
+    ).toBeFocused();
     await page.keyboard.press("Shift+Tab");
     await expect(
       reportReader.getByRole("button", { name: "01 Verification" })

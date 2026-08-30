@@ -1063,6 +1063,9 @@ export function RunConsole() {
     const onKey = (event: globalThis.KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
+        if (reportReader) {
+          return;
+        }
         setPaletteOpen((value) => !value);
       }
       if (event.key === "Escape") {
@@ -1073,7 +1076,7 @@ export function RunConsole() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [reportReader]);
 
   const paletteItems: PaletteItem[] = useMemo(() => {
     const items: PaletteItem[] = [

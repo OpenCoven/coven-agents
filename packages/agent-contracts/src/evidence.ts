@@ -192,6 +192,25 @@ function yamlIndent(value: string): number {
   return /^([\t ]*)/u.exec(value)?.[1]?.length ?? 0;
 }
 
+function isYamlBlockValue(value: string): boolean {
+  let remaining = value.trim();
+  if (!remaining || remaining.startsWith("#")) {
+    return true;
+  }
+
+  const commentIndex = remaining.search(/\s+#/u);
+  if (commentIndex >= 0) {
+    remaining = remaining.slice(0, commentIndex).trim();
+  }
+  while (/^[!&][^\s#]+(?:\s+|$)/u.test(remaining)) {
+    remaining = remaining.replace(/^[!&][^\s#]+\s*/u, "");
+  }
+
+  return (
+    remaining === "" || /^[|>](?:[1-9][+-]?|[+-][1-9]?)?$/u.test(remaining)
+  );
+}
+
 function redactYamlProperties(value: string): string {
   const lines = value.split("\n");
   const sanitized: string[] = [];
@@ -207,15 +226,21 @@ function redactYamlProperties(value: string): string {
 
     sanitized.push(`${match[1]}${REDACTED}`);
     const inlineValue = (match[4] ?? "").trim();
-    const blockValue = inlineValue === "" || /^[|>][+-]?$/u.test(inlineValue);
-    if (!blockValue) {
+    if (!isYamlBlockValue(inlineValue)) {
       continue;
     }
 
     const parentIndent = yamlIndent(line);
     while (index + 1 < lines.length) {
       const next = lines[index + 1] ?? "";
-      if (next.trim() && yamlIndent(next) <= parentIndent) {
+      const nextIndent = yamlIndent(next);
+      const indentationlessSequence =
+        nextIndent === parentIndent && /^-(?:\s|$)/u.test(next.trimStart());
+      if (
+        next.trim() &&
+        nextIndent <= parentIndent &&
+        !indentationlessSequence
+      ) {
         break;
       }
       index += 1;
@@ -302,15 +327,14 @@ export function sanitizeEvidenceText(
       sanitized = sanitized.replaceAll(secret, REDACTED);
     }
   }
-  sanitized = redactSensitiveAssignments(
-    sanitized
-      .replace(authorizationHeader, `$1${REDACTED}`)
-      .replace(apiKeyHeader, `$1${REDACTED}`)
-      .replace(cookieHeader, `$1${REDACTED}`)
-      .replace(credentialUrl, `$1${REDACTED}@`)
-      .replace(jwtValue, REDACTED)
-      .replace(bearerValue, `$1${REDACTED}`)
-  ).replace(secretCliOption, `$1${REDACTED}`);
+  sanitized = redactSensitiveAssignments(sanitized)
+    .replace(authorizationHeader, `$1${REDACTED}`)
+    .replace(apiKeyHeader, `$1${REDACTED}`)
+    .replace(cookieHeader, `$1${REDACTED}`)
+    .replace(credentialUrl, `$1${REDACTED}@`)
+    .replace(jwtValue, REDACTED)
+    .replace(bearerValue, `$1${REDACTED}`)
+    .replace(secretCliOption, `$1${REDACTED}`);
   for (const pattern of providerKeyPatterns) {
     sanitized = sanitized.replace(pattern, REDACTED);
   }
