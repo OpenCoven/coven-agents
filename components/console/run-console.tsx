@@ -13,6 +13,7 @@ import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
+import { BrandMark } from "@/components/brand/brand-mark";
 import { AgentRail } from "@/components/console/agent-rail";
 import { Analytics } from "@/components/console/analytics";
 import {
@@ -1114,9 +1115,13 @@ export function RunConsole() {
             }}
             title="Back to runs"
           >
-            <span style={{ color: "var(--accent-presence)", fontSize: 13 }}>
-              ◆
-            </span>
+            <BrandMark
+              style={{
+                color: "var(--accent-presence)",
+                height: 14,
+                width: 15,
+              }}
+            />
             <span className="oc-header-brand-copy" style={type_.title}>
               OpenCoven
             </span>

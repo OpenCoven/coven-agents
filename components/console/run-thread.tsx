@@ -4,6 +4,7 @@
 
 import type { FileEvidence } from "@opencoven/agent-contracts";
 import { useState } from "react";
+import { BrandMark } from "@/components/brand/brand-mark";
 import { MarkdownPreview } from "@/components/console/markdown-preview";
 import { Btn, Caret, Eyebrow } from "@/components/console/primitives";
 import {
@@ -421,7 +422,9 @@ function TextBlock({
 }) {
   return (
     <div style={{ display: "flex", gap: 11, padding: "2px 0" }}>
-      <span style={well(false, 24)}>◆</span>
+      <span style={well(false, 24)}>
+        <BrandMark style={{ height: 11, width: 12 }} />
+      </span>
       <MarkdownPreview live={block.live}>{block.text}</MarkdownPreview>
     </div>
   );

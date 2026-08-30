@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
+import Link from "next/link";
+import { BrandMark } from "@/components/brand/brand-mark";
 
 export const metadata: Metadata = {
   description:
     "How OpenCoven bounds autonomous agent execution: tenant-scoped Daytona sandboxes, same-origin authority, and transient credentials.",
-  title: "Security · OpenCoven",
+  title: "Security",
 };
 
 /**
@@ -62,6 +64,16 @@ export default function SecurityPage() {
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-[640px] flex-col gap-10 px-6 py-16">
       <header className="flex flex-col gap-3">
+        <Link
+          aria-label="OpenCoven home"
+          className="mb-5 flex w-fit items-center gap-2 text-foreground transition-opacity hover:opacity-75"
+          href="/"
+        >
+          <BrandMark className="size-5 text-[var(--oc-accent)]" />
+          <span className="font-medium text-[13px] tracking-[-0.01em]">
+            OpenCoven
+          </span>
+        </Link>
         <p className="font-mono text-[11px] text-muted-foreground uppercase tracking-[0.14em]">
           Security
         </p>

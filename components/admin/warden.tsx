@@ -3,6 +3,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { BrandMark } from "@/components/brand/brand-mark";
 import { Eyebrow } from "@/components/console/primitives";
 import { hairline, tabular, type as type_ } from "@/components/console/styles";
 import type { AdminAccountRow, AdminOverview } from "@/lib/admin/directory";
@@ -336,9 +337,13 @@ export function Warden({ operator }: { operator: string }) {
             gap: 8,
           }}
         >
-          <span style={{ color: "var(--accent-presence)", fontSize: 13 }}>
-            ◆
-          </span>
+          <BrandMark
+            style={{
+              color: "var(--accent-presence)",
+              height: 14,
+              width: 15,
+            }}
+          />
           <span style={{ font: "600 13px/1 var(--font-ui)" }}>Warden</span>
         </span>
         <nav

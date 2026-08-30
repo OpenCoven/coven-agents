@@ -13,10 +13,14 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 
 export const metadata: Metadata = {
+  applicationName: "OpenCoven Agents",
   description:
     "Create autonomous OpenCoven agents that run in isolated cloud sandboxes.",
   metadataBase: new URL(process.env.APP_ORIGIN ?? "http://localhost:3036"),
-  title: "Coven Agents",
+  title: {
+    default: "OpenCoven Agents",
+    template: "%s · OpenCoven",
+  },
 };
 
 export const viewport = {

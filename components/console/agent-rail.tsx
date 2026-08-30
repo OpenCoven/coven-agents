@@ -5,6 +5,7 @@
 import type { AgentDefinition } from "@opencoven/agent-contracts";
 import { Check, ChevronsUpDown, PanelLeft, Plus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { BrandMark } from "@/components/brand/brand-mark";
 import {
   AccountAvatar,
   Caret,
@@ -531,7 +532,7 @@ export function AgentRail(props: RailProps) {
             fontSize: 13,
           }}
         >
-          ◆
+          <BrandMark style={{ height: 14, width: 15 }} />
         </span>
         <span
           style={{
