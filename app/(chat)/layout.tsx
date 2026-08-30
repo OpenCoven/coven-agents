@@ -4,6 +4,7 @@ import Script from "next/script";
 import { SessionProvider } from "next-auth/react";
 import { Suspense } from "react";
 import { Toaster } from "sonner";
+import { BrandMark } from "@/components/brand/brand-mark";
 import { AppSidebar } from "@/components/chat/app-sidebar";
 import { DataStreamProvider } from "@/components/chat/data-stream-provider";
 import { ChatShell } from "@/components/chat/shell";
@@ -38,6 +39,7 @@ async function SidebarShell({ children }: { children: React.ReactNode }) {
     return (
       <main className="flex h-dvh w-full items-center justify-center bg-background px-5 py-10 text-center">
         <div className="max-w-[440px]">
+          <BrandMark className="mx-auto mb-5 size-10 text-[var(--oc-accent)]" />
           <p className="font-medium text-[11px] text-muted-foreground uppercase tracking-[0.14em]">
             {signedIn ? "Subscription required" : "Account required"}
           </p>

@@ -15,6 +15,7 @@ import { DeleteAllChats } from "@/components/account/delete-all-chats";
 import { HarnessCredentials } from "@/components/account/harness-credentials";
 import { UsageMeter } from "@/components/account/usage-meter";
 import { AccountMenu } from "@/components/agents/account-menu";
+import { BrandMark } from "@/components/brand/brand-mark";
 import { cn } from "@/lib/utils";
 
 /**
@@ -65,9 +66,7 @@ export default function Page() {
             className="flex items-center gap-2 transition-opacity hover:opacity-80"
             href="/"
           >
-            <span className="text-[13px] text-[var(--oc-accent)] leading-none">
-              ◆
-            </span>
+            <BrandMark className="size-4 text-[var(--oc-accent)]" />
             <span className="font-medium text-[13px] tracking-[-0.01em]">
               OpenCoven
             </span>
@@ -117,9 +116,7 @@ export default function Page() {
             className="flex items-center gap-2 transition-opacity hover:opacity-80"
             href="/"
           >
-            <span className="text-[13px] text-[var(--oc-accent)] leading-none">
-              ◆
-            </span>
+            <BrandMark className="size-4 text-[var(--oc-accent)]" />
             <span className="font-medium text-[13px] tracking-[-0.01em]">
               OpenCoven
             </span>

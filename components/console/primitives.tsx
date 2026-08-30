@@ -4,6 +4,7 @@
 
 import type { RunStatus } from "@opencoven/agent-contracts";
 import type { CSSProperties, ReactNode } from "react";
+import { BrandMark } from "@/components/brand/brand-mark";
 import {
   dot,
   pill,
@@ -227,7 +228,12 @@ export function AccountAvatar({
           width: size,
         }}
       >
-        ◆
+        <BrandMark
+          style={{
+            height: Math.round(size * 0.48),
+            width: Math.round(size * 0.52),
+          }}
+        />
       </span>
     );
   }

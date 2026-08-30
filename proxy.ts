@@ -5,6 +5,21 @@ import { betaVerdict, isAllowedIdentity, readBetaGate } from "./lib/beta";
 import { guestRegex, isDevelopmentEnvironment } from "./lib/constants";
 import { DEMO_COOKIE_NAME, isCanonicalUuid } from "./lib/session";
 
+const PUBLIC_BRAND_ASSETS = new Set([
+  "/apple-icon.png",
+  "/brand/opencoven-mark.svg",
+  "/icon.png",
+]);
+
+function isPublicBrandAsset(pathname: string, basePath: string): boolean {
+  const applicationPath =
+    basePath && pathname.startsWith(`${basePath}/`)
+      ? pathname.slice(basePath.length)
+      : pathname;
+
+  return PUBLIC_BRAND_ASSETS.has(applicationPath);
+}
+
 /**
  * Identifies an anonymous visitor across requests, with no database row
  * behind it. Set only when absent (see below), never overwritten — a demo
@@ -15,9 +30,14 @@ import { DEMO_COOKIE_NAME, isCanonicalUuid } from "./lib/session";
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
   if (pathname.startsWith("/ping")) {
     return new Response("pong", { status: 200 });
+  }
+
+  if (isPublicBrandAsset(pathname, base)) {
+    return NextResponse.next();
   }
 
   if (pathname.startsWith("/api/auth")) {
@@ -29,8 +49,6 @@ export async function proxy(request: NextRequest) {
     secret: process.env.AUTH_SECRET,
     secureCookie: !isDevelopmentEnvironment,
   });
-
-  const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
   // Refuse the hidden owner surface before React can stream a 200 response
   // around `notFound()`. The page and API repeat this gate as defense in depth.

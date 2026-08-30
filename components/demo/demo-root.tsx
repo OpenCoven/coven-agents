@@ -2,8 +2,9 @@ import {
   type DemoTranscript,
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
-import { Clock3, ShieldCheck, Sparkles } from "lucide-react";
+import { Clock3, ShieldCheck } from "lucide-react";
 import Link from "next/link";
+import { BrandMark } from "@/components/brand/brand-mark";
 import { ReplayPlayer } from "@/components/demo/replay-player";
 import { Badge } from "@/components/ui/badge";
 import type { resolveDemoView } from "@/lib/demo/root";
@@ -26,7 +27,7 @@ function DemoFrame({ children }: { children: React.ReactNode }) {
         <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-5 py-4 sm:px-8">
           <div className="flex items-center gap-3">
             <div className="grid size-9 place-items-center rounded-xl border border-violet-300/25 bg-violet-300/10 text-violet-300">
-              <Sparkles aria-hidden="true" className="size-4" />
+              <BrandMark className="size-4" />
             </div>
             <div>
               <div className="font-semibold tracking-[-0.02em]">OpenCoven</div>

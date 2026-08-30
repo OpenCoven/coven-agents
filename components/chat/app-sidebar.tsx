@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { User } from "next-auth";
 import { useCallback } from "react";
+import { BrandMark } from "@/components/brand/brand-mark";
 import { SidebarHistory } from "@/components/chat/sidebar-history";
 import { SidebarUserNav } from "@/components/chat/sidebar-user-nav";
 import {
@@ -52,9 +53,7 @@ export function AppSidebar({ user }: { user: User | undefined }) {
                 tooltip="OpenCoven"
               >
                 <Link href="/" onClick={closeMobile}>
-                  <span className="text-[15px] text-[var(--oc-accent)] leading-none">
-                    ◆
-                  </span>
+                  <BrandMark className="size-4 text-[var(--oc-accent)]" />
                 </Link>
               </SidebarMenuButton>
               <Tooltip>

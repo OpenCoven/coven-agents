@@ -1,6 +1,7 @@
 import { ArrowLeftIcon } from "lucide-react";
 import Link from "next/link";
 import { SessionProvider } from "next-auth/react";
+import { BrandMark } from "@/components/brand/brand-mark";
 
 /**
  * The signed-out surface, styled to the canonical component library
@@ -56,7 +57,7 @@ export default function AuthLayout({
                   color: "var(--oc-accent)",
                 }}
               >
-                ◆
+                <BrandMark className="size-5" />
               </span>
               <span className="font-medium text-[11px] text-muted-foreground uppercase tracking-[0.14em]">
                 OpenCoven Agents
