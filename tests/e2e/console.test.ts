@@ -1105,7 +1105,10 @@ test.describe("Run console", () => {
     });
     await expect(liveActivity).toContainText("Runner active");
     await expect(liveActivity).toContainText(
-      "Waiting for the first sanitized agent update."
+      "The runner is checking the isolated process while waiting for the first sanitized update."
+    );
+    await expect(liveActivity).toContainText(
+      "It will stop and report a run that reaches the execution limit."
     );
     await expect(liveActivity).toContainText("Safe updates");
     await expect(liveActivity).toContainText("Credential-safe stream");
