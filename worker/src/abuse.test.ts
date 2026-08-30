@@ -84,6 +84,13 @@ test("source limits use stable pseudonymous keys and a shared missing-IP bucket"
   assert.notEqual(edge.keys[0], edge.keys[2]);
   assert.ok(edge.keys.every((key) => !key.includes("203.0.113.10")));
   assert.ok(edge.keys.every((key) => !key.includes("unknown")));
+  assert.ok(
+    edge.keys.every(
+      (key) =>
+        /^v1:[A-Za-z0-9_-]{43}$/.test(key) &&
+        new TextEncoder().encode(key).byteLength <= 64
+    )
+  );
 });
 
 test("tenant reads are free while mutations and runs use isolated bindings", async () => {

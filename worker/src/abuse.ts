@@ -108,7 +108,9 @@ async function pseudonymousKey(
   const digest = new Uint8Array(
     await crypto.subtle.sign("HMAC", key, encoder.encode(subject))
   );
-  return `v1:${[...digest]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("")}`;
+  const encodedDigest = btoa(String.fromCharCode(...digest))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/[=]+$/, "");
+  return `v1:${encodedDigest}`;
 }
