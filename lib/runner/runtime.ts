@@ -100,6 +100,8 @@ export type ProductionRunnerRuntimeDependencies = Readonly<{
 
 export type RunnerReconciliationFailure = Readonly<{
   category: "runner" | "unknown";
+  code?: string;
+  name?: "DrizzleError" | "Error" | "PostgresError" | "TypeError";
   stage: "composition" | "lease" | "reconcile";
 }>;
 
@@ -404,6 +406,35 @@ function registryHarnesses(): readonly HarnessStatus[] {
   );
 }
 
+function reconciliationFailure(
+  error: unknown,
+  stage: RunnerReconciliationFailure["stage"],
+  runnerError: boolean
+): RunnerReconciliationFailure {
+  const safeNames = new Set<RunnerReconciliationFailure["name"]>([
+    "DrizzleError",
+    "Error",
+    "PostgresError",
+    "TypeError",
+  ]);
+  const candidate =
+    typeof error === "object" && error !== null
+      ? (error as Readonly<{ code?: unknown; name?: unknown }>)
+      : undefined;
+  return {
+    category: runnerError ? "runner" : "unknown",
+    ...(typeof candidate?.code === "string" &&
+    /^[0-9A-Z]{5}$/u.test(candidate.code)
+      ? { code: candidate.code }
+      : {}),
+    ...(typeof candidate?.name === "string" &&
+    safeNames.has(candidate.name as RunnerReconciliationFailure["name"])
+      ? { name: candidate.name as RunnerReconciliationFailure["name"] }
+      : {}),
+    stage,
+  };
+}
+
 function productionReconcile(
   database: ProductionDatabase,
   store: RunnerStore,
@@ -466,11 +497,9 @@ function productionReconcile(
       const { RunnerServiceError: RuntimeServiceError } = await import(
         "./errors"
       );
-      reportFailure?.({
-        category: error instanceof RuntimeServiceError ? "runner" : "unknown",
-        stage,
-      });
-      if (error instanceof RuntimeServiceError) {
+      const runnerError = error instanceof RuntimeServiceError;
+      reportFailure?.(reconciliationFailure(error, stage, runnerError));
+      if (runnerError) {
         throw error;
       }
       // biome-ignore lint/style/useErrorCause: The custom error preserves the sanitized cause through its options.
