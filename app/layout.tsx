@@ -15,7 +15,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   description:
     "Create autonomous OpenCoven agents that run in isolated cloud sandboxes.",
-  metadataBase: new URL(process.env.APP_ORIGIN ?? "http://localhost:3000"),
+  metadataBase: new URL(process.env.APP_ORIGIN ?? "http://localhost:3036"),
   title: "Coven Agents",
 };
 

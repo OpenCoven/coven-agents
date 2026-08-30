@@ -10,7 +10,7 @@ const layout = readFileSync(
 test("social metadata has an explicit deployment-aware base URL", () => {
   assert.match(
     layout,
-    /metadataBase:\s*new URL\(process\.env\.APP_ORIGIN \?\? "http:\/\/localhost:3000"\)/
+    /metadataBase:\s*new URL\(process\.env\.APP_ORIGIN \?\? "http:\/\/localhost:3036"\)/
   );
 });
 
