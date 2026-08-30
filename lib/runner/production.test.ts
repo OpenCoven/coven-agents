@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { DaytonaAuthenticationError } from "@daytona/sdk";
 import { diagnoseDaytonaSandbox, runEphemeralDiagnostic } from "./production";
 import {
   createProductionRunnerRuntime,
@@ -111,6 +112,7 @@ test("ephemeral diagnostics delete the sandbox after a bounded probe", async () 
 
 test("ephemeral diagnostics clean up after probe failure and hide provider output", async () => {
   const calls: string[] = [];
+  const failures: unknown[] = [];
 
   await assert.rejects(
     runEphemeralDiagnostic({
@@ -127,6 +129,9 @@ test("ephemeral diagnostics clean up after probe failure and hide provider outpu
           },
         });
       },
+      reportFailure: (failure) => {
+        failures.push(failure);
+      },
     }),
     (error: unknown) => {
       assert.ok(error instanceof RunnerServiceError);
@@ -137,6 +142,28 @@ test("ephemeral diagnostics clean up after probe failure and hide provider outpu
   );
 
   assert.deepEqual(calls, ["create", "execute", "delete"]);
+  assert.deepEqual(failures, [{ category: "unknown", stage: "execute" }]);
+  assert.equal(JSON.stringify(failures).includes("private-detail"), false);
+});
+
+test("ephemeral diagnostics classify provider authentication failures safely", async () => {
+  const failures: unknown[] = [];
+
+  await assert.rejects(
+    runEphemeralDiagnostic({
+      create: () =>
+        Promise.reject(
+          new DaytonaAuthenticationError("credential=private-detail", 401)
+        ),
+      reportFailure: (failure) => {
+        failures.push(failure);
+      },
+    }),
+    RunnerServiceError
+  );
+
+  assert.deepEqual(failures, [{ category: "authentication", stage: "create" }]);
+  assert.equal(JSON.stringify(failures).includes("private-detail"), false);
 });
 
 test("ephemeral diagnostics bound malformed provider exit codes and output", async () => {
@@ -157,6 +184,7 @@ test("ephemeral diagnostics bound malformed provider exit codes and output", asy
 
 test("ephemeral diagnostics return retryable failure when provider deletion fails", async () => {
   const calls: string[] = [];
+  const failures: unknown[] = [];
 
   await assert.rejects(
     runEphemeralDiagnostic({
@@ -173,6 +201,9 @@ test("ephemeral diagnostics return retryable failure when provider deletion fail
             return Promise.resolve({ exitCode: 0, result: "coven-agents" });
           },
         }),
+      reportFailure: (failure) => {
+        failures.push(failure);
+      },
     }),
     (error: unknown) => {
       assert.ok(error instanceof RunnerServiceError);
@@ -185,6 +216,7 @@ test("ephemeral diagnostics return retryable failure when provider deletion fail
   );
 
   assert.deepEqual(calls, ["execute", "delete"]);
+  assert.deepEqual(failures, [{ category: "unknown", stage: "delete" }]);
 });
 
 test("Daytona diagnostics use the exact precomputed name and bounded operations", async () => {
