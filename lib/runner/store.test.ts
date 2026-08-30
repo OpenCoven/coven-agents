@@ -340,6 +340,28 @@ test("expired reconciliation lease is reclaimed with a new fence", async () => {
   );
 });
 
+test("reconciliation lease normalizes timestamp strings returned by PostgreSQL", async () => {
+  const expiresAt = new Date("2026-08-28T21:46:00.000Z");
+  const { store } = scripted([
+    {
+      reconciliationLeaseExpiresAt: expiresAt.toISOString(),
+      reconciliationLeaseFence: 12,
+      reconciliationLeaseOwner: "owner-new",
+    },
+  ]);
+
+  assert.deepEqual(
+    await store.acquireReconciliationLease(operator, {
+      ownerToken: "owner-new",
+      ttlSeconds: 360,
+    }),
+    {
+      kind: "acquired",
+      lease: { expiresAt, fence: 12, ownerToken: "owner-new" },
+    }
+  );
+});
+
 test("reconciliation release is fenced by both owner and generation", async () => {
   const stale = scripted([]);
   const current = scripted([{ singleton: true }]);
