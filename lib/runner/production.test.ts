@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { DaytonaAuthenticationError } from "@daytona/sdk";
+import {
+  DaytonaAuthenticationError,
+  DaytonaConnectionError,
+  DaytonaTimeoutError,
+} from "@daytona/sdk";
 import { diagnoseDaytonaSandbox, runEphemeralDiagnostic } from "./production";
 import {
   createProductionRunnerRuntime,
@@ -164,6 +168,38 @@ test("ephemeral diagnostics classify provider authentication failures safely", a
 
   assert.deepEqual(failures, [{ category: "authentication", stage: "create" }]);
   assert.equal(JSON.stringify(failures).includes("private-detail"), false);
+});
+
+test("ephemeral diagnostics classify status-less transport failures safely", async () => {
+  const cases = [
+    {
+      category: "provider_unavailable",
+      error: new DaytonaConnectionError("private connection detail"),
+    },
+    {
+      category: "timeout",
+      error: new DaytonaTimeoutError("private timeout detail"),
+    },
+  ] as const;
+
+  await Promise.all(
+    cases.map(async (diagnosticCase) => {
+      const failures: unknown[] = [];
+      await assert.rejects(
+        runEphemeralDiagnostic({
+          create: () => Promise.reject(diagnosticCase.error),
+          reportFailure: (failure) => {
+            failures.push(failure);
+          },
+        }),
+        RunnerServiceError
+      );
+      assert.deepEqual(failures, [
+        { category: diagnosticCase.category, stage: "create" },
+      ]);
+      assert.equal(JSON.stringify(failures).includes("private"), false);
+    })
+  );
 });
 
 test("ephemeral diagnostics bound malformed provider exit codes and output", async () => {

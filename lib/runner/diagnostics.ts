@@ -3,7 +3,9 @@ import "server-only";
 import { performance } from "node:perf_hooks";
 import {
   type CreateSandboxFromSnapshotParams,
+  DaytonaConnectionError,
   DaytonaError,
+  DaytonaTimeoutError,
 } from "@daytona/sdk";
 import { daytonaClient } from "./daytona/client";
 import {
@@ -222,6 +224,12 @@ function diagnosticFailure(
   }
   if (!(error instanceof DaytonaError)) {
     return { category: "unknown", stage };
+  }
+  if (error instanceof DaytonaTimeoutError) {
+    return { category: "timeout", stage };
+  }
+  if (error instanceof DaytonaConnectionError) {
+    return { category: "provider_unavailable", stage };
   }
   switch (error.statusCode) {
     case 401:
