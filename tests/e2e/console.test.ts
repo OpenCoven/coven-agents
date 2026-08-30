@@ -339,6 +339,16 @@ test.describe("Run console", () => {
     page,
   }) => {
     await page.goto("/agents");
+    await expect(
+      page
+        .locator(".oc-console-header")
+        .getByRole("button", { name: "Account and settings" })
+    ).toHaveCount(0);
+    await expect(
+      page
+        .locator(".oc-agent-rail")
+        .getByRole("button", { name: "Account and settings" })
+    ).toHaveCount(1);
     await page.getByRole("button", { name: "Account and settings" }).click();
 
     await expect(
@@ -548,6 +558,42 @@ test.describe("Run console", () => {
     await expect(
       page.getByRole("heading", { level: 2, name: "Verification" })
     ).toBeVisible();
+    const evidenceReport = page.locator(".oc-evidence-report");
+    await expect(evidenceReport).toBeVisible();
+    const [reportBackground, deskBackground] = await evidenceReport.evaluate(
+      (element) => {
+        const consoleRoot = element.closest(".oc-console");
+        if (!consoleRoot) {
+          throw new Error("Console root not found");
+        }
+        const expected = document.createElement("span");
+        expected.style.background = "var(--bg-desk)";
+        consoleRoot.append(expected);
+        const colors = [
+          getComputedStyle(element).backgroundColor,
+          getComputedStyle(expected).backgroundColor,
+        ];
+        expected.remove();
+        return colors;
+      }
+    );
+    expect(reportBackground).toBe(deskBackground);
+    await expect(evidenceReport.locator(".oc-markdown-report")).toBeVisible();
+    await expect(
+      evidenceReport.getByRole("heading", {
+        level: 2,
+        name: "Verification",
+      })
+    ).toHaveCSS("font-family", /EB Garamond/);
+    await expect
+      .poll(() =>
+        evidenceReport
+          .getByRole("heading", { level: 2, name: "Verification" })
+          .evaluate((element) =>
+            Number.parseFloat(getComputedStyle(element).fontSize)
+          )
+      )
+      .toBeGreaterThan(27);
     await expect(
       page.locator(".oc-markdown strong", { hasText: "Timeline verified." })
     ).toBeVisible();
@@ -557,6 +603,26 @@ test.describe("Run console", () => {
     await expect(
       page.getByRole("button", { exact: true, name: "expand" })
     ).toBeVisible();
+
+    await page.setViewportSize({ height: 844, width: 390 });
+    await expect(
+      page.getByRole("button", { name: "Expand the steps panel" })
+    ).toBeVisible();
+    await expect
+      .poll(() =>
+        evidenceReport
+          .locator(".oc-markdown-report")
+          .evaluate((element) => element.getBoundingClientRect().width)
+      )
+      .toBeGreaterThan(150);
+    await expect
+      .poll(() =>
+        evidenceReport
+          .getByRole("heading", { level: 2, name: "Verification" })
+          .evaluate((element) => element.getBoundingClientRect().height)
+      )
+      .toBeLessThan(200);
+
     expect(applicationRequests).toEqual([
       "GET /api/agents",
       `GET /api/agents/${AGENT_ID}/runs`,
@@ -648,7 +714,7 @@ test.describe("Run console", () => {
 
       await page.goto("/agents");
       await page
-        .getByRole("complementary")
+        .locator(".oc-agent-rail")
         .getByRole("button", {
           name: new RegExp(`${scenario.historicalStatus} Verify timeline`, "u"),
         })
@@ -728,7 +794,7 @@ test.describe("Run console", () => {
 
     await page.goto("/agents");
     await page
-      .getByRole("complementary")
+      .locator(".oc-agent-rail")
       .getByRole("button", { name: /running Verify timeline/ })
       .click();
     await page.getByRole("button", { exact: true, name: "Stop" }).click();
@@ -784,7 +850,7 @@ test.describe("Run console", () => {
     ).toBeVisible();
     await expect(
       page
-        .getByRole("complementary")
+        .locator(".oc-agent-rail")
         .getByRole("button", { name: /completed Verify timeline/ })
     ).toBeVisible();
   });
@@ -1065,8 +1131,8 @@ test.describe("Run console", () => {
     await notifySessionChange(page);
     await sessionRefresh;
     await expect(
-      page.getByRole("button", { name: "signed out" })
-    ).toBeVisible();
+      page.getByRole("button", { name: "Account and settings" })
+    ).toHaveAttribute("title", "not signed in");
 
     await releaseAgents();
     await expect(page.getByText(retainedAgent.name)).toHaveCount(0);
@@ -1362,7 +1428,13 @@ test.describe("Run console", () => {
     });
     await notifySessionChange(page);
     await sessionRefresh;
-    await expect(page.getByTitle("second@example.invalid")).toBeVisible();
+    await page.getByRole("button", { exact: true, name: "Account" }).click();
+    await expect(
+      page.getByText("second@example.invalid", { exact: true })
+    ).toBeVisible();
+    await page
+      .getByRole("button", { exact: true, name: "Harness credentials" })
+      .click();
     await releaseList();
     await releaseSave();
     await page.waitForTimeout(100);
@@ -1512,7 +1584,10 @@ test.describe("Run console", () => {
     });
     await notifySessionChange(page);
     await sessionRefresh;
-    await expect(page.getByTitle("second@example.invalid")).toBeVisible();
+    await page.getByRole("button", { exact: true, name: "Account" }).click();
+    await expect(
+      page.getByText("second@example.invalid", { exact: true })
+    ).toBeVisible();
 
     await releaseWipe();
     await page.waitForTimeout(100);

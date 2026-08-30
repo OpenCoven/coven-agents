@@ -6,9 +6,11 @@ import { renderConsoleMarkdown } from "@/lib/console/markdown";
 export function MarkdownPreview({
   children,
   live = false,
+  variant = "default",
 }: {
   children: string;
   live?: boolean;
+  variant?: "default" | "report";
 }) {
   const [preview, setPreview] = useState<{
     html: string;
@@ -37,9 +39,16 @@ export function MarkdownPreview({
   }, [children]);
 
   const renderedHtml = preview?.source === children ? preview.html : null;
+  const className = [
+    "oc-markdown",
+    live ? "oc-markdown-live" : null,
+    variant === "report" ? "oc-markdown-report" : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
-    <div className={live ? "oc-markdown oc-markdown-live" : "oc-markdown"}>
+    <div className={className}>
       {renderedHtml === null ? (
         <span className="oc-markdown-fallback">{children}</span>
       ) : (

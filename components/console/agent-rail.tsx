@@ -850,6 +850,7 @@ export function AgentRail(props: RailProps) {
       </div>
 
       <button
+        aria-label="Account and settings"
         className="oc-row"
         onClick={props.onOpenAccount}
         style={{
@@ -865,6 +866,7 @@ export function AgentRail(props: RailProps) {
           textAlign: "left",
           width: "100%",
         }}
+        title={props.who}
         type="button"
       >
         <span

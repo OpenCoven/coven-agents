@@ -643,30 +643,12 @@ function EvidenceBlock({
         }}
       >
         {block.claim ? (
-          <div
-            style={{
-              background:
-                "color-mix(in oklch, var(--color-success) 6%, transparent)",
-              border:
-                "1px solid color-mix(in oklch, var(--color-success) 26%, var(--border-hairline))",
-              borderRadius: "var(--radius-md)",
-              display: "flex",
-              gap: 9,
-              padding: "11px 12px",
-            }}
-          >
-            <span
-              style={{
-                color: "var(--color-success)",
-                font: `500 10px/1.6 ${MONO}`,
-                letterSpacing: "0.1em",
-                textTransform: "uppercase",
-                whiteSpace: "nowrap",
-              }}
-            >
-              Claim
-            </span>
-            <MarkdownPreview>{block.claim}</MarkdownPreview>
+          <div className="oc-evidence-report">
+            <div className="oc-evidence-report__kicker">
+              <span className="oc-evidence-report__label">Claim</span>
+              <span className="oc-evidence-report__meta">Run report</span>
+            </div>
+            <MarkdownPreview variant="report">{block.claim}</MarkdownPreview>
           </div>
         ) : null}
 

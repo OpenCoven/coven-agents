@@ -19,7 +19,11 @@ test("run output and evidence claims use the sanitized Markdown preview", () => 
   assert.match(runThread, /<MarkdownPreview live=\{block\.live\}>/);
   assert.match(
     runThread,
-    /<MarkdownPreview>\{block\.claim\}<\/MarkdownPreview>/
+    /<MarkdownPreview variant="report">\s*\{block\.claim\}\s*<\/MarkdownPreview>/
   );
+  assert.match(runThread, />Run report<\/span>/);
+  assert.doesNotMatch(runThread, /Verified run report/);
   assert.match(consoleCss, /\.oc-markdown \.oc-md-preview/);
+  assert.match(consoleCss, /\.oc-evidence-report/);
+  assert.match(consoleCss, /\.oc-markdown-report/);
 });

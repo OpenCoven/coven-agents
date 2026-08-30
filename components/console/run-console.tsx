@@ -22,7 +22,6 @@ import {
 import { Composer } from "@/components/console/composer";
 import { CreateAgent } from "@/components/console/create-agent";
 import {
-  AccountAvatar,
   Btn,
   Eyebrow,
   LifecycleBadge,
@@ -153,16 +152,23 @@ export function RunConsole() {
 
   useEffect(() => {
     const compactViewport = window.matchMedia("(max-width: 720px)");
+    const narrowViewport = window.matchMedia("(max-width: 980px)");
     const collapseForViewport = () => {
       if (compactViewport.matches) {
         setRailCollapsed(true);
+      }
+      if (narrowViewport.matches) {
+        setTimelineCollapsed(true);
       }
     };
 
     collapseForViewport();
     compactViewport.addEventListener("change", collapseForViewport);
-    return () =>
+    narrowViewport.addEventListener("change", collapseForViewport);
+    return () => {
       compactViewport.removeEventListener("change", collapseForViewport);
+      narrowViewport.removeEventListener("change", collapseForViewport);
+    };
   }, []);
 
   const threadRef = useRef<HTMLDivElement>(null);
@@ -1191,20 +1197,6 @@ export function RunConsole() {
             type="button"
           >
             {connectionLabel}
-          </button>
-          <button
-            aria-label="Account and settings"
-            className="oc-tint"
-            onClick={() => setView("settings")}
-            style={{
-              ...well(false, 26),
-              borderRadius: "var(--radius-control)",
-              cursor: "pointer",
-            }}
-            title={who}
-            type="button"
-          >
-            <AccountAvatar size={24} src={avatarSrc} />
           </button>
         </div>
       </header>
