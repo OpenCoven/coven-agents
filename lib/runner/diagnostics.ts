@@ -350,7 +350,6 @@ export async function diagnoseDaytonaSandbox(
         {
           ephemeral: true,
           name,
-          networkBlockAll: true,
           public: false,
           snapshot: configuration.snapshotName,
           ttlMinutes: 5,
