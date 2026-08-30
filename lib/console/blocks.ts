@@ -88,13 +88,13 @@ export type Step = {
   detail: string;
   duration: string;
   /**
-   * Up to a handful of body lines behind the one-line detail — command
-   * output, report opening, file paths. The rail shows these by default and
-   * collapses to the single line on demand, so the index can carry real
-   * content without the thread's bulk.
+   * A bounded structured summary behind the one-line detail. Full Markdown
+   * and command output stay in the thread so the rail remains an index rather
+   * than an unformatted duplicate of the report.
    */
   expanded: string[];
   id: string;
+  kind: "command" | "error" | "file" | "lifecycle" | "receipt" | "report";
   label: string;
   tone: "danger" | "muted" | "running" | "success";
 };
@@ -489,6 +489,16 @@ function expandedLines(source: string): string[] {
     .slice(0, EXPANDED_LINES);
 }
 
+function nonEmptyLineCount(source: string): number {
+  return source.split("\n").filter((line) => line.trim()).length;
+}
+
+function looksLikeMarkdown(source: string): boolean {
+  return /(?:^|\n)\s*(?:#{1,6}\s|[-*+]\s|\d+\.\s|>|```)|(?:\*\*|__|`)[^\n]+(?:\*\*|__|`)/u.test(
+    source
+  );
+}
+
 function stepFor(block: ThreadBlock): Step | null {
   const duration =
     "durationMs" in block && block.durationMs !== null
@@ -505,27 +515,42 @@ function stepFor(block: ThreadBlock): Step | null {
         duration,
         expanded: [],
         id: block.id,
+        kind: "lifecycle",
         label: block.label,
         tone: block.status === "running" ? "running" : "muted",
       };
     case "command": {
-      // The result, not the invocation: the label already names what ran, so
-      // the detail line is the one place the step can say what came back.
-      // Falls back to the command for a tool that produced no output.
-      const outcome =
-        block.stdout.trim().split("\n", 1)[0] ||
-        block.stderr.trim().split("\n", 1)[0] ||
-        block.command;
+      const stdoutLines = nonEmptyLineCount(block.stdout);
+      const stderrLines = nonEmptyLineCount(block.stderr);
+      const detail =
+        block.exitCode === null
+          ? "Running · waiting for a result"
+          : block.exitCode === 0
+            ? `Succeeded · exit 0 · ${
+                stdoutLines + stderrLines > 0 ? "output captured" : "no output"
+              }`
+            : `Failed · exit ${block.exitCode} · ${
+                stderrLines > 0 ? "error output captured" : "no error output"
+              }`;
       return {
         blockId: block.id,
-        detail: outcome,
+        detail,
         duration,
-        expanded: expandedLines(
-          block.exitCode !== null && block.exitCode !== 0 && block.stderr
-            ? block.stderr
-            : block.stdout || block.stderr
-        ),
+        expanded: [
+          `Command: ${block.command}`,
+          stdoutLines > 0
+            ? `Standard output: ${stdoutLines} ${
+                stdoutLines === 1 ? "line" : "lines"
+              }`
+            : null,
+          stderrLines > 0
+            ? `Error output: ${stderrLines} ${
+                stderrLines === 1 ? "line" : "lines"
+              }`
+            : null,
+        ].filter((line): line is string => line !== null),
         id: block.id,
+        kind: "command",
         label: `Ran ${commandHead(block.command)}`,
         tone: commandExitTone(block.exitCode),
       };
@@ -544,25 +569,23 @@ function stepFor(block: ThreadBlock): Step | null {
               ]
             : paths,
         id: block.id,
+        kind: "file",
         label: block.label,
         tone: "muted",
       };
     }
     case "text": {
-      const lines = block.text
-        .trim()
-        .split("\n")
-        .filter((line) => line.trim());
-      const first = lines[0] ?? "";
+      const lines = nonEmptyLineCount(block.text);
+      const characters = [...block.text.trim()].length;
       return {
         blockId: block.id,
-        // The first line plus how much sits behind it, so a one-word
-        // acknowledgement and a twelve-paragraph survey read differently in
-        // the rail without either being expanded.
-        detail: lines.length > 1 ? `${first} · ${lines.length} lines` : first,
+        detail: `${looksLikeMarkdown(block.text) ? "Markdown report" : "Agent update"} · ${lines} ${
+          lines === 1 ? "line" : "lines"
+        } · ${characters} characters`,
         duration,
-        expanded: lines.slice(0, EXPANDED_LINES),
+        expanded: [],
         id: block.id,
+        kind: "report",
         label: block.live ? "Reporting" : "Reported",
         tone: block.live ? "running" : "muted",
       };
@@ -574,19 +597,30 @@ function stepFor(block: ThreadBlock): Step | null {
         duration: "—",
         expanded: expandedLines(block.details ?? ""),
         id: block.id,
+        kind: "error",
         label: "Stopped",
         tone: "danger",
       };
-    case "evidence":
+    case "evidence": {
+      const files =
+        block.stats.find((stat) => stat.label === "Files")?.value ?? "0";
+      const exited =
+        block.stats.find((stat) => stat.label === "Exited 0")?.value ?? "0";
+      const wallClock =
+        block.stats.find((stat) => stat.label === "Wall clock")?.value ?? "—";
       return {
         blockId: block.id,
-        detail: "receipt written",
-        duration: "—",
+        detail: `Receipt · ${exited} commands succeeded · ${
+          files === "0" ? "no file changes" : `${files} file changes`
+        }`,
+        duration: wallClock,
         expanded: block.stats.map((stat) => `${stat.label}: ${stat.value}`),
         id: block.id,
+        kind: "receipt",
         label: "Closed",
         tone: "success",
       };
+    }
     default:
       return null;
   }

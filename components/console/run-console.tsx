@@ -31,6 +31,7 @@ import {
   LifecycleBadge,
   Spinner,
 } from "@/components/console/primitives";
+import { ReportReader } from "@/components/console/report-reader";
 import {
   LiveActivityStatus,
   ThreadBlockView,
@@ -159,6 +160,11 @@ export function RunConsole() {
     STEPS_TIMELINE_WIDTHS.default
   );
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [reportReader, setReportReader] = useState<{
+    content: string;
+    title: string;
+  } | null>(null);
+  const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -1025,6 +1031,8 @@ export function RunConsole() {
   const openComposer = useCallback((agentId: string) => {
     setSelectedAgentId(agentId);
     setSelectedRunId(null);
+    setReportReader(null);
+    setSelectedBlockId(null);
     setView("composer");
   }, []);
 
@@ -1038,6 +1046,8 @@ export function RunConsole() {
 
   const openRun = useCallback((runId: string) => {
     setSelectedRunId(runId);
+    setReportReader(null);
+    setSelectedBlockId(null);
     setView("thread");
     setThreadOpenRevision((revision) => revision + 1);
     pinnedRef.current = true;
@@ -1797,11 +1807,32 @@ export function RunConsole() {
                 collapsed={timelineCollapsed}
                 elapsed={elapsed}
                 onJump={(blockId) => {
+                  setSelectedBlockId(blockId);
                   document
                     .getElementById(`block-${blockId}`)
                     ?.scrollIntoView({ behavior: "smooth", block: "center" });
                 }}
                 onOpenAnalytics={() => setView("analytics")}
+                onOpenReport={(blockId) => {
+                  const block = projection.blocks.find(
+                    (candidate) => candidate.id === blockId
+                  );
+                  const content =
+                    block?.kind === "text"
+                      ? block.text
+                      : block?.kind === "evidence"
+                        ? block.claim ||
+                          "## Run summary\n\nNo narrative report was produced for this run."
+                        : null;
+                  if (!content) {
+                    return;
+                  }
+                  setSelectedBlockId(blockId);
+                  setReportReader({
+                    content,
+                    title: sanitizeEvidenceText(selectedRun.snapshot.task),
+                  });
+                }}
                 onToggle={() => setTimelineCollapsed((value) => !value)}
                 onWidthChange={(width) =>
                   setStepsTimelineWidth(
@@ -1813,7 +1844,7 @@ export function RunConsole() {
                   )
                 }
                 running={running}
-                selectedBlockId={null}
+                selectedBlockId={selectedBlockId}
                 steps={projection.steps}
                 width={stepsTimelineWidth}
                 widthLimit={stepsTimelineWidthLimit}
@@ -1844,6 +1875,14 @@ export function RunConsole() {
           <CommandPalette
             items={paletteItems}
             onClose={() => setPaletteOpen(false)}
+          />
+        ) : null}
+
+        {reportReader ? (
+          <ReportReader
+            content={reportReader.content}
+            onClose={() => setReportReader(null)}
+            title={reportReader.title}
           />
         ) : null}
       </div>

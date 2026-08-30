@@ -1068,11 +1068,19 @@ async function reconcileAttachedProcess(
     ({ authority } = appended);
 
     const completedAt = clock();
-    const timedOut =
-      snapshot.status === "running" &&
+    const runWindowExpired =
       liveRun.startedAt !== null &&
       completedAt.getTime() - liveRun.startedAt.getTime() >= maxRunDurationMs;
-    if ((snapshot.status === "running" || !snapshot.logsSettled) && !timedOut) {
+    const timedOut = snapshot.status === "running" && runWindowExpired;
+    const terminalOutputIncomplete =
+      snapshot.status !== "running" &&
+      !snapshot.logsSettled &&
+      runWindowExpired;
+    if (
+      !timedOut &&
+      !terminalOutputIncomplete &&
+      (snapshot.status === "running" || !snapshot.logsSettled)
+    ) {
       return {
         adopted: true,
         kind: "deferred",
@@ -1080,22 +1088,26 @@ async function reconcileAttachedProcess(
       };
     }
     const terminalStatus =
-      timedOut || snapshot.status === "failed" ? "failed" : "completed";
+      timedOut || terminalOutputIncomplete || snapshot.status === "failed"
+        ? "failed"
+        : "completed";
     const finalized = await dependencies.store.finalizeRun(
       dependencies.operator,
       {
         commandEvidence: evidence.commandEvidence,
         completedAt,
-        error: timedOut
-          ? {
-              code: "run_timeout",
-              details:
-                "Complete sanitized updates received before shutdown are preserved in this record.",
-              message:
-                "The runner stopped this run after it reached the execution time limit.",
-              retryable: true,
-            }
-          : evidence.error,
+        error:
+          timedOut || terminalOutputIncomplete
+            ? {
+                code: timedOut ? "run_timeout" : "run_output_incomplete",
+                details:
+                  "Complete sanitized updates received before shutdown are preserved in this record.",
+                message: timedOut
+                  ? "The runner stopped this run after it reached the execution time limit."
+                  : "The command ended, but its final output record remained incomplete until the execution time limit.",
+                retryable: true,
+              }
+            : evidence.error,
         expectedVersion: authority.expectedVersion,
         fileEvidence: evidence.fileEvidence,
         leaseToken: authority.leaseToken,

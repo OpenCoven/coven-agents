@@ -645,7 +645,13 @@ test.describe("Run console", () => {
         });
       }
       if (pathname === `/api/runs/${RUN_ID}/events`) {
-        const event = {
+        const outputEvent = {
+          at: "2026-08-27T06:00:10.000Z",
+          id: 1,
+          output: markdownRun.output,
+          type: "output",
+        };
+        const commandEvent = {
           at: "2026-08-27T06:00:30.000Z",
           evidence: {
             command: "pnpm test",
@@ -655,11 +661,11 @@ test.describe("Run console", () => {
             stderr: "",
             stdout: "first output line\nsecond output line",
           },
-          id: 1,
+          id: 2,
           type: "command",
         };
         return route.fulfill({
-          body: `data: ${JSON.stringify(event)}\n\n`,
+          body: `data: ${JSON.stringify(outputEvent)}\n\ndata: ${JSON.stringify(commandEvent)}\n\n`,
           contentType: "text/event-stream",
         });
       }
@@ -771,9 +777,12 @@ test.describe("Run console", () => {
       )
       .toBeGreaterThanOrEqual(359);
 
-    await expect(page.getByText("second output line")).toBeVisible();
+    await expect(stepsRail).not.toContainText("second output line");
     await expect(
-      page.getByRole("heading", { level: 2, name: "Verification" })
+      stepsRail.getByRole("button", { name: /Standard output: 2 lines/u })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { level: 2, name: "Verification" }).first()
     ).toBeVisible();
     const evidenceReport = page.locator(".oc-evidence-report");
     await expect(evidenceReport).toBeVisible();
@@ -812,9 +821,44 @@ test.describe("Run console", () => {
       )
       .toBeGreaterThan(27);
     await expect(
-      page.locator(".oc-markdown strong", { hasText: "Timeline verified." })
+      page
+        .locator(".oc-markdown strong", { hasText: "Timeline verified." })
+        .first()
     ).toBeVisible();
-    await expect(page.getByText("Events stayed ordered")).toBeVisible();
+    await expect(page.getByText("Events stayed ordered").first()).toBeVisible();
+    await expect(stepsRail).not.toContainText("## Verification");
+    await expect(stepsRail).not.toContainText("**Timeline verified.**");
+    const reportStep = stepsRail.getByRole("button", {
+      name: /Reported Markdown report/u,
+    });
+    await expect(reportStep).toContainText("4 lines");
+    await reportStep.click();
+    const reportReader = page.getByRole("dialog", {
+      name: "Verify timeline output",
+    });
+    await expect(reportReader).toBeVisible();
+    await expect(
+      reportReader.getByRole("navigation", { name: "Report sections" })
+    ).toBeVisible();
+    await expect(
+      reportReader.getByRole("button", { name: "01 Verification" })
+    ).toBeVisible();
+    await expect(
+      reportReader.getByRole("heading", { level: 2, name: "Verification" })
+    ).toBeVisible();
+    await page.keyboard.press("Shift+Tab");
+    await expect(
+      reportReader.getByRole("button", { name: "01 Verification" })
+    ).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(
+      reportReader.getByRole("button", { name: "Close report reader" })
+    ).toBeFocused();
+    await reportReader
+      .getByRole("button", { name: "Close report reader" })
+      .click();
+    await expect(reportReader).toHaveCount(0);
+    await expect(reportStep).toBeFocused();
     const runRecord = page.getByRole("log", { name: "Run record" });
     await expect
       .poll(() =>
@@ -883,7 +927,7 @@ test.describe("Run console", () => {
       .getByRole("button", { name: /completed Verify timeline/u })
       .click();
     await expect(
-      page.getByRole("heading", { level: 2, name: "Verification" })
+      page.getByRole("heading", { level: 2, name: "Verification" }).first()
     ).toBeVisible();
     await page.getByRole("button", { exact: true, name: "collapse" }).click();
     await expect(page.getByText("second output line")).toHaveCount(0);

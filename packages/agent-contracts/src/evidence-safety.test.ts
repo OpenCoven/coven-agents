@@ -107,6 +107,44 @@ test("redacts camel-case, hyphenated, and indented structured credential fields"
   assert.equal(sanitized.match(/\[REDACTED\]/gu)?.length, secrets.length);
 });
 
+test("redacts complete structured credential collections", () => {
+  const secrets = [
+    "first-sensitive-value",
+    "second-sensitive-value",
+    "primary-sensitive-value",
+    "backup-sensitive-value",
+    "multiline-sensitive-value",
+    "yaml-first-sensitive-value",
+    "yaml-second-sensitive-value",
+  ];
+  const sanitized = sanitizeEvidenceText(
+    [
+      `{"apiKeys":["${secrets[0]}","${secrets[1]}"]}`,
+      `{"credentials":{"primary":"${secrets[2]}","backup":"${secrets[3]}"}}`,
+      [
+        "{",
+        '  "credentials": {',
+        `    "primary": "${secrets[4]}",`,
+        '    "safe": "metadata"',
+        "  }",
+        "}",
+      ].join("\n"),
+      [
+        "apiKeys:",
+        `  - ${secrets[5]}`,
+        `  - ${secrets[6]}`,
+        "safe: metadata",
+      ].join("\n"),
+    ].join("\n")
+  );
+
+  for (const secret of secrets) {
+    assert.equal(sanitized.includes(secret), false, `leaked ${secret}`);
+  }
+  assert.match(sanitized, /"apiKeys":\[REDACTED\]/u);
+  assert.match(sanitized, /"credentials":\[REDACTED\]/u);
+});
+
 test("redacts request and response session cookies from runner evidence", () => {
   const cookie = "session-id-private-value";
   const sanitized = sanitizeEvidenceText(

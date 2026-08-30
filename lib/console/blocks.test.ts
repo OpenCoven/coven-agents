@@ -119,6 +119,24 @@ test("a running run exposes useful public-safe activity without copying event pa
   assert.equal(JSON.stringify(activity).includes("private/project"), false);
 });
 
+test("the projected record redacts complete structured credential collections", () => {
+  const secrets = ["first-sensitive-value", "backup-sensitive-value"];
+  const { blocks } = project([
+    {
+      at: "2026-08-25T12:00:01.000Z",
+      id: 1,
+      output: `{"credentials":{"primary":"${secrets[0]}","backup":"${secrets[1]}"}}`,
+      type: "output",
+    },
+  ]);
+  const serialized = JSON.stringify(blocks);
+
+  for (const secret of secrets) {
+    assert.equal(serialized.includes(secret), false, `leaked ${secret}`);
+  }
+  assert.match(serialized, /\[REDACTED\]/u);
+});
+
 test("a quiet running run explains that it is waiting for sanitized output", () => {
   const { activity } = project([]);
 
@@ -289,6 +307,43 @@ test("consecutive output events coalesce into one passage", () => {
     text[0]?.kind === "text" ? text[0].text : "",
     "Three failures in twenty."
   );
+});
+
+test("the steps rail summarizes output without duplicating raw Markdown", () => {
+  const { steps } = project([
+    {
+      at: "2026-08-25T12:00:01.000Z",
+      id: 1,
+      output: "## Findings\n\n**Result:** complete\n\n- first\n- second",
+      type: "output",
+    },
+    {
+      at: "2026-08-25T12:00:02.000Z",
+      evidence: {
+        command: "pnpm test",
+        exitCode: 0,
+        stderr: "",
+        stdout: "first line\nsecond line",
+      },
+      id: 2,
+      type: "command",
+    },
+  ]);
+  const report = steps.find((step) => step.kind === "report");
+  const command = steps.find((step) => step.kind === "command");
+
+  assert.match(
+    report?.detail ?? "",
+    /^Markdown report · 4 lines · \d+ characters$/u
+  );
+  assert.deepEqual(report?.expanded, []);
+  assert.equal(command?.detail, "Succeeded · exit 0 · output captured");
+  assert.deepEqual(command?.expanded, [
+    "Command: pnpm test",
+    "Standard output: 2 lines",
+  ]);
+  assert.equal(JSON.stringify(steps).includes("**Result:**"), false);
+  assert.equal(JSON.stringify(steps).includes("second line"), false);
 });
 
 test("the trailing passage is live only while the run is not terminal", () => {

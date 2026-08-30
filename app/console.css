@@ -688,6 +688,164 @@
   );
 }
 
+.oc-report-reader-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: oklch(0.05 0.008 260 / 0.78);
+  backdrop-filter: blur(8px);
+}
+
+.oc-report-reader-backdrop__dismiss {
+  position: absolute;
+  inset: 0;
+  padding: 0;
+  cursor: default;
+  background: transparent;
+  border: 0;
+}
+
+.oc-report-reader {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: min(1120px, calc(100vw - 40px));
+  height: min(820px, calc(100vh - 40px));
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: var(--border-hairline);
+  border-radius: var(--radius-card);
+  box-shadow: 0 32px 96px oklch(0 0 0 / 0.55);
+}
+
+.oc-report-reader__header {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  min-height: 78px;
+  padding: 15px 18px 14px 22px;
+  border-bottom: var(--border-hairline);
+}
+
+.oc-report-reader__header > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.oc-report-reader__eyebrow,
+.oc-report-reader__nav > span {
+  font: 600 9px / 1 var(--font-mono);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+}
+
+.oc-report-reader__header h2 {
+  margin: 6px 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font: 600 18px / 1.15 var(--font-ui);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.oc-report-reader__header p {
+  margin: 0;
+  font: 400 10px / 1.4 var(--font-mono);
+  color: var(--text-muted);
+}
+
+.oc-report-reader__close {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  background: transparent;
+  border: var(--border-hairline);
+  border-radius: var(--radius-control);
+}
+
+.oc-report-reader__close:hover,
+.oc-report-reader__close:focus-visible {
+  color: var(--text-primary);
+  outline: none;
+  background: var(--bg-raised);
+}
+
+.oc-report-reader__layout {
+  display: grid;
+  flex: 1;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.oc-report-reader__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-height: 0;
+  padding: 22px 12px;
+  overflow-y: auto;
+  background: var(--bg-subtle);
+  border-right: var(--border-hairline);
+}
+
+.oc-report-reader__nav > span {
+  padding: 0 9px 7px;
+}
+
+.oc-report-reader__nav button {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 7px;
+  padding: 9px;
+  font: 500 11px / 1.35 var(--font-ui);
+  color: var(--text-secondary);
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+}
+
+.oc-report-reader__nav button span {
+  font: 500 9px / 1.5 var(--font-mono);
+  color: var(--text-faint);
+}
+
+.oc-report-reader__nav button:hover,
+.oc-report-reader__nav button:focus-visible {
+  color: var(--text-primary);
+  outline: none;
+  background: var(--bg-raised);
+}
+
+.oc-report-reader__body {
+  min-height: 0;
+  padding: 42px clamp(24px, 6vw, 72px) 64px;
+  overflow-y: auto;
+  background: var(--bg-desk);
+  scroll-behavior: smooth;
+}
+
+.oc-report-reader__body article {
+  max-width: 760px;
+  margin: 0 auto;
+  scroll-margin-top: 24px;
+}
+
+.oc-report-reader__body article + article {
+  padding-top: 34px;
+  margin-top: 34px;
+  border-top: var(--border-hairline);
+}
+
 .oc-evidence-card[data-layout="compact"] .oc-evidence-card__body {
   gap: 12px;
   padding: 14px;
@@ -1712,6 +1870,43 @@
    squeezing it out of the viewport. Settings navigation becomes a horizontal
    strip; profile creation is already a single-canvas flow. */
 @media (max-width: 720px) {
+  .oc-report-reader-backdrop {
+    padding: 0;
+  }
+
+  .oc-report-reader {
+    width: 100vw;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .oc-report-reader__layout {
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-columns: 1fr;
+  }
+
+  .oc-report-reader__nav {
+    flex-direction: row;
+    padding: 10px 12px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-bottom: var(--border-hairline);
+  }
+
+  .oc-report-reader__nav > span {
+    display: none;
+  }
+
+  .oc-report-reader__nav button {
+    min-width: max-content;
+  }
+
+  .oc-report-reader__body {
+    padding: 28px 20px 48px;
+  }
+
   .oc-evidence-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
