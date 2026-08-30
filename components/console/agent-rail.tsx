@@ -4,7 +4,7 @@
 
 import type { AgentDefinition } from "@opencoven/agent-contracts";
 import { Check, ChevronsUpDown, PanelLeft, Plus } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AccountAvatar,
   Caret,
@@ -34,6 +34,14 @@ const MAX_WIDTH = 420;
 const DEFAULT_WIDTH = 268;
 const MINI_WIDTH = 58;
 const KEY_STEP = 16;
+const VIEWPORT_WIDTH_RATIO = 0.86;
+
+function navigationMaxWidth() {
+  return Math.min(
+    MAX_WIDTH,
+    Math.floor(window.innerWidth * VIEWPORT_WIDTH_RATIO)
+  );
+}
 
 type RailProps = {
   agents: AgentDefinition[];
@@ -367,28 +375,27 @@ function RuntimeFilter({
 export function AgentRail(props: RailProps) {
   const [filter, setFilter] = useState<Set<string>>(new Set());
   const [width, setWidth] = useState(DEFAULT_WIDTH);
-  const dragFrom = useRef<{ startWidth: number; startX: number } | null>(null);
-
-  const onPointerMove = useCallback((event: PointerEvent) => {
-    const from = dragFrom.current;
-    if (!from) {
-      return;
-    }
-    const next = from.startWidth + (event.clientX - from.startX);
-    setWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, next)));
-  }, []);
+  const [maxWidth, setMaxWidth] = useState(MAX_WIDTH);
+  const dragFrom = useRef<{
+    pointerId: number;
+    startWidth: number;
+    startX: number;
+  } | null>(null);
 
   useEffect(() => {
-    const stop = () => {
-      dragFrom.current = null;
+    const syncWidthLimit = () => {
+      const nextMaxWidth = navigationMaxWidth();
+      const nextMinWidth = Math.min(MIN_WIDTH, nextMaxWidth);
+      setMaxWidth(nextMaxWidth);
+      setWidth((current) =>
+        Math.min(nextMaxWidth, Math.max(nextMinWidth, current))
+      );
     };
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", stop);
-    return () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", stop);
-    };
-  }, [onPointerMove]);
+
+    syncWidthLimit();
+    window.addEventListener("resize", syncWidthLimit);
+    return () => window.removeEventListener("resize", syncWidthLimit);
+  }, []);
 
   if (props.collapsed) {
     return <MiniRail {...props} />;
@@ -420,34 +427,78 @@ export function AgentRail(props: RailProps) {
 
   return (
     <aside
+      aria-label="Navigation"
       className="oc-agent-rail"
+      id="agent-navigation-rail"
       style={{
         background: "var(--bg-panel)",
         borderRight: hairline,
         display: "flex",
         flex: "none",
         flexDirection: "column",
-        position: "relative",
         width,
       }}
     >
       {/* biome-ignore lint/a11y/useSemanticElements: role="separator" is the ARIA splitter pattern for a focusable resize handle. */}
       <div
+        aria-controls="agent-navigation-rail"
         aria-label="Resize the navigation rail"
         aria-orientation="vertical"
-        aria-valuemax={MAX_WIDTH}
-        aria-valuemin={MIN_WIDTH}
+        aria-valuemax={maxWidth}
+        aria-valuemin={Math.min(MIN_WIDTH, maxWidth)}
         aria-valuenow={width}
         onKeyDown={(event) => {
+          if (event.key === "Home") {
+            setWidth(Math.min(MIN_WIDTH, maxWidth));
+          }
+          if (event.key === "End") {
+            setWidth(maxWidth);
+          }
           if (event.key === "ArrowLeft") {
-            setWidth((value) => Math.max(MIN_WIDTH, value - KEY_STEP));
+            setWidth((value) =>
+              Math.max(Math.min(MIN_WIDTH, maxWidth), value - KEY_STEP)
+            );
           }
           if (event.key === "ArrowRight") {
-            setWidth((value) => Math.min(MAX_WIDTH, value + KEY_STEP));
+            setWidth((value) => Math.min(maxWidth, value + KEY_STEP));
+          }
+        }}
+        onLostPointerCapture={(event) => {
+          if (dragFrom.current?.pointerId === event.pointerId) {
+            dragFrom.current = null;
+          }
+        }}
+        onPointerCancel={(event) => {
+          if (dragFrom.current?.pointerId === event.pointerId) {
+            dragFrom.current = null;
           }
         }}
         onPointerDown={(event) => {
-          dragFrom.current = { startWidth: width, startX: event.clientX };
+          if (!event.isPrimary || event.button !== 0) {
+            return;
+          }
+          event.currentTarget.setPointerCapture(event.pointerId);
+          dragFrom.current = {
+            pointerId: event.pointerId,
+            startWidth: width,
+            startX: event.clientX,
+          };
+        }}
+        onPointerMove={(event) => {
+          const from = dragFrom.current;
+          if (!from || from.pointerId !== event.pointerId) {
+            return;
+          }
+          const next = from.startWidth + (event.clientX - from.startX);
+          setWidth(
+            Math.min(maxWidth, Math.max(Math.min(MIN_WIDTH, maxWidth), next))
+          );
+        }}
+        onPointerUp={(event) => {
+          if (dragFrom.current?.pointerId === event.pointerId) {
+            dragFrom.current = null;
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
         }}
         role="separator"
         style={{
