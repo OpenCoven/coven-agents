@@ -424,7 +424,15 @@ async function activeDispatchCount(
       {},
       sql`SELECT count(*)::integer AS "activeCount"
         FROM "RunnerRun"
-        WHERE "dispatchState" IN ('dispatching', 'running')`
+        WHERE "dispatchState" IN ('dispatching', 'running')
+          OR (
+            "dispatchState" = 'terminal'
+            AND (
+              "daytonaAttemptId" IS NOT NULL
+              OR "daytonaCommandId" IS NOT NULL
+              OR "daytonaSessionId" IS NOT NULL
+            )
+          )`
     )
   );
   return row ? numericColumn(row, "activeCount") : 0;
@@ -478,13 +486,33 @@ async function selectEligibleDispatch(
               SELECT 1
               FROM "RunnerRun" AS "agentActive"
               WHERE "agentActive"."agentId" = "queued"."agentId"
-                AND "agentActive"."dispatchState" IN ('dispatching', 'running')
+                AND (
+                  "agentActive"."dispatchState" IN ('dispatching', 'running')
+                  OR (
+                    "agentActive"."dispatchState" = 'terminal'
+                    AND (
+                      "agentActive"."daytonaAttemptId" IS NOT NULL
+                      OR "agentActive"."daytonaCommandId" IS NOT NULL
+                      OR "agentActive"."daytonaSessionId" IS NOT NULL
+                    )
+                  )
+                )
             )
             AND (
               SELECT count(*)
               FROM "RunnerRun" AS "tenantActive"
               WHERE "tenantActive"."tenant" = "queued"."tenant"
-                AND "tenantActive"."dispatchState" IN ('dispatching', 'running')
+                AND (
+                  "tenantActive"."dispatchState" IN ('dispatching', 'running')
+                  OR (
+                    "tenantActive"."dispatchState" = 'terminal'
+                    AND (
+                      "tenantActive"."daytonaAttemptId" IS NOT NULL
+                      OR "tenantActive"."daytonaCommandId" IS NOT NULL
+                      OR "tenantActive"."daytonaSessionId" IS NOT NULL
+                    )
+                  )
+                )
             ) < ${limits.tenantActiveRuns}
           GROUP BY "queued"."tenant"
         ),
