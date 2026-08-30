@@ -15,6 +15,8 @@ export function BrandMark({
   style,
   ...props
 }: BrandMarkProps) {
+  const markUrl = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/brand/opencoven-mark.svg`;
+
   return (
     <span
       {...props}
@@ -24,8 +26,8 @@ export function BrandMark({
       role="img"
       style={{
         backgroundColor: "currentColor",
-        mask: "url(/brand/opencoven-mark.svg) center / contain no-repeat",
-        WebkitMask: "url(/brand/opencoven-mark.svg) center / contain no-repeat",
+        mask: `url(${markUrl}) center / contain no-repeat`,
+        WebkitMask: `url(${markUrl}) center / contain no-repeat`,
         ...style,
       }}
     />

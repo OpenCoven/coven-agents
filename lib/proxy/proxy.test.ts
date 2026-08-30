@@ -10,11 +10,16 @@ function visit(cookie?: string, path = "/"): Promise<Response> {
   return proxy(request) as Promise<Response>;
 }
 
-async function withClosedBeta<T>(operation: () => Promise<T>): Promise<T> {
+async function withClosedBeta<T>(
+  operation: () => Promise<T>,
+  basePath = ""
+): Promise<T> {
   const previousMode = process.env.BETA_MODE;
   const previousAllowlist = process.env.BETA_ALLOWLIST;
+  const previousBasePath = process.env.NEXT_PUBLIC_BASE_PATH;
   process.env.BETA_MODE = "on";
   delete process.env.BETA_ALLOWLIST;
+  process.env.NEXT_PUBLIC_BASE_PATH = basePath;
   try {
     return await operation();
   } finally {
@@ -27,6 +32,11 @@ async function withClosedBeta<T>(operation: () => Promise<T>): Promise<T> {
       delete process.env.BETA_ALLOWLIST;
     } else {
       process.env.BETA_ALLOWLIST = previousAllowlist;
+    }
+    if (previousBasePath === undefined) {
+      delete process.env.NEXT_PUBLIC_BASE_PATH;
+    } else {
+      process.env.NEXT_PUBLIC_BASE_PATH = previousBasePath;
     }
   }
 }
@@ -106,6 +116,38 @@ test("closed beta keeps exact runner machine routes reachable with query strings
       })
     );
   });
+});
+
+test("closed beta keeps exact public brand assets reachable", async () => {
+  await withClosedBeta(async () => {
+    await Promise.all(
+      ["/brand/opencoven-mark.svg", "/icon.png", "/apple-icon.png"].map(
+        async (path) => {
+          const response = await visit(undefined, path);
+
+          assert.equal(response.headers.get("location"), null, path);
+          assert.equal(response.headers.get("set-cookie"), null, path);
+        }
+      )
+    );
+  });
+});
+
+test("closed beta keeps demo-prefixed public brand assets reachable", async () => {
+  await withClosedBeta(async () => {
+    await Promise.all(
+      [
+        "/demo/brand/opencoven-mark.svg",
+        "/demo/icon.png",
+        "/demo/apple-icon.png",
+      ].map(async (path) => {
+        const response = await visit(undefined, path);
+
+        assert.equal(response.headers.get("location"), null, path);
+        assert.equal(response.headers.get("set-cookie"), null, path);
+      })
+    );
+  }, "/demo");
 });
 
 test("closed beta redirects runner machine-route descendants and lookalikes", async () => {

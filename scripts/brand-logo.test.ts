@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { BrandMark } from "@/components/brand/brand-mark";
 
 const repositoryRoot = new URL("../", import.meta.url);
 
@@ -51,6 +54,24 @@ test("primary product chrome uses the shared brand mark", () => {
       /◆/,
       `${path} still uses the placeholder glyph`
     );
+  }
+});
+
+test("the shared brand mark resolves beneath the demo base path", () => {
+  const previousBasePath = process.env.NEXT_PUBLIC_BASE_PATH;
+  process.env.NEXT_PUBLIC_BASE_PATH = "/demo";
+
+  try {
+    const markup = renderToStaticMarkup(createElement(BrandMark));
+
+    assert.match(markup, /url\(\/demo\/brand\/opencoven-mark\.svg\)/);
+    assert.doesNotMatch(markup, /url\(\/brand\/opencoven-mark\.svg\)/);
+  } finally {
+    if (previousBasePath === undefined) {
+      delete process.env.NEXT_PUBLIC_BASE_PATH;
+    } else {
+      process.env.NEXT_PUBLIC_BASE_PATH = previousBasePath;
+    }
   }
 });
 
