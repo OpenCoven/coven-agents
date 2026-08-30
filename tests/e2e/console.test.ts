@@ -704,7 +704,7 @@ test.describe("Run console", () => {
 
       await page.goto("/agents");
       await page
-        .getByRole("complementary")
+        .locator(".oc-agent-rail")
         .getByRole("button", {
           name: new RegExp(`${scenario.historicalStatus} Verify timeline`, "u"),
         })
@@ -784,7 +784,7 @@ test.describe("Run console", () => {
 
     await page.goto("/agents");
     await page
-      .getByRole("complementary")
+      .locator(".oc-agent-rail")
       .getByRole("button", { name: /running Verify timeline/ })
       .click();
     await page.getByRole("button", { exact: true, name: "Stop" }).click();
@@ -840,7 +840,7 @@ test.describe("Run console", () => {
     ).toBeVisible();
     await expect(
       page
-        .getByRole("complementary")
+        .locator(".oc-agent-rail")
         .getByRole("button", { name: /completed Verify timeline/ })
     ).toBeVisible();
   });
