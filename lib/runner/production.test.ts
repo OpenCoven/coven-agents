@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   DaytonaAuthenticationError,
   DaytonaConnectionError,
+  DaytonaError,
   DaytonaTimeoutError,
 } from "@daytona/sdk";
 import { diagnoseDaytonaSandbox, runEphemeralDiagnostic } from "./production";
@@ -166,8 +167,69 @@ test("ephemeral diagnostics classify provider authentication failures safely", a
     RunnerServiceError
   );
 
-  assert.deepEqual(failures, [{ category: "authentication", stage: "create" }]);
+  assert.deepEqual(failures, [
+    { category: "authentication", stage: "create", statusCode: 401 },
+  ]);
   assert.equal(JSON.stringify(failures).includes("private-detail"), false);
+});
+
+test("ephemeral diagnostics retain only safe provider machine codes", async () => {
+  const failures: unknown[] = [];
+
+  await assert.rejects(
+    runEphemeralDiagnostic({
+      create: () =>
+        Promise.reject(
+          new DaytonaError(
+            "credential=private-detail",
+            422,
+            undefined,
+            "INVALID_SANDBOX_PARAMETERS"
+          )
+        ),
+      reportFailure: (failure) => {
+        failures.push(failure);
+      },
+    }),
+    RunnerServiceError
+  );
+
+  assert.deepEqual(failures, [
+    {
+      category: "provider_rejected",
+      providerCode: "INVALID_SANDBOX_PARAMETERS",
+      stage: "create",
+      statusCode: 422,
+    },
+  ]);
+  assert.equal(JSON.stringify(failures).includes("private-detail"), false);
+});
+
+test("ephemeral diagnostics omit unsafe provider machine codes", async () => {
+  const failures: unknown[] = [];
+
+  await assert.rejects(
+    runEphemeralDiagnostic({
+      create: () =>
+        Promise.reject(
+          new DaytonaError(
+            "private detail",
+            422,
+            undefined,
+            "INVALID secret=value"
+          )
+        ),
+      reportFailure: (failure) => {
+        failures.push(failure);
+      },
+    }),
+    RunnerServiceError
+  );
+
+  assert.deepEqual(failures, [
+    { category: "provider_rejected", stage: "create", statusCode: 422 },
+  ]);
+  assert.equal(JSON.stringify(failures).includes("secret"), false);
 });
 
 test("ephemeral diagnostics classify status-less transport failures safely", async () => {
