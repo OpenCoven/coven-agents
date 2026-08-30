@@ -4,7 +4,7 @@
 
 import type { AgentDefinition } from "@opencoven/agent-contracts";
 import { Check, ChevronsUpDown, PanelLeft, Plus } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AccountAvatar,
   Caret,
@@ -29,8 +29,11 @@ import type { ConsoleRun } from "@/lib/console/types";
  * app shows a flat list of threads.
  */
 
-const RAIL_WIDTH = 268;
+const MIN_WIDTH = 220;
+const MAX_WIDTH = 420;
+const DEFAULT_WIDTH = 268;
 const MINI_WIDTH = 58;
+const KEY_STEP = 16;
 
 type RailProps = {
   agents: AgentDefinition[];
@@ -363,6 +366,29 @@ function RuntimeFilter({
 
 export function AgentRail(props: RailProps) {
   const [filter, setFilter] = useState<Set<string>>(new Set());
+  const [width, setWidth] = useState(DEFAULT_WIDTH);
+  const dragFrom = useRef<{ startWidth: number; startX: number } | null>(null);
+
+  const onPointerMove = useCallback((event: PointerEvent) => {
+    const from = dragFrom.current;
+    if (!from) {
+      return;
+    }
+    const next = from.startWidth + (event.clientX - from.startX);
+    setWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, next)));
+  }, []);
+
+  useEffect(() => {
+    const stop = () => {
+      dragFrom.current = null;
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", stop);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", stop);
+    };
+  }, [onPointerMove]);
 
   if (props.collapsed) {
     return <MiniRail {...props} />;
@@ -401,9 +427,43 @@ export function AgentRail(props: RailProps) {
         display: "flex",
         flex: "none",
         flexDirection: "column",
-        width: RAIL_WIDTH,
+        position: "relative",
+        width,
       }}
     >
+      {/* biome-ignore lint/a11y/useSemanticElements: role="separator" is the ARIA splitter pattern for a focusable resize handle. */}
+      <div
+        aria-label="Resize the navigation rail"
+        aria-orientation="vertical"
+        aria-valuemax={MAX_WIDTH}
+        aria-valuemin={MIN_WIDTH}
+        aria-valuenow={width}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft") {
+            setWidth((value) => Math.max(MIN_WIDTH, value - KEY_STEP));
+          }
+          if (event.key === "ArrowRight") {
+            setWidth((value) => Math.min(MAX_WIDTH, value + KEY_STEP));
+          }
+        }}
+        onPointerDown={(event) => {
+          dragFrom.current = { startWidth: width, startX: event.clientX };
+        }}
+        role="separator"
+        style={{
+          bottom: 0,
+          cursor: "col-resize",
+          position: "absolute",
+          right: -3,
+          top: 0,
+          touchAction: "none",
+          width: 7,
+          zIndex: 6,
+        }}
+        tabIndex={0}
+        title="Drag, or use the arrow keys, to resize"
+      />
+
       <div
         style={{
           alignItems: "center",

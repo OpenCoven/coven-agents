@@ -514,7 +514,7 @@
     bottom: 0;
     left: 0;
     z-index: 50;
-    max-width: min(268px, 86vw);
+    max-width: min(420px, 86vw);
     box-shadow: var(--shadow-lg);
   }
 
