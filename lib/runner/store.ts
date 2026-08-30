@@ -250,9 +250,15 @@ function asScheduler(row: Record<string, unknown>): RunnerSchedulerRecord {
 function asReconciliationLease(
   row: Record<string, unknown>
 ): RunnerReconciliationLease {
-  const expiresAt = column<unknown>(row, "reconciliationLeaseExpiresAt");
+  const expiresAtValue = column<unknown>(row, "reconciliationLeaseExpiresAt");
+  const expiresAt =
+    expiresAtValue instanceof Date
+      ? expiresAtValue
+      : typeof expiresAtValue === "string"
+        ? new Date(expiresAtValue)
+        : null;
   const ownerToken = column<unknown>(row, "reconciliationLeaseOwner");
-  if (!(expiresAt instanceof Date) || Number.isNaN(expiresAt.getTime())) {
+  if (!expiresAt || Number.isNaN(expiresAt.getTime())) {
     throw new Error(
       'Runner query returned an invalid "reconciliationLeaseExpiresAt".'
     );
