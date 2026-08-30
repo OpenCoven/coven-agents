@@ -738,6 +738,76 @@ test("run start returns 202 and schedules bounded recovery for a created run", a
   assert.equal(fixture.admissions.at(-1)?.route, "runner_run_start");
 });
 
+test("subscriber mutations reject same-site cross-origin requests", async () => {
+  let starts = 0;
+  let stops = 0;
+  const fixture = handlers({
+    service: service({
+      startRun: () => {
+        starts += 1;
+        return Promise.resolve({ kind: "accepted", run: run() });
+      },
+      stopRun: () => {
+        stops += 1;
+        return Promise.resolve({
+          kind: "stopped",
+          run: run(),
+          scheduleReconciliation: true,
+        });
+      },
+    }),
+  });
+  const headers = {
+    origin: "https://evil.app.test",
+    "sec-fetch-site": "same-site",
+  };
+
+  const started = await fixture.handlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({ operationId: OPERATION_ID, task: "Attack" }),
+      headers: { ...headers, "content-type": "text/plain" },
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+  const stopped = await fixture.handlers.stopRun(
+    new Request(`https://app.test/api/runs/${RUN_ID}/stop`, {
+      headers,
+      method: "POST",
+    }),
+    RUN_ID
+  );
+
+  assert.equal(started.status, 403);
+  assert.equal(stopped.status, 403);
+  assert.equal(
+    ((await started.json()) as { error: { code: string } }).error.code,
+    "forbidden_origin"
+  );
+  assert.equal(starts, 0);
+  assert.equal(stops, 0);
+  assert.equal(fixture.admissions.length, 0);
+  assert.equal(fixture.serviceRequests(), 0);
+});
+
+test("subscriber mutations accept an exact same-origin request", async () => {
+  const fixture = handlers();
+  const response = await fixture.handlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({
+        operationId: OPERATION_ID,
+        task: "Do the thing.",
+      }),
+      headers: { origin: "https://app.test" },
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 202);
+  assert.equal(fixture.admissions.at(-1)?.route, "runner_run_start");
+});
+
 test("run start returns 202 without scheduling duplicate or claimed results", async () => {
   let reconciled = 0;
   const fixture = handlers({

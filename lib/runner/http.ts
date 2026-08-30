@@ -240,11 +240,36 @@ function policyInput(
   };
 }
 
+function isTrustedMutationOrigin(request: Request): boolean {
+  if (request.method === "GET" || request.method === "HEAD") {
+    return true;
+  }
+
+  const origin = request.headers.get("origin");
+  if (origin !== null) {
+    return origin === new URL(request.url).origin;
+  }
+
+  const fetchSite = request.headers.get("sec-fetch-site");
+  return (
+    fetchSite === null || fetchSite === "none" || fetchSite === "same-origin"
+  );
+}
+
 async function authorizeSubscriber(
   request: Request,
   route: AbuseEnforcementInput["route"],
   dependencies: RunnerHttpDependencies
 ): Promise<Response | RunnerAuthenticatedSubscriber> {
+  if (!isTrustedMutationOrigin(request)) {
+    return errorResponse(
+      dependencies,
+      403,
+      "forbidden_origin",
+      "Request origin was rejected.",
+      false
+    );
+  }
   const subscriber = await dependencies.auth.authorizeSubscriber();
   if (subscriber.kind !== "allowed") {
     return subscriberFailure(dependencies, subscriber);
