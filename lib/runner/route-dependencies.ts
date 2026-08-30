@@ -51,7 +51,11 @@ export function productionRunnerHttpHandlers(): RunnerHttpHandlers {
     },
     diagnoseSandbox: async (name) => {
       const diagnostics = await productionDiagnostics();
-      return diagnostics.diagnoseDaytonaSandbox(name);
+      return diagnostics.diagnoseDaytonaSandbox(name, {
+        reportFailure: (failure) => {
+          console.error("Daytona diagnostic failed.", failure);
+        },
+      });
     },
     enforceAbuse: enforceAbusePolicy,
     ipAddress: (request) => ipAddress(request) ?? null,

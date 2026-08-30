@@ -1,7 +1,12 @@
 import "server-only";
 
 import { performance } from "node:perf_hooks";
-import type { CreateSandboxFromSnapshotParams } from "@daytona/sdk";
+import {
+  type CreateSandboxFromSnapshotParams,
+  DaytonaConnectionError,
+  DaytonaError,
+  DaytonaTimeoutError,
+} from "@daytona/sdk";
 import { daytonaClient } from "./daytona/client";
 import {
   type DaytonaSandboxConfiguration,
@@ -35,6 +40,21 @@ export type DiagnosticDeadlineDependencies = Readonly<{
 export type EphemeralDiagnosticDependencies = Readonly<{
   create: (timeoutSeconds: number) => Promise<RunnerDiagnosticSandbox>;
   deadline?: DiagnosticDeadlineDependencies;
+  reportFailure?: (failure: RunnerDiagnosticFailure) => void;
+}>;
+
+export type RunnerDiagnosticFailure = Readonly<{
+  category:
+    | "authentication"
+    | "authorization"
+    | "conflict"
+    | "not_found"
+    | "provider_rejected"
+    | "provider_unavailable"
+    | "rate_limited"
+    | "timeout"
+    | "unknown";
+  stage: "configuration" | "create" | "delete" | "execute";
 }>;
 
 type DaytonaDiagnosticSdkSandbox = Readonly<{
@@ -60,6 +80,7 @@ export type DaytonaDiagnosticDependencies = Readonly<{
   client?: () => DaytonaDiagnosticClient;
   configuration?: () => Pick<DaytonaSandboxConfiguration, "snapshotName">;
   deadline?: DiagnosticDeadlineDependencies;
+  reportFailure?: (failure: RunnerDiagnosticFailure) => void;
 }>;
 
 function retryableServiceError(
@@ -178,18 +199,58 @@ async function deleteLateDiagnosticSandbox(
 
 async function deleteDiagnosticSandbox(
   sandbox: RunnerDiagnosticSandbox,
-  deadline: DiagnosticDeadline
+  deadline: DiagnosticDeadline,
+  reportFailure?: (failure: RunnerDiagnosticFailure) => void
 ): Promise<void> {
   try {
     await deadline.run(DIAGNOSTIC_DELETE_TIMEOUT_MILLISECONDS, (timeout) =>
       sandbox.delete(timeout)
     );
-  } catch {
-    // biome-ignore lint/style/useErrorCause: Provider failures can contain credentials or identifiers.
+  } catch (error) {
+    reportFailure?.(diagnosticFailure(error, "delete"));
     throw retryableServiceError(
       "diagnostic_unavailable",
       "Daytona diagnostic cleanup is unavailable."
     );
+  }
+}
+
+function diagnosticFailure(
+  error: unknown,
+  stage: RunnerDiagnosticFailure["stage"]
+): RunnerDiagnosticFailure {
+  if (error instanceof DiagnosticDeadlineExceededError) {
+    return { category: "timeout", stage };
+  }
+  if (!(error instanceof DaytonaError)) {
+    return { category: "unknown", stage };
+  }
+  if (error instanceof DaytonaTimeoutError) {
+    return { category: "timeout", stage };
+  }
+  if (error instanceof DaytonaConnectionError) {
+    return { category: "provider_unavailable", stage };
+  }
+  switch (error.statusCode) {
+    case 401:
+      return { category: "authentication", stage };
+    case 403:
+      return { category: "authorization", stage };
+    case 404:
+      return { category: "not_found", stage };
+    case 408:
+    case 504:
+      return { category: "timeout", stage };
+    case 409:
+      return { category: "conflict", stage };
+    case 429:
+      return { category: "rate_limited", stage };
+    case 500:
+    case 502:
+    case 503:
+      return { category: "provider_unavailable", stage };
+    default:
+      return { category: "provider_rejected", stage };
   }
 }
 
@@ -203,6 +264,7 @@ export async function runEphemeralDiagnostic(
   const deadline = new DiagnosticDeadline(dependencies.deadline);
   let sandbox: RunnerDiagnosticSandbox | undefined;
   let result: RunnerDiagnosticResult | undefined;
+  let stage: RunnerDiagnosticFailure["stage"] = "create";
 
   try {
     const createdSandbox = await deadline.run(
@@ -215,6 +277,7 @@ export async function runEphemeralDiagnostic(
       }
     );
     sandbox = createdSandbox;
+    stage = "execute";
     const command = await deadline.run(
       DIAGNOSTIC_EXECUTION_TIMEOUT_MILLISECONDS,
       (timeout) => createdSandbox.execute(timeout)
@@ -226,11 +289,15 @@ export async function runEphemeralDiagnostic(
       ok: exitCode === 0 && output === "coven-agents",
       output,
     };
-  } catch {
+  } catch (error) {
+    dependencies.reportFailure?.(diagnosticFailure(error, stage));
     if (sandbox && deadline.hasTimeRemaining()) {
-      await deleteDiagnosticSandbox(sandbox, deadline);
+      await deleteDiagnosticSandbox(
+        sandbox,
+        deadline,
+        dependencies.reportFailure
+      );
     }
-    // biome-ignore lint/style/useErrorCause: Provider failures can contain credentials or identifiers.
     throw retryableServiceError(
       "diagnostic_unavailable",
       "Daytona diagnostic is unavailable."
@@ -243,7 +310,7 @@ export async function runEphemeralDiagnostic(
       "Daytona diagnostic is unavailable."
     );
   }
-  await deleteDiagnosticSandbox(sandbox, deadline);
+  await deleteDiagnosticSandbox(sandbox, deadline, dependencies.reportFailure);
   return result;
 }
 
@@ -251,52 +318,53 @@ export async function diagnoseDaytonaSandbox(
   name: string,
   dependencies: DaytonaDiagnosticDependencies = {}
 ): Promise<RunnerDiagnosticResult> {
+  let configuration: Pick<DaytonaSandboxConfiguration, "snapshotName">;
+  let client: DaytonaDiagnosticClient;
   try {
-    const configuration =
+    configuration =
       dependencies.configuration?.() ?? daytonaSandboxConfiguration();
-    const client = dependencies.client?.() ?? daytonaClient();
-    return await runEphemeralDiagnostic({
-      create: async (timeoutSeconds) => {
-        const sandbox = await client.create(
-          {
-            autoArchiveInterval: 0,
-            autoDeleteInterval: 0,
-            autoStopInterval: 0,
-            ephemeral: true,
-            name,
-            networkBlockAll: true,
-            public: false,
-            snapshot: configuration.snapshotName,
-            ttlMinutes: 5,
-          },
-          { timeout: timeoutSeconds }
-        );
-        return {
-          delete: (deleteTimeoutSeconds) =>
-            sandbox.delete(deleteTimeoutSeconds, true),
-          execute: async (executeTimeoutSeconds) => {
-            const command = await sandbox.process.executeCommand(
-              "printf coven-agents",
-              undefined,
-              undefined,
-              executeTimeoutSeconds
-            );
-            return {
-              exitCode: command.exitCode,
-              result: command.result ?? null,
-            };
-          },
-        };
-      },
-      deadline: dependencies.deadline,
-    });
+    client = dependencies.client?.() ?? daytonaClient();
   } catch (error) {
-    if (error instanceof RunnerServiceError) {
-      throw error;
-    }
+    dependencies.reportFailure?.(diagnosticFailure(error, "configuration"));
     throw retryableServiceError(
       "diagnostic_unavailable",
       "Daytona diagnostic is unavailable."
     );
   }
+  return await runEphemeralDiagnostic({
+    create: async (timeoutSeconds) => {
+      const sandbox = await client.create(
+        {
+          autoArchiveInterval: 0,
+          autoDeleteInterval: 0,
+          autoStopInterval: 0,
+          ephemeral: true,
+          name,
+          networkBlockAll: true,
+          public: false,
+          snapshot: configuration.snapshotName,
+          ttlMinutes: 5,
+        },
+        { timeout: timeoutSeconds }
+      );
+      return {
+        delete: (deleteTimeoutSeconds) =>
+          sandbox.delete(deleteTimeoutSeconds, true),
+        execute: async (executeTimeoutSeconds) => {
+          const command = await sandbox.process.executeCommand(
+            "printf coven-agents",
+            undefined,
+            undefined,
+            executeTimeoutSeconds
+          );
+          return {
+            exitCode: command.exitCode,
+            result: command.result ?? null,
+          };
+        },
+      };
+    },
+    deadline: dependencies.deadline,
+    reportFailure: dependencies.reportFailure,
+  });
 }
