@@ -340,25 +340,53 @@ test("expired reconciliation lease is reclaimed with a new fence", async () => {
   );
 });
 
-test("reconciliation lease normalizes timestamp strings returned by PostgreSQL", async () => {
+test("reconciliation lease parses zone-less PostgreSQL timestamps as UTC", async () => {
   const expiresAt = new Date("2026-08-28T21:46:00.000Z");
   const { store } = scripted([
     {
-      reconciliationLeaseExpiresAt: expiresAt.toISOString(),
+      reconciliationLeaseExpiresAt: "2026-08-28 21:46:00.000000",
       reconciliationLeaseFence: 12,
       reconciliationLeaseOwner: "owner-new",
     },
   ]);
 
-  assert.deepEqual(
-    await store.acquireReconciliationLease(operator, {
+  const previousTimezone = process.env.TZ;
+  process.env.TZ = "America/Chicago";
+  try {
+    assert.deepEqual(
+      await store.acquireReconciliationLease(operator, {
+        ownerToken: "owner-new",
+        ttlSeconds: 360,
+      }),
+      {
+        kind: "acquired",
+        lease: { expiresAt, fence: 12, ownerToken: "owner-new" },
+      }
+    );
+  } finally {
+    if (previousTimezone === undefined) {
+      delete process.env.TZ;
+    } else {
+      process.env.TZ = previousTimezone;
+    }
+  }
+});
+
+test("reconciliation lease rejects invalid PostgreSQL calendar timestamps", async () => {
+  const { store } = scripted([
+    {
+      reconciliationLeaseExpiresAt: "2026-02-30 00:00:00.000000",
+      reconciliationLeaseFence: 12,
+      reconciliationLeaseOwner: "owner-new",
+    },
+  ]);
+
+  await assert.rejects(
+    store.acquireReconciliationLease(operator, {
       ownerToken: "owner-new",
       ttlSeconds: 360,
     }),
-    {
-      kind: "acquired",
-      lease: { expiresAt, fence: 12, ownerToken: "owner-new" },
-    }
+    /invalid "reconciliationLeaseExpiresAt"/u
   );
 });
 

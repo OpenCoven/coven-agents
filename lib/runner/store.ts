@@ -247,16 +247,49 @@ function asScheduler(row: Record<string, unknown>): RunnerSchedulerRecord {
   };
 }
 
+function postgresTimestamp(value: unknown): Date | null {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?$/u.exec(
+      value
+    );
+  if (!match) {
+    return null;
+  }
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] =
+    match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const milliseconds = Number((match[7] ?? "").padEnd(3, "0").slice(0, 3));
+  const parsed = new Date(0);
+  parsed.setUTCFullYear(year, month - 1, day);
+  parsed.setUTCHours(hour, minute, second, milliseconds);
+  return year >= 1 &&
+    parsed.getUTCFullYear() === year &&
+    parsed.getUTCMonth() === month - 1 &&
+    parsed.getUTCDate() === day &&
+    parsed.getUTCHours() === hour &&
+    parsed.getUTCMinutes() === minute &&
+    parsed.getUTCSeconds() === second &&
+    parsed.getUTCMilliseconds() === milliseconds
+    ? parsed
+    : null;
+}
+
 function asReconciliationLease(
   row: Record<string, unknown>
 ): RunnerReconciliationLease {
   const expiresAtValue = column<unknown>(row, "reconciliationLeaseExpiresAt");
-  const expiresAt =
-    expiresAtValue instanceof Date
-      ? expiresAtValue
-      : typeof expiresAtValue === "string"
-        ? new Date(expiresAtValue)
-        : null;
+  const expiresAt = postgresTimestamp(expiresAtValue);
   const ownerToken = column<unknown>(row, "reconciliationLeaseOwner");
   if (!expiresAt || Number.isNaN(expiresAt.getTime())) {
     throw new Error(
