@@ -2,15 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   findDeploymentDocumentationViolations,
+  isVercelDeploymentDisableConfig,
   VERCEL_DEPLOYMENT_CONFIG_PATHS,
+  VERCEL_DEPLOYMENT_DISABLE_CONFIG,
   VERCEL_DEPLOYMENT_DOCUMENTATION_PATH,
   VERCEL_DEPLOYMENT_REQUIRED_HEADINGS,
 } from "./deployment-documentation-policy";
 
-const deploymentConfigEntries = VERCEL_DEPLOYMENT_CONFIG_PATHS.map((path) => ({
-  content: "{}\n",
-  path,
-}));
+const deploymentConfigEntries = [
+  {
+    content: '{"crons": [{"path": "/api/internal/runner-reconcile"}]}\n',
+    path: "vercel.json",
+  },
+  {
+    content: '{"products": [{"type": "blob"}]}\n',
+    path: "vercel-template.json",
+  },
+] as const;
+
+const disabledDeploymentConfig = `${JSON.stringify(
+  VERCEL_DEPLOYMENT_DISABLE_CONFIG
+)}\n`;
 
 test("passes when Vercel deployment configuration is absent", () => {
   assert.deepEqual(
@@ -19,6 +31,25 @@ test("passes when Vercel deployment configuration is absent", () => {
     ]),
     []
   );
+});
+
+test("allows only the deny-only Vercel Git deployment control", () => {
+  assert.equal(
+    isVercelDeploymentDisableConfig(disabledDeploymentConfig),
+    true
+  );
+  assert.deepEqual(
+    findDeploymentDocumentationViolations([
+      { content: disabledDeploymentConfig, path: "vercel.json" },
+    ]),
+    []
+  );
+
+  const extraDeploymentBehavior = JSON.stringify({
+    ...VERCEL_DEPLOYMENT_DISABLE_CONFIG,
+    framework: "nextjs",
+  });
+  assert.equal(isVercelDeploymentDisableConfig(extraDeploymentBehavior), false);
 });
 
 test("rejects Vercel deployment configuration without its runbook", () => {
@@ -55,7 +86,7 @@ test("rejects an incomplete Vercel deployment runbook", () => {
   );
 });
 
-test("allows Vercel deployment configuration with a complete runbook", () => {
+test("allows documented Vercel deployment configuration", () => {
   const documentation = `${VERCEL_DEPLOYMENT_REQUIRED_HEADINGS.join(
     "\n\n"
   )}\n`;
