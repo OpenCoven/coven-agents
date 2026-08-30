@@ -646,9 +646,7 @@ function EvidenceBlock({
           <div className="oc-evidence-report">
             <div className="oc-evidence-report__kicker">
               <span className="oc-evidence-report__label">Claim</span>
-              <span className="oc-evidence-report__meta">
-                Verified run report
-              </span>
+              <span className="oc-evidence-report__meta">Run report</span>
             </div>
             <MarkdownPreview variant="report">{block.claim}</MarkdownPreview>
           </div>
