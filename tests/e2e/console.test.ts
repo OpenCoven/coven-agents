@@ -397,6 +397,16 @@ test.describe("Run console", () => {
       output:
         "## Verification\n\n**Timeline verified.**\n\n- Events stayed ordered\n- Evidence stayed bounded",
     };
+    const retainedRuns = Array.from({ length: 20 }, (_, index) =>
+      index === 0
+        ? markdownRun
+        : {
+            ...retainedRun,
+            id: `22222222-2222-4222-8222-${String(index + 1).padStart(12, "0")}`,
+            operationId: `33333333-3333-4333-8333-${String(index + 1).padStart(12, "0")}`,
+            task: `Retained proof ${String(index + 1).padStart(2, "0")}`,
+          }
+    );
     await context.addCookies(await subscriberCookies());
     await page.route("**/api/credentials", (route) =>
       route.fulfill({ json: { harnessIds: ["copilot"] } })
@@ -412,7 +422,7 @@ test.describe("Run console", () => {
       }
       if (pathname === `/api/agents/${AGENT_ID}/runs`) {
         return route.fulfill({
-          json: { apiVersion: "1.0", runs: [markdownRun] },
+          json: { apiVersion: "1.0", runs: retainedRuns },
         });
       }
       if (pathname === `/api/runs/${RUN_ID}/events`) {
@@ -438,9 +448,42 @@ test.describe("Run console", () => {
     });
 
     await page.goto("/agents");
+    const sessionList = page.locator(".oc-session-list");
+    await expect
+      .poll(() =>
+        sessionList.evaluate(
+          (element) => element.scrollHeight > element.clientHeight
+        )
+      )
+      .toBe(true);
+
+    const missionGuidance = page.getByText("12 more characters", {
+      exact: true,
+    });
+    const [guidanceColor, mutedColor] = await missionGuidance.evaluate(
+      (element) => {
+        const consoleRoot = element.closest(".oc-console");
+        if (!consoleRoot) {
+          throw new Error("Console root not found");
+        }
+        const expected = document.createElement("span");
+        expected.style.color = "var(--text-muted)";
+        consoleRoot.append(expected);
+        const colors = [
+          getComputedStyle(element).color,
+          getComputedStyle(expected).color,
+        ];
+        expected.remove();
+        return colors;
+      }
+    );
+    expect(guidanceColor).toBe(mutedColor);
+
     await page
-      .getByRole("complementary")
-      .getByRole("button", { name: /completed Verify timeline/ })
+      .getByRole("complementary", { name: "Runs in this session" })
+      .getByRole("button", {
+        name: /^01 completed Verify timeline/,
+      })
       .click();
 
     const navigationRail = page.locator(".oc-agent-rail");
