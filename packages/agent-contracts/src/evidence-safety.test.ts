@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sanitizeEvidenceText } from "./index";
+import { sanitizeEvidencePath, sanitizeEvidenceText } from "./index";
 
 test("redacts authorization, credential assignments, and provider keys while preserving useful evidence", () => {
   const input = [
@@ -73,6 +73,93 @@ test("redacts an isolated sensitive environment assignment", () => {
   assert.equal(sanitized, "OPENAI_API_KEY=[REDACTED]");
 });
 
+test("redacts camel-case, hyphenated, and indented structured credential fields", () => {
+  const secrets = [
+    "camel-case-secret",
+    "hyphenated-secret",
+    "indented-secret",
+    "list-secret",
+    "hunter two",
+    "inline yaml secret",
+    "capital acronym secret",
+    "lowercase compact secret",
+    "nested-api-key-secret",
+    "escaped-secret-tail",
+  ];
+  const sanitized = sanitizeEvidenceText(
+    [
+      `{"apiKey":"${secrets[0]}"}`,
+      `{"x-api-key":"${secrets[1]}"}`,
+      `  password: ${secrets[2]}`,
+      `  - password: ${secrets[3]}`,
+      `  password: ${secrets[4]}`,
+      `{api.key: ${secrets[5]}}`,
+      `{"APIKey":"${secrets[6]}"}`,
+      `{"apikey":"${secrets[7]}"}`,
+      `{"config":{"apiKey":"${secrets[8]}"}}`,
+      `{"apiKey":"prefix\\"${secrets[9]}"}`,
+    ].join("\n")
+  );
+
+  for (const secret of secrets) {
+    assert.equal(sanitized.includes(secret), false);
+  }
+  assert.equal(sanitized.match(/\[REDACTED\]/gu)?.length, secrets.length);
+});
+
+test("redacts complete structured credential collections", () => {
+  const secrets = [
+    "first-sensitive-value",
+    "second-sensitive-value",
+    "primary-sensitive-value",
+    "backup-sensitive-value",
+    "multiline-sensitive-value",
+    "yaml-first-sensitive-value",
+    "yaml-second-sensitive-value",
+    "commented-sensitive-value",
+    "block-sensitive-value",
+    "anchored-sensitive-value",
+    "indentless-sensitive-value",
+  ];
+  const sanitized = sanitizeEvidenceText(
+    [
+      `{"apiKeys":["${secrets[0]}","${secrets[1]}"]}`,
+      `{"credentials":{"primary":"${secrets[2]}","backup":"${secrets[3]}"}}`,
+      [
+        "{",
+        '  "credentials": {',
+        `    "primary": "${secrets[4]}",`,
+        '    "safe": "metadata"',
+        "  }",
+        "}",
+      ].join("\n"),
+      [
+        "apiKeys:",
+        `  - ${secrets[5]}`,
+        `  - ${secrets[6]}`,
+        "safe: metadata",
+      ].join("\n"),
+      [
+        "credentials: # production",
+        `  primary: ${secrets[7]}`,
+        "apiKey: |2",
+        `    ${secrets[8]}`,
+        "credentials: &prod",
+        `  primary: ${secrets[9]}`,
+        "apiKeys:",
+        `- ${secrets[10]}`,
+        "safe: metadata",
+      ].join("\n"),
+    ].join("\n")
+  );
+
+  for (const secret of secrets) {
+    assert.equal(sanitized.includes(secret), false, `leaked ${secret}`);
+  }
+  assert.match(sanitized, /"apiKeys":\[REDACTED\]/u);
+  assert.match(sanitized, /"credentials":\[REDACTED\]/u);
+});
+
 test("redacts request and response session cookies from runner evidence", () => {
   const cookie = "session-id-private-value";
   const sanitized = sanitizeEvidenceText(
@@ -81,4 +168,101 @@ test("redacts request and response session cookies from runner evidence", () => 
 
   assert.equal(sanitized.includes(cookie), false);
   assert.match(sanitized, /\[REDACTED\]/);
+});
+
+test("redacts credential URLs, private keys, JWTs, and terminal control sequences", () => {
+  const jwt = [
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+    "eyJzdWIiOiIxMjM0NTY3ODkwIiwicm9sZSI6ImFkbWluIn0",
+    "abcdefghijklmnop0123456789",
+  ].join(".");
+  const shortJwt = ["eyJhbGciOiJub25lIn0", "e30", "c2ln"].join(".");
+  const privateKey = [
+    "-----BEGIN \u001B[31mPRIVATE",
+    " KEY-----\nprivate-key-material\n-----END PRIVATE",
+    " KEY-----",
+  ].join("");
+  const input = [
+    "postgres://runner:database-password@example.invalid/app",
+    "redis://:password-only@example.invalid/0",
+    "******example.invalid/path",
+    privateKey,
+    jwt,
+    shortJwt,
+    "\u001B]8;;https://malicious.example\u0007click\u001B]8;;\u0007",
+    "\u009B31mC1 terminal control",
+    "safe progress remains",
+  ].join("\n");
+
+  const sanitized = sanitizeEvidenceText(input);
+
+  assert.equal(sanitized.includes("database-password"), false);
+  assert.equal(sanitized.includes("password-only"), false);
+  assert.equal(sanitized.includes("opaque-token"), false);
+  assert.equal(sanitized.includes("private-key-material"), false);
+  assert.equal(sanitized.includes(jwt), false);
+  assert.equal(sanitized.includes(shortJwt), false);
+  assert.equal(sanitized.includes("\u001B"), false);
+  assert.equal(sanitized.includes("\u0007"), false);
+  assert.equal(sanitized.includes("\u009B"), false);
+  assert.match(sanitized, /safe progress remains/);
+});
+
+test("removes local user identities from absolute evidence paths", () => {
+  assert.equal(
+    sanitizeEvidencePath("/Users/alice/project/src/index.ts"),
+    "~/project/src/index.ts"
+  );
+  assert.equal(
+    sanitizeEvidencePath("/home/bob/project/src/index.ts"),
+    "~/project/src/index.ts"
+  );
+  assert.equal(
+    sanitizeEvidencePath("C:\\Users\\carol\\project\\src\\index.ts"),
+    "~\\project\\src\\index.ts"
+  );
+  assert.equal(
+    sanitizeEvidenceText(
+      "Error at /Users/alice/project/index.ts and C:\\Users\\carol\\repo\\app.ts"
+    ),
+    "Error at ~/project/index.ts and ~\\repo\\app.ts"
+  );
+  assert.equal(
+    sanitizeEvidenceText("Open file:///Users/dana/project/index.ts"),
+    "Open file://~/project/index.ts"
+  );
+  assert.equal(
+    sanitizeEvidenceText("Open C:\\Users\\Jane Doe\\project\\index.ts"),
+    "Open ~\\project\\index.ts"
+  );
+  assert.equal(
+    sanitizeEvidenceText('Open "/Users/Jane Doe" then continue'),
+    'Open "~" then continue'
+  );
+  assert.equal(
+    sanitizeEvidenceText('Open "C:\\Users\\Jane Doe" then continue'),
+    'Open "~" then continue'
+  );
+  assert.equal(
+    sanitizeEvidenceText('Open "/Users/O\'Brien" then continue'),
+    'Open "~" then continue'
+  );
+  assert.equal(
+    sanitizeEvidenceText('Open "C:\\Users\\O\'Brien" then continue'),
+    'Open "~" then continue'
+  );
+  assert.equal(
+    sanitizeEvidenceText("Home /Users/jane.doe is ready"),
+    "Home ~ is ready"
+  );
+  assert.equal(
+    sanitizeEvidenceText("Home C:\\Users\\jane.doe is ready"),
+    "Home ~ is ready"
+  );
+});
+
+test("preserves safe URLs containing email addresses", () => {
+  const url = "https://example.invalid?email=user@example.com";
+
+  assert.equal(sanitizeEvidenceText(url), url);
 });

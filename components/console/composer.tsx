@@ -2,9 +2,13 @@
 
 "use client";
 
-import type { AgentDefinition } from "@opencoven/agent-contracts";
+import {
+  type AgentDefinition,
+  sanitizeEvidencePath,
+  sanitizeEvidenceText,
+} from "@opencoven/agent-contracts";
 import { ArrowUpRight, Sparkles } from "lucide-react";
-import type { KeyboardEvent } from "react";
+import { type KeyboardEvent, useRef } from "react";
 import {
   Btn,
   Eyebrow,
@@ -13,6 +17,7 @@ import {
 } from "@/components/console/primitives";
 import { truncate, type as type_ } from "@/components/console/styles";
 import { formatAge } from "@/lib/console/format";
+import { quickPromptsForAgent } from "@/lib/console/quick-prompts";
 import type { ConsoleRun } from "@/lib/console/types";
 
 /**
@@ -48,6 +53,9 @@ export function Composer({
   runs: ConsoleRun[];
   starting: boolean;
 }) {
+  const briefRef = useRef<HTMLTextAreaElement>(null);
+  const quickPrompts = quickPromptsForAgent(agent);
+  const safeAgentName = sanitizeEvidenceText(agent.name);
   const tooShort = draft.trim().length < MIN_MISSION;
   const disabled = tooShort || starting || blocked !== null;
   const remainingCharacters = Math.max(0, MIN_MISSION - draft.trim().length);
@@ -79,8 +87,11 @@ export function Composer({
           <div className="oc-composer-context">
             {[
               ["runtime", agent.runtime],
-              ["model", agent.model],
-              ["workspace", agent.workspace ?? "/workspace"],
+              ["model", sanitizeEvidenceText(agent.model)],
+              [
+                "workspace",
+                sanitizeEvidencePath(agent.workspace ?? "/workspace"),
+              ],
             ].map(([label, value]) => (
               <div className="oc-composer-context-item" key={label}>
                 <span className="oc-composer-context-label">{label}</span>
@@ -89,6 +100,38 @@ export function Composer({
             ))}
           </div>
 
+          <section
+            aria-label={`Quick chats for ${safeAgentName}`}
+            className="oc-quick-chats"
+          >
+            <div className="oc-quick-chats__heading">
+              <Eyebrow>Quick chats</Eyebrow>
+              <span>Recommended for {safeAgentName}</span>
+            </div>
+            <div className="oc-quick-chats__grid">
+              {quickPrompts.map((prompt, index) => (
+                <button
+                  className="oc-quick-chat"
+                  key={prompt}
+                  onClick={() => {
+                    onDraft(prompt);
+                    requestAnimationFrame(() => {
+                      briefRef.current?.focus();
+                      briefRef.current?.setSelectionRange(
+                        prompt.length,
+                        prompt.length
+                      );
+                    });
+                  }}
+                  type="button"
+                >
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          </section>
+
           <div className="oc-composer-brief">
             <label htmlFor="oc-mission">Proof brief</label>
             <textarea
@@ -96,6 +139,7 @@ export function Composer({
               onChange={(event) => onDraft(event.target.value)}
               onKeyDown={onKeyDown}
               placeholder="Describe the outcome, the constraints, and the evidence you would accept…"
+              ref={briefRef}
               value={draft}
             />
 
@@ -122,7 +166,8 @@ export function Composer({
 
           <footer className="oc-composer-footnote">
             <span aria-hidden="true" className="oc-composer-footnote-dot" />
-            {agent.name} changes nothing unless the selected runtime grants it.
+            {safeAgentName} changes nothing unless the selected runtime grants
+            it.
           </footer>
         </section>
 
@@ -170,7 +215,9 @@ export function Composer({
                         size={5}
                         tone={statusTone(run.snapshot.status)}
                       />
-                      <span style={truncate}>{run.snapshot.task}</span>
+                      <span style={truncate}>
+                        {sanitizeEvidenceText(run.snapshot.task)}
+                      </span>
                     </span>
                     <small>{formatAge(run.snapshot.createdAt, now)}</small>
                   </span>

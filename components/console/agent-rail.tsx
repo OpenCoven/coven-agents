@@ -2,7 +2,10 @@
 
 "use client";
 
-import type { AgentDefinition } from "@opencoven/agent-contracts";
+import {
+  type AgentDefinition,
+  sanitizeEvidenceText,
+} from "@opencoven/agent-contracts";
 import { Check, ChevronsUpDown, PanelLeft, Plus } from "lucide-react";
 import { useRef, useState } from "react";
 import {
@@ -79,7 +82,11 @@ function AgentGlyph({
   selected: boolean;
   size?: number;
 }) {
-  return <span style={well(selected, size)}>{glyphFor(agent.name)}</span>;
+  return (
+    <span style={well(selected, size)}>
+      {glyphFor(sanitizeEvidenceText(agent.name))}
+    </span>
+  );
 }
 
 function MiniRail({
@@ -159,7 +166,7 @@ function MiniRail({
       >
         {agents.map((agent) => (
           <button
-            aria-label={agent.name}
+            aria-label={sanitizeEvidenceText(agent.name)}
             className="oc-tint"
             key={agent.id}
             onClick={() => onSelectAgent(agent.id)}
@@ -174,7 +181,7 @@ function MiniRail({
               placeItems: "center",
               position: "relative",
             }}
-            title={`${agent.name} · ${agent.status}`}
+            title={`${sanitizeEvidenceText(agent.name)} · ${agent.status}`}
             type="button"
           >
             <AgentGlyph
@@ -631,7 +638,7 @@ export function AgentRail(props: RailProps) {
                   <span
                     style={{ ...type_.title, lineHeight: 1.2, ...truncate }}
                   >
-                    {agent.name}
+                    {sanitizeEvidenceText(agent.name)}
                   </span>
                   <span
                     style={{
@@ -761,7 +768,7 @@ export function AgentRail(props: RailProps) {
                               ...truncate,
                             }}
                           >
-                            {run.snapshot.task}
+                            {sanitizeEvidenceText(run.snapshot.task)}
                           </span>
                           <span style={type_.meta}>
                             {formatAge(run.snapshot.createdAt, props.now)}

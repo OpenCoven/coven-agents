@@ -2350,10 +2350,23 @@ test("fair dispatch selection locks scheduler and enforces tenant and agent capa
       "advance-runner-scheduler",
     ]
   );
+  const activeCount = queryText(statements[1] as RunnerStoreStatement);
   const candidate = queryText(statements[2] as RunnerStoreStatement);
+  assert.match(activeCount, /"dispatchState" = 'terminal'/u);
+  assert.match(activeCount, /"daytonaAttemptId" IS NOT NULL/u);
+  assert.match(activeCount, /"daytonaCommandId" IS NOT NULL/u);
+  assert.match(activeCount, /"daytonaSessionId" IS NOT NULL/u);
   assert.match(candidate, /FOR UPDATE OF "queued" SKIP LOCKED/u);
   assert.match(candidate, /"agentActive"/u);
   assert.match(candidate, /"tenantActive"/u);
+  assert.match(
+    candidate,
+    /"agentActive"\."dispatchState" = 'terminal'[\s\S]*"agentActive"\."daytonaAttemptId" IS NOT NULL/u
+  );
+  assert.match(
+    candidate,
+    /"tenantActive"\."dispatchState" = 'terminal'[\s\S]*"tenantActive"\."daytonaAttemptId" IS NOT NULL/u
+  );
   assert.equal(statements[2]?.args.consecutiveDispatches, 2);
   assert.equal(statements[2]?.args.lastDispatchedTenantHash, "hash-a");
   assert.match(candidate, /md5\("queued"\."tenant"\)/u);

@@ -52,3 +52,12 @@ test("keeps safe external links isolated from the application window", async () 
   assert.match(html, /target="_blank"/);
   assert.match(html, /rel="noopener noreferrer"/);
 });
+
+test("renders highlight-like command delimiters as mark elements", async () => {
+  const html = await renderConsoleMarkdown(
+    'bash echo "== pwd ==" && echo "== config.json =="'
+  );
+
+  assert.match(html, /<mark> pwd <\/mark>/);
+  assert.match(html, /<mark> config\.json <\/mark>/);
+});
