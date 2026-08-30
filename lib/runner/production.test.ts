@@ -854,11 +854,15 @@ test("production reconciliation skips a live lease before provider or scan work"
 
 test("production reconciliation sanitizes lease database failures", async () => {
   const secret = "database=private-detail";
+  const failures: unknown[] = [];
   const runtime = createProductionRunnerRuntime({
     databaseFor: () =>
       ({
         transaction: () => Promise.reject(new Error(secret)),
       }) as never,
+    reportReconciliationFailure: (failure) => {
+      failures.push(failure);
+    },
   });
   const service = await runtime.createOperatorService();
 
@@ -870,4 +874,6 @@ test("production reconciliation sanitizes lease database failures", async () => 
     assert.equal(error.message.includes("private-detail"), false);
     return true;
   });
+  assert.deepEqual(failures, [{ category: "unknown", stage: "lease" }]);
+  assert.equal(JSON.stringify(failures).includes("private-detail"), false);
 });
