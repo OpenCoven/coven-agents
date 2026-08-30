@@ -575,6 +575,15 @@ test.describe("Run console", () => {
         name: "Verification",
       })
     ).toHaveCSS("font-family", /EB Garamond/);
+    await expect
+      .poll(() =>
+        evidenceReport
+          .getByRole("heading", { level: 2, name: "Verification" })
+          .evaluate((element) =>
+            Number.parseFloat(getComputedStyle(element).fontSize)
+          )
+      )
+      .toBeGreaterThan(27);
     await expect(
       page.locator(".oc-markdown strong", { hasText: "Timeline verified." })
     ).toBeVisible();

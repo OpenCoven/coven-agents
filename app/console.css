@@ -829,15 +829,6 @@
   color: var(--text-muted) !important;
 }
 
-.oc-evidence-report {
-  padding: 20px 14px 24px;
-}
-
-.oc-markdown-report .oc-md-h1,
-.oc-markdown-report .oc-md-h2 {
-  font-size: 23px;
-}
-
 .oc-composer {
   flex: 1;
   min-height: 0;
@@ -1257,6 +1248,15 @@
     width: 40%;
     height: 1px;
     background: linear-gradient(to right, var(--accent-presence), transparent);
+  }
+
+  .oc-evidence-report {
+    padding: 20px 14px 24px;
+  }
+
+  .oc-markdown-report .oc-md-h1,
+  .oc-markdown-report .oc-md-h2 {
+    font-size: 23px;
   }
 
   .oc-composer {
