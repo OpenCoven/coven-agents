@@ -1,20 +1,25 @@
 import Stripe from "stripe";
-import { subscriptionUpdate } from "@/lib/billing/webhook";
 import {
-  applySubscriptionUpdate,
-  claimStripeEvent,
+  applyStripeEntitlementEvent,
+  recordIgnoredStripeEvent,
+} from "@/lib/db/stripe-events";
+import {
   findUserById,
   findUserByStripeCustomerId,
 } from "@/lib/db/queries";
 
+const ENTITLEMENT_EVENT_TYPES = new Set([
+  "invoice.paid",
+  "invoice.payment_failed",
+]);
+
 /**
- * Stripe's webhook endpoint.
+ * Authenticated, retry-safe Stripe entitlement ingestion.
  *
- * Two things matter more than the rest. The signature is verified, because an
- * unverified endpoint that writes `subscribedUntil` is a free subscription for
- * anyone who can POST to it. And the event id is inserted as a primary key
- * before anything is written, so a redelivery — which Stripe does routinely —
- * conflicts instead of extending a subscription twice.
+ * Signature verification happens before any durable receipt. For entitlement
+ * events, the provider event id and normalized user entitlement commit in the
+ * same database transaction, so a crash cannot leave a claimed-but-unapplied
+ * event that every later Stripe retry falsely deduplicates.
  */
 export async function POST(request: Request) {
   const secret = process.env.STRIPE_SECRET_KEY;
@@ -25,7 +30,6 @@ export async function POST(request: Request) {
   }
 
   const signature = request.headers.get("stripe-signature");
-
   if (!signature) {
     return Response.json({ error: "unsigned" }, { status: 400 });
   }
@@ -33,7 +37,6 @@ export async function POST(request: Request) {
   // The raw body, not the parsed one: the signature covers the exact bytes.
   const raw = await request.text();
   const stripe = new Stripe(secret);
-
   let event: Stripe.Event;
 
   try {
@@ -46,60 +49,63 @@ export async function POST(request: Request) {
     return Response.json({ error: "bad_signature" }, { status: 400 });
   }
 
-  // The insert IS the idempotency check. A lookup-then-write would race a
-  // concurrent redelivery of the same event.
-  if (!(await claimStripeEvent(event.id))) {
-    return Response.json({ deduped: true });
-  }
+  try {
+    if (!ENTITLEMENT_EVENT_TYPES.has(event.type)) {
+      return receiptResponse(await recordIgnoredStripeEvent(event.id));
+    }
 
-  const object = event.data.object as {
-    billing_reason?: string | null;
-    customer?: string | null;
-    lines?: { data?: { period?: { end?: number; start?: number } }[] };
-  };
+    const object = event.data.object as {
+      billing_reason?: string | null;
+      customer?: unknown;
+      lines?: { data?: { period?: { end?: number; start?: number } }[] };
+    };
+    const customerId = stripeCustomerId(object.customer);
 
-  const customerId =
-    typeof object.customer === "string" ? object.customer : null;
+    if (!customerId) {
+      return receiptResponse(await recordIgnoredStripeEvent(event.id));
+    }
 
-  if (!customerId) {
-    return Response.json({ ignored: true });
-  }
+    const byCustomer = await findUserByStripeCustomerId(customerId);
+    // The first event for a new subscription cannot yet be found by the locally
+    // stored customer id. Checkout stamps server-owned userId metadata on the
+    // Stripe Customer for this bounded bootstrap only.
+    const owner = byCustomer ?? (await ownerFromMetadata(stripe, customerId));
 
-  const byCustomer = await findUserByStripeCustomerId(customerId);
+    if (!owner) {
+      // No receipt was written, so Stripe can safely redeliver after checkout
+      // metadata/account propagation converges.
+      return Response.json(
+        { error: "billing_owner_unavailable" },
+        { headers: { "retry-after": "5" }, status: 500 }
+      );
+    }
 
-  // The first event of a new subscription is the one that writes
-  // `stripeCustomerId`, so it cannot be found by it. Checkout stamps
-  // `metadata.userId` on the Customer for exactly this moment.
-  const owner = byCustomer ?? (await ownerFromMetadata(stripe, customerId));
-
-  if (!owner) {
-    return Response.json({ ignored: true });
-  }
-
-  const periodEndSeconds = object.lines?.data?.[0]?.period?.end;
-  const periodStartSeconds = object.lines?.data?.[0]?.period?.start;
-
-  const update = subscriptionUpdate({
-    billingReason: object.billing_reason ?? "",
-    current: owner.subscribedUntil ?? null,
-    currentPeriodStart: owner.billingPeriodStart ?? null,
-    periodEnd: periodEndSeconds ? new Date(periodEndSeconds * 1000) : null,
-    periodStart: periodStartSeconds
-      ? new Date(periodStartSeconds * 1000)
-      : null,
-    type: event.type,
-  });
-
-  if (update) {
-    await applySubscriptionUpdate({
-      billingPeriodStart: update.billingPeriodStart,
+    const period = object.lines?.data?.[0]?.period;
+    const state = await applyStripeEntitlementEvent({
+      billingReason: object.billing_reason ?? "",
       customerId,
-      subscribedUntil: update.subscribedUntil,
+      eventId: event.id,
+      eventType: event.type,
+      periodEnd: dateFromUnixSeconds(period?.end),
+      periodStart: dateFromUnixSeconds(period?.start),
       userId: owner.id,
     });
-  }
 
-  return Response.json({ received: true });
+    if (state === "rejected") {
+      // Stop provider retry without granting access. The event id remains a
+      // durable terminal receipt; no customer id or payment detail is exposed.
+      return Response.json({ received: true, state });
+    }
+    return receiptResponse(state);
+  } catch {
+    // The transaction rolls back both receipt and entitlement mutation. A
+    // non-2xx response therefore asks Stripe to retry rather than losing the
+    // event behind a false duplicate receipt.
+    return Response.json(
+      { error: "billing_processing_unavailable" },
+      { headers: { "retry-after": "5" }, status: 500 }
+    );
+  }
 }
 
 async function ownerFromMetadata(stripe: Stripe, customerId: string) {
@@ -109,6 +115,35 @@ async function ownerFromMetadata(stripe: Stripe, customerId: string) {
   if (!userId) {
     return null;
   }
-
   return await findUserById(userId);
+}
+
+function receiptResponse(state: "applied" | "deduped" | "ignored") {
+  return Response.json(
+    state === "deduped"
+      ? { deduped: true, state }
+      : { received: true, state }
+  );
+}
+
+function stripeCustomerId(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (
+    value &&
+    typeof value === "object" &&
+    "id" in value &&
+    typeof value.id === "string"
+  ) {
+    return value.id;
+  }
+  return null;
+}
+
+function dateFromUnixSeconds(value: number | undefined): Date | null {
+  if (!(typeof value === "number" && Number.isFinite(value) && value > 0)) {
+    return null;
+  }
+  return new Date(value * 1000);
 }

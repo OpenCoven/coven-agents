@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { GRACE_PERIOD_DAYS } from "./limits";
-import { subscriptionUpdate } from "./webhook";
+import {
+  advancingSubscriptionUpdate,
+  subscriptionUpdate,
+} from "./webhook";
 
 const PAID_UNTIL = new Date("2026-09-20T12:00:00.000Z");
 
@@ -34,7 +37,7 @@ test("a failed renewal extends by the grace window", () => {
   const update = subscriptionUpdate({
     billingReason: "subscription_cycle",
     current: PAID_UNTIL,
-    periodEnd: null,
+    periodEnd: PAID_UNTIL,
     type: "invoice.payment_failed",
   });
 
@@ -49,7 +52,7 @@ test("a failed renewal preserves the paid billing-period start", () => {
     billingReason: "subscription_cycle",
     current: PAID_UNTIL,
     currentPeriodStart: new Date("2026-08-20T12:00:00.000Z"),
-    periodEnd: null,
+    periodEnd: PAID_UNTIL,
     type: "invoice.payment_failed",
   };
   const update = subscriptionUpdate(input);
@@ -62,6 +65,18 @@ test("a failed renewal preserves the paid billing-period start", () => {
   });
 });
 
+test("a failed renewal without an affected period changes nothing", () => {
+  assert.equal(
+    subscriptionUpdate({
+      billingReason: "subscription_cycle",
+      current: PAID_UNTIL,
+      periodEnd: null,
+      type: "invoice.payment_failed",
+    }),
+    null
+  );
+});
+
 test("a failed FIRST payment changes nothing", () => {
   // Would otherwise grant a subscriber session -- database writes and
   // credential storage -- to someone who has never paid.
@@ -69,7 +84,7 @@ test("a failed FIRST payment changes nothing", () => {
     subscriptionUpdate({
       billingReason: "subscription_create",
       current: null,
-      periodEnd: null,
+      periodEnd: PAID_UNTIL,
       type: "invoice.payment_failed",
     }),
     null
@@ -117,7 +132,7 @@ test("a failed FIRST payment is refused even when a prior period exists", () => 
     subscriptionUpdate({
       billingReason: "subscription_create",
       current: PAID_UNTIL,
-      periodEnd: null,
+      periodEnd: PAID_UNTIL,
       type: "invoice.payment_failed",
     }),
     null
@@ -139,4 +154,28 @@ test("grace does not compound across two failures", () => {
     }),
     null
   );
+});
+
+test("a delayed paid event cannot regress a newer entitlement", () => {
+  const current = new Date("2026-10-20T12:00:00.000Z");
+  const candidate = subscriptionUpdate({
+    billingReason: "subscription_cycle",
+    current,
+    periodEnd: PAID_UNTIL,
+    type: "invoice.paid",
+  });
+
+  assert.equal(advancingSubscriptionUpdate(current, candidate), null);
+});
+
+test("an advancing paid event remains eligible for application", () => {
+  const current = new Date("2026-08-20T12:00:00.000Z");
+  const candidate = subscriptionUpdate({
+    billingReason: "subscription_cycle",
+    current,
+    periodEnd: PAID_UNTIL,
+    type: "invoice.paid",
+  });
+
+  assert.deepEqual(advancingSubscriptionUpdate(current, candidate), candidate);
 });

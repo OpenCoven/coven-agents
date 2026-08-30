@@ -6,6 +6,17 @@ export type SubscriptionUpdate = {
   subscribedUntil: Date;
 } | null;
 
+/** Keeps normalized entitlement monotonic under delayed/out-of-order delivery. */
+export function advancingSubscriptionUpdate(
+  current: Date | null,
+  update: SubscriptionUpdate
+): SubscriptionUpdate {
+  if (!update) {
+    return null;
+  }
+  return !current || update.subscribedUntil > current ? update : null;
+}
+
 /**
  * What a Stripe event changes about `subscribedUntil`, if anything.
  *
@@ -39,18 +50,25 @@ export function subscriptionUpdate(input: {
   }
 
   if (input.type === "invoice.payment_failed") {
+    // A failed event without the provider's affected paid-period boundary is
+    // not strong enough evidence to extend access. Otherwise a delayed or
+    // malformed failure could add grace to a newer successful renewal.
+    if (!input.periodEnd) {
+      return null;
+    }
+
     const extended = graceExtension({
       billingReason: input.billingReason,
       // Grace applies once. A second failure inside the window finds a date
       // already beyond the paid period and does not extend again.
       graceAlreadyApplied: Boolean(
-        input.current && input.periodEnd && input.current > input.periodEnd
+        input.current && input.current > input.periodEnd
       ),
       subscribedUntil: input.current,
     });
 
     const billingPeriodStart =
-      input.currentPeriodStart ?? periodStart(input.current);
+      input.currentPeriodStart ?? periodStart(input.periodEnd);
     return extended && billingPeriodStart
       ? { billingPeriodStart, subscribedUntil: extended }
       : null;
