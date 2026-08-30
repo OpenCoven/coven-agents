@@ -11,6 +11,16 @@ export const VERCEL_DEPLOYMENT_CONFIG_PATHS = [
   "vercel-template.json",
 ] as const;
 
+export const VERCEL_CONFIGURATION_SCHEMA =
+  "https://openapi.vercel.sh/vercel.json";
+
+export const VERCEL_DEPLOYMENT_DISABLE_CONFIG = {
+  $schema: VERCEL_CONFIGURATION_SCHEMA,
+  git: {
+    deploymentEnabled: false,
+  },
+} as const;
+
 export const VERCEL_DEPLOYMENT_REQUIRED_HEADINGS = [
   "# Vercel deployment",
   "## Ownership",
@@ -37,6 +47,38 @@ function normalizePath(path: string): string {
   return path.replaceAll("\\", "/");
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function isVercelDeploymentDisableConfig(content: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return false;
+  }
+
+  if (!isRecord(parsed)) {
+    return false;
+  }
+
+  const topLevelKeys = Object.keys(parsed);
+  if (
+    topLevelKeys.some((key) => key !== "$schema" && key !== "git") ||
+    ("$schema" in parsed && parsed.$schema !== VERCEL_CONFIGURATION_SCHEMA)
+  ) {
+    return false;
+  }
+
+  const git = parsed.git;
+  return (
+    isRecord(git) &&
+    Object.keys(git).length === 1 &&
+    git.deploymentEnabled === false
+  );
+}
+
 function normalizedHeadingLines(content: string): Set<string> {
   return new Set(
     content
@@ -51,9 +93,18 @@ export function findDeploymentDocumentationViolations(
   const entriesByPath = new Map(
     entries.map((entry) => [normalizePath(entry.path), entry.content])
   );
-  const configPaths = VERCEL_DEPLOYMENT_CONFIG_PATHS.filter((path) =>
-    entriesByPath.has(path)
-  );
+  const configPaths: string[] = [];
+  const vercelConfig = entriesByPath.get("vercel.json");
+
+  if (
+    vercelConfig !== undefined &&
+    !isVercelDeploymentDisableConfig(vercelConfig)
+  ) {
+    configPaths.push("vercel.json");
+  }
+  if (entriesByPath.has("vercel-template.json")) {
+    configPaths.push("vercel-template.json");
+  }
 
   if (configPaths.length === 0) {
     return [];
@@ -65,7 +116,7 @@ export function findDeploymentDocumentationViolations(
   if (documentation === undefined) {
     return [
       {
-        configPaths: [...configPaths],
+        configPaths,
         documentationPath: VERCEL_DEPLOYMENT_DOCUMENTATION_PATH,
         missingHeadings: [...VERCEL_DEPLOYMENT_REQUIRED_HEADINGS],
         reason: "missing-documentation",
@@ -83,7 +134,7 @@ export function findDeploymentDocumentationViolations(
 
   return [
     {
-      configPaths: [...configPaths],
+      configPaths,
       documentationPath: VERCEL_DEPLOYMENT_DOCUMENTATION_PATH,
       missingHeadings: [...missingHeadings],
       reason: "incomplete-documentation",
@@ -116,7 +167,7 @@ export function renderDeploymentDocumentationViolations(
     .map((violation) => {
       const configs = violation.configPaths.join(", ");
       if (violation.reason === "missing-documentation") {
-        return `Undocumented Vercel deployment configuration (${configs}). Add ${violation.documentationPath} before restoring these files.`;
+        return `Undocumented Vercel deployment configuration (${configs}). Add ${violation.documentationPath} before enabling deployments.`;
       }
 
       return `${violation.documentationPath} is incomplete for ${configs}. Missing headings: ${violation.missingHeadings.join(", ")}.`;
@@ -134,7 +185,7 @@ function main(): number {
   }
 
   process.stdout.write(
-    `Deployment documentation policy passed: Vercel deployment configuration is absent or backed by ${VERCEL_DEPLOYMENT_DOCUMENTATION_PATH}.\n`
+    `Deployment documentation policy passed: Vercel deployment is disabled, absent, or backed by ${VERCEL_DEPLOYMENT_DOCUMENTATION_PATH}.\n`
   );
   return 0;
 }
