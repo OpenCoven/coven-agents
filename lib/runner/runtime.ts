@@ -100,6 +100,8 @@ export type ProductionRunnerRuntimeDependencies = Readonly<{
 
 export type RunnerReconciliationFailure = Readonly<{
   category: "runner" | "unknown";
+  code?: string;
+  name?: "DrizzleError" | "Error" | "PostgresError" | "TypeError";
   stage: "composition" | "lease" | "reconcile";
 }>;
 
@@ -404,6 +406,52 @@ function registryHarnesses(): readonly HarnessStatus[] {
   );
 }
 
+function reconciliationFailure(
+  error: unknown,
+  stage: RunnerReconciliationFailure["stage"],
+  runnerError: boolean
+): RunnerReconciliationFailure {
+  const safeNames = new Set<RunnerReconciliationFailure["name"]>([
+    "DrizzleError",
+    "Error",
+    "PostgresError",
+    "TypeError",
+  ]);
+  let candidate = error;
+  let code: string | undefined;
+  let name: RunnerReconciliationFailure["name"];
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (typeof candidate !== "object" || candidate === null) {
+      break;
+    }
+    const current = candidate as Readonly<{
+      cause?: unknown;
+      code?: unknown;
+      name?: unknown;
+    }>;
+    const { cause, code: currentCode, name: currentName } = current;
+    if (typeof currentCode === "string" && /^[0-9A-Z]{5}$/u.test(currentCode)) {
+      code = currentCode;
+    }
+    if (
+      typeof currentName === "string" &&
+      safeNames.has(currentName as RunnerReconciliationFailure["name"])
+    ) {
+      name = currentName as RunnerReconciliationFailure["name"];
+    }
+    if (cause === candidate) {
+      break;
+    }
+    candidate = cause;
+  }
+  return {
+    category: runnerError ? "runner" : "unknown",
+    ...(code ? { code } : {}),
+    ...(name ? { name } : {}),
+    stage,
+  };
+}
+
 function productionReconcile(
   database: ProductionDatabase,
   store: RunnerStore,
@@ -466,11 +514,9 @@ function productionReconcile(
       const { RunnerServiceError: RuntimeServiceError } = await import(
         "./errors"
       );
-      reportFailure?.({
-        category: error instanceof RuntimeServiceError ? "runner" : "unknown",
-        stage,
-      });
-      if (error instanceof RuntimeServiceError) {
+      const runnerError = error instanceof RuntimeServiceError;
+      reportFailure?.(reconciliationFailure(error, stage, runnerError));
+      if (runnerError) {
         throw error;
       }
       // biome-ignore lint/style/useErrorCause: The custom error preserves the sanitized cause through its options.

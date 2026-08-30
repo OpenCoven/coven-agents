@@ -7,6 +7,7 @@ import {
   DaytonaError,
   DaytonaTimeoutError,
 } from "@daytona/sdk";
+import { DrizzleQueryError } from "drizzle-orm/errors";
 import { diagnoseDaytonaSandbox, runEphemeralDiagnostic } from "./production";
 import {
   createProductionRunnerRuntime,
@@ -855,10 +856,19 @@ test("production reconciliation skips a live lease before provider or scan work"
 test("production reconciliation sanitizes lease database failures", async () => {
   const secret = "database=private-detail";
   const failures: unknown[] = [];
+  const databaseError = Object.assign(new Error(secret), {
+    code: "42P01",
+    name: "PostgresError",
+  });
+  const queryError = new DrizzleQueryError(
+    `SELECT '${secret}'`,
+    [secret],
+    databaseError
+  );
   const runtime = createProductionRunnerRuntime({
     databaseFor: () =>
       ({
-        transaction: () => Promise.reject(new Error(secret)),
+        transaction: () => Promise.reject(queryError),
       }) as never,
     reportReconciliationFailure: (failure) => {
       failures.push(failure);
@@ -874,6 +884,13 @@ test("production reconciliation sanitizes lease database failures", async () => 
     assert.equal(error.message.includes("private-detail"), false);
     return true;
   });
-  assert.deepEqual(failures, [{ category: "unknown", stage: "lease" }]);
+  assert.deepEqual(failures, [
+    {
+      category: "unknown",
+      code: "42P01",
+      name: "PostgresError",
+      stage: "lease",
+    },
+  ]);
   assert.equal(JSON.stringify(failures).includes("private-detail"), false);
 });
