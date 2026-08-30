@@ -392,6 +392,7 @@ test.describe("Run console", () => {
     context,
     page,
   }) => {
+    await page.setViewportSize({ height: 720, width: 1024 });
     const markdownRun = {
       ...retainedRun,
       output:
@@ -448,6 +449,20 @@ test.describe("Run console", () => {
     });
 
     await page.goto("/agents");
+    const composerGrid = page.locator(".oc-composer-grid");
+    const composerFootnote = page.locator(".oc-composer-footnote");
+    const [composerGridBox, composerFootnoteBox] = await Promise.all([
+      composerGrid.boundingBox(),
+      composerFootnote.boundingBox(),
+    ]);
+    expect(composerGridBox).not.toBeNull();
+    expect(composerFootnoteBox).not.toBeNull();
+    expect(
+      (composerFootnoteBox?.y ?? 0) + (composerFootnoteBox?.height ?? 0)
+    ).toBeLessThanOrEqual(
+      (composerGridBox?.y ?? 0) + (composerGridBox?.height ?? 0)
+    );
+
     const sessionList = page.locator(".oc-session-list");
     await expect
       .poll(() =>
