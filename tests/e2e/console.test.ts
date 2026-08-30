@@ -548,6 +548,33 @@ test.describe("Run console", () => {
     await expect(
       page.getByRole("heading", { level: 2, name: "Verification" })
     ).toBeVisible();
+    const evidenceReport = page.locator(".oc-evidence-report");
+    await expect(evidenceReport).toBeVisible();
+    const [reportBackground, deskBackground] = await evidenceReport.evaluate(
+      (element) => {
+        const consoleRoot = element.closest(".oc-console");
+        if (!consoleRoot) {
+          throw new Error("Console root not found");
+        }
+        const expected = document.createElement("span");
+        expected.style.background = "var(--bg-desk)";
+        consoleRoot.append(expected);
+        const colors = [
+          getComputedStyle(element).backgroundColor,
+          getComputedStyle(expected).backgroundColor,
+        ];
+        expected.remove();
+        return colors;
+      }
+    );
+    expect(reportBackground).toBe(deskBackground);
+    await expect(evidenceReport.locator(".oc-markdown-report")).toBeVisible();
+    await expect(
+      evidenceReport.getByRole("heading", {
+        level: 2,
+        name: "Verification",
+      })
+    ).toHaveCSS("font-family", /EB Garamond/);
     await expect(
       page.locator(".oc-markdown strong", { hasText: "Timeline verified." })
     ).toBeVisible();
