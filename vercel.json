@@ -1,9 +1,6 @@
 {
-  "crons": [
-    {
-      "path": "/api/internal/runner-reconcile",
-      "schedule": "* * * * *"
-    }
-  ],
-  "framework": "nextjs"
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "git": {
+    "deploymentEnabled": false
+  }
 }

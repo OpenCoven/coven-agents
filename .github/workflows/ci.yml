@@ -45,6 +45,9 @@ jobs:
       - name: Secret scan
         run: pnpm secret:scan:all
 
+      - name: Validate deployment documentation policy
+        run: pnpm exec tsx scripts/deployment-documentation-policy.ts
+
       # Every gate runs even after an earlier one fails, so a single run reports
       # the full set of problems instead of only the first.
       - name: Lint
