@@ -4,6 +4,7 @@
 
 import type { FileEvidence } from "@opencoven/agent-contracts";
 import { useState } from "react";
+import { MarkdownPreview } from "@/components/console/markdown-preview";
 import { Btn, Caret, Eyebrow } from "@/components/console/primitives";
 import {
   card,
@@ -421,22 +422,7 @@ function TextBlock({
   return (
     <div style={{ display: "flex", gap: 11, padding: "2px 0" }}>
       <span style={well(false, 24)}>◆</span>
-      <p style={{ ...type_.body, flex: 1, whiteSpace: "pre-wrap" }}>
-        {block.text}
-        {block.live ? (
-          <span
-            className="oc-caret"
-            style={{
-              background: "var(--accent-presence)",
-              display: "inline-block",
-              height: 14,
-              marginLeft: 2,
-              verticalAlign: -2,
-              width: 7,
-            }}
-          />
-        ) : null}
-      </p>
+      <MarkdownPreview live={block.live}>{block.text}</MarkdownPreview>
     </div>
   );
 }
@@ -680,15 +666,7 @@ function EvidenceBlock({
             >
               Claim
             </span>
-            <p
-              style={{
-                ...type_.body,
-                color: "var(--text-primary)",
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {block.claim}
-            </p>
+            <MarkdownPreview>{block.claim}</MarkdownPreview>
           </div>
         ) : null}
 

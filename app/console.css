@@ -207,6 +207,198 @@
   background: transparent;
 }
 
+.oc-markdown {
+  flex: 1;
+  min-width: 0;
+  font: 400 13px / 1.65 var(--font-ui);
+  color: var(--text-primary);
+}
+
+.oc-markdown .oc-md-preview {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.oc-markdown-fallback {
+  white-space: pre-wrap;
+}
+
+.oc-markdown .oc-md-preview > :first-child {
+  margin-top: 0;
+}
+
+.oc-markdown .oc-md-preview > :last-child {
+  margin-bottom: 0;
+}
+
+.oc-markdown .oc-md-heading {
+  margin: 1.15em 0 0.5em;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text-primary);
+  letter-spacing: -0.018em;
+}
+
+.oc-markdown .oc-md-h1 {
+  font-size: 1.45em;
+}
+
+.oc-markdown .oc-md-h2 {
+  padding-bottom: 0.35em;
+  font-size: 1.25em;
+  border-bottom: var(--border-hairline);
+}
+
+.oc-markdown .oc-md-h3 {
+  font-size: 1.08em;
+}
+
+.oc-markdown .oc-md-h4,
+.oc-markdown .oc-md-h5,
+.oc-markdown .oc-md-h6 {
+  font-size: 1em;
+}
+
+.oc-markdown .oc-md-paragraph {
+  margin: 0 0 0.78em;
+}
+
+.oc-markdown .oc-md-bullet-list,
+.oc-markdown .oc-md-numbered-list {
+  padding-left: 1.45em;
+  margin: 0 0 0.78em;
+}
+
+.oc-markdown .oc-md-bullet-list {
+  list-style: disc;
+}
+
+.oc-markdown .oc-md-numbered-list {
+  list-style: decimal;
+}
+
+.oc-markdown li {
+  padding-left: 0.18em;
+  margin: 0.22em 0;
+}
+
+.oc-markdown strong {
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.oc-markdown em {
+  color: var(--text-secondary);
+}
+
+.oc-markdown a {
+  color: var(--accent-presence);
+  text-decoration: underline;
+  text-decoration-color: color-mix(
+    in oklch,
+    var(--accent-presence) 45%,
+    transparent
+  );
+  text-underline-offset: 0.18em;
+}
+
+.oc-markdown a:hover {
+  text-decoration-color: currentColor;
+}
+
+.oc-markdown code {
+  padding: 0.12em 0.35em;
+  font: 400 0.9em / 1.5 var(--font-mono);
+  color: var(--text-primary);
+  background: var(--code-surface);
+  border: var(--border-hairline);
+  border-radius: 4px;
+}
+
+.oc-markdown .oc-md-code-block {
+  max-width: 100%;
+  padding: 10px 12px;
+  margin: 0 0 0.85em;
+  overflow-x: auto;
+  background: var(--code-surface);
+  border: var(--border-hairline);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 2px 8px -3px oklch(0 0 0 / 0.55);
+}
+
+.oc-markdown .oc-md-code-block code {
+  padding: 0;
+  white-space: pre;
+  background: transparent;
+  border: 0;
+}
+
+.oc-markdown .oc-md-blockquote {
+  padding: 0.1em 0 0.1em 0.9em;
+  margin: 0 0 0.8em;
+  color: var(--text-secondary);
+  border-left: 2px solid var(--accent-presence);
+}
+
+.oc-markdown .oc-md-divider {
+  height: 1px;
+  margin: 1em 0;
+  background: var(--border-hairline);
+  border: 0;
+}
+
+.oc-markdown .oc-md-table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  margin: 0 0 0.85em;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.oc-markdown .oc-md-table th,
+.oc-markdown .oc-md-table td {
+  padding: 6px 9px;
+  text-align: left;
+  border: var(--border-hairline);
+}
+
+.oc-markdown .oc-md-table th {
+  font-weight: 600;
+  background: var(--bg-sunken);
+}
+
+.oc-markdown .oc-md-callout {
+  padding: 9px 11px;
+  margin: 0 0 0.85em;
+  background: color-mix(in oklch, var(--accent-presence) 5%, transparent);
+  border: var(--border-hairline);
+  border-left: 2px solid var(--accent-presence);
+  border-radius: var(--radius-md);
+}
+
+.oc-markdown .oc-md-callout-title {
+  display: block;
+  margin-bottom: 4px;
+  font: 600 10px / 1 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.oc-markdown-live .oc-md-preview,
+.oc-markdown-live .oc-md-preview > :last-child {
+  display: inline;
+}
+
+.oc-markdown-caret {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 3px;
+  vertical-align: -2px;
+  background: var(--accent-presence);
+}
+
 @keyframes oc-shimmer {
   0% {
     background-position: -200% 0;
