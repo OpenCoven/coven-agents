@@ -379,6 +379,11 @@ test.describe("Run console", () => {
     context,
     page,
   }) => {
+    const markdownRun = {
+      ...retainedRun,
+      output:
+        "## Verification\n\n**Timeline verified.**\n\n- Events stayed ordered\n- Evidence stayed bounded",
+    };
     await context.addCookies(await subscriberCookies());
     await page.route("**/api/credentials", (route) =>
       route.fulfill({ json: { harnessIds: ["copilot"] } })
@@ -394,7 +399,7 @@ test.describe("Run console", () => {
       }
       if (pathname === `/api/agents/${AGENT_ID}/runs`) {
         return route.fulfill({
-          json: { apiVersion: "1.0", runs: [retainedRun] },
+          json: { apiVersion: "1.0", runs: [markdownRun] },
         });
       }
       if (pathname === `/api/runs/${RUN_ID}/events`) {
@@ -426,6 +431,13 @@ test.describe("Run console", () => {
       .click();
 
     await expect(page.getByText("second output line")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { level: 2, name: "Verification" })
+    ).toBeVisible();
+    await expect(
+      page.locator(".oc-markdown strong", { hasText: "Timeline verified." })
+    ).toBeVisible();
+    await expect(page.getByText("Events stayed ordered")).toBeVisible();
     await page.getByRole("button", { exact: true, name: "collapse" }).click();
     await expect(page.getByText("second output line")).toHaveCount(0);
     await expect(
