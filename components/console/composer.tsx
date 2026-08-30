@@ -3,10 +3,15 @@
 "use client";
 
 import type { AgentDefinition } from "@opencoven/agent-contracts";
-import { Sparkles } from "lucide-react";
+import { ArrowUpRight, Sparkles } from "lucide-react";
 import type { KeyboardEvent } from "react";
-import { Btn, Eyebrow } from "@/components/console/primitives";
-import { hairline, truncate, type as type_ } from "@/components/console/styles";
+import {
+  Btn,
+  Eyebrow,
+  StatusDot,
+  statusTone,
+} from "@/components/console/primitives";
+import { truncate, type as type_ } from "@/components/console/styles";
 import { formatAge } from "@/lib/console/format";
 import type { ConsoleRun } from "@/lib/console/types";
 
@@ -45,6 +50,7 @@ export function Composer({
 }) {
   const tooShort = draft.trim().length < MIN_MISSION;
   const disabled = tooShort || starting || blocked !== null;
+  const remainingCharacters = Math.max(0, MIN_MISSION - draft.trim().length);
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (
@@ -58,176 +64,126 @@ export function Composer({
   };
 
   return (
-    <div
-      className="oc-scroll"
-      style={{
-        flex: 1,
-        minHeight: 0,
-        overflowY: "auto",
-        padding: "26px 24px",
-      }}
-    >
-      <div style={{ margin: "0 auto", maxWidth: 760 }}>
-        <h2 style={{ ...type_.display, marginBottom: 14 }}>
-          What should it prove?
-        </h2>
-
-        <div
-          style={{
-            background: "var(--bg-raised)",
-            border: "1px solid var(--border-strong)",
-            borderRadius: "var(--radius-card)",
-            boxShadow: "var(--shadow-md)",
-            overflow: "hidden",
-          }}
-        >
-          <textarea
-            aria-label="Mission"
-            onChange={(event) => onDraft(event.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder="Describe the outcome and the evidence you would accept…"
-            rows={5}
-            style={{
-              background: "transparent",
-              border: 0,
-              color: "var(--text-primary)",
-              display: "block",
-              font: "400 13px/1.65 var(--font-ui)",
-              minHeight: 104,
-              outline: "none",
-              padding: "14px 15px 10px",
-              resize: "vertical",
-              width: "100%",
-            }}
-            value={draft}
-          />
-
-          <div
-            style={{
-              alignItems: "center",
-              display: "flex",
-              flexWrap: "wrap",
-              gap: "8px 10px",
-              padding: "0 12px 12px",
-            }}
-          >
-            <span
-              style={{
-                color: "var(--text-muted)",
-                font: "400 11px/1 var(--font-mono)",
-                ...truncate,
-              }}
-              title="Set on the agent profile, not per run"
-            >
-              {[agent.runtime, agent.model, agent.workspace ?? "/workspace"]
-                .filter(Boolean)
-                .join(" · ")}
-            </span>
-            <div style={{ flex: 1 }} />
-            {blocked ? (
-              <span
-                style={{
-                  color: "var(--danger-text)",
-                  font: "400 11px/1.4 var(--font-ui)",
-                }}
-              >
-                {blocked}
-              </span>
-            ) : null}
-            <Btn
-              disabled={disabled}
-              onClick={onStart}
-              title="⌘↵"
-              variant={disabled ? "secondary" : "primary"}
-            >
-              <Sparkles size={13} />
-              {starting ? "Starting…" : "Run autonomously"}
-            </Btn>
-          </div>
-        </div>
-
-        <div
-          style={{
-            alignItems: "center",
-            display: "flex",
-            gap: 9,
-            marginTop: 22,
-          }}
-        >
-          <Eyebrow
-            style={{ color: "var(--text-muted)", letterSpacing: "0.14em" }}
-          >
-            This session
-          </Eyebrow>
-          <span
-            style={{ background: "var(--border-hairline)", flex: 1, height: 1 }}
-          />
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 1,
-            marginTop: 10,
-          }}
-        >
-          {runs.length === 0 ? (
-            <p
-              style={{
-                ...type_.body,
-                color: "var(--text-muted)",
-                font: "400 12px/1.55 var(--font-ui)",
-              }}
-            >
-              No runs opened yet for this agent.
+    <div className="oc-composer oc-scroll">
+      <div className="oc-composer-grid">
+        <section className="oc-composer-main">
+          <header className="oc-composer-heading">
+            <Eyebrow>New autonomous run</Eyebrow>
+            <h2 style={type_.display}>What should it prove?</h2>
+            <p style={type_.body}>
+              Define the outcome and the evidence Scout must return. The brief
+              is the contract for the run.
             </p>
-          ) : (
-            runs.map((run) => (
-              <button
-                className="oc-row oc-rowscope"
-                key={run.snapshot.id}
-                onClick={() => onOpenRun(run.snapshot.id)}
-                style={{
-                  alignItems: "center",
-                  background: "var(--bg-raised)",
-                  border: hairline,
-                  borderRadius: "var(--radius-md)",
-                  cursor: "pointer",
-                  display: "flex",
-                  gap: 11,
-                  padding: "10px 12px",
-                  textAlign: "left",
-                  width: "100%",
-                }}
-                type="button"
+          </header>
+
+          <div className="oc-composer-context">
+            {[
+              ["runtime", agent.runtime],
+              ["model", agent.model],
+              ["workspace", agent.workspace ?? "/workspace"],
+            ].map(([label, value]) => (
+              <div className="oc-composer-context-item" key={label}>
+                <span className="oc-composer-context-label">{label}</span>
+                <strong title={value}>{value}</strong>
+              </div>
+            ))}
+          </div>
+
+          <div className="oc-composer-brief">
+            <label htmlFor="oc-mission">Proof brief</label>
+            <textarea
+              id="oc-mission"
+              onChange={(event) => onDraft(event.target.value)}
+              onKeyDown={onKeyDown}
+              placeholder="Describe the outcome, the constraints, and the evidence you would accept…"
+              value={draft}
+            />
+
+            <div className="oc-composer-controls">
+              <span>
+                {remainingCharacters > 0
+                  ? `${remainingCharacters} more character${remainingCharacters === 1 ? "" : "s"}`
+                  : "⌘ ↵ to run"}
+              </span>
+              {blocked ? (
+                <span className="oc-composer-blocked">{blocked}</span>
+              ) : null}
+              <Btn
+                disabled={disabled}
+                onClick={onStart}
+                title="⌘/Ctrl + Enter"
+                variant={disabled ? "secondary" : "primary"}
               >
-                <span
-                  style={{
-                    color: "var(--text-secondary)",
-                    flex: 1,
-                    font: "400 13px/1.4 var(--font-ui)",
-                    ...truncate,
-                  }}
+                <Sparkles size={13} />
+                {starting ? "Starting…" : "Run autonomously"}
+              </Btn>
+            </div>
+          </div>
+
+          <footer className="oc-composer-footnote">
+            <span aria-hidden="true" className="oc-composer-footnote-dot" />
+            {agent.name} changes nothing unless the selected runtime grants it.
+          </footer>
+        </section>
+
+        <aside aria-label="Runs in this session" className="oc-session-ledger">
+          <header className="oc-session-ledger-head">
+            <div>
+              <Eyebrow>This session</Eyebrow>
+              <h3>Run ledger</h3>
+            </div>
+            <span className="oc-session-count">
+              {runs.length} {runs.length === 1 ? "run" : "runs"}
+            </span>
+          </header>
+
+          <div className="oc-session-ledger-rule">
+            <span>proof</span>
+            <span aria-hidden="true" />
+            <span>receipt</span>
+          </div>
+
+          <div className="oc-session-list oc-scroll">
+            {runs.length === 0 ? (
+              <div className="oc-session-empty">
+                <strong>No receipts yet</strong>
+                <p style={type_.body}>
+                  Runs opened in this browser session will collect here for
+                  comparison and review.
+                </p>
+              </div>
+            ) : (
+              runs.map((run, index) => (
+                <button
+                  className="oc-row oc-rowscope"
+                  key={run.snapshot.id}
+                  onClick={() => onOpenRun(run.snapshot.id)}
+                  type="button"
                 >
-                  {run.snapshot.task}
-                </span>
-                <span style={type_.meta}>
-                  {formatAge(run.snapshot.createdAt, now)}
-                </span>
-                <span
-                  className="oc-reveal"
-                  style={{
-                    color: "var(--accent-presence)",
-                    font: "400 11px/1 var(--font-mono)",
-                  }}
-                >
-                  open →
-                </span>
-              </button>
-            ))
-          )}
-        </div>
+                  <span className="oc-session-index">
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
+                  <span className="oc-session-run">
+                    <span className="oc-session-run-title">
+                      <StatusDot
+                        label={run.snapshot.status}
+                        size={5}
+                        tone={statusTone(run.snapshot.status)}
+                      />
+                      <span style={truncate}>{run.snapshot.task}</span>
+                    </span>
+                    <small>{formatAge(run.snapshot.createdAt, now)}</small>
+                  </span>
+                  <ArrowUpRight className="oc-reveal" size={14} />
+                </button>
+              ))
+            )}
+          </div>
+
+          <footer className="oc-session-ledger-foot">
+            Browser-local history · the receipt is the durable record
+          </footer>
+        </aside>
       </div>
     </div>
   );
