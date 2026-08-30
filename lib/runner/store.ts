@@ -130,25 +130,25 @@ function column<T>(row: Record<string, unknown>, name: string): T {
 
 function asAgent(row: Record<string, unknown>): RunnerAgentRecord {
   return {
-    createdAt: column(row, "createdAt"),
+    createdAt: timestampColumn(row, "createdAt"),
     daytonaSandboxId: column(row, "daytonaSandboxId"),
     description: column(row, "description"),
     id: column(row, "id"),
     instructions: column(row, "instructions"),
-    lastRunAt: column(row, "lastRunAt"),
+    lastRunAt: nullableTimestampColumn(row, "lastRunAt"),
     model: column(row, "model"),
     name: column(row, "name"),
     runtime: column(row, "runtime"),
     sandboxGeneration: column(row, "sandboxGeneration"),
     sandboxLifecycle: column(row, "sandboxLifecycle"),
-    sandboxUpdatedAt: column(row, "sandboxUpdatedAt"),
+    sandboxUpdatedAt: timestampColumn(row, "sandboxUpdatedAt"),
     status: column(row, "status"),
     tenant: column(row, "tenant"),
-    updatedAt: column(row, "updatedAt"),
+    updatedAt: timestampColumn(row, "updatedAt"),
     version: column(row, "version"),
     warmAttemptVersion: column(row, "warmAttemptVersion"),
     warmStatus: column(row, "warmStatus"),
-    warmUpdatedAt: column(row, "warmUpdatedAt"),
+    warmUpdatedAt: timestampColumn(row, "warmUpdatedAt"),
     workspace: column(row, "workspace"),
   };
 }
@@ -157,15 +157,21 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
   return {
     agentId: column(row, "agentId"),
     authVersion: column(row, "authVersion"),
-    cancellationRequestedAt: column(row, "cancellationRequestedAt"),
+    cancellationRequestedAt: nullableTimestampColumn(
+      row,
+      "cancellationRequestedAt"
+    ),
     commandEvidence: column(row, "commandEvidence"),
-    completedAt: column(row, "completedAt"),
-    createdAt: column(row, "createdAt"),
+    completedAt: nullableTimestampColumn(row, "completedAt"),
+    createdAt: timestampColumn(row, "createdAt"),
     daytonaAttemptId: column(row, "daytonaAttemptId"),
     daytonaCommandId: column(row, "daytonaCommandId"),
     daytonaLogCursor: column(row, "daytonaLogCursor"),
     daytonaSessionId: column(row, "daytonaSessionId"),
-    dispatchLeaseExpiresAt: column(row, "dispatchLeaseExpiresAt"),
+    dispatchLeaseExpiresAt: nullableTimestampColumn(
+      row,
+      "dispatchLeaseExpiresAt"
+    ),
     dispatchLeaseToken: column(row, "dispatchLeaseToken"),
     dispatchState: column(row, "dispatchState"),
     error: column(row, "error"),
@@ -176,7 +182,7 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
     output: column(row, "output"),
     queueSequence: column(row, "queueSequence"),
     requestHash: column(row, "requestHash"),
-    startedAt: column(row, "startedAt"),
+    startedAt: nullableTimestampColumn(row, "startedAt"),
     status: column(row, "status"),
     task: column(row, "task"),
     tenant: column(row, "tenant"),
@@ -186,7 +192,7 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
 
 function asEvent(row: Record<string, unknown>): RunnerRunEventRecord {
   return {
-    createdAt: column(row, "createdAt"),
+    createdAt: timestampColumn(row, "createdAt"),
     event: column(row, "event"),
     eventId: column(row, "eventId"),
     runId: column(row, "runId"),
@@ -200,7 +206,7 @@ function asAttemptRedaction(
     aadVersion: column(row, "aadVersion"),
     attemptId: column(row, "attemptId"),
     ciphertext: column(row, "ciphertext"),
-    createdAt: column(row, "createdAt"),
+    createdAt: timestampColumn(row, "createdAt"),
     iv: column(row, "iv"),
     kekVersion: column(row, "kekVersion"),
     runId: column(row, "runId"),
@@ -285,17 +291,41 @@ function postgresTimestamp(value: unknown): Date | null {
     : null;
 }
 
+function timestampColumn(row: Record<string, unknown>, name: string): Date {
+  const value = postgresTimestamp(column(row, name));
+  if (!value) {
+    throw new Error(`Runner query returned an invalid "${name}".`);
+  }
+  return value;
+}
+
+function nullableTimestampColumn(
+  row: Record<string, unknown>,
+  name: string
+): Date | null {
+  const value = column<unknown>(row, name);
+  if (value === null) {
+    return null;
+  }
+  const timestamp = postgresTimestamp(value);
+  if (!timestamp) {
+    throw new Error(`Runner query returned an invalid "${name}".`);
+  }
+  return timestamp;
+}
+
+function timestampParameter(value: Date): string {
+  if (Number.isNaN(value.getTime())) {
+    throw new Error("Runner timestamp parameter is invalid.");
+  }
+  return value.toISOString();
+}
+
 function asReconciliationLease(
   row: Record<string, unknown>
 ): RunnerReconciliationLease {
-  const expiresAtValue = column<unknown>(row, "reconciliationLeaseExpiresAt");
-  const expiresAt = postgresTimestamp(expiresAtValue);
+  const expiresAt = timestampColumn(row, "reconciliationLeaseExpiresAt");
   const ownerToken = column<unknown>(row, "reconciliationLeaseOwner");
-  if (!expiresAt || Number.isNaN(expiresAt.getTime())) {
-    throw new Error(
-      'Runner query returned an invalid "reconciliationLeaseExpiresAt".'
-    );
-  }
   if (
     typeof ownerToken !== "string" ||
     ownerToken.length === 0 ||
@@ -503,7 +533,7 @@ async function claimLockedDispatch(
       sql`UPDATE "RunnerRun"
         SET "dispatchState" = 'dispatching',
             "dispatchLeaseToken" = ${input.leaseToken},
-            "dispatchLeaseExpiresAt" = ${input.leaseExpiresAt},
+            "dispatchLeaseExpiresAt" = ${timestampParameter(input.leaseExpiresAt)},
             "updatedAt" = clock_timestamp(),
             "version" = "version" + 1
         WHERE "id" = ${candidate.id}
@@ -887,7 +917,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             input,
             sql`UPDATE "RunnerRun"
               SET "dispatchLeaseToken" = ${input.newLeaseToken},
-                  "dispatchLeaseExpiresAt" = ${input.leaseExpiresAt},
+                  "dispatchLeaseExpiresAt" = ${timestampParameter(input.leaseExpiresAt)},
                   "updatedAt" = clock_timestamp(),
                   "version" = "version" + 1
               WHERE "id" = ${input.runId}
@@ -958,7 +988,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             input,
             sql`UPDATE "RunnerRun"
               SET "dispatchLeaseToken" = ${input.newLeaseToken},
-                  "dispatchLeaseExpiresAt" = ${input.leaseExpiresAt},
+                  "dispatchLeaseExpiresAt" = ${timestampParameter(input.leaseExpiresAt)},
                   "updatedAt" = now(),
                   "version" = "version" + 1
               WHERE "id" = ${input.runId}
@@ -1860,7 +1890,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                   "sandboxLifecycle" IN ('unprovisioned', 'ready', 'decommission_failed')
                   OR (
                     "sandboxLifecycle" = 'provisioning'
-                    AND "sandboxUpdatedAt" <= ${input.provisioningStaleBefore}
+                    AND "sandboxUpdatedAt" <= ${timestampParameter(input.provisioningStaleBefore)}
                   )
                 )
               RETURNING *`
@@ -2117,7 +2147,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             input,
             sql`UPDATE "RunnerRun"
               SET "dispatchLeaseToken" = ${input.newLeaseToken},
-                  "dispatchLeaseExpiresAt" = ${input.leaseExpiresAt},
+                  "dispatchLeaseExpiresAt" = ${timestampParameter(input.leaseExpiresAt)},
                   "updatedAt" = clock_timestamp(),
                   "version" = "version" + 1
               WHERE "id" = ${input.runId}
@@ -2240,7 +2270,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             input,
             sql`UPDATE "RunnerRun"
               SET "dispatchLeaseToken" = ${input.newLeaseToken},
-                  "dispatchLeaseExpiresAt" = ${input.leaseExpiresAt},
+                  "dispatchLeaseExpiresAt" = ${timestampParameter(input.leaseExpiresAt)},
                   "updatedAt" = clock_timestamp(),
                   "version" = "version" + 1
               WHERE "id" = ${run.id}
@@ -2660,14 +2690,14 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             { ...input, eventId },
             sql`UPDATE "RunnerRun"
               SET "commandEvidence" = CAST(${JSON.stringify(input.commandEvidence)} AS jsonb),
-                  "completedAt" = ${input.completedAt},
+                  "completedAt" = ${timestampParameter(input.completedAt)},
                   "dispatchState" = 'terminal',
                   "error" = CAST(${input.error ? JSON.stringify(input.error) : null} AS jsonb),
                   "fileEvidence" = CAST(${JSON.stringify(input.fileEvidence)} AS jsonb),
                   "logCursor" = ${eventId},
                   "output" = ${input.output},
                   "status" = ${input.status},
-                  "updatedAt" = ${input.completedAt},
+                  "updatedAt" = ${timestampParameter(input.completedAt)},
                   "version" = "version" + 1
               WHERE "id" = ${input.runId}
                 AND "version" = ${input.expectedVersion}
@@ -2695,8 +2725,8 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                     WHEN ${input.status} = 'failed' THEN 'error'
                     ELSE 'idle'
                   END,
-                  "lastRunAt" = ${input.completedAt},
-                  "updatedAt" = ${input.completedAt},
+                  "lastRunAt" = ${timestampParameter(input.completedAt)},
+                  "updatedAt" = ${timestampParameter(input.completedAt)},
                   "version" = "version" + 1
               WHERE "id" = ${finalized.agentId}
                 AND "tenant" = ${finalized.tenant}`
@@ -3538,7 +3568,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             "renew-dispatch-lease",
             input,
             sql`UPDATE "RunnerRun"
-              SET "dispatchLeaseExpiresAt" = ${input.leaseExpiresAt},
+              SET "dispatchLeaseExpiresAt" = ${timestampParameter(input.leaseExpiresAt)},
                   "updatedAt" = now(),
                   "version" = "version" + 1
               WHERE "id" = ${input.runId}
@@ -3588,7 +3618,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                     ELSE "dispatchState"
                   END,
                   "dispatchLeaseToken" = ${input.leaseToken},
-                  "dispatchLeaseExpiresAt" = ${input.leaseExpiresAt},
+                  "dispatchLeaseExpiresAt" = ${timestampParameter(input.leaseExpiresAt)},
                   "updatedAt" = clock_timestamp(),
                   "version" = "version" + 1
               WHERE "id" = ${run.id}
@@ -3846,7 +3876,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                   )
                   OR (
                     "sandboxLifecycle" = 'provisioning'
-                    AND "sandboxUpdatedAt" <= ${input.provisioningStaleBefore}
+                    AND "sandboxUpdatedAt" <= ${timestampParameter(input.provisioningStaleBefore)}
                   )
                 )
               RETURNING *`
@@ -3914,7 +3944,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                   "sandboxLifecycle" IN ('unprovisioned', 'ready')
                   OR (
                     "sandboxLifecycle" = 'provisioning'
-                    AND "sandboxUpdatedAt" <= ${input.provisioningStaleBefore}
+                    AND "sandboxUpdatedAt" <= ${timestampParameter(input.provisioningStaleBefore)}
                   )
                 )
               RETURNING *`
@@ -4002,7 +4032,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             sql`SELECT * FROM "RunnerAgent"
               WHERE "sandboxLifecycle" = 'ready'
                 AND "warmStatus" = 'provisioning'
-                AND "warmUpdatedAt" <= ${staleBefore}
+                AND "warmUpdatedAt" <= ${timestampParameter(staleBefore)}
               ORDER BY "warmUpdatedAt" ASC, "id" ASC
               LIMIT ${limit}
               FOR UPDATE SKIP LOCKED`
@@ -4022,7 +4052,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             "scan-expired-dispatch-leases",
             { before, limit },
             sql`SELECT * FROM "RunnerRun"
-              WHERE "dispatchLeaseExpiresAt" <= ${before}
+              WHERE "dispatchLeaseExpiresAt" <= ${timestampParameter(before)}
                 AND "dispatchLeaseToken" IS NOT NULL
                 AND "dispatchState" IN ('dispatching', 'running')
               ORDER BY "dispatchLeaseExpiresAt" ASC

@@ -44,6 +44,17 @@ function queryText(statement: RunnerStoreStatement): string {
   return dialect.sqlToQuery(statement.query).sql;
 }
 
+function queryParams(statement: RunnerStoreStatement): unknown[] {
+  return dialect.sqlToQuery(statement.query).params;
+}
+
+function postgresTimestamp(date: Date): string {
+  return date
+    .toISOString()
+    .replace("T", " ")
+    .replace(/(\.\d{3})Z$/u, "$1000");
+}
+
 function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
   return {
     agentId: "00000000-0000-4000-8000-000000000001",
@@ -387,6 +398,102 @@ test("reconciliation lease rejects invalid PostgreSQL calendar timestamps", asyn
       ttlSeconds: 360,
     }),
     /invalid "reconciliationLeaseExpiresAt"/u
+  );
+});
+
+test("runner rows normalize raw PostgreSQL timestamp columns", async () => {
+  const createdAt = new Date("2026-01-01T00:00:00.000Z");
+  const updatedAt = new Date("2026-01-01T00:00:01.000Z");
+  const lastRunAt = new Date("2026-01-01T00:00:02.000Z");
+  const sandboxUpdatedAt = new Date("2026-01-01T00:00:03.000Z");
+  const warmUpdatedAt = new Date("2026-01-01T00:00:04.000Z");
+  const cancellationRequestedAt = new Date("2026-01-01T00:00:05.000Z");
+  const completedAt = new Date("2026-01-01T00:00:06.000Z");
+  const dispatchLeaseExpiresAt = new Date("2026-01-01T00:01:00.000Z");
+  const startedAt = new Date("2026-01-01T00:00:07.000Z");
+  const rawAgent = {
+    ...agent(),
+    createdAt: postgresTimestamp(createdAt),
+    lastRunAt: postgresTimestamp(lastRunAt),
+    sandboxUpdatedAt: postgresTimestamp(sandboxUpdatedAt),
+    updatedAt: postgresTimestamp(updatedAt),
+    warmUpdatedAt: postgresTimestamp(warmUpdatedAt),
+  };
+  const rawRun = {
+    ...run({
+      cancellationRequestedAt,
+      completedAt,
+      dispatchState: "terminal",
+      startedAt,
+      status: "completed",
+    }),
+    cancellationRequestedAt: postgresTimestamp(cancellationRequestedAt),
+    completedAt: postgresTimestamp(completedAt),
+    createdAt: postgresTimestamp(createdAt),
+    dispatchLeaseExpiresAt: postgresTimestamp(dispatchLeaseExpiresAt),
+    startedAt: postgresTimestamp(startedAt),
+  };
+  const eventCreatedAt = new Date("2026-01-01T00:00:08.000Z");
+  const rawEvent = {
+    createdAt: postgresTimestamp(eventCreatedAt),
+    event: { id: 1, status: "running", type: "status" },
+    eventId: 1,
+    runId: rawRun.id,
+  };
+  const { store } = scripted([rawAgent], [rawRun], [rawEvent]);
+
+  const hydratedAgent = await store.getAgent(principal, rawAgent.id);
+  const [hydratedRun] = await store.scanExpiredDispatchLeases(
+    operator,
+    new Date(),
+    1
+  );
+  const [hydratedEvent] = await store.readEventsAfter(principal, rawRun.id, 0);
+
+  assert.deepEqual(
+    {
+      createdAt: hydratedAgent?.createdAt,
+      lastRunAt: hydratedAgent?.lastRunAt,
+      sandboxUpdatedAt: hydratedAgent?.sandboxUpdatedAt,
+      updatedAt: hydratedAgent?.updatedAt,
+      warmUpdatedAt: hydratedAgent?.warmUpdatedAt,
+    },
+    { createdAt, lastRunAt, sandboxUpdatedAt, updatedAt, warmUpdatedAt }
+  );
+  assert.deepEqual(
+    {
+      cancellationRequestedAt: hydratedRun?.cancellationRequestedAt,
+      completedAt: hydratedRun?.completedAt,
+      createdAt: hydratedRun?.createdAt,
+      dispatchLeaseExpiresAt: hydratedRun?.dispatchLeaseExpiresAt,
+      startedAt: hydratedRun?.startedAt,
+    },
+    {
+      cancellationRequestedAt,
+      completedAt,
+      createdAt,
+      dispatchLeaseExpiresAt,
+      startedAt,
+    }
+  );
+  assert.deepEqual(hydratedEvent?.createdAt, eventCreatedAt);
+});
+
+test("runner scan timestamps are serialized before reaching PostgreSQL", async () => {
+  const before = new Date("2026-01-01T00:00:00.000Z");
+  const staleBefore = new Date("2026-01-01T00:01:00.000Z");
+  const { statements, store } = scripted([], []);
+
+  await store.scanExpiredDispatchLeases(operator, before, 25);
+  await store.scanDaytonaWarmRecoveries(operator, staleBefore, 25);
+
+  assert.equal(
+    queryParams(statements[0] as RunnerStoreStatement)[0],
+    before.toISOString()
+  );
+  assert.equal(
+    queryParams(statements[1] as RunnerStoreStatement)[0],
+    staleBefore.toISOString()
   );
 });
 
