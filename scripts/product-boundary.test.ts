@@ -825,6 +825,17 @@ test("package dependencies and scripts match the current application contract", 
   ]);
 });
 
+test("the development server uses the documented localhost origin", () => {
+  const manifest = readManifest("package.json");
+  const readme = readFileSync(readmeUrl, "utf8");
+
+  assert.equal(
+    manifest.scripts?.dev,
+    "next dev --turbo --hostname localhost --port 3036"
+  );
+  assert.match(readme, /Open <http:\/\/localhost:3036\/agents>\./u);
+});
+
 test("documented environment settings match the current application contract", () => {
   const envExample = readFileSync(
     new URL(".env.example", repositoryRoot),

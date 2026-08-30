@@ -89,7 +89,7 @@ Do not copy key output into logs, issues, or tracked files.
 pnpm dev
 ```
 
-Open <http://localhost:3000/agents>.
+Open <http://localhost:3036/agents>.
 
 Production Daytona configuration requires the API key, pinned snapshot,
 least-privilege domain allowlist, PostgreSQL, Redis admission state, and
