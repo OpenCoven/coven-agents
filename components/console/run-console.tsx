@@ -219,52 +219,95 @@ export function RunConsole() {
     viewportWidth > 0 && viewportWidth <= NARROW_VIEWPORT_MAX;
   const navigationOverlay =
     viewportWidth > 0 && viewportWidth <= COMPACT_VIEWPORT_MAX;
-  const stepsFootprint =
-    selectedRunId === null
-      ? 0
-      : timelineCollapsed
-        ? STEPS_TIMELINE_WIDTHS.collapsed
-        : stepsOverlay
+  const hasStepsTimeline = selectedRunId !== null;
+  let agentRailWidthLimit: number = AGENT_RAIL_WIDTHS.max;
+  let stepsTimelineWidthLimit: number = STEPS_TIMELINE_WIDTHS.max;
+  let renderedAgentRailWidth = agentRailWidth;
+  let renderedStepsTimelineWidth = stepsTimelineWidth;
+
+  if (viewportWidth > 0) {
+    const bothPanelsInFlow =
+      !railCollapsed &&
+      !navigationOverlay &&
+      hasStepsTimeline &&
+      !timelineCollapsed &&
+      !stepsOverlay;
+
+    if (bothPanelsInFlow) {
+      const availableForPanels = Math.max(
+        0,
+        viewportWidth - MIN_RUN_RECORD_WIDTH
+      );
+      const reservedStepsWidth = Math.min(
+        STEPS_TIMELINE_WIDTHS.min,
+        availableForPanels
+      );
+      const initialAgentLimit = Math.min(
+        AGENT_RAIL_WIDTHS.max,
+        Math.max(0, availableForPanels - reservedStepsWidth)
+      );
+      renderedAgentRailWidth = clampWidth(
+        agentRailWidth,
+        AGENT_RAIL_WIDTHS.min,
+        initialAgentLimit
+      );
+      stepsTimelineWidthLimit = Math.min(
+        STEPS_TIMELINE_WIDTHS.max,
+        Math.max(0, availableForPanels - renderedAgentRailWidth)
+      );
+      renderedStepsTimelineWidth = clampWidth(
+        stepsTimelineWidth,
+        STEPS_TIMELINE_WIDTHS.min,
+        stepsTimelineWidthLimit
+      );
+      agentRailWidthLimit = Math.min(
+        AGENT_RAIL_WIDTHS.max,
+        Math.max(0, availableForPanels - renderedStepsTimelineWidth)
+      );
+      renderedAgentRailWidth = clampWidth(
+        agentRailWidth,
+        AGENT_RAIL_WIDTHS.min,
+        agentRailWidthLimit
+      );
+    } else {
+      const stepsFootprint = hasStepsTimeline
+        ? timelineCollapsed
+          ? STEPS_TIMELINE_WIDTHS.collapsed
+          : 0
+        : 0;
+      agentRailWidthLimit = Math.min(
+        AGENT_RAIL_WIDTHS.max,
+        navigationOverlay
+          ? Math.floor(viewportWidth * OVERLAY_VIEWPORT_RATIO)
+          : Math.max(0, viewportWidth - stepsFootprint - MIN_RUN_RECORD_WIDTH)
+      );
+      renderedAgentRailWidth = clampWidth(
+        agentRailWidth,
+        AGENT_RAIL_WIDTHS.min,
+        agentRailWidthLimit
+      );
+
+      const navigationFootprint = railCollapsed
+        ? AGENT_RAIL_WIDTHS.collapsed
+        : navigationOverlay
           ? 0
-          : stepsTimelineWidth;
-  const navigationFootprint = railCollapsed
-    ? AGENT_RAIL_WIDTHS.collapsed
-    : navigationOverlay
-      ? 0
-      : agentRailWidth;
-  const agentRailWidthLimit =
-    viewportWidth === 0
-      ? AGENT_RAIL_WIDTHS.max
-      : Math.min(
-          AGENT_RAIL_WIDTHS.max,
-          navigationOverlay
-            ? Math.floor(viewportWidth * OVERLAY_VIEWPORT_RATIO)
-            : Math.max(0, viewportWidth - stepsFootprint - MIN_RUN_RECORD_WIDTH)
-        );
-  const stepsTimelineWidthLimit =
-    viewportWidth === 0
-      ? STEPS_TIMELINE_WIDTHS.max
-      : Math.min(
-          STEPS_TIMELINE_WIDTHS.max,
-          stepsOverlay
-            ? Math.floor(viewportWidth * OVERLAY_VIEWPORT_RATIO)
-            : Math.max(
-                0,
-                viewportWidth - navigationFootprint - MIN_RUN_RECORD_WIDTH
-              )
-        );
-
-  useEffect(() => {
-    setAgentRailWidth((width) =>
-      clampWidth(width, AGENT_RAIL_WIDTHS.min, agentRailWidthLimit)
-    );
-  }, [agentRailWidthLimit]);
-
-  useEffect(() => {
-    setStepsTimelineWidth((width) =>
-      clampWidth(width, STEPS_TIMELINE_WIDTHS.min, stepsTimelineWidthLimit)
-    );
-  }, [stepsTimelineWidthLimit]);
+          : renderedAgentRailWidth;
+      stepsTimelineWidthLimit = Math.min(
+        STEPS_TIMELINE_WIDTHS.max,
+        stepsOverlay
+          ? Math.floor(viewportWidth * OVERLAY_VIEWPORT_RATIO)
+          : Math.max(
+              0,
+              viewportWidth - navigationFootprint - MIN_RUN_RECORD_WIDTH
+            )
+      );
+      renderedStepsTimelineWidth = clampWidth(
+        stepsTimelineWidth,
+        STEPS_TIMELINE_WIDTHS.min,
+        stepsTimelineWidthLimit
+      );
+    }
+  }
 
   const threadRef = useRef<HTMLDivElement>(null);
   const runsRef = useRef<ConsoleRun[]>([]);
@@ -1358,7 +1401,7 @@ export function RunConsole() {
               selectedAgentId={selectedAgentId}
               selectedRunId={selectedRunId}
               who={who}
-              width={agentRailWidth}
+              width={renderedAgentRailWidth}
               widthLimit={agentRailWidthLimit}
             />
 
@@ -1854,7 +1897,7 @@ export function RunConsole() {
                 running={running}
                 selectedBlockId={selectedBlockId}
                 steps={projection.steps}
-                width={stepsTimelineWidth}
+                width={renderedStepsTimelineWidth}
                 widthLimit={stepsTimelineWidthLimit}
               />
             ) : null}
