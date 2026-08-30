@@ -348,9 +348,6 @@ export async function diagnoseDaytonaSandbox(
     create: async (timeoutSeconds) => {
       const sandbox = await client.create(
         {
-          autoArchiveInterval: 0,
-          autoDeleteInterval: 0,
-          autoStopInterval: 0,
           ephemeral: true,
           name,
           networkBlockAll: true,
