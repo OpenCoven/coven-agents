@@ -368,6 +368,19 @@ test.describe("Run console", () => {
     await expect(
       page.getByRole("button", { name: "Collapse the navigation" })
     ).toBeVisible();
+    const navigationRail = page.locator(".oc-agent-rail");
+    await expect(navigationRail).toHaveCSS("position", "absolute");
+    const resizeHandle = page.getByRole("separator", {
+      name: "Resize the navigation rail",
+    });
+    await resizeHandle.press("End");
+    const renderedWidth = await navigationRail.evaluate((element) =>
+      Math.round(element.getBoundingClientRect().width)
+    );
+    await expect(resizeHandle).toHaveAttribute(
+      "aria-valuenow",
+      String(renderedWidth)
+    );
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth
@@ -375,7 +388,7 @@ test.describe("Run console", () => {
     ).toBe(true);
   });
 
-  test("a retained run exposes rich steps and the global collapse control", async ({
+  test("a retained run exposes resizable rich side rails and the global collapse control", async ({
     context,
     page,
   }) => {
@@ -429,6 +442,49 @@ test.describe("Run console", () => {
       .getByRole("complementary")
       .getByRole("button", { name: /completed Verify timeline/ })
       .click();
+
+    const navigationRail = page.locator(".oc-agent-rail");
+    const navigationWidth = await navigationRail.evaluate(
+      (element) => element.getBoundingClientRect().width
+    );
+    const navigationResizeHandle = page.getByRole("separator", {
+      name: "Resize the navigation rail",
+    });
+    const navigationHandleBox = await navigationResizeHandle.boundingBox();
+    expect(navigationHandleBox).not.toBeNull();
+    await page.mouse.move(
+      (navigationHandleBox?.x ?? 0) + (navigationHandleBox?.width ?? 0) / 2,
+      (navigationHandleBox?.y ?? 0) + 20
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      (navigationHandleBox?.x ?? 0) +
+        (navigationHandleBox?.width ?? 0) / 2 +
+        32,
+      (navigationHandleBox?.y ?? 0) + 20
+    );
+    await page.mouse.up();
+    await expect
+      .poll(() =>
+        navigationRail.evaluate(
+          (element) => element.getBoundingClientRect().width
+        )
+      )
+      .toBeGreaterThan(navigationWidth);
+
+    const stepsResizeHandle = page.getByRole("separator", {
+      name: "Resize the steps panel",
+    });
+    const stepsRail = stepsResizeHandle.locator("..");
+    const stepsWidth = await stepsRail.evaluate(
+      (element) => element.getBoundingClientRect().width
+    );
+    await stepsResizeHandle.press("ArrowLeft");
+    await expect
+      .poll(() =>
+        stepsRail.evaluate((element) => element.getBoundingClientRect().width)
+      )
+      .toBeGreaterThan(stepsWidth);
 
     await expect(page.getByText("second output line")).toBeVisible();
     await expect(

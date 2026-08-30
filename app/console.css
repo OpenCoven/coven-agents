@@ -667,6 +667,10 @@
   }
 }
 
+.oc-agent-rail {
+  position: relative;
+}
+
 /* The console keeps its three-pane grammar on small screens: the rail becomes
    a 58px index, and expanding it overlays the record instead of squeezing the
    record out of the viewport. Creation and settings navigation become a
@@ -706,7 +710,7 @@
     bottom: 0;
     left: 0;
     z-index: 50;
-    max-width: min(268px, 86vw);
+    max-width: min(420px, 86vw);
     box-shadow: var(--shadow-lg);
   }
 
