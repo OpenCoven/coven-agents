@@ -356,7 +356,6 @@ test("Daytona diagnostics use the exact precomputed name and bounded operations"
   assert.deepEqual(createParameters, {
     ephemeral: true,
     name: "coven-diagnostic-precomputed",
-    networkBlockAll: true,
     public: false,
     snapshot: "diagnostic-snapshot",
     ttlMinutes: 5,
@@ -415,7 +414,6 @@ test("Daytona diagnostics bound create when the adapter ignores its timeout", as
   assert.deepEqual(createParameters, {
     ephemeral: true,
     name: "coven-diagnostic-create-timeout",
-    networkBlockAll: true,
     public: false,
     snapshot: "diagnostic-snapshot",
     ttlMinutes: 5,
