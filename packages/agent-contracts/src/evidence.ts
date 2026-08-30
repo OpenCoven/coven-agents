@@ -1,19 +1,23 @@
 const REDACTED = "[REDACTED]";
 const ENVIRONMENT_OUTPUT_REDACTED = "[environment output redacted]";
 
-const secretValue = String.raw`(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;\r\n]+)`;
-const structuredValue = String.raw`(?:"[^"\r\n]*"|'[^'\r\n]*'|[^,}\r\n]+)`;
+const doubleQuotedValue = String.raw`"(?:\\[^\r\n]|[^"\\\r\n])*"`;
+const singleQuotedValue = String.raw`'(?:\\[^\r\n]|[^'\\\r\n])*'`;
+const secretValue = String.raw`(?:${doubleQuotedValue}|${singleQuotedValue}|[^\s,;\r\n]+)`;
+const structuredValue = String.raw`(?:${doubleQuotedValue}|${singleQuotedValue}|[^,}\r\n]+)`;
+const structuredSensitiveKey =
+  "(?=[A-Za-z0-9_.-]*(?:token|secret|session|cookie|password|api[-_.]?key|apikey|access[-_.]?key|accesskey|private[-_.]?key|privatekey|credential|authorization))[A-Za-z_][A-Za-z0-9_.-]*";
 
 const environmentAssignment = new RegExp(
   String.raw`\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*${secretValue}`,
   "gu"
 );
 const objectProperty = new RegExp(
-  String.raw`((?:[,{]\s*)(["']?)([A-Za-z_][A-Za-z0-9_.-]*)\2\s*:\s*)${structuredValue}`,
-  "gmu"
+  String.raw`((?:[,{]\s*)(["']?)(${structuredSensitiveKey})\2\s*:\s*)${structuredValue}`,
+  "gimu"
 );
 const yamlProperty =
-  /(^[\t ]*(?:-[\t ]+)?(["']?)([A-Za-z_][A-Za-z0-9_.-]*)\2[\t ]*:[\t ]*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n]*)/gmu;
+  /(^[\t ]*(?:-[\t ]+)?(["']?)([A-Za-z_][A-Za-z0-9_.-]*)\2[\t ]*:[\t ]*)(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\r\n]*)/gmu;
 const secretCliOption =
   /(--[a-z0-9-]*(?:token|secret|password|api[-_]?key|access[-_]?key|private[-_]?key|credential)[a-z0-9-]*\s*(?:=|\s+))(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;\r\n]+)/giu;
 const authorizationHeader = /\b((?:proxy-)?authorization\s*:\s*)[^\r\n"']+/giu;

@@ -46,6 +46,10 @@ test("run output and evidence claims use the sanitized Markdown preview", () => 
   assert.match(runThread, /No file changes reported/);
   assert.doesNotMatch(runThread, /Verified run report/);
   assert.match(consoleCss, /\.oc-markdown \.oc-md-preview/);
+  assert.match(
+    consoleCss,
+    /\.oc-markdown mark \{[\s\S]*background: transparent;[\s\S]*\}/
+  );
   assert.match(consoleCss, /\.oc-evidence-report/);
   assert.match(consoleCss, /\.oc-markdown-report/);
 });

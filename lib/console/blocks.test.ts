@@ -202,6 +202,8 @@ test("the console projection redacts structured credential fields", () => {
     "projected inline yaml secret",
     "projected capital acronym secret",
     "projected lowercase compact secret",
+    "projected nested api key secret",
+    "projected escaped secret tail",
   ];
   const { blocks } = project([
     {
@@ -216,6 +218,8 @@ test("the console projection redacts structured credential fields", () => {
         `{api.key: ${secrets[5]}}`,
         `{"APIKey":"${secrets[6]}"}`,
         `{"apikey":"${secrets[7]}"}`,
+        `{"config":{"apiKey":"${secrets[8]}"}}`,
+        `{"apiKey":"prefix\\"${secrets[9]}"}`,
       ].join("\n"),
       type: "output",
     },

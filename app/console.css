@@ -370,6 +370,11 @@
   color: var(--text-secondary);
 }
 
+.oc-markdown mark {
+  color: inherit;
+  background: transparent;
+}
+
 .oc-markdown a {
   color: var(--accent-presence);
   text-decoration: underline;
