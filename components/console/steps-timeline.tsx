@@ -21,9 +21,13 @@ import type { Step } from "@/lib/console/blocks";
  * through the prose between them.
  */
 
-const MIN_WIDTH = 200;
-const MAX_WIDTH = 460;
-const DEFAULT_WIDTH = 268;
+export const STEPS_TIMELINE_WIDTHS = {
+  collapsed: 28,
+  default: 268,
+  max: 460,
+  min: 200,
+} as const;
+
 const KEY_STEP = 16;
 
 const TONE_GUTTER: Record<Step["tone"], string> = {
@@ -39,20 +43,25 @@ export function StepsTimeline({
   onOpenAnalytics,
   onJump,
   onToggle,
+  onWidthChange,
   running,
   selectedBlockId,
   steps,
+  width,
+  widthLimit,
 }: {
   collapsed: boolean;
   elapsed: string;
   onJump: (blockId: string) => void;
   onOpenAnalytics: () => void;
   onToggle: () => void;
+  onWidthChange: (width: number) => void;
   running: boolean;
   selectedBlockId: string | null;
   steps: Step[];
+  width: number;
+  widthLimit: number;
 }) {
-  const [width, setWidth] = useState(DEFAULT_WIDTH);
   /**
    * Rich by default: the rail opens showing each step's body lines, and one
    * toggle collapses the whole index back to single-line entries. Expanded
@@ -65,6 +74,7 @@ export function StepsTimeline({
     startWidth: number;
     startX: number;
   } | null>(null);
+  const minWidth = Math.min(STEPS_TIMELINE_WIDTHS.min, widthLimit);
 
   if (collapsed) {
     return (
@@ -85,7 +95,7 @@ export function StepsTimeline({
           gap: 9,
           padding: "10px 0",
           transition: "background var(--duration-fast) var(--ease-standard)",
-          width: 28,
+          width: STEPS_TIMELINE_WIDTHS.collapsed,
         }}
         title="Expand steps"
         type="button"
@@ -116,6 +126,7 @@ export function StepsTimeline({
   return (
     <aside
       aria-label="Steps"
+      className="oc-steps-timeline"
       id="steps-timeline"
       style={{
         background: "var(--bg-panel)",
@@ -123,7 +134,6 @@ export function StepsTimeline({
         display: "flex",
         flex: "none",
         flexDirection: "column",
-        position: "relative",
         width,
       }}
     >
@@ -132,21 +142,21 @@ export function StepsTimeline({
         aria-controls="steps-timeline"
         aria-label="Resize the steps panel"
         aria-orientation="vertical"
-        aria-valuemax={MAX_WIDTH}
-        aria-valuemin={MIN_WIDTH}
+        aria-valuemax={widthLimit}
+        aria-valuemin={minWidth}
         aria-valuenow={width}
         onKeyDown={(event) => {
           if (event.key === "Home") {
-            setWidth(MIN_WIDTH);
+            onWidthChange(minWidth);
           }
           if (event.key === "End") {
-            setWidth(MAX_WIDTH);
+            onWidthChange(widthLimit);
           }
           if (event.key === "ArrowLeft") {
-            setWidth((value) => Math.min(MAX_WIDTH, value + KEY_STEP));
+            onWidthChange(Math.min(widthLimit, width + KEY_STEP));
           }
           if (event.key === "ArrowRight") {
-            setWidth((value) => Math.max(MIN_WIDTH, value - KEY_STEP));
+            onWidthChange(Math.max(minWidth, width - KEY_STEP));
           }
         }}
         onLostPointerCapture={(event) => {
@@ -177,7 +187,7 @@ export function StepsTimeline({
           }
           // The panel is on the right, so dragging left widens it.
           const next = from.startWidth + (from.startX - event.clientX);
-          setWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, next)));
+          onWidthChange(Math.min(widthLimit, Math.max(minWidth, next)));
         }}
         onPointerUp={(event) => {
           if (dragFrom.current?.pointerId === event.pointerId) {

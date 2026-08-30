@@ -4,8 +4,14 @@
 
 import type { CreateAgentInput, Runtime } from "@opencoven/agent-contracts";
 import { HARNESS_SPECS } from "@opencoven/harness";
-import { Sparkles } from "lucide-react";
-import { useState } from "react";
+import {
+  ArrowLeft,
+  BriefcaseBusiness,
+  Hammer,
+  Sparkles,
+  UsersRound,
+} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { Btn, Eyebrow } from "@/components/console/primitives";
 import {
   hairline,
@@ -20,12 +26,12 @@ import { glyphFor } from "@/lib/console/format";
 /**
  * Forging an execution profile.
  *
- * A profile is a bounded execution contract, not a personality. The three tabs
- * are three ways to arrive at the same object: take a role as written, take a
- * complementary set of them, or write the contract yourself.
+ * A profile is a bounded execution contract, not a personality. The three
+ * paths are parallel ways to arrive at the same object: take a role as written,
+ * take a complementary set of them, or write the contract yourself.
  */
 
-type Tab = "crew" | "forge" | "role";
+type CreationPath = "crew" | "forge" | "role";
 
 const DEFAULT_MODEL = "auto";
 const DEFAULT_WORKSPACE = "/workspace";
@@ -35,11 +41,136 @@ const INSTRUCTIONS_LIMIT = 12_000;
 const RUNNABLE = HARNESS_SPECS.filter((spec) => spec.supported);
 const REFUSED = HARNESS_SPECS.filter((spec) => !spec.supported);
 
-const TABS: { hint: string; id: Tab; label: string }[] = [
-  { hint: "Take one as written", id: "role", label: "Start from a role" },
-  { hint: "A complementary set", id: "crew", label: "Create a crew" },
-  { hint: "Write the contract", id: "forge", label: "Forge a profile" },
-];
+const PATHS = [
+  {
+    description: "Use a proven operating contract, then adjust it later.",
+    eyebrow: "Proven contract",
+    icon: BriefcaseBusiness,
+    id: "role",
+    label: "Start from a role",
+    outcome: "1 profile · ~5 seconds",
+  },
+  {
+    description: "Create a complementary set for a specific kind of work.",
+    eyebrow: "Complementary set",
+    icon: UsersRound,
+    id: "crew",
+    label: "Create a crew",
+    outcome: "2–3 profiles · one action",
+  },
+  {
+    description:
+      "Define every field and write the operating contract yourself.",
+    eyebrow: "Blank contract",
+    icon: Hammer,
+    id: "forge",
+    label: "Forge a profile",
+    outcome: "1 profile · full control",
+  },
+] as const satisfies readonly {
+  description: string;
+  eyebrow: string;
+  icon: typeof BriefcaseBusiness;
+  id: CreationPath;
+  label: string;
+  outcome: string;
+}[];
+
+type PathDefinition = (typeof PATHS)[number];
+
+function PathCard({
+  disabled,
+  disabledReason,
+  onSelect,
+  path,
+  setRef,
+}: {
+  disabled: boolean;
+  disabledReason: string | null;
+  onSelect: () => void;
+  path: PathDefinition;
+  setRef: (node: HTMLButtonElement | null) => void;
+}) {
+  const Icon = path.icon;
+  const outcome = disabledReason ?? path.outcome;
+
+  return (
+    <button
+      aria-describedby={`${path.id}-path-description ${path.id}-path-outcome`}
+      className="oc-create-path-card"
+      disabled={disabled}
+      onClick={onSelect}
+      ref={setRef}
+      type="button"
+    >
+      <span aria-hidden="true" className="oc-create-path-glyph">
+        <Icon size={19} strokeWidth={1.5} />
+      </span>
+      <span className="oc-create-path-copy">
+        <Eyebrow>{path.eyebrow}</Eyebrow>
+        <span className="oc-create-path-title">{path.label}</span>
+        <span
+          className="oc-create-path-description"
+          id={`${path.id}-path-description`}
+        >
+          {path.description}
+        </span>
+        <span
+          className="oc-create-path-outcome"
+          data-unavailable={disabledReason ? "" : undefined}
+          id={`${path.id}-path-outcome`}
+        >
+          {outcome}
+        </span>
+        <span aria-hidden="true" className="oc-create-path-cta">
+          Choose path <span>→</span>
+        </span>
+      </span>
+    </button>
+  );
+}
+
+function CreationFrame({
+  children,
+  headingRef,
+  onCancel,
+  onShowPaths,
+  path,
+}: {
+  children: React.ReactNode;
+  headingRef: React.RefObject<HTMLHeadingElement | null>;
+  onCancel: () => void;
+  onShowPaths: () => void;
+  path: PathDefinition;
+}) {
+  return (
+    <div
+      className={`oc-create-agent-path-canvas oc-create-agent-path-${path.id}`}
+    >
+      <div className="oc-create-agent-path-toolbar">
+        <Btn onClick={onShowPaths} variant="ghost">
+          <ArrowLeft size={13} />
+          All paths
+        </Btn>
+        <Btn onClick={onCancel} variant="secondary">
+          Cancel
+        </Btn>
+      </div>
+      <div className="oc-create-agent-path-body">
+        <Eyebrow>{path.eyebrow}</Eyebrow>
+        <h2
+          className="oc-create-agent-path-heading"
+          ref={headingRef}
+          style={type_.display}
+          tabIndex={-1}
+        >
+          {path.label}
+        </h2>
+        {children}
+      </div>
+    </div>
+  );
+}
 
 function Field({
   children,
@@ -148,7 +279,7 @@ export function CreateAgent({
   onCreate: (input: CreateAgentInput) => void;
   onCreateFormation: (formation: Formation) => void;
 }) {
-  const [tab, setTab] = useState<Tab>("role");
+  const [path, setPath] = useState<CreationPath | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState("");
@@ -157,6 +288,28 @@ export function CreateAgent({
   );
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [workspace, setWorkspace] = useState(DEFAULT_WORKSPACE);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const pathButtonRefs = useRef<Record<CreationPath, HTMLButtonElement | null>>(
+    {
+      crew: null,
+      forge: null,
+      role: null,
+    }
+  );
+  const returnFocusPathRef = useRef<CreationPath | null>(null);
+
+  useEffect(() => {
+    if (path) {
+      headingRef.current?.focus();
+      return;
+    }
+
+    const returnPath = returnFocusPathRef.current;
+    if (returnPath) {
+      pathButtonRefs.current[returnPath]?.focus();
+      returnFocusPathRef.current = null;
+    }
+  }, [path]);
 
   const forgeBlocker = name.trim()
     ? instructions.trim().length < 20
@@ -176,6 +329,14 @@ export function CreateAgent({
     });
   };
 
+  const showAllPaths = () => {
+    returnFocusPathRef.current = path;
+    setPath(null);
+  };
+
+  const selectedPath = PATHS.find((entry) => entry.id === path) ?? null;
+  const hasRunnableHarness = RUNNABLE.length > 0;
+
   return (
     <div
       className="oc-create-agent"
@@ -186,90 +347,15 @@ export function CreateAgent({
         minHeight: 0,
       }}
     >
-      <div
-        className="oc-create-agent-nav"
-        style={{
-          borderRight: hairline,
-          display: "flex",
-          flex: "none",
-          flexDirection: "column",
-          gap: 6,
-          padding: "16px 12px",
-          width: 236,
-        }}
-      >
-        <Eyebrow style={{ letterSpacing: "0.14em", padding: "0 8px 8px" }}>
-          New execution profile
-        </Eyebrow>
-        {TABS.map((entry, index) => (
-          <button
-            className="oc-row"
-            key={entry.id}
-            onClick={() => setTab(entry.id)}
-            style={{
-              alignItems: "center",
-              background:
-                tab === entry.id
-                  ? "color-mix(in oklch, var(--accent-presence) 14%, transparent)"
-                  : "transparent",
-              border: 0,
-              borderRadius: "var(--radius-md)",
-              cursor: "pointer",
-              display: "flex",
-              gap: 10,
-              padding: "9px 8px",
-              textAlign: "left",
-              width: "100%",
-            }}
-            type="button"
-          >
-            <span style={well(tab === entry.id, 22)}>{index + 1}</span>
-            <span
-              style={{
-                display: "flex",
-                flex: 1,
-                flexDirection: "column",
-                gap: 3,
-                minWidth: 0,
-                textAlign: "left",
-              }}
-            >
-              <span style={{ font: "500 13px/1.25 var(--font-ui)" }}>
-                {entry.label}
-              </span>
-              <span
-                style={{
-                  color: "var(--text-muted)",
-                  font: "400 11px/1.4 var(--font-ui)",
-                }}
-              >
-                {entry.hint}
-              </span>
-            </span>
-          </button>
-        ))}
-        <div style={{ flex: 1 }} />
-        <Btn fullWidth onClick={onCancel} variant="secondary">
-          Cancel
-        </Btn>
-      </div>
-
-      <div
-        className="oc-create-agent-content oc-scroll"
-        style={{
-          background: "var(--bg-base)",
-          flex: 1,
-          minWidth: 0,
-          overflowY: "auto",
-          padding: "26px 30px",
-        }}
-      >
-        <div style={{ maxWidth: 720 }}>
-          {tab === "role" ? (
+      {selectedPath ? (
+        <CreationFrame
+          headingRef={headingRef}
+          onCancel={onCancel}
+          onShowPaths={showAllPaths}
+          path={selectedPath}
+        >
+          {path === "role" ? (
             <>
-              <h2 style={{ ...type_.display, marginBottom: 5 }}>
-                Start from a role
-              </h2>
               <p style={{ ...type_.body, marginBottom: 16, maxWidth: "62ch" }}>
                 Each role is an operating contract with a different bias. Pick
                 one, then adjust — a role is a starting point, not a class.
@@ -359,11 +445,8 @@ export function CreateAgent({
             </>
           ) : null}
 
-          {tab === "crew" ? (
+          {path === "crew" ? (
             <>
-              <h2 style={{ ...type_.display, marginBottom: 5 }}>
-                Create a crew
-              </h2>
               <p style={{ ...type_.body, marginBottom: 18, maxWidth: "60ch" }}>
                 A crew is a complementary <em>set</em> of profiles created
                 together. Members never hand work to each other — you dispatch
@@ -455,11 +538,8 @@ export function CreateAgent({
             </>
           ) : null}
 
-          {tab === "forge" ? (
+          {path === "forge" ? (
             <>
-              <h2 style={{ ...type_.display, marginBottom: 5 }}>
-                Forge a profile
-              </h2>
               <p style={{ ...type_.body, marginBottom: 20, maxWidth: "56ch" }}>
                 Everything the agent will be governed by, written out. The
                 contract is the only thing standing between the mission and the
@@ -613,8 +693,58 @@ export function CreateAgent({
               </div>
             </>
           ) : null}
+        </CreationFrame>
+      ) : (
+        <div className="oc-create-agent-chooser oc-scroll">
+          <div className="oc-create-agent-chooser-inner">
+            <div className="oc-create-agent-chooser-toolbar">
+              <div />
+              <Btn onClick={onCancel} variant="secondary">
+                Cancel
+              </Btn>
+            </div>
+            <header className="oc-create-agent-chooser-header">
+              <Eyebrow>New execution profile</Eyebrow>
+              <h1 style={type_.display}>Choose how to begin</h1>
+              <p style={type_.body}>
+                Each path creates runnable execution profiles. Choose based on
+                how quickly you want to start and how much control you need.
+              </p>
+            </header>
+            {hasRunnableHarness ? null : (
+              <p className="oc-create-agent-availability" role="status">
+                No runnable harness is available. Add a supported harness before
+                creating execution profiles.
+              </p>
+            )}
+            <fieldset
+              aria-label="Execution profile paths"
+              className="oc-create-agent-paths"
+            >
+              {PATHS.map((entry) => {
+                const disabledReason = hasRunnableHarness
+                  ? entry.id === "crew" && FORMATIONS.length === 0
+                    ? "Unavailable · no crew presets"
+                    : null
+                  : "Unavailable · no runnable harness";
+
+                return (
+                  <PathCard
+                    disabled={disabledReason !== null}
+                    disabledReason={disabledReason}
+                    key={entry.id}
+                    onSelect={() => setPath(entry.id)}
+                    path={entry}
+                    setRef={(node) => {
+                      pathButtonRefs.current[entry.id] = node;
+                    }}
+                  />
+                );
+              })}
+            </fieldset>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
