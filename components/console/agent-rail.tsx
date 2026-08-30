@@ -4,7 +4,7 @@
 
 import type { AgentDefinition } from "@opencoven/agent-contracts";
 import { Check, ChevronsUpDown, PanelLeft, Plus } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import {
   AccountAvatar,
   Caret,
@@ -29,19 +29,14 @@ import type { ConsoleRun } from "@/lib/console/types";
  * app shows a flat list of threads.
  */
 
-const MIN_WIDTH = 220;
-const MAX_WIDTH = 420;
-const DEFAULT_WIDTH = 268;
-const MINI_WIDTH = 58;
-const KEY_STEP = 16;
-const VIEWPORT_WIDTH_RATIO = 0.86;
+export const AGENT_RAIL_WIDTHS = {
+  collapsed: 58,
+  default: 268,
+  max: 420,
+  min: 220,
+} as const;
 
-function navigationMaxWidth() {
-  return Math.min(
-    MAX_WIDTH,
-    Math.floor(window.innerWidth * VIEWPORT_WIDTH_RATIO)
-  );
-}
+const KEY_STEP = 16;
 
 type RailProps = {
   agents: AgentDefinition[];
@@ -53,12 +48,15 @@ type RailProps = {
   onOpenAccount: () => void;
   onSelectAgent: (agentId: string) => void;
   onSelectRun: (runId: string) => void;
+  onWidthChange: (width: number) => void;
   /** The browser's clock, or 0 before it is known. */
   now: number;
   onToggle: () => void;
   runs: ConsoleRun[];
   selectedAgentId: string | null;
   selectedRunId: string | null;
+  width: number;
+  widthLimit: number;
   who: string;
 };
 
@@ -115,7 +113,7 @@ function MiniRail({
         flexDirection: "column",
         gap: 7,
         padding: "11px 0",
-        width: MINI_WIDTH,
+        width: AGENT_RAIL_WIDTHS.collapsed,
       }}
     >
       <button
@@ -374,33 +372,17 @@ function RuntimeFilter({
 
 export function AgentRail(props: RailProps) {
   const [filter, setFilter] = useState<Set<string>>(new Set());
-  const [width, setWidth] = useState(DEFAULT_WIDTH);
-  const [maxWidth, setMaxWidth] = useState(MAX_WIDTH);
   const dragFrom = useRef<{
     pointerId: number;
     startWidth: number;
     startX: number;
   } | null>(null);
 
-  useEffect(() => {
-    const syncWidthLimit = () => {
-      const nextMaxWidth = navigationMaxWidth();
-      const nextMinWidth = Math.min(MIN_WIDTH, nextMaxWidth);
-      setMaxWidth(nextMaxWidth);
-      setWidth((current) =>
-        Math.min(nextMaxWidth, Math.max(nextMinWidth, current))
-      );
-    };
-
-    syncWidthLimit();
-    window.addEventListener("resize", syncWidthLimit);
-    return () => window.removeEventListener("resize", syncWidthLimit);
-  }, []);
-
   if (props.collapsed) {
     return <MiniRail {...props} />;
   }
 
+  const minWidth = Math.min(AGENT_RAIL_WIDTHS.min, props.widthLimit);
   const runtimes = [...new Set(props.agents.map((agent) => agent.runtime))]
     .sort()
     .map((runtime) => ({
@@ -436,7 +418,7 @@ export function AgentRail(props: RailProps) {
         display: "flex",
         flex: "none",
         flexDirection: "column",
-        width,
+        width: props.width,
       }}
     >
       {/* biome-ignore lint/a11y/useSemanticElements: role="separator" is the ARIA splitter pattern for a focusable resize handle. */}
@@ -444,23 +426,23 @@ export function AgentRail(props: RailProps) {
         aria-controls="agent-navigation-rail"
         aria-label="Resize the navigation rail"
         aria-orientation="vertical"
-        aria-valuemax={maxWidth}
-        aria-valuemin={Math.min(MIN_WIDTH, maxWidth)}
-        aria-valuenow={width}
+        aria-valuemax={props.widthLimit}
+        aria-valuemin={minWidth}
+        aria-valuenow={props.width}
         onKeyDown={(event) => {
           if (event.key === "Home") {
-            setWidth(Math.min(MIN_WIDTH, maxWidth));
+            props.onWidthChange(minWidth);
           }
           if (event.key === "End") {
-            setWidth(maxWidth);
+            props.onWidthChange(props.widthLimit);
           }
           if (event.key === "ArrowLeft") {
-            setWidth((value) =>
-              Math.max(Math.min(MIN_WIDTH, maxWidth), value - KEY_STEP)
-            );
+            props.onWidthChange(Math.max(minWidth, props.width - KEY_STEP));
           }
           if (event.key === "ArrowRight") {
-            setWidth((value) => Math.min(maxWidth, value + KEY_STEP));
+            props.onWidthChange(
+              Math.min(props.widthLimit, props.width + KEY_STEP)
+            );
           }
         }}
         onLostPointerCapture={(event) => {
@@ -480,7 +462,7 @@ export function AgentRail(props: RailProps) {
           event.currentTarget.setPointerCapture(event.pointerId);
           dragFrom.current = {
             pointerId: event.pointerId,
-            startWidth: width,
+            startWidth: props.width,
             startX: event.clientX,
           };
         }}
@@ -490,8 +472,8 @@ export function AgentRail(props: RailProps) {
             return;
           }
           const next = from.startWidth + (event.clientX - from.startX);
-          setWidth(
-            Math.min(maxWidth, Math.max(Math.min(MIN_WIDTH, maxWidth), next))
+          props.onWidthChange(
+            Math.min(props.widthLimit, Math.max(minWidth, next))
           );
         }}
         onPointerUp={(event) => {

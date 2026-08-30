@@ -13,7 +13,7 @@ import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
-import { AgentRail } from "@/components/console/agent-rail";
+import { AGENT_RAIL_WIDTHS, AgentRail } from "@/components/console/agent-rail";
 import { Analytics } from "@/components/console/analytics";
 import {
   CommandPalette,
@@ -30,7 +30,10 @@ import {
 import { ThreadBlockView } from "@/components/console/run-thread";
 import { RuntimeInspector } from "@/components/console/runtime-inspector";
 import { Settings } from "@/components/console/settings";
-import { StepsTimeline } from "@/components/console/steps-timeline";
+import {
+  STEPS_TIMELINE_WIDTHS,
+  StepsTimeline,
+} from "@/components/console/steps-timeline";
 import {
   hairline,
   pill,
@@ -59,6 +62,14 @@ import {
 } from "@/lib/credentials/client";
 
 const TICK_MS = 1000;
+const COMPACT_VIEWPORT_MAX = 720;
+const NARROW_VIEWPORT_MAX = 980;
+const MIN_RUN_RECORD_WIDTH = 360;
+const OVERLAY_VIEWPORT_RATIO = 0.86;
+
+function clampWidth(width: number, min: number, max: number) {
+  return Math.min(max, Math.max(Math.min(min, max), width));
+}
 
 /**
  * The word the header pill wears.
@@ -132,6 +143,13 @@ export function RunConsole() {
 
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [timelineCollapsed, setTimelineCollapsed] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(0);
+  const [agentRailWidth, setAgentRailWidth] = useState<number>(
+    AGENT_RAIL_WIDTHS.default
+  );
+  const [stepsTimelineWidth, setStepsTimelineWidth] = useState<number>(
+    STEPS_TIMELINE_WIDTHS.default
+  );
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
@@ -151,8 +169,12 @@ export function RunConsole() {
   const [now, setNow] = useState(0);
 
   useEffect(() => {
-    const compactViewport = window.matchMedia("(max-width: 720px)");
-    const narrowViewport = window.matchMedia("(max-width: 980px)");
+    const compactViewport = window.matchMedia(
+      `(max-width: ${COMPACT_VIEWPORT_MAX}px)`
+    );
+    const narrowViewport = window.matchMedia(
+      `(max-width: ${NARROW_VIEWPORT_MAX}px)`
+    );
     const collapseForViewport = () => {
       if (compactViewport.matches) {
         setRailCollapsed(true);
@@ -170,6 +192,64 @@ export function RunConsole() {
       narrowViewport.removeEventListener("change", collapseForViewport);
     };
   }, []);
+
+  useEffect(() => {
+    const syncViewportWidth = () => setViewportWidth(window.innerWidth);
+    syncViewportWidth();
+    window.addEventListener("resize", syncViewportWidth);
+    return () => window.removeEventListener("resize", syncViewportWidth);
+  }, []);
+
+  const stepsOverlay =
+    viewportWidth > 0 && viewportWidth <= NARROW_VIEWPORT_MAX;
+  const navigationOverlay =
+    viewportWidth > 0 && viewportWidth <= COMPACT_VIEWPORT_MAX;
+  const stepsFootprint =
+    selectedRunId === null
+      ? 0
+      : timelineCollapsed
+        ? STEPS_TIMELINE_WIDTHS.collapsed
+        : stepsOverlay
+          ? 0
+          : stepsTimelineWidth;
+  const navigationFootprint = railCollapsed
+    ? AGENT_RAIL_WIDTHS.collapsed
+    : navigationOverlay
+      ? 0
+      : agentRailWidth;
+  const agentRailWidthLimit =
+    viewportWidth === 0
+      ? AGENT_RAIL_WIDTHS.max
+      : Math.min(
+          AGENT_RAIL_WIDTHS.max,
+          navigationOverlay
+            ? Math.floor(viewportWidth * OVERLAY_VIEWPORT_RATIO)
+            : Math.max(0, viewportWidth - stepsFootprint - MIN_RUN_RECORD_WIDTH)
+        );
+  const stepsTimelineWidthLimit =
+    viewportWidth === 0
+      ? STEPS_TIMELINE_WIDTHS.max
+      : Math.min(
+          STEPS_TIMELINE_WIDTHS.max,
+          stepsOverlay
+            ? Math.floor(viewportWidth * OVERLAY_VIEWPORT_RATIO)
+            : Math.max(
+                0,
+                viewportWidth - navigationFootprint - MIN_RUN_RECORD_WIDTH
+              )
+        );
+
+  useEffect(() => {
+    setAgentRailWidth((width) =>
+      clampWidth(width, AGENT_RAIL_WIDTHS.min, agentRailWidthLimit)
+    );
+  }, [agentRailWidthLimit]);
+
+  useEffect(() => {
+    setStepsTimelineWidth((width) =>
+      clampWidth(width, STEPS_TIMELINE_WIDTHS.min, stepsTimelineWidthLimit)
+    );
+  }, [stepsTimelineWidthLimit]);
 
   const threadRef = useRef<HTMLDivElement>(null);
   const runsRef = useRef<ConsoleRun[]>([]);
@@ -1233,13 +1313,21 @@ export function RunConsole() {
               onSelectAgent={openComposer}
               onSelectRun={openRun}
               onToggle={() => setRailCollapsed((value) => !value)}
+              onWidthChange={(width) =>
+                setAgentRailWidth(
+                  clampWidth(width, AGENT_RAIL_WIDTHS.min, agentRailWidthLimit)
+                )
+              }
               runs={runs}
               selectedAgentId={selectedAgentId}
               selectedRunId={selectedRunId}
               who={who}
+              width={agentRailWidth}
+              widthLimit={agentRailWidthLimit}
             />
 
             <section
+              className="oc-console-main-pane"
               style={{
                 background: "var(--bg-base)",
                 display: "flex",
@@ -1685,9 +1773,20 @@ export function RunConsole() {
                 }}
                 onOpenAnalytics={() => setView("analytics")}
                 onToggle={() => setTimelineCollapsed((value) => !value)}
+                onWidthChange={(width) =>
+                  setStepsTimelineWidth(
+                    clampWidth(
+                      width,
+                      STEPS_TIMELINE_WIDTHS.min,
+                      stepsTimelineWidthLimit
+                    )
+                  )
+                }
                 running={running}
                 selectedBlockId={null}
                 steps={projection.steps}
+                width={stepsTimelineWidth}
+                widthLimit={stepsTimelineWidthLimit}
               />
             ) : null}
 

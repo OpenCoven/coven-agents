@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { type BrowserContext, expect, type Page, test } from "@playwright/test";
 import { subscriberCookies } from "./session";
 
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
@@ -90,6 +90,31 @@ async function notifySessionChange(page: Page): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 50));
     channel.close();
   });
+}
+
+async function openAuthenticatedProfileCreator(
+  context: BrowserContext,
+  page: Page
+): Promise<void> {
+  await context.addCookies(await subscriberCookies());
+  await page.route("**/api/tenant/prewarm", (route) =>
+    route.fulfill({ status: 204 })
+  );
+  await page.route("**/api/credentials", (route) =>
+    route.fulfill({ json: { harnessIds: ["copilot"] } })
+  );
+  await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+    const { pathname } = new URL(route.request().url());
+    return route.fulfill(
+      pathname === "/api/agents"
+        ? { json: { agents: [] } }
+        : { json: { apiVersion: "1.0", runs: [] } }
+    );
+  });
+
+  await page.goto("/agents");
+  await expect(page.getByText("e2e-user@example.invalid")).toBeVisible();
+  await page.getByRole("button", { name: "New agent" }).click();
 }
 
 function expectCurrentBrowserRequestHeaders(
@@ -318,6 +343,97 @@ test.describe("Run console", () => {
     await expect(page).toHaveURL("/login");
   });
 
+  test("profile creation opens with three parallel paths instead of numbered steps", async ({
+    context,
+    page,
+  }) => {
+    await openAuthenticatedProfileCreator(context, page);
+
+    await expect(
+      page.getByRole("heading", { name: "Choose how to begin" })
+    ).toBeVisible();
+    const paths = page.getByRole("group", {
+      name: "Execution profile paths",
+    });
+    await expect(paths.getByRole("button")).toHaveCount(3);
+    await expect(
+      paths.getByRole("button", { name: /Start from a role/ })
+    ).toContainText("1 profile · ~5 seconds");
+    await expect(
+      paths.getByRole("button", { name: /Create a crew/ })
+    ).toContainText("2–3 profiles · one action");
+    await expect(
+      paths.getByRole("button", { name: /Forge a profile/ })
+    ).toContainText("1 profile · full control");
+    await expect(
+      page.getByRole("heading", { name: "Start from a role" })
+    ).toHaveCount(0);
+    await expect(paths).not.toContainText(/(^|\s)[123](\s|$)/);
+
+    await paths.getByRole("button", { name: /Start from a role/ }).click();
+    await expect(page.getByText("How read-only is enforced")).toBeVisible();
+    await page.getByRole("button", { name: "All paths" }).click();
+    await paths.getByRole("button", { name: /Create a crew/ }).click();
+    await expect(page.getByText("Proposed: sequenced mode")).toBeVisible();
+  });
+
+  test("returning to all paths preserves the Forge draft and restores focus", async ({
+    context,
+    page,
+  }) => {
+    await openAuthenticatedProfileCreator(context, page);
+
+    const forgePath = page.getByRole("button", { name: /Forge a profile/ });
+    await forgePath.click();
+    await expect(
+      page.getByRole("heading", { name: "Forge a profile" })
+    ).toBeFocused();
+    await page.getByLabel("Name", { exact: true }).fill("Release steward");
+    await page
+      .getByLabel("Operating contract")
+      .fill("Review the release evidence and report concrete blockers.");
+
+    await page.getByRole("button", { name: "All paths" }).click();
+    await expect(forgePath).toBeFocused();
+    await forgePath.click();
+
+    await expect(page.getByLabel("Name", { exact: true })).toHaveValue(
+      "Release steward"
+    );
+    await expect(page.getByLabel("Operating contract")).toHaveValue(
+      "Review the release evidence and report concrete blockers."
+    );
+  });
+
+  test("profile paths share a row on wide screens and stack without overflow on narrow screens", async ({
+    context,
+    page,
+  }) => {
+    await page.setViewportSize({ height: 800, width: 1200 });
+    await openAuthenticatedProfileCreator(context, page);
+
+    const cards = page.locator(".oc-create-path-card");
+    const wideBoxes = await cards.evaluateAll((elements) =>
+      elements.map((element) => {
+        const box = element.getBoundingClientRect();
+        return { height: Math.round(box.height), top: Math.round(box.top) };
+      })
+    );
+    expect(new Set(wideBoxes.map((box) => box.top)).size).toBe(1);
+    expect(new Set(wideBoxes.map((box) => box.height)).size).toBe(1);
+
+    await page.setViewportSize({ height: 844, width: 700 });
+    const narrowTops = await cards.evaluateAll((elements) =>
+      elements.map((element) => Math.round(element.getBoundingClientRect().top))
+    );
+    expect(new Set(narrowTops).size).toBe(3);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth
+      )
+    ).toBe(true);
+  });
+
   test("the command palette opens and closes from the keyboard", async ({
     page,
   }) => {
@@ -396,6 +512,45 @@ test.describe("Run console", () => {
         () => document.documentElement.scrollWidth <= innerWidth
       )
     ).toBe(true);
+  });
+
+  test("the empty console stacks before it crowds and scrolls in short landscapes", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ height: 600, width: 721 });
+    await page.goto("/agents");
+
+    const copy = page.locator(".oc-empty-console-copy");
+    const boundary = page.locator(".oc-empty-console-boundary");
+    const [copyBox, boundaryBox] = await Promise.all([
+      copy.boundingBox(),
+      boundary.boundingBox(),
+    ]);
+    expect(copyBox).not.toBeNull();
+    expect(boundaryBox).not.toBeNull();
+    expect(boundaryBox?.y ?? 0).toBeGreaterThanOrEqual(
+      (copyBox?.y ?? 0) + (copyBox?.height ?? 0) - 1
+    );
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth
+      )
+    ).toBe(true);
+
+    await page.setViewportSize({ height: 375, width: 667 });
+    const emptyConsole = page.locator(".oc-empty-console");
+    await expect(emptyConsole).toHaveCSS("overflow-y", "auto");
+    await expect
+      .poll(() =>
+        emptyConsole.evaluate(
+          (element) => element.scrollHeight > element.clientHeight
+        )
+      )
+      .toBe(true);
+    await emptyConsole.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    await expect(boundary).toBeInViewport();
   });
 
   test("a retained run exposes resizable rich side rails and the global collapse control", async ({
@@ -553,6 +708,15 @@ test.describe("Run console", () => {
         stepsRail.evaluate((element) => element.getBoundingClientRect().width)
       )
       .toBeGreaterThan(stepsWidth);
+    await navigationResizeHandle.press("End");
+    await stepsResizeHandle.press("End");
+    await expect
+      .poll(() =>
+        page
+          .locator(".oc-console-main-pane")
+          .evaluate((element) => element.getBoundingClientRect().width)
+      )
+      .toBeGreaterThanOrEqual(359);
 
     await expect(page.getByText("second output line")).toBeVisible();
     await expect(
@@ -608,6 +772,21 @@ test.describe("Run console", () => {
     await expect(
       page.getByRole("button", { name: "Expand the steps panel" })
     ).toBeVisible();
+    const mainPaneWidth = await page
+      .locator(".oc-console-main-pane")
+      .evaluate((element) => element.getBoundingClientRect().width);
+    await page.getByRole("button", { name: "Expand the steps panel" }).click();
+    await expect(page.locator(".oc-steps-timeline")).toHaveCSS(
+      "position",
+      "absolute"
+    );
+    await expect
+      .poll(() =>
+        page
+          .locator(".oc-console-main-pane")
+          .evaluate((element) => element.getBoundingClientRect().width)
+      )
+      .toBeGreaterThanOrEqual(mainPaneWidth);
     await expect
       .poll(() =>
         evidenceReport
