@@ -41,6 +41,7 @@ export function StepsTimeline({
   collapsed,
   elapsed,
   onOpenAnalytics,
+  onOpenReport,
   onJump,
   onToggle,
   onWidthChange,
@@ -54,6 +55,7 @@ export function StepsTimeline({
   elapsed: string;
   onJump: (blockId: string) => void;
   onOpenAnalytics: () => void;
+  onOpenReport: (blockId: string) => void;
   onToggle: () => void;
   onWidthChange: (width: number) => void;
   running: boolean;
@@ -278,7 +280,13 @@ export function StepsTimeline({
           <button
             className="oc-row"
             key={step.id}
-            onClick={() => onJump(step.blockId)}
+            onClick={() => {
+              if (step.kind === "report" || step.kind === "receipt") {
+                onOpenReport(step.blockId);
+                return;
+              }
+              onJump(step.blockId);
+            }}
             style={{
               alignItems: "flex-start",
               background:
@@ -294,6 +302,11 @@ export function StepsTimeline({
               textAlign: "left",
               width: "100%",
             }}
+            title={
+              step.kind === "report" || step.kind === "receipt"
+                ? "Open in report reader"
+                : "Jump to this step"
+            }
             type="button"
           >
             <span

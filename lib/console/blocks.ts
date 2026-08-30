@@ -6,6 +6,10 @@ import type {
   RunSnapshot,
   RunStatus,
 } from "@opencoven/agent-contracts";
+import {
+  sanitizeEvidencePath,
+  sanitizeEvidenceText,
+} from "@opencoven/agent-contracts";
 import { formatDuration, spanBetween } from "@/lib/console/format";
 
 /**
@@ -27,7 +31,6 @@ export type ThreadBlock =
       id: string;
       kind: "mission";
       text: string;
-      who: string;
     }
   | {
       detail: string | null;
@@ -71,6 +74,7 @@ export type ThreadBlock =
     }
   | {
       claim: string;
+      hasAnswer: boolean;
       id: string;
       kind: "evidence";
       meta: string;
@@ -84,30 +88,37 @@ export type Step = {
   detail: string;
   duration: string;
   /**
-   * Up to a handful of body lines behind the one-line detail — command
-   * output, report opening, file paths. The rail shows these by default and
-   * collapses to the single line on demand, so the index can carry real
-   * content without the thread's bulk.
+   * A bounded structured summary behind the one-line detail. Full Markdown
+   * and command output stay in the thread so the rail remains an index rather
+   * than an unformatted duplicate of the report.
    */
   expanded: string[];
   id: string;
+  kind: "command" | "error" | "file" | "lifecycle" | "receipt" | "report";
   label: string;
   tone: "danger" | "muted" | "running" | "success";
 };
 
 export type RunProjection = {
+  activity: LiveActivity | null;
   blocks: ThreadBlock[];
   /** What the agent is doing right now, for the running strip. */
   nowDoing: string;
   steps: Step[];
 };
 
+export type LiveActivity = {
+  detail: string;
+  headline: string;
+  lastSignalAt: string;
+  metrics: { label: string; value: string }[];
+  phase: "queued" | "running";
+};
+
 type ProjectInput = {
   agent: AgentDefinition | null;
   events: RunEvent[];
   run: RunSnapshot | null;
-  /** The account the mission is attributed to. */
-  who: string;
 };
 
 const TERMINAL_STATUSES: readonly RunStatus[] = [
@@ -183,6 +194,63 @@ function commandSummary(evidence: CommandEvidence): string {
   return lines.at(-1) ?? "";
 }
 
+function liveActivity(
+  events: readonly RunEvent[],
+  run: RunSnapshot | null
+): LiveActivity | null {
+  if (!run || (run.status !== "queued" && run.status !== "running")) {
+    return null;
+  }
+
+  const publicEvents = events.filter(
+    (event) =>
+      event.type === "output" ||
+      event.type === "command" ||
+      event.type === "file"
+  );
+  const commands = publicEvents.filter(
+    (event) => event.type === "command"
+  ).length;
+  const files = publicEvents.filter((event) => event.type === "file").length;
+  const latest = publicEvents.at(-1);
+  let detail: string;
+
+  if (run.status === "queued") {
+    detail =
+      "Waiting for an available execution slot. No workspace command has started.";
+  } else if (!latest) {
+    detail =
+      "The runner is checking the isolated process while waiting for the first sanitized update. It will stop and report a run that reaches the execution limit.";
+  } else if (latest.type === "command") {
+    detail =
+      latest.evidence.exitCode === null
+        ? "A command is running in the isolated workspace."
+        : "A command result was received. The agent is continuing.";
+  } else if (latest.type === "file") {
+    detail = "A file change was reported. The agent is continuing.";
+  } else {
+    detail = "A sanitized agent update was received. The agent is continuing.";
+  }
+
+  const lastSignalAt =
+    [...events].reverse().find((event) => event.at)?.at ??
+    run.startedAt ??
+    run.createdAt;
+
+  return {
+    detail,
+    headline:
+      run.status === "queued" ? "Queued for execution" : "Runner active",
+    lastSignalAt,
+    metrics: [
+      { label: "Safe updates", value: String(publicEvents.length) },
+      { label: "Commands", value: String(commands) },
+      { label: "Files", value: String(files) },
+    ],
+    phase: run.status,
+  };
+}
+
 /**
  * Groups the stream into blocks.
  *
@@ -193,19 +261,20 @@ function commandSummary(evidence: CommandEvidence): string {
  */
 function collectBlocks(input: ProjectInput): ThreadBlock[] {
   const blocks: ThreadBlock[] = [];
-  const { agent, events, run, who } = input;
+  const { agent, events, run } = input;
 
   if (run?.task) {
     blocks.push({
       context: [
-        agent?.name ?? "agent",
-        agent?.runtime ? `${agent.runtime} · ${agent.model}` : "",
-        agent?.workspace ?? "",
+        sanitizeEvidenceText(agent?.name ?? "agent"),
+        agent?.runtime
+          ? `${agent.runtime} · ${sanitizeEvidenceText(agent.model)}`
+          : "",
+        agent?.workspace ? sanitizeEvidencePath(agent.workspace) : "",
       ].filter(Boolean),
       id: "mission",
       kind: "mission",
-      text: run.task,
-      who,
+      text: sanitizeEvidenceText(run.task),
     });
   }
 
@@ -250,7 +319,9 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
       case "output": {
         const previous = blocks.at(-1);
         if (previous?.kind === "text") {
-          previous.text = `${previous.text}${event.output}`;
+          previous.text = sanitizeEvidenceText(
+            `${previous.text}${event.output}`
+          );
           previous.durationMs = gap;
           break;
         }
@@ -259,49 +330,55 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
           id: `e${event.id}`,
           kind: "text",
           live: false,
-          text: event.output,
+          text: sanitizeEvidenceText(event.output),
         });
         break;
       }
 
       case "command":
         blocks.push({
-          command: event.evidence.command,
+          command: sanitizeEvidenceText(event.evidence.command),
           durationMs: commandDuration(event.evidence) ?? gap,
           exitCode: event.evidence.exitCode,
           id: `e${event.id}`,
           kind: "command",
           live: event.evidence.exitCode === null,
-          stderr: event.evidence.stderr,
-          stdout: event.evidence.stdout,
+          stderr: sanitizeEvidenceText(event.evidence.stderr),
+          stdout: sanitizeEvidenceText(event.evidence.stdout),
         });
         break;
 
       case "file": {
+        const evidence = {
+          ...event.evidence,
+          path: sanitizeEvidencePath(event.evidence.path),
+        };
         const previous = blocks.at(-1);
         if (previous?.kind === "files") {
-          previous.files.push(event.evidence);
+          previous.files.push(evidence);
           previous.label = fileLabel(previous.files);
           previous.durationMs = gap;
           break;
         }
         blocks.push({
           durationMs: gap,
-          files: [event.evidence],
+          files: [evidence],
           id: `e${event.id}`,
           kind: "files",
-          label: fileLabel([event.evidence]),
+          label: fileLabel([evidence]),
         });
         break;
       }
 
       case "failed":
         blocks.push({
-          code: event.error.code,
-          details: event.error.details ?? null,
+          code: sanitizeEvidenceText(event.error.code),
+          details: event.error.details
+            ? sanitizeEvidenceText(event.error.details)
+            : null,
           id: `e${event.id}`,
           kind: "error",
-          message: event.error.message,
+          message: sanitizeEvidenceText(event.error.message),
           retryable: event.error.retryable,
         });
         break;
@@ -326,11 +403,13 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
 
   if (run?.error && !blocks.some((block) => block.kind === "error")) {
     blocks.push({
-      code: run.error.code,
-      details: run.error.details ?? null,
+      code: sanitizeEvidenceText(run.error.code),
+      details: run.error.details
+        ? sanitizeEvidenceText(run.error.details)
+        : null,
       id: "run-error",
       kind: "error",
-      message: run.error.message,
+      message: sanitizeEvidenceText(run.error.message),
       retryable: run.error.retryable,
     });
   }
@@ -360,15 +439,23 @@ function evidenceBlock(
     (evidence) => evidence.exitCode === 0
   ).length;
   const wall = spanBetween(run.startedAt ?? run.createdAt, run.completedAt);
+  const claim = sanitizeEvidenceText(run.output).trim();
+  const hasAnswer = claim.split("\n").some((line) => {
+    const text = line.trim();
+    return text.length > 0 && !/^Runner (?:omitted|truncated)\b/u.test(text);
+  });
 
   return {
-    claim: run.output.trim(),
+    claim,
+    hasAnswer,
     id,
     kind: "evidence",
     meta: `run ${run.id.slice(0, 8)}`,
     provenance: [
-      agent?.runtime ? `${agent.runtime} · ${agent.model}` : null,
-      agent?.workspace ?? null,
+      agent?.runtime
+        ? `${agent.runtime} · ${sanitizeEvidenceText(agent.model)}`
+        : null,
+      agent?.workspace ? sanitizeEvidencePath(agent.workspace) : null,
       "1 run against the cap",
     ]
       .filter(Boolean)
@@ -385,7 +472,10 @@ function evidenceBlock(
         value: wall === null ? "—" : formatDuration(wall),
       },
     ],
-    touched: run.fileEvidence,
+    touched: run.fileEvidence.map((file) => ({
+      ...file,
+      path: sanitizeEvidencePath(file.path),
+    })),
   };
 }
 
@@ -397,6 +487,16 @@ function expandedLines(source: string): string[] {
     .map((line) => line.trim())
     .filter(Boolean)
     .slice(0, EXPANDED_LINES);
+}
+
+function nonEmptyLineCount(source: string): number {
+  return source.split("\n").filter((line) => line.trim()).length;
+}
+
+function looksLikeMarkdown(source: string): boolean {
+  return /(?:^|\n)\s*(?:#{1,6}\s|[-*+]\s|\d+\.\s|>|```)|(?:\*\*|__|`)[^\n]+(?:\*\*|__|`)/u.test(
+    source
+  );
 }
 
 function stepFor(block: ThreadBlock): Step | null {
@@ -415,27 +515,42 @@ function stepFor(block: ThreadBlock): Step | null {
         duration,
         expanded: [],
         id: block.id,
+        kind: "lifecycle",
         label: block.label,
         tone: block.status === "running" ? "running" : "muted",
       };
     case "command": {
-      // The result, not the invocation: the label already names what ran, so
-      // the detail line is the one place the step can say what came back.
-      // Falls back to the command for a tool that produced no output.
-      const outcome =
-        block.stdout.trim().split("\n", 1)[0] ||
-        block.stderr.trim().split("\n", 1)[0] ||
-        block.command;
+      const stdoutLines = nonEmptyLineCount(block.stdout);
+      const stderrLines = nonEmptyLineCount(block.stderr);
+      const detail =
+        block.exitCode === null
+          ? "Running · waiting for a result"
+          : block.exitCode === 0
+            ? `Succeeded · exit 0 · ${
+                stdoutLines + stderrLines > 0 ? "output captured" : "no output"
+              }`
+            : `Failed · exit ${block.exitCode} · ${
+                stderrLines > 0 ? "error output captured" : "no error output"
+              }`;
       return {
         blockId: block.id,
-        detail: outcome,
+        detail,
         duration,
-        expanded: expandedLines(
-          block.exitCode !== null && block.exitCode !== 0 && block.stderr
-            ? block.stderr
-            : block.stdout || block.stderr
-        ),
+        expanded: [
+          `Command: ${block.command}`,
+          stdoutLines > 0
+            ? `Standard output: ${stdoutLines} ${
+                stdoutLines === 1 ? "line" : "lines"
+              }`
+            : null,
+          stderrLines > 0
+            ? `Error output: ${stderrLines} ${
+                stderrLines === 1 ? "line" : "lines"
+              }`
+            : null,
+        ].filter((line): line is string => line !== null),
         id: block.id,
+        kind: "command",
         label: `Ran ${commandHead(block.command)}`,
         tone: commandExitTone(block.exitCode),
       };
@@ -454,25 +569,23 @@ function stepFor(block: ThreadBlock): Step | null {
               ]
             : paths,
         id: block.id,
+        kind: "file",
         label: block.label,
         tone: "muted",
       };
     }
     case "text": {
-      const lines = block.text
-        .trim()
-        .split("\n")
-        .filter((line) => line.trim());
-      const first = lines[0] ?? "";
+      const lines = nonEmptyLineCount(block.text);
+      const characters = [...block.text.trim()].length;
       return {
         blockId: block.id,
-        // The first line plus how much sits behind it, so a one-word
-        // acknowledgement and a twelve-paragraph survey read differently in
-        // the rail without either being expanded.
-        detail: lines.length > 1 ? `${first} · ${lines.length} lines` : first,
+        detail: `${looksLikeMarkdown(block.text) ? "Markdown report" : "Agent update"} · ${lines} ${
+          lines === 1 ? "line" : "lines"
+        } · ${characters} characters`,
         duration,
-        expanded: lines.slice(0, EXPANDED_LINES),
+        expanded: [],
         id: block.id,
+        kind: "report",
         label: block.live ? "Reporting" : "Reported",
         tone: block.live ? "running" : "muted",
       };
@@ -484,19 +597,30 @@ function stepFor(block: ThreadBlock): Step | null {
         duration: "—",
         expanded: expandedLines(block.details ?? ""),
         id: block.id,
+        kind: "error",
         label: "Stopped",
         tone: "danger",
       };
-    case "evidence":
+    case "evidence": {
+      const files =
+        block.stats.find((stat) => stat.label === "Files")?.value ?? "0";
+      const exited =
+        block.stats.find((stat) => stat.label === "Exited 0")?.value ?? "0";
+      const wallClock =
+        block.stats.find((stat) => stat.label === "Wall clock")?.value ?? "—";
       return {
         blockId: block.id,
-        detail: "receipt written",
-        duration: "—",
+        detail: `Receipt · ${exited} commands succeeded · ${
+          files === "0" ? "no file changes" : `${files} file changes`
+        }`,
+        duration: wallClock,
         expanded: block.stats.map((stat) => `${stat.label}: ${stat.value}`),
         id: block.id,
+        kind: "receipt",
         label: "Closed",
         tone: "success",
       };
+    }
     default:
       return null;
   }
@@ -538,7 +662,12 @@ export function projectRun(input: ProjectInput): RunProjection {
     .map(stepFor)
     .filter((step): step is Step => step !== null);
 
-  return { blocks, nowDoing: describeNow(blocks, input.run), steps };
+  return {
+    activity: liveActivity(input.events, input.run),
+    blocks,
+    nowDoing: describeNow(blocks, input.run),
+    steps,
+  };
 }
 
 export { commandHead, commandSummary };
