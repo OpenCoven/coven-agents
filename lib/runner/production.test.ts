@@ -354,9 +354,6 @@ test("Daytona diagnostics use the exact precomputed name and bounded operations"
     output: "coven-agents",
   });
   assert.deepEqual(createParameters, {
-    autoArchiveInterval: 0,
-    autoDeleteInterval: 0,
-    autoStopInterval: 0,
     ephemeral: true,
     name: "coven-diagnostic-precomputed",
     networkBlockAll: true,
@@ -416,9 +413,6 @@ test("Daytona diagnostics bound create when the adapter ignores its timeout", as
   assert.equal(deadline.nowMilliseconds(), 45_000);
   assert.deepEqual(createOptions, { timeout: 45 });
   assert.deepEqual(createParameters, {
-    autoArchiveInterval: 0,
-    autoDeleteInterval: 0,
-    autoStopInterval: 0,
     ephemeral: true,
     name: "coven-diagnostic-create-timeout",
     networkBlockAll: true,
