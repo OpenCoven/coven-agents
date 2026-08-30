@@ -8,13 +8,17 @@ import type {
   RunEvent,
   RunSnapshot,
 } from "@opencoven/agent-contracts";
+import {
+  sanitizeEvidencePath,
+  sanitizeEvidenceText,
+} from "@opencoven/agent-contracts";
 import { MoreHorizontal, Search } from "lucide-react";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { BrandMark } from "@/components/brand/brand-mark";
-import { AgentRail } from "@/components/console/agent-rail";
+import { AGENT_RAIL_WIDTHS, AgentRail } from "@/components/console/agent-rail";
 import { Analytics } from "@/components/console/analytics";
 import {
   CommandPalette,
@@ -28,10 +32,17 @@ import {
   LifecycleBadge,
   Spinner,
 } from "@/components/console/primitives";
-import { ThreadBlockView } from "@/components/console/run-thread";
+import { ReportReader } from "@/components/console/report-reader";
+import {
+  LiveActivityStatus,
+  ThreadBlockView,
+} from "@/components/console/run-thread";
 import { RuntimeInspector } from "@/components/console/runtime-inspector";
 import { Settings } from "@/components/console/settings";
-import { StepsTimeline } from "@/components/console/steps-timeline";
+import {
+  STEPS_TIMELINE_WIDTHS,
+  StepsTimeline,
+} from "@/components/console/steps-timeline";
 import {
   hairline,
   pill,
@@ -60,6 +71,14 @@ import {
 } from "@/lib/credentials/client";
 
 const TICK_MS = 1000;
+const COMPACT_VIEWPORT_MAX = 720;
+const NARROW_VIEWPORT_MAX = 980;
+const MIN_RUN_RECORD_WIDTH = 360;
+const OVERLAY_VIEWPORT_RATIO = 0.86;
+
+function clampWidth(width: number, min: number, max: number) {
+  return Math.min(max, Math.max(Math.min(min, max), width));
+}
 
 /**
  * The word the header pill wears.
@@ -124,6 +143,7 @@ export function RunConsole() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [runs, setRuns] = useState<ConsoleRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [threadOpenRevision, setThreadOpenRevision] = useState(0);
   const [streamingRunId, setStreamingRunId] = useState<string | null>(null);
 
   const [view, setView] = useState<View>("composer");
@@ -133,7 +153,19 @@ export function RunConsole() {
 
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [timelineCollapsed, setTimelineCollapsed] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(0);
+  const [agentRailWidth, setAgentRailWidth] = useState<number>(
+    AGENT_RAIL_WIDTHS.default
+  );
+  const [stepsTimelineWidth, setStepsTimelineWidth] = useState<number>(
+    STEPS_TIMELINE_WIDTHS.default
+  );
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [reportReader, setReportReader] = useState<{
+    content: string;
+    title: string;
+  } | null>(null);
+  const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -152,8 +184,12 @@ export function RunConsole() {
   const [now, setNow] = useState(0);
 
   useEffect(() => {
-    const compactViewport = window.matchMedia("(max-width: 720px)");
-    const narrowViewport = window.matchMedia("(max-width: 980px)");
+    const compactViewport = window.matchMedia(
+      `(max-width: ${COMPACT_VIEWPORT_MAX}px)`
+    );
+    const narrowViewport = window.matchMedia(
+      `(max-width: ${NARROW_VIEWPORT_MAX}px)`
+    );
     const collapseForViewport = () => {
       if (compactViewport.matches) {
         setRailCollapsed(true);
@@ -171,6 +207,64 @@ export function RunConsole() {
       narrowViewport.removeEventListener("change", collapseForViewport);
     };
   }, []);
+
+  useEffect(() => {
+    const syncViewportWidth = () => setViewportWidth(window.innerWidth);
+    syncViewportWidth();
+    window.addEventListener("resize", syncViewportWidth);
+    return () => window.removeEventListener("resize", syncViewportWidth);
+  }, []);
+
+  const stepsOverlay =
+    viewportWidth > 0 && viewportWidth <= NARROW_VIEWPORT_MAX;
+  const navigationOverlay =
+    viewportWidth > 0 && viewportWidth <= COMPACT_VIEWPORT_MAX;
+  const stepsFootprint =
+    selectedRunId === null
+      ? 0
+      : timelineCollapsed
+        ? STEPS_TIMELINE_WIDTHS.collapsed
+        : stepsOverlay
+          ? 0
+          : stepsTimelineWidth;
+  const navigationFootprint = railCollapsed
+    ? AGENT_RAIL_WIDTHS.collapsed
+    : navigationOverlay
+      ? 0
+      : agentRailWidth;
+  const agentRailWidthLimit =
+    viewportWidth === 0
+      ? AGENT_RAIL_WIDTHS.max
+      : Math.min(
+          AGENT_RAIL_WIDTHS.max,
+          navigationOverlay
+            ? Math.floor(viewportWidth * OVERLAY_VIEWPORT_RATIO)
+            : Math.max(0, viewportWidth - stepsFootprint - MIN_RUN_RECORD_WIDTH)
+        );
+  const stepsTimelineWidthLimit =
+    viewportWidth === 0
+      ? STEPS_TIMELINE_WIDTHS.max
+      : Math.min(
+          STEPS_TIMELINE_WIDTHS.max,
+          stepsOverlay
+            ? Math.floor(viewportWidth * OVERLAY_VIEWPORT_RATIO)
+            : Math.max(
+                0,
+                viewportWidth - navigationFootprint - MIN_RUN_RECORD_WIDTH
+              )
+        );
+
+  useEffect(() => {
+    setAgentRailWidth((width) =>
+      clampWidth(width, AGENT_RAIL_WIDTHS.min, agentRailWidthLimit)
+    );
+  }, [agentRailWidthLimit]);
+
+  useEffect(() => {
+    setStepsTimelineWidth((width) =>
+      clampWidth(width, STEPS_TIMELINE_WIDTHS.min, stepsTimelineWidthLimit)
+    );
+  }, [stepsTimelineWidthLimit]);
 
   const threadRef = useRef<HTMLDivElement>(null);
   const runsRef = useRef<ConsoleRun[]>([]);
@@ -200,7 +294,9 @@ export function RunConsole() {
         setRunnerStatus(status);
       }
     }
-    toast.error(error instanceof Error ? error.message : fallback);
+    toast.error(
+      error instanceof Error ? sanitizeEvidenceText(error.message) : fallback
+    );
   }, []);
 
   const reconcileTerminalAgent = useCallback(
@@ -526,7 +622,7 @@ export function RunConsole() {
         setStreamingRunId(null);
         toast.error(
           error instanceof Error
-            ? error.message
+            ? sanitizeEvidenceText(error.message)
             : "Lost the run's event stream."
         );
       }
@@ -605,6 +701,9 @@ export function RunConsole() {
   const running = selectedRun
     ? !isTerminal(selectedRun.snapshot.status)
     : false;
+  const threadRevision = selectedRun
+    ? `${view}:${threadOpenRevision}:${selectedRun.snapshot.id}:${selectedRun.snapshot.status}:${selectedRun.events.length}`
+    : "";
 
   useEffect(() => {
     setNow(Date.now());
@@ -622,11 +721,14 @@ export function RunConsole() {
   // yanking someone back to the bottom mid-read is worse than a stale view.
   const pinnedRef = useRef(true);
   useEffect(() => {
+    if (!threadRevision) {
+      return;
+    }
     const node = threadRef.current;
     if (node && pinnedRef.current) {
       node.scrollTop = node.scrollHeight;
     }
-  }, []);
+  }, [threadRevision]);
 
   /* --------------------------------------------------------------- actions */
 
@@ -726,7 +828,7 @@ export function RunConsole() {
       setAgents((current) => [created, ...current]);
       setSelectedAgentId(created.id);
       setView("composer");
-      toast.success(`${created.name} is ready.`);
+      toast.success(`${sanitizeEvidenceText(created.name)} is ready.`);
     } catch (error) {
       if (isCurrentSession(context.generation, context.signal)) {
         reportRunnerError(error, "Agent creation failed.");
@@ -846,7 +948,7 @@ export function RunConsole() {
       setAgents((current) =>
         current.map((agent) => (agent.id === updated.id ? updated : agent))
       );
-      toast.success(`Renamed to ${updated.name}.`);
+      toast.success(`Renamed to ${sanitizeEvidenceText(updated.name)}.`);
     } catch (error) {
       if (isCurrentSession(context.generation, context.signal)) {
         reportRunnerError(error, "Could not rename the agent.");
@@ -880,7 +982,7 @@ export function RunConsole() {
       setSelectedAgentId(remaining[0]?.id ?? null);
       setSelectedRunId(null);
       setView("composer");
-      toast.success(`${selectedAgent.name} was removed.`);
+      toast.success(`${sanitizeEvidenceText(selectedAgent.name)} was removed.`);
     } catch (error) {
       if (isCurrentSession(context.generation, context.signal)) {
         reportRunnerError(error, "Could not remove the agent.");
@@ -900,18 +1002,20 @@ export function RunConsole() {
     const { snapshot } = selectedRun;
     const receipt = [
       `run ${snapshot.id}`,
-      `agent ${runAgent?.name ?? snapshot.agentId} · ${runAgent?.runtime ?? ""}`,
+      `agent ${sanitizeEvidenceText(runAgent?.name ?? snapshot.agentId)} · ${runAgent?.runtime ?? ""}`,
       `status ${snapshot.status}`,
-      `mission ${snapshot.task}`,
+      `mission ${sanitizeEvidenceText(snapshot.task)}`,
       "",
       ...snapshot.commandEvidence.map(
-        (evidence) => `$ ${evidence.command} → exit ${evidence.exitCode}`
+        (evidence) =>
+          `$ ${sanitizeEvidenceText(evidence.command)} → exit ${evidence.exitCode}`
       ),
       ...snapshot.fileEvidence.map(
-        (evidence) => `${evidence.operation} ${evidence.path}`
+        (evidence) =>
+          `${evidence.operation} ${sanitizeEvidencePath(evidence.path)}`
       ),
       "",
-      snapshot.output,
+      sanitizeEvidenceText(snapshot.output),
     ].join("\n");
 
     try {
@@ -928,6 +1032,8 @@ export function RunConsole() {
   const openComposer = useCallback((agentId: string) => {
     setSelectedAgentId(agentId);
     setSelectedRunId(null);
+    setReportReader(null);
+    setSelectedBlockId(null);
     setView("composer");
   }, []);
 
@@ -941,7 +1047,10 @@ export function RunConsole() {
 
   const openRun = useCallback((runId: string) => {
     setSelectedRunId(runId);
+    setReportReader(null);
+    setSelectedBlockId(null);
     setView("thread");
+    setThreadOpenRevision((revision) => revision + 1);
     pinnedRef.current = true;
     const run = runsRef.current.find((entry) => entry.snapshot.id === runId);
     if (run && !isTerminal(run.snapshot.status)) {
@@ -955,6 +1064,9 @@ export function RunConsole() {
     const onKey = (event: globalThis.KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
+        if (reportReader) {
+          return;
+        }
         setPaletteOpen((value) => !value);
       }
       if (event.key === "Escape") {
@@ -965,7 +1077,7 @@ export function RunConsole() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [reportReader]);
 
   const paletteItems: PaletteItem[] = useMemo(() => {
     const items: PaletteItem[] = [
@@ -1006,9 +1118,9 @@ export function RunConsole() {
     for (const agent of agents) {
       items.push({
         group: "agent",
-        hint: `${agent.runtime} · ${agent.model}`,
+        hint: `${agent.runtime} · ${sanitizeEvidenceText(agent.model)}`,
         id: `agent:${agent.id}`,
-        label: agent.name,
+        label: sanitizeEvidenceText(agent.name),
         run: () => openComposer(agent.id),
       });
     }
@@ -1018,7 +1130,7 @@ export function RunConsole() {
         group: "run",
         hint: run.snapshot.status,
         id: `run:${run.snapshot.id}`,
-        label: run.snapshot.task,
+        label: sanitizeEvidenceText(run.snapshot.task),
         run: () => openRun(run.snapshot.id),
       });
     }
@@ -1034,9 +1146,8 @@ export function RunConsole() {
         agent: runAgent,
         events: selectedRun?.events ?? [],
         run: selectedRun?.snapshot ?? null,
-        who,
       }),
-    [runAgent, selectedRun, who]
+    [runAgent, selectedRun]
   );
 
   const elapsed = (() => {
@@ -1238,13 +1349,21 @@ export function RunConsole() {
               onSelectAgent={openComposer}
               onSelectRun={openRun}
               onToggle={() => setRailCollapsed((value) => !value)}
+              onWidthChange={(width) =>
+                setAgentRailWidth(
+                  clampWidth(width, AGENT_RAIL_WIDTHS.min, agentRailWidthLimit)
+                )
+              }
               runs={runs}
               selectedAgentId={selectedAgentId}
               selectedRunId={selectedRunId}
               who={who}
+              width={agentRailWidth}
+              widthLimit={agentRailWidthLimit}
             />
 
             <section
+              className="oc-console-main-pane"
               style={{
                 background: "var(--bg-base)",
                 display: "flex",
@@ -1267,7 +1386,11 @@ export function RunConsole() {
                     }}
                   >
                     <span style={well(true, 30)}>
-                      {glyphFor(runAgent?.name ?? selectedAgent.name)}
+                      {glyphFor(
+                        sanitizeEvidenceText(
+                          runAgent?.name ?? selectedAgent.name
+                        )
+                      )}
                     </span>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div
@@ -1325,7 +1448,9 @@ export function RunConsole() {
                           </>
                         ) : (
                           <span style={{ ...type_.title, ...truncate }}>
-                            {runAgent?.name ?? selectedAgent.name}
+                            {sanitizeEvidenceText(
+                              runAgent?.name ?? selectedAgent.name
+                            )}
                           </span>
                         )}
                         {selectedRun ? (
@@ -1353,9 +1478,10 @@ export function RunConsole() {
                         }}
                       >
                         {selectedRun
-                          ? `run ${selectedRun.snapshot.id.slice(0, 8)} · ${runAgent?.runtime} · ${runAgent?.model}`
-                          : selectedAgent.description ||
-                            `${selectedAgent.runtime} · ${selectedAgent.model}`}
+                          ? `run ${selectedRun.snapshot.id.slice(0, 8)} · ${runAgent?.runtime} · ${sanitizeEvidenceText(runAgent?.model ?? "")}`
+                          : selectedAgent.description
+                            ? sanitizeEvidenceText(selectedAgent.description)
+                            : `${selectedAgent.runtime} · ${sanitizeEvidenceText(selectedAgent.model)}`}
                       </div>
                     </div>
 
@@ -1584,6 +1710,11 @@ export function RunConsole() {
                               />
                             </div>
                           ))}
+                          {projection.activity ? (
+                            <LiveActivityStatus
+                              activity={projection.activity}
+                            />
+                          ) : null}
                           <div style={{ height: 8 }} />
                         </div>
                       </div>
@@ -1684,15 +1815,47 @@ export function RunConsole() {
                 collapsed={timelineCollapsed}
                 elapsed={elapsed}
                 onJump={(blockId) => {
+                  setSelectedBlockId(blockId);
                   document
                     .getElementById(`block-${blockId}`)
                     ?.scrollIntoView({ behavior: "smooth", block: "center" });
                 }}
                 onOpenAnalytics={() => setView("analytics")}
+                onOpenReport={(blockId) => {
+                  const block = projection.blocks.find(
+                    (candidate) => candidate.id === blockId
+                  );
+                  const content =
+                    block?.kind === "text"
+                      ? block.text
+                      : block?.kind === "evidence"
+                        ? block.claim ||
+                          "## Run summary\n\nNo narrative report was produced for this run."
+                        : null;
+                  if (!content) {
+                    return;
+                  }
+                  setSelectedBlockId(blockId);
+                  setReportReader({
+                    content,
+                    title: sanitizeEvidenceText(selectedRun.snapshot.task),
+                  });
+                }}
                 onToggle={() => setTimelineCollapsed((value) => !value)}
+                onWidthChange={(width) =>
+                  setStepsTimelineWidth(
+                    clampWidth(
+                      width,
+                      STEPS_TIMELINE_WIDTHS.min,
+                      stepsTimelineWidthLimit
+                    )
+                  )
+                }
                 running={running}
-                selectedBlockId={null}
+                selectedBlockId={selectedBlockId}
                 steps={projection.steps}
+                width={stepsTimelineWidth}
+                widthLimit={stepsTimelineWidthLimit}
               />
             ) : null}
 
@@ -1708,7 +1871,7 @@ export function RunConsole() {
         {removing && selectedAgent ? (
           <ConfirmRemove
             busy={busy}
-            name={selectedAgent.name}
+            name={sanitizeEvidenceText(selectedAgent.name)}
             onCancel={() => setRemoving(false)}
             onConfirm={() => {
               removeAgent().catch(() => undefined);
@@ -1720,6 +1883,14 @@ export function RunConsole() {
           <CommandPalette
             items={paletteItems}
             onClose={() => setPaletteOpen(false)}
+          />
+        ) : null}
+
+        {reportReader ? (
+          <ReportReader
+            content={reportReader.content}
+            onClose={() => setReportReader(null)}
+            title={reportReader.title}
           />
         ) : null}
       </div>

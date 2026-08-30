@@ -57,6 +57,7 @@ const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_DISPATCH_LIMIT = 1;
 const DEFAULT_PROVIDER_CONCURRENCY = 4;
 const DISPATCH_LEASE_MS = 60_000;
+export const RUNNER_MAX_RUN_DURATION_MS = 15 * 60_000;
 
 type ReconciliationStore = Pick<
   RunnerStore,
@@ -236,6 +237,7 @@ export type ReconcileAndDispatchDependencies = Readonly<{
   operator: RunnerOperator;
   provider: RunnerReconciliationProvider;
   providerConcurrency?: number;
+  maxRunDurationMs?: number;
   randomToken?: () => string;
   consumeCredentialReservation?: (run: RunnerRunRecord) => Promise<void>;
   openAttemptRedaction?: (
@@ -905,7 +907,8 @@ async function reconcileAttachedProcess(
   run: RunnerRunRecord,
   dependencies: ReconcileAndDispatchDependencies,
   lease: Readonly<{ leaseExpiresAt: Date; leaseToken: string }>,
-  clock: () => Date
+  clock: () => Date,
+  maxRunDurationMs: number
 ): Promise<RecoveryResult> {
   if (
     !run.daytonaAttemptId ||
@@ -1064,25 +1067,53 @@ async function reconcileAttachedProcess(
     }
     ({ authority } = appended);
 
-    if (snapshot.status === "running" || !snapshot.logsSettled) {
+    const completedAt = clock();
+    const runWindowExpired =
+      liveRun.startedAt !== null &&
+      completedAt.getTime() - liveRun.startedAt.getTime() >= maxRunDurationMs;
+    const timedOut = snapshot.status === "running" && runWindowExpired;
+    const terminalOutputIncomplete =
+      snapshot.status !== "running" &&
+      !snapshot.logsSettled &&
+      runWindowExpired;
+    if (
+      !timedOut &&
+      !terminalOutputIncomplete &&
+      (snapshot.status === "running" || !snapshot.logsSettled)
+    ) {
       return {
         adopted: true,
         kind: "deferred",
         logEvents: projected.length,
       };
     }
+    const terminalStatus =
+      timedOut || terminalOutputIncomplete || snapshot.status === "failed"
+        ? "failed"
+        : "completed";
     const finalized = await dependencies.store.finalizeRun(
       dependencies.operator,
       {
         commandEvidence: evidence.commandEvidence,
-        completedAt: clock(),
-        error: evidence.error,
+        completedAt,
+        error:
+          timedOut || terminalOutputIncomplete
+            ? {
+                code: timedOut ? "run_timeout" : "run_output_incomplete",
+                details:
+                  "Complete sanitized updates received before shutdown are preserved in this record.",
+                message: timedOut
+                  ? "The runner stopped this run after it reached the execution time limit."
+                  : "The command ended, but its final output record remained incomplete until the execution time limit.",
+                retryable: true,
+              }
+            : evidence.error,
         expectedVersion: authority.expectedVersion,
         fileEvidence: evidence.fileEvidence,
         leaseToken: authority.leaseToken,
         output: evidence.output,
         runId: run.id,
-        status: snapshot.status,
+        status: terminalStatus,
       }
     );
     if (finalized.kind !== "finalized") {
@@ -1150,7 +1181,8 @@ async function reconcileAttachedProcess(
 async function recoverExpiredDispatch(
   run: RunnerRunRecord,
   dependencies: ReconcileAndDispatchDependencies,
-  lease: Readonly<{ leaseExpiresAt: Date; leaseToken: string }>
+  lease: Readonly<{ leaseExpiresAt: Date; leaseToken: string }>,
+  maxRunDurationMs: number
 ): Promise<RecoveryResult> {
   if (
     !run.dispatchLeaseToken ||
@@ -1199,7 +1231,8 @@ async function recoverExpiredDispatch(
       run,
       dependencies,
       lease,
-      dependencies.clock ?? (() => new Date())
+      dependencies.clock ?? (() => new Date()),
+      maxRunDurationMs
     );
   }
 
@@ -1667,6 +1700,12 @@ export async function reconcileAndDispatch(
   );
   const clock = dependencies.clock ?? (() => new Date());
   const randomToken = dependencies.randomToken ?? secureToken;
+  const maxRunDurationMs = boundedInteger(
+    dependencies.maxRunDurationMs,
+    RUNNER_MAX_RUN_DURATION_MS,
+    "Maximum run duration",
+    24 * 60 * 60 * 1000
+  );
   const result = {
     adopted: 0,
     deferred: 0,
@@ -1700,7 +1739,8 @@ export async function reconcileAndDispatch(
         return await recoverExpiredDispatch(
           run,
           dependencies,
-          nextLease(clock, randomToken)
+          nextLease(clock, randomToken),
+          maxRunDurationMs
         );
       } catch {
         return { kind: "failed" as const };

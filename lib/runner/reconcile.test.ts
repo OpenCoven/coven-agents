@@ -1385,6 +1385,357 @@ test("a terminal command with an unsettled log tail remains retryable", async ()
   assert.equal(result.terminalized, 0);
 });
 
+test("a terminal command with a persistently unsettled tail releases capacity after the run limit", async () => {
+  const calls: string[] = [];
+  const attached = run({
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+    dispatchState: "running",
+    startedAt: new Date("2026-08-28T14:44:00.000Z"),
+    status: "running",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: attached.version + 1,
+    leaseToken: "adopted-lease",
+    runId: attached.id,
+  } as RunnerDispatchAuthority;
+  const afterEvent = {
+    ...authority,
+    expectedVersion: authority.expectedVersion + 1,
+  } as RunnerDispatchAuthority;
+  const afterTerminal = {
+    ...afterEvent,
+    expectedVersion: afterEvent.expectedVersion + 1,
+  } as RunnerDispatchAuthority;
+  const result = await reconcileAndDispatch({
+    clock: () => new Date("2026-08-28T15:00:00.000Z"),
+    maxRunDurationMs: 15 * 60_000,
+    openAttemptRedaction: async () => "redaction-secret",
+    operator,
+    provider: {
+      resolveSandbox: async () => {
+        calls.push("resolve");
+        return {} as never;
+      },
+      snapshot: async () => {
+        calls.push("snapshot");
+        return {
+          cursor: 21,
+          events: [
+            {
+              at: "2026-08-28T14:55:00.000Z",
+              kind: "message",
+              model: null,
+              text: "Last complete safe update.",
+            },
+          ],
+          exitCode: 0,
+          logsSettled: false,
+          status: "completed",
+          summary: {
+            fileOperations: [],
+            output: "Last complete safe update.",
+            premiumRequests: null,
+            sessionId: null,
+            status: "completed",
+            toolCalls: [],
+          },
+        };
+      },
+      stop: async () => {
+        calls.push("stop");
+        return { kind: "stopped" as const };
+      },
+    },
+    randomToken: () => "adopted-lease",
+    releaseCredentialResources: async () => {
+      calls.push("release-credential");
+    },
+    store: {
+      adoptExpiredDaytonaProcess: async () => {
+        calls.push("adopt");
+        return {
+          authority,
+          kind: "adopted" as const,
+          run: {
+            ...attached,
+            dispatchLeaseToken: authority.leaseToken,
+            version: authority.expectedVersion,
+          },
+        };
+      },
+      appendDispatchEventBatch: async (
+        _operator: unknown,
+        _authority: unknown,
+        batch: unknown
+      ) => {
+        calls.push("append-batch");
+        assert.equal(
+          (batch as { snapshot: { output: string } }).snapshot.output,
+          "Last complete safe update."
+        );
+        return {
+          authority: afterEvent,
+          events: [],
+          kind: "appended" as const,
+          run: {} as never,
+        };
+      },
+      cleanupTerminalLease: async () => {
+        calls.push("cleanup-lease");
+        return { kind: "updated" as const, value: attached };
+      },
+      deleteAttemptRedaction: async () => {
+        calls.push("delete-redaction");
+        return { kind: "deleted" as const };
+      },
+      finalizeRun: async (_operator: unknown, finalization: unknown) => {
+        calls.push("finalize");
+        const input = finalization as {
+          error: { code: string; details: string; retryable: boolean };
+          output: string;
+          status: string;
+        };
+        assert.equal(input.error.code, "run_output_incomplete");
+        assert.equal(input.error.retryable, true);
+        assert.match(input.error.details, /complete sanitized updates/iu);
+        assert.equal(input.output, "Last complete safe update.");
+        assert.equal(input.status, "failed");
+        return {
+          kind: "finalized" as const,
+          prunedRunIds: [],
+          run: {
+            ...attached,
+            completedAt: new Date("2026-08-28T15:00:00.000Z"),
+            dispatchState: "terminal",
+            error: input.error,
+            output: input.output,
+            status: "failed",
+            version: afterTerminal.expectedVersion,
+          },
+        };
+      },
+      readAttemptRedaction: async () => ({
+        kind: "found" as const,
+        value: {
+          aadVersion: 1,
+          attemptId,
+          ciphertext: "ciphertext",
+          createdAt: new Date(),
+          iv: "iv",
+          kekVersion: "v1",
+          runId: attached.id,
+          wrappedKey: "wrapped",
+        },
+      }),
+      releaseTerminalDaytonaAttempt: async () => {
+        calls.push("release-attempt");
+        return { authority: afterTerminal, kind: "released" as const };
+      },
+      requeueExpiredDispatch: async () => ({ kind: "not_live" as const }),
+      scanExpiredDispatchLeases: async () => {
+        calls.push("scan");
+        return [attached];
+      },
+    } as never,
+  });
+
+  assert.deepEqual(calls, [
+    "scan",
+    "adopt",
+    "resolve",
+    "snapshot",
+    "append-batch",
+    "finalize",
+    "stop",
+    "release-credential",
+    "delete-redaction",
+    "release-attempt",
+    "cleanup-lease",
+  ]);
+  assert.equal(result.terminalized, 1);
+  assert.equal(result.logEvents, 1);
+});
+
+test("the watchdog captures available evidence and terminalizes an overlong running command", async () => {
+  const calls: string[] = [];
+  const attached = run({
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+    dispatchState: "running",
+    startedAt: new Date("2026-08-28T14:44:00.000Z"),
+    status: "running",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: attached.version + 1,
+    leaseToken: "adopted-lease",
+    runId: attached.id,
+  } as RunnerDispatchAuthority;
+  const afterEvent = {
+    ...authority,
+    expectedVersion: authority.expectedVersion + 1,
+  } as RunnerDispatchAuthority;
+  const afterTerminal = {
+    ...afterEvent,
+    expectedVersion: afterEvent.expectedVersion + 1,
+  } as RunnerDispatchAuthority;
+  const result = await reconcileAndDispatch({
+    clock: () => new Date("2026-08-28T15:00:00.000Z"),
+    maxRunDurationMs: 15 * 60_000,
+    openAttemptRedaction: async () => "redaction-secret",
+    operator,
+    provider: {
+      resolveSandbox: async () => {
+        calls.push("resolve");
+        return {} as never;
+      },
+      snapshot: async () => {
+        calls.push("snapshot");
+        return {
+          cursor: 21,
+          events: [
+            {
+              at: "2026-08-28T14:55:00.000Z",
+              kind: "message",
+              model: null,
+              text: "Last complete safe update.",
+            },
+          ],
+          exitCode: null,
+          logsSettled: false,
+          status: "running",
+          summary: {
+            fileOperations: [],
+            output: "Last complete safe update.",
+            premiumRequests: null,
+            sessionId: null,
+            status: "failed",
+            toolCalls: [],
+          },
+        };
+      },
+      stop: async () => {
+        calls.push("stop");
+        return { kind: "stopped" as const };
+      },
+    },
+    randomToken: () => "adopted-lease",
+    releaseCredentialResources: async () => {
+      calls.push("release-credential");
+    },
+    store: {
+      adoptExpiredDaytonaProcess: async () => {
+        calls.push("adopt");
+        return {
+          authority,
+          kind: "adopted" as const,
+          run: {
+            ...attached,
+            dispatchLeaseToken: authority.leaseToken,
+            version: authority.expectedVersion,
+          },
+        };
+      },
+      appendDispatchEventBatch: async (
+        _operator: unknown,
+        _authority: unknown,
+        batch: unknown
+      ) => {
+        calls.push("append-batch");
+        assert.equal(
+          (batch as { snapshot: { output: string } }).snapshot.output,
+          "Last complete safe update."
+        );
+        return {
+          authority: afterEvent,
+          events: [],
+          kind: "appended" as const,
+          run: {} as never,
+        };
+      },
+      cleanupTerminalLease: async () => {
+        calls.push("cleanup-lease");
+        return { kind: "updated" as const, value: attached };
+      },
+      deleteAttemptRedaction: async () => {
+        calls.push("delete-redaction");
+        return { kind: "deleted" as const };
+      },
+      finalizeRun: async (_operator: unknown, finalization: unknown) => {
+        calls.push("finalize");
+        const input = finalization as {
+          completedAt: Date;
+          error: { code: string; retryable: boolean };
+          output: string;
+          status: string;
+        };
+        assert.equal(
+          input.completedAt.toISOString(),
+          "2026-08-28T15:00:00.000Z"
+        );
+        assert.equal(input.error.code, "run_timeout");
+        assert.equal(input.error.retryable, true);
+        assert.equal(input.output, "Last complete safe update.");
+        assert.equal(input.status, "failed");
+        return {
+          kind: "finalized" as const,
+          prunedRunIds: [],
+          run: {
+            ...attached,
+            completedAt: input.completedAt,
+            dispatchState: "terminal",
+            error: input.error,
+            output: input.output,
+            status: "failed",
+            version: afterTerminal.expectedVersion,
+          },
+        };
+      },
+      readAttemptRedaction: async () => ({
+        kind: "found" as const,
+        value: {
+          aadVersion: 1,
+          attemptId,
+          ciphertext: "ciphertext",
+          createdAt: new Date(),
+          iv: "iv",
+          kekVersion: "v1",
+          runId: attached.id,
+          wrappedKey: "wrapped",
+        },
+      }),
+      releaseTerminalDaytonaAttempt: async () => {
+        calls.push("release-attempt");
+        return { authority: afterTerminal, kind: "released" as const };
+      },
+      requeueExpiredDispatch: async () => ({ kind: "not_live" as const }),
+      scanExpiredDispatchLeases: async () => {
+        calls.push("scan");
+        return [attached];
+      },
+    } as never,
+  });
+
+  assert.deepEqual(calls, [
+    "scan",
+    "adopt",
+    "resolve",
+    "snapshot",
+    "append-batch",
+    "finalize",
+    "stop",
+    "release-credential",
+    "delete-redaction",
+    "release-attempt",
+    "cleanup-lease",
+  ]);
+  assert.equal(result.terminalized, 1);
+  assert.equal(result.logEvents, 1);
+  assert.equal(result.failures, 0);
+});
+
 test("cancellation records durable intent before exact remote stop", async () => {
   const calls: string[] = [];
   const active = run({

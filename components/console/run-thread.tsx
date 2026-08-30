@@ -6,7 +6,7 @@ import type { FileEvidence } from "@opencoven/agent-contracts";
 import { useState } from "react";
 import { BrandMark } from "@/components/brand/brand-mark";
 import { MarkdownPreview } from "@/components/console/markdown-preview";
-import { Btn, Caret, Eyebrow } from "@/components/console/primitives";
+import { Btn, Caret, Eyebrow, Spinner } from "@/components/console/primitives";
 import {
   card,
   dot,
@@ -17,7 +17,7 @@ import {
   type as type_,
   well,
 } from "@/components/console/styles";
-import type { ThreadBlock } from "@/lib/console/blocks";
+import type { LiveActivity, ThreadBlock } from "@/lib/console/blocks";
 import { formatDuration, splitPath } from "@/lib/console/format";
 
 /**
@@ -108,8 +108,6 @@ function MissionBlock({
         }}
       >
         <Eyebrow style={{ letterSpacing: "0.14em" }}>Mission</Eyebrow>
-        <div style={{ flex: 1 }} />
-        <span style={type_.meta}>{block.who}</span>
       </div>
       <p
         style={{
@@ -195,6 +193,45 @@ function LifecycleBlock({
       {block.detail ? <span style={type_.meta}>{block.detail}</span> : null}
       <Duration ms={block.durationMs} />
     </div>
+  );
+}
+
+export function LiveActivityStatus({ activity }: { activity: LiveActivity }) {
+  return (
+    <section
+      aria-label="Live run activity"
+      aria-live="off"
+      className="oc-live-activity"
+    >
+      <div className="oc-live-activity__head">
+        <Spinner />
+        <Eyebrow>Live activity</Eyebrow>
+        <div style={{ flex: 1 }} />
+        <time dateTime={activity.lastSignalAt} style={type_.meta}>
+          signal {activity.lastSignalAt.slice(11, 19)} UTC
+        </time>
+        <span style={pill("success")}>Credential-safe stream</span>
+      </div>
+      <div className="oc-live-activity__body">
+        <div>
+          <div className="oc-live-activity__title">{activity.headline}</div>
+          <p className="oc-live-activity__detail">{activity.detail}</p>
+        </div>
+        <div className="oc-live-activity__metrics">
+          {activity.metrics.map((metric) => (
+            <div className="oc-live-activity__metric" key={metric.label}>
+              <span style={type_.eyebrow}>{metric.label}</span>
+              <span style={{ ...type_.label, ...tabular }}>{metric.value}</span>
+            </div>
+          ))}
+        </div>
+        <p className="oc-live-activity__safety">
+          Credentials, authorization headers, cookies, environment dumps,
+          private keys, terminal control sequences, and unsafe markup are
+          removed before display.
+        </p>
+      </div>
+    </section>
   );
 }
 
@@ -554,9 +591,24 @@ function EvidenceBlock({
   onCopyReceipt: () => void;
   onFollowUp: () => void;
 }) {
+  const commandCount =
+    block.stats.find((stat) => stat.label === "Commands")?.value ?? "0";
+  const fileCount =
+    block.stats.find((stat) => stat.label === "Files")?.value ?? "0";
+  const wallClock =
+    block.stats.find((stat) => stat.label === "Wall clock")?.value ?? "—";
+  const compact =
+    block.hasAnswer &&
+    commandCount === "0" &&
+    fileCount === "0" &&
+    block.touched.length === 0 &&
+    !block.claim.includes("\n") &&
+    block.claim.trim().length <= 160;
+
   return (
     <div
-      className="oc-lift"
+      className="oc-evidence-card oc-lift"
+      data-layout={compact ? "compact" : "report"}
       style={{
         background: "var(--bg-elevated)",
         border:
@@ -566,6 +618,7 @@ function EvidenceBlock({
       }}
     >
       <div
+        className="oc-evidence-card__header"
         style={{
           alignItems: "center",
           background:
@@ -583,7 +636,7 @@ function EvidenceBlock({
             font: "600 12px/1 var(--font-ui)",
           }}
         >
-          Evidence
+          {compact ? "Run complete" : "Evidence"}
         </span>
         <span style={type_.meta}>{block.meta}</span>
         <div style={{ flex: 1 }} />
@@ -603,55 +656,45 @@ function EvidenceBlock({
         </Btn>
       </div>
 
-      <div
-        style={{
-          borderBottom: hairline,
-          display: "grid",
-          gridTemplateColumns: "repeat(4, 1fr)",
-        }}
-      >
-        {block.stats.map((stat, index) => (
-          <div
-            key={stat.label}
-            style={{
-              borderLeft: index === 0 ? undefined : hairline,
-              display: "flex",
-              flexDirection: "column",
-              gap: 5,
-              padding: "11px 14px",
-            }}
-          >
-            <Eyebrow style={{ color: "var(--text-muted)" }}>
-              {stat.label}
-            </Eyebrow>
-            <span
-              style={{
-                color: "var(--text-primary)",
-                font: "500 14px/1.2 var(--font-ui)",
-                ...tabular,
-              }}
-            >
-              {stat.value}
-            </span>
-          </div>
-        ))}
-      </div>
+      {compact ? null : (
+        <div className="oc-evidence-stats">
+          {block.stats.map((stat) => (
+            <div className="oc-evidence-stat" key={stat.label}>
+              <Eyebrow style={{ color: "var(--text-muted)" }}>
+                {stat.label}
+              </Eyebrow>
+              <span
+                style={{
+                  color: "var(--text-primary)",
+                  font: "500 14px/1.2 var(--font-ui)",
+                  ...tabular,
+                }}
+              >
+                {stat.value}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
 
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: 10,
-          padding: "13px 14px",
-        }}
-      >
+      <div className="oc-evidence-card__body">
         {block.claim ? (
           <div className="oc-evidence-report">
             <div className="oc-evidence-report__kicker">
-              <span className="oc-evidence-report__label">Claim</span>
-              <span className="oc-evidence-report__meta">Run report</span>
+              <span className="oc-evidence-report__label">Result</span>
+              <span className="oc-evidence-report__meta">
+                {compact ? "Final answer" : "Run report"}
+              </span>
             </div>
             <MarkdownPreview variant="report">{block.claim}</MarkdownPreview>
+          </div>
+        ) : null}
+
+        {compact ? (
+          <div className="oc-evidence-summary">
+            <span>Direct response</span>
+            <span>Completed in {wallClock}</span>
+            <span>No file changes reported</span>
           </div>
         ) : null}
 
@@ -663,21 +706,13 @@ function EvidenceBlock({
           </div>
         ) : null}
 
-        <div
-          style={{
-            alignItems: "center",
-            borderTop: hairline,
-            display: "flex",
-            gap: 8,
-            paddingTop: 8,
-          }}
-        >
+        <div className="oc-evidence-card__footer">
           <span style={{ ...type_.meta, lineHeight: 1.6 }}>
             {block.provenance}
           </span>
           <div style={{ flex: 1 }} />
           <Btn onClick={onFollowUp} variant="secondary">
-            Start a follow-up run
+            Ask a follow-up
           </Btn>
         </div>
       </div>
