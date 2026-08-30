@@ -192,6 +192,32 @@ test("the console projection defensively redacts every displayed runner string",
   assert.match(displayed, /\[REDACTED\]/);
 });
 
+test("the console projection redacts structured credential fields", () => {
+  const secrets = [
+    "projected-camel-secret",
+    "projected-hyphen-secret",
+    "projected-yaml-secret",
+  ];
+  const { blocks } = project([
+    {
+      at: "2026-08-25T12:00:01.000Z",
+      id: 1,
+      output: [
+        `{"apiKey":"${secrets[0]}"}`,
+        `{"x-api-key":"${secrets[1]}"}`,
+        `  password: ${secrets[2]}`,
+      ].join("\n"),
+      type: "output",
+    },
+  ]);
+  const displayed = JSON.stringify(blocks);
+
+  for (const secret of secrets) {
+    assert.equal(displayed.includes(secret), false);
+  }
+  assert.match(displayed, /\[REDACTED\]/);
+});
+
 test("the console projection sanitizes arbitrary agent metadata", () => {
   const token = ["ghp", "_", "A".repeat(24)].join("");
   const projection = projectRun({

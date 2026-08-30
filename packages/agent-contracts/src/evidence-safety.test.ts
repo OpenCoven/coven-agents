@@ -73,6 +73,22 @@ test("redacts an isolated sensitive environment assignment", () => {
   assert.equal(sanitized, "OPENAI_API_KEY=[REDACTED]");
 });
 
+test("redacts camel-case, hyphenated, and indented structured credential fields", () => {
+  const secrets = ["camel-case-secret", "hyphenated-secret", "indented-secret"];
+  const sanitized = sanitizeEvidenceText(
+    [
+      `{"apiKey":"${secrets[0]}"}`,
+      `{"x-api-key":"${secrets[1]}"}`,
+      `  password: ${secrets[2]}`,
+    ].join("\n")
+  );
+
+  for (const secret of secrets) {
+    assert.equal(sanitized.includes(secret), false);
+  }
+  assert.equal(sanitized.match(/\[REDACTED\]/gu)?.length, secrets.length);
+});
+
 test("redacts request and response session cookies from runner evidence", () => {
   const cookie = "session-id-private-value";
   const sanitized = sanitizeEvidenceText(

@@ -8,7 +8,7 @@ const environmentAssignment = new RegExp(
   "gu"
 );
 const objectProperty = new RegExp(
-  String.raw`((?:^|[,{]\s*)(["']?)([A-Za-z_][A-Za-z0-9_]*)\2\s*:\s*)${secretValue}`,
+  String.raw`((?:^[\t ]*|[,{]\s*)(["']?)([A-Za-z_][A-Za-z0-9_-]*)\2\s*:\s*)${secretValue}`,
   "gmu"
 );
 const secretCliOption =
@@ -58,7 +58,10 @@ const providerKeyPatterns = [
 ];
 
 function isSensitiveKey(value: string): boolean {
-  const key = value.toUpperCase();
+  const key = value
+    .replace(/([a-z0-9])([A-Z])/gu, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/gu, "_")
+    .toUpperCase();
   return [
     "TOKEN",
     "SECRET",
