@@ -81,6 +81,8 @@ test("redacts camel-case, hyphenated, and indented structured credential fields"
     "list-secret",
     "hunter two",
     "inline yaml secret",
+    "capital acronym secret",
+    "lowercase compact secret",
   ];
   const sanitized = sanitizeEvidenceText(
     [
@@ -90,6 +92,8 @@ test("redacts camel-case, hyphenated, and indented structured credential fields"
       `  - password: ${secrets[3]}`,
       `  password: ${secrets[4]}`,
       `{api.key: ${secrets[5]}}`,
+      `{"APIKey":"${secrets[6]}"}`,
+      `{"apikey":"${secrets[7]}"}`,
     ].join("\n")
   );
 

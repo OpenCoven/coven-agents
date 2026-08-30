@@ -65,6 +65,7 @@ function isSensitiveKey(value: string): boolean {
     .replace(/([a-z0-9])([A-Z])/gu, "$1_$2")
     .replace(/[^A-Za-z0-9]+/gu, "_")
     .toUpperCase();
+  const compactKey = key.replaceAll("_", "");
   return [
     "TOKEN",
     "SECRET",
@@ -76,7 +77,11 @@ function isSensitiveKey(value: string): boolean {
     "PRIVATE_KEY",
     "CREDENTIAL",
     "AUTHORIZATION",
-  ].some((fragment) => key.includes(fragment));
+  ].some(
+    (fragment) =>
+      key.includes(fragment) ||
+      compactKey.includes(fragment.replaceAll("_", ""))
+  );
 }
 
 function redactSensitiveAssignments(value: string): string {

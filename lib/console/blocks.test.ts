@@ -125,7 +125,7 @@ test("a quiet running run explains that it is waiting for sanitized output", () 
   assert.equal(activity?.headline, "Runner active");
   assert.equal(
     activity?.detail,
-    "The isolated session is running. Waiting for the first sanitized agent update."
+    "The runner is checking the isolated process while waiting for the first sanitized update. It will stop and report a run that reaches the execution limit."
   );
   assert.equal(activity?.lastSignalAt, snapshot().startedAt);
 });
@@ -200,6 +200,8 @@ test("the console projection redacts structured credential fields", () => {
     "projected-list-secret",
     "projected multi word secret",
     "projected inline yaml secret",
+    "projected capital acronym secret",
+    "projected lowercase compact secret",
   ];
   const { blocks } = project([
     {
@@ -212,6 +214,8 @@ test("the console projection redacts structured credential fields", () => {
         `  - password: ${secrets[3]}`,
         `  password: ${secrets[4]}`,
         `{api.key: ${secrets[5]}}`,
+        `{"APIKey":"${secrets[6]}"}`,
+        `{"apikey":"${secrets[7]}"}`,
       ].join("\n"),
       type: "output",
     },
@@ -456,6 +460,40 @@ test("a failed run reports the runner's error rather than inventing one", () => 
   const failure = blocks.find((block) => block.kind === "error");
   assert.equal(failure?.kind === "error" ? failure.code : "", "command_failed");
   assert.equal(steps.at(-1)?.tone, "danger");
+});
+
+test("a watchdog timeout remains explicit and retryable in the run record", () => {
+  const timeoutError = {
+    code: "run_timeout",
+    details:
+      "Complete sanitized updates received before shutdown are preserved in this record.",
+    message:
+      "The runner stopped this run after it reached the execution time limit.",
+    retryable: true,
+  };
+  const { blocks } = project(
+    [
+      {
+        at: "2026-08-25T12:15:00.000Z",
+        error: timeoutError,
+        id: 1,
+        type: "failed",
+      },
+    ],
+    snapshot({
+      completedAt: "2026-08-25T12:15:00.000Z",
+      error: timeoutError,
+      status: "failed",
+    })
+  );
+  const failure = blocks.find((block) => block.kind === "error");
+
+  assert.equal(failure?.kind === "error" ? failure.code : "", "run_timeout");
+  assert.equal(failure?.kind === "error" && failure.retryable, true);
+  assert.match(
+    failure?.kind === "error" ? failure.message : "",
+    /execution time limit/u
+  );
 });
 
 test("the running strip names the command in flight", () => {

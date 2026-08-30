@@ -220,7 +220,7 @@ function liveActivity(
       "Waiting for an available execution slot. No workspace command has started.";
   } else if (!latest) {
     detail =
-      "The isolated session is running. Waiting for the first sanitized agent update.";
+      "The runner is checking the isolated process while waiting for the first sanitized update. It will stop and report a run that reaches the execution limit.";
   } else if (latest.type === "command") {
     detail =
       latest.evidence.exitCode === null
