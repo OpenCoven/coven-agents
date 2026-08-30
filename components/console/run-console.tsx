@@ -153,16 +153,23 @@ export function RunConsole() {
 
   useEffect(() => {
     const compactViewport = window.matchMedia("(max-width: 720px)");
+    const narrowViewport = window.matchMedia("(max-width: 980px)");
     const collapseForViewport = () => {
       if (compactViewport.matches) {
         setRailCollapsed(true);
+      }
+      if (narrowViewport.matches) {
+        setTimelineCollapsed(true);
       }
     };
 
     collapseForViewport();
     compactViewport.addEventListener("change", collapseForViewport);
-    return () =>
+    narrowViewport.addEventListener("change", collapseForViewport);
+    return () => {
       compactViewport.removeEventListener("change", collapseForViewport);
+      narrowViewport.removeEventListener("change", collapseForViewport);
+    };
   }, []);
 
   const threadRef = useRef<HTMLDivElement>(null);

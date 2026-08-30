@@ -584,6 +584,26 @@ test.describe("Run console", () => {
     await expect(
       page.getByRole("button", { exact: true, name: "expand" })
     ).toBeVisible();
+
+    await page.setViewportSize({ height: 844, width: 390 });
+    await expect(
+      page.getByRole("button", { name: "Expand the steps panel" })
+    ).toBeVisible();
+    await expect
+      .poll(() =>
+        evidenceReport
+          .locator(".oc-markdown-report")
+          .evaluate((element) => element.getBoundingClientRect().width)
+      )
+      .toBeGreaterThan(150);
+    await expect
+      .poll(() =>
+        evidenceReport
+          .getByRole("heading", { level: 2, name: "Verification" })
+          .evaluate((element) => element.getBoundingClientRect().height)
+      )
+      .toBeLessThan(200);
+
     expect(applicationRequests).toEqual([
       "GET /api/agents",
       `GET /api/agents/${AGENT_ID}/runs`,
