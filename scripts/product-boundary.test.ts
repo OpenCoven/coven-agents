@@ -442,7 +442,8 @@ test("the cutover attestation separates repository and production evidence", () 
   for (const heading of [
     "# Daytona Cutover Attestation and Runbook",
     "## Verified repository evidence",
-    "## Production approval-gated evidence",
+    "## Production cutover and retirement evidence",
+    "## Production evidence and remaining release exercises",
     "## Resource inventory and revocation",
     "## Rollback",
     "## Observation window",
@@ -451,7 +452,11 @@ test("the cutover attestation separates repository and production evidence", () 
     assert.match(attestation, new RegExp(heading));
   }
 
-  assert.match(attestation, /production.*pending/is);
+  assert.match(attestation, /superseded resource deletion\s+are complete/is);
+  assert.match(
+    attestation,
+    /full subscriber lifecycle exercise remains\s+approval-gated/is
+  );
   assert.match(attestation, /PR #128/);
   assert.match(attestation, /PR #133/);
   assert.match(attestation, /PR #134/);
