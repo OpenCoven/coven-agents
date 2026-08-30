@@ -22,7 +22,6 @@ import {
 import { Composer } from "@/components/console/composer";
 import { CreateAgent } from "@/components/console/create-agent";
 import {
-  AccountAvatar,
   Btn,
   Eyebrow,
   LifecycleBadge,
@@ -1198,20 +1197,6 @@ export function RunConsole() {
             type="button"
           >
             {connectionLabel}
-          </button>
-          <button
-            aria-label="Account and settings"
-            className="oc-tint"
-            onClick={() => setView("settings")}
-            style={{
-              ...well(false, 26),
-              borderRadius: "var(--radius-control)",
-              cursor: "pointer",
-            }}
-            title={who}
-            type="button"
-          >
-            <AccountAvatar size={24} src={avatarSrc} />
           </button>
         </div>
       </header>

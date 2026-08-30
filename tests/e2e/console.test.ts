@@ -339,6 +339,16 @@ test.describe("Run console", () => {
     page,
   }) => {
     await page.goto("/agents");
+    await expect(
+      page
+        .locator(".oc-console-header")
+        .getByRole("button", { name: "Account and settings" })
+    ).toHaveCount(0);
+    await expect(
+      page
+        .locator(".oc-agent-rail")
+        .getByRole("button", { name: "Account and settings" })
+    ).toHaveCount(1);
     await page.getByRole("button", { name: "Account and settings" }).click();
 
     await expect(
@@ -1121,8 +1131,8 @@ test.describe("Run console", () => {
     await notifySessionChange(page);
     await sessionRefresh;
     await expect(
-      page.getByRole("button", { name: "signed out" })
-    ).toBeVisible();
+      page.getByRole("button", { name: "Account and settings" })
+    ).toHaveAttribute("title", "not signed in");
 
     await releaseAgents();
     await expect(page.getByText(retainedAgent.name)).toHaveCount(0);
@@ -1418,7 +1428,13 @@ test.describe("Run console", () => {
     });
     await notifySessionChange(page);
     await sessionRefresh;
-    await expect(page.getByTitle("second@example.invalid")).toBeVisible();
+    await page.getByRole("button", { exact: true, name: "Account" }).click();
+    await expect(
+      page.getByText("second@example.invalid", { exact: true })
+    ).toBeVisible();
+    await page
+      .getByRole("button", { exact: true, name: "Harness credentials" })
+      .click();
     await releaseList();
     await releaseSave();
     await page.waitForTimeout(100);
@@ -1568,7 +1584,10 @@ test.describe("Run console", () => {
     });
     await notifySessionChange(page);
     await sessionRefresh;
-    await expect(page.getByTitle("second@example.invalid")).toBeVisible();
+    await page.getByRole("button", { exact: true, name: "Account" }).click();
+    await expect(
+      page.getByText("second@example.invalid", { exact: true })
+    ).toBeVisible();
 
     await releaseWipe();
     await page.waitForTimeout(100);
