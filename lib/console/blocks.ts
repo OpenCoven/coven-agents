@@ -6,6 +6,10 @@ import type {
   RunSnapshot,
   RunStatus,
 } from "@opencoven/agent-contracts";
+import {
+  sanitizeEvidencePath,
+  sanitizeEvidenceText,
+} from "@opencoven/agent-contracts";
 import { formatDuration, spanBetween } from "@/lib/console/format";
 
 /**
@@ -27,7 +31,6 @@ export type ThreadBlock =
       id: string;
       kind: "mission";
       text: string;
-      who: string;
     }
   | {
       detail: string | null;
@@ -71,6 +74,7 @@ export type ThreadBlock =
     }
   | {
       claim: string;
+      hasAnswer: boolean;
       id: string;
       kind: "evidence";
       meta: string;
@@ -96,18 +100,25 @@ export type Step = {
 };
 
 export type RunProjection = {
+  activity: LiveActivity | null;
   blocks: ThreadBlock[];
   /** What the agent is doing right now, for the running strip. */
   nowDoing: string;
   steps: Step[];
 };
 
+export type LiveActivity = {
+  detail: string;
+  headline: string;
+  lastSignalAt: string;
+  metrics: { label: string; value: string }[];
+  phase: "queued" | "running";
+};
+
 type ProjectInput = {
   agent: AgentDefinition | null;
   events: RunEvent[];
   run: RunSnapshot | null;
-  /** The account the mission is attributed to. */
-  who: string;
 };
 
 const TERMINAL_STATUSES: readonly RunStatus[] = [
@@ -183,6 +194,63 @@ function commandSummary(evidence: CommandEvidence): string {
   return lines.at(-1) ?? "";
 }
 
+function liveActivity(
+  events: readonly RunEvent[],
+  run: RunSnapshot | null
+): LiveActivity | null {
+  if (!run || (run.status !== "queued" && run.status !== "running")) {
+    return null;
+  }
+
+  const publicEvents = events.filter(
+    (event) =>
+      event.type === "output" ||
+      event.type === "command" ||
+      event.type === "file"
+  );
+  const commands = publicEvents.filter(
+    (event) => event.type === "command"
+  ).length;
+  const files = publicEvents.filter((event) => event.type === "file").length;
+  const latest = publicEvents.at(-1);
+  let detail: string;
+
+  if (run.status === "queued") {
+    detail =
+      "Waiting for an available execution slot. No workspace command has started.";
+  } else if (!latest) {
+    detail =
+      "The isolated session is running. Waiting for the first sanitized agent update.";
+  } else if (latest.type === "command") {
+    detail =
+      latest.evidence.exitCode === null
+        ? "A command is running in the isolated workspace."
+        : "A command result was received. The agent is continuing.";
+  } else if (latest.type === "file") {
+    detail = "A file change was reported. The agent is continuing.";
+  } else {
+    detail = "A sanitized agent update was received. The agent is continuing.";
+  }
+
+  const lastSignalAt =
+    [...events].reverse().find((event) => event.at)?.at ??
+    run.startedAt ??
+    run.createdAt;
+
+  return {
+    detail,
+    headline:
+      run.status === "queued" ? "Queued for execution" : "Runner active",
+    lastSignalAt,
+    metrics: [
+      { label: "Safe updates", value: String(publicEvents.length) },
+      { label: "Commands", value: String(commands) },
+      { label: "Files", value: String(files) },
+    ],
+    phase: run.status,
+  };
+}
+
 /**
  * Groups the stream into blocks.
  *
@@ -193,19 +261,20 @@ function commandSummary(evidence: CommandEvidence): string {
  */
 function collectBlocks(input: ProjectInput): ThreadBlock[] {
   const blocks: ThreadBlock[] = [];
-  const { agent, events, run, who } = input;
+  const { agent, events, run } = input;
 
   if (run?.task) {
     blocks.push({
       context: [
-        agent?.name ?? "agent",
-        agent?.runtime ? `${agent.runtime} · ${agent.model}` : "",
-        agent?.workspace ?? "",
+        sanitizeEvidenceText(agent?.name ?? "agent"),
+        agent?.runtime
+          ? `${agent.runtime} · ${sanitizeEvidenceText(agent.model)}`
+          : "",
+        agent?.workspace ? sanitizeEvidencePath(agent.workspace) : "",
       ].filter(Boolean),
       id: "mission",
       kind: "mission",
-      text: run.task,
-      who,
+      text: sanitizeEvidenceText(run.task),
     });
   }
 
@@ -250,7 +319,9 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
       case "output": {
         const previous = blocks.at(-1);
         if (previous?.kind === "text") {
-          previous.text = `${previous.text}${event.output}`;
+          previous.text = sanitizeEvidenceText(
+            `${previous.text}${event.output}`
+          );
           previous.durationMs = gap;
           break;
         }
@@ -259,49 +330,55 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
           id: `e${event.id}`,
           kind: "text",
           live: false,
-          text: event.output,
+          text: sanitizeEvidenceText(event.output),
         });
         break;
       }
 
       case "command":
         blocks.push({
-          command: event.evidence.command,
+          command: sanitizeEvidenceText(event.evidence.command),
           durationMs: commandDuration(event.evidence) ?? gap,
           exitCode: event.evidence.exitCode,
           id: `e${event.id}`,
           kind: "command",
           live: event.evidence.exitCode === null,
-          stderr: event.evidence.stderr,
-          stdout: event.evidence.stdout,
+          stderr: sanitizeEvidenceText(event.evidence.stderr),
+          stdout: sanitizeEvidenceText(event.evidence.stdout),
         });
         break;
 
       case "file": {
+        const evidence = {
+          ...event.evidence,
+          path: sanitizeEvidencePath(event.evidence.path),
+        };
         const previous = blocks.at(-1);
         if (previous?.kind === "files") {
-          previous.files.push(event.evidence);
+          previous.files.push(evidence);
           previous.label = fileLabel(previous.files);
           previous.durationMs = gap;
           break;
         }
         blocks.push({
           durationMs: gap,
-          files: [event.evidence],
+          files: [evidence],
           id: `e${event.id}`,
           kind: "files",
-          label: fileLabel([event.evidence]),
+          label: fileLabel([evidence]),
         });
         break;
       }
 
       case "failed":
         blocks.push({
-          code: event.error.code,
-          details: event.error.details ?? null,
+          code: sanitizeEvidenceText(event.error.code),
+          details: event.error.details
+            ? sanitizeEvidenceText(event.error.details)
+            : null,
           id: `e${event.id}`,
           kind: "error",
-          message: event.error.message,
+          message: sanitizeEvidenceText(event.error.message),
           retryable: event.error.retryable,
         });
         break;
@@ -326,11 +403,13 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
 
   if (run?.error && !blocks.some((block) => block.kind === "error")) {
     blocks.push({
-      code: run.error.code,
-      details: run.error.details ?? null,
+      code: sanitizeEvidenceText(run.error.code),
+      details: run.error.details
+        ? sanitizeEvidenceText(run.error.details)
+        : null,
       id: "run-error",
       kind: "error",
-      message: run.error.message,
+      message: sanitizeEvidenceText(run.error.message),
       retryable: run.error.retryable,
     });
   }
@@ -360,15 +439,23 @@ function evidenceBlock(
     (evidence) => evidence.exitCode === 0
   ).length;
   const wall = spanBetween(run.startedAt ?? run.createdAt, run.completedAt);
+  const claim = sanitizeEvidenceText(run.output).trim();
+  const hasAnswer = claim.split("\n").some((line) => {
+    const text = line.trim();
+    return text.length > 0 && !/^Runner (?:omitted|truncated)\b/u.test(text);
+  });
 
   return {
-    claim: run.output.trim(),
+    claim,
+    hasAnswer,
     id,
     kind: "evidence",
     meta: `run ${run.id.slice(0, 8)}`,
     provenance: [
-      agent?.runtime ? `${agent.runtime} · ${agent.model}` : null,
-      agent?.workspace ?? null,
+      agent?.runtime
+        ? `${agent.runtime} · ${sanitizeEvidenceText(agent.model)}`
+        : null,
+      agent?.workspace ? sanitizeEvidencePath(agent.workspace) : null,
       "1 run against the cap",
     ]
       .filter(Boolean)
@@ -385,7 +472,10 @@ function evidenceBlock(
         value: wall === null ? "—" : formatDuration(wall),
       },
     ],
-    touched: run.fileEvidence,
+    touched: run.fileEvidence.map((file) => ({
+      ...file,
+      path: sanitizeEvidencePath(file.path),
+    })),
   };
 }
 
@@ -538,7 +628,12 @@ export function projectRun(input: ProjectInput): RunProjection {
     .map(stepFor)
     .filter((step): step is Step => step !== null);
 
-  return { blocks, nowDoing: describeNow(blocks, input.run), steps };
+  return {
+    activity: liveActivity(input.events, input.run),
+    blocks,
+    nowDoing: describeNow(blocks, input.run),
+    steps,
+  };
 }
 
 export { commandHead, commandSummary };

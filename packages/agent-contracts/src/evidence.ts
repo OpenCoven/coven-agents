@@ -18,6 +18,29 @@ const apiKeyHeader =
   /\b((?:x[-_])?(?:api[-_]?key|auth[-_]?token|access[-_]?token)\s*:\s*)[^\r\n"']+/giu;
 const bearerValue = /\b(Bearer\s+)[^\s"'`,;]+/giu;
 const cookieHeader = /\b((?:set-)?cookie\s*:\s*)[^\r\n]+/giu;
+const credentialUrl = /\b([a-z][a-z0-9+.-]*:\/\/)[^/\s@?#]+@/giu;
+const jwtValue = /\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu;
+const privateKeyBlock =
+  /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z0-9]+)* PRIVATE KEY-----/gu;
+const doubleQuotedUnixHomeRoot = /"\/(?:Users|home)\/[^/\r\n"]+"/gu;
+const singleQuotedUnixHomeRoot = /'\/(?:Users|home)\/[^/\r\n']+'/gu;
+const backtickQuotedUnixHomeRoot = /`\/(?:Users|home)\/[^/\r\n`]+`/gu;
+const doubleQuotedWindowsHomeRoot = /"(?:[A-Za-z]:\\)?Users\\[^\\\r\n"]+"/giu;
+const singleQuotedWindowsHomeRoot = /'(?:[A-Za-z]:\\)?Users\\[^\\\r\n']+'/giu;
+const backtickQuotedWindowsHomeRoot = /`(?:[A-Za-z]:\\)?Users\\[^\\\r\n`]+`/giu;
+const unixHomePath = /(^|[^A-Za-z0-9._-])\/(?:Users|home)\/[^/\r\n]+(?=\/)/gu;
+const windowsHomePath =
+  /(^|[^A-Za-z0-9._-])(?:[A-Za-z]:\\)?Users\\[^\\\r\n]+(?=\\)/giu;
+const unixHomeRoot =
+  /(^|[^A-Za-z0-9._-])\/(?:Users|home)\/[^/\s),;:]+(?=$|[\s),;:])/gu;
+const windowsHomeRoot =
+  /(^|[^A-Za-z0-9._-])(?:[A-Za-z]:\\)?Users\\[^\\\s),;:]+(?=$|[\s),;:])/giu;
+const ESCAPE = String.fromCodePoint(0x1b);
+const BELL = String.fromCodePoint(0x07);
+const terminalControlSequence = new RegExp(
+  `${ESCAPE}(?:\\[[0-?]*[ -/]*[@-~]|\\][^${BELL}]*(?:${BELL}|${ESCAPE}\\\\))`,
+  "gu"
+);
 
 const providerKeyPatterns = [
   /\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b/gu,
@@ -95,6 +118,22 @@ function redactEnvironmentDumps(value: string): string {
   return sanitized.join("\n");
 }
 
+function removeUnsafeControlCharacters(value: string): string {
+  return [...value]
+    .filter((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return (
+        character === "\t" ||
+        character === "\n" ||
+        character === "\r" ||
+        (codePoint >= 0x20 &&
+          codePoint !== 0x7f &&
+          (codePoint < 0x80 || codePoint >= 0xa0))
+      );
+    })
+    .join("");
+}
+
 /**
  * Removes credentials from textual evidence before it reaches persistence or
  * event streams. Callers can provide process-local secrets that have no
@@ -104,7 +143,12 @@ export function sanitizeEvidenceText(
   value: string,
   additionalSecrets: Iterable<string> = []
 ): string {
-  let sanitized = redactEnvironmentDumps(value);
+  const withoutTerminalControls = removeUnsafeControlCharacters(
+    value.replace(terminalControlSequence, "")
+  );
+  let sanitized = redactEnvironmentDumps(
+    withoutTerminalControls.replace(privateKeyBlock, "[PRIVATE KEY REDACTED]")
+  );
   for (const secret of additionalSecrets) {
     if (secret) {
       sanitized = sanitized.replaceAll(secret, REDACTED);
@@ -115,12 +159,24 @@ export function sanitizeEvidenceText(
       .replace(authorizationHeader, `$1${REDACTED}`)
       .replace(apiKeyHeader, `$1${REDACTED}`)
       .replace(cookieHeader, `$1${REDACTED}`)
+      .replace(credentialUrl, `$1${REDACTED}@`)
+      .replace(jwtValue, REDACTED)
       .replace(bearerValue, `$1${REDACTED}`)
   ).replace(secretCliOption, `$1${REDACTED}`);
   for (const pattern of providerKeyPatterns) {
     sanitized = sanitized.replace(pattern, REDACTED);
   }
-  return sanitized;
+  return sanitized
+    .replace(doubleQuotedUnixHomeRoot, '"~"')
+    .replace(singleQuotedUnixHomeRoot, "'~'")
+    .replace(backtickQuotedUnixHomeRoot, "`~`")
+    .replace(doubleQuotedWindowsHomeRoot, '"~"')
+    .replace(singleQuotedWindowsHomeRoot, "'~'")
+    .replace(backtickQuotedWindowsHomeRoot, "`~`")
+    .replace(unixHomePath, "$1~")
+    .replace(windowsHomePath, "$1~")
+    .replace(unixHomeRoot, "$1~")
+    .replace(windowsHomeRoot, "$1~");
 }
 
 export function sanitizeEvidencePath(value: string): string {

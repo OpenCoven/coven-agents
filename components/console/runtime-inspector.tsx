@@ -2,7 +2,11 @@
 
 "use client";
 
-import type { AgentDefinition } from "@opencoven/agent-contracts";
+import {
+  type AgentDefinition,
+  sanitizeEvidencePath,
+  sanitizeEvidenceText,
+} from "@opencoven/agent-contracts";
 import { X } from "lucide-react";
 import { useState } from "react";
 import { Caret, Eyebrow } from "@/components/console/primitives";
@@ -157,14 +161,18 @@ export function RuntimeInspector({
           <Eyebrow>Execution profile</Eyebrow>
           <div style={{ display: "flex", flexDirection: "column" }}>
             <Row k="harness" v={agent.runtime} />
-            <Row k="model" v={agent.model} />
+            <Row k="model" v={sanitizeEvidenceText(agent.model)} />
             <Row k="backend" v={agent.backend} />
-            <Row k="workspace" v={agent.workspace ?? "/workspace"} />
+            <Row
+              k="workspace"
+              v={sanitizeEvidencePath(agent.workspace ?? "/workspace")}
+            />
             <Row k="approvals" v="none" />
           </div>
           <p style={{ ...type_.body, font: "400 11px/1.5 var(--font-ui)" }}>
-            {agent.description ||
-              "No description. The operating contract below is what actually governs the run."}
+            {agent.description
+              ? sanitizeEvidenceText(agent.description)
+              : "No description. The operating contract below is what actually governs the run."}
           </p>
         </div>
 
@@ -254,7 +262,7 @@ export function RuntimeInspector({
                 whiteSpace: "pre-wrap",
               }}
             >
-              {agent.instructions}
+              {sanitizeEvidenceText(agent.instructions)}
             </pre>
           ) : null}
         </div>

@@ -51,7 +51,7 @@ function snapshot(patch: Partial<RunSnapshot> = {}): RunSnapshot {
 }
 
 function project(events: RunEvent[], run: RunSnapshot | null = snapshot()) {
-  return projectRun({ agent: AGENT, events, run, who: "val@opencoven.ai" });
+  return projectRun({ agent: AGENT, events, run });
 }
 
 test("the mission opens the record and is not a step", () => {
@@ -61,6 +61,158 @@ test("the mission opens the record and is not a step", () => {
 
   assert.equal(blocks[0]?.kind, "mission");
   assert.equal(steps.length, 0);
+});
+
+test("the streamed record does not repeat the subscriber identity", () => {
+  const [mission] = project([]).blocks;
+
+  assert.equal(mission?.kind, "mission");
+  assert.equal(mission && "who" in mission, false);
+});
+
+test("a running run exposes useful public-safe activity without copying event payloads", () => {
+  const sensitiveOutput = "Authorization: Bearer private-stream-token";
+  const sensitiveCommand = "curl https://user:password@example.invalid";
+  const sensitivePath = "/Users/private/project/secret.txt";
+  const { activity } = project([
+    {
+      at: "2026-08-25T12:00:01.000Z",
+      id: 1,
+      output: sensitiveOutput,
+      type: "output",
+    },
+    {
+      at: "2026-08-25T12:00:02.000Z",
+      evidence: {
+        command: sensitiveCommand,
+        exitCode: 0,
+        stderr: "",
+        stdout: "",
+      },
+      id: 2,
+      type: "command",
+    },
+    {
+      at: "2026-08-25T12:00:03.000Z",
+      evidence: { operation: "modify", path: sensitivePath },
+      id: 3,
+      type: "file",
+    },
+  ]);
+
+  assert.deepEqual(activity, {
+    detail: "A file change was reported. The agent is continuing.",
+    headline: "Runner active",
+    lastSignalAt: "2026-08-25T12:00:03.000Z",
+    metrics: [
+      { label: "Safe updates", value: "3" },
+      { label: "Commands", value: "1" },
+      { label: "Files", value: "1" },
+    ],
+    phase: "running",
+  });
+  assert.equal(
+    JSON.stringify(activity).includes("private-stream-token"),
+    false
+  );
+  assert.equal(JSON.stringify(activity).includes("password"), false);
+  assert.equal(JSON.stringify(activity).includes("private/project"), false);
+});
+
+test("a quiet running run explains that it is waiting for sanitized output", () => {
+  const { activity } = project([]);
+
+  assert.equal(activity?.headline, "Runner active");
+  assert.equal(
+    activity?.detail,
+    "The isolated session is running. Waiting for the first sanitized agent update."
+  );
+  assert.equal(activity?.lastSignalAt, snapshot().startedAt);
+});
+
+test("the console projection defensively redacts every displayed runner string", () => {
+  const token = [
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+    "eyJzdWIiOiJwdWJsaWMtc3RyZWFtIn0",
+    "abcdefghijklmnop0123456789",
+  ].join(".");
+  const privateKey = [
+    "-----BEGIN PRIVATE",
+    " KEY-----\nmaterial\n-----END PRIVATE",
+    " KEY-----",
+  ].join("");
+  const { blocks } = project(
+    [
+      {
+        at: "2026-08-25T12:00:01.000Z",
+        id: 1,
+        output: `analysis ${token}`,
+        type: "output",
+      },
+      {
+        at: "2026-08-25T12:00:02.000Z",
+        evidence: {
+          command: "curl postgres://runner:password@example.invalid/app",
+          exitCode: 1,
+          stderr: privateKey,
+          stdout: "",
+        },
+        id: 2,
+        type: "command",
+      },
+      {
+        at: "2026-08-25T12:00:03.000Z",
+        evidence: {
+          operation: "modify",
+          path: "/Users/private/project/secret.txt",
+        },
+        id: 3,
+        type: "file",
+      },
+      {
+        at: "2026-08-25T12:00:04.000Z",
+        error: {
+          code: "provider_error",
+          details: `Authorization: Bearer ${token}`,
+          message: `failed ${token}`,
+          retryable: true,
+        },
+        id: 4,
+        type: "failed",
+      },
+    ],
+    snapshot({ task: `Inspect ${token}` })
+  );
+  const displayed = JSON.stringify(blocks);
+
+  assert.equal(displayed.includes(token), false);
+  assert.equal(displayed.includes("runner:password"), false);
+  assert.equal(displayed.includes("material"), false);
+  assert.equal(displayed.includes("/Users/private"), false);
+  assert.match(displayed, /\[REDACTED\]/);
+});
+
+test("the console projection sanitizes arbitrary agent metadata", () => {
+  const token = ["ghp", "_", "A".repeat(24)].join("");
+  const projection = projectRun({
+    agent: {
+      ...AGENT,
+      model: token,
+      name: `Builder ${token}`,
+      workspace: "/Users/private/project",
+    },
+    events: [],
+    run: snapshot({
+      completedAt: "2026-08-25T12:01:00.000Z",
+      output: "Done.",
+      status: "completed",
+    }),
+  });
+  const displayed = JSON.stringify(projection.blocks);
+
+  assert.equal(displayed.includes(token), false);
+  assert.equal(displayed.includes("/Users/private"), false);
+  assert.match(displayed, /\[REDACTED\]/);
 });
 
 test("a queued status opens no lifecycle line", () => {
@@ -236,6 +388,24 @@ test("a terminal snapshot writes a receipt even when the completed event was mis
   assert.equal(receipt.claim, "The compiler is what stops it now.");
 });
 
+test("a diagnostic-only completion is not classified as an agent answer", () => {
+  const { blocks } = project(
+    [],
+    snapshot({
+      completedAt: "2026-08-25T12:01:00.000Z",
+      output: "Runner omitted a file operation without a path.",
+      status: "completed",
+    })
+  );
+  const receipt = blocks.find((block) => block.kind === "evidence");
+
+  assert.ok(receipt);
+  assert.equal(
+    (receipt as { hasAnswer?: boolean } | undefined)?.hasAnswer,
+    false
+  );
+});
+
 test("a failed run reports the runner's error rather than inventing one", () => {
   const { blocks, steps } = project(
     [],
@@ -280,11 +450,12 @@ test("a queued run says it is waiting for a sandbox", () => {
 });
 
 test("a terminal run is doing nothing", () => {
-  const { nowDoing } = project(
+  const { activity, nowDoing } = project(
     [],
     snapshot({ completedAt: "2026-08-25T12:01:00.000Z", status: "completed" })
   );
   assert.equal(nowDoing, "");
+  assert.equal(activity, null);
 });
 
 test("only the three ended statuses are terminal", () => {

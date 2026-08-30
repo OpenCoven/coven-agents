@@ -8,6 +8,10 @@ import type {
   RunEvent,
   RunSnapshot,
 } from "@opencoven/agent-contracts";
+import {
+  sanitizeEvidencePath,
+  sanitizeEvidenceText,
+} from "@opencoven/agent-contracts";
 import { MoreHorizontal, Search } from "lucide-react";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
@@ -27,7 +31,10 @@ import {
   LifecycleBadge,
   Spinner,
 } from "@/components/console/primitives";
-import { ThreadBlockView } from "@/components/console/run-thread";
+import {
+  LiveActivityStatus,
+  ThreadBlockView,
+} from "@/components/console/run-thread";
 import { RuntimeInspector } from "@/components/console/runtime-inspector";
 import { Settings } from "@/components/console/settings";
 import {
@@ -134,6 +141,7 @@ export function RunConsole() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [runs, setRuns] = useState<ConsoleRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [threadOpenRevision, setThreadOpenRevision] = useState(0);
   const [streamingRunId, setStreamingRunId] = useState<string | null>(null);
 
   const [view, setView] = useState<View>("composer");
@@ -279,7 +287,9 @@ export function RunConsole() {
         setRunnerStatus(status);
       }
     }
-    toast.error(error instanceof Error ? error.message : fallback);
+    toast.error(
+      error instanceof Error ? sanitizeEvidenceText(error.message) : fallback
+    );
   }, []);
 
   const reconcileTerminalAgent = useCallback(
@@ -605,7 +615,7 @@ export function RunConsole() {
         setStreamingRunId(null);
         toast.error(
           error instanceof Error
-            ? error.message
+            ? sanitizeEvidenceText(error.message)
             : "Lost the run's event stream."
         );
       }
@@ -684,6 +694,9 @@ export function RunConsole() {
   const running = selectedRun
     ? !isTerminal(selectedRun.snapshot.status)
     : false;
+  const threadRevision = selectedRun
+    ? `${view}:${threadOpenRevision}:${selectedRun.snapshot.id}:${selectedRun.snapshot.status}:${selectedRun.events.length}`
+    : "";
 
   useEffect(() => {
     setNow(Date.now());
@@ -701,11 +714,14 @@ export function RunConsole() {
   // yanking someone back to the bottom mid-read is worse than a stale view.
   const pinnedRef = useRef(true);
   useEffect(() => {
+    if (!threadRevision) {
+      return;
+    }
     const node = threadRef.current;
     if (node && pinnedRef.current) {
       node.scrollTop = node.scrollHeight;
     }
-  }, []);
+  }, [threadRevision]);
 
   /* --------------------------------------------------------------- actions */
 
@@ -805,7 +821,7 @@ export function RunConsole() {
       setAgents((current) => [created, ...current]);
       setSelectedAgentId(created.id);
       setView("composer");
-      toast.success(`${created.name} is ready.`);
+      toast.success(`${sanitizeEvidenceText(created.name)} is ready.`);
     } catch (error) {
       if (isCurrentSession(context.generation, context.signal)) {
         reportRunnerError(error, "Agent creation failed.");
@@ -925,7 +941,7 @@ export function RunConsole() {
       setAgents((current) =>
         current.map((agent) => (agent.id === updated.id ? updated : agent))
       );
-      toast.success(`Renamed to ${updated.name}.`);
+      toast.success(`Renamed to ${sanitizeEvidenceText(updated.name)}.`);
     } catch (error) {
       if (isCurrentSession(context.generation, context.signal)) {
         reportRunnerError(error, "Could not rename the agent.");
@@ -959,7 +975,7 @@ export function RunConsole() {
       setSelectedAgentId(remaining[0]?.id ?? null);
       setSelectedRunId(null);
       setView("composer");
-      toast.success(`${selectedAgent.name} was removed.`);
+      toast.success(`${sanitizeEvidenceText(selectedAgent.name)} was removed.`);
     } catch (error) {
       if (isCurrentSession(context.generation, context.signal)) {
         reportRunnerError(error, "Could not remove the agent.");
@@ -979,18 +995,20 @@ export function RunConsole() {
     const { snapshot } = selectedRun;
     const receipt = [
       `run ${snapshot.id}`,
-      `agent ${runAgent?.name ?? snapshot.agentId} · ${runAgent?.runtime ?? ""}`,
+      `agent ${sanitizeEvidenceText(runAgent?.name ?? snapshot.agentId)} · ${runAgent?.runtime ?? ""}`,
       `status ${snapshot.status}`,
-      `mission ${snapshot.task}`,
+      `mission ${sanitizeEvidenceText(snapshot.task)}`,
       "",
       ...snapshot.commandEvidence.map(
-        (evidence) => `$ ${evidence.command} → exit ${evidence.exitCode}`
+        (evidence) =>
+          `$ ${sanitizeEvidenceText(evidence.command)} → exit ${evidence.exitCode}`
       ),
       ...snapshot.fileEvidence.map(
-        (evidence) => `${evidence.operation} ${evidence.path}`
+        (evidence) =>
+          `${evidence.operation} ${sanitizeEvidencePath(evidence.path)}`
       ),
       "",
-      snapshot.output,
+      sanitizeEvidenceText(snapshot.output),
     ].join("\n");
 
     try {
@@ -1021,6 +1039,7 @@ export function RunConsole() {
   const openRun = useCallback((runId: string) => {
     setSelectedRunId(runId);
     setView("thread");
+    setThreadOpenRevision((revision) => revision + 1);
     pinnedRef.current = true;
     const run = runsRef.current.find((entry) => entry.snapshot.id === runId);
     if (run && !isTerminal(run.snapshot.status)) {
@@ -1085,9 +1104,9 @@ export function RunConsole() {
     for (const agent of agents) {
       items.push({
         group: "agent",
-        hint: `${agent.runtime} · ${agent.model}`,
+        hint: `${agent.runtime} · ${sanitizeEvidenceText(agent.model)}`,
         id: `agent:${agent.id}`,
-        label: agent.name,
+        label: sanitizeEvidenceText(agent.name),
         run: () => openComposer(agent.id),
       });
     }
@@ -1097,7 +1116,7 @@ export function RunConsole() {
         group: "run",
         hint: run.snapshot.status,
         id: `run:${run.snapshot.id}`,
-        label: run.snapshot.task,
+        label: sanitizeEvidenceText(run.snapshot.task),
         run: () => openRun(run.snapshot.id),
       });
     }
@@ -1113,9 +1132,8 @@ export function RunConsole() {
         agent: runAgent,
         events: selectedRun?.events ?? [],
         run: selectedRun?.snapshot ?? null,
-        who,
       }),
-    [runAgent, selectedRun, who]
+    [runAgent, selectedRun]
   );
 
   const elapsed = (() => {
@@ -1350,7 +1368,11 @@ export function RunConsole() {
                     }}
                   >
                     <span style={well(true, 30)}>
-                      {glyphFor(runAgent?.name ?? selectedAgent.name)}
+                      {glyphFor(
+                        sanitizeEvidenceText(
+                          runAgent?.name ?? selectedAgent.name
+                        )
+                      )}
                     </span>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div
@@ -1408,7 +1430,9 @@ export function RunConsole() {
                           </>
                         ) : (
                           <span style={{ ...type_.title, ...truncate }}>
-                            {runAgent?.name ?? selectedAgent.name}
+                            {sanitizeEvidenceText(
+                              runAgent?.name ?? selectedAgent.name
+                            )}
                           </span>
                         )}
                         {selectedRun ? (
@@ -1436,9 +1460,10 @@ export function RunConsole() {
                         }}
                       >
                         {selectedRun
-                          ? `run ${selectedRun.snapshot.id.slice(0, 8)} · ${runAgent?.runtime} · ${runAgent?.model}`
-                          : selectedAgent.description ||
-                            `${selectedAgent.runtime} · ${selectedAgent.model}`}
+                          ? `run ${selectedRun.snapshot.id.slice(0, 8)} · ${runAgent?.runtime} · ${sanitizeEvidenceText(runAgent?.model ?? "")}`
+                          : selectedAgent.description
+                            ? sanitizeEvidenceText(selectedAgent.description)
+                            : `${selectedAgent.runtime} · ${sanitizeEvidenceText(selectedAgent.model)}`}
                       </div>
                     </div>
 
@@ -1667,6 +1692,11 @@ export function RunConsole() {
                               />
                             </div>
                           ))}
+                          {projection.activity ? (
+                            <LiveActivityStatus
+                              activity={projection.activity}
+                            />
+                          ) : null}
                           <div style={{ height: 8 }} />
                         </div>
                       </div>
@@ -1802,7 +1832,7 @@ export function RunConsole() {
         {removing && selectedAgent ? (
           <ConfirmRemove
             busy={busy}
-            name={selectedAgent.name}
+            name={sanitizeEvidenceText(selectedAgent.name)}
             onCancel={() => setRemoving(false)}
             onConfirm={() => {
               removeAgent().catch(() => undefined);

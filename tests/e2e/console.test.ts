@@ -1,4 +1,5 @@
 import { type BrowserContext, expect, type Page, test } from "@playwright/test";
+import { TEMPLATES } from "@/lib/agents/formations";
 import { subscriberCookies } from "./session";
 
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
@@ -206,6 +207,49 @@ test.describe("Run console", () => {
     await notifySessionChange(page);
     await page.waitForTimeout(100);
     expect(prewarmRequests).toBe(1);
+  });
+
+  test("the selected agent offers role-specific quick chats", async ({
+    context,
+    page,
+  }) => {
+    const scoutAgent = {
+      ...retainedAgent,
+      description: "Surveys the workspace and reports. Changes nothing.",
+      instructions:
+        TEMPLATES.find((template) => template.id === "scout")?.instructions ??
+        retainedAgent.instructions,
+      name: "Scout",
+    };
+    await context.addCookies(await subscriberCookies());
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [scoutAgent] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+
+    await page.goto("/agents");
+
+    const quickChats = page.getByRole("region", {
+      name: "Quick chats for Scout",
+    });
+    await expect(quickChats).toBeVisible();
+    const recommendation =
+      "Map the repository architecture and identify the three riskiest boundaries.";
+    await quickChats.getByRole("button", { name: recommendation }).click();
+    await expect(page.getByLabel("Proof brief")).toHaveValue(recommendation);
+    await expect(
+      page.getByRole("button", { name: "Run autonomously" })
+    ).toBeEnabled();
   });
 
   test("a lapsed authenticated session makes no protected console request", async ({
@@ -566,12 +610,21 @@ test.describe("Run console", () => {
     const retainedRuns = Array.from({ length: 20 }, (_, index) =>
       index === 0
         ? markdownRun
-        : {
-            ...retainedRun,
-            id: `22222222-2222-4222-8222-${String(index + 1).padStart(12, "0")}`,
-            operationId: `33333333-3333-4333-8333-${String(index + 1).padStart(12, "0")}`,
-            task: `Retained proof ${String(index + 1).padStart(2, "0")}`,
-          }
+        : index === 1
+          ? {
+              ...retainedRun,
+              completedAt: "2026-08-27T06:01:31.000Z",
+              id: "22222222-2222-4222-8222-000000000002",
+              operationId: "33333333-3333-4333-8333-000000000002",
+              output: "4",
+              task: "Answer 2+2 and nothing else",
+            }
+          : {
+              ...retainedRun,
+              id: `22222222-2222-4222-8222-${String(index + 1).padStart(12, "0")}`,
+              operationId: `33333333-3333-4333-8333-${String(index + 1).padStart(12, "0")}`,
+              task: `Retained proof ${String(index + 1).padStart(2, "0")}`,
+            }
     );
     await context.addCookies(await subscriberCookies());
     await page.route("**/api/credentials", (route) =>
@@ -659,12 +712,12 @@ test.describe("Run console", () => {
     );
     expect(guidanceColor).toBe(mutedColor);
 
-    await page
+    const retainedRunButton = page
       .getByRole("complementary", { name: "Runs in this session" })
       .getByRole("button", {
         name: /^01 completed Verify timeline/,
-      })
-      .click();
+      });
+    await retainedRunButton.click();
 
     const navigationRail = page.locator(".oc-agent-rail");
     const navigationWidth = await navigationRail.evaluate(
@@ -762,6 +815,76 @@ test.describe("Run console", () => {
       page.locator(".oc-markdown strong", { hasText: "Timeline verified." })
     ).toBeVisible();
     await expect(page.getByText("Events stayed ordered")).toBeVisible();
+    const runRecord = page.getByRole("log", { name: "Run record" });
+    await expect
+      .poll(() =>
+        runRecord.evaluate(
+          (element) => element.scrollHeight > element.clientHeight
+        )
+      )
+      .toBe(true);
+    await runRecord.evaluate((element) => {
+      element.scrollTop = 0;
+    });
+    await page
+      .locator(".oc-agent-rail")
+      .getByRole("button", { name: /completed Verify timeline/u })
+      .click();
+    await expect
+      .poll(() => runRecord.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(0);
+
+    await page
+      .locator(".oc-agent-rail")
+      .getByRole("button", { name: /completed Answer 2\+2 and nothing else/u })
+      .click();
+    const compactReceipt = page.locator(
+      '.oc-evidence-card[data-layout="compact"]'
+    );
+    await expect(compactReceipt).toBeVisible();
+    await expect(compactReceipt.getByText("Run complete")).toBeVisible();
+    await expect(compactReceipt.getByText("Result")).toBeVisible();
+    await expect(compactReceipt.getByText("Direct response")).toBeVisible();
+    await expect(compactReceipt.getByText("Completed in 1m 30s")).toBeVisible();
+    await expect(
+      compactReceipt.getByText("No file changes reported")
+    ).toBeVisible();
+    await expect(
+      compactReceipt.getByText("Commands", { exact: true })
+    ).toHaveCount(0);
+    await expect(
+      compactReceipt.getByText("Files", { exact: true })
+    ).toHaveCount(0);
+    await expect(
+      compactReceipt.getByText("Exited 0", { exact: true })
+    ).toHaveCount(0);
+    await expect(
+      compactReceipt.getByRole("button", { name: "Ask a follow-up" })
+    ).toBeVisible();
+    await expect
+      .poll(() =>
+        compactReceipt.evaluate(
+          (element) => element.getBoundingClientRect().height
+        )
+      )
+      .toBeLessThan(380);
+    await expect
+      .poll(() =>
+        compactReceipt
+          .locator(".oc-markdown-report")
+          .evaluate((element) =>
+            Number.parseFloat(getComputedStyle(element).fontSize)
+          )
+      )
+      .toBeGreaterThanOrEqual(24);
+
+    await page
+      .locator(".oc-agent-rail")
+      .getByRole("button", { name: /completed Verify timeline/u })
+      .click();
+    await expect(
+      page.getByRole("heading", { level: 2, name: "Verification" })
+    ).toBeVisible();
     await page.getByRole("button", { exact: true, name: "collapse" }).click();
     await expect(page.getByText("second output line")).toHaveCount(0);
     await expect(
@@ -807,6 +930,7 @@ test.describe("Run console", () => {
       `GET /api/agents/${AGENT_ID}/runs`,
       `GET /api/runs/${RUN_ID}/events`,
       `GET /api/runs/${RUN_ID}`,
+      "GET /api/runs/22222222-2222-4222-8222-000000000002/events",
     ]);
   });
 
@@ -976,6 +1100,15 @@ test.describe("Run console", () => {
       .locator(".oc-agent-rail")
       .getByRole("button", { name: /running Verify timeline/ })
       .click();
+    const liveActivity = page.getByRole("region", {
+      name: "Live run activity",
+    });
+    await expect(liveActivity).toContainText("Runner active");
+    await expect(liveActivity).toContainText(
+      "Waiting for the first sanitized agent update."
+    );
+    await expect(liveActivity).toContainText("Safe updates");
+    await expect(liveActivity).toContainText("Credential-safe stream");
     await page.getByRole("button", { exact: true, name: "Stop" }).click();
 
     await expect(page.getByText("Run cancelled.")).toBeVisible();
