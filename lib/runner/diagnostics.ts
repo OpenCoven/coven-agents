@@ -54,7 +54,9 @@ export type RunnerDiagnosticFailure = Readonly<{
     | "rate_limited"
     | "timeout"
     | "unknown";
+  providerCode?: string;
   stage: "configuration" | "create" | "delete" | "execute";
+  statusCode?: number;
 }>;
 
 type DaytonaDiagnosticSdkSandbox = Readonly<{
@@ -225,32 +227,43 @@ function diagnosticFailure(
   if (!(error instanceof DaytonaError)) {
     return { category: "unknown", stage };
   }
+  const details = {
+    ...(typeof error.code === "string" &&
+    /^[A-Z][A-Z0-9_]{0,63}$/u.test(error.code)
+      ? { providerCode: error.code }
+      : {}),
+    ...(Number.isSafeInteger(error.statusCode) &&
+    (error.statusCode as number) >= 400 &&
+    (error.statusCode as number) <= 599
+      ? { statusCode: error.statusCode }
+      : {}),
+  };
   if (error instanceof DaytonaTimeoutError) {
-    return { category: "timeout", stage };
+    return { category: "timeout", stage, ...details };
   }
   if (error instanceof DaytonaConnectionError) {
-    return { category: "provider_unavailable", stage };
+    return { category: "provider_unavailable", stage, ...details };
   }
   switch (error.statusCode) {
     case 401:
-      return { category: "authentication", stage };
+      return { category: "authentication", stage, ...details };
     case 403:
-      return { category: "authorization", stage };
+      return { category: "authorization", stage, ...details };
     case 404:
-      return { category: "not_found", stage };
+      return { category: "not_found", stage, ...details };
     case 408:
     case 504:
-      return { category: "timeout", stage };
+      return { category: "timeout", stage, ...details };
     case 409:
-      return { category: "conflict", stage };
+      return { category: "conflict", stage, ...details };
     case 429:
-      return { category: "rate_limited", stage };
+      return { category: "rate_limited", stage, ...details };
     case 500:
     case 502:
     case 503:
-      return { category: "provider_unavailable", stage };
+      return { category: "provider_unavailable", stage, ...details };
     default:
-      return { category: "provider_rejected", stage };
+      return { category: "provider_rejected", stage, ...details };
   }
 }
 
