@@ -74,12 +74,22 @@ test("redacts an isolated sensitive environment assignment", () => {
 });
 
 test("redacts camel-case, hyphenated, and indented structured credential fields", () => {
-  const secrets = ["camel-case-secret", "hyphenated-secret", "indented-secret"];
+  const secrets = [
+    "camel-case-secret",
+    "hyphenated-secret",
+    "indented-secret",
+    "list-secret",
+    "hunter two",
+    "inline yaml secret",
+  ];
   const sanitized = sanitizeEvidenceText(
     [
       `{"apiKey":"${secrets[0]}"}`,
       `{"x-api-key":"${secrets[1]}"}`,
       `  password: ${secrets[2]}`,
+      `  - password: ${secrets[3]}`,
+      `  password: ${secrets[4]}`,
+      `{api.key: ${secrets[5]}}`,
     ].join("\n")
   );
 
