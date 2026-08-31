@@ -12,8 +12,8 @@ function environment(overrides: Partial<NodeJS.ProcessEnv>): NodeJS.ProcessEnv {
   };
 }
 
-test("subscription checkout is disabled unless the flag is exactly on", () => {
-  for (const value of [undefined, "", "  ", "off", "true", "1", "ON", "on "]) {
+test("subscription checkout accepts only exact enabled and disabled values", () => {
+  for (const value of [undefined, "", "  ", "off"]) {
     assert.equal(
       subscriptionCheckoutEnabled({
         SUBSCRIPTION_CHECKOUT_ENABLED: value,
@@ -28,6 +28,20 @@ test("subscription checkout is disabled unless the flag is exactly on", () => {
     }),
     true
   );
+});
+
+test("subscription checkout enablement rejects invalid configured values", () => {
+  for (const value of ["true", "1", "ON", "on ", "disabled"]) {
+    assert.throws(
+      () =>
+        subscriptionCheckoutEnabled({
+          SUBSCRIPTION_CHECKOUT_ENABLED: value,
+        }),
+      new Error(
+        'SUBSCRIPTION_CHECKOUT_ENABLED must be exactly "on" or "off" when configured.'
+      )
+    );
+  }
 });
 
 test("disabled checkout does not require Stripe configuration", () => {

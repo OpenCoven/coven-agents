@@ -911,6 +911,27 @@ test("server-only credential custody remains part of the runner boundary", () =>
   assert.match(runnerAuth, /^import "server-only";/m);
 });
 
+test("subscription checkout secrets remain behind a server-only boundary", () => {
+  const billingConfig = readFileSync(
+    new URL("lib/billing/config.ts", repositoryRoot),
+    "utf8"
+  );
+  const billingConfigCore = readFileSync(
+    new URL("lib/billing/config-core.ts", repositoryRoot),
+    "utf8"
+  );
+  const runtimeValidation = readFileSync(
+    new URL("scripts/runtime-config-validation.ts", repositoryRoot),
+    "utf8"
+  );
+
+  assert.match(billingConfig, /^import "server-only";/m);
+  assert.doesNotMatch(billingConfigCore, /server-only/);
+  assert.doesNotMatch(billingConfigCore, /\b(?:apiKey|webhookSecret)\b/);
+  assert.match(runtimeValidation, /billing\/config-core/);
+  assert.doesNotMatch(runtimeValidation, /billing\/config["']/);
+});
+
 test("agent contracts expose the current tenant identity primitives", () => {
   const identity = readFileSync(
     new URL("packages/agent-contracts/src/identity.ts", repositoryRoot),

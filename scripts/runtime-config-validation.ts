@@ -1,6 +1,6 @@
 import { validateAbuseConfig } from "../lib/abuse/config";
 import { approvedApplicationOrigin } from "../lib/auth/application-origin";
-import { subscriptionCheckoutConfig } from "../lib/billing/config";
+import { validateSubscriptionCheckoutEnvironment } from "../lib/billing/config-core";
 import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
 import {
   daytonaDomainAllowList,
@@ -291,7 +291,7 @@ export async function validateRuntimeConfig(
   env: NodeJS.ProcessEnv,
   explicitRelease: boolean
 ): Promise<void> {
-  subscriptionCheckoutConfig(env);
+  validateSubscriptionCheckoutEnvironment(env);
 
   const productionRelease = isProductionRelease(env, explicitRelease);
   validateReleaseAudience(env, explicitRelease);
