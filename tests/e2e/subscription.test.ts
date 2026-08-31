@@ -117,6 +117,101 @@ async function openEligibleAccount(page: Page): Promise<void> {
   await expect(checkoutButton(page)).toBeVisible();
 }
 
+async function installSubscriptionBodyMock(
+  page: Page,
+  closeAfterMs: number | null
+): Promise<void> {
+  await page.addInitScript(
+    ({ activeBody, delay }) => {
+      const originalFetch = window.fetch;
+      const state = {
+        aborts: 0,
+        calls: 0,
+        lateBodyWrites: 0,
+      };
+      Object.assign(window, { __subscriptionBodyMock: state });
+      window.fetch = (input, init) => {
+        const rawUrl =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : input.url;
+        if (
+          new URL(rawUrl, window.location.href).pathname.endsWith(
+            "/api/subscription"
+          )
+        ) {
+          state.calls += 1;
+          let bodyController: ReadableStreamDefaultController<Uint8Array>;
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              bodyController = controller;
+              controller.enqueue(
+                new TextEncoder().encode(activeBody.slice(0, 12))
+              );
+              if (delay !== null) {
+                setTimeout(() => {
+                  try {
+                    controller.enqueue(
+                      new TextEncoder().encode(activeBody.slice(12))
+                    );
+                    controller.close();
+                  } catch {
+                    state.lateBodyWrites += 1;
+                  }
+                }, delay);
+              }
+            },
+          });
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              state.aborts += 1;
+              try {
+                bodyController.error(
+                  new DOMException("The operation was aborted.", "AbortError")
+                );
+              } catch {
+                // The delayed writer may already have closed the stream.
+              }
+            },
+            { once: true }
+          );
+          return Promise.resolve(
+            new Response(body, {
+              headers: { "content-type": "application/json" },
+              status: 200,
+            })
+          );
+        }
+        return originalFetch.call(window, input, init);
+      };
+    },
+    {
+      activeBody: JSON.stringify(subscriptionStatus(true)),
+      delay: closeAfterMs,
+    }
+  );
+}
+
+function subscriptionBodyMockState(
+  page: Page
+): Promise<{ aborts: number; calls: number; lateBodyWrites: number }> {
+  return page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __subscriptionBodyMock: {
+            aborts: number;
+            calls: number;
+            lateBodyWrites: number;
+          };
+        }
+      ).__subscriptionBodyMock
+  );
+}
+
 test.describe("Subscriber checkout", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
@@ -254,6 +349,120 @@ test.describe("Subscriber checkout", () => {
 
     await expect(page.getByText("Subscription active")).toBeVisible();
     await expect(page).toHaveURL("/account?source=ledger#allowance");
+  });
+
+  test("successful confirmation continues under another account tab for the same owner", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
+    let currentSession = sessionFor("demo");
+    let releaseStatus!: () => void;
+    const statusGate = new Promise<void>((resolve) => {
+      releaseStatus = resolve;
+    });
+    let updates = 0;
+    let reads = 0;
+    await page.route("**/api/auth/csrf", (route) =>
+      route.fulfill({ json: { csrfToken: "e2e-csrf" } })
+    );
+    await page.route("**/api/auth/session", (route) => {
+      if (route.request().method() === "POST") {
+        updates += 1;
+        currentSession = sessionFor("subscriber");
+      }
+      return route.fulfill({ json: currentSession });
+    });
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", async (route) => {
+      reads += 1;
+      await statusGate;
+      await route
+        .fulfill({ json: subscriptionStatus(true) })
+        .catch(() => undefined);
+    });
+
+    await page.goto("/account?checkout=success");
+    await expect.poll(() => reads).toBe(1);
+    await page.getByRole("tab", { name: "Profile" }).click();
+    releaseStatus();
+
+    await expect.poll(() => updates).toBe(1);
+    await page.getByRole("tab", { name: "Billing" }).click();
+    await expect(page.getByText("Subscription active")).toBeVisible();
+    await expect(page).toHaveURL("/account");
+  });
+
+  test("a hidden successful return keeps user A as owner when the session changes to user B", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
+    let currentSession = sessionFor("demo");
+    let reads = 0;
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", (route) => {
+      reads += 1;
+      return route.fulfill({ json: subscriptionStatus(false) });
+    });
+
+    await page.goto("/account?checkout=success");
+    await expect.poll(() => reads).toBe(1);
+    await page.getByRole("tab", { name: "Profile" }).click();
+
+    currentSession = sessionFor("demo", {
+      email: "second@example.invalid",
+      id: "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa",
+    });
+    await notifySessionChange(page);
+    const readsBeforeReopen = reads;
+
+    await page.getByRole("tab", { name: "Billing" }).click();
+    await expect(page.getByRole("status")).toContainText(
+      "The signed-in account changed."
+    );
+    await page.waitForTimeout(1200);
+    expect(reads).toBe(readsBeforeReopen);
+  });
+
+  test("a successful return never rebinds after its established owner signs out", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
+    let currentSession: ReturnType<typeof sessionFor> | null =
+      sessionFor("demo");
+    let reads = 0;
+    await page.route("**/api/auth/session", (route) =>
+      currentSession
+        ? route.fulfill({ json: currentSession })
+        : route.fulfill({ body: "null", contentType: "application/json" })
+    );
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", (route) => {
+      reads += 1;
+      return route.fulfill({ json: subscriptionStatus(false) });
+    });
+
+    await page.goto("/account?checkout=success");
+    await expect.poll(() => reads).toBe(1);
+
+    currentSession = null;
+    await notifySessionChange(page);
+    await expect(
+      page.getByRole("heading", { name: "Sign in to manage your account" })
+    ).toBeVisible();
+
+    currentSession = sessionFor("demo", {
+      email: "second@example.invalid",
+      id: "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa",
+    });
+    await notifySessionChange(page);
+    await expect(page.getByRole("status")).toContainText(
+      "The signed-in account changed."
+    );
+    await page.waitForTimeout(1200);
+    expect(reads).toBe(1);
   });
 
   test("database activation updates Auth.js with an object before showing success", async ({
@@ -627,10 +836,123 @@ test.describe("Subscriber checkout", () => {
       page.getByText(/payment may still be processing/i)
     ).toBeVisible();
     await expect(page.getByText("Subscription active")).toHaveCount(0);
-    await expect.poll(() => attempts).toBe(15);
+    expect(attempts).toBeGreaterThan(1);
+    expect(attempts).toBeLessThanOrEqual(15);
 
+    const attemptsBeforeRetry = attempts;
     await page.getByRole("button", { name: "Check again" }).click();
-    await expect.poll(() => attempts).toBe(16);
+    await expect.poll(() => attempts).toBe(attemptsBeforeRetry + 1);
+  });
+
+  test("a never-ending subscription response body aborts at the confirmation deadline", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
+    await page.clock.install({
+      time: new Date("2026-08-31T14:25:01.000Z"),
+    });
+    await installSubscriptionBodyMock(page, null);
+    await mockSession(page, "demo");
+    await mockAccountDependencies(page);
+
+    await page.goto("/account?checkout=success");
+    await expect
+      .poll(async () => (await subscriptionBodyMockState(page)).calls)
+      .toBe(1);
+    await page.clock.runFor(15_000);
+
+    await expect(
+      page.getByText(/payment may still be processing/i)
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Check again" })
+    ).toBeVisible();
+    expect(await subscriptionBodyMockState(page)).toMatchObject({
+      aborts: 1,
+      calls: 1,
+    });
+  });
+
+  test("headers before the deadline cannot activate from a body completed after it", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
+    await page.clock.install({
+      time: new Date("2026-08-31T14:25:01.000Z"),
+    });
+    await installSubscriptionBodyMock(page, 16_000);
+    await mockSession(page, "demo");
+    await mockAccountDependencies(page);
+
+    await page.goto("/account?checkout=success");
+    await expect
+      .poll(async () => (await subscriptionBodyMockState(page)).calls)
+      .toBe(1);
+    await page.clock.runFor(15_000);
+    await expect(
+      page.getByRole("button", { name: "Check again" })
+    ).toBeVisible();
+
+    await page.clock.runFor(1100);
+
+    await expect(page.getByText("Subscription active")).toHaveCount(0);
+    await expect(page).toHaveURL("/account?checkout=success");
+    expect(await subscriptionBodyMockState(page)).toMatchObject({
+      aborts: 1,
+      calls: 1,
+      lateBodyWrites: 1,
+    });
+  });
+
+  test("a stalled session refresh times out and its late completion cannot overwrite a fresh check", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
+    await page.clock.install({
+      time: new Date("2026-08-31T14:25:01.000Z"),
+    });
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let refreshes = 0;
+    let statusReads = 0;
+    await page.route("**/api/auth/csrf", (route) =>
+      route.fulfill({ json: { csrfToken: "e2e-csrf" } })
+    );
+    await page.route("**/api/auth/session", async (route) => {
+      if (route.request().method() !== "POST") {
+        return route.fulfill({ json: sessionFor("demo") });
+      }
+      refreshes += 1;
+      await refreshGate;
+      return route.fulfill({ json: sessionFor("subscriber") });
+    });
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", (route) => {
+      statusReads += 1;
+      return route.fulfill({
+        json: subscriptionStatus(statusReads === 1),
+      });
+    });
+
+    await page.goto("/account?checkout=success");
+    await expect.poll(() => refreshes).toBe(1);
+    await page.clock.runFor(15_000);
+
+    await expect(
+      page.getByRole("button", { name: "Check again" })
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Check again" }).click();
+    await expect.poll(() => statusReads).toBe(2);
+    await expect(page.getByRole("status")).toContainText("Confirming payment");
+
+    releaseRefresh();
+    await page.clock.runFor(0);
+
+    await expect(page.getByText("Subscription active")).toHaveCount(0);
+    await expect(page.getByRole("status")).toContainText("Confirming payment");
+    await expect(page).toHaveURL("/account?checkout=success");
   });
 
   test("a short Retry-After delays confirmation without an early request", async ({
@@ -662,7 +984,7 @@ test.describe("Subscriber checkout", () => {
     await expect.poll(() => attempts).toBe(2);
   });
 
-  test("a long Retry-After stops foreground polling until Check again becomes eligible", async ({
+  test("a long Retry-After cannot keep foreground confirmation past its deadline", async ({
     page,
   }) => {
     test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
@@ -689,12 +1011,8 @@ test.describe("Subscriber checkout", () => {
       "Payment status is temporarily rate limited."
     );
     await expect(page.getByRole("status")).toContainText("after");
-    await page.clock.runFor(29_000);
+    await page.clock.runFor(15_000);
     expect(attempts).toBe(1);
-    await expect(page.getByRole("button", { name: "Check again" })).toHaveCount(
-      0
-    );
-    await page.clock.runFor(1100);
     await expect(
       page.getByRole("button", { name: "Check again" })
     ).toBeVisible();

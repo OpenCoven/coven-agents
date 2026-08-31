@@ -54,7 +54,31 @@ test.describe("Account settings", () => {
     await expect(
       page.getByRole("heading", { name: "Harness credentials" })
     ).toBeVisible();
-    const navigation = await page.locator("nav").boundingBox();
+    const tablist = page.getByRole("tablist", { name: "Account settings" });
+    const copilot = page.getByRole("tab", { name: "Copilot" });
+    const profile = page.getByRole("tab", { name: "Profile" });
+    await expect(tablist).toHaveAttribute("aria-orientation", "horizontal");
+    await copilot.focus();
+    expect(
+      await copilot.evaluate((button) => {
+        const event = new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "ArrowDown",
+        });
+        button.dispatchEvent(event);
+        return event.defaultPrevented;
+      })
+    ).toBe(false);
+    await page.keyboard.press("ArrowDown");
+    await expect(copilot).toBeFocused();
+    await expect(copilot).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("ArrowRight");
+    await expect(profile).toBeFocused();
+    await expect(profile).toHaveAttribute("aria-selected", "true");
+    const navigation = await page
+      .getByRole("navigation", { name: "Account settings navigation" })
+      .boundingBox();
     expect(navigation).not.toBeNull();
     expect(navigation?.width ?? 0).toBeGreaterThanOrEqual(360);
     expect(
@@ -64,7 +88,7 @@ test.describe("Account settings", () => {
     ).toBe(true);
   });
 
-  test("account settings expose keyboard-operable ARIA tabs", async ({
+  test("desktop account settings expose vertical keyboard-operable ARIA tabs", async ({
     page,
   }) => {
     await page.route("**/api/auth/session", (route) =>
@@ -94,6 +118,7 @@ test.describe("Account settings", () => {
 
     const tablist = page.getByRole("tablist", { name: "Account settings" });
     await expect(tablist).toBeVisible();
+    await expect(tablist).toHaveAttribute("aria-orientation", "vertical");
     const copilot = page.getByRole("tab", { name: "Copilot" });
     const profile = page.getByRole("tab", { name: "Profile" });
     const data = page.getByRole("tab", { name: "Data" });
@@ -108,7 +133,21 @@ test.describe("Account settings", () => {
     ).toHaveAttribute("id", "account-panel-copilot");
 
     await copilot.focus();
+    expect(
+      await copilot.evaluate((button) => {
+        const event = new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "ArrowRight",
+        });
+        button.dispatchEvent(event);
+        return event.defaultPrevented;
+      })
+    ).toBe(false);
     await page.keyboard.press("ArrowRight");
+    await expect(copilot).toBeFocused();
+    await expect(copilot).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("ArrowDown");
     await expect(profile).toBeFocused();
     await expect(profile).toHaveAttribute("aria-selected", "true");
     await expect(page.getByRole("tabpanel", { name: "Profile" })).toBeVisible();

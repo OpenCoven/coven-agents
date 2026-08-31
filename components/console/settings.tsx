@@ -17,6 +17,7 @@ import {
   type as type_,
   well,
 } from "@/components/console/styles";
+import { useResponsiveTabOrientation } from "@/hooks/use-responsive-tab-orientation";
 import { glyphFor } from "@/lib/console/format";
 import {
   isSessionOperationCurrent,
@@ -62,22 +63,6 @@ function settingsPanelId(tab: Tab): string {
 
 function settingsTabId(tab: Tab): string {
   return `console-settings-tab-${tab}`;
-}
-
-function useHorizontalSettingsTabs(): boolean {
-  const [horizontal, setHorizontal] = useState(false);
-
-  useEffect(() => {
-    const query = window.matchMedia(HORIZONTAL_SETTINGS_QUERY);
-    const update = () => {
-      setHorizontal(query.matches);
-    };
-    query.addEventListener("change", update);
-    update();
-    return () => query.removeEventListener("change", update);
-  }, []);
-
-  return horizontal;
 }
 
 type Usage = { cap: number; resetsAt: string | null; used: number };
@@ -232,7 +217,8 @@ export function Settings({
   operationContext: SessionOperationContext | null;
 }) {
   const [tab, setTab] = useState<Tab>("harness");
-  const horizontalTabs = useHorizontalSettingsTabs();
+  const tabOrientation = useResponsiveTabOrientation(HORIZONTAL_SETTINGS_QUERY);
+  const horizontalTabs = tabOrientation === "horizontal";
   const showBilling = checkoutEnabled || isSubscriber;
   const tabs: { id: Tab; label: string }[] = showBilling
     ? [
@@ -619,7 +605,7 @@ export function Settings({
         >
           <div
             aria-label="Console settings"
-            aria-orientation={horizontalTabs ? "horizontal" : "vertical"}
+            aria-orientation={tabOrientation}
             role="tablist"
             style={{ display: "contents" }}
           >

@@ -19,6 +19,7 @@ import { AccountMenu } from "@/components/agents/account-menu";
 import { SubscriptionCard } from "@/components/billing/subscription-card";
 import { BrandMark } from "@/components/brand/brand-mark";
 import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
+import { useResponsiveTabOrientation } from "@/hooks/use-responsive-tab-orientation";
 import { cn } from "@/lib/utils";
 
 type CheckoutResult = "cancelled" | "success" | null;
@@ -52,6 +53,7 @@ const TABS = [
 
 type Tab = (typeof TABS)[number];
 type TabId = Tab["id"];
+const HORIZONTAL_ACCOUNT_TABS_QUERY = "(max-width: 639px)";
 
 function accountPanelId(tab: TabId): string {
   return `account-panel-${tab}`;
@@ -67,6 +69,9 @@ export function AccountSettings({
 }: AccountSettingsProps) {
   const [effectiveCheckoutResult, setEffectiveCheckoutResult] =
     useState(checkoutResult);
+  const [confirmationOwner, setConfirmationOwner] = useState<string | null>(
+    null
+  );
   const [tab, setTab] = useState<TabId>(() =>
     checkoutResult === "success" ||
     (checkoutResult === "cancelled" && checkoutEnabled)
@@ -75,6 +80,9 @@ export function AccountSettings({
   );
   const { data: session, status } = useSession();
   const loginPath = useApplicationLoginPath();
+  const tabOrientation = useResponsiveTabOrientation(
+    HORIZONTAL_ACCOUNT_TABS_QUERY
+  );
   const isSubscriber = session?.user?.type === "subscriber";
   const showBilling =
     checkoutEnabled || isSubscriber || effectiveCheckoutResult === "success";
@@ -89,6 +97,9 @@ export function AccountSettings({
 
   useEffect(() => {
     setEffectiveCheckoutResult(checkoutResult);
+    if (checkoutResult !== "success") {
+      setConfirmationOwner(null);
+    }
   }, [checkoutResult]);
 
   useEffect(() => {
@@ -129,12 +140,16 @@ export function AccountSettings({
     (id: TabId, key: string) => {
       const index = visibleTabs.findIndex((entry) => entry.id === id);
       if (index < 0) {
-        return;
+        return false;
       }
       let destination: TabId | null = null;
-      if (key === "ArrowRight") {
+      const nextKey =
+        tabOrientation === "horizontal" ? "ArrowRight" : "ArrowDown";
+      const previousKey =
+        tabOrientation === "horizontal" ? "ArrowLeft" : "ArrowUp";
+      if (key === nextKey) {
         destination = visibleTabs[(index + 1) % visibleTabs.length].id;
-      } else if (key === "ArrowLeft") {
+      } else if (key === previousKey) {
         destination =
           visibleTabs[(index - 1 + visibleTabs.length) % visibleTabs.length].id;
       } else if (key === "Home") {
@@ -144,13 +159,20 @@ export function AccountSettings({
       }
       if (destination) {
         focusTab(destination);
+        return true;
       }
+      return false;
     },
-    [focusTab, visibleTabs]
+    [focusTab, tabOrientation, visibleTabs]
   );
 
   const checkoutConfirmed = useCallback(() => {
     setEffectiveCheckoutResult(null);
+    setConfirmationOwner(null);
+  }, []);
+
+  const establishConfirmationOwner = useCallback((ownerId: string) => {
+    setConfirmationOwner((current) => current ?? ownerId);
   }, []);
 
   if (!session?.user && status === "loading") {
@@ -252,6 +274,7 @@ export function AccountSettings({
           >
             <div
               aria-label="Account settings"
+              aria-orientation={tabOrientation}
               className="contents"
               role="tablist"
             >
@@ -273,25 +296,36 @@ export function AccountSettings({
             </div>
           </nav>
 
-          <section
-            aria-labelledby={accountTabId(selectedTab)}
-            className="min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-8 sm:py-6"
-            id={accountPanelId(selectedTab)}
-            role="tabpanel"
-          >
-            {selectedTab === "copilot" ? <HarnessCredentials /> : null}
-            {selectedTab === "profile" ? <AvatarSettings /> : null}
-            {selectedTab === "usage" ? <UsageMeter /> : null}
-            {selectedTab === "billing" && showBilling ? (
-              <SubscriptionCard
-                checkoutEnabled={checkoutEnabled}
-                checkoutResult={effectiveCheckoutResult}
-                isSubscriber={isSubscriber}
-                onCheckoutConfirmed={checkoutConfirmed}
-              />
-            ) : null}
-            {selectedTab === "data" ? <DeleteAllChats /> : null}
-          </section>
+          {visibleTabs.map((entry) => {
+            const active = selectedTab === entry.id;
+            return (
+              <section
+                aria-labelledby={accountTabId(entry.id)}
+                className="min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-8 sm:py-6"
+                hidden={!active}
+                id={accountPanelId(entry.id)}
+                key={entry.id}
+                role="tabpanel"
+              >
+                {active && entry.id === "copilot" ? (
+                  <HarnessCredentials />
+                ) : null}
+                {active && entry.id === "profile" ? <AvatarSettings /> : null}
+                {active && entry.id === "usage" ? <UsageMeter /> : null}
+                {entry.id === "billing" && showBilling ? (
+                  <SubscriptionCard
+                    checkoutEnabled={checkoutEnabled}
+                    checkoutResult={effectiveCheckoutResult}
+                    confirmationOwner={confirmationOwner}
+                    isSubscriber={isSubscriber}
+                    onCheckoutConfirmed={checkoutConfirmed}
+                    onConfirmationOwnerEstablished={establishConfirmationOwner}
+                  />
+                ) : null}
+                {active && entry.id === "data" ? <DeleteAllChats /> : null}
+              </section>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -308,7 +342,7 @@ function TabButton({
 }: {
   active: boolean;
   onFocus: (id: TabId) => void;
-  onKeyDown: (id: TabId, key: string) => void;
+  onKeyDown: (id: TabId, key: string) => boolean;
   onSelect: (id: TabId) => void;
   register: (id: TabId, element: HTMLButtonElement | null) => void;
   tab: Tab;
@@ -323,14 +357,8 @@ function TabButton({
   }, [onFocus, tab.id]);
   const keyDown = useCallback(
     (event: React.KeyboardEvent<HTMLButtonElement>) => {
-      if (
-        event.key === "ArrowLeft" ||
-        event.key === "ArrowRight" ||
-        event.key === "Home" ||
-        event.key === "End"
-      ) {
+      if (onKeyDown(tab.id, event.key)) {
         event.preventDefault();
-        onKeyDown(tab.id, event.key);
       }
     },
     [onKeyDown, tab.id]

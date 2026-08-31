@@ -20,8 +20,10 @@ type CheckoutResult = "cancelled" | "success" | null;
 export type SubscriptionCardProps = {
   checkoutEnabled: boolean;
   checkoutResult?: CheckoutResult;
+  confirmationOwner?: string | null;
   isSubscriber: boolean;
   onCheckoutConfirmed?: () => void;
+  onConfirmationOwnerEstablished?: (userId: string) => void;
 };
 
 type Notice = {
@@ -59,6 +61,13 @@ const CONFIRMING_NOTICE: Notice = {
     "Account access stays unchanged until the payment is recorded on this account.",
   title: "Confirming payment",
   tone: "pending",
+};
+
+const PROCESSING_NOTICE: Notice = {
+  detail:
+    "Account access will update after Stripe records the payment. You can check the same account again.",
+  title: "Payment may still be processing.",
+  tone: "neutral",
 };
 
 function initialNotice(
@@ -154,8 +163,10 @@ function retryTime(retryAt: number): string {
 export function SubscriptionCard({
   checkoutEnabled,
   checkoutResult = null,
+  confirmationOwner,
   isSubscriber,
   onCheckoutConfirmed,
+  onConfirmationOwnerEstablished,
 }: SubscriptionCardProps) {
   const titleId = useId();
   const session = useSession();
@@ -186,9 +197,16 @@ export function SubscriptionCard({
   const checkoutGenerationRef = useRef(0);
   const checkoutKeyRef = useRef<CheckoutKey | null>(null);
   const pollAbortRef = useRef<AbortController | null>(null);
+  const pollDeadlineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionRefreshCancelRef = useRef<(() => void) | null>(null);
+  const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
   const pollGenerationRef = useRef(0);
-  const confirmationOwnerRef = useRef<string | null>(null);
+  const internalConfirmationOwnerRef = useRef<string | null>(null);
   const authorityRef = useRef({ isSubscriber, userId });
   const checkoutIdentityRef = useRef(checkoutUserId);
 
@@ -212,9 +230,19 @@ export function SubscriptionCard({
     pollGenerationRef.current += 1;
     pollAbortRef.current?.abort();
     pollAbortRef.current = null;
+    if (pollDeadlineTimerRef.current) {
+      clearTimeout(pollDeadlineTimerRef.current);
+      pollDeadlineTimerRef.current = null;
+    }
     if (pollTimerRef.current) {
       clearTimeout(pollTimerRef.current);
       pollTimerRef.current = null;
+    }
+    sessionRefreshCancelRef.current?.();
+    sessionRefreshCancelRef.current = null;
+    if (sessionRefreshTimerRef.current) {
+      clearTimeout(sessionRefreshTimerRef.current);
+      sessionRefreshTimerRef.current = null;
     }
   }, []);
 
@@ -284,8 +312,9 @@ export function SubscriptionCard({
     stopPolling();
     const generation = pollGenerationRef.current;
     const confirmationUserId = userId;
-    const startedAt = Date.now();
+    const deadline = performance.now() + CONFIRMATION_FOREGROUND_BUDGET_MS;
     let attempts = 0;
+    let deadlineFinished = false;
 
     setActiveConfirmed(false);
     setPaidThrough(null);
@@ -296,6 +325,7 @@ export function SubscriptionCard({
     const isCurrent = () =>
       pollGenerationRef.current === generation &&
       userIdRef.current === confirmationUserId;
+    const remainingTime = () => Math.max(0, deadline - performance.now());
 
     const finishForRetry = (next: Notice) => {
       if (!isCurrent()) {
@@ -305,6 +335,14 @@ export function SubscriptionCard({
       publishNotice(next, { focus: true });
     };
 
+    const finishAtDeadline = () => {
+      if (deadlineFinished || !isCurrent()) {
+        return;
+      }
+      deadlineFinished = true;
+      finishForRetry(PROCESSING_NOTICE);
+    };
+
     const scheduleNext = (
       next: Notice,
       delay: number = CONFIRMATION_INTERVAL_MS
@@ -312,21 +350,19 @@ export function SubscriptionCard({
       if (!isCurrent()) {
         return;
       }
-      if (
-        attempts >= MAX_CONFIRMATION_ATTEMPTS ||
-        Date.now() + delay - startedAt > CONFIRMATION_FOREGROUND_BUDGET_MS
-      ) {
-        finishForRetry({
-          detail:
-            "Account access will update after Stripe records the payment. You can check the same account again.",
-          title: "Payment may still be processing.",
-          tone: "neutral",
-        });
+      const remaining = remainingTime();
+      if (attempts >= MAX_CONFIRMATION_ATTEMPTS || remaining <= 0) {
+        finishAtDeadline();
         return;
       }
       publishNotice(next);
+      const boundedDelay = Math.min(delay, remaining);
       pollTimerRef.current = setTimeout(() => {
         pollTimerRef.current = null;
+        if (boundedDelay >= remaining) {
+          finishAtDeadline();
+          return;
+        }
         check().catch(() => {
           finishForRetry({
             detail: "No account access was changed. Check again.",
@@ -334,7 +370,7 @@ export function SubscriptionCard({
             tone: "error",
           });
         });
-      }, delay);
+      }, boundedDelay);
     };
 
     const waitForRateLimit = (response: Response) => {
@@ -348,13 +384,13 @@ export function SubscriptionCard({
             ? "Automatic checks stopped. Return later to check this account again."
             : `Automatic checks stopped. Check this account again after ${retryTime(retryAfter.retryAt)}.`;
         setCanCheckAgain(false);
-        publishNotice(
+        scheduleNext(
           {
             detail: retryGuidance,
             title: "Payment status is temporarily rate limited.",
-            tone: "neutral",
+            tone: "pending",
           },
-          { focus: true }
+          remainingTime()
         );
         return;
       }
@@ -369,47 +405,238 @@ export function SubscriptionCard({
         title: "Payment status is temporarily rate limited.",
         tone: "pending",
       };
-      if (Date.now() + delay - startedAt <= CONFIRMATION_FOREGROUND_BUDGET_MS) {
-        scheduleNext(rateLimitNotice, delay);
-        return;
-      }
-
       setCanCheckAgain(false);
-      publishNotice(rateLimitNotice);
-      pollTimerRef.current = setTimeout(() => {
-        pollTimerRef.current = null;
-        if (!isCurrent()) {
-          return;
-        }
-        finishForRetry({
-          detail: "The same account can be checked again now.",
-          title: "Payment may still be processing.",
-          tone: "neutral",
-        });
-      }, delay);
+      scheduleNext(rateLimitNotice, delay);
     };
 
     const check = async (): Promise<void> => {
       if (!isCurrent()) {
         return;
       }
+      if (remainingTime() <= 0) {
+        finishAtDeadline();
+        return;
+      }
       attempts += 1;
       const controller = new AbortController();
       pollAbortRef.current = controller;
+      let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+      const operationRemaining = remainingTime();
+      deadlineTimer = setTimeout(() => {
+        if (pollDeadlineTimerRef.current === deadlineTimer) {
+          pollDeadlineTimerRef.current = null;
+        }
+        controller.abort();
+        finishAtDeadline();
+      }, operationRemaining);
+      pollDeadlineTimerRef.current = deadlineTimer;
 
-      let response: Response;
       try {
-        response = await fetch(browserApplicationPath("/api/subscription"), {
-          cache: "no-store",
-          credentials: "same-origin",
-          signal: controller.signal,
+        const response = await fetch(
+          browserApplicationPath("/api/subscription"),
+          {
+            cache: "no-store",
+            credentials: "same-origin",
+            signal: controller.signal,
+          }
+        );
+
+        if (!isCurrent()) {
+          return;
+        }
+        if (remainingTime() <= 0) {
+          finishAtDeadline();
+          return;
+        }
+        if (response.status === 401) {
+          setNeedsSignIn(true);
+          finishForRetry({
+            detail: "Sign in again to check the subscription on this account.",
+            title: "Your sign-in changed before payment could be confirmed.",
+            tone: "error",
+          });
+          setCanCheckAgain(false);
+          return;
+        }
+        if (response.status === 429) {
+          waitForRateLimit(response);
+          return;
+        }
+        if (response.status >= 500) {
+          scheduleNext({
+            detail: "The account will be checked again in a moment.",
+            title: "Payment status is temporarily unavailable.",
+            tone: "pending",
+          });
+          return;
+        }
+        if (!response.ok) {
+          finishForRetry({
+            detail: "Check the same account again.",
+            title: "Subscription status could not be checked.",
+            tone: "error",
+          });
+          return;
+        }
+
+        let decoded: unknown;
+        try {
+          decoded = await response.json();
+        } catch (error) {
+          if (controller.signal.aborted || remainingTime() <= 0) {
+            throw error;
+          }
+          decoded = null;
+        }
+        if (!isCurrent()) {
+          return;
+        }
+        if (remainingTime() <= 0) {
+          finishAtDeadline();
+          return;
+        }
+        const status = parseSubscriptionStatus(decoded);
+        if (!status) {
+          finishForRetry({
+            detail: "No account access was changed. Check again.",
+            title: "The subscription status response was incomplete.",
+            tone: "error",
+          });
+          return;
+        }
+        if (!status.active) {
+          scheduleNext(CONFIRMING_NOTICE);
+          return;
+        }
+
+        const paidUntil = paidThroughDate(status.subscribedUntil);
+        if (!paidUntil) {
+          finishForRetry({
+            detail: "No account access was changed. Check again.",
+            title: "The subscription status response was incomplete.",
+            tone: "error",
+          });
+          return;
+        }
+        publishNotice({
+          detail: "Refreshing this signed-in account before access changes.",
+          title: "Refreshing account access",
+          tone: "pending",
         });
+
+        const refreshPromise = updateSessionRef
+          .current({ refreshSubscription: true })
+          .then(
+            (value) => ({ kind: "resolved" as const, value }),
+            () => ({ kind: "rejected" as const })
+          );
+        let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+        let cancelRefreshTimeout: (() => void) | null = null;
+        const refreshTimeout = new Promise<
+          { kind: "cancelled" } | { kind: "timeout" }
+        >((resolve) => {
+          let settled = false;
+          const settle = (kind: "cancelled" | "timeout") => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            if (refreshTimer) {
+              clearTimeout(refreshTimer);
+              if (sessionRefreshTimerRef.current === refreshTimer) {
+                sessionRefreshTimerRef.current = null;
+              }
+            }
+            if (sessionRefreshCancelRef.current === cancelRefreshTimeout) {
+              sessionRefreshCancelRef.current = null;
+            }
+            resolve({ kind });
+          };
+          cancelRefreshTimeout = () => settle("cancelled");
+          sessionRefreshCancelRef.current = cancelRefreshTimeout;
+          refreshTimer = setTimeout(() => {
+            settle("timeout");
+          }, remainingTime());
+          sessionRefreshTimerRef.current = refreshTimer;
+        });
+        let refreshOutcome:
+          | Awaited<typeof refreshPromise>
+          | { kind: "cancelled" }
+          | { kind: "timeout" };
+        try {
+          refreshOutcome = await Promise.race([refreshPromise, refreshTimeout]);
+        } finally {
+          if (sessionRefreshCancelRef.current === cancelRefreshTimeout) {
+            sessionRefreshCancelRef.current = null;
+          }
+          if (refreshTimer) {
+            clearTimeout(refreshTimer);
+            if (sessionRefreshTimerRef.current === refreshTimer) {
+              sessionRefreshTimerRef.current = null;
+            }
+          }
+        }
+        if (!isCurrent()) {
+          return;
+        }
+        if (refreshOutcome.kind === "timeout" || remainingTime() <= 0) {
+          finishAtDeadline();
+          return;
+        }
+        if (refreshOutcome.kind === "cancelled") {
+          return;
+        }
+        if (refreshOutcome.kind === "rejected") {
+          scheduleNext({
+            detail:
+              "The paid status is recorded. Account access will be checked again.",
+            title: "Refreshing account access",
+            tone: "pending",
+          });
+          return;
+        }
+        if (refreshOutcome.value?.user?.type !== "subscriber") {
+          scheduleNext({
+            detail:
+              "The paid status is recorded. Account access will be checked again.",
+            title: "Refreshing account access",
+            tone: "pending",
+          });
+          return;
+        }
+
+        setCanCheckAgain(false);
+        setNeedsSignIn(false);
+        setPaidThrough(paidUntil);
+        setActiveConfirmed(true);
+        publishNotice({
+          detail: "Subscriber access is ready on this account.",
+          title: "Subscription active",
+          tone: "success",
+        });
+        const url = new URL(window.location.href);
+        if (url.searchParams.get("checkout") === "success") {
+          url.searchParams.delete("checkout");
+          window.history.replaceState(
+            window.history.state,
+            "",
+            `${url.pathname}${url.search}${url.hash}`
+          );
+        }
+        onCheckoutConfirmed?.();
       } catch (error) {
+        if (!isCurrent()) {
+          return;
+        }
         if (
-          controller.signal.aborted ||
-          (error instanceof DOMException && error.name === "AbortError") ||
-          !isCurrent()
+          deadlineFinished ||
+          remainingTime() <= 0 ||
+          controller.signal.aborted
         ) {
+          finishAtDeadline();
+          return;
+        }
+        if (error instanceof DOMException && error.name === "AbortError") {
           return;
         }
         scheduleNext({
@@ -417,132 +644,17 @@ export function SubscriptionCard({
           title: "Payment status could not be reached. Trying again…",
           tone: "pending",
         });
-        return;
-      }
-
-      if (!isCurrent()) {
-        return;
-      }
-      pollAbortRef.current = null;
-
-      if (response.status === 401) {
-        setNeedsSignIn(true);
-        finishForRetry({
-          detail: "Sign in again to check the subscription on this account.",
-          title: "Your sign-in changed before payment could be confirmed.",
-          tone: "error",
-        });
-        setCanCheckAgain(false);
-        return;
-      }
-      if (response.status === 429) {
-        waitForRateLimit(response);
-        return;
-      }
-      if (response.status >= 500) {
-        scheduleNext({
-          detail: "The account will be checked again in a moment.",
-          title: "Payment status is temporarily unavailable.",
-          tone: "pending",
-        });
-        return;
-      }
-      if (!response.ok) {
-        finishForRetry({
-          detail: "Check the same account again.",
-          title: "Subscription status could not be checked.",
-          tone: "error",
-        });
-        return;
-      }
-
-      let decoded: unknown;
-      try {
-        decoded = await response.json();
-      } catch {
-        decoded = null;
-      }
-      if (!isCurrent()) {
-        return;
-      }
-      const status = parseSubscriptionStatus(decoded);
-      if (!status) {
-        finishForRetry({
-          detail: "No account access was changed. Check again.",
-          title: "The subscription status response was incomplete.",
-          tone: "error",
-        });
-        return;
-      }
-      if (!status.active) {
-        scheduleNext(CONFIRMING_NOTICE);
-        return;
-      }
-
-      const paidUntil = paidThroughDate(status.subscribedUntil);
-      if (!paidUntil) {
-        finishForRetry({
-          detail: "No account access was changed. Check again.",
-          title: "The subscription status response was incomplete.",
-          tone: "error",
-        });
-        return;
-      }
-      publishNotice({
-        detail: "Refreshing this signed-in account before access changes.",
-        title: "Refreshing account access",
-        tone: "pending",
-      });
-
-      let refreshed: Awaited<ReturnType<typeof session.update>>;
-      try {
-        refreshed = await updateSessionRef.current({
-          refreshSubscription: true,
-        });
-      } catch {
-        if (!isCurrent()) {
-          return;
+      } finally {
+        if (pollAbortRef.current === controller) {
+          pollAbortRef.current = null;
         }
-        scheduleNext({
-          detail:
-            "The paid status is recorded. Account access will be checked again.",
-          title: "Refreshing account access",
-          tone: "pending",
-        });
-        return;
+        if (deadlineTimer) {
+          clearTimeout(deadlineTimer);
+          if (pollDeadlineTimerRef.current === deadlineTimer) {
+            pollDeadlineTimerRef.current = null;
+          }
+        }
       }
-      if (!isCurrent()) {
-        return;
-      }
-      if (refreshed?.user?.type !== "subscriber") {
-        scheduleNext({
-          detail:
-            "The paid status is recorded. Account access will be checked again.",
-          title: "Refreshing account access",
-          tone: "pending",
-        });
-        return;
-      }
-
-      setCanCheckAgain(false);
-      setNeedsSignIn(false);
-      setPaidThrough(paidUntil);
-      setActiveConfirmed(true);
-      publishNotice({
-        detail: "Subscriber access is ready on this account.",
-        title: "Subscription active",
-        tone: "success",
-      });
-      const url = new URL(window.location.href);
-      if (url.searchParams.get("checkout") === "success") {
-        url.searchParams.delete("checkout");
-        window.history.replaceState(
-          window.history.state,
-          "",
-          `${url.pathname}${url.search}${url.hash}`
-        );
-      }
-      onCheckoutConfirmed?.();
     };
 
     check().catch(() => {
@@ -556,16 +668,26 @@ export function SubscriptionCard({
 
   useEffect(() => {
     if (checkoutResult !== "success") {
-      confirmationOwnerRef.current = null;
+      internalConfirmationOwnerRef.current = null;
       return;
     }
     if (!userId) {
       return;
     }
-    if (confirmationOwnerRef.current === null) {
-      confirmationOwnerRef.current = userId;
+    let owner =
+      confirmationOwner === undefined
+        ? internalConfirmationOwnerRef.current
+        : confirmationOwner;
+    if (owner === null) {
+      if (confirmationOwner === undefined) {
+        internalConfirmationOwnerRef.current = userId;
+        owner = userId;
+      } else {
+        onConfirmationOwnerEstablished?.(userId);
+        return;
+      }
     }
-    if (confirmationOwnerRef.current !== userId) {
+    if (owner !== userId) {
       stopPolling();
       setCanCheckAgain(false);
       publishNotice(
@@ -583,7 +705,15 @@ export function SubscriptionCard({
       clearTimeout(kickoff);
       stopPolling();
     };
-  }, [checkoutResult, publishNotice, startConfirmation, stopPolling, userId]);
+  }, [
+    checkoutResult,
+    confirmationOwner,
+    onConfirmationOwnerEstablished,
+    publishNotice,
+    startConfirmation,
+    stopPolling,
+    userId,
+  ]);
 
   useEffect(() => {
     if (
