@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { browserApplicationPath } from "@/lib/application-path";
 import {
   createDeviceFlowAttempt,
+  DeviceFlowRequestError,
   requestDeviceFlowStart,
   type StartedDeviceFlow,
 } from "@/lib/credentials/device-flow-attempt";
@@ -23,13 +24,15 @@ import {
  * configuring a machine rather than themselves.
  */
 export function ConnectCopilot({
+  authorityContext,
   configured,
+  onAuthorityInvalidated,
   onConnected,
-  userId,
 }: {
+  authorityContext: string;
   configured: boolean;
+  onAuthorityInvalidated: () => void;
   onConnected: () => void;
-  userId: string;
 }) {
   const [started, setStarted] = useState<StartedDeviceFlow | null>(null);
   const [busy, setBusy] = useState(false);
@@ -37,16 +40,27 @@ export function ConnectCopilot({
     createDeviceFlowAttempt(() => crypto.randomUUID())
   );
   const stopped = useRef(false);
-  const ownerRef = useRef(userId);
+  const authorityContextRef = useRef(authorityContext);
+  authorityContextRef.current = authorityContext;
+  const ownerRef = useRef(authorityContext);
 
   useEffect(() => {
-    if (ownerRef.current === userId) {
+    if (ownerRef.current === authorityContext) {
       return;
     }
-    ownerRef.current = userId;
+    ownerRef.current = authorityContext;
     stopped.current = true;
+    startAttempt.reset();
     setStarted(null);
-  }, [userId]);
+    setBusy(false);
+  }, [authorityContext, startAttempt]);
+
+  useEffect(
+    () => () => {
+      stopped.current = true;
+    },
+    []
+  );
 
   /**
    * Polls for the authorization result.
@@ -57,12 +71,16 @@ export function ConnectCopilot({
    * continuing at the old rate earns `slow_down` indefinitely.
    */
   const poll = useCallback(
-    (session: StartedDeviceFlow) => {
+    (session: StartedDeviceFlow, requestAuthorityContext: string) => {
       const deadline = Date.now() + 15 * 60 * 1000;
       let waitMs = session.interval * 1000;
 
       const attempt = () => {
-        if (stopped.current || Date.now() > deadline) {
+        if (
+          stopped.current ||
+          authorityContextRef.current !== requestAuthorityContext ||
+          Date.now() > deadline
+        ) {
           return;
         }
 
@@ -83,7 +101,7 @@ export function ConnectCopilot({
             status?: string;
           } | null;
           if (response.status === 401 || response.status === 403) {
-            return { status: "unauthorized" };
+            return { status: "authority_refused" };
           }
           if (response.status === 409) {
             return { status: body?.status ?? "owner_changed" };
@@ -93,7 +111,10 @@ export function ConnectCopilot({
 
         ask()
           .then((body) => {
-            if (stopped.current) {
+            if (
+              stopped.current ||
+              authorityContextRef.current !== requestAuthorityContext
+            ) {
               return;
             }
 
@@ -124,9 +145,12 @@ export function ConnectCopilot({
 
             if (
               body?.status === "owner_changed" ||
-              body?.status === "unauthorized"
+              body?.status === "authority_refused"
             ) {
               stopped.current = true;
+              if (body.status === "authority_refused") {
+                onAuthorityInvalidated();
+              }
               toast({
                 description: "Sign in again to connect Copilot.",
                 type: "error",
@@ -148,31 +172,51 @@ export function ConnectCopilot({
 
       setTimeout(attempt, waitMs);
     },
-    [onConnected]
+    [onAuthorityInvalidated, onConnected]
   );
 
   const connect = useCallback(async () => {
     setBusy(true);
     stopped.current = false;
+    const requestAuthorityContext = authorityContextRef.current;
 
     try {
       const session = await requestDeviceFlowStart({
         attempt: startAttempt,
         fetcher: fetch,
       });
+      if (authorityContextRef.current !== requestAuthorityContext) {
+        return;
+      }
 
       setStarted(session);
       window.open(session.verificationUri, "_blank", "noopener,noreferrer");
-      poll(session);
-    } catch {
-      toast({
-        description: "Could not start the GitHub connection.",
-        type: "error",
-      });
+      poll(session, requestAuthorityContext);
+    } catch (error) {
+      if (authorityContextRef.current === requestAuthorityContext) {
+        if (
+          error instanceof DeviceFlowRequestError &&
+          (error.status === 401 || error.status === 403)
+        ) {
+          stopped.current = true;
+          onAuthorityInvalidated();
+        }
+        toast({
+          description:
+            error instanceof DeviceFlowRequestError && error.status === 401
+              ? "Sign in again to connect Copilot."
+              : error instanceof DeviceFlowRequestError && error.status === 403
+                ? "An active subscription is required to connect Copilot."
+                : "Could not start the GitHub connection.",
+          type: "error",
+        });
+      }
     } finally {
-      setBusy(false);
+      if (authorityContextRef.current === requestAuthorityContext) {
+        setBusy(false);
+      }
     }
-  }, [poll, startAttempt]);
+  }, [onAuthorityInvalidated, poll, startAttempt]);
 
   if (started) {
     return (

@@ -1422,6 +1422,66 @@ test.describe("Subscriber checkout", () => {
     await expect(page.getByText("Connected", { exact: true })).toHaveCount(0);
   });
 
+  for (const refusedMethod of ["POST", "PUT"] as const) {
+    test(`device-flow ${refusedMethod} refusal closes shared account authority`, async ({
+      page,
+    }) => {
+      await setServerSession(page.context(), "subscriber");
+      await page.route("**/api/auth/session", (route) =>
+        route.fulfill({ json: sessionFor("subscriber") })
+      );
+      await mockAccountDependencies(page);
+      await page.route("**/api/credentials/device", (route) => {
+        const method = route.request().method();
+        if (method === refusedMethod) {
+          return route.fulfill({
+            json: { error: "subscription_required" },
+            status: 403,
+          });
+        }
+        if (method === "POST") {
+          return route.fulfill({
+            json: {
+              binding: "signed-device-binding",
+              deviceCode: "device-secret",
+              interval: 0,
+              userCode: "ABCD-EFGH",
+              verificationUri: "https://github.com/login/device",
+            },
+          });
+        }
+        return route.fulfill({ json: {}, status: 500 });
+      });
+      let releaseRefresh!: () => void;
+      const refreshGate = new Promise<void>((resolve) => {
+        releaseRefresh = resolve;
+      });
+      let serverRefreshes = 0;
+      await page.route("**/account?**", async (route) => {
+        if (isServerComponentRequest(route.request())) {
+          serverRefreshes += 1;
+          await refreshGate;
+        }
+        await route.continue();
+      });
+
+      await page.goto("/account");
+      await page
+        .getByRole("button", { name: "Connect GitHub Copilot" })
+        .click();
+
+      await expect.poll(() => serverRefreshes).toBe(1);
+      await expect(
+        page.getByText("Storing a credential needs an active subscription.", {
+          exact: true,
+        })
+      ).toBeVisible();
+      await expect(page.getByLabel("GitHub Copilot CLI")).toHaveCount(0);
+
+      releaseRefresh();
+    });
+  }
+
   test("agents ignores subscriber authority belonging to another current client identity", async ({
     page,
   }) => {

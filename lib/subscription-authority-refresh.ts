@@ -3,8 +3,8 @@ import type { SubscriptionAuthority } from "./subscription-authority";
 export type SubscriptionAuthorityRevision = Readonly<{
   authorityKey: string;
   checkedAt: string;
-  checkedAtMs: number;
   contextKey: string;
+  resolutionId: string;
 }>;
 
 export function subscriptionAuthorityRevisionContext(
@@ -30,7 +30,11 @@ export function subscriptionAuthorityRevision(
     return null;
   }
   const checkedAtMs = Date.parse(authority.checkedAt);
-  if (!Number.isFinite(checkedAtMs)) {
+  if (
+    !Number.isFinite(checkedAtMs) ||
+    typeof authority.resolutionId !== "string" ||
+    authority.resolutionId.length === 0
+  ) {
     return null;
   }
   return {
@@ -41,11 +45,11 @@ export function subscriptionAuthorityRevision(
       authority.authorityExpiresAt ?? null,
     ]),
     checkedAt: authority.checkedAt,
-    checkedAtMs,
     contextKey: subscriptionAuthorityRevisionContext(
       sessionUserId,
       authVersion
     ),
+    resolutionId: authority.resolutionId,
   };
 }
 
@@ -73,7 +77,7 @@ export function createSubscriptionAuthorityInvalidationFence(): SubscriptionAuth
     invalidate: (revision) => {
       if (
         invalidated?.contextKey === revision.contextKey &&
-        invalidated.checkedAtMs >= revision.checkedAtMs
+        invalidated.resolutionId === revision.resolutionId
       ) {
         return false;
       }
@@ -84,7 +88,7 @@ export function createSubscriptionAuthorityInvalidationFence(): SubscriptionAuth
         incident &&
         sameIncident &&
         invalidated &&
-        revision.checkedAtMs > invalidated.checkedAtMs
+        revision.resolutionId !== invalidated.resolutionId
       ) {
         incident.retried = true;
       }
@@ -117,9 +121,16 @@ export function createSubscriptionAuthorityInvalidationFence(): SubscriptionAuth
       ) {
         return true;
       }
-      return revision.checkedAtMs <= invalidated.checkedAtMs;
+      return revision.resolutionId === invalidated.resolutionId;
     },
     reconcile: (revision, contextKey) => {
+      if (
+        incident &&
+        (incident.contextKey !== contextKey ||
+          (revision && revision.authorityKey !== incident.authorityKey))
+      ) {
+        incident = null;
+      }
       if (!invalidated) {
         return false;
       }
@@ -131,7 +142,7 @@ export function createSubscriptionAuthorityInvalidationFence(): SubscriptionAuth
         incident = null;
         return true;
       }
-      if (revision && revision.checkedAtMs > invalidated.checkedAtMs) {
+      if (revision && revision.resolutionId !== invalidated.resolutionId) {
         if (incident?.retried) {
           return false;
         }

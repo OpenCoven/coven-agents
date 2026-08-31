@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import NextAuth, { type DefaultSession, type Session } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
 import GitHub from "next-auth/providers/github";
@@ -232,13 +233,19 @@ export async function subscriptionPageAuthority(
   if (!resolved) {
     return null;
   }
+  const resolutionId = randomUUID();
   if (resolved.kind === "storage-unavailable") {
-    return storageUnavailableSubscriptionAuthority(resolved.session, now);
+    return storageUnavailableSubscriptionAuthority(
+      resolved.session,
+      now,
+      resolutionId
+    );
   }
   return {
     authVersion: resolved.session.user.authVersion,
     checkedAt: now.toISOString(),
     isSubscriber: isSubscribedAt(resolved.user, now),
+    resolutionId,
     subscribedUntil: resolved.user.subscribedUntil?.toISOString() ?? null,
     userId: resolved.session.user.id,
   };

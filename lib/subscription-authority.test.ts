@@ -11,6 +11,7 @@ const USER_B = "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa";
 const PAID_UNTIL = "2099-01-15T12:00:00.000Z";
 const CHECKED_AT = "2099-01-15T11:00:00.000Z";
 const AUTH_VERSION = 7;
+const RESOLUTION_ID = "authority-resolution";
 
 test("same-user server authority activates a stale demo client", () => {
   assert.deepEqual(
@@ -19,6 +20,7 @@ test("same-user server authority activates a stale demo client", () => {
         authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: true,
+        resolutionId: RESOLUTION_ID,
         subscribedUntil: PAID_UNTIL,
         userId: USER_A,
       },
@@ -39,6 +41,7 @@ test("server downgrade overrides a stale subscriber client", () => {
         authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: false,
+        resolutionId: RESOLUTION_ID,
         subscribedUntil: null,
         userId: USER_A,
       },
@@ -59,6 +62,7 @@ test("authority for another user is ignored", () => {
         authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: true,
+        resolutionId: RESOLUTION_ID,
         subscribedUntil: PAID_UNTIL,
         userId: USER_A,
       },
@@ -77,6 +81,7 @@ test("authority from an older auth version is ignored", () => {
     authVersion: AUTH_VERSION,
     checkedAt: CHECKED_AT,
     isSubscriber: true,
+    resolutionId: RESOLUTION_ID,
     subscribedUntil: PAID_UNTIL,
     userId: USER_A,
   } as const;
@@ -101,6 +106,7 @@ test("a pending boundary refresh fails effective authority closed", () => {
         authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: true,
+        resolutionId: RESOLUTION_ID,
         subscribedUntil: PAID_UNTIL,
         userId: USER_A,
       },
@@ -127,13 +133,15 @@ test("storage fallback preserves only a bounded same-session paid authority", ()
           type: "subscriber",
         },
       },
-      now
+      now,
+      RESOLUTION_ID
     ),
     {
       authorityExpiresAt: PAID_UNTIL,
       authVersion: AUTH_VERSION,
       checkedAt: CHECKED_AT,
       isSubscriber: true,
+      resolutionId: RESOLUTION_ID,
       subscribedUntil: null,
       userId: USER_A,
     }
@@ -154,13 +162,15 @@ test("storage fallback preserves only a bounded same-session paid authority", ()
             type: "subscriber",
           },
         },
-        now
+        now,
+        RESOLUTION_ID
       ),
       {
         authorityExpiresAt: null,
         authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: false,
+        resolutionId: RESOLUTION_ID,
         subscribedUntil: null,
         userId: USER_A,
       }
@@ -175,6 +185,7 @@ test("same-user expiry scheduling uses database or bounded fallback dates", () =
         authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: true,
+        resolutionId: RESOLUTION_ID,
         subscribedUntil: PAID_UNTIL,
         userId: USER_A,
       },
@@ -190,6 +201,7 @@ test("same-user expiry scheduling uses database or bounded fallback dates", () =
         authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: true,
+        resolutionId: RESOLUTION_ID,
         subscribedUntil: null,
         userId: USER_A,
       },
@@ -205,6 +217,7 @@ test("same-user expiry scheduling uses database or bounded fallback dates", () =
         authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: true,
+        resolutionId: RESOLUTION_ID,
         subscribedUntil: null,
         userId: USER_A,
       },

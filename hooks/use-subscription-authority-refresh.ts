@@ -138,7 +138,7 @@ export function useSubscriptionAuthorityRefresh({
 
   return {
     authorityPending,
-    authorityRevision: revision?.checkedAt ?? null,
+    authorityRevision: revision?.resolutionId ?? null,
     invalidateAndRefresh,
   };
 }

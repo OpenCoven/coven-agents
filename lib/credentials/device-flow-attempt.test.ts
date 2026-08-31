@@ -85,3 +85,19 @@ test("device flow starts beneath the configured application base path", async ()
   }
   assert.deepEqual(inputs, ["/demo/api/credentials/device"]);
 });
+
+test("device flow start errors preserve authorization refusal status", async () => {
+  const attempt = createDeviceFlowAttempt(() => "attempt-one");
+
+  await assert.rejects(
+    requestDeviceFlowStart({
+      attempt,
+      fetcher: () =>
+        Promise.resolve(
+          Response.json({ error: "authentication_required" }, { status: 401 })
+        ),
+    }),
+    (error: unknown) =>
+      error instanceof Error && "status" in error && error.status === 401
+  );
+});

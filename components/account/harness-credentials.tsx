@@ -288,15 +288,16 @@ export function HarnessCredentials({
       ) : (
         HARNESSES.map((harness) => (
           <HarnessRow
+            authorityContext={authorityContext}
             busy={busy === harness.id}
             configured={configured.includes(harness.id)}
             harness={harness}
             key={`${authorityContext}:${harness.id}`}
+            onAuthorityInvalidated={onAuthorityInvalidated}
             onChange={change}
             onConnected={reload}
             onRemove={remove}
             onSave={save}
-            userId={userId}
             value={values[harness.id] ?? ""}
           />
         ))
@@ -306,24 +307,26 @@ export function HarnessCredentials({
 }
 
 function HarnessRow({
+  authorityContext,
   busy,
   configured,
   harness,
   onChange,
+  onAuthorityInvalidated,
   onConnected,
   onRemove,
   onSave,
-  userId,
   value,
 }: {
+  authorityContext: string;
   busy: boolean;
   configured: boolean;
   onConnected: () => void;
   harness: { help: string; id: string; label: string };
   onChange: (harnessId: string, next: string) => void;
+  onAuthorityInvalidated: () => void;
   onRemove: (harnessId: string) => void;
   onSave: (harnessId: string) => Promise<boolean>;
-  userId: string;
   value: string;
 }) {
   /**
@@ -424,9 +427,10 @@ function HarnessRow({
       {showEditor && harness.id === "copilot" ? (
         <>
           <ConnectCopilot
+            authorityContext={authorityContext}
             configured={configured}
+            onAuthorityInvalidated={onAuthorityInvalidated}
             onConnected={handleConnected}
-            userId={userId}
           />
           <div className="flex items-center gap-3 py-1">
             <span className="h-px flex-1 bg-border" />

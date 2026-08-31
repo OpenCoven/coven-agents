@@ -13,6 +13,16 @@ export type StartedDeviceFlow = {
   verificationUri: string;
 };
 
+export class DeviceFlowRequestError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(String(status));
+    this.name = "DeviceFlowRequestError";
+    this.status = status;
+  }
+}
+
 export function createDeviceFlowAttempt(
   generateKey: () => string
 ): DeviceFlowAttempt {
@@ -42,7 +52,7 @@ export async function requestDeviceFlowStart(input: {
   );
 
   if (!response.ok) {
-    throw new Error(String(response.status));
+    throw new DeviceFlowRequestError(response.status);
   }
 
   const started = (await response.json()) as StartedDeviceFlow;

@@ -3,6 +3,7 @@ export type SubscriptionAuthority = Readonly<{
   authVersion: number | null;
   checkedAt: string;
   isSubscriber: boolean;
+  resolutionId: string;
   subscribedUntil: string | null;
   userId: string;
 }> | null;
@@ -28,7 +29,8 @@ const INACTIVE_AUTHORITY: EffectiveSubscriptionAuthority = {
 
 export function storageUnavailableSubscriptionAuthority(
   session: SubscriptionAuthoritySession,
-  now: Date
+  now: Date,
+  resolutionId: string
 ): SubscriptionAuthority {
   const userId = session.user?.id;
   if (!userId) {
@@ -49,6 +51,7 @@ export function storageUnavailableSubscriptionAuthority(
     authVersion: Number.isInteger(authVersion) ? (authVersion ?? null) : null,
     checkedAt: now.toISOString(),
     isSubscriber,
+    resolutionId,
     subscribedUntil: null,
     userId,
   };
