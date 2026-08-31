@@ -20,10 +20,12 @@ import ts from "typescript5";
 const repositoryRoot = new URL("../", import.meta.url);
 
 type RouteExpectation = {
+  admissionMarker?: string;
   file: string;
   handler: string;
   identityMarker: string;
   implementation?: string;
+  implementationFile?: string;
   markers: string[];
   policy: string;
 };
@@ -50,13 +52,18 @@ const protectedHandlers: RouteExpectation[] = [
     ["readBoundedFormData(", "put("],
     "upload"
   ),
-  route(
-    "app/api/checkout/route.ts",
-    "POST",
-    "auth(",
-    ["findUserById(", "new Stripe("],
-    "checkout"
-  ),
+  {
+    ...route(
+      "app/api/checkout/route.ts",
+      "POST",
+      "dependencies.authenticate(",
+      ["dependencies.findUser(", "dependencies.createProvider("],
+      "checkout"
+    ),
+    admissionMarker: "dependencies.enforceAbuse({",
+    implementation: "checkoutResponse",
+    implementationFile: "lib/billing/checkout-response.ts",
+  },
   route(
     "app/api/credentials/device/route.ts",
     "POST",
@@ -204,9 +211,14 @@ test("resource-bearing handlers admit after identity and before expensive work",
   for (const expectation of protectedHandlers) {
     const source = read(expectation.file);
     const implementation = expectation.implementation ?? expectation.handler;
+    const implementationSource = expectation.implementationFile
+      ? read(expectation.implementationFile)
+      : source;
     const handlerBlock = exportedFunctionBlock(source, expectation.handler);
-    const block = functionBlock(source, implementation);
-    const admissionIndex = block.indexOf("enforceAbusePolicy({");
+    const block = functionBlock(implementationSource, implementation);
+    const admissionIndex = block.indexOf(
+      expectation.admissionMarker ?? "enforceAbusePolicy({"
+    );
 
     assert.match(
       source,
@@ -296,12 +308,16 @@ test("runner credential acquisition reserves and leases before decryption", () =
 });
 
 test("costly creates claim idempotency before calling their provider", () => {
-  for (const [file, providerMarker] of [
-    ["app/api/checkout/route.ts", "stripe.subscriptions.list("],
-    ["app/api/credentials/device/route.ts", "startDeviceFlow("],
+  for (const [file, handler, providerMarker] of [
+    [
+      "lib/billing/checkout-response.ts",
+      "checkoutResponse",
+      "dependencies.createProvider(",
+    ],
+    ["app/api/credentials/device/route.ts", "POST", "startDeviceFlow("],
   ] as const) {
     const source = read(file);
-    const block = exportedFunctionBlock(source, "POST");
+    const block = exportedFunctionBlock(source, handler);
     const claimIndex = block.indexOf("runIdempotentOperation({");
     const providerIndex = block.indexOf(providerMarker);
 
@@ -316,7 +332,7 @@ test("costly creates claim idempotency before calling their provider", () => {
 
 test("device starts encrypt replay payloads while checkout uses tagged plaintext", () => {
   const deviceSource = read("app/api/credentials/device/route.ts");
-  const checkoutSource = read("app/api/checkout/route.ts");
+  const checkoutSource = read("lib/billing/checkout-response.ts");
 
   assert.match(deviceSource, /encryptedIdempotencyResponseStorage\(/);
   assert.match(deviceSource, /credentialKekVersion/);
@@ -325,7 +341,7 @@ test("device starts encrypt replay payloads while checkout uses tagged plaintext
     /responseStorage:\s*deviceStartResponseStorage/
   );
   assert.match(
-    functionBlock(checkoutSource, "POST"),
+    functionBlock(checkoutSource, "checkoutResponse"),
     /responseStorage:\s*plaintextIdempotencyResponseStorage/
   );
 });

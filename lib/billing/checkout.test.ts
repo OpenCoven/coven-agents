@@ -1,42 +1,60 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { checkoutDecision } from "./checkout";
+import type Stripe from "stripe";
+import { checkoutDecision, stableIntegrationIdentifier } from "./checkout";
+import { createStripeClient } from "./stripe-client";
 
-test("a user with no active subscription may check out", () => {
-  assert.equal(
-    checkoutDecision({ hasActiveSubscription: false, userId: "user-1" }).kind,
-    "allowed"
-  );
+const BLOCKING_STATUSES = [
+  "active",
+  "trialing",
+  "past_due",
+  "unpaid",
+  "paused",
+  "incomplete",
+] satisfies Stripe.Subscription.Status[];
+
+test("every live subscription status blocks checkout", () => {
+  for (const status of BLOCKING_STATUSES) {
+    assert.equal(
+      checkoutDecision({
+        subscriptions: [{ status }],
+        userId: "user-1",
+      }).kind,
+      "already_subscribed",
+      status
+    );
+  }
 });
 
-test("a user who is already subscribed is refused", () => {
-  // Not enforced by a unique constraint on the customer id: a
-  // cancel-then-resubscribe reuses the same Customer, so a constraint there
-  // would reject exactly the returning customer worth not breaking.
-  assert.equal(
-    checkoutDecision({ hasActiveSubscription: true, userId: "user-1" }).kind,
-    "already_subscribed"
-  );
+test("terminal subscriptions allow a new checkout", () => {
+  for (const status of [
+    "canceled",
+    "incomplete_expired",
+  ] satisfies Stripe.Subscription.Status[]) {
+    assert.equal(
+      checkoutDecision({
+        subscriptions: [{ status }],
+        userId: "user-1",
+      }).kind,
+      "allowed",
+      status
+    );
+  }
 });
 
-test("an anonymous caller is refused", () => {
+test("an anonymous caller is refused before subscription state is disclosed", () => {
   assert.equal(
-    checkoutDecision({ hasActiveSubscription: false, userId: null }).kind,
+    checkoutDecision({
+      subscriptions: [{ status: "active" }],
+      userId: null,
+    }).kind,
     "unauthorized"
   );
 });
 
-test("signed-out is checked before subscription state", () => {
-  // An anonymous caller must never learn whether some account is subscribed.
-  assert.equal(
-    checkoutDecision({ hasActiveSubscription: true, userId: null }).kind,
-    "unauthorized"
-  );
-});
-
-test("an allowed decision carries the user it is for", () => {
+test("an allowed decision carries the authenticated user", () => {
   const decision = checkoutDecision({
-    hasActiveSubscription: false,
+    subscriptions: [],
     userId: "user-1",
   });
 
@@ -44,4 +62,20 @@ test("an allowed decision carries the user it is for", () => {
   if (decision.kind === "allowed") {
     assert.equal(decision.userId, "user-1");
   }
+});
+
+test("integration identifiers are stable and end in eight lowercase letters", () => {
+  const first = stableIntegrationIdentifier("provider-key-one");
+  const retry = stableIntegrationIdentifier("provider-key-one");
+  const other = stableIntegrationIdentifier("provider-key-two");
+
+  assert.equal(first, retry);
+  assert.notEqual(first, other);
+  assert.match(first, /^opencoven_coven_agents_[a-z]{8}$/);
+});
+
+test("Stripe clients use the pinned Dahlia API version", () => {
+  const client = createStripeClient("sk_test_checkout");
+
+  assert.equal(client.getApiField("version"), "2026-07-29.dahlia");
 });

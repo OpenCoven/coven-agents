@@ -21,6 +21,7 @@ import {
   well,
 } from "@/components/console/styles";
 import { FORMATIONS, type Formation, TEMPLATES } from "@/lib/agents/formations";
+import { executionProfileForTemplate } from "@/lib/console/agent-profile";
 import { glyphFor } from "@/lib/console/format";
 
 /**
@@ -371,71 +372,102 @@ export function CreateAgent({
                   overflow: "hidden",
                 }}
               >
-                {TEMPLATES.map((template) => (
-                  <button
-                    className="oc-row oc-rowscope"
-                    disabled={busy}
-                    key={template.id}
-                    onClick={() =>
-                      onCreate({
-                        backend: "cloud",
-                        description: template.blurb,
-                        instructions: template.instructions,
-                        model: DEFAULT_MODEL,
-                        name: template.name,
-                        runtime,
-                        workspace: DEFAULT_WORKSPACE,
-                      })
-                    }
-                    style={{
-                      alignItems: "center",
-                      background: "var(--bg-raised)",
-                      border: 0,
-                      cursor: busy ? "wait" : "pointer",
-                      display: "flex",
-                      gap: 12,
-                      padding: "12px 14px",
-                      textAlign: "left",
-                      width: "100%",
-                    }}
-                    type="button"
-                  >
-                    <span style={well(false, 26)}>
-                      {glyphFor(template.name)}
-                    </span>
-                    <span
+                {TEMPLATES.map((template) => {
+                  const profile = executionProfileForTemplate(template);
+                  return (
+                    <button
+                      aria-label={`Create ${template.name}. ${profile.mode}. ${profile.outcome}. ${template.blurb}`}
+                      className="oc-row oc-rowscope"
+                      disabled={busy}
+                      key={template.id}
+                      onClick={() =>
+                        onCreate({
+                          backend: "cloud",
+                          description: template.blurb,
+                          instructions: template.instructions,
+                          model: DEFAULT_MODEL,
+                          name: template.name,
+                          runtime,
+                          workspace: DEFAULT_WORKSPACE,
+                        })
+                      }
                       style={{
-                        ...type_.title,
-                        flex: "none",
+                        alignItems: "center",
+                        background: "var(--bg-raised)",
+                        border: 0,
+                        cursor: busy ? "wait" : "pointer",
+                        display: "flex",
+                        gap: 12,
+                        padding: "12px 14px",
                         textAlign: "left",
-                        width: 64,
+                        width: "100%",
                       }}
+                      type="button"
                     >
-                      {template.name}
-                    </span>
-                    <span
-                      style={{
-                        color: "var(--text-muted)",
-                        flex: 1,
-                        font: "400 12px/1.45 var(--font-ui)",
-                        textAlign: "left",
-                        ...truncate,
-                      }}
-                    >
-                      {template.blurb}
-                    </span>
-                    <span
-                      className="oc-reveal"
-                      style={{
-                        color: "var(--accent-presence)",
-                        flex: "none",
-                        font: "500 11px/1 var(--font-mono)",
-                      }}
-                    >
-                      use →
-                    </span>
-                  </button>
-                ))}
+                      <span style={well(false, 26)}>
+                        {glyphFor(template.name)}
+                      </span>
+                      <span
+                        style={{
+                          display: "grid",
+                          flex: "none",
+                          gap: 4,
+                          textAlign: "left",
+                          width: 84,
+                        }}
+                      >
+                        <strong style={type_.title}>{template.name}</strong>
+                        <small
+                          style={{
+                            color: "var(--text-muted)",
+                            font: "500 9px/1 var(--font-mono)",
+                            textTransform: "uppercase",
+                          }}
+                        >
+                          {profile.mode}
+                        </small>
+                      </span>
+                      <span
+                        style={{
+                          display: "grid",
+                          flex: 1,
+                          gap: 3,
+                          minWidth: 0,
+                          textAlign: "left",
+                        }}
+                      >
+                        <span
+                          style={{
+                            color: "var(--text-secondary)",
+                            font: "400 12px/1.35 var(--font-ui)",
+                            ...truncate,
+                          }}
+                        >
+                          {template.blurb}
+                        </span>
+                        <small
+                          style={{
+                            color: "var(--text-muted)",
+                            font: "500 10px/1.25 var(--font-ui)",
+                            ...truncate,
+                          }}
+                        >
+                          Returns {profile.outcome.toLocaleLowerCase()}
+                        </small>
+                      </span>
+                      <span
+                        className="oc-reveal"
+                        style={{
+                          color: "var(--accent-presence)",
+                          flex: "none",
+                          font: "500 11px/1 var(--font-mono)",
+                        }}
+                      >
+                        {busy ? "Creating…" : `Create ${template.name}`} →
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
               <FinePrint label="How read-only is enforced">
                 Read-only roles are enforced by their contract, not by the
