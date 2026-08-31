@@ -61,6 +61,7 @@ import {
 } from "@/lib/agents/connection-status";
 import type { Formation } from "@/lib/agents/formations";
 import { memberName } from "@/lib/agents/formations";
+import { browserApplicationLoginHref } from "@/lib/application-path";
 import { avatarFor } from "@/lib/avatar";
 import { isTerminal, projectRun } from "@/lib/console/blocks";
 import { formatDuration, glyphFor, spanBetween } from "@/lib/console/format";
@@ -74,6 +75,7 @@ import {
 import {
   effectiveSubscriptionAuthority,
   type SubscriptionAuthority,
+  subscriptionAuthorityExpiryBoundary,
 } from "@/lib/subscription-authority";
 
 const TICK_MS = 1000;
@@ -142,7 +144,10 @@ export function RunConsole({
   const authorityPending = useSubscriptionAuthorityRefresh({
     isSubscriber: serverAuthority.isSubscriber,
     status: session.status,
-    subscribedUntil: serverAuthority.subscribedUntil,
+    subscribedUntil: subscriptionAuthorityExpiryBoundary(
+      subscriptionAuthority,
+      accountId
+    ),
     type: session.data?.user?.type,
     userId: accountId,
   });
@@ -1121,7 +1126,11 @@ export function RunConsole({
 
   const openCreate = useCallback(() => {
     if (session.status !== "authenticated") {
-      window.location.assign("/login");
+      window.location.assign(
+        browserApplicationLoginHref(
+          `${window.location.pathname}${window.location.search}${window.location.hash}`
+        )
+      );
       return;
     }
     setView("create");

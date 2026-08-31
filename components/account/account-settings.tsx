@@ -24,6 +24,7 @@ import { useSubscriptionAuthorityRefresh } from "@/hooks/use-subscription-author
 import {
   effectiveSubscriptionAuthority,
   type SubscriptionAuthority,
+  subscriptionAuthorityExpiryBoundary,
 } from "@/lib/subscription-authority";
 import { cn } from "@/lib/utils";
 
@@ -98,7 +99,10 @@ export function AccountSettings({
     enabled: effectiveCheckoutResult !== "success",
     isSubscriber: serverAuthority.isSubscriber,
     status,
-    subscribedUntil: serverAuthority.subscribedUntil,
+    subscribedUntil: subscriptionAuthorityExpiryBoundary(
+      subscriptionAuthority,
+      session?.user?.id
+    ),
     type: session?.user?.type,
     userId: session?.user?.id,
   });
@@ -275,12 +279,21 @@ export function AccountSettings({
               Harness credentials, usage, profile, and account data are
               available after GitHub sign-in.
             </p>
-            <Link
-              className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white transition-opacity hover:opacity-90"
-              href={loginPath}
-            >
-              Sign in with GitHub
-            </Link>
+            {loginPath ? (
+              <Link
+                className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white transition-opacity hover:opacity-90"
+                href={loginPath}
+              >
+                Sign in with GitHub
+              </Link>
+            ) : (
+              <span
+                aria-disabled="true"
+                className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white opacity-60"
+              >
+                Sign in with GitHub
+              </span>
+            )}
           </div>
         </main>
       </div>
@@ -362,7 +375,7 @@ export function AccountSettings({
                 role="tabpanel"
               >
                 {active && entry.id === "copilot" ? (
-                  <HarnessCredentials />
+                  <HarnessCredentials userId={session.user.id} />
                 ) : null}
                 {active && entry.id === "profile" ? <AvatarSettings /> : null}
                 {active && entry.id === "usage" ? <UsageMeter /> : null}

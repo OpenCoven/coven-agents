@@ -11,6 +11,13 @@ test.describe("Demo base path", () => {
   }) => {
     test.skip(!IS_DEMO, "This contract runs with IS_DEMO=1.");
     const callbacks: Array<string | null> = [];
+    const applicationRequests: string[] = [];
+    page.on("request", (request) => {
+      const { pathname } = new URL(request.url());
+      if (pathname.includes("/api/")) {
+        applicationRequests.push(pathname);
+      }
+    });
     await page.route("**/demo/api/credentials", (route) =>
       route.fulfill({ json: { harnessIds: [] } })
     );
@@ -85,6 +92,10 @@ test.describe("Demo base path", () => {
 
     await expect.poll(() => callbacks).toEqual(["/demo/login", "/demo/login"]);
     expect(callbacks).not.toContain("/demo/demo/login");
+    expect(applicationRequests).toContain("/demo/api/credentials");
+    expect(applicationRequests).not.toContain("/api/credentials");
+    expect(applicationRequests).not.toContain("/api/agents");
+    expect(applicationRequests).not.toContain("/api/runs");
   });
 
   test("billing surfaces call APIs beneath /demo", async ({ page }) => {
@@ -99,6 +110,7 @@ test.describe("Demo base path", () => {
         requestedPaths.push(pathname);
       }
     });
+
     await page.route("**/demo/api/auth/session", (route) =>
       route.fulfill({
         json: {
@@ -146,6 +158,33 @@ test.describe("Demo base path", () => {
     await expect.poll(() => requestedPaths).toContain("/demo/api/checkout");
     expect(requestedPaths).not.toContain("/api/subscription");
     expect(requestedPaths).not.toContain("/api/checkout");
+  });
+
+  test("signed-out console settings preserve the demo return path", async ({
+    page,
+  }) => {
+    test.skip(!IS_DEMO, "This contract runs with IS_DEMO=1.");
+    await page.route("**/demo/api/auth/session", (route) =>
+      route.fulfill({ body: "null", contentType: "application/json" })
+    );
+    await page.route("**/demo/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route(/\/demo\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/demo/api/agents"
+          ? { json: { agents: [] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+
+    await page.goto("/demo/agents");
+    await page.getByRole("button", { name: "Account and settings" }).click();
+
+    await expect(
+      page.getByRole("link", { name: "Sign in with GitHub" })
+    ).toHaveAttribute("href", "/demo/login?callbackUrl=%2Fdemo%2Fagents");
   });
 
   test("signed-out checkout recovery preserves the base path, query, and fragment through login", async ({

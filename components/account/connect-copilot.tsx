@@ -1,9 +1,10 @@
 "use client";
 
 import { Check, ExternalLink } from "lucide-react";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
+import { browserApplicationPath } from "@/lib/application-path";
 import {
   createDeviceFlowAttempt,
   requestDeviceFlowStart,
@@ -24,9 +25,11 @@ import {
 export function ConnectCopilot({
   configured,
   onConnected,
+  userId,
 }: {
   configured: boolean;
   onConnected: () => void;
+  userId: string;
 }) {
   const [started, setStarted] = useState<StartedDeviceFlow | null>(null);
   const [busy, setBusy] = useState(false);
@@ -34,6 +37,16 @@ export function ConnectCopilot({
     createDeviceFlowAttempt(() => crypto.randomUUID())
   );
   const stopped = useRef(false);
+  const ownerRef = useRef(userId);
+
+  useEffect(() => {
+    if (ownerRef.current === userId) {
+      return;
+    }
+    ownerRef.current = userId;
+    stopped.current = true;
+    setStarted(null);
+  }, [userId]);
 
   /**
    * Polls for the authorization result.
@@ -54,15 +67,28 @@ export function ConnectCopilot({
         }
 
         const ask = async (): Promise<{ status?: string } | null> => {
-          const response = await fetch("/api/credentials/device", {
-            body: JSON.stringify({ deviceCode: session.deviceCode }),
-            headers: { "content-type": "application/json" },
-            method: "PUT",
-          });
+          const response = await fetch(
+            browserApplicationPath("/api/credentials/device"),
+            {
+              body: JSON.stringify({
+                binding: session.binding,
+                deviceCode: session.deviceCode,
+              }),
+              headers: { "content-type": "application/json" },
+              method: "PUT",
+            }
+          );
 
-          return (await response.json().catch(() => null)) as {
+          const body = (await response.json().catch(() => null)) as {
             status?: string;
           } | null;
+          if (response.status === 401 || response.status === 403) {
+            return { status: "unauthorized" };
+          }
+          if (response.status === 409) {
+            return { status: body?.status ?? "owner_changed" };
+          }
+          return body;
         };
 
         ask()
@@ -90,6 +116,19 @@ export function ConnectCopilot({
             if (body?.status === "expired") {
               toast({
                 description: "That code expired. Try again.",
+                type: "error",
+              });
+              setStarted(null);
+              return;
+            }
+
+            if (
+              body?.status === "owner_changed" ||
+              body?.status === "unauthorized"
+            ) {
+              stopped.current = true;
+              toast({
+                description: "Sign in again to connect Copilot.",
                 type: "error",
               });
               setStarted(null);

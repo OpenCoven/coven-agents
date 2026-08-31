@@ -22,6 +22,28 @@ test("the browser credential summary is fetched once", async () => {
   assert.equal(calls, 1);
 });
 
+test("the browser credential summary uses the configured application base path", async () => {
+  resetCredentialCache();
+  const previous = process.env.NEXT_PUBLIC_BASE_PATH;
+  process.env.NEXT_PUBLIC_BASE_PATH = "/demo";
+  const paths: string[] = [];
+  try {
+    await fetchHasCredential((input) => {
+      paths.push(input);
+      return Promise.resolve(
+        Response.json({ harnessIds: [] }, { status: 200 })
+      );
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.NEXT_PUBLIC_BASE_PATH;
+    } else {
+      process.env.NEXT_PUBLIC_BASE_PATH = previous;
+    }
+  }
+  assert.deepEqual(paths, ["/demo/api/credentials"]);
+});
+
 test("an unreadable credential summary is not cached", async () => {
   resetCredentialCache();
   let calls = 0;

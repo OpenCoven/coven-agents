@@ -725,6 +725,7 @@ test.describe("Subscriber checkout", () => {
     page,
   }) => {
     let currentSession = sessionFor("subscriber");
+    let credentialStatus = 200;
     let credentialMutations = 0;
     await setServerSession(page.context(), "subscriber");
     await page.route("**/api/auth/session", (route) =>
@@ -736,6 +737,9 @@ test.describe("Subscriber checkout", () => {
     await page.route("**/api/credentials", (route) => {
       if (route.request().method() !== "GET") {
         credentialMutations += 1;
+      }
+      if (credentialStatus !== 200) {
+        return route.fulfill({ status: credentialStatus });
       }
       return route.fulfill({ json: { harnessIds: [] } });
     });
@@ -797,6 +801,14 @@ test.describe("Subscriber checkout", () => {
     await expect(credential).toBeEnabled();
     await credential.fill("new-authority-token");
     await expect(save).toBeEnabled();
+
+    credentialStatus = 401;
+    await save.click();
+
+    await expect(page.getByText("Subscription required")).toBeVisible();
+    await expect(credential).toBeDisabled();
+    await expect(credential).toHaveValue("");
+    await expect(save).toBeDisabled();
   });
 
   test("agents ignores subscriber authority belonging to another current client identity", async ({

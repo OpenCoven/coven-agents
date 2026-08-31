@@ -8,6 +8,7 @@ import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { browserApplicationPath } from "@/lib/application-path";
 
 /**
  * Where a tenant supplies their own harness credential.
@@ -46,19 +47,28 @@ const HARNESSES = HARNESS_SPECS.filter((spec) => spec.supported).map(
   })
 );
 
-export function HarnessCredentials() {
+export function HarnessCredentials({ userId }: { userId: string }) {
   const [configured, setConfigured] = useState<string[]>([]);
   const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
-  const [locked, setLocked] = useState(false);
+  const [locked, setLocked] = useState<"session" | "subscription" | null>(null);
+
+  const closeForAuthorityLoss = useCallback((status: number) => {
+    if (status !== 401 && status !== 403) {
+      return false;
+    }
+    setConfigured([]);
+    setValues({});
+    setLocked(status === 401 ? "session" : "subscription");
+    return true;
+  }, []);
 
   const refresh = useCallback(async () => {
-    const response = await fetch("/api/credentials");
+    const response = await fetch(browserApplicationPath("/api/credentials"));
 
-    if (response.status === 403) {
+    if (closeForAuthorityLoss(response.status)) {
       // A guest account cannot store one, and saying so beats a form that
       // fails on submit.
-      setLocked(true);
       return;
     }
 
@@ -68,7 +78,7 @@ export function HarnessCredentials() {
 
     const body = (await response.json()) as { harnessIds?: string[] };
     setConfigured(body.harnessIds ?? []);
-  }, []);
+  }, [closeForAuthorityLoss]);
 
   const reload = useCallback(() => {
     refresh().catch(() => undefined);
@@ -93,11 +103,18 @@ export function HarnessCredentials() {
       setBusy(harnessId);
 
       try {
-        const response = await fetch("/api/credentials", {
-          body: JSON.stringify({ credential, harnessId }),
-          headers: { "content-type": "application/json" },
-          method: "POST",
-        });
+        const response = await fetch(
+          browserApplicationPath("/api/credentials"),
+          {
+            body: JSON.stringify({ credential, harnessId }),
+            headers: { "content-type": "application/json" },
+            method: "POST",
+          }
+        );
+
+        if (closeForAuthorityLoss(response.status)) {
+          return false;
+        }
 
         if (response.status === 422) {
           // A rejected token is the person's to fix, so it is shown verbatim
@@ -132,7 +149,7 @@ export function HarnessCredentials() {
         setBusy(null);
       }
     },
-    [refresh, values]
+    [closeForAuthorityLoss, refresh, values]
   );
 
   const remove = useCallback(
@@ -140,11 +157,18 @@ export function HarnessCredentials() {
       setBusy(harnessId);
 
       try {
-        const response = await fetch("/api/credentials", {
-          body: JSON.stringify({ harnessId }),
-          headers: { "content-type": "application/json" },
-          method: "DELETE",
-        });
+        const response = await fetch(
+          browserApplicationPath("/api/credentials"),
+          {
+            body: JSON.stringify({ harnessId }),
+            headers: { "content-type": "application/json" },
+            method: "DELETE",
+          }
+        );
+
+        if (closeForAuthorityLoss(response.status)) {
+          return;
+        }
 
         if (!response.ok) {
           throw new Error(String(response.status));
@@ -161,7 +185,7 @@ export function HarnessCredentials() {
         setBusy(null);
       }
     },
-    [refresh]
+    [closeForAuthorityLoss, refresh]
   );
 
   return (
@@ -176,7 +200,9 @@ export function HarnessCredentials() {
 
       {locked ? (
         <p className="text-[13px] text-muted-foreground">
-          Storing a credential needs an active subscription.
+          {locked === "session"
+            ? "Sign in again to manage harness credentials."
+            : "Storing a credential needs an active subscription."}
         </p>
       ) : (
         HARNESSES.map((harness) => (
@@ -189,6 +215,7 @@ export function HarnessCredentials() {
             onConnected={reload}
             onRemove={remove}
             onSave={save}
+            userId={userId}
             value={values[harness.id] ?? ""}
           />
         ))
@@ -205,6 +232,7 @@ function HarnessRow({
   onConnected,
   onRemove,
   onSave,
+  userId,
   value,
 }: {
   busy: boolean;
@@ -214,6 +242,7 @@ function HarnessRow({
   onChange: (harnessId: string, next: string) => void;
   onRemove: (harnessId: string) => void;
   onSave: (harnessId: string) => Promise<boolean>;
+  userId: string;
   value: string;
 }) {
   /**
@@ -316,6 +345,7 @@ function HarnessRow({
           <ConnectCopilot
             configured={configured}
             onConnected={handleConnected}
+            userId={userId}
           />
           <div className="flex items-center gap-3 py-1">
             <span className="h-px flex-1 bg-border" />

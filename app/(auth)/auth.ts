@@ -14,7 +14,10 @@ import {
   refreshTokenType,
 } from "@/lib/session-claims";
 import { isSubscribedAt, userTypeFor } from "@/lib/subscription";
-import type { SubscriptionAuthority } from "@/lib/subscription-authority";
+import {
+  type SubscriptionAuthority,
+  storageUnavailableSubscriptionAuthority,
+} from "@/lib/subscription-authority";
 import { authConfig } from "./auth.config";
 
 export type UserType = "demo" | "subscriber";
@@ -24,6 +27,7 @@ declare module "next-auth" {
     user: {
       authVersion: number;
       id: string;
+      subscriptionAuthorityExpiresAt?: string | null;
       type: UserType;
     } & DefaultSession["user"];
   }
@@ -124,6 +128,10 @@ export const {
         }
         session.user.type = token.type;
         session.user.image = token.picture ?? null;
+        session.user.subscriptionAuthorityExpiresAt =
+          typeof token.subscribedUntil === "string"
+            ? token.subscribedUntil
+            : null;
       }
 
       return session;
@@ -225,11 +233,7 @@ export async function subscriptionPageAuthority(
     return null;
   }
   if (resolved.kind === "storage-unavailable") {
-    return {
-      isSubscriber: resolved.session.user.type === "subscriber",
-      subscribedUntil: null,
-      userId: resolved.session.user.id,
-    };
+    return storageUnavailableSubscriptionAuthority(resolved.session, now);
   }
   return {
     isSubscriber: isSubscribedAt(resolved.user, now),

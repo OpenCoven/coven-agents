@@ -88,6 +88,32 @@ test.describe("Account settings", () => {
     ).toBe(true);
   });
 
+  test("credential authority loss clears a typed secret and closes the editor", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let credentialStatus = 200;
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill(
+        credentialStatus === 200
+          ? { json: { harnessIds: [] } }
+          : { status: credentialStatus }
+      )
+    );
+
+    await page.goto("/account");
+    const credential = page.getByLabel("GitHub Copilot CLI");
+    await credential.fill("must-not-survive");
+    credentialStatus = 401;
+    await page.getByRole("button", { exact: true, name: "Save" }).click();
+
+    await expect(credential).toHaveCount(0);
+    await expect(
+      page.getByText("Sign in again to manage harness credentials.")
+    ).toBeVisible();
+  });
+
   test("desktop account settings expose vertical keyboard-operable ARIA tabs", async ({
     page,
   }) => {

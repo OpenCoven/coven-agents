@@ -1,3 +1,5 @@
+import { browserApplicationPath } from "@/lib/application-path";
+
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 export type CredentialRefreshTicket = Readonly<{
@@ -56,7 +58,9 @@ export function fetchHasCredential(
   credentialsInFlight ??= (async () => {
     const requestVersion = credentialVersion;
     try {
-      const response = await fetchImpl("/api/credentials");
+      const response = await fetchImpl(
+        browserApplicationPath("/api/credentials")
+      );
 
       if (!response.ok) {
         if (requestVersion === credentialVersion) {

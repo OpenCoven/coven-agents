@@ -1300,10 +1300,14 @@ export function SubscriptionCard({
               Check again
             </button>
           ) : null}
-          {needsSignIn ? (
+          {needsSignIn && loginPath ? (
             <Link className="oc-subscription-action" href={loginPath}>
               Sign in again
             </Link>
+          ) : needsSignIn ? (
+            <button className="oc-subscription-action" disabled type="button">
+              Sign in again
+            </button>
           ) : null}
         </div>
       ) : null}

@@ -23,6 +23,7 @@ import {
   type as type_,
   well,
 } from "@/components/console/styles";
+import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { useResponsiveTabOrientation } from "@/hooks/use-responsive-tab-orientation";
 import { browserApplicationPath } from "@/lib/application-path";
 import { glyphFor } from "@/lib/console/format";
@@ -228,6 +229,7 @@ export function Settings({
   operationContext: SessionOperationContext | null;
   subscribedUntil: string | null;
 }) {
+  const loginPath = useApplicationLoginPath();
   const [tab, setTab] = useState<Tab>("harness");
   const tabOrientation = useResponsiveTabOrientation(HORIZONTAL_SETTINGS_QUERY);
   const horizontalTabs = tabOrientation === "horizontal";
@@ -346,10 +348,11 @@ export function Settings({
       if (!isCurrentOperation(context) || !refreshFence.isCurrent(ticket)) {
         return null;
       }
-      if (response.status === 403) {
+      if (response.status === 401 || response.status === 403) {
         // A demo session cannot store one, and saying so beats a form that
         // fails on submit.
         setLocked(true);
+        setDrafts({});
         return publishCredentials([], context);
       }
       if (!response.ok) {
@@ -516,11 +519,15 @@ export function Settings({
           }
           return;
         }
-        if (response.status === 403) {
+        if (response.status === 401 || response.status === 403) {
           setLocked(true);
           setDrafts({});
           publishCredentials([], context);
-          toast.error("Subscription required.");
+          toast.error(
+            response.status === 401
+              ? "Sign in again."
+              : "Subscription required."
+          );
           return;
         }
         if (!response.ok) {
@@ -578,10 +585,13 @@ export function Settings({
       if (!isCurrentOperation(context)) {
         return;
       }
-      if (response.status === 403) {
+      if (response.status === 401 || response.status === 403) {
         setLocked(true);
+        setDrafts({});
         publishCredentials([], context);
-        toast.error("Subscription required.");
+        toast.error(
+          response.status === 401 ? "Sign in again." : "Subscription required."
+        );
         return;
       }
       if (!response.ok) {
@@ -673,18 +683,33 @@ export function Settings({
             Harness credentials, usage, and account data are available only
             after GitHub sign-in.
           </p>
-          <Link
-            href="/login"
-            style={{
-              ...pill("accent"),
-              display: "inline-flex",
-              marginTop: 20,
-              padding: "9px 14px",
-              textDecoration: "none",
-            }}
-          >
-            Sign in with GitHub
-          </Link>
+          {loginPath ? (
+            <Link
+              href={loginPath}
+              style={{
+                ...pill("accent"),
+                display: "inline-flex",
+                marginTop: 20,
+                padding: "9px 14px",
+                textDecoration: "none",
+              }}
+            >
+              Sign in with GitHub
+            </Link>
+          ) : (
+            <span
+              aria-disabled="true"
+              style={{
+                ...pill("accent"),
+                display: "inline-flex",
+                marginTop: 20,
+                opacity: 0.6,
+                padding: "9px 14px",
+              }}
+            >
+              Sign in with GitHub
+            </span>
+          )}
         </div>
       </div>
     );
@@ -1173,7 +1198,11 @@ export function Settings({
                     // opposite.
                     <Btn
                       onClick={() => {
-                        window.location.href = "/login";
+                        if (loginPath) {
+                          window.location.assign(
+                            browserApplicationPath(loginPath)
+                          );
+                        }
                       }}
                       variant="secondary"
                     >

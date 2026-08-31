@@ -775,6 +775,22 @@ test("Auth.js handlers use method-aware abuse classification", () => {
   assert.ok(handler > userAdmission);
 });
 
+test("device flow redemption verifies start ownership before provider exchange", () => {
+  const source = functionBlock(
+    read("app/api/credentials/device/route.ts"),
+    "PUT"
+  );
+  const parse = source.indexOf("devicePollSchema");
+  const ownership = source.indexOf("verifyDeviceFlowBinding(");
+  const exchange = source.indexOf("exchangeDeviceCode(");
+  const store = source.indexOf("putCredential(");
+
+  assert.ok(parse >= 0);
+  assert.ok(ownership > parse);
+  assert.ok(exchange > ownership);
+  assert.ok(store > exchange);
+});
+
 test("handler extraction does not include markers from a later handler", () => {
   const source = `
 export async function POST(request: Request) {
