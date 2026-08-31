@@ -380,6 +380,7 @@ export function AccountSettings({
                 {active && entry.id === "copilot" ? (
                   <HarnessCredentials
                     authorityRevision={authorityRevision}
+                    authVersion={session.user.authVersion}
                     isSubscriber={isSubscriber}
                     onAuthorityInvalidated={invalidateAndRefresh}
                     userId={session.user.id}

@@ -49,11 +49,13 @@ const HARNESSES = HARNESS_SPECS.filter((spec) => spec.supported).map(
 
 export function HarnessCredentials({
   authorityRevision,
+  authVersion,
   isSubscriber,
   onAuthorityInvalidated,
   userId,
 }: {
   authorityRevision: string | null;
+  authVersion: number | null | undefined;
   isSubscriber: boolean;
   onAuthorityInvalidated: () => void;
   userId: string;
@@ -65,7 +67,7 @@ export function HarnessCredentials({
     context: string;
     kind: "session" | "subscription";
   } | null>(null);
-  const authorityContext = `${userId}:${authorityRevision ?? ""}:${isSubscriber ? "subscriber" : "demo"}`;
+  const authorityContext = `${userId}:${authVersion ?? ""}:${authorityRevision ?? ""}:${isSubscriber ? "subscriber" : "demo"}`;
   const authorityContextRef = useRef(authorityContext);
   authorityContextRef.current = authorityContext;
   const locked = isSubscriber

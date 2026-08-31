@@ -16,14 +16,15 @@ type SessionType = "demo" | "subscriber";
 function sessionFor(
   type: SessionType,
   {
+    authVersion = 1,
     email = "e2e-user@example.invalid",
     id = E2E_USER_ID,
-  }: { email?: string; id?: string } = {}
+  }: { authVersion?: number; email?: string; id?: string } = {}
 ) {
   return {
     expires: "2099-01-01T00:00:00.000Z",
     user: {
-      authVersion: 1,
+      authVersion,
       email,
       id,
       image: null,
@@ -1116,6 +1117,61 @@ test.describe("Subscriber checkout", () => {
     await page.keyboard.press("Escape");
     await expect(page.getByRole("tab", { name: "Billing" })).toBeVisible();
     expect(serverRefreshes).toBe(1);
+  });
+
+  test("an old account credential refusal cannot invalidate a newer auth version", async ({
+    page,
+  }) => {
+    let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    let releaseCredentials!: () => void;
+    const credentialsGate = new Promise<void>((resolve) => {
+      releaseCredentials = resolve;
+    });
+    let credentialGets = 0;
+    await page.route("**/api/credentials", async (route) => {
+      credentialGets += 1;
+      if (credentialGets === 1) {
+        await credentialsGate;
+        return route.fulfill({
+          json: { error: "subscription_required" },
+          status: 403,
+        });
+      }
+      return route.fulfill({ json: { harnessIds: [] } });
+    });
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let serverRefreshes = 0;
+    await page.route("**/account?**", async (route) => {
+      if (isServerComponentRequest(route.request())) {
+        serverRefreshes += 1;
+        await refreshGate;
+      }
+      await route.continue();
+    });
+
+    await page.goto("/account");
+    const credential = page.getByLabel("GitHub Copilot CLI");
+    await expect(credential).toBeVisible();
+    await credential.fill("belongs-to-new-auth-version");
+
+    currentSession = sessionFor("subscriber", { authVersion: 2 });
+    await notifySessionChange(page);
+    await expect.poll(() => serverRefreshes).toBe(1);
+    releaseCredentials();
+
+    await page.waitForTimeout(100);
+    await expect(credential).toBeVisible();
+    await expect(credential).toHaveValue("belongs-to-new-auth-version");
+    expect(serverRefreshes).toBe(1);
+
+    releaseRefresh();
   });
 
   test("agents ignores subscriber authority belonging to another current client identity", async ({
