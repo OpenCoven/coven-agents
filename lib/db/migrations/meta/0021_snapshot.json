@@ -2933,18 +2933,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "plannedOperationId": {
-          "name": "plannedOperationId",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "plannedRunnerRunId": {
-          "name": "plannedRunnerRunId",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "required": {
           "name": "required",
           "type": "boolean",
@@ -3023,36 +3011,6 @@
           "columns": [
             {
               "expression": "runnerRunId",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "RTStep_plannedOperation_uq": {
-          "name": "RTStep_plannedOperation_uq",
-          "columns": [
-            {
-              "expression": "plannedOperationId",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "RTStep_plannedRunnerRun_uq": {
-          "name": "RTStep_plannedRunnerRun_uq",
-          "columns": [
-            {
-              "expression": "plannedRunnerRunId",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -3161,10 +3119,6 @@
         "RTStep_approval_audit_valid": {
           "name": "RTStep_approval_audit_valid",
           "value": "((\"RunnerTeamStep\".\"approvalStatus\" in ('not_required', 'pending')) and \"RunnerTeamStep\".\"approvalActorUserId\" is null and \"RunnerTeamStep\".\"approvalDecidedAt\" is null and jsonb_array_length(\"RunnerTeamStep\".\"approvedCapabilities\") = 0) or (\"RunnerTeamStep\".\"approvalStatus\" = 'approved' and \"RunnerTeamStep\".\"approvalActorUserId\" is not null and \"RunnerTeamStep\".\"approvalDecidedAt\" is not null and \"RunnerTeamStep\".\"approvalDecidedAt\" >= \"RunnerTeamStep\".\"createdAt\" and jsonb_array_length(\"RunnerTeamStep\".\"approvedCapabilities\") between 1 and 8) or (\"RunnerTeamStep\".\"approvalStatus\" = 'rejected' and \"RunnerTeamStep\".\"approvalActorUserId\" is not null and \"RunnerTeamStep\".\"approvalDecidedAt\" is not null and \"RunnerTeamStep\".\"approvalDecidedAt\" >= \"RunnerTeamStep\".\"createdAt\" and jsonb_array_length(\"RunnerTeamStep\".\"approvedCapabilities\") = 0)"
-        },
-        "RTStep_childReservation_valid": {
-          "name": "RTStep_childReservation_valid",
-          "value": "((\"RunnerTeamStep\".\"plannedOperationId\" is null and \"RunnerTeamStep\".\"plannedRunnerRunId\" is null) or (\"RunnerTeamStep\".\"plannedOperationId\" is not null and \"RunnerTeamStep\".\"plannedRunnerRunId\" is not null)) and (\"RunnerTeamStep\".\"runnerRunId\" is null or \"RunnerTeamStep\".\"runnerRunId\" = \"RunnerTeamStep\".\"plannedRunnerRunId\")"
         },
         "RTStep_agentSnapshot_valid": {
           "name": "RTStep_agentSnapshot_valid",

@@ -228,7 +228,8 @@ export function createTeamOrchestrator(
             );
             if (
               cancellation.kind !== "stopped" &&
-              cancellation.kind !== "already_terminal"
+              cancellation.kind !== "already_terminal" &&
+              cancellation.kind !== "cancelled"
             ) {
               deferred += 1;
             }
@@ -238,6 +239,35 @@ export function createTeamOrchestrator(
           break;
         }
         admitted += 1;
+        if (["completed", "failed", "cancelled"].includes(result.run.status)) {
+          let projectedExactTeam = false;
+          for (
+            let projectionIndex = 0;
+            projectionIndex < limit;
+            projectionIndex += 1
+          ) {
+            try {
+              const projected =
+                await dependencies.store.projectNextTerminalTeamStep(
+                  dependencies.operator
+                );
+              if (projected.kind === "idle") {
+                break;
+              }
+              if (projected.teamRunId === claim.teamRunId) {
+                projectedExactTeam = true;
+                break;
+              }
+            } catch {
+              failures += 1;
+              break;
+            }
+          }
+          if (!projectedExactTeam) {
+            deferred += 1;
+            deferredTeamRunIds.add(claim.teamRunId);
+          }
+        }
         if (result.kind === "claimed") {
           claimedDispatches.push(result.claimed);
         }
@@ -288,7 +318,11 @@ export function createTeamOrchestrator(
             cancellationDeferred += 1;
             break;
           }
-          if (result.kind === "stopped" || result.kind === "already_terminal") {
+          if (
+            result.kind === "stopped" ||
+            result.kind === "already_terminal" ||
+            result.kind === "cancelled"
+          ) {
             cancellationRequested += 1;
           } else {
             cancellationDeferred += 1;

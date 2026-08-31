@@ -285,8 +285,19 @@ test("forward migration persists team authority, approval audit, and execution s
     name.startsWith("0021_")
   );
   assert.ok(migrationName, "Task 5 must add a forward 0021 migration");
-  const migration = await readFile(
+  const authorityMigration = await readFile(
     new URL(migrationName, migrationDirectory),
+    "utf8"
+  );
+  const reservationMigrationName = (await readdir(migrationDirectory)).find(
+    (name) => name.startsWith("0022_")
+  );
+  assert.ok(
+    reservationMigrationName,
+    "planned child reservations must advance through migration 0022"
+  );
+  const reservationMigration = await readFile(
+    new URL(reservationMigrationName, migrationDirectory),
     "utf8"
   );
 
@@ -300,30 +311,35 @@ test("forward migration persists team authority, approval audit, and execution s
     "approvedCapabilities",
     "approvalActorUserId",
     "approvalDecidedAt",
-    "plannedOperationId",
-    "plannedRunnerRunId",
   ]) {
     assert.match(schema, new RegExp(field, "u"));
-    assert.match(migration, new RegExp(`"${field}"`, "u"));
+    assert.match(authorityMigration, new RegExp(`"${field}"`, "u"));
   }
-  assert.match(migration, /RTRun_authVersion_valid/u);
-  assert.match(migration, /RTStep_approval_audit_valid/u);
-  assert.match(migration, /RTStep_approvedCapabilities_valid/u);
-  assert.match(migration, /RTStep_plannedOperation_uq/u);
-  assert.match(migration, /RTStep_plannedRunnerRun_uq/u);
-  assert.match(migration, /RTStep_childReservation_valid/u);
-  assert.match(migration, /RunnerRun_agentSnapshot_valid/u);
+  for (const field of ["plannedOperationId", "plannedRunnerRunId"]) {
+    assert.match(schema, new RegExp(field, "u"));
+    assert.match(reservationMigration, new RegExp(`"${field}"`, "u"));
+  }
+  assert.match(authorityMigration, /RTRun_authVersion_valid/u);
+  assert.match(authorityMigration, /RTStep_approval_audit_valid/u);
+  assert.match(authorityMigration, /RTStep_approvedCapabilities_valid/u);
+  assert.match(reservationMigration, /RTStep_plannedOperation_uq/u);
+  assert.match(reservationMigration, /RTStep_plannedRunnerRun_uq/u);
+  assert.match(reservationMigration, /RTStep_childReservation_valid/u);
+  assert.match(authorityMigration, /RunnerRun_agentSnapshot_valid/u);
   assert.match(
-    migration,
+    authorityMigration,
     /RTStep_handoff_bounded[\s\S]*octet_length\("RunnerTeamStep"\."handoff"::text\) <= 24576/u
   );
-  assert.match(migration, /FOREIGN KEY \("createdByUserId"\).*"User"\("id"\)/u);
   assert.match(
-    migration,
+    authorityMigration,
+    /FOREIGN KEY \("createdByUserId"\).*"User"\("id"\)/u
+  );
+  assert.match(
+    authorityMigration,
     /FOREIGN KEY \("approvalActorUserId"\).*"User"\("id"\)/u
   );
   assert.doesNotMatch(
-    migration,
+    reservationMigration,
     /FOREIGN KEY \("plannedRunnerRunId"[^)]*\).*"RunnerRun"/u
   );
 });
@@ -1177,6 +1193,44 @@ test("child attachment is tenant-fenced, idempotent, and immutable", async () =>
   );
 });
 
+test("an exact reserved child may attach after it terminalizes", async () => {
+  const runnerRunId = "aaaaaaaa-0000-4000-8000-000000000001";
+  const operationId = "aaaaaaaa-0000-4000-8000-000000000010";
+  const current = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    plannedOperationId: operationId,
+    plannedRunnerRunId: runnerRunId,
+    status: "queued",
+    teamRunStatus: "running",
+    version: 2,
+  };
+  const attached = {
+    ...current,
+    runnerRunId,
+    status: "running",
+    version: 3,
+  };
+  const terminal = scripted([current], [{ id: runnerRunId }], [attached]);
+
+  assert.deepEqual(
+    await terminal.store.attachTeamStepRunnerRun(operator, {
+      expectedVersion: 2,
+      operationId,
+      runnerRunId,
+      teamStepId: TEAM_STEP_A,
+    }),
+    { kind: "attached" }
+  );
+  assert.match(
+    queryText(captured(terminal.statements, 1)),
+    /"runnerRun"\."status" IN \(\s*'queued',\s*'running',\s*'completed',\s*'failed',\s*'cancelled'\s*\)/u
+  );
+  assert.match(
+    queryText(captured(terminal.statements, 2)),
+    /SET "runnerRunId" = [^,]+,\s*"status" = 'running'/u
+  );
+});
+
 test("child attachment refuses identifiers outside the durable reservation", async () => {
   const planned = {
     operationId: "aaaaaaaa-0000-4000-8000-000000000010",
@@ -1820,6 +1874,65 @@ test("cancellation projects an already-terminal attached child before skipping l
     "Completed before cancellation."
   );
   assert.equal(result.kind === "updated" && result.childRunId, null);
+});
+
+test("cancellation projects an exact terminal reserved queued child before skipping later steps", async () => {
+  const childRunId = "aaaaaaaa-0000-4000-8000-000000000001";
+  const operationId = "aaaaaaaa-0000-4000-8000-000000000010";
+  const current = teamRunRow({
+    terminalChildRunId: childRunId,
+    version: 3,
+  });
+  const terminalChild = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    plannedOperationId: operationId,
+    plannedRunnerRunId: childRunId,
+    priorHandoffs: [],
+    runnerCommandEvidence: [],
+    runnerError: null,
+    runnerFileEvidence: [],
+    runnerOperationId: operationId,
+    runnerOutput: "Completed before attachment.",
+    runnerRunId: null,
+    runnerStatus: "completed",
+    status: "queued",
+  };
+  const cancelled = teamRunRow({
+    completedAt: NOW,
+    status: "cancelled",
+    version: 4,
+  });
+  const cancellation = scripted(
+    [current],
+    [terminalChild],
+    [{ id: TEAM_STEP_A }],
+    [cancelled],
+    [],
+    [cancelled]
+  );
+
+  const result = await cancellation.store.cancelTeamRun(principal, {
+    expectedVersion: 3,
+    id: TEAM_RUN_A,
+  });
+
+  assert.equal(result.kind, "updated");
+  const lockSql = queryText(captured(cancellation.statements, 1));
+  assert.match(lockSql, /"runnerRun"\."agentId" = "step"\."agentId"/u);
+  assert.match(
+    lockSql,
+    /"step"\."plannedOperationId" = "runnerRun"\."operationId"/u
+  );
+  assert.match(lockSql, /"step"\."plannedRunnerRunId" = "runnerRun"\."id"/u);
+  const projectionSql = queryText(captured(cancellation.statements, 2));
+  assert.match(projectionSql, /"runnerRunId" = COALESCE/u);
+  assert.match(projectionSql, /"plannedRunnerRunId" =/u);
+  assert.match(projectionSql, /"plannedOperationId" =/u);
+  assert.match(projectionSql, /"status" IN \('queued', 'running'\)/u);
+  assert.equal(
+    captured(cancellation.statements, 2).args.runnerRunId,
+    childRunId
+  );
 });
 
 test("handoff validation rejects over-limit persisted text before querying", async () => {

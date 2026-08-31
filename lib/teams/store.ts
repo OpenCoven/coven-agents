@@ -1106,7 +1106,13 @@ export function createTeamStore(database: TeamStoreDatabase) {
                 AND "runnerRun"."tenant" = "step"."tenant"
                 AND "runnerRun"."agentId" = "step"."agentId"
                 AND "runnerRun"."operationId" = ${input.operationId}
-                AND "runnerRun"."status" IN ('queued', 'running')
+                AND "runnerRun"."status" IN (
+                  'queued',
+                  'running',
+                  'completed',
+                  'failed',
+                  'cancelled'
+                )
               FOR SHARE OF "runnerRun"`
           )
         );
@@ -1351,6 +1357,15 @@ export function createTeamStore(database: TeamStoreDatabase) {
                       "step"."plannedRunnerRunId"
                     )
                     AND "runnerRun"."tenant" = "step"."tenant"
+                    AND "runnerRun"."agentId" = "step"."agentId"
+                    AND (
+                      "step"."runnerRunId" = "runnerRun"."id"
+                      OR (
+                        "step"."runnerRunId" IS NULL
+                        AND "step"."plannedRunnerRunId" = "runnerRun"."id"
+                        AND "step"."plannedOperationId" = "runnerRun"."operationId"
+                      )
+                    )
                   WHERE "step"."teamRunId" = "teamRun"."id"
                     AND "step"."tenant" = "teamRun"."tenant"
                     AND "runnerRun"."status" IN ('queued', 'running')
@@ -1369,6 +1384,15 @@ export function createTeamStore(database: TeamStoreDatabase) {
                       "step"."plannedRunnerRunId"
                     )
                     AND "runnerRun"."tenant" = "step"."tenant"
+                    AND "runnerRun"."agentId" = "step"."agentId"
+                    AND (
+                      "step"."runnerRunId" = "runnerRun"."id"
+                      OR (
+                        "step"."runnerRunId" IS NULL
+                        AND "step"."plannedRunnerRunId" = "runnerRun"."id"
+                        AND "step"."plannedOperationId" = "runnerRun"."operationId"
+                      )
+                    )
                   WHERE "step"."teamRunId" = "teamRun"."id"
                     AND "step"."tenant" = "teamRun"."tenant"
                     AND "step"."position" = "teamRun"."currentPosition"
@@ -1433,6 +1457,15 @@ export function createTeamStore(database: TeamStoreDatabase) {
                     "step"."plannedRunnerRunId"
                   )
                   AND "runnerRun"."tenant" = "step"."tenant"
+                  AND "runnerRun"."agentId" = "step"."agentId"
+                  AND (
+                    "step"."runnerRunId" = "runnerRun"."id"
+                    OR (
+                      "step"."runnerRunId" IS NULL
+                      AND "step"."plannedRunnerRunId" = "runnerRun"."id"
+                      AND "step"."plannedOperationId" = "runnerRun"."operationId"
+                    )
+                  )
                 WHERE "step"."teamRunId" = ${input.id}
                   AND "step"."tenant" = ${principal.tenant}
                   AND "step"."position" = ${column(current, "currentPosition")}
@@ -1490,6 +1523,7 @@ export function createTeamStore(database: TeamStoreDatabase) {
               {
                 error,
                 handoff,
+                plannedOperationId: column(terminalChild, "plannedOperationId"),
                 runnerRunId: terminalChildRunId,
                 teamStepId: column(terminalChild, "id"),
                 tenant: principal.tenant,
@@ -1511,7 +1545,18 @@ export function createTeamStore(database: TeamStoreDatabase) {
                     "runnerRunId",
                     "plannedRunnerRunId"
                   ) = ${terminalChildRunId}
-                  AND "status" = 'running'
+                  AND (
+                    "runnerRunId" = ${terminalChildRunId}
+                    OR (
+                      "runnerRunId" IS NULL
+                      AND "plannedRunnerRunId" = ${terminalChildRunId}
+                      AND "plannedOperationId" = ${column(
+                        terminalChild,
+                        "plannedOperationId"
+                      )}
+                    )
+                  )
+                  AND "status" IN ('queued', 'running')
                 RETURNING "id"`
             )
           );

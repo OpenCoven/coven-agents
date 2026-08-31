@@ -1,0 +1,5 @@
+ALTER TABLE "RunnerTeamStep" ADD COLUMN "plannedOperationId" uuid;--> statement-breakpoint
+ALTER TABLE "RunnerTeamStep" ADD COLUMN "plannedRunnerRunId" uuid;--> statement-breakpoint
+CREATE UNIQUE INDEX "RTStep_plannedOperation_uq" ON "RunnerTeamStep" USING btree ("plannedOperationId");--> statement-breakpoint
+CREATE UNIQUE INDEX "RTStep_plannedRunnerRun_uq" ON "RunnerTeamStep" USING btree ("plannedRunnerRunId");--> statement-breakpoint
+ALTER TABLE "RunnerTeamStep" ADD CONSTRAINT "RTStep_childReservation_valid" CHECK ((("RunnerTeamStep"."plannedOperationId" is null and "RunnerTeamStep"."plannedRunnerRunId" is null) or ("RunnerTeamStep"."plannedOperationId" is not null and "RunnerTeamStep"."plannedRunnerRunId" is not null)) and ("RunnerTeamStep"."runnerRunId" is null or "RunnerTeamStep"."runnerRunId" = "RunnerTeamStep"."plannedRunnerRunId"));

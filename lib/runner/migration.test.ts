@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
 
 test("migration 0015 adds nullable fail-closed run authority without a default", () => {
   const directory = new URL("../db/migrations/", import.meta.url);
@@ -189,4 +194,62 @@ test("generated migration 0019 normalizes legacy agents before replacing the run
     `"RunnerAgent"."runtime" in ('codex', 'claude', 'copilot')`
   );
   assert.equal(snapshot.includes(`'${retiredRuntime}'`), false);
+});
+
+test("migration 0021 is immutable and planned child reservations advance through 0022", () => {
+  const directory = new URL("../db/migrations/", import.meta.url);
+  const migration21 = readFileSync(
+    new URL("0021_salty_the_stranger.sql", directory),
+    "utf8"
+  );
+  const snapshot21 = readFileSync(
+    new URL("meta/0021_snapshot.json", directory),
+    "utf8"
+  );
+  assert.equal(
+    sha256(migration21),
+    "70d3f8a15cf5fb0d9742846696d76b5d48b9b077e0f5ad6c3840e80045cb6c35"
+  );
+  assert.equal(
+    sha256(snapshot21),
+    "f88d1d1be4e466b1e04d881e07307ec5a3814ca2140a0115bac114e5570231bc"
+  );
+
+  const migrationName22 = readdirSync(directory).find((name) =>
+    name.startsWith("0022_")
+  );
+  assert.ok(
+    migrationName22,
+    "planned child reservations require migration 0022"
+  );
+  const migration22 = readFileSync(new URL(migrationName22, directory), "utf8");
+  assert.match(migration22, /ADD COLUMN "plannedOperationId" uuid/u);
+  assert.match(migration22, /ADD COLUMN "plannedRunnerRunId" uuid/u);
+  assert.match(migration22, /RTStep_plannedOperation_uq/u);
+  assert.match(migration22, /RTStep_plannedRunnerRun_uq/u);
+  assert.match(migration22, /RTStep_childReservation_valid/u);
+  assert.doesNotMatch(
+    migration22,
+    /createdByUserId|authVersion|agentInstructions|approvalActorUserId/u
+  );
+
+  const journal = JSON.parse(
+    readFileSync(new URL("meta/_journal.json", directory), "utf8")
+  ) as { entries: { idx: number; tag: string }[] };
+  assert.equal(
+    journal.entries.find((entry) => entry.idx === 21)?.tag,
+    "0021_salty_the_stranger"
+  );
+  assert.equal(
+    journal.entries.find((entry) => entry.idx === 22)?.tag,
+    migrationName22.replace(/\.sql$/u, "")
+  );
+
+  const snapshot22 = readFileSync(
+    new URL("meta/0022_snapshot.json", directory),
+    "utf8"
+  );
+  assert.match(snapshot22, /"plannedOperationId"/u);
+  assert.match(snapshot22, /"plannedRunnerRunId"/u);
+  assert.match(snapshot22, /"RTStep_childReservation_valid"/u);
 });
