@@ -587,6 +587,11 @@ test.describe("Run console", () => {
         .locator(".oc-agent-conversation__preview")
     ).toBeVisible();
     await expect(
+      navigation.getByRole("button", { name: "Timeline auditor" })
+    ).toHaveAccessibleName(
+      "Timeline auditor, Verify timeline output, copilot, running"
+    );
+    await expect(
       navigation.getByRole("button", { name: "New agent" })
     ).toBeVisible();
 
@@ -646,6 +651,63 @@ test.describe("Run console", () => {
 
     await releaseHistory();
 
+    await expect(
+      navigation.getByRole("button", { name: retainedAgent.name })
+    ).toBeVisible();
+    await expect(navigation.getByText("Searching run history…")).toHaveCount(0);
+  });
+
+  test("a newer profile reload owns the rail history loading state", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let historyRequests = 0;
+    let releaseFirstHistory!: () => Promise<void>;
+    let releaseSecondHistory!: () => Promise<void>;
+
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({ json: { agents: [retainedAgent] } });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        historyRequests += 1;
+        return new Promise<void>((resolve) => {
+          const release = async (runs: (typeof retainedRun)[]) => {
+            await route.fulfill({ json: { apiVersion: "1.0", runs } });
+            resolve();
+          };
+          if (historyRequests === 1) {
+            releaseFirstHistory = () => release([]);
+          } else {
+            releaseSecondHistory = () => release([retainedRun]);
+          }
+        });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+
+    const navigation = page.getByRole("complementary", { name: "Navigation" });
+    await navigation
+      .getByRole("searchbox", { name: "Search profiles and runs" })
+      .fill(retainedRun.task);
+    await page.getByRole("button", { name: "More run actions" }).click();
+    await page.getByRole("menuitem", { name: "Reload profiles" }).click();
+    await expect.poll(() => historyRequests).toBe(2);
+
+    await releaseFirstHistory();
+    await expect(navigation.getByText("Searching run history…")).toBeVisible();
+
+    await releaseSecondHistory();
     await expect(
       navigation.getByRole("button", { name: retainedAgent.name })
     ).toBeVisible();

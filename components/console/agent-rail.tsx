@@ -469,7 +469,7 @@ export function AgentRail(props: RailProps) {
                 <div className="oc-agent-conversation" key={agent.id}>
                   <button
                     aria-expanded={isOpen}
-                    aria-label={name}
+                    aria-label={`${name}, ${preview}, ${agent.runtime}, ${agent.status}`}
                     className="oc-row oc-agent-conversation__button"
                     data-selected={isOpen ? "true" : "false"}
                     onClick={() => props.onSelectAgent(agent.id)}

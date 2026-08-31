@@ -318,6 +318,7 @@ export function RunConsole() {
   const activeSessionIdentityRef = useRef("");
   const latestSessionIdentityRef = useRef(sessionIdentity);
   const prewarmedIdentitiesRef = useRef(new Set<string>());
+  const refreshGenerationRef = useRef(0);
   const sessionAbortRef = useRef<AbortController | null>(null);
   const sessionGenerationRef = useRef(0);
   latestSessionIdentityRef.current = sessionIdentity;
@@ -376,9 +377,15 @@ export function RunConsole() {
 
   const refresh = useCallback(
     async (generation: number, signal: AbortSignal) => {
+      refreshGenerationRef.current += 1;
+      const refreshGeneration = refreshGenerationRef.current;
+      const isLatestRefresh = () =>
+        refreshGenerationRef.current === refreshGeneration &&
+        isCurrentSession(generation, signal);
+
       try {
         const next = await client.listAgents(signal);
-        if (!isCurrentSession(generation, signal)) {
+        if (!isLatestRefresh()) {
           return;
         }
         setRunnerStatus("connected");
@@ -398,7 +405,7 @@ export function RunConsole() {
           next.map(async (agent) => {
             try {
               const snapshots = await client.listRuns(agent.id, signal);
-              if (!isCurrentSession(generation, signal)) {
+              if (!isLatestRefresh()) {
                 return;
               }
               const discovered = snapshots.map((snapshot) => ({
@@ -427,7 +434,7 @@ export function RunConsole() {
                 throw error;
               }
             } finally {
-              if (isCurrentSession(generation, signal)) {
+              if (isLatestRefresh()) {
                 setPendingRunHistoryAgentIds((current) => {
                   const pending = new Set(current);
                   pending.delete(agent.id);
@@ -438,7 +445,7 @@ export function RunConsole() {
           })
         );
       } catch (error) {
-        if (!isCurrentSession(generation, signal)) {
+        if (!isLatestRefresh()) {
           return;
         }
         setPendingRunHistoryAgentIds(new Set());
@@ -456,6 +463,7 @@ export function RunConsole() {
 
   useEffect(() => {
     sessionGenerationRef.current += 1;
+    refreshGenerationRef.current += 1;
     const generation = sessionGenerationRef.current;
     activeSessionIdentityRef.current = sessionIdentity;
     sessionAbortRef.current?.abort();
