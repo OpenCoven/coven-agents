@@ -122,6 +122,19 @@ function matchesRailQuery(
     .some((value) => value.includes(query));
 }
 
+function disambiguatedLabel(
+  agent: AgentDefinition,
+  agents: AgentDefinition[],
+  labelFor: (candidate: AgentDefinition) => string
+): string {
+  const label = labelFor(agent);
+  const matches = agents.filter((candidate) => labelFor(candidate) === label);
+  if (matches.length < 2) {
+    return label;
+  }
+  return `${label}, profile ${matches.findIndex((candidate) => candidate.id === agent.id) + 1} of ${matches.length}`;
+}
+
 function MiniRail({
   agents,
   avatarSrc,
@@ -199,7 +212,12 @@ function MiniRail({
       >
         {agents.map((agent) => (
           <button
-            aria-label={`${sanitizeEvidenceText(agent.name)}, ${agent.runtime}, ${agent.status}`}
+            aria-label={disambiguatedLabel(
+              agent,
+              agents,
+              (candidate) =>
+                `${sanitizeEvidenceText(candidate.name)}, ${candidate.runtime}, ${candidate.status}`
+            )}
             className="oc-tint"
             key={agent.id}
             onClick={() => onSelectAgent(agent.id)}
@@ -464,12 +482,26 @@ export function AgentRail(props: RailProps) {
               );
               const recency = latestRun?.snapshot.createdAt ?? agent.lastRunAt;
               const name = sanitizeEvidenceText(agent.name);
+              const accessibleLabel = disambiguatedLabel(
+                agent,
+                props.agents,
+                (candidate) => {
+                  const candidateRuns = runsByAgent.get(candidate.id) ?? [];
+                  const [candidateLatestRun] = candidateRuns;
+                  const candidatePreview = sanitizeEvidenceText(
+                    candidateLatestRun?.snapshot.task ||
+                      candidate.description ||
+                      `${candidate.runtime} execution profile`
+                  );
+                  return `${sanitizeEvidenceText(candidate.name)}, ${candidatePreview}, ${candidate.runtime}, ${candidate.status}`;
+                }
+              );
 
               return (
                 <div className="oc-agent-conversation" key={agent.id}>
                   <button
                     aria-expanded={isOpen}
-                    aria-label={`${name}, ${preview}, ${agent.runtime}, ${agent.status}`}
+                    aria-label={accessibleLabel}
                     className="oc-row oc-agent-conversation__button"
                     data-selected={isOpen ? "true" : "false"}
                     onClick={() => props.onSelectAgent(agent.id)}

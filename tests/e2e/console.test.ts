@@ -760,7 +760,6 @@ test.describe("Run console", () => {
     const duplicateAgent = {
       ...retainedAgent,
       id: OTHER_AGENT_ID,
-      status: "running",
     };
     await page.route("**/api/tenant/prewarm", (route) =>
       route.fulfill({ status: 204 })
@@ -787,12 +786,12 @@ test.describe("Run console", () => {
     const collapsed = page.getByLabel("Navigation, collapsed");
     await expect(
       collapsed.getByRole("button", {
-        name: "Timeline auditor, copilot, idle",
+        name: "Timeline auditor, copilot, idle, profile 1 of 2",
       })
     ).toBeVisible();
     await expect(
       collapsed.getByRole("button", {
-        name: "Timeline auditor, copilot, running",
+        name: "Timeline auditor, copilot, idle, profile 2 of 2",
       })
     ).toBeVisible();
   });
