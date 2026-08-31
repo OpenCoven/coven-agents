@@ -2,6 +2,13 @@
 
 This is the public strategic view of delivery. Private Beads/DoltHub data is the task-level source of truth; OpenCoven Project #10 is its generated private view. This file contains outcomes, gates, aggregate counts, and evidence links. It does not duplicate private task descriptions or acceptance criteria.
 
+## Authority freshness
+
+On 2026-08-31, the field-only Project aggregate still matched the checked-in
+status block. Private Beads repository access was unavailable, so that check is
+not proof of source reconciliation and does not authorize promotion or
+reordering. The generated status block remains unchanged.
+
 ## Current gate: Phase 0 baseline
 
 Phase 0 restores a trustworthy delivery baseline and is required before any

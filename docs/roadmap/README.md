@@ -18,6 +18,14 @@ task text from this index or treat a newer public artifact as authoritative.
 | `Historical` | Dated evidence or a decision log retained for context but not used as current instructions. |
 | `Superseded` | An index or artifact whose operative guidance has moved to named current documents. |
 
+## Reconciliation status
+
+On 2026-08-31, `pnpm roadmap:status check` confirmed that Project #10's
+field-only aggregate matched the checked-in `ROADMAP.md` block. The private
+Beads repository could not be read by the active credential, so the
+Beads-to-Project no-op reconciliation remains pending. No task status,
+dependency, wave order, or promotion claim was inferred from public artifacts.
+
 ## Registry
 
 <!-- coven-agents-planning-registry:v1:start -->

@@ -5,9 +5,11 @@ deployment, migration, provider action, or resource deletion occurred.
 
 ## Current release disposition
 
-**No production approval is recorded in this document.** Promotion remains
-pending until every required item has a dated sanitized artifact and named
-operator.
+**Infrastructure cutover is complete; full product release approval is
+pending.** The Daytona control-plane and retired-provider evidence is retained
+in the [cutover attestation](../operations/daytona-cutover-attestation.md).
+Promotion remains pending until every remaining product item has a dated
+sanitized artifact and named operator.
 
 ## Automatic no-go rules
 
@@ -15,6 +17,8 @@ Do not promote when:
 
 - any repository gate fails;
 - a worktree is `AT RISK`;
+- private Beads-to-Project reconciliation has not completed with a final no-op
+  preview;
 - release audience configuration is ambiguous;
 - database migration compatibility is unproved;
 - subscriber or tenant authority can be supplied by request input;
@@ -54,6 +58,8 @@ pnpm validate:release
 Only an authorized maintainer may update private planning data. Run the
 repository's documented preview/apply sequence and retain only sanitized
 aggregate results. A delivery artifact never overrides the private authority.
+Do not promote until private Beads-to-Project reconciliation has completed with
+a final no-op preview and `ROADMAP.md` passes its freshness check.
 
 ## Required local gates
 
@@ -87,6 +93,14 @@ Record the candidate SHA and exact exit status for every command.
 - Subscriber state and tenant identity are derived and revalidated server-side.
 - Browser code receives no provider credential or tenant harness plaintext.
 - Mutation origin and media type checks run before body work.
+
+## Deployment posture
+
+Git-triggered Vercel deployments remain intentionally disabled by the deny-only
+root `vercel.json`. Restoring Git deployment behavior requires the separately
+reviewed deployment runbook described in
+[`vercel-git-deployment-disablement.md`](../operations/vercel-git-deployment-disablement.md).
+Repository build evidence does not prove a deployment occurred.
 
 ## Stripe webhook delivery
 

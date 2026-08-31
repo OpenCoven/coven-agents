@@ -1,9 +1,14 @@
 # Wave 1 Delivery Report
 
-- Status: Complete
+- Status: Historical report — bounded 2026-08-25 tranche complete
 - Delivery date: 2026-08-25
 - Scope: product authority, safe guest replay, commit leak prevention, and
   execution threat modeling
+
+The checked-in public roadmap snapshot reports public wave status, but its
+authority-freshness note applies while private reconciliation remains pending.
+This dated report proves the bounded tranche below; it does not close later
+work that the authoritative private plan assigns to the same wave.
 
 ## Outcome
 
