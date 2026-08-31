@@ -102,6 +102,11 @@ export function AccountSettings({
   });
   const showBilling =
     checkoutEnabled || isSubscriber || effectiveCheckoutResult === "success";
+  const credentialAuthorityContextRevision = [
+    session?.user?.id ?? "",
+    session?.user?.authVersion ?? "",
+    authorityRevision ?? "",
+  ].join(":");
   const visibleTabs = TABS.filter(
     (entry) => entry.id !== "billing" || showBilling
   );
@@ -356,6 +361,9 @@ export function AccountSettings({
               >
                 {active && entry.id === "copilot" ? (
                   <HarnessCredentials
+                    authorityContextRevision={
+                      credentialAuthorityContextRevision
+                    }
                     authorityRevision={authorityRevision}
                     isSubscriber={isSubscriber}
                     onAuthorityInvalidated={invalidateAndRefresh}

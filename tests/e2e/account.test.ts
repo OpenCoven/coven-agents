@@ -1,6 +1,14 @@
 import { expect, test } from "@playwright/test";
 import { subscriberCookies } from "./session";
 
+const STARTED_DEVICE_FLOW = {
+  deviceCode: "device-secret",
+  expiresIn: 900,
+  interval: 0.01,
+  userCode: "ABCD-EFGH",
+  verificationUri: "https://github.com/login/device",
+};
+
 test.describe("Account settings", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
@@ -184,5 +192,115 @@ test.describe("Account settings", () => {
     await page.keyboard.press("Home");
     await expect(copilot).toBeFocused();
     await expect(copilot).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("device start 403 clears the flow and shows subscription guidance", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: [] } })
+    );
+    await page.route("**/api/credentials/device", (route) =>
+      route.fulfill({
+        json: { error: "subscription_required" },
+        status: 403,
+      })
+    );
+
+    await page.goto("/account");
+    await page.getByRole("button", { name: "Connect GitHub Copilot" }).click();
+
+    await expect(
+      page.getByText("Subscription required to connect GitHub Copilot.")
+    ).toBeVisible();
+    await expect(page.getByText(STARTED_DEVICE_FLOW.userCode)).toHaveCount(0);
+  });
+
+  test("device poll 403 clears the displayed code and stops the flow", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.addInitScript(() => {
+      window.open = () => null;
+    });
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: [] } })
+    );
+    await page.route("**/api/credentials/device", (route) =>
+      route.request().method() === "POST"
+        ? route.fulfill({ json: STARTED_DEVICE_FLOW })
+        : route.fulfill({
+            json: { error: "subscription_required" },
+            status: 403,
+          })
+    );
+
+    await page.goto("/account");
+    await page.getByRole("button", { name: "Connect GitHub Copilot" }).click();
+    await expect(page.getByText(STARTED_DEVICE_FLOW.userCode)).toBeVisible();
+
+    await expect(
+      page.getByText("Subscription required to connect GitHub Copilot.")
+    ).toBeVisible();
+    await expect(page.getByText(STARTED_DEVICE_FLOW.userCode)).toHaveCount(0);
+  });
+
+  test("leaving the credential tab cancels its pending device poll", async ({
+    context,
+    page,
+  }) => {
+    let polls = 0;
+    await context.addCookies(await subscriberCookies());
+    await page.addInitScript(() => {
+      window.open = () => null;
+    });
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: [] } })
+    );
+    await page.route("**/api/credentials/device", (route) => {
+      if (route.request().method() === "POST") {
+        return route.fulfill({
+          json: { ...STARTED_DEVICE_FLOW, interval: 1 },
+        });
+      }
+      polls += 1;
+      return route.fulfill({ json: { status: "pending" } });
+    });
+
+    await page.goto("/account");
+    await page.getByRole("button", { name: "Connect GitHub Copilot" }).click();
+    await expect(page.getByText(STARTED_DEVICE_FLOW.userCode)).toBeVisible();
+    await page.getByRole("tab", { name: "Profile" }).click();
+    await page.waitForTimeout(1250);
+
+    expect(polls).toBe(0);
+  });
+
+  test("successful device flow still connects and clears its code", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.addInitScript(() => {
+      window.open = () => null;
+    });
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: [] } })
+    );
+    await page.route("**/api/credentials/device", (route) =>
+      route.request().method() === "POST"
+        ? route.fulfill({ json: STARTED_DEVICE_FLOW })
+        : route.fulfill({ json: { status: "authorized" } })
+    );
+
+    await page.goto("/account");
+    await page.getByRole("button", { name: "Connect GitHub Copilot" }).click();
+    await expect(page.getByText(STARTED_DEVICE_FLOW.userCode)).toBeVisible();
+
+    await expect(page.getByText("Copilot connected.")).toBeVisible();
+    await expect(page.getByText(STARTED_DEVICE_FLOW.userCode)).toHaveCount(0);
   });
 });

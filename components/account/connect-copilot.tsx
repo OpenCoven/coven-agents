@@ -4,12 +4,13 @@ import { Check, ExternalLink } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
-import { browserApplicationPath } from "@/lib/application-path";
+import type { StartedDeviceFlow } from "@/lib/credentials/device-flow-attempt";
 import {
-  createDeviceFlowAttempt,
-  requestDeviceFlowStart,
-  type StartedDeviceFlow,
-} from "@/lib/credentials/device-flow-attempt";
+  createDeviceFlowController,
+  type DeviceFlowAuthorityContext,
+  type DeviceFlowController,
+  type DeviceFlowViewState,
+} from "@/lib/credentials/device-flow-client";
 
 /**
  * One-click Copilot connection.
@@ -23,156 +24,114 @@ import {
  * configuring a machine rather than themselves.
  */
 export function ConnectCopilot({
+  authorityContextRevision,
+  authorityRevision,
   configured,
+  isSubscriber,
+  onAuthorityInvalidated,
   onConnected,
-  userId,
 }: {
+  authorityContextRevision: string;
+  authorityRevision: string | null;
   configured: boolean;
+  isSubscriber: boolean;
+  onAuthorityInvalidated: () => void;
   onConnected: () => void;
-  userId: string;
 }) {
   const [started, setStarted] = useState<StartedDeviceFlow | null>(null);
   const [busy, setBusy] = useState(false);
-  const [startAttempt] = useState(() =>
-    createDeviceFlowAttempt(() => crypto.randomUUID())
-  );
-  const stopped = useRef(false);
-  const ownerRef = useRef(userId);
+  const mountedRef = useRef(false);
+  const authorityContext: DeviceFlowAuthorityContext = {
+    key: `${authorityContextRevision}:${isSubscriber ? "subscriber" : "demo"}`,
+    revision: authorityRevision,
+    valid: isSubscriber && authorityRevision !== null,
+  };
+  const authorityContextRef = useRef(authorityContext);
+  authorityContextRef.current = authorityContext;
+  const callbackRef = useRef({
+    onAuthorityInvalidated,
+    onConnected,
+  });
+  callbackRef.current = {
+    onAuthorityInvalidated,
+    onConnected,
+  };
+  const controllerRef = useRef<DeviceFlowController | null>(null);
+  if (!controllerRef.current) {
+    const publishState = (state: DeviceFlowViewState) => {
+      if (!mountedRef.current) {
+        return;
+      }
+      setBusy(state.busy);
+      setStarted(state.started);
+    };
+    controllerRef.current = createDeviceFlowController({
+      cancel: (handle) => {
+        clearTimeout(handle as ReturnType<typeof setTimeout>);
+      },
+      fetcher: fetch,
+      generateKey: () => crypto.randomUUID(),
+      getAuthority: () => authorityContextRef.current,
+      onAuthorityInvalidated: () => {
+        if (mountedRef.current) {
+          callbackRef.current.onAuthorityInvalidated();
+        }
+      },
+      onConnected: () => {
+        if (mountedRef.current) {
+          callbackRef.current.onConnected();
+        }
+      },
+      onNotice: ({ message, type }) => {
+        if (mountedRef.current) {
+          toast({ description: message, type });
+        }
+      },
+      onOpenVerification: (uri) => {
+        if (mountedRef.current) {
+          window.open(uri, "_blank", "noopener,noreferrer");
+        }
+      },
+      onState: publishState,
+      schedule: (callback, delay) =>
+        setTimeout(() => {
+          Promise.resolve(callback()).catch(() => undefined);
+        }, delay),
+    });
+  }
+  const controller = controllerRef.current;
 
   useEffect(() => {
-    if (ownerRef.current === userId) {
-      return;
-    }
-    ownerRef.current = userId;
-    stopped.current = true;
-    setStarted(null);
-  }, [userId]);
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      controller.dispose();
+    };
+  }, [controller]);
 
-  /**
-   * Polls for the authorization result.
-   *
-   * Self-scheduling rather than a loop: each attempt must observe the result
-   * of the last, and GitHub answers `slow_down` if asked faster than the
-   * interval it named. Backing off on that is what keeps the flow landing --
-   * continuing at the old rate earns `slow_down` indefinitely.
-   */
-  const poll = useCallback(
-    (session: StartedDeviceFlow) => {
-      const deadline = Date.now() + 15 * 60 * 1000;
-      let waitMs = session.interval * 1000;
+  useEffect(() => {
+    controller.authorityChanged({
+      key: authorityContext.key,
+      revision: authorityRevision,
+      valid: authorityContext.valid,
+    });
+  }, [
+    authorityContext.key,
+    authorityContext.valid,
+    authorityRevision,
+    controller,
+  ]);
 
-      const attempt = () => {
-        if (stopped.current || Date.now() > deadline) {
-          return;
-        }
-
-        const ask = async (): Promise<{ status?: string } | null> => {
-          const response = await fetch(
-            browserApplicationPath("/api/credentials/device"),
-            {
-              body: JSON.stringify({
-                binding: session.binding,
-                deviceCode: session.deviceCode,
-              }),
-              headers: { "content-type": "application/json" },
-              method: "PUT",
-            }
-          );
-
-          const body = (await response.json().catch(() => null)) as {
-            status?: string;
-          } | null;
-          if (response.status === 401 || response.status === 403) {
-            return { status: "unauthorized" };
-          }
-          if (response.status === 409) {
-            return { status: body?.status ?? "owner_changed" };
-          }
-          return body;
-        };
-
-        ask()
-          .then((body) => {
-            if (stopped.current) {
-              return;
-            }
-
-            if (body?.status === "authorized") {
-              toast({ description: "Copilot connected.", type: "success" });
-              setStarted(null);
-              onConnected();
-              return;
-            }
-
-            if (body?.status === "denied") {
-              toast({
-                description: "Authorization was declined.",
-                type: "error",
-              });
-              setStarted(null);
-              return;
-            }
-
-            if (body?.status === "expired") {
-              toast({
-                description: "That code expired. Try again.",
-                type: "error",
-              });
-              setStarted(null);
-              return;
-            }
-
-            if (
-              body?.status === "owner_changed" ||
-              body?.status === "unauthorized"
-            ) {
-              stopped.current = true;
-              toast({
-                description: "Sign in again to connect Copilot.",
-                type: "error",
-              });
-              setStarted(null);
-              return;
-            }
-
-            if (body?.status === "slow_down") {
-              waitMs += 5000;
-            }
-
-            setTimeout(attempt, waitMs);
-          })
-          .catch(() => {
-            setTimeout(attempt, waitMs);
-          });
-      };
-
-      setTimeout(attempt, waitMs);
-    },
-    [onConnected]
-  );
-
-  const connect = useCallback(async () => {
-    setBusy(true);
-    stopped.current = false;
-
-    try {
-      const session = await requestDeviceFlowStart({
-        attempt: startAttempt,
-        fetcher: fetch,
-      });
-
-      setStarted(session);
-      window.open(session.verificationUri, "_blank", "noopener,noreferrer");
-      poll(session);
-    } catch {
-      toast({
-        description: "Could not start the GitHub connection.",
-        type: "error",
-      });
-    } finally {
-      setBusy(false);
-    }
-  }, [poll, startAttempt]);
+  const connect = useCallback(() => {
+    controller.start().catch(() => {
+      if (mountedRef.current) {
+        toast({
+          description: "Could not start the GitHub connection.",
+          type: "error",
+        });
+      }
+    });
+  }, [controller]);
 
   if (started) {
     return (
@@ -201,7 +160,7 @@ export function ConnectCopilot({
   return (
     <Button
       className="h-10 w-full rounded-[8px] font-semibold text-[13px]"
-      disabled={busy}
+      disabled={busy || !authorityContext.valid}
       onClick={connect}
       type="button"
       variant={configured ? "outline" : "default"}
