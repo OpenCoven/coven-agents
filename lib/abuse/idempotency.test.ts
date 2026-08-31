@@ -5,6 +5,7 @@ import {
   type IdempotencyClaimResult,
   type IdempotencyCompleteInput,
   type IdempotencyReleaseInput,
+  type IdempotencyRenewInput,
   type IdempotencyStore,
   idempotencyResultResponse,
   runIdempotentOperation,
@@ -17,6 +18,7 @@ import type {
 const KEY = "request-key-1234567890";
 const OWNER = "00000000-0000-4000-8000-000000000001";
 const OPERATION = "checkout";
+const CLAIM_TTL_MS = 5 * 60_000;
 
 test("same key and normalized request replay the exact completed response", async () => {
   const store = new MemoryIdempotencyStore();
@@ -242,6 +244,229 @@ test("parallel claims permit exactly one provider call", async () => {
   await first;
 });
 
+test("a renewable claim survives its original TTL and replays the completed response", async () => {
+  const clock = new ManualClock();
+  const timers = new ManualTimers();
+  const store = new MemoryIdempotencyStore();
+  let providerCalls = 0;
+  let releaseProvider!: () => void;
+  let signalProviderStarted!: () => void;
+  const providerStarted = new Promise<void>((resolve) => {
+    signalProviderStarted = resolve;
+  });
+  const providerGate = new Promise<void>((resolve) => {
+    releaseProvider = resolve;
+  });
+
+  const first = runRenewable({
+    createOwnerToken: () => "owner-one",
+    now: clock.now,
+    perform: async () => {
+      providerCalls += 1;
+      signalProviderStarted();
+      await providerGate;
+      return { body: { url: "https://checkout.test/renewed" }, status: 200 };
+    },
+    store,
+    timers,
+  });
+  await providerStarted;
+
+  clock.advance(CLAIM_TTL_MS / 2);
+  await timers.runNext();
+  clock.advance(CLAIM_TTL_MS / 2 + 1);
+
+  const concurrent = await runRenewable({
+    createOwnerToken: () => "owner-two",
+    now: clock.now,
+    perform: () => {
+      providerCalls += 1;
+      return Promise.resolve({
+        body: { url: "https://checkout.test/impossible" },
+        status: 200,
+      });
+    },
+    store,
+    timers,
+  });
+
+  assert.deepEqual(concurrent, { kind: "in_progress" });
+  assert.equal(providerCalls, 1);
+
+  releaseProvider();
+  assert.equal((await first).kind, "response");
+
+  const replay = await runRenewable({
+    createOwnerToken: () => "owner-three",
+    now: clock.now,
+    perform: () => {
+      providerCalls += 1;
+      return Promise.resolve({
+        body: { url: "https://checkout.test/impossible" },
+        status: 200,
+      });
+    },
+    store,
+    timers,
+  });
+  assert.deepEqual(replay, {
+    kind: "response",
+    replayed: true,
+    response: {
+      body: { url: "https://checkout.test/renewed" },
+      status: 200,
+    },
+  });
+  assert.equal(providerCalls, 1);
+  assert.deepEqual(store.claimedOwnerTokens, [
+    "owner-one",
+    "owner-two",
+    "owner-three",
+  ]);
+  assert.equal(timers.activeCount, 0);
+});
+
+test("a stale renewable owner cannot complete its successor's record", async () => {
+  const clock = new ManualClock();
+  const timers = new ManualTimers();
+  const store = new MemoryIdempotencyStore();
+  let releaseFirst!: () => void;
+  let releaseSuccessor!: () => void;
+  let signalFirstStarted!: () => void;
+  let signalSuccessorStarted!: () => void;
+  const firstStarted = new Promise<void>((resolve) => {
+    signalFirstStarted = resolve;
+  });
+  const successorStarted = new Promise<void>((resolve) => {
+    signalSuccessorStarted = resolve;
+  });
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const successorGate = new Promise<void>((resolve) => {
+    releaseSuccessor = resolve;
+  });
+
+  const first = runRenewable({
+    createOwnerToken: () => "owner-one",
+    now: clock.now,
+    perform: async () => {
+      signalFirstStarted();
+      await firstGate;
+      return { body: { owner: "stale" }, status: 200 };
+    },
+    store,
+    timers,
+  });
+  await firstStarted;
+
+  clock.advance(CLAIM_TTL_MS + 1);
+  const successor = runRenewable({
+    createOwnerToken: () => "owner-two",
+    now: clock.now,
+    perform: async () => {
+      signalSuccessorStarted();
+      await successorGate;
+      return { body: { owner: "successor" }, status: 200 };
+    },
+    store,
+    timers,
+  });
+  await successorStarted;
+
+  releaseFirst();
+  assert.deepEqual(await first, { kind: "in_progress" });
+  releaseSuccessor();
+  await successor;
+
+  const replay = await runRenewable({
+    createOwnerToken: () => "owner-three",
+    now: clock.now,
+    perform: () =>
+      Promise.resolve({ body: { owner: "impossible" }, status: 200 }),
+    store,
+    timers,
+  });
+  assert.deepEqual(replay, {
+    kind: "response",
+    replayed: true,
+    response: { body: { owner: "successor" }, status: 200 },
+  });
+  assert.deepEqual(store.claimedOwnerTokens.slice(0, 2), [
+    "owner-one",
+    "owner-two",
+  ]);
+});
+
+test("a stale renewable owner cannot release its successor's record", async () => {
+  const clock = new ManualClock();
+  const timers = new ManualTimers();
+  const store = new MemoryIdempotencyStore();
+  let releaseFirst!: () => void;
+  let releaseSuccessor!: () => void;
+  let signalFirstStarted!: () => void;
+  let signalSuccessorStarted!: () => void;
+  const firstStarted = new Promise<void>((resolve) => {
+    signalFirstStarted = resolve;
+  });
+  const successorStarted = new Promise<void>((resolve) => {
+    signalSuccessorStarted = resolve;
+  });
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const successorGate = new Promise<void>((resolve) => {
+    releaseSuccessor = resolve;
+  });
+
+  const first = runRenewable({
+    createOwnerToken: () => "owner-one",
+    now: clock.now,
+    perform: async () => {
+      signalFirstStarted();
+      await firstGate;
+      return { body: { error: "retry" }, status: 502 };
+    },
+    store,
+    timers,
+  });
+  await firstStarted;
+
+  clock.advance(CLAIM_TTL_MS + 1);
+  const successor = runRenewable({
+    createOwnerToken: () => "owner-two",
+    now: clock.now,
+    perform: async () => {
+      signalSuccessorStarted();
+      await successorGate;
+      return { body: { owner: "successor" }, status: 200 };
+    },
+    store,
+    timers,
+  });
+  await successorStarted;
+
+  releaseFirst();
+  assert.deepEqual(await first, { kind: "in_progress" });
+
+  const blocked = await runRenewable({
+    createOwnerToken: () => "owner-three",
+    now: clock.now,
+    perform: () =>
+      Promise.resolve({ body: { owner: "impossible" }, status: 200 }),
+    store,
+    timers,
+  });
+  assert.deepEqual(blocked, { kind: "in_progress" });
+  assert.deepEqual(store.claimedOwnerTokens.slice(0, 2), [
+    "owner-one",
+    "owner-two",
+  ]);
+
+  releaseSuccessor();
+  await successor;
+});
+
 test("response storage encodes on completion and decodes only on replay", async () => {
   const store = new MemoryIdempotencyStore();
   let replayCalls = 0;
@@ -406,9 +631,80 @@ function run(options: {
   });
 }
 
+function runRenewable(options: {
+  createOwnerToken: () => string;
+  now: () => Date;
+  perform: Parameters<typeof runIdempotentOperation>[0]["perform"];
+  store: IdempotencyStore;
+  timers: ManualTimers;
+}) {
+  const renewableRun = runIdempotentOperation as (
+    input: Parameters<typeof runIdempotentOperation>[0] & {
+      claimLease: {
+        createOwnerToken: () => string;
+        timers: ManualTimers;
+      };
+    }
+  ) => ReturnType<typeof runIdempotentOperation>;
+  return renewableRun({
+    claimLease: {
+      createOwnerToken: options.createOwnerToken,
+      timers: options.timers,
+    },
+    idempotencyKey: KEY,
+    now: options.now,
+    operation: OPERATION,
+    ownerId: OWNER,
+    perform: options.perform,
+    request: {},
+    retentionMs: 60_000,
+    store: options.store,
+  });
+}
+
+class ManualClock {
+  private timestamp = Date.parse("2026-08-31T00:00:00.000Z");
+  readonly now = () => new Date(this.timestamp);
+
+  advance(milliseconds: number) {
+    this.timestamp += milliseconds;
+  }
+}
+
+type ManualTimer = {
+  callback: () => Promise<void>;
+  cancelled: boolean;
+};
+
+class ManualTimers {
+  private readonly timers: ManualTimer[] = [];
+
+  get activeCount() {
+    return this.timers.filter(({ cancelled }) => !cancelled).length;
+  }
+
+  clearTimeout(timer: unknown) {
+    (timer as ManualTimer).cancelled = true;
+  }
+
+  async runNext() {
+    const timer = this.timers.find(({ cancelled }) => !cancelled);
+    assert.ok(timer);
+    timer.cancelled = true;
+    await timer.callback();
+  }
+
+  setTimeout(callback: () => Promise<void>, _delayMs: number) {
+    const timer = { callback, cancelled: false };
+    this.timers.push(timer);
+    return timer;
+  }
+}
+
 type MemoryRecord = {
   claimExpiresAt: Date;
   envelope: StoredIdempotencyResponseEnvelope | null;
+  ownerToken: string | null;
   requestHash: string;
   state: "completed" | "in_progress";
   status: number | null;
@@ -416,6 +712,7 @@ type MemoryRecord = {
 };
 
 class MemoryIdempotencyStore implements IdempotencyStore {
+  claimedOwnerTokens: Array<string | null> = [];
   claimCount = 0;
   cleanupDeletedStates: MemoryRecord["state"][] = [];
   cleanupFailure: Error | null = null;
@@ -447,6 +744,7 @@ class MemoryIdempotencyStore implements IdempotencyStore {
 
   claim(input: IdempotencyClaimInput): Promise<IdempotencyClaimResult> {
     this.claimCount += 1;
+    this.claimedOwnerTokens.push(ownerToken(input));
     this.lastClaim = input;
     const scope = scoped(input);
     const existing = this.records.get(scope);
@@ -456,6 +754,10 @@ class MemoryIdempotencyStore implements IdempotencyStore {
         claimExpiresAt: input.claimExpiresAt,
         envelope: null,
         expiresAt: input.claimExpiresAt,
+        ownerToken:
+          "ownerToken" in input && typeof input.ownerToken === "string"
+            ? input.ownerToken
+            : null,
         requestHash: input.requestHash,
         state: "in_progress",
         status: null,
@@ -483,32 +785,59 @@ class MemoryIdempotencyStore implements IdempotencyStore {
     });
   }
 
-  complete(input: IdempotencyCompleteInput): Promise<void> {
+  complete(input: IdempotencyCompleteInput): Promise<"completed" | "lost"> {
     const record = this.records.get(scoped(input.claim));
-    assert.ok(record);
-    assert.equal(
-      record.claimExpiresAt.getTime(),
-      input.claim.claimExpiresAt.getTime()
-    );
+    if (
+      !record ||
+      record.claimExpiresAt.getTime() !==
+        input.claim.claimExpiresAt.getTime() ||
+      record.ownerToken !== ownerToken(input.claim)
+    ) {
+      return Promise.resolve("lost");
+    }
     record.envelope = input.response.envelope;
     record.expiresAt = input.expiresAt;
     record.state = "completed";
     record.status = input.response.status;
     this.lastCompletedResponse = input.response;
-    return Promise.resolve();
+    return Promise.resolve("completed");
   }
 
-  release(input: IdempotencyReleaseInput): Promise<void> {
+  release(input: IdempotencyReleaseInput): Promise<"lost" | "released"> {
     const scope = scoped(input.claim);
     const record = this.records.get(scope);
     if (
       record?.state === "in_progress" &&
-      record.claimExpiresAt.getTime() === input.claim.claimExpiresAt.getTime()
+      record.claimExpiresAt.getTime() ===
+        input.claim.claimExpiresAt.getTime() &&
+      record.ownerToken === ownerToken(input.claim)
     ) {
       this.records.delete(scope);
+      this.releaseCount += 1;
+      return Promise.resolve("released");
     }
     this.releaseCount += 1;
-    return Promise.resolve();
+    return Promise.resolve("lost");
+  }
+
+  renew(input: IdempotencyRenewInput) {
+    const record = this.records.get(scoped(input.claim));
+    if (
+      record?.state !== "in_progress" ||
+      record.ownerToken !== ownerToken(input.claim) ||
+      record.expiresAt.getTime() <= input.now.getTime()
+    ) {
+      return Promise.resolve({ kind: "lost" } as const);
+    }
+    record.claimExpiresAt = input.claimExpiresAt;
+    record.expiresAt = input.claimExpiresAt;
+    return Promise.resolve({
+      claim: {
+        ...input.claim,
+        claimExpiresAt: input.claimExpiresAt,
+      },
+      kind: "renewed",
+    } as const);
   }
 }
 
@@ -545,7 +874,14 @@ function claimHandle(input: IdempotencyClaimInput) {
     claimExpiresAt: input.claimExpiresAt,
     keyHash: input.keyHash,
     operation: input.operation,
+    ...("ownerToken" in input ? { ownerToken: input.ownerToken } : {}),
     ownerId: input.ownerId,
     requestHash: input.requestHash,
   };
+}
+
+function ownerToken(input: object): string | null {
+  return "ownerToken" in input && typeof input.ownerToken === "string"
+    ? input.ownerToken
+    : null;
 }

@@ -6,21 +6,26 @@ import {
 import {
   type IdempotencyResponse,
   type IdempotencyStore,
+  type IdempotencyTimers,
   idempotencyResultResponse,
   runIdempotentOperation,
 } from "@/lib/abuse/idempotency";
 import { plaintextIdempotencyResponseStorage } from "@/lib/abuse/idempotency-response";
 import type { SessionLike } from "@/lib/auth/subscriber-access";
 import {
+  CHECKOUT_ATTEMPT_METADATA_KEY,
   CHECKOUT_FLOW_VERSION,
   CheckoutSessionCleanupError,
+  type CheckoutSessionPage,
+  type CheckoutSessionSnapshot,
   checkoutDecision,
-  type OpenCheckoutSessionPage,
-  recoverOpenCheckoutSession,
+  isValidCheckoutSessionUrl,
+  reconcileCheckoutSessions,
   stableIntegrationIdentifier,
 } from "@/lib/billing/checkout";
 import {
   type CheckoutAttemptLeaseStore,
+  type CheckoutAttemptState,
   type CheckoutLeaseTimers,
   runWithCheckoutAttemptLease,
 } from "@/lib/billing/checkout-lease";
@@ -32,11 +37,48 @@ type ProviderRequestOptions = {
   idempotencyKey: string;
 };
 
+type CheckoutAttemptResult =
+  | {
+      disposition: "preserve_attempt";
+      state: CheckoutAttemptState;
+      value: IdempotencyResponse;
+    }
+  | {
+      disposition: "retire_attempt";
+      value: IdempotencyResponse;
+    };
+
+export class CheckoutProviderRequestError extends Error {
+  readonly requestOutcome: "pre_request" | "uncertain";
+
+  constructor(
+    requestOutcome: "pre_request" | "uncertain",
+    options?: ErrorOptions
+  ) {
+    super("Checkout provider request failed.", options);
+    this.name = "CheckoutProviderRequestError";
+    this.requestOutcome = requestOutcome;
+  }
+}
+
 export type CheckoutProvider = {
   createCheckoutSession: (
     input: Stripe.Checkout.SessionCreateParams,
     options: ProviderRequestOptions
-  ) => Promise<{ url: string | null }>;
+  ) => Promise<
+    Partial<
+      Pick<
+        CheckoutSessionSnapshot,
+        | "clientReferenceId"
+        | "customerId"
+        | "id"
+        | "integrationIdentifier"
+        | "metadata"
+        | "mode"
+        | "status"
+      >
+    > & { url: string | null }
+  >;
   createCustomer: (
     input: Stripe.CustomerCreateParams,
     options: ProviderRequestOptions
@@ -46,9 +88,12 @@ export type CheckoutProvider = {
     options: ProviderRequestOptions
   ) => Promise<void>;
   hasBlockingSubscription: (customerId: string) => Promise<boolean>;
-  listOpenCheckoutSessions: (
+  listCheckoutSessions: (
     input: Stripe.Checkout.SessionListParams
-  ) => Promise<OpenCheckoutSessionPage>;
+  ) => Promise<CheckoutSessionPage>;
+  retrieveCheckoutSession: (
+    sessionId: string
+  ) => Promise<CheckoutSessionSnapshot>;
 };
 
 export type CheckoutDependencies = {
@@ -64,6 +109,8 @@ export type CheckoutDependencies = {
   ) => Promise<{ stripeCustomerId: string | null } | null>;
   getCheckoutConfig: () => SubscriptionCheckoutConfig;
   idempotencyStore: IdempotencyStore;
+  idempotencyTimers?: IdempotencyTimers;
+  now?: () => Date;
   origin: () => string;
 };
 
@@ -96,7 +143,9 @@ export async function checkoutResponse(
   }
 
   const result = await runIdempotentOperation({
+    claimLease: { timers: dependencies.idempotencyTimers },
     idempotencyKey: request.headers.get("idempotency-key"),
+    now: dependencies.now,
     operation: "checkout",
     ownerId: userId,
     perform: async (): Promise<IdempotencyResponse> => {
@@ -117,86 +166,133 @@ export async function checkoutResponse(
 
       try {
         const attempt = await runWithCheckoutAttemptLease<IdempotencyResponse>({
+          now: dependencies.now,
           ownerId: userId,
           perform: async ({
+            attemptId,
+            attemptState,
+            expirationIdempotencyKey,
             providerIdempotencyKey,
-          }): Promise<{
-            disposition: "preserve_attempt" | "retire_attempt";
-            value: IdempotencyResponse;
-          }> => {
+          }): Promise<CheckoutAttemptResult> => {
             const row = await dependencies.findUser(userId);
             const provider = dependencies.createProvider(enabledConfig.apiKey);
-            const hasBlockingSubscription = row?.stripeCustomerId
-              ? await provider.hasBlockingSubscription(row.stripeCustomerId)
-              : false;
-
             const decision = checkoutDecision({
-              hasBlockingSubscription,
+              hasBlockingSubscription: false,
               userId,
             });
-            if (decision.kind === "already_subscribed") {
+            if (decision.kind !== "allowed") {
               return {
                 disposition: "retire_attempt",
-                value: {
-                  body: { error: "already_subscribed" },
-                  status: 409,
-                },
-              };
-            }
-            if (decision.kind === "unauthorized") {
-              return {
-                disposition: "retire_attempt",
-                value: { body: { error: "unauthorized" }, status: 401 },
+                value:
+                  decision.kind === "unauthorized"
+                    ? { body: { error: "unauthorized" }, status: 401 }
+                    : {
+                        body: { error: "already_subscribed" },
+                        status: 409,
+                      },
               };
             }
 
-            if (row?.stripeCustomerId) {
-              let openCheckout: Awaited<
-                ReturnType<typeof recoverOpenCheckoutSession>
+            const inspectCustomer = async (
+              candidateCustomerId: string
+            ): Promise<CheckoutAttemptResult | null> => {
+              if (await provider.hasBlockingSubscription(candidateCustomerId)) {
+                return {
+                  disposition: "retire_attempt",
+                  value: {
+                    body: { error: "already_subscribed" },
+                    status: 409,
+                  },
+                } as const;
+              }
+
+              let reconciliation: Awaited<
+                ReturnType<typeof reconcileCheckoutSessions>
               >;
               try {
-                openCheckout = await recoverOpenCheckoutSession({
-                  customerId: row.stripeCustomerId,
+                reconciliation = await reconcileCheckoutSessions({
+                  attemptId,
+                  attemptState,
+                  customerId: candidateCustomerId,
+                  expirationIdempotencyKey,
                   expire: provider.expireCheckoutSession,
-                  listPage: provider.listOpenCheckoutSessions,
+                  listPage: provider.listCheckoutSessions,
                   priceId: enabledConfig.priceId,
                   providerIdempotencyKey,
+                  retrieve: provider.retrieveCheckoutSession,
                   userId: decision.userId,
                 });
               } catch (error) {
                 if (error instanceof CheckoutSessionCleanupError) {
                   return {
                     disposition: "preserve_attempt",
+                    state: attemptState,
                     value: {
                       body: { error: "checkout_session_conflict" },
                       status: 409,
                     },
-                  };
+                  } as const;
                 }
                 throw error;
               }
-              if (openCheckout.kind === "reused") {
-                return openCheckout.url
-                  ? {
-                      disposition: "preserve_attempt",
-                      value: {
-                        body: { url: openCheckout.url },
-                        status: 200,
-                      },
-                    }
-                  : {
-                      disposition: "preserve_attempt",
-                      value: checkoutFailure(),
-                    };
+              if (reconciliation.kind === "reused") {
+                return {
+                  disposition: "preserve_attempt",
+                  state: {
+                    kind: "session_created",
+                    sessionId: reconciliation.sessionId,
+                  },
+                  value: {
+                    body: { url: reconciliation.url },
+                    status: 200,
+                  },
+                } as const;
               }
-              if (openCheckout.kind === "retry_required") {
+              if (reconciliation.kind === "complete") {
+                return {
+                  disposition: "preserve_attempt",
+                  state: {
+                    kind: "session_created",
+                    sessionId: reconciliation.sessionId,
+                  },
+                  value: requestInProgress(),
+                } as const;
+              }
+              if (reconciliation.kind === "invalid_url") {
+                return {
+                  disposition: "preserve_attempt",
+                  state: {
+                    kind: "session_created",
+                    sessionId: reconciliation.sessionId,
+                  },
+                  value: checkoutFailure(),
+                } as const;
+              }
+              if (reconciliation.kind === "retire_attempt") {
                 return {
                   disposition: "retire_attempt",
+                  value: requestInProgress(),
+                } as const;
+              }
+              if (reconciliation.kind === "retry_required") {
+                return {
+                  disposition: "preserve_attempt",
+                  state: attemptState,
                   value: {
                     body: { error: "request_in_progress" },
                     status: 409,
                   },
-                };
+                } as const;
+              }
+              return null;
+            };
+
+            const inspectedCustomerId = row?.stripeCustomerId ?? null;
+            if (inspectedCustomerId) {
+              const existingCustomer =
+                await inspectCustomer(inspectedCustomerId);
+              if (existingCustomer) {
+                return existingCustomer;
               }
             }
 
@@ -217,39 +313,79 @@ export async function checkoutResponse(
               );
             }
 
-            const origin = dependencies.origin();
-            const checkout = await provider.createCheckoutSession(
-              {
-                cancel_url: `${origin}/account?checkout=cancelled`,
-                client_reference_id: decision.userId,
-                customer: customerId,
-                integration_identifier: stableIntegrationIdentifier(
-                  providerIdempotencyKey
-                ),
-                line_items: [{ price: enabledConfig.priceId, quantity: 1 }],
-                metadata: {
-                  checkoutFlowVersion: CHECKOUT_FLOW_VERSION,
-                  priceId: enabledConfig.priceId,
-                  userId: decision.userId,
-                },
-                mode: "subscription",
-                subscription_data: { metadata: { userId: decision.userId } },
-                success_url: `${origin}/account?checkout=success`,
-              },
-              { idempotencyKey: sessionIdempotencyKey }
-            );
+            if (customerId !== inspectedCustomerId) {
+              const attachedCustomer = await inspectCustomer(customerId);
+              if (attachedCustomer) {
+                return attachedCustomer;
+              }
+            }
 
-            if (!checkout.url) {
+            const origin = dependencies.origin();
+            let checkout: Awaited<
+              ReturnType<CheckoutProvider["createCheckoutSession"]>
+            >;
+            try {
+              checkout = await provider.createCheckoutSession(
+                {
+                  cancel_url: `${origin}/account?checkout=cancelled`,
+                  client_reference_id: decision.userId,
+                  customer: customerId,
+                  integration_identifier: stableIntegrationIdentifier(
+                    providerIdempotencyKey
+                  ),
+                  line_items: [{ price: enabledConfig.priceId, quantity: 1 }],
+                  metadata: {
+                    [CHECKOUT_ATTEMPT_METADATA_KEY]: attemptId,
+                    checkoutFlowVersion: CHECKOUT_FLOW_VERSION,
+                    priceId: enabledConfig.priceId,
+                    userId: decision.userId,
+                  },
+                  mode: "subscription",
+                  subscription_data: { metadata: { userId: decision.userId } },
+                  success_url: `${origin}/account?checkout=success`,
+                },
+                { idempotencyKey: sessionIdempotencyKey }
+              );
+            } catch (error) {
+              return isPreRequestProviderFailure(error)
+                ? {
+                    disposition: "retire_attempt",
+                    value: checkoutFailure(),
+                  }
+                : {
+                    disposition: "preserve_attempt",
+                    state: { kind: "create_uncertain" },
+                    value: checkoutFailure(),
+                  };
+            }
+
+            const createdState = createdAttemptState(checkout.id);
+            if (checkout.status === "expired") {
+              return {
+                disposition: "retire_attempt",
+                value: requestInProgress(),
+              };
+            }
+            if (checkout.status === "complete") {
               return {
                 disposition: "preserve_attempt",
-                value: checkoutFailure(),
+                state: createdState,
+                value: requestInProgress(),
               };
+            }
+            if (!isValidCheckoutSessionUrl(checkout.url)) {
+              return {
+                disposition: "preserve_attempt",
+                state: createdState,
+                value: checkoutFailure(),
+              } as const;
             }
 
             return {
               disposition: "preserve_attempt",
+              state: createdState,
               value: { body: { url: checkout.url }, status: 200 },
-            };
+            } as const;
           },
           store: dependencies.checkoutLeaseStore,
           timers: dependencies.checkoutLeaseTimers,
@@ -276,4 +412,23 @@ export async function checkoutResponse(
 
 function checkoutFailure() {
   return { body: { error: "checkout_failed" }, status: 502 } as const;
+}
+
+function requestInProgress() {
+  return { body: { error: "request_in_progress" }, status: 409 } as const;
+}
+
+function createdAttemptState(
+  sessionId: string | undefined
+): CheckoutAttemptState {
+  return sessionId ? { kind: "session_created", sessionId } : { kind: "fresh" };
+}
+
+function isPreRequestProviderFailure(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "requestOutcome" in error &&
+    error.requestOutcome === "pre_request"
+  );
 }

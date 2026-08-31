@@ -9,10 +9,16 @@ const CHECKOUT_ATTEMPT_RENEWAL_MS = CHECKOUT_ATTEMPT_LEASE_TTL_MS / 2;
 
 export type CheckoutAttemptLease = {
   attemptId: string;
+  attemptState: CheckoutAttemptState;
   expiresAt: Date;
   ownerId: string;
   ownerToken: string;
 };
+
+export type CheckoutAttemptState =
+  | { kind: "create_uncertain" }
+  | { kind: "fresh" }
+  | { kind: "session_created"; sessionId: string };
 
 export type CheckoutAttemptLeaseClaimInput = {
   leaseExpiresAt: Date;
@@ -36,7 +42,9 @@ export type CheckoutAttemptLeaseRenewResult =
   | { kind: "renewed"; lease: CheckoutAttemptLease };
 
 export type CheckoutAttemptLeaseReleaseInput = {
-  disposition: "preserve_attempt" | "retire_attempt";
+  disposition:
+    | { kind: "preserve_attempt"; state: CheckoutAttemptState }
+    | { kind: "retire_attempt" };
   lease: CheckoutAttemptLease;
   releasedAt: Date;
 };
@@ -60,10 +68,16 @@ export type CheckoutLeaseTimers = {
   setTimeout: (callback: () => Promise<void>, delayMs: number) => unknown;
 };
 
-type CheckoutAttemptWork<T> = {
-  disposition: "preserve_attempt" | "retire_attempt";
-  value: T;
-};
+type CheckoutAttemptWork<T> =
+  | {
+      disposition: "preserve_attempt";
+      state: CheckoutAttemptState;
+      value: T;
+    }
+  | {
+      disposition: "retire_attempt";
+      value: T;
+    };
 
 export type CheckoutAttemptLeaseResult<T> =
   | { kind: "in_progress" }
@@ -87,6 +101,9 @@ export async function runWithCheckoutAttemptLease<T>(options: {
   now?: () => Date;
   ownerId: string;
   perform: (input: {
+    attemptId: string;
+    attemptState: CheckoutAttemptState;
+    expirationIdempotencyKey: (sessionId: string) => string;
     providerIdempotencyKey: string;
   }) => Promise<CheckoutAttemptWork<T>>;
   store: CheckoutAttemptLeaseStore;
@@ -157,16 +174,28 @@ export async function runWithCheckoutAttemptLease<T>(options: {
 
   let work: CheckoutAttemptWork<T>;
   try {
+    const providerIdempotencyKey = checkoutProviderIdempotencyKey(
+      options.ownerId,
+      lease.attemptId
+    );
     work = await options.perform({
-      providerIdempotencyKey: checkoutProviderIdempotencyKey(
-        options.ownerId,
-        lease.attemptId
-      ),
+      attemptId: lease.attemptId,
+      attemptState: lease.attemptState,
+      expirationIdempotencyKey: (sessionId) =>
+        checkoutExpirationIdempotencyKey(
+          providerIdempotencyKey,
+          lease.ownerToken,
+          sessionId
+        ),
+      providerIdempotencyKey,
     });
   } catch (error) {
     await stopRenewal();
     await options.store.release({
-      disposition: "preserve_attempt",
+      disposition: {
+        kind: "preserve_attempt",
+        state: lease.attemptState,
+      },
       lease,
       releasedAt: validNow(now),
     });
@@ -176,7 +205,10 @@ export async function runWithCheckoutAttemptLease<T>(options: {
   await stopRenewal();
   if (renewalError !== undefined) {
     await options.store.release({
-      disposition: "preserve_attempt",
+      disposition: {
+        kind: "preserve_attempt",
+        state: lease.attemptState,
+      },
       lease,
       releasedAt: validNow(now),
     });
@@ -187,7 +219,10 @@ export async function runWithCheckoutAttemptLease<T>(options: {
   }
   if (renewalError !== undefined) {
     await options.store.release({
-      disposition: "preserve_attempt",
+      disposition: {
+        kind: "preserve_attempt",
+        state: lease.attemptState,
+      },
       lease,
       releasedAt: validNow(now),
     });
@@ -195,7 +230,10 @@ export async function runWithCheckoutAttemptLease<T>(options: {
   }
   if (leaseLost) {
     await options.store.release({
-      disposition: "preserve_attempt",
+      disposition: {
+        kind: "preserve_attempt",
+        state: lease.attemptState,
+      },
       lease,
       releasedAt: validNow(now),
     });
@@ -203,7 +241,10 @@ export async function runWithCheckoutAttemptLease<T>(options: {
   }
 
   const releaseResult = await options.store.release({
-    disposition: work.disposition,
+    disposition:
+      work.disposition === "preserve_attempt"
+        ? { kind: "preserve_attempt", state: work.state }
+        : { kind: "retire_attempt" },
     lease,
     releasedAt: validNow(now),
   });
@@ -213,12 +254,58 @@ export async function runWithCheckoutAttemptLease<T>(options: {
   return { kind: "performed", value: work.value };
 }
 
+export function parseCheckoutAttemptState(
+  storedState: string
+): CheckoutAttemptState {
+  if (storedState === "checkout-attempt:v1:fresh") {
+    return { kind: "fresh" };
+  }
+  if (storedState === "checkout-attempt:v1:create_uncertain") {
+    return { kind: "create_uncertain" };
+  }
+  const sessionPrefix = "checkout-attempt:v1:session_created:";
+  if (storedState.startsWith(sessionPrefix)) {
+    const sessionId = storedState.slice(sessionPrefix.length);
+    if (sessionId.length > 0) {
+      return { kind: "session_created", sessionId };
+    }
+  }
+  return { kind: "create_uncertain" };
+}
+
+export function serializeCheckoutAttemptState(
+  state: CheckoutAttemptState
+): string {
+  return state.kind === "session_created"
+    ? `checkout-attempt:v1:session_created:${state.sessionId}`
+    : `checkout-attempt:v1:${state.kind}`;
+}
+
 function checkoutProviderIdempotencyKey(
   ownerId: string,
   attemptId: string
 ): string {
   const digest = createHash("sha256")
     .update(["checkout-attempt", ownerId, attemptId].join("\0"), "utf8")
+    .digest("hex");
+  return `coven_${digest}`;
+}
+
+function checkoutExpirationIdempotencyKey(
+  providerIdempotencyKey: string,
+  ownerToken: string,
+  sessionId: string
+): string {
+  const digest = createHash("sha256")
+    .update(
+      [
+        "checkout-expiration",
+        providerIdempotencyKey,
+        ownerToken,
+        sessionId,
+      ].join("\0"),
+      "utf8"
+    )
     .digest("hex");
   return `coven_${digest}`;
 }

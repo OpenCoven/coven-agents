@@ -520,8 +520,10 @@ test("database claims and reclaims idempotency records atomically", () => {
     storeSource.match(
       /eq\(\s*idempotencyRecord\.expiresAt,\s*input\.claim\.claimExpiresAt\s*\)/g
     )?.length,
-    2
+    3
   );
+  assert.match(storeSource, /storedIdempotencyClaimHash\(input\.claim\)/);
+  assert.match(storeSource, /async renew\(input\)/);
 });
 
 test("database cleanup is bounded, state-agnostic, and preserves checkout recovery leases", () => {
@@ -581,6 +583,14 @@ test("checkout leases preserve attempt identity and fence renewals and releases"
     /returning\(\{ attemptId: idempotencyRecord\.id \}\)/
   );
   assert.match(leaseStore, /requestHash: input\.ownerToken/);
+  assert.match(
+    leaseStore,
+    /parseCheckoutAttemptState\(existing\.requestHash\)/
+  );
+  assert.match(
+    leaseStore,
+    /serializeCheckoutAttemptState\(\s*input\.disposition\.state\s*\)/
+  );
   assert.match(leaseStore, /lte\(idempotencyRecord\.expiresAt, input\.now\)/);
   assert.match(leaseStore, /gt\(idempotencyRecord\.expiresAt, input\.now\)/);
   assert.ok(

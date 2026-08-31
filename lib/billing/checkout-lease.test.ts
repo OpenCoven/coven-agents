@@ -9,7 +9,9 @@ import {
   type CheckoutAttemptLeaseRenewInput,
   type CheckoutAttemptLeaseStore,
   type CheckoutLeaseTimers,
+  parseCheckoutAttemptState,
   runWithCheckoutAttemptLease,
+  serializeCheckoutAttemptState,
 } from "./checkout-lease";
 
 const USER_ID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
@@ -150,6 +152,79 @@ test("a successor reuses the attempt key and a stale release cannot delete its l
   assert.equal(timers.activeCount, 0);
 });
 
+test("preserved attempt state survives reclaim while expiration identities rotate", async () => {
+  const clock = new ManualClock();
+  const store = new MemoryCheckoutAttemptLeaseStore();
+  let firstExpirationKey = "";
+  let firstProviderKey = "";
+
+  const first = await runWithCheckoutAttemptLease({
+    createOwnerToken: () => "owner-one",
+    now: clock.now,
+    ownerId: USER_ID,
+    perform: ({
+      attemptState,
+      expirationIdempotencyKey,
+      providerIdempotencyKey,
+    }) => {
+      assert.deepEqual(attemptState, { kind: "fresh" });
+      firstExpirationKey = expirationIdempotencyKey("cs_obsolete");
+      firstProviderKey = providerIdempotencyKey;
+      return Promise.resolve({
+        disposition: "preserve_attempt",
+        state: { kind: "session_created", sessionId: "cs_created" },
+        value: "preserved",
+      } as const);
+    },
+    store,
+  });
+  assert.deepEqual(first, { kind: "performed", value: "preserved" });
+
+  clock.advance(1);
+  const second = await runWithCheckoutAttemptLease({
+    createOwnerToken: () => "owner-two",
+    now: clock.now,
+    ownerId: USER_ID,
+    perform: ({
+      attemptState,
+      expirationIdempotencyKey,
+      providerIdempotencyKey,
+    }) => {
+      assert.deepEqual(attemptState, {
+        kind: "session_created",
+        sessionId: "cs_created",
+      });
+      assert.equal(providerIdempotencyKey, firstProviderKey);
+      assert.notEqual(
+        expirationIdempotencyKey("cs_obsolete"),
+        firstExpirationKey
+      );
+      return Promise.resolve({
+        disposition: "retire_attempt",
+        value: "retired",
+      } as const);
+    },
+    store,
+  });
+
+  assert.deepEqual(second, { kind: "performed", value: "retired" });
+});
+
+test("checkout attempt state encoding fails closed for legacy or malformed values", () => {
+  assert.deepEqual(
+    parseCheckoutAttemptState(
+      serializeCheckoutAttemptState({
+        kind: "session_created",
+        sessionId: "cs_recoverable",
+      })
+    ),
+    { kind: "session_created", sessionId: "cs_recoverable" }
+  );
+  assert.deepEqual(parseCheckoutAttemptState("legacy-owner-token"), {
+    kind: "create_uncertain",
+  });
+});
+
 class ManualClock {
   private timestamp = Date.parse("2026-08-31T00:00:00.000Z");
   readonly now = () => new Date(this.timestamp);
@@ -191,6 +266,7 @@ class ManualTimers implements CheckoutLeaseTimers {
 
 type LeaseRecord = {
   attemptId: string;
+  attemptState: CheckoutAttemptLease["attemptState"];
   expiresAt: Date;
   ownerToken: string;
 };
@@ -210,6 +286,7 @@ class MemoryCheckoutAttemptLeaseStore implements CheckoutAttemptLeaseStore {
 
     const record = existing ?? {
       attemptId: `attempt-${this.nextAttempt}`,
+      attemptState: { kind: "fresh" } as const,
       expiresAt: input.leaseExpiresAt,
       ownerToken: input.ownerToken,
     };
@@ -234,9 +311,10 @@ class MemoryCheckoutAttemptLeaseStore implements CheckoutAttemptLeaseStore {
       return Promise.resolve("lost");
     }
 
-    if (input.disposition === "retire_attempt") {
+    if (input.disposition.kind === "retire_attempt") {
       this.records.delete(input.lease.ownerId);
     } else {
+      record.attemptState = input.disposition.state;
       record.expiresAt = input.releasedAt;
     }
     return Promise.resolve("released");
@@ -267,6 +345,7 @@ class MemoryCheckoutAttemptLeaseStore implements CheckoutAttemptLeaseStore {
 function lease(ownerId: string, record: LeaseRecord): CheckoutAttemptLease {
   return {
     attemptId: record.attemptId,
+    attemptState: record.attemptState,
     expiresAt: record.expiresAt,
     ownerId,
     ownerToken: record.ownerToken,

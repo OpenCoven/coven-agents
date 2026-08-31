@@ -10,7 +10,11 @@ import type {
   IdempotencyStore,
   StoredIdempotencyResponse,
 } from "@/lib/abuse/idempotency";
-import { hasBlockingSubscription } from "@/lib/billing/checkout";
+import { IDEMPOTENCY_CLAIM_TTL_MS } from "@/lib/abuse/idempotency";
+import {
+  type CheckoutSessionSnapshot,
+  hasBlockingSubscription,
+} from "@/lib/billing/checkout";
 import type {
   CheckoutAttemptLease,
   CheckoutAttemptLeaseClaimInput,
@@ -19,6 +23,7 @@ import type {
   CheckoutAttemptLeaseRenewInput,
   CheckoutAttemptLeaseStore,
 } from "@/lib/billing/checkout-lease";
+import { CHECKOUT_ATTEMPT_LEASE_TTL_MS } from "@/lib/billing/checkout-lease";
 import {
   type CheckoutDependencies,
   type CheckoutProvider,
@@ -34,7 +39,7 @@ test("disabled checkout performs no abuse, database, or Stripe work", async () =
   const dependencies = dependenciesFor({
     authenticate: () => {
       calls.push("authenticate");
-      return Promise.resolve(session());
+      return Promise.resolve(userSession());
     },
     checkoutEnabled: () => {
       calls.push("launch");
@@ -114,7 +119,7 @@ test("enabled checkout preserves the required operation order", async () => {
     },
     authenticate: () => {
       calls.push("authenticate");
-      return Promise.resolve(session());
+      return Promise.resolve(userSession());
     },
     checkoutEnabled: () => {
       calls.push("launch");
@@ -178,6 +183,7 @@ test("enabled checkout preserves the required operation order", async () => {
     "create Checkout",
     "checkout lease renew",
     "checkout lease release",
+    "idempotency renew",
     "idempotency complete",
   ]);
 });
@@ -283,6 +289,71 @@ test("concurrent distinct browser keys create only one payable Checkout attempt"
   assert.equal(attachedCustomerId, "cus_1");
 });
 
+test("checkout renews both durable claims through long Stripe work and replays success", async () => {
+  const clock = new ResponseManualClock();
+  const checkoutTimers = new ResponseManualTimers();
+  const responseTimers = new ResponseManualTimers();
+  const providerKeys: string[] = [];
+  let releaseProvider!: () => void;
+  let signalProviderStarted!: () => void;
+  const providerStarted = new Promise<void>((resolve) => {
+    signalProviderStarted = resolve;
+  });
+  const providerGate = new Promise<void>((resolve) => {
+    releaseProvider = resolve;
+  });
+  const dependencies = dependenciesFor({
+    checkoutLeaseTimers: checkoutTimers,
+    createProvider: () =>
+      defaultProvider({
+        async createCheckoutSession(_input, options) {
+          providerKeys.push(options.idempotencyKey);
+          signalProviderStarted();
+          await providerGate;
+          return { url: "https://checkout.stripe.test/long-running" };
+        },
+      }),
+    idempotencyStore: new MemoryIdempotencyStore(),
+    idempotencyTimers: responseTimers,
+    now: clock.now,
+  } as Partial<CheckoutDependencies> & {
+    idempotencyTimers: ResponseManualTimers;
+    now: () => Date;
+  });
+
+  const first = checkoutResponse(request(), dependencies, null);
+  await providerStarted;
+
+  clock.advance(
+    Math.min(IDEMPOTENCY_CLAIM_TTL_MS, CHECKOUT_ATTEMPT_LEASE_TTL_MS) / 2
+  );
+  await responseTimers.runNext();
+  await checkoutTimers.runNext();
+  clock.advance(
+    Math.max(IDEMPOTENCY_CLAIM_TTL_MS, CHECKOUT_ATTEMPT_LEASE_TTL_MS) / 2 + 1
+  );
+
+  const concurrent = await checkoutResponse(request(), dependencies, null);
+  assert.equal(concurrent.status, 409);
+  assert.deepEqual(await concurrent.json(), { error: "request_in_progress" });
+  assert.equal(new Set(providerKeys).size, 1);
+
+  releaseProvider();
+  const completed = await first;
+  assert.equal(completed.status, 200);
+  assert.deepEqual(await completed.json(), {
+    url: "https://checkout.stripe.test/long-running",
+  });
+
+  const replay = await checkoutResponse(request(), dependencies, null);
+  assert.equal(replay.status, 200);
+  assert.equal(replay.headers.get("idempotency-replayed"), "true");
+  assert.deepEqual(await replay.json(), {
+    url: "https://checkout.stripe.test/long-running",
+  });
+  assert.equal(providerKeys.length, 1);
+});
+
 test("an expired lease takeover reuses provider identities and fences the stale holder", async () => {
   const leaseStore = new MemoryCheckoutAttemptLeaseStore();
   let attachedCustomerId: string | null = null;
@@ -375,6 +446,7 @@ test("a later distinct browser key reuses the open Checkout Session", async () =
           openCheckout = openCheckoutSession({
             id: `cs_${sessionCalls}`,
             metadata: {
+              checkoutAttemptId: "attempt-1",
               checkoutFlowVersion: "1",
               priceId: "price_configured",
               userId: USER_ID,
@@ -413,23 +485,43 @@ test("a later distinct browser key reuses the open Checkout Session", async () =
   assert.equal(sessionCalls, 1);
 });
 
-test("a later request reuses the provider Session key when open-session listing lags", async () => {
-  const sessionByKey = new Map<string, string>();
+test("a later request retrieves the durable Session when listing lags", async () => {
+  const sessionByKey = new Map<
+    string,
+    ReturnType<typeof reconciledCheckoutSession>
+  >();
   const sessionKeys: string[] = [];
   const dependencies = dependenciesFor({
     createProvider: () =>
       defaultProvider({
-        createCheckoutSession(_input, options) {
+        createCheckoutSession(input, options) {
           sessionKeys.push(options.idempotencyKey);
-          let url = sessionByKey.get(options.idempotencyKey);
-          if (!url) {
-            url = `https://checkout.stripe.test/session-${sessionByKey.size + 1}`;
-            sessionByKey.set(options.idempotencyKey, url);
+          let checkoutSession = sessionByKey.get(options.idempotencyKey);
+          if (!checkoutSession) {
+            const sequence = sessionByKey.size + 1;
+            checkoutSession = reconciledCheckoutSession({
+              customerId: "cus_existing",
+              id: `cs_${sequence}`,
+              integrationIdentifier: input.integration_identifier ?? null,
+              metadata: input.metadata ?? {},
+              status: "open",
+              url: `https://checkout.stripe.test/session-${sequence}`,
+            });
+            sessionByKey.set(options.idempotencyKey, checkoutSession);
           }
-          return Promise.resolve({ url });
+          return Promise.resolve(checkoutSession);
         },
+        listCheckoutSessions: () =>
+          Promise.resolve({ data: [], hasMore: false }),
         listOpenCheckoutSessions: () =>
           Promise.resolve({ data: [], hasMore: false }),
+        retrieveCheckoutSession(sessionId) {
+          const checkoutSession = [...sessionByKey.values()].find(
+            ({ id }) => id === sessionId
+          );
+          assert.ok(checkoutSession);
+          return Promise.resolve(checkoutSession);
+        },
       }),
   });
 
@@ -447,8 +539,392 @@ test("a later request reuses the provider Session key when open-session listing 
   assert.equal(first.status, 200);
   assert.equal(later.status, 200);
   assert.equal(new Set(sessionKeys).size, 1);
+  assert.equal(sessionKeys.length, 1);
   assert.equal(sessionByKey.size, 1);
   assert.deepEqual(await later.json(), await first.json());
+});
+
+test("an expired current attempt is retired before one fresh Session is created", async () => {
+  const sessionsByKey = new Map<
+    string,
+    ReturnType<typeof reconciledCheckoutSession>
+  >();
+  const sessionKeys: string[] = [];
+  let firstSessionExpired = false;
+  let createdMetadata: Stripe.MetadataParam | undefined;
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession(input, options) {
+        sessionKeys.push(options.idempotencyKey);
+        createdMetadata = input.metadata;
+        let session = sessionsByKey.get(options.idempotencyKey);
+        if (!session) {
+          const sequence = sessionsByKey.size + 1;
+          session = reconciledCheckoutSession({
+            customerId: "cus_existing",
+            id: `cs_${sequence}`,
+            integrationIdentifier: input.integration_identifier ?? null,
+            metadata: input.metadata ?? {},
+            status: "open",
+            url: `https://checkout.stripe.test/session-${sequence}`,
+          });
+          sessionsByKey.set(options.idempotencyKey, session);
+        }
+        return Promise.resolve({
+          ...session,
+          status:
+            firstSessionExpired && session.id === "cs_1" ? "expired" : "open",
+        });
+      },
+      listOpenCheckoutSessions: () =>
+        Promise.resolve({
+          data: [...sessionsByKey.values()]
+            .map((session) => ({
+              ...session,
+              status:
+                firstSessionExpired && session.id === "cs_1"
+                  ? ("expired" as const)
+                  : ("open" as const),
+            }))
+            .filter(({ status }) => status === "open"),
+          hasMore: false,
+        }),
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return [...sessionsByKey.values()]
+          .map((session) => ({
+            ...session,
+            status:
+              firstSessionExpired && session.id === "cs_1"
+                ? ("expired" as const)
+                : ("open" as const),
+          }))
+          .filter((session) => session.status === input.status);
+      },
+      retrieve(sessionId) {
+        const session = [...sessionsByKey.values()].find(
+          ({ id }) => id === sessionId
+        );
+        assert.ok(session);
+        return {
+          ...session,
+          status:
+            firstSessionExpired && session.id === "cs_1" ? "expired" : "open",
+        };
+      },
+    })
+  );
+  const dependencies = dependenciesFor({ createProvider: () => provider });
+
+  const first = await checkoutResponse(
+    request("checkout-request-expired-first"),
+    dependencies,
+    null
+  );
+  firstSessionExpired = true;
+  const retirement = await checkoutResponse(
+    request("checkout-request-expired-retire"),
+    dependencies,
+    null
+  );
+  const replacement = await checkoutResponse(
+    request("checkout-request-expired-replace"),
+    dependencies,
+    null
+  );
+
+  assert.equal(first.status, 200);
+  assert.equal(retirement.status, 409);
+  assert.deepEqual(await retirement.json(), { error: "request_in_progress" });
+  assert.equal(replacement.status, 200);
+  assert.deepEqual(await replacement.json(), {
+    url: "https://checkout.stripe.test/session-2",
+  });
+  assert.equal(sessionKeys.length, 2);
+  assert.notEqual(sessionKeys[0], sessionKeys[1]);
+  assert.equal(typeof createdMetadata?.checkoutAttemptId, "string");
+  assert.notEqual(createdMetadata?.checkoutAttemptId, "");
+});
+
+test("a completed current attempt returns request_in_progress without a replacement", async () => {
+  let status: "complete" | "open" = "open";
+  let session: ReturnType<typeof reconciledCheckoutSession> | null = null;
+  let sessionCalls = 0;
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession(input) {
+        sessionCalls += 1;
+        session = reconciledCheckoutSession({
+          customerId: "cus_existing",
+          id: "cs_completed",
+          integrationIdentifier: input.integration_identifier ?? null,
+          metadata: input.metadata ?? {},
+          status: "open",
+          url: "https://checkout.stripe.test/completed",
+        });
+        return Promise.resolve(session);
+      },
+      listOpenCheckoutSessions: () =>
+        Promise.resolve({
+          data: status === "open" && session ? [{ ...session, status }] : [],
+          hasMore: false,
+        }),
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return session && status === input.status
+          ? [{ ...session, status }]
+          : [];
+      },
+      retrieve() {
+        assert.ok(session);
+        return { ...session, status };
+      },
+    })
+  );
+  const dependencies = dependenciesFor({ createProvider: () => provider });
+
+  const first = await checkoutResponse(
+    request("checkout-request-complete-first"),
+    dependencies,
+    null
+  );
+  status = "complete";
+  const completed = await checkoutResponse(
+    request("checkout-request-complete-retry"),
+    dependencies,
+    null
+  );
+
+  assert.equal(first.status, 200);
+  assert.equal(completed.status, 409);
+  assert.deepEqual(await completed.json(), { error: "request_in_progress" });
+  assert.equal(sessionCalls, 1);
+});
+
+test("an uncertain create failure recovers a discoverable Session without another create", async () => {
+  let session: ReturnType<typeof reconciledCheckoutSession> | null = null;
+  let stampedAttemptId: string | undefined;
+  let sessionCalls = 0;
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession(input) {
+        sessionCalls += 1;
+        session = reconciledCheckoutSession({
+          customerId: "cus_existing",
+          id: "cs_uncertain_created",
+          integrationIdentifier: input.integration_identifier ?? null,
+          metadata: input.metadata ?? {},
+          status: "open",
+          url: "https://checkout.stripe.test/uncertain-created",
+        });
+        stampedAttemptId = session.metadata.checkoutAttemptId;
+        return Promise.reject(providerFailure("uncertain"));
+      },
+      listOpenCheckoutSessions: () =>
+        Promise.resolve({ data: [], hasMore: false }),
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        if (!session || session.status !== input.status) {
+          return [];
+        }
+        return [session];
+      },
+      retrieve() {
+        assert.ok(session);
+        return session;
+      },
+    })
+  );
+  const dependencies = dependenciesFor({ createProvider: () => provider });
+
+  const uncertain = await checkoutResponse(request(), dependencies, null);
+  const recovered = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(uncertain.status, 502);
+  assert.equal(recovered.status, 200);
+  assert.deepEqual(await recovered.json(), {
+    url: "https://checkout.stripe.test/uncertain-created",
+  });
+  assert.equal(sessionCalls, 1);
+  assert.equal(typeof stampedAttemptId, "string");
+});
+
+test("an uncertain create failure without a provably terminal attempt does not loop the provider key", async () => {
+  const sessionKeys: string[] = [];
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession(_input, options) {
+        sessionKeys.push(options.idempotencyKey);
+        return Promise.reject(providerFailure("uncertain"));
+      },
+      listOpenCheckoutSessions: () =>
+        Promise.resolve({ data: [], hasMore: false }),
+    }),
+    reconciledProviderMethods({
+      list: () => [],
+      retrieve() {
+        throw new Error("No Session exists.");
+      },
+    })
+  );
+  const dependencies = dependenciesFor({ createProvider: () => provider });
+
+  const uncertain = await checkoutResponse(request(), dependencies, null);
+  const pending = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(uncertain.status, 502);
+  assert.equal(pending.status, 409);
+  assert.deepEqual(await pending.json(), { error: "request_in_progress" });
+  assert.equal(sessionKeys.length, 1);
+});
+
+test("a definite pre-request create failure retires the attempt for a fresh provider key", async () => {
+  const sessionKeys: string[] = [];
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession(_input, options) {
+        sessionKeys.push(options.idempotencyKey);
+        if (sessionKeys.length === 1) {
+          return Promise.reject(providerFailure("pre_request"));
+        }
+        return Promise.resolve({
+          url: "https://checkout.stripe.test/after-local-failure",
+        });
+      },
+      listOpenCheckoutSessions: () =>
+        Promise.resolve({ data: [], hasMore: false }),
+    }),
+    reconciledProviderMethods({
+      list: () => [],
+      retrieve() {
+        throw new Error("No Session exists.");
+      },
+    })
+  );
+  const dependencies = dependenciesFor({ createProvider: () => provider });
+
+  const failed = await checkoutResponse(request(), dependencies, null);
+  const retry = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(failed.status, 502);
+  assert.equal(retry.status, 200);
+  assert.equal(sessionKeys.length, 2);
+  assert.notEqual(sessionKeys[0], sessionKeys[1]);
+});
+
+test("expiration retries rotate their identity only after reconciling the Session as still open", async () => {
+  let obsoleteStatus: "expired" | "open" = "open";
+  const expirationKeys: string[] = [];
+  let sessionCalls = 0;
+  const obsolete = reconciledCheckoutSession({
+    customerId: "cus_existing",
+    id: "cs_obsolete_retry",
+    integrationIdentifier: "older-attempt",
+    metadata: {
+      checkoutAttemptId: "older-attempt",
+      checkoutFlowVersion: "0",
+      priceId: "price_retired",
+      userId: USER_ID,
+    },
+    status: "open",
+  });
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession() {
+        sessionCalls += 1;
+        return Promise.resolve({
+          url: "https://checkout.stripe.test/after-cleanup",
+        });
+      },
+      expireCheckoutSession(_sessionId, options) {
+        expirationKeys.push(options.idempotencyKey);
+        if (new Set(expirationKeys).size === 1) {
+          return Promise.reject(providerFailure("uncertain"));
+        }
+        obsoleteStatus = "expired";
+        return Promise.resolve();
+      },
+      listOpenCheckoutSessions: () =>
+        Promise.resolve({
+          data:
+            obsoleteStatus === "open"
+              ? [{ ...obsolete, status: obsoleteStatus }]
+              : [],
+          hasMore: false,
+        }),
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return obsoleteStatus === input.status
+          ? [{ ...obsolete, status: obsoleteStatus }]
+          : [];
+      },
+      retrieve() {
+        return { ...obsolete, status: obsoleteStatus };
+      },
+    })
+  );
+  const dependencies = dependenciesFor({ createProvider: () => provider });
+
+  const uncertainCleanup = await checkoutResponse(
+    request("checkout-request-cleanup-one"),
+    dependencies,
+    null
+  );
+  const recovered = await checkoutResponse(
+    request("checkout-request-cleanup-two"),
+    dependencies,
+    null
+  );
+
+  assert.equal(uncertainCleanup.status, 409);
+  assert.equal(recovered.status, 200);
+  assert.equal(expirationKeys.length, 2);
+  assert.notEqual(expirationKeys[0], expirationKeys[1]);
+  assert.equal(obsoleteStatus, "expired");
+  assert.equal(sessionCalls, 1);
+});
+
+test("a matching open Session with a non-HTTPS URL is never returned or replaced", async () => {
+  let sessionCalls = 0;
+  const invalid = reconciledCheckoutSession({
+    customerId: "cus_existing",
+    id: "cs_invalid_url",
+    integrationIdentifier: "current-attempt",
+    metadata: {
+      checkoutFlowVersion: "1",
+      priceId: "price_configured",
+      userId: USER_ID,
+    },
+    status: "open",
+    url: "http://checkout.stripe.test/not-safe",
+  });
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession() {
+        sessionCalls += 1;
+        return Promise.resolve({ url: "impossible" });
+      },
+      listOpenCheckoutSessions: () =>
+        Promise.resolve({ data: [invalid], hasMore: false }),
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return input.status === "open" ? [invalid] : [];
+      },
+      retrieve: () => invalid,
+    })
+  );
+  const dependencies = dependenciesFor({ createProvider: () => provider });
+
+  const response = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), { error: "checkout_failed" });
+  assert.equal(sessionCalls, 0);
 });
 
 test("a matching current-price Checkout Session is reused across pages", async () => {
@@ -508,6 +984,25 @@ test("a matching current-price Checkout Session is reused across pages", async (
 
 test("obsolete app-owned Checkout Sessions expire before a replacement is created", async () => {
   const calls: string[] = [];
+  const expired = new Set<string>();
+  const obsolete = [
+    openCheckoutSession({
+      id: "cs_old_price",
+      metadata: {
+        checkoutFlowVersion: "1",
+        priceId: "price_retired",
+        userId: USER_ID,
+      },
+    }),
+    openCheckoutSession({
+      id: "cs_old_version",
+      metadata: {
+        checkoutFlowVersion: "0",
+        priceId: "price_configured",
+        userId: USER_ID,
+      },
+    }),
+  ];
   const provider = Object.assign(
     defaultProvider({
       createCheckoutSession() {
@@ -520,29 +1015,22 @@ test("obsolete app-owned Checkout Sessions expire before a replacement is create
     {
       expireCheckoutSession(sessionId: string) {
         calls.push(`expire ${sessionId}`);
+        expired.add(sessionId);
         return Promise.resolve();
       },
       listOpenCheckoutSessions() {
         return Promise.resolve({
-          data: [
-            openCheckoutSession({
-              id: "cs_old_price",
-              metadata: {
-                checkoutFlowVersion: "1",
-                priceId: "price_retired",
-                userId: USER_ID,
-              },
-            }),
-            openCheckoutSession({
-              id: "cs_old_version",
-              metadata: {
-                checkoutFlowVersion: "0",
-                priceId: "price_configured",
-                userId: USER_ID,
-              },
-            }),
-          ],
+          data: obsolete.filter(({ id }) => !expired.has(id)),
           hasMore: false,
+        });
+      },
+      retrieveCheckoutSession(sessionId: string) {
+        const session = obsolete.find(({ id }) => id === sessionId);
+        assert.ok(session);
+        return Promise.resolve({
+          ...session,
+          customerId: "cus_existing",
+          status: expired.has(sessionId) ? "expired" : "open",
         });
       },
     }
@@ -715,6 +1203,77 @@ test("Checkout uses the Customer that won the atomic ownership attachment", asyn
   assert.equal(checkoutCustomer, "cus_owned");
 });
 
+test("a racing Customer winner is rechecked for blocking subscriptions", async () => {
+  const inspectedCustomers: string[] = [];
+  let checkoutCalls = 0;
+  const dependencies = dependenciesFor({
+    attachCustomer: () => Promise.resolve("cus_owned"),
+    createProvider: () =>
+      defaultProvider({
+        createCheckoutSession() {
+          checkoutCalls += 1;
+          return Promise.resolve({ url: "impossible" });
+        },
+        createCustomer: () => Promise.resolve({ id: "cus_racing" }),
+        hasBlockingSubscription(customerId) {
+          inspectedCustomers.push(customerId);
+          return Promise.resolve(customerId === "cus_owned");
+        },
+      }),
+    findUser: () => Promise.resolve({ stripeCustomerId: null }),
+  });
+
+  const response = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: "already_subscribed" });
+  assert.deepEqual(inspectedCustomers, ["cus_owned"]);
+  assert.equal(checkoutCalls, 0);
+});
+
+test("a racing Customer winner reuses its matching open Checkout Session", async () => {
+  const listedCustomers: string[] = [];
+  let checkoutCalls = 0;
+  const dependencies = dependenciesFor({
+    attachCustomer: () => Promise.resolve("cus_owned"),
+    createProvider: () =>
+      defaultProvider({
+        createCheckoutSession() {
+          checkoutCalls += 1;
+          return Promise.resolve({ url: "impossible" });
+        },
+        createCustomer: () => Promise.resolve({ id: "cus_racing" }),
+        listOpenCheckoutSessions(input) {
+          listedCustomers.push(input.customer ?? "");
+          return Promise.resolve({
+            data: [
+              openCheckoutSession({
+                id: "cs_owned",
+                metadata: {
+                  checkoutFlowVersion: "1",
+                  priceId: "price_configured",
+                  userId: USER_ID,
+                },
+                url: "https://checkout.stripe.test/owned",
+              }),
+            ],
+            hasMore: false,
+          });
+        },
+      }),
+    findUser: () => Promise.resolve({ stripeCustomerId: null }),
+  });
+
+  const response = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    url: "https://checkout.stripe.test/owned",
+  });
+  assert.deepEqual(listedCustomers, ["cus_owned"]);
+  assert.equal(checkoutCalls, 0);
+});
+
 test("every blocking subscription status returns already_subscribed", async (t) => {
   await Promise.all(
     (
@@ -852,6 +1411,7 @@ test("Checkout carries the user, configured Price, and account return URLs", asy
     integration_identifier: checkoutInput.value.integration_identifier,
     line_items: [{ price: "price_configured", quantity: 1 }],
     metadata: {
+      checkoutAttemptId: "attempt-1",
       checkoutFlowVersion: "1",
       priceId: "price_configured",
       userId: USER_ID,
@@ -948,7 +1508,7 @@ function dependenciesFor(
 ): CheckoutDependencies {
   return {
     attachCustomer: (_userId, customerId) => Promise.resolve(customerId),
-    authenticate: () => Promise.resolve(session()),
+    authenticate: () => Promise.resolve(userSession()),
     checkoutEnabled: () => true,
     checkoutLeaseStore: new MemoryCheckoutAttemptLeaseStore(),
     createProvider: () => defaultProvider(),
@@ -967,18 +1527,70 @@ function dependenciesFor(
 }
 
 function defaultProvider(
-  overrides: Partial<CheckoutProvider> = {}
+  overrides: Partial<CheckoutProvider> & {
+    listOpenCheckoutSessions?: (
+      input: Stripe.Checkout.SessionListParams
+    ) => Promise<{
+      data: ReturnType<typeof openCheckoutSession>[];
+      hasMore: boolean;
+    }>;
+  } = {}
 ): CheckoutProvider {
-  return {
+  const listedSessions = new Map<string, CheckoutSessionSnapshot>();
+  const provider: CheckoutProvider = {
     createCheckoutSession: () =>
       Promise.resolve({ url: "https://checkout.stripe.test/session" }),
     createCustomer: () => Promise.resolve({ id: "cus_new" }),
-    expireCheckoutSession: () => Promise.resolve(),
     hasBlockingSubscription: () => Promise.resolve(false),
-    listOpenCheckoutSessions: () =>
-      Promise.resolve({ data: [], hasMore: false }),
     ...overrides,
+    async expireCheckoutSession(sessionId, options) {
+      if (overrides.expireCheckoutSession) {
+        await overrides.expireCheckoutSession(sessionId, options);
+      }
+      const session = listedSessions.get(sessionId);
+      if (session) {
+        listedSessions.set(sessionId, { ...session, status: "expired" });
+      }
+    },
+    async listCheckoutSessions(input) {
+      if (overrides.listCheckoutSessions) {
+        return overrides.listCheckoutSessions(input);
+      }
+      const legacyList = (
+        provider as CheckoutProvider & {
+          listOpenCheckoutSessions?: NonNullable<
+            typeof overrides.listOpenCheckoutSessions
+          >;
+        }
+      ).listOpenCheckoutSessions;
+      if (input.status !== "open" || !legacyList) {
+        return { data: [], hasMore: false };
+      }
+      const page = await legacyList(input);
+      const data = page.data.map((session) => {
+        const reconciled = {
+          ...session,
+          customerId:
+            typeof input.customer === "string" ? input.customer : null,
+          status: "open" as const,
+        };
+        listedSessions.set(reconciled.id, reconciled);
+        return reconciled;
+      });
+      return { data, hasMore: page.hasMore };
+    },
+    retrieveCheckoutSession(sessionId) {
+      if (overrides.retrieveCheckoutSession) {
+        return overrides.retrieveCheckoutSession(sessionId);
+      }
+      const session = listedSessions.get(sessionId);
+      if (!session) {
+        return Promise.reject(new Error("Checkout Session was not listed."));
+      }
+      return Promise.resolve(session);
+    },
   };
+  return provider;
 }
 
 function request(idempotencyKey = REQUEST_IDENTIFIER) {
@@ -988,7 +1600,7 @@ function request(idempotencyKey = REQUEST_IDENTIFIER) {
   });
 }
 
-function session() {
+function userSession() {
   return { user: { id: USER_ID } };
 }
 
@@ -1007,6 +1619,51 @@ function openCheckoutSession(input: {
     mode: "subscription" as const,
     url: input.url ?? `https://checkout.stripe.test/${input.id}`,
   };
+}
+
+function reconciledCheckoutSession(input: {
+  customerId: string;
+  id: string;
+  integrationIdentifier?: string | null;
+  metadata: Stripe.MetadataParam;
+  status: "complete" | "expired" | "open";
+  url?: string;
+}) {
+  return {
+    clientReferenceId: USER_ID,
+    customerId: input.customerId,
+    id: input.id,
+    integrationIdentifier: input.integrationIdentifier ?? null,
+    metadata: input.metadata as Record<string, string>,
+    mode: "subscription" as const,
+    status: input.status,
+    url: input.url ?? `https://checkout.stripe.test/${input.id}`,
+  };
+}
+
+function reconciledProviderMethods(input: {
+  list: (
+    params: Stripe.Checkout.SessionListParams
+  ) => ReturnType<typeof reconciledCheckoutSession>[];
+  retrieve: (sessionId: string) => ReturnType<typeof reconciledCheckoutSession>;
+}) {
+  return {
+    listCheckoutSessions(params: Stripe.Checkout.SessionListParams) {
+      return Promise.resolve({
+        data: input.list(params),
+        hasMore: false,
+      });
+    },
+    retrieveCheckoutSession(sessionId: string) {
+      return Promise.resolve(input.retrieve(sessionId));
+    },
+  };
+}
+
+function providerFailure(requestOutcome: "pre_request" | "uncertain"): Error {
+  return Object.assign(new Error("Provider request failed."), {
+    requestOutcome,
+  });
 }
 
 function throwingStore(calls: string[]): IdempotencyStore {
@@ -1049,11 +1706,16 @@ class MemoryIdempotencyStore implements IdempotencyStore {
     this.recordOperation("idempotency claim");
     const scope = idempotencyScope(input);
     const record = this.records.get(scope);
-    if (!record) {
+    if (
+      !record ||
+      (record.response === null &&
+        record.claim.claimExpiresAt.getTime() <= input.now.getTime())
+    ) {
       const claim = {
         claimExpiresAt: input.claimExpiresAt,
         keyHash: input.keyHash,
         operation: input.operation,
+        ...(input.ownerToken ? { ownerToken: input.ownerToken } : {}),
         ownerId: input.ownerId,
         requestHash: input.requestHash,
       };
@@ -1077,18 +1739,60 @@ class MemoryIdempotencyStore implements IdempotencyStore {
     return Promise.resolve();
   }
 
-  complete(input: IdempotencyCompleteInput): Promise<void> {
+  complete(input: IdempotencyCompleteInput): Promise<"completed" | "lost"> {
     this.recordOperation("idempotency complete");
     const record = this.records.get(idempotencyScope(input.claim));
-    assert.ok(record);
+    if (
+      !record ||
+      record.claim.claimExpiresAt.getTime() !==
+        input.claim.claimExpiresAt.getTime() ||
+      record.claim.ownerToken !== input.claim.ownerToken
+    ) {
+      return Promise.resolve("lost");
+    }
     record.response = input.response;
-    return Promise.resolve();
+    return Promise.resolve("completed");
   }
 
-  release(input: IdempotencyReleaseInput): Promise<void> {
+  release(input: IdempotencyReleaseInput): Promise<"lost" | "released"> {
     this.recordOperation("idempotency release");
-    this.records.delete(idempotencyScope(input.claim));
-    return Promise.resolve();
+    const scope = idempotencyScope(input.claim);
+    const record = this.records.get(scope);
+    if (
+      !record ||
+      record.claim.claimExpiresAt.getTime() !==
+        input.claim.claimExpiresAt.getTime() ||
+      record.claim.ownerToken !== input.claim.ownerToken
+    ) {
+      return Promise.resolve("lost");
+    }
+    this.records.delete(scope);
+    return Promise.resolve("released");
+  }
+
+  renew(
+    input: Parameters<NonNullable<IdempotencyStore["renew"]>>[0]
+  ): ReturnType<NonNullable<IdempotencyStore["renew"]>> {
+    this.recordOperation("idempotency renew");
+    const record = this.records.get(idempotencyScope(input.claim));
+    if (
+      !record ||
+      record.response !== null ||
+      record.claim.claimExpiresAt.getTime() !==
+        input.claim.claimExpiresAt.getTime() ||
+      record.claim.ownerToken !== input.claim.ownerToken ||
+      record.claim.claimExpiresAt.getTime() <= input.now.getTime()
+    ) {
+      return Promise.resolve({ kind: "lost" });
+    }
+    record.claim = {
+      ...record.claim,
+      claimExpiresAt: input.claimExpiresAt,
+    };
+    return Promise.resolve({
+      claim: record.claim,
+      kind: "renewed",
+    });
   }
 }
 
@@ -1100,6 +1804,7 @@ class MemoryCheckoutAttemptLeaseStore implements CheckoutAttemptLeaseStore {
   private record:
     | {
         attemptId: string;
+        attemptState: CheckoutAttemptLease["attemptState"];
         expiresAt: Date;
         ownerId: string;
         ownerToken: string;
@@ -1124,6 +1829,7 @@ class MemoryCheckoutAttemptLeaseStore implements CheckoutAttemptLeaseStore {
     } else {
       this.record = {
         attemptId: `attempt-${this.nextAttemptId}`,
+        attemptState: { kind: "fresh" },
         expiresAt: input.leaseExpiresAt,
         ownerId: input.ownerId,
         ownerToken: input.ownerToken,
@@ -1150,9 +1856,10 @@ class MemoryCheckoutAttemptLeaseStore implements CheckoutAttemptLeaseStore {
       this.successorWasDeletedByStaleRelease = this.record === undefined;
       return Promise.resolve("lost");
     }
-    if (input.disposition === "retire_attempt") {
+    if (input.disposition.kind === "retire_attempt") {
       this.record = undefined;
     } else {
+      this.record.attemptState = input.disposition.state;
       this.record.expiresAt = input.releasedAt;
     }
     return Promise.resolve("released");
@@ -1181,6 +1888,7 @@ class MemoryCheckoutAttemptLeaseStore implements CheckoutAttemptLeaseStore {
 
 function checkoutAttemptLease(record: {
   attemptId: string;
+  attemptState: CheckoutAttemptLease["attemptState"];
   expiresAt: Date;
   ownerId: string;
   ownerToken: string;
@@ -1194,4 +1902,39 @@ function idempotencyScope(input: {
   ownerId: string;
 }) {
   return `${input.ownerId}\0${input.operation}\0${input.keyHash}`;
+}
+
+class ResponseManualClock {
+  private timestamp = Date.parse("2026-08-31T00:00:00.000Z");
+  readonly now = () => new Date(this.timestamp);
+
+  advance(milliseconds: number) {
+    this.timestamp += milliseconds;
+  }
+}
+
+type ResponseManualTimer = {
+  callback: () => Promise<void>;
+  cancelled: boolean;
+};
+
+class ResponseManualTimers {
+  private readonly timers: ResponseManualTimer[] = [];
+
+  clearTimeout(timer: unknown) {
+    (timer as ResponseManualTimer).cancelled = true;
+  }
+
+  async runNext() {
+    const timer = this.timers.find(({ cancelled }) => !cancelled);
+    assert.ok(timer);
+    timer.cancelled = true;
+    await timer.callback();
+  }
+
+  setTimeout(callback: () => Promise<void>, _delayMs: number) {
+    const timer = { callback, cancelled: false };
+    this.timers.push(timer);
+    return timer;
+  }
 }

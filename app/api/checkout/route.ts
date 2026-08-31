@@ -1,9 +1,14 @@
 import { ipAddress } from "@vercel/functions";
+import type Stripe from "stripe";
 import { auth } from "@/app/(auth)/auth";
 import { enforceAbusePolicy } from "@/lib/abuse/enforce";
-import { hasBlockingSubscription } from "@/lib/billing/checkout";
+import {
+  type CheckoutSessionSnapshot,
+  hasBlockingSubscription,
+} from "@/lib/billing/checkout";
 import {
   type CheckoutDependencies,
+  CheckoutProviderRequestError,
   checkoutResponse as checkoutResponseWithDependencies,
 } from "@/lib/billing/checkout-response";
 import {
@@ -30,8 +35,16 @@ const checkoutDependencies: CheckoutDependencies = {
     const stripe = createStripeClient(apiKey);
     return {
       async createCheckoutSession(input, options) {
-        const session = await stripe.checkout.sessions.create(input, options);
-        return { url: session.url };
+        let session: Stripe.Checkout.Session;
+        try {
+          session = await stripe.checkout.sessions.create(input, options);
+        } catch (error) {
+          throw new CheckoutProviderRequestError(
+            isStripeRequestFailure(error) ? "uncertain" : "pre_request",
+            { cause: error }
+          );
+        }
+        return checkoutSessionSnapshot(session);
       },
       async createCustomer(input, options) {
         const customer = await stripe.customers.create(input, options);
@@ -49,19 +62,17 @@ const checkoutDependencies: CheckoutDependencies = {
           };
         });
       },
-      async listOpenCheckoutSessions(input) {
+      async listCheckoutSessions(input) {
         const sessions = await stripe.checkout.sessions.list(input);
         return {
-          data: sessions.data.map((session) => ({
-            clientReferenceId: session.client_reference_id,
-            id: session.id,
-            integrationIdentifier: session.integration_identifier,
-            metadata: session.metadata ?? {},
-            mode: session.mode,
-            url: session.url,
-          })),
+          data: sessions.data.map(checkoutSessionSnapshot),
           hasMore: sessions.has_more,
         };
+      },
+      async retrieveCheckoutSession(sessionId) {
+        return checkoutSessionSnapshot(
+          await stripe.checkout.sessions.retrieve(sessionId)
+        );
       },
     };
   },
@@ -85,4 +96,32 @@ export function checkoutResponse(
 
 export function POST(request: Request) {
   return checkoutResponse(request);
+}
+
+function checkoutSessionSnapshot(
+  session: Stripe.Checkout.Session
+): CheckoutSessionSnapshot {
+  return {
+    clientReferenceId: session.client_reference_id,
+    customerId:
+      typeof session.customer === "string"
+        ? session.customer
+        : (session.customer?.id ?? null),
+    id: session.id,
+    integrationIdentifier: session.integration_identifier,
+    metadata: session.metadata ?? {},
+    mode: session.mode,
+    status: session.status,
+    url: session.url,
+  };
+}
+
+function isStripeRequestFailure(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "type" in error &&
+    typeof error.type === "string" &&
+    error.type.startsWith("Stripe")
+  );
 }
