@@ -17,6 +17,7 @@ export type CheckoutAttemptLease = {
 
 export type CheckoutAttemptState =
   | { kind: "create_uncertain" }
+  | { customerId: string; kind: "customer_created" }
   | { kind: "fresh" }
   | { kind: "session_created"; sessionId: string };
 
@@ -51,7 +52,20 @@ export type CheckoutAttemptLeaseReleaseInput = {
 
 export type CheckoutAttemptLeaseReleaseResult = "lost" | "released";
 
+export type CheckoutAttemptLeaseCheckpointInput = {
+  lease: CheckoutAttemptLease;
+  state: CheckoutAttemptState;
+  updatedAt: Date;
+};
+
+export type CheckoutAttemptLeaseCheckpointResult =
+  | { kind: "lost" }
+  | { kind: "checkpointed"; lease: CheckoutAttemptLease };
+
 export interface CheckoutAttemptLeaseStore {
+  checkpoint: (
+    input: CheckoutAttemptLeaseCheckpointInput
+  ) => Promise<CheckoutAttemptLeaseCheckpointResult>;
   claim: (
     input: CheckoutAttemptLeaseClaimInput
   ) => Promise<CheckoutAttemptLeaseClaimResult>;
@@ -103,6 +117,7 @@ export async function runWithCheckoutAttemptLease<T>(options: {
   perform: (input: {
     attemptId: string;
     attemptState: CheckoutAttemptState;
+    checkpoint: (state: CheckoutAttemptState) => Promise<void>;
     expirationIdempotencyKey: (sessionId: string) => string;
     providerIdempotencyKey: string;
   }) => Promise<CheckoutAttemptWork<T>>;
@@ -125,9 +140,21 @@ export async function runWithCheckoutAttemptLease<T>(options: {
   let leaseLost = false;
   let renewalError: unknown;
   let renewalInFlight: Promise<void> | null = null;
+  let leaseMutation = Promise.resolve();
   let stopped = false;
   let timer: unknown;
   const timers = options.timers ?? SYSTEM_TIMERS;
+
+  const withLeaseMutation = <Result>(
+    operation: () => Promise<Result>
+  ): Promise<Result> => {
+    const result = leaseMutation.then(operation, operation);
+    leaseMutation = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  };
 
   const scheduleRenewal = () => {
     if (stopped || leaseLost || renewalError !== undefined) {
@@ -137,7 +164,7 @@ export async function runWithCheckoutAttemptLease<T>(options: {
       if (stopped) {
         return;
       }
-      renewalInFlight = renew();
+      renewalInFlight = withLeaseMutation(renew);
       await renewalInFlight;
       renewalInFlight = null;
       scheduleRenewal();
@@ -170,6 +197,23 @@ export async function runWithCheckoutAttemptLease<T>(options: {
     await renewalInFlight;
   };
 
+  const checkpoint = (state: CheckoutAttemptState) =>
+    withLeaseMutation(async () => {
+      if (leaseLost) {
+        throw new CheckoutAttemptLeaseLostError();
+      }
+      const result = await options.store.checkpoint({
+        lease,
+        state,
+        updatedAt: validNow(now),
+      });
+      if (result.kind === "lost") {
+        leaseLost = true;
+        throw new CheckoutAttemptLeaseLostError();
+      }
+      ({ lease } = result);
+    });
+
   scheduleRenewal();
 
   let work: CheckoutAttemptWork<T>;
@@ -181,6 +225,7 @@ export async function runWithCheckoutAttemptLease<T>(options: {
     work = await options.perform({
       attemptId: lease.attemptId,
       attemptState: lease.attemptState,
+      checkpoint,
       expirationIdempotencyKey: (sessionId) =>
         checkoutExpirationIdempotencyKey(
           providerIdempotencyKey,
@@ -199,6 +244,9 @@ export async function runWithCheckoutAttemptLease<T>(options: {
       lease,
       releasedAt: validNow(now),
     });
+    if (error instanceof CheckoutAttemptLeaseLostError) {
+      return { kind: "lease_lost" };
+    }
     throw error;
   }
 
@@ -257,6 +305,19 @@ export async function runWithCheckoutAttemptLease<T>(options: {
 export function parseCheckoutAttemptState(
   storedState: string
 ): CheckoutAttemptState {
+  const ownedPrefix = "checkout-attempt-owner:v1:";
+  if (storedState.startsWith(ownedPrefix)) {
+    try {
+      const parsed = JSON.parse(storedState.slice(ownedPrefix.length)) as {
+        state?: unknown;
+      };
+      return typeof parsed.state === "string"
+        ? parseCheckoutAttemptState(parsed.state)
+        : { kind: "create_uncertain" };
+    } catch {
+      return { kind: "create_uncertain" };
+    }
+  }
   if (storedState === "checkout-attempt:v1:fresh") {
     return { kind: "fresh" };
   }
@@ -270,15 +331,36 @@ export function parseCheckoutAttemptState(
       return { kind: "session_created", sessionId };
     }
   }
+  const customerPrefix = "checkout-attempt:v1:customer_created:";
+  if (storedState.startsWith(customerPrefix)) {
+    const customerId = storedState.slice(customerPrefix.length);
+    if (customerId.length > 0) {
+      return { customerId, kind: "customer_created" };
+    }
+  }
   return { kind: "create_uncertain" };
 }
 
 export function serializeCheckoutAttemptState(
   state: CheckoutAttemptState
 ): string {
-  return state.kind === "session_created"
-    ? `checkout-attempt:v1:session_created:${state.sessionId}`
-    : `checkout-attempt:v1:${state.kind}`;
+  if (state.kind === "session_created") {
+    return `checkout-attempt:v1:session_created:${state.sessionId}`;
+  }
+  if (state.kind === "customer_created") {
+    return `checkout-attempt:v1:customer_created:${state.customerId}`;
+  }
+  return `checkout-attempt:v1:${state.kind}`;
+}
+
+export function serializeCheckoutAttemptLeaseOwner(
+  ownerToken: string,
+  state: CheckoutAttemptState
+): string {
+  return `checkout-attempt-owner:v1:${JSON.stringify({
+    ownerToken,
+    state: serializeCheckoutAttemptState(state),
+  })}`;
 }
 
 function checkoutProviderIdempotencyKey(
@@ -321,3 +403,5 @@ function validNow(now: () => Date): Date {
   }
   return value;
 }
+
+class CheckoutAttemptLeaseLostError extends Error {}

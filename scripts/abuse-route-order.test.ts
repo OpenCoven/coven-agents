@@ -582,7 +582,7 @@ test("checkout leases preserve attempt identity and fence renewals and releases"
     leaseStore,
     /returning\(\{ attemptId: idempotencyRecord\.id \}\)/
   );
-  assert.match(leaseStore, /requestHash: input\.ownerToken/);
+  assert.match(leaseStore, /serializeCheckoutAttemptLeaseOwner\(/);
   assert.match(
     leaseStore,
     /parseCheckoutAttemptState\(existing\.requestHash\)/
@@ -594,11 +594,8 @@ test("checkout leases preserve attempt identity and fence renewals and releases"
   assert.match(leaseStore, /lte\(idempotencyRecord\.expiresAt, input\.now\)/);
   assert.match(leaseStore, /gt\(idempotencyRecord\.expiresAt, input\.now\)/);
   assert.ok(
-    (
-      leaseStore.match(
-        /eq\(idempotencyRecord\.requestHash, input\.lease\.ownerToken\)/g
-      ) ?? []
-    ).length >= 2
+    (leaseStore.match(/serializeCheckoutAttemptLeaseOwner\(/g) ?? []).length >=
+      2
   );
   assert.ok(
     (

@@ -210,6 +210,51 @@ test("preserved attempt state survives reclaim while expiration identities rotat
   assert.deepEqual(second, { kind: "performed", value: "retired" });
 });
 
+test("checkpointed Customer identity survives a failed attachment", async () => {
+  const clock = new ManualClock();
+  const store = new MemoryCheckoutAttemptLeaseStore();
+  let providerKey = "";
+
+  await assert.rejects(
+    runWithCheckoutAttemptLease({
+      createOwnerToken: () => "owner-one",
+      now: clock.now,
+      ownerId: USER_ID,
+      perform: async ({ checkpoint, providerIdempotencyKey }) => {
+        providerKey = providerIdempotencyKey;
+        await checkpoint({
+          customerId: "cus_recoverable",
+          kind: "customer_created",
+        });
+        throw new Error("attachment failed");
+      },
+      store,
+    }),
+    /attachment failed/
+  );
+
+  clock.advance(1);
+  const recovered = await runWithCheckoutAttemptLease({
+    createOwnerToken: () => "owner-two",
+    now: clock.now,
+    ownerId: USER_ID,
+    perform: ({ attemptState, providerIdempotencyKey }) => {
+      assert.deepEqual(attemptState, {
+        customerId: "cus_recoverable",
+        kind: "customer_created",
+      });
+      assert.equal(providerIdempotencyKey, providerKey);
+      return Promise.resolve({
+        disposition: "retire_attempt",
+        value: "recovered",
+      } as const);
+    },
+    store,
+  });
+
+  assert.deepEqual(recovered, { kind: "performed", value: "recovered" });
+});
+
 test("checkout attempt state encoding fails closed for legacy or malformed values", () => {
   assert.deepEqual(
     parseCheckoutAttemptState(
@@ -300,6 +345,22 @@ class MemoryCheckoutAttemptLeaseStore implements CheckoutAttemptLeaseStore {
       kind: "claimed",
       lease: lease(input.ownerId, record),
     });
+  }
+
+  checkpoint(input: {
+    lease: CheckoutAttemptLease;
+    state: CheckoutAttemptLease["attemptState"];
+    updatedAt: Date;
+  }) {
+    const record = this.records.get(input.lease.ownerId);
+    if (!record || record.ownerToken !== input.lease.ownerToken) {
+      return Promise.resolve({ kind: "lost" } as const);
+    }
+    record.attemptState = input.state;
+    return Promise.resolve({
+      kind: "checkpointed",
+      lease: lease(input.lease.ownerId, record),
+    } as const);
   }
 
   release(

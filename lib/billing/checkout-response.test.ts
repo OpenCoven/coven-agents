@@ -179,6 +179,7 @@ test("enabled checkout preserves the required operation order", async () => {
     "read user",
     "create Stripe client",
     "create Customer",
+    "checkout lease checkpoint",
     "attach customer",
     "create Checkout",
     "checkout lease renew",
@@ -1485,6 +1486,78 @@ test("Customer and Checkout creation use separate derived idempotency keys", asy
   assert.notEqual(customerKey, sessionKey);
 });
 
+test("a created Customer is recovered when database attachment initially fails", async () => {
+  let attachCalls = 0;
+  let customerCalls = 0;
+  let sessionCalls = 0;
+  const dependencies = dependenciesFor({
+    attachCustomer: (_userId, customerId) => {
+      attachCalls += 1;
+      return attachCalls === 1
+        ? Promise.reject(new Error("database unavailable"))
+        : Promise.resolve(customerId);
+    },
+    createProvider: () =>
+      defaultProvider({
+        createCheckoutSession: () => {
+          sessionCalls += 1;
+          return Promise.resolve({
+            url: "https://checkout.stripe.test/recovered-customer",
+          });
+        },
+        createCustomer: () => {
+          customerCalls += 1;
+          return Promise.resolve({ id: "cus_recoverable" });
+        },
+      }),
+    findUser: () => Promise.resolve({ stripeCustomerId: null }),
+  });
+
+  const failed = await checkoutResponse(request(), dependencies, null);
+  const recovered = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(failed.status, 502);
+  assert.equal(recovered.status, 200);
+  assert.deepEqual(await recovered.json(), {
+    url: "https://checkout.stripe.test/recovered-customer",
+  });
+  assert.equal(customerCalls, 1);
+  assert.equal(attachCalls, 2);
+  assert.equal(sessionCalls, 1);
+});
+
+test("a definite Customer rejection rotates the provider identity", async () => {
+  const customerKeys: string[] = [];
+  let sessionCalls = 0;
+  const dependencies = dependenciesFor({
+    createProvider: () =>
+      defaultProvider({
+        createCheckoutSession: () => {
+          sessionCalls += 1;
+          return Promise.resolve({
+            url: "https://checkout.stripe.test/customer-retry",
+          });
+        },
+        createCustomer: (_input, options) => {
+          customerKeys.push(options.idempotencyKey);
+          return customerKeys.length === 1
+            ? Promise.reject(providerFailure("pre_request"))
+            : Promise.resolve({ id: "cus_after_rejection" });
+        },
+      }),
+    findUser: () => Promise.resolve({ stripeCustomerId: null }),
+  });
+
+  const rejected = await checkoutResponse(request(), dependencies, null);
+  const retried = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(rejected.status, 502);
+  assert.equal(retried.status, 200);
+  assert.equal(customerKeys.length, 2);
+  assert.notEqual(customerKeys[0], customerKeys[1]);
+  assert.equal(sessionCalls, 1);
+});
+
 test("Checkout uses the Customer that won the atomic ownership attachment", async () => {
   let checkoutCustomer: string | undefined;
   const dependencies = dependenciesFor({
@@ -2157,6 +2230,22 @@ class MemoryCheckoutAttemptLeaseStore implements CheckoutAttemptLeaseStore {
   expireCheckoutLease() {
     assert.ok(this.record);
     this.record.expiresAt = new Date(0);
+  }
+
+  checkpoint(input: {
+    lease: CheckoutAttemptLease;
+    state: CheckoutAttemptLease["attemptState"];
+    updatedAt: Date;
+  }) {
+    this.recordOperation("checkout lease checkpoint");
+    if (!this.record || this.record.ownerToken !== input.lease.ownerToken) {
+      return Promise.resolve({ kind: "lost" } as const);
+    }
+    this.record.attemptState = input.state;
+    return Promise.resolve({
+      kind: "checkpointed",
+      lease: checkoutAttemptLease(this.record),
+    } as const);
   }
 
   release(

@@ -197,7 +197,10 @@ export async function reconcileCheckoutSessions(input: {
     return { kind: "retire_attempt" };
   }
 
-  if (input.attemptState.kind !== "fresh") {
+  if (
+    input.attemptState.kind === "create_uncertain" ||
+    input.attemptState.kind === "session_created"
+  ) {
     return { kind: "retry_required" };
   }
 

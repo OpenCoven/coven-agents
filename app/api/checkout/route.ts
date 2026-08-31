@@ -49,7 +49,15 @@ const checkoutDependencies: CheckoutDependencies = {
         return checkoutSessionSnapshot(session);
       },
       async createCustomer(input, options) {
-        const customer = await stripe.customers.create(input, options);
+        let customer: Stripe.Customer;
+        try {
+          customer = await stripe.customers.create(input, options);
+        } catch (error) {
+          throw new CheckoutProviderRequestError(
+            classifyStripeRequestOutcome(error),
+            { cause: error }
+          );
+        }
         return { id: customer.id };
       },
       async expireCheckoutSession(sessionId, options) {

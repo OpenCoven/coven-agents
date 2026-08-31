@@ -79,8 +79,11 @@ administrative revoke clears the period immediately.
    original browser request can still persist and replay a successful response
    after work exceeds either original lease duration.
 5. Reuse the user's Stripe Customer or create one with `metadata.userId`, then
-   atomically attach it without replacing a Customer already owned by the
-   account.
+   checkpoint the returned Customer ID in the durable attempt before atomically
+   attaching it without replacing a Customer already owned by the account. A
+   failed attachment is retried with the checkpointed Customer rather than
+   creating another one. Deterministic provider rejections retire the attempt;
+   uncertain provider outcomes retain its identity for reconciliation.
 6. Page through every Stripe subscription until a blocking status is found or
    all pages are exhausted. If atomic Customer attachment returns a different
    winner from the Customer already inspected, repeat both subscription and
@@ -115,13 +118,15 @@ payment states as blocking so a second payable Checkout cannot bypass an
 incomplete first attempt.
 The checkout lease reuses the existing `IdempotencyRecord` row: its stable row
 ID identifies the provider attempt, `requestHash` carries the fencing token
-while owned and bounded reconciliation state while idle, and `expiresAt` is
-renewed before expiry. Retryable, uncertain, and Session-created outcomes keep
-the row so a successor reconciles the same attempt without replaying a cached
-provider error. A definite local pre-request failure, blocking subscription, or
-provider-proven terminal attempt retires it. Generic route-idempotency cleanup
-excludes these recovery rows. Stripe remains the durable source for Checkout
-Session and subscription state.
+and latest bounded reconciliation checkpoint while owned and that state alone
+while idle, and `expiresAt` is renewed before expiry. Customer-created,
+retryable, uncertain, and Session-created outcomes keep the row so a successor
+reconciles the same attempt without replaying a cached provider error or
+creating a second Customer after a failed database attachment. A definite
+local pre-request failure, blocking subscription, or provider-proven terminal
+attempt retires it. Generic route-idempotency cleanup excludes these recovery
+rows. Stripe remains the durable source for Checkout Session and subscription
+state.
 
 ## Webhook responsibilities
 
@@ -178,6 +183,7 @@ the accounting read fails, the endpoint returns `capacity_unavailable`.
 | Stripe unavailable during checkout | Checkout fails; no entitlement is written. | Retry with an application idempotency key after Stripe and local dependencies recover. Confirm no active subscription exists before opening a new session. |
 | Checkout lease expires during Stripe work | A successor reclaims the same durable attempt and provider keys; the stale holder returns `request_in_progress` rather than success. | Retry after the current owner settles. Inspect the open Session and Customer using the deterministic provider keys if manual reconciliation is required. |
 | Checkout creation has an uncertain provider outcome | The attempt and provider key are preserved. A retry scans every Session state; it reuses a discovered open Session, waits on a complete Session, retires an expired Session, and otherwise returns `request_in_progress` without replaying the create call. | Reconcile the stamped attempt in Stripe. Do not rotate the attempt unless provider state proves it terminal. |
+| Customer creation succeeds but database attachment fails | The returned Customer ID remains checkpointed in the fenced checkout attempt. | Retry after database recovery; the successor attaches and reconciles that Customer without creating another one. |
 | A current Checkout Session is complete but entitlement is not visible | Checkout returns `request_in_progress`; no replacement Session is created. | Allow the verified webhook to update entitlement, then re-establish the application session as required. |
 | A current Checkout Session expired | The durable attempt is retired and the request returns `request_in_progress`; its URL is never replayed. | Retry with the same browser key after the non-success response is released; the new durable attempt may create one replacement. |
 | Obsolete open Checkout Session cannot be expired | Checkout returns `checkout_session_conflict`; no replacement Session is created. | Restore Stripe access, retry cleanup with the same application key, and confirm only the current Price/version remains payable. |

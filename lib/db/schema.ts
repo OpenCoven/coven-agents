@@ -386,8 +386,9 @@ export type StripeEvent = InferSelectModel<typeof stripeEvent>;
  * expiry is also the claim lease while work is in progress, so a dead process
  * can be reclaimed without allowing a stale completion to overwrite its
  * replacement. The checkout-attempt scope additionally keeps `id` stable as
- * the provider-attempt identity. While leased, `requestHash` is the ownership
- * token; between leases it stores the bounded provider-reconciliation state.
+ * the provider-attempt identity. While leased, `requestHash` carries the
+ * ownership token plus the latest bounded provider-reconciliation checkpoint;
+ * between leases it stores that reconciliation state alone.
  */
 export const idempotencyRecord = pgTable(
   "IdempotencyRecord",

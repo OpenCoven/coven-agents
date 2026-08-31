@@ -31,6 +31,7 @@ import {
   type CheckoutAttemptLease,
   type CheckoutAttemptLeaseStore,
   parseCheckoutAttemptState,
+  serializeCheckoutAttemptLeaseOwner,
   serializeCheckoutAttemptState,
 } from "../billing/checkout-lease";
 import type { DayCount } from "../billing/history";
@@ -267,6 +268,46 @@ export async function claimStripeEvent(eventId: string): Promise<boolean> {
 }
 
 export const databaseCheckoutAttemptLeaseStore: CheckoutAttemptLeaseStore = {
+  async checkpoint(input) {
+    try {
+      const [checkpointed] = await db
+        .update(idempotencyRecord)
+        .set({
+          requestHash: serializeCheckoutAttemptLeaseOwner(
+            input.lease.ownerToken,
+            input.state
+          ),
+          updatedAt: input.updatedAt,
+        })
+        .where(
+          and(
+            checkoutAttemptLeaseScope(input.lease.ownerId),
+            eq(idempotencyRecord.id, input.lease.attemptId),
+            eq(
+              idempotencyRecord.requestHash,
+              serializeCheckoutAttemptLeaseOwner(
+                input.lease.ownerToken,
+                input.lease.attemptState
+              )
+            ),
+            eq(idempotencyRecord.state, "in_progress")
+          )
+        )
+        .returning({ id: idempotencyRecord.id });
+      if (!checkpointed) {
+        return { kind: "lost" };
+      }
+      return {
+        kind: "checkpointed",
+        lease: {
+          ...input.lease,
+          attemptState: input.state,
+        },
+      };
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
   async claim(input) {
     try {
       return await db.transaction(async (transaction) => {
@@ -280,7 +321,10 @@ export const databaseCheckoutAttemptLeaseStore: CheckoutAttemptLeaseStore = {
               keyHash: CHECKOUT_ATTEMPT_KEY_HASH,
               operation: CHECKOUT_ATTEMPT_OPERATION,
               ownerId: input.ownerId,
-              requestHash: input.ownerToken,
+              requestHash: serializeCheckoutAttemptLeaseOwner(
+                input.ownerToken,
+                { kind: "fresh" }
+              ),
               state: "in_progress",
               updatedAt: input.now,
             })
@@ -321,7 +365,10 @@ export const databaseCheckoutAttemptLeaseStore: CheckoutAttemptLeaseStore = {
             .update(idempotencyRecord)
             .set({
               expiresAt: input.leaseExpiresAt,
-              requestHash: input.ownerToken,
+              requestHash: serializeCheckoutAttemptLeaseOwner(
+                input.ownerToken,
+                attemptState
+              ),
               updatedAt: input.now,
             })
             .where(
@@ -360,7 +407,13 @@ export const databaseCheckoutAttemptLeaseStore: CheckoutAttemptLeaseStore = {
       const fence = and(
         checkoutAttemptLeaseScope(input.lease.ownerId),
         eq(idempotencyRecord.id, input.lease.attemptId),
-        eq(idempotencyRecord.requestHash, input.lease.ownerToken),
+        eq(
+          idempotencyRecord.requestHash,
+          serializeCheckoutAttemptLeaseOwner(
+            input.lease.ownerToken,
+            input.lease.attemptState
+          )
+        ),
         eq(idempotencyRecord.state, "in_progress")
       );
       const released =
@@ -398,7 +451,13 @@ export const databaseCheckoutAttemptLeaseStore: CheckoutAttemptLeaseStore = {
           and(
             checkoutAttemptLeaseScope(input.lease.ownerId),
             eq(idempotencyRecord.id, input.lease.attemptId),
-            eq(idempotencyRecord.requestHash, input.lease.ownerToken),
+            eq(
+              idempotencyRecord.requestHash,
+              serializeCheckoutAttemptLeaseOwner(
+                input.lease.ownerToken,
+                input.lease.attemptState
+              )
+            ),
             eq(idempotencyRecord.state, "in_progress"),
             gt(idempotencyRecord.expiresAt, input.now)
           )

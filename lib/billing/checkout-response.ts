@@ -177,6 +177,7 @@ export async function checkoutResponse(
           perform: async ({
             attemptId,
             attemptState,
+            checkpoint,
             expirationIdempotencyKey,
             providerIdempotencyKey,
           }): Promise<CheckoutAttemptResult> => {
@@ -359,15 +360,39 @@ export async function checkoutResponse(
 
             const customerIdempotencyKey = `${providerIdempotencyKey}:customer`;
             const sessionIdempotencyKey = `${providerIdempotencyKey}:session`;
-            let customerId = row?.stripeCustomerId ?? null;
+            let customerId =
+              row?.stripeCustomerId ??
+              (attemptState.kind === "customer_created"
+                ? attemptState.customerId
+                : null);
 
             if (!customerId) {
-              customerId = (
-                await provider.createCustomer(
-                  { metadata: { userId: decision.userId } },
-                  { idempotencyKey: customerIdempotencyKey }
-                )
-              ).id;
+              try {
+                customerId = (
+                  await provider.createCustomer(
+                    { metadata: { userId: decision.userId } },
+                    { idempotencyKey: customerIdempotencyKey }
+                  )
+                ).id;
+              } catch (error) {
+                return isPreRequestProviderFailure(error)
+                  ? {
+                      disposition: "retire_attempt",
+                      value: checkoutFailure(),
+                    }
+                  : {
+                      disposition: "preserve_attempt",
+                      state: { kind: "create_uncertain" },
+                      value: checkoutFailure(),
+                    };
+              }
+              await checkpoint({
+                customerId,
+                kind: "customer_created",
+              });
+            }
+
+            if (!row?.stripeCustomerId) {
               customerId = await dependencies.attachCustomer(
                 decision.userId,
                 customerId
