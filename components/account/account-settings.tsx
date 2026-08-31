@@ -18,6 +18,7 @@ import { UsageMeter } from "@/components/account/usage-meter";
 import { AccountMenu } from "@/components/agents/account-menu";
 import { SubscriptionCard } from "@/components/billing/subscription-card";
 import { BrandMark } from "@/components/brand/brand-mark";
+import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { cn } from "@/lib/utils";
 
 type CheckoutResult = "cancelled" | "success" | null;
@@ -73,6 +74,7 @@ export function AccountSettings({
       : "copilot"
   );
   const { data: session, status } = useSession();
+  const loginPath = useApplicationLoginPath();
   const isSubscriber = session?.user?.type === "subscriber";
   const showBilling =
     checkoutEnabled || isSubscriber || effectiveCheckoutResult === "success";
@@ -199,7 +201,7 @@ export function AccountSettings({
             </p>
             <Link
               className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white transition-opacity hover:opacity-90"
-              href="/login"
+              href={loginPath}
             >
               Sign in with GitHub
             </Link>

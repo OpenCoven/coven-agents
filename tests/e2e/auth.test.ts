@@ -148,6 +148,63 @@ test.describe("Authentication Pages", () => {
     await expect(page).toHaveTitle("GitHub authorization");
   });
 
+  test("login forwards a validated account callback with its query and fragment", async ({
+    page,
+  }) => {
+    const callbackUrl = "/account?source=ledger&checkout=success#allowance";
+    const authorizationUrl =
+      "https://github.com/login/oauth/authorize?client_id=test-client";
+    await mockGitHubAuthSupport(
+      page,
+      async (route) => {
+        await route.fulfill({ json: { url: authorizationUrl } });
+      },
+      callbackUrl
+    );
+    await page.route(authorizationUrl, (route) =>
+      route.fulfill({
+        body: "<title>GitHub authorization</title>",
+        contentType: "text/html",
+      })
+    );
+
+    await page.goto(`/login?callbackUrl=${encodeURIComponent(callbackUrl)}`);
+    await page.getByRole("button", { name: "Continue with GitHub" }).click();
+
+    await expect(page).toHaveURL(authorizationUrl);
+  });
+
+  for (const maliciousCallback of [
+    "https://attacker.test/account",
+    "//attacker.test/account",
+    "%68%74%74%70%73%3A%2F%2Fattacker.test",
+    "/a/../account",
+    "/account/%",
+  ]) {
+    test(`login rejects unsafe callback ${maliciousCallback}`, async ({
+      page,
+    }) => {
+      const authorizationUrl =
+        "https://github.com/login/oauth/authorize?client_id=test-client";
+      await mockGitHubAuthSupport(page, async (route) => {
+        await route.fulfill({ json: { url: authorizationUrl } });
+      });
+      await page.route(authorizationUrl, (route) =>
+        route.fulfill({
+          body: "<title>GitHub authorization</title>",
+          contentType: "text/html",
+        })
+      );
+
+      await page.goto(
+        `/login?callbackUrl=${encodeURIComponent(maliciousCallback)}`
+      );
+      await page.getByRole("button", { name: "Continue with GitHub" }).click();
+
+      await expect(page).toHaveURL(authorizationUrl);
+    });
+  }
+
   test("register redirects to GitHub account creation", async ({ page }) => {
     await page.goto("/register");
     await expect(page).toHaveURL("/login");
@@ -156,7 +213,8 @@ test.describe("Authentication Pages", () => {
 
 async function mockGitHubAuthSupport(
   page: Page,
-  handleSignIn: (route: Route) => Promise<void>
+  handleSignIn: (route: Route) => Promise<void>,
+  expectedCallbackUrl = "/"
 ) {
   const authRequests: string[] = [];
 
@@ -219,7 +277,7 @@ async function mockGitHubAuthSupport(
       expect(
         Object.fromEntries(new URLSearchParams(request.postData() ?? ""))
       ).toEqual({
-        callbackUrl: "/",
+        callbackUrl: expectedCallbackUrl,
         csrfToken: "test-csrf-token",
       });
       await handleSignIn(route);

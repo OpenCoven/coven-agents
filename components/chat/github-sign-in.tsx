@@ -1,8 +1,13 @@
 "use client";
 
+import { useSearchParams } from "next/navigation";
 import { signIn } from "next-auth/react";
 import { useCallback, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import {
+  APPLICATION_CALLBACK_PARAM,
+  safeApplicationCallbackPath,
+} from "@/lib/application-path";
 
 const RETRY_MESSAGE = "We couldn’t start GitHub sign-in. Please try again.";
 
@@ -13,6 +18,10 @@ const RETRY_MESSAGE = "We couldn’t start GitHub sign-in. Please try again.";
  * the local account; later sign-ins return to that same account.
  */
 export function GithubSignIn({ callbackUrl = "/" }: { callbackUrl?: string }) {
+  const safeCallbackUrl = safeApplicationCallbackPath(
+    callbackUrl,
+    process.env.NEXT_PUBLIC_BASE_PATH ?? ""
+  );
   const pendingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -35,7 +44,7 @@ export function GithubSignIn({ callbackUrl = "/" }: { callbackUrl?: string }) {
     try {
       const result = await signIn("github", {
         redirect: false,
-        redirectTo: callbackUrl,
+        redirectTo: safeCallbackUrl,
       });
 
       if (!(result.ok && result.url)) {
@@ -60,7 +69,7 @@ export function GithubSignIn({ callbackUrl = "/" }: { callbackUrl?: string }) {
     } catch {
       showRetry();
     }
-  }, [callbackUrl]);
+  }, [safeCallbackUrl]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -92,4 +101,14 @@ export function GithubSignIn({ callbackUrl = "/" }: { callbackUrl?: string }) {
       ) : null}
     </div>
   );
+}
+
+export function GithubSignInWithCallback() {
+  const searchParams = useSearchParams();
+  const callbackUrl = safeApplicationCallbackPath(
+    searchParams.get(APPLICATION_CALLBACK_PARAM),
+    process.env.NEXT_PUBLIC_BASE_PATH ?? ""
+  );
+
+  return <GithubSignIn callbackUrl={callbackUrl} />;
 }

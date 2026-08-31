@@ -417,6 +417,193 @@ test.describe("Subscriber checkout", () => {
     await expect(page.getByRole("status")).toBeFocused();
   });
 
+  test("a delayed successful checkout for user A cannot navigate after switching to user B, which gets a new key", async ({
+    page,
+  }) => {
+    test.skip(!CHECKOUT_ENABLED, "This is the launch-flag-on contract.");
+    let currentSession: ReturnType<typeof sessionFor> | null =
+      sessionFor("demo");
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const keys: string[] = [];
+    let checkoutRequests = 0;
+    let assignedDestinations = 0;
+    await page.route("**/api/auth/session", (route) =>
+      currentSession
+        ? route.fulfill({ json: currentSession })
+        : route.fulfill({ body: "null", contentType: "application/json" })
+    );
+    await mockAccountDependencies(page);
+    await page.route("https://checkout.stripe.test/**", (route) => {
+      assignedDestinations += 1;
+      return route.abort();
+    });
+    await page.route("**/api/checkout", async (route) => {
+      checkoutRequests += 1;
+      keys.push(idempotencyKey(route.request()));
+      if (checkoutRequests === 1) {
+        await firstGate;
+        await route
+          .fulfill({
+            json: { url: "https://checkout.stripe.test/session/user-a" },
+          })
+          .catch(() => undefined);
+        return;
+      }
+      await route.fulfill({
+        json: { error: "request_in_progress" },
+        status: 409,
+      });
+    });
+    await page.goto("/account");
+    await page.getByRole("tab", { name: "Billing" }).click();
+
+    await checkoutButton(page).click();
+    await expect.poll(() => checkoutRequests).toBe(1);
+
+    currentSession = sessionFor("demo", {
+      email: "second@example.invalid",
+      id: "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa",
+    });
+    await notifySessionChange(page);
+    await expect(checkoutButton(page)).toBeEnabled();
+    await checkoutButton(page).click();
+    await expect.poll(() => checkoutRequests).toBe(2);
+    await expect(page.getByRole("status")).toContainText(
+      "A checkout request is still processing."
+    );
+
+    releaseFirst();
+
+    await expect.poll(() => assignedDestinations).toBe(0);
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
+  test("a delayed successful checkout for user A cannot navigate after sign-out, and null to user B starts cleanly", async ({
+    page,
+  }) => {
+    test.skip(!CHECKOUT_ENABLED, "This is the launch-flag-on contract.");
+    let currentSession: ReturnType<typeof sessionFor> | null =
+      sessionFor("demo");
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const keys: string[] = [];
+    let checkoutRequests = 0;
+    let assignedDestinations = 0;
+    await page.route("**/api/auth/session", (route) =>
+      currentSession
+        ? route.fulfill({ json: currentSession })
+        : route.fulfill({ body: "null", contentType: "application/json" })
+    );
+    await mockAccountDependencies(page);
+    await page.route("https://checkout.stripe.test/**", (route) => {
+      assignedDestinations += 1;
+      return route.abort();
+    });
+    await page.route("**/api/checkout", async (route) => {
+      checkoutRequests += 1;
+      keys.push(idempotencyKey(route.request()));
+      if (checkoutRequests === 1) {
+        await firstGate;
+        await route
+          .fulfill({
+            json: { url: "https://checkout.stripe.test/session/user-a" },
+          })
+          .catch(() => undefined);
+        return;
+      }
+      await route.fulfill({
+        json: { error: "checkout_refused" },
+        status: 400,
+      });
+    });
+    await page.goto("/account");
+    await page.getByRole("tab", { name: "Billing" }).click();
+    await checkoutButton(page).click();
+    await expect.poll(() => checkoutRequests).toBe(1);
+
+    currentSession = null;
+    await notifySessionChange(page);
+    await expect(
+      page.getByRole("heading", { name: "Sign in to manage your account" })
+    ).toBeVisible();
+    releaseFirst();
+    await expect.poll(() => assignedDestinations).toBe(0);
+
+    currentSession = sessionFor("demo", {
+      email: "second@example.invalid",
+      id: "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa",
+    });
+    await notifySessionChange(page);
+    await page.getByRole("tab", { name: "Billing" }).click();
+    await checkoutButton(page).click();
+    await expect.poll(() => checkoutRequests).toBe(2);
+    await expect(page.getByRole("status")).toContainText(
+      "Checkout could not be started."
+    );
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
+  test("a stale checkout error for user A cannot overwrite user B state", async ({
+    page,
+  }) => {
+    test.skip(!CHECKOUT_ENABLED, "This is the launch-flag-on contract.");
+    let currentSession = sessionFor("demo");
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let checkoutRequests = 0;
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await mockAccountDependencies(page);
+    await page.route("**/api/checkout", async (route) => {
+      checkoutRequests += 1;
+      if (checkoutRequests === 1) {
+        await firstGate;
+        await route
+          .fulfill({
+            json: { error: "billing_unavailable" },
+            status: 503,
+          })
+          .catch(() => undefined);
+        return;
+      }
+      await route.fulfill({
+        json: { error: "request_in_progress" },
+        status: 409,
+      });
+    });
+    await page.goto("/account");
+    await page.getByRole("tab", { name: "Billing" }).click();
+    await checkoutButton(page).click();
+    await expect.poll(() => checkoutRequests).toBe(1);
+
+    currentSession = sessionFor("demo", {
+      email: "second@example.invalid",
+      id: "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa",
+    });
+    await notifySessionChange(page);
+    await checkoutButton(page).click();
+    await expect(page.getByRole("status")).toContainText(
+      "A checkout request is still processing."
+    );
+
+    releaseFirst();
+
+    await expect(page.getByRole("status")).toContainText(
+      "A checkout request is still processing."
+    );
+    await expect(page.getByRole("status")).not.toContainText(
+      "Billing is temporarily unavailable."
+    );
+  });
+
   test("inactive confirmation times out without implying success and Check again starts a bounded new check", async ({
     page,
   }) => {
@@ -579,7 +766,7 @@ test.describe("Subscriber checkout", () => {
     await expect(page.getByText("January 15, 2099")).toHaveCount(0);
   });
 
-  test("console settings expose vertical keyboard-operable ARIA tabs", async ({
+  test("desktop console settings expose vertical keyboard-operable ARIA tabs", async ({
     page,
   }) => {
     await mockSession(page, "demo");
@@ -597,6 +784,9 @@ test.describe("Subscriber checkout", () => {
       "console-settings-panel-harness"
     );
     await harness.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(harness).toBeFocused();
+    await expect(harness).toHaveAttribute("aria-selected", "true");
     await page.keyboard.press("ArrowDown");
     await expect(usage).toBeFocused();
     await expect(usage).toHaveAttribute("aria-selected", "true");
@@ -608,6 +798,58 @@ test.describe("Subscriber checkout", () => {
     await expect(account).toBeFocused();
     await page.keyboard.press("Home");
     await expect(harness).toBeFocused();
+  });
+
+  test("mobile console settings expose non-shrinking horizontal tabs with Billing keyboard-reachable", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ height: 844, width: 390 });
+    await mockSession(page, "subscriber");
+    await mockSubscriberConsoleDependencies(page);
+    await page.route("**/api/subscription", (route) =>
+      route.fulfill({ json: subscriptionStatus(true) })
+    );
+    await openConsoleSettings(page);
+
+    const tablist = page.getByRole("tablist", { name: "Console settings" });
+    const harness = page.getByRole("tab", { name: "Harness credentials" });
+    const usage = page.getByRole("tab", { name: "Usage" });
+    const billing = page.getByRole("tab", { name: "Billing" });
+    await expect(tablist).toHaveAttribute("aria-orientation", "horizontal");
+    await harness.focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(harness).toBeFocused();
+    await expect(harness).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("ArrowRight");
+    await expect(usage).toBeFocused();
+    await page.keyboard.press("ArrowRight");
+    await expect(billing).toBeFocused();
+    await expect(billing).toHaveAttribute("aria-selected", "true");
+
+    const geometry = await page.evaluate(() => {
+      const navigation = document.querySelector(".oc-settings-nav");
+      const tabs = Array.from(
+        document.querySelectorAll<HTMLElement>('.oc-settings-nav [role="tab"]')
+      );
+      return {
+        contentFits: tabs.every(
+          (element) => element.scrollWidth <= element.clientWidth
+        ),
+        flexShrink: tabs.map((element) => getComputedStyle(element).flexShrink),
+        navigationOverflowX:
+          navigation instanceof HTMLElement
+            ? getComputedStyle(navigation).overflowX
+            : null,
+        whiteSpace: tabs.map((element) => getComputedStyle(element).whiteSpace),
+      };
+    });
+    expect(geometry).toEqual({
+      contentFits: true,
+      flexShrink: ["0", "0", "0", "0", "0"],
+      navigationOverflowX: "auto",
+      whiteSpace: ["nowrap", "nowrap", "nowrap", "nowrap", "nowrap"],
+    });
+    await expect(billing).toHaveCSS("outline-style", "solid");
   });
 
   test("console settings focus a visible fallback when Billing is removed", async ({
@@ -779,6 +1021,29 @@ test.describe("Subscriber checkout", () => {
       expect(reads).toBe(1);
     });
   }
+
+  test("a 401 confirmation action preserves the full successful return through login", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
+    await mockSession(page, "demo");
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", (route) =>
+      route.fulfill({ json: { error: "unauthorized" }, status: 401 })
+    );
+    await page.goto("/account?source=ledger&checkout=success#allowance");
+
+    const signIn = page.getByRole("link", { name: "Sign in again" });
+    await expect(signIn).toHaveAttribute(
+      "href",
+      "/login?callbackUrl=%2Faccount%3Fsource%3Dledger%26checkout%3Dsuccess%23allowance"
+    );
+    await signIn.click();
+
+    await expect(page).toHaveURL(
+      "/login?callbackUrl=%2Faccount%3Fsource%3Dledger%26checkout%3Dsuccess%23allowance"
+    );
+  });
 
   for (const scenario of [
     {

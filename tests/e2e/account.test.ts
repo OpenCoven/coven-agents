@@ -21,14 +21,17 @@ test.describe("Account settings", () => {
       }
     });
 
-    await page.goto("/account");
+    await page.goto("/account?source=ledger&checkout=success#allowance");
 
     await expect(
       page.getByRole("heading", { name: "Sign in to manage your account" })
     ).toBeVisible();
     await expect(
       page.getByRole("link", { name: "Sign in with GitHub" })
-    ).toHaveAttribute("href", "/login");
+    ).toHaveAttribute(
+      "href",
+      "/login?callbackUrl=%2Faccount%3Fsource%3Dledger%26checkout%3Dsuccess%23allowance"
+    );
     await expect(page.getByLabel("GitHub Copilot credential")).toHaveCount(0);
     expect(protectedRequests).toEqual([]);
   });

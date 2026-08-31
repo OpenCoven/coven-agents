@@ -54,6 +54,7 @@ const REFUSED = HARNESS_SPECS.filter((spec) => !spec.supported);
 
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const MS_PER_DAY = 86_400_000;
+const HORIZONTAL_SETTINGS_QUERY = "(max-width: 720px)";
 
 function settingsPanelId(tab: Tab): string {
   return `console-settings-panel-${tab}`;
@@ -61,6 +62,22 @@ function settingsPanelId(tab: Tab): string {
 
 function settingsTabId(tab: Tab): string {
   return `console-settings-tab-${tab}`;
+}
+
+function useHorizontalSettingsTabs(): boolean {
+  const [horizontal, setHorizontal] = useState(false);
+
+  useEffect(() => {
+    const query = window.matchMedia(HORIZONTAL_SETTINGS_QUERY);
+    const update = () => {
+      setHorizontal(query.matches);
+    };
+    query.addEventListener("change", update);
+    update();
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  return horizontal;
 }
 
 type Usage = { cap: number; resetsAt: string | null; used: number };
@@ -215,6 +232,7 @@ export function Settings({
   operationContext: SessionOperationContext | null;
 }) {
   const [tab, setTab] = useState<Tab>("harness");
+  const horizontalTabs = useHorizontalSettingsTabs();
   const showBilling = checkoutEnabled || isSubscriber;
   const tabs: { id: Tab; label: string }[] = showBilling
     ? [
@@ -329,9 +347,11 @@ export function Settings({
         return;
       }
       let destination: Tab | null = null;
-      if (event.key === "ArrowDown") {
+      const nextKey = horizontalTabs ? "ArrowRight" : "ArrowDown";
+      const previousKey = horizontalTabs ? "ArrowLeft" : "ArrowUp";
+      if (event.key === nextKey) {
         destination = tabs[(index + 1) % tabs.length].id;
-      } else if (event.key === "ArrowUp") {
+      } else if (event.key === previousKey) {
         destination = tabs[(index - 1 + tabs.length) % tabs.length].id;
       } else if (event.key === "Home") {
         destination = tabs[0].id;
@@ -345,7 +365,7 @@ export function Settings({
       setTab(destination);
       tabRefs.current.get(destination)?.focus();
     },
-    [tabs]
+    [horizontalTabs, tabs]
   );
 
   useEffect(() => {
@@ -599,7 +619,7 @@ export function Settings({
         >
           <div
             aria-label="Console settings"
-            aria-orientation="vertical"
+            aria-orientation={horizontalTabs ? "horizontal" : "vertical"}
             role="tablist"
             style={{ display: "contents" }}
           >

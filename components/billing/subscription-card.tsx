@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { browserApplicationPath } from "@/lib/application-path";
 import { parseRetryAfter } from "@/lib/http/retry-after";
 
@@ -33,6 +34,18 @@ type SubscriptionStatusBody = {
   active: boolean;
   checkoutEnabled: boolean;
   subscribedUntil: string | null;
+};
+
+type CheckoutAttempt = {
+  controller: AbortController;
+  generation: number;
+  idempotencyKey: string;
+  userId: string;
+};
+
+type CheckoutKey = {
+  idempotencyKey: string;
+  userId: string;
 };
 
 const CANCELLED_NOTICE: Notice = {
@@ -146,11 +159,16 @@ export function SubscriptionCard({
 }: SubscriptionCardProps) {
   const titleId = useId();
   const session = useSession();
+  const loginPath = useApplicationLoginPath();
   const userId = session.data?.user?.id ?? null;
+  const checkoutUserId =
+    session.status === "authenticated" ? (session.data.user?.id ?? null) : null;
   const updateSessionRef = useRef(session.update);
   updateSessionRef.current = session.update;
   const userIdRef = useRef(userId);
   userIdRef.current = userId;
+  const checkoutUserIdRef = useRef(checkoutUserId);
+  checkoutUserIdRef.current = checkoutUserId;
 
   const [activeConfirmed, setActiveConfirmed] = useState(false);
   const [paidThrough, setPaidThrough] = useState<Date | null>(null);
@@ -164,14 +182,15 @@ export function SubscriptionCard({
   const [checkoutPending, setCheckoutPending] = useState(false);
 
   const noticeRef = useRef<HTMLDivElement>(null);
-  const checkoutKeyRef = useRef<string | null>(null);
-  const checkoutPendingRef = useRef(false);
-  const checkoutAbortRef = useRef<AbortController | null>(null);
+  const checkoutAttemptRef = useRef<CheckoutAttempt | null>(null);
+  const checkoutGenerationRef = useRef(0);
+  const checkoutKeyRef = useRef<CheckoutKey | null>(null);
   const pollAbortRef = useRef<AbortController | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollGenerationRef = useRef(0);
   const confirmationOwnerRef = useRef<string | null>(null);
   const authorityRef = useRef({ isSubscriber, userId });
+  const checkoutIdentityRef = useRef(checkoutUserId);
 
   const publishNotice = useCallback(
     (next: Notice, options: { focus?: boolean } = {}) => {
@@ -206,22 +225,20 @@ export function SubscriptionCard({
       return;
     }
 
-    const userChanged =
-      previous.userId !== null && userId !== null && previous.userId !== userId;
-    if (userChanged) {
+    const identityChanged = previous.userId !== userId;
+    if (identityChanged) {
       stopPolling();
-      checkoutAbortRef.current?.abort();
-      checkoutAbortRef.current = null;
-      checkoutKeyRef.current = null;
-      checkoutPendingRef.current = false;
-      setCheckoutPending(false);
     }
     setActiveConfirmed(false);
     setPaidThrough(null);
     setCanCheckAgain(false);
     setNeedsSignIn(false);
     setCheckoutSuppressed(false);
-    if (userChanged && checkoutResult === "success") {
+    if (
+      identityChanged &&
+      previous.userId !== null &&
+      checkoutResult === "success"
+    ) {
       publishNotice(
         {
           detail: "Return to the account that opened checkout to confirm it.",
@@ -240,6 +257,28 @@ export function SubscriptionCard({
       setNotice(initialNotice(checkoutResult, isSubscriber));
     }
   }, [checkoutResult, isSubscriber, publishNotice, stopPolling, userId]);
+
+  useEffect(() => {
+    const previousUserId = checkoutIdentityRef.current;
+    checkoutIdentityRef.current = checkoutUserId;
+    if (previousUserId === checkoutUserId) {
+      return;
+    }
+
+    checkoutGenerationRef.current += 1;
+    const attempt = checkoutAttemptRef.current;
+    if (attempt && attempt.userId !== checkoutUserId) {
+      attempt.controller.abort();
+      if (checkoutAttemptRef.current === attempt) {
+        checkoutAttemptRef.current = null;
+        setCheckoutPending(false);
+      }
+    }
+    if (checkoutKeyRef.current?.userId !== checkoutUserId) {
+      checkoutKeyRef.current = null;
+    }
+    setCheckoutSuppressed(false);
+  }, [checkoutUserId]);
 
   const startConfirmation = useCallback(() => {
     stopPolling();
@@ -688,16 +727,15 @@ export function SubscriptionCard({
     };
   }, [activeConfirmed, checkoutResult, isSubscriber, publishNotice, userId]);
 
-  useEffect(() => {
-    checkoutAbortRef.current?.abort();
-    checkoutAbortRef.current = null;
-    checkoutKeyRef.current = null;
-    checkoutPendingRef.current = false;
-    setCheckoutPending(false);
-    return () => {
-      checkoutAbortRef.current?.abort();
-    };
-  }, []);
+  useEffect(
+    () => () => {
+      checkoutGenerationRef.current += 1;
+      checkoutAttemptRef.current?.controller.abort();
+      checkoutAttemptRef.current = null;
+      checkoutKeyRef.current = null;
+    },
+    []
+  );
 
   useEffect(
     () => () => {
@@ -707,23 +745,83 @@ export function SubscriptionCard({
   );
 
   const beginCheckout = useCallback(async () => {
-    if (checkoutPendingRef.current) {
+    if (checkoutAttemptRef.current) {
       return;
     }
-    checkoutPendingRef.current = true;
-    setCheckoutPending(true);
-    setCanCheckAgain(false);
-    setNeedsSignIn(false);
-    publishNotice({
+    const initiatingUserId = checkoutUserIdRef.current;
+    if (!initiatingUserId) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const existingKey = checkoutKeyRef.current;
+    const idempotencyKey =
+      existingKey?.userId === initiatingUserId
+        ? existingKey.idempotencyKey
+        : crypto.randomUUID();
+    const attempt: CheckoutAttempt = {
+      controller,
+      generation: checkoutGenerationRef.current + 1,
+      idempotencyKey,
+      userId: initiatingUserId,
+    };
+    checkoutGenerationRef.current = attempt.generation;
+    checkoutAttemptRef.current = attempt;
+
+    const isCurrent = () =>
+      checkoutAttemptRef.current === attempt &&
+      !attempt.controller.signal.aborted &&
+      checkoutGenerationRef.current === attempt.generation &&
+      checkoutUserIdRef.current === attempt.userId;
+    const mutate = (mutation: () => void): boolean => {
+      if (!isCurrent()) {
+        return false;
+      }
+      mutation();
+      return true;
+    };
+    const finish = () => {
+      mutate(() => {
+        setCheckoutPending(false);
+        checkoutAttemptRef.current = null;
+      });
+    };
+    const clearKey = () => {
+      mutate(() => {
+        if (
+          checkoutKeyRef.current?.userId === attempt.userId &&
+          checkoutKeyRef.current.idempotencyKey === attempt.idempotencyKey
+        ) {
+          checkoutKeyRef.current = null;
+        }
+      });
+    };
+    const announce = (
+      next: Notice,
+      options: { focus?: boolean } = {}
+    ): boolean => mutate(() => publishNotice(next, options));
+
+    if (
+      !mutate(() => {
+        checkoutKeyRef.current = {
+          idempotencyKey,
+          userId: initiatingUserId,
+        };
+      })
+    ) {
+      controller.abort();
+      return;
+    }
+    if (!mutate(() => setCheckoutPending(true))) {
+      return;
+    }
+    mutate(() => setCanCheckAgain(false));
+    mutate(() => setNeedsSignIn(false));
+    announce({
       detail: "Stripe will show the configured amount before purchase.",
       title: "Opening secure checkout",
       tone: "pending",
     });
-
-    const idempotencyKey = checkoutKeyRef.current ?? crypto.randomUUID();
-    checkoutKeyRef.current = idempotencyKey;
-    const controller = new AbortController();
-    checkoutAbortRef.current = controller;
 
     let response: Response;
     try {
@@ -741,7 +839,10 @@ export function SubscriptionCard({
       ) {
         return;
       }
-      publishNotice(
+      if (!isCurrent()) {
+        return;
+      }
+      announce(
         {
           detail:
             "Check your connection, then use the same checkout action again.",
@@ -750,11 +851,10 @@ export function SubscriptionCard({
         },
         { focus: true }
       );
-      if (checkoutAbortRef.current === controller) {
-        checkoutAbortRef.current = null;
-        checkoutPendingRef.current = false;
-        setCheckoutPending(false);
-      }
+      finish();
+      return;
+    }
+    if (!isCurrent()) {
       return;
     }
 
@@ -764,18 +864,16 @@ export function SubscriptionCard({
     } catch {
       decoded = null;
     }
-    if (checkoutAbortRef.current === controller && !controller.signal.aborted) {
-      checkoutAbortRef.current = null;
-      checkoutPendingRef.current = false;
-      setCheckoutPending(false);
+    if (!isCurrent()) {
+      return;
     }
     const body = responseBody(decoded);
 
     if (response.ok) {
       const destination = secureCheckoutDestination(body.url);
-      checkoutKeyRef.current = null;
+      clearKey();
       if (destination.kind === "missing") {
-        publishNotice(
+        announce(
           {
             detail: "No navigation occurred. Use the checkout action again.",
             title: "Checkout returned no secure destination.",
@@ -783,10 +881,11 @@ export function SubscriptionCard({
           },
           { focus: true }
         );
+        finish();
         return;
       }
       if (destination.kind === "unsafe") {
-        publishNotice(
+        announce(
           {
             detail: "Only an HTTPS checkout destination can be opened.",
             title: "Checkout returned an unsafe destination.",
@@ -794,6 +893,10 @@ export function SubscriptionCard({
           },
           { focus: true }
         );
+        finish();
+        return;
+      }
+      if (!isCurrent()) {
         return;
       }
       window.location.assign(destination.href);
@@ -807,12 +910,12 @@ export function SubscriptionCard({
       error === "request_in_progress" ||
       error === "checkout_session_conflict";
     if (!retryable) {
-      checkoutKeyRef.current = null;
+      clearKey();
     }
 
     if (error === "subscriptions_unavailable") {
-      setCheckoutSuppressed(true);
-      publishNotice(
+      mutate(() => setCheckoutSuppressed(true));
+      announce(
         {
           detail: "No payment was started.",
           title: "Subscriptions are not available right now.",
@@ -820,12 +923,13 @@ export function SubscriptionCard({
         },
         { focus: true }
       );
+      finish();
       return;
     }
     if (error === "already_subscribed") {
-      setCheckoutSuppressed(true);
-      setCanCheckAgain(true);
-      publishNotice(
+      mutate(() => setCheckoutSuppressed(true));
+      mutate(() => setCanCheckAgain(true));
+      announce(
         {
           detail: "Check this account to load its current paid status.",
           title: "A subscription already exists for this account.",
@@ -833,10 +937,11 @@ export function SubscriptionCard({
         },
         { focus: true }
       );
+      finish();
       return;
     }
     if (error === "billing_unavailable") {
-      publishNotice(
+      announce(
         {
           detail: "Use the same checkout action again in a moment.",
           title: "Billing is temporarily unavailable.",
@@ -844,10 +949,11 @@ export function SubscriptionCard({
         },
         { focus: true }
       );
+      finish();
       return;
     }
     if (error === "request_in_progress") {
-      publishNotice(
+      announce(
         {
           detail: "Wait a moment, then use the same checkout action again.",
           title: "A checkout request is still processing.",
@@ -855,10 +961,11 @@ export function SubscriptionCard({
         },
         { focus: true }
       );
+      finish();
       return;
     }
     if (error === "checkout_session_conflict") {
-      publishNotice(
+      announce(
         {
           detail: "Wait a moment, then use the same checkout action again.",
           title: "A previous checkout session is still settling.",
@@ -866,10 +973,11 @@ export function SubscriptionCard({
         },
         { focus: true }
       );
+      finish();
       return;
     }
     if (response.status === 429) {
-      publishNotice(
+      announce(
         {
           detail: "Wait a moment, then use the same checkout action again.",
           title: "Checkout is temporarily rate limited.",
@@ -877,12 +985,13 @@ export function SubscriptionCard({
         },
         { focus: true }
       );
+      finish();
       return;
     }
     if (response.status === 401) {
-      setCheckoutSuppressed(true);
-      setNeedsSignIn(true);
-      publishNotice(
+      mutate(() => setCheckoutSuppressed(true));
+      mutate(() => setNeedsSignIn(true));
+      announce(
         {
           detail: "Sign in again before opening checkout.",
           title: "Your sign-in changed.",
@@ -890,10 +999,11 @@ export function SubscriptionCard({
         },
         { focus: true }
       );
+      finish();
       return;
     }
     if (response.status >= 500) {
-      publishNotice(
+      announce(
         {
           detail: "Use the same checkout action again.",
           title: "The checkout provider could not open a session.",
@@ -901,10 +1011,11 @@ export function SubscriptionCard({
         },
         { focus: true }
       );
+      finish();
       return;
     }
 
-    publishNotice(
+    announce(
       {
         detail: "No payment was started. Use the checkout action again.",
         title: "Checkout could not be started.",
@@ -912,24 +1023,12 @@ export function SubscriptionCard({
       },
       { focus: true }
     );
+    finish();
   }, [publishNotice]);
 
   const startCheckout = useCallback(() => {
-    beginCheckout().catch(() => {
-      checkoutAbortRef.current?.abort();
-      checkoutAbortRef.current = null;
-      checkoutPendingRef.current = false;
-      setCheckoutPending(false);
-      publishNotice(
-        {
-          detail: "No payment was started. Use the checkout action again.",
-          title: "Checkout could not be started.",
-          tone: "error",
-        },
-        { focus: true }
-      );
-    });
-  }, [beginCheckout, publishNotice]);
+    beginCheckout().catch(() => undefined);
+  }, [beginCheckout]);
 
   if (!(checkoutEnabled || isSubscriber || checkoutResult === "success")) {
     return null;
@@ -1042,7 +1141,7 @@ export function SubscriptionCard({
             </button>
           ) : null}
           {needsSignIn ? (
-            <Link className="oc-subscription-action" href="/login">
+            <Link className="oc-subscription-action" href={loginPath}>
               Sign in again
             </Link>
           ) : null}
