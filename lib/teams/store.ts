@@ -20,6 +20,7 @@ import { type SQL, sql } from "drizzle-orm";
 import type { databaseFor } from "@/lib/db/access";
 import type {
   RunnerAgentExecutionSnapshot,
+  RunnerExecutionPermission,
   RunnerOperator,
   RunnerPrincipal,
 } from "@/lib/runner/types";
@@ -278,8 +279,13 @@ export type UpdateTeamStepStoreInput = {
 export type TeamStepExecutionClaim = Readonly<{
   agentId: string;
   agentSnapshot: RunnerAgentExecutionSnapshot;
+  approvedCapabilities: readonly TeamCapability[];
   authVersion: number;
   declaredCapabilities: readonly TeamCapability[];
+  executionPermission: Exclude<
+    RunnerExecutionPermission,
+    "unrestricted"
+  > | null;
   kind: "ready";
   mission: string;
   principal: RunnerPrincipal;
@@ -862,6 +868,25 @@ function declaredGitHubCapabilities(
       )
     ),
   ].sort();
+}
+
+function declaredCapabilities(
+  snapshots: readonly TeamSkillSnapshot[]
+): TeamCapability[] {
+  return [
+    ...new Set(
+      snapshots.flatMap(({ requiredCapabilities }) => requiredCapabilities)
+    ),
+  ].sort();
+}
+
+function teamExecutionPermission(
+  capabilities: readonly TeamCapability[]
+): TeamStepExecutionClaim["executionPermission"] {
+  if (capabilities.includes("workspace.write")) {
+    return "workspace_write";
+  }
+  return capabilities.includes("workspace.read") ? "workspace_read" : null;
 }
 
 function validApprovalCapabilities(
@@ -1851,12 +1876,7 @@ export function createTeamStore(database: TeamStoreDatabase) {
         const snapshots = arrayColumn<unknown>(candidate, "skillSnapshots").map(
           asSkillSnapshot
         );
-        const effectiveCapabilities =
-          approvalStatus === "approved"
-            ? arrayColumn<TeamCapability>(candidate, "approvedCapabilities")
-            : declaredGitHubCapabilities(snapshots).filter(
-                (capability) => !capability.endsWith(".write")
-              );
+        const immutableCapabilities = declaredCapabilities(snapshots);
         return {
           agentId: column(candidate, "agentId"),
           agentSnapshot: {
@@ -1865,8 +1885,10 @@ export function createTeamStore(database: TeamStoreDatabase) {
             runtime: column(candidate, "agentRuntime"),
             workspace: column(candidate, "agentWorkspace"),
           },
+          approvedCapabilities: arrayColumn(candidate, "approvedCapabilities"),
           authVersion: column(candidate, "authVersion"),
-          declaredCapabilities: effectiveCapabilities,
+          declaredCapabilities: immutableCapabilities,
+          executionPermission: teamExecutionPermission(immutableCapabilities),
           kind: "ready" as const,
           mission: column(candidate, "mission"),
           plannedOperationId,
@@ -1878,13 +1900,10 @@ export function createTeamStore(database: TeamStoreDatabase) {
           },
           priorHandoffs: arrayColumn(candidate, "priorHandoffs"),
           responsibility: column(candidate, "responsibility"),
-          skillSnapshots: snapshots
-            .filter((snapshot) =>
-              declaredGitHubCapabilities([snapshot]).every((capability) =>
-                effectiveCapabilities.includes(capability)
-              )
-            )
-            .map(({ instructions, name }) => ({ instructions, name })),
+          skillSnapshots: snapshots.map(({ instructions, name }) => ({
+            instructions,
+            name,
+          })),
           teamRunId,
           teamStepId: column(candidate, "id"),
           teamStepVersion,

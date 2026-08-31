@@ -6,6 +6,11 @@ export interface Invocation {
   readonly cwd: string;
 }
 
+export type HarnessExecutionPermission =
+  | "unrestricted"
+  | "workspace_read"
+  | "workspace_write";
+
 export interface InvocationRequest {
   /** Fresh configuration directory outside caller-controlled workspace files. */
   configDir?: string;
@@ -16,7 +21,7 @@ export interface InvocationRequest {
   /** `auto` lets the harness pick, so no `--model` flag is passed. */
   model: string;
   /** Restrict tools for tasks that must not inherit broad harness authority. */
-  permissionMode?: "unrestricted" | "workspace";
+  permissionMode?: HarnessExecutionPermission;
   /** Ask for the harness's structured event stream instead of a text blob. */
   stream?: boolean;
   task: string;
@@ -31,20 +36,27 @@ function modelArgs(model: string): string[] {
 }
 
 function copilotArgs(request: InvocationRequest): string[] {
-  if (request.permissionMode === "workspace" && !request.configDir) {
+  const permissionMode = request.permissionMode ?? "unrestricted";
+  if (permissionMode !== "unrestricted" && !request.configDir) {
     throw new Error(
       "Restricted Copilot runs require an isolated config directory."
     );
   }
   const permissionArgs =
-    request.permissionMode === "workspace"
-      ? [
-          "--available-tools",
-          "view,edit,grep,glob",
-          "--allow-tool",
-          "read,write",
-        ]
-      : ["--yolo"];
+    permissionMode === "workspace_read"
+      ? ["--available-tools", "view,grep,glob"]
+      : permissionMode === "workspace_write"
+        ? ["--available-tools", "view,edit,grep,glob", "--allow-tool", "write"]
+        : ["--yolo"];
+  const restrictedArgs =
+    permissionMode === "unrestricted"
+      ? []
+      : [
+          "--disable-builtin-mcps",
+          "--no-custom-instructions",
+          "--disallow-temp-dir",
+          "--no-bash-env",
+        ];
   const configArgs = request.configDir
     ? ["--config-dir", request.configDir]
     : [];
@@ -55,6 +67,7 @@ function copilotArgs(request: InvocationRequest): string[] {
     ...permissionArgs,
     "--no-ask-user",
     ...configArgs,
+    ...restrictedArgs,
     "--no-auto-update",
     "--no-color",
     // JSONL carries tool calls, file writes and usage. Plain text collapses all
@@ -111,6 +124,12 @@ export function buildInvocation(request: InvocationRequest): Invocation {
   const build = spec ? ARG_BUILDERS[spec.id] : undefined;
   if (!(spec && build)) {
     throw new Error(`Unsupported harness: ${request.harness}`);
+  }
+  const permissionMode = request.permissionMode ?? "unrestricted";
+  if (permissionMode !== "unrestricted" && spec.id !== "copilot") {
+    throw new Error(
+      `${spec.label} cannot enforce ${permissionMode} permissions.`
+    );
   }
   return { args: build(request), command: spec.command, cwd: request.cwd };
 }

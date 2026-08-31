@@ -721,6 +721,12 @@ export function createRunnerService(
                 kind: "refused",
                 retryable: true,
               };
+            case "sandbox_trust_conflict":
+              return {
+                code: "lifecycle_conflict",
+                kind: "refused",
+                retryable: false,
+              };
             case "global_busy":
             case "tenant_queue_full":
               return { code: "busy", kind: "refused", retryable: true };

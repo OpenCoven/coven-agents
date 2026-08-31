@@ -44,6 +44,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     dispatchLeaseToken: "claim-lease",
     dispatchState: "dispatching",
     error: null,
+    executionPermission: "unrestricted",
     fileEvidence: [],
     id: "00000000-0000-4000-8000-000000000002",
     logCursor: 1,
@@ -74,6 +75,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     runtime: "copilot",
     sandboxGeneration: 1,
     sandboxLifecycle: "ready",
+    sandboxTrust: "clean",
     sandboxUpdatedAt: new Date("2026-08-28T15:00:00.000Z"),
     status: "idle",
     tenant: "tenant_a",
@@ -153,7 +155,74 @@ test("operation reuse with another immutable hash is a typed conflict", async ()
   );
 });
 
-test("admission passes the trusted authority version to storage", async () => {
+test("operation reuse with another execution permission is a typed conflict", async () => {
+  const current = run({ executionPermission: "workspace_read" });
+  const result = await admitRunnerRun(
+    {
+      agentId: current.agentId,
+      authVersion: 1,
+      executionPermission: "workspace_write",
+      id: current.id,
+      operationId: current.operationId,
+      principal: { kind: "subscriber", tenant: current.tenant, userId: "user" },
+      requestHash: current.requestHash,
+      task: current.task,
+    },
+    {
+      clock: () => new Date("2026-08-28T15:00:00.000Z"),
+      limits: admissionLimitsFromEnvironment({}),
+      randomToken: () => "lease",
+      store: {
+        startRun: async (
+          _principal: RunnerPrincipal,
+          input: StartRunnerRunInput
+        ) => {
+          assert.equal(input.executionPermission, "workspace_write");
+          return { kind: "conflict", run: {} };
+        },
+      } as never,
+    }
+  );
+
+  assert.equal(result.kind, "refused");
+  assert.equal(
+    result.kind === "refused" && result.error.code,
+    "operation_conflict"
+  );
+});
+
+test("restricted admission refuses a sandbox previously used unrestricted", async () => {
+  const current = run({ executionPermission: "workspace_read" });
+  const result = await admitRunnerRun(
+    {
+      agentId: current.agentId,
+      authVersion: 1,
+      executionPermission: "workspace_read",
+      id: current.id,
+      operationId: current.operationId,
+      principal: { kind: "subscriber", tenant: current.tenant, userId: "user" },
+      requestHash: current.requestHash,
+      task: current.task,
+    },
+    {
+      clock: () => new Date("2026-08-28T15:00:00.000Z"),
+      limits: admissionLimitsFromEnvironment({}),
+      randomToken: () => "lease",
+      store: {
+        startRun: async () => ({ kind: "sandbox_trust_conflict" }),
+      } as never,
+    }
+  );
+
+  assert.equal(result.kind, "refused");
+  assert.equal(
+    result.kind === "refused" && result.error.code,
+    "sandbox_trust_conflict"
+  );
+  assert.equal(result.kind === "refused" && result.error.retryable, false);
+});
+
+test("admission passes trusted authority and execution permission to storage", async () => {
   const current = run();
   let storedInput: unknown;
   const agentSnapshot = {
@@ -168,6 +237,7 @@ test("admission passes the trusted authority version to storage", async () => {
       agentId: current.agentId,
       agentSnapshot,
       authVersion: 8,
+      executionPermission: "workspace_read",
       id: current.id,
       operationId: current.operationId,
       principal: { kind: "subscriber", tenant: current.tenant, userId: "user" },
@@ -191,6 +261,10 @@ test("admission passes the trusted authority version to storage", async () => {
   );
 
   assert.equal((storedInput as { authVersion?: number }).authVersion, 8);
+  assert.equal(
+    (storedInput as { executionPermission?: string }).executionPermission,
+    "workspace_read"
+  );
   assert.deepEqual(
     (storedInput as { agentSnapshot?: unknown }).agentSnapshot,
     agentSnapshot
@@ -260,7 +334,7 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
   const calls: string[] = [];
   let persistedRedaction: unknown;
   const processInputs: Record<string, unknown>[] = [];
-  const claimedRun = run();
+  const claimedRun = run({ executionPermission: "workspace_read" });
   const authority = {
     expectedVersion: claimedRun.version,
     leaseToken: claimedRun.dispatchLeaseToken as string,
@@ -298,6 +372,8 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
         kind: "authorized" as const,
       };
     },
+    authorizeUnrestrictedExecution: () =>
+      Promise.resolve({ kind: "authorized" as const }),
     claimNextDispatch: async () => {
       calls.push("claim");
       return claimed;
@@ -389,6 +465,10 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
         sandbox: {} as never,
       };
     },
+    inspectRestrictedWorkspace: async () => {
+      calls.push("inspect-workspace");
+      return { kind: "safe" as const };
+    },
     limits: admissionLimitsFromEnvironment({}),
     operator,
     randomToken: () => "next-lease",
@@ -440,6 +520,7 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
     "claim",
     "get-agent",
     "sandbox",
+    "inspect-workspace",
     "credential",
     "commit",
     "start",
@@ -454,6 +535,10 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
   assert.equal(processInputs[0]?.instructions, claimedRun.agentInstructions);
   assert.equal(processInputs[0]?.model, claimedRun.agentModel);
   assert.equal(processInputs[0]?.runtime, claimedRun.agentRuntime);
+  assert.equal(
+    processInputs[0]?.executionPermission,
+    claimedRun.executionPermission
+  );
   assert.equal(processInputs[0]?.workspace, claimedRun.agentWorkspace);
 });
 
@@ -565,6 +650,360 @@ test("snapshotted unsupported harness dispatch claims terminalize before sandbox
     runId: claimedRun.id,
   });
   assert.deepEqual(calls, ["get-agent", "finalize", "cleanup", "get-agent"]);
+});
+
+test("restricted dispatch rejects a missing persisted workspace before sandbox or credentials", async () => {
+  const calls: string[] = [];
+  const claimedRun = run({
+    agentWorkspace: null,
+    executionPermission: "workspace_read",
+  });
+  const authority = {
+    expectedVersion: claimedRun.version,
+    leaseToken: claimedRun.dispatchLeaseToken as string,
+    runId: claimedRun.id,
+  } as RunnerDispatchAuthority;
+
+  const result = await dispatchRunnerClaim(
+    { authority, run: claimedRun },
+    {
+      acquireCredential: async () => {
+        calls.push("credential");
+        throw new Error("must not acquire a credential");
+      },
+      credentialInput: () => {
+        calls.push("credential-input");
+        throw new Error("must not build credential input");
+      },
+      ensureSandbox: async () => {
+        calls.push("sandbox");
+        throw new Error("must not ensure a sandbox");
+      },
+      limits: admissionLimitsFromEnvironment({}),
+      operator,
+      startProcess: async () => {
+        calls.push("provider");
+        throw new Error("must not start provider work");
+      },
+      store: {
+        cleanupTerminalLease: async () => {
+          calls.push("cleanup");
+          return {
+            kind: "updated" as const,
+            value: run({
+              ...claimedRun,
+              completedAt: new Date("2026-08-28T15:00:01.000Z"),
+              dispatchLeaseExpiresAt: null,
+              dispatchLeaseToken: null,
+              dispatchState: "terminal",
+              status: "failed",
+            }),
+          };
+        },
+        finalizeRun: async (
+          _operator: RunnerOperator,
+          input: {
+            error?: {
+              code: string;
+              message: string;
+              retryable: boolean;
+            } | null;
+          }
+        ) => {
+          calls.push("finalize");
+          assert.deepEqual(input.error, {
+            code: "workspace_required",
+            message: "Restricted runner execution requires a workspace.",
+            retryable: false,
+          });
+          return {
+            kind: "finalized" as const,
+            prunedRunIds: [],
+            run: { ...claimedRun, version: claimedRun.version + 1 },
+          };
+        },
+        getDispatchAgent: async () => {
+          calls.push("get-agent");
+          return {
+            agent: agent(),
+            kind: "found" as const,
+            run: claimedRun,
+          };
+        },
+      } as never,
+    }
+  );
+
+  assert.deepEqual(result, {
+    kind: "refused",
+    reason: "workspace",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(calls, ["get-agent", "finalize", "cleanup"]);
+});
+
+test("restricted dispatch rejects repository hook policy before credentials", async () => {
+  const calls: string[] = [];
+  const claimedRun = run({
+    agentWorkspace: "/workspace/repo",
+    executionPermission: "workspace_read",
+  });
+  const authority = {
+    expectedVersion: claimedRun.version,
+    leaseToken: claimedRun.dispatchLeaseToken as string,
+    runId: claimedRun.id,
+  } as RunnerDispatchAuthority;
+
+  const result = await dispatchRunnerClaim(
+    { authority, run: claimedRun },
+    {
+      acquireCredential: async () => {
+        calls.push("credential");
+        throw new Error("must not acquire a credential");
+      },
+      credentialInput: () => {
+        calls.push("credential-input");
+        throw new Error("must not build credential input");
+      },
+      ensureSandbox: async () => {
+        calls.push("sandbox");
+        return { agent: agent(), sandbox: {} as never };
+      },
+      inspectRestrictedWorkspace: async () => {
+        calls.push("inspect-workspace");
+        return { kind: "unsafe" as const };
+      },
+      limits: admissionLimitsFromEnvironment({}),
+      operator,
+      startProcess: async () => {
+        calls.push("provider");
+        throw new Error("must not start provider work");
+      },
+      store: {
+        cleanupTerminalLease: async () => {
+          calls.push("cleanup");
+          return {
+            kind: "updated" as const,
+            value: run({
+              ...claimedRun,
+              completedAt: new Date("2026-08-28T15:00:01.000Z"),
+              dispatchLeaseExpiresAt: null,
+              dispatchLeaseToken: null,
+              dispatchState: "terminal",
+              status: "failed",
+            }),
+          };
+        },
+        finalizeRun: async (
+          _operator: RunnerOperator,
+          input: {
+            error?: {
+              code: string;
+              message: string;
+              retryable: boolean;
+            } | null;
+          }
+        ) => {
+          calls.push("finalize");
+          assert.deepEqual(input.error, {
+            code: "workspace_configuration_unsafe",
+            message:
+              "Restricted runner execution cannot load repository hooks or settings.",
+            retryable: false,
+          });
+          return {
+            kind: "finalized" as const,
+            prunedRunIds: [],
+            run: { ...claimedRun, version: claimedRun.version + 1 },
+          };
+        },
+        getDispatchAgent: async () => {
+          calls.push("get-agent");
+          return {
+            agent: agent(),
+            kind: "found" as const,
+            run: claimedRun,
+          };
+        },
+      } as never,
+    }
+  );
+
+  assert.deepEqual(result, {
+    kind: "refused",
+    reason: "workspace",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(calls, [
+    "get-agent",
+    "sandbox",
+    "inspect-workspace",
+    "finalize",
+    "cleanup",
+  ]);
+});
+
+test("restricted dispatch waits for an in-progress sandbox warm before inspection or credentials", async () => {
+  const calls: string[] = [];
+  const claimedRun = run({
+    agentWorkspace: "/workspace/repo",
+    executionPermission: "workspace_read",
+  });
+  const authority = {
+    expectedVersion: claimedRun.version,
+    leaseToken: claimedRun.dispatchLeaseToken as string,
+    runId: claimedRun.id,
+  } as RunnerDispatchAuthority;
+
+  const result = await dispatchRunnerClaim(
+    { authority, run: claimedRun },
+    {
+      acquireCredential: async () => {
+        calls.push("credential");
+        throw new Error("must not acquire a credential");
+      },
+      credentialInput: () => {
+        calls.push("credential-input");
+        throw new Error("must not build credential input");
+      },
+      ensureSandbox: async () => {
+        calls.push("sandbox");
+        return {
+          agent: agent({ warmStatus: "provisioning" }),
+          sandbox: {} as never,
+        };
+      },
+      inspectRestrictedWorkspace: async () => {
+        calls.push("inspect-workspace");
+        throw new Error("must not inspect during a warm");
+      },
+      limits: admissionLimitsFromEnvironment({}),
+      operator,
+      startProcess: async () => {
+        calls.push("provider");
+        throw new Error("must not start provider work");
+      },
+      store: {
+        getDispatchAgent: async () => {
+          calls.push("get-agent");
+          return {
+            agent: agent(),
+            kind: "found" as const,
+            run: claimedRun,
+          };
+        },
+        releaseUnstartedDispatch: async () => {
+          calls.push("release");
+          return { kind: "released" as const, value: claimedRun };
+        },
+      } as never,
+    }
+  );
+
+  assert.deepEqual(result, {
+    kind: "retryable",
+    reason: "sandbox_unavailable",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(calls, ["get-agent", "sandbox", "release"]);
+});
+
+test("restricted dispatch rejects an unrestricted sandbox trust profile before credentials", async () => {
+  const calls: string[] = [];
+  const claimedRun = run({
+    agentWorkspace: "/workspace/repo",
+    executionPermission: "workspace_read",
+  });
+  const authority = {
+    expectedVersion: claimedRun.version,
+    leaseToken: claimedRun.dispatchLeaseToken as string,
+    runId: claimedRun.id,
+  } as RunnerDispatchAuthority;
+
+  const result = await dispatchRunnerClaim(
+    { authority, run: claimedRun },
+    {
+      acquireCredential: async () => {
+        calls.push("credential");
+        throw new Error("must not acquire a credential");
+      },
+      credentialInput: () => {
+        calls.push("credential-input");
+        throw new Error("must not build credential input");
+      },
+      ensureSandbox: async () => {
+        calls.push("sandbox");
+        return {
+          agent: agent({ sandboxTrust: "unrestricted" }),
+          sandbox: {} as never,
+        };
+      },
+      inspectRestrictedWorkspace: async () => {
+        calls.push("inspect-workspace");
+        throw new Error("must not inspect an unrestricted sandbox");
+      },
+      limits: admissionLimitsFromEnvironment({}),
+      operator,
+      startProcess: async () => {
+        calls.push("provider");
+        throw new Error("must not start provider work");
+      },
+      store: {
+        cleanupTerminalLease: async () => {
+          calls.push("cleanup");
+          return {
+            kind: "updated" as const,
+            value: run({
+              ...claimedRun,
+              completedAt: new Date("2026-08-28T15:00:01.000Z"),
+              dispatchLeaseExpiresAt: null,
+              dispatchLeaseToken: null,
+              dispatchState: "terminal",
+              status: "failed",
+            }),
+          };
+        },
+        finalizeRun: async (
+          _operator: RunnerOperator,
+          input: {
+            error?: {
+              code: string;
+              message: string;
+              retryable: boolean;
+            } | null;
+          }
+        ) => {
+          calls.push("finalize");
+          assert.deepEqual(input.error, {
+            code: "sandbox_trust_conflict",
+            message:
+              "Restricted runner execution requires a clean sandbox trust profile.",
+            retryable: false,
+          });
+          return {
+            kind: "finalized" as const,
+            prunedRunIds: [],
+            run: { ...claimedRun, version: claimedRun.version + 1 },
+          };
+        },
+        getDispatchAgent: async () => {
+          calls.push("get-agent");
+          return {
+            agent: agent(),
+            kind: "found" as const,
+            run: claimedRun,
+          };
+        },
+      } as never,
+    }
+  );
+
+  assert.deepEqual(result, {
+    kind: "refused",
+    reason: "workspace",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(calls, ["get-agent", "sandbox", "finalize", "cleanup"]);
 });
 
 test("a proven failed launch compensates accounting with the callback's current fence", async () => {

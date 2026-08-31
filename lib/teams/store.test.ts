@@ -1372,7 +1372,7 @@ test("team step claiming uses database locks and never queues pending write appr
   );
 });
 
-test("team step claiming returns immutable authority and snapshots after a fenced queue transition", async () => {
+test("team step claiming derives immutable workspace permission from skill snapshots", async () => {
   const planned = teamChildRunnerIds(TEAM_STEP_A);
   const candidate = {
     ...(teamRunRow().steps as Record<string, unknown>[])[0],
@@ -1390,11 +1390,14 @@ test("team step claiming returns immutable authority and snapshots after a fence
     result.kind === "ready"
       ? {
           agentSnapshot: result.agentSnapshot,
+          approvedCapabilities: result.approvedCapabilities,
           authVersion: result.authVersion,
           declaredCapabilities: result.declaredCapabilities,
+          executionPermission: result.executionPermission,
           plannedOperationId: result.plannedOperationId,
           plannedRunnerRunId: result.plannedRunnerRunId,
           principal: result.principal,
+          skillSnapshots: result.skillSnapshots,
           teamStepVersion: result.teamStepVersion,
         }
       : null,
@@ -1405,11 +1408,19 @@ test("team step claiming returns immutable authority and snapshots after a fence
         runtime: "copilot",
         workspace: "/workspace/repo",
       },
+      approvedCapabilities: [],
       authVersion: 7,
-      declaredCapabilities: [],
+      declaredCapabilities: ["workspace.read", "workspace.write"],
+      executionPermission: "workspace_write",
       plannedOperationId: planned.operationId,
       plannedRunnerRunId: planned.runId,
       principal,
+      skillSnapshots: [
+        {
+          instructions: "Run the build and focused tests.",
+          name: "Release evidence",
+        },
+      ],
       teamStepVersion: 1,
     }
   );
@@ -1434,9 +1445,14 @@ test("team step claiming returns immutable authority and snapshots after a fence
     queryText(captured(claimed.statements, 1)),
     /"plannedRunnerRunId"/u
   );
+  assert.doesNotMatch(
+    queryText(captured(claimed.statements, 0)),
+    /RunnerSkill/u,
+    "later skill edits must not participate in permission derivation"
+  );
 });
 
-test("approved team claims use only the durable approved capability subset", async () => {
+test("approval preserves declarations and changes only the GitHub write subset", async () => {
   const candidate = {
     ...(teamRunRow().steps as Record<string, unknown>[])[0],
     approvalActorUserId: principal.userId,
@@ -1456,6 +1472,7 @@ test("approved team claims use only the durable approved capability subset", asy
         instructions: "Modify issues and pull requests.",
         name: "GitHub delivery",
         requiredCapabilities: [
+          "workspace.read",
           "github.issues.write",
           "github.pull_requests.write",
         ],
@@ -1471,8 +1488,22 @@ test("approved team claims use only the durable approved capability subset", asy
   assert.equal(result.kind, "ready");
   assert.deepEqual(result.kind === "ready" ? result.declaredCapabilities : [], [
     "github.issues.write",
+    "github.pull_requests.write",
+    "workspace.read",
   ]);
-  assert.deepEqual(result.kind === "ready" ? result.skillSnapshots : [], []);
+  assert.deepEqual(result.kind === "ready" ? result.approvedCapabilities : [], [
+    "github.issues.write",
+  ]);
+  assert.equal(
+    result.kind === "ready" ? result.executionPermission : null,
+    "workspace_read"
+  );
+  assert.deepEqual(result.kind === "ready" ? result.skillSnapshots : [], [
+    {
+      instructions: "Modify issues and pull requests.",
+      name: "GitHub delivery",
+    },
+  ]);
 });
 
 test("deferred queued claims rotate their parent row with database time", async () => {

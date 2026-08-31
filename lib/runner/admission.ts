@@ -21,6 +21,8 @@ import {
   DaytonaProcessError,
   type DaytonaProcessSandbox,
   type DaytonaStartedProcess,
+  inspectRestrictedWorkspace,
+  type RestrictedWorkspaceInspection,
   startDaytonaProcess,
 } from "./daytona/process";
 import {
@@ -66,6 +68,7 @@ export type RunnerAdmissionErrorCode =
   | "agent_not_found"
   | "global_busy"
   | "operation_conflict"
+  | "sandbox_trust_conflict"
   | "sandbox_unavailable"
   | "tenant_queue_full";
 
@@ -98,6 +101,7 @@ type DispatchStore = Pick<
   RunnerStore,
   | "authorizeDaytonaLaunch"
   | "authorizeDaytonaPreparation"
+  | "authorizeUnrestrictedExecution"
   | "claimNextDispatch"
   | "getDispatchAgent"
   | "markDispatchRunningForDispatch"
@@ -149,7 +153,7 @@ export type RunnerDispatchResult =
     }
   | {
       kind: "refused";
-      reason: "authority" | "capacity" | "credential" | "harness";
+      reason: "authority" | "capacity" | "credential" | "harness" | "workspace";
       runId: string;
     };
 
@@ -166,6 +170,10 @@ export type RunnerDispatchDependencies = Readonly<{
   ensureSandbox: (
     authority: RunnerDispatchAuthority
   ) => Promise<{ agent: RunnerAgentRecord; sandbox: DaytonaProcessSandbox }>;
+  inspectRestrictedWorkspace?: (
+    sandbox: DaytonaProcessSandbox,
+    workspace: string
+  ) => Promise<RestrictedWorkspaceInspection>;
   limits: RunnerAdmissionLimits;
   operator: RunnerOperator;
   randomToken?: () => string;
@@ -353,6 +361,7 @@ export async function admitRunnerRun(
       agentId: input.agentId,
       ...(input.agentSnapshot ? { agentSnapshot: input.agentSnapshot } : {}),
       authVersion: input.authVersion,
+      executionPermission: input.executionPermission ?? "unrestricted",
       id: input.id,
       ...(initialDispatch ? { initialDispatch } : {}),
       operationId: input.operationId,
@@ -381,6 +390,15 @@ export async function admitRunnerRun(
         error: new RunnerAdmissionError(
           "operation_conflict",
           "The operation identifier is already bound to a different request.",
+          false
+        ),
+        kind: "refused",
+      };
+    case "sandbox_trust_conflict":
+      return {
+        error: new RunnerAdmissionError(
+          "sandbox_trust_conflict",
+          "Restricted execution requires a sandbox with no unrestricted run history.",
           false
         ),
         kind: "refused",
@@ -458,7 +476,10 @@ export async function terminalizeUnstartedDispatchFailure(
     | "credential_unavailable"
     | "dispatch_failed"
     | "harness_unsupported"
-    | "no_credential",
+    | "no_credential"
+    | "sandbox_trust_conflict"
+    | "workspace_configuration_unsafe"
+    | "workspace_required",
   message: string,
   retryable: boolean
 ): Promise<boolean> {
@@ -536,6 +557,21 @@ export async function dispatchRunnerClaim(
       ? { kind: "refused", reason: "harness", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
+  if (
+    run.executionPermission !== "unrestricted" &&
+    !run.agentWorkspace?.trim()
+  ) {
+    return (await terminalizeUnstartedDispatchFailure(
+      dependencies,
+      authority,
+      run,
+      "workspace_required",
+      "Restricted runner execution requires a workspace.",
+      false
+    ))
+      ? { kind: "refused", reason: "workspace", runId: run.id }
+      : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
 
   let ensured: { agent: RunnerAgentRecord; sandbox: DaytonaProcessSandbox };
   try {
@@ -544,6 +580,51 @@ export async function dispatchRunnerClaim(
     return (await releaseUnstarted(dependencies, authority))
       ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
+  if (
+    run.executionPermission !== "unrestricted" &&
+    ensured.agent.sandboxTrust === "unrestricted"
+  ) {
+    return (await terminalizeUnstartedDispatchFailure(
+      dependencies,
+      authority,
+      run,
+      "sandbox_trust_conflict",
+      "Restricted runner execution requires a clean sandbox trust profile.",
+      false
+    ))
+      ? { kind: "refused", reason: "workspace", runId: run.id }
+      : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
+  if (
+    run.executionPermission !== "unrestricted" &&
+    ensured.agent.warmStatus === "provisioning"
+  ) {
+    return (await releaseUnstarted(dependencies, authority))
+      ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }
+      : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
+  if (run.executionPermission !== "unrestricted") {
+    const inspection = await (
+      dependencies.inspectRestrictedWorkspace ?? inspectRestrictedWorkspace
+    )(ensured.sandbox, run.agentWorkspace as string);
+    if (inspection.kind === "unavailable") {
+      return (await releaseUnstarted(dependencies, authority))
+        ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }
+        : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
+    if (inspection.kind === "unsafe") {
+      return (await terminalizeUnstartedDispatchFailure(
+        dependencies,
+        authority,
+        run,
+        "workspace_configuration_unsafe",
+        "Restricted runner execution cannot load repository hooks or settings.",
+        false
+      ))
+        ? { kind: "refused", reason: "workspace", runId: run.id }
+        : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
   }
 
   const credential = await dependencies.acquireCredential(
@@ -662,6 +743,7 @@ export async function dispatchRunnerClaim(
               callbacks.currentAuthority()
             )
           ).kind === "deleted",
+        executionPermission: run.executionPermission,
         instructions: run.agentInstructions,
         model: run.agentModel,
         persistAttemptRedaction: async ({

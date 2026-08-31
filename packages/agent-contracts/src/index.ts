@@ -305,6 +305,26 @@ export const expectedVersionInputSchema = z
   })
   .strict();
 
+function workspaceStaysInsideSandbox(value: string): boolean {
+  if (!value) {
+    return true;
+  }
+  const base = value.startsWith("/") ? value : `/workspace/${value}`;
+  const parts: string[] = [];
+  for (const segment of base.split("/")) {
+    if (!segment || segment === ".") {
+      continue;
+    }
+    if (segment === "..") {
+      parts.pop();
+    } else {
+      parts.push(segment);
+    }
+  }
+  const resolved = `/${parts.join("/")}`;
+  return resolved === "/workspace" || resolved.startsWith("/workspace/");
+}
+
 const agentDefinitionInputShape = {
   backend: backendSchema,
   description: z
@@ -324,6 +344,10 @@ const agentDefinitionInputShape = {
     .string()
     .trim()
     .max(AGENT_RUNNER_LIMITS.maxWorkspaceLength)
+    .refine(
+      workspaceStaysInsideSandbox,
+      "Workspace must stay inside /workspace."
+    )
     .optional(),
 };
 

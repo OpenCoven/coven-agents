@@ -169,6 +169,13 @@
       "when": 1788185371752,
       "tag": "0023_jittery_cardiac",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1788197163441,
+      "tag": "0024_runner_execution_permissions",
+      "breakpoints": true
     }
   ]
 }

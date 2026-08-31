@@ -540,6 +540,12 @@ export const runnerAgent = pgTable(
     })
       .notNull()
       .default("unprovisioned"),
+    sandboxTrust: varchar("sandboxTrust", {
+      enum: ["clean", "restricted", "unrestricted"],
+      length: 16,
+    })
+      .notNull()
+      .default("clean"),
     sandboxUpdatedAt: timestamp("sandboxUpdatedAt").notNull().defaultNow(),
     status: varchar("status", {
       enum: ["idle", "running", "error"],
@@ -590,6 +596,10 @@ export const runnerAgent = pgTable(
     check(
       "RunnerAgent_sandboxLifecycle_valid",
       sql`${table.sandboxLifecycle} in ('unprovisioned', 'provisioning', 'provisioning_ambiguous', 'ready', 'resetting', 'decommissioning', 'decommission_failed')`
+    ),
+    check(
+      "RunnerAgent_sandboxTrust_valid",
+      sql`${table.sandboxTrust} in ('clean', 'restricted', 'unrestricted')`
     ),
     check(
       "RunnerAgent_warmStatus_valid",
@@ -649,6 +659,12 @@ export const runnerRun = pgTable(
       .notNull()
       .default("queued"),
     error: jsonb("error").$type<RunError>(),
+    executionPermission: varchar("executionPermission", {
+      enum: ["unrestricted", "workspace_read", "workspace_write"],
+      length: 32,
+    })
+      .notNull()
+      .default("unrestricted"),
     fileEvidence: jsonb("fileEvidence")
       .$type<FileEvidence[]>()
       .notNull()
@@ -728,6 +744,10 @@ export const runnerRun = pgTable(
     check(
       "RunnerRun_dispatchState_valid",
       sql`${table.dispatchState} in ('queued', 'dispatching', 'running', 'terminal')`
+    ),
+    check(
+      "RunnerRun_executionPermission_valid",
+      sql`${table.executionPermission} in ('unrestricted', 'workspace_read', 'workspace_write')`
     ),
     check("RunnerRun_queueSequence_positive", sql`${table.queueSequence} > 0`),
     check("RunnerRun_logCursor_nonnegative", sql`${table.logCursor} >= 0`),

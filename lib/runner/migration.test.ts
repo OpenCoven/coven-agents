@@ -304,3 +304,152 @@ test("billing migration 0021 stays immutable and team migrations advance through
   assert.match(snapshot23, /"plannedRunnerRunId"/u);
   assert.match(snapshot23, /"RTStep_childReservation_valid"/u);
 });
+
+test("migration 0024 adds fail-closed runner execution permission after existing history", () => {
+  const directory = new URL("../db/migrations/", import.meta.url);
+  const migrationNames = readdirSync(directory);
+  const migrationName = migrationNames.find((name) => name.startsWith("0024_"));
+  assert.ok(
+    migrationName,
+    "runner execution permission requires migration 0024"
+  );
+
+  const migration = readFileSync(new URL(migrationName, directory), "utf8");
+  const addNullable = 'ADD COLUMN "executionPermission" varchar(32);';
+  const rejectUnsafe = "0024 cannot safely migrate live team children";
+  const backfillTeam = 'UPDATE "RunnerRun" AS "run"';
+  const backfillOrdinary =
+    'UPDATE "RunnerRun" SET "executionPermission" = \'unrestricted\'';
+  const setDefault =
+    'ALTER TABLE "RunnerRun" ALTER COLUMN "executionPermission" SET DEFAULT \'unrestricted\'';
+  const setNotNull =
+    'ALTER TABLE "RunnerRun" ALTER COLUMN "executionPermission" SET NOT NULL';
+  assert.ok(migration.includes(addNullable));
+  assert.match(migration, new RegExp(rejectUnsafe, "u"));
+  assert.match(
+    migration,
+    /CREATE TRIGGER "RunnerRun_team_execution_permission_guard"/u
+  );
+  assert.match(
+    migration,
+    /NEW\."executionPermission" IS NULL[\s\S]*NEW\."executionPermission" = 'unrestricted'[\s\S]*RAISE EXCEPTION/u
+  );
+  assert.match(migration, /NEW\."executionPermission" <> "teamPermission"/u);
+  assert.match(migration, /"run"\."status" IN \('queued', 'running'\)/u);
+  assert.match(migration, /"run"\."daytonaAttemptId" IS NOT NULL/u);
+  const migrationGuard = migration.slice(
+    migration.indexOf("DO $$"),
+    migration.indexOf("END $$") + "END $$".length
+  );
+  assert.doesNotMatch(
+    migrationGuard,
+    /agentRuntime|agentWorkspace|requiredCapabilities/u
+  );
+  assert.match(migration, /jsonb_array_elements\("step"\."skillSnapshots"\)/u);
+  assert.match(migration, /\? 'workspace\.write'/u);
+  assert.match(migration, /\? 'workspace\.read'/u);
+  assert.match(
+    migration,
+    /UPDATE "RunnerRun" AS "run"\s+SET "executionPermission" = 'unrestricted'\s+FROM "RunnerTeamStep"/u
+  );
+  assert.match(
+    migration,
+    /ALTER TABLE "RunnerAgent" ADD COLUMN "sandboxTrust" varchar\(16\)/u
+  );
+  assert.match(
+    migration,
+    /UPDATE "RunnerAgent" AS "agent"[\s\S]*"daytonaSandboxId" IS NOT NULL[\s\S]*"sandboxLifecycle" <> 'unprovisioned'[\s\S]*THEN 'unrestricted'[\s\S]*ELSE 'clean'/u
+  );
+  assert.match(
+    migration,
+    /SET "sandboxTrust" = 'unrestricted',\s+"updatedAt" = clock_timestamp\(\),\s+"version" = "version" \+ 1/u
+  );
+  assert.match(
+    migration,
+    /SET "sandboxTrust" = 'restricted',\s+"updatedAt" = clock_timestamp\(\),\s+"version" = "version" \+ 1/u
+  );
+  const insertTriggerFunction = migration.slice(
+    migration.indexOf(
+      'CREATE FUNCTION "RunnerRun_enforce_team_execution_permission"'
+    ),
+    migration.indexOf("$$ LANGUAGE plpgsql") + "$$ LANGUAGE plpgsql".length
+  );
+  assert.doesNotMatch(
+    insertTriggerFunction,
+    /NEW\."executionPermission" = 'unrestricted'[\s\S]*SET "sandboxTrust" = 'unrestricted'/u
+  );
+  assert.match(
+    migration,
+    /CREATE FUNCTION "RunnerRun_mark_launched_sandbox_trust"[\s\S]*OLD\."daytonaSessionId" IS NULL[\s\S]*NEW\."daytonaSessionId" IS NOT NULL/u
+  );
+  assert.match(migration, /RunnerAgent_sandboxTrust_valid/u);
+  assert.ok(migration.includes(backfillTeam));
+  assert.ok(migration.includes(backfillOrdinary));
+  assert.ok(migration.includes(setDefault));
+  assert.ok(migration.includes(setNotNull));
+  assert.ok(migration.indexOf(addNullable) < migration.indexOf(rejectUnsafe));
+  assert.ok(migration.indexOf(rejectUnsafe) < migration.indexOf(backfillTeam));
+  assert.ok(
+    migration.indexOf(backfillTeam) < migration.indexOf(backfillOrdinary)
+  );
+  assert.ok(
+    migration.indexOf(backfillOrdinary) < migration.indexOf(setDefault)
+  );
+  assert.ok(migration.indexOf(setDefault) < migration.indexOf(setNotNull));
+  assert.match(migration, /RunnerRun_executionPermission_valid/u);
+  assert.match(
+    migration,
+    /"RunnerRun"\."executionPermission" in \('unrestricted', 'workspace_read', 'workspace_write'\)/u
+  );
+
+  const journal = JSON.parse(
+    readFileSync(new URL("meta/_journal.json", directory), "utf8")
+  ) as { entries: { idx: number; tag: string }[] };
+  assert.deepEqual(journal.entries.at(-1), {
+    ...journal.entries.at(-1),
+    idx: 24,
+    tag: migrationName.replace(/\.sql$/u, ""),
+  });
+
+  const snapshot23 = JSON.parse(
+    readFileSync(new URL("meta/0023_snapshot.json", directory), "utf8")
+  ) as { id: string };
+  const snapshot24Source = readFileSync(
+    new URL("meta/0024_snapshot.json", directory),
+    "utf8"
+  );
+  const snapshot24 = JSON.parse(snapshot24Source) as {
+    prevId: string;
+    tables: {
+      "public.RunnerAgent": {
+        columns: Record<string, { default?: string; notNull: boolean }>;
+      };
+      "public.RunnerRun": {
+        checkConstraints: Record<string, { value: string }>;
+        columns: Record<string, { default?: string; notNull: boolean }>;
+      };
+    };
+  };
+  assert.equal(snapshot24.prevId, snapshot23.id);
+  assert.deepEqual(
+    snapshot24.tables["public.RunnerRun"].columns.executionPermission,
+    {
+      ...snapshot24.tables["public.RunnerRun"].columns.executionPermission,
+      default: "'unrestricted'",
+      notNull: true,
+    }
+  );
+  assert.equal(
+    snapshot24.tables["public.RunnerRun"].checkConstraints
+      .RunnerRun_executionPermission_valid?.value,
+    `"RunnerRun"."executionPermission" in ('unrestricted', 'workspace_read', 'workspace_write')`
+  );
+  assert.deepEqual(
+    snapshot24.tables["public.RunnerAgent"].columns.sandboxTrust,
+    {
+      ...snapshot24.tables["public.RunnerAgent"].columns.sandboxTrust,
+      default: "'clean'",
+      notNull: true,
+    }
+  );
+});

@@ -127,6 +127,20 @@ export function createTeamOrchestrator(
         if (deferredTeamRunIds.has(claim.teamRunId)) {
           break;
         }
+        if (claim.agentSnapshot.runtime !== "copilot") {
+          failures += 1;
+          if (
+            await failAdmission(claim, {
+              code: "restricted_runtime_unsupported",
+              message:
+                "The selected runtime cannot enforce team workspace permissions.",
+              retryable: false,
+            })
+          ) {
+            continue;
+          }
+          break;
+        }
         if (
           claim.declaredCapabilities.some((capability) =>
             capability.startsWith("github.")
@@ -137,6 +151,33 @@ export function createTeamOrchestrator(
             await failAdmission(claim, {
               code: "github_broker_unavailable",
               message: "GitHub operations require brokered execution.",
+              retryable: false,
+            })
+          ) {
+            continue;
+          }
+          break;
+        }
+        if (claim.executionPermission === null) {
+          failures += 1;
+          if (
+            await failAdmission(claim, {
+              code: "workspace_capability_required",
+              message:
+                "Team steps require declared workspace execution authority.",
+              retryable: false,
+            })
+          ) {
+            continue;
+          }
+          break;
+        }
+        if (!claim.agentSnapshot.workspace?.trim()) {
+          failures += 1;
+          if (
+            await failAdmission(claim, {
+              code: "workspace_required",
+              message: "Team steps require an explicit snapshotted workspace.",
               retryable: false,
             })
           ) {
@@ -163,10 +204,15 @@ export function createTeamOrchestrator(
             agentId: claim.agentId,
             agentSnapshot: claim.agentSnapshot,
             authVersion: claim.authVersion,
+            executionPermission: claim.executionPermission,
             id: ids.runId,
             operationId: ids.operationId,
             principal: claim.principal,
-            requestHash: hashRunRequest(claim.agentId, task),
+            requestHash: hashRunRequest(
+              claim.agentId,
+              task,
+              claim.executionPermission
+            ),
             task,
           });
         } catch {

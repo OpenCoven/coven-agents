@@ -5,6 +5,7 @@ import {
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
 import type {
+  HarnessExecutionPermission,
   HarnessId,
   HarnessSpec,
   HarnessStatus,
@@ -338,6 +339,7 @@ export function parseHarnessLog(
 
 export function buildHarnessCommand(input: {
   configDirectory?: string;
+  executionPermission?: HarnessExecutionPermission;
   harness: HarnessId;
   instructions: string;
   model: string;
@@ -351,9 +353,7 @@ export function buildHarnessCommand(input: {
       harness: input.harness,
       instructions: input.instructions,
       model: input.model,
-      permissionMode: input.task.startsWith("# Team Step Task\n")
-        ? "workspace"
-        : "unrestricted",
+      permissionMode: input.executionPermission ?? "unrestricted",
       stream: true,
       task: input.task,
     })

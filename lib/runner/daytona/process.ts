@@ -21,7 +21,11 @@ import {
   shellQuote,
   summarizeRun,
 } from "../harness";
-import type { RunnerDaytonaAttemptId, RunnerDispatchAuthority } from "../types";
+import type {
+  RunnerDaytonaAttemptId,
+  RunnerDispatchAuthority,
+  RunnerExecutionPermission,
+} from "../types";
 import {
   daytonaRunConfigDirectory,
   daytonaRunCredentialPath,
@@ -30,7 +34,24 @@ import {
 import { classifyDaytonaProviderError } from "./sandbox";
 
 const STAGING_TIMEOUT_SECONDS = 15;
+const WORKSPACE_INSPECTION_TIMEOUT_SECONDS = 15;
 const PROBE_SESSION_PATTERN = /^coven-probe-[0-9a-f]{40}$/u;
+const RESTRICTED_WORKSPACE_CONTROL_PATHS = [
+  ".mcp.json",
+  ".github/hooks",
+  ".github/mcp.json",
+  ".github/extensions",
+  ".github/lsp.json",
+  ".github/copilot/settings.json",
+  ".github/copilot/settings.local.json",
+  ".github/copilot/config.json",
+  ".github/copilot/plugins",
+  ".github/plugins",
+  ".copilot/plugins",
+  ".claude/settings.json",
+  ".claude/settings.local.json",
+  ".claude/plugins",
+] as const;
 
 /**
  * Daytona's command model has no lifecycle status in SDK 0.207, but it can
@@ -107,7 +128,8 @@ export class DaytonaProcessError extends Error {
     | "harness_missing"
     | "process_start_failed"
     | "sandbox_reset_required"
-    | "session_create_failed";
+    | "session_create_failed"
+    | "workspace_required";
   readonly retryable: boolean;
 
   constructor(
@@ -148,10 +170,25 @@ function stagingCommand(authName: string, path: string): string {
   ].join(" && ");
 }
 
+function restrictedWorkspaceInspectionCommand(): string {
+  const checks = RESTRICTED_WORKSPACE_CONTROL_PATHS.map(
+    (path) => `[ ! -e "$root/${path}" ] && [ ! -L "$root/${path}" ]`
+  ).join(" && ");
+  return [
+    'root="$(pwd -P)"',
+    "while :; do",
+    `  if ! (${checks}); then exit 42; fi`,
+    '  [ "$root" = "/workspace" ] && break',
+    `  case "$root" in /workspace/*) root="\${root%/*}" ;; *) exit 43 ;; esac`,
+    "done",
+  ].join("\n");
+}
+
 function asyncCommand(
   authName: string,
   credentialPath: string,
   configDirectory: string,
+  executionPermission: RunnerExecutionPermission,
   workspace: string,
   harnessCommand: string
 ): string {
@@ -167,21 +204,86 @@ function asyncCommand(
       ...providerCredentialVariables,
     ]),
   ].filter((name) => name !== authName);
+  const restricted = executionPermission !== "unrestricted";
+  const settingsPath = `${configDirectory}/settings.json`;
+  const restrictedSettings =
+    '{"disableAllHooks":true,"extensions":{"mode":"disabled"}}';
   return [
     "set -eu",
     `rm -rf -- ${shellQuote(configDirectory)}`,
     `mkdir -p -- ${shellQuote(configDirectory)}`,
     `chmod 700 ${shellQuote(configDirectory)}`,
     `export HOME=${shellQuote(configDirectory)}`,
+    ...(restricted
+      ? [
+          `export COPILOT_HOME=${shellQuote(configDirectory)}`,
+          `printf '%s\\n' ${shellQuote(restrictedSettings)} > ${shellQuote(settingsPath)}`,
+          `chmod 600 ${shellQuote(settingsPath)}`,
+          `mkdir -p -- ${shellQuote(workspace)}`,
+          `cd -- ${shellQuote(workspace)}`,
+          restrictedWorkspaceInspectionCommand(),
+          "unset COPILOT_ALLOW_ALL GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS",
+        ]
+      : []),
     `${authName}="$(cat -- ${shellQuote(credentialPath)})"`,
     `export ${authName}`,
     `rm -f -- ${shellQuote(credentialPath)}`,
     `unset ${credentialVariables.join(" ")}`,
     "export CI=true",
-    `mkdir -p -- ${shellQuote(workspace)}`,
-    `cd -- ${shellQuote(workspace)}`,
+    ...(restricted
+      ? []
+      : [
+          `mkdir -p -- ${shellQuote(workspace)}`,
+          `cd -- ${shellQuote(workspace)}`,
+        ]),
     `exec ${harnessCommand}`,
   ].join("; ");
+}
+
+export type RestrictedWorkspaceInspection =
+  | Readonly<{ kind: "safe" }>
+  | Readonly<{ kind: "unsafe" }>
+  | Readonly<{ kind: "unavailable" }>;
+
+/**
+ * Repository hooks execute outside model tool permissions. Scan the workspace
+ * and its ancestors before loading a restricted run's credential.
+ */
+export async function inspectRestrictedWorkspace(
+  sandbox: DaytonaProcessSandbox,
+  workspace: string
+): Promise<RestrictedWorkspaceInspection> {
+  let resolvedWorkspace: string;
+  try {
+    resolvedWorkspace = resolveSandboxWorkspace(workspace);
+  } catch {
+    return { kind: "unsafe" };
+  }
+  const command = [
+    "set -eu",
+    `mkdir -p -- ${shellQuote(resolvedWorkspace)}`,
+    `cd -- ${shellQuote(resolvedWorkspace)}`,
+    restrictedWorkspaceInspectionCommand(),
+  ].join("\n");
+  try {
+    if ((await sandbox.process.listSessions()).length > 0) {
+      return { kind: "unavailable" };
+    }
+    const result = await sandbox.process.executeCommand(
+      command,
+      "/workspace",
+      undefined,
+      WORKSPACE_INSPECTION_TIMEOUT_SECONDS
+    );
+    if (result.exitCode === 0) {
+      return { kind: "safe" };
+    }
+    return result.exitCode === 42
+      ? { kind: "unsafe" }
+      : { kind: "unavailable" };
+  } catch {
+    return { kind: "unavailable" };
+  }
 }
 
 async function removeCredential(
@@ -358,6 +460,13 @@ export type DaytonaPreparationAuthorizer = (
   authorization: DaytonaPreparationAuthorization
 ) => Promise<DaytonaAttemptId | null>;
 
+export type DaytonaUnrestrictedExecutionAuthorizer = (
+  authorization: Readonly<{
+    attemptId: DaytonaAttemptId;
+    runId: string;
+  }>
+) => Promise<boolean>;
+
 export type DaytonaLaunchAuthorization = Readonly<{
   commandId?: string;
   attemptId: DaytonaAttemptId;
@@ -411,8 +520,10 @@ export type DaytonaAttemptRedactionRelease = (
 export async function startDaytonaProcess(input: {
   authorizeLaunch: DaytonaLaunchAuthorizer;
   authorizePreparation: DaytonaPreparationAuthorizer;
+  authorizeUnrestrictedExecution: DaytonaUnrestrictedExecutionAuthorizer;
   credential: HarnessCredential;
   deleteAttemptRedaction: DaytonaAttemptRedactionRelease;
+  executionPermission: RunnerExecutionPermission;
   instructions: string;
   model: string;
   persistAttemptRedaction: DaytonaAttemptRedactionPersister;
@@ -424,6 +535,16 @@ export async function startDaytonaProcess(input: {
   workspace?: string;
 }): Promise<DaytonaStartedProcess> {
   const { auth, spec } = requireHarness(input.runtime, input.credential);
+  if (
+    input.executionPermission !== "unrestricted" &&
+    !input.workspace?.trim()
+  ) {
+    throw new DaytonaProcessError(
+      "Restricted runner execution requires an explicit workspace.",
+      "workspace_required",
+      false
+    );
+  }
   const workspace = resolveSandboxWorkspace(input.workspace);
   const { process } = input.sandbox;
 
@@ -444,6 +565,13 @@ export async function startDaytonaProcess(input: {
   if (typeof input.authorizeLaunch !== "function") {
     throw new DaytonaProcessError(
       "Daytona launch authorization is required before provider mutation.",
+      "process_start_failed",
+      false
+    );
+  }
+  if (typeof input.authorizeUnrestrictedExecution !== "function") {
+    throw new DaytonaProcessError(
+      "Daytona unrestricted execution authorization is required before provider mutation.",
       "process_start_failed",
       false
     );
@@ -544,6 +672,46 @@ export async function startDaytonaProcess(input: {
     );
   }
 
+  let sessionCreated = false;
+  if (input.executionPermission !== "unrestricted") {
+    try {
+      await process.createSession(sessionId);
+      sessionCreated = true;
+      const sessions = await process.listSessions();
+      if (sessions.length !== 1 || sessions[0]?.sessionId !== sessionId) {
+        throw new DaytonaProcessError(
+          "Restricted runner execution requires an exclusive process session.",
+          "process_start_failed",
+          true
+        );
+      }
+    } catch (error) {
+      return await cleanupFailedStart(
+        input.sandbox,
+        credentialPath,
+        sessionId,
+        error instanceof DaytonaProcessError
+          ? error
+          : providerError(
+              "session_create_failed",
+              "Daytona could not create the run process session.",
+              error
+            ),
+        (claim) =>
+          input.deleteAttemptRedaction({
+            attemptId: claim,
+            runId: input.runId,
+          }),
+        (claim) =>
+          input.releasePreparation({
+            attemptId: claim,
+            runId: input.runId,
+          }),
+        attemptId
+      );
+    }
+  }
+
   try {
     const staged = await process.executeCommand(
       stagingCommand(auth.name, credentialPath),
@@ -581,39 +749,59 @@ export async function startDaytonaProcess(input: {
     );
   }
 
-  try {
-    await process.createSession(sessionId);
-  } catch (error) {
-    return await cleanupFailedStart(
-      input.sandbox,
-      credentialPath,
-      sessionId,
-      providerError(
-        "session_create_failed",
-        "Daytona could not create the run process session.",
-        error
-      ),
-      (claim) =>
-        input.deleteAttemptRedaction({ attemptId: claim, runId: input.runId }),
-      (claim) =>
-        input.releasePreparation({
-          attemptId: claim,
-          runId: input.runId,
-        }),
-      attemptId
-    );
+  if (!sessionCreated) {
+    try {
+      await process.createSession(sessionId);
+    } catch (error) {
+      return await cleanupFailedStart(
+        input.sandbox,
+        credentialPath,
+        sessionId,
+        providerError(
+          "session_create_failed",
+          "Daytona could not create the run process session.",
+          error
+        ),
+        (claim) =>
+          input.deleteAttemptRedaction({
+            attemptId: claim,
+            runId: input.runId,
+          }),
+        (claim) =>
+          input.releasePreparation({
+            attemptId: claim,
+            runId: input.runId,
+          }),
+        attemptId
+      );
+    }
   }
 
   let commandId: string;
   try {
+    if (
+      input.executionPermission === "unrestricted" &&
+      !(await input.authorizeUnrestrictedExecution({
+        attemptId,
+        runId: input.runId,
+      }))
+    ) {
+      throw new DaytonaProcessError(
+        "Daytona unrestricted execution authorization could not be confirmed.",
+        "process_start_failed",
+        false
+      );
+    }
     const response = await process.executeSessionCommand(sessionId, {
       command: asyncCommand(
         auth.name,
         credentialPath,
         configDirectory,
+        input.executionPermission,
         workspace,
         buildHarnessCommand({
           configDirectory,
+          executionPermission: input.executionPermission,
           harness: spec.id,
           instructions: input.instructions,
           model: input.model,

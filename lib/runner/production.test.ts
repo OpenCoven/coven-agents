@@ -66,6 +66,7 @@ function run(authVersion: number | null): RunnerRunRecord {
     dispatchLeaseToken: "claim-lease",
     dispatchState: "dispatching",
     error: null,
+    executionPermission: "unrestricted",
     fileEvidence: [],
     id: "00000000-0000-4000-8000-000000000002",
     logCursor: 1,

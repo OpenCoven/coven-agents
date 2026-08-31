@@ -13,6 +13,7 @@ import {
   daytonaRunSessionName,
 } from "./daytona/names";
 import {
+  hashRunRequest,
   MAX_EVENT_PAGE_BYTES,
   MAX_EVENTS_PER_PAGE,
   MAX_EVENTS_PER_RUN,
@@ -75,6 +76,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     dispatchLeaseToken: "lease-a",
     dispatchState: "dispatching",
     error: null,
+    executionPermission: "unrestricted",
     fileEvidence: [],
     id: "00000000-0000-4000-8000-000000000002",
     logCursor: 3,
@@ -104,6 +106,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     runtime: "copilot",
     sandboxGeneration: 0,
     sandboxLifecycle: "unprovisioned",
+    sandboxTrust: "clean",
     sandboxUpdatedAt: new Date("2026-01-01T00:00:00.000Z"),
     status: "idle",
     tenant: principal.tenant,
@@ -606,6 +609,133 @@ test("duplicate starts return the immutable matching request", async () => {
   assert.equal(existing.authVersion, 4);
 });
 
+test("duplicate starts conflict when execution permission differs", async () => {
+  const existing = run({ executionPermission: "workspace_read" });
+  const { store } = scripted(
+    [agent({ id: existing.agentId, sandboxLifecycle: "ready" })],
+    [existing]
+  );
+
+  const result = await store.startRun(principal, {
+    agentId: existing.agentId,
+    authVersion: 9,
+    executionPermission: "workspace_write",
+    id: existing.id,
+    operationId: existing.operationId,
+    requestHash: existing.requestHash,
+    task: existing.task,
+  });
+
+  assert.equal(result.kind, "conflict");
+});
+
+test("restricted starts refuse an unrestricted sandbox trust profile", async () => {
+  const current = run({ executionPermission: "workspace_read" });
+  const { statements, store } = scripted(
+    [
+      agent({
+        id: current.agentId,
+        sandboxLifecycle: "ready",
+        sandboxTrust: "unrestricted",
+      }),
+    ],
+    []
+  );
+
+  const result = await store.startRun(principal, {
+    agentId: current.agentId,
+    authVersion: 9,
+    executionPermission: "workspace_read",
+    id: current.id,
+    operationId: current.operationId,
+    requestHash: current.requestHash,
+    task: current.task,
+  });
+
+  assert.deepEqual(result, { kind: "sandbox_trust_conflict" });
+  assert.deepEqual(
+    statements.map((statement) => statement.name),
+    ["lock-agent-for-run-start", "get-operation-run-before-admission"]
+  );
+});
+
+test("restricted starts refuse a pending unrestricted run before admission", async () => {
+  const current = run({ executionPermission: "workspace_read" });
+  const { statements, store } = scripted(
+    [
+      agent({
+        id: current.agentId,
+        sandboxLifecycle: "ready",
+        sandboxTrust: "restricted",
+      }),
+    ],
+    [],
+    [{ id: "pending-unrestricted-run" }]
+  );
+
+  const result = await store.startRun(principal, {
+    agentId: current.agentId,
+    authVersion: 9,
+    executionPermission: "workspace_read",
+    id: current.id,
+    operationId: current.operationId,
+    requestHash: current.requestHash,
+    task: current.task,
+  });
+
+  assert.deepEqual(result, { kind: "sandbox_trust_conflict" });
+  assert.equal(statements[2]?.name, "find-pending-unrestricted-run");
+  assert.match(
+    queryText(statements[2] as RunnerStoreStatement),
+    /"cancellationRequestedAt" IS NULL[\s\S]*"executionPermission" = 'unrestricted'/u
+  );
+});
+
+test("restricted retries accept only their exact legacy pre-migration hash", async () => {
+  const existing = run({
+    executionPermission: "workspace_read",
+    requestHash: hashRunRequest(run().agentId, run().task),
+  });
+  const exact = scripted(
+    [agent({ id: existing.agentId, sandboxLifecycle: "ready" })],
+    [existing]
+  );
+  const changed = scripted(
+    [agent({ id: existing.agentId, sandboxLifecycle: "ready" })],
+    [existing]
+  );
+
+  const duplicate = await exact.store.startRun(principal, {
+    agentId: existing.agentId,
+    authVersion: 9,
+    executionPermission: "workspace_read",
+    id: existing.id,
+    operationId: existing.operationId,
+    requestHash: hashRunRequest(
+      existing.agentId,
+      existing.task,
+      "workspace_read"
+    ),
+    task: existing.task,
+  });
+  const conflict = await changed.store.startRun(principal, {
+    agentId: existing.agentId,
+    authVersion: 9,
+    executionPermission: "workspace_read",
+    id: existing.id,
+    operationId: existing.operationId,
+    requestHash: hashRunRequest(
+      existing.agentId,
+      `${existing.task} changed`,
+      "workspace_read"
+    ),
+    task: `${existing.task} changed`,
+  });
+
+  assert.equal(duplicate.kind, "duplicate");
+  assert.equal(conflict.kind, "conflict");
+});
+
 test("new runs persist trusted authority and internal hydration preserves it", async () => {
   const inserted = { ...run(), authVersion: 8 } as RunnerRunRecord;
   const accepted = {
@@ -642,11 +772,55 @@ test("new runs persist trusted authority and internal hydration preserves it", a
     (statement) => statement.name === "insert-run"
   );
   assert.equal(insert?.args.authVersion, 8);
+  assert.equal(insert?.args.executionPermission, "unrestricted");
   assert.match(queryText(insert as RunnerStoreStatement), /"authVersion"/);
+  assert.match(
+    queryText(insert as RunnerStoreStatement),
+    /"executionPermission"/
+  );
 
   const hydration = scripted([advanced]);
   const [hydrated] = await hydration.store.scanLiveRuns(operator, 1);
   assert.equal((hydrated as { authVersion?: number }).authVersion, 8);
+  assert.equal(
+    (hydrated as { executionPermission?: string }).executionPermission,
+    "unrestricted"
+  );
+});
+
+test("new restricted runs persist the exact execution permission", async () => {
+  const inserted = run({ executionPermission: "workspace_read" });
+  const accepted = {
+    createdAt: inserted.createdAt,
+    event: {},
+    eventId: 1,
+    runId: inserted.id,
+  };
+  const creation = scripted(
+    [agent({ id: inserted.agentId, sandboxLifecycle: "ready" })],
+    [],
+    [],
+    [inserted],
+    [accepted],
+    [{ ...inserted, logCursor: 1, version: inserted.version + 1 }]
+  );
+
+  const result = await creation.store.startRun(principal, {
+    agentId: inserted.agentId,
+    authVersion: 8,
+    executionPermission: "workspace_read",
+    id: inserted.id,
+    operationId: inserted.operationId,
+    requestHash: inserted.requestHash,
+    task: inserted.task,
+  });
+
+  assert.equal(result.kind, "created");
+  assert.equal(
+    creation.statements.find((statement) => statement.name === "insert-run")
+      ?.args.executionPermission,
+    "workspace_read"
+  );
 });
 
 test("new runs persist immutable agent execution snapshots", async () => {
@@ -2624,6 +2798,16 @@ test("dispatch store methods fence preparation, attachment, and release", async 
     /"daytonaAttemptId" = NULL/
   );
 
+  const trust = scripted([launchCurrent], [{ id: launchCurrent.agentId }]);
+  assert.deepEqual(
+    await trust.store.authorizeUnrestrictedExecution(operator, claim.authority),
+    { kind: "authorized" }
+  );
+  assert.match(
+    queryText(trust.statements[1] as RunnerStoreStatement),
+    /"sandboxTrust" = 'unrestricted'[\s\S]*"version" = "version" \+ 1/u
+  );
+
   const releaseCurrent = run({
     daytonaAttemptId: claim.attemptId,
     version: preparedRun.version,
@@ -2668,6 +2852,8 @@ test("dispatch store methods fence preparation, attachment, and release", async 
         });
       },
       authorizeDaytonaPreparation: () => Promise.resolve(claim),
+      authorizeUnrestrictedExecution: () =>
+        Promise.resolve({ kind: "authorized" as const }),
       releaseDaytonaPreparation: () =>
         Promise.resolve({ authority, kind: "released" as const }),
     },
@@ -2678,6 +2864,13 @@ test("dispatch store methods fence preparation, attachment, and release", async 
     runId: dispatching.id,
   });
   assert.equal(callbackClaim, claim.attemptId);
+  assert.equal(
+    await callbacks.authorizeUnrestrictedExecution({
+      attemptId: claim.attemptId,
+      runId: dispatching.id,
+    }),
+    true
+  );
   assert.equal(
     await callbacks.authorizeLaunch({
       attemptId: claim.attemptId,
@@ -2987,6 +3180,10 @@ test("cancellation sandbox reset reserves and clears a fenced generation", async
   assert.match(
     queryText(finish.statements[0] as RunnerStoreStatement),
     /"daytonaSandboxId" = NULL/u
+  );
+  assert.match(
+    queryText(finish.statements[0] as RunnerStoreStatement),
+    /"sandboxTrust" = 'clean'/u
   );
 });
 
@@ -3438,6 +3635,10 @@ test("warm and decommission transitions retain generation and version fences", a
   assert.match(warmQuery, /"warmStatus" = 'provisioning'/u);
   assert.match(warmQuery, /"warmAttemptVersion" = "warmAttemptVersion" \+ 1/u);
   assert.match(warmQuery, /"sandboxGeneration" = \$/u);
+  assert.match(
+    warmQuery,
+    /NOT EXISTS \(\s*SELECT 1\s*FROM "RunnerRun" AS "activeRun"[\s\S]*"activeRun"\."dispatchState" IN \('dispatching', 'running'\)/u
+  );
   assert.match(decommissionQuery, /"sandboxLifecycle" = 'decommissioning'/u);
   assert.match(deleteQuery, /"sandboxLifecycle" = 'decommissioning'/u);
   assert.match(deleteQuery, /"version" = \$/u);
@@ -3876,6 +4077,72 @@ test("zero queue capacity atomically claims an immediately eligible run", async 
       "advance-runner-scheduler",
     ]
   );
+});
+
+test("zero queue rejection restores sandbox trust when its run is discarded", async () => {
+  const current = run({
+    dispatchLeaseExpiresAt: null,
+    dispatchLeaseToken: null,
+    dispatchState: "queued",
+    executionPermission: "unrestricted",
+    version: 0,
+  });
+  const accepted = run({ ...current, logCursor: 1, version: 1 });
+  const other = run({
+    ...accepted,
+    id: "00000000-0000-4000-8000-000000000099",
+  });
+  const { statements, store } = scripted(
+    [
+      agent({
+        id: current.agentId,
+        sandboxLifecycle: "ready",
+        sandboxTrust: "restricted",
+      }),
+    ],
+    [],
+    [
+      {
+        consecutiveDispatchCount: 0,
+        lastDispatchedTenantHash: null,
+      },
+    ],
+    [{ activeCount: 0 }],
+    [current],
+    [{}],
+    [accepted],
+    [other],
+    [],
+    [{}]
+  );
+
+  const result = await store.startRun(principal, {
+    admission: {
+      consecutiveDispatches: 2,
+      deploymentActiveRuns: 25,
+      tenantActiveRuns: 2,
+      tenantQueuedRuns: 0,
+    },
+    agentId: current.agentId,
+    authVersion: 1,
+    id: current.id,
+    initialDispatch: {
+      leaseExpiresAt: new Date("2026-01-01T00:01:00.000Z"),
+      leaseToken: "lease-a",
+    },
+    operationId: current.operationId,
+    requestHash: current.requestHash,
+    task: current.task,
+  });
+
+  assert.deepEqual(result, { kind: "refused", reason: "tenant_queue_full" });
+  assert.deepEqual(
+    statements.slice(-2).map((statement) => statement.name),
+    ["discard-zero-capacity-run", "restore-discarded-run-sandbox-trust"]
+  );
+  const restored = statements.at(-1) as RunnerStoreStatement;
+  assert.equal(restored.args.sandboxTrust, "restricted");
+  assert.match(queryText(restored), /"sandboxTrust" = \$/u);
 });
 
 test("the production statement shape remains Drizzle-safe", () => {

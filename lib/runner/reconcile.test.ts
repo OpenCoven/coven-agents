@@ -40,6 +40,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     dispatchLeaseToken: "expired-lease",
     dispatchState: "dispatching",
     error: null,
+    executionPermission: "unrestricted",
     fileEvidence: [],
     id: "00000000-0000-4000-8000-000000000002",
     logCursor: 1,
@@ -58,7 +59,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
 
 test("reconciliation projects and claims teams before dispatch and retries terminal cleanup last", async () => {
   const calls: string[] = [];
-  const claimedRun = run();
+  const claimedRun = run({ executionPermission: "workspace_write" });
   const claimed = {
     authority: {
       expectedVersion: claimedRun.version,
@@ -80,6 +81,7 @@ test("reconciliation projects and claims teams before dispatch and retries termi
     dispatchClaim: async (value) => {
       calls.push("dispatch-team-claim");
       assert.equal(value, claimed);
+      assert.equal(value.run.executionPermission, "workspace_write");
       return { kind: "started" as const, runId: value.run.id };
     },
     operator,
@@ -189,6 +191,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     runtime: "copilot",
     sandboxGeneration: 1,
     sandboxLifecycle: "provisioning_ambiguous",
+    sandboxTrust: "clean",
     sandboxUpdatedAt: new Date("2026-08-28T14:00:00.000Z"),
     status: "idle",
     tenant: "tenant_a",

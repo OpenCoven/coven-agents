@@ -12,6 +12,7 @@ import { type SQL, sql } from "drizzle-orm";
 import type { databaseFor } from "@/lib/db/access";
 import { daytonaRunSessionName } from "./daytona/names";
 import {
+  hashRunRequest,
   MAX_EVENT_PAGE_BYTES,
   MAX_EVENTS_PER_PAGE,
   MAX_EVENTS_PER_RUN,
@@ -141,6 +142,7 @@ function asAgent(row: Record<string, unknown>): RunnerAgentRecord {
     runtime: column(row, "runtime"),
     sandboxGeneration: column(row, "sandboxGeneration"),
     sandboxLifecycle: column(row, "sandboxLifecycle"),
+    sandboxTrust: column(row, "sandboxTrust"),
     sandboxUpdatedAt: timestampColumn(row, "sandboxUpdatedAt"),
     status: column(row, "status"),
     tenant: column(row, "tenant"),
@@ -179,6 +181,7 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
     dispatchLeaseToken: column(row, "dispatchLeaseToken"),
     dispatchState: column(row, "dispatchState"),
     error: column(row, "error"),
+    executionPermission: column(row, "executionPermission"),
     fileEvidence: column(row, "fileEvidence"),
     id: column(row, "id"),
     logCursor: column(row, "logCursor"),
@@ -629,6 +632,43 @@ function runSnapshot(run: RunnerRunRecord): RunSnapshot {
     status: run.status,
     task: run.task,
   };
+}
+
+function matchesRunRequest(
+  run: RunnerRunRecord,
+  input: StartRunnerRunInput,
+  executionPermission: RunnerRunRecord["executionPermission"]
+): boolean {
+  if (run.executionPermission !== executionPermission) {
+    return false;
+  }
+  if (run.requestHash === input.requestHash) {
+    return true;
+  }
+  return (
+    executionPermission !== "unrestricted" &&
+    run.task === input.task &&
+    run.requestHash === hashRunRequest(input.agentId, input.task)
+  );
+}
+
+async function restoreDiscardedRunSandboxTrust(
+  transaction: RunnerStoreTransaction,
+  agentId: string,
+  tenant: string,
+  sandboxTrust: RunnerAgentRecord["sandboxTrust"]
+): Promise<void> {
+  await transaction.execute(
+    statement(
+      "restore-discarded-run-sandbox-trust",
+      { agentId, sandboxTrust, tenant },
+      sql`UPDATE "RunnerAgent"
+        SET "sandboxTrust" = ${sandboxTrust},
+            "updatedAt" = clock_timestamp()
+        WHERE "id" = ${agentId}
+          AND "tenant" = ${tenant}`
+    )
+  );
 }
 
 async function lockedPrincipalRun(
@@ -1854,6 +1894,39 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         };
       }),
 
+    authorizeUnrestrictedExecution: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority
+    ): Promise<{ kind: "authorized" | "not_live" }> =>
+      database.transaction(async (transaction) => {
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+        ]);
+        if (
+          run?.executionPermission !== "unrestricted" ||
+          !authority.attemptId ||
+          run.daytonaAttemptId !== authority.attemptId ||
+          run.daytonaSessionId ||
+          run.daytonaCommandId
+        ) {
+          return { kind: "not_live" };
+        }
+        const [updated] = await transaction.execute(
+          statement(
+            "authorize-unrestricted-execution",
+            { agentId: run.agentId, tenant: run.tenant },
+            sql`UPDATE "RunnerAgent"
+              SET "sandboxTrust" = 'unrestricted',
+                  "updatedAt" = clock_timestamp(),
+                  "version" = "version" + 1
+              WHERE "id" = ${run.agentId}
+                AND "tenant" = ${run.tenant}
+              RETURNING "id"`
+          )
+        );
+        return { kind: updated ? "authorized" : "not_live" };
+      }),
+
     beginDaytonaSandboxDecommission: (
       principal: RunnerPrincipal,
       input: BeginDaytonaSandboxDecommissionInput
@@ -2120,6 +2193,13 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "sandboxGeneration" = ${input.expectedGeneration}
                 AND "sandboxLifecycle" = 'ready'
                 AND "warmStatus" <> 'provisioning'
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM "RunnerRun" AS "activeRun"
+                  WHERE "activeRun"."agentId" = ${input.agentId}
+                    AND "activeRun"."tenant" = ${principal.tenant}
+                    AND "activeRun"."dispatchState" IN ('dispatching', 'running')
+                )
               RETURNING *`
           )
         );
@@ -2814,6 +2894,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             sql`UPDATE "RunnerAgent"
               SET "daytonaSandboxId" = NULL,
                   "sandboxLifecycle" = 'unprovisioned',
+                  "sandboxTrust" = 'clean',
                   "sandboxUpdatedAt" = clock_timestamp(),
                   "warmStatus" = 'not_started',
                   "warmUpdatedAt" = clock_timestamp(),
@@ -4009,6 +4090,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             sql`UPDATE "RunnerAgent"
               SET "daytonaSandboxId" = NULL,
                   "sandboxLifecycle" = 'unprovisioned',
+                  "sandboxTrust" = 'clean',
                   "sandboxUpdatedAt" = clock_timestamp(),
                   "warmStatus" = 'not_started',
                   "warmUpdatedAt" = clock_timestamp(),
@@ -4167,6 +4249,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
       | { kind: "claimed"; claimed: RunnerClaimedDispatch; run: RunSnapshot }
       | { kind: "duplicate"; run: RunSnapshot }
       | { kind: "conflict"; run: RunSnapshot }
+      | { kind: "sandbox_trust_conflict" }
       | {
           kind: "refused";
           reason: "global_busy" | "tenant_queue_full";
@@ -4179,8 +4262,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             "unprovisioned" | "provisioning" | "ready"
           >;
         }
-    > =>
-      database.transaction(async (transaction) => {
+    > => {
+      const executionPermission = input.executionPermission ?? "unrestricted";
+      return database.transaction(async (transaction) => {
         const [agent] = await transaction.execute(
           statement(
             "lock-agent-for-run-start",
@@ -4200,9 +4284,38 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           principal.tenant
         );
         if (existingOperation) {
-          return existingOperation.requestHash === input.requestHash
+          return matchesRunRequest(
+            existingOperation,
+            input,
+            executionPermission
+          )
             ? { kind: "duplicate", run: runSnapshot(existingOperation) }
             : { kind: "conflict", run: runSnapshot(existingOperation) };
+        }
+        if (
+          executionPermission !== "unrestricted" &&
+          column(agent, "sandboxTrust") === "unrestricted"
+        ) {
+          return { kind: "sandbox_trust_conflict" };
+        }
+        if (executionPermission !== "unrestricted") {
+          const [pendingUnrestrictedRun] = await transaction.execute(
+            statement(
+              "find-pending-unrestricted-run",
+              { agentId: input.agentId, tenant: principal.tenant },
+              sql`SELECT "id"
+                FROM "RunnerRun"
+                WHERE "agentId" = ${input.agentId}
+                  AND "tenant" = ${principal.tenant}
+                  AND "status" IN ('queued', 'running')
+                  AND "cancellationRequestedAt" IS NULL
+                  AND "executionPermission" = 'unrestricted'
+                LIMIT 1`
+            )
+          );
+          if (pendingUnrestrictedRun) {
+            return { kind: "sandbox_trust_conflict" };
+          }
         }
         if (
           agent.sandboxLifecycle !== "unprovisioned" &&
@@ -4261,6 +4374,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               agentRuntime: agentSnapshot.runtime,
               agentWorkspace: agentSnapshot.workspace,
               authVersion: input.authVersion,
+              executionPermission,
               id: input.id,
               operationId: input.operationId,
               requestHash: input.requestHash,
@@ -4270,13 +4384,13 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             sql`INSERT INTO "RunnerRun" (
               "id", "agentId", "tenant", "agentInstructions", "agentModel",
               "agentRuntime", "agentWorkspace", "authVersion", "operationId",
-              "requestHash", "task"
+              "requestHash", "task", "executionPermission"
             ) VALUES (
               ${input.id}, ${input.agentId}, ${principal.tenant},
               ${agentSnapshot.instructions}, ${agentSnapshot.model},
               ${agentSnapshot.runtime}, ${agentSnapshot.workspace},
               ${input.authVersion}, ${input.operationId}, ${input.requestHash},
-              ${input.task}
+              ${input.task}, ${executionPermission}
             ) ON CONFLICT ("agentId", "operationId") DO NOTHING RETURNING *`
           )
         );
@@ -4345,6 +4459,12 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                       AND "status" = 'queued'`
                 )
               );
+              await restoreDiscardedRunSandboxTrust(
+                transaction,
+                input.agentId,
+                principal.tenant,
+                column(agent, "sandboxTrust")
+              );
               return { kind: "refused", reason: "tenant_queue_full" };
             }
             const claimed = await claimLockedDispatch(transaction, candidate, {
@@ -4362,6 +4482,12 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                       AND "dispatchState" = 'queued'
                       AND "status" = 'queued'`
                 )
+              );
+              await restoreDiscardedRunSandboxTrust(
+                transaction,
+                input.agentId,
+                principal.tenant,
+                column(agent, "sandboxTrust")
               );
               return { kind: "refused", reason: "tenant_queue_full" };
             }
@@ -4402,10 +4528,11 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           );
         }
         const run = asRun(existing);
-        return run.requestHash === input.requestHash
+        return matchesRunRequest(run, input, executionPermission)
           ? { kind: "duplicate", run: runSnapshot(run) }
           : { kind: "conflict", run: runSnapshot(run) };
-      }),
+      });
+    },
 
     updateAgent: (
       principal: RunnerPrincipal,

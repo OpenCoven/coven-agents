@@ -69,6 +69,15 @@ test("creates strict queued snapshots and accepted events with a stable request 
   assert.notEqual(matchingHash, differentHash);
 });
 
+test("request hashing binds restricted execution permission without changing ordinary hashes", () => {
+  const legacy = hashRunRequest(agentId, "Same task.");
+  assert.equal(hashRunRequest(agentId, "Same task.", "unrestricted"), legacy);
+  assert.notEqual(
+    hashRunRequest(agentId, "Same task.", "workspace_read"),
+    hashRunRequest(agentId, "Same task.", "workspace_write")
+  );
+});
+
 test("bounds Unicode by UTF-16 and UTF-8 limits without splitting characters", () => {
   const value = "😀".repeat(100);
   const bounded = truncateUtf8(value, 31, 31, "");
