@@ -47,10 +47,12 @@ const HARNESSES = HARNESS_SPECS.filter((spec) => spec.supported).map(
 );
 
 export function HarnessCredentials({
+  authorityContextRevision,
   authorityRevision,
   isSubscriber,
   onAuthorityInvalidated,
 }: {
+  authorityContextRevision: string;
   authorityRevision: string | null;
   isSubscriber: boolean;
   onAuthorityInvalidated: () => void;
@@ -61,7 +63,7 @@ export function HarnessCredentials({
   const [lockedAuthorityContext, setLockedAuthorityContext] = useState<
     string | null
   >(null);
-  const authorityContext = `${authorityRevision ?? ""}:${isSubscriber ? "subscriber" : "demo"}`;
+  const authorityContext = `${authorityContextRevision}:${isSubscriber ? "subscriber" : "demo"}`;
   const authorityContextRef = useRef(authorityContext);
   authorityContextRef.current = authorityContext;
   const locked = !isSubscriber || lockedAuthorityContext === authorityContext;
@@ -235,10 +237,14 @@ export function HarnessCredentials({
       ) : (
         HARNESSES.map((harness) => (
           <HarnessRow
+            authorityContextRevision={authorityContextRevision}
+            authorityRevision={authorityRevision}
             busy={busy === harness.id}
             configured={configured.includes(harness.id)}
             harness={harness}
+            isSubscriber={isSubscriber}
             key={harness.id}
+            onAuthorityInvalidated={onAuthorityInvalidated}
             onChange={change}
             onConnected={reload}
             onRemove={remove}
@@ -252,17 +258,25 @@ export function HarnessCredentials({
 }
 
 function HarnessRow({
+  authorityContextRevision,
+  authorityRevision,
   busy,
   configured,
   harness,
+  isSubscriber,
   onChange,
+  onAuthorityInvalidated,
   onConnected,
   onRemove,
   onSave,
   value,
 }: {
+  authorityContextRevision: string;
+  authorityRevision: string | null;
   busy: boolean;
   configured: boolean;
+  isSubscriber: boolean;
+  onAuthorityInvalidated: () => void;
   onConnected: () => void;
   harness: { help: string; id: string; label: string };
   onChange: (harnessId: string, next: string) => void;
@@ -368,7 +382,11 @@ function HarnessRow({
       {showEditor && harness.id === "copilot" ? (
         <>
           <ConnectCopilot
+            authorityContextRevision={authorityContextRevision}
+            authorityRevision={authorityRevision}
             configured={configured}
+            isSubscriber={isSubscriber}
+            onAuthorityInvalidated={onAuthorityInvalidated}
             onConnected={handleConnected}
           />
           <div className="flex items-center gap-3 py-1">

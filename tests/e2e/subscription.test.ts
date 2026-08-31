@@ -6,6 +6,7 @@ import {
   type Route,
   test,
 } from "@playwright/test";
+import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
 import { E2E_USER_ID, sessionCookies } from "./session";
 
 const CHECKOUT_ENABLED = process.env.SUBSCRIPTION_CHECKOUT_ENABLED === "on";
@@ -82,7 +83,7 @@ async function mockSubscriberConsoleDependencies(page: Page): Promise<void> {
   await page.route("**/api/usage", (route) =>
     route.fulfill({
       json: {
-        cap: 750,
+        cap: MONTHLY_RUN_CAP,
         resetsAt: "2099-02-01T00:00:00.000Z",
         used: 0,
       },
@@ -293,7 +294,7 @@ test.describe("Subscriber checkout", () => {
     await expect(checkoutButton(page)).toHaveCount(0);
   });
 
-  test("flag on presents the same restrained 750-run offer on both account surfaces", async ({
+  test("flag on presents the same authoritative run cap on both account surfaces", async ({
     page,
   }) => {
     test.skip(!CHECKOUT_ENABLED, "This is the launch-flag-on contract.");
@@ -303,7 +304,13 @@ test.describe("Subscriber checkout", () => {
     await page.goto("/account");
     await page.getByRole("tab", { name: "Billing" }).click();
     const accountCard = page.locator(".oc-subscription-card");
-    await expect(accountCard).toContainText("750 runs");
+    await expect(accountCard).toContainText(`${MONTHLY_RUN_CAP} runs`);
+    await expect(
+      accountCard.getByRole("img", { name: "Monthly allowance" })
+    ).toHaveAttribute(
+      "aria-label",
+      `Monthly allowance: ${MONTHLY_RUN_CAP} agent runs`
+    );
     await expect(accountCard).toContainText("each month");
     await expect(accountCard).toContainText(
       "Stripe shows the configured amount before purchase"
@@ -314,7 +321,7 @@ test.describe("Subscriber checkout", () => {
     await openConsoleSettings(page);
     await page.getByRole("tab", { name: "Billing" }).click();
     const consoleCard = page.locator(".oc-subscription-card");
-    await expect(consoleCard).toContainText("750 runs");
+    await expect(consoleCard).toContainText(`${MONTHLY_RUN_CAP} runs`);
     await expect(checkoutButton(page)).toBeVisible();
     expect(await consoleCard.innerText()).toBe(accountOffer);
     expect(accountOffer).not.toMatch(/[$€£]|\b(?:USD|EUR|GBP)\b/);
@@ -756,7 +763,7 @@ test.describe("Subscriber checkout", () => {
     await page.route("**/api/usage", (route) =>
       route.fulfill({
         json: {
-          cap: 750,
+          cap: MONTHLY_RUN_CAP,
           resetsAt: "2099-02-01T00:00:00.000Z",
           used: 0,
         },
@@ -829,7 +836,7 @@ test.describe("Subscriber checkout", () => {
       await page.route("**/api/usage", (route) =>
         route.fulfill({
           json: {
-            cap: 750,
+            cap: MONTHLY_RUN_CAP,
             resetsAt: "2099-02-01T00:00:00.000Z",
             used: 0,
           },
