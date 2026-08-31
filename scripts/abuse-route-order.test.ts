@@ -731,6 +731,16 @@ test("Auth.js handlers use method-aware abuse classification", () => {
   const routeSource = read("app/(auth)/api/auth/[...nextauth]/route.ts");
   const wrapperSource = read("lib/auth/abuse.ts");
   const sessionUpdate = functionBlock(wrapperSource, "withAuthAbusePolicy");
+  const sessionReadRoute = sessionUpdate.indexOf(
+    'route === "auth_session_read_ip"'
+  );
+  const sessionReadAdmission = sessionUpdate.indexOf(
+    'route: "auth_session_read_ip"'
+  );
+  const sessionReadHandler = sessionUpdate.indexOf(
+    "return handler(request, ...args)",
+    sessionReadAdmission
+  );
   const ipAdmission = sessionUpdate.indexOf('route: "auth_session_update_ip"');
   const bodyRead = sessionUpdate.indexOf("readBoundedBytes(");
   const identity = sessionUpdate.indexOf(
@@ -750,6 +760,13 @@ test("Auth.js handlers use method-aware abuse classification", () => {
   assert.match(
     wrapperSource,
     /authAbuseRoute\(\s*request\.method,\s*new URL\(request\.url\)\.pathname,\s*options\.basePath \?\? process\.env\.NEXT_PUBLIC_BASE_PATH\s*\)/
+  );
+  assert.ok(sessionReadRoute >= 0);
+  assert.ok(sessionReadAdmission > sessionReadRoute);
+  assert.ok(sessionReadHandler > sessionReadAdmission);
+  assert.doesNotMatch(
+    sessionUpdate.slice(sessionReadRoute, sessionReadHandler),
+    /readBoundedBytes|readIdentity|auth_session_update/
   );
   assert.ok(ipAdmission >= 0);
   assert.ok(bodyRead > ipAdmission);

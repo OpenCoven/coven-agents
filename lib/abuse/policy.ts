@@ -9,6 +9,9 @@ const STANDARD_WRITE = rateClass(20, 60, 100, 3600);
 const SENSITIVE_READ = rateClass(30, 60, 200, 3600);
 const SENSITIVE_WRITE = rateClass(10, 60, 40, 3600);
 const DESTRUCTIVE_WRITE = rateClass(5, 60, 20, 3600);
+// Session reads reach Auth.js' JWE decoder even when a cookie is malformed.
+// Gate every source first while leaving ample headroom for shared NATs.
+const AUTH_SESSION_READ_IP = rateClass(600, 60, 10_000, 3600);
 // Session-update POSTs are tiny, but they reach Auth.js' CSRF/JWE machinery.
 // Admit every source before body or cookie work, while leaving enough room
 // for many normal clients behind one NAT. Verified users keep the stricter
@@ -25,6 +28,7 @@ const WEBHOOK_WRITE = rateClass(600, 60, 10_000, 3600);
 const POLICIES = Object.freeze({
   analytics_read: closedPolicy(["ip", "user"], 0, EXPENSIVE_READ),
   auth_callback: closedPolicy(["ip"], 16_384, rateClass(10, 60, 40, 3600)),
+  auth_session_read_ip: closedPolicy(["ip"], 0, AUTH_SESSION_READ_IP),
   // Auth.js session-update and CSRF JSON is normally under 1 KiB. A 16 KiB
   // raw-byte ceiling leaves generous protocol headroom without allowing its
   // internal parser to buffer an attacker-controlled body.

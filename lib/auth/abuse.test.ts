@@ -26,7 +26,8 @@ test("classifies only Auth.js OAuth initiation and callback methods", () => {
     ["POST", "/api/auth/callback/github", "auth_callback"],
     ["POST", "/api/auth/callback/github/", "auth_callback"],
     ["PUT", "/api/auth/callback/github", null],
-    ["GET", "/api/auth/session", null],
+    ["GET", "/api/auth/session", "auth_session_read_ip"],
+    ["GET", "/api/auth/session/", "auth_session_read_ip"],
     ["POST", "/api/auth/session", "auth_session_update"],
     ["POST", "/api/auth/session/", "auth_session_update"],
     ["GET", "/api/auth/csrf", null],
@@ -58,7 +59,10 @@ test("classifies OAuth routes beneath the configured base path", () => {
     authAbuseRoute("GET", "/demo/api/auth/callback/github", "/demo"),
     "auth_callback"
   );
-  assert.equal(authAbuseRoute("GET", "/demo/api/auth/session", "/demo"), null);
+  assert.equal(
+    authAbuseRoute("GET", "/demo/api/auth/session", "/demo"),
+    "auth_session_read_ip"
+  );
   assert.equal(
     authAbuseRoute("POST", "/demo/api/auth/session", "/demo"),
     "auth_session_update"
@@ -91,7 +95,7 @@ test("the wrapper enforces OAuth limits beneath the configured base path", async
   assert.ok(consumedKeys.every((key) => key.startsWith("auth_start:")));
 });
 
-test("wraps POST starts and callback methods but bypasses GET sign-in and cheap actions", async () => {
+test("wraps protected auth actions while leaving other auth actions untouched", async () => {
   const consumedKeys: string[] = [];
   const store: AbuseStore = {
     consume(key, limit, windowSeconds) {
@@ -119,7 +123,7 @@ test("wraps POST starts and callback methods but bypasses GET sign-in and cheap 
     ["GET", "/api/auth/callback/github", "auth_callback"],
     ["POST", "/api/auth/callback/github", "auth_callback"],
     ["PUT", "/api/auth/callback/github", null],
-    ["GET", "/api/auth/session", null],
+    ["GET", "/api/auth/session", "auth_session_read_ip"],
     ["POST", "/api/auth/session", "auth_session_update_ip"],
     ["GET", "/api/auth/providers", null],
     ["GET", "/api/auth/csrf", null],
@@ -530,16 +534,22 @@ test("session body stream failures return an explicit retryable read error", asy
   });
 });
 
-test("ordinary GET session reads do not verify identity or consume update quota", async () => {
+test("GET session reads admit IP before the handler without body or user work", async () => {
   const calls: string[] = [];
+  const request = authRequest("/api/auth/session", "GET", "203.0.113.48");
   const wrapped = withAuthAbusePolicy(
-    () => {
+    (receivedRequest) => {
       calls.push("handler");
+      assert.strictEqual(receivedRequest, request);
       return new Response(null, { status: 204 });
     },
     {
-      enforceAbuse: () => {
-        calls.push("abuse");
+      enforceAbuse: (input) => {
+        calls.push(input.route);
+        assert.deepEqual(input, {
+          ip: "203.0.113.48",
+          route: "auth_session_read_ip",
+        });
         return Promise.resolve({ kind: "allowed" });
       },
       readIdentity: () => {
@@ -549,10 +559,50 @@ test("ordinary GET session reads do not verify identity or consume update quota"
     }
   );
 
-  const response = await wrapped(authRequest("/api/auth/session", "GET"));
+  const response = await wrapped(request);
 
   assert.equal(response.status, 204);
-  assert.deepEqual(calls, ["handler"]);
+  assert.deepEqual(calls, ["auth_session_read_ip", "handler"]);
+});
+
+test("GET session denial and unavailability stop before Auth.js or identity work", async () => {
+  for (const admission of [
+    {
+      kind: "denied" as const,
+      responseStatus: 429 as const,
+      retryAfterSeconds: 12,
+    },
+    {
+      kind: "unavailable" as const,
+      responseStatus: 503 as const,
+    },
+  ]) {
+    const calls: string[] = [];
+    const wrapped = withAuthAbusePolicy(
+      () => {
+        calls.push("handler");
+        return new Response(null, { status: 204 });
+      },
+      {
+        enforceAbuse: (input) => {
+          calls.push(input.route);
+          return Promise.resolve(admission);
+        },
+        readIdentity: () => {
+          calls.push("identity");
+          return Promise.resolve(null);
+        },
+      }
+    );
+
+    // biome-ignore lint/performance/noAwaitInLoops: each admission owns its short-circuit trace
+    const response = await wrapped(
+      authRequest("/api/auth/session", "GET", "203.0.113.49")
+    );
+
+    assert.equal(response.status, admission.responseStatus);
+    assert.deepEqual(calls, ["auth_session_read_ip"]);
+  }
 });
 
 test("repeated GET sign-in pages do not consume the store but POST initiation does", async () => {
@@ -719,6 +769,7 @@ test("limiter outages degrade starts and callbacks instead of blocking sign-in",
   for (const [method, pathname] of [
     ["POST", "/api/auth/signin/github"],
     ["GET", "/api/auth/callback/github"],
+    ["GET", "/api/auth/session"],
   ] as const) {
     // biome-ignore lint/performance/noAwaitInLoops: each response body is asserted before the next request
     const response = await wrapped(authRequest(pathname, method));
@@ -729,7 +780,6 @@ test("limiter outages degrade starts and callbacks instead of blocking sign-in",
   for (const [method, pathname] of [
     ["GET", "/api/auth/signin"],
     ["GET", "/api/auth/signin/github"],
-    ["GET", "/api/auth/session"],
     ["POST", "/api/auth/session"],
     ["GET", "/api/auth/providers"],
     ["GET", "/api/auth/csrf"],
@@ -740,8 +790,8 @@ test("limiter outages degrade starts and callbacks instead of blocking sign-in",
     assert.equal(response.status, 200, `${method} ${pathname}`);
     assert.deepEqual(await response.json(), { readable: true });
   }
-  // Nine, not seven: the two gated flows above now reach the handler under a
-  // store outage instead of 503ing before it.
+  // All three gated flows degrade to per-instance limiting; the six
+  // unaffected actions continue to bypass admission.
   assert.equal(handlerCalls, 9);
 });
 

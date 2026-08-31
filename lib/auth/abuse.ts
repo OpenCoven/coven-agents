@@ -11,7 +11,10 @@ import type { VerifiedJwtIdentity } from "@/lib/auth/verified-jwt";
 
 type AuthAbuseRoute = Extract<
   AbuseRoute,
-  "auth_callback" | "auth_session_update" | "auth_start"
+  | "auth_callback"
+  | "auth_session_read_ip"
+  | "auth_session_update"
+  | "auth_start"
 >;
 
 type AuthAbuseOptions = {
@@ -40,6 +43,9 @@ export function authAbuseRoute(
   ) {
     return "auth_callback";
   }
+  if (method === "GET" && AUTH_SESSION_PATH.test(normalizedPathname)) {
+    return "auth_session_read_ip";
+  }
   if (method === "POST" && AUTH_SESSION_PATH.test(normalizedPathname)) {
     return "auth_session_update";
   }
@@ -63,6 +69,19 @@ export function withAuthAbusePolicy<
       options.basePath ?? process.env.NEXT_PUBLIC_BASE_PATH
     );
     if (route) {
+      if (route === "auth_session_read_ip") {
+        const admission = await (options.enforceAbuse ?? enforceAbusePolicy)({
+          ip: ipAddress(request) ?? null,
+          route: "auth_session_read_ip",
+          ...(options.store ? { store: options.store } : {}),
+        });
+        if (admission.kind !== "allowed") {
+          return abuseAdmissionResponse(admission);
+        }
+
+        return handler(request, ...args);
+      }
+
       if (route === "auth_session_update") {
         const ipAdmission = await (options.enforceAbuse ?? enforceAbusePolicy)({
           ip: ipAddress(request) ?? null,
