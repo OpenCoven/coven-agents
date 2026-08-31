@@ -57,6 +57,19 @@ test("an unreadable credential summary is not cached", async () => {
   assert.equal(calls, 2);
 });
 
+test("a subscription-refused credential summary is exposed to the authority owner", async () => {
+  resetCredentialCache();
+
+  assert.equal(
+    await fetchHasCredential(() =>
+      Promise.resolve(
+        Response.json({ error: "subscription_required" }, { status: 403 })
+      )
+    ),
+    "subscription_required"
+  );
+});
+
 test("successful credential refreshes replace cached run eligibility", async () => {
   resetCredentialCache();
   let calls = 0;

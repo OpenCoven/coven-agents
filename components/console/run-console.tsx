@@ -551,7 +551,14 @@ export function RunConsole({
     }
     fetchHasCredential()
       .then((has) => {
-        if (has !== null && isCurrentSession(generation, controller.signal)) {
+        if (!isCurrentSession(generation, controller.signal)) {
+          return;
+        }
+        if (has === "subscription_required") {
+          invalidateAndRefresh();
+          return;
+        }
+        if (has !== null) {
           setHasCredential(has);
         }
       })
@@ -569,6 +576,7 @@ export function RunConsole({
     isCurrentSession,
     refresh,
     isSubscriber,
+    invalidateAndRefresh,
     session.status,
     sessionIdentity,
   ]);

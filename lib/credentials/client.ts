@@ -48,13 +48,15 @@ export function createCredentialRefreshFence(): CredentialRefreshFence {
   };
 }
 
-let credentialsInFlight: Promise<boolean | null> | null = null;
+export type CredentialEligibility = boolean | "subscription_required" | null;
+
+let credentialsInFlight: Promise<CredentialEligibility> | null = null;
 let credentialEligibility: boolean | null = null;
 let credentialVersion = 0;
 
 export function fetchHasCredential(
   fetchImpl: FetchLike = (input, init) => fetch(input, init)
-): Promise<boolean | null> {
+): Promise<CredentialEligibility> {
   credentialsInFlight ??= (async () => {
     const requestVersion = credentialVersion;
     try {
@@ -63,11 +65,12 @@ export function fetchHasCredential(
       );
 
       if (!response.ok) {
-        if (requestVersion === credentialVersion) {
-          credentialsInFlight = null;
-          credentialEligibility = null;
+        if (requestVersion !== credentialVersion) {
+          return credentialEligibility;
         }
-        return credentialEligibility;
+        credentialsInFlight = null;
+        credentialEligibility = null;
+        return response.status === 403 ? "subscription_required" : null;
       }
 
       const body = (await response.json()) as { harnessIds?: string[] };
