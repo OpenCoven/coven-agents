@@ -348,6 +348,29 @@ test("fails closed for malformed escaped and unquoted sensitive keys", () => {
   }
 });
 
+test("detects escaped sensitive keys without whitespace after a missing delimiter", () => {
+  const markers = ["NO_SPACE_TOKEN_SURVIVES", "MIXED_TOKEN_SURVIVES"];
+  const result = built(
+    buildTeamHandoff({
+      output: [
+        `{"safe":1\\u0074oken:["${markers[0]}"]}`,
+        `{"safe":1t\\u006fken:["${markers[1]}"]}`,
+      ].join("\n"),
+    })
+  );
+
+  for (const marker of markers) {
+    assert.equal(JSON.stringify(result.handoff).includes(marker), false);
+  }
+});
+
+test("preserves harmless digit-prefixed prose outside structured candidates", () => {
+  const output = "Status: ok; 123provider: synthetic benchmark label.";
+  const result = built(buildTeamHandoff({ output }));
+
+  assert.equal(result.handoff.output, output);
+});
+
 test("fails closed for balanced malformed JSON with sensitive keys anywhere in the candidate", () => {
   const cases = [
     ["raw\\u004cogs", "BALANCED_RAW_LOG_SECRET"],

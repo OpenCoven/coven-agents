@@ -169,12 +169,20 @@ function containsOperationalMetadataKey(value: string): boolean {
   ) {
     return true;
   }
-  const unquotedProperty =
-    /(?:^|[,{;]\s*|\s+)((?:(?:\\u[\dA-Fa-f]{4})|(?:\\x[\dA-Fa-f]{2})|[A-Za-z0-9_$.-])+)\s*[:=]/gmu;
-  for (const match of value.matchAll(unquotedProperty)) {
-    const decoded = match[1] && decodeJsonKeyEscapes(match[1]);
-    if (decoded && isOperationalMetadataKey(decoded)) {
-      return true;
+  const unquotedProperties = [
+    /(?:^|[,{;]\s*|\s+)((?:(?:\\u[\dA-Fa-f]{4})|(?:\\x[\dA-Fa-f]{2})|[A-Za-z_$])(?:(?:\\u[\dA-Fa-f]{4})|(?:\\x[\dA-Fa-f]{2})|[A-Za-z0-9_$.-])*)\s*[:=]/gmu,
+    ...(value.includes("{") || value.includes("[")
+      ? [
+          /((?:(?:\\u[\dA-Fa-f]{4})|(?:\\x[\dA-Fa-f]{2})|[A-Za-z_$])(?:(?:\\u[\dA-Fa-f]{4})|(?:\\x[\dA-Fa-f]{2})|[A-Za-z0-9_$.-])*)\s*[:=]/gmu,
+        ]
+      : []),
+  ];
+  for (const unquotedProperty of unquotedProperties) {
+    for (const match of value.matchAll(unquotedProperty)) {
+      const decoded = match[1] && decodeJsonKeyEscapes(match[1]);
+      if (decoded && isOperationalMetadataKey(decoded)) {
+        return true;
+      }
     }
   }
   return false;
@@ -240,6 +248,21 @@ function filterStructuredValue(value: unknown): unknown {
   );
 }
 
+function hasStructuredOperationalMetadata(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some(hasStructuredOperationalMetadata);
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return false;
+  }
+  return Object.entries(record).some(
+    ([key, nestedValue]) =>
+      isOperationalMetadataKey(key) ||
+      hasStructuredOperationalMetadata(nestedValue)
+  );
+}
+
 function filterStructuredMetadata(value: string): string {
   let output = "";
   let cursor = 0;
@@ -262,9 +285,7 @@ function filterStructuredMetadata(value: string): string {
         (containsOperationalMetadataKey(remainder) ? "[REDACTED]" : remainder)
       );
     }
-
     const candidate = value.slice(start, end);
-    const hasOperationalMetadata = containsOperationalMetadataKey(candidate);
     let parsed: unknown;
     try {
       parsed = JSON.parse(candidate);
@@ -272,11 +293,13 @@ function filterStructuredMetadata(value: string): string {
       if (!(error instanceof SyntaxError)) {
         throw error;
       }
-      output += hasOperationalMetadata ? "[REDACTED]" : candidate;
+      output += containsOperationalMetadataKey(candidate)
+        ? "[REDACTED]"
+        : candidate;
       cursor = end;
       continue;
     }
-    output += hasOperationalMetadata
+    output += hasStructuredOperationalMetadata(parsed)
       ? JSON.stringify(filterStructuredValue(parsed))
       : candidate;
     cursor = end;
