@@ -14,7 +14,10 @@ import {
   refreshTokenType,
 } from "@/lib/session-claims";
 import { isSubscribedAt, userTypeFor } from "@/lib/subscription";
-import type { SubscriptionAuthority } from "@/lib/subscription-authority";
+import {
+  type SubscriptionAuthority,
+  serializeSubscriptionAuthority,
+} from "@/lib/subscription-authority";
 import { authConfig } from "./auth.config";
 
 export type UserType = "demo" | "subscriber";
@@ -124,6 +127,14 @@ export const {
         }
         session.user.type = token.type;
         session.user.image = token.picture ?? null;
+        const subscribedUntil =
+          typeof token.subscribedUntil === "string"
+            ? new Date(token.subscribedUntil)
+            : null;
+        session.user.subscribedUntil =
+          subscribedUntil && Number.isFinite(subscribedUntil.getTime())
+            ? subscribedUntil
+            : null;
       }
 
       return session;
@@ -222,18 +233,25 @@ export async function subscriptionPageAuthority(
 ): Promise<SubscriptionAuthority> {
   const resolved = await resolveAuth(now);
   if (!resolved) {
-    return null;
+    return serializeSubscriptionAuthority({
+      checkedAt: now,
+      isSubscriber: false,
+      subscribedUntil: null,
+      userId: null,
+    });
   }
   if (resolved.kind === "storage-unavailable") {
-    return {
+    return serializeSubscriptionAuthority({
+      checkedAt: now,
       isSubscriber: resolved.session.user.type === "subscriber",
-      subscribedUntil: null,
+      subscribedUntil: resolved.session.user.subscribedUntil,
       userId: resolved.session.user.id,
-    };
+    });
   }
-  return {
+  return serializeSubscriptionAuthority({
+    checkedAt: now,
     isSubscriber: isSubscribedAt(resolved.user, now),
-    subscribedUntil: resolved.user.subscribedUntil?.toISOString() ?? null,
+    subscribedUntil: resolved.user.subscribedUntil,
     userId: resolved.session.user.id,
-  };
+  });
 }

@@ -2,7 +2,7 @@
 
 import { HARNESS_SPECS } from "@opencoven/harness";
 import { Check, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ConnectCopilot } from "@/components/account/connect-copilot";
 import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
@@ -46,19 +46,41 @@ const HARNESSES = HARNESS_SPECS.filter((spec) => spec.supported).map(
   })
 );
 
-export function HarnessCredentials() {
+export function HarnessCredentials({
+  authorityRevision,
+  isSubscriber,
+  onAuthorityInvalidated,
+}: {
+  authorityRevision: string | null;
+  isSubscriber: boolean;
+  onAuthorityInvalidated: () => void;
+}) {
   const [configured, setConfigured] = useState<string[]>([]);
   const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
-  const [locked, setLocked] = useState(false);
+  const [lockedAuthorityContext, setLockedAuthorityContext] = useState<
+    string | null
+  >(null);
+  const authorityContext = `${authorityRevision ?? ""}:${isSubscriber ? "subscriber" : "demo"}`;
+  const authorityContextRef = useRef(authorityContext);
+  authorityContextRef.current = authorityContext;
+  const locked = !isSubscriber || lockedAuthorityContext === authorityContext;
 
   const refresh = useCallback(async () => {
+    if (!isSubscriber) {
+      return;
+    }
+    const requestAuthorityContext = authorityContext;
     const response = await fetch("/api/credentials");
+    if (authorityContextRef.current !== requestAuthorityContext) {
+      return;
+    }
 
     if (response.status === 403) {
-      // A guest account cannot store one, and saying so beats a form that
-      // fails on submit.
-      setLocked(true);
+      setLockedAuthorityContext(requestAuthorityContext);
+      setConfigured([]);
+      setValues({});
+      onAuthorityInvalidated();
       return;
     }
 
@@ -68,7 +90,7 @@ export function HarnessCredentials() {
 
     const body = (await response.json()) as { harnessIds?: string[] };
     setConfigured(body.harnessIds ?? []);
-  }, []);
+  }, [authorityContext, isSubscriber, onAuthorityInvalidated]);
 
   const reload = useCallback(() => {
     refresh().catch(() => undefined);
@@ -91,6 +113,7 @@ export function HarnessCredentials() {
       }
 
       setBusy(harnessId);
+      const requestAuthorityContext = authorityContextRef.current;
 
       try {
         const response = await fetch("/api/credentials", {
@@ -98,6 +121,9 @@ export function HarnessCredentials() {
           headers: { "content-type": "application/json" },
           method: "POST",
         });
+        if (authorityContextRef.current !== requestAuthorityContext) {
+          return false;
+        }
 
         if (response.status === 422) {
           // A rejected token is the person's to fix, so it is shown verbatim
@@ -107,6 +133,18 @@ export function HarnessCredentials() {
 
           toast({
             description: body.message ?? "That token was rejected.",
+            type: "error",
+          });
+          return false;
+        }
+
+        if (response.status === 403) {
+          setLockedAuthorityContext(requestAuthorityContext);
+          setConfigured([]);
+          setValues({});
+          onAuthorityInvalidated();
+          toast({
+            description: "Storing a credential needs an active subscription.",
             type: "error",
           });
           return false;
@@ -132,12 +170,13 @@ export function HarnessCredentials() {
         setBusy(null);
       }
     },
-    [refresh, values]
+    [onAuthorityInvalidated, refresh, values]
   );
 
   const remove = useCallback(
     async (harnessId: string) => {
       setBusy(harnessId);
+      const requestAuthorityContext = authorityContextRef.current;
 
       try {
         const response = await fetch("/api/credentials", {
@@ -145,6 +184,21 @@ export function HarnessCredentials() {
           headers: { "content-type": "application/json" },
           method: "DELETE",
         });
+        if (authorityContextRef.current !== requestAuthorityContext) {
+          return;
+        }
+
+        if (response.status === 403) {
+          setLockedAuthorityContext(requestAuthorityContext);
+          setConfigured([]);
+          setValues({});
+          onAuthorityInvalidated();
+          toast({
+            description: "Storing a credential needs an active subscription.",
+            type: "error",
+          });
+          return;
+        }
 
         if (!response.ok) {
           throw new Error(String(response.status));
@@ -161,7 +215,7 @@ export function HarnessCredentials() {
         setBusy(null);
       }
     },
-    [refresh]
+    [onAuthorityInvalidated, refresh]
   );
 
   return (
