@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   type IdempotencyResponseStorage,
   type JsonValue,
@@ -6,9 +6,10 @@ import {
   type StoredIdempotencyResponseEnvelope,
 } from "./idempotency-response";
 
-const CLAIM_TTL_MS = 5 * 60_000;
+export const IDEMPOTENCY_CLAIM_TTL_MS = 5 * 60_000;
 const CLEANUP_LIMIT = 100;
 const IDEMPOTENCY_KEY_PATTERN = /^[\x20-\x7e]{16,128}$/;
+const IDEMPOTENCY_CLAIM_RENEWAL_MS = IDEMPOTENCY_CLAIM_TTL_MS / 2;
 
 export type { JsonValue } from "./idempotency-response";
 
@@ -27,11 +28,16 @@ export type IdempotencyClaimInput = {
   keyHash: string;
   now: Date;
   operation: string;
+  ownerToken?: string;
   ownerId: string;
+  reclaimCompleted?: boolean;
   requestHash: string;
 };
 
-export type IdempotencyClaimHandle = Omit<IdempotencyClaimInput, "now">;
+export type IdempotencyClaimHandle = Omit<
+  IdempotencyClaimInput,
+  "now" | "reclaimCompleted"
+>;
 
 export type IdempotencyClaimResult =
   | { claim: IdempotencyClaimHandle; kind: "claimed" }
@@ -50,12 +56,28 @@ export type IdempotencyReleaseInput = {
   claim: IdempotencyClaimHandle;
 };
 
+export type IdempotencyRenewInput = {
+  claim: IdempotencyClaimHandle;
+  claimExpiresAt: Date;
+  now: Date;
+};
+
+export type IdempotencyRenewResult =
+  | { kind: "lost" }
+  | { claim: IdempotencyClaimHandle; kind: "renewed" };
+
 export interface IdempotencyStore {
   claim: (input: IdempotencyClaimInput) => Promise<IdempotencyClaimResult>;
   cleanupExpired: (input: { before: Date; limit: number }) => Promise<void>;
-  complete: (input: IdempotencyCompleteInput) => Promise<void>;
-  release: (input: IdempotencyReleaseInput) => Promise<void>;
+  complete: (input: IdempotencyCompleteInput) => Promise<"completed" | "lost">;
+  release: (input: IdempotencyReleaseInput) => Promise<"lost" | "released">;
+  renew?: (input: IdempotencyRenewInput) => Promise<IdempotencyRenewResult>;
 }
+
+export type IdempotencyTimers = {
+  clearTimeout: (timer: unknown) => void;
+  setTimeout: (callback: () => Promise<void>, delayMs: number) => unknown;
+};
 
 export type IdempotencyResult =
   | { kind: "conflict" }
@@ -68,7 +90,24 @@ export type IdempotencyResult =
       response: IdempotencyResponse;
     };
 
+const SYSTEM_TIMERS: IdempotencyTimers = {
+  clearTimeout: (timer) =>
+    globalThis.clearTimeout(timer as ReturnType<typeof setTimeout>),
+  setTimeout(callback, delayMs) {
+    const timer = globalThis.setTimeout(() => {
+      callback().catch(() => undefined);
+    }, delayMs);
+    timer.unref();
+    return timer;
+  },
+};
+
 export async function runIdempotentOperation(options: {
+  cacheSuccessfulResponse?: boolean;
+  claimLease?: {
+    createOwnerToken?: () => string;
+    timers?: IdempotencyTimers;
+  };
   idempotencyKey: string | null;
   now?: () => Date;
   operation: string;
@@ -97,7 +136,7 @@ export async function runIdempotentOperation(options: {
 
   const keyHash = sha256(options.idempotencyKey);
   const requestHash = sha256(canonicalJson(options.request));
-  const claimExpiresAt = new Date(claimedAt.getTime() + CLAIM_TTL_MS);
+  const claimExpiresAt = claimExpiry(claimedAt);
   await options.store.cleanupExpired({
     before: claimedAt,
     limit: CLEANUP_LIMIT,
@@ -107,7 +146,15 @@ export async function runIdempotentOperation(options: {
     keyHash,
     now: claimedAt,
     operation: options.operation,
+    ...(options.claimLease
+      ? {
+          ownerToken: (options.claimLease.createOwnerToken ?? randomUUID)(),
+        }
+      : {}),
     ownerId: options.ownerId,
+    ...(options.cacheSuccessfulResponse === false
+      ? { reclaimCompleted: true }
+      : {}),
     requestHash,
   });
 
@@ -129,6 +176,67 @@ export async function runIdempotentOperation(options: {
     return claimResult;
   }
 
+  let { claim } = claimResult;
+  let claimLost = false;
+  let renewalError: unknown;
+  let renewalInFlight: Promise<void> | null = null;
+  let stopped = false;
+  let timer: unknown;
+  const timers = options.claimLease?.timers ?? SYSTEM_TIMERS;
+  const renew = async () => {
+    if (!options.claimLease || !options.store.renew) {
+      return;
+    }
+    try {
+      const renewedAt = now();
+      assertValidDate(renewedAt);
+      const result = await options.store.renew({
+        claim,
+        claimExpiresAt: claimExpiry(renewedAt),
+        now: renewedAt,
+      });
+      if (result.kind === "lost") {
+        claimLost = true;
+        return;
+      }
+      ({ claim } = result);
+    } catch (error) {
+      renewalError = error;
+    }
+  };
+  const scheduleRenewal = () => {
+    if (
+      !options.claimLease ||
+      stopped ||
+      claimLost ||
+      renewalError !== undefined
+    ) {
+      return;
+    }
+    timer = timers.setTimeout(async () => {
+      if (stopped) {
+        return;
+      }
+      renewalInFlight = renew();
+      await renewalInFlight;
+      renewalInFlight = null;
+      scheduleRenewal();
+    }, IDEMPOTENCY_CLAIM_RENEWAL_MS);
+  };
+  const stopRenewal = async () => {
+    stopped = true;
+    if (timer !== undefined) {
+      timers.clearTimeout(timer);
+    }
+    await renewalInFlight;
+  };
+
+  if (options.claimLease && !options.store.renew) {
+    await options.store.release({ claim });
+    throw new Error("Renewable idempotency claims require store.renew.");
+  }
+  scheduleRenewal();
+
   const providerIdempotencyKey = `coven_${sha256(
     ["provider", options.ownerId, options.operation, keyHash, requestHash].join(
       "\0"
@@ -139,12 +247,41 @@ export async function runIdempotentOperation(options: {
   try {
     response = await options.perform({ providerIdempotencyKey });
   } catch (error) {
-    await options.store.release({ claim: claimResult.claim });
+    await stopRenewal();
+    await options.store.release({ claim });
     throw error;
   }
 
+  await stopRenewal();
+  if (renewalError !== undefined) {
+    await options.store.release({ claim });
+    throw renewalError;
+  }
+  if (options.claimLease && !claimLost) {
+    await renew();
+  }
+  if (renewalError !== undefined) {
+    await options.store.release({ claim });
+    throw renewalError;
+  }
+  if (claimLost) {
+    await options.store.release({ claim });
+    return { kind: "in_progress" };
+  }
+
   if (response.status < 200 || response.status >= 300) {
-    await options.store.release({ claim: claimResult.claim });
+    const releaseResult = await options.store.release({ claim });
+    if (releaseResult === "lost") {
+      return { kind: "in_progress" };
+    }
+    return { kind: "response", replayed: false, response };
+  }
+
+  if (options.cacheSuccessfulResponse === false) {
+    const releaseResult = await options.store.release({ claim });
+    if (releaseResult === "lost") {
+      return { kind: "in_progress" };
+    }
     return { kind: "response", replayed: false, response };
   }
 
@@ -158,18 +295,25 @@ export async function runIdempotentOperation(options: {
       operation: options.operation,
       ownerId: options.ownerId,
     });
-    await options.store.complete({
-      claim: claimResult.claim,
+    const completeResult = await options.store.complete({
+      claim,
       completedAt,
       expiresAt: new Date(completedAt.getTime() + options.retentionMs),
       response: { envelope, status: response.status },
     });
+    if (completeResult === "lost") {
+      return { kind: "in_progress" };
+    }
   } catch (error) {
-    await options.store.release({ claim: claimResult.claim });
+    await options.store.release({ claim });
     throw error;
   }
 
   return { kind: "response", replayed: false, response };
+}
+
+function claimExpiry(now: Date): Date {
+  return new Date(now.getTime() + IDEMPOTENCY_CLAIM_TTL_MS);
 }
 
 export function idempotencyResultResponse(result: IdempotencyResult): Response {
