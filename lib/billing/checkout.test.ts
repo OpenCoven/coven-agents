@@ -322,7 +322,7 @@ test("an app-owned retrieved Session with changed attempt metadata is expired be
 test("Stripe clients use the pinned Dahlia API version", () => {
   const client = createStripeClient("sk_test_checkout");
 
-  assert.equal(client.getApiField("version"), "2026-07-29.dahlia");
+  assert.equal(client.getApiField("version"), "2026-08-26.dahlia");
 });
 
 function checkoutSession(input: {
