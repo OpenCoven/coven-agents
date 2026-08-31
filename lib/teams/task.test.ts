@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AGENT_RUNNER_LIMITS,
+  TEAM_LIMITS,
   type TeamHandoff,
 } from "@opencoven/agent-contracts";
 import {
@@ -107,8 +108,10 @@ test("states GitHub capability and approval scope for all modes", () => {
   assert.match(write, /Scope: read and write/u);
   assert.match(
     write,
-    /Approval: GitHub writes are approved only for this team step/u
+    /GitHub writes require explicit actor-attributed approval before execution/u
   );
+  assert.match(write, /Capability assignment alone does not grant approval/u);
+  assert.doesNotMatch(write, /GitHub writes are (?:already )?approved/u);
 });
 
 test("sanitizes embedded credentials, paths, environment output, and structured secrets", () => {
@@ -169,6 +172,47 @@ test("does not include metadata outside the conceptual task input", () => {
   ]) {
     assert.equal(task.includes(forbidden), false);
   }
+});
+
+test("does not leak nested or malformed operational metadata from prior handoffs", () => {
+  const nestedMarkers = [
+    "TASK_RAW_LOG_SECRET",
+    "TASK_PROVIDER_LOG_SECRET",
+    "TASK_SESSION_SECRET",
+    "TASK_TENANT_SECRET",
+    "TASK_CREDENTIAL_SECRET",
+    "TASK_ENCRYPTED_SECRET",
+  ];
+  const malformedMarker = "TASK_MALFORMED_SECRET";
+  const task = buildTeamStepTask(
+    baseInput({
+      priorHandoffs: [
+        priorHandoff(
+          [
+            JSON.stringify({
+              credential: { records: [{ value: nestedMarkers[4] }] },
+              encrypted: [{ record: { value: nestedMarkers[5] } }],
+              providerLogs: [{ details: nestedMarkers[1] }],
+              rawLogs: {
+                first: "ordinary log",
+                second: nestedMarkers[0],
+              },
+              safe: "preserved",
+              session: { metadata: { value: nestedMarkers[2] } },
+              tenant: [{ metadata: nestedMarkers[3] }],
+            }),
+            `{"providerLogs":[{"value":"${malformedMarker}"}],"safe":`,
+          ].join("\n")
+        ),
+      ],
+    })
+  );
+
+  for (const marker of [...nestedMarkers, malformedMarker]) {
+    assert.equal(task.includes(marker), false);
+  }
+  assert.equal(task.includes("preserved"), true);
+  assert.match(task, /\[REDACTED\]/u);
 });
 
 test("bounds multibyte tasks at the runner limit with an explicit marker", () => {
@@ -258,6 +302,22 @@ test("rejects empty, malformed, and invalid required inputs", () => {
         })
       ),
     /GitHub capability/u
+  );
+});
+
+test("rejects prior handoffs whose aggregate serialized size exceeds the team limit", () => {
+  const priorHandoffs = Array.from({ length: 4 }, (_, index) =>
+    priorHandoff(`${index}:${"x".repeat(12_500)}`)
+  );
+  const totalBytes = priorHandoffs.reduce(
+    (total, value) => total + Buffer.byteLength(JSON.stringify(value)),
+    0
+  );
+
+  assert.ok(totalBytes > TEAM_LIMITS.maxTotalHandoffLength);
+  assert.throws(
+    () => buildTeamStepTask(baseInput({ priorHandoffs })),
+    /aggregate serialized byte limit/u
   );
 });
 

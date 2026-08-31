@@ -19,7 +19,7 @@ export const TEAM_HANDOFF_TRUNCATION_MARKER =
 
 const EVIDENCE_TRUNCATION_MARKER = "\n[evidence truncated for public safety]";
 const OPERATIONAL_METADATA_KEY =
-  "(?:tenant[-_\\s]?id|provider[-_\\s]?(?:id|metadata)|session[-_\\s]?id|command[-_\\s]?id|encrypted[-_\\s]?credential|credential[-_\\s]?(?:id|record)|daytona[-_\\s]?logs|raw[-_\\s]?logs|daytona[-_\\s]?(?:session|command)[-_\\s]?id)";
+  "(?:tenant(?:[-_\\s]?(?:id|metadata))?|provider(?:[-_\\s]?(?:id|metadata|logs?))?|session(?:[-_\\s]?(?:id|metadata))?|command[-_\\s]?id|encrypted(?:[-_\\s]?(?:credential|record|records))?|credentials?(?:[-_\\s]?(?:id|record|records|metadata))?|daytona[-_\\s]?logs|raw[-_\\s]?logs|daytona[-_\\s]?(?:session|command)[-_\\s]?id)";
 const operationalMetadataLine = new RegExp(
   String.raw`^(\s*["']?${OPERATIONAL_METADATA_KEY}["']?\s*[:=]\s*).*$`,
   "gimu"
@@ -72,8 +72,138 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+function isOperationalMetadataKey(value: string): boolean {
+  const compact = value.replace(/[-_\s]/gu, "");
+  const normalized = compact.toLowerCase();
+  const isLogField =
+    normalized === "logs" ||
+    /[-_\s]logs$/iu.test(value) ||
+    /Logs$/u.test(compact) ||
+    /^(?:daytona|provider|raw)logs$/u.test(normalized);
+  return (
+    isLogField ||
+    normalized.includes("credential") ||
+    normalized.startsWith("encrypted") ||
+    /^(?:provider|session|tenant)(?:id|metadata)?$/u.test(normalized) ||
+    /^(?:daytona)?(?:command|session)id$/u.test(normalized)
+  );
+}
+
+function containsOperationalMetadataKey(value: string): boolean {
+  const propertyKey = /(?:^|[,{]\s*)["']?([^"'{}[\],:]+?)["']?\s*:/gmu;
+  for (const match of value.matchAll(propertyKey)) {
+    if (match[1] && isOperationalMetadataKey(match[1])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function structuredValueEnd(value: string, start: number): number | null {
+  const opening = value[start];
+  if (opening !== "{" && opening !== "[") {
+    return null;
+  }
+
+  const closers = [opening === "{" ? "}" : "]"];
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  for (let index = start + 1; index < value.length; index += 1) {
+    const character = value[index];
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === "{" || character === "[") {
+      closers.push(character === "{" ? "}" : "]");
+      continue;
+    }
+    if (character === "}" || character === "]") {
+      if (closers.at(-1) !== character) {
+        return null;
+      }
+      closers.pop();
+      if (closers.length === 0) {
+        return index + 1;
+      }
+    }
+  }
+  return null;
+}
+
+function filterStructuredValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(filterStructuredValue);
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(record).map(([key, nestedValue]) => [
+      key,
+      isOperationalMetadataKey(key)
+        ? "[REDACTED]"
+        : filterStructuredValue(nestedValue),
+    ])
+  );
+}
+
+function filterStructuredMetadata(value: string): string {
+  let output = "";
+  let cursor = 0;
+  while (cursor < value.length) {
+    const objectStart = value.indexOf("{", cursor);
+    const arrayStart = value.indexOf("[", cursor);
+    const starts = [objectStart, arrayStart].filter(
+      (candidateStart) => candidateStart >= 0
+    );
+    if (starts.length === 0) {
+      return output + value.slice(cursor);
+    }
+    const start = Math.min(...starts);
+    output += value.slice(cursor, start);
+    const end = structuredValueEnd(value, start);
+    if (end === null) {
+      const remainder = value.slice(start);
+      return (
+        output +
+        (containsOperationalMetadataKey(remainder) ? "[REDACTED]" : remainder)
+      );
+    }
+
+    const candidate = value.slice(start, end);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(candidate);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) {
+        throw error;
+      }
+      output += containsOperationalMetadataKey(candidate)
+        ? "[REDACTED]"
+        : candidate;
+      cursor = end;
+      continue;
+    }
+    output += JSON.stringify(filterStructuredValue(parsed));
+    cursor = end;
+  }
+  return output;
+}
+
 export function sanitizeTeamText(value: string): string {
-  return sanitizeEvidenceText(value)
+  return sanitizeEvidenceText(filterStructuredMetadata(value))
     .replace(operationalMetadataLine, "$1[REDACTED]")
     .replace(operationalMetadataProperty, `$1"[REDACTED]"`);
 }
@@ -258,16 +388,20 @@ function compactEvidence(
   limit: number
 ): {
   commandEvidence: CommandEvidence[];
+  commandSourceIndexes: number[];
   fileEvidence: FileEvidence[];
 } | null {
-  const commands = commandEvidence.map((evidence) => ({
-    ...evidence,
-    stderr: "",
-    stdout: "",
+  const commands = commandEvidence.map((evidence, sourceIndex) => ({
+    evidence: {
+      ...evidence,
+      stderr: "",
+      stdout: "",
+    },
+    sourceIndex,
   }));
   const files = [...fileEvidence];
   const render = (): TeamHandoff => ({
-    commandEvidence: commands,
+    commandEvidence: commands.map((command) => command.evidence),
     fileEvidence: files,
     output: TEAM_HANDOFF_TRUNCATION_MARKER,
   });
@@ -277,7 +411,7 @@ function compactEvidence(
       return null;
     }
     const commandBytes = commands[0]
-      ? serializedBytes(commands[0])
+      ? serializedBytes(commands[0].evidence)
       : Number.NEGATIVE_INFINITY;
     const fileBytes = files[0]
       ? serializedBytes(files[0])
@@ -288,31 +422,27 @@ function compactEvidence(
       files.shift();
     }
   }
-  return { commandEvidence: commands, fileEvidence: files };
+  return {
+    commandEvidence: commands.map((command) => command.evidence),
+    commandSourceIndexes: commands.map((command) => command.sourceIndex),
+    fileEvidence: files,
+  };
 }
 
 function enrichCommandOutput(
   handoff: TeamHandoff,
   source: readonly CommandEvidence[],
+  sourceIndexes: readonly number[],
   limit: number
 ): TeamHandoff {
-  const sourceByCommand = new Map(
-    source.map((evidence) => [
-      `${evidence.command}\u0000${evidence.startedAt ?? ""}\u0000${evidence.completedAt ?? ""}`,
-      evidence,
-    ])
-  );
   let current = handoff;
 
   for (let index = current.commandEvidence.length - 1; index >= 0; index -= 1) {
     const evidence = current.commandEvidence[index];
-    if (!evidence) {
-      continue;
-    }
-    const sourceEvidence = sourceByCommand.get(
-      `${evidence.command}\u0000${evidence.startedAt ?? ""}\u0000${evidence.completedAt ?? ""}`
-    );
-    if (!sourceEvidence) {
+    const sourceIndex = sourceIndexes[index];
+    const sourceEvidence =
+      sourceIndex === undefined ? undefined : source[sourceIndex];
+    if (!(evidence && sourceEvidence)) {
       continue;
     }
     for (const field of ["stdout", "stderr"] as const) {
@@ -413,7 +543,8 @@ export function buildTeamHandoff(
       );
     }
     const render = (candidateOutput: string): TeamHandoff => ({
-      ...compact,
+      commandEvidence: compact.commandEvidence,
+      fileEvidence: compact.fileEvidence,
       output: candidateOutput,
     });
     const fittedOutput = fitStringField(
@@ -431,6 +562,7 @@ export function buildTeamHandoff(
     handoff = enrichCommandOutput(
       render(fittedOutput),
       commandEvidence,
+      compact.commandSourceIndexes,
       availableBytes
     );
   }

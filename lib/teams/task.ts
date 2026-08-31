@@ -100,7 +100,8 @@ function capabilitySection(capability: GitHubCapability): string {
     case "write":
       return [
         "Scope: read and write",
-        "Approval: GitHub writes are approved only for this team step.",
+        "Approval: GitHub writes require explicit actor-attributed approval before execution.",
+        "Capability assignment alone does not grant approval.",
         "Use only the minimum GitHub operations required by the mission; never merge, delete branches, or alter repository settings.",
       ].join("\n");
     default:
@@ -108,7 +109,7 @@ function capabilitySection(capability: GitHubCapability): string {
   }
 }
 
-function sanitizeHandoff(value: unknown, index: number): TeamHandoff {
+function validateHandoff(value: unknown, index: number): TeamHandoff {
   const parsed = teamHandoffSchema.safeParse(value);
   if (!parsed.success) {
     throw new TypeError(
@@ -120,8 +121,12 @@ function sanitizeHandoff(value: unknown, index: number): TeamHandoff {
       `Prior handoff ${index + 1} exceeds the serialized byte limit.`
     );
   }
+  return parsed.data;
+}
+
+function sanitizeHandoff(value: TeamHandoff): TeamHandoff {
   return teamHandoffSchema.parse({
-    commandEvidence: parsed.data.commandEvidence.map((evidence) => ({
+    commandEvidence: value.commandEvidence.map((evidence) => ({
       ...evidence,
       command: truncateUtf8(
         sanitizeTeamText(evidence.command),
@@ -142,7 +147,7 @@ function sanitizeHandoff(value: unknown, index: number): TeamHandoff {
         CONTEXT_TRUNCATION_MARKER
       ),
     })),
-    fileEvidence: parsed.data.fileEvidence.map((evidence) => ({
+    fileEvidence: value.fileEvidence.map((evidence) => ({
       ...evidence,
       path: truncateUtf8(
         sanitizeTeamText(sanitizeEvidencePath(evidence.path)),
@@ -152,7 +157,7 @@ function sanitizeHandoff(value: unknown, index: number): TeamHandoff {
       ),
     })),
     output: truncateUtf8(
-      sanitizeTeamText(parsed.data.output),
+      sanitizeTeamText(value.output),
       TEAM_LIMITS.maxHandoffLength,
       TEAM_LIMITS.maxHandoffLength,
       CONTEXT_TRUNCATION_MARKER
@@ -192,8 +197,18 @@ function taskContext(input: BuildTeamStepTaskInput): TaskContext {
     );
     return { instructions, name };
   });
-  const handoffs = input.priorHandoffs.map((value, index) =>
-    JSON.stringify(sanitizeHandoff(value, index))
+  const validatedHandoffs = input.priorHandoffs.map(validateHandoff);
+  const totalHandoffBytes = validatedHandoffs.reduce(
+    (total, handoff) => total + byteLength(JSON.stringify(handoff)),
+    0
+  );
+  if (totalHandoffBytes > TEAM_LIMITS.maxTotalHandoffLength) {
+    throw new TypeError(
+      "Prior handoffs exceed the aggregate serialized byte limit."
+    );
+  }
+  const handoffs = validatedHandoffs.map((value) =>
+    JSON.stringify(sanitizeHandoff(value))
   );
 
   return {

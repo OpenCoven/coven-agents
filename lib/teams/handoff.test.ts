@@ -182,6 +182,93 @@ test("redacts labeled execution metadata and normalizes a missing exit code", ()
   }
 });
 
+test("redacts complete nested operational metadata values and fails closed for malformed JSON", () => {
+  const nestedMarkers = [
+    "HANDOFF_RAW_LOG_SECRET",
+    "HANDOFF_PROVIDER_LOG_SECRET",
+    "HANDOFF_SESSION_SECRET",
+    "HANDOFF_TENANT_SECRET",
+    "HANDOFF_CREDENTIAL_SECRET",
+    "HANDOFF_ENCRYPTED_SECRET",
+  ];
+  const malformedMarker = "HANDOFF_MALFORMED_SECRET";
+  const result = built(
+    buildTeamHandoff({
+      output: [
+        JSON.stringify({
+          credential: { records: [{ value: nestedMarkers[4] }] },
+          encrypted: [{ record: { value: nestedMarkers[5] } }],
+          providerLogs: [{ details: nestedMarkers[1] }],
+          rawLogs: {
+            first: "ordinary log",
+            second: nestedMarkers[0],
+          },
+          safe: "preserved",
+          session: { metadata: { value: nestedMarkers[2] } },
+          tenant: [{ metadata: nestedMarkers[3] }],
+        }),
+        `{"rawLogs":{"first":"ordinary","second":"${malformedMarker}"},"safe":`,
+      ].join("\n"),
+    })
+  );
+  const serialized = JSON.stringify(result.handoff);
+
+  for (const marker of [...nestedMarkers, malformedMarker]) {
+    assert.equal(serialized.includes(marker), false);
+  }
+  assert.equal(serialized.includes("preserved"), true);
+  assert.match(serialized, /\[REDACTED\]/u);
+});
+
+test("keeps identical command records associated with their own output after truncation", () => {
+  const firstOutput = `FIRST_COMMAND_OUTPUT:${"a".repeat(12_000)}`;
+  const secondOutput = `SECOND_COMMAND_OUTPUT:${"b".repeat(12_000)}`;
+  const result = built(
+    buildTeamHandoff({
+      commandEvidence: [
+        {
+          command: "pnpm test",
+          completedAt: NOW,
+          exitCode: 11,
+          startedAt: NOW,
+          stderr: "",
+          stdout: firstOutput,
+        },
+        {
+          command: "pnpm test",
+          completedAt: NOW,
+          exitCode: 22,
+          startedAt: NOW,
+          stderr: "",
+          stdout: secondOutput,
+        },
+      ],
+      output: "Command evidence summary.",
+    })
+  );
+
+  assert.ok(result.handoff.output.endsWith(TEAM_HANDOFF_TRUNCATION_MARKER));
+  assert.equal(result.handoff.commandEvidence.length, 2);
+  assert.equal(result.handoff.commandEvidence[0]?.exitCode, 11);
+  assert.match(
+    result.handoff.commandEvidence[0]?.stdout ?? "",
+    /FIRST_COMMAND_OUTPUT/u
+  );
+  assert.doesNotMatch(
+    result.handoff.commandEvidence[0]?.stdout ?? "",
+    /SECOND_COMMAND_OUTPUT/u
+  );
+  assert.equal(result.handoff.commandEvidence[1]?.exitCode, 22);
+  assert.match(
+    result.handoff.commandEvidence[1]?.stdout ?? "",
+    /SECOND_COMMAND_OUTPUT/u
+  );
+  assert.doesNotMatch(
+    result.handoff.commandEvidence[1]?.stdout ?? "",
+    /FIRST_COMMAND_OUTPUT/u
+  );
+});
+
 test("uses the exact remaining aggregate byte budget without exceeding it", () => {
   const prior = handoff("prior");
   const remaining =
