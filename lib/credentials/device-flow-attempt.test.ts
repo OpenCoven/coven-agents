@@ -85,3 +85,47 @@ test("device flow starts beneath the configured application base path", async ()
   }
   assert.deepEqual(inputs, ["/demo/api/credentials/device"]);
 });
+
+test("device flow start errors preserve authorization refusal status", async () => {
+  const attempt = createDeviceFlowAttempt(() => "attempt-one");
+
+  await assert.rejects(
+    requestDeviceFlowStart({
+      attempt,
+      fetcher: () =>
+        Promise.resolve(
+          Response.json({ error: "authentication_required" }, { status: 401 })
+        ),
+    }),
+    (error: unknown) =>
+      error instanceof Error && "status" in error && error.status === 401
+  );
+});
+
+test("a stale start success cannot reset a replacement attempt key", async () => {
+  const generated = ["attempt-one", "attempt-two", "attempt-three"];
+  const attempt = createDeviceFlowAttempt(() => generated.shift() ?? "extra");
+  let resolveResponse!: (response: Response) => void;
+  const response = new Promise<Response>((resolve) => {
+    resolveResponse = resolve;
+  });
+
+  const stale = requestDeviceFlowStart({
+    attempt,
+    fetcher: () => response,
+  });
+  attempt.reset();
+  assert.equal(attempt.key(), "attempt-two");
+  resolveResponse(
+    Response.json({
+      binding: "stale-owner-binding",
+      deviceCode: "stale-device-secret",
+      interval: 5,
+      userCode: "ABCD-EFGH",
+      verificationUri: "https://github.com/login/device",
+    })
+  );
+
+  await stale;
+  assert.equal(attempt.key(), "attempt-two");
+});

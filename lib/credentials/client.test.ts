@@ -57,6 +57,32 @@ test("an unreadable credential summary is not cached", async () => {
   assert.equal(calls, 2);
 });
 
+test("a subscription-refused credential summary is exposed to the authority owner", async () => {
+  resetCredentialCache();
+
+  assert.equal(
+    await fetchHasCredential(() =>
+      Promise.resolve(
+        Response.json({ error: "subscription_required" }, { status: 403 })
+      )
+    ),
+    "subscription_required"
+  );
+});
+
+test("an authentication-refused credential summary is exposed to the authority owner", async () => {
+  resetCredentialCache();
+
+  assert.equal(
+    await fetchHasCredential(() =>
+      Promise.resolve(
+        Response.json({ error: "authentication_required" }, { status: 401 })
+      )
+    ),
+    "authentication_required"
+  );
+});
+
 test("successful credential refreshes replace cached run eligibility", async () => {
   resetCredentialCache();
   let calls = 0;
@@ -91,6 +117,28 @@ test("an older in-flight summary cannot overwrite a successful credential update
   assert.equal(await pending, true);
   assert.equal(await fetchHasCredential(), true);
 });
+
+for (const refusal of [
+  { result: "authentication_required", status: 401 },
+  { result: "subscription_required", status: 403 },
+] as const) {
+  test(`an in-flight ${refusal.status} remains authoritative after a credential cache update`, async () => {
+    resetCredentialCache();
+    let resolveResponse!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => {
+      resolveResponse = resolve;
+    });
+
+    const pending = fetchHasCredential(() => response);
+    updateCredentialEligibility(["copilot"]);
+    resolveResponse(
+      Response.json({ error: refusal.result }, { status: refusal.status })
+    );
+
+    assert.equal(await pending, refusal.result);
+    assert.equal(await fetchHasCredential(), true);
+  });
+}
 
 test("credential refresh fencing rejects stale epochs, overlapping reads, and unmounted updates", () => {
   const fence = createCredentialRefreshFence();

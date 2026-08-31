@@ -8,10 +8,16 @@ const SECURE_SESSION_COOKIE = "__Secure-authjs.session-token";
 export function sessionCookies(
   type: "demo" | "subscriber",
   {
+    authVersion = 1,
     email = "e2e-user@example.invalid",
     id = E2E_USER_ID,
     subscribedUntil = type === "subscriber" ? "2099-01-01T00:00:00.000Z" : null,
-  }: { email?: string; id?: string; subscribedUntil?: string | null } = {}
+  }: {
+    authVersion?: number;
+    email?: string;
+    id?: string;
+    subscribedUntil?: string | null;
+  } = {}
 ) {
   const secret = process.env.AUTH_SECRET;
   if (!secret) {
@@ -34,7 +40,7 @@ export function sessionCookies(
         salt: name,
         secret,
         token: {
-          authVersion: 1,
+          authVersion,
           email,
           id,
           name: "E2E subscriber",
