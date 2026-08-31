@@ -156,6 +156,10 @@ function asAgent(row: Record<string, unknown>): RunnerAgentRecord {
 function asRun(row: Record<string, unknown>): RunnerRunRecord {
   return {
     agentId: column(row, "agentId"),
+    agentInstructions: column(row, "agentInstructions"),
+    agentModel: column(row, "agentModel"),
+    agentRuntime: column(row, "agentRuntime"),
+    agentWorkspace: column(row, "agentWorkspace"),
     authVersion: column(row, "authVersion"),
     cancellationRequestedAt: nullableTimestampColumn(
       row,
@@ -782,6 +786,11 @@ async function pruneTerminalRunsInTransaction(
           AND "daytonaAttemptId" IS NULL
           AND "daytonaSessionId" IS NULL
           AND "daytonaCommandId" IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM "RunnerTeamStep" AS "teamStep"
+            WHERE "teamStep"."runnerRunId" = "RunnerRun"."id"
+          )
         ORDER BY "completedAt" DESC NULLS LAST, "id" DESC
         OFFSET 20
       )
@@ -4175,7 +4184,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           statement(
             "lock-agent-for-run-start",
             { agentId: input.agentId, tenant: principal.tenant },
-            sql`SELECT "id", "sandboxLifecycle" FROM "RunnerAgent"
+            sql`SELECT * FROM "RunnerAgent"
               WHERE "id" = ${input.agentId}
                 AND "tenant" = ${principal.tenant}
               FOR UPDATE`
@@ -4235,11 +4244,21 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           }
           admission = { limits, scheduler };
         }
+        const agentSnapshot = input.agentSnapshot ?? {
+          instructions: column<string>(agent, "instructions"),
+          model: column<string>(agent, "model"),
+          runtime: column<RunnerAgentRecord["runtime"]>(agent, "runtime"),
+          workspace: column<string | null>(agent, "workspace"),
+        };
         const [inserted] = await transaction.execute(
           statement(
             "insert-run",
             {
               agentId: input.agentId,
+              agentInstructions: agentSnapshot.instructions,
+              agentModel: agentSnapshot.model,
+              agentRuntime: agentSnapshot.runtime,
+              agentWorkspace: agentSnapshot.workspace,
               authVersion: input.authVersion,
               id: input.id,
               operationId: input.operationId,
@@ -4248,10 +4267,15 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               tenant: principal.tenant,
             },
             sql`INSERT INTO "RunnerRun" (
-              "id", "agentId", "tenant", "authVersion", "operationId", "requestHash", "task"
+              "id", "agentId", "tenant", "agentInstructions", "agentModel",
+              "agentRuntime", "agentWorkspace", "authVersion", "operationId",
+              "requestHash", "task"
             ) VALUES (
-              ${input.id}, ${input.agentId}, ${principal.tenant}, ${input.authVersion}, ${input.operationId},
-              ${input.requestHash}, ${input.task}
+              ${input.id}, ${input.agentId}, ${principal.tenant},
+              ${agentSnapshot.instructions}, ${agentSnapshot.model},
+              ${agentSnapshot.runtime}, ${agentSnapshot.workspace},
+              ${input.authVersion}, ${input.operationId}, ${input.requestHash},
+              ${input.task}
             ) ON CONFLICT ("agentId", "operationId") DO NOTHING RETURNING *`
           )
         );

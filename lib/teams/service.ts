@@ -2,34 +2,52 @@ import "server-only";
 
 import { createHash, randomUUID } from "node:crypto";
 import {
+  approveTeamRunInputSchema,
   createSkillInputSchema,
   createTeamInputSchema,
+  createTeamRunInputSchema,
   expectedVersionInputSchema,
   type SkillResource,
   skillIdSchema,
   skillResourceSchema,
   type TeamResource,
+  type TeamRun,
   teamIdSchema,
   teamResourceSchema,
+  teamRunIdSchema,
+  teamRunSchema,
+  teamStepIdSchema,
   updateSkillInputSchema,
   updateTeamInputSchema,
 } from "@opencoven/agent-contracts";
 import type { RunnerPrincipal } from "@/lib/runner/types";
-import type { createTeamStore, TeamRecord, TeamSkillRecord } from "./store";
+import type {
+  createTeamStore,
+  TeamRecord,
+  TeamRunRecord,
+  TeamSkillRecord,
+} from "./store";
 
-export type TeamCrudStore = Pick<
+export type TeamServiceStore = Pick<
   ReturnType<typeof createTeamStore>,
+  | "cancelTeamRun"
   | "createSkill"
   | "createTeam"
+  | "createTeamRun"
+  | "decideTeamStepApproval"
   | "deleteSkill"
   | "deleteTeam"
   | "getSkill"
   | "getTeam"
+  | "getTeamRun"
   | "listSkills"
+  | "listTeamRuns"
   | "listTeams"
   | "updateSkill"
   | "updateTeam"
 >;
+
+export type TeamCrudStore = TeamServiceStore;
 
 export type TeamCreateSkillResult =
   | Readonly<{ kind: "created"; skill: SkillResource }>
@@ -62,7 +80,52 @@ export type TeamDeleteResult =
   | Readonly<{ kind: "not_found" }>
   | Readonly<{ kind: "stale_version" }>;
 
+export type TeamCreateRunResult =
+  | Readonly<{ kind: "created" | "duplicate"; teamRun: TeamRun }>
+  | Readonly<{ kind: "conflict" | "invalid" | "not_found" }>;
+
+export type TeamReadRunResult =
+  | Readonly<{ kind: "found"; teamRun: TeamRun }>
+  | Readonly<{ kind: "not_found" }>;
+
+export type TeamListRunsResult =
+  | Readonly<{ kind: "found"; teamRuns: readonly TeamRun[] }>
+  | Readonly<{ kind: "not_found" }>;
+
+export type TeamApproveRunResult =
+  | Readonly<{ kind: "approved"; teamRun: TeamRun }>
+  | Readonly<{
+      kind:
+        | "invalid"
+        | "invalid_capabilities"
+        | "invalid_transition"
+        | "not_found"
+        | "stale_version";
+    }>;
+
+export type TeamStopRunResult =
+  | Readonly<{
+      cancellation: "confirmed" | "deferred" | "not_required";
+      kind: "stopped";
+      scheduleReconciliation: true;
+      teamRun: TeamRun;
+    }>
+  | Readonly<{
+      kind: "already_terminal" | "invalid" | "not_found" | "stale_version";
+    }>;
+
 export type TeamService = Readonly<{
+  approveRun: (
+    principal: RunnerPrincipal,
+    id: string,
+    input: unknown
+  ) => Promise<TeamApproveRunResult>;
+  createRun: (
+    principal: RunnerPrincipal,
+    authVersion: number,
+    teamId: string,
+    input: unknown
+  ) => Promise<TeamCreateRunResult>;
   createSkill: (
     principal: RunnerPrincipal,
     input: unknown,
@@ -91,8 +154,21 @@ export type TeamService = Readonly<{
     principal: RunnerPrincipal,
     id: string
   ) => Promise<TeamReadTeamResult>;
+  getRun: (
+    principal: RunnerPrincipal,
+    id: string
+  ) => Promise<TeamReadRunResult>;
   listSkills: (principal: RunnerPrincipal) => Promise<readonly SkillResource[]>;
   listTeams: (principal: RunnerPrincipal) => Promise<readonly TeamResource[]>;
+  listRuns: (
+    principal: RunnerPrincipal,
+    teamId: string
+  ) => Promise<TeamListRunsResult>;
+  stopRun: (
+    principal: RunnerPrincipal,
+    id: string,
+    expectedVersion: number
+  ) => Promise<TeamStopRunResult>;
   updateSkill: (
     principal: RunnerPrincipal,
     id: string,
@@ -106,8 +182,12 @@ export type TeamService = Readonly<{
 }>;
 
 export type TeamServiceDependencies = Readonly<{
+  cancelChild?: (
+    principal: RunnerPrincipal,
+    runId: string
+  ) => Promise<Readonly<{ kind: string }>>;
   createId?: (scope?: string) => string;
-  store: TeamCrudStore;
+  store: TeamServiceStore;
 }>;
 
 function projectSkill(record: TeamSkillRecord): SkillResource {
@@ -142,10 +222,49 @@ function projectTeam(record: TeamRecord): TeamResource {
   });
 }
 
+function projectTeamRun(record: TeamRunRecord): TeamRun {
+  return teamRunSchema.parse({
+    completedAt: record.completedAt?.toISOString() ?? null,
+    createdAt: record.createdAt.toISOString(),
+    currentPosition: record.currentPosition,
+    error: record.error,
+    id: record.id,
+    mission: record.mission,
+    operationId: record.operationId,
+    startedAt: record.startedAt?.toISOString() ?? null,
+    status: record.status,
+    steps: record.steps.map((step) => ({
+      agentId: step.agentId,
+      approvalStatus: step.approvalStatus,
+      completedAt: step.completedAt?.toISOString() ?? null,
+      createdAt: step.createdAt.toISOString(),
+      error: step.error,
+      handoff: step.handoff,
+      id: step.id,
+      position: step.position,
+      required: step.required,
+      responsibility: step.responsibility,
+      runnerRunId: step.runnerRunId,
+      skillIds: step.skillIds,
+      startedAt: step.startedAt?.toISOString() ?? null,
+      status: step.status,
+      updatedAt: step.updatedAt.toISOString(),
+      version: step.version,
+    })),
+    teamId: record.teamId,
+    updatedAt: record.updatedAt.toISOString(),
+    version: record.version,
+  });
+}
+
 function generatedId(
   createId: (scope?: string) => string,
   scope: string | undefined,
-  schema: typeof skillIdSchema | typeof teamIdSchema
+  schema:
+    | typeof skillIdSchema
+    | typeof teamIdSchema
+    | typeof teamRunIdSchema
+    | typeof teamStepIdSchema
 ): string {
   const id = createId(scope);
   if (!schema.safeParse(id).success) {
@@ -185,6 +304,108 @@ export function createTeamService(
     ((scope?: string) => (scope ? deterministicUuid(scope) : randomUUID()));
 
   return {
+    approveRun: async (principal, id, input) => {
+      if (!teamRunIdSchema.safeParse(id).success) {
+        return { kind: "not_found" };
+      }
+      const parsed = approveTeamRunInputSchema.safeParse(input);
+      if (!parsed.success) {
+        return { kind: "invalid" };
+      }
+      const run = await dependencies.store.getTeamRun(principal, id);
+      if (!run) {
+        return { kind: "not_found" };
+      }
+      const step = run.steps[run.currentPosition];
+      if (
+        run.status !== "waiting_approval" ||
+        !step ||
+        step.status !== "waiting_approval" ||
+        step.approvalStatus !== "pending"
+      ) {
+        return { kind: "invalid_transition" };
+      }
+      const result = await dependencies.store.decideTeamStepApproval(
+        principal,
+        {
+          ...parsed.data,
+          decision: "approve",
+          id: step.id,
+        }
+      );
+      switch (result.kind) {
+        case "updated": {
+          const updated = await dependencies.store.getTeamRun(principal, id);
+          if (!updated) {
+            throw new Error("Approved team run disappeared.");
+          }
+          return { kind: "approved", teamRun: projectTeamRun(updated) };
+        }
+        case "invalid_capabilities":
+        case "invalid_transition":
+        case "not_found":
+        case "stale_version":
+          return result;
+        default:
+          return unreachable(result, "team run approval");
+      }
+    },
+
+    createRun: async (principal, authVersion, teamId, input) => {
+      if (
+        !teamIdSchema.safeParse(teamId).success ||
+        !expectedVersionInputSchema.safeParse({
+          expectedVersion: authVersion,
+        }).success
+      ) {
+        return { kind: "invalid" };
+      }
+      const parsed = createTeamRunInputSchema.safeParse(input);
+      if (!parsed.success) {
+        return { kind: "invalid" };
+      }
+      const team = await dependencies.store.getTeam(principal, teamId);
+      if (!team) {
+        return { kind: "not_found" };
+      }
+      const runId = generatedId(
+        createId,
+        `team-run:${teamId}:${parsed.data.operationId}`,
+        teamRunIdSchema
+      );
+      const requestHash = createHash("sha256")
+        .update(`${teamId}\0${parsed.data.task}`, "utf8")
+        .digest("hex");
+      const result = await dependencies.store.createTeamRun(principal, {
+        authVersion,
+        id: runId,
+        mission: parsed.data.task,
+        operationId: parsed.data.operationId,
+        requestHash,
+        stepIds: team.members.map((_, position) =>
+          generatedId(
+            createId,
+            `team-run:${runId}:step:${position}`,
+            teamStepIdSchema
+          )
+        ),
+        teamId,
+      });
+      switch (result.kind) {
+        case "created":
+        case "duplicate":
+          return {
+            kind: result.kind,
+            teamRun: projectTeamRun(result.run),
+          };
+        case "conflict":
+        case "not_found":
+          return result;
+        default:
+          return unreachable(result, "team run creation");
+      }
+    },
+
     createSkill: async (principal, input, creationKey) => {
       const parsed = createSkillInputSchema.safeParse(input);
       if (!parsed.success) {
@@ -286,6 +507,16 @@ export function createTeamService(
       }
     },
 
+    getRun: async (principal, id) => {
+      if (!teamRunIdSchema.safeParse(id).success) {
+        return { kind: "not_found" };
+      }
+      const record = await dependencies.store.getTeamRun(principal, id);
+      return record
+        ? { kind: "found", teamRun: projectTeamRun(record) }
+        : { kind: "not_found" };
+    },
+
     getSkill: async (principal, id) => {
       if (!skillIdSchema.safeParse(id).success) {
         return { kind: "not_found" };
@@ -306,11 +537,81 @@ export function createTeamService(
         : { kind: "not_found" };
     },
 
+    listRuns: async (principal, teamId) => {
+      if (!teamIdSchema.safeParse(teamId).success) {
+        return { kind: "not_found" };
+      }
+      if (!(await dependencies.store.getTeam(principal, teamId))) {
+        return { kind: "not_found" };
+      }
+      return {
+        kind: "found",
+        teamRuns: (
+          await dependencies.store.listTeamRuns(principal, teamId)
+        ).map(projectTeamRun),
+      };
+    },
+
     listSkills: async (principal) =>
       (await dependencies.store.listSkills(principal)).map(projectSkill),
 
     listTeams: async (principal) =>
       (await dependencies.store.listTeams(principal)).map(projectTeam),
+
+    stopRun: async (principal, id, expectedVersion) => {
+      if (
+        !teamRunIdSchema.safeParse(id).success ||
+        !expectedVersionInputSchema.safeParse({ expectedVersion }).success
+      ) {
+        return { kind: "invalid" };
+      }
+      const result = await dependencies.store.cancelTeamRun(principal, {
+        expectedVersion,
+        id,
+      });
+      switch (result.kind) {
+        case "not_found":
+        case "stale_version":
+          return result;
+        case "already_terminal": {
+          const terminal = await dependencies.store.getTeamRun(principal, id);
+          if (!terminal) {
+            return { kind: "not_found" };
+          }
+          return {
+            cancellation: "not_required",
+            kind: "stopped",
+            scheduleReconciliation: true,
+            teamRun: projectTeamRun(terminal),
+          };
+        }
+        case "updated": {
+          let cancellation: "confirmed" | "deferred" | "not_required" =
+            "not_required";
+          if (result.childRunId) {
+            if (!dependencies.cancelChild) {
+              throw new Error("Team child cancellation is not configured.");
+            }
+            const child = await dependencies.cancelChild(
+              principal,
+              result.childRunId
+            );
+            cancellation =
+              child.kind === "stopped" || child.kind === "already_terminal"
+                ? "confirmed"
+                : "deferred";
+          }
+          return {
+            cancellation,
+            kind: "stopped",
+            scheduleReconciliation: true,
+            teamRun: projectTeamRun(result.value),
+          };
+        }
+        default:
+          return unreachable(result, "team run cancellation");
+      }
+    },
 
     updateSkill: async (principal, id, input) => {
       if (!skillIdSchema.safeParse(id).success) {

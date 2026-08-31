@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/useAwait: Dependency doubles keep async signatures for readability.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -9,7 +10,10 @@ import {
   skillEnvelopeSchema,
   skillsEnvelopeSchema,
   type TeamResource,
+  type TeamRun,
   teamEnvelopeSchema,
+  teamRunEnvelopeSchema,
+  teamRunsEnvelopeSchema,
   teamsEnvelopeSchema,
 } from "@opencoven/agent-contracts";
 import type {
@@ -38,6 +42,9 @@ const MEMBER_B = "44444444-4444-4444-8444-444444444444";
 const AGENT_A = "55555555-5555-4555-8555-555555555555";
 const AGENT_B = "66666666-6666-4666-8666-666666666666";
 const REQUEST_ID = "77777777-7777-4777-8777-777777777777";
+const TEAM_RUN_ID = "88888888-8888-4888-8888-888888888888";
+const TEAM_STEP_ID = "99999999-9999-4999-8999-999999999999";
+const OPERATION_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const REPLAY_HEADER_VALUE = "team-http-test-key-0001";
 const NativeRequest = globalThis.Request;
 
@@ -113,6 +120,41 @@ const team: TeamResource = {
   version: 3,
 };
 
+const teamRun: TeamRun = {
+  completedAt: null,
+  createdAt: "2026-08-30T12:00:00.000Z",
+  currentPosition: 0,
+  error: null,
+  id: TEAM_RUN_ID,
+  mission: "Deliver the approved issue.",
+  operationId: OPERATION_ID,
+  startedAt: null,
+  status: "queued",
+  steps: [
+    {
+      agentId: AGENT_A,
+      approvalStatus: "pending",
+      completedAt: null,
+      createdAt: "2026-08-30T12:00:00.000Z",
+      error: null,
+      handoff: null,
+      id: TEAM_STEP_ID,
+      position: 0,
+      required: true,
+      responsibility: "Implement the approved change.",
+      runnerRunId: null,
+      skillIds: [SKILL_ID],
+      startedAt: null,
+      status: "waiting_approval",
+      updatedAt: "2026-08-30T12:00:00.000Z",
+      version: 2,
+    },
+  ],
+  teamId: TEAM_ID,
+  updatedAt: "2026-08-30T12:00:00.000Z",
+  version: 3,
+};
+
 function authorizedAuth(): RunnerAuth {
   return {
     authorizeDiagnostic: () => ({ kind: "unauthorized" }),
@@ -123,14 +165,40 @@ function authorizedAuth(): RunnerAuth {
 
 function service(overrides: Partial<TeamService> = {}): TeamService {
   return {
+    approveRun: async () => ({
+      kind: "approved",
+      teamRun: {
+        ...teamRun,
+        status: "queued",
+        steps: teamRun.steps.map((step) => ({
+          ...step,
+          approvalStatus: "approved",
+          version: step.version + 1,
+        })),
+      },
+    }),
+    createRun: async () => ({ kind: "created", teamRun }),
     createSkill: async () => ({ kind: "created", skill }),
     createTeam: async () => ({ kind: "created", team }),
     deleteSkill: async () => ({ kind: "deleted" }),
     deleteTeam: async () => ({ kind: "deleted" }),
+    getRun: async () => ({ kind: "found", teamRun }),
     getSkill: async () => ({ kind: "found", skill }),
     getTeam: async () => ({ kind: "found", team }),
+    listRuns: async () => ({ kind: "found", teamRuns: [teamRun] }),
     listSkills: async () => [skill],
     listTeams: async () => [team],
+    stopRun: async () => ({
+      cancellation: "confirmed",
+      kind: "stopped",
+      scheduleReconciliation: true,
+      teamRun: {
+        ...teamRun,
+        completedAt: "2026-08-30T12:01:00.000Z",
+        status: "cancelled",
+        version: teamRun.version + 1,
+      },
+    }),
     updateSkill: async () => ({
       kind: "updated",
       skill: { ...skill, name: "Updated", version: 3 },
@@ -150,6 +218,7 @@ function handlers(
     auth?: RunnerAuth;
     idempotencyStore?: IdempotencyStore;
     onAbuse?: (input: AbuseEnforcementInput) => void;
+    onAfter?: (operation: () => Promise<void>) => void;
     service?: TeamService;
   } = {}
 ) {
@@ -163,6 +232,10 @@ function handlers(
     ...(Object.hasOwn(options, "appOrigin")
       ? { appOrigin: options.appOrigin }
       : {}),
+    after: (operation) => {
+      events.push("after");
+      options.onAfter?.(operation);
+    },
     auth: options.auth ?? authorizedAuth(),
     createRequestId: () => REQUEST_ID,
     createService: () => {
@@ -178,6 +251,9 @@ function handlers(
     },
     idempotencyStore,
     ipAddress: () => "203.0.113.10",
+    reconcile: async () => {
+      events.push("reconcile");
+    },
   });
   return {
     admissions,
@@ -205,6 +281,14 @@ function teamBody(overrides: Record<string, unknown> = {}) {
       ({ id: _id, position: _position, ...member }) => member
     ),
     name: team.name,
+    ...overrides,
+  });
+}
+
+function teamRunBody(overrides: Record<string, unknown> = {}) {
+  return JSON.stringify({
+    operationId: OPERATION_ID,
+    task: "Deliver the approved issue.",
     ...overrides,
   });
 }
@@ -526,6 +610,203 @@ test("same creation key with a different request returns a stable conflict", asy
   assert.equal(conflict.status, 409);
   assert.equal(await errorCode(conflict), "idempotency_conflict");
   assert.equal(fixture.serviceRequests(), 1);
+});
+
+test("team run create distinguishes created, duplicate, and conflict while scheduling reconciliation", async () => {
+  const scheduled: Array<() => Promise<void>> = [];
+  const calls: unknown[][] = [];
+  let mode: "conflict" | "created" | "duplicate" = "created";
+  const fixture = handlers({
+    onAfter: (operation) => scheduled.push(operation),
+    service: service({
+      createRun: async (...args) => {
+        calls.push(args);
+        return mode === "conflict"
+          ? { kind: "conflict" }
+          : { kind: mode, teamRun };
+      },
+    }),
+  });
+
+  const created = await fixture.handlers.createTeamRun(
+    new Request(`https://app.test/api/teams/${TEAM_ID}/runs`, {
+      body: teamRunBody(),
+      method: "POST",
+    }),
+    TEAM_ID
+  );
+  mode = "duplicate";
+  const duplicate = await fixture.handlers.createTeamRun(
+    new Request(`https://app.test/api/teams/${TEAM_ID}/runs`, {
+      body: teamRunBody(),
+      headers: { "idempotency-key": "team-http-test-key-0002" },
+      method: "POST",
+    }),
+    TEAM_ID
+  );
+  mode = "conflict";
+  const conflict = await fixture.handlers.createTeamRun(
+    new Request(`https://app.test/api/teams/${TEAM_ID}/runs`, {
+      body: teamRunBody({ task: "Different immutable request." }),
+      headers: { "idempotency-key": "team-http-test-key-0003" },
+      method: "POST",
+    }),
+    TEAM_ID
+  );
+
+  assert.equal(created.status, 201);
+  teamRunEnvelopeSchema.parse(await created.json());
+  assert.equal(duplicate.status, 200);
+  teamRunEnvelopeSchema.parse(await duplicate.json());
+  assert.equal(conflict.status, 409);
+  assert.equal(await errorCode(conflict), "resource_conflict");
+  assert.deepEqual(calls[0], [
+    subscriber.principal,
+    subscriber.authVersion,
+    TEAM_ID,
+    {
+      operationId: OPERATION_ID,
+      task: "Deliver the approved issue.",
+    },
+  ]);
+  assert.equal(scheduled.length, 2);
+  await Promise.all(scheduled.map((operation) => operation()));
+  assert.equal(
+    fixture.events.filter((event) => event === "reconcile").length,
+    2
+  );
+});
+
+test("team run list and get return strict tenant-free contract envelopes", async () => {
+  const fixture = handlers();
+
+  const listed = await fixture.handlers.listTeamRuns(
+    new Request(`https://app.test/api/teams/${TEAM_ID}/runs`),
+    TEAM_ID
+  );
+  const found = await fixture.handlers.getTeamRun(
+    new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}`),
+    TEAM_RUN_ID
+  );
+
+  assert.equal(listed.status, 200);
+  assert.equal(found.status, 200);
+  teamRunsEnvelopeSchema.parse(await listed.json());
+  const parsed = teamRunEnvelopeSchema.parse(await found.json());
+  assert.equal(parsed.teamRun.version, 3);
+  assert.equal(JSON.stringify(parsed).includes(TENANT), false);
+  assert.equal(JSON.stringify(parsed).includes(USER_ID), false);
+});
+
+test("team run list returns not found for a missing tenant-fenced parent", async () => {
+  const fixture = handlers({
+    service: service({
+      listRuns: async () => ({ kind: "not_found" }),
+    }),
+  });
+
+  const response = await fixture.handlers.listTeamRuns(
+    new Request(`https://app.test/api/teams/${TEAM_ID}/runs`),
+    TEAM_ID
+  );
+
+  assert.equal(response.status, 404);
+  assert.equal(await errorCode(response), "not_found");
+});
+
+test("team run stop and approval require strict JSON versions and schedule durable reconciliation", async () => {
+  const scheduled: Array<() => Promise<void>> = [];
+  const calls: unknown[][] = [];
+  const fixture = handlers({
+    onAfter: (operation) => scheduled.push(operation),
+    service: service({
+      approveRun: async (...args) => {
+        calls.push(["approve", ...args]);
+        return { kind: "approved", teamRun };
+      },
+      stopRun: async (...args) => {
+        calls.push(["stop", ...args]);
+        return {
+          cancellation: "confirmed",
+          kind: "stopped",
+          scheduleReconciliation: true,
+          teamRun,
+        };
+      },
+    }),
+  });
+
+  const stopped = await fixture.handlers.stopTeamRun(
+    new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}/stop`, {
+      body: JSON.stringify({ expectedVersion: 3 }),
+      method: "POST",
+    }),
+    TEAM_RUN_ID
+  );
+  const approved = await fixture.handlers.approveTeamRun(
+    new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}/approve`, {
+      body: JSON.stringify({
+        capabilities: ["github.pull_requests.write"],
+        expectedVersion: 2,
+      }),
+      method: "POST",
+    }),
+    TEAM_RUN_ID
+  );
+
+  assert.equal(stopped.status, 200);
+  assert.equal(approved.status, 200);
+  teamRunEnvelopeSchema.parse(await stopped.json());
+  teamRunEnvelopeSchema.parse(await approved.json());
+  assert.deepEqual(calls, [
+    ["stop", subscriber.principal, TEAM_RUN_ID, 3],
+    [
+      "approve",
+      subscriber.principal,
+      TEAM_RUN_ID,
+      {
+        capabilities: ["github.pull_requests.write"],
+        expectedVersion: 2,
+      },
+    ],
+  ]);
+  assert.equal(scheduled.length, 2);
+
+  const invalid = await fixture.handlers.approveTeamRun(
+    new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}/approve`, {
+      body: JSON.stringify({
+        capabilities: ["github.projects.write"],
+        expectedVersion: 2,
+        userId: USER_ID,
+      }),
+      method: "POST",
+    }),
+    TEAM_RUN_ID
+  );
+  assert.equal(invalid.status, 400);
+  assert.equal(await errorCode(invalid), "invalid_request");
+});
+
+test("undeclared approval capability escalation has a stable safe error", async () => {
+  const fixture = handlers({
+    service: service({
+      approveRun: async () => ({ kind: "invalid_capabilities" }),
+    }),
+  });
+
+  const response = await fixture.handlers.approveTeamRun(
+    new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}/approve`, {
+      body: JSON.stringify({
+        capabilities: ["github.projects.write"],
+        expectedVersion: 2,
+      }),
+      method: "POST",
+    }),
+    TEAM_RUN_ID
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal(await errorCode(response), "capability_escalation");
 });
 
 test("creation passes only the derived opaque key into deterministic ID generation", async () => {
@@ -972,6 +1253,39 @@ test("abuse requests use authenticated user or tenant scopes for each explicit r
     }),
     TEAM_ID
   );
+  await fixture.handlers.listTeamRuns(
+    new Request(`https://app.test/api/teams/${TEAM_ID}/runs`),
+    TEAM_ID
+  );
+  await fixture.handlers.createTeamRun(
+    new Request(`https://app.test/api/teams/${TEAM_ID}/runs`, {
+      body: teamRunBody(),
+      headers: { "idempotency-key": "team-http-test-key-0004" },
+      method: "POST",
+    }),
+    TEAM_ID
+  );
+  await fixture.handlers.getTeamRun(
+    new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}`),
+    TEAM_RUN_ID
+  );
+  await fixture.handlers.stopTeamRun(
+    new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}/stop`, {
+      body: JSON.stringify({ expectedVersion: 3 }),
+      method: "POST",
+    }),
+    TEAM_RUN_ID
+  );
+  await fixture.handlers.approveTeamRun(
+    new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}/approve`, {
+      body: JSON.stringify({
+        capabilities: ["github.pull_requests.write"],
+        expectedVersion: 2,
+      }),
+      method: "POST",
+    }),
+    TEAM_RUN_ID
+  );
 
   assert.deepEqual(
     fixture.admissions.map(({ route, tenant, userId }) => ({
@@ -986,6 +1300,11 @@ test("abuse requests use authenticated user or tenant scopes for each explicit r
       { route: "team_read", tenant: TENANT, userId: USER_ID },
       { route: "team_write", tenant: TENANT, userId: USER_ID },
       { route: "team_delete", tenant: TENANT, userId: USER_ID },
+      { route: "team_run_read", tenant: TENANT, userId: USER_ID },
+      { route: "team_run_start", tenant: TENANT, userId: USER_ID },
+      { route: "team_run_read", tenant: TENANT, userId: USER_ID },
+      { route: "team_run_stop", tenant: TENANT, userId: USER_ID },
+      { route: "team_run_approve", tenant: TENANT, userId: USER_ID },
     ]
   );
 });
@@ -1035,14 +1354,36 @@ async function executeRouteFixture(): Promise<void> {
       productionTeamHttpHandlers: () => api,
     },
   });
-  const [skills, skillRoute, teams, teamRoute] = await Promise.all([
+  const [
+    skills,
+    skillRoute,
+    teams,
+    teamRoute,
+    teamRuns,
+    teamRunRoute,
+    teamRunStop,
+    teamRunApprove,
+  ] = await Promise.all([
     import("../../app/api/skills/route"),
     import("../../app/api/skills/[id]/route"),
     import("../../app/api/teams/route"),
     import("../../app/api/teams/[id]/route"),
+    import("../../app/api/teams/[id]/runs/route"),
+    import("../../app/api/team-runs/[id]/route"),
+    import("../../app/api/team-runs/[id]/stop/route"),
+    import("../../app/api/team-runs/[id]/approve/route"),
   ]);
 
-  for (const route of [skills, skillRoute, teams, teamRoute]) {
+  for (const route of [
+    skills,
+    skillRoute,
+    teams,
+    teamRoute,
+    teamRuns,
+    teamRunRoute,
+    teamRunStop,
+    teamRunApprove,
+  ]) {
     assert.equal("runtime" in route, false);
     assert.equal("dynamic" in route, false);
     assert.equal(route.maxDuration, 300);
@@ -1051,6 +1392,10 @@ async function executeRouteFixture(): Promise<void> {
   assert.deepEqual(exportedVerbs(skillRoute), ["DELETE", "GET", "PUT"]);
   assert.deepEqual(exportedVerbs(teams), ["GET", "POST"]);
   assert.deepEqual(exportedVerbs(teamRoute), ["DELETE", "GET", "PUT"]);
+  assert.deepEqual(exportedVerbs(teamRuns), ["GET", "POST"]);
+  assert.deepEqual(exportedVerbs(teamRunRoute), ["GET"]);
+  assert.deepEqual(exportedVerbs(teamRunStop), ["POST"]);
+  assert.deepEqual(exportedVerbs(teamRunApprove), ["POST"]);
 
   assert.equal(
     (await skills.GET(new Request("https://app.test/api/skills"))).status,
@@ -1061,6 +1406,24 @@ async function executeRouteFixture(): Promise<void> {
       await skillRoute.GET(
         new Request(`https://app.test/api/skills/${SKILL_ID}`),
         { params: Promise.resolve({ id: SKILL_ID }) }
+      )
+    ).status,
+    200
+  );
+  assert.equal(
+    (
+      await teamRuns.GET(
+        new Request(`https://app.test/api/teams/${TEAM_ID}/runs`),
+        { params: Promise.resolve({ id: TEAM_ID }) }
+      )
+    ).status,
+    200
+  );
+  assert.equal(
+    (
+      await teamRunRoute.GET(
+        new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}`),
+        { params: Promise.resolve({ id: TEAM_RUN_ID }) }
       )
     ).status,
     200

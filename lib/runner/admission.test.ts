@@ -28,6 +28,10 @@ const attemptId =
 function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
   return {
     agentId: "00000000-0000-4000-8000-000000000001",
+    agentInstructions: "snapshotted instructions",
+    agentModel: "snapshotted-model",
+    agentRuntime: "copilot",
+    agentWorkspace: "/workspace/snapshot",
     authVersion: 1,
     cancellationRequestedAt: null,
     commandEvidence: [],
@@ -152,10 +156,17 @@ test("operation reuse with another immutable hash is a typed conflict", async ()
 test("admission passes the trusted authority version to storage", async () => {
   const current = run();
   let storedInput: unknown;
+  const agentSnapshot = {
+    instructions: current.agentInstructions,
+    model: current.agentModel,
+    runtime: current.agentRuntime,
+    workspace: current.agentWorkspace,
+  };
 
   await admitRunnerRun(
     {
       agentId: current.agentId,
+      agentSnapshot,
       authVersion: 8,
       id: current.id,
       operationId: current.operationId,
@@ -180,6 +191,10 @@ test("admission passes the trusted authority version to storage", async () => {
   );
 
   assert.equal((storedInput as { authVersion?: number }).authVersion, 8);
+  assert.deepEqual(
+    (storedInput as { agentSnapshot?: unknown }).agentSnapshot,
+    agentSnapshot
+  );
 });
 
 test("admission store outages return a typed retryable error without a database cause", async () => {
@@ -244,6 +259,7 @@ test("dispatch claim outages do not expose store errors", async () => {
 test("dispatch claims before sandbox and credential acquisition", async () => {
   const calls: string[] = [];
   let persistedRedaction: unknown;
+  const processInputs: Record<string, unknown>[] = [];
   const claimedRun = run();
   const authority = {
     expectedVersion: claimedRun.version,
@@ -289,7 +305,16 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
     deleteAttemptRedaction: async () => ({ kind: "deleted" as const }),
     getDispatchAgent: async () => {
       calls.push("get-agent");
-      return { agent: agent(), kind: "found" as const, run: claimedRun };
+      return {
+        agent: agent({
+          instructions: "mutated live instructions",
+          model: "mutated-live-model",
+          runtime: "codex",
+          workspace: "/workspace/mutated",
+        }),
+        kind: "found" as const,
+        run: claimedRun,
+      };
     },
     markDispatchRunningForDispatch: async () => {
       calls.push("mark-running");
@@ -354,7 +379,15 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
       }) as never,
     ensureSandbox: async () => {
       calls.push("sandbox");
-      return { agent: agent(), sandbox: {} as never };
+      return {
+        agent: agent({
+          instructions: "mutated live instructions",
+          model: "mutated-live-model",
+          runtime: "codex",
+          workspace: "/workspace/mutated",
+        }),
+        sandbox: {} as never,
+      };
     },
     limits: admissionLimitsFromEnvironment({}),
     operator,
@@ -372,6 +405,7 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
     },
     startProcess: async (input) => {
       calls.push("start");
+      processInputs.push(input as unknown as Record<string, unknown>);
       const prepared = await input.authorizePreparation({ runId: input.runId });
       assert.equal(prepared, attemptId);
       assert.equal(
@@ -417,11 +451,15 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
   ]);
   assert.equal(JSON.stringify(result).includes("secret"), false);
   assert.equal(JSON.stringify(persistedRedaction).includes("secret"), false);
+  assert.equal(processInputs[0]?.instructions, claimedRun.agentInstructions);
+  assert.equal(processInputs[0]?.model, claimedRun.agentModel);
+  assert.equal(processInputs[0]?.runtime, claimedRun.agentRuntime);
+  assert.equal(processInputs[0]?.workspace, claimedRun.agentWorkspace);
 });
 
-test("unsupported harness dispatch claims terminalize before sandbox, credential, accounting, or provider work", async () => {
+test("snapshotted unsupported harness dispatch claims terminalize before sandbox, credential, accounting, or provider work", async () => {
   const calls: string[] = [];
-  const claimedRun = run();
+  const claimedRun = run({ agentRuntime: "codex" });
   const authority = {
     expectedVersion: claimedRun.version,
     leaseToken: claimedRun.dispatchLeaseToken as string,
@@ -507,7 +545,7 @@ test("unsupported harness dispatch claims terminalize before sandbox, credential
         return terminalized
           ? { kind: "not_live" as const }
           : {
-              agent: agent({ runtime: "codex" }),
+              agent: agent({ runtime: "copilot" }),
               kind: "found" as const,
               run: claimedRun,
             };

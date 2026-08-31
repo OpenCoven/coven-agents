@@ -58,6 +58,10 @@ function postgresTimestamp(date: Date): string {
 function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
   return {
     agentId: "00000000-0000-4000-8000-000000000001",
+    agentInstructions: "test instructions",
+    agentModel: "test-model",
+    agentRuntime: "copilot",
+    agentWorkspace: null,
     authVersion: 1,
     cancellationRequestedAt: null,
     commandEvidence: [],
@@ -188,12 +192,7 @@ function serializedAgentStore() {
           ): Promise<Row[]> => {
             switch (currentStatement.name) {
               case "lock-agent-for-run-start":
-                return resultRows<Row>([
-                  {
-                    id: currentAgent.id,
-                    sandboxLifecycle: currentAgent.sandboxLifecycle,
-                  },
-                ]);
+                return resultRows<Row>([currentAgent]);
               case "lock-agent-for-update":
                 return resultRows<Row>([currentAgent]);
               case "get-operation-run-before-admission":
@@ -222,6 +221,17 @@ function serializedAgentStore() {
               case "insert-run": {
                 const inserted = run({
                   agentId: String(currentStatement.args.agentId),
+                  agentInstructions: String(
+                    currentStatement.args.agentInstructions
+                  ),
+                  agentModel: String(currentStatement.args.agentModel),
+                  agentRuntime: String(
+                    currentStatement.args.agentRuntime
+                  ) as RunnerRunRecord["agentRuntime"],
+                  agentWorkspace:
+                    currentStatement.args.agentWorkspace === null
+                      ? null
+                      : String(currentStatement.args.agentWorkspace),
                   authVersion: Number(currentStatement.args.authVersion),
                   id: String(currentStatement.args.id),
                   operationId: String(currentStatement.args.operationId),
@@ -570,7 +580,7 @@ test("principal methods bind every read and mutation to its tenant", async () =>
 test("duplicate starts return the immutable matching request", async () => {
   const existing = { ...run(), authVersion: 4 } as RunnerRunRecord;
   const { store } = scripted(
-    [{ id: existing.agentId, sandboxLifecycle: "ready" }],
+    [agent({ id: existing.agentId, sandboxLifecycle: "ready" })],
     [existing]
   );
 
@@ -610,7 +620,7 @@ test("new runs persist trusted authority and internal hydration preserves it", a
     version: inserted.version + 1,
   };
   const creation = scripted(
-    [{ id: inserted.agentId, sandboxLifecycle: "ready" }],
+    [agent({ id: inserted.agentId, sandboxLifecycle: "ready" })],
     [],
     [inserted],
     [accepted],
@@ -639,10 +649,61 @@ test("new runs persist trusted authority and internal hydration preserves it", a
   assert.equal((hydrated as { authVersion?: number }).authVersion, 8);
 });
 
+test("new runs persist immutable agent execution snapshots", async () => {
+  const suppliedSnapshot = {
+    instructions: "Team run profile snapshot.",
+    model: "snapshotted-model",
+    runtime: "copilot" as const,
+    workspace: "/workspace/snapshot",
+  };
+  const inserted = run({
+    agentInstructions: suppliedSnapshot.instructions,
+    agentModel: suppliedSnapshot.model,
+    agentRuntime: suppliedSnapshot.runtime,
+    agentWorkspace: suppliedSnapshot.workspace,
+  });
+  const accepted = {
+    createdAt: inserted.createdAt,
+    event: {},
+    eventId: 1,
+    runId: inserted.id,
+  };
+  const creation = scripted(
+    [agent({ instructions: "Mutated live profile." })],
+    [],
+    [inserted],
+    [accepted],
+    [{ ...inserted, logCursor: 1, version: inserted.version + 1 }]
+  );
+
+  const result = await creation.store.startRun(principal, {
+    agentId: inserted.agentId,
+    agentSnapshot: suppliedSnapshot,
+    authVersion: 8,
+    id: inserted.id,
+    operationId: inserted.operationId,
+    requestHash: inserted.requestHash,
+    task: inserted.task,
+  });
+
+  assert.equal(result.kind, "created");
+  const insert = creation.statements.find(
+    (statement) => statement.name === "insert-run"
+  );
+  assert.ok(insert);
+  assert.equal(insert.args.agentInstructions, suppliedSnapshot.instructions);
+  assert.equal(insert.args.agentModel, suppliedSnapshot.model);
+  assert.equal(insert.args.agentRuntime, suppliedSnapshot.runtime);
+  assert.equal(insert.args.agentWorkspace, suppliedSnapshot.workspace);
+  assert.match(queryText(insert), /"agentInstructions"/u);
+  assert.match(queryText(insert), /"agentRuntime"/u);
+  assert.match(queryText(insert), /"agentWorkspace"/u);
+});
+
 test("reusing an operation with another request hash conflicts", async () => {
   const existing = run();
   const { store } = scripted(
-    [{ id: existing.agentId, sandboxLifecycle: "ready" }],
+    [agent({ id: existing.agentId, sandboxLifecycle: "ready" })],
     [existing]
   );
 
@@ -664,11 +725,11 @@ test("operation retries win over reset or decommission lifecycle rejection", asy
     (["resetting", "decommissioning"] as const).map(async (lifecycle) => {
       const existing = run();
       const matching = scripted(
-        [{ id: existing.agentId, sandboxLifecycle: lifecycle }],
+        [agent({ id: existing.agentId, sandboxLifecycle: lifecycle })],
         [existing]
       );
       const conflicting = scripted(
-        [{ id: existing.agentId, sandboxLifecycle: lifecycle }],
+        [agent({ id: existing.agentId, sandboxLifecycle: lifecycle })],
         [existing]
       );
 
@@ -2013,6 +2074,10 @@ test("terminal retention prunes cleanup-free runs beyond capacity", async () => 
   assert.match(query, /"daytonaCommandId" IS NULL/);
   assert.match(query, /OFFSET 20/);
   assert.match(query, /"tenant"\s*=\s*\$\d+/);
+  assert.match(
+    query,
+    /NOT EXISTS \([\s\S]*FROM "RunnerTeamStep"[\s\S]*"runnerRunId" = "RunnerRun"\."id"/u
+  );
 });
 
 test("global scans require the operator authority and do not manufacture tenant scope", async () => {
@@ -2223,7 +2288,7 @@ test("principal mutations bind every affected row to the principal tenant", asyn
     [{ id: current.agentId }]
   );
   const start = scripted(
-    [{ id: current.agentId, sandboxLifecycle: "ready" }],
+    [agent({ id: current.agentId, sandboxLifecycle: "ready" })],
     [],
     [],
     [current]
@@ -3229,7 +3294,7 @@ test("agent deletion and starts serialize through the same agent lock", async ()
     [{ id: current.agentId }]
   );
   const start = scripted(
-    [{ id: current.agentId, sandboxLifecycle: "ready" }],
+    [agent({ id: current.agentId, sandboxLifecycle: "ready" })],
     [],
     [],
     [current]
@@ -3647,7 +3712,7 @@ test("normal, unprovisioned, and provisioning agents remain eligible for run adm
       async (sandboxLifecycle) => {
         const current = run();
         const { statements, store } = scripted(
-          [{ id: current.agentId, sandboxLifecycle }],
+          [agent({ id: current.agentId, sandboxLifecycle })],
           [],
           [current],
           [{}],
@@ -3680,7 +3745,7 @@ test("normal, unprovisioned, and provisioning agents remain eligible for run adm
 test("admission-aware starts serialize tenant depth and preserve queue refusal", async () => {
   const current = run();
   const { statements, store } = scripted(
-    [{ id: current.agentId, sandboxLifecycle: "ready" }],
+    [agent({ id: current.agentId, sandboxLifecycle: "ready" })],
     [],
     [
       {
@@ -3750,7 +3815,7 @@ test("zero queue capacity atomically claims an immediately eligible run", async 
     version: 2,
   });
   const { statements, store } = scripted(
-    [{ id: current.agentId, sandboxLifecycle: "ready" }],
+    [agent({ id: current.agentId, sandboxLifecycle: "ready" })],
     [],
     [
       {

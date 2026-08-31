@@ -48,6 +48,7 @@ import {
 import type { RunnerStore } from "./store";
 import type {
   RunnerAgentRecord,
+  RunnerClaimedDispatch,
   RunnerDispatchAuthority,
   RunnerOperator,
   RunnerRunRecord,
@@ -231,8 +232,17 @@ export type RunnerReconciliationExecutionResult =
 
 export type ReconcileAndDispatchDependencies = Readonly<{
   batchSize?: number;
+  claimTeamRuns?: () => Promise<
+    Readonly<{
+      claimedDispatches: readonly RunnerClaimedDispatch[];
+      failures: number;
+    }>
+  >;
   clock?: () => Date;
   dispatch?: () => Promise<Readonly<{ kind: string }>>;
+  dispatchClaim?: (
+    claimed: RunnerClaimedDispatch
+  ) => Promise<Readonly<{ kind: string }>>;
   dispatchLimit?: number;
   operator: RunnerOperator;
   provider: RunnerReconciliationProvider;
@@ -244,6 +254,7 @@ export type ReconcileAndDispatchDependencies = Readonly<{
     scope: RunnerAttemptRedactionScope,
     envelope: RunnerAttemptRedactionEnvelope
   ) => Promise<string>;
+  projectTeamRuns?: () => Promise<Readonly<{ failures: number }>>;
   releaseCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
   rollbackCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
   sandboxRecovery?: Omit<
@@ -1763,6 +1774,71 @@ export async function reconcileAndDispatch(
     }
   }
 
+  if (dependencies.sandboxRecovery) {
+    const sandbox = await reconcileDaytonaSandboxes({
+      ...dependencies.sandboxRecovery,
+      clock,
+      operator: dependencies.operator,
+    });
+    result.deferred += sandbox.deferred;
+    result.failures += sandbox.failures;
+    result.sandboxRecovered += sandbox.recovered;
+  }
+
+  if (dependencies.projectTeamRuns) {
+    try {
+      result.failures += (await dependencies.projectTeamRuns()).failures;
+    } catch {
+      result.failures += 1;
+    }
+  }
+
+  let claimedDispatches: readonly RunnerClaimedDispatch[] = [];
+  if (dependencies.claimTeamRuns) {
+    try {
+      const claimed = await dependencies.claimTeamRuns();
+      ({ claimedDispatches } = claimed);
+      result.failures += claimed.failures;
+    } catch {
+      result.failures += 1;
+    }
+  }
+
+  if (claimedDispatches.length > 0) {
+    if (dependencies.dispatchClaim) {
+      for (const claimed of claimedDispatches) {
+        try {
+          // biome-ignore lint/performance/noAwaitInLoops: Exact zero-queue claims must dispatch sequentially.
+          const dispatched = await dependencies.dispatchClaim(claimed);
+          if (dispatched.kind === "started") {
+            result.dispatched += 1;
+          }
+        } catch {
+          result.failures += 1;
+        }
+      }
+    } else {
+      result.failures += claimedDispatches.length;
+    }
+  }
+
+  if (dependencies.dispatch) {
+    for (let index = 0; index < dispatchLimit; index += 1) {
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: Claims are intentionally sequential to preserve global fairness.
+        const dispatched = await dependencies.dispatch();
+        if (dispatched.kind === "idle") {
+          break;
+        }
+        if (dispatched.kind === "started") {
+          result.dispatched += 1;
+        }
+      } catch {
+        result.failures += 1;
+      }
+    }
+  }
+
   if (dependencies.store.scanTerminalLeaseCleanups) {
     let terminalLeases: RunnerRunRecord[];
     try {
@@ -1829,34 +1905,6 @@ export async function reconcileAndDispatch(
         result.failures += 1;
       } else {
         result.deferred += 1;
-      }
-    }
-  }
-
-  if (dependencies.sandboxRecovery) {
-    const sandbox = await reconcileDaytonaSandboxes({
-      ...dependencies.sandboxRecovery,
-      clock,
-      operator: dependencies.operator,
-    });
-    result.deferred += sandbox.deferred;
-    result.failures += sandbox.failures;
-    result.sandboxRecovered += sandbox.recovered;
-  }
-
-  if (dependencies.dispatch) {
-    for (let index = 0; index < dispatchLimit; index += 1) {
-      try {
-        // biome-ignore lint/performance/noAwaitInLoops: Claims are intentionally sequential to preserve global fairness.
-        const dispatched = await dependencies.dispatch();
-        if (dispatched.kind === "idle") {
-          break;
-        }
-        if (dispatched.kind === "started") {
-          result.dispatched += 1;
-        }
-      } catch {
-        result.failures += 1;
       }
     }
   }

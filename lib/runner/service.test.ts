@@ -688,6 +688,10 @@ test("reconciliation recovers a cancelled terminal row after lease cleanup faile
   let cleanupAttempts = 0;
   let persisted: RunnerRunRecord = {
     agentId: AGENT_ID,
+    agentInstructions: "Do the thing.",
+    agentModel: "auto",
+    agentRuntime: "copilot",
+    agentWorkspace: null,
     authVersion: 1,
     cancellationRequestedAt: null,
     commandEvidence: [],

@@ -49,6 +49,10 @@ function fakeDiagnosticDeadline(timeoutMilliseconds = 240_000) {
 function run(authVersion: number | null): RunnerRunRecord {
   return {
     agentId: "00000000-0000-4000-8000-000000000001",
+    agentInstructions: "safe instructions",
+    agentModel: "auto",
+    agentRuntime: "copilot",
+    agentWorkspace: null,
     authVersion,
     cancellationRequestedAt: null,
     commandEvidence: [],

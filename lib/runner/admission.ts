@@ -351,6 +351,7 @@ export async function admitRunnerRun(
     result = await dependencies.store.startRun(input.principal, {
       admission: limits,
       agentId: input.agentId,
+      ...(input.agentSnapshot ? { agentSnapshot: input.agentSnapshot } : {}),
       authVersion: input.authVersion,
       id: input.id,
       ...(initialDispatch ? { initialDispatch } : {}),
@@ -523,7 +524,7 @@ export async function dispatchRunnerClaim(
   if (associated.kind !== "found") {
     return { kind: "retained", reason: "launch_fenced", runId: run.id };
   }
-  if (!isRunnableHarness(associated.agent.runtime)) {
+  if (!isRunnableHarness(run.agentRuntime)) {
     return (await terminalizeUnstartedDispatchFailure(
       dependencies,
       authority,
@@ -661,8 +662,8 @@ export async function dispatchRunnerClaim(
               callbacks.currentAuthority()
             )
           ).kind === "deleted",
-        instructions: ensured.agent.instructions,
-        model: ensured.agent.model,
+        instructions: run.agentInstructions,
+        model: run.agentModel,
         persistAttemptRedaction: async ({
           attemptId,
           credential: credentialForRedaction,
@@ -688,10 +689,10 @@ export async function dispatchRunnerClaim(
           );
         },
         runId: run.id,
-        runtime: ensured.agent.runtime,
+        runtime: run.agentRuntime,
         sandbox: ensured.sandbox,
         task: run.task,
-        workspace: ensured.agent.workspace ?? undefined,
+        workspace: run.agentWorkspace ?? undefined,
       })
     );
   } catch (error) {

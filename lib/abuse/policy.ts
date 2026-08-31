@@ -68,6 +68,14 @@ const POLICIES = Object.freeze({
   suggestions_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   team_delete: closedPolicy(["ip", "tenant"], 0, DESTRUCTIVE_WRITE),
   team_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
+  team_run_approve: closedPolicy(["ip", "tenant"], 4096, SENSITIVE_WRITE),
+  team_run_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
+  team_run_start: closedPolicy(
+    ["ip", "tenant"],
+    64_000,
+    rateClass(5, 60, 25, 86_400)
+  ),
+  team_run_stop: closedPolicy(["ip", "tenant"], 1024, DESTRUCTIVE_WRITE),
   team_write: closedPolicy(["ip", "tenant"], 131_072, SENSITIVE_WRITE),
   upload: closedPolicy(["ip", "user"], 5_250_000, rateClass(2, 60, 20, 3600)),
   usage_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),

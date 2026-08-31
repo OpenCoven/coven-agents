@@ -125,10 +125,21 @@ export type RunnerAgentRecord = {
   workspace: string | null;
 };
 
+export type RunnerAgentExecutionSnapshot = Readonly<{
+  instructions: string;
+  model: string;
+  runtime: RunnerRuntime;
+  workspace: string | null;
+}>;
+
 export type RunnerRunRecord = Omit<
   RunSnapshot,
   "apiVersion" | "completedAt" | "createdAt" | "error" | "startedAt"
 > & {
+  agentInstructions: string;
+  agentModel: string;
+  agentRuntime: RunnerRuntime;
+  agentWorkspace: string | null;
   authVersion: number | null;
   cancellationRequestedAt: Date | null;
   completedAt: Date | null;
@@ -199,6 +210,7 @@ export type UpdateRunnerAgentInput = {
 
 export type StartRunnerRunInput = {
   agentId: string;
+  agentSnapshot?: RunnerAgentExecutionSnapshot;
   admission?: RunnerAdmissionLimits;
   authVersion: number;
   id: string;
