@@ -106,6 +106,13 @@ test("every declared route initially fails closed", () => {
   }
 });
 
+test("Stripe webhook admission is IP-only and preserves the registered budget", () => {
+  assert.deepEqual(
+    abusePolicyFor("stripe_webhook"),
+    expectedPolicy(["ip"], 262_144, 60, 60, 600, 3600)
+  );
+});
+
 test("every policy has valid finite integer bounds and subjects", () => {
   for (const route of EXPECTED_ROUTES) {
     const policy = abusePolicyFor(route);

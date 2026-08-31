@@ -205,8 +205,6 @@ const protectedHandlers: RouteExpectation[] = [
   ),
 ];
 
-const excludedRoutes = ["app/api/stripe/webhook/route.ts"];
-
 test("resource-bearing handlers admit after identity and before expensive work", () => {
   for (const expectation of protectedHandlers) {
     const source = read(expectation.file);
@@ -265,10 +263,56 @@ test("resource-bearing handlers admit after identity and before expensive work",
   }
 });
 
-test("deferred webhook routes stay untouched", () => {
-  for (const file of excludedRoutes) {
-    assert.doesNotMatch(read(file), /enforceAbusePolicy/);
+test("Stripe webhook admission precedes body and provider work", () => {
+  const routeSource = read("app/api/stripe/webhook/route.ts");
+  const webhookSource = read("lib/billing/webhook.ts");
+  const handler = exportedFunctionBlock(routeSource, "POST");
+  const response = exportedFunctionBlock(
+    webhookSource,
+    "stripeWebhookResponse"
+  );
+  const admissionIndex = response.indexOf("dependencies.enforceAbuse({");
+  const bodyIndex = response.indexOf("request.text()");
+  const providerIndex = response.indexOf("dependencies.createProvider(");
+
+  assert.match(routeSource, /from "@\/lib\/abuse\/enforce"/);
+  assert.match(routeSource, /from "@vercel\/functions"/);
+  assert.match(handler, /ipAddress\(request\)/);
+  assert.match(handler, /stripeWebhookResponse\(/);
+  assert.ok(admissionIndex >= 0);
+  assert.match(response, /route: "stripe_webhook"/);
+  assert.ok(bodyIndex > admissionIndex);
+  assert.ok(providerIndex > admissionIndex);
+});
+
+test("Stripe webhook path never reads the Checkout launch flag", () => {
+  for (const file of [
+    "app/api/stripe/webhook/route.ts",
+    "lib/billing/webhook.ts",
+  ]) {
+    const source = read(file);
+    assert.doesNotMatch(source, /SUBSCRIPTION_CHECKOUT_ENABLED/);
+    assert.doesNotMatch(source, /@\/lib\/billing\/config/);
   }
+});
+
+test("Stripe event claims and User writes share one transaction", () => {
+  const source = read("lib/db/queries.ts");
+  const start = source.indexOf("export async function applyStripeEventUpdate");
+  const end = source.indexOf(
+    "export const databaseCheckoutAttemptLeaseStore",
+    start
+  );
+  const update = source.slice(start, end);
+
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  assert.match(update, /db\.transaction\(/);
+  assert.match(update, /\.insert\(stripeEvent\)/);
+  assert.match(update, /\.onConflictDoNothing\(\)/);
+  assert.match(update, /\.update\(user\)/);
+  assert.match(update, /\.returning\(\{ id: user\.id \}\)/);
+  assert.match(update, /throw new Error/);
 });
 
 test("analytics revalidates subscriber authority before reading history", () => {

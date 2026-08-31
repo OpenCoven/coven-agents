@@ -9,9 +9,11 @@ import {
   gt,
   gte,
   inArray,
+  isNull,
   lt,
   lte,
   ne,
+  or,
   type SQL,
   sql,
 } from "drizzle-orm";
@@ -41,6 +43,7 @@ import {
   reservationUsage,
 } from "../billing/run-reservations";
 import { countRun, usageFor } from "../billing/usage";
+import type { StripeEventUpdateInput } from "../billing/webhook";
 import { ChatbotError } from "../errors";
 import {
   type Chat,
@@ -228,40 +231,52 @@ export async function attachStripeCustomer(
   }
 }
 
-export async function applySubscriptionUpdate(input: {
-  billingPeriodStart: Date;
-  customerId: string;
-  subscribedUntil: Date;
-  userId: string;
-}) {
-  try {
-    return await db
-      .update(user)
-      .set({
-        billingPeriodStart: input.billingPeriodStart,
-        stripeCustomerId: input.customerId,
-        subscribedUntil: input.subscribedUntil,
-      })
-      .where(eq(user.id, input.userId));
-  } catch (error) {
-    throw new ChatbotError("bad_request:database", { cause: error });
-  }
-}
+export type StripeEventWriteResult = "applied" | "duplicate";
 
-/**
- * Records a Stripe event id, returning false if it was already processed.
- *
- * The insert IS the idempotency check. A lookup-then-write would race a
- * concurrent redelivery of the same event, and Stripe retries routinely.
- */
-export async function claimStripeEvent(eventId: string): Promise<boolean> {
+export async function applyStripeEventUpdate(
+  input: StripeEventUpdateInput
+): Promise<StripeEventWriteResult> {
   try {
-    const claimed = await db
-      .insert(stripeEvent)
-      .values({ id: eventId })
-      .onConflictDoNothing()
-      .returning({ id: stripeEvent.id });
-    return claimed.length > 0;
+    return await db.transaction(async (transaction) => {
+      const claimed = await transaction
+        .insert(stripeEvent)
+        .values({ id: input.eventId })
+        .onConflictDoNothing()
+        .returning({ id: stripeEvent.id });
+      if (claimed.length === 0) {
+        return "duplicate";
+      }
+
+      const updated = await transaction
+        .update(user)
+        .set({
+          ...(input.billingPeriodStart
+            ? { billingPeriodStart: input.billingPeriodStart }
+            : {}),
+          stripeCustomerId: input.customerId,
+          ...(input.stripeSubscriptionId
+            ? { stripeSubscriptionId: input.stripeSubscriptionId }
+            : {}),
+          ...(input.subscribedUntil
+            ? { subscribedUntil: input.subscribedUntil }
+            : {}),
+        })
+        .where(
+          and(
+            eq(user.id, input.userId),
+            or(
+              isNull(user.stripeCustomerId),
+              eq(user.stripeCustomerId, input.customerId)
+            )
+          )
+        )
+        .returning({ id: user.id });
+
+      if (updated.length !== 1) {
+        throw new Error("Stripe Customer owner does not match.");
+      }
+      return "applied";
+    });
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
   }
