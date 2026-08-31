@@ -21,6 +21,11 @@ const AUTH_SESSION_UPDATE_IP = rateClass(120, 60, 1200, 3600);
 // Gate every source before JWE work with ample shared-NAT headroom; verified
 // users retain the existing 60/minute and 600/hour budget below.
 const SUBSCRIPTION_READ_IP = rateClass(600, 60, 10_000, 3600);
+// One GitHub device flow can poll 180 times at the normal five-second cadence.
+// The start policy caps a subject at five attempts/hour, so 1200 polls leaves
+// 300 requests of retry/reconnect headroom over five complete flows. The
+// 90/minute window admits those flows behind one IP with 50% burst headroom.
+const CREDENTIAL_DEVICE_POLL = rateClass(90, 60, 1200, 3600);
 // Stripe retries and renewal batches can legitimately share an egress IP.
 // This route still has its own IP-only budget and a bounded 256 KiB reader.
 const WEBHOOK_WRITE = rateClass(600, 60, 10_000, 3600);
@@ -44,7 +49,7 @@ const POLICIES = Object.freeze({
   credential_device_poll: closedPolicy(
     ["ip", "user"],
     8192,
-    rateClass(12, 60, 60, 3600)
+    CREDENTIAL_DEVICE_POLL
   ),
   credential_device_start: closedPolicy(
     ["ip", "user"],
