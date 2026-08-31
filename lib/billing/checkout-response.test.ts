@@ -3938,6 +3938,38 @@ test("Checkout carries the user, configured Price, and account return URLs", asy
   assert.equal(Object.hasOwn(checkoutInput.value, "automatic_tax"), false);
 });
 
+test("Checkout return URLs include the configured application base path", async () => {
+  const checkoutInput: {
+    value: Stripe.Checkout.SessionCreateParams | null;
+  } = { value: null };
+  const dependencies = dependenciesFor({
+    appBasePath: () => "/demo",
+    createProvider: () =>
+      defaultProvider({
+        createCheckoutSession(input) {
+          checkoutInput.value = input;
+          return Promise.resolve({
+            url: "https://checkout.stripe.test/session",
+          });
+        },
+        hasBlockingSubscription: () => Promise.resolve(false),
+      }),
+  });
+
+  const response = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(response.status, 200);
+  assert.ok(checkoutInput.value);
+  assert.equal(
+    checkoutInput.value.cancel_url,
+    `${ORIGIN}/demo/account?checkout=cancelled`
+  );
+  assert.equal(
+    checkoutInput.value.success_url,
+    `${ORIGIN}/demo/account?checkout=success`
+  );
+});
+
 test("a null Checkout URL returns an explicit failure", async () => {
   const dependencies = dependenciesFor({
     createProvider: () =>
@@ -4105,6 +4137,7 @@ function dependenciesFor(
   overrides: Partial<CheckoutDependencies> = {}
 ): CheckoutDependencies {
   return {
+    appBasePath: () => "",
     attachCustomer: (_userId, customerId) => Promise.resolve(customerId),
     authenticate: () => Promise.resolve(userSession()),
     checkoutEnabled: () => true,

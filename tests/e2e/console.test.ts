@@ -2215,12 +2215,12 @@ test.describe("Run console", () => {
     });
     await notifySessionChange(page);
     await sessionRefresh;
-    await page.getByRole("button", { exact: true, name: "Account" }).click();
+    await page.getByRole("tab", { exact: true, name: "Account" }).click();
     await expect(
       page.getByText("second@example.invalid", { exact: true })
     ).toBeVisible();
     await page
-      .getByRole("button", { exact: true, name: "Harness credentials" })
+      .getByRole("tab", { exact: true, name: "Harness credentials" })
       .click();
     await releaseList();
     await releaseSave();
@@ -2347,7 +2347,7 @@ test.describe("Run console", () => {
 
     await page.goto("/agents");
     await page.getByRole("button", { name: "Account and settings" }).click();
-    await page.getByRole("button", { name: "Data" }).click();
+    await page.getByRole("tab", { name: "Data" }).click();
     await page.getByRole("button", { name: "Delete all chats…" }).click();
     await page.getByRole("button", { name: "Yes, delete every chat" }).click();
     await started;
@@ -2371,7 +2371,7 @@ test.describe("Run console", () => {
     });
     await notifySessionChange(page);
     await sessionRefresh;
-    await page.getByRole("button", { exact: true, name: "Account" }).click();
+    await page.getByRole("tab", { exact: true, name: "Account" }).click();
     await expect(
       page.getByText("second@example.invalid", { exact: true })
     ).toBeVisible();

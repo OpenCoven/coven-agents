@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AvatarSettings } from "@/components/account/avatar-settings";
 import { DeleteAllChats } from "@/components/account/delete-all-chats";
 import { HarnessCredentials } from "@/components/account/harness-credentials";
@@ -52,10 +52,20 @@ const TABS = [
 type Tab = (typeof TABS)[number];
 type TabId = Tab["id"];
 
+function accountPanelId(tab: TabId): string {
+  return `account-panel-${tab}`;
+}
+
+function accountTabId(tab: TabId): string {
+  return `account-tab-${tab}`;
+}
+
 export function AccountSettings({
   checkoutEnabled,
   checkoutResult = null,
 }: AccountSettingsProps) {
+  const [effectiveCheckoutResult, setEffectiveCheckoutResult] =
+    useState(checkoutResult);
   const [tab, setTab] = useState<TabId>(() =>
     checkoutResult === "success" ||
     (checkoutResult === "cancelled" && checkoutEnabled)
@@ -65,10 +75,81 @@ export function AccountSettings({
   const { data: session, status } = useSession();
   const isSubscriber = session?.user?.type === "subscriber";
   const showBilling =
-    checkoutEnabled || isSubscriber || checkoutResult === "success";
+    checkoutEnabled || isSubscriber || effectiveCheckoutResult === "success";
   const visibleTabs = TABS.filter(
     (entry) => entry.id !== "billing" || showBilling
   );
+  const selectedTab = visibleTabs.some((entry) => entry.id === tab)
+    ? tab
+    : visibleTabs[0].id;
+  const tabRefs = useRef(new Map<TabId, HTMLButtonElement>());
+  const focusedTabRef = useRef<TabId | null>(null);
+
+  useEffect(() => {
+    setEffectiveCheckoutResult(checkoutResult);
+  }, [checkoutResult]);
+
+  useEffect(() => {
+    if (tab === selectedTab) {
+      return;
+    }
+    const shouldFocus = focusedTabRef.current === tab;
+    setTab(selectedTab);
+    if (!shouldFocus) {
+      return;
+    }
+    queueMicrotask(() => {
+      tabRefs.current.get(selectedTab)?.focus();
+    });
+  }, [selectedTab, tab]);
+
+  const registerTab = useCallback(
+    (id: TabId, element: HTMLButtonElement | null) => {
+      if (element) {
+        tabRefs.current.set(id, element);
+      } else {
+        tabRefs.current.delete(id);
+      }
+    },
+    []
+  );
+
+  const focusTab = useCallback((id: TabId) => {
+    setTab(id);
+    tabRefs.current.get(id)?.focus();
+  }, []);
+
+  const handleTabFocus = useCallback((id: TabId) => {
+    focusedTabRef.current = id;
+  }, []);
+
+  const handleTabKeyDown = useCallback(
+    (id: TabId, key: string) => {
+      const index = visibleTabs.findIndex((entry) => entry.id === id);
+      if (index < 0) {
+        return;
+      }
+      let destination: TabId | null = null;
+      if (key === "ArrowRight") {
+        destination = visibleTabs[(index + 1) % visibleTabs.length].id;
+      } else if (key === "ArrowLeft") {
+        destination =
+          visibleTabs[(index - 1 + visibleTabs.length) % visibleTabs.length].id;
+      } else if (key === "Home") {
+        destination = visibleTabs[0].id;
+      } else if (key === "End") {
+        destination = visibleTabs.at(-1)?.id ?? null;
+      }
+      if (destination) {
+        focusTab(destination);
+      }
+    },
+    [focusTab, visibleTabs]
+  );
+
+  const checkoutConfirmed = useCallback(() => {
+    setEffectiveCheckoutResult(null);
+  }, []);
 
   if (!session?.user && status === "loading") {
     return (
@@ -164,35 +245,50 @@ export function AccountSettings({
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className="flex min-h-0 w-full flex-col sm:flex-row">
           <nav
-            aria-label="Account settings"
+            aria-label="Account settings navigation"
             className="flex w-full shrink-0 flex-row gap-1 overflow-x-auto border-border border-b px-3 py-3 sm:w-[200px] sm:flex-col sm:overflow-x-visible sm:border-r sm:border-b-0 sm:px-4 sm:py-6"
           >
-            <p className="hidden px-3 pb-2 font-medium text-[11px] text-muted-foreground uppercase tracking-[0.14em] sm:block">
-              Settings
-            </p>
+            <div
+              aria-label="Account settings"
+              className="contents"
+              role="tablist"
+            >
+              <p className="hidden px-3 pb-2 font-medium text-[11px] text-muted-foreground uppercase tracking-[0.14em] sm:block">
+                Settings
+              </p>
 
-            {visibleTabs.map((entry) => (
-              <TabButton
-                active={tab === entry.id}
-                key={entry.id}
-                onSelect={setTab}
-                tab={entry}
-              />
-            ))}
+              {visibleTabs.map((entry) => (
+                <TabButton
+                  active={selectedTab === entry.id}
+                  key={entry.id}
+                  onFocus={handleTabFocus}
+                  onKeyDown={handleTabKeyDown}
+                  onSelect={setTab}
+                  register={registerTab}
+                  tab={entry}
+                />
+              ))}
+            </div>
           </nav>
 
-          <section className="min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-8 sm:py-6">
-            {tab === "copilot" ? <HarnessCredentials /> : null}
-            {tab === "profile" ? <AvatarSettings /> : null}
-            {tab === "usage" ? <UsageMeter /> : null}
-            {tab === "billing" && showBilling ? (
+          <section
+            aria-labelledby={accountTabId(selectedTab)}
+            className="min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-8 sm:py-6"
+            id={accountPanelId(selectedTab)}
+            role="tabpanel"
+          >
+            {selectedTab === "copilot" ? <HarnessCredentials /> : null}
+            {selectedTab === "profile" ? <AvatarSettings /> : null}
+            {selectedTab === "usage" ? <UsageMeter /> : null}
+            {selectedTab === "billing" && showBilling ? (
               <SubscriptionCard
                 checkoutEnabled={checkoutEnabled}
-                checkoutResult={checkoutResult}
+                checkoutResult={effectiveCheckoutResult}
                 isSubscriber={isSubscriber}
+                onCheckoutConfirmed={checkoutConfirmed}
               />
             ) : null}
-            {tab === "data" ? <DeleteAllChats /> : null}
+            {selectedTab === "data" ? <DeleteAllChats /> : null}
           </section>
         </div>
       </div>
@@ -202,11 +298,17 @@ export function AccountSettings({
 
 function TabButton({
   active,
+  onFocus,
+  onKeyDown,
   onSelect,
+  register,
   tab,
 }: {
   active: boolean;
+  onFocus: (id: TabId) => void;
+  onKeyDown: (id: TabId, key: string) => void;
   onSelect: (id: TabId) => void;
+  register: (id: TabId, element: HTMLButtonElement | null) => void;
   tab: Tab;
 }) {
   const Icon = tab.icon;
@@ -214,16 +316,47 @@ function TabButton({
   const select = useCallback(() => {
     onSelect(tab.id);
   }, [onSelect, tab.id]);
+  const focus = useCallback(() => {
+    onFocus(tab.id);
+  }, [onFocus, tab.id]);
+  const keyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>) => {
+      if (
+        event.key === "ArrowLeft" ||
+        event.key === "ArrowRight" ||
+        event.key === "Home" ||
+        event.key === "End"
+      ) {
+        event.preventDefault();
+        onKeyDown(tab.id, event.key);
+      }
+    },
+    [onKeyDown, tab.id]
+  );
+  const ref = useCallback(
+    (element: HTMLButtonElement | null) => {
+      register(tab.id, element);
+    },
+    [register, tab.id]
+  );
 
   return (
     <button
+      aria-controls={accountPanelId(tab.id)}
+      aria-selected={active}
       className={cn(
         "oc-account-tab flex shrink-0 items-center gap-2.5 rounded-[8px] px-3 py-2 text-left text-[13px] transition-colors",
         active
           ? "bg-[var(--oc-accent-soft)] font-medium text-[var(--oc-accent)]"
           : "text-muted-foreground hover:bg-secondary hover:text-foreground"
       )}
+      id={accountTabId(tab.id)}
       onClick={select}
+      onFocus={focus}
+      onKeyDown={keyDown}
+      ref={ref}
+      role="tab"
+      tabIndex={active ? 0 : -1}
       type="button"
     >
       <Icon className="size-4 shrink-0" />

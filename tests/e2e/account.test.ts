@@ -60,4 +60,61 @@ test.describe("Account settings", () => {
       )
     ).toBe(true);
   });
+
+  test("account settings expose keyboard-operable ARIA tabs", async ({
+    page,
+  }) => {
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({
+        json: {
+          expires: "2099-01-01T00:00:00.000Z",
+          user: {
+            authVersion: 1,
+            email: "tabs@example.invalid",
+            id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+            image: null,
+            name: "Tabs user",
+            type: "subscriber",
+          },
+        },
+      })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({
+        body: JSON.stringify({ harnessIds: [] }),
+        contentType: "application/json",
+        status: 200,
+      })
+    );
+
+    await page.goto("/account");
+
+    const tablist = page.getByRole("tablist", { name: "Account settings" });
+    await expect(tablist).toBeVisible();
+    const copilot = page.getByRole("tab", { name: "Copilot" });
+    const profile = page.getByRole("tab", { name: "Profile" });
+    const data = page.getByRole("tab", { name: "Data" });
+    await expect(copilot).toHaveAttribute("aria-selected", "true");
+    await expect(copilot).toHaveAttribute("tabindex", "0");
+    await expect(copilot).toHaveAttribute(
+      "aria-controls",
+      "account-panel-copilot"
+    );
+    await expect(
+      page.getByRole("tabpanel", { name: "Copilot" })
+    ).toHaveAttribute("id", "account-panel-copilot");
+
+    await copilot.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(profile).toBeFocused();
+    await expect(profile).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tabpanel", { name: "Profile" })).toBeVisible();
+
+    await page.keyboard.press("End");
+    await expect(data).toBeFocused();
+    await expect(data).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("Home");
+    await expect(copilot).toBeFocused();
+    await expect(copilot).toHaveAttribute("aria-selected", "true");
+  });
 });

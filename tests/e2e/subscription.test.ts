@@ -6,18 +6,35 @@ const SUBSCRIBED_UNTIL = "2099-01-15T12:00:00.000Z";
 
 type SessionType = "demo" | "subscriber";
 
-function sessionFor(type: SessionType) {
+function sessionFor(
+  type: SessionType,
+  {
+    email = "e2e-user@example.invalid",
+    id = E2E_USER_ID,
+  }: { email?: string; id?: string } = {}
+) {
   return {
     expires: "2099-01-01T00:00:00.000Z",
     user: {
       authVersion: 1,
-      email: "e2e-user@example.invalid",
-      id: E2E_USER_ID,
+      email,
+      id,
       image: null,
       name: "E2E subscriber",
       type,
     },
   };
+}
+
+async function notifySessionChange(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const channel = new BroadcastChannel("next-auth");
+    channel.postMessage({ event: "session" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    channel.postMessage({ event: "session" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    channel.close();
+  });
 }
 
 async function mockSession(page: Page, type: SessionType): Promise<void> {
@@ -96,7 +113,7 @@ async function openEligibleAccount(page: Page): Promise<void> {
   await mockSession(page, "demo");
   await mockAccountDependencies(page);
   await page.goto("/account");
-  await page.getByRole("button", { name: "Billing" }).click();
+  await page.getByRole("tab", { name: "Billing" }).click();
   await expect(checkoutButton(page)).toBeVisible();
 }
 
@@ -111,11 +128,11 @@ test.describe("Subscriber checkout", () => {
     await mockAccountDependencies(page);
 
     await page.goto("/account?checkout=SUCCESS");
-    await expect(page.getByRole("button", { name: "Billing" })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
     await expect(checkoutButton(page)).toHaveCount(0);
 
     await openConsoleSettings(page);
-    await expect(page.getByRole("button", { name: "Billing" })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
     await expect(checkoutButton(page)).toHaveCount(0);
   });
 
@@ -127,7 +144,7 @@ test.describe("Subscriber checkout", () => {
     await mockAccountDependencies(page);
 
     await page.goto("/account");
-    await page.getByRole("button", { name: "Billing" }).click();
+    await page.getByRole("tab", { name: "Billing" }).click();
     const accountCard = page.locator(".oc-subscription-card");
     await expect(accountCard).toContainText("750 runs");
     await expect(accountCard).toContainText("each month");
@@ -138,7 +155,7 @@ test.describe("Subscriber checkout", () => {
     const accountOffer = await accountCard.innerText();
 
     await openConsoleSettings(page);
-    await page.getByRole("button", { name: "Billing" }).click();
+    await page.getByRole("tab", { name: "Billing" }).click();
     const consoleCard = page.locator(".oc-subscription-card");
     await expect(consoleCard).toContainText("750 runs");
     await expect(checkoutButton(page)).toBeVisible();
@@ -160,7 +177,7 @@ test.describe("Subscriber checkout", () => {
     });
 
     await page.goto("/account");
-    await page.getByRole("button", { name: "Billing" }).click();
+    await page.getByRole("tab", { name: "Billing" }).click();
     await expect(page.getByText("Subscription active")).toBeVisible();
     await expect(page.getByText("January 15, 2099")).toBeVisible();
     await expect(checkoutButton(page)).toHaveCount(0);
@@ -169,13 +186,13 @@ test.describe("Subscriber checkout", () => {
     ).toHaveCount(0);
 
     await openConsoleSettings(page);
-    await page.getByRole("button", { name: "Billing" }).click();
+    await page.getByRole("tab", { name: "Billing" }).click();
     await expect(page.getByText("Subscription active")).toBeVisible();
     await expect(checkoutButton(page)).toHaveCount(0);
     await expect.poll(() => statusReads).toBe(2);
   });
 
-  test("a successful return opens billing while disabled, stays confirming while inactive, and preserves the rest of the URL", async ({
+  test("a successful return opens billing while disabled, stays confirming while inactive, and preserves the full URL", async ({
     page,
   }) => {
     test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
@@ -189,12 +206,54 @@ test.describe("Subscriber checkout", () => {
 
     await page.goto("/account?source=ledger&checkout=success#allowance");
 
-    await expect(page.getByRole("button", { name: "Billing" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Billing" })).toBeVisible();
     await expect(page.getByText("Confirming payment")).toBeVisible();
     await expect(page.getByText("Subscription active")).toHaveCount(0);
     await expect(checkoutButton(page)).toHaveCount(0);
-    await expect(page).toHaveURL("/account?source=ledger#allowance");
+    await expect(page).toHaveURL(
+      "/account?source=ledger&checkout=success#allowance"
+    );
     await expect.poll(() => statusReads).toBeGreaterThan(0);
+  });
+
+  test("reloading an inactive successful return resumes confirmation with the flag off and cleans only after activation", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
+    let sessionType: SessionType = "demo";
+    let active = false;
+    let statusReads = 0;
+    await page.route("**/api/auth/csrf", (route) =>
+      route.fulfill({ json: { csrfToken: "e2e-csrf" } })
+    );
+    await page.route("**/api/auth/session", (route) => {
+      if (route.request().method() === "POST" && active) {
+        sessionType = "subscriber";
+      }
+      return route.fulfill({ json: sessionFor(sessionType) });
+    });
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", (route) => {
+      statusReads += 1;
+      return route.fulfill({ json: subscriptionStatus(active) });
+    });
+
+    await page.goto("/account?source=ledger&checkout=success#allowance");
+    await expect.poll(() => statusReads).toBeGreaterThan(0);
+    const readsBeforeReload = statusReads;
+    await page.reload();
+
+    await expect(page.getByRole("tab", { name: "Billing" })).toBeVisible();
+    await expect(page.getByText("Confirming payment")).toBeVisible();
+    await expect(page).toHaveURL(
+      "/account?source=ledger&checkout=success#allowance"
+    );
+    await expect.poll(() => statusReads).toBeGreaterThan(readsBeforeReload);
+
+    active = true;
+
+    await expect(page.getByText("Subscription active")).toBeVisible();
+    await expect(page).toHaveURL("/account?source=ledger#allowance");
   });
 
   test("database activation updates Auth.js with an object before showing success", async ({
@@ -332,8 +391,7 @@ test.describe("Subscriber checkout", () => {
     });
     await openEligibleAccount(page);
     const button = checkoutButton(page);
-    await page.getByRole("button", { name: "Billing" }).focus();
-    await page.keyboard.press("Tab");
+    await page.getByRole("tab", { name: "Billing" }).focus();
     await page.keyboard.press("Tab");
     await expect(button).toBeFocused();
     await expect(button).toHaveCSS("outline-style", "solid");
@@ -386,6 +444,200 @@ test.describe("Subscriber checkout", () => {
 
     await page.getByRole("button", { name: "Check again" }).click();
     await expect.poll(() => attempts).toBe(16);
+  });
+
+  test("a short Retry-After delays confirmation without an early request", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
+    await page.clock.install({
+      time: new Date("2026-08-31T14:25:01.000Z"),
+    });
+    await mockSession(page, "demo");
+    await mockAccountDependencies(page);
+    let attempts = 0;
+    await page.route("**/api/subscription", (route) => {
+      attempts += 1;
+      return attempts === 1
+        ? route.fulfill({
+            headers: { "retry-after": "3" },
+            json: { error: "rate_limited" },
+            status: 429,
+          })
+        : route.fulfill({ json: subscriptionStatus(false) });
+    });
+
+    await page.goto("/account?checkout=success");
+    await expect.poll(() => attempts).toBe(1);
+    await page.clock.runFor(2500);
+    expect(attempts).toBe(1);
+    await page.clock.runFor(600);
+    await expect.poll(() => attempts).toBe(2);
+  });
+
+  test("a long Retry-After stops foreground polling until Check again becomes eligible", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
+    await page.clock.install({
+      time: new Date("2026-08-31T14:25:01.000Z"),
+    });
+    await mockSession(page, "demo");
+    await mockAccountDependencies(page);
+    let attempts = 0;
+    await page.route("**/api/subscription", (route) => {
+      attempts += 1;
+      return attempts === 1
+        ? route.fulfill({
+            headers: { "retry-after": "30" },
+            json: { error: "rate_limited" },
+            status: 429,
+          })
+        : route.fulfill({ json: subscriptionStatus(false) });
+    });
+
+    await page.goto("/account?checkout=success");
+    await expect.poll(() => attempts).toBe(1);
+    await expect(page.getByRole("status")).toContainText(
+      "Payment status is temporarily rate limited."
+    );
+    await expect(page.getByRole("status")).toContainText("after");
+    await page.clock.runFor(29_000);
+    expect(attempts).toBe(1);
+    await expect(page.getByRole("button", { name: "Check again" })).toHaveCount(
+      0
+    );
+    await page.clock.runFor(1100);
+    await expect(
+      page.getByRole("button", { name: "Check again" })
+    ).toBeVisible();
+    expect(attempts).toBe(1);
+    await page.getByRole("button", { name: "Check again" }).click();
+    await expect.poll(() => attempts).toBe(2);
+  });
+
+  test("a subscriber downgrade clears stale billing state and falls back from a removed Billing tab", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the launch-flag-off contract.");
+    let currentSession = sessionFor("subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", (route) =>
+      route.fulfill({ json: subscriptionStatus(true) })
+    );
+    await page.goto("/account");
+    const billing = page.getByRole("tab", { name: "Billing" });
+    await billing.click();
+    await expect(page.getByText("Subscription active")).toBeVisible();
+    await billing.focus();
+
+    currentSession = sessionFor("demo");
+    await notifySessionChange(page);
+
+    await expect(billing).toHaveCount(0);
+    const copilot = page.getByRole("tab", { name: "Copilot" });
+    await expect(copilot).toHaveAttribute("aria-selected", "true");
+    await expect(copilot).toBeFocused();
+    await expect(page.getByRole("tabpanel", { name: "Copilot" })).toBeVisible();
+    await expect(page.getByText("Subscription active")).toHaveCount(0);
+  });
+
+  test("switching users aborts stale subscription reads and clears old authority notices", async ({
+    page,
+  }) => {
+    test.skip(!CHECKOUT_ENABLED, "This is the launch-flag-on contract.");
+    let currentSession = sessionFor("subscriber");
+    let releaseStatus!: () => void;
+    const statusGate = new Promise<void>((resolve) => {
+      releaseStatus = resolve;
+    });
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", async (route) => {
+      await statusGate;
+      return route.fulfill({ json: subscriptionStatus(true) });
+    });
+    await page.goto("/account");
+    await page.getByRole("tab", { name: "Billing" }).click();
+    await expect(page.getByText("Checking subscription")).toBeVisible();
+
+    currentSession = sessionFor("demo", {
+      email: "second@example.invalid",
+      id: "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa",
+    });
+    await notifySessionChange(page);
+    releaseStatus();
+
+    await expect(checkoutButton(page)).toBeVisible();
+    await expect(page.getByText("Checking subscription")).toHaveCount(0);
+    await expect(page.getByText("Subscription active")).toHaveCount(0);
+    await expect(page.getByText("January 15, 2099")).toHaveCount(0);
+  });
+
+  test("console settings expose vertical keyboard-operable ARIA tabs", async ({
+    page,
+  }) => {
+    await mockSession(page, "demo");
+    await mockSubscriberConsoleDependencies(page);
+    await openConsoleSettings(page);
+
+    const tablist = page.getByRole("tablist", { name: "Console settings" });
+    await expect(tablist).toHaveAttribute("aria-orientation", "vertical");
+    const harness = page.getByRole("tab", { name: "Harness credentials" });
+    const usage = page.getByRole("tab", { name: "Usage" });
+    const account = page.getByRole("tab", { exact: true, name: "Account" });
+    await expect(harness).toHaveAttribute("aria-selected", "true");
+    await expect(harness).toHaveAttribute(
+      "aria-controls",
+      "console-settings-panel-harness"
+    );
+    await harness.focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(usage).toBeFocused();
+    await expect(usage).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tabpanel", { name: "Usage" })).toHaveAttribute(
+      "id",
+      "console-settings-panel-usage"
+    );
+    await page.keyboard.press("End");
+    await expect(account).toBeFocused();
+    await page.keyboard.press("Home");
+    await expect(harness).toBeFocused();
+  });
+
+  test("console settings focus a visible fallback when Billing is removed", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the launch-flag-off contract.");
+    let currentSession = sessionFor("subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await mockSubscriberConsoleDependencies(page);
+    await page.route("**/api/subscription", (route) =>
+      route.fulfill({ json: subscriptionStatus(true) })
+    );
+    await openConsoleSettings(page);
+    const billing = page.getByRole("tab", { name: "Billing" });
+    await billing.click();
+    await expect(page.getByText("Subscription active")).toBeVisible();
+    await billing.focus();
+
+    currentSession = sessionFor("demo");
+    await notifySessionChange(page);
+
+    await expect(billing).toHaveCount(0);
+    const harness = page.getByRole("tab", { name: "Harness credentials" });
+    await expect(harness).toHaveAttribute("aria-selected", "true");
+    await expect(harness).toBeFocused();
+    await expect(
+      page.getByRole("tabpanel", { name: "Harness credentials" })
+    ).toBeVisible();
   });
 
   for (const scenario of [
@@ -578,7 +830,7 @@ test.describe("Subscriber checkout", () => {
     await mockAccountDependencies(page);
 
     await page.goto("/account");
-    await page.getByRole("button", { name: "Billing" }).click();
+    await page.getByRole("tab", { name: "Billing" }).click();
     await expect(checkoutButton(page)).toBeVisible();
     expect(
       await page.evaluate(
@@ -591,7 +843,7 @@ test.describe("Subscriber checkout", () => {
     );
 
     await openConsoleSettings(page);
-    await page.getByRole("button", { name: "Billing" }).click();
+    await page.getByRole("tab", { name: "Billing" }).click();
     await expect(checkoutButton(page)).toBeVisible();
     const consoleLayout = await page.evaluate(() => {
       const settings = document.querySelector(".oc-settings");

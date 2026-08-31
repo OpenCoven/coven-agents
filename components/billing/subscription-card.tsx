@@ -3,9 +3,12 @@
 import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { browserApplicationPath } from "@/lib/application-path";
+import { parseRetryAfter } from "@/lib/http/retry-after";
 
 const MAX_CONFIRMATION_ATTEMPTS = 15;
 const CONFIRMATION_INTERVAL_MS = 1000;
+const CONFIRMATION_FOREGROUND_BUDGET_MS = 15_000;
 const ALLOWANCE_MARKERS = Array.from(
   { length: 15 },
   (_, index) => `allowance-${index + 1}`
@@ -17,6 +20,7 @@ export type SubscriptionCardProps = {
   checkoutEnabled: boolean;
   checkoutResult?: CheckoutResult;
   isSubscriber: boolean;
+  onCheckoutConfirmed?: () => void;
 };
 
 type Notice = {
@@ -126,16 +130,27 @@ function responseBody(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function retryTime(retryAt: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(retryAt);
+}
+
 export function SubscriptionCard({
   checkoutEnabled,
   checkoutResult = null,
   isSubscriber,
+  onCheckoutConfirmed,
 }: SubscriptionCardProps) {
   const titleId = useId();
   const session = useSession();
   const userId = session.data?.user?.id ?? null;
   const updateSessionRef = useRef(session.update);
   updateSessionRef.current = session.update;
+  const userIdRef = useRef(userId);
+  userIdRef.current = userId;
 
   const [activeConfirmed, setActiveConfirmed] = useState(false);
   const [paidThrough, setPaidThrough] = useState<Date | null>(null);
@@ -155,7 +170,8 @@ export function SubscriptionCard({
   const pollAbortRef = useRef<AbortController | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollGenerationRef = useRef(0);
-  const checkoutOwnerRef = useRef(userId);
+  const confirmationOwnerRef = useRef<string | null>(null);
+  const authorityRef = useRef({ isSubscriber, userId });
 
   const publishNotice = useCallback(
     (next: Notice, options: { focus?: boolean } = {}) => {
@@ -183,9 +199,53 @@ export function SubscriptionCard({
     }
   }, []);
 
+  useEffect(() => {
+    const previous = authorityRef.current;
+    authorityRef.current = { isSubscriber, userId };
+    if (previous.userId === userId && previous.isSubscriber === isSubscriber) {
+      return;
+    }
+
+    const userChanged =
+      previous.userId !== null && userId !== null && previous.userId !== userId;
+    if (userChanged) {
+      stopPolling();
+      checkoutAbortRef.current?.abort();
+      checkoutAbortRef.current = null;
+      checkoutKeyRef.current = null;
+      checkoutPendingRef.current = false;
+      setCheckoutPending(false);
+    }
+    setActiveConfirmed(false);
+    setPaidThrough(null);
+    setCanCheckAgain(false);
+    setNeedsSignIn(false);
+    setCheckoutSuppressed(false);
+    if (userChanged && checkoutResult === "success") {
+      publishNotice(
+        {
+          detail: "Return to the account that opened checkout to confirm it.",
+          title: "The signed-in account changed.",
+          tone: "error",
+        },
+        { focus: true }
+      );
+      return;
+    }
+    if (checkoutResult === "success") {
+      setNotice((current) =>
+        current?.tone === "success" ? CONFIRMING_NOTICE : current
+      );
+    } else {
+      setNotice(initialNotice(checkoutResult, isSubscriber));
+    }
+  }, [checkoutResult, isSubscriber, publishNotice, stopPolling, userId]);
+
   const startConfirmation = useCallback(() => {
     stopPolling();
     const generation = pollGenerationRef.current;
+    const confirmationUserId = userId;
+    const startedAt = Date.now();
     let attempts = 0;
 
     setActiveConfirmed(false);
@@ -194,7 +254,9 @@ export function SubscriptionCard({
     setNeedsSignIn(false);
     publishNotice(CONFIRMING_NOTICE);
 
-    const isCurrent = () => pollGenerationRef.current === generation;
+    const isCurrent = () =>
+      pollGenerationRef.current === generation &&
+      userIdRef.current === confirmationUserId;
 
     const finishForRetry = (next: Notice) => {
       if (!isCurrent()) {
@@ -204,11 +266,17 @@ export function SubscriptionCard({
       publishNotice(next, { focus: true });
     };
 
-    const scheduleNext = (next: Notice) => {
+    const scheduleNext = (
+      next: Notice,
+      delay: number = CONFIRMATION_INTERVAL_MS
+    ) => {
       if (!isCurrent()) {
         return;
       }
-      if (attempts >= MAX_CONFIRMATION_ATTEMPTS) {
+      if (
+        attempts >= MAX_CONFIRMATION_ATTEMPTS ||
+        Date.now() + delay - startedAt > CONFIRMATION_FOREGROUND_BUDGET_MS
+      ) {
         finishForRetry({
           detail:
             "Account access will update after Stripe records the payment. You can check the same account again.",
@@ -227,7 +295,59 @@ export function SubscriptionCard({
             tone: "error",
           });
         });
-      }, CONFIRMATION_INTERVAL_MS);
+      }, delay);
+    };
+
+    const waitForRateLimit = (response: Response) => {
+      const retryAfter = parseRetryAfter(
+        response.headers.get("retry-after"),
+        Date.now()
+      );
+      if (retryAfter.kind === "excessive") {
+        const retryGuidance =
+          retryAfter.retryAt === null
+            ? "Automatic checks stopped. Return later to check this account again."
+            : `Automatic checks stopped. Check this account again after ${retryTime(retryAfter.retryAt)}.`;
+        setCanCheckAgain(false);
+        publishNotice(
+          {
+            detail: retryGuidance,
+            title: "Payment status is temporarily rate limited.",
+            tone: "neutral",
+          },
+          { focus: true }
+        );
+        return;
+      }
+
+      const retryAt =
+        retryAfter.kind === "valid"
+          ? retryAfter.retryAt
+          : Date.now() + CONFIRMATION_INTERVAL_MS;
+      const delay = Math.max(0, retryAt - Date.now());
+      const rateLimitNotice: Notice = {
+        detail: `The next account check is eligible after ${retryTime(retryAt)}.`,
+        title: "Payment status is temporarily rate limited.",
+        tone: "pending",
+      };
+      if (Date.now() + delay - startedAt <= CONFIRMATION_FOREGROUND_BUDGET_MS) {
+        scheduleNext(rateLimitNotice, delay);
+        return;
+      }
+
+      setCanCheckAgain(false);
+      publishNotice(rateLimitNotice);
+      pollTimerRef.current = setTimeout(() => {
+        pollTimerRef.current = null;
+        if (!isCurrent()) {
+          return;
+        }
+        finishForRetry({
+          detail: "The same account can be checked again now.",
+          title: "Payment may still be processing.",
+          tone: "neutral",
+        });
+      }, delay);
     };
 
     const check = async (): Promise<void> => {
@@ -240,7 +360,7 @@ export function SubscriptionCard({
 
       let response: Response;
       try {
-        response = await fetch("/api/subscription", {
+        response = await fetch(browserApplicationPath("/api/subscription"), {
           cache: "no-store",
           credentials: "same-origin",
           signal: controller.signal,
@@ -277,11 +397,7 @@ export function SubscriptionCard({
         return;
       }
       if (response.status === 429) {
-        scheduleNext({
-          detail: "The account will be checked again in a moment.",
-          title: "Payment status is temporarily rate limited.",
-          tone: "pending",
-        });
+        waitForRateLimit(response);
         return;
       }
       if (response.status >= 500) {
@@ -333,7 +449,6 @@ export function SubscriptionCard({
         });
         return;
       }
-      setPaidThrough(paidUntil);
       publishNotice({
         detail: "Refreshing this signed-in account before access changes.",
         title: "Refreshing account access",
@@ -372,12 +487,23 @@ export function SubscriptionCard({
 
       setCanCheckAgain(false);
       setNeedsSignIn(false);
+      setPaidThrough(paidUntil);
       setActiveConfirmed(true);
       publishNotice({
         detail: "Subscriber access is ready on this account.",
         title: "Subscription active",
         tone: "success",
       });
+      const url = new URL(window.location.href);
+      if (url.searchParams.get("checkout") === "success") {
+        url.searchParams.delete("checkout");
+        window.history.replaceState(
+          window.history.state,
+          "",
+          `${url.pathname}${url.search}${url.hash}`
+        );
+      }
+      onCheckoutConfirmed?.();
     };
 
     check().catch(() => {
@@ -387,26 +513,20 @@ export function SubscriptionCard({
         tone: "error",
       });
     });
-  }, [publishNotice, stopPolling]);
+  }, [onCheckoutConfirmed, publishNotice, stopPolling, userId]);
 
   useEffect(() => {
     if (checkoutResult !== "success") {
+      confirmationOwnerRef.current = null;
       return;
     }
-    const url = new URL(window.location.href);
-    url.searchParams.delete("checkout");
-    window.history.replaceState(
-      window.history.state,
-      "",
-      `${url.pathname}${url.search}${url.hash}`
-    );
-  }, [checkoutResult]);
-
-  useEffect(() => {
-    if (checkoutResult !== "success") {
+    if (!userId) {
       return;
     }
-    if (checkoutOwnerRef.current !== userId) {
+    if (confirmationOwnerRef.current === null) {
+      confirmationOwnerRef.current = userId;
+    }
+    if (confirmationOwnerRef.current !== userId) {
       stopPolling();
       setCanCheckAgain(false);
       publishNotice(
@@ -427,7 +547,14 @@ export function SubscriptionCard({
   }, [checkoutResult, publishNotice, startConfirmation, stopPolling, userId]);
 
   useEffect(() => {
-    if (!(isSubscriber && checkoutResult !== "success" && userId)) {
+    if (
+      !(
+        isSubscriber &&
+        checkoutResult !== "success" &&
+        userId &&
+        !activeConfirmed
+      )
+    ) {
       return;
     }
     const controller = new AbortController();
@@ -442,7 +569,7 @@ export function SubscriptionCard({
     const read = async () => {
       let response: Response;
       try {
-        response = await fetch("/api/subscription", {
+        response = await fetch(browserApplicationPath("/api/subscription"), {
           cache: "no-store",
           credentials: "same-origin",
           signal: controller.signal,
@@ -559,10 +686,9 @@ export function SubscriptionCard({
       clearTimeout(kickoff);
       controller.abort();
     };
-  }, [checkoutResult, isSubscriber, publishNotice, userId]);
+  }, [activeConfirmed, checkoutResult, isSubscriber, publishNotice, userId]);
 
   useEffect(() => {
-    checkoutOwnerRef.current = userId;
     checkoutAbortRef.current?.abort();
     checkoutAbortRef.current = null;
     checkoutKeyRef.current = null;
@@ -571,7 +697,7 @@ export function SubscriptionCard({
     return () => {
       checkoutAbortRef.current?.abort();
     };
-  }, [userId]);
+  }, []);
 
   useEffect(
     () => () => {
@@ -601,7 +727,7 @@ export function SubscriptionCard({
 
     let response: Response;
     try {
-      response = await fetch("/api/checkout", {
+      response = await fetch(browserApplicationPath("/api/checkout"), {
         credentials: "same-origin",
         headers: { "idempotency-key": idempotencyKey },
         method: "POST",

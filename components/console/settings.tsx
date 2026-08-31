@@ -55,6 +55,14 @@ const REFUSED = HARNESS_SPECS.filter((spec) => !spec.supported);
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const MS_PER_DAY = 86_400_000;
 
+function settingsPanelId(tab: Tab): string {
+  return `console-settings-panel-${tab}`;
+}
+
+function settingsTabId(tab: Tab): string {
+  return `console-settings-tab-${tab}`;
+}
+
 type Usage = { cap: number; resetsAt: string | null; used: number };
 
 const inputStyle: React.CSSProperties = {
@@ -215,6 +223,9 @@ export function Settings({
         ...TABS.slice(2),
       ]
     : TABS;
+  const selectedTab = tabs.some((entry) => entry.id === tab) ? tab : tabs[0].id;
+  const tabRefs = useRef(new Map<Tab, HTMLButtonElement>());
+  const focusedTabRef = useRef<Tab | null>(null);
 
   const [configured, setConfigured] = useState<string[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -298,10 +309,44 @@ export function Settings({
   }, [account, operationContext, refreshCredentials, refreshFence]);
 
   useEffect(() => {
-    if (tab === "billing" && !showBilling) {
-      setTab("harness");
+    if (tab === selectedTab) {
+      return;
     }
-  }, [showBilling, tab]);
+    const shouldFocus = focusedTabRef.current === tab;
+    setTab(selectedTab);
+    if (!shouldFocus) {
+      return;
+    }
+    queueMicrotask(() => {
+      tabRefs.current.get(selectedTab)?.focus();
+    });
+  }, [selectedTab, tab]);
+
+  const handleTabKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>, id: Tab) => {
+      const index = tabs.findIndex((entry) => entry.id === id);
+      if (index < 0) {
+        return;
+      }
+      let destination: Tab | null = null;
+      if (event.key === "ArrowDown") {
+        destination = tabs[(index + 1) % tabs.length].id;
+      } else if (event.key === "ArrowUp") {
+        destination = tabs[(index - 1 + tabs.length) % tabs.length].id;
+      } else if (event.key === "Home") {
+        destination = tabs[0].id;
+      } else if (event.key === "End") {
+        destination = tabs.at(-1)?.id ?? null;
+      }
+      if (!destination) {
+        return;
+      }
+      event.preventDefault();
+      setTab(destination);
+      tabRefs.current.get(destination)?.focus();
+    },
+    [tabs]
+  );
 
   useEffect(() => {
     const context = operationContext;
@@ -540,6 +585,7 @@ export function Settings({
     >
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         <nav
+          aria-label="Console settings navigation"
           className="oc-settings-nav"
           style={{
             borderRight: hairline,
@@ -551,46 +597,72 @@ export function Settings({
             width: 212,
           }}
         >
-          <Eyebrow
-            style={{
-              color: "var(--text-muted)",
-              letterSpacing: "0.14em",
-              padding: "0 10px 8px",
-            }}
+          <div
+            aria-label="Console settings"
+            aria-orientation="vertical"
+            role="tablist"
+            style={{ display: "contents" }}
           >
-            Settings
-          </Eyebrow>
-          {tabs.map((entry) => (
-            <button
-              className="oc-row"
-              key={entry.id}
-              onClick={() => setTab(entry.id)}
+            <Eyebrow
               style={{
-                background:
-                  tab === entry.id
-                    ? "color-mix(in oklch, var(--accent-presence) 14%, transparent)"
-                    : "transparent",
-                border: 0,
-                borderRadius: "var(--radius-md)",
-                color:
-                  tab === entry.id
-                    ? "var(--text-primary)"
-                    : "var(--text-secondary)",
-                cursor: "pointer",
-                font: "500 12px/1.3 var(--font-ui)",
-                padding: "8px 10px",
-                textAlign: "left",
-                width: "100%",
+                color: "var(--text-muted)",
+                letterSpacing: "0.14em",
+                padding: "0 10px 8px",
               }}
-              type="button"
             >
-              {entry.label}
-            </button>
-          ))}
+              Settings
+            </Eyebrow>
+            {tabs.map((entry) => (
+              <button
+                aria-controls={settingsPanelId(entry.id)}
+                aria-selected={selectedTab === entry.id}
+                className="oc-row"
+                id={settingsTabId(entry.id)}
+                key={entry.id}
+                onClick={() => setTab(entry.id)}
+                onFocus={() => {
+                  focusedTabRef.current = entry.id;
+                }}
+                onKeyDown={(event) => handleTabKeyDown(event, entry.id)}
+                ref={(element) => {
+                  if (element) {
+                    tabRefs.current.set(entry.id, element);
+                  } else {
+                    tabRefs.current.delete(entry.id);
+                  }
+                }}
+                role="tab"
+                style={{
+                  background:
+                    selectedTab === entry.id
+                      ? "color-mix(in oklch, var(--accent-presence) 14%, transparent)"
+                      : "transparent",
+                  border: 0,
+                  borderRadius: "var(--radius-md)",
+                  color:
+                    selectedTab === entry.id
+                      ? "var(--text-primary)"
+                      : "var(--text-secondary)",
+                  cursor: "pointer",
+                  font: "500 12px/1.3 var(--font-ui)",
+                  padding: "8px 10px",
+                  textAlign: "left",
+                  width: "100%",
+                }}
+                tabIndex={selectedTab === entry.id ? 0 : -1}
+                type="button"
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
         </nav>
 
         <div
+          aria-labelledby={settingsTabId(selectedTab)}
           className="oc-settings-content oc-scroll"
+          id={settingsPanelId(selectedTab)}
+          role="tabpanel"
           style={{
             background: "var(--bg-base)",
             flex: 1,
@@ -607,7 +679,7 @@ export function Settings({
               maxWidth: 640,
             }}
           >
-            {tab === "harness" ? (
+            {selectedTab === "harness" ? (
               <>
                 <Heading
                   blurb="Your credential, envelope-encrypted, fetched for the duration of one run and redacted from evidence. Never shared with another account."
@@ -682,7 +754,7 @@ export function Settings({
               </>
             ) : null}
 
-            {tab === "usage" ? (
+            {selectedTab === "usage" ? (
               <>
                 <Heading
                   blurb="A run is counted when an agent starts, whether it succeeds or not."
@@ -823,14 +895,14 @@ export function Settings({
               </>
             ) : null}
 
-            {tab === "billing" && showBilling ? (
+            {selectedTab === "billing" && showBilling ? (
               <SubscriptionCard
                 checkoutEnabled={checkoutEnabled}
                 isSubscriber={isSubscriber}
               />
             ) : null}
 
-            {tab === "data" ? (
+            {selectedTab === "data" ? (
               <>
                 <Heading
                   blurb="What this account stores, and how to remove it."
@@ -921,7 +993,7 @@ export function Settings({
               </>
             ) : null}
 
-            {tab === "account" ? (
+            {selectedTab === "account" ? (
               <>
                 <Heading
                   blurb="Sign-in is GitHub-only. There is no password to change."

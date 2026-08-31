@@ -2,6 +2,8 @@ import { ipAddress } from "@vercel/functions";
 import type Stripe from "stripe";
 import { auth } from "@/app/(auth)/auth";
 import { enforceAbusePolicy } from "@/lib/abuse/enforce";
+import { configuredApplicationBasePath } from "@/lib/application-path";
+import { approvedApplicationOrigin } from "@/lib/auth/application-origin";
 import {
   type CheckoutSessionSnapshot,
   checkoutSessionSubscriptionId,
@@ -26,6 +28,7 @@ import {
 } from "@/lib/db/queries";
 
 const checkoutDependencies: CheckoutDependencies = {
+  appBasePath: () => configuredApplicationBasePath(process.env),
   attachCustomer: attachStripeCustomer,
   authenticate: auth,
   checkoutEnabled: () =>
@@ -102,7 +105,7 @@ const checkoutDependencies: CheckoutDependencies = {
   findUser: findUserById,
   getCheckoutConfig: () => subscriptionCheckoutConfig(process.env),
   idempotencyStore: databaseIdempotencyStore,
-  origin: () => process.env.APP_ORIGIN ?? "",
+  origin: () => approvedApplicationOrigin(process.env),
 };
 
 export function checkoutResponse(
