@@ -33,6 +33,7 @@ export type CheckoutSessionSnapshot = {
   metadata: Record<string, string>;
   mode: Stripe.Checkout.Session.Mode;
   status: Stripe.Checkout.Session.Status | null;
+  subscriptionId: string | null;
   url: string | null;
 };
 
@@ -73,6 +74,14 @@ export function isBlockingSubscriptionStatus(
   status: Stripe.Subscription.Status
 ): boolean {
   return BLOCKING_SUBSCRIPTION_STATUSES.has(status);
+}
+
+export function checkoutSessionSubscriptionId(
+  subscription: Stripe.Checkout.Session["subscription"]
+): string | null {
+  return typeof subscription === "string"
+    ? subscription
+    : (subscription?.id ?? null);
 }
 
 export async function hasBlockingSubscription(
@@ -125,7 +134,7 @@ export async function reconcileCheckoutSessions(input: {
   retrieve: (sessionId: string) => Promise<CheckoutSessionSnapshot>;
   userId: string;
 }): Promise<
-  | { kind: "complete"; sessionId: string }
+  | { kind: "complete"; sessionId: string; subscriptionId: string | null }
   | { kind: "invalid_url"; sessionId: string }
   | { kind: "none" }
   | { kind: "retire_attempt" }
@@ -151,11 +160,21 @@ export async function reconcileCheckoutSessions(input: {
     if (!isAppOwned(current, input)) {
       return { kind: "retry_required" };
     }
+    if (!hasExpectedAttemptIdentity(current, input)) {
+      if (current.status === "expired") {
+        return { kind: "retire_attempt" };
+      }
+      if (current.status === "open") {
+        await expireAndVerify(current, input);
+        return { kind: "retire_attempt" };
+      }
+      return { kind: "retry_required" };
+    }
     if (current.status === "expired") {
       return { kind: "retire_attempt" };
     }
     if (current.status === "complete") {
-      return { kind: "complete", sessionId: current.id };
+      return completedSession(current);
     }
     if (current.status !== "open") {
       return { kind: "retry_required" };
@@ -198,9 +217,81 @@ export async function reconcileCheckoutSessions(input: {
   }
 
   if (reusable) {
-    return reusableSession(await input.retrieve(reusable.id));
+    return reconcileRetrievedReusable(
+      await input.retrieve(reusable.id),
+      reusable,
+      input
+    );
   }
   return { kind: "none" };
+}
+
+async function reconcileRetrievedReusable(
+  session: CheckoutSessionSnapshot,
+  listed: CheckoutSessionSnapshot,
+  input: {
+    attemptId: string;
+    customerId: string;
+    expire: (
+      sessionId: string,
+      options: { idempotencyKey: string }
+    ) => Promise<void>;
+    expirationIdempotencyKey: (sessionId: string) => string;
+    priceId: string;
+    providerIdempotencyKey: string;
+    retrieve: (sessionId: string) => Promise<CheckoutSessionSnapshot>;
+    userId: string;
+  }
+): Promise<
+  | { kind: "complete"; sessionId: string; subscriptionId: string | null }
+  | { kind: "invalid_url"; sessionId: string }
+  | { kind: "retire_attempt" }
+  | { kind: "retry_required" }
+  | { kind: "reused"; sessionId: string; url: string }
+> {
+  if (!isAppOwned(session, input)) {
+    return { kind: "retry_required" };
+  }
+  if (!hasExpectedAttemptIdentity(session, input)) {
+    if (session.status === "expired") {
+      return { kind: "retire_attempt" };
+    }
+    if (session.status === "open") {
+      await expireAndVerify(session, input);
+      return { kind: "retire_attempt" };
+    }
+    return { kind: "retry_required" };
+  }
+  if (!hasSameAttemptIdentity(session, listed)) {
+    if (session.status === "expired") {
+      return { kind: "retire_attempt" };
+    }
+    if (session.status === "open") {
+      await expireAndVerify(session, input);
+      return { kind: "retire_attempt" };
+    }
+    return { kind: "retry_required" };
+  }
+  if (!matchesCurrentFlow(session, input.priceId)) {
+    if (session.status === "expired") {
+      return { kind: "retire_attempt" };
+    }
+    if (session.status === "open") {
+      await expireAndVerify(session, input);
+      return { kind: "retire_attempt" };
+    }
+    return { kind: "retry_required" };
+  }
+  if (session.status === "expired") {
+    return { kind: "retire_attempt" };
+  }
+  if (session.status === "complete") {
+    return completedSession(session);
+  }
+  if (session.status !== "open") {
+    return { kind: "retry_required" };
+  }
+  return reusableSession(session);
 }
 
 async function listCheckoutSessions(input: {
@@ -248,11 +339,12 @@ async function expireAndVerify(
     ) => Promise<void>;
     expirationIdempotencyKey: (sessionId: string) => string;
     retrieve: (sessionId: string) => Promise<CheckoutSessionSnapshot>;
+    userId: string;
   }
 ): Promise<void> {
-  if (session.customerId !== input.customerId) {
+  if (!isAppOwned(session, input)) {
     throw new CheckoutSessionCleanupError(
-      "An obsolete Checkout Session belongs to another Customer."
+      "An obsolete Checkout Session is not safely app-owned."
     );
   }
   if (session.status === "expired") {
@@ -309,6 +401,29 @@ function isCurrentAttempt(
   );
 }
 
+function hasExpectedAttemptIdentity(
+  session: CheckoutSessionSnapshot,
+  input: { attemptId: string; providerIdempotencyKey: string }
+): boolean {
+  const metadataAttemptId =
+    session.metadata[CHECKOUT_ATTEMPT_METADATA_KEY] ?? null;
+  return metadataAttemptId
+    ? metadataAttemptId === input.attemptId
+    : session.integrationIdentifier ===
+        stableIntegrationIdentifier(input.providerIdempotencyKey);
+}
+
+function hasSameAttemptIdentity(
+  session: CheckoutSessionSnapshot,
+  expected: CheckoutSessionSnapshot
+): boolean {
+  return (
+    session.metadata[CHECKOUT_ATTEMPT_METADATA_KEY] ===
+      expected.metadata[CHECKOUT_ATTEMPT_METADATA_KEY] &&
+    session.integrationIdentifier === expected.integrationIdentifier
+  );
+}
+
 function matchesCurrentFlow(
   session: CheckoutSessionSnapshot,
   priceId: string
@@ -328,6 +443,18 @@ function reusableSession(
     return { kind: "invalid_url", sessionId: session.id };
   }
   return { kind: "reused", sessionId: session.id, url: session.url };
+}
+
+function completedSession(session: CheckoutSessionSnapshot): {
+  kind: "complete";
+  sessionId: string;
+  subscriptionId: string | null;
+} {
+  return {
+    kind: "complete",
+    sessionId: session.id,
+    subscriptionId: session.subscriptionId,
+  };
 }
 
 export function isValidCheckoutSessionUrl(

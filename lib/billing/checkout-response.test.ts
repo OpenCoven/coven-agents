@@ -184,7 +184,7 @@ test("enabled checkout preserves the required operation order", async () => {
     "checkout lease renew",
     "checkout lease release",
     "idempotency renew",
-    "idempotency complete",
+    "idempotency release",
   ]);
 });
 
@@ -289,11 +289,13 @@ test("concurrent distinct browser keys create only one payable Checkout attempt"
   assert.equal(attachedCustomerId, "cus_1");
 });
 
-test("checkout renews both durable claims through long Stripe work and replays success", async () => {
+test("checkout renews both durable claims through long Stripe work and reconciles a later same-key retry", async () => {
   const clock = new ResponseManualClock();
   const checkoutTimers = new ResponseManualTimers();
   const responseTimers = new ResponseManualTimers();
   const providerKeys: string[] = [];
+  let checkoutSession: ReturnType<typeof reconciledCheckoutSession> | null =
+    null;
   let releaseProvider!: () => void;
   let signalProviderStarted!: () => void;
   const providerStarted = new Promise<void>((resolve) => {
@@ -302,17 +304,40 @@ test("checkout renews both durable claims through long Stripe work and replays s
   const providerGate = new Promise<void>((resolve) => {
     releaseProvider = resolve;
   });
+  const provider = Object.assign(
+    defaultProvider({
+      async createCheckoutSession(input, options) {
+        providerKeys.push(options.idempotencyKey);
+        checkoutSession = reconciledCheckoutSession({
+          customerId: "cus_existing",
+          id: "cs_long_running",
+          integrationIdentifier: input.integration_identifier ?? null,
+          metadata: input.metadata ?? {},
+          status: "open",
+          url: "https://checkout.stripe.test/long-running",
+        });
+        signalProviderStarted();
+        await providerGate;
+        return checkoutSession;
+      },
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        const session = checkoutSession;
+        if (!session || session.status !== input.status) {
+          return [];
+        }
+        return [session];
+      },
+      retrieve() {
+        assert.ok(checkoutSession);
+        return checkoutSession;
+      },
+    })
+  );
   const dependencies = dependenciesFor({
     checkoutLeaseTimers: checkoutTimers,
-    createProvider: () =>
-      defaultProvider({
-        async createCheckoutSession(_input, options) {
-          providerKeys.push(options.idempotencyKey);
-          signalProviderStarted();
-          await providerGate;
-          return { url: "https://checkout.stripe.test/long-running" };
-        },
-      }),
+    createProvider: () => provider,
     idempotencyStore: new MemoryIdempotencyStore(),
     idempotencyTimers: responseTimers,
     now: clock.now,
@@ -345,10 +370,10 @@ test("checkout renews both durable claims through long Stripe work and replays s
     url: "https://checkout.stripe.test/long-running",
   });
 
-  const replay = await checkoutResponse(request(), dependencies, null);
-  assert.equal(replay.status, 200);
-  assert.equal(replay.headers.get("idempotency-replayed"), "true");
-  assert.deepEqual(await replay.json(), {
+  const reconciled = await checkoutResponse(request(), dependencies, null);
+  assert.equal(reconciled.status, 200);
+  assert.equal(reconciled.headers.get("idempotency-replayed"), null);
+  assert.deepEqual(await reconciled.json(), {
     url: "https://checkout.stripe.test/long-running",
   });
   assert.equal(providerKeys.length, 1);
@@ -617,22 +642,10 @@ test("an expired current attempt is retired before one fresh Session is created"
   );
   const dependencies = dependenciesFor({ createProvider: () => provider });
 
-  const first = await checkoutResponse(
-    request("checkout-request-expired-first"),
-    dependencies,
-    null
-  );
+  const first = await checkoutResponse(request(), dependencies, null);
   firstSessionExpired = true;
-  const retirement = await checkoutResponse(
-    request("checkout-request-expired-retire"),
-    dependencies,
-    null
-  );
-  const replacement = await checkoutResponse(
-    request("checkout-request-expired-replace"),
-    dependencies,
-    null
-  );
+  const retirement = await checkoutResponse(request(), dependencies, null);
+  const replacement = await checkoutResponse(request(), dependencies, null);
 
   assert.equal(first.status, 200);
   assert.equal(retirement.status, 409);
@@ -647,8 +660,179 @@ test("an expired current attempt is retired before one fresh Session is created"
   assert.notEqual(createdMetadata?.checkoutAttemptId, "");
 });
 
-test("a completed current attempt returns request_in_progress without a replacement", async () => {
-  let status: "complete" | "open" = "open";
+test("a completed Session with a blocking subscription preserves the attempt until cancel-then-resubscribe", async () => {
+  let currentStatus: Stripe.Checkout.Session.Status = "open";
+  let subscriptionStatus: Stripe.Subscription.Status = "active";
+  const sessions: ReturnType<typeof reconciledCheckoutSession>[] = [];
+  const sessionKeys: string[] = [];
+  const retrievedSubscriptions: string[] = [];
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession(input, options) {
+        sessionKeys.push(options.idempotencyKey);
+        const sequence = sessionKeys.length;
+        const session = reconciledCheckoutSession({
+          customerId: "cus_existing",
+          id: `cs_completed_${sequence}`,
+          integrationIdentifier: input.integration_identifier ?? null,
+          metadata: input.metadata ?? {},
+          status: "open",
+          subscriptionId: null,
+          url: `https://checkout.stripe.test/completed-${sequence}`,
+        });
+        sessions.push(session);
+        currentStatus = "open";
+        return Promise.resolve(session);
+      },
+      hasBlockingSubscription: () =>
+        Promise.resolve(
+          currentStatus === "complete" &&
+            [
+              "active",
+              "incomplete",
+              "past_due",
+              "paused",
+              "trialing",
+              "unpaid",
+            ].includes(subscriptionStatus)
+        ),
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return sessions
+          .map((session, index) =>
+            index === 0
+              ? {
+                  ...session,
+                  status: currentStatus,
+                  subscriptionId:
+                    currentStatus === "complete" ? "sub_completed" : null,
+                }
+              : session
+          )
+          .filter((session) => session.status === input.status);
+      },
+      retrieve(sessionId) {
+        const session = sessions.find(({ id }) => id === sessionId);
+        assert.ok(session);
+        return session.id === "cs_completed_1"
+          ? {
+              ...session,
+              status: currentStatus,
+              subscriptionId:
+                currentStatus === "complete" ? "sub_completed" : null,
+            }
+          : session;
+      },
+    }),
+    {
+      retrieveSubscription(subscriptionId: string) {
+        retrievedSubscriptions.push(subscriptionId);
+        return Promise.resolve({
+          id: subscriptionId,
+          status: subscriptionStatus,
+        });
+      },
+    }
+  );
+  const dependencies = dependenciesFor({ createProvider: () => provider });
+
+  const first = await checkoutResponse(request(), dependencies, null);
+  currentStatus = "complete";
+  const blocked = await checkoutResponse(request(), dependencies, null);
+  subscriptionStatus = "canceled";
+  const retirement = await checkoutResponse(request(), dependencies, null);
+  const replacement = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(first.status, 200);
+  assert.equal(blocked.status, 409);
+  assert.deepEqual(await blocked.json(), { error: "already_subscribed" });
+  assert.equal(retirement.status, 409);
+  assert.deepEqual(await retirement.json(), { error: "request_in_progress" });
+  assert.equal(replacement.status, 200);
+  assert.deepEqual(await replacement.json(), {
+    url: "https://checkout.stripe.test/completed-2",
+  });
+  assert.deepEqual(retrievedSubscriptions, ["sub_completed", "sub_completed"]);
+  assert.equal(sessionKeys.length, 2);
+  assert.notEqual(sessionKeys[0], sessionKeys[1]);
+});
+
+test("a completed Session with an incomplete-expired subscription permits exactly one fresh retry", async () => {
+  let status: Stripe.Checkout.Session.Status = "open";
+  const sessions: ReturnType<typeof reconciledCheckoutSession>[] = [];
+  const sessionKeys: string[] = [];
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession(input, options) {
+        sessionKeys.push(options.idempotencyKey);
+        const session = reconciledCheckoutSession({
+          customerId: "cus_existing",
+          id: `cs_failed_payment_${sessionKeys.length}`,
+          integrationIdentifier: input.integration_identifier ?? null,
+          metadata: input.metadata ?? {},
+          status: "open",
+          subscriptionId: null,
+        });
+        sessions.push(session);
+        status = "open";
+        return Promise.resolve(session);
+      },
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return sessions
+          .map((session, index) =>
+            index === 0
+              ? {
+                  ...session,
+                  status,
+                  subscriptionId:
+                    status === "complete" ? "sub_failed_payment" : null,
+                }
+              : session
+          )
+          .filter((session) => session.status === input.status);
+      },
+      retrieve(sessionId) {
+        const session = sessions.find(({ id }) => id === sessionId);
+        assert.ok(session);
+        return session.id === "cs_failed_payment_1"
+          ? {
+              ...session,
+              status,
+              subscriptionId:
+                status === "complete" ? "sub_failed_payment" : null,
+            }
+          : session;
+      },
+    }),
+    {
+      retrieveSubscription(subscriptionId: string) {
+        return Promise.resolve({
+          id: subscriptionId,
+          status: "incomplete_expired" as const,
+        });
+      },
+    }
+  );
+  const dependencies = dependenciesFor({ createProvider: () => provider });
+
+  const first = await checkoutResponse(request(), dependencies, null);
+  status = "complete";
+  const retirement = await checkoutResponse(request(), dependencies, null);
+  const replacement = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(first.status, 200);
+  assert.equal(retirement.status, 409);
+  assert.deepEqual(await retirement.json(), { error: "request_in_progress" });
+  assert.equal(replacement.status, 200);
+  assert.equal(sessionKeys.length, 2);
+  assert.notEqual(sessionKeys[0], sessionKeys[1]);
+});
+
+test("a completed Session without a resolvable subscription fails retryably without replacement", async () => {
+  let status: Stripe.Checkout.Session.Status = "open";
   let session: ReturnType<typeof reconciledCheckoutSession> | null = null;
   let sessionCalls = 0;
   const provider = Object.assign(
@@ -657,49 +841,96 @@ test("a completed current attempt returns request_in_progress without a replacem
         sessionCalls += 1;
         session = reconciledCheckoutSession({
           customerId: "cus_existing",
-          id: "cs_completed",
+          id: "cs_missing_subscription",
           integrationIdentifier: input.integration_identifier ?? null,
           metadata: input.metadata ?? {},
           status: "open",
-          url: "https://checkout.stripe.test/completed",
+          subscriptionId: null,
         });
         return Promise.resolve(session);
       },
-      listOpenCheckoutSessions: () =>
-        Promise.resolve({
-          data: status === "open" && session ? [{ ...session, status }] : [],
-          hasMore: false,
-        }),
     }),
     reconciledProviderMethods({
       list(input) {
         return session && status === input.status
-          ? [{ ...session, status }]
+          ? [{ ...session, status, subscriptionId: null }]
           : [];
       },
       retrieve() {
         assert.ok(session);
-        return { ...session, status };
+        return { ...session, status, subscriptionId: null };
       },
-    })
+    }),
+    {
+      retrieveSubscription() {
+        throw new Error("A missing subscription must not be retrieved.");
+      },
+    }
   );
   const dependencies = dependenciesFor({ createProvider: () => provider });
 
-  const first = await checkoutResponse(
-    request("checkout-request-complete-first"),
-    dependencies,
-    null
-  );
+  const first = await checkoutResponse(request(), dependencies, null);
   status = "complete";
-  const completed = await checkoutResponse(
-    request("checkout-request-complete-retry"),
-    dependencies,
-    null
-  );
+  const failed = await checkoutResponse(request(), dependencies, null);
+  const retry = await checkoutResponse(request(), dependencies, null);
 
   assert.equal(first.status, 200);
-  assert.equal(completed.status, 409);
-  assert.deepEqual(await completed.json(), { error: "request_in_progress" });
+  assert.equal(failed.status, 502);
+  assert.deepEqual(await failed.json(), { error: "checkout_failed" });
+  assert.equal(retry.status, 502);
+  assert.equal(sessionCalls, 1);
+});
+
+test("a completed Session subscription retrieval failure preserves the attempt without replacement", async () => {
+  let status: Stripe.Checkout.Session.Status = "open";
+  let session: ReturnType<typeof reconciledCheckoutSession> | null = null;
+  let sessionCalls = 0;
+  let retrievalCalls = 0;
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession(input) {
+        sessionCalls += 1;
+        session = reconciledCheckoutSession({
+          customerId: "cus_existing",
+          id: "cs_subscription_failure",
+          integrationIdentifier: input.integration_identifier ?? null,
+          metadata: input.metadata ?? {},
+          status: "open",
+          subscriptionId: null,
+        });
+        return Promise.resolve(session);
+      },
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return session && status === input.status
+          ? [{ ...session, status, subscriptionId: "sub_uncertain" }]
+          : [];
+      },
+      retrieve() {
+        assert.ok(session);
+        return { ...session, status, subscriptionId: "sub_uncertain" };
+      },
+    }),
+    {
+      retrieveSubscription() {
+        retrievalCalls += 1;
+        return Promise.reject(new Error("Stripe retrieval failed."));
+      },
+    }
+  );
+  const dependencies = dependenciesFor({ createProvider: () => provider });
+
+  const first = await checkoutResponse(request(), dependencies, null);
+  status = "complete";
+  const failed = await checkoutResponse(request(), dependencies, null);
+  const retry = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(first.status, 200);
+  assert.equal(failed.status, 502);
+  assert.deepEqual(await failed.json(), { error: "checkout_failed" });
+  assert.equal(retry.status, 502);
+  assert.equal(retrievalCalls, 2);
   assert.equal(sessionCalls, 1);
 });
 
@@ -895,6 +1126,7 @@ test("a matching open Session with a non-HTTPS URL is never returned or replaced
     id: "cs_invalid_url",
     integrationIdentifier: "current-attempt",
     metadata: {
+      checkoutAttemptId: "attempt-1",
       checkoutFlowVersion: "1",
       priceId: "price_configured",
       userId: USER_ID,
@@ -956,6 +1188,7 @@ test("a matching current-price Checkout Session is reused across pages", async (
               openCheckoutSession({
                 id: "cs_current",
                 metadata: {
+                  checkoutAttemptId: "attempt-1",
                   checkoutFlowVersion: "1",
                   priceId: "price_configured",
                   userId: USER_ID,
@@ -1044,6 +1277,79 @@ test("obsolete app-owned Checkout Sessions expire before a replacement is create
     "expire cs_old_price",
     "expire cs_old_version",
     "create",
+  ]);
+});
+
+test("a same-key retry does not replay a successful URL after the configured Price changes", async () => {
+  const calls: string[] = [];
+  const sessions: ReturnType<typeof reconciledCheckoutSession>[] = [];
+  let configuredPrice = "price_retired";
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession(input) {
+        const session = reconciledCheckoutSession({
+          customerId: "cus_existing",
+          id: `cs_price_${sessions.length + 1}`,
+          integrationIdentifier: input.integration_identifier ?? null,
+          metadata: input.metadata ?? {},
+          status: "open",
+          subscriptionId: null,
+          url: `https://checkout.stripe.test/${String(
+            input.line_items?.[0]?.price
+          )}`,
+        });
+        sessions.push(session);
+        calls.push(`create ${String(input.line_items?.[0]?.price)}`);
+        return Promise.resolve(session);
+      },
+      expireCheckoutSession(sessionId) {
+        const session = sessions.find(({ id }) => id === sessionId);
+        assert.ok(session);
+        session.status = "expired";
+        calls.push(`expire ${sessionId}`);
+        return Promise.resolve();
+      },
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return sessions.filter((session) => session.status === input.status);
+      },
+      retrieve(sessionId) {
+        const session = sessions.find(({ id }) => id === sessionId);
+        assert.ok(session);
+        return session;
+      },
+    })
+  );
+  const dependencies = dependenciesFor({
+    createProvider: () => provider,
+    getCheckoutConfig: () => ({
+      apiKey: "sk_test_checkout",
+      enabled: true,
+      priceId: configuredPrice,
+      webhookSecret: "whsec_configured",
+    }),
+  });
+
+  const first = await checkoutResponse(request(), dependencies, null);
+  configuredPrice = "price_configured";
+  const cleanup = await checkoutResponse(request(), dependencies, null);
+  const replacement = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(first.status, 200);
+  assert.deepEqual(await first.json(), {
+    url: "https://checkout.stripe.test/price_retired",
+  });
+  assert.equal(cleanup.status, 409);
+  assert.deepEqual(await cleanup.json(), { error: "request_in_progress" });
+  assert.equal(replacement.status, 200);
+  assert.deepEqual(await replacement.json(), {
+    url: "https://checkout.stripe.test/price_configured",
+  });
+  assert.deepEqual(calls, [
+    "create price_retired",
+    "expire cs_price_1",
+    "create price_configured",
   ]);
 });
 
@@ -1250,6 +1556,7 @@ test("a racing Customer winner reuses its matching open Checkout Session", async
               openCheckoutSession({
                 id: "cs_owned",
                 metadata: {
+                  checkoutAttemptId: "attempt-1",
                   checkoutFlowVersion: "1",
                   priceId: "price_configured",
                   userId: USER_ID,
@@ -1542,6 +1849,8 @@ function defaultProvider(
       Promise.resolve({ url: "https://checkout.stripe.test/session" }),
     createCustomer: () => Promise.resolve({ id: "cus_new" }),
     hasBlockingSubscription: () => Promise.resolve(false),
+    retrieveSubscription: () =>
+      Promise.reject(new Error("No Subscription was configured.")),
     ...overrides,
     async expireCheckoutSession(sessionId, options) {
       if (overrides.expireCheckoutSession) {
@@ -1573,6 +1882,7 @@ function defaultProvider(
           customerId:
             typeof input.customer === "string" ? input.customer : null,
           status: "open" as const,
+          subscriptionId: null,
         };
         listedSessions.set(reconciled.id, reconciled);
         return reconciled;
@@ -1627,6 +1937,7 @@ function reconciledCheckoutSession(input: {
   integrationIdentifier?: string | null;
   metadata: Stripe.MetadataParam;
   status: "complete" | "expired" | "open";
+  subscriptionId?: string | null;
   url?: string;
 }) {
   return {
@@ -1637,6 +1948,7 @@ function reconciledCheckoutSession(input: {
     metadata: input.metadata as Record<string, string>,
     mode: "subscription" as const,
     status: input.status,
+    subscriptionId: input.subscriptionId ?? null,
     url: input.url ?? `https://checkout.stripe.test/${input.id}`,
   };
 }

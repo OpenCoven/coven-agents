@@ -4,6 +4,7 @@ import type Stripe from "stripe";
 import {
   CHECKOUT_ATTEMPT_METADATA_KEY,
   checkoutDecision,
+  checkoutSessionSubscriptionId,
   isBlockingSubscriptionStatus,
   reconcileCheckoutSessions,
   stableIntegrationIdentifier,
@@ -32,6 +33,17 @@ test("terminal subscriptions allow a new checkout", () => {
   ] satisfies Stripe.Subscription.Status[]) {
     assert.equal(isBlockingSubscriptionStatus(status), false, status);
   }
+});
+
+test("completed Checkout subscription references normalize string, expanded, and null values", () => {
+  assert.equal(checkoutSessionSubscriptionId("sub_string"), "sub_string");
+  assert.equal(
+    checkoutSessionSubscriptionId({
+      id: "sub_expanded",
+    } as Stripe.Subscription),
+    "sub_expanded"
+  );
+  assert.equal(checkoutSessionSubscriptionId(null), null);
 });
 
 test("an anonymous caller is refused before subscription state is disclosed", () => {
@@ -109,7 +121,11 @@ test("current attempts are reconciled across paginated completed Sessions", asyn
     userId: "user-1",
   });
 
-  assert.deepEqual(result, { kind: "complete", sessionId: "cs_current" });
+  assert.deepEqual(result, {
+    kind: "complete",
+    sessionId: "cs_current",
+    subscriptionId: "sub_current",
+  });
   assert.deepEqual(
     cursors.filter(({ status }) => status === "complete"),
     [
@@ -120,6 +136,185 @@ test("current attempts are reconciled across paginated completed Sessions", asyn
       },
     ]
   );
+});
+
+test("a listed open current attempt routes a retrieved completed Session through subscription reconciliation", async () => {
+  const listed = checkoutSession({
+    attemptId: "attempt-current",
+    id: "cs_current",
+    status: "open",
+  });
+  const result = await reconcileCheckoutSessions({
+    attemptId: "attempt-current",
+    attemptState: { kind: "session_created", sessionId: listed.id },
+    customerId: "cus_existing",
+    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
+    expire: () => Promise.resolve(),
+    listPage(input) {
+      return Promise.resolve({
+        data: input.status === "open" ? [listed] : [],
+        hasMore: false,
+      });
+    },
+    priceId: "price_configured",
+    providerIdempotencyKey: "provider-key",
+    retrieve: () =>
+      Promise.resolve({
+        ...listed,
+        status: "complete",
+        subscriptionId: "sub_completed",
+      }),
+    userId: "user-1",
+  });
+
+  assert.deepEqual(result, {
+    kind: "complete",
+    sessionId: "cs_current",
+    subscriptionId: "sub_completed",
+  });
+});
+
+test("a listed reusable Session that expires before retrieve is retired", async () => {
+  const listed = checkoutSession({
+    attemptId: "older-attempt",
+    id: "cs_expired",
+    status: "open",
+  });
+  const result = await reconcileCheckoutSessions({
+    attemptId: "attempt-current",
+    attemptState: { kind: "fresh" },
+    customerId: "cus_existing",
+    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
+    expire: () => Promise.resolve(),
+    listPage(input) {
+      return Promise.resolve({
+        data: input.status === "open" ? [listed] : [],
+        hasMore: false,
+      });
+    },
+    priceId: "price_configured",
+    providerIdempotencyKey: "provider-key",
+    retrieve: () =>
+      Promise.resolve({
+        ...listed,
+        status: "expired",
+      }),
+    userId: "user-1",
+  });
+
+  assert.deepEqual(result, { kind: "retire_attempt" });
+});
+
+test("an app-owned open Session from another attempt is expired instead of reused", async () => {
+  const listed = checkoutSession({
+    attemptId: "older-attempt",
+    id: "cs_older_attempt",
+    status: "open",
+  });
+  let status: Stripe.Checkout.Session.Status = "open";
+  const expired: string[] = [];
+  const result = await reconcileCheckoutSessions({
+    attemptId: "attempt-current",
+    attemptState: { kind: "fresh" },
+    customerId: "cus_existing",
+    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
+    expire(sessionId) {
+      expired.push(sessionId);
+      status = "expired";
+      return Promise.resolve();
+    },
+    listPage(input) {
+      return Promise.resolve({
+        data: input.status === "open" ? [listed] : [],
+        hasMore: false,
+      });
+    },
+    priceId: "price_configured",
+    providerIdempotencyKey: "provider-key",
+    retrieve: () => Promise.resolve({ ...listed, status }),
+    userId: "user-1",
+  });
+
+  assert.deepEqual(result, { kind: "retire_attempt" });
+  assert.deepEqual(expired, ["cs_older_attempt"]);
+});
+
+test("a retrieved Session with another Customer is not reused or expired", async () => {
+  const listed = checkoutSession({
+    attemptId: "older-attempt",
+    id: "cs_other_customer",
+    status: "open",
+  });
+  const expired: string[] = [];
+  const result = await reconcileCheckoutSessions({
+    attemptId: "attempt-current",
+    attemptState: { kind: "fresh" },
+    customerId: "cus_existing",
+    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
+    expire(sessionId) {
+      expired.push(sessionId);
+      return Promise.resolve();
+    },
+    listPage(input) {
+      return Promise.resolve({
+        data: input.status === "open" ? [listed] : [],
+        hasMore: false,
+      });
+    },
+    priceId: "price_configured",
+    providerIdempotencyKey: "provider-key",
+    retrieve: () =>
+      Promise.resolve({
+        ...listed,
+        customerId: "cus_unrelated",
+      }),
+    userId: "user-1",
+  });
+
+  assert.deepEqual(result, { kind: "retry_required" });
+  assert.deepEqual(expired, []);
+});
+
+test("an app-owned retrieved Session with changed attempt metadata is expired before rotation", async () => {
+  const listed = checkoutSession({
+    attemptId: "attempt-current",
+    id: "cs_changed_attempt",
+    status: "open",
+  });
+  let status: Stripe.Checkout.Session.Status = "open";
+  const expired: string[] = [];
+  const result = await reconcileCheckoutSessions({
+    attemptId: "attempt-current",
+    attemptState: { kind: "session_created", sessionId: listed.id },
+    customerId: "cus_existing",
+    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
+    expire(sessionId) {
+      expired.push(sessionId);
+      status = "expired";
+      return Promise.resolve();
+    },
+    listPage(input) {
+      return Promise.resolve({
+        data: input.status === "open" ? [listed] : [],
+        hasMore: false,
+      });
+    },
+    priceId: "price_configured",
+    providerIdempotencyKey: "provider-key",
+    retrieve: () =>
+      Promise.resolve({
+        ...listed,
+        metadata: {
+          ...listed.metadata,
+          [CHECKOUT_ATTEMPT_METADATA_KEY]: "another-attempt",
+        },
+        status,
+      }),
+    userId: "user-1",
+  });
+
+  assert.deepEqual(result, { kind: "retire_attempt" });
+  assert.deepEqual(expired, ["cs_changed_attempt"]);
 });
 
 test("Stripe clients use the pinned Dahlia API version", () => {
@@ -146,6 +341,7 @@ function checkoutSession(input: {
     },
     mode: "subscription" as const,
     status: input.status,
+    subscriptionId: input.status === "complete" ? "sub_current" : null,
     url: `https://checkout.stripe.test/${input.id}`,
   };
 }

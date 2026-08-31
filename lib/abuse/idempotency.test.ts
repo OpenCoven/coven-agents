@@ -197,6 +197,52 @@ test("non-success provider results are retryable rather than permanently complet
   assert.equal(attempts, 2);
 });
 
+test("successful responses can release their claim instead of being cached", async () => {
+  const store = new MemoryIdempotencyStore();
+  let attempts = 0;
+  const perform = () => {
+    attempts += 1;
+    return Promise.resolve({
+      body: { attempt: attempts },
+      status: 200,
+    });
+  };
+
+  const first = await runIdempotentOperation({
+    cacheSuccessfulResponse: false,
+    idempotencyKey: KEY,
+    operation: OPERATION,
+    ownerId: OWNER,
+    perform,
+    request: {},
+    retentionMs: 60_000,
+    store,
+  });
+  const retry = await runIdempotentOperation({
+    cacheSuccessfulResponse: false,
+    idempotencyKey: KEY,
+    operation: OPERATION,
+    ownerId: OWNER,
+    perform,
+    request: {},
+    retentionMs: 60_000,
+    store,
+  });
+
+  assert.deepEqual(first, {
+    kind: "response",
+    replayed: false,
+    response: { body: { attempt: 1 }, status: 200 },
+  });
+  assert.deepEqual(retry, {
+    kind: "response",
+    replayed: false,
+    response: { body: { attempt: 2 }, status: 200 },
+  });
+  assert.equal(store.releaseCount, 2);
+  assert.equal(store.lastCompletedResponse, null);
+});
+
 test("parallel claims permit exactly one provider call", async () => {
   const store = new MemoryIdempotencyStore();
   let providerCalls = 0;

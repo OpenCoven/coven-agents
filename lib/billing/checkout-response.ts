@@ -19,6 +19,7 @@ import {
   type CheckoutSessionPage,
   type CheckoutSessionSnapshot,
   checkoutDecision,
+  isBlockingSubscriptionStatus,
   isValidCheckoutSessionUrl,
   reconcileCheckoutSessions,
   stableIntegrationIdentifier,
@@ -76,6 +77,7 @@ export type CheckoutProvider = {
         | "metadata"
         | "mode"
         | "status"
+        | "subscriptionId"
       >
     > & { url: string | null }
   >;
@@ -94,6 +96,9 @@ export type CheckoutProvider = {
   retrieveCheckoutSession: (
     sessionId: string
   ) => Promise<CheckoutSessionSnapshot>;
+  retrieveSubscription: (
+    subscriptionId: string
+  ) => Promise<Pick<Stripe.Subscription, "id" | "status">>;
 };
 
 export type CheckoutDependencies = {
@@ -143,6 +148,7 @@ export async function checkoutResponse(
   }
 
   const result = await runIdempotentOperation({
+    cacheSuccessfulResponse: false,
     claimLease: { timers: dependencies.idempotencyTimers },
     idempotencyKey: request.headers.get("idempotency-key"),
     now: dependencies.now,
@@ -193,19 +199,73 @@ export async function checkoutResponse(
               };
             }
 
+            const completedSessionResult = async (input: {
+              candidateCustomerId: string;
+              sessionId: string;
+              subscriptionId: string | null;
+            }): Promise<CheckoutAttemptResult> => {
+              const state = {
+                kind: "session_created",
+                sessionId: input.sessionId,
+              } as const;
+              if (!input.subscriptionId) {
+                return {
+                  disposition: "preserve_attempt",
+                  state,
+                  value: checkoutFailure(),
+                };
+              }
+
+              let subscription: Pick<Stripe.Subscription, "id" | "status">;
+              try {
+                subscription = await provider.retrieveSubscription(
+                  input.subscriptionId
+                );
+              } catch {
+                return {
+                  disposition: "preserve_attempt",
+                  state,
+                  value: checkoutFailure(),
+                };
+              }
+
+              if (isBlockingSubscriptionStatus(subscription.status)) {
+                return {
+                  disposition: "preserve_attempt",
+                  state,
+                  value: alreadySubscribed(),
+                };
+              }
+              if (
+                subscription.status !== "canceled" &&
+                subscription.status !== "incomplete_expired"
+              ) {
+                return {
+                  disposition: "preserve_attempt",
+                  state,
+                  value: checkoutFailure(),
+                };
+              }
+              if (
+                await provider.hasBlockingSubscription(
+                  input.candidateCustomerId
+                )
+              ) {
+                return {
+                  disposition: "preserve_attempt",
+                  state,
+                  value: alreadySubscribed(),
+                };
+              }
+              return {
+                disposition: "retire_attempt",
+                value: requestInProgress(),
+              };
+            };
+
             const inspectCustomer = async (
               candidateCustomerId: string
             ): Promise<CheckoutAttemptResult | null> => {
-              if (await provider.hasBlockingSubscription(candidateCustomerId)) {
-                return {
-                  disposition: "retire_attempt",
-                  value: {
-                    body: { error: "already_subscribed" },
-                    status: 409,
-                  },
-                } as const;
-              }
-
               let reconciliation: Awaited<
                 ReturnType<typeof reconcileCheckoutSessions>
               >;
@@ -235,6 +295,27 @@ export async function checkoutResponse(
                 }
                 throw error;
               }
+              if (reconciliation.kind === "complete") {
+                return completedSessionResult({
+                  candidateCustomerId,
+                  sessionId: reconciliation.sessionId,
+                  subscriptionId: reconciliation.subscriptionId,
+                });
+              }
+              if (reconciliation.kind === "retry_required") {
+                return {
+                  disposition: "preserve_attempt",
+                  state: attemptState,
+                  value: requestInProgress(),
+                } as const;
+              }
+              if (await provider.hasBlockingSubscription(candidateCustomerId)) {
+                return {
+                  disposition: "preserve_attempt",
+                  state: attemptState,
+                  value: alreadySubscribed(),
+                } as const;
+              }
               if (reconciliation.kind === "reused") {
                 return {
                   disposition: "preserve_attempt",
@@ -246,16 +327,6 @@ export async function checkoutResponse(
                     body: { url: reconciliation.url },
                     status: 200,
                   },
-                } as const;
-              }
-              if (reconciliation.kind === "complete") {
-                return {
-                  disposition: "preserve_attempt",
-                  state: {
-                    kind: "session_created",
-                    sessionId: reconciliation.sessionId,
-                  },
-                  value: requestInProgress(),
                 } as const;
               }
               if (reconciliation.kind === "invalid_url") {
@@ -272,16 +343,6 @@ export async function checkoutResponse(
                 return {
                   disposition: "retire_attempt",
                   value: requestInProgress(),
-                } as const;
-              }
-              if (reconciliation.kind === "retry_required") {
-                return {
-                  disposition: "preserve_attempt",
-                  state: attemptState,
-                  value: {
-                    body: { error: "request_in_progress" },
-                    status: 409,
-                  },
                 } as const;
               }
               return null;
@@ -367,11 +428,18 @@ export async function checkoutResponse(
               };
             }
             if (checkout.status === "complete") {
-              return {
-                disposition: "preserve_attempt",
-                state: createdState,
-                value: requestInProgress(),
-              };
+              if (!checkout.id) {
+                return {
+                  disposition: "preserve_attempt",
+                  state: createdState,
+                  value: checkoutFailure(),
+                };
+              }
+              return completedSessionResult({
+                candidateCustomerId: customerId,
+                sessionId: checkout.id,
+                subscriptionId: checkout.subscriptionId ?? null,
+              });
             }
             if (!isValidCheckoutSessionUrl(checkout.url)) {
               return {
@@ -416,6 +484,10 @@ function checkoutFailure() {
 
 function requestInProgress() {
   return { body: { error: "request_in_progress" }, status: 409 } as const;
+}
+
+function alreadySubscribed() {
+  return { body: { error: "already_subscribed" }, status: 409 } as const;
 }
 
 function createdAttemptState(

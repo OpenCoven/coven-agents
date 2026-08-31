@@ -99,6 +99,7 @@ const SYSTEM_TIMERS: IdempotencyTimers = {
 };
 
 export async function runIdempotentOperation(options: {
+  cacheSuccessfulResponse?: boolean;
   claimLease?: {
     createOwnerToken?: () => string;
     timers?: IdempotencyTimers;
@@ -262,6 +263,14 @@ export async function runIdempotentOperation(options: {
   }
 
   if (response.status < 200 || response.status >= 300) {
+    const releaseResult = await options.store.release({ claim });
+    if (releaseResult === "lost") {
+      return { kind: "in_progress" };
+    }
+    return { kind: "response", replayed: false, response };
+  }
+
+  if (options.cacheSuccessfulResponse === false) {
     const releaseResult = await options.store.release({ claim });
     if (releaseResult === "lost") {
       return { kind: "in_progress" };

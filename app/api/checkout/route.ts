@@ -4,6 +4,7 @@ import { auth } from "@/app/(auth)/auth";
 import { enforceAbusePolicy } from "@/lib/abuse/enforce";
 import {
   type CheckoutSessionSnapshot,
+  checkoutSessionSubscriptionId,
   hasBlockingSubscription,
 } from "@/lib/billing/checkout";
 import {
@@ -16,6 +17,7 @@ import {
   subscriptionCheckoutEnabled,
 } from "@/lib/billing/config";
 import { createStripeClient } from "@/lib/billing/stripe-client";
+import { classifyStripeRequestOutcome } from "@/lib/billing/stripe-error";
 import {
   attachStripeCustomer,
   databaseCheckoutAttemptLeaseStore,
@@ -40,7 +42,7 @@ const checkoutDependencies: CheckoutDependencies = {
           session = await stripe.checkout.sessions.create(input, options);
         } catch (error) {
           throw new CheckoutProviderRequestError(
-            isStripeRequestFailure(error) ? "uncertain" : "pre_request",
+            classifyStripeRequestOutcome(error),
             { cause: error }
           );
         }
@@ -73,6 +75,11 @@ const checkoutDependencies: CheckoutDependencies = {
         return checkoutSessionSnapshot(
           await stripe.checkout.sessions.retrieve(sessionId)
         );
+      },
+      async retrieveSubscription(subscriptionId) {
+        const subscription =
+          await stripe.subscriptions.retrieve(subscriptionId);
+        return { id: subscription.id, status: subscription.status };
       },
     };
   },
@@ -112,16 +119,7 @@ function checkoutSessionSnapshot(
     metadata: session.metadata ?? {},
     mode: session.mode,
     status: session.status,
+    subscriptionId: checkoutSessionSubscriptionId(session.subscription),
     url: session.url,
   };
-}
-
-function isStripeRequestFailure(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "type" in error &&
-    typeof error.type === "string" &&
-    error.type.startsWith("Stripe")
-  );
 }
