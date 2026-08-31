@@ -1,5 +1,6 @@
 import { type BrowserContext, expect, type Page, test } from "@playwright/test";
 import { TEMPLATES } from "@/lib/agents/formations";
+import { executionProfileForTemplate } from "@/lib/console/agent-profile";
 import { subscriberCookies } from "./session";
 
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
@@ -252,6 +253,96 @@ test.describe("Run console", () => {
     ).toBeEnabled();
   });
 
+  test("every built-in profile can be selected and dispatches its own run", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    const roleAgents = TEMPLATES.map((template, index) => ({
+      ...retainedAgent,
+      description: template.blurb,
+      id: `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      instructions: template.instructions,
+      name: template.name,
+    }));
+    const startedAgentIds: string[] = [];
+
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const request = route.request();
+      const { pathname } = new URL(request.url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({ json: { agents: roleAgents } });
+      }
+      const runStart = pathname.match(/^\/api\/agents\/([^/]+)\/runs$/u);
+      if (runStart && request.method() === "POST") {
+        const agentId = runStart[1] ?? "";
+        startedAgentIds.push(agentId);
+        return route.fulfill({
+          json: {
+            run: {
+              ...retainedRun,
+              completedAt: "2026-08-27T06:01:00.000Z",
+              id: `20000000-0000-4000-8000-${String(startedAgentIds.length).padStart(12, "0")}`,
+              operationId: `30000000-0000-4000-8000-${String(startedAgentIds.length).padStart(12, "0")}`,
+              status: "completed",
+            },
+          },
+          status: 202,
+        });
+      }
+      if (pathname.includes("/runs")) {
+        return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+
+    const selectAndRun = async (index = 0): Promise<void> => {
+      const template = TEMPLATES[index];
+      if (!template) {
+        return;
+      }
+      const profile = executionProfileForTemplate(template);
+      await page
+        .getByRole("button", { name: "Choose execution profile" })
+        .click();
+      const selector = page.getByRole("dialog", {
+        name: "Choose execution profile",
+      });
+      await selector
+        .getByRole("button", {
+          name: new RegExp(`${template.name}.*${profile.mode}`, "u"),
+        })
+        .click();
+
+      await expect(
+        page.getByRole("heading", {
+          name: `What should ${template.name} prove?`,
+        })
+      ).toBeVisible();
+      await expect(page.getByText(profile.composerGuidance)).toBeVisible();
+      const quickChats = page.getByRole("region", {
+        name: `Quick chats for ${template.name}`,
+      });
+      await quickChats
+        .getByRole("button", { name: profile.prompts[0] })
+        .click();
+      await page.getByRole("button", { name: "Run autonomously" }).click();
+      await expect.poll(() => startedAgentIds.length).toBe(index + 1);
+      expect(startedAgentIds.at(-1)).toBe(roleAgents[index]?.id);
+      await selectAndRun(index + 1);
+    };
+
+    await selectAndRun();
+  });
+
   test("a lapsed authenticated session makes no protected console request", async ({
     context,
     page,
@@ -416,6 +507,19 @@ test.describe("Run console", () => {
 
     await paths.getByRole("button", { name: /Start from a role/ }).click();
     await expect(page.getByText("How read-only is enforced")).toBeVisible();
+    await Promise.all(
+      TEMPLATES.map((template) => {
+        const profile = executionProfileForTemplate(template);
+        return expect(
+          page.getByRole("button", {
+            name: new RegExp(
+              `Create ${template.name}.*${profile.mode}.*${profile.outcome}`,
+              "u"
+            ),
+          })
+        ).toBeVisible();
+      })
+    );
     await page.getByRole("button", { name: "All paths" }).click();
     await paths.getByRole("button", { name: /Create a crew/ }).click();
     await expect(page.getByText("Proposed: sequenced mode")).toBeVisible();

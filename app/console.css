@@ -1828,6 +1828,269 @@
   }
 }
 
+.oc-profile-selector {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.oc-profile-selector__trigger {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  max-width: min(520px, 100%);
+  padding: 4px 7px 4px 4px;
+  margin: -4px 0;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+}
+
+.oc-profile-selector__trigger:hover,
+.oc-profile-selector__trigger[aria-expanded="true"] {
+  background: var(--bg-raised);
+}
+
+.oc-profile-selector__trigger:focus-visible,
+.oc-profile-selector__create:focus-visible,
+.oc-profile-selector__option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.oc-profile-selector__current {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.oc-profile-selector__current strong,
+.oc-profile-selector__current span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.oc-profile-selector__current strong {
+  font: 600 13px / 1.25 var(--font-ui);
+}
+
+.oc-profile-selector__current span {
+  font: 500 10px / 1.45 var(--font-mono);
+  color: var(--text-muted);
+}
+
+.oc-profile-selector__chevron {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.oc-profile-selector__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 38;
+  padding: 0;
+  cursor: default;
+  background: color-mix(in oklch, var(--bg-base) 58%, transparent);
+  border: 0;
+}
+
+.oc-profile-selector__dialog {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 0;
+  z-index: 39;
+  width: min(520px, calc(100vw - 32px));
+  max-height: min(620px, calc(100vh - 120px));
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-card);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 42%);
+}
+
+.oc-profile-selector__heading {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.oc-profile-selector__heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.oc-profile-selector__heading span,
+.oc-profile-selector__list h2 {
+  font: 600 9px / 1 var(--font-mono);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.oc-profile-selector__heading strong {
+  font: 600 14px / 1.2 var(--font-ui);
+  color: var(--text-primary);
+}
+
+.oc-profile-selector__create {
+  display: inline-flex;
+  flex: none;
+  gap: 6px;
+  align-items: center;
+  height: 28px;
+  padding: 0 9px;
+  font: 600 10px / 1 var(--font-ui);
+  color: var(--text-secondary);
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+}
+
+.oc-profile-selector__create:hover {
+  color: var(--text-primary);
+  background: var(--bg-raised);
+}
+
+.oc-profile-selector__search {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 16px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.oc-profile-selector__search:focus-within {
+  color: var(--accent);
+}
+
+.oc-profile-selector__search input {
+  flex: 1;
+  min-width: 0;
+  font: 500 12px / 1.2 var(--font-ui);
+  color: var(--text-primary);
+  outline: none;
+  background: transparent;
+  border: 0;
+}
+
+.oc-profile-selector__search input::placeholder {
+  color: var(--text-muted);
+}
+
+.oc-profile-selector__list {
+  max-height: min(480px, calc(100vh - 240px));
+  padding: 8px;
+  overflow-y: auto;
+}
+
+.oc-profile-selector__group {
+  margin-top: 8px;
+}
+
+.oc-profile-selector__list h2 {
+  display: flex;
+  justify-content: space-between;
+  padding: 7px 8px 6px;
+  margin: 0;
+}
+
+.oc-profile-selector__list > p {
+  padding: 24px 12px;
+  margin: 0;
+  font: 500 12px / 1.5 var(--font-ui);
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.oc-profile-selector__option {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 8px;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+}
+
+.oc-profile-selector__option:hover {
+  background: var(--bg-raised);
+}
+
+.oc-profile-selector__option[data-selected="true"] {
+  background: color-mix(in oklch, var(--accent) 8%, var(--bg-raised));
+  border-color: color-mix(in oklch, var(--accent) 30%, var(--border-hairline));
+}
+
+.oc-profile-selector__glyph {
+  position: relative;
+  flex: none;
+}
+
+.oc-profile-selector__glyph > span:last-child {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  border: 2px solid var(--bg-panel);
+}
+
+.oc-profile-selector__copy {
+  display: grid;
+  flex: 1;
+  gap: 3px;
+  min-width: 0;
+}
+
+.oc-profile-selector__copy > span {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.oc-profile-selector__copy strong,
+.oc-profile-selector__copy > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.oc-profile-selector__copy strong {
+  flex: 1;
+  font: 600 12px / 1.2 var(--font-ui);
+}
+
+.oc-profile-selector__copy small {
+  flex: none;
+  font: 500 9px / 1 var(--font-mono);
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.oc-profile-selector__copy > span:last-child {
+  font: 500 11px / 1.35 var(--font-ui);
+  color: var(--text-secondary);
+}
+
+.oc-profile-selector__check {
+  flex: none;
+  color: var(--accent);
+}
+
 .oc-agent-rail {
   position: relative;
 }
@@ -2171,6 +2434,25 @@
    squeezing it out of the viewport. Settings navigation becomes a horizontal
    strip; profile creation is already a single-canvas flow. */
 @media (max-width: 720px) {
+  .oc-profile-selector__dialog {
+    right: 8px;
+    left: 8px;
+    width: auto;
+    max-height: calc(100dvh - 96px);
+  }
+
+  .oc-profile-selector__list {
+    max-height: calc(100dvh - 216px);
+  }
+
+  .oc-profile-selector__heading {
+    padding-inline: 12px;
+  }
+
+  .oc-profile-selector__search {
+    padding-inline: 12px;
+  }
+
   .oc-report-reader-backdrop {
     padding: 0;
   }
