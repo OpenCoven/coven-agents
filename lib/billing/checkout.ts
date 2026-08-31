@@ -12,6 +12,9 @@ const BLOCKING_SUBSCRIPTION_STATUSES = new Set<Stripe.Subscription.Status>([
 ]);
 
 export const CHECKOUT_FLOW_VERSION = "1";
+export const CHECKOUT_PROVIDER_DISCOVERY_MAX_PAGES = 3;
+export const CHECKOUT_PROVIDER_DISCOVERY_MAX_RESULTS = 300;
+export const CHECKOUT_PROVIDER_DISCOVERY_PAGE_SIZE = 100;
 
 export type CheckoutDecision =
   | { kind: "allowed"; userId: string }
@@ -56,6 +59,13 @@ export type CheckoutSessionCleanup = (input: {
 }) => Promise<CheckoutSessionCleanupResult[]>;
 
 export class CheckoutSessionCleanupError extends Error {}
+
+export class CheckoutProviderDiscoveryError extends Error {
+  constructor() {
+    super("Stripe provider discovery limit exceeded.");
+    this.name = "CheckoutProviderDiscoveryError";
+  }
+}
 
 /**
  * Whether this user may open a checkout session.
@@ -104,15 +114,30 @@ export async function hasBlockingSubscription(
   ) => Promise<CheckoutSubscriptionPage>
 ): Promise<boolean> {
   let startingAfter: string | undefined;
+  let resultCount = 0;
 
-  do {
+  for (
+    let pageCount = 0;
+    pageCount < CHECKOUT_PROVIDER_DISCOVERY_MAX_PAGES;
+    pageCount += 1
+  ) {
     // biome-ignore lint/performance/noAwaitInLoops: each Stripe page supplies the cursor for the next.
     const page = await listPage({
       customer: customerId,
-      limit: 100,
+      limit: CHECKOUT_PROVIDER_DISCOVERY_PAGE_SIZE,
       starting_after: startingAfter,
       status: "all",
     });
+    resultCount += page.data.length;
+    if (resultCount > CHECKOUT_PROVIDER_DISCOVERY_MAX_RESULTS) {
+      throw new CheckoutProviderDiscoveryError();
+    }
+    if (
+      page.hasMore &&
+      pageCount === CHECKOUT_PROVIDER_DISCOVERY_MAX_PAGES - 1
+    ) {
+      throw new CheckoutProviderDiscoveryError();
+    }
     if (page.data.some(({ status }) => isBlockingSubscriptionStatus(status))) {
       return true;
     }
@@ -125,9 +150,9 @@ export async function hasBlockingSubscription(
       throw new Error("Stripe returned an empty non-terminal page.");
     }
     startingAfter = lastSubscription.id;
-  } while (startingAfter);
+  }
 
-  return false;
+  throw new CheckoutProviderDiscoveryError();
 }
 
 export async function reconcileCheckoutSessions(input: {
@@ -382,17 +407,34 @@ async function listCheckoutSessions(
   ]
 ): Promise<CheckoutSessionSnapshot[]> {
   const sessions: CheckoutSessionSnapshot[] = [];
+  const maxRequests =
+    CHECKOUT_PROVIDER_DISCOVERY_MAX_PAGES + statuses.length - 1;
+  let requestCount = 0;
   for (const status of statuses) {
     let startingAfter: string | undefined;
-    do {
+    for (
+      let pageCount = 0;
+      pageCount < CHECKOUT_PROVIDER_DISCOVERY_MAX_PAGES;
+      pageCount += 1
+    ) {
+      if (requestCount === maxRequests) {
+        throw new CheckoutProviderDiscoveryError();
+      }
+      requestCount += 1;
       // biome-ignore lint/performance/noAwaitInLoops: each Stripe page supplies the cursor for the next.
       const page = await input.listPage({
         customer: input.customerId,
-        limit: 100,
+        limit: CHECKOUT_PROVIDER_DISCOVERY_PAGE_SIZE,
         starting_after: startingAfter,
         status,
       });
       sessions.push(...page.data);
+      if (sessions.length > CHECKOUT_PROVIDER_DISCOVERY_MAX_RESULTS) {
+        throw new CheckoutProviderDiscoveryError();
+      }
+      if (page.hasMore && requestCount === maxRequests) {
+        throw new CheckoutProviderDiscoveryError();
+      }
       if (!page.hasMore) {
         break;
       }
@@ -400,8 +442,11 @@ async function listCheckoutSessions(
       if (!lastSession) {
         throw new Error("Stripe returned an empty non-terminal page.");
       }
+      if (pageCount === CHECKOUT_PROVIDER_DISCOVERY_MAX_PAGES - 1) {
+        throw new CheckoutProviderDiscoveryError();
+      }
       startingAfter = lastSession.id;
-    } while (startingAfter);
+    }
   }
   return sessions;
 }

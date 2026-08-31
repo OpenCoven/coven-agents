@@ -12,6 +12,7 @@ import type {
 } from "@/lib/abuse/idempotency";
 import { IDEMPOTENCY_CLAIM_TTL_MS } from "@/lib/abuse/idempotency";
 import {
+  CHECKOUT_ATTEMPT_METADATA_KEY,
   type CheckoutSessionSnapshot,
   hasBlockingSubscription,
 } from "@/lib/billing/checkout";
@@ -2098,6 +2099,46 @@ test("Checkout cleanup failure returns non-success without creating another Sess
   assert.equal(checkoutCalls, 0);
 });
 
+test("subscription discovery failure occurs before Checkout Session cleanup", async () => {
+  let checkoutCalls = 0;
+  let expirationCalls = 0;
+  const provider = defaultProvider({
+    createCheckoutSession() {
+      checkoutCalls += 1;
+      return Promise.resolve({ url: "impossible" });
+    },
+    expireCheckoutSession() {
+      expirationCalls += 1;
+      return Promise.resolve();
+    },
+    hasBlockingSubscription: () =>
+      Promise.reject(
+        new Error("Stripe subscription discovery limit exceeded.")
+      ),
+    listOpenCheckoutSessions: () =>
+      Promise.resolve({
+        data: [
+          openCheckoutSession({
+            id: "cs_must_not_expire",
+            metadata: {
+              checkoutFlowVersion: "0",
+              priceId: "price_retired",
+              userId: USER_ID,
+            },
+          }),
+        ],
+        hasMore: false,
+      }),
+  });
+  const dependencies = dependenciesFor({ createProvider: () => provider });
+
+  const response = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(response.status, 502);
+  assert.equal(expirationCalls, 0);
+  assert.equal(checkoutCalls, 0);
+});
+
 test("Customer and Checkout creation use separate derived idempotency keys", async () => {
   let customerKey = "";
   let sessionKey = "";
@@ -2164,6 +2205,156 @@ test("a created Customer is recovered when database attachment initially fails",
   assert.equal(customerCalls, 1);
   assert.equal(attachCalls, 2);
   assert.equal(sessionCalls, 1);
+});
+
+test("an uncertain Customer creation recovers the exact app-owned Customer before reissue", async () => {
+  const attachedCustomers: string[] = [];
+  let customerCalls = 0;
+  let customerListCalls = 0;
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession: () =>
+        Promise.resolve({
+          url: "https://checkout.stripe.test/recovered-uncertain-customer",
+        }),
+      createCustomer: () => {
+        customerCalls += 1;
+        return Promise.reject(providerFailure("uncertain"));
+      },
+    }),
+    {
+      listCustomers() {
+        customerListCalls += 1;
+        return Promise.resolve({
+          data: [
+            {
+              id: "cus_created_before_crash",
+              metadata: {
+                [CHECKOUT_ATTEMPT_METADATA_KEY]: "attempt-1",
+                checkoutFlowVersion: "1",
+                userId: USER_ID,
+              },
+            },
+          ],
+          hasMore: false,
+        });
+      },
+    }
+  );
+  const dependencies = dependenciesFor({
+    attachCustomer: (_userId, customerId) => {
+      attachedCustomers.push(customerId);
+      return Promise.resolve(customerId);
+    },
+    createProvider: () => provider,
+    findUser: () => Promise.resolve({ stripeCustomerId: null }),
+  });
+
+  const uncertain = await checkoutResponse(request(), dependencies, null);
+  const recovered = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(uncertain.status, 502);
+  assert.equal(recovered.status, 200);
+  assert.equal(customerCalls, 1);
+  assert.equal(customerListCalls, 1);
+  assert.deepEqual(attachedCustomers, ["cus_created_before_crash"]);
+});
+
+test("ambiguous app-owned Customer recovery fails closed without reissue or attachment", async () => {
+  let attachCalls = 0;
+  let customerCalls = 0;
+  let customerListCalls = 0;
+  const matchingMetadata = {
+    [CHECKOUT_ATTEMPT_METADATA_KEY]: "attempt-1",
+    checkoutFlowVersion: "1",
+    userId: USER_ID,
+  };
+  const provider = Object.assign(
+    defaultProvider({
+      createCustomer: () => {
+        customerCalls += 1;
+        return Promise.reject(providerFailure("uncertain"));
+      },
+    }),
+    {
+      listCustomers() {
+        customerListCalls += 1;
+        return Promise.resolve({
+          data: [
+            { id: "cus_ambiguous_one", metadata: matchingMetadata },
+            { id: "cus_ambiguous_two", metadata: matchingMetadata },
+          ],
+          hasMore: false,
+        });
+      },
+    }
+  );
+  const dependencies = dependenciesFor({
+    attachCustomer: (_userId, customerId) => {
+      attachCalls += 1;
+      return Promise.resolve(customerId);
+    },
+    createProvider: () => provider,
+    findUser: () => Promise.resolve({ stripeCustomerId: null }),
+  });
+
+  assert.equal(
+    (await checkoutResponse(request(), dependencies, null)).status,
+    502
+  );
+  assert.equal(
+    (await checkoutResponse(request(), dependencies, null)).status,
+    502
+  );
+  assert.equal(customerCalls, 1);
+  assert.equal(customerListCalls, 1);
+  assert.equal(attachCalls, 0);
+});
+
+test("Customer recovery fails closed when bounded discovery cannot reach a terminal page", async () => {
+  let customerCalls = 0;
+  let customerListCalls = 0;
+  const provider = Object.assign(
+    defaultProvider({
+      createCustomer: () => {
+        customerCalls += 1;
+        return Promise.reject(providerFailure("uncertain"));
+      },
+    }),
+    {
+      listCustomers() {
+        customerListCalls += 1;
+        return Promise.resolve({
+          data: [
+            {
+              id: `cus_unrelated_${customerListCalls}`,
+              metadata: {
+                [CHECKOUT_ATTEMPT_METADATA_KEY]: "another-attempt",
+                checkoutFlowVersion: "1",
+                userId: USER_ID,
+              },
+            },
+          ],
+          hasMore: true,
+        });
+      },
+    }
+  );
+  const dependencies = dependenciesFor({
+    createProvider: () => provider,
+    findUser: () => Promise.resolve({ stripeCustomerId: null }),
+  });
+
+  assert.equal(
+    (await checkoutResponse(request(), dependencies, null)).status,
+    502
+  );
+  assert.equal(
+    (await checkoutResponse(request(), dependencies, null)).status,
+    502
+  );
+  assert.equal(customerCalls, 1);
+  assert.equal(customerListCalls, 3);
 });
 
 test("a definite Customer rejection rotates the provider identity", async () => {
@@ -3117,7 +3308,7 @@ test("a Session that completes during blocking cleanup reconciles its subscripti
 
   assert.equal(response.status, 409);
   assert.deepEqual(await response.json(), { error: "already_subscribed" });
-  assert.equal(expirationCalls, 0);
+  assert.equal(expirationCalls, 1);
   assert.equal(subscriptionCalls, 1);
 });
 
@@ -3878,6 +4069,7 @@ function defaultProvider(
       Promise.resolve({ url: "https://checkout.stripe.test/session" }),
     createCustomer: () => Promise.resolve({ id: "cus_new" }),
     hasBlockingSubscription: () => Promise.resolve(false),
+    listCustomers: () => Promise.resolve({ data: [], hasMore: false }),
     retrieveSubscription: () =>
       Promise.reject(new Error("No Subscription was configured.")),
     ...overrides,

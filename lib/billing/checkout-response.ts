@@ -15,6 +15,9 @@ import type { SessionLike } from "@/lib/auth/subscriber-access";
 import {
   CHECKOUT_ATTEMPT_METADATA_KEY,
   CHECKOUT_FLOW_VERSION,
+  CHECKOUT_PROVIDER_DISCOVERY_MAX_PAGES,
+  CHECKOUT_PROVIDER_DISCOVERY_MAX_RESULTS,
+  CHECKOUT_PROVIDER_DISCOVERY_PAGE_SIZE,
   CheckoutSessionCleanupError,
   type CheckoutSessionPage,
   type CheckoutSessionSnapshot,
@@ -39,6 +42,11 @@ const CHECKOUT_RESULT_RETENTION_MS = 24 * 60 * 60_000;
 
 type ProviderRequestOptions = {
   idempotencyKey: string;
+};
+
+type CheckoutCustomerPage = {
+  data: Array<{ id: string; metadata: Record<string, string> }>;
+  hasMore: boolean;
 };
 
 type CheckoutAttemptResult =
@@ -93,6 +101,9 @@ export type CheckoutProvider = {
     options: ProviderRequestOptions
   ) => Promise<void>;
   hasBlockingSubscription: (customerId: string) => Promise<boolean>;
+  listCustomers: (
+    input: Stripe.CustomerListParams
+  ) => Promise<CheckoutCustomerPage>;
   listCheckoutSessions: (
     input: Stripe.Checkout.SessionListParams
   ) => Promise<CheckoutSessionPage>;
@@ -464,15 +475,30 @@ export async function checkoutResponse(
             }
 
             const inspectCustomer = async (
-              candidateCustomerId: string
+              candidateCustomerId: string,
+              reconciliationState: CheckoutAttemptState = resumeAttemptState
             ): Promise<CheckoutAttemptResult | null> => {
+              if (await provider.hasBlockingSubscription(candidateCustomerId)) {
+                const knownSessionIds =
+                  reconciliationState.kind === "session_created"
+                    ? [reconciliationState.sessionId]
+                    : [];
+                return blockingSubscriptionResult(
+                  candidateCustomerId,
+                  reconciliationState.kind === "create_uncertain"
+                    ? reconciliationState
+                    : null,
+                  knownSessionIds
+                );
+              }
+
               let reconciliation: Awaited<
                 ReturnType<typeof reconcileCheckoutSessions>
               >;
               try {
                 reconciliation = await reconcileCheckoutSessions({
                   attemptId,
-                  attemptState: resumeAttemptState,
+                  attemptState: reconciliationState,
                   cleanupSessions: expiration.cleanupSessions,
                   customerId: candidateCustomerId,
                   listPage: provider.listCheckoutSessions,
@@ -504,22 +530,6 @@ export async function checkoutResponse(
                     },
                   ],
                 });
-              }
-              if (await provider.hasBlockingSubscription(candidateCustomerId)) {
-                const knownSessionIds =
-                  reconciliation.kind === "reused" ||
-                  reconciliation.kind === "invalid_url"
-                    ? [reconciliation.sessionId]
-                    : resumeAttemptState.kind === "session_created"
-                      ? [resumeAttemptState.sessionId]
-                      : [];
-                return blockingSubscriptionResult(
-                  candidateCustomerId,
-                  resumeAttemptState.kind === "create_uncertain"
-                    ? resumeAttemptState
-                    : null,
-                  knownSessionIds
-                );
               }
               if (reconciliation.kind === "retry_required") {
                 return {
@@ -573,11 +583,26 @@ export async function checkoutResponse(
 
             const customerIdempotencyKey = `${providerIdempotencyKey}:customer`;
             const sessionIdempotencyKey = `${providerIdempotencyKey}:session`;
+            let customerAttemptState = resumeAttemptState;
             let customerId =
               row?.stripeCustomerId ??
               (resumeAttemptState.kind === "customer_created"
                 ? resumeAttemptState.customerId
                 : null);
+
+            if (!customerId && resumeAttemptState.kind === "create_uncertain") {
+              customerId = await recoverCheckoutCustomer(provider, {
+                attemptId,
+                userId: decision.userId,
+              });
+              if (customerId) {
+                customerAttemptState = {
+                  customerId,
+                  kind: "customer_created",
+                };
+                await expiration.checkpoint(customerAttemptState);
+              }
+            }
 
             if (!customerId) {
               try {
@@ -605,10 +630,11 @@ export async function checkoutResponse(
                       value: checkoutFailure(),
                     };
               }
-              await expiration.checkpoint({
+              customerAttemptState = {
                 customerId,
                 kind: "customer_created",
-              });
+              };
+              await expiration.checkpoint(customerAttemptState);
             }
 
             if (!row?.stripeCustomerId) {
@@ -619,7 +645,10 @@ export async function checkoutResponse(
             }
 
             if (customerId !== inspectedCustomerId) {
-              const attachedCustomer = await inspectCustomer(customerId);
+              const attachedCustomer = await inspectCustomer(
+                customerId,
+                customerAttemptState
+              );
               if (attachedCustomer) {
                 return attachedCustomer;
               }
@@ -733,6 +762,56 @@ function requestInProgress() {
 
 function alreadySubscribed() {
   return { body: { error: "already_subscribed" }, status: 409 } as const;
+}
+
+async function recoverCheckoutCustomer(
+  provider: Pick<CheckoutProvider, "listCustomers">,
+  input: { attemptId: string; userId: string }
+): Promise<string | null> {
+  const matches: string[] = [];
+  let resultCount = 0;
+  let startingAfter: string | undefined;
+
+  for (
+    let pageCount = 0;
+    pageCount < CHECKOUT_PROVIDER_DISCOVERY_MAX_PAGES;
+    pageCount += 1
+  ) {
+    // biome-ignore lint/performance/noAwaitInLoops: each Stripe page supplies the cursor for the next.
+    const page = await provider.listCustomers({
+      limit: CHECKOUT_PROVIDER_DISCOVERY_PAGE_SIZE,
+      starting_after: startingAfter,
+    });
+    resultCount += page.data.length;
+    if (resultCount > CHECKOUT_PROVIDER_DISCOVERY_MAX_RESULTS) {
+      throw new Error("Stripe Customer discovery limit exceeded.");
+    }
+    for (const customer of page.data) {
+      if (
+        customer.metadata[CHECKOUT_ATTEMPT_METADATA_KEY] === input.attemptId &&
+        customer.metadata.checkoutFlowVersion === CHECKOUT_FLOW_VERSION &&
+        customer.metadata.userId === input.userId
+      ) {
+        matches.push(customer.id);
+        if (matches.length > 1) {
+          throw new Error("Stripe Customer recovery is ambiguous.");
+        }
+      }
+    }
+    if (!page.hasMore) {
+      return matches[0] ?? null;
+    }
+    const lastCustomer = page.data.at(-1);
+    if (!lastCustomer) {
+      throw new Error("Stripe returned an empty non-terminal Customer page.");
+    }
+    if (pageCount === CHECKOUT_PROVIDER_DISCOVERY_MAX_PAGES - 1) {
+      throw new Error("Stripe Customer discovery limit exceeded.");
+    }
+    startingAfter = lastCustomer.id;
+  }
+
+  throw new Error("Stripe Customer discovery limit exceeded.");
 }
 
 function checkoutSessionConflict() {
