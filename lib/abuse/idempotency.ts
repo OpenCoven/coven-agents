@@ -30,10 +30,14 @@ export type IdempotencyClaimInput = {
   operation: string;
   ownerToken?: string;
   ownerId: string;
+  reclaimCompleted?: boolean;
   requestHash: string;
 };
 
-export type IdempotencyClaimHandle = Omit<IdempotencyClaimInput, "now">;
+export type IdempotencyClaimHandle = Omit<
+  IdempotencyClaimInput,
+  "now" | "reclaimCompleted"
+>;
 
 export type IdempotencyClaimResult =
   | { claim: IdempotencyClaimHandle; kind: "claimed" }
@@ -148,6 +152,9 @@ export async function runIdempotentOperation(options: {
         }
       : {}),
     ownerId: options.ownerId,
+    ...(options.cacheSuccessfulResponse === false
+      ? { reclaimCompleted: true }
+      : {}),
     requestHash,
   });
 

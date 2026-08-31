@@ -3,6 +3,7 @@ import test from "node:test";
 import type Stripe from "stripe";
 import {
   CHECKOUT_ATTEMPT_METADATA_KEY,
+  CheckoutSessionCleanupError,
   checkoutDecision,
   checkoutSessionSubscriptionId,
   isBlockingSubscriptionStatus,
@@ -239,39 +240,40 @@ test("an app-owned open Session from another attempt is expired instead of reuse
   assert.deepEqual(expired, ["cs_older_attempt"]);
 });
 
-test("a retrieved Session with another Customer is not reused or expired", async () => {
+test("a retrieved Session with another Customer fails closed without expiration", async () => {
   const listed = checkoutSession({
     attemptId: "older-attempt",
     id: "cs_other_customer",
     status: "open",
   });
   const expired: string[] = [];
-  const result = await reconcileCheckoutSessions({
-    attemptId: "attempt-current",
-    attemptState: { kind: "fresh" },
-    customerId: "cus_existing",
-    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
-    expire(sessionId) {
-      expired.push(sessionId);
-      return Promise.resolve();
-    },
-    listPage(input) {
-      return Promise.resolve({
-        data: input.status === "open" ? [listed] : [],
-        hasMore: false,
-      });
-    },
-    priceId: "price_configured",
-    providerIdempotencyKey: "provider-key",
-    retrieve: () =>
-      Promise.resolve({
-        ...listed,
-        customerId: "cus_unrelated",
-      }),
-    userId: "user-1",
-  });
-
-  assert.deepEqual(result, { kind: "retry_required" });
+  await assert.rejects(
+    reconcileCheckoutSessions({
+      attemptId: "attempt-current",
+      attemptState: { kind: "fresh" },
+      customerId: "cus_existing",
+      expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
+      expire(sessionId) {
+        expired.push(sessionId);
+        return Promise.resolve();
+      },
+      listPage(input) {
+        return Promise.resolve({
+          data: input.status === "open" ? [listed] : [],
+          hasMore: false,
+        });
+      },
+      priceId: "price_configured",
+      providerIdempotencyKey: "provider-key",
+      retrieve: () =>
+        Promise.resolve({
+          ...listed,
+          customerId: "cus_unrelated",
+        }),
+      userId: "user-1",
+    }),
+    CheckoutSessionCleanupError
+  );
   assert.deepEqual(expired, []);
 });
 

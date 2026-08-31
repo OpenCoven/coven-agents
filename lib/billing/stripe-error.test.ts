@@ -22,6 +22,16 @@ test("Stripe 5xx responses are uncertain", () => {
   assert.equal(classifyStripeRequestOutcome(error), "uncertain");
 });
 
+test("Stripe idempotency conflicts are uncertain", () => {
+  const error = new Stripe.errors.StripeIdempotencyError({
+    message: "Another request with the same idempotency key is executing.",
+    statusCode: 409,
+    type: "idempotency_error",
+  });
+
+  assert.equal(classifyStripeRequestOutcome(error), "uncertain");
+});
+
 test("deterministic Stripe 4xx responses are definite rejections", async (t) => {
   const cases = [
     new Stripe.errors.StripeInvalidRequestError({
@@ -69,6 +79,13 @@ test("representative SDK-shaped Stripe responses use their HTTP status", () => {
       type: "StripeInvalidRequestError",
     }),
     "pre_request"
+  );
+  assert.equal(
+    classifyStripeRequestOutcome({
+      statusCode: 409,
+      type: "StripeIdempotencyError",
+    }),
+    "uncertain"
   );
 });
 

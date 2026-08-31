@@ -54,6 +54,7 @@ export type CheckoutAttemptLeaseReleaseResult = "lost" | "released";
 
 export type CheckoutAttemptLeaseCheckpointInput = {
   lease: CheckoutAttemptLease;
+  leaseExpiresAt: Date;
   state: CheckoutAttemptState;
   updatedAt: Date;
 };
@@ -202,10 +203,12 @@ export async function runWithCheckoutAttemptLease<T>(options: {
       if (leaseLost) {
         throw new CheckoutAttemptLeaseLostError();
       }
+      const updatedAt = validNow(now);
       const result = await options.store.checkpoint({
         lease,
+        leaseExpiresAt: leaseExpiry(updatedAt),
         state,
-        updatedAt: validNow(now),
+        updatedAt,
       });
       if (result.kind === "lost") {
         leaseLost = true;

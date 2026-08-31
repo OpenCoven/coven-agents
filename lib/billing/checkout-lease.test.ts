@@ -255,6 +255,31 @@ test("checkpointed Customer identity survives a failed attachment", async () => 
   assert.deepEqual(recovered, { kind: "performed", value: "recovered" });
 });
 
+test("an expired holder cannot checkpoint or continue checkout work", async () => {
+  const clock = new ManualClock();
+  const store = new MemoryCheckoutAttemptLeaseStore();
+  let continued = false;
+
+  const result = await runWithCheckoutAttemptLease({
+    createOwnerToken: () => "owner-one",
+    now: clock.now,
+    ownerId: USER_ID,
+    perform: async ({ checkpoint }) => {
+      clock.advance(CHECKOUT_ATTEMPT_LEASE_TTL_MS + 1);
+      await checkpoint({
+        customerId: "cus_too_late",
+        kind: "customer_created",
+      });
+      continued = true;
+      return { disposition: "retire_attempt", value: "unsafe" } as const;
+    },
+    store,
+  });
+
+  assert.deepEqual(result, { kind: "lease_lost" });
+  assert.equal(continued, false);
+});
+
 test("checkout attempt state encoding fails closed for legacy or malformed values", () => {
   assert.deepEqual(
     parseCheckoutAttemptState(
@@ -349,14 +374,20 @@ class MemoryCheckoutAttemptLeaseStore implements CheckoutAttemptLeaseStore {
 
   checkpoint(input: {
     lease: CheckoutAttemptLease;
+    leaseExpiresAt: Date;
     state: CheckoutAttemptLease["attemptState"];
     updatedAt: Date;
   }) {
     const record = this.records.get(input.lease.ownerId);
-    if (!record || record.ownerToken !== input.lease.ownerToken) {
+    if (
+      !record ||
+      record.ownerToken !== input.lease.ownerToken ||
+      record.expiresAt.getTime() <= input.updatedAt.getTime()
+    ) {
       return Promise.resolve({ kind: "lost" } as const);
     }
     record.attemptState = input.state;
+    record.expiresAt = input.leaseExpiresAt;
     return Promise.resolve({
       kind: "checkpointed",
       lease: lease(input.lease.ownerId, record),
@@ -367,7 +398,11 @@ class MemoryCheckoutAttemptLeaseStore implements CheckoutAttemptLeaseStore {
     input: CheckoutAttemptLeaseReleaseInput
   ): Promise<"lost" | "released"> {
     const record = this.records.get(input.lease.ownerId);
-    if (!record || record.ownerToken !== input.lease.ownerToken) {
+    if (
+      !record ||
+      record.ownerToken !== input.lease.ownerToken ||
+      record.expiresAt.getTime() <= input.releasedAt.getTime()
+    ) {
       this.staleReleaseCount += 1;
       return Promise.resolve("lost");
     }

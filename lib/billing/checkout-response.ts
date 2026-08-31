@@ -21,6 +21,7 @@ import {
   checkoutDecision,
   isBlockingSubscriptionStatus,
   isValidCheckoutSessionUrl,
+  reconcileBlockingCheckoutSessions,
   reconcileCheckoutSessions,
   stableIntegrationIdentifier,
 } from "@/lib/billing/checkout";
@@ -200,20 +201,34 @@ export async function checkoutResponse(
               };
             }
 
-            const completedSessionResult = async (input: {
-              candidateCustomerId: string;
+            const inspectCompletedSubscription = async (input: {
               sessionId: string;
               subscriptionId: string | null;
-            }): Promise<CheckoutAttemptResult> => {
+            }): Promise<
+              | {
+                  kind: "failure";
+                  result: CheckoutAttemptResult;
+                }
+              | {
+                  kind: "blocking" | "terminal";
+                  state: Extract<
+                    CheckoutAttemptState,
+                    { kind: "session_created" }
+                  >;
+                }
+            > => {
               const state = {
                 kind: "session_created",
                 sessionId: input.sessionId,
               } as const;
               if (!input.subscriptionId) {
                 return {
-                  disposition: "preserve_attempt",
-                  state,
-                  value: checkoutFailure(),
+                  kind: "failure",
+                  result: {
+                    disposition: "preserve_attempt",
+                    state,
+                    value: checkoutFailure(),
+                  },
                 };
               }
 
@@ -224,39 +239,110 @@ export async function checkoutResponse(
                 );
               } catch {
                 return {
-                  disposition: "preserve_attempt",
-                  state,
-                  value: checkoutFailure(),
+                  kind: "failure",
+                  result: {
+                    disposition: "preserve_attempt",
+                    state,
+                    value: checkoutFailure(),
+                  },
                 };
               }
 
               if (isBlockingSubscriptionStatus(subscription.status)) {
-                return {
-                  disposition: "preserve_attempt",
-                  state,
-                  value: alreadySubscribed(),
-                };
+                return { kind: "blocking", state };
               }
               if (
-                subscription.status !== "canceled" &&
-                subscription.status !== "incomplete_expired"
+                subscription.status === "canceled" ||
+                subscription.status === "incomplete_expired"
               ) {
-                return {
+                return { kind: "terminal", state };
+              }
+              return {
+                kind: "failure",
+                result: {
                   disposition: "preserve_attempt",
                   state,
                   value: checkoutFailure(),
-                };
+                },
+              };
+            };
+
+            const blockingSubscriptionResult = async (
+              candidateCustomerId: string,
+              retainedState: CheckoutAttemptState | null = null,
+              knownSessionIds: readonly string[] = []
+            ): Promise<CheckoutAttemptResult> => {
+              let stateToRetain = retainedState;
+              let completedSessions: Awaited<
+                ReturnType<typeof reconcileBlockingCheckoutSessions>
+              >;
+              try {
+                completedSessions = await reconcileBlockingCheckoutSessions({
+                  customerId: candidateCustomerId,
+                  expirationIdempotencyKey,
+                  expire: provider.expireCheckoutSession,
+                  knownSessionIds,
+                  listPage: provider.listCheckoutSessions,
+                  retrieve: provider.retrieveCheckoutSession,
+                  userId: decision.userId,
+                });
+              } catch (error) {
+                if (error instanceof CheckoutSessionCleanupError) {
+                  return {
+                    disposition: "preserve_attempt",
+                    state: retainedState ?? attemptState,
+                    value: checkoutSessionConflict(),
+                  };
+                }
+                throw error;
+              }
+
+              const inspections = await Promise.all(
+                completedSessions.map(inspectCompletedSubscription)
+              );
+              for (const inspection of inspections) {
+                if (inspection.kind === "failure") {
+                  return inspection.result;
+                }
+                stateToRetain ??= inspection.state;
+              }
+
+              return stateToRetain
+                ? {
+                    disposition: "preserve_attempt",
+                    state: stateToRetain,
+                    value: alreadySubscribed(),
+                  }
+                : {
+                    disposition: "retire_attempt",
+                    value: alreadySubscribed(),
+                  };
+            };
+
+            const completedSessionResult = async (input: {
+              candidateCustomerId: string;
+              sessionId: string;
+              subscriptionId: string | null;
+            }): Promise<CheckoutAttemptResult> => {
+              const inspection = await inspectCompletedSubscription(input);
+              if (inspection.kind === "failure") {
+                return inspection.result;
+              }
+              if (inspection.kind === "blocking") {
+                return blockingSubscriptionResult(
+                  input.candidateCustomerId,
+                  inspection.state
+                );
               }
               if (
                 await provider.hasBlockingSubscription(
                   input.candidateCustomerId
                 )
               ) {
-                return {
-                  disposition: "preserve_attempt",
-                  state,
-                  value: alreadySubscribed(),
-                };
+                return blockingSubscriptionResult(
+                  input.candidateCustomerId,
+                  inspection.state
+                );
               }
               return {
                 disposition: "retire_attempt",
@@ -303,18 +389,25 @@ export async function checkoutResponse(
                   subscriptionId: reconciliation.subscriptionId,
                 });
               }
+              if (await provider.hasBlockingSubscription(candidateCustomerId)) {
+                const knownSessionIds =
+                  reconciliation.kind === "reused" ||
+                  reconciliation.kind === "invalid_url"
+                    ? [reconciliation.sessionId]
+                    : attemptState.kind === "session_created"
+                      ? [attemptState.sessionId]
+                      : [];
+                return blockingSubscriptionResult(
+                  candidateCustomerId,
+                  null,
+                  knownSessionIds
+                );
+              }
               if (reconciliation.kind === "retry_required") {
                 return {
                   disposition: "preserve_attempt",
                   state: attemptState,
                   value: requestInProgress(),
-                } as const;
-              }
-              if (await provider.hasBlockingSubscription(candidateCustomerId)) {
-                return {
-                  disposition: "preserve_attempt",
-                  state: attemptState,
-                  value: alreadySubscribed(),
                 } as const;
               }
               if (reconciliation.kind === "reused") {
@@ -513,6 +606,13 @@ function requestInProgress() {
 
 function alreadySubscribed() {
   return { body: { error: "already_subscribed" }, status: 409 } as const;
+}
+
+function checkoutSessionConflict() {
+  return {
+    body: { error: "checkout_session_conflict" },
+    status: 409,
+  } as const;
 }
 
 function createdAttemptState(

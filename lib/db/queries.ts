@@ -273,6 +273,7 @@ export const databaseCheckoutAttemptLeaseStore: CheckoutAttemptLeaseStore = {
       const [checkpointed] = await db
         .update(idempotencyRecord)
         .set({
+          expiresAt: input.leaseExpiresAt,
           requestHash: serializeCheckoutAttemptLeaseOwner(
             input.lease.ownerToken,
             input.state
@@ -290,7 +291,8 @@ export const databaseCheckoutAttemptLeaseStore: CheckoutAttemptLeaseStore = {
                 input.lease.attemptState
               )
             ),
-            eq(idempotencyRecord.state, "in_progress")
+            eq(idempotencyRecord.state, "in_progress"),
+            gt(idempotencyRecord.expiresAt, input.updatedAt)
           )
         )
         .returning({ id: idempotencyRecord.id });
@@ -302,6 +304,7 @@ export const databaseCheckoutAttemptLeaseStore: CheckoutAttemptLeaseStore = {
         lease: {
           ...input.lease,
           attemptState: input.state,
+          expiresAt: input.leaseExpiresAt,
         },
       };
     } catch (error) {
@@ -414,7 +417,8 @@ export const databaseCheckoutAttemptLeaseStore: CheckoutAttemptLeaseStore = {
             input.lease.attemptState
           )
         ),
-        eq(idempotencyRecord.state, "in_progress")
+        eq(idempotencyRecord.state, "in_progress"),
+        gt(idempotencyRecord.expiresAt, input.releasedAt)
       );
       const released =
         input.disposition.kind === "retire_attempt"
@@ -502,6 +506,30 @@ export const databaseIdempotencyStore: IdempotencyStore = {
 
           if (inserted) {
             return { claim: claimHandle(input), kind: "claimed" } as const;
+          }
+
+          if (input.reclaimCompleted) {
+            const [reclaimedCompleted] = await transaction
+              .update(idempotencyRecord)
+              .set({
+                expiresAt: input.claimExpiresAt,
+                requestHash: storedIdempotencyClaimHash(input),
+                responseJson: null,
+                responseStatus: null,
+                state: "in_progress",
+                updatedAt: input.now,
+              })
+              .where(
+                and(
+                  idempotencyScope(input),
+                  eq(idempotencyRecord.state, "completed")
+                )
+              )
+              .returning({ id: idempotencyRecord.id });
+
+            if (reclaimedCompleted) {
+              return { claim: claimHandle(input), kind: "claimed" } as const;
+            }
           }
 
           const [reclaimed] = await transaction

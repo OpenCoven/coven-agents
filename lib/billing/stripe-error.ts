@@ -17,7 +17,7 @@ export function classifyStripeRequestOutcome(
   }
 
   const statusCode = stripeStatusCode(error);
-  if (statusCode !== null && statusCode >= 500) {
+  if (statusCode === 409 || (statusCode !== null && statusCode >= 500)) {
     return "uncertain";
   }
   if (statusCode !== null && statusCode >= 400 && statusCode < 500) {

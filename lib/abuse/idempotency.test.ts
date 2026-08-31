@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import {
   type IdempotencyClaimInput,
@@ -6,6 +7,7 @@ import {
   type IdempotencyCompleteInput,
   type IdempotencyReleaseInput,
   type IdempotencyRenewInput,
+  type IdempotencyResponse,
   type IdempotencyStore,
   idempotencyResultResponse,
   runIdempotentOperation,
@@ -241,6 +243,103 @@ test("successful responses can release their claim instead of being cached", asy
   });
   assert.equal(store.releaseCount, 2);
   assert.equal(store.lastCompletedResponse, null);
+});
+
+test("non-caching callers reclaim a seeded completed response instead of replaying it", async () => {
+  const store = new MemoryIdempotencyStore();
+  store.seedCompleted({
+    body: { url: "https://checkout.test/stale" },
+    status: 200,
+  });
+  let providerCalls = 0;
+
+  const result = await runIdempotentOperation({
+    cacheSuccessfulResponse: false,
+    idempotencyKey: KEY,
+    operation: OPERATION,
+    ownerId: OWNER,
+    perform: () => {
+      providerCalls += 1;
+      return Promise.resolve({
+        body: { url: "https://checkout.test/current" },
+        status: 200,
+      });
+    },
+    request: {},
+    retentionMs: 60_000,
+    store,
+  });
+
+  assert.deepEqual(result, {
+    kind: "response",
+    replayed: false,
+    response: {
+      body: { url: "https://checkout.test/current" },
+      status: 200,
+    },
+  });
+  assert.equal(providerCalls, 1);
+});
+
+test("parallel non-caching claims safely reacquire one seeded completed record", async () => {
+  const store = new MemoryIdempotencyStore();
+  store.seedCompleted({
+    body: { url: "https://checkout.test/stale" },
+    status: 200,
+  });
+  let providerCalls = 0;
+  let releaseProvider!: () => void;
+  let signalProviderStarted!: () => void;
+  const providerStarted = new Promise<void>((resolve) => {
+    signalProviderStarted = resolve;
+  });
+  const providerGate = new Promise<void>((resolve) => {
+    releaseProvider = resolve;
+  });
+  const perform = async () => {
+    providerCalls += 1;
+    signalProviderStarted();
+    await providerGate;
+    return {
+      body: { url: "https://checkout.test/current" },
+      status: 200,
+    };
+  };
+
+  const first = runIdempotentOperation({
+    cacheSuccessfulResponse: false,
+    idempotencyKey: KEY,
+    operation: OPERATION,
+    ownerId: OWNER,
+    perform,
+    request: {},
+    retentionMs: 60_000,
+    store,
+  });
+  assert.equal(
+    await Promise.race([
+      providerStarted.then(() => "started" as const),
+      first.then(() => "finished" as const),
+    ]),
+    "started"
+  );
+  assert.equal(providerCalls, 1);
+
+  const concurrent = await runIdempotentOperation({
+    cacheSuccessfulResponse: false,
+    idempotencyKey: KEY,
+    operation: OPERATION,
+    ownerId: OWNER,
+    perform,
+    request: {},
+    retentionMs: 60_000,
+    store,
+  });
+
+  assert.deepEqual(concurrent, { kind: "in_progress" });
+  assert.equal(providerCalls, 1);
+  releaseProvider();
+  assert.equal((await first).kind, "response");
 });
 
 test("parallel claims permit exactly one provider call", async () => {
@@ -795,6 +894,29 @@ class MemoryIdempotencyStore implements IdempotencyStore {
     const scope = scoped(input);
     const existing = this.records.get(scope);
 
+    if (
+      existing?.state === "completed" &&
+      "reclaimCompleted" in input &&
+      input.reclaimCompleted === true
+    ) {
+      this.records.set(scope, {
+        claimExpiresAt: input.claimExpiresAt,
+        envelope: null,
+        expiresAt: input.claimExpiresAt,
+        ownerToken:
+          "ownerToken" in input && typeof input.ownerToken === "string"
+            ? input.ownerToken
+            : null,
+        requestHash: input.requestHash,
+        state: "in_progress",
+        status: null,
+      });
+      return Promise.resolve({
+        claim: claimHandle(input),
+        kind: "claimed",
+      });
+    }
+
     if (!existing || existing.expiresAt.getTime() <= input.now.getTime()) {
       this.records.set(scope, {
         claimExpiresAt: input.claimExpiresAt,
@@ -828,6 +950,22 @@ class MemoryIdempotencyStore implements IdempotencyStore {
         envelope: existing.envelope,
         status: existing.status,
       },
+    });
+  }
+
+  seedCompleted(response: IdempotencyResponse) {
+    const now = new Date("2026-08-31T00:00:00.000Z");
+    this.records.set(`${OWNER}:${OPERATION}:${sha256(KEY)}`, {
+      claimExpiresAt: now,
+      envelope: {
+        body: response.body,
+        kind: "plain_json",
+      },
+      expiresAt: new Date("2100-01-01T00:00:00.000Z"),
+      ownerToken: null,
+      requestHash: sha256("{}"),
+      state: "completed",
+      status: response.status,
     });
   }
 
@@ -930,4 +1068,8 @@ function ownerToken(input: object): string | null {
   return "ownerToken" in input && typeof input.ownerToken === "string"
     ? input.ownerToken
     : null;
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
