@@ -2,6 +2,7 @@ import { expect, type Page, type Route, test } from "@playwright/test";
 import { sessionCookies, subscriberCookies } from "./session";
 
 const STARTED_DEVICE_FLOW = {
+  binding: "owner-binding",
   deviceCode: "device-secret",
   expiresIn: 900,
   interval: 0.01,

@@ -54,6 +54,11 @@ type CredentialOperation = Readonly<{
   generation: number;
 }>;
 
+type CredentialLock = Readonly<{
+  authorityContext: string;
+  reason: "session" | "subscription";
+}>;
+
 export function HarnessCredentials({
   authorityContextRevision,
   authorityRevision,
@@ -71,9 +76,9 @@ export function HarnessCredentials({
   const [stateAuthorityContext, setStateAuthorityContext] = useState<
     string | null
   >(null);
-  const [lockedAuthorityContext, setLockedAuthorityContext] = useState<
-    string | null
-  >(null);
+  const [credentialLock, setCredentialLock] = useState<CredentialLock | null>(
+    null
+  );
   const authorityContext = `${authorityContextRevision}:${isSubscriber ? "subscriber" : "demo"}`;
   const authorityContextRef = useRef(authorityContext);
   authorityContextRef.current = authorityContext;
@@ -89,9 +94,11 @@ export function HarnessCredentials({
   const visibleConfigured = stateIsCurrent ? configured : [];
   const visibleValues = stateIsCurrent ? values : {};
   const visibleBusy = stateIsCurrent ? busy : null;
-  const locked =
-    !isSubscriber ||
-    (stateIsCurrent && lockedAuthorityContext === authorityContext);
+  const currentLock =
+    stateIsCurrent && credentialLock?.authorityContext === authorityContext
+      ? credentialLock
+      : null;
+  const locked = !isSubscriber || currentLock !== null;
 
   const abortActiveOperation = useCallback(() => {
     generationRef.current += 1;
@@ -152,12 +159,17 @@ export function HarnessCredentials({
       return;
     }
 
-    if (response.status === 403) {
-      setLockedAuthorityContext(operation.authorityContext);
+    if (response.status === 401 || response.status === 403) {
+      setCredentialLock({
+        authorityContext: operation.authorityContext,
+        reason: response.status === 401 ? "session" : "subscription",
+      });
       setConfigured([]);
       setValues({});
       finishOperation(operation);
-      authorityInvalidatedRef.current();
+      if (response.status === 403) {
+        authorityInvalidatedRef.current();
+      }
       return;
     }
 
@@ -193,7 +205,7 @@ export function HarnessCredentials({
     setConfigured([]);
     setValues({});
     setBusy(null);
-    setLockedAuthorityContext(null);
+    setCredentialLock(null);
     scheduledLoadRef.current += 1;
     const scheduledLoad = scheduledLoadRef.current;
     if (!isSubscriber) {
@@ -257,13 +269,21 @@ export function HarnessCredentials({
           return false;
         }
 
-        if (response.status === 403) {
-          setLockedAuthorityContext(operation.authorityContext);
+        if (response.status === 401 || response.status === 403) {
+          setCredentialLock({
+            authorityContext: operation.authorityContext,
+            reason: response.status === 401 ? "session" : "subscription",
+          });
           setConfigured([]);
           setValues({});
-          authorityInvalidatedRef.current();
+          if (response.status === 403) {
+            authorityInvalidatedRef.current();
+          }
           toast({
-            description: "Storing a credential needs an active subscription.",
+            description:
+              response.status === 401
+                ? "Sign in again."
+                : "Storing a credential needs an active subscription.",
             type: "error",
           });
           return false;
@@ -318,13 +338,21 @@ export function HarnessCredentials({
           return;
         }
 
-        if (response.status === 403) {
-          setLockedAuthorityContext(operation.authorityContext);
+        if (response.status === 401 || response.status === 403) {
+          setCredentialLock({
+            authorityContext: operation.authorityContext,
+            reason: response.status === 401 ? "session" : "subscription",
+          });
           setConfigured([]);
           setValues({});
-          authorityInvalidatedRef.current();
+          if (response.status === 403) {
+            authorityInvalidatedRef.current();
+          }
           toast({
-            description: "Storing a credential needs an active subscription.",
+            description:
+              response.status === 401
+                ? "Sign in again."
+                : "Storing a credential needs an active subscription.",
             type: "error",
           });
           return;
@@ -366,7 +394,9 @@ export function HarnessCredentials({
 
       {locked ? (
         <p className="text-[13px] text-muted-foreground">
-          Storing a credential needs an active subscription.
+          {currentLock?.reason === "session"
+            ? "Sign in again to manage harness credentials."
+            : "Storing a credential needs an active subscription."}
         </p>
       ) : (
         HARNESSES.map((harness) => (

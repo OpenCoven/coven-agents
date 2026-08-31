@@ -241,6 +241,7 @@ test.describe("Demo base path", () => {
       route.request().method() === "POST"
         ? route.fulfill({
             json: {
+              binding: "demo-owner-binding",
               deviceCode: "demo-device-secret",
               expiresIn: 900,
               interval: 0.01,
