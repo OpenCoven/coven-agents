@@ -7,12 +7,17 @@ import {
 
 const USER_ID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
-function revision(checkedAt: string, authVersion = 7) {
+function revision(
+  checkedAt: string,
+  authVersion = 7,
+  subscribedUntil = "2099-01-15T12:00:00.000Z"
+) {
   return subscriptionAuthorityRevision(
     {
+      authVersion,
       checkedAt,
       isSubscriber: true,
-      subscribedUntil: "2099-01-15T12:00:00.000Z",
+      subscribedUntil,
       userId: USER_ID,
     },
     USER_ID,
@@ -43,7 +48,7 @@ test("an older or identical response cannot clear manual invalidation", () => {
   assert.equal(fence.isPending(current, current.contextKey), true);
 });
 
-test("a newer server resolution clears invalidation even when authority values match", () => {
+test("a newer server resolution permits one retry when authority values match", () => {
   const fence = createSubscriptionAuthorityInvalidationFence();
   const current = revision("2026-08-31T18:00:00.000Z");
   const refreshed = revision("2026-08-31T18:00:00.001Z");
@@ -53,7 +58,46 @@ test("a newer server resolution clears invalidation even when authority values m
 
   assert.equal(fence.isPending(refreshed, refreshed.contextKey), false);
   assert.equal(fence.reconcile(refreshed, refreshed.contextKey), true);
-  assert.equal(fence.invalidate(refreshed), true);
+  assert.equal(fence.invalidate(refreshed), false);
+  assert.equal(fence.isPending(refreshed, refreshed.contextKey), true);
+});
+
+test("one unchanged authority incident gets only one automatic recovery refresh", () => {
+  const fence = createSubscriptionAuthorityInvalidationFence();
+  const initial = revision("2026-08-31T18:00:00.000Z");
+  const retried = revision("2026-08-31T18:00:00.001Z");
+  const later = revision("2026-08-31T18:00:00.002Z");
+  assert.ok(initial);
+  assert.ok(retried);
+  assert.ok(later);
+
+  assert.equal(fence.invalidate(initial), true);
+  assert.equal(fence.reconcile(retried, retried.contextKey), true);
+  assert.equal(fence.invalidate(retried), false);
+  assert.equal(fence.isPending(retried, retried.contextKey), true);
+  assert.equal(fence.reconcile(later, later.contextKey), false);
+  assert.equal(fence.isPending(later, later.contextKey), true);
+});
+
+test("a materially changed authority clears a bounded refusal incident", () => {
+  const fence = createSubscriptionAuthorityInvalidationFence();
+  const initial = revision("2026-08-31T18:00:00.000Z");
+  const retried = revision("2026-08-31T18:00:00.001Z");
+  const extended = revision(
+    "2026-08-31T18:00:00.002Z",
+    7,
+    "2099-02-15T12:00:00.000Z"
+  );
+  assert.ok(initial);
+  assert.ok(retried);
+  assert.ok(extended);
+  fence.invalidate(initial);
+  fence.reconcile(retried, retried.contextKey);
+  fence.invalidate(retried);
+
+  assert.equal(fence.reconcile(extended, extended.contextKey), true);
+  assert.equal(fence.isPending(extended, extended.contextKey), false);
+  assert.equal(fence.invalidate(extended), true);
 });
 
 test("invalid, cross-user, or changed-auth revisions cannot reopen an invalidated context", () => {
@@ -65,6 +109,7 @@ test("invalid, cross-user, or changed-auth revisions cannot reopen an invalidate
   assert.equal(
     subscriptionAuthorityRevision(
       {
+        authVersion: 7,
         checkedAt: "not-a-date",
         isSubscriber: true,
         subscribedUntil: "2099-01-15T12:00:00.000Z",
@@ -78,6 +123,21 @@ test("invalid, cross-user, or changed-auth revisions cannot reopen an invalidate
   assert.equal(
     subscriptionAuthorityRevision(
       {
+        authVersion: 7,
+        checkedAt: "2026-08-31T18:00:00.001Z",
+        isSubscriber: true,
+        subscribedUntil: "2099-01-15T12:00:00.000Z",
+        userId: USER_ID,
+      },
+      USER_ID,
+      8
+    ),
+    null
+  );
+  assert.equal(
+    subscriptionAuthorityRevision(
+      {
+        authVersion: 7,
         checkedAt: "2026-08-31T18:00:00.001Z",
         isSubscriber: true,
         subscribedUntil: "2099-01-15T12:00:00.000Z",

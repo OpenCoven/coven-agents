@@ -376,7 +376,7 @@ export function Settings({
       setLockedAuthorityContext(requestAuthorityContext);
       setDrafts({});
       publishCredentials([], context);
-      if (status === 403) {
+      if (status === 401 || status === 403) {
         invalidateSubscriptionAuthority();
       }
       return true;

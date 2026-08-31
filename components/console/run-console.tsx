@@ -139,7 +139,8 @@ export function RunConsole({
   const accountId = session.data?.user?.id ?? null;
   const serverAuthority = effectiveSubscriptionAuthority(
     subscriptionAuthority,
-    accountId
+    accountId,
+    session.data?.user?.authVersion
   );
   const { authorityPending, authorityRevision, invalidateAndRefresh } =
     useSubscriptionAuthorityRefresh({
@@ -149,7 +150,8 @@ export function RunConsole({
       status: session.status,
       subscribedUntil: subscriptionAuthorityExpiryBoundary(
         subscriptionAuthority,
-        accountId
+        accountId,
+        session.data?.user?.authVersion
       ),
       type: session.data?.user?.type,
       userId: accountId,
@@ -157,6 +159,7 @@ export function RunConsole({
   const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
     subscriptionAuthority,
     accountId,
+    session.data?.user?.authVersion,
     authorityPending
   );
   const sessionIdentity = [
@@ -557,7 +560,10 @@ export function RunConsole({
         if (!isCurrentSession(generation, controller.signal)) {
           return;
         }
-        if (has === "subscription_required") {
+        if (
+          has === "authentication_required" ||
+          has === "subscription_required"
+        ) {
           invalidateAndRefresh();
           return;
         }

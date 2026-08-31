@@ -98,6 +98,19 @@ test("a subscription-refused credential summary is exposed to the authority owne
   );
 });
 
+test("an authentication-refused credential summary is exposed to the authority owner", async () => {
+  resetCredentialCache();
+
+  assert.equal(
+    await fetchHasCredential(() =>
+      Promise.resolve(
+        Response.json({ error: "authentication_required" }, { status: 401 })
+      )
+    ),
+    "authentication_required"
+  );
+});
+
 test("successful credential refreshes replace cached run eligibility", async () => {
   resetCredentialCache();
   let calls = 0;

@@ -62,7 +62,11 @@ export function createCredentialRefreshFence(): CredentialRefreshFence {
   };
 }
 
-export type CredentialEligibility = boolean | "subscription_required" | null;
+export type CredentialEligibility =
+  | "authentication_required"
+  | boolean
+  | "subscription_required"
+  | null;
 
 let credentialsInFlight: Promise<CredentialEligibility> | null = null;
 let credentialEligibility: boolean | null = null;
@@ -84,6 +88,9 @@ export function fetchHasCredential(
         }
         credentialsInFlight = null;
         credentialEligibility = null;
+        if (response.status === 401) {
+          return "authentication_required";
+        }
         return response.status === 403 ? "subscription_required" : null;
       }
 

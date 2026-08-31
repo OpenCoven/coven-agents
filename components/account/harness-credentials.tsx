@@ -107,7 +107,7 @@ export function HarnessCredentials({
         context: requestAuthorityContext,
         kind: status === 401 ? "session" : "subscription",
       });
-      if (status === 403) {
+      if (status === 401 || status === 403) {
         onAuthorityInvalidated();
       }
       return true;

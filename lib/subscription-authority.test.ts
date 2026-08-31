@@ -10,17 +10,20 @@ const USER_A = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 const USER_B = "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa";
 const PAID_UNTIL = "2099-01-15T12:00:00.000Z";
 const CHECKED_AT = "2099-01-15T11:00:00.000Z";
+const AUTH_VERSION = 7;
 
 test("same-user server authority activates a stale demo client", () => {
   assert.deepEqual(
     effectiveSubscriptionAuthority(
       {
+        authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: true,
         subscribedUntil: PAID_UNTIL,
         userId: USER_A,
       },
-      USER_A
+      USER_A,
+      AUTH_VERSION
     ),
     {
       isSubscriber: true,
@@ -33,12 +36,14 @@ test("server downgrade overrides a stale subscriber client", () => {
   assert.deepEqual(
     effectiveSubscriptionAuthority(
       {
+        authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: false,
         subscribedUntil: null,
         userId: USER_A,
       },
-      USER_A
+      USER_A,
+      AUTH_VERSION
     ),
     {
       isSubscriber: false,
@@ -51,12 +56,14 @@ test("authority for another user is ignored", () => {
   assert.deepEqual(
     effectiveSubscriptionAuthority(
       {
+        authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: true,
         subscribedUntil: PAID_UNTIL,
         userId: USER_A,
       },
-      USER_B
+      USER_B,
+      AUTH_VERSION
     ),
     {
       isSubscriber: false,
@@ -65,16 +72,40 @@ test("authority for another user is ignored", () => {
   );
 });
 
+test("authority from an older auth version is ignored", () => {
+  const authority = {
+    authVersion: AUTH_VERSION,
+    checkedAt: CHECKED_AT,
+    isSubscriber: true,
+    subscribedUntil: PAID_UNTIL,
+    userId: USER_A,
+  } as const;
+
+  assert.deepEqual(
+    effectiveSubscriptionAuthority(authority, USER_A, AUTH_VERSION + 1),
+    {
+      isSubscriber: false,
+      subscribedUntil: null,
+    }
+  );
+  assert.equal(
+    subscriptionAuthorityExpiryBoundary(authority, USER_A, AUTH_VERSION + 1),
+    null
+  );
+});
+
 test("a pending boundary refresh fails effective authority closed", () => {
   assert.deepEqual(
     effectiveSubscriptionAuthority(
       {
+        authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: true,
         subscribedUntil: PAID_UNTIL,
         userId: USER_A,
       },
       USER_A,
+      AUTH_VERSION,
       true
     ),
     {
@@ -90,6 +121,7 @@ test("storage fallback preserves only a bounded same-session paid authority", ()
     storageUnavailableSubscriptionAuthority(
       {
         user: {
+          authVersion: AUTH_VERSION,
           id: USER_A,
           subscriptionAuthorityExpiresAt: PAID_UNTIL,
           type: "subscriber",
@@ -99,6 +131,7 @@ test("storage fallback preserves only a bounded same-session paid authority", ()
     ),
     {
       authorityExpiresAt: PAID_UNTIL,
+      authVersion: AUTH_VERSION,
       checkedAt: CHECKED_AT,
       isSubscriber: true,
       subscribedUntil: null,
@@ -115,6 +148,7 @@ test("storage fallback preserves only a bounded same-session paid authority", ()
       storageUnavailableSubscriptionAuthority(
         {
           user: {
+            authVersion: AUTH_VERSION,
             id: USER_A,
             subscriptionAuthorityExpiresAt: subscribedUntil,
             type: "subscriber",
@@ -124,6 +158,7 @@ test("storage fallback preserves only a bounded same-session paid authority", ()
       ),
       {
         authorityExpiresAt: null,
+        authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: false,
         subscribedUntil: null,
@@ -137,12 +172,14 @@ test("same-user expiry scheduling uses database or bounded fallback dates", () =
   assert.equal(
     subscriptionAuthorityExpiryBoundary(
       {
+        authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: true,
         subscribedUntil: PAID_UNTIL,
         userId: USER_A,
       },
-      USER_A
+      USER_A,
+      AUTH_VERSION
     ),
     PAID_UNTIL
   );
@@ -150,12 +187,14 @@ test("same-user expiry scheduling uses database or bounded fallback dates", () =
     subscriptionAuthorityExpiryBoundary(
       {
         authorityExpiresAt: PAID_UNTIL,
+        authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: true,
         subscribedUntil: null,
         userId: USER_A,
       },
-      USER_A
+      USER_A,
+      AUTH_VERSION
     ),
     PAID_UNTIL
   );
@@ -163,12 +202,14 @@ test("same-user expiry scheduling uses database or bounded fallback dates", () =
     subscriptionAuthorityExpiryBoundary(
       {
         authorityExpiresAt: PAID_UNTIL,
+        authVersion: AUTH_VERSION,
         checkedAt: CHECKED_AT,
         isSubscriber: true,
         subscribedUntil: null,
         userId: USER_A,
       },
-      USER_B
+      USER_B,
+      AUTH_VERSION
     ),
     null
   );

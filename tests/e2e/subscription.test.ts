@@ -58,7 +58,7 @@ async function mockSession(page: Page, type: SessionType): Promise<void> {
 async function setServerSession(
   context: BrowserContext,
   type: SessionType,
-  options: { email?: string; id?: string } = {}
+  options: { authVersion?: number; email?: string; id?: string } = {}
 ): Promise<void> {
   await context.addCookies(await sessionCookies(type, options));
 }
@@ -1011,6 +1011,50 @@ test.describe("Subscriber checkout", () => {
     expect(serverRefreshes).toBe(1);
   });
 
+  test("persistent credential refusal stays closed after one recovery refresh", async ({
+    page,
+  }) => {
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("subscriber") })
+    );
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({
+        json: { error: "subscription_required" },
+        status: 403,
+      })
+    );
+    let serverRefreshes = 0;
+    page.on("request", (request) => {
+      if (
+        new URL(request.url()).pathname === "/agents" &&
+        isServerComponentRequest(request)
+      ) {
+        serverRefreshes += 1;
+      }
+    });
+
+    await page.goto("/agents");
+
+    await expect.poll(() => serverRefreshes).toBeGreaterThanOrEqual(1);
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+    await page.waitForTimeout(500);
+    expect(serverRefreshes).toBe(1);
+  });
+
   test("console credential bootstrap starts fresh after a same-user auth-version change", async ({
     page,
   }) => {
@@ -1062,6 +1106,7 @@ test.describe("Subscriber checkout", () => {
         "The Daytona runner answered for this authenticated session."
       )
     ).toBeVisible();
+    await setServerSession(page.context(), "subscriber", { authVersion: 2 });
     currentSession = sessionFor("subscriber", { authVersion: 2 });
     await notifySessionChange(page);
 
@@ -1076,6 +1121,96 @@ test.describe("Subscriber checkout", () => {
       )
     ).toBeVisible();
     expect(serverRefreshes).toBe(1);
+  });
+
+  test("a same-user auth-version change fails closed before refreshed authority returns", async ({
+    page,
+  }) => {
+    let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await mockSubscriberConsoleDependencies(page);
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let serverRefreshes = 0;
+    await page.route("**/agents?**", async (route) => {
+      if (isServerComponentRequest(route.request())) {
+        serverRefreshes += 1;
+        await refreshGate;
+      }
+      await route.continue();
+    });
+
+    await page.goto("/agents");
+    await expect(
+      page.getByTitle(
+        "The Daytona runner answered for this authenticated session."
+      )
+    ).toBeVisible();
+
+    await setServerSession(page.context(), "demo", { authVersion: 2 });
+    currentSession = sessionFor("demo", { authVersion: 2 });
+    await notifySessionChange(page);
+
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+
+    releaseRefresh();
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+  });
+
+  test("a current credential 401 closes shared console authority", async ({
+    page,
+  }) => {
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("subscriber") })
+    );
+    await mockSubscriberConsoleDependencies(page);
+    await page.unroute("**/api/credentials");
+    await page.route("**/api/credentials", async (route) => {
+      if (route.request().method() === "POST") {
+        await setServerSession(page.context(), "demo");
+        return route.fulfill({
+          json: { error: "authentication_required" },
+          status: 401,
+        });
+      }
+      return route.fulfill({ json: { harnessIds: [] } });
+    });
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let serverRefreshes = 0;
+    await page.route("**/agents?**", async (route) => {
+      if (isServerComponentRequest(route.request())) {
+        serverRefreshes += 1;
+        await refreshGate;
+      }
+      await route.continue();
+    });
+
+    await openConsoleSettings(page);
+    const credential = page.getByLabel("GitHub Copilot CLI credential");
+    await credential.fill("must-close-shared-authority");
+    await page.getByRole("button", { exact: true, name: "Save" }).click();
+
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+    await expect(credential).toBeDisabled();
+
+    releaseRefresh();
   });
 
   test("credential 403 remains fail-closed when the newer server revision is inactive", async ({
@@ -1229,16 +1364,20 @@ test.describe("Subscriber checkout", () => {
     await credential.fill("belongs-to-new-auth-version");
 
     currentSession = sessionFor("subscriber", { authVersion: 2 });
+    await setServerSession(page.context(), "subscriber", { authVersion: 2 });
     await notifySessionChange(page);
     await expect.poll(() => serverRefreshes).toBe(1);
     releaseCredentials();
 
     await page.waitForTimeout(100);
-    await expect(credential).toBeVisible();
-    await expect(credential).toHaveValue("");
+    await expect(credential).toHaveCount(0);
     expect(serverRefreshes).toBe(1);
 
     releaseRefresh();
+
+    await expect(credential).toBeVisible();
+    await expect(credential).toHaveValue("");
+    expect(serverRefreshes).toBe(1);
   });
 
   test("account credential memory clears before a new subscriber response arrives", async ({

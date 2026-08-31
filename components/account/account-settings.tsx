@@ -93,7 +93,8 @@ export function AccountSettings({
   );
   const serverAuthority = effectiveSubscriptionAuthority(
     subscriptionAuthority,
-    session?.user?.id
+    session?.user?.id,
+    session?.user?.authVersion
   );
   const { authorityPending, authorityRevision, invalidateAndRefresh } =
     useSubscriptionAuthorityRefresh({
@@ -104,7 +105,8 @@ export function AccountSettings({
       status,
       subscribedUntil: subscriptionAuthorityExpiryBoundary(
         subscriptionAuthority,
-        session?.user?.id
+        session?.user?.id,
+        session?.user?.authVersion
       ),
       type: session?.user?.type,
       userId: session?.user?.id,
@@ -112,6 +114,7 @@ export function AccountSettings({
   const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
     subscriptionAuthority,
     session?.user?.id,
+    session?.user?.authVersion,
     authorityPending
   );
   const showBilling =

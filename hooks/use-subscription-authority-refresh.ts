@@ -126,11 +126,14 @@ export function useSubscriptionAuthorityRefresh({
 
   const invalidateAndRefresh = useCallback(() => {
     const currentRevision = revisionRef.current;
-    if (!currentRevision || !invalidationFence.invalidate(currentRevision)) {
+    if (!currentRevision) {
       return;
     }
+    const shouldRefresh = invalidationFence.invalidate(currentRevision);
     setManualInvalidation(currentRevision);
-    router.refresh();
+    if (shouldRefresh) {
+      router.refresh();
+    }
   }, [invalidationFence, router]);
 
   return {
