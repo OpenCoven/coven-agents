@@ -146,6 +146,28 @@ test("an older in-flight summary cannot overwrite a successful credential update
   assert.equal(await fetchHasCredential(), true);
 });
 
+test("a replacement authority never attaches to an older in-flight refusal", async () => {
+  resetCredentialCache();
+  let resolveOld!: (response: Response) => void;
+  const oldResponse = new Promise<Response>((resolve) => {
+    resolveOld = resolve;
+  });
+  let newCalls = 0;
+
+  const old = fetchHasCredential(() => oldResponse, "user:1:resolution-one");
+  const replacement = fetchHasCredential(() => {
+    newCalls += 1;
+    return Promise.resolve(Response.json({ harnessIds: ["copilot"] }));
+  }, "user:1:resolution-two");
+  resolveOld(
+    Response.json({ error: "subscription_required" }, { status: 403 })
+  );
+
+  assert.equal(await replacement, true);
+  assert.equal(await old, "subscription_required");
+  assert.equal(newCalls, 1);
+});
+
 for (const refusal of [
   { result: "authentication_required", status: 401 },
   { result: "subscription_required", status: 403 },

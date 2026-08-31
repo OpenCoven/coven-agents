@@ -21,11 +21,7 @@ import { BrandMark } from "@/components/brand/brand-mark";
 import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { useResponsiveTabOrientation } from "@/hooks/use-responsive-tab-orientation";
 import { useSubscriptionAuthorityRefresh } from "@/hooks/use-subscription-authority-refresh";
-import {
-  effectiveSubscriptionAuthority,
-  type SubscriptionAuthority,
-  subscriptionAuthorityExpiryBoundary,
-} from "@/lib/subscription-authority";
+import type { SubscriptionAuthority } from "@/lib/subscription-authority";
 import { cn } from "@/lib/utils";
 
 type CheckoutResult = "cancelled" | "success" | null;
@@ -91,34 +87,26 @@ export function AccountSettings({
   const tabOrientation = useResponsiveTabOrientation(
     HORIZONTAL_ACCOUNT_TABS_QUERY
   );
-  const serverAuthority = effectiveSubscriptionAuthority(
-    subscriptionAuthority,
-    session?.user?.id,
-    session?.user?.authVersion
-  );
-  const { authorityPending, authorityRevision, invalidateAndRefresh } =
-    useSubscriptionAuthorityRefresh({
-      authority: subscriptionAuthority,
-      authVersion: session?.user?.authVersion,
-      enabled: effectiveCheckoutResult !== "success",
-      isSubscriber: serverAuthority.isSubscriber,
-      status,
-      subscribedUntil: subscriptionAuthorityExpiryBoundary(
-        subscriptionAuthority,
-        session?.user?.id,
-        session?.user?.authVersion
-      ),
-      type: session?.user?.type,
-      userId: session?.user?.id,
-    });
-  const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
-    subscriptionAuthority,
-    session?.user?.id,
-    session?.user?.authVersion,
-    authorityPending
-  );
+  const {
+    authorityRevision,
+    invalidateAndRefresh,
+    isSubscriber,
+    subscribedUntil,
+  } = useSubscriptionAuthorityRefresh({
+    authority: subscriptionAuthority,
+    authVersion: session?.user?.authVersion,
+    enabled: effectiveCheckoutResult !== "success",
+    status,
+    type: session?.user?.type,
+    userId: session?.user?.id,
+  });
   const showBilling =
     checkoutEnabled || isSubscriber || effectiveCheckoutResult === "success";
+  const credentialAuthorityContextRevision = [
+    session?.user?.id ?? "",
+    session?.user?.authVersion ?? "",
+    authorityRevision ?? "",
+  ].join(":");
   const visibleTabs = TABS.filter(
     (entry) => entry.id !== "billing" || showBilling
   );
@@ -382,11 +370,12 @@ export function AccountSettings({
               >
                 {active && entry.id === "copilot" ? (
                   <HarnessCredentials
+                    authorityContextRevision={
+                      credentialAuthorityContextRevision
+                    }
                     authorityRevision={authorityRevision}
-                    authVersion={session.user.authVersion}
                     isSubscriber={isSubscriber}
                     onAuthorityInvalidated={invalidateAndRefresh}
-                    userId={session.user.id}
                   />
                 ) : null}
                 {active && entry.id === "profile" ? <AvatarSettings /> : null}

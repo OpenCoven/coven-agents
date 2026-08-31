@@ -15,7 +15,7 @@ export function subscriptionAuthorityRevisionContext(
 }
 
 export function subscriptionAuthorityRevision(
-  authority: SubscriptionAuthority,
+  authority: SubscriptionAuthority | null,
   sessionUserId: string | null | undefined,
   authVersion: number | null | undefined
 ): SubscriptionAuthorityRevision | null {
@@ -42,7 +42,6 @@ export function subscriptionAuthorityRevision(
       authority.authVersion,
       authority.isSubscriber,
       authority.subscribedUntil,
-      authority.authorityExpiresAt ?? null,
     ]),
     checkedAt: authority.checkedAt,
     contextKey: subscriptionAuthorityRevisionContext(

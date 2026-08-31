@@ -376,9 +376,7 @@ export function Settings({
       setLockedAuthorityContext(requestAuthorityContext);
       setDrafts({});
       publishCredentials([], context);
-      if (status === 401 || status === 403) {
-        invalidateSubscriptionAuthority();
-      }
+      invalidateSubscriptionAuthority();
       return true;
     },
     [invalidateSubscriptionAuthority, isCurrentOperation, publishCredentials]
@@ -410,8 +408,6 @@ export function Settings({
           requestAuthorityContext
         )
       ) {
-        // A demo session cannot store one, and saying so beats a form that
-        // fails on submit.
         return [];
       }
       if (!refreshFence.isCurrent(ticket)) {

@@ -15,7 +15,7 @@ const protectedRoutes = new Map([
   ["app/(chat)/api/suggestions/route.ts", 1],
   ["app/(chat)/api/vote/route.ts", 2],
   ["app/api/account/avatar/route.ts", 2],
-  ["app/api/credentials/device/route.ts", 2],
+  ["app/api/credentials/device/route.ts", 4],
   ["app/api/credentials/route.ts", 3],
 ]);
 

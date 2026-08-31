@@ -118,6 +118,7 @@ test("a stale start success cannot reset a replacement attempt key", async () =>
   assert.equal(attempt.key(), "attempt-two");
   resolveResponse(
     Response.json({
+      binding: "stale-owner-binding",
       deviceCode: "stale-device-secret",
       interval: 5,
       userCode: "ABCD-EFGH",

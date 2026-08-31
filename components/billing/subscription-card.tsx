@@ -6,6 +6,7 @@ import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { browserApplicationPath } from "@/lib/application-path";
+import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
 import { parseRetryAfter } from "@/lib/http/retry-after";
 
 const MAX_CONFIRMATION_ATTEMPTS = 15;
@@ -1217,13 +1218,13 @@ export function SubscriptionCard({
         <p className="oc-subscription-card__eyebrow">Monthly contract</p>
         <h2 id={titleId}>Subscriber access</h2>
         <p>
-          One subscription provides 750 runs each month. A run is counted when
-          an agent starts.
+          One subscription provides {MONTHLY_RUN_CAP} runs each month. A run is
+          counted when an agent starts.
         </p>
       </div>
 
       <div
-        aria-label="Monthly allowance: 750 agent runs"
+        aria-label={`Monthly allowance: ${MONTHLY_RUN_CAP} agent runs`}
         className="oc-subscription-ledger"
         role="img"
       >
@@ -1232,7 +1233,7 @@ export function SubscriptionCard({
           <span>Monthly</span>
         </div>
         <div className="oc-subscription-ledger__value">
-          <strong>750</strong>
+          <strong>{MONTHLY_RUN_CAP}</strong>
           <span>runs</span>
         </div>
         <div aria-hidden="true" className="oc-subscription-ledger__ticks">

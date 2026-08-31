@@ -102,9 +102,14 @@ async function notifySessionChange(page: Page): Promise<void> {
 
 async function subscriberSessionSetCookie(
   email: string,
-  id: string
+  id: string,
+  authVersion = 1
 ): Promise<string> {
-  const [cookie] = await sessionCookies("subscriber", { email, id });
+  const [cookie] = await sessionCookies("subscriber", {
+    authVersion,
+    email,
+    id,
+  });
   if (!cookie) {
     throw new Error("Subscriber session cookie was not created.");
   }
@@ -487,7 +492,8 @@ test.describe("Run console", () => {
     };
     sessionSetCookie = await subscriberSessionSetCookie(
       "second@example.invalid",
-      "00000000-0000-4000-8000-000000000002"
+      "00000000-0000-4000-8000-000000000002",
+      0
     );
     const sessionRefresh = page.waitForResponse(async (response) => {
       if (new URL(response.url()).pathname !== "/api/auth/session") {
@@ -512,12 +518,12 @@ test.describe("Run console", () => {
   }) => {
     await page.goto("/agents");
     await page.getByRole("button", { name: "New agent" }).click();
-    await expect(page).toHaveURL("/login");
+    await expect(page).toHaveURL("/login?callbackUrl=%2Fagents");
 
     await page.goto("/agents");
     await page.getByRole("button", { name: "Search or run a command" }).click();
     await page.getByRole("button", { name: "action Create an agent" }).click();
-    await expect(page).toHaveURL("/login");
+    await expect(page).toHaveURL("/login?callbackUrl=%2Fagents");
   });
 
   test("profile creation opens with three parallel paths instead of numbered steps", async ({
@@ -2035,6 +2041,7 @@ test.describe("Run console", () => {
     sessionOverride = {
       expires: "2099-01-01T00:00:00.000Z",
       user: {
+        authVersion: 1,
         email: "second@example.invalid",
         id: "00000000-0000-4000-8000-000000000002",
         image: null,
@@ -2139,6 +2146,7 @@ test.describe("Run console", () => {
     sessionOverride = {
       expires: "2099-01-01T00:00:00.000Z",
       user: {
+        authVersion: 1,
         email: "second@example.invalid",
         id: "00000000-0000-4000-8000-000000000002",
         image: null,
@@ -2245,6 +2253,7 @@ test.describe("Run console", () => {
     sessionOverride = {
       expires: "2099-01-01T00:00:00.000Z",
       user: {
+        authVersion: 1,
         email: "second@example.invalid",
         id: "00000000-0000-4000-8000-000000000002",
         image: null,
@@ -2404,6 +2413,7 @@ test.describe("Run console", () => {
     sessionOverride = {
       expires: "2099-01-01T00:00:00.000Z",
       user: {
+        authVersion: 1,
         email: "second@example.invalid",
         id: "00000000-0000-4000-8000-000000000002",
         image: null,

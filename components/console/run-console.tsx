@@ -72,11 +72,7 @@ import {
   resetCredentialCache,
   updateCredentialEligibility,
 } from "@/lib/credentials/client";
-import {
-  effectiveSubscriptionAuthority,
-  type SubscriptionAuthority,
-  subscriptionAuthorityExpiryBoundary,
-} from "@/lib/subscription-authority";
+import type { SubscriptionAuthority } from "@/lib/subscription-authority";
 
 const TICK_MS = 1000;
 const COMPACT_VIEWPORT_MAX = 720;
@@ -137,31 +133,18 @@ export function RunConsole({
    * change when someone changes their address.
    */
   const accountId = session.data?.user?.id ?? null;
-  const serverAuthority = effectiveSubscriptionAuthority(
-    subscriptionAuthority,
-    accountId,
-    session.data?.user?.authVersion
-  );
-  const { authorityPending, authorityRevision, invalidateAndRefresh } =
-    useSubscriptionAuthorityRefresh({
-      authority: subscriptionAuthority,
-      authVersion: session.data?.user?.authVersion,
-      isSubscriber: serverAuthority.isSubscriber,
-      status: session.status,
-      subscribedUntil: subscriptionAuthorityExpiryBoundary(
-        subscriptionAuthority,
-        accountId,
-        session.data?.user?.authVersion
-      ),
-      type: session.data?.user?.type,
-      userId: accountId,
-    });
-  const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
-    subscriptionAuthority,
-    accountId,
-    session.data?.user?.authVersion,
-    authorityPending
-  );
+  const {
+    authorityRevision,
+    invalidateAndRefresh,
+    isSubscriber,
+    subscribedUntil,
+  } = useSubscriptionAuthorityRefresh({
+    authority: subscriptionAuthority,
+    authVersion: session.data?.user?.authVersion,
+    status: session.status,
+    type: session.data?.user?.type,
+    userId: accountId,
+  });
   const sessionIdentity = [
     session.status,
     accountId ?? "",
@@ -171,6 +154,9 @@ export function RunConsole({
   ].join(":");
   const credentialOwner = accountId
     ? `${accountId}:${session.data?.user?.authVersion ?? ""}`
+    : null;
+  const credentialRequestAuthority = credentialOwner
+    ? `${credentialOwner}:${authorityRevision ?? ""}`
     : null;
   const avatarSrc = accountId
     ? avatarFor({ id: accountId, image: session.data?.user?.image })
@@ -555,7 +541,7 @@ export function RunConsole({
       credentialOwnerRef.current = credentialOwner;
       resetCredentialCache();
     }
-    fetchHasCredential()
+    fetchHasCredential(undefined, credentialRequestAuthority)
       .then((has) => {
         if (!isCurrentSession(generation, controller.signal)) {
           return;
@@ -583,6 +569,7 @@ export function RunConsole({
     accountId,
     client,
     credentialOwner,
+    credentialRequestAuthority,
     isCurrentSession,
     refresh,
     isSubscriber,

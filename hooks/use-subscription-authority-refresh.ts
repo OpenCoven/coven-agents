@@ -1,9 +1,26 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { SubscriptionAuthority } from "@/lib/subscription-authority";
-import { scheduleSubscriptionAuthorityExpiry } from "@/lib/subscription-authority-expiry";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
+import {
+  effectiveSubscriptionAuthority,
+  type SubscriptionAuthority,
+} from "@/lib/subscription-authority";
+import {
+  INITIAL_SUBSCRIPTION_AUTHORITY_EXPIRY_STATE,
+  reduceSubscriptionAuthorityExpiry,
+  scheduleSubscriptionAuthorityExpiry,
+  subscriptionAuthorityBoundaryPending,
+  subscriptionAuthorityBoundaryRefreshRequired,
+  subscriptionAuthorityBoundaryRevision,
+} from "@/lib/subscription-authority-expiry";
 import {
   createSubscriptionAuthorityInvalidationFence,
   type SubscriptionAuthorityRevision,
@@ -15,33 +32,37 @@ type SessionAuthorityIdentity = {
   authority: SubscriptionAuthority;
   authVersion: number | null | undefined;
   enabled?: boolean;
-  isSubscriber: boolean;
   status: "authenticated" | "loading" | "unauthenticated";
-  subscribedUntil: string | null;
   type: string | null | undefined;
   userId: string | null | undefined;
 };
 
-type SubscriptionAuthorityRefreshState = Readonly<{
+type SubscriptionAuthorityState = Readonly<{
   authorityPending: boolean;
   authorityRevision: string | null;
   invalidateAndRefresh: () => void;
+  isSubscriber: boolean;
+  subscribedUntil: string | null;
 }>;
 
 export function useSubscriptionAuthorityRefresh({
   authority,
   authVersion,
   enabled = true,
-  isSubscriber,
   status,
-  subscribedUntil,
   type,
   userId,
-}: SessionAuthorityIdentity): SubscriptionAuthorityRefreshState {
+}: SessionAuthorityIdentity): SubscriptionAuthorityState {
   const router = useRouter();
   const previousIdentityRef = useRef<string | null>(null);
   const hasResolvedIdentityRef = useRef(false);
-  const refreshedBoundaryRef = useRef<string | null>(null);
+  const boundaryRequestRef = useRef<{
+    observedKey: string | null;
+    requestedKey: string | null;
+  }>({
+    observedKey: null,
+    requestedKey: null,
+  });
   const invalidationFence = useRef(
     createSubscriptionAuthorityInvalidationFence()
   ).current;
@@ -59,19 +80,44 @@ export function useSubscriptionAuthorityRefresh({
     userId,
     authVersion
   );
-  const authorityKey =
-    isSubscriber && userId && subscribedUntil
-      ? `${userId}:${subscribedUntil}`
-      : null;
-  const [expiredAuthorityKey, setExpiredAuthorityKey] = useState<string | null>(
-    null
+  const boundaryRevision = useMemo(
+    () =>
+      authorityMatchesIdentity
+        ? subscriptionAuthorityBoundaryRevision(
+            {
+              checkedAt: authority.checkedAt,
+              subscribedUntil: authority.subscribedUntil,
+              userId: authority.userId,
+            },
+            userId
+          )
+        : null,
+    [
+      authority.checkedAt,
+      authority.subscribedUntil,
+      authority.userId,
+      authorityMatchesIdentity,
+      userId,
+    ]
   );
-  const boundaryPending =
-    authorityKey !== null && expiredAuthorityKey === authorityKey;
+  const [expiryState, dispatchExpiry] = useReducer(
+    reduceSubscriptionAuthorityExpiry,
+    INITIAL_SUBSCRIPTION_AUTHORITY_EXPIRY_STATE
+  );
+  const boundaryPending = subscriptionAuthorityBoundaryPending(
+    expiryState,
+    boundaryRevision
+  );
   const invalidationPending =
     manualInvalidation !== null &&
     invalidationFence.isPending(revision, revisionContext);
   const authorityPending = boundaryPending || invalidationPending;
+  const effectiveAuthority = effectiveSubscriptionAuthority(
+    authority,
+    userId,
+    authVersion,
+    authorityPending
+  );
 
   useEffect(() => {
     if (status === "loading") {
@@ -109,31 +155,53 @@ export function useSubscriptionAuthorityRefresh({
   ]);
 
   useEffect(() => {
-    if (!authorityKey || !subscribedUntil) {
-      return;
-    }
-    const boundary = Date.parse(subscribedUntil);
-    if (!Number.isFinite(boundary)) {
-      setExpiredAuthorityKey(authorityKey);
-      return;
-    }
-    return scheduleSubscriptionAuthorityExpiry(boundary, () => {
-      setExpiredAuthorityKey(authorityKey);
+    dispatchExpiry({
+      nowMs: Date.now(),
+      revision: boundaryRevision,
+      type: "reconcile",
     });
-  }, [authorityKey, subscribedUntil]);
+  }, [boundaryRevision]);
 
-  // Refresh separately so every consumer renders the closed gate first.
   useEffect(() => {
+    if (!boundaryRevision) {
+      return;
+    }
+    return scheduleSubscriptionAuthorityExpiry(
+      boundaryRevision.boundaryMs,
+      () => {
+        dispatchExpiry({
+          revision: boundaryRevision,
+          type: "boundary",
+        });
+      }
+    );
+  }, [boundaryRevision]);
+
+  useEffect(() => {
+    const revisionKey = boundaryRevision?.key ?? null;
+    if (boundaryRequestRef.current.observedKey !== revisionKey) {
+      boundaryRequestRef.current = {
+        observedKey: revisionKey,
+        requestedKey: null,
+      };
+    }
     if (
-      !boundaryPending ||
-      !authorityKey ||
-      refreshedBoundaryRef.current === authorityKey
+      !subscriptionAuthorityBoundaryRefreshRequired(
+        expiryState,
+        boundaryRevision
+      ) ||
+      !boundaryRevision ||
+      boundaryRequestRef.current.requestedKey === boundaryRevision.key
     ) {
       return;
     }
-    refreshedBoundaryRef.current = authorityKey;
+    boundaryRequestRef.current.requestedKey = boundaryRevision.key;
+    dispatchExpiry({
+      revision: boundaryRevision,
+      type: "refresh_requested",
+    });
     router.refresh();
-  }, [authorityKey, boundaryPending, router]);
+  }, [boundaryRevision, expiryState, router]);
 
   useEffect(() => {
     if (invalidationFence.reconcile(revision, revisionContext)) {
@@ -157,5 +225,6 @@ export function useSubscriptionAuthorityRefresh({
     authorityPending,
     authorityRevision: revision?.resolutionId ?? null,
     invalidateAndRefresh,
+    ...effectiveAuthority,
   };
 }

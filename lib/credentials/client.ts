@@ -69,12 +69,23 @@ export type CredentialEligibility =
   | null;
 
 let credentialsInFlight: Promise<CredentialEligibility> | null = null;
+let credentialAuthorityContext: string | null = null;
 let credentialEligibility: boolean | null = null;
 let credentialVersion = 0;
 
 export function fetchHasCredential(
-  fetchImpl: FetchLike = (input, init) => fetch(input, init)
+  fetchImpl: FetchLike = (input, init) => fetch(input, init),
+  authorityContext: string | null = null
 ): Promise<CredentialEligibility> {
+  if (
+    authorityContext !== null &&
+    authorityContext !== credentialAuthorityContext
+  ) {
+    credentialAuthorityContext = authorityContext;
+    credentialVersion += 1;
+    credentialEligibility = null;
+    credentialsInFlight = null;
+  }
   credentialsInFlight ??= (async () => {
     const requestVersion = credentialVersion;
     try {
@@ -128,6 +139,7 @@ export function updateCredentialEligibility(
 /** Test seam. */
 export function resetCredentialCache(): void {
   credentialVersion += 1;
+  credentialAuthorityContext = null;
   credentialEligibility = null;
   credentialsInFlight = null;
 }

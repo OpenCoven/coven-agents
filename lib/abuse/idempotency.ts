@@ -37,7 +37,9 @@ export type IdempotencyClaimInput = {
 export type IdempotencyClaimHandle = Omit<
   IdempotencyClaimInput,
   "now" | "reclaimCompleted"
->;
+> & {
+  recordId?: string;
+};
 
 export type IdempotencyClaimResult =
   | { claim: IdempotencyClaimHandle; kind: "claimed" }
@@ -65,6 +67,11 @@ export type IdempotencyRenewInput = {
 export type IdempotencyRenewResult =
   | { kind: "lost" }
   | { claim: IdempotencyClaimHandle; kind: "renewed" };
+
+export type IdempotencyCompletionResult =
+  | "completed"
+  | "lost"
+  | { kind: "replayed"; response: StoredIdempotencyResponse };
 
 export interface IdempotencyStore {
   claim: (input: IdempotencyClaimInput) => Promise<IdempotencyClaimResult>;
@@ -108,6 +115,9 @@ export async function runIdempotentOperation(options: {
     createOwnerToken?: () => string;
     timers?: IdempotencyTimers;
   };
+  completeSuccessfulResponse?: (
+    input: IdempotencyCompleteInput
+  ) => Promise<IdempotencyCompletionResult>;
   idempotencyKey: string | null;
   now?: () => Date;
   operation: string;
@@ -118,6 +128,7 @@ export async function runIdempotentOperation(options: {
   request: JsonValue;
   responseStorage?: IdempotencyResponseStorage;
   retentionMs: number;
+  shouldCacheResponse?: (response: IdempotencyResponse) => boolean;
   store: IdempotencyStore;
 }): Promise<IdempotencyResult> {
   if (options.idempotencyKey === null) {
@@ -269,15 +280,19 @@ export async function runIdempotentOperation(options: {
     return { kind: "in_progress" };
   }
 
-  if (response.status < 200 || response.status >= 300) {
-    const releaseResult = await options.store.release({ claim });
-    if (releaseResult === "lost") {
-      return { kind: "in_progress" };
-    }
-    return { kind: "response", replayed: false, response };
+  let shouldCacheResponse =
+    response.status >= 200 &&
+    response.status < 300 &&
+    options.cacheSuccessfulResponse !== false;
+  try {
+    shouldCacheResponse =
+      shouldCacheResponse && (options.shouldCacheResponse?.(response) ?? true);
+  } catch (error) {
+    await options.store.release({ claim });
+    throw error;
   }
 
-  if (options.cacheSuccessfulResponse === false) {
+  if (!shouldCacheResponse) {
     const releaseResult = await options.store.release({ claim });
     if (releaseResult === "lost") {
       return { kind: "in_progress" };
@@ -295,14 +310,34 @@ export async function runIdempotentOperation(options: {
       operation: options.operation,
       ownerId: options.ownerId,
     });
-    const completeResult = await options.store.complete({
+    const completion = {
       claim,
       completedAt,
       expiresAt: new Date(completedAt.getTime() + options.retentionMs),
       response: { envelope, status: response.status },
-    });
+    };
+    const completeResult = options.completeSuccessfulResponse
+      ? await options.completeSuccessfulResponse(completion)
+      : await options.store.complete(completion);
     if (completeResult === "lost") {
       return { kind: "in_progress" };
+    }
+    if (typeof completeResult === "object") {
+      const replayedBody = await (
+        options.responseStorage ?? plaintextIdempotencyResponseStorage
+      ).replay(completeResult.response.envelope, {
+        keyHash,
+        operation: options.operation,
+        ownerId: options.ownerId,
+      });
+      return {
+        kind: "response",
+        replayed: true,
+        response: {
+          body: replayedBody,
+          status: completeResult.response.status,
+        },
+      };
     }
   } catch (error) {
     await options.store.release({ claim });

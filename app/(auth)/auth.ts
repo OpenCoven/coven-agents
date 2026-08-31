@@ -17,7 +17,7 @@ import {
 import { isSubscribedAt, userTypeFor } from "@/lib/subscription";
 import {
   type SubscriptionAuthority,
-  storageUnavailableSubscriptionAuthority,
+  serializeSubscriptionAuthority,
 } from "@/lib/subscription-authority";
 import { authConfig } from "./auth.config";
 
@@ -230,23 +230,34 @@ export async function subscriptionPageAuthority(
   now: Date
 ): Promise<SubscriptionAuthority> {
   const resolved = await resolveAuth(now);
-  if (!resolved) {
-    return null;
-  }
   const resolutionId = randomUUID();
-  if (resolved.kind === "storage-unavailable") {
-    return storageUnavailableSubscriptionAuthority(
-      resolved.session,
-      now,
-      resolutionId
-    );
+  if (!resolved) {
+    return serializeSubscriptionAuthority({
+      authVersion: null,
+      checkedAt: now,
+      isSubscriber: false,
+      resolutionId,
+      subscribedUntil: null,
+      userId: null,
+    });
   }
-  return {
+  if (resolved.kind === "storage-unavailable") {
+    return serializeSubscriptionAuthority({
+      authVersion: resolved.session.user.authVersion,
+      checkedAt: now,
+      isSubscriber: resolved.session.user.type === "subscriber",
+      resolutionId,
+      subscribedUntil:
+        resolved.session.user.subscriptionAuthorityExpiresAt ?? null,
+      userId: resolved.session.user.id,
+    });
+  }
+  return serializeSubscriptionAuthority({
     authVersion: resolved.session.user.authVersion,
-    checkedAt: now.toISOString(),
+    checkedAt: now,
     isSubscriber: isSubscribedAt(resolved.user, now),
     resolutionId,
-    subscribedUntil: resolved.user.subscribedUntil?.toISOString() ?? null,
+    subscribedUntil: resolved.user.subscribedUntil,
     userId: resolved.session.user.id,
-  };
+  });
 }
