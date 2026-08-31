@@ -1011,6 +1011,73 @@ test.describe("Subscriber checkout", () => {
     expect(serverRefreshes).toBe(1);
   });
 
+  test("console credential bootstrap starts fresh after a same-user auth-version change", async ({
+    page,
+  }) => {
+    let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+    let releaseCredentials!: () => void;
+    const credentialsGate = new Promise<void>((resolve) => {
+      releaseCredentials = resolve;
+    });
+    let credentialGets = 0;
+    await page.route("**/api/credentials", async (route) => {
+      credentialGets += 1;
+      if (credentialGets === 1) {
+        await credentialsGate;
+        return route.fulfill({
+          json: { error: "subscription_required" },
+          status: 403,
+        });
+      }
+      return route.fulfill({ json: { harnessIds: [] } });
+    });
+    let serverRefreshes = 0;
+    page.on("request", (request) => {
+      if (
+        new URL(request.url()).pathname === "/agents" &&
+        isServerComponentRequest(request)
+      ) {
+        serverRefreshes += 1;
+      }
+    });
+
+    await page.goto("/agents");
+    await expect(
+      page.getByTitle(
+        "The Daytona runner answered for this authenticated session."
+      )
+    ).toBeVisible();
+    currentSession = sessionFor("subscriber", { authVersion: 2 });
+    await notifySessionChange(page);
+
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await expect.poll(() => credentialGets).toBe(2);
+    releaseCredentials();
+    await page.waitForTimeout(100);
+
+    await expect(
+      page.getByTitle(
+        "The Daytona runner answered for this authenticated session."
+      )
+    ).toBeVisible();
+    expect(serverRefreshes).toBe(1);
+  });
+
   test("credential 403 remains fail-closed when the newer server revision is inactive", async ({
     page,
   }) => {
