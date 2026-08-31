@@ -2311,6 +2311,77 @@ test("ambiguous app-owned Customer recovery fails closed without reissue or atta
   assert.equal(attachCalls, 0);
 });
 
+test("an exact attempt Customer without authoritative user ownership fails closed", async (t) => {
+  await Promise.all(
+    (
+      [
+        ["mismatched", "another-user"],
+        ["missing", undefined],
+      ] as const
+    ).map(([name, recoveredUserId]) =>
+      t.test(name, async () => {
+        let attachCalls = 0;
+        let checkoutCalls = 0;
+        let customerCalls = 0;
+        let customerListCalls = 0;
+        const provider = Object.assign(
+          defaultProvider({
+            createCheckoutSession: () => {
+              checkoutCalls += 1;
+              return Promise.resolve({ url: "impossible" });
+            },
+            createCustomer: () => {
+              customerCalls += 1;
+              return customerCalls === 1
+                ? Promise.reject(providerFailure("uncertain"))
+                : Promise.resolve({ id: "cus_cross_user" });
+            },
+          }),
+          {
+            listCustomers() {
+              customerListCalls += 1;
+              return Promise.resolve({
+                data: [
+                  {
+                    id: "cus_cross_user",
+                    metadata: {
+                      [CHECKOUT_ATTEMPT_METADATA_KEY]: "attempt-1",
+                      checkoutFlowVersion: "1",
+                      ...(recoveredUserId ? { userId: recoveredUserId } : {}),
+                    },
+                  },
+                ],
+                hasMore: false,
+              });
+            },
+          }
+        );
+        const dependencies = dependenciesFor({
+          attachCustomer: (_userId, customerId) => {
+            attachCalls += 1;
+            return Promise.resolve(customerId);
+          },
+          createProvider: () => provider,
+          findUser: () => Promise.resolve({ stripeCustomerId: null }),
+        });
+
+        assert.equal(
+          (await checkoutResponse(request(), dependencies, null)).status,
+          502
+        );
+        assert.equal(
+          (await checkoutResponse(request(), dependencies, null)).status,
+          502
+        );
+        assert.equal(customerCalls, 1);
+        assert.equal(customerListCalls, 1);
+        assert.equal(attachCalls, 0);
+        assert.equal(checkoutCalls, 0);
+      })
+    )
+  );
+});
+
 test("Customer recovery fails closed when bounded discovery cannot reach a terminal page", async () => {
   let customerCalls = 0;
   let customerListCalls = 0;

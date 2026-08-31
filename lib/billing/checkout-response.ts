@@ -789,9 +789,11 @@ async function recoverCheckoutCustomer(
     for (const customer of page.data) {
       if (
         customer.metadata[CHECKOUT_ATTEMPT_METADATA_KEY] === input.attemptId &&
-        customer.metadata.checkoutFlowVersion === CHECKOUT_FLOW_VERSION &&
-        customer.metadata.userId === input.userId
+        customer.metadata.checkoutFlowVersion === CHECKOUT_FLOW_VERSION
       ) {
+        if (customer.metadata.userId !== input.userId) {
+          throw new Error("Stripe Customer recovery ownership is invalid.");
+        }
         matches.push(customer.id);
         if (matches.length > 1) {
           throw new Error("Stripe Customer recovery is ambiguous.");
