@@ -13,7 +13,9 @@ test.describe("Account settings", () => {
       if (
         pathname === "/api/credentials" ||
         pathname === "/api/account/avatar" ||
-        pathname === "/api/usage"
+        pathname === "/api/usage" ||
+        pathname === "/api/subscription" ||
+        pathname === "/api/checkout"
       ) {
         protectedRequests.push(pathname);
       }

@@ -7,6 +7,7 @@ import Link from "next/link";
 import { signOut } from "next-auth/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { SubscriptionCard } from "@/components/billing/subscription-card";
 import { Btn, Caret, Eyebrow } from "@/components/console/primitives";
 import {
   hairline,
@@ -32,9 +33,9 @@ import { createCredentialRefreshFence } from "@/lib/credentials/client";
  * cannot drift.
  */
 
-type Tab = "account" | "data" | "harness" | "usage";
+type Tab = "account" | "billing" | "data" | "harness" | "usage";
 
-const TABS: { id: Tab; label: string }[] = [
+const TABS: { id: Exclude<Tab, "billing">; label: string }[] = [
   { id: "harness", label: "Harness credentials" },
   { id: "usage", label: "Usage" },
   { id: "data", label: "Data" },
@@ -191,6 +192,8 @@ function HarnessCard({
 
 export function Settings({
   account,
+  checkoutEnabled,
+  isSubscriber,
   onCredentialsChange,
   operationContext,
 }: {
@@ -198,10 +201,20 @@ export function Settings({
    *  how to render "nobody", so a fallback sentence can never be mistaken for
    *  an account name or have an initial derived from it. */
   account: string | null;
+  checkoutEnabled: boolean;
+  isSubscriber: boolean;
   onCredentialsChange: (harnessIds: readonly string[]) => void;
   operationContext: SessionOperationContext | null;
 }) {
   const [tab, setTab] = useState<Tab>("harness");
+  const showBilling = checkoutEnabled || isSubscriber;
+  const tabs: { id: Tab; label: string }[] = showBilling
+    ? [
+        ...TABS.slice(0, 2),
+        { id: "billing", label: "Billing" },
+        ...TABS.slice(2),
+      ]
+    : TABS;
 
   const [configured, setConfigured] = useState<string[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -283,6 +296,12 @@ export function Settings({
     refreshCredentials(operationContext).catch(() => undefined);
     return () => refreshFence.deactivate();
   }, [account, operationContext, refreshCredentials, refreshFence]);
+
+  useEffect(() => {
+    if (tab === "billing" && !showBilling) {
+      setTab("harness");
+    }
+  }, [showBilling, tab]);
 
   useEffect(() => {
     const context = operationContext;
@@ -516,6 +535,7 @@ export function Settings({
         flex: 1,
         flexDirection: "column",
         minHeight: 0,
+        minWidth: 0,
       }}
     >
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
@@ -540,7 +560,7 @@ export function Settings({
           >
             Settings
           </Eyebrow>
-          {TABS.map((entry) => (
+          {tabs.map((entry) => (
             <button
               className="oc-row"
               key={entry.id}
@@ -801,6 +821,13 @@ export function Settings({
                   </p>
                 )}
               </>
+            ) : null}
+
+            {tab === "billing" && showBilling ? (
+              <SubscriptionCard
+                checkoutEnabled={checkoutEnabled}
+                isSubscriber={isSubscriber}
+              />
             ) : null}
 
             {tab === "data" ? (

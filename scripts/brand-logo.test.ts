@@ -10,8 +10,8 @@ const repositoryRoot = new URL("../", import.meta.url);
 const brandedSurfaces = [
   "app/(auth)/layout.tsx",
   "app/(chat)/layout.tsx",
-  "app/account/page.tsx",
   "app/security/page.tsx",
+  "components/account/account-settings.tsx",
   "components/admin/warden.tsx",
   "components/chat/app-sidebar.tsx",
   "components/chat/message.tsx",

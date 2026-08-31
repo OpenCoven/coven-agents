@@ -106,7 +106,7 @@ type View = "analytics" | "composer" | "create" | "settings" | "thread";
  * it on the right. The record is the product — everything else is a way to get
  * to one, or a way to start one that will produce another.
  */
-export function RunConsole() {
+export function RunConsole({ checkoutEnabled }: { checkoutEnabled: boolean }) {
   const session = useSession();
   /**
    * Who the console attributes a mission to.
@@ -1389,6 +1389,8 @@ export function RunConsole() {
         ) : view === "settings" ? (
           <Settings
             account={account}
+            checkoutEnabled={checkoutEnabled}
+            isSubscriber={session.data?.user?.type === "subscriber"}
             onCredentialsChange={onCredentialsChange}
             operationContext={settingsOperationContext}
           />

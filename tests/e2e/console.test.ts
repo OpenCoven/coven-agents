@@ -603,6 +603,14 @@ test.describe("Run console", () => {
   test("signed-out settings show a sign-in gate instead of credential controls", async ({
     page,
   }) => {
+    const billingRequests: string[] = [];
+    page.on("request", (request) => {
+      const { pathname } = new URL(request.url());
+      if (pathname === "/api/subscription" || pathname === "/api/checkout") {
+        billingRequests.push(pathname);
+      }
+    });
+
     await page.goto("/agents");
     await expect(
       page
@@ -623,6 +631,7 @@ test.describe("Run console", () => {
       page.getByRole("link", { name: "Sign in with GitHub" })
     ).toBeVisible();
     await expect(page.getByLabel("GitHub Copilot credential")).toHaveCount(0);
+    expect(billingRequests).toEqual([]);
   });
 
   test("the navigation rail groups and filters profile conversations", async ({
