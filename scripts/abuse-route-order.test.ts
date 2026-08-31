@@ -64,6 +64,18 @@ const protectedHandlers: RouteExpectation[] = [
     implementation: "checkoutResponse",
     implementationFile: "lib/billing/checkout-response.ts",
   },
+  {
+    ...route(
+      "app/api/subscription/route.ts",
+      "GET",
+      "dependencies.authenticate(",
+      ["dependencies.findUser("],
+      "subscription_read"
+    ),
+    admissionMarker: "dependencies.enforceAbuse({",
+    implementation: "subscriptionResponse",
+    implementationFile: "lib/billing/subscription-status.ts",
+  },
   route(
     "app/api/credentials/device/route.ts",
     "POST",

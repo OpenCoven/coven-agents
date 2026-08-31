@@ -73,6 +73,7 @@ const applicationRouteFiles = [
   "app/api/runs/[id]/route.ts",
   "app/api/runs/[id]/stop/route.ts",
   "app/api/stripe/webhook/route.ts",
+  "app/api/subscription/route.ts",
   "app/api/tenant/prewarm/route.ts",
   "app/api/usage/route.ts",
 ] as const;
@@ -930,12 +931,22 @@ test("subscription checkout secrets remain behind a server-only boundary", () =>
     new URL("scripts/runtime-config-validation.ts", repositoryRoot),
     "utf8"
   );
+  const subscriptionRoute = readFileSync(
+    new URL("app/api/subscription/route.ts", repositoryRoot),
+    "utf8"
+  );
 
   assert.match(billingConfig, /^import "server-only";/m);
   assert.doesNotMatch(billingConfigCore, /server-only/);
   assert.doesNotMatch(billingConfigCore, /\b(?:apiKey|webhookSecret)\b/);
   assert.match(runtimeValidation, /billing\/config-core/);
   assert.doesNotMatch(runtimeValidation, /billing\/config["']/);
+  assert.match(subscriptionRoute, /from "@\/lib\/billing\/config"/);
+  assert.match(
+    subscriptionRoute,
+    /subscriptionCheckoutEnabled\(\s*process\.env/
+  );
+  assert.doesNotMatch(subscriptionRoute, /billing\/config-core/);
 });
 
 test("agent contracts expose the current tenant identity primitives", () => {

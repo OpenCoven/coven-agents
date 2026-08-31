@@ -65,6 +65,7 @@ const POLICIES = Object.freeze({
   runner_write: closedPolicy(["ip", "user"], 64_000, SENSITIVE_WRITE),
   // Admission runs before the signed raw body is read.
   stripe_webhook: closedPolicy(["ip"], 262_144, WEBHOOK_WRITE),
+  subscription_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   suggestions_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   upload: closedPolicy(["ip", "user"], 5_250_000, rateClass(2, 60, 20, 3600)),
   usage_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),

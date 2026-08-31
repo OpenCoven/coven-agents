@@ -1,3 +1,6 @@
+import type { JWT } from "next-auth/jwt";
+import { authVersionMatches } from "./auth/session-revocation";
+import { isCanonicalUuid } from "./session";
 import { userTypeFor } from "./subscription";
 
 type RefreshableToken = {
@@ -34,4 +37,49 @@ export function refreshTokenType<T extends RefreshableToken>(
     parsed && !Number.isNaN(parsed.getTime()) ? parsed : null;
 
   return { ...token, type: userTypeFor({ subscribedUntil }, now) };
+}
+
+type StoredUserClaims = {
+  authVersion: number;
+  image: string | null;
+  subscribedUntil: Date | null;
+};
+
+export function claimsFromStoredUser(
+  token: JWT,
+  user: StoredUserClaims,
+  now: Date
+): JWT {
+  return {
+    ...token,
+    authVersion: user.authVersion,
+    picture: user.image,
+    subscribedUntil: user.subscribedUntil?.toISOString() ?? null,
+    type: userTypeFor(user, now),
+  };
+}
+
+/**
+ * Reloads an update from storage without trusting any authority or presentation
+ * field in the browser payload. Returning null is Auth.js' instruction to
+ * clear an invalid or revoked JWT; lookup failures remain errors so an
+ * infrastructure outage is never mistaken for a successful refresh.
+ */
+export async function refreshClaimsForSessionUpdate(
+  token: JWT,
+  _clientUpdate: unknown,
+  findUser: (userId: string) => Promise<StoredUserClaims | null>,
+  now: Date
+): Promise<JWT | null> {
+  const userId = token.id;
+  if (typeof userId !== "string" || !isCanonicalUuid(userId)) {
+    return null;
+  }
+
+  const user = await findUser(userId);
+  if (!user || !authVersionMatches(user.authVersion, token.authVersion)) {
+    return null;
+  }
+
+  return claimsFromStoredUser(token, user, now);
 }
