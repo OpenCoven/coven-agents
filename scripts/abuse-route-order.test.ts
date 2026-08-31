@@ -445,6 +445,20 @@ test("costly creates claim idempotency before calling their provider", () => {
   }
 });
 
+test("device polling parses its body and claims idempotency before provider and storage work", () => {
+  const source = read("app/api/credentials/device/route.ts");
+  const block = exportedFunctionBlock(source, "PUT");
+  const bodyIndex = block.indexOf("readBoundedJson(");
+  const idempotencyIndex = block.indexOf("runCredentialDevicePoll({");
+  const providerIndex = block.indexOf("exchangeDeviceCode(");
+  const storageIndex = block.indexOf("putCredential(");
+
+  assert.ok(bodyIndex >= 0);
+  assert.ok(idempotencyIndex > bodyIndex);
+  assert.ok(providerIndex > idempotencyIndex);
+  assert.ok(storageIndex > providerIndex);
+});
+
 test("device starts encrypt replay payloads while checkout uses tagged plaintext", () => {
   const deviceSource = read("app/api/credentials/device/route.ts");
   const checkoutSource = read("lib/billing/checkout-response.ts");
