@@ -126,6 +126,7 @@ constraints.
 
 ## Evidence and operating docs
 
+- [Planning document registry](docs/roadmap/README.md)
 - [Repository setup and architecture](README.md)
 - [Current-state audit](docs/roadmap/current-state.md)
 - [Daytona cutover audit](docs/roadmap/daytona-cutover-audit-2026-08-29.md)
@@ -136,8 +137,6 @@ constraints.
 - [Product authority ADR](docs/architecture/adr-001-product-authority-boundary.md)
 - [Daytona execution ADR](docs/architecture/adr-002-daytona-execution-boundary.md)
 - [Daytona cutover attestation](docs/operations/daytona-cutover-attestation.md)
-- [Historical specification tombstone index](docs/superpowers/README.md)
-- [Private planning sync operations](docs/beads-project-sync.md)
 
 ## Refreshing status
 

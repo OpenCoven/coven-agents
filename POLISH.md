@@ -1,5 +1,11 @@
 # Console polish — decisions log
 
+- Status: historical decision log
+- Last reviewed: 2026-08-31
+- Current guidance: [planning registry](docs/roadmap/README.md),
+  [current state](docs/roadmap/current-state.md), and
+  [implementation sequence](docs/roadmap/implementation-sequence.md)
+
 Working notes for the polishing pass. Each entry is one decision and its
 one-sentence defense, per the pass's own constraint.
 
@@ -48,7 +54,11 @@ empty-runs paragraph shrank to one line. Removed outright: the sidebar
 aphorism about profiles not being personalities — decoration, not
 information.
 
-## Deferred, deliberately
+## Historical deferred observations
+
+These bullets record what the polishing pass did not change. They are not
+current task commitments; private Beads/DoltHub remains authoritative for any
+follow-up.
 
 - Mobile architecture (tab bar, sheets, drawer navigation): a design project
   of its own; the console is desktop-first today and pretending otherwise in

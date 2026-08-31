@@ -101,6 +101,23 @@ events:
 Do not hand-edit the generated status block. A current Project projection does
 not prove Beads is current when the private authority cannot be read.
 
+## Planning document registry
+
+[`docs/roadmap/README.md`](README.md) is the canonical index for tracked
+planning documents. It classifies living guidance, non-authoritative proposals,
+historical evidence, decision logs, and superseded specifications without
+changing the authority hierarchy.
+
+Add or update a registry row in the same change that creates, reclassifies,
+supersedes, or removes a planning document. Historical and superseded rows must
+link to current guidance. Deleted mixed-content specifications continue to use
+the specialized tombstone index in
+[`docs/superpowers/README.md`](../superpowers/README.md).
+
+Run `pnpm planning:check` before commit. The check is local and privacy-safe: it
+validates tracked paths, lifecycle metadata, and current-guidance links without
+querying or reproducing private task content.
+
 ## Promotion and demotion
 
 A phase, wave, capability, or release may be promoted only when:
