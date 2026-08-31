@@ -54,10 +54,10 @@ export const {
   callbacks: {
     async jwt({ token, user, account, trigger, session: updated }) {
       /**
-       * `useSession().update()` is only a signal to reload the stored user.
-       * The browser payload is never an authority source: the avatar route
-       * commits its image first, and this refresh then picks up that image
-       * together with the current subscription and revocation version.
+       * A session update POST is only a signal to reload the stored user. The
+       * browser payload is never an authority source: the avatar route commits
+       * its image first, and this refresh then picks up that image together
+       * with the current subscription and revocation version.
        */
       if (trigger === "update") {
         return refreshClaimsForSessionUpdate(

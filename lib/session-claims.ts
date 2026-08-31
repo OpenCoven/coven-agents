@@ -72,7 +72,7 @@ export function claimsFromStoredUser(
  */
 export async function refreshClaimsForSessionUpdate(
   token: JWT,
-  _clientUpdate: unknown,
+  clientUpdate: unknown,
   findUser: (userId: string) => Promise<StoredUserClaims | null>,
   now: Date
 ): Promise<JWT | null> {
@@ -81,6 +81,14 @@ export async function refreshClaimsForSessionUpdate(
     typeof userId !== "string" ||
     !isCanonicalUuid(userId) ||
     !validAuthVersion(token.authVersion)
+  ) {
+    return null;
+  }
+  if (
+    clientUpdate &&
+    typeof clientUpdate === "object" &&
+    (clientUpdate as Record<string, unknown>).refreshSubscription === true &&
+    (clientUpdate as Record<string, unknown>).expectedUserId !== userId
   ) {
     return null;
   }

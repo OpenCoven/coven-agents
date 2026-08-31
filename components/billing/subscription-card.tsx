@@ -5,11 +5,14 @@ import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { browserApplicationPath } from "@/lib/application-path";
+import { refreshSubscriberSession } from "@/lib/auth/session-refresh.client";
 import { parseRetryAfter } from "@/lib/http/retry-after";
 
 const MAX_CONFIRMATION_ATTEMPTS = 15;
 const CONFIRMATION_INTERVAL_MS = 1000;
 const CONFIRMATION_FOREGROUND_BUDGET_MS = 15_000;
+const SESSION_REFRESH_RELOAD_MARKER =
+  "opencoven:subscriber-session-refresh-reload";
 const ALLOWANCE_MARKERS = Array.from(
   { length: 15 },
   (_, index) => `allowance-${index + 1}`
@@ -47,6 +50,12 @@ type CheckoutAttempt = {
 
 type CheckoutKey = {
   idempotencyKey: string;
+  userId: string;
+};
+
+type SessionRefreshAttempt = {
+  controller: AbortController;
+  generation: number;
   userId: string;
 };
 
@@ -160,6 +169,38 @@ function retryTime(retryAt: number): string {
   }).format(retryAt);
 }
 
+function clearSessionRefreshReloadMarker(): void {
+  try {
+    window.sessionStorage.removeItem(SESSION_REFRESH_RELOAD_MARKER);
+  } catch {
+    // Storage is optional; identity and abort fences remain authoritative.
+  }
+}
+
+function hasSessionRefreshReloadMarker(userId: string): boolean {
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_REFRESH_RELOAD_MARKER);
+    if (!raw) {
+      return false;
+    }
+    const marker = JSON.parse(raw) as { href?: unknown; userId?: unknown };
+    return marker.href === window.location.href && marker.userId === userId;
+  } catch {
+    return false;
+  }
+}
+
+function markSessionRefreshReload(userId: string): void {
+  try {
+    window.sessionStorage.setItem(
+      SESSION_REFRESH_RELOAD_MARKER,
+      JSON.stringify({ href: window.location.href, userId })
+    );
+  } catch {
+    // A same-URL replacement still succeeds when storage is unavailable.
+  }
+}
+
 export function SubscriptionCard({
   checkoutEnabled,
   checkoutResult = null,
@@ -174,8 +215,6 @@ export function SubscriptionCard({
   const userId = session.data?.user?.id ?? null;
   const checkoutUserId =
     session.status === "authenticated" ? (session.data.user?.id ?? null) : null;
-  const updateSessionRef = useRef(session.update);
-  updateSessionRef.current = session.update;
   const userIdRef = useRef(userId);
   userIdRef.current = userId;
   const checkoutUserIdRef = useRef(checkoutUserId);
@@ -201,10 +240,8 @@ export function SubscriptionCard({
     null
   );
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const sessionRefreshCancelRef = useRef<(() => void) | null>(null);
-  const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null
-  );
+  const sessionRefreshAttemptRef = useRef<SessionRefreshAttempt | null>(null);
+  const sessionRefreshGenerationRef = useRef(0);
   const pollGenerationRef = useRef(0);
   const internalConfirmationOwnerRef = useRef<string | null>(null);
   const authorityRef = useRef({ isSubscriber, userId });
@@ -238,12 +275,9 @@ export function SubscriptionCard({
       clearTimeout(pollTimerRef.current);
       pollTimerRef.current = null;
     }
-    sessionRefreshCancelRef.current?.();
-    sessionRefreshCancelRef.current = null;
-    if (sessionRefreshTimerRef.current) {
-      clearTimeout(sessionRefreshTimerRef.current);
-      sessionRefreshTimerRef.current = null;
-    }
+    sessionRefreshGenerationRef.current += 1;
+    sessionRefreshAttemptRef.current?.controller.abort();
+    sessionRefreshAttemptRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -341,6 +375,32 @@ export function SubscriptionCard({
       }
       deadlineFinished = true;
       finishForRetry(PROCESSING_NOTICE);
+    };
+
+    const finishActivation = (paidUntil: Date) => {
+      if (!isCurrent()) {
+        return;
+      }
+      clearSessionRefreshReloadMarker();
+      setCanCheckAgain(false);
+      setNeedsSignIn(false);
+      setPaidThrough(paidUntil);
+      setActiveConfirmed(true);
+      publishNotice({
+        detail: "Subscriber access is ready on this account.",
+        title: "Subscription active",
+        tone: "success",
+      });
+      const url = new URL(window.location.href);
+      if (url.searchParams.get("checkout") === "success") {
+        url.searchParams.delete("checkout");
+        window.history.replaceState(
+          window.history.state,
+          "",
+          `${url.pathname}${url.search}${url.hash}`
+        );
+      }
+      onCheckoutConfirmed?.();
     };
 
     const scheduleNext = (
@@ -518,112 +578,97 @@ export function SubscriptionCard({
           });
           return;
         }
+        if (authorityRef.current.isSubscriber) {
+          finishActivation(paidUntil);
+          return;
+        }
+        if (
+          confirmationUserId &&
+          hasSessionRefreshReloadMarker(confirmationUserId)
+        ) {
+          clearSessionRefreshReloadMarker();
+          finishForRetry({
+            detail:
+              "The paid status is recorded. Check this account again to refresh access.",
+            title: "Account access still needs refreshing.",
+            tone: "neutral",
+          });
+          return;
+        }
         publishNotice({
           detail: "Refreshing this signed-in account before access changes.",
           title: "Refreshing account access",
           tone: "pending",
         });
-
-        const refreshPromise = updateSessionRef
-          .current({ refreshSubscription: true })
-          .then(
-            (value) => ({ kind: "resolved" as const, value }),
-            () => ({ kind: "rejected" as const })
-          );
-        let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-        let cancelRefreshTimeout: (() => void) | null = null;
-        const refreshTimeout = new Promise<
-          { kind: "cancelled" } | { kind: "timeout" }
-        >((resolve) => {
-          let settled = false;
-          const settle = (kind: "cancelled" | "timeout") => {
-            if (settled) {
-              return;
-            }
-            settled = true;
-            if (refreshTimer) {
-              clearTimeout(refreshTimer);
-              if (sessionRefreshTimerRef.current === refreshTimer) {
-                sessionRefreshTimerRef.current = null;
-              }
-            }
-            if (sessionRefreshCancelRef.current === cancelRefreshTimeout) {
-              sessionRefreshCancelRef.current = null;
-            }
-            resolve({ kind });
-          };
-          cancelRefreshTimeout = () => settle("cancelled");
-          sessionRefreshCancelRef.current = cancelRefreshTimeout;
-          refreshTimer = setTimeout(() => {
-            settle("timeout");
-          }, remainingTime());
-          sessionRefreshTimerRef.current = refreshTimer;
-        });
-        let refreshOutcome:
-          | Awaited<typeof refreshPromise>
-          | { kind: "cancelled" }
-          | { kind: "timeout" };
+        if (!confirmationUserId) {
+          return;
+        }
+        const refreshAttempt: SessionRefreshAttempt = {
+          controller: new AbortController(),
+          generation: sessionRefreshGenerationRef.current + 1,
+          userId: confirmationUserId,
+        };
+        sessionRefreshGenerationRef.current = refreshAttempt.generation;
+        sessionRefreshAttemptRef.current = refreshAttempt;
+        const isCurrentRefresh = () =>
+          isCurrent() &&
+          sessionRefreshAttemptRef.current === refreshAttempt &&
+          sessionRefreshGenerationRef.current === refreshAttempt.generation &&
+          userIdRef.current === refreshAttempt.userId &&
+          !refreshAttempt.controller.signal.aborted;
+        const refreshTimer = setTimeout(
+          () => refreshAttempt.controller.abort(),
+          remainingTime()
+        );
         try {
-          refreshOutcome = await Promise.race([refreshPromise, refreshTimeout]);
-        } finally {
-          if (sessionRefreshCancelRef.current === cancelRefreshTimeout) {
-            sessionRefreshCancelRef.current = null;
-          }
-          if (refreshTimer) {
-            clearTimeout(refreshTimer);
-            if (sessionRefreshTimerRef.current === refreshTimer) {
-              sessionRefreshTimerRef.current = null;
-            }
-          }
-        }
-        if (!isCurrent()) {
-          return;
-        }
-        if (refreshOutcome.kind === "timeout" || remainingTime() <= 0) {
-          finishAtDeadline();
-          return;
-        }
-        if (refreshOutcome.kind === "cancelled") {
-          return;
-        }
-        if (refreshOutcome.kind === "rejected") {
-          scheduleNext({
-            detail:
-              "The paid status is recorded. Account access will be checked again.",
-            title: "Refreshing account access",
-            tone: "pending",
-          });
-          return;
-        }
-        if (refreshOutcome.value?.user?.type !== "subscriber") {
-          scheduleNext({
-            detail:
-              "The paid status is recorded. Account access will be checked again.",
-            title: "Refreshing account access",
-            tone: "pending",
-          });
-          return;
-        }
-
-        setCanCheckAgain(false);
-        setNeedsSignIn(false);
-        setPaidThrough(paidUntil);
-        setActiveConfirmed(true);
-        publishNotice({
-          detail: "Subscriber access is ready on this account.",
-          title: "Subscription active",
-          tone: "success",
-        });
-        const url = new URL(window.location.href);
-        if (url.searchParams.get("checkout") === "success") {
-          url.searchParams.delete("checkout");
-          window.history.replaceState(
-            window.history.state,
-            "",
-            `${url.pathname}${url.search}${url.hash}`
+          const refreshed = await refreshSubscriberSession(
+            refreshAttempt.userId,
+            refreshAttempt.controller.signal
           );
+          if (!isCurrentRefresh()) {
+            return;
+          }
+          if (remainingTime() <= 0) {
+            finishAtDeadline();
+            return;
+          }
+          if (!refreshed) {
+            scheduleNext({
+              detail:
+                "The paid status is recorded. Account access will be checked again.",
+              title: "Refreshing account access",
+              tone: "pending",
+            });
+            return;
+          }
+          markSessionRefreshReload(refreshAttempt.userId);
+          window.location.reload();
+        } catch (error) {
+          if (!isCurrent()) {
+            return;
+          }
+          if (
+            refreshAttempt.controller.signal.aborted ||
+            remainingTime() <= 0
+          ) {
+            finishAtDeadline();
+            return;
+          }
+          if (error instanceof DOMException && error.name === "AbortError") {
+            return;
+          }
+          scheduleNext({
+            detail:
+              "The paid status is recorded. Account access will be checked again.",
+            title: "Refreshing account access",
+            tone: "pending",
+          });
+        } finally {
+          clearTimeout(refreshTimer);
+          if (sessionRefreshAttemptRef.current === refreshAttempt) {
+            sessionRefreshAttemptRef.current = null;
+          }
         }
-        onCheckoutConfirmed?.();
       } catch (error) {
         if (!isCurrent()) {
           return;

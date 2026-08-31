@@ -12,6 +12,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { browserApplicationPath } from "@/lib/application-path";
 import { sessionMenu } from "@/lib/auth/session-menu";
 import { avatarFor } from "@/lib/avatar";
 
@@ -31,7 +32,10 @@ export function AccountMenu() {
 
   const leave = useCallback(() => {
     setPending(true);
-    signOut({ callbackUrl: "/login", redirect: true });
+    signOut({
+      callbackUrl: browserApplicationPath("/login"),
+      redirect: true,
+    });
   }, []);
 
   const email = session?.user?.email;

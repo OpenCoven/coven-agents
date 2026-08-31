@@ -109,6 +109,10 @@ function idempotencyKey(request: Request): string {
   return key;
 }
 
+function signOutCallback(request: Request): string | null {
+  return new URLSearchParams(request.postData() ?? "").get("callbackUrl");
+}
+
 async function openEligibleAccount(page: Page): Promise<void> {
   await mockSession(page, "demo");
   await mockAccountDependencies(page);
@@ -195,6 +199,51 @@ async function installSubscriptionBodyMock(
   );
 }
 
+async function installAuthRefreshSignalProbe(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const originalFetch = window.fetch;
+    const state = { aborts: 0, posts: 0 };
+    Object.assign(window, { __authRefreshSignalProbe: state });
+    window.fetch = (input, init) => {
+      const rawUrl =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (
+        init?.method === "POST" &&
+        new URL(rawUrl, window.location.href).pathname.endsWith(
+          "/api/auth/session"
+        )
+      ) {
+        state.posts += 1;
+        init.signal?.addEventListener(
+          "abort",
+          () => {
+            state.aborts += 1;
+          },
+          { once: true }
+        );
+      }
+      return originalFetch.call(window, input, init);
+    };
+  });
+}
+
+function authRefreshSignalProbe(
+  page: Page
+): Promise<{ aborts: number; posts: number }> {
+  return page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __authRefreshSignalProbe: { aborts: number; posts: number };
+        }
+      ).__authRefreshSignalProbe
+  );
+}
+
 function subscriptionBodyMockState(
   page: Page
 ): Promise<{ aborts: number; calls: number; lateBodyWrites: number }> {
@@ -214,6 +263,39 @@ function subscriptionBodyMockState(
 
 test.describe("Subscriber checkout", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
+
+  test("account and console sign-out callbacks target the application login path", async ({
+    page,
+  }) => {
+    const callbacks: Array<string | null> = [];
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("subscriber") })
+    );
+    await page.route("**/api/auth/csrf", (route) =>
+      route.fulfill({ json: { csrfToken: "e2e-csrf" } })
+    );
+    await page.route("**/api/auth/signout", (route) => {
+      callbacks.push(signOutCallback(route.request()));
+      return route.fulfill({ json: { url: "/login" } });
+    });
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", (route) =>
+      route.fulfill({ json: subscriptionStatus(true) })
+    );
+
+    await page.goto("/account");
+    await page.getByRole("button", { name: "Account" }).click();
+    await page.getByRole("menuitem", { name: "Sign out" }).click();
+    await expect.poll(() => callbacks).toEqual(["/login"]);
+
+    await mockSubscriberConsoleDependencies(page);
+    await page.goto("/agents");
+    await page.getByRole("button", { name: "Account and settings" }).click();
+    await page.getByRole("tab", { exact: true, name: "Account" }).click();
+    await page.getByRole("button", { name: "Sign out" }).click();
+
+    await expect.poll(() => callbacks).toEqual(["/login", "/login"]);
+  });
 
   test("flag off hides billing from non-subscribers and ignores inexact checkout values", async ({
     page,
@@ -465,13 +547,59 @@ test.describe("Subscriber checkout", () => {
     expect(reads).toBe(1);
   });
 
-  test("database activation updates Auth.js with an object before showing success", async ({
+  test("database activation refreshes Auth.js and reloads once before cleaning the return query", async ({
     page,
   }) => {
     test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
+    let currentSession = sessionFor("demo");
     let updateBody: unknown;
     let updates = 0;
+    let accountDocuments = 0;
 
+    await page.route("**/api/auth/csrf", (route) =>
+      route.fulfill({ json: { csrfToken: "e2e-csrf" } })
+    );
+    await page.route("**/api/auth/session", (route) => {
+      if (route.request().method() !== "POST") {
+        return route.fulfill({ json: currentSession });
+      }
+      updateBody = route.request().postDataJSON();
+      updates += 1;
+      currentSession = sessionFor("subscriber");
+      return route.fulfill({ json: currentSession });
+    });
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", (route) =>
+      route.fulfill({ json: subscriptionStatus(true) })
+    );
+    page.on("request", (request) => {
+      if (
+        request.resourceType() === "document" &&
+        new URL(request.url()).pathname === "/account"
+      ) {
+        accountDocuments += 1;
+      }
+    });
+
+    await page.goto("/account?source=ledger&checkout=success#allowance");
+    await expect(page.getByText("Subscription active")).toBeVisible();
+    await expect(page).toHaveURL("/account?source=ledger#allowance");
+    expect(accountDocuments).toBe(2);
+    expect(updates).toBe(1);
+    expect(updateBody).toMatchObject({
+      data: {
+        expectedUserId: E2E_USER_ID,
+        refreshSubscription: true,
+      },
+    });
+  });
+
+  test("a refresh reload that still sees a demo session stops without looping or cleaning the query", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
+    let updates = 0;
+    let accountDocuments = 0;
     await page.route("**/api/auth/csrf", (route) =>
       route.fulfill({ json: { csrfToken: "e2e-csrf" } })
     );
@@ -479,26 +607,103 @@ test.describe("Subscriber checkout", () => {
       if (route.request().method() !== "POST") {
         return route.fulfill({ json: sessionFor("demo") });
       }
-      updateBody = route.request().postDataJSON();
       updates += 1;
-      return route.fulfill({
-        json: sessionFor(updates === 1 ? "demo" : "subscriber"),
-      });
+      return route.fulfill({ json: sessionFor("subscriber") });
     });
     await mockAccountDependencies(page);
     await page.route("**/api/subscription", (route) =>
       route.fulfill({ json: subscriptionStatus(true) })
     );
-    await page.goto("/account?checkout=success");
-    await page.goto("/account?checkout=success");
-    await expect(page.getByText("Subscription active")).toHaveCount(0);
-    await expect(page.getByText("Subscription active")).toHaveCount(0);
-
-    await expect(page.getByText("Subscription active")).toBeVisible();
-    expect(updates).toBe(2);
-    expect(updateBody).toMatchObject({
-      data: { refreshSubscription: true },
+    page.on("request", (request) => {
+      if (
+        request.resourceType() === "document" &&
+        new URL(request.url()).pathname === "/account"
+      ) {
+        accountDocuments += 1;
+      }
     });
+
+    await page.goto("/account?checkout=success");
+
+    await expect(page.getByRole("status")).toContainText(
+      "Account access still needs refreshing."
+    );
+    await expect(page).toHaveURL("/account?checkout=success");
+    await page.waitForTimeout(1200);
+    expect(accountDocuments).toBe(2);
+    expect(updates).toBe(1);
+  });
+
+  test("a delayed user-A refresh cannot replace user B or reload after the identity changes", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
+    const secondUserId = "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa";
+    let currentSession = sessionFor("demo");
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let refreshes = 0;
+    let accountDocuments = 0;
+    await page.route("**/api/auth/csrf", (route) =>
+      route.fulfill({ json: { csrfToken: "e2e-csrf" } })
+    );
+    await page.route("**/api/auth/session", async (route) => {
+      if (route.request().method() !== "POST") {
+        return route.fulfill({ json: currentSession });
+      }
+      refreshes += 1;
+      await refreshGate;
+      await route
+        .fulfill({
+          headers: {
+            "set-cookie": "activation-owner=user-a; Path=/; SameSite=Lax",
+          },
+          json: sessionFor("subscriber"),
+        })
+        .catch(() => undefined);
+    });
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", (route) =>
+      route.fulfill({ json: subscriptionStatus(true) })
+    );
+    page.on("request", (request) => {
+      if (
+        request.resourceType() === "document" &&
+        new URL(request.url()).pathname === "/account"
+      ) {
+        accountDocuments += 1;
+      }
+    });
+
+    await page.goto("/account?checkout=success");
+    await expect.poll(() => refreshes).toBe(1);
+    await page.context().addCookies([
+      {
+        name: "activation-owner",
+        url: new URL(page.url()).origin,
+        value: "user-b",
+      },
+    ]);
+    currentSession = sessionFor("demo", {
+      email: "second@example.invalid",
+      id: secondUserId,
+    });
+    await notifySessionChange(page);
+    releaseRefresh();
+
+    await expect(page.getByText("second@example.invalid")).toBeVisible();
+    await expect(page.getByRole("status")).toContainText(
+      "The signed-in account changed."
+    );
+    await page.waitForTimeout(200);
+    expect(accountDocuments).toBe(1);
+    expect(
+      (await page.context().cookies()).find(
+        (cookie) => cookie.name === "activation-owner"
+      )?.value
+    ).toBe("user-b");
   });
 
   test("a cancelled return is neutral and restores the checkout action", async ({
@@ -911,6 +1116,7 @@ test.describe("Subscriber checkout", () => {
     await page.clock.install({
       time: new Date("2026-08-31T14:25:01.000Z"),
     });
+    await installAuthRefreshSignalProbe(page);
     let releaseRefresh!: () => void;
     const refreshGate = new Promise<void>((resolve) => {
       releaseRefresh = resolve;
@@ -943,6 +1149,12 @@ test.describe("Subscriber checkout", () => {
     await expect(
       page.getByRole("button", { name: "Check again" })
     ).toBeVisible();
+    await expect
+      .poll(() => authRefreshSignalProbe(page))
+      .toEqual({
+        aborts: 1,
+        posts: 1,
+      });
     await page.getByRole("button", { name: "Check again" }).click();
     await expect.poll(() => statusReads).toBe(2);
     await expect(page.getByRole("status")).toContainText("Confirming payment");
@@ -1048,6 +1260,63 @@ test.describe("Subscriber checkout", () => {
     await expect(copilot).toBeFocused();
     await expect(page.getByRole("tabpanel", { name: "Copilot" })).toBeVisible();
     await expect(page.getByText("Subscription active")).toHaveCount(0);
+  });
+
+  test("an account downgrade preserves focus moved outside Billing", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the launch-flag-off contract.");
+    let currentSession = sessionFor("subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", (route) =>
+      route.fulfill({ json: subscriptionStatus(true) })
+    );
+    await page.goto("/account");
+    await page.getByRole("tab", { name: "Billing" }).click();
+    await expect(page.getByText("Subscription active")).toBeVisible();
+    const accountButton = page.getByRole("button", { name: "Account" });
+    await accountButton.focus();
+
+    currentSession = sessionFor("demo");
+    await notifySessionChange(page);
+
+    await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "Copilot" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    await expect(accountButton).toBeFocused();
+  });
+
+  test("an account downgrade moves focus out of the removed Billing panel", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the launch-flag-off contract.");
+    let currentSession = sessionFor("subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", (route) =>
+      route.fulfill({ json: subscriptionStatus(true) })
+    );
+    await page.goto("/account");
+    await page.getByRole("tab", { name: "Billing" }).click();
+    const notice = page.getByRole("status");
+    await expect(page.getByText("Subscription active")).toBeVisible();
+    await notice.focus();
+    await expect(notice).toBeFocused();
+
+    currentSession = sessionFor("demo");
+    await notifySessionChange(page);
+
+    const copilot = page.getByRole("tab", { name: "Copilot" });
+    await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
+    await expect(copilot).toHaveAttribute("aria-selected", "true");
+    await expect(copilot).toBeFocused();
   });
 
   test("switching users aborts stale subscription reads and clears old authority notices", async ({
@@ -1198,6 +1467,64 @@ test.describe("Subscriber checkout", () => {
     await expect(
       page.getByRole("tabpanel", { name: "Harness credentials" })
     ).toBeVisible();
+  });
+
+  test("console settings preserve focus moved outside Billing on downgrade", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the launch-flag-off contract.");
+    let currentSession = sessionFor("subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await mockSubscriberConsoleDependencies(page);
+    await page.route("**/api/subscription", (route) =>
+      route.fulfill({ json: subscriptionStatus(true) })
+    );
+    await openConsoleSettings(page);
+    await page.getByRole("tab", { name: "Billing" }).click();
+    await expect(page.getByText("Subscription active")).toBeVisible();
+    const externalButton = page.getByRole("button", {
+      name: "Search or run a command",
+    });
+    await externalButton.focus();
+
+    currentSession = sessionFor("demo");
+    await notifySessionChange(page);
+
+    await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
+    await expect(
+      page.getByRole("tab", { name: "Harness credentials" })
+    ).toHaveAttribute("aria-selected", "true");
+    await expect(externalButton).toBeFocused();
+  });
+
+  test("console settings move focus out of the removed Billing panel", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the launch-flag-off contract.");
+    let currentSession = sessionFor("subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await mockSubscriberConsoleDependencies(page);
+    await page.route("**/api/subscription", (route) =>
+      route.fulfill({ json: subscriptionStatus(true) })
+    );
+    await openConsoleSettings(page);
+    await page.getByRole("tab", { name: "Billing" }).click();
+    const notice = page.locator(".oc-subscription-card").getByRole("status");
+    await expect(page.getByText("Subscription active")).toBeVisible();
+    await notice.focus();
+    await expect(notice).toBeFocused();
+
+    currentSession = sessionFor("demo");
+    await notifySessionChange(page);
+
+    const harness = page.getByRole("tab", { name: "Harness credentials" });
+    await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
+    await expect(harness).toHaveAttribute("aria-selected", "true");
+    await expect(harness).toBeFocused();
   });
 
   for (const scenario of [

@@ -19,6 +19,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
+import { browserApplicationPath } from "@/lib/application-path";
 import { guestRegex } from "@/lib/constants";
 import { LoaderIcon } from "./icons";
 import { toast } from "./toast";
@@ -57,7 +58,7 @@ export function SidebarUserNav({ user }: { user: User }) {
       // Straight to /login. "/" redirects to the console, which the beta
       // gate redirects to /login anyway -- three hops for the same page.
       signOut({
-        redirectTo: "/login",
+        redirectTo: browserApplicationPath("/login"),
       });
     }
   }, [isGuest, router, status]);

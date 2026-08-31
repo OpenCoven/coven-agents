@@ -6,6 +6,87 @@ const IS_DEMO = process.env.IS_DEMO === "1";
 test.describe("Demo base path", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
+  test("account and console sign-out callbacks use one demo prefix", async ({
+    page,
+  }) => {
+    test.skip(!IS_DEMO, "This contract runs with IS_DEMO=1.");
+    const callbacks: Array<string | null> = [];
+    await page.route("**/demo/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: [] } })
+    );
+    await page.route("**/demo/api/usage", (route) =>
+      route.fulfill({
+        json: {
+          cap: 750,
+          resetsAt: "2099-02-01T00:00:00.000Z",
+          used: 0,
+        },
+      })
+    );
+    await page.route("**/demo/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route(/\/demo\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/demo/api/agents"
+          ? { json: { agents: [] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+    await page.route("**/demo/api/subscription", (route) =>
+      route.fulfill({
+        json: {
+          active: true,
+          checkoutEnabled: true,
+          subscribedUntil: "2099-01-15T12:00:00.000Z",
+        },
+      })
+    );
+    await page.route("**/demo/api/auth/**", (route) => {
+      const request = route.request();
+      const { pathname } = new URL(request.url());
+      if (pathname === "/demo/api/auth/session") {
+        return route.fulfill({
+          json: {
+            expires: "2099-01-01T00:00:00.000Z",
+            user: {
+              authVersion: 1,
+              email: "e2e-user@example.invalid",
+              id: E2E_USER_ID,
+              image: null,
+              name: "E2E subscriber",
+              type: "subscriber",
+            },
+          },
+        });
+      }
+      if (pathname === "/demo/api/auth/csrf") {
+        return route.fulfill({ json: { csrfToken: "demo-signout-csrf" } });
+      }
+      if (pathname === "/demo/api/auth/signout") {
+        callbacks.push(
+          new URLSearchParams(request.postData() ?? "").get("callbackUrl")
+        );
+        return route.fulfill({ json: { url: "/demo/login" } });
+      }
+      throw new Error(`Unexpected demo Auth.js path: ${pathname}`);
+    });
+
+    await page.goto("/demo/account");
+    await page.getByRole("button", { name: "Account" }).click();
+    await page.getByRole("menuitem", { name: "Sign out" }).click();
+    await expect.poll(() => callbacks).toEqual(["/demo/login"]);
+
+    await page.goto("/demo/agents");
+    await page.getByRole("button", { name: "Account and settings" }).click();
+    await page.getByRole("tab", { exact: true, name: "Account" }).click();
+    await page.getByRole("button", { name: "Sign out" }).click();
+
+    await expect.poll(() => callbacks).toEqual(["/demo/login", "/demo/login"]);
+    expect(callbacks).not.toContain("/demo/demo/login");
+  });
+
   test("billing surfaces call APIs beneath /demo", async ({ page }) => {
     test.skip(!IS_DEMO, "This contract runs with IS_DEMO=1.");
     const requestedPaths: string[] = [];

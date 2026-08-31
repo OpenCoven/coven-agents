@@ -18,6 +18,7 @@ import {
   well,
 } from "@/components/console/styles";
 import { useResponsiveTabOrientation } from "@/hooks/use-responsive-tab-orientation";
+import { browserApplicationPath } from "@/lib/application-path";
 import { glyphFor } from "@/lib/console/format";
 import {
   isSessionOperationCurrent,
@@ -229,7 +230,9 @@ export function Settings({
     : TABS;
   const selectedTab = tabs.some((entry) => entry.id === tab) ? tab : tabs[0].id;
   const tabRefs = useRef(new Map<Tab, HTMLButtonElement>());
-  const focusedTabRef = useRef<Tab | null>(null);
+  const billingTabRef = useRef<HTMLButtonElement | null>(null);
+  const billingPanelRef = useRef<HTMLDivElement | null>(null);
+  const removedBillingOwnedFocusRef = useRef(false);
 
   const [configured, setConfigured] = useState<string[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -247,6 +250,47 @@ export function Settings({
     (context: SessionOperationContext | null) =>
       isSessionOperationCurrent(context, operationContextRef.current),
     []
+  );
+
+  const captureRemovedBillingFocus = useCallback(
+    (element: HTMLElement | null) => {
+      const { activeElement } = document;
+      if (
+        element &&
+        (activeElement === element ||
+          (activeElement && element.contains(activeElement)))
+      ) {
+        removedBillingOwnedFocusRef.current = true;
+      }
+    },
+    []
+  );
+
+  const registerBillingTab = useCallback(
+    (element: HTMLButtonElement | null) => {
+      if (element) {
+        removedBillingOwnedFocusRef.current = false;
+        billingTabRef.current = element;
+        tabRefs.current.set("billing", element);
+        return;
+      }
+      captureRemovedBillingFocus(billingTabRef.current);
+      billingTabRef.current = null;
+      tabRefs.current.delete("billing");
+    },
+    [captureRemovedBillingFocus]
+  );
+
+  const registerBillingPanel = useCallback(
+    (element: HTMLDivElement | null) => {
+      if (element) {
+        billingPanelRef.current = element;
+        return;
+      }
+      captureRemovedBillingFocus(billingPanelRef.current);
+      billingPanelRef.current = null;
+    },
+    [captureRemovedBillingFocus]
   );
 
   const publishCredentials = useCallback(
@@ -316,7 +360,9 @@ export function Settings({
     if (tab === selectedTab) {
       return;
     }
-    const shouldFocus = focusedTabRef.current === tab;
+    const shouldFocus =
+      tab === "billing" && removedBillingOwnedFocusRef.current;
+    removedBillingOwnedFocusRef.current = false;
     setTab(selectedTab);
     if (!shouldFocus) {
       return;
@@ -626,17 +672,18 @@ export function Settings({
                 id={settingsTabId(entry.id)}
                 key={entry.id}
                 onClick={() => setTab(entry.id)}
-                onFocus={() => {
-                  focusedTabRef.current = entry.id;
-                }}
                 onKeyDown={(event) => handleTabKeyDown(event, entry.id)}
-                ref={(element) => {
-                  if (element) {
-                    tabRefs.current.set(entry.id, element);
-                  } else {
-                    tabRefs.current.delete(entry.id);
-                  }
-                }}
+                ref={
+                  entry.id === "billing"
+                    ? registerBillingTab
+                    : (element) => {
+                        if (element) {
+                          tabRefs.current.set(entry.id, element);
+                        } else {
+                          tabRefs.current.delete(entry.id);
+                        }
+                      }
+                }
                 role="tab"
                 style={{
                   background:
@@ -902,10 +949,12 @@ export function Settings({
             ) : null}
 
             {selectedTab === "billing" && showBilling ? (
-              <SubscriptionCard
-                checkoutEnabled={checkoutEnabled}
-                isSubscriber={isSubscriber}
-              />
+              <div ref={registerBillingPanel}>
+                <SubscriptionCard
+                  checkoutEnabled={checkoutEnabled}
+                  isSubscriber={isSubscriber}
+                />
+              </div>
             ) : null}
 
             {selectedTab === "data" ? (
@@ -1036,7 +1085,11 @@ export function Settings({
                   </div>
                   {account ? (
                     <Btn
-                      onClick={() => signOut({ redirectTo: "/login" })}
+                      onClick={() =>
+                        signOut({
+                          redirectTo: browserApplicationPath("/login"),
+                        })
+                      }
                       variant="ghost"
                     >
                       Sign out

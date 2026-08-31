@@ -93,7 +93,8 @@ export function AccountSettings({
     ? tab
     : visibleTabs[0].id;
   const tabRefs = useRef(new Map<TabId, HTMLButtonElement>());
-  const focusedTabRef = useRef<TabId | null>(null);
+  const billingPanelRef = useRef<HTMLElement | null>(null);
+  const removedBillingOwnedFocusRef = useRef(false);
 
   useEffect(() => {
     setEffectiveCheckoutResult(checkoutResult);
@@ -106,7 +107,9 @@ export function AccountSettings({
     if (tab === selectedTab) {
       return;
     }
-    const shouldFocus = focusedTabRef.current === tab;
+    const shouldFocus =
+      tab === "billing" && removedBillingOwnedFocusRef.current;
+    removedBillingOwnedFocusRef.current = false;
     setTab(selectedTab);
     if (!shouldFocus) {
       return;
@@ -116,24 +119,52 @@ export function AccountSettings({
     });
   }, [selectedTab, tab]);
 
-  const registerTab = useCallback(
-    (id: TabId, element: HTMLButtonElement | null) => {
-      if (element) {
-        tabRefs.current.set(id, element);
-      } else {
-        tabRefs.current.delete(id);
+  const captureRemovedBillingFocus = useCallback(
+    (element: HTMLElement | null) => {
+      const { activeElement } = document;
+      if (
+        element &&
+        (activeElement === element ||
+          (activeElement && element.contains(activeElement)))
+      ) {
+        removedBillingOwnedFocusRef.current = true;
       }
     },
     []
   );
 
+  const registerTab = useCallback(
+    (id: TabId, element: HTMLButtonElement | null) => {
+      if (element) {
+        if (id === "billing") {
+          removedBillingOwnedFocusRef.current = false;
+        }
+        tabRefs.current.set(id, element);
+      } else {
+        if (id === "billing") {
+          captureRemovedBillingFocus(tabRefs.current.get(id) ?? null);
+        }
+        tabRefs.current.delete(id);
+      }
+    },
+    [captureRemovedBillingFocus]
+  );
+
+  const registerBillingPanel = useCallback(
+    (element: HTMLElement | null) => {
+      if (element) {
+        billingPanelRef.current = element;
+        return;
+      }
+      captureRemovedBillingFocus(billingPanelRef.current);
+      billingPanelRef.current = null;
+    },
+    [captureRemovedBillingFocus]
+  );
+
   const focusTab = useCallback((id: TabId) => {
     setTab(id);
     tabRefs.current.get(id)?.focus();
-  }, []);
-
-  const handleTabFocus = useCallback((id: TabId) => {
-    focusedTabRef.current = id;
   }, []);
 
   const handleTabKeyDown = useCallback(
@@ -286,7 +317,6 @@ export function AccountSettings({
                 <TabButton
                   active={selectedTab === entry.id}
                   key={entry.id}
-                  onFocus={handleTabFocus}
                   onKeyDown={handleTabKeyDown}
                   onSelect={setTab}
                   register={registerTab}
@@ -305,6 +335,7 @@ export function AccountSettings({
                 hidden={!active}
                 id={accountPanelId(entry.id)}
                 key={entry.id}
+                ref={entry.id === "billing" ? registerBillingPanel : undefined}
                 role="tabpanel"
               >
                 {active && entry.id === "copilot" ? (
@@ -334,14 +365,12 @@ export function AccountSettings({
 
 function TabButton({
   active,
-  onFocus,
   onKeyDown,
   onSelect,
   register,
   tab,
 }: {
   active: boolean;
-  onFocus: (id: TabId) => void;
   onKeyDown: (id: TabId, key: string) => boolean;
   onSelect: (id: TabId) => void;
   register: (id: TabId, element: HTMLButtonElement | null) => void;
@@ -352,9 +381,6 @@ function TabButton({
   const select = useCallback(() => {
     onSelect(tab.id);
   }, [onSelect, tab.id]);
-  const focus = useCallback(() => {
-    onFocus(tab.id);
-  }, [onFocus, tab.id]);
   const keyDown = useCallback(
     (event: React.KeyboardEvent<HTMLButtonElement>) => {
       if (onKeyDown(tab.id, event.key)) {
@@ -382,7 +408,6 @@ function TabButton({
       )}
       id={accountTabId(tab.id)}
       onClick={select}
-      onFocus={focus}
       onKeyDown={keyDown}
       ref={ref}
       role="tab"
