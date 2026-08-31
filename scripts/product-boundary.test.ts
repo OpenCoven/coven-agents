@@ -199,6 +199,7 @@ const environmentKeys = [
   "STRIPE_PRICE_ID",
   "STRIPE_SECRET_KEY",
   "STRIPE_WEBHOOK_SECRET",
+  "SUBSCRIPTION_CHECKOUT_ENABLED",
 ] as const;
 const productionDependencies = [
   "@ai-sdk/otel",
@@ -908,6 +909,27 @@ test("server-only credential custody remains part of the runner boundary", () =>
   );
   assert.match(runnerCredential, /^import "server-only";/m);
   assert.match(runnerAuth, /^import "server-only";/m);
+});
+
+test("subscription checkout secrets remain behind a server-only boundary", () => {
+  const billingConfig = readFileSync(
+    new URL("lib/billing/config.ts", repositoryRoot),
+    "utf8"
+  );
+  const billingConfigCore = readFileSync(
+    new URL("lib/billing/config-core.ts", repositoryRoot),
+    "utf8"
+  );
+  const runtimeValidation = readFileSync(
+    new URL("scripts/runtime-config-validation.ts", repositoryRoot),
+    "utf8"
+  );
+
+  assert.match(billingConfig, /^import "server-only";/m);
+  assert.doesNotMatch(billingConfigCore, /server-only/);
+  assert.doesNotMatch(billingConfigCore, /\b(?:apiKey|webhookSecret)\b/);
+  assert.match(runtimeValidation, /billing\/config-core/);
+  assert.doesNotMatch(runtimeValidation, /billing\/config["']/);
 });
 
 test("agent contracts expose the current tenant identity primitives", () => {
