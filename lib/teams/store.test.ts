@@ -1762,14 +1762,31 @@ test("a pending approval cannot enter the execution queue", async () => {
   assert.equal(statements.length, 1);
 });
 
-test("cancelling a team run fences version and cancels only live steps", async () => {
+test("cancelling a team run fences version and targets only the locked live child", async () => {
+  const childRunId = "aaaaaaaa-0000-4000-8000-000000000001";
+  const current = teamRunRow({
+    liveChildRunId: childRunId,
+    version: 3,
+  });
+  const liveChild = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    priorHandoffs: [],
+    runnerCommandEvidence: [],
+    runnerError: null,
+    runnerFileEvidence: [],
+    runnerOutput: "",
+    runnerRunId: childRunId,
+    runnerStatus: "running",
+    status: "running",
+  };
   const cancelled = teamRunRow({
     completedAt: NOW,
     status: "cancelled",
     version: 4,
   });
   const { statements, store } = scripted(
-    [teamRunRow({ version: 3 })],
+    [current],
+    [liveChild],
     [cancelled],
     [],
     [cancelled]
@@ -1781,22 +1798,53 @@ test("cancelling a team run fences version and cancels only live steps", async (
   });
 
   assert.equal(result.kind, "updated");
-  assert.equal(result.kind === "updated" && result.childRunId, null);
+  assert.equal(result.kind === "updated" && result.childRunId, childRunId);
   assert.match(
     queryText(captured(statements, 0)),
     /COALESCE\(\s*"step"\."runnerRunId",\s*"step"\."plannedRunnerRunId"\s*\)/u
   );
   assert.match(
-    queryText(captured(statements, 2)),
+    queryText(captured(statements, 3)),
     /"status" IN \('pending', 'queued', 'running', 'waiting_approval'\)/u
   );
   assert.match(
-    queryText(captured(statements, 2)),
+    queryText(captured(statements, 3)),
     /COALESCE\(\s*"runnerRunId",\s*"plannedRunnerRunId"\s*\)/u
   );
   for (const statement of statements) {
     assert.equal(statement.args.tenant, principal.tenant);
   }
+});
+
+test("cancellation without an exact current child skips steps without targeting a runner", async () => {
+  const cancelled = teamRunRow({
+    completedAt: NOW,
+    status: "cancelled",
+    version: 4,
+  });
+  const cancellation = scripted(
+    [teamRunRow({ version: 3 })],
+    [cancelled],
+    [],
+    [cancelled]
+  );
+
+  const result = await cancellation.store.cancelTeamRun(principal, {
+    expectedVersion: 3,
+    id: TEAM_RUN_A,
+  });
+
+  assert.equal(result.kind, "updated");
+  assert.equal(result.kind === "updated" && result.childRunId, null);
+  assert.deepEqual(
+    cancellation.statements.map(({ name }) => name),
+    [
+      "lock-team-run-for-cancel",
+      "cancel-team-run",
+      "cancel-team-run-steps",
+      "get-cancelled-team-run",
+    ]
+  );
 });
 
 test("cancellation projects an already-terminal attached child before skipping later steps", async () => {
@@ -1858,7 +1906,7 @@ test("cancellation projects an already-terminal attached child before skipping l
     cancellation.statements.map(({ name }) => name),
     [
       "lock-team-run-for-cancel",
-      "lock-terminal-team-child-before-cancel",
+      "lock-current-team-child-before-cancel",
       "project-terminal-team-child-before-cancel",
       "cancel-team-run",
       "cancel-team-run-steps",
@@ -1874,6 +1922,100 @@ test("cancellation projects an already-terminal attached child before skipping l
     "Completed before cancellation."
   );
   assert.equal(result.kind === "updated" && result.childRunId, null);
+});
+
+test("cancellation locks and re-reads a live child that terminalizes after parent classification", async () => {
+  const childRunId = "aaaaaaaa-0000-4000-8000-000000000001";
+  const current = teamRunRow({
+    liveChildRunId: childRunId,
+    terminalChildRunId: null,
+    version: 3,
+  });
+  const terminalChild = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    priorHandoffs: [],
+    runnerCommandEvidence: [],
+    runnerError: null,
+    runnerFileEvidence: [],
+    runnerOutput: "Completed during cancellation.",
+    runnerRunId: childRunId,
+    runnerStatus: "completed",
+    status: "running",
+  };
+  const cancelled = teamRunRow({
+    completedAt: NOW,
+    status: "cancelled",
+    version: 4,
+  });
+  const statements: TeamStoreStatement[] = [];
+  let childStatus: "running" | "completed" = "running";
+  const store = createTeamStore({
+    transaction: (callback) =>
+      callback({
+        execute: <Row extends Record<string, unknown>>(
+          currentStatement: TeamStoreStatement
+        ) => {
+          statements.push(currentStatement);
+          let rows: Record<string, unknown>[] = [];
+          switch (currentStatement.name) {
+            case "lock-team-run-for-cancel":
+              rows = [current];
+              childStatus = "completed";
+              break;
+            case "lock-current-team-child-before-cancel":
+              assert.equal(childStatus, "completed");
+              rows = [terminalChild];
+              break;
+            case "project-terminal-team-child-before-cancel":
+              rows = [{ id: TEAM_STEP_A }];
+              break;
+            case "cancel-team-run":
+            case "get-cancelled-team-run":
+              rows = [cancelled];
+              break;
+            case "cancel-team-run-steps":
+              break;
+            default:
+              assert.fail(`Unexpected statement: ${currentStatement.name}`);
+          }
+          return Promise.resolve(rows as Row[]);
+        },
+      }),
+  });
+
+  const result = await store.cancelTeamRun(principal, {
+    expectedVersion: 3,
+    id: TEAM_RUN_A,
+  });
+
+  assert.equal(result.kind, "updated");
+  assert.equal(result.kind === "updated" && result.childRunId, null);
+  const childLockSql = queryText(captured(statements, 1));
+  assert.match(childLockSql, /FOR UPDATE OF "step", "runnerRun"/u);
+  assert.match(
+    childLockSql,
+    /"step"\."plannedOperationId" = "runnerRun"\."operationId"/u
+  );
+  assert.match(childLockSql, /"step"\."position" =/u);
+  assert.deepEqual(
+    statements.map(({ name }) => name),
+    [
+      "lock-team-run-for-cancel",
+      "lock-current-team-child-before-cancel",
+      "project-terminal-team-child-before-cancel",
+      "cancel-team-run",
+      "cancel-team-run-steps",
+      "get-cancelled-team-run",
+    ]
+  );
+  assert.equal(
+    (
+      captured(statements, 2).args.handoff as {
+        output: string;
+      }
+    ).output,
+    "Completed during cancellation."
+  );
 });
 
 test("cancellation projects an exact terminal reserved queued child before skipping later steps", async () => {

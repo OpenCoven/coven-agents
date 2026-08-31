@@ -1368,8 +1368,8 @@ export function createTeamStore(database: TeamStoreDatabase) {
                     )
                   WHERE "step"."teamRunId" = "teamRun"."id"
                     AND "step"."tenant" = "teamRun"."tenant"
+                    AND "step"."position" = "teamRun"."currentPosition"
                     AND "runnerRun"."status" IN ('queued', 'running')
-                  ORDER BY "step"."position"
                   LIMIT 1
                 ) AS "liveChildRunId",
                 (
@@ -1426,13 +1426,15 @@ export function createTeamStore(database: TeamStoreDatabase) {
           current,
           "terminalChildRunId"
         );
-        if (terminalChildRunId) {
-          const [terminalChild] = await transaction.execute(
+        const classifiedChildRunId = terminalChildRunId ?? liveChildRunId;
+        let cancellationChildRunId: string | null = null;
+        if (classifiedChildRunId) {
+          const [currentChild] = await transaction.execute(
             statement(
-              "lock-terminal-team-child-before-cancel",
+              "lock-current-team-child-before-cancel",
               {
                 id: input.id,
-                runnerRunId: terminalChildRunId,
+                runnerRunId: classifiedChildRunId,
                 tenant: principal.tenant,
               },
               sql`SELECT
@@ -1469,99 +1471,114 @@ export function createTeamStore(database: TeamStoreDatabase) {
                 WHERE "step"."teamRunId" = ${input.id}
                   AND "step"."tenant" = ${principal.tenant}
                   AND "step"."position" = ${column(current, "currentPosition")}
-                  AND "runnerRun"."id" = ${terminalChildRunId}
-                  AND "runnerRun"."status" IN ('completed', 'failed', 'cancelled')
+                  AND "step"."status" IN ('queued', 'running')
+                  AND "runnerRun"."id" = ${classifiedChildRunId}
                 FOR UPDATE OF "step", "runnerRun"`
             )
           );
-          if (!terminalChild) {
-            throw new Error("Terminal team child disappeared during cancel.");
-          }
-          const runnerStatus = column<"completed" | "failed" | "cancelled">(
-            terminalChild,
-            "runnerStatus"
-          );
-          const built =
-            runnerStatus === "completed"
-              ? buildTeamHandoff({
-                  commandEvidence: arrayColumn(
-                    terminalChild,
-                    "runnerCommandEvidence"
-                  ),
-                  fileEvidence: arrayColumn(
-                    terminalChild,
-                    "runnerFileEvidence"
-                  ),
-                  output: column(terminalChild, "runnerOutput"),
-                  priorHandoffs: arrayColumn(terminalChild, "priorHandoffs"),
-                })
-              : null;
-          const completed = built?.kind === "built";
-          const handoff = completed ? built.handoff : null;
-          const error: RunError | null = completed
-            ? null
-            : runnerStatus === "completed"
-              ? {
-                  code: "handoff_invalid",
-                  message: "Runner output could not be projected safely.",
-                  retryable: false,
-                }
-              : (column<RunError | null>(terminalChild, "runnerError") ?? {
-                  code:
-                    runnerStatus === "cancelled"
-                      ? "child_cancelled"
-                      : "child_failed",
-                  message:
-                    runnerStatus === "cancelled"
-                      ? "The team step runner was cancelled."
-                      : "The team step runner failed.",
-                  retryable: false,
-                });
-          const [projected] = await transaction.execute(
-            statement(
-              "project-terminal-team-child-before-cancel",
-              {
-                error,
-                handoff,
-                plannedOperationId: column(terminalChild, "plannedOperationId"),
-                runnerRunId: terminalChildRunId,
-                teamStepId: column(terminalChild, "id"),
-                tenant: principal.tenant,
-              },
-              sql`UPDATE "RunnerTeamStep"
-                SET "status" = ${completed ? "completed" : "failed"},
-                    "runnerRunId" = COALESCE(
-                      "runnerRunId",
-                      ${terminalChildRunId}
-                    ),
-                    "handoff" = CAST(${jsonParameter(handoff)} AS jsonb),
-                    "error" = CAST(${jsonParameter(error)} AS jsonb),
-                    "completedAt" = now(),
-                    "updatedAt" = now(),
-                    "version" = "version" + 1
-                WHERE "id" = ${column(terminalChild, "id")}
-                  AND "tenant" = ${principal.tenant}
-                  AND COALESCE(
-                    "runnerRunId",
-                    "plannedRunnerRunId"
-                  ) = ${terminalChildRunId}
-                  AND (
-                    "runnerRunId" = ${terminalChildRunId}
-                    OR (
-                      "runnerRunId" IS NULL
-                      AND "plannedRunnerRunId" = ${terminalChildRunId}
-                      AND "plannedOperationId" = ${column(
-                        terminalChild,
-                        "plannedOperationId"
-                      )}
-                    )
-                  )
-                  AND "status" IN ('queued', 'running')
-                RETURNING "id"`
+          if (
+            currentChild &&
+            ["queued", "running"].includes(
+              column<string>(currentChild, "runnerStatus")
             )
-          );
-          if (!projected) {
-            throw new Error("Terminal team child projection was fenced.");
+          ) {
+            cancellationChildRunId = classifiedChildRunId;
+          }
+          if (
+            currentChild &&
+            ["completed", "failed", "cancelled"].includes(
+              column<string>(currentChild, "runnerStatus")
+            )
+          ) {
+            const runnerStatus = column<"completed" | "failed" | "cancelled">(
+              currentChild,
+              "runnerStatus"
+            );
+            const built =
+              runnerStatus === "completed"
+                ? buildTeamHandoff({
+                    commandEvidence: arrayColumn(
+                      currentChild,
+                      "runnerCommandEvidence"
+                    ),
+                    fileEvidence: arrayColumn(
+                      currentChild,
+                      "runnerFileEvidence"
+                    ),
+                    output: column(currentChild, "runnerOutput"),
+                    priorHandoffs: arrayColumn(currentChild, "priorHandoffs"),
+                  })
+                : null;
+            const completed = built?.kind === "built";
+            const handoff = completed ? built.handoff : null;
+            const error: RunError | null = completed
+              ? null
+              : runnerStatus === "completed"
+                ? {
+                    code: "handoff_invalid",
+                    message: "Runner output could not be projected safely.",
+                    retryable: false,
+                  }
+                : (column<RunError | null>(currentChild, "runnerError") ?? {
+                    code:
+                      runnerStatus === "cancelled"
+                        ? "child_cancelled"
+                        : "child_failed",
+                    message:
+                      runnerStatus === "cancelled"
+                        ? "The team step runner was cancelled."
+                        : "The team step runner failed.",
+                    retryable: false,
+                  });
+            const [projected] = await transaction.execute(
+              statement(
+                "project-terminal-team-child-before-cancel",
+                {
+                  error,
+                  handoff,
+                  plannedOperationId: column(
+                    currentChild,
+                    "plannedOperationId"
+                  ),
+                  runnerRunId: classifiedChildRunId,
+                  teamStepId: column(currentChild, "id"),
+                  tenant: principal.tenant,
+                },
+                sql`UPDATE "RunnerTeamStep"
+                  SET "status" = ${completed ? "completed" : "failed"},
+                      "runnerRunId" = COALESCE(
+                        "runnerRunId",
+                        ${classifiedChildRunId}
+                      ),
+                      "handoff" = CAST(${jsonParameter(handoff)} AS jsonb),
+                      "error" = CAST(${jsonParameter(error)} AS jsonb),
+                      "completedAt" = now(),
+                      "updatedAt" = now(),
+                      "version" = "version" + 1
+                  WHERE "id" = ${column(currentChild, "id")}
+                    AND "tenant" = ${principal.tenant}
+                    AND COALESCE(
+                      "runnerRunId",
+                      "plannedRunnerRunId"
+                    ) = ${classifiedChildRunId}
+                    AND (
+                      "runnerRunId" = ${classifiedChildRunId}
+                      OR (
+                        "runnerRunId" IS NULL
+                        AND "plannedRunnerRunId" = ${classifiedChildRunId}
+                        AND "plannedOperationId" = ${column(
+                          currentChild,
+                          "plannedOperationId"
+                        )}
+                      )
+                    )
+                    AND "status" IN ('queued', 'running')
+                  RETURNING "id"`
+              )
+            );
+            if (!projected) {
+              throw new Error("Terminal team child projection was fenced.");
+            }
           }
         }
         const [updated] = await transaction.execute(
@@ -1592,7 +1609,7 @@ export function createTeamStore(database: TeamStoreDatabase) {
                     WHEN COALESCE(
                       "runnerRunId",
                       "plannedRunnerRunId"
-                    ) = ${liveChildRunId} THEN 'cancelled'
+                    ) = ${cancellationChildRunId} THEN 'cancelled'
                     ELSE 'skipped'
                   END,
                   "completedAt" = now(),
@@ -1618,7 +1635,7 @@ export function createTeamStore(database: TeamStoreDatabase) {
           throw new Error("Cancelled team run disappeared.");
         }
         return {
-          childRunId: liveChildRunId,
+          childRunId: cancellationChildRunId,
           kind: "updated" as const,
           value: asRun(hydrated),
         };
