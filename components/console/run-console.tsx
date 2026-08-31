@@ -141,16 +141,19 @@ export function RunConsole({
     subscriptionAuthority,
     accountId
   );
-  const authorityPending = useSubscriptionAuthorityRefresh({
-    isSubscriber: serverAuthority.isSubscriber,
-    status: session.status,
-    subscribedUntil: subscriptionAuthorityExpiryBoundary(
-      subscriptionAuthority,
-      accountId
-    ),
-    type: session.data?.user?.type,
-    userId: accountId,
-  });
+  const { authorityPending, authorityRevision, invalidateAndRefresh } =
+    useSubscriptionAuthorityRefresh({
+      authority: subscriptionAuthority,
+      authVersion: session.data?.user?.authVersion,
+      isSubscriber: serverAuthority.isSubscriber,
+      status: session.status,
+      subscribedUntil: subscriptionAuthorityExpiryBoundary(
+        subscriptionAuthority,
+        accountId
+      ),
+      type: session.data?.user?.type,
+      userId: accountId,
+    });
   const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
     subscriptionAuthority,
     accountId,
@@ -161,6 +164,7 @@ export function RunConsole({
     accountId ?? "",
     isSubscriber ? "subscriber" : "demo",
     session.data?.user?.authVersion ?? "",
+    authorityRevision ?? "",
   ].join(":");
   const avatarSrc = accountId
     ? avatarFor({ id: accountId, image: session.data?.user?.image })
@@ -1417,7 +1421,9 @@ export function RunConsole({
         ) : view === "settings" ? (
           <Settings
             account={account}
+            authorityRevision={authorityRevision}
             checkoutEnabled={checkoutEnabled}
+            invalidateSubscriptionAuthority={invalidateAndRefresh}
             isSubscriber={isSubscriber}
             onCredentialsChange={onCredentialsChange}
             operationContext={settingsOperationContext}

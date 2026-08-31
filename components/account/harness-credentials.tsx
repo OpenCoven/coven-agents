@@ -2,7 +2,7 @@
 
 import { HARNESS_SPECS } from "@opencoven/harness";
 import { Check, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ConnectCopilot } from "@/components/account/connect-copilot";
 import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
@@ -47,26 +47,66 @@ const HARNESSES = HARNESS_SPECS.filter((spec) => spec.supported).map(
   })
 );
 
-export function HarnessCredentials({ userId }: { userId: string }) {
+export function HarnessCredentials({
+  authorityRevision,
+  isSubscriber,
+  onAuthorityInvalidated,
+  userId,
+}: {
+  authorityRevision: string | null;
+  isSubscriber: boolean;
+  onAuthorityInvalidated: () => void;
+  userId: string;
+}) {
   const [configured, setConfigured] = useState<string[]>([]);
   const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
-  const [locked, setLocked] = useState<"session" | "subscription" | null>(null);
+  const [lockedAuthority, setLockedAuthority] = useState<{
+    context: string;
+    kind: "session" | "subscription";
+  } | null>(null);
+  const authorityContext = `${userId}:${authorityRevision ?? ""}:${isSubscriber ? "subscriber" : "demo"}`;
+  const authorityContextRef = useRef(authorityContext);
+  authorityContextRef.current = authorityContext;
+  const locked = isSubscriber
+    ? lockedAuthority?.context === authorityContext
+      ? lockedAuthority.kind
+      : null
+    : "subscription";
 
-  const closeForAuthorityLoss = useCallback((status: number) => {
-    if (status !== 401 && status !== 403) {
-      return false;
-    }
-    setConfigured([]);
-    setValues({});
-    setLocked(status === 401 ? "session" : "subscription");
-    return true;
-  }, []);
+  const closeForAuthorityLoss = useCallback(
+    (status: number, requestAuthorityContext: string) => {
+      if (
+        authorityContextRef.current !== requestAuthorityContext ||
+        (status !== 401 && status !== 403)
+      ) {
+        return false;
+      }
+      setConfigured([]);
+      setValues({});
+      setLockedAuthority({
+        context: requestAuthorityContext,
+        kind: status === 401 ? "session" : "subscription",
+      });
+      if (status === 403) {
+        onAuthorityInvalidated();
+      }
+      return true;
+    },
+    [onAuthorityInvalidated]
+  );
 
   const refresh = useCallback(async () => {
+    if (!isSubscriber) {
+      return;
+    }
+    const requestAuthorityContext = authorityContext;
     const response = await fetch(browserApplicationPath("/api/credentials"));
+    if (authorityContextRef.current !== requestAuthorityContext) {
+      return;
+    }
 
-    if (closeForAuthorityLoss(response.status)) {
+    if (closeForAuthorityLoss(response.status, requestAuthorityContext)) {
       // A guest account cannot store one, and saying so beats a form that
       // fails on submit.
       return;
@@ -78,7 +118,7 @@ export function HarnessCredentials({ userId }: { userId: string }) {
 
     const body = (await response.json()) as { harnessIds?: string[] };
     setConfigured(body.harnessIds ?? []);
-  }, [closeForAuthorityLoss]);
+  }, [authorityContext, closeForAuthorityLoss, isSubscriber]);
 
   const reload = useCallback(() => {
     refresh().catch(() => undefined);
@@ -101,6 +141,7 @@ export function HarnessCredentials({ userId }: { userId: string }) {
       }
 
       setBusy(harnessId);
+      const requestAuthorityContext = authorityContextRef.current;
 
       try {
         const response = await fetch(
@@ -111,8 +152,11 @@ export function HarnessCredentials({ userId }: { userId: string }) {
             method: "POST",
           }
         );
+        if (authorityContextRef.current !== requestAuthorityContext) {
+          return false;
+        }
 
-        if (closeForAuthorityLoss(response.status)) {
+        if (closeForAuthorityLoss(response.status, requestAuthorityContext)) {
           return false;
         }
 
@@ -155,6 +199,7 @@ export function HarnessCredentials({ userId }: { userId: string }) {
   const remove = useCallback(
     async (harnessId: string) => {
       setBusy(harnessId);
+      const requestAuthorityContext = authorityContextRef.current;
 
       try {
         const response = await fetch(
@@ -165,8 +210,11 @@ export function HarnessCredentials({ userId }: { userId: string }) {
             method: "DELETE",
           }
         );
+        if (authorityContextRef.current !== requestAuthorityContext) {
+          return;
+        }
 
-        if (closeForAuthorityLoss(response.status)) {
+        if (closeForAuthorityLoss(response.status, requestAuthorityContext)) {
           return;
         }
 

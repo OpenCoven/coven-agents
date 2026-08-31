@@ -3,6 +3,7 @@ import {
   expect,
   type Page,
   type Request,
+  type Route,
   test,
 } from "@playwright/test";
 import { E2E_USER_ID, sessionCookies } from "./session";
@@ -809,6 +810,242 @@ test.describe("Subscriber checkout", () => {
     await expect(credential).toBeDisabled();
     await expect(credential).toHaveValue("");
     await expect(save).toBeDisabled();
+  });
+
+  for (const refusedMethod of ["GET", "POST", "DELETE"] as const) {
+    test(`credential ${refusedMethod} 403 invalidates shared authority once and a newer active revision recovers`, async ({
+      page,
+    }) => {
+      await setServerSession(page.context(), "subscriber");
+      await page.route("**/api/auth/session", (route) =>
+        route.fulfill({ json: sessionFor("subscriber") })
+      );
+      await page.route("**/api/tenant/prewarm", (route) =>
+        route.fulfill({ status: 204 })
+      );
+      await page.route("**/api/usage", (route) =>
+        route.fulfill({
+          json: {
+            cap: 750,
+            resetsAt: "2099-02-01T00:00:00.000Z",
+            used: 0,
+          },
+        })
+      );
+      await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+        const { pathname } = new URL(route.request().url());
+        return route.fulfill(
+          pathname === "/api/agents"
+            ? { json: { agents: [] } }
+            : { json: { apiVersion: "1.0", runs: [] } }
+        );
+      });
+
+      await page.route("**/api/credentials", (route) => {
+        const method = route.request().method();
+        if (method === "GET") {
+          return route.fulfill({
+            json: {
+              harnessIds: refusedMethod === "DELETE" ? ["copilot"] : [],
+            },
+          });
+        }
+        if (method === refusedMethod) {
+          return route.fulfill({
+            json: { error: "subscription_required" },
+            status: 403,
+          });
+        }
+        return route.fulfill({ json: {}, status: 500 });
+      });
+
+      let releaseRefresh!: () => void;
+      const refreshGate = new Promise<void>((resolve) => {
+        releaseRefresh = resolve;
+      });
+      let serverRefreshes = 0;
+      await page.route("**/agents?**", async (route) => {
+        if (isServerComponentRequest(route.request())) {
+          serverRefreshes += 1;
+          await refreshGate;
+        }
+        await route.continue();
+      });
+
+      let refusedGetHandler: ((route: Route) => Promise<void>) | null = null;
+      if (refusedMethod === "GET") {
+        await page.goto("/agents");
+        await expect(
+          page.getByTitle(
+            "The Daytona runner answered for this authenticated session."
+          )
+        ).toBeVisible();
+        refusedGetHandler = (route) =>
+          route.fulfill({
+            json: { error: "subscription_required" },
+            status: 403,
+          });
+        await page.route("**/api/credentials", refusedGetHandler);
+        await page
+          .getByRole("button", { name: "Account and settings" })
+          .click();
+      } else {
+        await openConsoleSettings(page);
+      }
+      const credential = page.getByLabel("GitHub Copilot CLI credential");
+      const billing = page.getByRole("tab", { name: "Billing" });
+      if (refusedMethod !== "GET") {
+        await expect(credential).toBeEnabled();
+        await expect(billing).toBeVisible();
+      }
+
+      if (refusedMethod === "POST") {
+        await credential.fill("must-clear-after-refusal");
+        await page.getByRole("button", { exact: true, name: "Save" }).click();
+      } else if (refusedMethod === "DELETE") {
+        await page.getByRole("button", { exact: true, name: "Remove" }).click();
+      }
+
+      await expect.poll(() => serverRefreshes).toBe(1);
+      await expect(
+        page.getByTitle("An active subscription is required to run agents.")
+      ).toBeVisible();
+      await expect(credential).toBeDisabled();
+      await expect(credential).toHaveValue("");
+      await expect(
+        page.getByText("Subscription required", { exact: true })
+      ).toBeVisible();
+      await expect(page.getByText("Subscription active")).toHaveCount(0);
+      if (CHECKOUT_ENABLED) {
+        await expect(billing).toBeVisible();
+      } else {
+        await expect(billing).toHaveCount(0);
+      }
+      await page.waitForTimeout(100);
+      expect(serverRefreshes).toBe(1);
+
+      if (refusedGetHandler) {
+        await page.unroute("**/api/credentials", refusedGetHandler);
+      }
+      releaseRefresh();
+
+      await expect(credential).toBeEnabled();
+      await expect(
+        page.getByTitle(
+          "The Daytona runner answered for this authenticated session."
+        )
+      ).toBeVisible();
+      await expect(page.getByRole("tab", { name: "Billing" })).toBeVisible();
+      expect(serverRefreshes).toBe(1);
+    });
+  }
+
+  test("credential 403 remains fail-closed when the newer server revision is inactive", async ({
+    page,
+  }) => {
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("subscriber") })
+    );
+    await mockSubscriberConsoleDependencies(page);
+    await page.unroute("**/api/credentials");
+    await page.route("**/api/credentials", async (route) => {
+      if (route.request().method() === "POST") {
+        await setServerSession(page.context(), "demo");
+        return route.fulfill({
+          json: { error: "subscription_required" },
+          status: 403,
+        });
+      }
+      return route.fulfill({ json: { harnessIds: [] } });
+    });
+    let serverRefreshes = 0;
+    page.on("request", (request) => {
+      if (
+        new URL(request.url()).pathname === "/agents" &&
+        isServerComponentRequest(request)
+      ) {
+        serverRefreshes += 1;
+      }
+    });
+
+    await openConsoleSettings(page);
+    const credential = page.getByLabel("GitHub Copilot CLI credential");
+    await credential.fill("must-not-reactivate");
+    await page.getByRole("button", { exact: true, name: "Save" }).click();
+
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+    await expect(credential).toBeDisabled();
+    await expect(credential).toHaveValue("");
+    if (CHECKOUT_ENABLED) {
+      await page.getByRole("tab", { name: "Billing" }).click();
+      await expect(checkoutButton(page)).toBeVisible();
+    } else {
+      await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
+    }
+    await page.waitForTimeout(100);
+    expect(serverRefreshes).toBe(1);
+  });
+
+  test("an account credential 403 closes the menu and Billing until a newer active revision reloads", async ({
+    page,
+  }) => {
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("subscriber") })
+    );
+    let credentialGets = 0;
+    await page.route("**/api/credentials", (route) => {
+      credentialGets += 1;
+      return credentialGets === 1
+        ? route.fulfill({
+            json: { error: "subscription_required" },
+            status: 403,
+          })
+        : route.fulfill({ json: { harnessIds: [] } });
+    });
+
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let serverRefreshes = 0;
+    await page.route("**/account?**", async (route) => {
+      if (isServerComponentRequest(route.request())) {
+        serverRefreshes += 1;
+        await refreshGate;
+      }
+      await route.continue();
+    });
+
+    await page.goto("/account");
+
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await page.getByRole("button", { name: "Account" }).click();
+    await expect(page.getByText("Guest", { exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(
+      page.getByText("Storing a credential needs an active subscription.")
+    ).toBeVisible();
+    await expect(page.getByLabel("GitHub Copilot CLI")).toHaveCount(0);
+    await expect(page.getByText("Subscription active")).toHaveCount(0);
+    if (CHECKOUT_ENABLED) {
+      await expect(page.getByRole("tab", { name: "Billing" })).toBeVisible();
+    } else {
+      await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
+    }
+
+    releaseRefresh();
+
+    await expect(page.getByLabel("GitHub Copilot CLI")).toBeVisible();
+    await page.getByRole("button", { name: "Account" }).click();
+    await expect(page.getByText("Subscriber", { exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("tab", { name: "Billing" })).toBeVisible();
+    expect(serverRefreshes).toBe(1);
   });
 
   test("agents ignores subscriber authority belonging to another current client identity", async ({

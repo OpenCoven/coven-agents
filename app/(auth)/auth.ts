@@ -236,6 +236,7 @@ export async function subscriptionPageAuthority(
     return storageUnavailableSubscriptionAuthority(resolved.session, now);
   }
   return {
+    checkedAt: now.toISOString(),
     isSubscriber: isSubscribedAt(resolved.user, now),
     subscribedUntil: resolved.user.subscribedUntil?.toISOString() ?? null,
     userId: resolved.session.user.id,

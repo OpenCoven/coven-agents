@@ -213,7 +213,9 @@ function HarnessCard({
 
 export function Settings({
   account,
+  authorityRevision,
   checkoutEnabled,
+  invalidateSubscriptionAuthority,
   isSubscriber,
   onCredentialsChange,
   operationContext,
@@ -223,7 +225,9 @@ export function Settings({
    *  how to render "nobody", so a fallback sentence can never be mistaken for
    *  an account name or have an initial derived from it. */
   account: string | null;
+  authorityRevision: string | null;
   checkoutEnabled: boolean;
+  invalidateSubscriptionAuthority: () => void;
   isSubscriber: boolean;
   onCredentialsChange: (harnessIds: readonly string[]) => void;
   operationContext: SessionOperationContext | null;
@@ -249,7 +253,9 @@ export function Settings({
 
   const [configured, setConfigured] = useState<string[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [locked, setLocked] = useState(false);
+  const [lockedAuthorityContext, setLockedAuthorityContext] = useState<
+    string | null
+  >(null);
   const [busy, setBusy] = useState(false);
   const [refusedOpen, setRefusedOpen] = useState(false);
 
@@ -268,11 +274,22 @@ export function Settings({
     isSubscriber &&
     operationContext !== null &&
     isCurrentOperation(operationContext);
-  const credentialsLocked = locked || !credentialAuthorityValid;
+  const credentialAuthorityContext = [
+    account ?? "",
+    authorityRevision ?? "",
+    isSubscriber ? "subscriber" : "demo",
+    operationContext?.generation ?? "",
+  ].join(":");
+  const credentialAuthorityContextRef = useRef(credentialAuthorityContext);
+  credentialAuthorityContextRef.current = credentialAuthorityContext;
+  const credentialsLocked =
+    !credentialAuthorityValid ||
+    lockedAuthorityContext === credentialAuthorityContext;
   const credentialsLockedRef = useRef(credentialsLocked);
   credentialsLockedRef.current = credentialsLocked;
   const credentialMemoryFence = [
     account ?? "",
+    authorityRevision ?? "",
     isSubscriber ? "subscriber" : "demo",
     operationContext?.generation ?? "",
     credentialsLocked ? "locked" : "unlocked",
@@ -336,6 +353,26 @@ export function Settings({
     [isCurrentOperation, onCredentialsChange]
   );
 
+  const closeCredentialAuthority = useCallback(
+    (status: number, context: SessionOperationContext | null) => {
+      if (
+        (status !== 401 && status !== 403) ||
+        !context ||
+        !isCurrentOperation(context)
+      ) {
+        return false;
+      }
+      setLockedAuthorityContext(credentialAuthorityContextRef.current);
+      setDrafts({});
+      publishCredentials([], context);
+      if (status === 403) {
+        invalidateSubscriptionAuthority();
+      }
+      return true;
+    },
+    [invalidateSubscriptionAuthority, isCurrentOperation, publishCredentials]
+  );
+
   const refreshCredentials = useCallback(
     async (context: SessionOperationContext | null) => {
       if (!context || !isCurrentOperation(context)) {
@@ -348,12 +385,10 @@ export function Settings({
       if (!isCurrentOperation(context) || !refreshFence.isCurrent(ticket)) {
         return null;
       }
-      if (response.status === 401 || response.status === 403) {
+      if (closeCredentialAuthority(response.status, context)) {
         // A demo session cannot store one, and saying so beats a form that
         // fails on submit.
-        setLocked(true);
-        setDrafts({});
-        return publishCredentials([], context);
+        return [];
       }
       if (!response.ok) {
         return null;
@@ -364,7 +399,12 @@ export function Settings({
       }
       return publishCredentials(body.harnessIds ?? [], context);
     },
-    [isCurrentOperation, publishCredentials, refreshFence]
+    [
+      closeCredentialAuthority,
+      isCurrentOperation,
+      publishCredentials,
+      refreshFence,
+    ]
   );
 
   useEffect(() => {
@@ -372,7 +412,6 @@ export function Settings({
     setTab("harness");
     setConfigured([]);
     setDrafts({});
-    setLocked(false);
     setBusy(false);
     setRefusedOpen(false);
     setUsage(null);
@@ -519,10 +558,7 @@ export function Settings({
           }
           return;
         }
-        if (response.status === 401 || response.status === 403) {
-          setLocked(true);
-          setDrafts({});
-          publishCredentials([], context);
+        if (closeCredentialAuthority(response.status, context)) {
           toast.error(
             response.status === 401
               ? "Sign in again."
@@ -585,10 +621,7 @@ export function Settings({
       if (!isCurrentOperation(context)) {
         return;
       }
-      if (response.status === 401 || response.status === 403) {
-        setLocked(true);
-        setDrafts({});
-        publishCredentials([], context);
+      if (closeCredentialAuthority(response.status, context)) {
         toast.error(
           response.status === 401 ? "Sign in again." : "Subscription required."
         );

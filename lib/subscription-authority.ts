@@ -1,5 +1,6 @@
 export type SubscriptionAuthority = Readonly<{
   authorityExpiresAt?: string | null;
+  checkedAt: string;
   isSubscriber: boolean;
   subscribedUntil: string | null;
   userId: string;
@@ -42,6 +43,7 @@ export function storageUnavailableSubscriptionAuthority(
     boundary > now.getTime();
   return {
     authorityExpiresAt: isSubscriber ? subscribedUntil : null,
+    checkedAt: now.toISOString(),
     isSubscriber,
     subscribedUntil: null,
     userId,
