@@ -52,6 +52,7 @@ export function useSubscriptionAuthorityRefresh({
     userId,
     authVersion
   );
+  const authorityMatchesIdentity = revision !== null;
   const revisionRef = useRef(revision);
   revisionRef.current = revision;
   const revisionContext = subscriptionAuthorityRevisionContext(
@@ -80,6 +81,14 @@ export function useSubscriptionAuthorityRefresh({
     if (!hasResolvedIdentityRef.current) {
       hasResolvedIdentityRef.current = true;
       previousIdentityRef.current = identity;
+      if (
+        enabled &&
+        status === "authenticated" &&
+        userId &&
+        !authorityMatchesIdentity
+      ) {
+        router.refresh();
+      }
       return;
     }
     if (previousIdentityRef.current === identity) {
@@ -89,7 +98,15 @@ export function useSubscriptionAuthorityRefresh({
     if (enabled) {
       router.refresh();
     }
-  }, [authVersion, enabled, router, status, type, userId]);
+  }, [
+    authorityMatchesIdentity,
+    authVersion,
+    enabled,
+    router,
+    status,
+    type,
+    userId,
+  ]);
 
   useEffect(() => {
     if (!authorityKey || !subscribedUntil) {

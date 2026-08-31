@@ -1422,6 +1422,44 @@ test.describe("Subscriber checkout", () => {
     await expect(page.getByText("Connected", { exact: true })).toHaveCount(0);
   });
 
+  for (const initialMismatch of ["auth-version", "user"] as const) {
+    test(`initial client ${initialMismatch} mismatch refreshes server authority once`, async ({
+      page,
+    }) => {
+      const secondUserId = "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa";
+      const nextSession =
+        initialMismatch === "user"
+          ? sessionFor("subscriber", {
+              email: "second@example.invalid",
+              id: secondUserId,
+            })
+          : sessionFor("subscriber", { authVersion: 2 });
+      const nextServerOptions =
+        initialMismatch === "user" ? { id: secondUserId } : { authVersion: 2 };
+      await setServerSession(page.context(), "subscriber");
+      await page.route("**/api/auth/session", async (route) => {
+        await setServerSession(page.context(), "subscriber", nextServerOptions);
+        return route.fulfill({ json: nextSession });
+      });
+      await mockAccountDependencies(page);
+      let serverRefreshes = 0;
+      page.on("request", (request) => {
+        if (
+          new URL(request.url()).pathname === "/account" &&
+          isServerComponentRequest(request)
+        ) {
+          serverRefreshes += 1;
+        }
+      });
+
+      await page.goto("/account");
+
+      await expect.poll(() => serverRefreshes).toBe(1);
+      await expect(page.getByLabel("GitHub Copilot CLI")).toBeVisible();
+      expect(serverRefreshes).toBe(1);
+    });
+  }
+
   for (const refusedMethod of ["POST", "PUT"] as const) {
     test(`device-flow ${refusedMethod} refusal closes shared account authority`, async ({
       page,
