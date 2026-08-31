@@ -22,6 +22,8 @@ Do not promote when:
 - release audience configuration is ambiguous;
 - database migration compatibility is unproved;
 - subscriber or tenant authority can be supplied by request input;
+- a team child can exceed its immutable workspace/tool authority or a
+  GitHub-capable step can run without the approved capability broker;
 - Daytona credentials, snapshot, target, or domain policy are missing;
 - an active run lacks durable PostgreSQL ownership;
 - lifecycle, SSE, rollback, or reconciliation evidence is absent;
@@ -78,8 +80,11 @@ Record the candidate SHA and exact exit status for every command.
 - health and authenticated account access;
 - guest refusal for protected resources;
 - subscriber agent create, read, update, and delete;
+- subscriber skill and team create, read, update, and delete;
 - Daytona sandbox create and reuse;
 - idempotent run start;
+- workspace-only team run, bounded handoff, approval, cancellation, terminal
+  projection, and reconciliation;
 - SSE reconnect from `Last-Event-ID`;
 - stop and terminal convergence;
 - credential acquisition compensation on injected launch failure;
@@ -90,7 +95,8 @@ Record the candidate SHA and exact exit status for every command.
 
 - Browser requests use relative `/api` paths.
 - The Auth.js session is the only browser execution credential.
-- Subscriber state and tenant identity are derived and revalidated server-side.
+- Subscriber state and tenant identity are derived and revalidated server-side
+  for standalone and coordinated-team routes.
 - Browser code receives no provider credential or tenant harness plaintext.
 - Mutation origin and media type checks run before body work.
 
@@ -101,6 +107,20 @@ root `vercel.json`. Restoring Git deployment behavior requires the separately
 reviewed deployment runbook described in
 [`vercel-git-deployment-disablement.md`](../operations/vercel-git-deployment-disablement.md).
 Repository build evidence does not prove a deployment occurred.
+
+## Coordinated team execution
+
+- Team and skill resources remain tenant-fenced and exclude tenant identifiers,
+  token hashes, and provider internals from public responses.
+- Every child uses immutable authority, agent, skill, workspace, and tool
+  snapshots plus deterministic reserved run and operation IDs.
+- Handoffs remain within aggregate and per-handoff UTF-8 byte budgets and
+  reject or redact operational metadata.
+- Workspace-only Copilot steps receive no shell, network, or GitHub tools.
+- GitHub-capable steps fail closed until approval is enforced through a bounded
+  production capability broker.
+- Cancellation, crash recovery, terminal projection, and retained-child
+  cleanup must be exercised against release-equivalent PostgreSQL.
 
 ## Stripe webhook delivery
 

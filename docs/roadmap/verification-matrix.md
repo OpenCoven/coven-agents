@@ -1,7 +1,7 @@
 # Verification Matrix
 
 This matrix records implemented source and retained evidence as of 2026-08-31
-for application baseline `fc7578f39beae2541fd288fc8c16871a943574a3`
+for application baseline `f211e49eb2c633759c63e1cb077a9e44e5bdc172`
 and the planning-document candidate that updates this matrix. Repository and
 local contract procedures are verified; infrastructure cutover evidence is
 retained; full product release certification remains pending.
@@ -22,7 +22,8 @@ retained; full product release certification remains pending.
 | Capability | State | Repository evidence | Required next evidence |
 | --- | --- | --- | --- |
 | Console profile execution | `Verified` | `lib/console/agent-profile.ts`, console component coverage, responsive contract tests, and production build | Release-equivalent subscriber exercise and accessibility evidence |
-| Subscription checkout gating | `Verified` | Checkout response, configuration, idempotency, abuse-order, and runtime validation unit coverage | Real Stripe checkout and webhook transition exercise when billing is enabled |
+| Paid subscription authority | `Verified` | Checkout lease, provider recovery, webhook transaction, paid-interval, reconciliation, configuration, idempotency, abuse-order, and runtime validation unit coverage | Real Stripe checkout, webhook, retry, and manual-reconciliation exercise when billing is enabled |
+| Coordinated team execution | `Verified` | Strict contracts, tenant-fenced CRUD and persistence, deterministic child reservations, bounded handoffs, durable orchestration, cancellation, approval, migration, and production-route coverage | Release-equivalent workspace-only team run with approval, cancellation, recovery, redaction, and cross-tenant evidence; brokered operations before GitHub-capable steps |
 | Guest replay | `Verified` | `lib/demo/`, `components/demo/`, `scripts/demo-route.test.ts`; final unit gate | Retained release-equivalent replay artifact |
 | Subscriber classification | `Verified` | Auth unit coverage and 28-case authenticated browser contract | Real OAuth and active/expired account exercise |
 | Same-origin execution session | `Verified` | Browser transport, runner authorization, product-boundary, and browser contract tests | Production-equivalent Auth.js request evidence |

@@ -7,7 +7,6 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -260,7 +259,9 @@ test("the repository planning registry passes the policy", () => {
 });
 
 test("repository scanning does not treat untracked files as tracked", () => {
-  const directory = mkdtempSync(join(tmpdir(), "planning-docs-policy-"));
+  const directory = mkdtempSync(
+    join(repositoryRoot, ".planning-docs-policy-test-")
+  );
 
   try {
     mkdirSync(join(directory, "docs/roadmap"), { recursive: true });

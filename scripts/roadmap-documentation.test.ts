@@ -14,14 +14,16 @@ test("the current-state snapshot covers merged product and planning surfaces", (
   assert.match(currentState, /Snapshot date: 2026-08-31/u);
   assert.match(
     currentState,
-    /Application baseline: `fc7578f39beae2541fd288fc8c16871a943574a3`/u
+    /Application baseline: `f211e49eb2c633759c63e1cb077a9e44e5bdc172`/u
   );
 
   for (const evidence of [
     "Console workspace",
     "lib/console/agent-profile.ts",
-    "Subscription checkout",
-    "lib/billing/checkout-response.ts",
+    "Subscription authority",
+    "lib/billing/checkout-lease.ts",
+    "Coordinated teams",
+    "lib/teams/",
     "Deployment posture",
     "docs/operations/vercel-git-deployment-disablement.md",
     "Planning documents",
@@ -45,12 +47,13 @@ test("the verification matrix records the newly verified repository boundaries",
   assert.match(matrix, /as of 2026-08-31/u);
   assert.match(
     matrix,
-    /application baseline `fc7578f39beae2541fd288fc8c16871a943574a3`/u
+    /application baseline `f211e49eb2c633759c63e1cb077a9e44e5bdc172`/u
   );
 
   for (const capability of [
     "Console profile execution",
-    "Subscription checkout gating",
+    "Paid subscription authority",
+    "Coordinated team execution",
     "Planning document registry",
     "Vercel Git deployment disablement",
   ]) {
@@ -73,6 +76,8 @@ test("release readiness separates infrastructure cutover from product approval",
     readiness,
     /private Beads-to-Project reconciliation has completed with\s+a final no-op preview/u
   );
+  assert.match(readiness, /## Coordinated team execution/u);
+  assert.match(readiness, /GitHub-capable steps fail closed/u);
 });
 
 test("the implementation sequence records its authority freshness boundary", () => {
