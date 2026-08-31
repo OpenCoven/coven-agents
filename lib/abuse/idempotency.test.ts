@@ -281,6 +281,35 @@ test("non-caching callers reclaim a seeded completed response instead of replayi
   assert.equal(providerCalls, 1);
 });
 
+test("non-caching callers reject a conflicting seeded completed response", async () => {
+  const store = new MemoryIdempotencyStore();
+  store.seedCompleted({
+    body: { url: "https://checkout.test/stale" },
+    status: 200,
+  });
+  let providerCalls = 0;
+
+  const result = await runIdempotentOperation({
+    cacheSuccessfulResponse: false,
+    idempotencyKey: KEY,
+    operation: OPERATION,
+    ownerId: OWNER,
+    perform: () => {
+      providerCalls += 1;
+      return Promise.resolve({
+        body: { url: "https://checkout.test/current" },
+        status: 200,
+      });
+    },
+    request: { revision: 2 },
+    retentionMs: 60_000,
+    store,
+  });
+
+  assert.deepEqual(result, { kind: "conflict" });
+  assert.equal(providerCalls, 0);
+});
+
 test("parallel non-caching claims safely reacquire one seeded completed record", async () => {
   const store = new MemoryIdempotencyStore();
   store.seedCompleted({
@@ -897,7 +926,8 @@ class MemoryIdempotencyStore implements IdempotencyStore {
     if (
       existing?.state === "completed" &&
       "reclaimCompleted" in input &&
-      input.reclaimCompleted === true
+      input.reclaimCompleted === true &&
+      existing.requestHash === input.requestHash
     ) {
       this.records.set(scope, {
         claimExpiresAt: input.claimExpiresAt,

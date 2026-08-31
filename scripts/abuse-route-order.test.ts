@@ -517,6 +517,10 @@ test("database claims and reclaims idempotency records atomically", () => {
   assert.match(storeSource, /\.onConflictDoNothing\(/);
   assert.match(storeSource, /input\.reclaimCompleted/);
   assert.match(storeSource, /eq\(idempotencyRecord\.state, "completed"\)/);
+  assert.match(
+    storeSource,
+    /left\(\$\{idempotencyRecord\.requestHash\}, 64\) = \$\{input\.requestHash\}/
+  );
   assert.match(storeSource, /lte\(idempotencyRecord\.expiresAt, input\.now\)/);
   assert.equal(
     storeSource.match(

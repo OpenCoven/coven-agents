@@ -183,6 +183,7 @@ test("enabled checkout preserves the required operation order", async () => {
     "create Customer",
     "checkout lease checkpoint",
     "attach customer",
+    "checkout lease checkpoint",
     "create Checkout",
     "checkout lease renew",
     "checkout lease release",
@@ -463,7 +464,7 @@ test("an expired lease takeover reuses provider identities and fences the stale 
   assert.equal(leaseStore.successorWasDeletedByStaleRelease, false);
 });
 
-test("a takeover preserves the provider identity when Stripe returns an idempotency conflict", async () => {
+test("a takeover waits for an in-flight provider identity to reconcile", async () => {
   const leaseStore = new MemoryCheckoutAttemptLeaseStore();
   const sessions: ReturnType<typeof reconciledCheckoutSession>[] = [];
   const sessionKeys: string[] = [];
@@ -547,7 +548,8 @@ test("a takeover preserves the provider identity when Stripe returns an idempote
     null
   );
 
-  assert.equal(conflicted.status, 502);
+  assert.equal(conflicted.status, 409);
+  assert.deepEqual(await conflicted.json(), { error: "request_in_progress" });
   releaseStaleCreate();
   const staleResponse = await stale;
   assert.equal(staleResponse.status, 409);
@@ -571,7 +573,94 @@ test("a takeover preserves the provider identity when Stripe returns an idempote
   assert.deepEqual(await reconciled.json(), {
     url: "https://checkout.stripe.test/stale-create",
   });
-  assert.equal(sessionKeys.length, 2);
+  assert.equal(sessionKeys.length, 1);
+  assert.equal(new Set(sessionKeys).size, 1);
+});
+
+test("a takeover preserves an attempt while Session creation is still in flight", async () => {
+  const leaseStore = new MemoryCheckoutAttemptLeaseStore();
+  const sessions: ReturnType<typeof reconciledCheckoutSession>[] = [];
+  const sessionKeys: string[] = [];
+  let blocking = false;
+  let releaseStaleCreate!: () => void;
+  let signalStaleCreateStarted!: () => void;
+  const staleCreateStarted = new Promise<void>((resolve) => {
+    signalStaleCreateStarted = resolve;
+  });
+  const staleCreateGate = new Promise<void>((resolve) => {
+    releaseStaleCreate = resolve;
+  });
+  const provider = Object.assign(
+    defaultProvider({
+      async createCheckoutSession(input, options) {
+        sessionKeys.push(options.idempotencyKey);
+        if (sessionKeys.length === 1) {
+          signalStaleCreateStarted();
+          await staleCreateGate;
+          const created = reconciledCheckoutSession({
+            customerId: "cus_existing",
+            id: "cs_in_flight",
+            integrationIdentifier: input.integration_identifier ?? null,
+            metadata: input.metadata ?? {},
+            status: "open",
+            url: "https://checkout.stripe.test/in-flight",
+          });
+          sessions.push(created);
+          return created;
+        }
+        const [existing] = sessions;
+        assert.ok(existing);
+        return existing;
+      },
+      hasBlockingSubscription: () => Promise.resolve(blocking),
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return sessions.filter((session) => session.status === input.status);
+      },
+      retrieve(sessionId) {
+        const session = sessions.find(({ id }) => id === sessionId);
+        assert.ok(session);
+        return session;
+      },
+    })
+  );
+  const dependencies = dependenciesFor({
+    checkoutLeaseStore: leaseStore,
+    createProvider: () => provider,
+  });
+
+  const stale = checkoutResponse(
+    request("checkout-request-in-flight-stale"),
+    dependencies,
+    null
+  );
+  await staleCreateStarted;
+  leaseStore.expireCheckoutLease();
+  blocking = true;
+
+  const blocked = await checkoutResponse(
+    request("checkout-request-in-flight-blocked"),
+    dependencies,
+    null
+  );
+  assert.equal(blocked.status, 409);
+  assert.deepEqual(await blocked.json(), { error: "already_subscribed" });
+
+  releaseStaleCreate();
+  assert.equal((await stale).status, 409);
+  blocking = false;
+
+  const recovered = await checkoutResponse(
+    request("checkout-request-in-flight-recovered"),
+    dependencies,
+    null
+  );
+  assert.equal(recovered.status, 200);
+  assert.deepEqual(await recovered.json(), {
+    url: "https://checkout.stripe.test/in-flight",
+  });
+  assert.equal(sessionKeys.length, 1);
   assert.equal(new Set(sessionKeys).size, 1);
 });
 

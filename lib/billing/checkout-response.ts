@@ -399,7 +399,9 @@ export async function checkoutResponse(
                       : [];
                 return blockingSubscriptionResult(
                   candidateCustomerId,
-                  null,
+                  attemptState.kind === "create_uncertain"
+                    ? attemptState
+                    : null,
                   knownSessionIds
                 );
               }
@@ -504,6 +506,7 @@ export async function checkoutResponse(
               ReturnType<CheckoutProvider["createCheckoutSession"]>
             >;
             try {
+              await checkpoint({ kind: "create_uncertain" });
               checkout = await provider.createCheckoutSession(
                 {
                   cancel_url: `${origin}/account?checkout=cancelled`,

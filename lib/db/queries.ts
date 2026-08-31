@@ -522,7 +522,8 @@ export const databaseIdempotencyStore: IdempotencyStore = {
               .where(
                 and(
                   idempotencyScope(input),
-                  eq(idempotencyRecord.state, "completed")
+                  eq(idempotencyRecord.state, "completed"),
+                  sql`left(${idempotencyRecord.requestHash}, 64) = ${input.requestHash}`
                 )
               )
               .returning({ id: idempotencyRecord.id });
