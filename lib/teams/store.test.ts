@@ -819,6 +819,30 @@ test("a pending approval cannot be bypassed by completing the step", async () =>
   assert.equal(statements.length, 1);
 });
 
+test("a pending approval cannot enter the execution queue", async () => {
+  const pending = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[1],
+    approvalStatus: "pending",
+    status: "pending",
+    version: 5,
+  };
+  const { statements, store } = scripted([pending]);
+
+  assert.deepEqual(
+    await store.updateTeamStep(principal, {
+      approvalStatus: "pending",
+      error: null,
+      expectedVersion: 5,
+      handoff: null,
+      id: TEAM_STEP_B,
+      runnerRunId: null,
+      status: "queued",
+    }),
+    { kind: "invalid_transition" }
+  );
+  assert.equal(statements.length, 1);
+});
+
 test("cancelling a team run fences version and cancels only live steps", async () => {
   const cancelled = teamRunRow({
     completedAt: NOW,
@@ -957,6 +981,22 @@ test("GitHub capability persistence accepts only hashes, bounded budgets, and al
     JSON.stringify(created.statements[1]?.args),
     /plaintext|accessToken|authorization/iu
   );
+  assert.match(
+    queryText(captured(created.statements, 0)),
+    /"step"\."status" IN \('queued', 'running'\)/u
+  );
+  assert.match(
+    queryText(captured(created.statements, 0)),
+    /"step"\."skillSnapshots"/u
+  );
+  assert.match(
+    queryText(captured(created.statements, 0)),
+    /"teamRun"\."status" IN \('queued', 'running'\)/u
+  );
+  assert.match(
+    queryText(captured(created.statements, 0)),
+    /"step"\."approvalStatus" = 'approved'/u
+  );
 
   const invalid = scripted();
   await assert.rejects(
@@ -1055,6 +1095,22 @@ test("GitHub operations are idempotent by operation id and sanitized request has
   assert.match(
     queryText(captured(created.statements, 1)),
     /FOR UPDATE OF "capability"/u
+  );
+  assert.match(
+    queryText(captured(created.statements, 1)),
+    /"step"\."status" = 'running'/u
+  );
+  assert.match(
+    queryText(captured(created.statements, 1)),
+    /"teamRun"\."status" = 'running'/u
+  );
+  assert.match(
+    queryText(captured(created.statements, 1)),
+    /"step"\."skillSnapshots"/u
+  );
+  assert.match(
+    queryText(captured(created.statements, 1)),
+    /"step"\."approvalStatus" = 'approved'/u
   );
 
   const duplicate = scripted([operation]);

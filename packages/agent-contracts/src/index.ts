@@ -202,6 +202,12 @@ export const createSkillInputSchema = z
   })
   .strict();
 
+export const updateSkillInputSchema = createSkillInputSchema
+  .extend({
+    expectedVersion: z.number().int().nonnegative(),
+  })
+  .strict();
+
 export const skillDefinitionSchema = createSkillInputSchema.extend({
   createdAt: datetimeSchema,
   id: skillIdSchema,
@@ -209,6 +215,15 @@ export const skillDefinitionSchema = createSkillInputSchema.extend({
   updatedAt: datetimeSchema,
   version: z.number().int().nonnegative(),
 });
+
+export const skillResourceSchema = createSkillInputSchema
+  .extend({
+    createdAt: datetimeSchema,
+    id: skillIdSchema,
+    updatedAt: datetimeSchema,
+    version: z.number().int().nonnegative(),
+  })
+  .strict();
 
 export const createTeamMemberInputSchema = z
   .object({
@@ -247,6 +262,12 @@ export const createTeamInputSchema = z
   })
   .strict();
 
+export const updateTeamInputSchema = createTeamInputSchema
+  .extend({
+    expectedVersion: z.number().int().nonnegative(),
+  })
+  .strict();
+
 export const teamMemberSchema = createTeamMemberInputSchema.extend({
   id: z.string().uuid(),
   position: z.number().int().nonnegative(),
@@ -262,6 +283,24 @@ export const teamDefinitionSchema = z
     owner: agentOwnerSchema,
     updatedAt: datetimeSchema,
     version: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const teamResourceSchema = z
+  .object({
+    createdAt: datetimeSchema,
+    description: z.string().max(TEAM_LIMITS.maxDescriptionLength).default(""),
+    id: teamIdSchema,
+    members: z.array(teamMemberSchema).min(2).max(TEAM_LIMITS.maxMembers),
+    name: boundedString(TEAM_LIMITS.maxNameLength),
+    updatedAt: datetimeSchema,
+    version: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const expectedVersionInputSchema = z
+  .object({
+    expectedVersion: z.number().int().nonnegative(),
   })
   .strict();
 
@@ -761,6 +800,30 @@ export const agentEnvelopeSchema = z.object({
   agent: agentDefinitionSchema,
 });
 
+export const skillsEnvelopeSchema = z
+  .object({
+    skills: z.array(skillResourceSchema),
+  })
+  .strict();
+
+export const skillEnvelopeSchema = z
+  .object({
+    skill: skillResourceSchema,
+  })
+  .strict();
+
+export const teamsEnvelopeSchema = z
+  .object({
+    teams: z.array(teamResourceSchema),
+  })
+  .strict();
+
+export const teamEnvelopeSchema = z
+  .object({
+    team: teamResourceSchema,
+  })
+  .strict();
+
 /**
  * Projects a run snapshot onto the older `RunResult` shape.
  *
@@ -845,18 +908,23 @@ export type RunSnapshotEnvelope = z.infer<typeof runSnapshotEnvelopeSchema>;
 export type CreateSkillInput = z.input<typeof createSkillInputSchema>;
 export type CreateTeamInput = z.input<typeof createTeamInputSchema>;
 export type CreateTeamRunInput = z.input<typeof createTeamRunInputSchema>;
+export type ExpectedVersionInput = z.input<typeof expectedVersionInputSchema>;
 export type GitHubOperationKind = z.infer<typeof githubOperationKindSchema>;
 export type GitHubOperationReceipt = z.output<
   typeof githubOperationReceiptSchema
 >;
 export type GitHubOperationStatus = z.infer<typeof githubOperationStatusSchema>;
 export type SkillDefinition = z.output<typeof skillDefinitionSchema>;
+export type SkillResource = z.output<typeof skillResourceSchema>;
 export type TeamApprovalStatus = z.infer<typeof teamApprovalStatusSchema>;
 export type TeamCapability = z.infer<typeof teamCapabilitySchema>;
 export type TeamDefinition = z.output<typeof teamDefinitionSchema>;
+export type TeamResource = z.output<typeof teamResourceSchema>;
 export type TeamHandoff = z.output<typeof teamHandoffSchema>;
 export type TeamMember = z.output<typeof teamMemberSchema>;
 export type TeamRun = z.output<typeof teamRunSchema>;
 export type TeamRunStatus = z.infer<typeof teamRunStatusSchema>;
 export type TeamStep = z.output<typeof teamStepSchema>;
 export type TeamStepStatus = z.infer<typeof teamStepStatusSchema>;
+export type UpdateSkillInput = z.input<typeof updateSkillInputSchema>;
+export type UpdateTeamInput = z.input<typeof updateTeamInputSchema>;

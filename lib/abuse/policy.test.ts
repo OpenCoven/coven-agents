@@ -39,6 +39,12 @@ const EXPECTED_ROUTES = [
   "runner_stop",
   "runner_diagnostic",
   "runner_reconcile",
+  "skill_read",
+  "skill_write",
+  "skill_delete",
+  "team_read",
+  "team_write",
+  "team_delete",
 ] as const satisfies readonly AbuseRoute[];
 
 const EXPECTED_POLICIES = {
@@ -78,8 +84,14 @@ const EXPECTED_POLICIES = {
   runner_run_start: expectedPolicy(["ip", "tenant"], 64_000, 5, 60, 25, 86_400),
   runner_stop: expectedPolicy(["ip", "tenant"], 1024, 5, 60, 20, 3600),
   runner_write: expectedPolicy(["ip", "user"], 64_000, 10, 60, 40, 3600),
+  skill_delete: expectedPolicy(["ip", "tenant"], 0, 5, 60, 20, 3600),
+  skill_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
+  skill_write: expectedPolicy(["ip", "tenant"], 8192, 10, 60, 40, 3600),
   stripe_webhook: expectedPolicy(["ip"], 262_144, 60, 60, 600, 3600),
   suggestions_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
+  team_delete: expectedPolicy(["ip", "tenant"], 0, 5, 60, 20, 3600),
+  team_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
+  team_write: expectedPolicy(["ip", "tenant"], 131_072, 10, 60, 40, 3600),
   upload: expectedPolicy(["ip", "user"], 5_250_000, 2, 60, 20, 3600),
   usage_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   vote_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),

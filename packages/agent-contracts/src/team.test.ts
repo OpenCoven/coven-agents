@@ -4,11 +4,20 @@ import {
   createSkillInputSchema,
   createTeamInputSchema,
   createTeamRunInputSchema,
+  expectedVersionInputSchema,
   githubOperationReceiptSchema,
+  skillEnvelopeSchema,
+  skillResourceSchema,
+  skillsEnvelopeSchema,
   TEAM_LIMITS,
   teamCapabilitySchema,
+  teamEnvelopeSchema,
   teamHandoffSchema,
+  teamResourceSchema,
   teamRunSchema,
+  teamsEnvelopeSchema,
+  updateSkillInputSchema,
+  updateTeamInputSchema,
 } from "./index";
 
 const AGENT_A = "11111111-1111-4111-8111-111111111111";
@@ -19,6 +28,44 @@ const TEAM_RUN_A = "55555555-5555-4555-8555-555555555555";
 const TEAM_STEP_A = "66666666-6666-4666-8666-666666666666";
 const OPERATION_A = "88888888-8888-4888-8888-888888888888";
 const NOW = "2026-08-30T12:00:00.000Z";
+
+const skillResource = {
+  createdAt: NOW,
+  description: "Requires focused regression evidence.",
+  id: SKILL_A,
+  instructions: "Run the smallest regression test that proves the change.",
+  name: "Release evidence",
+  requiredCapabilities: ["workspace.read"] as const,
+  updatedAt: NOW,
+  version: 3,
+};
+
+const teamResource = {
+  createdAt: NOW,
+  description: "Moves approved work through delivery.",
+  id: TEAM_A,
+  members: [
+    {
+      agentId: AGENT_A,
+      id: "77777777-7777-4777-8777-777777777777",
+      position: 0,
+      required: true,
+      responsibility: "Implement the approved change.",
+      skillIds: [SKILL_A],
+    },
+    {
+      agentId: AGENT_B,
+      id: "99999999-9999-4999-8999-999999999999",
+      position: 1,
+      required: false,
+      responsibility: "Review the resulting change.",
+      skillIds: [],
+    },
+  ],
+  name: "Delivery team",
+  updatedAt: NOW,
+  version: 2,
+};
 
 test("accepts a bounded reusable skill with explicit capabilities", () => {
   const parsed = createSkillInputSchema.parse({
@@ -212,6 +259,68 @@ test("team and skill inputs reject unknown fields", () => {
     }).success,
     false
   );
+});
+
+test("CRUD update and deletion inputs require a strict optimistic version", () => {
+  assert.equal(
+    updateSkillInputSchema.safeParse({
+      description: skillResource.description,
+      expectedVersion: skillResource.version,
+      instructions: skillResource.instructions,
+      name: skillResource.name,
+      requiredCapabilities: skillResource.requiredCapabilities,
+    }).success,
+    true
+  );
+  assert.equal(
+    updateTeamInputSchema.safeParse({
+      description: teamResource.description,
+      expectedVersion: teamResource.version,
+      members: teamResource.members.map(
+        ({ id: _id, position: _position, ...member }) => member
+      ),
+      name: teamResource.name,
+    }).success,
+    true
+  );
+
+  for (const candidate of [
+    {},
+    { expectedVersion: -1 },
+    { expectedVersion: 1.5 },
+    { expectedVersion: 1, tenant: "caller-controlled" },
+  ]) {
+    assert.equal(
+      expectedVersionInputSchema.safeParse(candidate).success,
+      false
+    );
+  }
+});
+
+test("team CRUD resources and envelopes exclude tenant and internal metadata", () => {
+  assert.deepEqual(skillResourceSchema.parse(skillResource), skillResource);
+  assert.deepEqual(teamResourceSchema.parse(teamResource), teamResource);
+  assert.deepEqual(skillEnvelopeSchema.parse({ skill: skillResource }), {
+    skill: skillResource,
+  });
+  assert.deepEqual(skillsEnvelopeSchema.parse({ skills: [skillResource] }), {
+    skills: [skillResource],
+  });
+  assert.deepEqual(teamEnvelopeSchema.parse({ team: teamResource }), {
+    team: teamResource,
+  });
+  assert.deepEqual(teamsEnvelopeSchema.parse({ teams: [teamResource] }), {
+    teams: [teamResource],
+  });
+
+  for (const schemaAndValue of [
+    [skillResourceSchema, { ...skillResource, tenant: "secret-tenant" }],
+    [skillResourceSchema, { ...skillResource, tokenHash: "a".repeat(64) }],
+    [teamResourceSchema, { ...teamResource, tenant: "secret-tenant" }],
+    [teamResourceSchema, { ...teamResource, githubInstallationId: "12345" }],
+  ] as const) {
+    assert.equal(schemaAndValue[0].safeParse(schemaAndValue[1]).success, false);
+  }
 });
 
 test("accepts a bounded team run with ordered strict steps", () => {

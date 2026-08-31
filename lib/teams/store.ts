@@ -935,18 +935,35 @@ export function createTeamStore(database: TeamStoreDatabase) {
             },
             sql`SELECT "step"."id"
               FROM "RunnerTeamStep" AS "step"
+              JOIN "RunnerTeamRun" AS "teamRun"
+                ON "teamRun"."id" = "step"."teamRunId"
+                AND "teamRun"."tenant" = "step"."tenant"
               JOIN "RunnerGitHubCapability" AS "capability"
                 ON "capability"."teamStepId" = "step"."id"
                 AND "capability"."tenant" = "step"."tenant"
               WHERE "step"."id" = ${input.teamStepId}
                 AND "step"."tenant" = ${principal.tenant}
+                AND "step"."status" = 'running'
+                AND "teamRun"."status" = 'running'
+                AND "step"."approvalStatus" IN ('not_required', 'approved')
+                AND (
+                  ${capability.endsWith(".write")} = false
+                  OR "step"."approvalStatus" = 'approved'
+                )
+                AND EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements("step"."skillSnapshots")
+                    AS "skill"("snapshot")
+                  WHERE ("skill"."snapshot"->'requiredCapabilities')
+                    ? ${capability}
+                )
                 AND "capability"."id" = ${input.capabilityId}
                 AND "capability"."revokedAt" IS NULL
                 AND "capability"."expiresAt" > now()
                 AND "capability"."usedCallCount" < "capability"."maxCallCount"
                 AND "capability"."approvedCapabilities" @> CAST(${jsonParameter([capability])} AS jsonb)
                 AND "capability"."repositoryAllowlist" @> CAST(${jsonParameter([input.repository])} AS jsonb)
-              FOR SHARE OF "step"
+              FOR SHARE OF "step", "teamRun"
               FOR UPDATE OF "capability"`
           )
         );
@@ -1179,15 +1196,47 @@ export function createTeamStore(database: TeamStoreDatabase) {
       input: CreateGitHubCapabilityInput
     ) => {
       validateCapabilityInput(input);
+      const requiresWriteApproval = input.approvedCapabilities.some(
+        (capability) => capability.endsWith(".write")
+      );
       return await database.transaction(async (transaction) => {
         const [step] = await transaction.execute(
           statement(
             "validate-github-capability-step",
-            { teamStepId: input.teamStepId, tenant: principal.tenant },
-            sql`SELECT "id" FROM "RunnerTeamStep"
-              WHERE "id" = ${input.teamStepId}
-                AND "tenant" = ${principal.tenant}
-              FOR SHARE`
+            {
+              approvedCapabilities: input.approvedCapabilities,
+              requiresWriteApproval,
+              teamStepId: input.teamStepId,
+              tenant: principal.tenant,
+            },
+            sql`SELECT "step"."id"
+              FROM "RunnerTeamStep" AS "step"
+              JOIN "RunnerTeamRun" AS "teamRun"
+                ON "teamRun"."id" = "step"."teamRunId"
+                AND "teamRun"."tenant" = "step"."tenant"
+              WHERE "step"."id" = ${input.teamStepId}
+                AND "step"."tenant" = ${principal.tenant}
+                AND "step"."status" IN ('queued', 'running')
+                AND "teamRun"."status" IN ('queued', 'running')
+                AND "step"."approvalStatus" IN ('not_required', 'approved')
+                AND (
+                  ${requiresWriteApproval} = false
+                  OR "step"."approvalStatus" = 'approved'
+                )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements_text(
+                    CAST(${jsonParameter(input.approvedCapabilities)} AS jsonb)
+                  ) AS "requested"("capability")
+                  WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements("step"."skillSnapshots")
+                      AS "skill"("snapshot")
+                    WHERE ("skill"."snapshot"->'requiredCapabilities')
+                      ? "requested"."capability"
+                  )
+                )
+              FOR SHARE OF "step", "teamRun"`
           )
         );
         if (!step) {
@@ -1981,9 +2030,10 @@ export function createTeamStore(database: TeamStoreDatabase) {
         if (
           (input.status === "waiting_approval" &&
             currentApprovalStatus !== "pending") ||
-          (currentStatus === "waiting_approval" &&
-            currentApprovalStatus === "pending" &&
-            !["waiting_approval", "failed", "cancelled"].includes(input.status))
+          (currentApprovalStatus === "pending" &&
+            !["pending", "waiting_approval", "failed", "cancelled"].includes(
+              input.status
+            ))
         ) {
           return { kind: "invalid_transition" as const };
         }
