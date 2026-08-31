@@ -6,6 +6,7 @@ import {
   teamHandoffSchema,
 } from "@opencoven/agent-contracts";
 import { buildTeamHandoff, TEAM_HANDOFF_TRUNCATION_MARKER } from "./handoff";
+import { buildTeamStepTask } from "./task";
 
 const NOW = "2026-08-31T08:00:00.000Z";
 
@@ -217,6 +218,49 @@ test("redacts complete nested operational metadata values and fails closed for m
     assert.equal(serialized.includes(marker), false);
   }
   assert.equal(serialized.includes("preserved"), true);
+  assert.match(serialized, /\[REDACTED\]/u);
+});
+
+test("rejects malformed metadata with escaped sensitive keys before handoff task embedding", () => {
+  const cases = [
+    ["raw\\u004cogs", "MALFORMED_ESCAPED_RAW_LOG_SECRET"],
+    ["PROVIDER\\u006cOGS", "MALFORMED_ESCAPED_PROVIDER_LOG_SECRET"],
+    ["se\\u0073sion", "MALFORMED_ESCAPED_SESSION_SECRET"],
+    ["TEN\\u0061NT", "MALFORMED_ESCAPED_TENANT_SECRET"],
+    ["creden\\u0074ial", "MALFORMED_ESCAPED_CREDENTIAL_SECRET"],
+    ["ENC\\u0052YPTED", "MALFORMED_ESCAPED_ENCRYPTED_SECRET"],
+    ["raw\\tLogs", "MALFORMED_ESCAPED_WHITESPACE_LOG_SECRET"],
+  ] as const;
+  const harmlessJson = JSON.stringify({
+    summary: "USEFUL_VALID_HANDOFF_METADATA",
+  });
+  const harmlessText = "USEFUL_PLAIN_HANDOFF_TEXT";
+  const output = [
+    ...cases.map(([key, marker]) => `{"${key}":"${marker}",}`),
+    harmlessJson,
+    harmlessText,
+  ].join("\n");
+  const first = built(buildTeamHandoff({ output }));
+  const second = built(buildTeamHandoff({ output }));
+  const task = buildTeamStepTask({
+    githubCapability: "none",
+    memberResponsibility: "Continue the verified team task.",
+    mission: "Complete the requested work.",
+    priorHandoffs: [first.handoff],
+    profileInstructions: "Use only public-safe evidence.",
+    skillSnapshots: [],
+  });
+  const serialized = JSON.stringify(first.handoff);
+
+  assert.deepEqual(first, second);
+  for (const [, marker] of cases) {
+    assert.equal(serialized.includes(marker), false);
+    assert.equal(task.includes(marker), false);
+  }
+  assert.equal(serialized.includes("USEFUL_VALID_HANDOFF_METADATA"), true);
+  assert.equal(serialized.includes(harmlessText), true);
+  assert.equal(task.includes("USEFUL_VALID_HANDOFF_METADATA"), true);
+  assert.equal(task.includes(harmlessText), true);
   assert.match(serialized, /\[REDACTED\]/u);
 });
 

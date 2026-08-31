@@ -89,9 +89,65 @@ function isOperationalMetadataKey(value: string): boolean {
   );
 }
 
+function decodeJsonKeyEscapes(value: string): string | null {
+  let decoded = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character !== "\\") {
+      decoded += character;
+      continue;
+    }
+
+    const escapeCode = value[index + 1];
+    if (escapeCode === undefined) {
+      return null;
+    }
+    if (escapeCode === "u") {
+      const hex = value.slice(index + 2, index + 6);
+      if (!/^[\dA-Fa-f]{4}$/u.test(hex)) {
+        return null;
+      }
+      decoded += String.fromCharCode(Number.parseInt(hex, 16));
+      index += 5;
+      continue;
+    }
+
+    const simpleEscapes: Readonly<Record<string, string>> = {
+      '"': '"',
+      "/": "/",
+      "\\": "\\",
+      b: "\b",
+      f: "\f",
+      n: "\n",
+      r: "\r",
+      t: "\t",
+    };
+    const replacement = simpleEscapes[escapeCode];
+    if (replacement === undefined) {
+      return null;
+    }
+    decoded += replacement;
+    index += 1;
+  }
+  return decoded;
+}
+
 function containsOperationalMetadataKey(value: string): boolean {
-  const propertyKey = /(?:^|[,{]\s*)["']?([^"'{}[\],:]+?)["']?\s*:/gmu;
-  for (const match of value.matchAll(propertyKey)) {
+  const doubleQuotedProperty =
+    /(?:^|[,{]\s*)"((?:\\[^\r\n]|[^"\\\r\n])*)"\s*:/gmu;
+  const singleQuotedProperty =
+    /(?:^|[,{]\s*)'((?:\\[^\r\n]|[^'\\\r\n])*)'\s*:/gmu;
+  for (const propertyKey of [doubleQuotedProperty, singleQuotedProperty]) {
+    for (const match of value.matchAll(propertyKey)) {
+      const decoded = match[1] && decodeJsonKeyEscapes(match[1]);
+      if (decoded !== null && decoded && isOperationalMetadataKey(decoded)) {
+        return true;
+      }
+    }
+  }
+
+  const unquotedProperty = /(?:^|[,{]\s*)([^"'{}[\],:\\]+?)\s*:/gmu;
+  for (const match of value.matchAll(unquotedProperty)) {
     if (match[1] && isOperationalMetadataKey(match[1])) {
       return true;
     }
