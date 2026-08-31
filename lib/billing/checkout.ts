@@ -254,30 +254,37 @@ export async function reconcileBlockingCheckoutSessions(input: {
       .map((session) => session.id),
     ...(input.knownSessionIds ?? []),
   ]);
-  const completed = await Promise.all(
-    [...sessionIds].map(async (sessionId) => {
-      const session = await input.retrieve(sessionId);
-      if (!isAppOwnedCheckoutSession(session, input)) {
-        throw new CheckoutSessionCleanupError(
-          "A Checkout Session is not safely app-owned."
-        );
-      }
-      if (session.status === "complete") {
-        return completedSession(session);
-      }
-      if (session.status === "expired") {
-        return null;
-      }
-      if (session.status !== "open") {
-        throw new CheckoutSessionCleanupError(
-          "A Checkout Session is no longer safely expirable."
-        );
-      }
-      return expireBlockingSession(session, input);
-    })
-  );
+  const completed: Array<{
+    sessionId: string;
+    subscriptionId: string | null;
+  }> = [];
+  for (const sessionId of [...sessionIds].sort()) {
+    // biome-ignore lint/performance/noAwaitInLoops: one durable expiration checkpoint cannot safely represent concurrent provider mutations.
+    const session = await input.retrieve(sessionId);
+    if (!isAppOwnedCheckoutSession(session, input)) {
+      throw new CheckoutSessionCleanupError(
+        "A Checkout Session is not safely app-owned."
+      );
+    }
+    if (session.status === "complete") {
+      completed.push(completedSession(session));
+      continue;
+    }
+    if (session.status === "expired") {
+      continue;
+    }
+    if (session.status !== "open") {
+      throw new CheckoutSessionCleanupError(
+        "A Checkout Session is no longer safely expirable."
+      );
+    }
+    const reconciled = await expireBlockingSession(session, input);
+    if (reconciled) {
+      completed.push(reconciled);
+    }
+  }
 
-  return completed.filter((session) => session !== null);
+  return completed;
 }
 
 async function reconcileRetrievedReusable(
