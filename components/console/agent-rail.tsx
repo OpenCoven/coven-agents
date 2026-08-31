@@ -6,18 +6,16 @@ import {
   type AgentDefinition,
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
-import { Check, ChevronsUpDown, PanelLeft, Plus } from "lucide-react";
+import { ChevronsUpDown, PanelLeft, Plus, Search } from "lucide-react";
 import { useRef, useState } from "react";
 import { BrandMark } from "@/components/brand/brand-mark";
 import {
   AccountAvatar,
-  Caret,
   StatusDot,
   statusTone,
 } from "@/components/console/primitives";
 import {
   hairline,
-  tabular,
   truncate,
   type as type_,
   well,
@@ -35,12 +33,19 @@ import type { ConsoleRun } from "@/lib/console/types";
 
 export const AGENT_RAIL_WIDTHS = {
   collapsed: 58,
-  default: 268,
+  default: 296,
   max: 420,
-  min: 220,
+  min: 248,
 } as const;
 
 const KEY_STEP = 16;
+const AGENT_SECTIONS = [
+  { id: "active", label: "Active" },
+  { id: "profiles", label: "Profiles" },
+  { id: "attention", label: "Needs attention" },
+] as const;
+
+type AgentSectionId = (typeof AGENT_SECTIONS)[number]["id"];
 
 type RailProps = {
   agents: AgentDefinition[];
@@ -56,6 +61,7 @@ type RailProps = {
   /** The browser's clock, or 0 before it is known. */
   now: number;
   onToggle: () => void;
+  pendingRunHistoryAgentIds: ReadonlySet<string>;
   runs: ConsoleRun[];
   selectedAgentId: string | null;
   selectedRunId: string | null;
@@ -88,6 +94,45 @@ function AgentGlyph({
       {glyphFor(sanitizeEvidenceText(agent.name))}
     </span>
   );
+}
+
+function sectionForAgent(agent: AgentDefinition): AgentSectionId {
+  if (agent.status === "running") {
+    return "active";
+  }
+  return agent.status === "error" ? "attention" : "profiles";
+}
+
+function matchesRailQuery(
+  agent: AgentDefinition,
+  agentRuns: ConsoleRun[],
+  query: string
+): boolean {
+  if (!query) {
+    return true;
+  }
+
+  return [
+    agent.name,
+    agent.description,
+    agent.runtime,
+    ...agentRuns.map((run) => run.snapshot.task),
+  ]
+    .map((value) => sanitizeEvidenceText(value).toLocaleLowerCase())
+    .some((value) => value.includes(query));
+}
+
+function disambiguatedLabel(
+  agent: AgentDefinition,
+  agents: AgentDefinition[],
+  labelFor: (candidate: AgentDefinition) => string
+): string {
+  const label = labelFor(agent);
+  const matches = agents.filter((candidate) => labelFor(candidate) === label);
+  if (matches.length < 2) {
+    return label;
+  }
+  return `${label}, profile ${matches.findIndex((candidate) => candidate.id === agent.id) + 1} of ${matches.length}`;
 }
 
 function MiniRail({
@@ -167,7 +212,12 @@ function MiniRail({
       >
         {agents.map((agent) => (
           <button
-            aria-label={sanitizeEvidenceText(agent.name)}
+            aria-label={disambiguatedLabel(
+              agent,
+              agents,
+              (candidate) =>
+                `${sanitizeEvidenceText(candidate.name)}, ${candidate.runtime}, ${candidate.status}`
+            )}
             className="oc-tint"
             key={agent.id}
             onClick={() => onSelectAgent(agent.id)}
@@ -226,160 +276,8 @@ function MiniRail({
   );
 }
 
-function RuntimeFilter({
-  onToggle,
-  runtimes,
-  selected,
-  total,
-}: {
-  onToggle: (runtime: string) => void;
-  runtimes: { count: number; id: string }[];
-  selected: Set<string>;
-  total: number;
-}) {
-  const [open, setOpen] = useState(false);
-  const label =
-    selected.size === 0
-      ? "every harness"
-      : selected.size === 1
-        ? [...selected][0]
-        : `${selected.size} harnesses`;
-
-  return (
-    <div style={{ position: "relative" }}>
-      <button
-        aria-expanded={open}
-        aria-haspopup="listbox"
-        className="oc-tint"
-        onClick={() => setOpen((value) => !value)}
-        style={{
-          alignItems: "center",
-          background: "transparent",
-          border: hairline,
-          borderRadius: "var(--radius-sm)",
-          cursor: "pointer",
-          display: "flex",
-          gap: 6,
-          height: 22,
-          padding: "0 7px",
-        }}
-        title="Filter by harness"
-        type="button"
-      >
-        <span
-          style={{
-            color: "var(--text-secondary)",
-            font: "400 10px/1 var(--font-mono)",
-            ...truncate,
-          }}
-        >
-          {label}
-        </span>
-        <span style={{ ...type_.meta, ...tabular }}>{total}</span>
-        <Caret open={open} size={9} />
-      </button>
-      {open ? (
-        <>
-          <button
-            aria-label="Close the harness filter"
-            onClick={() => setOpen(false)}
-            style={{
-              background: "transparent",
-              border: 0,
-              cursor: "default",
-              inset: 0,
-              position: "fixed",
-              zIndex: 28,
-            }}
-            type="button"
-          />
-          <div
-            aria-label="Filter by harness"
-            aria-multiselectable="true"
-            role="listbox"
-            style={{
-              background: "var(--bg-elevated)",
-              border: "1px solid var(--border-strong)",
-              borderRadius: "var(--radius-card)",
-              boxShadow: "var(--shadow-lg)",
-              display: "flex",
-              flexDirection: "column",
-              gap: 2,
-              padding: 6,
-              position: "absolute",
-              right: 0,
-              top: 28,
-              width: 214,
-              zIndex: 30,
-            }}
-          >
-            {runtimes.map((runtime) => (
-              <button
-                aria-selected={selected.has(runtime.id)}
-                className="oc-row"
-                key={runtime.id}
-                onClick={() => onToggle(runtime.id)}
-                role="option"
-                style={{
-                  alignItems: "center",
-                  background: "transparent",
-                  border: 0,
-                  borderRadius: "var(--radius-control)",
-                  cursor: "pointer",
-                  display: "flex",
-                  gap: 9,
-                  padding: "7px 8px",
-                  textAlign: "left",
-                  width: "100%",
-                }}
-                type="button"
-              >
-                <span
-                  style={{
-                    alignItems: "center",
-                    background: selected.has(runtime.id)
-                      ? "color-mix(in oklch, var(--accent-presence) 22%, transparent)"
-                      : "transparent",
-                    border: `1px solid ${
-                      selected.has(runtime.id)
-                        ? "color-mix(in oklch, var(--accent-presence) 60%, transparent)"
-                        : "var(--border-hairline)"
-                    }`,
-                    borderRadius: 4,
-                    color: "var(--accent-presence)",
-                    display: "grid",
-                    flex: "none",
-                    height: 14,
-                    placeItems: "center",
-                    width: 14,
-                  }}
-                >
-                  {selected.has(runtime.id) ? <Check size={10} /> : null}
-                </span>
-                <span
-                  style={{
-                    color: "var(--text-primary)",
-                    flex: 1,
-                    font: "400 12px/1.3 var(--font-ui)",
-                    ...truncate,
-                  }}
-                >
-                  {runtime.id}
-                </span>
-                <span style={{ ...type_.meta, ...tabular }}>
-                  {runtime.count}
-                </span>
-              </button>
-            ))}
-          </div>
-        </>
-      ) : null}
-    </div>
-  );
-}
-
 export function AgentRail(props: RailProps) {
-  const [filter, setFilter] = useState<Set<string>>(new Set());
+  const [query, setQuery] = useState("");
   const dragFrom = useRef<{
     pointerId: number;
     startWidth: number;
@@ -391,29 +289,35 @@ export function AgentRail(props: RailProps) {
   }
 
   const minWidth = Math.min(AGENT_RAIL_WIDTHS.min, props.widthLimit);
-  const runtimes = [...new Set(props.agents.map((agent) => agent.runtime))]
-    .sort()
-    .map((runtime) => ({
-      count: props.agents.filter((agent) => agent.runtime === runtime).length,
-      id: runtime,
-    }));
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const runsByAgent = new Map<string, ConsoleRun[]>();
+  for (const run of props.runs) {
+    const agentRuns = runsByAgent.get(run.agentId) ?? [];
+    agentRuns.push(run);
+    runsByAgent.set(run.agentId, agentRuns);
+  }
+  for (const agentRuns of runsByAgent.values()) {
+    agentRuns.sort(
+      (left, right) =>
+        Date.parse(right.snapshot.createdAt) -
+        Date.parse(left.snapshot.createdAt)
+    );
+  }
 
-  const visible =
-    filter.size === 0
-      ? props.agents
-      : props.agents.filter((agent) => filter.has(agent.runtime));
-
-  const toggleRuntime = (runtime: string) => {
-    setFilter((current) => {
-      const next = new Set(current);
-      if (next.has(runtime)) {
-        next.delete(runtime);
-      } else {
-        next.add(runtime);
-      }
-      return next;
-    });
-  };
+  const sections = AGENT_SECTIONS.map((section) => ({
+    ...section,
+    agents: props.agents.filter((agent) => {
+      const agentRuns = runsByAgent.get(agent.id) ?? [];
+      return (
+        sectionForAgent(agent) === section.id &&
+        matchesRailQuery(agent, agentRuns, normalizedQuery)
+      );
+    }),
+  })).filter((section) => section.agents.length > 0);
+  const visibleCount = sections.reduce(
+    (count, section) => count + section.agents.length,
+    0
+  );
 
   return (
     <aside
@@ -505,52 +409,29 @@ export function AgentRail(props: RailProps) {
         title="Drag, or use the arrow keys, to resize"
       />
 
-      <div
-        style={{
-          alignItems: "center",
-          display: "flex",
-          flex: "none",
-          gap: 10,
-          padding: "12px 12px 6px",
-        }}
-      >
-        <span
-          style={{
-            ...well(false, 30),
-            color: "var(--accent-presence)",
-            fontSize: 13,
-          }}
-        >
-          <BrandMark style={{ height: 14, width: 15 }} />
-        </span>
-        <span
-          style={{
-            display: "flex",
-            flex: 1,
-            flexDirection: "column",
-            gap: 3,
-            minWidth: 0,
-          }}
-        >
-          <span style={type_.title}>OpenCoven</span>
-          <span style={type_.meta}>Control plane</span>
+      <div className="oc-agent-rail__header">
+        <span className="oc-agent-rail__identity">
+          <span className="oc-agent-rail__brand">
+            <BrandMark style={{ height: 14, width: 15 }} />
+          </span>
+          <span>
+            <span className="oc-agent-rail__title">OpenCoven</span>
+            <span className="oc-agent-rail__subtitle">Execution profiles</span>
+          </span>
         </span>
         <button
+          aria-label="New agent"
+          className="oc-tint oc-agent-rail__action"
+          onClick={props.onCreateAgent}
+          title="New agent"
+          type="button"
+        >
+          <Plus size={15} />
+        </button>
+        <button
           aria-label="Collapse the navigation"
-          className="oc-tint"
+          className="oc-tint oc-agent-rail__action"
           onClick={props.onToggle}
-          style={{
-            background: "transparent",
-            border: "1px solid transparent",
-            borderRadius: "var(--radius-control)",
-            color: "var(--text-muted)",
-            cursor: "pointer",
-            display: "grid",
-            flex: "none",
-            height: 26,
-            placeItems: "center",
-            width: 26,
-          }}
           title="Collapse the navigation"
           type="button"
         >
@@ -558,231 +439,153 @@ export function AgentRail(props: RailProps) {
         </button>
       </div>
 
+      <search className="oc-agent-rail__search">
+        <Search aria-hidden="true" size={14} />
+        <input
+          aria-label="Search profiles and runs"
+          onChange={(event) => setQuery(event.currentTarget.value)}
+          placeholder="Search profiles and runs"
+          type="search"
+          value={query}
+        />
+      </search>
+
       <div
         className="oc-scroll"
         style={{
           flex: 1,
           minHeight: 0,
           overflowY: "auto",
-          padding: "2px 8px 10px",
+          padding: "6px 8px 14px",
         }}
       >
-        <div
-          style={{
-            alignItems: "center",
-            display: "flex",
-            gap: 8,
-            padding: "12px 9px 6px",
-          }}
-        >
-          <span
-            style={{
-              color: "var(--text-muted)",
-              font: "400 11px/1 var(--font-ui)",
-            }}
-          >
-            Agents
-          </span>
-          <div style={{ flex: 1 }} />
-          {runtimes.length > 1 ? (
-            <RuntimeFilter
-              onToggle={toggleRuntime}
-              runtimes={runtimes}
-              selected={filter}
-              total={visible.length}
-            />
-          ) : (
-            <span style={{ ...type_.meta, ...tabular }}>{visible.length}</span>
-          )}
-        </div>
+        <div>
+          {sections.flatMap((section) => [
+            <h2
+              className="oc-agent-group__heading"
+              key={`section-${section.id}`}
+            >
+              <span>{section.label}</span>
+              <span>{section.agents.length}</span>
+            </h2>,
+            ...section.agents.map((agent) => {
+              const isOpen = agent.id === props.selectedAgentId;
+              const agentRuns = runsByAgent.get(agent.id) ?? [];
+              const historyPending = props.pendingRunHistoryAgentIds.has(
+                agent.id
+              );
+              const [latestRun] = agentRuns;
+              const preview = sanitizeEvidenceText(
+                latestRun?.snapshot.task ||
+                  agent.description ||
+                  `${agent.runtime} execution profile`
+              );
+              const recency = latestRun?.snapshot.createdAt ?? agent.lastRunAt;
+              const name = sanitizeEvidenceText(agent.name);
+              const accessibleLabel = disambiguatedLabel(
+                agent,
+                props.agents,
+                (candidate) => {
+                  const candidateRuns = runsByAgent.get(candidate.id) ?? [];
+                  const [candidateLatestRun] = candidateRuns;
+                  const candidatePreview = sanitizeEvidenceText(
+                    candidateLatestRun?.snapshot.task ||
+                      candidate.description ||
+                      `${candidate.runtime} execution profile`
+                  );
+                  return `${sanitizeEvidenceText(candidate.name)}, ${candidatePreview}, ${candidate.runtime}, ${candidate.status}`;
+                }
+              );
 
-        {visible.map((agent) => {
-          const isOpen = agent.id === props.selectedAgentId;
-          const agentRuns = props.runs.filter(
-            (run) => run.agentId === agent.id
-          );
-
-          return (
-            <div key={agent.id} style={{ marginBottom: 2 }}>
-              <button
-                aria-expanded={isOpen}
-                className="oc-row oc-rowscope"
-                onClick={() => props.onSelectAgent(agent.id)}
-                style={{
-                  alignItems: "center",
-                  background: isOpen
-                    ? "color-mix(in oklch, var(--accent-presence) 12%, transparent)"
-                    : "transparent",
-                  border: 0,
-                  borderRadius: "var(--radius-md)",
-                  cursor: "pointer",
-                  display: "flex",
-                  gap: 8,
-                  padding: "8px 8px",
-                  textAlign: "left",
-                  width: "100%",
-                }}
-                type="button"
-              >
-                <Caret open={isOpen} size={10} />
-                <AgentGlyph agent={agent} selected={isOpen} />
-                <span
-                  style={{
-                    display: "flex",
-                    flex: 1,
-                    flexDirection: "column",
-                    gap: 2,
-                    minWidth: 0,
-                    textAlign: "left",
-                  }}
-                >
-                  <span
-                    style={{ ...type_.title, lineHeight: 1.2, ...truncate }}
-                  >
-                    {sanitizeEvidenceText(agent.name)}
-                  </span>
-                  <span
-                    style={{
-                      alignItems: "center",
-                      color: "var(--text-muted)",
-                      display: "flex",
-                      font: "400 10px/1.2 var(--font-mono)",
-                      gap: 5,
-                      ...truncate,
-                    }}
-                  >
-                    <span style={{ color: "var(--text-secondary)" }}>
-                      {agent.runtime}
-                    </span>
-                    <span aria-hidden="true">·</span>
-                    <span>{formatAge(agent.lastRunAt, props.now)}</span>
-                  </span>
-                </span>
-                <StatusDot
-                  label={agent.status}
-                  size={6}
-                  tone={agentTone(agent)}
-                />
-              </button>
-
-              {isOpen ? (
-                <div
-                  style={{
-                    borderLeft: hairline,
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 1,
-                    marginLeft: 25,
-                    padding: "4px 0 8px 14px",
-                  }}
-                >
+              return (
+                <div className="oc-agent-conversation" key={agent.id}>
                   <button
-                    className="oc-row"
-                    onClick={() => props.onNewRun(agent.id)}
-                    style={{
-                      alignItems: "center",
-                      background: "transparent",
-                      border: 0,
-                      borderRadius: "var(--radius-sm)",
-                      color: "var(--accent-presence)",
-                      cursor: "pointer",
-                      display: "flex",
-                      gap: 8,
-                      padding: "6px 8px",
-                      textAlign: "left",
-                      width: "100%",
-                    }}
+                    aria-expanded={isOpen}
+                    aria-label={accessibleLabel}
+                    className="oc-row oc-agent-conversation__button"
+                    data-selected={isOpen ? "true" : "false"}
+                    onClick={() => props.onSelectAgent(agent.id)}
                     type="button"
                   >
-                    <span
-                      style={{
-                        display: "grid",
-                        placeItems: "center",
-                        width: 12,
-                      }}
-                    >
-                      <Plus size={11} />
+                    <span className="oc-agent-conversation__glyph">
+                      <AgentGlyph agent={agent} selected={isOpen} size={34} />
+                      <span className="oc-agent-conversation__beacon">
+                        <StatusDot
+                          label={agent.status}
+                          size={7}
+                          tone={agentTone(agent)}
+                        />
+                      </span>
                     </span>
-                    <span
-                      style={{
-                        font: "500 12px/1.3 var(--font-ui)",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      New run
+                    <span className="oc-agent-conversation__copy">
+                      <span className="oc-agent-conversation__topline">
+                        <span className="oc-agent-conversation__name">
+                          {name}
+                        </span>
+                        <span className="oc-agent-conversation__time">
+                          {formatAge(recency, props.now)}
+                        </span>
+                      </span>
+                      <span className="oc-agent-conversation__preview">
+                        {preview}
+                      </span>
                     </span>
                   </button>
 
-                  {agentRuns.length === 0 ? (
-                    <p
-                      style={{
-                        ...type_.body,
-                        color: "var(--text-muted)",
-                        font: "400 11px/1.5 var(--font-ui)",
-                        padding: "4px 8px 2px",
-                      }}
-                    >
-                      No runs this session.
-                    </p>
-                  ) : (
-                    agentRuns.map((run) => (
-                      <button
-                        className="oc-row"
-                        key={run.snapshot.id}
-                        onClick={() => props.onSelectRun(run.snapshot.id)}
-                        style={{
-                          alignItems: "center",
-                          background:
-                            run.snapshot.id === props.selectedRunId
-                              ? "var(--bg-raised)"
-                              : "transparent",
-                          border: 0,
-                          borderRadius: "var(--radius-sm)",
-                          cursor: "pointer",
-                          display: "flex",
-                          gap: 8,
-                          padding: "7px 8px",
-                          textAlign: "left",
-                          width: "100%",
-                        }}
-                        type="button"
-                      >
-                        <StatusDot
-                          label={run.snapshot.status}
-                          size={6}
-                          tone={statusTone(run.snapshot.status)}
-                        />
-                        <span
-                          style={{
-                            display: "flex",
-                            flex: 1,
-                            flexDirection: "column",
-                            gap: 3,
-                            minWidth: 0,
-                            textAlign: "left",
-                          }}
+                  {isOpen ? (
+                    <div className="oc-agent-runs">
+                      <div className="oc-agent-runs__heading">
+                        <span>Recent runs</span>
+                        <button
+                          className="oc-tint"
+                          onClick={() => props.onNewRun(agent.id)}
+                          type="button"
                         >
-                          <span
-                            style={{
-                              color: "var(--text-secondary)",
-                              font: "400 12px/1.35 var(--font-ui)",
-                              ...truncate,
-                            }}
+                          <Plus size={11} />
+                          New run
+                        </button>
+                      </div>
+
+                      {agentRuns.length === 0 ? (
+                        <p>
+                          {historyPending
+                            ? "Loading recent runs…"
+                            : "No runs in this session."}
+                        </p>
+                      ) : (
+                        agentRuns.map((run) => (
+                          <button
+                            className="oc-row oc-agent-run"
+                            data-selected={
+                              run.snapshot.id === props.selectedRunId
+                                ? "true"
+                                : "false"
+                            }
+                            key={run.snapshot.id}
+                            onClick={() => props.onSelectRun(run.snapshot.id)}
+                            type="button"
                           >
-                            {sanitizeEvidenceText(run.snapshot.task)}
-                          </span>
-                          <span style={type_.meta}>
-                            {formatAge(run.snapshot.createdAt, props.now)}
-                          </span>
-                        </span>
-                      </button>
-                    ))
-                  )}
+                            <StatusDot
+                              label={run.snapshot.status}
+                              size={6}
+                              tone={statusTone(run.snapshot.status)}
+                            />
+                            <span>
+                              {sanitizeEvidenceText(run.snapshot.task)}
+                            </span>
+                            <time dateTime={run.snapshot.createdAt}>
+                              {formatAge(run.snapshot.createdAt, props.now)}
+                            </time>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  ) : null}
                 </div>
-              ) : null}
-            </div>
-          );
-        })}
+              );
+            }),
+          ])}
+        </div>
 
         {props.agents.length === 0 ? (
           <p
@@ -797,46 +600,13 @@ export function AgentRail(props: RailProps) {
             start a run.
           </p>
         ) : null}
-      </div>
-
-      <div style={{ borderTop: hairline, flex: "none", padding: "8px 10px" }}>
-        <button
-          className="oc-newagent"
-          onClick={props.onCreateAgent}
-          style={{
-            alignItems: "center",
-            background: "transparent",
-            border:
-              "1px dashed color-mix(in oklch, var(--accent-presence) 45%, transparent)",
-            borderRadius: "var(--radius-md)",
-            color: "var(--accent-presence)",
-            cursor: "pointer",
-            display: "flex",
-            gap: 9,
-            padding: "8px 9px",
-            textAlign: "left",
-            transition:
-              "background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard)",
-            width: "100%",
-          }}
-          type="button"
-        >
-          <span
-            style={{
-              border:
-                "1px dashed color-mix(in oklch, var(--accent-presence) 55%, transparent)",
-              borderRadius: "var(--radius-control)",
-              display: "grid",
-              flex: "none",
-              height: 24,
-              placeItems: "center",
-              width: 24,
-            }}
-          >
-            <Plus size={12} />
-          </span>
-          <span style={{ font: "500 12px/1.2 var(--font-ui)" }}>New agent</span>
-        </button>
+        {props.agents.length > 0 && visibleCount === 0 ? (
+          <p className="oc-agent-search-empty" role="status">
+            {normalizedQuery && props.pendingRunHistoryAgentIds.size > 0
+              ? "Searching run history…"
+              : `No profiles or runs match “${sanitizeEvidenceText(query.trim())}”.`}
+          </p>
+        ) : null}
       </div>
 
       <button

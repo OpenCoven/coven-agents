@@ -520,6 +520,200 @@ test.describe("Run console", () => {
     await expect(page.getByLabel("GitHub Copilot credential")).toHaveCount(0);
   });
 
+  test("the navigation rail groups and filters profile conversations", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    const profiles = [
+      {
+        ...retainedAgent,
+        description: "Audits evidence and verifies delivery timelines.",
+        status: "running",
+      },
+      {
+        ...retainedAgent,
+        description: "Finds source material before a run begins.",
+        id: OTHER_AGENT_ID,
+        name: "Research scout",
+      },
+      {
+        ...retainedAgent,
+        description: "Needs a credential before it can continue.",
+        id: "77777777-7777-4777-8777-777777777777",
+        name: "Blocked verifier",
+        status: "error",
+      },
+    ];
+
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({ json: { agents: profiles } });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", runs: [retainedRun] },
+        });
+      }
+      if (pathname.includes("/runs")) {
+        return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+
+    const navigation = page.getByRole("complementary", { name: "Navigation" });
+    await expect(
+      navigation.getByRole("searchbox", { name: "Search profiles and runs" })
+    ).toBeVisible();
+    await expect(navigation.getByText("Active", { exact: true })).toBeVisible();
+    await expect(
+      navigation.getByText("Profiles", { exact: true })
+    ).toBeVisible();
+    await expect(
+      navigation.getByText("Needs attention", { exact: true })
+    ).toBeVisible();
+    await expect(
+      navigation
+        .getByRole("button", { name: "Timeline auditor" })
+        .locator(".oc-agent-conversation__preview")
+    ).toBeVisible();
+    await expect(
+      navigation.getByRole("button", { name: "Timeline auditor" })
+    ).toHaveAccessibleName(
+      "Timeline auditor, Verify timeline output, copilot, running"
+    );
+    await expect(
+      navigation.getByRole("button", { name: "New agent" })
+    ).toBeVisible();
+
+    await navigation
+      .getByRole("searchbox", { name: "Search profiles and runs" })
+      .fill("source material");
+
+    await expect(
+      navigation.getByRole("button", { name: "Research scout" })
+    ).toBeVisible();
+    await expect(
+      navigation.getByRole("button", { name: "Timeline auditor" })
+    ).toHaveCount(0);
+    await expect(
+      navigation.getByRole("button", { name: "Blocked verifier" })
+    ).toHaveCount(0);
+  });
+
+  test("run-backed rail search stays pending until histories resolve", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let releaseHistory!: () => Promise<void>;
+
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({ json: { agents: [retainedAgent] } });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        return new Promise<void>((resolve) => {
+          releaseHistory = async () => {
+            await route.fulfill({
+              json: { apiVersion: "1.0", runs: [retainedRun] },
+            });
+            resolve();
+          };
+        });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+
+    const navigation = page.getByRole("complementary", { name: "Navigation" });
+    await navigation
+      .getByRole("searchbox", { name: "Search profiles and runs" })
+      .fill(retainedRun.task);
+    await expect(navigation.getByText("Searching run history…")).toBeVisible();
+
+    await releaseHistory();
+
+    await expect(
+      navigation.getByRole("button", { name: retainedAgent.name })
+    ).toBeVisible();
+    await expect(navigation.getByText("Searching run history…")).toHaveCount(0);
+  });
+
+  test("a newer profile reload owns the rail history loading state", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let historyRequests = 0;
+    let releaseFirstHistory!: () => Promise<void>;
+    let releaseSecondHistory!: () => Promise<void>;
+
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({ json: { agents: [retainedAgent] } });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        historyRequests += 1;
+        return new Promise<void>((resolve) => {
+          const release = async (runs: (typeof retainedRun)[]) => {
+            await route.fulfill({ json: { apiVersion: "1.0", runs } });
+            resolve();
+          };
+          if (historyRequests === 1) {
+            releaseFirstHistory = () => release([]);
+          } else {
+            releaseSecondHistory = () => release([retainedRun]);
+          }
+        });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+
+    const navigation = page.getByRole("complementary", { name: "Navigation" });
+    await navigation
+      .getByRole("searchbox", { name: "Search profiles and runs" })
+      .fill(retainedRun.task);
+    await page.getByRole("button", { name: "More run actions" }).click();
+    await page.getByRole("menuitem", { name: "Reload profiles" }).click();
+    await expect.poll(() => historyRequests).toBe(2);
+
+    await releaseFirstHistory();
+    await expect(navigation.getByText("Searching run history…")).toBeVisible();
+
+    await releaseSecondHistory();
+    await expect(
+      navigation.getByRole("button", { name: retainedAgent.name })
+    ).toBeVisible();
+    await expect(navigation.getByText("Searching run history…")).toHaveCount(0);
+  });
+
   test("the console remains operable at a phone viewport", async ({ page }) => {
     await page.setViewportSize({ height: 844, width: 390 });
     await page.goto("/agents");
@@ -556,6 +750,50 @@ test.describe("Run console", () => {
         () => document.documentElement.scrollWidth <= innerWidth
       )
     ).toBe(true);
+  });
+
+  test("collapsed profile controls include runtime and status context", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    const duplicateAgent = {
+      ...retainedAgent,
+      id: OTHER_AGENT_ID,
+    };
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({
+          json: { agents: [retainedAgent, duplicateAgent] },
+        });
+      }
+      if (pathname.includes("/runs")) {
+        return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.setViewportSize({ height: 844, width: 390 });
+    await page.goto("/agents");
+
+    const collapsed = page.getByLabel("Navigation, collapsed");
+    await expect(
+      collapsed.getByRole("button", {
+        name: "Timeline auditor, copilot, idle, profile 1 of 2",
+      })
+    ).toBeVisible();
+    await expect(
+      collapsed.getByRole("button", {
+        name: "Timeline auditor, copilot, idle, profile 2 of 2",
+      })
+    ).toBeVisible();
   });
 
   test("the empty console stacks before it crowds and scrolls in short landscapes", async ({
@@ -1235,6 +1473,7 @@ test.describe("Run console", () => {
     page,
   }) => {
     await context.addCookies(await subscriberCookies());
+    let releaseEvents!: () => Promise<void>;
     await page.route("**/api/tenant/prewarm", (route) =>
       route.fulfill({ status: 204 })
     );
@@ -1254,13 +1493,18 @@ test.describe("Run console", () => {
         });
       }
       if (pathname === `/api/runs/${RUN_ID}/events`) {
-        return route.fulfill({
-          body: `data: ${JSON.stringify({
-            id: 1,
-            run: liveRun("completed"),
-            type: "completed",
-          })}\n\n`,
-          contentType: "text/event-stream",
+        return new Promise<void>((resolve) => {
+          releaseEvents = async () => {
+            await route.fulfill({
+              body: `data: ${JSON.stringify({
+                id: 1,
+                run: liveRun("completed"),
+                type: "completed",
+              })}\n\n`,
+              contentType: "text/event-stream",
+            });
+            resolve();
+          };
         });
       }
       return route.fulfill({ json: {}, status: 404 });
@@ -1268,11 +1512,15 @@ test.describe("Run console", () => {
 
     await page.goto("/agents");
 
-    await expect(
-      page
-        .getByRole("button", { name: retainedAgent.name })
-        .getByRole("img", { name: "idle" })
-    ).toBeVisible();
+    const agentButton = page.getByRole("button", {
+      name: retainedAgent.name,
+    });
+    await agentButton.focus();
+    await expect(agentButton).toBeFocused();
+    await releaseEvents();
+
+    await expect(agentButton.getByRole("img", { name: "idle" })).toBeVisible();
+    await expect(agentButton).toBeFocused();
     await expect(
       page
         .locator(".oc-agent-rail")

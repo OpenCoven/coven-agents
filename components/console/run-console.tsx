@@ -142,6 +142,9 @@ export function RunConsole() {
   const [agents, setAgents] = useState<AgentDefinition[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [runs, setRuns] = useState<ConsoleRun[]>([]);
+  const [pendingRunHistoryAgentIds, setPendingRunHistoryAgentIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [threadOpenRevision, setThreadOpenRevision] = useState(0);
   const [streamingRunId, setStreamingRunId] = useState<string | null>(null);
@@ -315,6 +318,7 @@ export function RunConsole() {
   const activeSessionIdentityRef = useRef("");
   const latestSessionIdentityRef = useRef(sessionIdentity);
   const prewarmedIdentitiesRef = useRef(new Set<string>());
+  const refreshGenerationRef = useRef(0);
   const sessionAbortRef = useRef<AbortController | null>(null);
   const sessionGenerationRef = useRef(0);
   latestSessionIdentityRef.current = sessionIdentity;
@@ -373,13 +377,20 @@ export function RunConsole() {
 
   const refresh = useCallback(
     async (generation: number, signal: AbortSignal) => {
+      refreshGenerationRef.current += 1;
+      const refreshGeneration = refreshGenerationRef.current;
+      const isLatestRefresh = () =>
+        refreshGenerationRef.current === refreshGeneration &&
+        isCurrentSession(generation, signal);
+
       try {
         const next = await client.listAgents(signal);
-        if (!isCurrentSession(generation, signal)) {
+        if (!isLatestRefresh()) {
           return;
         }
         setRunnerStatus("connected");
         setAgents(next);
+        setPendingRunHistoryAgentIds(new Set(next.map((agent) => agent.id)));
         setSelectedAgentId((current) =>
           next.some((agent) => agent.id === current)
             ? current
@@ -387,51 +398,57 @@ export function RunConsole() {
         );
 
         // The runner remembers a bounded history per agent; without this a
-        // reload shows an empty session list while the runs still exist. Each
-        // agent's listing fails soft — a runner without the route (or one
-        // agent's directory hiccup) costs history, never the console.
-        const discovered = (
-          await Promise.all(
-            next.map((agent) =>
-              client.listRuns(agent.id, signal).then(
-                (snapshots) =>
-                  snapshots.map((snapshot) => ({
-                    agentId: agent.id,
-                    snapshot,
-                  })),
-                (error: unknown) => {
-                  if (signal.aborted) {
-                    throw error;
-                  }
-                  return [];
-                }
-              )
-            )
-          )
-        ).flat();
-        if (!isCurrentSession(generation, signal)) {
-          return;
-        }
-        setRuns((current) => {
-          const known = new Set(current.map((run) => run.snapshot.id));
-          return [
-            ...current,
-            ...discovered
-              .filter((run) => !known.has(run.snapshot.id))
-              .map((run) => ({ ...run, events: [], lastEventId: 0 })),
-          ];
-        });
-        // A run that survived the refresh mid-flight resumes streaming; its
-        // events replay from the start, so the transcript rebuilds itself.
-        const live = discovered.find((run) => !isTerminal(run.snapshot.status))
-          ?.snapshot.id;
-        if (live && isCurrentSession(generation, signal)) {
-          setStreamingRunId((current) => current ?? live);
-        }
+        // reload shows an empty session list while the runs still exist.
+        // Histories merge as each request resolves so one slow agent cannot
+        // suppress every other profile's previews and search results.
+        await Promise.all(
+          next.map(async (agent) => {
+            try {
+              const snapshots = await client.listRuns(agent.id, signal);
+              if (!isLatestRefresh()) {
+                return;
+              }
+              const discovered = snapshots.map((snapshot) => ({
+                agentId: agent.id,
+                snapshot,
+              }));
+              setRuns((current) => {
+                const known = new Set(current.map((run) => run.snapshot.id));
+                return [
+                  ...current,
+                  ...discovered
+                    .filter((run) => !known.has(run.snapshot.id))
+                    .map((run) => ({ ...run, events: [], lastEventId: 0 })),
+                ];
+              });
+              // A run that survived the refresh mid-flight resumes streaming;
+              // its events replay from the start, so the transcript rebuilds.
+              const live = discovered.find(
+                (run) => !isTerminal(run.snapshot.status)
+              )?.snapshot.id;
+              if (live) {
+                setStreamingRunId((current) => current ?? live);
+              }
+            } catch (error) {
+              if (signal.aborted) {
+                throw error;
+              }
+            } finally {
+              if (isLatestRefresh()) {
+                setPendingRunHistoryAgentIds((current) => {
+                  const pending = new Set(current);
+                  pending.delete(agent.id);
+                  return pending;
+                });
+              }
+            }
+          })
+        );
       } catch (error) {
-        if (!isCurrentSession(generation, signal)) {
+        if (!isLatestRefresh()) {
           return;
         }
+        setPendingRunHistoryAgentIds(new Set());
         setRunnerStatus(
           error instanceof RunnerApiError
             ? (applicationRunnerStatusFromError(error) ?? "unavailable")
@@ -446,6 +463,7 @@ export function RunConsole() {
 
   useEffect(() => {
     sessionGenerationRef.current += 1;
+    refreshGenerationRef.current += 1;
     const generation = sessionGenerationRef.current;
     activeSessionIdentityRef.current = sessionIdentity;
     sessionAbortRef.current?.abort();
@@ -455,6 +473,7 @@ export function RunConsole() {
     setAgents([]);
     setSelectedAgentId(null);
     setRuns([]);
+    setPendingRunHistoryAgentIds(new Set());
     setSelectedRunId(null);
     setStreamingRunId(null);
     setStarting(false);
@@ -1397,6 +1416,7 @@ export function RunConsole() {
                   clampWidth(width, AGENT_RAIL_WIDTHS.min, agentRailWidthLimit)
                 )
               }
+              pendingRunHistoryAgentIds={pendingRunHistoryAgentIds}
               runs={runs}
               selectedAgentId={selectedAgentId}
               selectedRunId={selectedRunId}
