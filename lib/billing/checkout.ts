@@ -42,12 +42,18 @@ export type CheckoutSessionPage = {
   hasMore: boolean;
 };
 
-export type CheckoutSessionExpiration = (input: {
+export type CheckoutSessionCleanupResult = {
+  sessionId: string;
+  status: "complete" | "expired";
+  subscriptionId: string | null;
+};
+
+export type CheckoutSessionCleanup = (input: {
   cleanupKind: "blocking" | "obsolete";
   customerId: string;
-  sessionId: string;
+  sessionIds: readonly string[];
   userId: string;
-}) => Promise<CheckoutSessionSnapshot>;
+}) => Promise<CheckoutSessionCleanupResult[]>;
 
 export class CheckoutSessionCleanupError extends Error {}
 
@@ -127,8 +133,8 @@ export async function hasBlockingSubscription(
 export async function reconcileCheckoutSessions(input: {
   attemptId: string;
   attemptState: CheckoutAttemptState;
+  cleanupSessions: CheckoutSessionCleanup;
   customerId: string;
-  expireSession: CheckoutSessionExpiration;
   listPage: (
     input: Stripe.Checkout.SessionListParams
   ) => Promise<CheckoutSessionPage>;
@@ -137,7 +143,15 @@ export async function reconcileCheckoutSessions(input: {
   retrieve: (sessionId: string) => Promise<CheckoutSessionSnapshot>;
   userId: string;
 }): Promise<
-  | { kind: "complete"; sessionId: string; subscriptionId: string | null }
+  | {
+      completedSessions?: Array<{
+        sessionId: string;
+        subscriptionId: string | null;
+      }>;
+      kind: "complete";
+      sessionId: string;
+      subscriptionId: string | null;
+    }
   | { kind: "invalid_url"; sessionId: string }
   | { kind: "none" }
   | { kind: "retire_attempt" }
@@ -171,8 +185,11 @@ export async function reconcileCheckoutSessions(input: {
         return { kind: "retire_attempt" };
       }
       if (current.status === "open") {
-        await expireAndVerify(current, input);
-        return { kind: "retire_attempt" };
+        return (
+          (await cleanupObsoleteSessions([current.id], input)) ?? {
+            kind: "retire_attempt",
+          }
+        );
       }
       return { kind: "retry_required" };
     }
@@ -186,21 +203,28 @@ export async function reconcileCheckoutSessions(input: {
       return { kind: "retry_required" };
     }
     if (matchesCurrentFlow(current, input.priceId)) {
-      for (const session of byId.values()) {
-        if (
-          session.id !== current.id &&
-          session.status === "open" &&
-          isAppOwnedCheckoutSession(session, input)
-        ) {
-          // biome-ignore lint/performance/noAwaitInLoops: reusable Checkout is returned only after every competing Session is expired.
-          await expireAndVerify(await input.retrieve(session.id), input);
-        }
+      const completed = await cleanupObsoleteSessions(
+        [...byId.values()]
+          .filter(
+            (session) =>
+              session.id !== current.id &&
+              session.status === "open" &&
+              isAppOwnedCheckoutSession(session, input)
+          )
+          .map(({ id }) => id),
+        input
+      );
+      if (completed) {
+        return completed;
       }
       return reusableSession(current);
     }
 
-    await expireAndVerify(current, input);
-    return { kind: "retire_attempt" };
+    return (
+      (await cleanupObsoleteSessions([current.id], input)) ?? {
+        kind: "retire_attempt",
+      }
+    );
   }
 
   if (
@@ -218,12 +242,14 @@ export async function reconcileCheckoutSessions(input: {
     matchesCurrentFlow(session, input.priceId)
   );
 
-  for (const session of appOwnedOpen) {
-    if (session.id === reusable?.id) {
-      continue;
-    }
-    // biome-ignore lint/performance/noAwaitInLoops: replacement is forbidden until each payable Session is proven expired.
-    await expireAndVerify(await input.retrieve(session.id), input);
+  const completed = await cleanupObsoleteSessions(
+    appOwnedOpen
+      .filter((session) => session.id !== reusable?.id)
+      .map(({ id }) => id),
+    input
+  );
+  if (completed) {
+    return completed;
   }
 
   if (reusable) {
@@ -237,13 +263,12 @@ export async function reconcileCheckoutSessions(input: {
 }
 
 export async function reconcileBlockingCheckoutSessions(input: {
+  cleanupSessions: CheckoutSessionCleanup;
   customerId: string;
-  expireSession: CheckoutSessionExpiration;
   knownSessionIds?: readonly string[];
   listPage: (
     input: Stripe.Checkout.SessionListParams
   ) => Promise<CheckoutSessionPage>;
-  retrieve: (sessionId: string) => Promise<CheckoutSessionSnapshot>;
   userId: string;
 }): Promise<Array<{ sessionId: string; subscriptionId: string | null }>> {
   const sessions = await listCheckoutSessions(input, ["open"]);
@@ -254,37 +279,18 @@ export async function reconcileBlockingCheckoutSessions(input: {
       .map((session) => session.id),
     ...(input.knownSessionIds ?? []),
   ]);
-  const completed: Array<{
-    sessionId: string;
-    subscriptionId: string | null;
-  }> = [];
-  for (const sessionId of [...sessionIds].sort()) {
-    // biome-ignore lint/performance/noAwaitInLoops: one durable expiration checkpoint cannot safely represent concurrent provider mutations.
-    const session = await input.retrieve(sessionId);
-    if (!isAppOwnedCheckoutSession(session, input)) {
-      throw new CheckoutSessionCleanupError(
-        "A Checkout Session is not safely app-owned."
-      );
-    }
-    if (session.status === "complete") {
-      completed.push(completedSession(session));
-      continue;
-    }
-    if (session.status === "expired") {
-      continue;
-    }
-    if (session.status !== "open") {
-      throw new CheckoutSessionCleanupError(
-        "A Checkout Session is no longer safely expirable."
-      );
-    }
-    const reconciled = await expireBlockingSession(session, input);
-    if (reconciled) {
-      completed.push(reconciled);
-    }
-  }
-
-  return completed;
+  const terminal = await input.cleanupSessions({
+    cleanupKind: "blocking",
+    customerId: input.customerId,
+    sessionIds: [...sessionIds],
+    userId: input.userId,
+  });
+  return terminal
+    .filter(({ status }) => status === "complete")
+    .map(({ sessionId, subscriptionId }) => ({
+      sessionId,
+      subscriptionId,
+    }));
 }
 
 async function reconcileRetrievedReusable(
@@ -292,8 +298,8 @@ async function reconcileRetrievedReusable(
   listed: CheckoutSessionSnapshot,
   input: {
     attemptId: string;
+    cleanupSessions: CheckoutSessionCleanup;
     customerId: string;
-    expireSession: CheckoutSessionExpiration;
     priceId: string;
     providerIdempotencyKey: string;
     retrieve: (sessionId: string) => Promise<CheckoutSessionSnapshot>;
@@ -316,8 +322,11 @@ async function reconcileRetrievedReusable(
       return { kind: "retire_attempt" };
     }
     if (session.status === "open") {
-      await expireAndVerify(session, input);
-      return { kind: "retire_attempt" };
+      return (
+        (await cleanupObsoleteSessions([session.id], input)) ?? {
+          kind: "retire_attempt",
+        }
+      );
     }
     return { kind: "retry_required" };
   }
@@ -326,8 +335,11 @@ async function reconcileRetrievedReusable(
       return { kind: "retire_attempt" };
     }
     if (session.status === "open") {
-      await expireAndVerify(session, input);
-      return { kind: "retire_attempt" };
+      return (
+        (await cleanupObsoleteSessions([session.id], input)) ?? {
+          kind: "retire_attempt",
+        }
+      );
     }
     return { kind: "retry_required" };
   }
@@ -336,8 +348,11 @@ async function reconcileRetrievedReusable(
       return { kind: "retire_attempt" };
     }
     if (session.status === "open") {
-      await expireAndVerify(session, input);
-      return { kind: "retire_attempt" };
+      return (
+        (await cleanupObsoleteSessions([session.id], input)) ?? {
+          kind: "retire_attempt",
+        }
+      );
     }
     return { kind: "retry_required" };
   }
@@ -391,87 +406,57 @@ async function listCheckoutSessions(
   return sessions;
 }
 
-async function expireAndVerify(
-  session: CheckoutSessionSnapshot,
+async function cleanupObsoleteSessions(
+  sessionIds: readonly string[],
   input: {
+    cleanupSessions: CheckoutSessionCleanup;
     customerId: string;
-    expireSession: CheckoutSessionExpiration;
     userId: string;
   }
-): Promise<void> {
-  if (!isAppOwnedCheckoutSession(session, input)) {
-    throw new CheckoutSessionCleanupError(
-      "An obsolete Checkout Session is not safely app-owned."
-    );
+): Promise<{
+  completedSessions?: Array<{
+    sessionId: string;
+    subscriptionId: string | null;
+  }>;
+  kind: "complete";
+  sessionId: string;
+  subscriptionId: string | null;
+} | null> {
+  if (sessionIds.length === 0) {
+    return null;
   }
-  if (session.status === "expired") {
-    return;
-  }
-  if (session.status !== "open") {
-    throw new CheckoutSessionCleanupError(
-      "An obsolete Checkout Session is no longer safely expirable."
-    );
-  }
+  let terminal: CheckoutSessionCleanupResult[];
   try {
-    const reconciled = await input.expireSession({
+    terminal = await input.cleanupSessions({
       cleanupKind: "obsolete",
       customerId: input.customerId,
-      sessionId: session.id,
+      sessionIds,
       userId: input.userId,
     });
-    if (
-      !isAppOwnedCheckoutSession(reconciled, input) ||
-      reconciled.status !== "expired"
-    ) {
-      throw new Error("Stripe did not confirm Checkout Session expiration.");
-    }
   } catch (error) {
     throw new CheckoutSessionCleanupError(
       "An obsolete Checkout Session could not be expired.",
       { cause: error }
     );
   }
-}
-
-async function expireBlockingSession(
-  session: CheckoutSessionSnapshot,
-  input: {
-    customerId: string;
-    expireSession: CheckoutSessionExpiration;
-    userId: string;
-  }
-): Promise<{
-  sessionId: string;
-  subscriptionId: string | null;
-} | null> {
-  let reconciled: CheckoutSessionSnapshot;
-  try {
-    reconciled = await input.expireSession({
-      cleanupKind: "blocking",
-      customerId: input.customerId,
-      sessionId: session.id,
-      userId: input.userId,
-    });
-  } catch (error) {
-    throw new CheckoutSessionCleanupError(
-      "A Checkout Session could not be reconciled after expiration.",
-      { cause: error }
-    );
-  }
-  if (!isAppOwnedCheckoutSession(reconciled, input)) {
-    throw new CheckoutSessionCleanupError(
-      "A Checkout Session is not safely app-owned."
-    );
-  }
-  if (reconciled.status === "expired") {
+  const completed = terminal.filter(({ status }) => status === "complete");
+  const [firstCompleted] = completed;
+  if (!firstCompleted) {
     return null;
   }
-  if (reconciled.status === "complete") {
-    return completedSession(reconciled);
-  }
-  throw new CheckoutSessionCleanupError(
-    "A Checkout Session could not be safely closed."
-  );
+  return {
+    ...(completed.length > 1
+      ? {
+          completedSessions: completed.map(({ sessionId, subscriptionId }) => ({
+            sessionId,
+            subscriptionId,
+          })),
+        }
+      : {}),
+    kind: "complete",
+    sessionId: firstCompleted.sessionId,
+    subscriptionId: firstCompleted.subscriptionId,
+  };
 }
 
 function assertOpenSubscriptionSessionOwnership(

@@ -5,7 +5,12 @@ export const CHECKOUT_ATTEMPT_OPERATION = "checkout-attempt";
 export const CHECKOUT_ATTEMPT_KEY_HASH = createHash("sha256")
   .update("checkout-attempt-lease", "utf8")
   .digest("hex");
+export const CHECKOUT_ATTEMPT_STATE_MAX_BYTES = 8192;
+export const CHECKOUT_CLEANUP_QUEUE_MAX_LENGTH = 16;
+export const CHECKOUT_PROVIDER_IDENTIFIER_MAX_LENGTH = 128;
 const CHECKOUT_ATTEMPT_RENEWAL_MS = CHECKOUT_ATTEMPT_LEASE_TTL_MS / 2;
+const CHECKOUT_ATTEMPT_OWNER_MAX_BYTES =
+  CHECKOUT_ATTEMPT_STATE_MAX_BYTES * 2 + 512;
 
 export type CheckoutAttemptLease = {
   attemptId: string;
@@ -23,21 +28,32 @@ export type CheckoutAttemptStableState =
 
 export type CheckoutExpirationCleanupKind = "blocking" | "obsolete";
 
-type CheckoutExpirationAttempt = {
+export type CheckoutCleanupQueueItem =
+  | { sessionId: string }
+  | {
+      sessionId: string;
+      subscriptionId: string | null;
+      terminalStatus: "complete" | "expired";
+    };
+
+export type CheckoutCleanupQueueState = {
   cleanupKind: CheckoutExpirationCleanupKind;
+  currentIndex: number;
   customerId: string;
-  expirationIdempotencyKey: string;
+  expiration: {
+    generation: number;
+    idempotencyKey: string;
+    status: "in_flight" | "rejected";
+  } | null;
+  items: CheckoutCleanupQueueItem[];
+  kind: "cleanup_queue";
   resumeState: CheckoutAttemptStableState;
-  sessionId: string;
 };
 
 export type CheckoutAttemptState =
   | CheckoutAttemptStableState
-  | (CheckoutExpirationAttempt & { kind: "expiration_in_flight" })
-  | (CheckoutExpirationAttempt & {
-      kind: "expiration_confirmed";
-      terminalStatus: "complete" | "expired";
-    });
+  | CheckoutCleanupQueueState
+  | { kind: "invalid" };
 
 export type CheckoutAttemptLeaseClaimInput = {
   leaseExpiresAt: Date;
@@ -137,7 +153,10 @@ export async function runWithCheckoutAttemptLease<T>(options: {
     attemptId: string;
     attemptState: CheckoutAttemptState;
     checkpoint: (state: CheckoutAttemptState) => Promise<void>;
-    expirationIdempotencyKey: (sessionId: string) => string;
+    expirationIdempotencyKey: (
+      sessionId: string,
+      generation?: number
+    ) => string;
     providerIdempotencyKey: string;
   }) => Promise<CheckoutAttemptWork<T>>;
   store: CheckoutAttemptLeaseStore;
@@ -247,8 +266,12 @@ export async function runWithCheckoutAttemptLease<T>(options: {
       attemptId: lease.attemptId,
       attemptState: lease.attemptState,
       checkpoint,
-      expirationIdempotencyKey: (sessionId) =>
-        checkoutExpirationIdempotencyKey(providerIdempotencyKey, sessionId),
+      expirationIdempotencyKey: (sessionId, generation = 0) =>
+        checkoutExpirationIdempotencyKey(
+          providerIdempotencyKey,
+          sessionId,
+          generation
+        ),
       providerIdempotencyKey,
     });
   } catch (error) {
@@ -324,16 +347,38 @@ export function parseCheckoutAttemptState(
 ): CheckoutAttemptState {
   const ownedPrefix = "checkout-attempt-owner:v1:";
   if (storedState.startsWith(ownedPrefix)) {
+    if (
+      Buffer.byteLength(storedState, "utf8") > CHECKOUT_ATTEMPT_OWNER_MAX_BYTES
+    ) {
+      return { kind: "invalid" };
+    }
     try {
       const parsed = JSON.parse(storedState.slice(ownedPrefix.length)) as {
         state?: unknown;
       };
       return typeof parsed.state === "string"
         ? parseCheckoutAttemptState(parsed.state)
-        : { kind: "create_uncertain" };
+        : { kind: "invalid" };
     } catch {
-      return { kind: "create_uncertain" };
+      return { kind: "invalid" };
     }
+  }
+  const cleanupPrefix = "checkout-attempt:v3:cleanup:";
+  if (storedState.startsWith(cleanupPrefix)) {
+    if (
+      Buffer.byteLength(storedState, "utf8") > CHECKOUT_ATTEMPT_STATE_MAX_BYTES
+    ) {
+      return { kind: "invalid" };
+    }
+    try {
+      const parsed = JSON.parse(storedState.slice(cleanupPrefix.length));
+      return parseCheckoutCleanupQueueState(parsed) ?? { kind: "invalid" };
+    } catch {
+      return { kind: "invalid" };
+    }
+  }
+  if (storedState === "checkout-attempt:v3:invalid") {
+    return { kind: "invalid" };
   }
   const expirationPrefix = "checkout-attempt:v2:expiration:";
   if (storedState.startsWith(expirationPrefix)) {
@@ -342,9 +387,11 @@ export function parseCheckoutAttemptState(
         storedState.slice(expirationPrefix.length)
       ) as unknown;
       const expirationState = parseCheckoutExpirationState(parsed);
-      return expirationState ?? { kind: "create_uncertain" };
+      return expirationState
+        ? upgradeCheckoutExpirationState(expirationState)
+        : { kind: "invalid" };
     } catch {
-      return { kind: "create_uncertain" };
+      return { kind: "invalid" };
     }
   }
   if (storedState === "checkout-attempt:v1:fresh") {
@@ -356,14 +403,14 @@ export function parseCheckoutAttemptState(
   const sessionPrefix = "checkout-attempt:v1:session_created:";
   if (storedState.startsWith(sessionPrefix)) {
     const sessionId = storedState.slice(sessionPrefix.length);
-    if (sessionId.length > 0) {
+    if (isProviderIdentifier(sessionId)) {
       return { kind: "session_created", sessionId };
     }
   }
   const customerPrefix = "checkout-attempt:v1:customer_created:";
   if (storedState.startsWith(customerPrefix)) {
     const customerId = storedState.slice(customerPrefix.length);
-    if (customerId.length > 0) {
+    if (isProviderIdentifier(customerId)) {
       return { customerId, kind: "customer_created" };
     }
   }
@@ -373,26 +420,39 @@ export function parseCheckoutAttemptState(
 export function serializeCheckoutAttemptState(
   state: CheckoutAttemptState
 ): string {
-  if (
-    state.kind === "expiration_in_flight" ||
-    state.kind === "expiration_confirmed"
-  ) {
-    return `checkout-attempt:v2:expiration:${JSON.stringify({
+  if (state.kind === "cleanup_queue") {
+    if (!isValidCheckoutCleanupQueueState(state)) {
+      throw new RangeError("Checkout cleanup queue state is invalid.");
+    }
+    const serialized = `checkout-attempt:v3:cleanup:${JSON.stringify({
       cleanupKind: state.cleanupKind,
+      currentIndex: state.currentIndex,
       customerId: state.customerId,
-      expirationIdempotencyKey: state.expirationIdempotencyKey,
+      expiration: state.expiration,
+      items: state.items,
       kind: state.kind,
       resumeState: state.resumeState,
-      sessionId: state.sessionId,
-      ...(state.kind === "expiration_confirmed"
-        ? { terminalStatus: state.terminalStatus }
-        : {}),
     })}`;
+    if (
+      Buffer.byteLength(serialized, "utf8") > CHECKOUT_ATTEMPT_STATE_MAX_BYTES
+    ) {
+      throw new RangeError("Checkout cleanup queue state is too large.");
+    }
+    return serialized;
+  }
+  if (state.kind === "invalid") {
+    return "checkout-attempt:v3:invalid";
   }
   if (state.kind === "session_created") {
+    if (!isProviderIdentifier(state.sessionId)) {
+      throw new RangeError("Checkout Session id is invalid.");
+    }
     return `checkout-attempt:v1:session_created:${state.sessionId}`;
   }
   if (state.kind === "customer_created") {
+    if (!isProviderIdentifier(state.customerId)) {
+      throw new RangeError("Stripe Customer id is invalid.");
+    }
     return `checkout-attempt:v1:customer_created:${state.customerId}`;
   }
   return `checkout-attempt:v1:${state.kind}`;
@@ -401,29 +461,52 @@ export function serializeCheckoutAttemptState(
 export function checkoutAttemptResumeState(
   state: CheckoutAttemptState
 ): CheckoutAttemptStableState {
-  return state.kind === "expiration_in_flight" ||
-    state.kind === "expiration_confirmed"
-    ? state.resumeState
-    : state;
+  if (state.kind === "cleanup_queue") {
+    return state.resumeState;
+  }
+  return state.kind === "invalid" ? { kind: "create_uncertain" } : state;
 }
 
-export function isCheckoutAttemptExpirationState(
+export function isCheckoutAttemptCleanupQueueState(
   state: CheckoutAttemptState
-): state is Exclude<CheckoutAttemptState, CheckoutAttemptStableState> {
-  return (
-    state.kind === "expiration_in_flight" ||
-    state.kind === "expiration_confirmed"
-  );
+): state is CheckoutCleanupQueueState {
+  return state.kind === "cleanup_queue";
+}
+
+export function createCheckoutCleanupQueueState(input: {
+  cleanupKind: CheckoutExpirationCleanupKind;
+  customerId: string;
+  resumeState: CheckoutAttemptStableState;
+  sessionIds: readonly string[];
+}): CheckoutCleanupQueueState {
+  const sessionIds = [...new Set(input.sessionIds)].sort();
+  const state: CheckoutCleanupQueueState = {
+    cleanupKind: input.cleanupKind,
+    currentIndex: 0,
+    customerId: input.customerId,
+    expiration: null,
+    items: sessionIds.map((sessionId) => ({ sessionId })),
+    kind: "cleanup_queue",
+    resumeState: input.resumeState,
+  };
+  serializeCheckoutAttemptState(state);
+  return state;
 }
 
 export function serializeCheckoutAttemptLeaseOwner(
   ownerToken: string,
   state: CheckoutAttemptState
 ): string {
-  return `checkout-attempt-owner:v1:${JSON.stringify({
+  const serialized = `checkout-attempt-owner:v1:${JSON.stringify({
     ownerToken,
     state: serializeCheckoutAttemptState(state),
   })}`;
+  if (
+    Buffer.byteLength(serialized, "utf8") > CHECKOUT_ATTEMPT_OWNER_MAX_BYTES
+  ) {
+    throw new RangeError("Checkout attempt owner state is too large.");
+  }
+  return serialized;
 }
 
 function checkoutProviderIdempotencyKey(
@@ -438,13 +521,23 @@ function checkoutProviderIdempotencyKey(
 
 function checkoutExpirationIdempotencyKey(
   providerIdempotencyKey: string,
-  sessionId: string
+  sessionId: string,
+  generation: number
 ): string {
+  if (!Number.isSafeInteger(generation) || generation < 0) {
+    throw new RangeError("Expiration generation must be a safe integer.");
+  }
+  const identity =
+    generation === 0
+      ? ["checkout-expiration", providerIdempotencyKey, sessionId]
+      : [
+          "checkout-expiration",
+          providerIdempotencyKey,
+          sessionId,
+          String(generation),
+        ];
   const digest = createHash("sha256")
-    .update(
-      ["checkout-expiration", providerIdempotencyKey, sessionId].join("\0"),
-      "utf8"
-    )
+    .update(identity.join("\0"), "utf8")
     .digest("hex");
   return `coven_${digest}`;
 }
@@ -461,24 +554,27 @@ function validNow(now: () => Date): Date {
   return value;
 }
 
-function parseCheckoutExpirationState(
-  value: unknown
-): Exclude<CheckoutAttemptState, CheckoutAttemptStableState> | null {
+function parseCheckoutExpirationState(value: unknown): {
+  cleanupKind: CheckoutExpirationCleanupKind;
+  customerId: string;
+  expirationIdempotencyKey: string;
+  kind: "expiration_confirmed" | "expiration_in_flight";
+  resumeState: CheckoutAttemptStableState;
+  sessionId: string;
+  terminalStatus?: "complete" | "expired";
+} | null {
   if (typeof value !== "object" || value === null) {
     return null;
   }
   const candidate = value as Record<string, unknown>;
+  const { cleanupKind } = candidate;
   if (
     (candidate.kind !== "expiration_in_flight" &&
       candidate.kind !== "expiration_confirmed") ||
-    (candidate.cleanupKind !== "blocking" &&
-      candidate.cleanupKind !== "obsolete") ||
-    typeof candidate.customerId !== "string" ||
-    candidate.customerId.length === 0 ||
-    typeof candidate.expirationIdempotencyKey !== "string" ||
-    candidate.expirationIdempotencyKey.length === 0 ||
-    typeof candidate.sessionId !== "string" ||
-    candidate.sessionId.length === 0
+    !isCheckoutCleanupKind(cleanupKind) ||
+    !isProviderIdentifier(candidate.customerId) ||
+    !isProviderIdentifier(candidate.expirationIdempotencyKey) ||
+    !isProviderIdentifier(candidate.sessionId)
   ) {
     return null;
   }
@@ -486,8 +582,8 @@ function parseCheckoutExpirationState(
   if (!resumeState) {
     return null;
   }
-  const base: CheckoutExpirationAttempt = {
-    cleanupKind: candidate.cleanupKind as CheckoutExpirationCleanupKind,
+  const base = {
+    cleanupKind,
     customerId: candidate.customerId,
     expirationIdempotencyKey: candidate.expirationIdempotencyKey,
     resumeState,
@@ -509,6 +605,217 @@ function parseCheckoutExpirationState(
   };
 }
 
+function upgradeCheckoutExpirationState(
+  state: NonNullable<ReturnType<typeof parseCheckoutExpirationState>>
+): CheckoutCleanupQueueState {
+  return {
+    cleanupKind: state.cleanupKind,
+    currentIndex: 0,
+    customerId: state.customerId,
+    expiration:
+      state.kind === "expiration_in_flight"
+        ? {
+            generation: 0,
+            idempotencyKey: state.expirationIdempotencyKey,
+            status: "in_flight",
+          }
+        : null,
+    items: [{ sessionId: state.sessionId }],
+    kind: "cleanup_queue",
+    resumeState: state.resumeState,
+  };
+}
+
+function parseCheckoutCleanupQueueState(
+  value: unknown
+): CheckoutCleanupQueueState | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const candidate = value as Record<string, unknown>;
+  const { cleanupKind } = candidate;
+  const resumeState = parseCheckoutStableState(candidate.resumeState);
+  if (
+    candidate.kind !== "cleanup_queue" ||
+    !isCheckoutCleanupKind(cleanupKind) ||
+    !isProviderIdentifier(candidate.customerId) ||
+    !isNonNegativeInteger(candidate.currentIndex) ||
+    !Array.isArray(candidate.items) ||
+    !resumeState
+  ) {
+    return null;
+  }
+  const items: CheckoutCleanupQueueItem[] = [];
+  for (const itemValue of candidate.items) {
+    const item = parseCheckoutCleanupQueueItem(itemValue);
+    if (!item) {
+      return null;
+    }
+    items.push(item);
+  }
+  const expiration = parseCheckoutCleanupQueueExpiration(candidate.expiration);
+  if (expiration === undefined) {
+    return null;
+  }
+  const state: CheckoutCleanupQueueState = {
+    cleanupKind,
+    currentIndex: candidate.currentIndex,
+    customerId: candidate.customerId,
+    expiration,
+    items,
+    kind: candidate.kind,
+    resumeState,
+  };
+  return isValidCheckoutCleanupQueueState(state) ? state : null;
+}
+
+function parseCheckoutCleanupQueueItem(
+  value: unknown
+): CheckoutCleanupQueueItem | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (!isProviderIdentifier(candidate.sessionId)) {
+    return null;
+  }
+  if (
+    candidate.terminalStatus === undefined &&
+    candidate.subscriptionId === undefined
+  ) {
+    return { sessionId: candidate.sessionId };
+  }
+  if (
+    (candidate.terminalStatus !== "complete" &&
+      candidate.terminalStatus !== "expired") ||
+    (candidate.subscriptionId !== null &&
+      !isProviderIdentifier(candidate.subscriptionId))
+  ) {
+    return null;
+  }
+  return {
+    sessionId: candidate.sessionId,
+    subscriptionId: candidate.subscriptionId,
+    terminalStatus: candidate.terminalStatus,
+  };
+}
+
+function parseCheckoutCleanupQueueExpiration(
+  value: unknown
+): CheckoutCleanupQueueState["expiration"] | undefined {
+  if (value === null) {
+    return null;
+  }
+  if (typeof value !== "object") {
+    return undefined;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    !isNonNegativeSafeInteger(candidate.generation) ||
+    !isProviderIdentifier(candidate.idempotencyKey) ||
+    (candidate.status !== "in_flight" && candidate.status !== "rejected")
+  ) {
+    return undefined;
+  }
+  return {
+    generation: candidate.generation,
+    idempotencyKey: candidate.idempotencyKey,
+    status: candidate.status,
+  };
+}
+
+function isValidCheckoutCleanupQueueState(
+  state: CheckoutCleanupQueueState
+): boolean {
+  if (
+    !isProviderIdentifier(state.customerId) ||
+    !isValidCheckoutStableState(state.resumeState) ||
+    state.items.length === 0 ||
+    state.items.length > CHECKOUT_CLEANUP_QUEUE_MAX_LENGTH ||
+    !Number.isInteger(state.currentIndex) ||
+    state.currentIndex < 0 ||
+    state.currentIndex > state.items.length ||
+    (state.currentIndex === state.items.length && state.expiration !== null)
+  ) {
+    return false;
+  }
+  const sessionIds = state.items.map(({ sessionId }) => sessionId);
+  if (
+    sessionIds.some((sessionId) => !isProviderIdentifier(sessionId)) ||
+    new Set(sessionIds).size !== sessionIds.length ||
+    sessionIds.some((sessionId, index) => {
+      const previousSessionId = sessionIds[index - 1];
+      return (
+        index > 0 &&
+        previousSessionId !== undefined &&
+        previousSessionId >= sessionId
+      );
+    })
+  ) {
+    return false;
+  }
+  for (const [index, item] of state.items.entries()) {
+    const terminal = "terminalStatus" in item;
+    if (
+      (index < state.currentIndex && !terminal) ||
+      (index >= state.currentIndex && terminal) ||
+      (terminal &&
+        item.subscriptionId !== null &&
+        !isProviderIdentifier(item.subscriptionId)) ||
+      (terminal &&
+        item.terminalStatus === "expired" &&
+        item.subscriptionId !== null)
+    ) {
+      return false;
+    }
+  }
+  if (!state.expiration) {
+    return true;
+  }
+  return (
+    state.currentIndex < state.items.length &&
+    Number.isSafeInteger(state.expiration.generation) &&
+    state.expiration.generation >= 0 &&
+    isProviderIdentifier(state.expiration.idempotencyKey) &&
+    (state.expiration.status === "in_flight" ||
+      state.expiration.status === "rejected")
+  );
+}
+
+function isProviderIdentifier(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= CHECKOUT_PROVIDER_IDENTIFIER_MAX_LENGTH &&
+    /^[A-Za-z0-9_-]+$/.test(value)
+  );
+}
+
+function isCheckoutCleanupKind(
+  value: unknown
+): value is CheckoutExpirationCleanupKind {
+  return value === "blocking" || value === "obsolete";
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isValidCheckoutStableState(
+  state: CheckoutAttemptStableState
+): boolean {
+  if (state.kind === "fresh" || state.kind === "create_uncertain") {
+    return true;
+  }
+  return isProviderIdentifier(
+    state.kind === "customer_created" ? state.customerId : state.sessionId
+  );
+}
+
 function parseCheckoutStableState(
   value: unknown
 ): CheckoutAttemptStableState | null {
@@ -521,15 +828,13 @@ function parseCheckoutStableState(
   }
   if (
     candidate.kind === "customer_created" &&
-    typeof candidate.customerId === "string" &&
-    candidate.customerId.length > 0
+    isProviderIdentifier(candidate.customerId)
   ) {
     return { customerId: candidate.customerId, kind: candidate.kind };
   }
   if (
     candidate.kind === "session_created" &&
-    typeof candidate.sessionId === "string" &&
-    candidate.sessionId.length > 0
+    isProviderIdentifier(candidate.sessionId)
   ) {
     return { kind: candidate.kind, sessionId: candidate.sessionId };
   }

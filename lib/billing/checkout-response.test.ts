@@ -22,8 +22,14 @@ import type {
   CheckoutAttemptLeaseReleaseInput,
   CheckoutAttemptLeaseRenewInput,
   CheckoutAttemptLeaseStore,
+  CheckoutAttemptState,
 } from "@/lib/billing/checkout-lease";
-import { CHECKOUT_ATTEMPT_LEASE_TTL_MS } from "@/lib/billing/checkout-lease";
+import {
+  CHECKOUT_ATTEMPT_LEASE_TTL_MS,
+  CHECKOUT_ATTEMPT_STATE_MAX_BYTES,
+  CHECKOUT_CLEANUP_QUEUE_MAX_LENGTH,
+  parseCheckoutAttemptState,
+} from "@/lib/billing/checkout-lease";
 import {
   type CheckoutDependencies,
   type CheckoutProvider,
@@ -1323,6 +1329,343 @@ test("expiration retries preserve their identity while reconciling an uncertain 
   assert.equal(sessionCalls, 1);
 });
 
+test("a cacheable Stripe 5xx rotates the durable expiration key after an open reconciliation", async () => {
+  const leaseStore = new MemoryCheckoutAttemptLeaseStore();
+  let obsoleteStatus: "expired" | "open" = "open";
+  const expirationKeys: string[] = [];
+  const failedKeys = new Set<string>();
+  let sessionCalls = 0;
+  const obsolete = reconciledCheckoutSession({
+    customerId: "cus_existing",
+    id: "cs_cached_500",
+    integrationIdentifier: "older-attempt",
+    metadata: {
+      checkoutAttemptId: "older-attempt",
+      checkoutFlowVersion: "0",
+      priceId: "price_retired",
+      userId: USER_ID,
+    },
+    status: "open",
+  });
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession() {
+        sessionCalls += 1;
+        return Promise.resolve({
+          id: "cs_after_cached_500",
+          status: "open",
+          url: "https://checkout.stripe.test/after-cached-500",
+        });
+      },
+      expireCheckoutSession(_sessionId, options) {
+        expirationKeys.push(options.idempotencyKey);
+        if (failedKeys.has(options.idempotencyKey)) {
+          return Promise.reject(
+            new Stripe.errors.StripeAPIError({
+              message: "Permanently replayed cached failure.",
+              statusCode: 500,
+              type: "api_error",
+            })
+          );
+        }
+        if (failedKeys.size === 0) {
+          failedKeys.add(options.idempotencyKey);
+          return Promise.reject(
+            new Stripe.errors.StripeAPIError({
+              message: "Initial cacheable failure.",
+              statusCode: 500,
+              type: "api_error",
+            })
+          );
+        }
+        obsoleteStatus = "expired";
+        return Promise.resolve();
+      },
+      listOpenCheckoutSessions: () =>
+        Promise.resolve({
+          data:
+            obsoleteStatus === "open"
+              ? [{ ...obsolete, status: obsoleteStatus }]
+              : [],
+          hasMore: false,
+        }),
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return obsoleteStatus === input.status
+          ? [{ ...obsolete, status: obsoleteStatus }]
+          : [];
+      },
+      retrieve() {
+        return { ...obsolete, status: obsoleteStatus };
+      },
+    })
+  );
+  const dependencies = dependenciesFor({
+    checkoutLeaseStore: leaseStore,
+    createProvider: () => provider,
+  });
+
+  const cachedFailure = await checkoutResponse(
+    request("checkout-request-cached-500"),
+    dependencies,
+    null
+  );
+
+  assert.equal(cachedFailure.status, 409);
+  assert.deepEqual(await cachedFailure.json(), {
+    error: "checkout_session_conflict",
+  });
+  assert.equal(expirationKeys.length, 1);
+  assert.deepEqual(leaseStore.attemptState, {
+    cleanupKind: "obsolete",
+    currentIndex: 0,
+    customerId: "cus_existing",
+    expiration: {
+      generation: 1,
+      idempotencyKey: leaseStore.currentExpirationKey,
+      status: "in_flight",
+    },
+    items: [{ sessionId: "cs_cached_500" }],
+    kind: "cleanup_queue",
+    resumeState: { kind: "fresh" },
+  });
+  assert.notEqual(leaseStore.currentExpirationKey, expirationKeys[0]);
+
+  const recovered = await checkoutResponse(
+    request("checkout-request-after-cached-500"),
+    dependencies,
+    null
+  );
+
+  assert.equal(recovered.status, 200);
+  assert.deepEqual(await recovered.json(), {
+    url: "https://checkout.stripe.test/after-cached-500",
+  });
+  assert.equal(expirationKeys.length, 2);
+  assert.notEqual(expirationKeys[1], expirationKeys[0]);
+  assert.equal(failedKeys.has(expirationKeys[0] ?? ""), true);
+  assert.equal(obsoleteStatus, "expired");
+  assert.equal(sessionCalls, 1);
+});
+
+test("an uncertain retrieve after a Stripe 5xx retains the current expiration key", async () => {
+  const leaseStore = new MemoryCheckoutAttemptLeaseStore();
+  const expirationKeys: string[] = [];
+  let retrieveCalls = 0;
+  const obsolete = reconciledCheckoutSession({
+    customerId: "cus_existing",
+    id: "cs_500_retrieve_uncertain",
+    integrationIdentifier: "older-attempt",
+    metadata: {
+      checkoutAttemptId: "older-attempt",
+      checkoutFlowVersion: "0",
+      priceId: "price_retired",
+      userId: USER_ID,
+    },
+    status: "open",
+  });
+  const provider = Object.assign(
+    defaultProvider({
+      expireCheckoutSession(_sessionId, options) {
+        expirationKeys.push(options.idempotencyKey);
+        return Promise.reject(
+          new Stripe.errors.StripeAPIError({
+            message: "Cacheable failure.",
+            statusCode: 500,
+            type: "api_error",
+          })
+        );
+      },
+      listOpenCheckoutSessions: () =>
+        Promise.resolve({ data: [obsolete], hasMore: false }),
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return input.status === "open" ? [obsolete] : [];
+      },
+      retrieve() {
+        retrieveCalls += 1;
+        if (retrieveCalls === 2) {
+          throw new Stripe.errors.StripeConnectionError({
+            message: "Reconciliation timed out.",
+            type: "api_error",
+          });
+        }
+        return obsolete;
+      },
+    })
+  );
+  const dependencies = dependenciesFor({
+    checkoutLeaseStore: leaseStore,
+    createProvider: () => provider,
+  });
+
+  const response = await checkoutResponse(
+    request("checkout-request-500-retrieve-uncertain"),
+    dependencies,
+    null
+  );
+
+  assert.equal(response.status, 409);
+  assert.equal(expirationKeys.length, 1);
+  assert.equal(leaseStore.currentExpirationKey, expirationKeys[0]);
+  assert.equal(leaseStore.currentExpirationGeneration, 0);
+});
+
+test("connection and idempotency-conflict expiration failures retain the exact durable key", async (t) => {
+  const cases = [
+    {
+      error: () =>
+        new Stripe.errors.StripeConnectionError({
+          message: "Connection timed out.",
+          type: "api_error",
+        }),
+      name: "connection",
+    },
+    {
+      error: () =>
+        new Stripe.errors.StripeIdempotencyError({
+          message: "Another request with the same key is executing.",
+          statusCode: 409,
+          type: "idempotency_error",
+        }),
+      name: "idempotency 409",
+    },
+  ];
+
+  await Promise.all(
+    cases.map((entry) =>
+      t.test(entry.name, async () => {
+        const leaseStore = new MemoryCheckoutAttemptLeaseStore();
+        const expirationKeys: string[] = [];
+        const obsolete = reconciledCheckoutSession({
+          customerId: "cus_existing",
+          id: `cs_uncertain_${entry.name.replaceAll(" ", "_")}`,
+          integrationIdentifier: "older-attempt",
+          metadata: {
+            checkoutAttemptId: "older-attempt",
+            checkoutFlowVersion: "0",
+            priceId: "price_retired",
+            userId: USER_ID,
+          },
+          status: "open",
+        });
+        const provider = Object.assign(
+          defaultProvider({
+            expireCheckoutSession(_sessionId, options) {
+              expirationKeys.push(options.idempotencyKey);
+              return Promise.reject(entry.error());
+            },
+            listOpenCheckoutSessions: () =>
+              Promise.resolve({ data: [obsolete], hasMore: false }),
+          }),
+          reconciledProviderMethods({
+            list(input) {
+              return input.status === "open" ? [obsolete] : [];
+            },
+            retrieve: () => obsolete,
+          })
+        );
+        const dependencies = dependenciesFor({
+          checkoutLeaseStore: leaseStore,
+          createProvider: () => provider,
+        });
+
+        const first = await checkoutResponse(
+          request(`checkout-request-${entry.name}-one`),
+          dependencies,
+          null
+        );
+        const retainedKey = leaseStore.currentExpirationKey;
+        const second = await checkoutResponse(
+          request(`checkout-request-${entry.name}-two`),
+          dependencies,
+          null
+        );
+
+        assert.equal(first.status, 409);
+        assert.equal(second.status, 409);
+        assert.equal(expirationKeys.length, 2);
+        assert.equal(expirationKeys[0], retainedKey);
+        assert.equal(expirationKeys[1], retainedKey);
+        assert.equal(leaseStore.currentExpirationGeneration, 0);
+      })
+    )
+  );
+});
+
+test("a deterministic expiration 4xx retires dispatch while the open Session remains queued", async () => {
+  const leaseStore = new MemoryCheckoutAttemptLeaseStore();
+  let expirationCalls = 0;
+  const obsolete = reconciledCheckoutSession({
+    customerId: "cus_existing",
+    id: "cs_rejected_expiration",
+    integrationIdentifier: "older-attempt",
+    metadata: {
+      checkoutAttemptId: "older-attempt",
+      checkoutFlowVersion: "0",
+      priceId: "price_retired",
+      userId: USER_ID,
+    },
+    status: "open",
+  });
+  const provider = Object.assign(
+    defaultProvider({
+      expireCheckoutSession() {
+        expirationCalls += 1;
+        return Promise.reject(
+          new Stripe.errors.StripeInvalidRequestError({
+            message: "This Checkout Session cannot be expired.",
+            statusCode: 400,
+            type: "invalid_request_error",
+          })
+        );
+      },
+      listOpenCheckoutSessions: () =>
+        Promise.resolve({ data: [obsolete], hasMore: false }),
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return input.status === "open" ? [obsolete] : [];
+      },
+      retrieve: () => obsolete,
+    })
+  );
+  const dependencies = dependenciesFor({
+    checkoutLeaseStore: leaseStore,
+    createProvider: () => provider,
+  });
+
+  const rejected = await checkoutResponse(
+    request("checkout-request-rejected-expiration-one"),
+    dependencies,
+    null
+  );
+  const retry = await checkoutResponse(
+    request("checkout-request-rejected-expiration-two"),
+    dependencies,
+    null
+  );
+
+  assert.equal(rejected.status, 409);
+  assert.equal(retry.status, 409);
+  assert.equal(expirationCalls, 1);
+  assert.deepEqual(leaseStore.attemptState, {
+    cleanupKind: "obsolete",
+    currentIndex: 0,
+    customerId: "cus_existing",
+    expiration: {
+      generation: 0,
+      idempotencyKey: leaseStore.currentExpirationKey,
+      status: "rejected",
+    },
+    items: [{ sessionId: "cs_rejected_expiration" }],
+    kind: "cleanup_queue",
+    resumeState: { kind: "fresh" },
+  });
+});
+
 test("a matching open Session with a non-HTTPS URL is never returned or replaced", async () => {
   let sessionCalls = 0;
   const invalid = reconciledCheckoutSession({
@@ -2004,7 +2347,7 @@ test("a blocking subscription expires a prior payable Session and retires the at
   assert.deepEqual(createdAttemptIds, ["attempt-2"]);
 });
 
-test("a stale blocking cleanup cannot expire a Session after its successor returns the URL", async () => {
+test("a stale blocking cleanup is fenced after its successor drains the durable queue", async () => {
   const leaseStore = new MemoryCheckoutAttemptLeaseStore();
   let blocking = true;
   let expirationCalls = 0;
@@ -2072,9 +2415,9 @@ test("a stale blocking cleanup cannot expire a Session after its successor retur
     dependencies,
     null
   );
-  assert.equal(successor.status, 200);
+  assert.equal(successor.status, 409);
   assert.deepEqual(await successor.json(), {
-    url: "https://checkout.stripe.test/still-payable",
+    error: "request_in_progress",
   });
 
   releaseStaleRetrieve();
@@ -2083,8 +2426,8 @@ test("a stale blocking cleanup cannot expire a Session after its successor retur
   assert.deepEqual(await staleResponse.json(), {
     error: "request_in_progress",
   });
-  assert.equal(expirationCalls, 0);
-  assert.equal(status, "open");
+  assert.equal(expirationCalls, 1);
+  assert.equal(status, "expired");
 
   const replay = await checkoutResponse(
     request("checkout-request-after-stale-cleanup"),
@@ -2093,8 +2436,77 @@ test("a stale blocking cleanup cannot expire a Session after its successor retur
   );
   assert.equal(replay.status, 200);
   assert.deepEqual(await replay.json(), {
-    url: "https://checkout.stripe.test/still-payable",
+    url: "https://checkout.stripe.test/session",
   });
+});
+
+test("a resumed in-flight expiration checkpoints its lease before provider dispatch", async () => {
+  const leaseStore = new MemoryCheckoutAttemptLeaseStore();
+  leaseStore.seedAttemptState({
+    cleanupKind: "obsolete",
+    currentIndex: 0,
+    customerId: "cus_existing",
+    expiration: {
+      generation: 0,
+      idempotencyKey: "coven_resumed_expiration_key",
+      status: "in_flight",
+    },
+    items: [{ sessionId: "cs_resumed_expiration" }],
+    kind: "cleanup_queue",
+    resumeState: { kind: "fresh" },
+  });
+  let expirationCalls = 0;
+  let releaseRetrieve!: () => void;
+  let signalRetrieveStarted!: () => void;
+  const retrieveStarted = new Promise<void>((resolve) => {
+    signalRetrieveStarted = resolve;
+  });
+  const retrieveGate = new Promise<void>((resolve) => {
+    releaseRetrieve = resolve;
+  });
+  const session = reconciledCheckoutSession({
+    customerId: "cus_existing",
+    id: "cs_resumed_expiration",
+    metadata: {
+      checkoutAttemptId: "attempt-older",
+      checkoutFlowVersion: "0",
+      priceId: "price_retired",
+      userId: USER_ID,
+    },
+    status: "open",
+  });
+  const provider = defaultProvider({
+    expireCheckoutSession() {
+      expirationCalls += 1;
+      return Promise.resolve();
+    },
+    async retrieveCheckoutSession() {
+      signalRetrieveStarted();
+      await retrieveGate;
+      return session;
+    },
+  });
+  const dependencies = dependenciesFor({
+    checkoutLeaseStore: leaseStore,
+    createProvider: () => provider,
+  });
+
+  const stale = checkoutResponse(
+    request("checkout-request-resumed-expiration-fence"),
+    dependencies,
+    null
+  );
+  await retrieveStarted;
+  leaseStore.expireCheckoutLease();
+  releaseRetrieve();
+
+  const response = await stale;
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    error: "request_in_progress",
+  });
+  assert.equal(expirationCalls, 0);
 });
 
 test("a takeover reconciles an uncertain expiration with the persisted provider key", async () => {
@@ -2173,11 +2585,16 @@ test("a takeover reconciles an uncertain expiration with the persisted provider 
   });
   assert.deepEqual(leaseStore.attemptState, {
     cleanupKind: "blocking",
+    currentIndex: 0,
     customerId: "cus_existing",
-    expirationIdempotencyKey: expirationKeys[0],
-    kind: "expiration_in_flight",
+    expiration: {
+      generation: 0,
+      idempotencyKey: expirationKeys[0],
+      status: "in_flight",
+    },
+    items: [{ sessionId: "cs_uncertain_expiration" }],
+    kind: "cleanup_queue",
     resumeState: { kind: "fresh" },
-    sessionId: "cs_uncertain_expiration",
   });
 
   blocking = false;
@@ -2349,13 +2766,17 @@ test("a two-Session takeover serializes expiration before returning a replacemen
   );
   const firstConfirmationIndex = leaseStore.checkpointStates.findIndex(
     (state) =>
-      state.kind === "expiration_confirmed" &&
-      state.sessionId === firstSessionId
+      state.kind === "cleanup_queue" &&
+      state.currentIndex === 1 &&
+      state.items[0]?.sessionId === firstSessionId &&
+      "terminalStatus" in state.items[0]
   );
   const secondExpirationIndex = leaseStore.checkpointStates.findIndex(
     (state) =>
-      state.kind === "expiration_in_flight" &&
-      state.sessionId === secondSessionId
+      state.kind === "cleanup_queue" &&
+      state.currentIndex === 1 &&
+      state.items[1]?.sessionId === secondSessionId &&
+      state.expiration?.status === "in_flight"
   );
   assert.ok(firstConfirmationIndex >= 0);
   assert.ok(secondExpirationIndex > firstConfirmationIndex);
@@ -2369,7 +2790,138 @@ test("a two-Session takeover serializes expiration before returning a replacemen
   assert.equal(sessions.get(replacementSessionId)?.status, "open");
 });
 
+test("takeover drains the persisted second Session even when fresh listing omits it", async () => {
+  const leaseStore = new MemoryCheckoutAttemptLeaseStore();
+  const firstSessionId = "cs_persisted_queue_a";
+  const secondSessionId = "cs_persisted_queue_b";
+  let candidatesListed = false;
+  let releaseStaleSecondRetrieve!: () => void;
+  let signalStaleSecondRetrieve!: () => void;
+  const staleSecondRetrieveStarted = new Promise<void>((resolve) => {
+    signalStaleSecondRetrieve = resolve;
+  });
+  const staleSecondRetrieveGate = new Promise<void>((resolve) => {
+    releaseStaleSecondRetrieve = resolve;
+  });
+  const events: string[] = [];
+  const retrieveCounts = new Map<string, number>();
+  const sessions = new Map(
+    [firstSessionId, secondSessionId].map((sessionId) => [
+      sessionId,
+      reconciledCheckoutSession({
+        customerId: "cus_existing",
+        id: sessionId,
+        metadata: {
+          checkoutAttemptId: "attempt-older",
+          checkoutFlowVersion: "0",
+          priceId: "price_retired",
+          userId: USER_ID,
+        },
+        status: "open",
+      }),
+    ])
+  );
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession() {
+        events.push("create replacement");
+        assert.equal(sessions.get(firstSessionId)?.status, "expired");
+        assert.equal(sessions.get(secondSessionId)?.status, "expired");
+        return Promise.resolve({
+          id: "cs_after_persisted_queue",
+          status: "open",
+          url: "https://checkout.stripe.test/after-persisted-queue",
+        });
+      },
+      expireCheckoutSession(sessionId) {
+        events.push(`expire ${sessionId}`);
+        const session = sessions.get(sessionId);
+        assert.ok(session);
+        sessions.set(sessionId, { ...session, status: "expired" });
+        return Promise.resolve();
+      },
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        if (input.status === "open" && !candidatesListed) {
+          candidatesListed = true;
+          return [...sessions.values()];
+        }
+        return [];
+      },
+      async retrieve(sessionId) {
+        events.push(`retrieve ${sessionId}`);
+        const retrieveCount = (retrieveCounts.get(sessionId) ?? 0) + 1;
+        retrieveCounts.set(sessionId, retrieveCount);
+        if (sessionId === secondSessionId && retrieveCount === 1) {
+          signalStaleSecondRetrieve();
+          await staleSecondRetrieveGate;
+        }
+        const session = sessions.get(sessionId);
+        assert.ok(session);
+        return session;
+      },
+    })
+  );
+  const dependencies = dependenciesFor({
+    checkoutLeaseStore: leaseStore,
+    createProvider: () => provider,
+  });
+
+  const stale = checkoutResponse(
+    request("checkout-request-persisted-queue-stale"),
+    dependencies,
+    null
+  );
+  await staleSecondRetrieveStarted;
+
+  assert.deepEqual(leaseStore.attemptState, {
+    cleanupKind: "obsolete",
+    currentIndex: 1,
+    customerId: "cus_existing",
+    expiration: null,
+    items: [
+      {
+        sessionId: firstSessionId,
+        subscriptionId: null,
+        terminalStatus: "expired",
+      },
+      { sessionId: secondSessionId },
+    ],
+    kind: "cleanup_queue",
+    resumeState: { kind: "fresh" },
+  });
+
+  leaseStore.expireCheckoutLease();
+  const successor = await checkoutResponse(
+    request("checkout-request-persisted-queue-successor"),
+    dependencies,
+    null
+  );
+
+  assert.equal(successor.status, 200);
+  assert.deepEqual(await successor.json(), {
+    url: "https://checkout.stripe.test/after-persisted-queue",
+  });
+  assert.ok(
+    events.indexOf(`expire ${secondSessionId}`) <
+      events.indexOf("create replacement")
+  );
+  assert.deepEqual(
+    events.filter((event) => event.startsWith("expire ")),
+    [`expire ${firstSessionId}`, `expire ${secondSessionId}`]
+  );
+
+  releaseStaleSecondRetrieve();
+  const staleResponse = await stale;
+  assert.equal(staleResponse.status, 409);
+  assert.deepEqual(await staleResponse.json(), {
+    error: "request_in_progress",
+  });
+});
+
 test("blocking cleanup leaves the second Session untouched when the first expiration is uncertain", async () => {
+  const leaseStore = new MemoryCheckoutAttemptLeaseStore();
   const firstSessionId = "cs_cleanup_a_first";
   const secondSessionId = "cs_cleanup_b_second";
   const expirationCalls: string[] = [];
@@ -2433,7 +2985,10 @@ test("blocking cleanup leaves the second Session untouched when the first expira
       },
     })
   );
-  const dependencies = dependenciesFor({ createProvider: () => provider });
+  const dependencies = dependenciesFor({
+    checkoutLeaseStore: leaseStore,
+    createProvider: () => provider,
+  });
 
   const response = await checkoutResponse(request(), dependencies, null);
 
@@ -2447,6 +3002,19 @@ test("blocking cleanup leaves the second Session untouched when the first expira
     true
   );
   assert.equal(sessions.get(secondSessionId)?.status, "open");
+  assert.deepEqual(leaseStore.attemptState, {
+    cleanupKind: "blocking",
+    currentIndex: 0,
+    customerId: "cus_existing",
+    expiration: {
+      generation: 0,
+      idempotencyKey: leaseStore.currentExpirationKey,
+      status: "in_flight",
+    },
+    items: [{ sessionId: firstSessionId }, { sessionId: secondSessionId }],
+    kind: "cleanup_queue",
+    resumeState: { kind: "fresh" },
+  });
 });
 
 test("blocking cleanup retrieves the durable Session when open listing lags", async () => {
@@ -2548,6 +3116,352 @@ test("a Session that completes during blocking cleanup reconciles its subscripti
   assert.deepEqual(await response.json(), { error: "already_subscribed" });
   assert.equal(expirationCalls, 0);
   assert.equal(subscriptionCalls, 1);
+});
+
+test("takeover reconciles a durably completed queued Session before listing can omit it", async () => {
+  const leaseStore = new MemoryCheckoutAttemptLeaseStore();
+  let listedOpen = false;
+  let replacementCalls = 0;
+  let retrieveCalls = 0;
+  let subscriptionCalls = 0;
+  let releaseStaleSubscription!: () => void;
+  let signalStaleSubscriptionStarted!: () => void;
+  const staleSubscriptionStarted = new Promise<void>((resolve) => {
+    signalStaleSubscriptionStarted = resolve;
+  });
+  const staleSubscriptionGate = new Promise<void>((resolve) => {
+    releaseStaleSubscription = resolve;
+  });
+  const prior = reconciledCheckoutSession({
+    customerId: "cus_existing",
+    id: "cs_completed_queue_takeover",
+    metadata: {
+      checkoutAttemptId: "attempt-older",
+      checkoutFlowVersion: "0",
+      priceId: "price_retired",
+      userId: USER_ID,
+    },
+    status: "open",
+  });
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession() {
+        replacementCalls += 1;
+        return Promise.resolve({
+          url: "https://checkout.stripe.test/unsafe-replacement",
+        });
+      },
+      expireCheckoutSession() {
+        return Promise.resolve();
+      },
+      hasBlockingSubscription: () => Promise.resolve(false),
+      async retrieveSubscription(subscriptionId) {
+        subscriptionCalls += 1;
+        if (subscriptionCalls === 1) {
+          signalStaleSubscriptionStarted();
+          await staleSubscriptionGate;
+        }
+        return { id: subscriptionId, status: "active" };
+      },
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        if (input.status === "open" && !listedOpen) {
+          listedOpen = true;
+          return [prior];
+        }
+        return [];
+      },
+      retrieve() {
+        retrieveCalls += 1;
+        return retrieveCalls === 1
+          ? prior
+          : {
+              ...prior,
+              status: "complete",
+              subscriptionId: "sub_completed_queue_takeover",
+            };
+      },
+    })
+  );
+  const dependencies = dependenciesFor({
+    checkoutLeaseStore: leaseStore,
+    createProvider: () => provider,
+  });
+
+  const stale = checkoutResponse(
+    request("checkout-request-completed-queue-stale"),
+    dependencies,
+    null
+  );
+  await staleSubscriptionStarted;
+  leaseStore.expireCheckoutLease();
+
+  const successor = await checkoutResponse(
+    request("checkout-request-completed-queue-successor"),
+    dependencies,
+    null
+  );
+
+  assert.equal(successor.status, 409);
+  assert.deepEqual(await successor.json(), {
+    error: "already_subscribed",
+  });
+  assert.equal(replacementCalls, 0);
+  assert.equal(subscriptionCalls, 2);
+
+  releaseStaleSubscription();
+  const staleResponse = await stale;
+  assert.equal(staleResponse.status, 409);
+  assert.deepEqual(await staleResponse.json(), {
+    error: "request_in_progress",
+  });
+});
+
+test("multi-Session cleanup reconciles every completed subscription and retains the blocker", async () => {
+  const leaseStore = new MemoryCheckoutAttemptLeaseStore();
+  const sessionIds = ["cs_a_completed_terminal", "cs_b_completed_blocking"];
+  const retrieveCounts = new Map<string, number>();
+  let replacementCalls = 0;
+  const sessions = new Map(
+    sessionIds.map((sessionId) => [
+      sessionId,
+      reconciledCheckoutSession({
+        customerId: "cus_existing",
+        id: sessionId,
+        metadata: {
+          checkoutAttemptId: "attempt-older",
+          checkoutFlowVersion: "0",
+          priceId: "price_retired",
+          userId: USER_ID,
+        },
+        status: "open",
+      }),
+    ])
+  );
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession() {
+        replacementCalls += 1;
+        return Promise.resolve({
+          url: "https://checkout.stripe.test/unsafe-replacement",
+        });
+      },
+      expireCheckoutSession() {
+        return Promise.resolve();
+      },
+      hasBlockingSubscription: () => Promise.resolve(false),
+      retrieveSubscription(subscriptionId) {
+        return Promise.resolve({
+          id: subscriptionId,
+          status:
+            subscriptionId === "sub_completed_blocking" ? "active" : "canceled",
+        });
+      },
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return input.status === "open" ? [...sessions.values()] : [];
+      },
+      retrieve(sessionId) {
+        const count = (retrieveCounts.get(sessionId) ?? 0) + 1;
+        retrieveCounts.set(sessionId, count);
+        const session = sessions.get(sessionId);
+        assert.ok(session);
+        return count === 1
+          ? session
+          : {
+              ...session,
+              status: "complete",
+              subscriptionId:
+                sessionId === "cs_b_completed_blocking"
+                  ? "sub_completed_blocking"
+                  : "sub_completed_terminal",
+            };
+      },
+    })
+  );
+  const dependencies = dependenciesFor({
+    checkoutLeaseStore: leaseStore,
+    createProvider: () => provider,
+  });
+
+  const response = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: "already_subscribed" });
+  assert.equal(replacementCalls, 0);
+  assert.deepEqual(leaseStore.attemptState, {
+    kind: "session_created",
+    sessionId: "cs_b_completed_blocking",
+  });
+});
+
+test("a completed subscription inspection failure preserves the full terminal queue", async () => {
+  const leaseStore = new MemoryCheckoutAttemptLeaseStore();
+  const sessionIds = ["cs_completed_failure_a", "cs_completed_failure_b"];
+  const retrieveCounts = new Map<string, number>();
+  let subscriptionCalls = 0;
+  const sessions = new Map(
+    sessionIds.map((sessionId) => [
+      sessionId,
+      reconciledCheckoutSession({
+        customerId: "cus_existing",
+        id: sessionId,
+        metadata: {
+          checkoutAttemptId: "attempt-older",
+          checkoutFlowVersion: "0",
+          priceId: "price_retired",
+          userId: USER_ID,
+        },
+        status: "open",
+      }),
+    ])
+  );
+  const provider = Object.assign(
+    defaultProvider({
+      expireCheckoutSession() {
+        return Promise.resolve();
+      },
+      retrieveSubscription() {
+        subscriptionCalls += 1;
+        return Promise.reject(new Error("Subscription lookup failed."));
+      },
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return input.status === "open" ? [...sessions.values()] : [];
+      },
+      retrieve(sessionId) {
+        const count = (retrieveCounts.get(sessionId) ?? 0) + 1;
+        retrieveCounts.set(sessionId, count);
+        const session = sessions.get(sessionId);
+        assert.ok(session);
+        return count === 1
+          ? session
+          : {
+              ...session,
+              status: "complete",
+              subscriptionId: `sub_${sessionId}`,
+            };
+      },
+    })
+  );
+  const dependencies = dependenciesFor({
+    checkoutLeaseStore: leaseStore,
+    createProvider: () => provider,
+  });
+
+  const response = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), { error: "checkout_failed" });
+  assert.equal(subscriptionCalls, 1);
+  assert.equal(
+    (leaseStore.attemptState as CheckoutAttemptState).kind,
+    "cleanup_queue"
+  );
+  assert.deepEqual(
+    (
+      leaseStore.attemptState as Extract<
+        CheckoutAttemptState,
+        { kind: "cleanup_queue" }
+      >
+    ).items.map(({ sessionId, ...item }) => ({
+      ...item,
+      sessionId,
+    })),
+    [
+      {
+        sessionId: "cs_completed_failure_a",
+        subscriptionId: "sub_cs_completed_failure_a",
+        terminalStatus: "complete",
+      },
+      {
+        sessionId: "cs_completed_failure_b",
+        subscriptionId: "sub_cs_completed_failure_b",
+        terminalStatus: "complete",
+      },
+    ]
+  );
+});
+
+test("a completed queued Session refreshes a subscription reference that appears later", async () => {
+  const leaseStore = new MemoryCheckoutAttemptLeaseStore();
+  let listedOpen = false;
+  let retrieveCalls = 0;
+  let subscriptionVisible = false;
+  const prior = reconciledCheckoutSession({
+    customerId: "cus_existing",
+    id: "cs_late_subscription_reference",
+    metadata: {
+      checkoutAttemptId: "attempt-older",
+      checkoutFlowVersion: "0",
+      priceId: "price_retired",
+      userId: USER_ID,
+    },
+    status: "open",
+  });
+  const provider = Object.assign(
+    defaultProvider({
+      expireCheckoutSession() {
+        return Promise.resolve();
+      },
+      retrieveSubscription(subscriptionId) {
+        return Promise.resolve({ id: subscriptionId, status: "active" });
+      },
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        if (input.status === "open" && !listedOpen) {
+          listedOpen = true;
+          return [prior];
+        }
+        return [];
+      },
+      retrieve() {
+        retrieveCalls += 1;
+        return retrieveCalls === 1
+          ? prior
+          : {
+              ...prior,
+              status: "complete",
+              subscriptionId: subscriptionVisible
+                ? "sub_late_subscription_reference"
+                : null,
+            };
+      },
+    })
+  );
+  const dependencies = dependenciesFor({
+    checkoutLeaseStore: leaseStore,
+    createProvider: () => provider,
+  });
+
+  const unresolved = await checkoutResponse(
+    request("checkout-request-late-subscription-one"),
+    dependencies,
+    null
+  );
+  assert.equal(unresolved.status, 502);
+  assert.equal(retrieveCalls, 3);
+
+  subscriptionVisible = true;
+  const recovered = await checkoutResponse(
+    request("checkout-request-late-subscription-two"),
+    dependencies,
+    null
+  );
+
+  assert.equal(recovered.status, 409);
+  assert.deepEqual(await recovered.json(), {
+    error: "already_subscribed",
+  });
+  assert.equal(retrieveCalls, 4);
+  assert.deepEqual(leaseStore.attemptState, {
+    kind: "session_created",
+    sessionId: "cs_late_subscription_reference",
+  });
 });
 
 test("blocking cleanup expiration failure returns a conflict without replacement", async () => {
@@ -2821,6 +3735,94 @@ test("Stripe failures return explicit non-success responses", async (t) => {
 
         assert.equal(response.status, 502);
         assert.deepEqual(await response.json(), { error: "checkout_failed" });
+      })
+    )
+  );
+});
+
+test("malformed and oversized persisted cleanup queues fail closed before provider work", async (t) => {
+  const base = {
+    cleanupKind: "blocking",
+    currentIndex: 0,
+    customerId: "cus_existing",
+    expiration: null,
+    kind: "cleanup_queue",
+    resumeState: { kind: "fresh" },
+  };
+  const encoded = (value: unknown) =>
+    `checkout-attempt:v3:cleanup:${JSON.stringify(value)}`;
+  const cases = [
+    {
+      name: "duplicate Session ids",
+      stored: encoded({
+        ...base,
+        items: [{ sessionId: "cs_duplicate" }, { sessionId: "cs_duplicate" }],
+      }),
+    },
+    {
+      name: "too many Session ids",
+      stored: encoded({
+        ...base,
+        items: Array.from(
+          { length: CHECKOUT_CLEANUP_QUEUE_MAX_LENGTH + 1 },
+          (_, index) => ({ sessionId: `cs_oversized_${index}` })
+        ),
+      }),
+    },
+    {
+      name: "oversized serialized state",
+      stored: `checkout-attempt:v3:cleanup:${"x".repeat(
+        CHECKOUT_ATTEMPT_STATE_MAX_BYTES
+      )}`,
+    },
+  ];
+
+  await Promise.all(
+    cases.map((entry) =>
+      t.test(entry.name, async () => {
+        const attemptState = parseCheckoutAttemptState(entry.stored);
+        assert.deepEqual(attemptState, { kind: "invalid" });
+        const leaseStore = new MemoryCheckoutAttemptLeaseStore();
+        leaseStore.seedAttemptState(attemptState);
+        let providerCalls = 0;
+        const provider = defaultProvider({
+          createCheckoutSession() {
+            providerCalls += 1;
+            throw new Error("A Session must not be created.");
+          },
+          expireCheckoutSession() {
+            providerCalls += 1;
+            throw new Error("A Session must not be expired.");
+          },
+          hasBlockingSubscription() {
+            providerCalls += 1;
+            throw new Error("Subscriptions must not be listed.");
+          },
+          listCheckoutSessions() {
+            providerCalls += 1;
+            throw new Error("Checkout Sessions must not be listed.");
+          },
+          retrieveCheckoutSession() {
+            providerCalls += 1;
+            throw new Error("A Checkout Session must not be retrieved.");
+          },
+        });
+        const dependencies = dependenciesFor({
+          checkoutLeaseStore: leaseStore,
+          createProvider: () => provider,
+        });
+
+        const response = await checkoutResponse(
+          request(`checkout-request-invalid-queue-${entry.name}`),
+          dependencies,
+          null
+        );
+
+        assert.equal(response.status, 409);
+        assert.deepEqual(await response.json(), {
+          error: "checkout_session_conflict",
+        });
+        assert.equal(providerCalls, 0);
       })
     )
   );
@@ -3151,6 +4153,32 @@ class MemoryCheckoutAttemptLeaseStore implements CheckoutAttemptLeaseStore {
 
   get attemptState(): unknown {
     return this.record?.attemptState;
+  }
+
+  get currentExpirationGeneration(): number | null {
+    const state = this.record?.attemptState;
+    return state?.kind === "cleanup_queue" && state.expiration
+      ? state.expiration.generation
+      : null;
+  }
+
+  get currentExpirationKey(): string | null {
+    const state = this.record?.attemptState;
+    return state?.kind === "cleanup_queue"
+      ? (state.expiration?.idempotencyKey ?? null)
+      : null;
+  }
+
+  seedAttemptState(attemptState: CheckoutAttemptState) {
+    assert.equal(this.record, undefined);
+    this.record = {
+      attemptId: `attempt-${this.nextAttemptId}`,
+      attemptState,
+      expiresAt: new Date(0),
+      ownerId: USER_ID,
+      ownerToken: "seed-owner",
+    };
+    this.nextAttemptId += 1;
   }
 
   claim(

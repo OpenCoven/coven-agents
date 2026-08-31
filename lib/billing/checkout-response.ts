@@ -30,7 +30,7 @@ import {
   type CheckoutAttemptLeaseStore,
   type CheckoutAttemptState,
   type CheckoutLeaseTimers,
-  isCheckoutAttemptExpirationState,
+  isCheckoutAttemptCleanupQueueState,
   runWithCheckoutAttemptLease,
 } from "@/lib/billing/checkout-lease";
 import type { SubscriptionCheckoutConfig } from "@/lib/billing/config";
@@ -211,6 +211,14 @@ export async function checkoutResponse(
             });
             const resumeAttemptState = expiration.resumeState;
 
+            if (attemptState.kind === "invalid") {
+              return {
+                disposition: "preserve_attempt",
+                state: attemptState,
+                value: checkoutSessionConflict(),
+              };
+            }
+
             const inspectCompletedSubscription = async (input: {
               sessionId: string;
               subscriptionId: string | null;
@@ -283,16 +291,19 @@ export async function checkoutResponse(
               knownSessionIds: readonly string[] = []
             ): Promise<CheckoutAttemptResult> => {
               let stateToRetain = retainedState;
+              let blockingState: Extract<
+                CheckoutAttemptState,
+                { kind: "session_created" }
+              > | null = null;
               let completedSessions: Awaited<
                 ReturnType<typeof reconcileBlockingCheckoutSessions>
               >;
               try {
                 completedSessions = await reconcileBlockingCheckoutSessions({
+                  cleanupSessions: expiration.cleanupSessions,
                   customerId: candidateCustomerId,
-                  expireSession: expiration.expireSession,
                   knownSessionIds,
                   listPage: provider.listCheckoutSessions,
-                  retrieve: provider.retrieveCheckoutSession,
                   userId: decision.userId,
                 });
               } catch (error) {
@@ -311,15 +322,27 @@ export async function checkoutResponse(
               );
               for (const inspection of inspections) {
                 if (inspection.kind === "failure") {
+                  const currentState = expiration.currentAttemptState();
+                  if (isCheckoutAttemptCleanupQueueState(currentState)) {
+                    return {
+                      disposition: "preserve_attempt",
+                      state: currentState,
+                      value: inspection.result.value,
+                    };
+                  }
                   return inspection.result;
+                }
+                if (inspection.kind === "blocking") {
+                  blockingState ??= inspection.state;
                 }
                 stateToRetain ??= inspection.state;
               }
 
-              return stateToRetain
+              const finalState = blockingState ?? stateToRetain;
+              return finalState
                 ? {
                     disposition: "preserve_attempt",
-                    state: stateToRetain,
+                    state: finalState,
                     value: alreadySubscribed(),
                   }
                 : {
@@ -328,29 +351,61 @@ export async function checkoutResponse(
                   };
             };
 
-            const completedSessionResult = async (input: {
+            const completedSessionsResult = async (input: {
               candidateCustomerId: string;
-              sessionId: string;
-              subscriptionId: string | null;
+              sessions: Array<{
+                sessionId: string;
+                subscriptionId: string | null;
+              }>;
             }): Promise<CheckoutAttemptResult> => {
-              const inspection = await inspectCompletedSubscription(input);
-              if (inspection.kind === "failure") {
-                return inspection.result;
+              let retainedState: Extract<
+                CheckoutAttemptState,
+                { kind: "session_created" }
+              > | null = null;
+              let blockingState: Extract<
+                CheckoutAttemptState,
+                { kind: "session_created" }
+              > | null = null;
+              let foundBlocking = false;
+              for (const completedSession of input.sessions) {
+                const inspection =
+                  // biome-ignore lint/performance/noAwaitInLoops: every durably completed Session must be reconciled before the queue outcome is released.
+                  await inspectCompletedSubscription(completedSession);
+                if (inspection.kind === "failure") {
+                  const currentState = expiration.currentAttemptState();
+                  if (isCheckoutAttemptCleanupQueueState(currentState)) {
+                    return {
+                      disposition: "preserve_attempt",
+                      state: currentState,
+                      value: inspection.result.value,
+                    };
+                  }
+                  return inspection.result;
+                }
+                retainedState ??= inspection.state;
+                if (inspection.kind === "blocking") {
+                  blockingState ??= inspection.state;
+                  foundBlocking = true;
+                }
               }
-              if (inspection.kind === "blocking") {
-                return blockingSubscriptionResult(
-                  input.candidateCustomerId,
-                  inspection.state
-                );
-              }
+              const state = blockingState ??
+                retainedState ?? { kind: "create_uncertain" };
               if (
-                await provider.hasBlockingSubscription(
+                foundBlocking ||
+                (await provider.hasBlockingSubscription(
                   input.candidateCustomerId
-                )
+                ))
               ) {
+                if (
+                  isCheckoutAttemptCleanupQueueState(
+                    expiration.currentAttemptState()
+                  )
+                ) {
+                  await expiration.checkpoint(state);
+                }
                 return blockingSubscriptionResult(
                   input.candidateCustomerId,
-                  inspection.state
+                  state
                 );
               }
               return {
@@ -359,13 +414,22 @@ export async function checkoutResponse(
               };
             };
 
-            if (isCheckoutAttemptExpirationState(attemptState)) {
-              let recoveredExpiration: CheckoutSessionSnapshot;
+            const completedSessionResult = (input: {
+              candidateCustomerId: string;
+              sessionId: string;
+              subscriptionId: string | null;
+            }) =>
+              completedSessionsResult({
+                candidateCustomerId: input.candidateCustomerId,
+                sessions: [input],
+              });
+
+            if (isCheckoutAttemptCleanupQueueState(attemptState)) {
+              let recoveredCleanup: Awaited<
+                ReturnType<typeof expiration.drainPendingQueue>
+              >;
               try {
-                recoveredExpiration = await expiration.expireSession({
-                  cleanupKind: attemptState.cleanupKind,
-                  customerId: attemptState.customerId,
-                  sessionId: attemptState.sessionId,
+                recoveredCleanup = await expiration.drainPendingQueue({
                   userId: decision.userId,
                 });
               } catch (error) {
@@ -378,11 +442,13 @@ export async function checkoutResponse(
                 }
                 throw error;
               }
-              if (recoveredExpiration.status === "complete") {
-                return completedSessionResult({
+              const recoveredCompleted = recoveredCleanup.filter(
+                ({ status }) => status === "complete"
+              );
+              if (recoveredCompleted.length > 0) {
+                return completedSessionsResult({
                   candidateCustomerId: attemptState.customerId,
-                  sessionId: recoveredExpiration.id,
-                  subscriptionId: recoveredExpiration.subscriptionId,
+                  sessions: recoveredCompleted,
                 });
               }
             }
@@ -397,8 +463,8 @@ export async function checkoutResponse(
                 reconciliation = await reconcileCheckoutSessions({
                   attemptId,
                   attemptState: resumeAttemptState,
+                  cleanupSessions: expiration.cleanupSessions,
                   customerId: candidateCustomerId,
-                  expireSession: expiration.expireSession,
                   listPage: provider.listCheckoutSessions,
                   priceId: enabledConfig.priceId,
                   providerIdempotencyKey,
@@ -419,10 +485,14 @@ export async function checkoutResponse(
                 throw error;
               }
               if (reconciliation.kind === "complete") {
-                return completedSessionResult({
+                return completedSessionsResult({
                   candidateCustomerId,
-                  sessionId: reconciliation.sessionId,
-                  subscriptionId: reconciliation.subscriptionId,
+                  sessions: reconciliation.completedSessions ?? [
+                    {
+                      sessionId: reconciliation.sessionId,
+                      subscriptionId: reconciliation.subscriptionId,
+                    },
+                  ],
                 });
               }
               if (await provider.hasBlockingSubscription(candidateCustomerId)) {

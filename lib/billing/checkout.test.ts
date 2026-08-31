@@ -100,9 +100,9 @@ test("current attempts are reconciled across paginated completed Sessions", asyn
   const result = await reconcileCheckoutSessions({
     attemptId: "attempt-current",
     attemptState: { kind: "create_uncertain" },
-    customerId: "cus_existing",
-    expireSession: () =>
+    cleanupSessions: () =>
       Promise.reject(new Error("Expiration was not expected.")),
+    customerId: "cus_existing",
     listPage(input) {
       cursors.push({
         startingAfter: input.starting_after,
@@ -148,9 +148,9 @@ test("a listed open current attempt routes a retrieved completed Session through
   const result = await reconcileCheckoutSessions({
     attemptId: "attempt-current",
     attemptState: { kind: "session_created", sessionId: listed.id },
-    customerId: "cus_existing",
-    expireSession: () =>
+    cleanupSessions: () =>
       Promise.reject(new Error("Expiration was not expected.")),
+    customerId: "cus_existing",
     listPage(input) {
       return Promise.resolve({
         data: input.status === "open" ? [listed] : [],
@@ -184,9 +184,9 @@ test("a listed reusable Session that expires before retrieve is retired", async 
   const result = await reconcileCheckoutSessions({
     attemptId: "attempt-current",
     attemptState: { kind: "fresh" },
-    customerId: "cus_existing",
-    expireSession: () =>
+    cleanupSessions: () =>
       Promise.reject(new Error("Expiration was not expected.")),
+    customerId: "cus_existing",
     listPage(input) {
       return Promise.resolve({
         data: input.status === "open" ? [listed] : [],
@@ -217,12 +217,18 @@ test("an app-owned open Session from another attempt is expired instead of reuse
   const result = await reconcileCheckoutSessions({
     attemptId: "attempt-current",
     attemptState: { kind: "fresh" },
-    customerId: "cus_existing",
-    expireSession(input) {
-      expired.push(input.sessionId);
+    cleanupSessions(input) {
+      expired.push(...input.sessionIds);
       status = "expired";
-      return Promise.resolve({ ...listed, status });
+      return Promise.resolve(
+        input.sessionIds.map((sessionId) => ({
+          sessionId,
+          status: "expired" as const,
+          subscriptionId: null,
+        }))
+      );
     },
+    customerId: "cus_existing",
     listPage(input) {
       return Promise.resolve({
         data: input.status === "open" ? [listed] : [],
@@ -250,14 +256,11 @@ test("a retrieved Session with another Customer fails closed without expiration"
     reconcileCheckoutSessions({
       attemptId: "attempt-current",
       attemptState: { kind: "fresh" },
-      customerId: "cus_existing",
-      expireSession(input) {
-        expired.push(input.sessionId);
-        return Promise.resolve({
-          ...listed,
-          customerId: "cus_unrelated",
-        });
+      cleanupSessions(input) {
+        expired.push(...input.sessionIds);
+        return Promise.resolve([]);
       },
+      customerId: "cus_existing",
       listPage(input) {
         return Promise.resolve({
           data: input.status === "open" ? [listed] : [],
@@ -289,19 +292,18 @@ test("an app-owned retrieved Session with changed attempt metadata is expired be
   const result = await reconcileCheckoutSessions({
     attemptId: "attempt-current",
     attemptState: { kind: "session_created", sessionId: listed.id },
-    customerId: "cus_existing",
-    expireSession(input) {
-      expired.push(input.sessionId);
+    cleanupSessions(input) {
+      expired.push(...input.sessionIds);
       status = "expired";
-      return Promise.resolve({
-        ...listed,
-        metadata: {
-          ...listed.metadata,
-          [CHECKOUT_ATTEMPT_METADATA_KEY]: "another-attempt",
-        },
-        status,
-      });
+      return Promise.resolve(
+        input.sessionIds.map((sessionId) => ({
+          sessionId,
+          status: "expired" as const,
+          subscriptionId: null,
+        }))
+      );
     },
+    customerId: "cus_existing",
     listPage(input) {
       return Promise.resolve({
         data: input.status === "open" ? [listed] : [],
