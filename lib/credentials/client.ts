@@ -2,6 +2,20 @@ import { browserApplicationPath } from "@/lib/application-path";
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+export function isCredentialAuthorityRequestCurrent({
+  currentAuthorityContext,
+  operationIsCurrent,
+  requestAuthorityContext,
+}: {
+  currentAuthorityContext: string;
+  operationIsCurrent: boolean;
+  requestAuthorityContext: string;
+}): boolean {
+  return (
+    operationIsCurrent && requestAuthorityContext === currentAuthorityContext
+  );
+}
+
 export type CredentialRefreshTicket = Readonly<{
   generation: number;
   mutationEpoch: number;

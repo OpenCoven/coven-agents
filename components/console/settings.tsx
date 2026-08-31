@@ -31,7 +31,10 @@ import {
   isSessionOperationCurrent,
   type SessionOperationContext,
 } from "@/lib/console/session-operation";
-import { createCredentialRefreshFence } from "@/lib/credentials/client";
+import {
+  createCredentialRefreshFence,
+  isCredentialAuthorityRequestCurrent,
+} from "@/lib/credentials/client";
 
 /**
  * Settings, inside the console shell.
@@ -354,15 +357,23 @@ export function Settings({
   );
 
   const closeCredentialAuthority = useCallback(
-    (status: number, context: SessionOperationContext | null) => {
+    (
+      status: number,
+      context: SessionOperationContext | null,
+      requestAuthorityContext: string
+    ) => {
       if (
         (status !== 401 && status !== 403) ||
         !context ||
-        !isCurrentOperation(context)
+        !isCredentialAuthorityRequestCurrent({
+          currentAuthorityContext: credentialAuthorityContextRef.current,
+          operationIsCurrent: isCurrentOperation(context),
+          requestAuthorityContext,
+        })
       ) {
         return false;
       }
-      setLockedAuthorityContext(credentialAuthorityContextRef.current);
+      setLockedAuthorityContext(requestAuthorityContext);
       setDrafts({});
       publishCredentials([], context);
       if (status === 403) {
@@ -378,14 +389,28 @@ export function Settings({
       if (!context || !isCurrentOperation(context)) {
         return null;
       }
+      const requestAuthorityContext = credentialAuthorityContextRef.current;
       const ticket = refreshFence.beginRefresh();
       const response = await fetch(`${BASE_PATH}/api/credentials`, {
         signal: context.signal,
       });
-      if (!isCurrentOperation(context) || !refreshFence.isCurrent(ticket)) {
+      if (
+        !isCredentialAuthorityRequestCurrent({
+          currentAuthorityContext: credentialAuthorityContextRef.current,
+          operationIsCurrent: isCurrentOperation(context),
+          requestAuthorityContext,
+        }) ||
+        !refreshFence.isCurrent(ticket)
+      ) {
         return null;
       }
-      if (closeCredentialAuthority(response.status, context)) {
+      if (
+        closeCredentialAuthority(
+          response.status,
+          context,
+          requestAuthorityContext
+        )
+      ) {
         // A demo session cannot store one, and saying so beats a form that
         // fails on submit.
         return [];
@@ -394,7 +419,14 @@ export function Settings({
         return null;
       }
       const body = (await response.json()) as { harnessIds?: string[] };
-      if (!isCurrentOperation(context) || !refreshFence.isCurrent(ticket)) {
+      if (
+        !isCredentialAuthorityRequestCurrent({
+          currentAuthorityContext: credentialAuthorityContextRef.current,
+          operationIsCurrent: isCurrentOperation(context),
+          requestAuthorityContext,
+        }) ||
+        !refreshFence.isCurrent(ticket)
+      ) {
         return null;
       }
       return publishCredentials(body.harnessIds ?? [], context);
@@ -527,6 +559,7 @@ export function Settings({
       return;
     }
     setBusy(true);
+    const requestAuthorityContext = credentialAuthorityContextRef.current;
     let stored = 0;
     let nextConfigured = configured;
     try {
@@ -544,7 +577,13 @@ export function Settings({
           method: "POST",
           signal: context.signal,
         });
-        if (!isCurrentOperation(context)) {
+        if (
+          !isCredentialAuthorityRequestCurrent({
+            currentAuthorityContext: credentialAuthorityContextRef.current,
+            operationIsCurrent: isCurrentOperation(context),
+            requestAuthorityContext,
+          })
+        ) {
           return;
         }
 
@@ -558,7 +597,13 @@ export function Settings({
           }
           return;
         }
-        if (closeCredentialAuthority(response.status, context)) {
+        if (
+          closeCredentialAuthority(
+            response.status,
+            context,
+            requestAuthorityContext
+          )
+        ) {
           toast.error(
             response.status === 401
               ? "Sign in again."
@@ -611,6 +656,7 @@ export function Settings({
       return;
     }
     setBusy(true);
+    const requestAuthorityContext = credentialAuthorityContextRef.current;
     try {
       const response = await fetch(`${BASE_PATH}/api/credentials`, {
         body: JSON.stringify({ harnessId }),
@@ -618,10 +664,22 @@ export function Settings({
         method: "DELETE",
         signal: context.signal,
       });
-      if (!isCurrentOperation(context)) {
+      if (
+        !isCredentialAuthorityRequestCurrent({
+          currentAuthorityContext: credentialAuthorityContextRef.current,
+          operationIsCurrent: isCurrentOperation(context),
+          requestAuthorityContext,
+        })
+      ) {
         return;
       }
-      if (closeCredentialAuthority(response.status, context)) {
+      if (
+        closeCredentialAuthority(
+          response.status,
+          context,
+          requestAuthorityContext
+        )
+      ) {
         toast.error(
           response.status === 401 ? "Sign in again." : "Subscription required."
         );
