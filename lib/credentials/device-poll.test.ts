@@ -5,11 +5,13 @@ import type {
   IdempotencyClaimResult,
   IdempotencyCompleteInput,
   IdempotencyReleaseInput,
-  IdempotencyStore,
+  IdempotencyRenewInput,
   StoredIdempotencyResponse,
 } from "../abuse/idempotency";
 import {
   CREDENTIAL_DEVICE_POLL_RETENTION_MS,
+  type CredentialDevicePollClaim,
+  type CredentialDevicePollStore,
   runCredentialDevicePoll,
 } from "./device-poll";
 import type { DeviceExchange } from "./github-device";
@@ -27,15 +29,23 @@ const CREDENTIAL: StoredCredential = {
 };
 
 type RecordState = {
-  claim: IdempotencyClaimInput;
+  claim: CredentialDevicePollClaim;
   expiresAt: Date;
   response: StoredIdempotencyResponse | null;
   state: "completed" | "in_progress";
 };
 
-class MemoryStore implements IdempotencyStore {
-  completed: IdempotencyCompleteInput | null = null;
+class MemoryStore implements CredentialDevicePollStore<StoredCredential> {
+  commitAttempts = 0;
+  commitFailures: string[] = [];
+  committed: IdempotencyCompleteInput | null = null;
+  credentialWrites = 0;
+  duplicateBeforeCommit = false;
+  loseAuthorityBeforeCommit = false;
+  loseFenceBeforeCommit = false;
   releaseCount = 0;
+  readonly credentials = new Map<string, StoredCredential>();
+  private nextRecord = 0;
   private readonly records = new Map<string, RecordState>();
 
   cleanupExpired({ before }: { before: Date; limit: number }) {
@@ -48,25 +58,28 @@ class MemoryStore implements IdempotencyStore {
   }
 
   claim(input: IdempotencyClaimInput): Promise<IdempotencyClaimResult> {
+    const { ownerToken } = input;
+    assert.ok(ownerToken);
     const key = this.key(input);
     const existing = this.records.get(key);
     if (!existing) {
+      this.nextRecord += 1;
+      const claim: CredentialDevicePollClaim = {
+        claimExpiresAt: input.claimExpiresAt,
+        keyHash: input.keyHash,
+        operation: input.operation,
+        ownerId: input.ownerId,
+        ownerToken,
+        recordId: `record-${this.nextRecord}`,
+        requestHash: input.requestHash,
+      };
       this.records.set(key, {
-        claim: input,
+        claim,
         expiresAt: input.claimExpiresAt,
         response: null,
         state: "in_progress",
       });
-      return Promise.resolve({
-        claim: {
-          claimExpiresAt: input.claimExpiresAt,
-          keyHash: input.keyHash,
-          operation: input.operation,
-          ownerId: input.ownerId,
-          requestHash: input.requestHash,
-        },
-        kind: "claimed",
-      });
+      return Promise.resolve({ claim, kind: "claimed" });
     }
     if (existing.claim.requestHash !== input.requestHash) {
       return Promise.resolve({ kind: "conflict" });
@@ -81,20 +94,126 @@ class MemoryStore implements IdempotencyStore {
     });
   }
 
-  complete(input: IdempotencyCompleteInput) {
-    const record = this.records.get(this.key(input.claim));
-    assert.ok(record);
+  complete(): Promise<"completed" | "lost"> {
+    throw new Error("authorized device polls must use the atomic commit");
+  }
+
+  commitAuthorized(
+    input: IdempotencyCompleteInput & {
+      authVersion: number;
+      claim: CredentialDevicePollClaim;
+      credential: StoredCredential;
+    }
+  ) {
+    this.commitAttempts += 1;
+    const key = this.key(input.claim);
+    const record = this.records.get(key);
+
+    if (this.duplicateBeforeCommit && record) {
+      this.duplicateBeforeCommit = false;
+      record.claim = {
+        ...record.claim,
+        ownerToken: "concurrent-winner-token",
+      };
+      record.expiresAt = input.expiresAt;
+      record.response = input.response;
+      record.state = "completed";
+      this.credentials.set(
+        input.claim.ownerId,
+        structuredClone(input.credential)
+      );
+      this.credentialWrites += 1;
+    } else if (this.loseFenceBeforeCommit && record) {
+      this.loseFenceBeforeCommit = false;
+      record.claim = {
+        ...record.claim,
+        ownerToken: "replacement-owner-token",
+      };
+    }
+
+    if (
+      !record ||
+      record.claim.recordId !== input.claim.recordId ||
+      record.claim.ownerToken !== input.claim.ownerToken ||
+      record.claim.requestHash !== input.claim.requestHash ||
+      record.claim.claimExpiresAt.getTime() !==
+        input.claim.claimExpiresAt.getTime() ||
+      record.expiresAt.getTime() <= input.completedAt.getTime() ||
+      record.state !== "in_progress"
+    ) {
+      if (
+        record?.state === "completed" &&
+        record.claim.recordId === input.claim.recordId &&
+        record.claim.requestHash === input.claim.requestHash &&
+        record.response
+      ) {
+        return Promise.resolve({
+          kind: "replayed",
+          response: record.response,
+        } as const);
+      }
+      return Promise.resolve("lost" as const);
+    }
+
+    if (this.loseAuthorityBeforeCommit) {
+      this.loseAuthorityBeforeCommit = false;
+      return Promise.resolve("authority_lost" as const);
+    }
+
+    const failureCode = this.commitFailures.shift();
+    if (failureCode) {
+      return Promise.reject(
+        Object.assign(new Error("transaction commit failed"), {
+          code: failureCode,
+        })
+      );
+    }
+
     record.expiresAt = input.expiresAt;
     record.response = input.response;
     record.state = "completed";
-    this.completed = input;
+    this.credentials.set(
+      input.claim.ownerId,
+      structuredClone(input.credential)
+    );
+    this.credentialWrites += 1;
+    this.committed = input;
     return Promise.resolve("completed" as const);
   }
 
   release(input: IdempotencyReleaseInput) {
-    this.records.delete(this.key(input.claim));
+    const key = this.key(input.claim);
+    const record = this.records.get(key);
+    if (
+      record?.state === "in_progress" &&
+      record.claim.recordId === input.claim.recordId &&
+      record.claim.ownerToken === input.claim.ownerToken
+    ) {
+      this.records.delete(key);
+      this.releaseCount += 1;
+      return Promise.resolve("released" as const);
+    }
     this.releaseCount += 1;
-    return Promise.resolve("released" as const);
+    return Promise.resolve("lost" as const);
+  }
+
+  renew(input: IdempotencyRenewInput) {
+    const record = this.records.get(this.key(input.claim));
+    if (
+      record?.state !== "in_progress" ||
+      record.claim.recordId !== input.claim.recordId ||
+      record.claim.ownerToken !== input.claim.ownerToken ||
+      record.expiresAt.getTime() <= input.now.getTime()
+    ) {
+      return Promise.resolve({ kind: "lost" } as const);
+    }
+    const claim = {
+      ...record.claim,
+      claimExpiresAt: input.claimExpiresAt,
+    };
+    record.claim = claim;
+    record.expiresAt = input.claimExpiresAt;
+    return Promise.resolve({ claim, kind: "renewed" } as const);
   }
 
   private key(input: { keyHash: string; operation: string; ownerId: string }) {
@@ -106,29 +225,52 @@ function authorized(): DeviceExchange {
   return { credential: CREDENTIAL, kind: "authorized" };
 }
 
+function poll(
+  store: MemoryStore,
+  overrides: Partial<{
+    exchange: () => Promise<DeviceExchange | { kind: "unavailable" }>;
+    idempotencyKey: string | null;
+    ownerId: string;
+    prepareCredential: (
+      credential: StoredCredential
+    ) => Promise<StoredCredential>;
+    revalidateAuthority: () => Promise<boolean>;
+  }> = {}
+) {
+  return runCredentialDevicePoll({
+    authVersion: 4,
+    deviceCode: DEVICE_CODE,
+    exchange: overrides.exchange ?? (() => Promise.resolve(authorized())),
+    idempotencyKey:
+      "idempotencyKey" in overrides ? (overrides.idempotencyKey ?? null) : KEY,
+    ownerId: overrides.ownerId ?? OWNER_A,
+    prepareCredential:
+      overrides.prepareCredential ??
+      ((credential) => Promise.resolve(structuredClone(credential))),
+    revalidateAuthority:
+      overrides.revalidateAuthority ?? (() => Promise.resolve(true)),
+    store,
+  });
+}
+
 test("a lost authorized response replays without exchanging or storing twice", async () => {
   const store = new MemoryStore();
   let exchanges = 0;
-  let writes = 0;
-  const poll = () =>
-    runCredentialDevicePoll({
-      deviceCode: DEVICE_CODE,
+  let preparations = 0;
+  const run = () =>
+    poll(store, {
       exchange: () => {
         exchanges += 1;
         return Promise.resolve(authorized());
       },
-      idempotencyKey: KEY,
-      ownerId: OWNER_A,
-      store,
-      storeCredential: () => {
-        writes += 1;
-        return Promise.resolve();
+      prepareCredential: (credential) => {
+        preparations += 1;
+        return Promise.resolve(structuredClone(credential));
       },
     });
 
-  const lostResponse = await poll();
-  assert.equal(lostResponse.kind, "response");
-  const replay = await poll();
+  assert.equal((await run()).kind, "response");
+  const replay = await run();
 
   assert.deepEqual(replay, {
     kind: "response",
@@ -136,71 +278,45 @@ test("a lost authorized response replays without exchanging or storing twice", a
     response: { body: { status: "authorized" }, status: 200 },
   });
   assert.equal(exchanges, 1);
-  assert.equal(writes, 1);
+  assert.equal(preparations, 1);
+  assert.equal(store.credentialWrites, 1);
 });
 
 test("pending releases the key so a later authorized poll can complete", async () => {
   const store = new MemoryStore();
   const results: DeviceExchange[] = [{ kind: "pending" }, authorized()];
-  let writes = 0;
-  const poll = () =>
-    runCredentialDevicePoll({
-      deviceCode: DEVICE_CODE,
-      exchange: () => Promise.resolve(results.shift() ?? authorized()),
-      idempotencyKey: KEY,
-      ownerId: OWNER_A,
-      store,
-      storeCredential: () => {
-        writes += 1;
-        return Promise.resolve();
-      },
-    });
+  const exchange = () => Promise.resolve(results.shift() ?? authorized());
 
-  assert.deepEqual(await poll(), {
+  assert.deepEqual(await poll(store, { exchange }), {
     kind: "response",
     replayed: false,
     response: { body: { status: "pending" }, status: 200 },
   });
-  assert.deepEqual(await poll(), {
+  assert.deepEqual(await poll(store, { exchange }), {
     kind: "response",
     replayed: false,
     response: { body: { status: "authorized" }, status: 200 },
   });
   assert.equal(store.releaseCount, 1);
-  assert.equal(writes, 1);
+  assert.equal(store.credentialWrites, 1);
 });
 
 test("provider configuration errors release the key for a later retry", async () => {
   const store = new MemoryStore();
-  let configured = false;
-  let writes = 0;
-  const poll = () =>
-    runCredentialDevicePoll({
-      deviceCode: DEVICE_CODE,
-      exchange: () =>
-        Promise.resolve(configured ? authorized() : { kind: "unavailable" }),
-      idempotencyKey: KEY,
-      ownerId: OWNER_A,
-      store,
-      storeCredential: () => {
-        writes += 1;
-        return Promise.resolve();
-      },
-    });
 
-  assert.deepEqual(await poll(), {
-    kind: "response",
-    replayed: false,
-    response: { body: { error: "github_unconfigured" }, status: 503 },
-  });
-  configured = true;
-  assert.deepEqual(await poll(), {
-    kind: "response",
-    replayed: false,
-    response: { body: { status: "authorized" }, status: 200 },
-  });
+  assert.deepEqual(
+    await poll(store, {
+      exchange: () => Promise.resolve({ kind: "unavailable" }),
+    }),
+    {
+      kind: "response",
+      replayed: false,
+      response: { body: { error: "github_unconfigured" }, status: 503 },
+    }
+  );
+  assert.equal((await poll(store)).kind, "response");
   assert.equal(store.releaseCount, 1);
-  assert.equal(writes, 1);
+  assert.equal(store.credentialWrites, 1);
 });
 
 test("concurrent same-key polls permit one provider exchange", async () => {
@@ -214,41 +330,138 @@ test("concurrent same-key polls permit one provider exchange", async () => {
     releaseExchange = resolve;
   });
   let exchanges = 0;
-  const poll = () =>
-    runCredentialDevicePoll({
-      deviceCode: DEVICE_CODE,
+  const run = () =>
+    poll(store, {
       exchange: async () => {
         exchanges += 1;
         exchangeStarted();
         await gate;
         return authorized();
       },
-      idempotencyKey: KEY,
-      ownerId: OWNER_A,
-      store,
-      storeCredential: () => Promise.resolve(),
     });
 
-  const first = poll();
+  const first = run();
   await started;
-  assert.deepEqual(await poll(), { kind: "in_progress" });
+  assert.deepEqual(await run(), { kind: "in_progress" });
   assert.equal(exchanges, 1);
   releaseExchange();
   await first;
 });
 
-test("the cached response contains only the authorized status", async () => {
+test("a transient transaction failure retries without re-exchanging or re-encrypting", async () => {
   const store = new MemoryStore();
-  await runCredentialDevicePoll({
-    deviceCode: DEVICE_CODE,
-    exchange: () => Promise.resolve(authorized()),
-    idempotencyKey: KEY,
-    ownerId: OWNER_A,
-    store,
-    storeCredential: () => Promise.resolve(),
+  store.commitFailures.push("40001");
+  let exchanges = 0;
+  let preparations = 0;
+
+  const result = await poll(store, {
+    exchange: () => {
+      exchanges += 1;
+      return Promise.resolve(authorized());
+    },
+    prepareCredential: (credential) => {
+      preparations += 1;
+      return Promise.resolve(structuredClone(credential));
+    },
   });
 
-  assert.deepEqual(store.completed?.response, {
+  assert.deepEqual(result, {
+    kind: "response",
+    replayed: false,
+    response: { body: { status: "authorized" }, status: 200 },
+  });
+  assert.equal(exchanges, 1);
+  assert.equal(preparations, 1);
+  assert.equal(store.commitAttempts, 2);
+  assert.equal(store.credentialWrites, 1);
+});
+
+test("an unrecoverable transaction failure returns an explicit 503 and releases the claim", async () => {
+  const store = new MemoryStore();
+  store.commitFailures.push("XX000");
+
+  const result = await poll(store);
+
+  assert.deepEqual(result, {
+    kind: "response",
+    replayed: false,
+    response: {
+      body: { error: "credential_storage_unavailable" },
+      status: 503,
+    },
+  });
+  assert.equal(store.credentials.size, 0);
+  assert.equal(store.committed, null);
+  assert.equal(store.releaseCount, 1);
+});
+
+test("authority lost after provider exchange returns 403 without publishing poll state", async () => {
+  const store = new MemoryStore();
+  let revalidations = 0;
+
+  const result = await poll(store, {
+    exchange: () => Promise.resolve({ kind: "pending" }),
+    revalidateAuthority: () => {
+      revalidations += 1;
+      return Promise.resolve(false);
+    },
+  });
+
+  assert.deepEqual(result, {
+    kind: "response",
+    replayed: false,
+    response: {
+      body: { error: "subscription_required" },
+      status: 403,
+    },
+  });
+  assert.equal(revalidations, 1);
+  assert.equal(store.releaseCount, 1);
+});
+
+test("authority lost inside the commit transaction stores no credential", async () => {
+  const store = new MemoryStore();
+  store.loseAuthorityBeforeCommit = true;
+
+  assert.deepEqual(await poll(store), {
+    kind: "response",
+    replayed: false,
+    response: {
+      body: { error: "subscription_required" },
+      status: 403,
+    },
+  });
+  assert.equal(store.credentialWrites, 0);
+  assert.equal(store.releaseCount, 1);
+});
+
+test("a lost exact fence does not write a credential or report authorization", async () => {
+  const store = new MemoryStore();
+  store.loseFenceBeforeCommit = true;
+
+  assert.deepEqual(await poll(store), { kind: "in_progress" });
+  assert.equal(store.credentialWrites, 0);
+  assert.equal(store.committed, null);
+});
+
+test("a concurrently completed exact record replays without a second credential write", async () => {
+  const store = new MemoryStore();
+  store.duplicateBeforeCommit = true;
+
+  assert.deepEqual(await poll(store), {
+    kind: "response",
+    replayed: true,
+    response: { body: { status: "authorized" }, status: 200 },
+  });
+  assert.equal(store.credentialWrites, 1);
+  assert.equal(store.committed, null);
+});
+
+test("the completed response is bounded and contains no credential or device code", async () => {
+  const store = new MemoryStore();
+  await poll(store);
+
+  assert.deepEqual(store.committed?.response, {
     envelope: {
       body: { status: "authorized" },
       kind: "plain_json",
@@ -256,11 +469,14 @@ test("the cached response contains only the authorized status", async () => {
     status: 200,
   });
   assert.equal(
-    store.completed?.expiresAt.getTime() -
-      store.completed?.completedAt.getTime(),
+    store.committed?.expiresAt.getTime() -
+      store.committed?.completedAt.getTime(),
     CREDENTIAL_DEVICE_POLL_RETENTION_MS
   );
-  assert.doesNotMatch(JSON.stringify(store.completed?.response), /secret/);
+  assert.doesNotMatch(
+    JSON.stringify(store.committed?.response),
+    /access-secret|refresh-secret|device-secret/
+  );
 });
 
 test("missing and malformed keys are rejected before provider work", async () => {
@@ -268,16 +484,12 @@ test("missing and malformed keys are rejected before provider work", async () =>
     [null, "short"].map(async (idempotencyKey) => {
       const store = new MemoryStore();
       let exchanges = 0;
-      const result = await runCredentialDevicePoll({
-        deviceCode: DEVICE_CODE,
+      const result = await poll(store, {
         exchange: () => {
           exchanges += 1;
           return Promise.resolve(authorized());
         },
         idempotencyKey,
-        ownerId: OWNER_A,
-        store,
-        storeCredential: () => Promise.resolve(),
       });
       return { exchanges, idempotencyKey, result };
     })
@@ -295,48 +507,39 @@ test("missing and malformed keys are rejected before provider work", async () =>
 test("the same browser key is scoped independently to each authenticated owner", async () => {
   const store = new MemoryStore();
   let exchanges = 0;
-  const poll = (ownerId: string) =>
-    runCredentialDevicePoll({
-      deviceCode: DEVICE_CODE,
+  const run = (ownerId: string) =>
+    poll(store, {
       exchange: () => {
         exchanges += 1;
         return Promise.resolve(authorized());
       },
-      idempotencyKey: KEY,
       ownerId,
-      store,
-      storeCredential: () => Promise.resolve(),
     });
 
-  assert.equal((await poll(OWNER_A)).kind, "response");
-  assert.equal((await poll(OWNER_B)).kind, "response");
+  assert.equal((await run(OWNER_A)).kind, "response");
+  assert.equal((await run(OWNER_B)).kind, "response");
   assert.equal(exchanges, 2);
+  assert.equal(store.credentials.size, 2);
 });
 
-test("credential storage failure releases the claim and never authorizes", async () => {
+test("credential preparation failure returns 503 without completing authorization", async () => {
   const store = new MemoryStore();
-  let writes = 0;
-  const poll = () =>
-    runCredentialDevicePoll({
-      deviceCode: DEVICE_CODE,
-      exchange: () => Promise.resolve(authorized()),
-      idempotencyKey: KEY,
-      ownerId: OWNER_A,
-      store,
-      storeCredential: () => {
-        writes += 1;
-        return writes === 1
-          ? Promise.reject(new Error("database unavailable"))
-          : Promise.resolve();
-      },
-    });
 
-  await assert.rejects(poll(), /database unavailable/);
-  assert.equal(store.completed, null);
+  assert.deepEqual(
+    await poll(store, {
+      prepareCredential: () =>
+        Promise.reject(new Error("credential encryption unavailable")),
+    }),
+    {
+      kind: "response",
+      replayed: false,
+      response: {
+        body: { error: "credential_storage_unavailable" },
+        status: 503,
+      },
+    }
+  );
+  assert.equal(store.commitAttempts, 0);
+  assert.equal(store.credentials.size, 0);
   assert.equal(store.releaseCount, 1);
-  assert.deepEqual(await poll(), {
-    kind: "response",
-    replayed: false,
-    response: { body: { status: "authorized" }, status: 200 },
-  });
 });

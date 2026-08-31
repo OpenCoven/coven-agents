@@ -117,6 +117,8 @@ const credentialSourceFiles = [
   "lib/credentials/device-flow-binding.ts",
   "lib/credentials/device-flow-client.test.ts",
   "lib/credentials/device-flow-client.ts",
+  "lib/credentials/device-poll-commit.test.ts",
+  "lib/credentials/device-poll-commit.ts",
   "lib/credentials/device-poll.test.ts",
   "lib/credentials/device-poll.ts",
   "lib/credentials/envelope.test.ts",

@@ -451,12 +451,13 @@ test("device polling parses its body and claims idempotency before provider and 
   const bodyIndex = block.indexOf("readBoundedJson(");
   const idempotencyIndex = block.indexOf("runCredentialDevicePoll({");
   const providerIndex = block.indexOf("exchangeDeviceCode(");
-  const storageIndex = block.indexOf("putCredential(");
+  const storageIndex = block.indexOf("prepareCredentialWrite(");
 
   assert.ok(bodyIndex >= 0);
   assert.ok(idempotencyIndex > bodyIndex);
   assert.ok(providerIndex > idempotencyIndex);
   assert.ok(storageIndex > providerIndex);
+  assert.match(block, /store:\s*databaseCredentialDevicePollStore/);
 });
 
 test("device starts encrypt replay payloads while checkout uses tagged plaintext", () => {
