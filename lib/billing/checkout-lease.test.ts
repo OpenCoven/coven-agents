@@ -12,6 +12,8 @@ import {
   type CheckoutAttemptLeaseRenewInput,
   type CheckoutAttemptLeaseStore,
   type CheckoutLeaseTimers,
+  checkoutAttemptProvesCustomer,
+  checkoutAttemptProvesResources,
   parseCheckoutAttemptState,
   runWithCheckoutAttemptLease,
   serializeCheckoutAttemptState,
@@ -291,15 +293,96 @@ test("checkout attempt state encoding fails closed for legacy or malformed value
   assert.deepEqual(
     parseCheckoutAttemptState(
       serializeCheckoutAttemptState({
+        customerId: "cus_recoverable",
         kind: "session_created",
         sessionId: "cs_recoverable",
       })
     ),
-    { kind: "session_created", sessionId: "cs_recoverable" }
+    {
+      customerId: "cus_recoverable",
+      kind: "session_created",
+      sessionId: "cs_recoverable",
+    }
   );
   assert.deepEqual(parseCheckoutAttemptState("legacy-owner-token"), {
     kind: "create_uncertain",
   });
+});
+
+test("checkout attempt provenance proves only exact bounded Customer and Session ids", () => {
+  const direct = {
+    customerId: "cus_exact",
+    kind: "session_created",
+    sessionId: "cs_exact",
+  } as const;
+  const cleanup = {
+    cleanupKind: "obsolete",
+    currentIndex: 0,
+    customerId: "cus_exact",
+    expiration: null,
+    items: [{ sessionId: "cs_cleanup" }],
+    kind: "cleanup_queue",
+    resumeState: direct,
+  } satisfies CheckoutAttemptLease["attemptState"];
+
+  assert.equal(
+    checkoutAttemptProvesResources(direct, {
+      customerId: "cus_exact",
+      sessionId: "cs_exact",
+    }),
+    true
+  );
+  assert.equal(
+    checkoutAttemptProvesResources(cleanup, {
+      customerId: "cus_exact",
+      sessionId: "cs_cleanup",
+    }),
+    true
+  );
+  assert.equal(
+    checkoutAttemptProvesResources(cleanup, {
+      customerId: "cus_exact",
+      sessionId: "cs_exact",
+    }),
+    true
+  );
+  assert.equal(checkoutAttemptProvesCustomer(cleanup, "cus_exact"), true);
+
+  for (const [state, customerId, sessionId] of [
+    [direct, "cus_other", "cs_exact"],
+    [direct, "cus_exact", "cs_other"],
+    [
+      { customerId: "cus_exact", kind: "customer_created" },
+      "cus_exact",
+      "cs_exact",
+    ],
+    [{ kind: "invalid" }, "cus_exact", "cs_exact"],
+    [null, "cus_exact", "cs_exact"],
+  ] as const) {
+    assert.equal(
+      checkoutAttemptProvesResources(state, { customerId, sessionId }),
+      false
+    );
+  }
+});
+
+test("legacy Session-only attempt state is usable for recovery but not ownership proof", () => {
+  const state = parseCheckoutAttemptState(
+    "checkout-attempt:v1:session_created:cs_legacy"
+  );
+
+  assert.deepEqual(state, {
+    kind: "session_created",
+    sessionId: "cs_legacy",
+  });
+  assert.equal(
+    checkoutAttemptProvesResources(state, {
+      customerId: "cus_legacy",
+      sessionId: "cs_legacy",
+    }),
+    false
+  );
+  assert.equal(checkoutAttemptProvesCustomer(state, "cus_legacy"), false);
 });
 
 test("bounded cleanup queue state round-trips with deterministic expiration generations", () => {

@@ -43,6 +43,10 @@ import {
 import { countRun, usageFor } from "../billing/usage";
 import {
   type StripeEventUpdateInput,
+  type StripeEventWriteResult,
+  type StripeManualReconciliationWriteResult,
+  type StripeUserMutation,
+  type StripeWebhookManualReconciliationRecord,
   stripeEventMutation,
 } from "../billing/webhook";
 import { ChatbotError } from "../errors";
@@ -56,12 +60,16 @@ import {
   type Suggestion,
   stream,
   stripeEvent,
+  stripeReconciliation,
   suggestion,
   type User,
   user,
   vote,
 } from "./schema";
-import { stripeEventOwnerWhere } from "./stripe-event";
+import {
+  checkoutAttemptProvenanceWhere,
+  stripeEventOwnerWhere,
+} from "./stripe-event";
 
 const client = postgres(process.env.POSTGRES_URL ?? "");
 export const db = drizzle(client);
@@ -233,18 +241,47 @@ export async function attachStripeCustomer(
   }
 }
 
-export type StripeEventWriteResult = "applied" | "duplicate";
-
-export async function claimStripeEventDisposition(
-  eventId: string
-): Promise<StripeEventWriteResult> {
+export async function findCheckoutAttemptState(input: {
+  attemptId: string;
+  ownerId: string;
+}) {
   try {
-    const claimed = await db
-      .insert(stripeEvent)
-      .values({ id: eventId })
-      .onConflictDoNothing()
-      .returning({ id: stripeEvent.id });
-    return claimed.length === 0 ? "duplicate" : "applied";
+    const [record] = await db
+      .select({ requestHash: idempotencyRecord.requestHash })
+      .from(idempotencyRecord)
+      .where(checkoutAttemptProvenanceWhere(input))
+      .limit(1);
+    return record ? parseCheckoutAttemptState(record.requestHash) : null;
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
+export async function recordStripeReconciliation(
+  record: StripeWebhookManualReconciliationRecord
+): Promise<StripeManualReconciliationWriteResult> {
+  try {
+    return await db.transaction(async (transaction) => {
+      const claimed = await transaction
+        .insert(stripeEvent)
+        .values({ id: record.eventId })
+        .onConflictDoNothing()
+        .returning({ id: stripeEvent.id });
+      if (claimed.length === 0) {
+        return "duplicate";
+      }
+
+      await transaction.insert(stripeReconciliation).values({
+        eventId: record.eventId,
+        eventType: record.eventType,
+        reason: record.reason,
+        status: "pending",
+      });
+      return {
+        kind: "manual_reconciliation",
+        record: { ...record, status: "pending" },
+      };
+    });
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
   }
@@ -274,7 +311,25 @@ export async function applyStripeEventUpdate(
         throw new Error("Stripe webhook owner does not exist.");
       }
 
-      const mutation = stripeEventMutation(owner, input);
+      const decision = stripeEventMutation(owner, input);
+      if (
+        decision &&
+        "kind" in decision &&
+        decision.kind === "manual_reconciliation"
+      ) {
+        const record: StripeWebhookManualReconciliationRecord = {
+          eventId: input.eventId,
+          eventType:
+            input.eventType === "invoice_paid"
+              ? "invoice.paid"
+              : "invoice.payment_failed",
+          reason: decision.reason,
+          status: "pending",
+        };
+        await transaction.insert(stripeReconciliation).values(record);
+        return { kind: "manual_reconciliation", record };
+      }
+      const mutation = decision as StripeUserMutation | null;
       if (!mutation) {
         return "applied";
       }

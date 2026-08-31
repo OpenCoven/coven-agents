@@ -1,7 +1,7 @@
 # Subscription and Billing Policy
 
 - Status: living repository policy
-- Last reviewed: 2026-08-29
+- Last reviewed: 2026-08-31
 - Scope: subscriber entitlement, Stripe checkout and webhook handling, billing
   period usage, and recovery expectations
 
@@ -115,9 +115,11 @@ administrative revoke clears the period immediately.
    cancelled subscriptions are expected and do not violate the invariant.
 11. Create the hosted subscription Checkout Session with distinct Customer and
     Session idempotency keys derived from the durable checkout-attempt identity,
-    and stamp that attempt identity in Session metadata. If a lease expires,
-    its successor keeps the attempt and provider keys. A stale holder that
-    later finishes cannot report success or delete the successor's lease.
+    and stamp that attempt identity in both Customer and Session metadata. The
+    durable Session-created checkpoint binds the exact Customer and Session
+    IDs. If a lease expires, its successor keeps the attempt and provider keys.
+    A stale holder that later finishes cannot report success or delete the
+    successor's lease.
 
 The decision helper is `lib/billing/checkout.ts`; the route and
 `lib/billing/checkout.test.ts` are the current enforcement sources. A user row
@@ -145,13 +147,29 @@ state.
 1. Require both Stripe secrets and the `stripe-signature` header.
 2. Verify the signature against the exact raw request body before reading any
    event as authority.
-3. Claim the Stripe event ID in `StripeEvent` before mutation. The primary-key
-   insert is the idempotency boundary; a redelivery is a no-op.
-4. Resolve the user by the persisted Customer ID, falling back to the
-   Customer's checkout-stamped `metadata.userId` for the first event.
-5. Allow-list entitlement changes through `lib/billing/webhook.ts`.
-   `invoice.paid` sets the authoritative period start and end when both can be
-   established. Unknown events change nothing.
+3. Claim the Stripe event ID in `StripeEvent` inside the same transaction that
+   locks and updates the owner. Any claim, lock, decision, update, or commit
+   failure rolls the claim back so Stripe receives a retryable `503`.
+4. Resolve invoice ownership by the unique persisted
+   `User.stripeCustomerId` first. That path does not retrieve the Stripe
+   Customer and ignores stale provider metadata. Only an unmapped Customer may
+   use checkout-stamped metadata, and then the exact attempt ID, operation,
+   local owner, and bounded durable checkout state must prove that Customer.
+5. Require the same local attempt evidence for Checkout reference events. The
+   provider markers alone are insufficient: the durable state must prove the
+   exact Customer and Checkout Session IDs.
+6. Allow-list entitlement changes through `lib/billing/webhook.ts`.
+   `invoice.paid` accepts the subscription ID, billing-period start, and
+   period end as one exact interval. A same-subscription renewal may advance
+   it. A different subscription may replace it only when no paid interval is
+   backed, or when its start is at or after the stored end and its end advances.
+   Overlapping replacement intervals never merge or reset usage; they enter
+   manual reconciliation. Unknown events change nothing.
+7. Persist manual dispositions by inserting `StripeEvent` and
+   `StripeReconciliation` together. A redelivery conflicts on the event ID and
+   returns `deduped`; a reconciliation insert or commit failure rolls both rows
+   back and returns `503`. Sanitized logging occurs only after commit and may
+   fail without losing the durable evidence.
 
 Failed-payment grace is `GRACE_PERIOD_DAYS = 3` from
 `lib/billing/limits.ts`. `lib/billing/grace.ts` grants it only for
@@ -161,6 +179,28 @@ period, an unknown billing reason, or a second failure inside grace grants
 nothing. Stripe dunning may continue, but this application does not extend
 again. `customer.subscription.deleted` also changes nothing because the
 already-paid period expires through its stored timestamp.
+
+## Reconciliation evidence and runbook
+
+`StripeReconciliation` is the dedicated operational queue for events that
+cannot be applied safely. Its `eventId` is the primary key and a restrictive
+foreign key to `StripeEvent.id`. `eventType`, `reason`, and `status` are
+finite checked values; statuses are `pending`, `acknowledged`, and `resolved`.
+No user ID, Customer ID, Subscription ID, raw payload, metadata, secret, or
+arbitrary operator text is stored. Logs contain only the event ID, bounded
+event type, bounded reason, and status.
+
+Generic idempotency cleanup does not read or delete either Stripe table.
+Reconciliation retention is therefore an operator-controlled billing record
+policy, not an expiry side effect. This scope adds no UI or public API. An
+authorized operator reviews `pending` rows, retrieves the corresponding event
+from Stripe through approved administrative access, compares it with the
+current `User` entitlement state, marks the row `acknowledged` while
+investigating, performs any explicit repair through the authorized billing
+procedure, and marks it `resolved` only after verification. Deletion, if a
+future retention policy requires it, must be an explicit audited operation
+that handles the restrictive event foreign key; generic cleanup must never
+silently remove unresolved evidence.
 
 ## Usage cap and run accounting
 
@@ -202,8 +242,11 @@ the accounting read fails, the endpoint returns `capacity_unavailable`.
 | Missing billing configuration | Checkout or webhook returns `billing_unavailable`. | Restore the deployment secrets and verify configuration without logging values. |
 | Missing or invalid webhook signature | `400`; no event is trusted. | Correct the endpoint secret or delivery configuration, then request a provider redelivery. |
 | Duplicate Stripe event | The event ID conflicts and the delivery returns `deduped`. | Confirm the original event produced the intended database period; do not bypass deduplication. |
-| Event lacks a customer or resolvable owner | The already-claimed event is ignored. | Reconcile Stripe Customer metadata and the user mapping from authorized provider evidence, then repair entitlement explicitly; replaying the same event ID will remain deduped. |
-| Failure after event claim but before entitlement update | The event remains claimed, so the same event ID will not retry the write. | Inspect the Stripe event and database audit evidence, repair the mapping or period through an authorized administrative procedure, and record the incident. This route is not transactional across claim and update. |
+| Persisted Customer mapping is absent but valid checkout metadata could still converge | The delivery remains unclaimed and returns `503` until local attempt provenance proves the same owner and Customer. | Let checkout attachment or recovery settle, then accept Stripe's redelivery. Never attach ownership from metadata alone. |
+| Customer metadata is foreign or lacks bounded application markers | The event is ignored without an entitlement write or event claim. | Treat it as unrelated unless authorized provider and local records establish a separate repair case. |
+| Manual reconciliation is required | `StripeEvent` and a `pending` `StripeReconciliation` row commit atomically; no entitlement is mutated. | Follow the reconciliation runbook, moving the bounded status through `acknowledged` to `resolved` only after verified repair. |
+| Failure during event claim, reconciliation insert, owner update, or transaction commit | All transaction writes roll back and the webhook returns `503`. | Restore PostgreSQL and allow the same Stripe event ID to retry. |
+| Sanitized reconciliation logging fails after commit | The webhook remains successful because durable evidence already exists. | Inspect the `pending` reconciliation queue; do not replay or delete the committed event to compensate for logging. |
 | Renewal payment fails | One three-day renewal-only grace extension may be written. | Verify the event reason, prior paid period, stored period end, and that grace did not compound. |
 | Initial payment fails | No entitlement is granted. | Complete payment successfully; never use renewal grace as a trial. |
 | Usage or reservation storage fails | New run admission fails closed before credential access. | Restore PostgreSQL/admission dependencies and retry the same run ID so deduplication and compensation remain effective. |
@@ -219,12 +262,15 @@ Minimum repository checks for changes to this policy or its sources:
 
 ```bash
 pnpm exec tsx --conditions=react-server --test \
+  lib/billing/checkout-lease.test.ts lib/billing/checkout-response.test.ts \
   lib/billing/checkout.test.ts lib/billing/grace.test.ts \
   lib/billing/limits.test.ts lib/billing/period.test.ts \
   lib/billing/run-reservations.test.ts lib/billing/webhook.test.ts \
+  lib/db/stripe-event.test.ts \
   lib/subscription.test.ts lib/session-claims.test.ts \
   lib/auth/subscriber-authorization.test.ts
 pnpm exec tsx --test scripts/product-boundary.test.ts
+pnpm db:check
 pnpm check
 pnpm typecheck
 ```

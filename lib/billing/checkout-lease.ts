@@ -24,7 +24,7 @@ export type CheckoutAttemptStableState =
   | { kind: "create_uncertain" }
   | { customerId: string; kind: "customer_created" }
   | { kind: "fresh" }
-  | { kind: "session_created"; sessionId: string };
+  | { customerId?: string; kind: "session_created"; sessionId: string };
 
 export type CheckoutExpirationCleanupKind = "blocking" | "obsolete";
 
@@ -407,6 +407,33 @@ export function parseCheckoutAttemptState(
       return { kind: "session_created", sessionId };
     }
   }
+  const ownedSessionPrefix = "checkout-attempt:v2:session_created:";
+  if (storedState.startsWith(ownedSessionPrefix)) {
+    if (
+      Buffer.byteLength(storedState, "utf8") > CHECKOUT_ATTEMPT_STATE_MAX_BYTES
+    ) {
+      return { kind: "invalid" };
+    }
+    try {
+      const parsed = JSON.parse(
+        storedState.slice(ownedSessionPrefix.length)
+      ) as unknown;
+      if (typeof parsed !== "object" || parsed === null) {
+        return { kind: "invalid" };
+      }
+      const candidate = parsed as Record<string, unknown>;
+      return isProviderIdentifier(candidate.customerId) &&
+        isProviderIdentifier(candidate.sessionId)
+        ? {
+            customerId: candidate.customerId,
+            kind: "session_created",
+            sessionId: candidate.sessionId,
+          }
+        : { kind: "invalid" };
+    } catch {
+      return { kind: "invalid" };
+    }
+  }
   const customerPrefix = "checkout-attempt:v1:customer_created:";
   if (storedState.startsWith(customerPrefix)) {
     const customerId = storedState.slice(customerPrefix.length);
@@ -447,6 +474,21 @@ export function serializeCheckoutAttemptState(
     if (!isProviderIdentifier(state.sessionId)) {
       throw new RangeError("Checkout Session id is invalid.");
     }
+    if (state.customerId !== undefined) {
+      if (!isProviderIdentifier(state.customerId)) {
+        throw new RangeError("Stripe Customer id is invalid.");
+      }
+      const serialized = `checkout-attempt:v2:session_created:${JSON.stringify({
+        customerId: state.customerId,
+        sessionId: state.sessionId,
+      })}`;
+      if (
+        Buffer.byteLength(serialized, "utf8") > CHECKOUT_ATTEMPT_STATE_MAX_BYTES
+      ) {
+        throw new RangeError("Checkout attempt state is too large.");
+      }
+      return serialized;
+    }
     return `checkout-attempt:v1:session_created:${state.sessionId}`;
   }
   if (state.kind === "customer_created") {
@@ -471,6 +513,66 @@ export function isCheckoutAttemptCleanupQueueState(
   state: CheckoutAttemptState
 ): state is CheckoutCleanupQueueState {
   return state.kind === "cleanup_queue";
+}
+
+export function checkoutAttemptProvesCustomer(
+  state: CheckoutAttemptState | null,
+  customerId: string
+): boolean {
+  if (!(state && isProviderIdentifier(customerId))) {
+    return false;
+  }
+  if (state.kind === "customer_created") {
+    return (
+      isProviderIdentifier(state.customerId) && state.customerId === customerId
+    );
+  }
+  if (state.kind === "session_created") {
+    return (
+      state.customerId !== undefined &&
+      isProviderIdentifier(state.customerId) &&
+      isProviderIdentifier(state.sessionId) &&
+      state.customerId === customerId
+    );
+  }
+  return (
+    state.kind === "cleanup_queue" &&
+    isValidCheckoutCleanupQueueState(state) &&
+    state.customerId === customerId
+  );
+}
+
+export function checkoutAttemptProvesResources(
+  state: CheckoutAttemptState | null,
+  expected: { customerId: string; sessionId: string }
+): boolean {
+  if (
+    !(
+      state &&
+      isProviderIdentifier(expected.customerId) &&
+      isProviderIdentifier(expected.sessionId)
+    )
+  ) {
+    return false;
+  }
+  if (state.kind === "session_created") {
+    return (
+      checkoutAttemptProvesCustomer(state, expected.customerId) &&
+      state.sessionId === expected.sessionId
+    );
+  }
+  if (
+    state.kind !== "cleanup_queue" ||
+    !isValidCheckoutCleanupQueueState(state) ||
+    state.customerId !== expected.customerId
+  ) {
+    return false;
+  }
+  return (
+    (state.resumeState.kind === "session_created" &&
+      state.resumeState.sessionId === expected.sessionId) ||
+    state.items.some((item) => item.sessionId === expected.sessionId)
+  );
 }
 
 export function createCheckoutCleanupQueueState(input: {
@@ -811,8 +913,12 @@ function isValidCheckoutStableState(
   if (state.kind === "fresh" || state.kind === "create_uncertain") {
     return true;
   }
-  return isProviderIdentifier(
-    state.kind === "customer_created" ? state.customerId : state.sessionId
+  if (state.kind === "customer_created") {
+    return isProviderIdentifier(state.customerId);
+  }
+  return (
+    isProviderIdentifier(state.sessionId) &&
+    (state.customerId === undefined || isProviderIdentifier(state.customerId))
   );
 }
 
@@ -836,7 +942,19 @@ function parseCheckoutStableState(
     candidate.kind === "session_created" &&
     isProviderIdentifier(candidate.sessionId)
   ) {
-    return { kind: candidate.kind, sessionId: candidate.sessionId };
+    if (
+      candidate.customerId !== undefined &&
+      !isProviderIdentifier(candidate.customerId)
+    ) {
+      return null;
+    }
+    return {
+      ...(candidate.customerId
+        ? { customerId: candidate.customerId }
+        : undefined),
+      kind: candidate.kind,
+      sessionId: candidate.sessionId,
+    };
   }
   return null;
 }

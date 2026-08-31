@@ -3292,6 +3292,7 @@ test("multi-Session cleanup reconciles every completed subscription and retains 
   assert.deepEqual(await response.json(), { error: "already_subscribed" });
   assert.equal(replacementCalls, 0);
   assert.deepEqual(leaseStore.attemptState, {
+    customerId: "cus_existing",
     kind: "session_created",
     sessionId: "cs_b_completed_blocking",
   });
@@ -3459,6 +3460,7 @@ test("a completed queued Session refreshes a subscription reference that appears
   });
   assert.equal(retrieveCalls, 4);
   assert.deepEqual(leaseStore.attemptState, {
+    customerId: "cus_existing",
     kind: "session_created",
     sessionId: "cs_late_subscription_reference",
   });
@@ -3638,7 +3640,13 @@ test("Checkout carries the user, configured Price, and account return URLs", asy
   const response = await checkoutResponse(request(), dependencies, null);
 
   assert.equal(response.status, 200);
-  assert.deepEqual(customerInput, { metadata: { userId: USER_ID } });
+  assert.deepEqual(customerInput, {
+    metadata: {
+      checkoutAttemptId: "attempt-1",
+      checkoutFlowVersion: "1",
+      userId: USER_ID,
+    },
+  });
   assert.deepEqual(attached, { customerId: "cus_new", userId: USER_ID });
   assert.ok(checkoutInput.value);
   assert.deepEqual(checkoutInput.value, {

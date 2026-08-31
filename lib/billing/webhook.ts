@@ -11,11 +11,33 @@ import {
   CHECKOUT_FLOW_VERSION,
   stableIntegrationIdentifier,
 } from "./checkout";
-import { checkoutProviderIdempotencyKey } from "./checkout-lease";
+import {
+  type CheckoutAttemptState,
+  checkoutAttemptProvesCustomer,
+  checkoutAttemptProvesResources,
+  checkoutProviderIdempotencyKey,
+} from "./checkout-lease";
 import { graceExtension } from "./grace";
-import { periodStart } from "./period";
+import type {
+  StripeReconciliationReason,
+  StripeReconciliationRecord,
+} from "./stripe-reconciliation";
 
-export type StripeEventWriteResult = "applied" | "duplicate";
+export type StripeWebhookManualReconciliationRecord =
+  StripeReconciliationRecord;
+
+export type StripeEventWriteResult =
+  | "applied"
+  | "duplicate"
+  | {
+      kind: "manual_reconciliation";
+      record: StripeWebhookManualReconciliationRecord;
+    };
+
+export type StripeManualReconciliationWriteResult = Exclude<
+  StripeEventWriteResult,
+  "applied"
+>;
 
 type StripeEventUpdateBase = {
   customerId: string;
@@ -61,6 +83,14 @@ export type StripeUserMutation = Partial<
   >
 >;
 
+export type StripeEventMutationDecision =
+  | StripeUserMutation
+  | null
+  | {
+      kind: "manual_reconciliation";
+      reason: StripeWebhookManualReconciliationReason;
+    };
+
 export type StripeWebhookProvider = {
   constructEvent: (
     raw: Uint8Array,
@@ -80,30 +110,29 @@ export type StripeWebhookDependencies = {
   applyEventUpdate: (
     input: StripeEventUpdateInput
   ) => Promise<StripeEventWriteResult>;
-  claimEventDisposition: (eventId: string) => Promise<StripeEventWriteResult>;
   createProvider: (apiKey: string) => StripeWebhookProvider;
   enforceAbuse: typeof enforceAbusePolicy;
+  findCheckoutAttemptState: (input: {
+    attemptId: string;
+    ownerId: string;
+  }) => Promise<CheckoutAttemptState | null>;
+  findUserByStripeCustomerId: (
+    customerId: string
+  ) => Promise<WebhookUser | null>;
   getConfig: () => {
     apiKey: string;
     priceId: string;
     webhookSecret: string;
   } | null;
+  recordManualReconciliation: (
+    record: StripeWebhookManualReconciliationRecord
+  ) => Promise<StripeManualReconciliationWriteResult>;
   reportManualReconciliation: (
-    alert: StripeWebhookManualReconciliationAlert
+    record: StripeWebhookManualReconciliationRecord
   ) => void;
 };
 
-type StripeWebhookManualReconciliationReason =
-  | "invoice_ambiguous_entitlement"
-  | "invoice_contradictory_subscription"
-  | "invoice_invalid_period"
-  | "invoice_invalid_reference";
-
-export type StripeWebhookManualReconciliationAlert = {
-  eventId: string;
-  eventType: string;
-  reason: StripeWebhookManualReconciliationReason;
-};
+type StripeWebhookManualReconciliationReason = StripeReconciliationReason;
 
 export type SubscriptionUpdate = {
   billingPeriodStart: Date;
@@ -124,11 +153,9 @@ export function subscriptionUpdate(input: {
   type: string;
 }): SubscriptionUpdate {
   if (input.type === "invoice.paid") {
-    const billingPeriodStart =
-      input.periodStart ?? periodStart(input.periodEnd);
-    return input.periodEnd && billingPeriodStart
+    return input.periodEnd && input.periodStart
       ? {
-          billingPeriodStart,
+          billingPeriodStart: input.periodStart,
           subscribedUntil: input.periodEnd,
         }
       : null;
@@ -142,10 +169,11 @@ export function subscriptionUpdate(input: {
       ),
       subscribedUntil: input.current,
     });
-    const billingPeriodStart =
-      input.currentPeriodStart ?? periodStart(input.current);
-    return extended && billingPeriodStart
-      ? { billingPeriodStart, subscribedUntil: extended }
+    return extended && input.currentPeriodStart
+      ? {
+          billingPeriodStart: input.currentPeriodStart,
+          subscribedUntil: extended,
+        }
       : null;
   }
 
@@ -155,14 +183,14 @@ export function subscriptionUpdate(input: {
 /**
  * Decide a webhook mutation from the User state held under `FOR UPDATE`.
  *
- * Paid authority is monotonic by billing-period start and period end. Events
- * that cannot prove they are newer are claimed but change nothing. Checkout
- * events only fill missing references and never replace a conflicting one.
+ * Same-subscription paid authority advances as an exact interval. A different
+ * subscription must begin after the backed interval or is routed to durable
+ * reconciliation. Checkout events only fill missing references.
  */
 export function stripeEventMutation(
   current: WebhookUser,
   input: StripeEventUpdateInput
-): StripeUserMutation | null {
+): StripeEventMutationDecision {
   if (input.userId && current.id !== input.userId) {
     throw new Error("Stripe webhook owner does not match.");
   }
@@ -259,26 +287,22 @@ export async function stripeWebhookResponse(
       return Response.json({ ignored: true, reason: result.reason });
     }
     if (result.kind === "manual_reconciliation") {
-      const write = await dependencies.claimEventDisposition(event.id);
-      if (write === "duplicate") {
-        return Response.json({ deduped: true });
-      }
-      try {
-        dependencies.reportManualReconciliation({
-          eventId: event.id,
-          eventType: event.type,
-          reason: result.reason,
-        });
-      } catch {
-        // The durable terminal claim must not become retryable after logging.
-      }
-      return Response.json({
+      const write = await dependencies.recordManualReconciliation({
+        eventId: event.id,
+        eventType: reconciliationEventType(event.type),
         reason: result.reason,
-        reconciliation: true,
+        status: "pending",
       });
+      return manualReconciliationResponse(write, dependencies);
     }
     if (result.write === "duplicate") {
       return Response.json({ deduped: true });
+    }
+    if (
+      typeof result.write === "object" &&
+      result.write.kind === "manual_reconciliation"
+    ) {
+      return manualReconciliationResponse(result.write, dependencies);
     }
     return Response.json({ received: true });
   } catch {
@@ -292,6 +316,7 @@ type WebhookEventResult =
       reason:
         | "checkout_unrelated"
         | "invoice_no_entitlement"
+        | "invoice_unrelated_customer"
         | "invoice_unsupported_billing_reason"
         | "unsupported";
     }
@@ -349,6 +374,18 @@ async function applyCheckoutEvent(
       ) ||
     !customerId ||
     !stripeSubscriptionId
+  ) {
+    return { kind: "ignored", reason: "checkout_unrelated" };
+  }
+  const attemptState = await dependencies.findCheckoutAttemptState({
+    attemptId,
+    ownerId: userId,
+  });
+  if (
+    !checkoutAttemptProvesResources(attemptState, {
+      customerId,
+      sessionId: session.id,
+    })
   ) {
     return { kind: "ignored", reason: "checkout_unrelated" };
   }
@@ -422,7 +459,15 @@ async function applyInvoiceEvent(
     };
   }
 
-  const userId = await invoiceUserId(invoice.customer, customer.id, provider);
+  const owner = await invoiceOwner(
+    invoice.customer,
+    customer.id,
+    provider,
+    dependencies
+  );
+  if (owner.kind === "ignored") {
+    return owner;
+  }
   return {
     kind: "written",
     write: await dependencies.applyEventUpdate({
@@ -436,7 +481,7 @@ async function applyInvoiceEvent(
       periodEnd: entitlement.end,
       periodStart: entitlement.start,
       stripeSubscriptionId: entitlement.stripeSubscriptionId,
-      ...(userId ? { userId } : {}),
+      ...(owner.kind === "attempt_provenance" ? { userId: owner.userId } : {}),
     }),
   };
 }
@@ -599,19 +644,50 @@ function invoiceLinePriceId(line: Stripe.InvoiceLineItem): string | null {
       : null;
 }
 
-async function invoiceUserId(
+type InvoiceOwner =
+  | { kind: "attempt_provenance"; userId: string }
+  | { kind: "ignored"; reason: "invoice_unrelated_customer" }
+  | { kind: "persisted_customer" };
+
+async function invoiceOwner(
   customer: Stripe.Invoice["customer"],
   customerId: string,
-  provider: StripeWebhookProvider
-): Promise<string | null> {
-  if (customer && typeof customer !== "string") {
-    return userIdFromCustomer(customer);
+  provider: StripeWebhookProvider,
+  dependencies: StripeWebhookDependencies
+): Promise<InvoiceOwner> {
+  const persisted = await dependencies.findUserByStripeCustomerId(customerId);
+  if (persisted) {
+    if (persisted.stripeCustomerId !== customerId) {
+      throw new Error("Persisted Stripe Customer lookup did not match.");
+    }
+    return { kind: "persisted_customer" };
   }
-  const retrieved = await provider.retrieveCustomer(customerId);
+
+  const retrieved =
+    customer && typeof customer !== "string"
+      ? customer
+      : await provider.retrieveCustomer(customerId);
   if (retrieved.id !== customerId) {
     throw new Error("Webhook Customer lookup did not match.");
   }
-  return userIdFromCustomer(retrieved);
+  const markers = checkoutCustomerMarkers(retrieved);
+  if (!markers) {
+    return { kind: "ignored", reason: "invoice_unrelated_customer" };
+  }
+  const attemptState = await dependencies.findCheckoutAttemptState({
+    attemptId: markers.attemptId,
+    ownerId: markers.userId,
+  });
+  if (!checkoutAttemptProvesCustomer(attemptState, customerId)) {
+    if (
+      attemptState?.kind === "fresh" ||
+      attemptState?.kind === "create_uncertain"
+    ) {
+      throw new Error("Checkout Customer ownership may still converge.");
+    }
+    return { kind: "ignored", reason: "invoice_unrelated_customer" };
+  }
+  return { kind: "attempt_provenance", userId: markers.userId };
 }
 
 function checkoutUserId(session: Stripe.Checkout.Session): string | null {
@@ -625,18 +701,22 @@ function checkoutUserId(session: Stripe.Checkout.Session): string | null {
     : null;
 }
 
-function userIdFromCustomer(
-  customer:
-    | Stripe.Checkout.Session["customer"]
-    | Stripe.Invoice["customer"]
-    | Stripe.Customer
-    | Stripe.DeletedCustomer
-): string | null {
-  if (!customer || typeof customer === "string" || customer.deleted) {
+function checkoutCustomerMarkers(
+  customer: Stripe.Customer | Stripe.DeletedCustomer
+): { attemptId: string; userId: string } | null {
+  if (customer.deleted) {
     return null;
   }
+  const attemptId =
+    customer.metadata[CHECKOUT_ATTEMPT_METADATA_KEY] ?? undefined;
   const { userId } = customer.metadata;
-  return userId && isCanonicalUuid(userId) ? userId : null;
+  return attemptId &&
+    userId &&
+    isCanonicalUuid(attemptId) &&
+    isCanonicalUuid(userId) &&
+    customer.metadata.checkoutFlowVersion === CHECKOUT_FLOW_VERSION
+    ? { attemptId, userId }
+    : null;
 }
 
 type StripeResourceReference =
@@ -709,41 +789,45 @@ function supportedBillingReason(
 function paidInvoiceMutation(
   current: WebhookUser,
   input: Extract<StripeEventUpdateInput, { eventType: "invoice_paid" }>
-): StripeUserMutation | null {
+): StripeEventMutationDecision {
   const currentStart = current.billingPeriodStart?.getTime() ?? null;
   const incomingStart = input.periodStart.getTime();
   const incomingEnd = input.periodEnd.getTime();
   const currentEnd = current.subscribedUntil?.getTime() ?? null;
-
-  if (currentStart !== null && currentStart > incomingStart) {
-    return null;
-  }
-  if (
-    currentStart === incomingStart &&
-    current.stripeSubscriptionId &&
-    current.stripeSubscriptionId !== input.stripeSubscriptionId
-  ) {
-    return null;
-  }
-  if (
-    currentStart === null &&
+  const hasBackedPaidInterval =
+    currentStart !== null &&
     currentEnd !== null &&
-    currentEnd > incomingEnd
+    current.stripeSubscriptionId !== null;
+  const sameSubscription =
+    current.stripeSubscriptionId === input.stripeSubscriptionId;
+
+  if (hasBackedPaidInterval && sameSubscription) {
+    if (
+      incomingStart < currentStart ||
+      incomingEnd <= currentEnd ||
+      incomingEnd <= incomingStart
+    ) {
+      return null;
+    }
+  } else if (
+    hasBackedPaidInterval &&
+    !sameSubscription &&
+    (incomingStart < currentEnd ||
+      incomingEnd <= currentEnd ||
+      incomingEnd <= incomingStart)
   ) {
-    return null;
+    return {
+      kind: "manual_reconciliation",
+      reason: "invoice_conflicting_paid_interval",
+    };
   }
 
-  const mutation = customerMutation(current, input.customerId);
-  if (currentStart !== incomingStart) {
-    mutation.billingPeriodStart = input.periodStart;
-  }
-  if (current.stripeSubscriptionId !== input.stripeSubscriptionId) {
-    mutation.stripeSubscriptionId = input.stripeSubscriptionId;
-  }
-  if (currentEnd === null || incomingEnd > currentEnd) {
-    mutation.subscribedUntil = input.periodEnd;
-  }
-  return nonEmptyMutation(mutation);
+  return {
+    ...customerMutation(current, input.customerId),
+    billingPeriodStart: input.periodStart,
+    stripeSubscriptionId: input.stripeSubscriptionId,
+    subscribedUntil: input.periodEnd,
+  };
 }
 
 function failedInvoiceMutation(
@@ -806,6 +890,33 @@ function dateFromStripeSeconds(seconds: number): Date | null {
   }
   const date = new Date(seconds * 1000);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function reconciliationEventType(
+  eventType: Stripe.Event["type"]
+): "invoice.paid" | "invoice.payment_failed" {
+  if (eventType === "invoice.paid" || eventType === "invoice.payment_failed") {
+    return eventType;
+  }
+  throw new Error("Unsupported reconciliation event type.");
+}
+
+function manualReconciliationResponse(
+  write: StripeManualReconciliationWriteResult,
+  dependencies: StripeWebhookDependencies
+): Response {
+  if (write === "duplicate") {
+    return Response.json({ deduped: true });
+  }
+  try {
+    dependencies.reportManualReconciliation(write.record);
+  } catch {
+    // Durable evidence has committed; logging cannot make it retryable.
+  }
+  return Response.json({
+    reason: write.record.reason,
+    reconciliation: true,
+  });
 }
 
 function retryableWebhookResponse(): Response {

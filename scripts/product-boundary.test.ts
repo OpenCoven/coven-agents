@@ -505,11 +505,17 @@ test("the living subscription policy records current billing authorities", () =>
     "app/api/checkout/route.ts",
     "app/api/stripe/webhook/route.ts",
     "lib/credentials/runner-credential.ts",
+    "StripeReconciliation",
+    "pending",
+    "acknowledged",
+    "resolved",
   ]) {
     assert.equal(policy.includes(decision), true, decision);
   }
 
   assert.match(policy, /not.*production certification/is);
+  assert.match(policy, /no (user|Customer|Subscription).*stored/is);
+  assert.match(policy, /retention.*operator/is);
 });
 
 test("the README links the living subscription policy", () => {

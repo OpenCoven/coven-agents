@@ -319,6 +319,7 @@ test("Stripe event claims, User row locks, decisions, and writes share one trans
   assert.match(update, /\.from\(user\)/);
   assert.match(update, /\.for\("update"\)/);
   assert.match(update, /stripeEventMutation\(owner, input\)/);
+  assert.match(update, /\.insert\(stripeReconciliation\)/);
   assert.match(update, /\.update\(user\)/);
   assert.match(update, /\.returning\(\{ id: user\.id \}\)/);
   assert.match(update, /throw new Error/);
@@ -332,21 +333,29 @@ test("Stripe event claims, User row locks, decisions, and writes share one trans
   assert.ok(writeIndex > decisionIndex);
 });
 
-test("terminal Stripe dispositions claim atomically without a fake User update", () => {
+test("manual Stripe dispositions persist event and reconciliation evidence atomically", () => {
   const source = read("lib/db/queries.ts");
   const start = source.indexOf(
-    "export async function claimStripeEventDisposition"
+    "export async function recordStripeReconciliation"
   );
   const end = source.indexOf("export async function applyStripeEventUpdate");
   const claim = source.slice(start, end);
 
   assert.ok(start >= 0);
   assert.ok(end > start);
+  assert.match(claim, /db\.transaction\(/);
   assert.match(claim, /\.insert\(stripeEvent\)/);
   assert.match(claim, /\.onConflictDoNothing\(\)/);
   assert.match(claim, /\.returning\(\{ id: stripeEvent\.id \}\)/);
+  assert.match(claim, /\.insert\(stripeReconciliation\)/);
+  assert.match(claim, /status: "pending"/);
   assert.doesNotMatch(claim, /\.update\(user\)/);
   assert.doesNotMatch(claim, /\.from\(user\)/);
+
+  assert.ok(
+    claim.indexOf(".insert(stripeReconciliation)") >
+      claim.indexOf(".insert(stripeEvent)")
+  );
 });
 
 test("analytics revalidates subscriber authority before reading history", () => {

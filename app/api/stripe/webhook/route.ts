@@ -7,12 +7,13 @@ import {
 } from "@/lib/billing/webhook";
 import {
   applyStripeEventUpdate,
-  claimStripeEventDisposition,
+  findCheckoutAttemptState,
+  findUserByStripeCustomerId,
+  recordStripeReconciliation,
 } from "@/lib/db/queries";
 
 const webhookDependencies: StripeWebhookDependencies = {
   applyEventUpdate: applyStripeEventUpdate,
-  claimEventDisposition: claimStripeEventDisposition,
   createProvider(apiKey) {
     const stripe = createStripeClient(apiKey);
     return {
@@ -35,6 +36,8 @@ const webhookDependencies: StripeWebhookDependencies = {
     };
   },
   enforceAbuse: enforceAbusePolicy,
+  findCheckoutAttemptState,
+  findUserByStripeCustomerId,
   getConfig() {
     const apiKey = process.env.STRIPE_SECRET_KEY?.trim();
     const priceId = process.env.STRIPE_PRICE_ID?.trim();
@@ -43,6 +46,7 @@ const webhookDependencies: StripeWebhookDependencies = {
       ? { apiKey, priceId, webhookSecret }
       : null;
   },
+  recordManualReconciliation: recordStripeReconciliation,
   reportManualReconciliation(alert) {
     console.error(alert);
   },

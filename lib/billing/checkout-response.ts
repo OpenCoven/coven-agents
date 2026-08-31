@@ -220,6 +220,7 @@ export async function checkoutResponse(
             }
 
             const inspectCompletedSubscription = async (input: {
+              customerId: string;
               sessionId: string;
               subscriptionId: string | null;
             }): Promise<
@@ -236,6 +237,7 @@ export async function checkoutResponse(
                 }
             > => {
               const state = {
+                customerId: input.customerId,
                 kind: "session_created",
                 sessionId: input.sessionId,
               } as const;
@@ -318,7 +320,12 @@ export async function checkoutResponse(
               }
 
               const inspections = await Promise.all(
-                completedSessions.map(inspectCompletedSubscription)
+                completedSessions.map((completedSession) =>
+                  inspectCompletedSubscription({
+                    ...completedSession,
+                    customerId: candidateCustomerId,
+                  })
+                )
               );
               for (const inspection of inspections) {
                 if (inspection.kind === "failure") {
@@ -370,7 +377,10 @@ export async function checkoutResponse(
               for (const completedSession of input.sessions) {
                 const inspection =
                   // biome-ignore lint/performance/noAwaitInLoops: every durably completed Session must be reconciled before the queue outcome is released.
-                  await inspectCompletedSubscription(completedSession);
+                  await inspectCompletedSubscription({
+                    ...completedSession,
+                    customerId: input.candidateCustomerId,
+                  });
                 if (inspection.kind === "failure") {
                   const currentState = expiration.currentAttemptState();
                   if (isCheckoutAttemptCleanupQueueState(currentState)) {
@@ -522,6 +532,7 @@ export async function checkoutResponse(
                 return {
                   disposition: "preserve_attempt",
                   state: {
+                    customerId: candidateCustomerId,
                     kind: "session_created",
                     sessionId: reconciliation.sessionId,
                   },
@@ -535,6 +546,7 @@ export async function checkoutResponse(
                 return {
                   disposition: "preserve_attempt",
                   state: {
+                    customerId: candidateCustomerId,
                     kind: "session_created",
                     sessionId: reconciliation.sessionId,
                   },
@@ -571,7 +583,13 @@ export async function checkoutResponse(
               try {
                 customerId = (
                   await provider.createCustomer(
-                    { metadata: { userId: decision.userId } },
+                    {
+                      metadata: {
+                        [CHECKOUT_ATTEMPT_METADATA_KEY]: attemptId,
+                        checkoutFlowVersion: CHECKOUT_FLOW_VERSION,
+                        userId: decision.userId,
+                      },
+                    },
                     { idempotencyKey: customerIdempotencyKey }
                   )
                 ).id;
@@ -647,7 +665,7 @@ export async function checkoutResponse(
                   };
             }
 
-            const createdState = createdAttemptState(checkout.id);
+            const createdState = createdAttemptState(customerId, checkout.id);
             if (checkout.status === "expired") {
               return {
                 disposition: "retire_attempt",
@@ -725,9 +743,12 @@ function checkoutSessionConflict() {
 }
 
 function createdAttemptState(
+  customerId: string,
   sessionId: string | undefined
 ): CheckoutAttemptState {
-  return sessionId ? { kind: "session_created", sessionId } : { kind: "fresh" };
+  return sessionId
+    ? { customerId, kind: "session_created", sessionId }
+    : { kind: "fresh" };
 }
 
 function isPreRequestProviderFailure(error: unknown): boolean {
