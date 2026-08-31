@@ -512,12 +512,12 @@ test.describe("Run console", () => {
   }) => {
     await page.goto("/agents");
     await page.getByRole("button", { name: "New agent" }).click();
-    await expect(page).toHaveURL("/login");
+    await expect(page).toHaveURL("/login?callbackUrl=%2Fagents");
 
     await page.goto("/agents");
     await page.getByRole("button", { name: "Search or run a command" }).click();
     await page.getByRole("button", { name: "action Create an agent" }).click();
-    await expect(page).toHaveURL("/login");
+    await expect(page).toHaveURL("/login?callbackUrl=%2Fagents");
   });
 
   test("profile creation opens with three parallel paths instead of numbered steps", async ({

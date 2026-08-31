@@ -61,6 +61,7 @@ import {
 } from "@/lib/agents/connection-status";
 import type { Formation } from "@/lib/agents/formations";
 import { memberName } from "@/lib/agents/formations";
+import { browserApplicationLoginHref } from "@/lib/application-path";
 import { avatarFor } from "@/lib/avatar";
 import { isTerminal, projectRun } from "@/lib/console/blocks";
 import { formatDuration, glyphFor, spanBetween } from "@/lib/console/format";
@@ -1115,7 +1116,11 @@ export function RunConsole({
 
   const openCreate = useCallback(() => {
     if (session.status !== "authenticated") {
-      window.location.assign("/login");
+      window.location.assign(
+        browserApplicationLoginHref(
+          `${window.location.pathname}${window.location.search}${window.location.hash}`
+        )
+      );
       return;
     }
     setView("create");

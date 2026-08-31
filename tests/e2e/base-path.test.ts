@@ -189,6 +189,34 @@ test.describe("Demo base path", () => {
     ).toHaveAttribute("href", "/demo/login?callbackUrl=%2Fdemo%2Fagents");
   });
 
+  test("signed-out profile creation preserves the full demo return path", async ({
+    page,
+  }) => {
+    test.skip(!IS_DEMO, "This contract runs with IS_DEMO=1.");
+    await page.route("**/demo/api/auth/session", (route) =>
+      route.fulfill({ body: "null", contentType: "application/json" })
+    );
+    await page.route("**/demo/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route(/\/demo\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/demo/api/agents"
+          ? { json: { agents: [] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+
+    const callbackUrl = "/demo/agents?source=create#builder";
+    await page.goto(callbackUrl);
+    await page.getByRole("button", { name: "New agent" }).click();
+
+    await expect(page).toHaveURL(
+      `/demo/login?callbackUrl=${encodeURIComponent(callbackUrl)}`
+    );
+  });
+
   test("credential read, write, delete, device start, and poll use one demo prefix", async ({
     context,
     page,
