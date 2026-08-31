@@ -255,6 +255,51 @@ test("bounds multibyte tasks at the runner limit with an explicit marker", () =>
   );
 });
 
+test("truncates untrusted context before authoritative mission content", () => {
+  const task = buildTeamStepTask(
+    baseInput({
+      mission: `${"mission ".repeat(4300)}MISSION_REQUIRED_TAIL`,
+      priorHandoffs: [
+        priorHandoff(`${"handoff ".repeat(1200)}UNTRUSTED_HANDOFF_TAIL`),
+      ],
+      skillSnapshots: [
+        {
+          instructions: `${"skill ".repeat(1800)}UNTRUSTED_SKILL_TAIL`,
+          name: "Oversized untrusted skill",
+        },
+      ],
+    })
+  );
+
+  assert.match(task, /MISSION_REQUIRED_TAIL/u);
+  assert.doesNotMatch(task, /UNTRUSTED_HANDOFF_TAIL/u);
+  assert.doesNotMatch(task, /UNTRUSTED_SKILL_TAIL/u);
+  assert.ok(task.endsWith(TEAM_TASK_TRUNCATION_MARKER));
+});
+
+test("omits a handoff structurally instead of separating evidence from its claim", () => {
+  const priorHandoffs = Array.from({ length: 3 }, (_, index) => ({
+    commandEvidence: [
+      {
+        command: `command-${index}`,
+        exitCode: 0,
+        stderr: "",
+        stdout: `${"evidence ".repeat(1100)}EVIDENCE_${index}`,
+      },
+    ],
+    fileEvidence: [],
+    output: `${"claim ".repeat(500)}CLAIM_${index}`,
+  }));
+  const task = buildTeamStepTask(baseInput({ priorHandoffs }));
+
+  for (let index = 0; index < priorHandoffs.length; index += 1) {
+    const hasEvidence = task.includes(`EVIDENCE_${index}`);
+    const hasClaim = task.includes(`CLAIM_${index}`);
+    assert.equal(hasEvidence, hasClaim);
+  }
+  assert.ok(task.endsWith(TEAM_TASK_TRUNCATION_MARKER));
+});
+
 test("rejects empty, malformed, and invalid required inputs", () => {
   assert.throws(
     () => buildTeamStepTask(baseInput({ mission: "   " })),

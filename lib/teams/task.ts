@@ -290,10 +290,29 @@ function renderTask(
   );
 }
 
-function contextValues(context: TaskContext): Array<{
+type ContextValue = {
   get: () => string;
   set: (value: string) => void;
-}> {
+};
+
+function untrustedContextValues(context: TaskContext): ContextValue[] {
+  return context.skills.flatMap((skill) => [
+    {
+      get: () => skill.instructions,
+      set: (value: string) => {
+        skill.instructions = value;
+      },
+    },
+    {
+      get: () => skill.name,
+      set: (value: string) => {
+        skill.name = value;
+      },
+    },
+  ]);
+}
+
+function authoritativeContextValues(context: TaskContext): ContextValue[] {
   return [
     {
       get: () => context.mission,
@@ -313,27 +332,14 @@ function contextValues(context: TaskContext): Array<{
         context.profileInstructions = value;
       },
     },
-    ...context.skills.flatMap((skill) => [
-      {
-        get: () => skill.instructions,
-        set: (value: string) => {
-          skill.instructions = value;
-        },
-      },
-      {
-        get: () => skill.name,
-        set: (value: string) => {
-          skill.name = value;
-        },
-      },
-    ]),
-    ...context.handoffs.map((_, index) => ({
-      get: () => context.handoffs[index] ?? "",
-      set: (value: string) => {
-        context.handoffs[index] = value;
-      },
-    })),
   ];
+}
+
+function fitsTask(value: string): boolean {
+  return (
+    value.length <= AGENT_RUNNER_LIMITS.maxTaskLength &&
+    byteLength(value) <= AGENT_RUNNER_LIMITS.maxTaskLength
+  );
 }
 
 function boundedTask(
@@ -341,58 +347,67 @@ function boundedTask(
   githubCapability: GitHubCapability
 ): string {
   const full = renderTask(context, githubCapability, false);
-  if (
-    full.length <= AGENT_RUNNER_LIMITS.maxTaskLength &&
-    byteLength(full) <= AGENT_RUNNER_LIMITS.maxTaskLength
-  ) {
+  if (fitsTask(full)) {
     return full;
   }
 
-  const values = contextValues(context);
-  for (let attempts = 0; attempts < values.length * 3 + 8; attempts += 1) {
+  const handoffsBySize = context.handoffs
+    .map((handoff, index) => ({ bytes: byteLength(handoff), index }))
+    .sort((left, right) => right.bytes - left.bytes);
+  for (const handoff of handoffsBySize) {
+    context.handoffs[handoff.index] = CONTEXT_TRUNCATION_MARKER;
     const rendered = renderTask(context, githubCapability, true);
-    const excessLength = Math.max(
-      0,
-      rendered.length - AGENT_RUNNER_LIMITS.maxTaskLength
-    );
-    const excessBytes = Math.max(
-      0,
-      byteLength(rendered) - AGENT_RUNNER_LIMITS.maxTaskLength
-    );
-    if (excessLength === 0 && excessBytes === 0) {
+    if (fitsTask(rendered)) {
       return rendered;
     }
+  }
 
-    const [largest] = values
-      .map((value) => ({
-        ...value,
-        bytes: byteLength(value.get()),
-        length: value.get().length,
-      }))
-      .sort(
-        (left, right) =>
-          Math.max(right.bytes, right.length) -
-          Math.max(left.bytes, left.length)
+  const valueGroups = [
+    untrustedContextValues(context),
+    authoritativeContextValues(context),
+  ];
+  for (const values of valueGroups) {
+    for (let attempts = 0; attempts < values.length * 3 + 8; attempts += 1) {
+      const rendered = renderTask(context, githubCapability, true);
+      if (fitsTask(rendered)) {
+        return rendered;
+      }
+      const excessLength = Math.max(
+        0,
+        rendered.length - AGENT_RUNNER_LIMITS.maxTaskLength
       );
-    if (!largest || (largest.bytes === 0 && largest.length === 0)) {
-      break;
+      const excessBytes = Math.max(
+        0,
+        byteLength(rendered) - AGENT_RUNNER_LIMITS.maxTaskLength
+      );
+      const [largest] = values
+        .map((value) => ({
+          ...value,
+          bytes: byteLength(value.get()),
+          length: value.get().length,
+        }))
+        .sort(
+          (left, right) =>
+            Math.max(right.bytes, right.length) -
+            Math.max(left.bytes, left.length)
+        );
+      if (!largest || (largest.bytes === 0 && largest.length === 0)) {
+        break;
+      }
+      const reduction = Math.max(excessBytes, excessLength, 1);
+      const current = largest.get();
+      const shortened = truncateUtf8(
+        current,
+        Math.max(0, current.length - reduction),
+        Math.max(0, largest.bytes - reduction),
+        CONTEXT_TRUNCATION_MARKER
+      );
+      largest.set(shortened === current ? "" : shortened);
     }
-    const reduction = Math.max(excessBytes, excessLength, 1);
-    const current = largest.get();
-    const shortened = truncateUtf8(
-      current,
-      Math.max(0, current.length - reduction),
-      Math.max(0, largest.bytes - reduction),
-      CONTEXT_TRUNCATION_MARKER
-    );
-    largest.set(shortened === current ? "" : shortened);
   }
 
   const finalTask = renderTask(context, githubCapability, true);
-  if (
-    finalTask.length > AGENT_RUNNER_LIMITS.maxTaskLength ||
-    byteLength(finalTask) > AGENT_RUNNER_LIMITS.maxTaskLength
-  ) {
+  if (!fitsTask(finalTask)) {
     throw new Error("Team step task cannot fit the Agent Runner task limit.");
   }
   return finalTask;

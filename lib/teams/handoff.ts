@@ -27,9 +27,6 @@ const TEAM_HANDOFF_INPUT_KEYS = new Set([
   "output",
   "priorHandoffs",
 ]);
-const metadataLine = /^(\s*["']?([^"'=:]+?)["']?\s*[:=]\s*).*$/gmu;
-const metadataProperty =
-  /(["']((?:\\[^\r\n]|[^"'\\\r\n])*)["']\s*:\s*)(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^,}\r\n]+)/gmu;
 
 export type BuildTeamHandoffInput = {
   commandEvidence?: readonly unknown[];
@@ -124,6 +121,15 @@ function decodeJsonKeyEscapes(value: string): string | null {
       index += 5;
       continue;
     }
+    if (escapeCode === "x") {
+      const hex = value.slice(index + 2, index + 4);
+      if (!/^[\dA-Fa-f]{2}$/u.test(hex)) {
+        return null;
+      }
+      decoded += String.fromCharCode(Number.parseInt(hex, 16));
+      index += 3;
+      continue;
+    }
 
     const simpleEscapes: Readonly<Record<string, string>> = {
       '"': '"',
@@ -146,14 +152,28 @@ function decodeJsonKeyEscapes(value: string): string | null {
 }
 
 function containsOperationalMetadataKey(value: string): boolean {
-  const doubleQuotedProperty = /"((?:\\[^\r\n]|[^"\\\r\n])*)"\s*:/gmu;
-  const singleQuotedProperty = /'((?:\\[^\r\n]|[^'\\\r\n])*)'\s*:/gmu;
+  const doubleQuotedProperty = /"((?:\\[^\r\n]|[^"\\\r\n])*)"\s*[:=]/gmu;
+  const singleQuotedProperty = /'((?:\\[^\r\n]|[^'\\\r\n])*)'\s*[:=]/gmu;
   for (const propertyKey of [doubleQuotedProperty, singleQuotedProperty]) {
     for (const match of value.matchAll(propertyKey)) {
       const decoded = match[1] && decodeJsonKeyEscapes(match[1]);
       if (decoded !== null && decoded && isOperationalMetadataKey(decoded)) {
         return true;
       }
+    }
+  }
+  const lineAssignment = /^\s*["']?(.+?)["']?\s*[:=]/u.exec(value);
+  if (
+    lineAssignment?.[1] &&
+    isOperationalMetadataKey(lineAssignment[1].replace(/^[{[]/u, ""))
+  ) {
+    return true;
+  }
+  const unquotedProperty =
+    /(?:^|[,{;]\s*|\s+)([A-Za-z_$][A-Za-z0-9_$.-]*)\s*[:=]/gmu;
+  for (const match of value.matchAll(unquotedProperty)) {
+    if (match[1] && isOperationalMetadataKey(match[1])) {
+      return true;
     }
   }
   return false;
@@ -263,17 +283,28 @@ function filterStructuredMetadata(value: string): string {
   return output;
 }
 
+function isValidJson(value: string): boolean {
+  try {
+    JSON.parse(value);
+    return true;
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 export function sanitizeTeamText(value: string): string {
-  return sanitizeEvidenceText(filterStructuredMetadata(value))
-    .replace(metadataLine, (match, prefix: string, key: string) =>
-      isOperationalMetadataKey(key) ? `${prefix}[REDACTED]` : match
+  const filtered = filterStructuredMetadata(value)
+    .split("\n")
+    .map((line) =>
+      !isValidJson(line) && containsOperationalMetadataKey(line)
+        ? "[REDACTED]"
+        : line
     )
-    .replace(metadataProperty, (match, prefix: string, encodedKey: string) => {
-      const decodedKey = decodeJsonKeyEscapes(encodedKey);
-      return decodedKey && isOperationalMetadataKey(decodedKey)
-        ? `${prefix}"[REDACTED]"`
-        : match;
-    });
+    .join("\n");
+  return sanitizeEvidenceText(filtered);
 }
 
 function boundedEvidenceText(value: string, maxLength: number): string {

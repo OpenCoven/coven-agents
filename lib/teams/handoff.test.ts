@@ -296,6 +296,51 @@ test("fails closed for malformed JSON containing generic secret keys", () => {
   assert.match(serialized, /\[REDACTED\]/u);
 });
 
+test("redacts complete structured values for loose sensitive properties", () => {
+  const cases = [
+    ["password", "PASSWORD_SURVIVES"],
+    ["token", "TOKEN_SURVIVES"],
+    ["authorization", "AUTHORIZATION_SURVIVES"],
+    ["apiKey", "API_KEY_SURVIVES"],
+  ] as const;
+  const output = cases
+    .map(
+      ([key, marker]) =>
+        `{};"${key}":["${key.toUpperCase()}_FIRST","${marker}"]`
+    )
+    .join("\n");
+  const result = built(buildTeamHandoff({ output }));
+  const task = buildTeamStepTask({
+    githubCapability: "none",
+    memberResponsibility: "Continue the verified team task.",
+    mission: "Complete the requested work.",
+    priorHandoffs: [result.handoff],
+    profileInstructions: "Use only public-safe evidence.",
+    skillSnapshots: [],
+  });
+
+  for (const [, marker] of cases) {
+    assert.equal(JSON.stringify(result.handoff).includes(marker), false);
+    assert.equal(task.includes(marker), false);
+  }
+});
+
+test("fails closed for malformed escaped and unquoted sensitive keys", () => {
+  const markers = ["HEX_PASSWORD_SURVIVES", "UNQUOTED_TOKEN_SURVIVES"];
+  const result = built(
+    buildTeamHandoff({
+      output: [
+        `{"safe":1 "\\x70assword":["first","${markers[0]}"]}`,
+        `{"safe":1 token:["first","${markers[1]}"]}`,
+      ].join("\n"),
+    })
+  );
+
+  for (const marker of markers) {
+    assert.equal(JSON.stringify(result.handoff).includes(marker), false);
+  }
+});
+
 test("fails closed for balanced malformed JSON with sensitive keys anywhere in the candidate", () => {
   const cases = [
     ["raw\\u004cogs", "BALANCED_RAW_LOG_SECRET"],
