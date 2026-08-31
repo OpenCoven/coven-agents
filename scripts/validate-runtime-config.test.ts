@@ -31,6 +31,12 @@ const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
   RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
   RUNNER_MANUAL_RECONCILE_SECRET: "subprocess-test-manual-reconcile-secret",
 };
+const VALID_STRIPE_ENV: Partial<NodeJS.ProcessEnv> = {
+  STRIPE_PRICE_ID: "price_test",
+  STRIPE_SECRET_KEY: "sk_test",
+  STRIPE_WEBHOOK_SECRET: "whsec_test",
+  SUBSCRIPTION_CHECKOUT_ENABLED: "on",
+};
 const REQUIRED_PRODUCTION_VARIABLES = [
   "ABUSE_KEY_SECRET",
   "APP_ORIGIN",
@@ -83,6 +89,10 @@ const RUNTIME_CONFIGURATION_KEYS = [
   "RUN_ADMISSION_TENANT_ACTIVE_MAX",
   "RUN_ADMISSION_TENANT_QUEUE_MAX",
   "RUNNER_MANUAL_RECONCILE_SECRET",
+  "STRIPE_PRICE_ID",
+  "STRIPE_SECRET_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+  "SUBSCRIPTION_CHECKOUT_ENABLED",
   "VERCEL_ENV",
   "VERCEL_PROJECT_PRODUCTION_URL",
   "VERCEL_URL",
@@ -353,6 +363,59 @@ test("unknown environment settings are ignored by the runtime validator", () => 
   });
 
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("disabled checkout validation accepts absent Stripe variables", () => {
+  for (const checkoutFlag of [undefined, "", "  ", "off"]) {
+    const result = runValidator({
+      STRIPE_PRICE_ID: undefined,
+      STRIPE_SECRET_KEY: undefined,
+      STRIPE_WEBHOOK_SECRET: undefined,
+      SUBSCRIPTION_CHECKOUT_ENABLED: checkoutFlag,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+  }
+});
+
+test("enabled checkout validation accepts complete Stripe configuration", () => {
+  for (const arguments_ of [[], ["--release"]]) {
+    const result = runValidator(VALID_STRIPE_ENV, arguments_);
+
+    assert.equal(result.status, 0, result.stderr);
+  }
+});
+
+test("enabled production and release validation names missing Stripe variables", () => {
+  for (const arguments_ of [[], ["--release"]]) {
+    const result = runValidator(
+      {
+        STRIPE_PRICE_ID: " ",
+        STRIPE_SECRET_KEY: undefined,
+        STRIPE_WEBHOOK_SECRET: "",
+        SUBSCRIPTION_CHECKOUT_ENABLED: "on",
+      },
+      arguments_
+    );
+
+    assertRejectedWithMessage(
+      result,
+      "Subscription Checkout requires nonblank environment variables: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID."
+    );
+  }
+});
+
+test("runtime validation rejects checkout flag typos", () => {
+  for (const checkoutFlag of ["true", "1", "ON", "on ", "disabled"]) {
+    const result = runValidator({
+      SUBSCRIPTION_CHECKOUT_ENABLED: checkoutFlag,
+    });
+
+    assertRejectedWithMessage(
+      result,
+      'SUBSCRIPTION_CHECKOUT_ENABLED must be exactly "on" or "off" when configured.'
+    );
+  }
 });
 
 test("rejects configured run reservations without a nonempty abuse key secret", () => {

@@ -199,6 +199,7 @@ const environmentKeys = [
   "STRIPE_PRICE_ID",
   "STRIPE_SECRET_KEY",
   "STRIPE_WEBHOOK_SECRET",
+  "SUBSCRIPTION_CHECKOUT_ENABLED",
 ] as const;
 const productionDependencies = [
   "@ai-sdk/otel",
