@@ -31,6 +31,14 @@ export async function subscriptionResponse(
   dependencies: SubscriptionStatusDependencies,
   sourceIp: string | null
 ): Promise<Response> {
+  const ipAdmission = await dependencies.enforceAbuse({
+    ip: sourceIp,
+    route: "subscription_read_ip",
+  });
+  if (ipAdmission.kind !== "allowed") {
+    return abuseAdmissionResponse(ipAdmission);
+  }
+
   let identity: VerifiedJwtIdentity | null;
   try {
     identity = await dependencies.authenticate(request);
@@ -48,7 +56,7 @@ export async function subscriptionResponse(
   }
 
   const admission = await dependencies.enforceAbuse({
-    ip: sourceIp,
+    ip: null,
     route: "subscription_read",
     userId,
   });

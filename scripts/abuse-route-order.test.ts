@@ -64,18 +64,6 @@ const protectedHandlers: RouteExpectation[] = [
     implementation: "checkoutResponse",
     implementationFile: "lib/billing/checkout-response.ts",
   },
-  {
-    ...route(
-      "app/api/subscription/route.ts",
-      "GET",
-      "dependencies.authenticate(",
-      ["dependencies.findUser("],
-      "subscription_read"
-    ),
-    admissionMarker: "dependencies.enforceAbuse({",
-    implementation: "subscriptionResponse",
-    implementationFile: "lib/billing/subscription-status.ts",
-  },
   route(
     "app/api/credentials/device/route.ts",
     "POST",
@@ -273,6 +261,34 @@ test("resource-bearing handlers admit after identity and before expensive work",
       );
     }
   }
+});
+
+test("subscription status admits IP before verification and user before database work", () => {
+  const routeSource = read("app/api/subscription/route.ts");
+  const response = functionBlock(
+    read("lib/billing/subscription-status.ts"),
+    "subscriptionResponse"
+  );
+  const ipAdmission = response.indexOf('route: "subscription_read_ip"');
+  const authenticate = response.indexOf("dependencies.authenticate(");
+  const userAdmission = response.indexOf('route: "subscription_read"');
+  const database = response.indexOf("dependencies.findUser(");
+
+  assert.match(routeSource, /from "@\/lib\/abuse\/enforce"/);
+  assert.match(routeSource, /from "@vercel\/functions"/);
+  assert.ok(ipAdmission >= 0, "subscription status needs IP admission");
+  assert.ok(
+    ipAdmission < authenticate,
+    "subscription IP admission must precede JWT verification"
+  );
+  assert.ok(
+    authenticate < userAdmission,
+    "subscription user admission must follow JWT verification"
+  );
+  assert.ok(
+    userAdmission < database,
+    "subscription user admission must precede database work"
+  );
 });
 
 test("Stripe webhook admission precedes body and provider work", () => {

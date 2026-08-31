@@ -14,6 +14,10 @@ const DESTRUCTIVE_WRITE = rateClass(5, 60, 20, 3600);
 // for many normal clients behind one NAT. Verified users keep the stricter
 // existing 20/minute and 100/hour write budget below.
 const AUTH_SESSION_UPDATE_IP = rateClass(120, 60, 1200, 3600);
+// Subscription status is a cheap account read, but JWT verification is not.
+// Gate every source before JWE work with ample shared-NAT headroom; verified
+// users retain the existing 60/minute and 600/hour budget below.
+const SUBSCRIPTION_READ_IP = rateClass(600, 60, 10_000, 3600);
 // Stripe retries and renewal batches can legitimately share an egress IP.
 // This route still has its own IP-only budget and a bounded 256 KiB reader.
 const WEBHOOK_WRITE = rateClass(600, 60, 10_000, 3600);
@@ -78,7 +82,8 @@ const POLICIES = Object.freeze({
   skill_write: closedPolicy(["ip", "tenant"], 8192, SENSITIVE_WRITE),
   // Admission runs before the signed raw body is read.
   stripe_webhook: closedPolicy(["ip"], 262_144, WEBHOOK_WRITE),
-  subscription_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
+  subscription_read: closedPolicy(["user"], 0, STANDARD_READ),
+  subscription_read_ip: closedPolicy(["ip"], 0, SUBSCRIPTION_READ_IP),
   suggestions_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   team_delete: closedPolicy(["ip", "tenant"], 0, DESTRUCTIVE_WRITE),
   team_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),

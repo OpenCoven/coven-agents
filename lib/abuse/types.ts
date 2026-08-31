@@ -16,6 +16,7 @@ export const ABUSE_ROUTES = Object.freeze([
   "vote_write",
   "upload",
   "checkout",
+  "subscription_read_ip",
   "subscription_read",
   "avatar_read",
   "avatar_write",
