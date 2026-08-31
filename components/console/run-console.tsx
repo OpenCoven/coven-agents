@@ -32,6 +32,7 @@ import {
   LifecycleBadge,
   Spinner,
 } from "@/components/console/primitives";
+import { ProfileSelector } from "@/components/console/profile-selector";
 import { ReportReader } from "@/components/console/report-reader";
 import {
   LiveActivityStatus,
@@ -1448,105 +1449,118 @@ export function RunConsole() {
                       position: "relative",
                     }}
                   >
-                    <span style={well(true, 30)}>
-                      {glyphFor(
-                        sanitizeEvidenceText(
-                          runAgent?.name ?? selectedAgent.name
-                        )
-                      )}
-                    </span>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div
-                        style={{
-                          alignItems: "center",
-                          display: "flex",
-                          gap: 8,
-                        }}
-                      >
-                        {renaming ? (
-                          <>
-                            <input
-                              aria-label="Agent name"
-                              autoFocus
-                              maxLength={64}
-                              onChange={(event) =>
-                                setRenameDraft(event.target.value)
-                              }
-                              onKeyDown={(event) => {
-                                if (event.key === "Enter") {
-                                  commitRename().catch(() => undefined);
-                                }
-                                if (event.key === "Escape") {
-                                  setRenaming(false);
-                                }
-                              }}
-                              style={{
-                                background: "var(--bg-sunken)",
-                                border: "1px solid var(--border-strong)",
-                                borderRadius: "var(--radius-control)",
-                                color: "var(--text-primary)",
-                                font: "500 13px/1 var(--font-ui)",
-                                outline: "none",
-                                padding: "6px 9px",
-                                width: 220,
-                              }}
-                              value={renameDraft}
-                            />
-                            <Btn
-                              onClick={() => {
-                                commitRename().catch(() => undefined);
-                              }}
-                              size="xs"
-                              variant="primary"
-                            >
-                              Save
-                            </Btn>
-                            <Btn
-                              onClick={() => setRenaming(false)}
-                              size="xs"
-                              variant="ghost"
-                            >
-                              Cancel
-                            </Btn>
-                          </>
-                        ) : (
-                          <span style={{ ...type_.title, ...truncate }}>
-                            {sanitizeEvidenceText(
+                    {selectedRun || renaming ? (
+                      <>
+                        <span style={well(true, 30)}>
+                          {glyphFor(
+                            sanitizeEvidenceText(
                               runAgent?.name ?? selectedAgent.name
-                            )}
-                          </span>
-                        )}
-                        {selectedRun ? (
-                          <LifecycleBadge
-                            status={selectedRun.snapshot.status}
-                          />
-                        ) : null}
-                        {running ? (
-                          <span
+                            )
+                          )}
+                        </span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div
                             style={{
-                              color: "var(--color-warning)",
-                              font: "500 11px/1 var(--font-mono)",
-                              ...tabular,
+                              alignItems: "center",
+                              display: "flex",
+                              gap: 8,
                             }}
                           >
-                            {elapsed}
-                          </span>
-                        ) : null}
-                      </div>
-                      <div
-                        style={{
-                          ...type_.meta,
-                          marginTop: 3,
-                          ...truncate,
-                        }}
-                      >
-                        {selectedRun
-                          ? `run ${selectedRun.snapshot.id.slice(0, 8)} · ${runAgent?.runtime} · ${sanitizeEvidenceText(runAgent?.model ?? "")}`
-                          : selectedAgent.description
-                            ? sanitizeEvidenceText(selectedAgent.description)
-                            : `${selectedAgent.runtime} · ${sanitizeEvidenceText(selectedAgent.model)}`}
-                      </div>
-                    </div>
+                            {renaming ? (
+                              <>
+                                <input
+                                  aria-label="Agent name"
+                                  autoFocus
+                                  maxLength={64}
+                                  onChange={(event) =>
+                                    setRenameDraft(event.target.value)
+                                  }
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") {
+                                      commitRename().catch(() => undefined);
+                                    }
+                                    if (event.key === "Escape") {
+                                      setRenaming(false);
+                                    }
+                                  }}
+                                  style={{
+                                    background: "var(--bg-sunken)",
+                                    border: "1px solid var(--border-strong)",
+                                    borderRadius: "var(--radius-control)",
+                                    color: "var(--text-primary)",
+                                    font: "500 13px/1 var(--font-ui)",
+                                    outline: "none",
+                                    padding: "6px 9px",
+                                    width: 220,
+                                  }}
+                                  value={renameDraft}
+                                />
+                                <Btn
+                                  onClick={() => {
+                                    commitRename().catch(() => undefined);
+                                  }}
+                                  size="xs"
+                                  variant="primary"
+                                >
+                                  Save
+                                </Btn>
+                                <Btn
+                                  onClick={() => setRenaming(false)}
+                                  size="xs"
+                                  variant="ghost"
+                                >
+                                  Cancel
+                                </Btn>
+                              </>
+                            ) : (
+                              <span style={{ ...type_.title, ...truncate }}>
+                                {sanitizeEvidenceText(
+                                  runAgent?.name ?? selectedAgent.name
+                                )}
+                              </span>
+                            )}
+                            {selectedRun ? (
+                              <LifecycleBadge
+                                status={selectedRun.snapshot.status}
+                              />
+                            ) : null}
+                            {running ? (
+                              <span
+                                style={{
+                                  color: "var(--color-warning)",
+                                  font: "500 11px/1 var(--font-mono)",
+                                  ...tabular,
+                                }}
+                              >
+                                {elapsed}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div
+                            style={{
+                              ...type_.meta,
+                              marginTop: 3,
+                              ...truncate,
+                            }}
+                          >
+                            {selectedRun
+                              ? `run ${selectedRun.snapshot.id.slice(0, 8)} · ${runAgent?.runtime} · ${sanitizeEvidenceText(runAgent?.model ?? "")}`
+                              : selectedAgent.description
+                                ? sanitizeEvidenceText(
+                                    selectedAgent.description
+                                  )
+                                : `${selectedAgent.runtime} · ${sanitizeEvidenceText(selectedAgent.model)}`}
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <ProfileSelector
+                        agents={agents}
+                        currentAgent={selectedAgent}
+                        onCreate={openCreate}
+                        onSelect={openComposer}
+                      />
+                    )}
 
                     {running ? (
                       <Btn onClick={stopRun} variant="danger-ghost">
