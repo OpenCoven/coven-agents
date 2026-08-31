@@ -1482,6 +1482,58 @@ test.describe("Subscriber checkout", () => {
     });
   }
 
+  test("a stale device-flow start refusal cannot invalidate a replacement authority", async ({
+    page,
+  }) => {
+    const secondUserId = "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa";
+    let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await mockAccountDependencies(page);
+    let releaseDeviceStart!: () => void;
+    const deviceStartGate = new Promise<void>((resolve) => {
+      releaseDeviceStart = resolve;
+    });
+    await page.route("**/api/credentials/device", async (route) => {
+      await deviceStartGate;
+      return route.fulfill({
+        json: { error: "subscription_required" },
+        status: 403,
+      });
+    });
+    let serverRefreshes = 0;
+    page.on("request", (request) => {
+      if (
+        new URL(request.url()).pathname === "/account" &&
+        isServerComponentRequest(request)
+      ) {
+        serverRefreshes += 1;
+      }
+    });
+
+    await page.goto("/account");
+    await page.getByRole("button", { name: "Connect GitHub Copilot" }).click();
+
+    await setServerSession(page.context(), "subscriber", { id: secondUserId });
+    currentSession = sessionFor("subscriber", {
+      email: "second@example.invalid",
+      id: secondUserId,
+    });
+    await notifySessionChange(page);
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await expect(
+      page.getByRole("button", { name: "Connect GitHub Copilot" })
+    ).toBeVisible();
+
+    releaseDeviceStart();
+    await page.waitForTimeout(100);
+
+    expect(serverRefreshes).toBe(1);
+    await expect(page.getByLabel("GitHub Copilot CLI")).toBeVisible();
+  });
+
   test("agents ignores subscriber authority belonging to another current client identity", async ({
     page,
   }) => {

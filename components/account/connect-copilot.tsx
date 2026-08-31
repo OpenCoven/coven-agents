@@ -40,6 +40,7 @@ export function ConnectCopilot({
     createDeviceFlowAttempt(() => crypto.randomUUID())
   );
   const stopped = useRef(false);
+  const mounted = useRef(true);
   const authorityContextRef = useRef(authorityContext);
   authorityContextRef.current = authorityContext;
   const ownerRef = useRef(authorityContext);
@@ -55,12 +56,13 @@ export function ConnectCopilot({
     setBusy(false);
   }, [authorityContext, startAttempt]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
       stopped.current = true;
-    },
-    []
-  );
+    };
+  }, []);
 
   /**
    * Polls for the authorization result.
@@ -185,7 +187,11 @@ export function ConnectCopilot({
         attempt: startAttempt,
         fetcher: fetch,
       });
-      if (authorityContextRef.current !== requestAuthorityContext) {
+      if (
+        !mounted.current ||
+        stopped.current ||
+        authorityContextRef.current !== requestAuthorityContext
+      ) {
         return;
       }
 
@@ -193,7 +199,11 @@ export function ConnectCopilot({
       window.open(session.verificationUri, "_blank", "noopener,noreferrer");
       poll(session, requestAuthorityContext);
     } catch (error) {
-      if (authorityContextRef.current === requestAuthorityContext) {
+      if (
+        mounted.current &&
+        !stopped.current &&
+        authorityContextRef.current === requestAuthorityContext
+      ) {
         if (
           error instanceof DeviceFlowRequestError &&
           (error.status === 401 || error.status === 403)
@@ -212,7 +222,10 @@ export function ConnectCopilot({
         });
       }
     } finally {
-      if (authorityContextRef.current === requestAuthorityContext) {
+      if (
+        mounted.current &&
+        authorityContextRef.current === requestAuthorityContext
+      ) {
         setBusy(false);
       }
     }
