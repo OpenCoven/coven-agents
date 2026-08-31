@@ -155,6 +155,9 @@ export function RunConsole({
   const credentialOwner = accountId
     ? `${accountId}:${session.data?.user?.authVersion ?? ""}`
     : null;
+  const credentialRequestAuthority = credentialOwner
+    ? `${credentialOwner}:${authorityRevision ?? ""}`
+    : null;
   const avatarSrc = accountId
     ? avatarFor({ id: accountId, image: session.data?.user?.image })
     : null;
@@ -538,7 +541,7 @@ export function RunConsole({
       credentialOwnerRef.current = credentialOwner;
       resetCredentialCache();
     }
-    fetchHasCredential()
+    fetchHasCredential(undefined, credentialRequestAuthority)
       .then((has) => {
         if (!isCurrentSession(generation, controller.signal)) {
           return;
@@ -566,6 +569,7 @@ export function RunConsole({
     accountId,
     client,
     credentialOwner,
+    credentialRequestAuthority,
     isCurrentSession,
     refresh,
     isSubscriber,

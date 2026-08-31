@@ -167,9 +167,7 @@ export function HarnessCredentials({
       setConfigured([]);
       setValues({});
       finishOperation(operation);
-      if (response.status === 403) {
-        authorityInvalidatedRef.current();
-      }
+      authorityInvalidatedRef.current();
       return;
     }
 
@@ -276,9 +274,7 @@ export function HarnessCredentials({
           });
           setConfigured([]);
           setValues({});
-          if (response.status === 403) {
-            authorityInvalidatedRef.current();
-          }
+          authorityInvalidatedRef.current();
           toast({
             description:
               response.status === 401
@@ -345,9 +341,7 @@ export function HarnessCredentials({
           });
           setConfigured([]);
           setValues({});
-          if (response.status === 403) {
-            authorityInvalidatedRef.current();
-          }
+          authorityInvalidatedRef.current();
           toast({
             description:
               response.status === 401

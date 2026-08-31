@@ -278,6 +278,7 @@ export function createDeviceFlowController(
 
   const signInRequired = () => {
     stopActive({
+      invalidate: true,
       notice: {
         message:
           "Your sign-in expired. Sign in again to connect GitHub Copilot.",

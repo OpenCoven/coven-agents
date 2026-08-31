@@ -155,11 +155,16 @@ test.describe("Account settings", () => {
     const credential = page.getByLabel("GitHub Copilot CLI");
     await credential.fill("must-not-survive");
     credentialStatus = 401;
+    const authorityRefresh = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return url.pathname === "/account" && request.headers().rsc === "1";
+    });
     await page.getByRole("button", { exact: true, name: "Save" }).click();
 
+    await authorityRefresh;
     await expect(credential).toHaveCount(0);
     await expect(
-      page.getByText("Sign in again to manage harness credentials.")
+      page.getByText("Storing a credential needs an active subscription.")
     ).toBeVisible();
   });
 

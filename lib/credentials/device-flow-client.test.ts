@@ -258,6 +258,7 @@ test("401 stops with explicit sign-in guidance", async () => {
   await harness.controller.start();
 
   assert.equal(harness.scheduled.length, 0);
+  assert.deepEqual(harness.invalidations, ["revision-one"]);
   assert.match(harness.notices.at(-1)?.message ?? "", /sign in again/i);
 });
 
