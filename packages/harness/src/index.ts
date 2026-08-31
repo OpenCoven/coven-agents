@@ -7,6 +7,7 @@ export {
 export {
   buildInvocation,
   buildMission,
+  type HarnessExecutionPermission,
   type Invocation,
   type InvocationRequest,
   shellQuote,

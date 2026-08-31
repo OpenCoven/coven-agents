@@ -31,6 +31,18 @@ export const agentRunnerApiVersionSchema = z.literal(AGENT_RUNNER_API_VERSION);
 const boundedString = (max: number) => z.string().trim().min(1).max(max);
 const datetimeSchema = z.string().datetime();
 
+export const TEAM_LIMITS = Object.freeze({
+  maxDescriptionLength: AGENT_RUNNER_LIMITS.maxDescriptionLength,
+  maxHandoffLength: 16_384,
+  maxMembers: 8,
+  maxMissionLength: AGENT_RUNNER_LIMITS.maxTaskLength,
+  maxNameLength: 64,
+  maxSkillInstructionsLength: 4000,
+  maxSkillsPerMember: 8,
+  maxTeamRunsPerPage: 10,
+  maxTotalHandoffLength: 49_152,
+});
+
 /**
  * Stable Agent Runner v1 deployment-class discriminator. `cloud` means the
  * runner is remotely deployed; it is not an execution-provider identity or
@@ -128,6 +140,191 @@ export const agentOwnerSchema = z.discriminatedUnion("kind", [
 ]);
 export const ownerSchema = agentOwnerSchema;
 
+export const teamCapabilitySchema = z.enum([
+  "workspace.read",
+  "workspace.write",
+  "github.issues.read",
+  "github.issues.write",
+  "github.pull_requests.read",
+  "github.pull_requests.write",
+  "github.projects.read",
+  "github.projects.write",
+]);
+export const teamRunStatusSchema = z.enum([
+  "queued",
+  "running",
+  "waiting_approval",
+  "completed",
+  "completed_with_warnings",
+  "failed",
+  "cancelled",
+]);
+export const teamStepStatusSchema = z.enum([
+  "pending",
+  "queued",
+  "running",
+  "waiting_approval",
+  "completed",
+  "failed",
+  "cancelled",
+  "skipped",
+]);
+export const skillIdSchema = z.string().uuid();
+export const teamIdSchema = z.string().uuid();
+export const teamRunIdSchema = z.string().uuid();
+export const teamStepIdSchema = z.string().uuid();
+
+const distinctValues = <T>(
+  values: readonly T[],
+  context: z.core.$RefinementCtx,
+  message: string
+) => {
+  if (new Set(values).size !== values.length) {
+    context.addIssue({ code: "custom", message });
+  }
+};
+
+export const createSkillInputSchema = z
+  .object({
+    description: z
+      .string()
+      .trim()
+      .max(TEAM_LIMITS.maxDescriptionLength)
+      .default(""),
+    instructions: boundedString(TEAM_LIMITS.maxSkillInstructionsLength),
+    name: boundedString(TEAM_LIMITS.maxNameLength),
+    requiredCapabilities: z
+      .array(teamCapabilitySchema)
+      .max(TEAM_LIMITS.maxSkillsPerMember)
+      .default([])
+      .superRefine((capabilities, context) =>
+        distinctValues(capabilities, context, "Capabilities must be unique.")
+      ),
+  })
+  .strict();
+
+export const updateSkillInputSchema = createSkillInputSchema
+  .extend({
+    expectedVersion: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const skillDefinitionSchema = createSkillInputSchema.extend({
+  createdAt: datetimeSchema,
+  id: skillIdSchema,
+  owner: agentOwnerSchema,
+  updatedAt: datetimeSchema,
+  version: z.number().int().nonnegative(),
+});
+
+export const skillResourceSchema = createSkillInputSchema
+  .extend({
+    createdAt: datetimeSchema,
+    id: skillIdSchema,
+    updatedAt: datetimeSchema,
+    version: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const createTeamMemberInputSchema = z
+  .object({
+    agentId: agentIdSchema,
+    required: z.boolean().default(true),
+    responsibility: boundedString(AGENT_RUNNER_LIMITS.maxInstructionsLength),
+    skillIds: z
+      .array(skillIdSchema)
+      .max(TEAM_LIMITS.maxSkillsPerMember)
+      .default([])
+      .superRefine((skillIds, context) =>
+        distinctValues(skillIds, context, "Skill ids must be unique.")
+      ),
+  })
+  .strict();
+
+export const createTeamInputSchema = z
+  .object({
+    description: z
+      .string()
+      .trim()
+      .max(TEAM_LIMITS.maxDescriptionLength)
+      .default(""),
+    members: z
+      .array(createTeamMemberInputSchema)
+      .min(2)
+      .max(TEAM_LIMITS.maxMembers)
+      .superRefine((members, context) =>
+        distinctValues(
+          members.map(({ agentId }) => agentId),
+          context,
+          "Team agent ids must be unique."
+        )
+      ),
+    name: boundedString(TEAM_LIMITS.maxNameLength),
+  })
+  .strict();
+
+export const updateTeamInputSchema = createTeamInputSchema
+  .extend({
+    expectedVersion: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const teamMemberSchema = createTeamMemberInputSchema.extend({
+  id: z.string().uuid(),
+  position: z.number().int().nonnegative(),
+});
+
+export const teamDefinitionSchema = z
+  .object({
+    createdAt: datetimeSchema,
+    description: z.string().max(TEAM_LIMITS.maxDescriptionLength).default(""),
+    id: teamIdSchema,
+    members: z.array(teamMemberSchema).min(2).max(TEAM_LIMITS.maxMembers),
+    name: boundedString(TEAM_LIMITS.maxNameLength),
+    owner: agentOwnerSchema,
+    updatedAt: datetimeSchema,
+    version: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const teamResourceSchema = z
+  .object({
+    createdAt: datetimeSchema,
+    description: z.string().max(TEAM_LIMITS.maxDescriptionLength).default(""),
+    id: teamIdSchema,
+    members: z.array(teamMemberSchema).min(2).max(TEAM_LIMITS.maxMembers),
+    name: boundedString(TEAM_LIMITS.maxNameLength),
+    updatedAt: datetimeSchema,
+    version: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const expectedVersionInputSchema = z
+  .object({
+    expectedVersion: z.number().int().nonnegative(),
+  })
+  .strict();
+
+function workspaceStaysInsideSandbox(value: string): boolean {
+  if (!value) {
+    return true;
+  }
+  const base = value.startsWith("/") ? value : `/workspace/${value}`;
+  const parts: string[] = [];
+  for (const segment of base.split("/")) {
+    if (!segment || segment === ".") {
+      continue;
+    }
+    if (segment === "..") {
+      parts.pop();
+    } else {
+      parts.push(segment);
+    }
+  }
+  const resolved = `/${parts.join("/")}`;
+  return resolved === "/workspace" || resolved.startsWith("/workspace/");
+}
+
 const agentDefinitionInputShape = {
   backend: backendSchema,
   description: z
@@ -147,6 +344,10 @@ const agentDefinitionInputShape = {
     .string()
     .trim()
     .max(AGENT_RUNNER_LIMITS.maxWorkspaceLength)
+    .refine(
+      workspaceStaysInsideSandbox,
+      "Workspace must stay inside /workspace."
+    )
     .optional(),
 };
 
@@ -294,6 +495,169 @@ export const runSnapshotSchema = z
     startedAt: datetimeSchema.nullable().default(null),
     status: runStatusSchema,
     task: z.string().trim().min(1).max(AGENT_RUNNER_LIMITS.maxTaskLength),
+  })
+  .strict();
+
+export const teamApprovalStatusSchema = z.enum([
+  "not_required",
+  "pending",
+  "approved",
+  "rejected",
+]);
+export const githubOperationKindSchema = z.enum([
+  "issue.get",
+  "issue.search",
+  "issue.create",
+  "issue.comment",
+  "pull.get",
+  "pull.create",
+  "pull.comment",
+  "pull.review",
+  "project.item.add",
+  "project.item.field.update",
+]);
+export const githubOperationStatusSchema = z.enum([
+  "pending",
+  "running",
+  "completed",
+  "failed",
+]);
+
+export const createTeamRunInputSchema = z
+  .object({
+    operationId: z.string().uuid(),
+    task: boundedString(TEAM_LIMITS.maxMissionLength),
+  })
+  .strict();
+
+const approveTeamRunDecisionInputSchema = z
+  .object({
+    capabilities: z
+      .array(
+        teamCapabilitySchema.refine(
+          (capability) => capability.startsWith("github."),
+          "Only declared GitHub capabilities may be approved."
+        )
+      )
+      .min(1)
+      .max(TEAM_LIMITS.maxSkillsPerMember)
+      .superRefine((capabilities, context) => {
+        distinctValues(capabilities, context, "Capabilities must be unique.");
+        if (!capabilities.some((capability) => capability.endsWith(".write"))) {
+          context.addIssue({
+            code: "custom",
+            message:
+              "Approval must include a declared GitHub write capability.",
+          });
+        }
+      }),
+    decision: z.literal("approve"),
+    expectedVersion: z.number().int().nonnegative(),
+  })
+  .strict();
+
+const rejectTeamRunDecisionInputSchema = z
+  .object({
+    capabilities: z.array(teamCapabilitySchema).length(0).default([]),
+    decision: z.literal("reject"),
+    expectedVersion: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const approveTeamRunInputSchema = z.discriminatedUnion("decision", [
+  approveTeamRunDecisionInputSchema,
+  rejectTeamRunDecisionInputSchema,
+]);
+
+export const teamHandoffSchema = z
+  .object({
+    commandEvidence: z
+      .array(commandEvidenceSchema)
+      .max(AGENT_RUNNER_LIMITS.maxCommandResults),
+    fileEvidence: z
+      .array(fileEvidenceSchema)
+      .max(AGENT_RUNNER_LIMITS.maxFileOperations),
+    output: z.string().max(TEAM_LIMITS.maxHandoffLength),
+  })
+  .strict();
+
+export const githubOperationReceiptSchema = z
+  .object({
+    completedAt: datetimeSchema.nullable(),
+    id: z.string().uuid(),
+    kind: githubOperationKindSchema,
+    providerRequestId: z.string().trim().max(256).nullable(),
+    requestHash: z.string().regex(/^[a-f0-9]{64}$/u),
+    resultNodeId: z.string().trim().max(256).nullable(),
+    resultUrl: z.url().max(2048).nullable(),
+    status: githubOperationStatusSchema,
+    stepId: teamStepIdSchema,
+    target: boundedString(512),
+  })
+  .strict();
+
+export const teamStepSchema = z
+  .object({
+    agentId: agentIdSchema,
+    approvalStatus: teamApprovalStatusSchema,
+    completedAt: datetimeSchema.nullable(),
+    createdAt: datetimeSchema,
+    error: runErrorSchema.nullable(),
+    handoff: teamHandoffSchema.nullable(),
+    id: teamStepIdSchema,
+    position: z.number().int().nonnegative(),
+    required: z.boolean(),
+    responsibility: boundedString(AGENT_RUNNER_LIMITS.maxInstructionsLength),
+    runnerRunId: z.string().uuid().nullable(),
+    skillIds: z
+      .array(skillIdSchema)
+      .max(TEAM_LIMITS.maxSkillsPerMember)
+      .superRefine((skillIds, context) =>
+        distinctValues(skillIds, context, "Skill ids must be unique.")
+      ),
+    startedAt: datetimeSchema.nullable(),
+    status: teamStepStatusSchema,
+    updatedAt: datetimeSchema,
+    version: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const teamRunSchema = z
+  .object({
+    completedAt: datetimeSchema.nullable(),
+    createdAt: datetimeSchema,
+    currentPosition: z.number().int().nonnegative(),
+    error: runErrorSchema.nullable(),
+    id: teamRunIdSchema,
+    mission: boundedString(TEAM_LIMITS.maxMissionLength),
+    operationId: z.string().uuid(),
+    startedAt: datetimeSchema.nullable(),
+    status: teamRunStatusSchema,
+    steps: z
+      .array(teamStepSchema)
+      .min(1)
+      .max(TEAM_LIMITS.maxMembers)
+      .superRefine((steps, context) => {
+        distinctValues(
+          steps.map(({ id }) => id),
+          context,
+          "Team step ids must be unique."
+        );
+        distinctValues(
+          steps.map(({ position }) => position),
+          context,
+          "Team step positions must be unique."
+        );
+        if (steps.some(({ position }, index) => position !== index)) {
+          context.addIssue({
+            code: "custom",
+            message: "Team step positions must be contiguous and ordered.",
+          });
+        }
+      }),
+    teamId: teamIdSchema,
+    updatedAt: datetimeSchema,
+    version: z.number().int().nonnegative(),
   })
   .strict();
 
@@ -496,6 +860,43 @@ export const agentEnvelopeSchema = z.object({
   agent: agentDefinitionSchema,
 });
 
+export const skillsEnvelopeSchema = z
+  .object({
+    skills: z.array(skillResourceSchema),
+  })
+  .strict();
+
+export const skillEnvelopeSchema = z
+  .object({
+    skill: skillResourceSchema,
+  })
+  .strict();
+
+export const teamsEnvelopeSchema = z
+  .object({
+    teams: z.array(teamResourceSchema),
+  })
+  .strict();
+
+export const teamEnvelopeSchema = z
+  .object({
+    team: teamResourceSchema,
+  })
+  .strict();
+
+export const teamRunsEnvelopeSchema = z
+  .object({
+    nextCursor: teamRunIdSchema.nullable(),
+    teamRuns: z.array(teamRunSchema).max(TEAM_LIMITS.maxTeamRunsPerPage),
+  })
+  .strict();
+
+export const teamRunEnvelopeSchema = z
+  .object({
+    teamRun: teamRunSchema,
+  })
+  .strict();
+
 /**
  * Projects a run snapshot onto the older `RunResult` shape.
  *
@@ -577,3 +978,29 @@ export type RunErrorEnvelope = z.infer<typeof runErrorEnvelopeSchema>;
 export type RunEventType = z.infer<typeof runEventTypeSchema>;
 export type RunEventsEnvelope = z.infer<typeof runEventsEnvelopeSchema>;
 export type RunSnapshotEnvelope = z.infer<typeof runSnapshotEnvelopeSchema>;
+export type CreateSkillInput = z.input<typeof createSkillInputSchema>;
+export type CreateTeamInput = z.input<typeof createTeamInputSchema>;
+export type CreateTeamRunInput = z.input<typeof createTeamRunInputSchema>;
+export type ApproveTeamRunInput = z.input<typeof approveTeamRunInputSchema>;
+export type ExpectedVersionInput = z.input<typeof expectedVersionInputSchema>;
+export type GitHubOperationKind = z.infer<typeof githubOperationKindSchema>;
+export type GitHubOperationReceipt = z.output<
+  typeof githubOperationReceiptSchema
+>;
+export type GitHubOperationStatus = z.infer<typeof githubOperationStatusSchema>;
+export type SkillDefinition = z.output<typeof skillDefinitionSchema>;
+export type SkillResource = z.output<typeof skillResourceSchema>;
+export type TeamApprovalStatus = z.infer<typeof teamApprovalStatusSchema>;
+export type TeamCapability = z.infer<typeof teamCapabilitySchema>;
+export type TeamDefinition = z.output<typeof teamDefinitionSchema>;
+export type TeamResource = z.output<typeof teamResourceSchema>;
+export type TeamHandoff = z.output<typeof teamHandoffSchema>;
+export type TeamMember = z.output<typeof teamMemberSchema>;
+export type TeamRun = z.output<typeof teamRunSchema>;
+export type TeamRunEnvelope = z.output<typeof teamRunEnvelopeSchema>;
+export type TeamRunStatus = z.infer<typeof teamRunStatusSchema>;
+export type TeamRunsEnvelope = z.output<typeof teamRunsEnvelopeSchema>;
+export type TeamStep = z.output<typeof teamStepSchema>;
+export type TeamStepStatus = z.infer<typeof teamStepStatusSchema>;
+export type UpdateSkillInput = z.input<typeof updateSkillInputSchema>;
+export type UpdateTeamInput = z.input<typeof updateTeamInputSchema>;

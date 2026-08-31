@@ -264,9 +264,15 @@ test("auth callbacks and the client update preserve server-owned identity", () =
     new URL("../components/account/avatar-settings.tsx", import.meta.url),
     "utf8"
   );
+  const avatarLibrary = readFileSync(
+    new URL("../lib/avatar.ts", import.meta.url),
+    "utf8"
+  );
 
   assert.match(authSource, /token\.authVersion = row\.authVersion/);
   assert.match(authSource, /session\.user\.authVersion = token\.authVersion/);
   assert.match(authSource, /return refreshTokenType\(token, new Date\(\)\)/);
-  assert.match(avatarSource, /await update\(\{ image \}\)/);
+  assert.match(avatarSource, /refreshAvatarSession\(image, update\)/);
+  assert.match(avatarLibrary, /const session = await update\(\{\}\)/);
+  assert.doesNotMatch(avatarLibrary, /update\(\{\s*image\s*[:},]/);
 });

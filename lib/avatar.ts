@@ -108,3 +108,37 @@ export function avatarFor(user: { id: string; image?: string | null }): string {
     ? stored
     : generatedAvatar(user.id);
 }
+
+export function avatarSessionRefreshStatus(
+  expectedImage: string | null,
+  session: { user?: { image?: string | null } | null } | null
+): "deferred" | "refreshed" {
+  if (!session?.user) {
+    return "deferred";
+  }
+  return (session.user.image ?? null) === expectedImage
+    ? "refreshed"
+    : "deferred";
+}
+
+type AvatarSession = {
+  user?: { image?: string | null } | null;
+};
+
+type AvatarSessionUpdater = (
+  data: Record<string, never>
+) => Promise<AvatarSession | null | undefined>;
+
+/**
+ * An explicit object makes Auth.js use its POST session-update action. The
+ * empty signal carries no browser-controlled claim values; the JWT callback
+ * reloads storage and the caller only reports success once that returned
+ * session reflects the stored image.
+ */
+export async function refreshAvatarSession(
+  expectedImage: string | null,
+  update: AvatarSessionUpdater
+): Promise<"deferred" | "refreshed"> {
+  const session = await update({});
+  return avatarSessionRefreshStatus(expectedImage, session ?? null);
+}

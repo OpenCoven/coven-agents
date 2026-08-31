@@ -68,6 +68,11 @@ export type ReleaseRunnerReconciliationLeaseResult =
   | Readonly<{ kind: "stale" }>;
 
 export type RunnerRuntime = "codex" | "claude" | "copilot";
+export type RunnerSandboxTrust = "clean" | "restricted" | "unrestricted";
+export type RunnerExecutionPermission =
+  | "unrestricted"
+  | "workspace_read"
+  | "workspace_write";
 export type RunnerAgentStatus = "idle" | "running" | "error";
 export type RunnerSandboxLifecycle =
   | "unprovisioned"
@@ -114,6 +119,7 @@ export type RunnerAgentRecord = {
   runtime: RunnerRuntime;
   sandboxGeneration: number;
   sandboxLifecycle: RunnerSandboxLifecycle;
+  sandboxTrust: RunnerSandboxTrust;
   sandboxUpdatedAt: Date;
   status: RunnerAgentStatus;
   tenant: string;
@@ -125,10 +131,21 @@ export type RunnerAgentRecord = {
   workspace: string | null;
 };
 
+export type RunnerAgentExecutionSnapshot = Readonly<{
+  instructions: string;
+  model: string;
+  runtime: RunnerRuntime;
+  workspace: string | null;
+}>;
+
 export type RunnerRunRecord = Omit<
   RunSnapshot,
   "apiVersion" | "completedAt" | "createdAt" | "error" | "startedAt"
 > & {
+  agentInstructions: string;
+  agentModel: string;
+  agentRuntime: RunnerRuntime;
+  agentWorkspace: string | null;
   authVersion: number | null;
   cancellationRequestedAt: Date | null;
   completedAt: Date | null;
@@ -141,6 +158,7 @@ export type RunnerRunRecord = Omit<
   dispatchLeaseToken: string | null;
   dispatchState: RunnerDispatchState;
   error: RunError | null;
+  executionPermission: RunnerExecutionPermission;
   logCursor: number;
   queueSequence: number;
   requestHash: string;
@@ -199,8 +217,10 @@ export type UpdateRunnerAgentInput = {
 
 export type StartRunnerRunInput = {
   agentId: string;
+  agentSnapshot?: RunnerAgentExecutionSnapshot;
   admission?: RunnerAdmissionLimits;
   authVersion: number;
+  executionPermission?: RunnerExecutionPermission;
   id: string;
   initialDispatch?: Pick<DispatchClaimInput, "leaseExpiresAt" | "leaseToken">;
   operationId: string;

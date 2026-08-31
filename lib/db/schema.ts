@@ -2,8 +2,12 @@ import {
   AGENT_RUNNER_LIMITS,
   type CommandEvidence,
   type FileEvidence,
+  type GitHubOperationKind,
   type RunError,
   type RunEvent,
+  TEAM_LIMITS,
+  type TeamCapability,
+  type TeamHandoff,
 } from "@opencoven/agent-contracts";
 import { type InferSelectModel, sql } from "drizzle-orm";
 import {
@@ -26,6 +30,11 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 import type { StoredIdempotencyResponseEnvelope } from "../abuse/idempotency-response";
+import {
+  STRIPE_RECONCILIATION_EVENT_TYPES,
+  STRIPE_RECONCILIATION_REASONS,
+  STRIPE_RECONCILIATION_STATUSES,
+} from "../billing/stripe-reconciliation";
 
 const runnerMaxCommandResultsSql = sql.raw(
   String(AGENT_RUNNER_LIMITS.maxCommandResults)
@@ -42,6 +51,19 @@ const runnerMaxFileOperationsSql = sql.raw(
 const runnerMaxMessageLengthSql = sql.raw(
   String(AGENT_RUNNER_LIMITS.maxMessageLength)
 );
+const teamMaxPersistedHandoffLengthSql = sql.raw("24576");
+const teamMaxMembersSql = sql.raw(String(TEAM_LIMITS.maxMembers));
+const teamMaxSkillsPerMemberSql = sql.raw(
+  String(TEAM_LIMITS.maxSkillsPerMember)
+);
+
+type RunnerTeamSkillSnapshot = {
+  description: string;
+  id: string;
+  instructions: string;
+  name: string;
+  requiredCapabilities: TeamCapability[];
+};
 
 export const user = pgTable(
   "User",
@@ -379,13 +401,67 @@ export const stripeEvent = pgTable("StripeEvent", {
 export type StripeEvent = InferSelectModel<typeof stripeEvent>;
 
 /**
+ * Sanitized operator evidence for Stripe events that cannot be applied
+ * automatically.
+ *
+ * The event id is both the primary key and the only provider identifier
+ * retained here. User, Customer, Subscription, payload, and free-form fields
+ * are deliberately absent.
+ */
+export const stripeReconciliation = pgTable(
+  "StripeReconciliation",
+  {
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    eventId: varchar("eventId", { length: 64 })
+      .primaryKey()
+      .notNull()
+      .references(() => stripeEvent.id, { onDelete: "restrict" }),
+    eventType: varchar("eventType", {
+      enum: STRIPE_RECONCILIATION_EVENT_TYPES,
+      length: 32,
+    }).notNull(),
+    reason: varchar("reason", {
+      enum: STRIPE_RECONCILIATION_REASONS,
+      length: 64,
+    }).notNull(),
+    status: varchar("status", {
+      enum: STRIPE_RECONCILIATION_STATUSES,
+      length: 16,
+    })
+      .notNull()
+      .default("pending"),
+  },
+  (table) => [
+    check(
+      "StripeReconciliation_eventType_check",
+      sql`${table.eventType} in ('invoice.paid', 'invoice.payment_failed')`
+    ),
+    check(
+      "StripeReconciliation_reason_check",
+      sql`${table.reason} in ('invoice_ambiguous_entitlement', 'invoice_conflicting_paid_interval', 'invoice_contradictory_subscription', 'invoice_invalid_period', 'invoice_invalid_reference')`
+    ),
+    check(
+      "StripeReconciliation_status_check",
+      sql`${table.status} in ('pending', 'acknowledged', 'resolved')`
+    ),
+  ]
+);
+
+export type StripeReconciliation = InferSelectModel<
+  typeof stripeReconciliation
+>;
+
+/**
  * One durable claim for a costly request.
  *
  * The scoped unique index is the concurrency boundary: only one request for
  * an owner, operation, and hashed browser key may reach its provider. The
  * expiry is also the claim lease while work is in progress, so a dead process
  * can be reclaimed without allowing a stale completion to overwrite its
- * replacement.
+ * replacement. The checkout-attempt scope additionally keeps `id` stable as
+ * the provider-attempt identity. While leased, `requestHash` carries the
+ * ownership token plus the latest bounded provider-reconciliation checkpoint;
+ * between leases it stores that reconciliation state alone.
  */
 export const idempotencyRecord = pgTable(
   "IdempotencyRecord",
@@ -464,6 +540,12 @@ export const runnerAgent = pgTable(
     })
       .notNull()
       .default("unprovisioned"),
+    sandboxTrust: varchar("sandboxTrust", {
+      enum: ["clean", "restricted", "unrestricted"],
+      length: 16,
+    })
+      .notNull()
+      .default("clean"),
     sandboxUpdatedAt: timestamp("sandboxUpdatedAt").notNull().defaultNow(),
     status: varchar("status", {
       enum: ["idle", "running", "error"],
@@ -516,6 +598,10 @@ export const runnerAgent = pgTable(
       sql`${table.sandboxLifecycle} in ('unprovisioned', 'provisioning', 'provisioning_ambiguous', 'ready', 'resetting', 'decommissioning', 'decommission_failed')`
     ),
     check(
+      "RunnerAgent_sandboxTrust_valid",
+      sql`${table.sandboxTrust} in ('clean', 'restricted', 'unrestricted')`
+    ),
+    check(
       "RunnerAgent_warmStatus_valid",
       sql`${table.warmStatus} in ('not_started', 'provisioning', 'ready', 'failed')`
     ),
@@ -537,6 +623,19 @@ export const runnerRun = pgTable(
   "RunnerRun",
   {
     agentId: uuid("agentId").notNull(),
+    agentInstructions: varchar("agentInstructions", {
+      length: AGENT_RUNNER_LIMITS.maxInstructionsLength,
+    }).notNull(),
+    agentModel: varchar("agentModel", {
+      length: AGENT_RUNNER_LIMITS.maxModelLength,
+    }).notNull(),
+    agentRuntime: varchar("agentRuntime", {
+      enum: ["codex", "claude", "copilot"],
+      length: 16,
+    }).notNull(),
+    agentWorkspace: varchar("agentWorkspace", {
+      length: AGENT_RUNNER_LIMITS.maxWorkspaceLength,
+    }),
     authVersion: integer("authVersion"),
     cancellationRequestedAt: timestamp("cancellationRequestedAt"),
     commandEvidence: jsonb("commandEvidence")
@@ -560,6 +659,12 @@ export const runnerRun = pgTable(
       .notNull()
       .default("queued"),
     error: jsonb("error").$type<RunError>(),
+    executionPermission: varchar("executionPermission", {
+      enum: ["unrestricted", "workspace_read", "workspace_write"],
+      length: 32,
+    })
+      .notNull()
+      .default("unrestricted"),
     fileEvidence: jsonb("fileEvidence")
       .$type<FileEvidence[]>()
       .notNull()
@@ -587,6 +692,7 @@ export const runnerRun = pgTable(
     version: integer("version").notNull().default(0),
   },
   (table) => [
+    unique("RunnerRun_id_tenant_key").on(table.id, table.tenant),
     foreignKey({
       columns: [table.agentId, table.tenant],
       foreignColumns: [runnerAgent.id, runnerAgent.tenant],
@@ -639,6 +745,10 @@ export const runnerRun = pgTable(
       "RunnerRun_dispatchState_valid",
       sql`${table.dispatchState} in ('queued', 'dispatching', 'running', 'terminal')`
     ),
+    check(
+      "RunnerRun_executionPermission_valid",
+      sql`${table.executionPermission} in ('unrestricted', 'workspace_read', 'workspace_write')`
+    ),
     check("RunnerRun_queueSequence_positive", sql`${table.queueSequence} > 0`),
     check("RunnerRun_logCursor_nonnegative", sql`${table.logCursor} >= 0`),
     check(
@@ -649,6 +759,10 @@ export const runnerRun = pgTable(
     check(
       "RunnerRun_authVersion_valid",
       sql`${table.authVersion} is null or ${table.authVersion} >= 0`
+    ),
+    check(
+      "RunnerRun_agentSnapshot_valid",
+      sql`char_length(btrim(${table.agentInstructions})) between 1 and ${sql.raw(String(AGENT_RUNNER_LIMITS.maxInstructionsLength))} and char_length(btrim(${table.agentModel})) between 1 and ${sql.raw(String(AGENT_RUNNER_LIMITS.maxModelLength))} and ${table.agentRuntime} in ('codex', 'claude', 'copilot')`
     ),
     check(
       "RunnerRun_timestamps_valid",
@@ -690,6 +804,589 @@ export const runnerRun = pgTable(
 );
 
 export type RunnerRun = InferSelectModel<typeof runnerRun>;
+
+export const runnerSkill = pgTable(
+  "RunnerSkill",
+  {
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    description: varchar("description", {
+      length: TEAM_LIMITS.maxDescriptionLength,
+    })
+      .notNull()
+      .default(""),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    instructions: varchar("instructions", {
+      length: TEAM_LIMITS.maxSkillInstructionsLength,
+    }).notNull(),
+    name: varchar("name", { length: TEAM_LIMITS.maxNameLength }).notNull(),
+    requiredCapabilities: jsonb("requiredCapabilities")
+      .$type<TeamCapability[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+    version: integer("version").notNull().default(0),
+  },
+  (table) => [
+    unique("RSkill_id_tenant_uq").on(table.id, table.tenant),
+    index("RSkill_tenant_updated_idx").on(table.tenant, table.updatedAt),
+    check("RSkill_tenant_valid", sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`),
+    check("RSkill_version_valid", sql`${table.version} >= 0`),
+    check(
+      "RSkill_caps_valid",
+      sql`jsonb_typeof(${table.requiredCapabilities}) = 'array' and jsonb_array_length(${table.requiredCapabilities}) <= ${teamMaxSkillsPerMemberSql} and ${table.requiredCapabilities} <@ '["workspace.read","workspace.write","github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb`
+    ),
+  ]
+);
+
+export type RunnerSkill = InferSelectModel<typeof runnerSkill>;
+
+export const runnerTeam = pgTable(
+  "RunnerTeam",
+  {
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    description: varchar("description", {
+      length: TEAM_LIMITS.maxDescriptionLength,
+    })
+      .notNull()
+      .default(""),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    name: varchar("name", { length: TEAM_LIMITS.maxNameLength }).notNull(),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+    version: integer("version").notNull().default(0),
+  },
+  (table) => [
+    unique("RTeam_id_tenant_uq").on(table.id, table.tenant),
+    index("RTeam_tenant_updated_idx").on(table.tenant, table.updatedAt),
+    check("RTeam_tenant_valid", sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`),
+    check("RTeam_version_valid", sql`${table.version} >= 0`),
+  ]
+);
+
+export type RunnerTeam = InferSelectModel<typeof runnerTeam>;
+
+export const runnerTeamMember = pgTable(
+  "RunnerTeamMember",
+  {
+    agentId: uuid("agentId").notNull(),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    position: integer("position").notNull(),
+    required: boolean("required").notNull().default(true),
+    responsibility: varchar("responsibility", {
+      length: AGENT_RUNNER_LIMITS.maxInstructionsLength,
+    }).notNull(),
+    teamId: uuid("teamId").notNull(),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [
+    unique("RTMember_id_tenant_uq").on(table.id, table.tenant),
+    unique("RTMember_team_pos_uq").on(
+      table.teamId,
+      table.tenant,
+      table.position
+    ),
+    unique("RTMember_team_agent_uq").on(
+      table.teamId,
+      table.tenant,
+      table.agentId
+    ),
+    foreignKey({
+      columns: [table.teamId, table.tenant],
+      foreignColumns: [runnerTeam.id, runnerTeam.tenant],
+      name: "RTMember_team_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.agentId, table.tenant],
+      foreignColumns: [runnerAgent.id, runnerAgent.tenant],
+      name: "RTMember_agent_fk",
+    }).onDelete("restrict"),
+    check(
+      "RTMember_tenant_valid",
+      sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`
+    ),
+    check(
+      "RTMember_position_valid",
+      sql`${table.position} >= 0 and ${table.position} < ${teamMaxMembersSql}`
+    ),
+  ]
+);
+
+export type RunnerTeamMember = InferSelectModel<typeof runnerTeamMember>;
+
+export const runnerTeamMemberSkill = pgTable(
+  "RunnerTeamMemberSkill",
+  {
+    memberId: uuid("memberId").notNull(),
+    skillId: uuid("skillId").notNull(),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.memberId, table.tenant, table.skillId],
+      name: "RTMemberSkill_pk",
+    }),
+    foreignKey({
+      columns: [table.memberId, table.tenant],
+      foreignColumns: [runnerTeamMember.id, runnerTeamMember.tenant],
+      name: "RTMemberSkill_member_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.skillId, table.tenant],
+      foreignColumns: [runnerSkill.id, runnerSkill.tenant],
+      name: "RTMemberSkill_skill_fk",
+    }).onDelete("restrict"),
+    index("RTMemberSkill_skill_idx").on(table.skillId, table.tenant),
+    check(
+      "RTMemberSkill_tenant_valid",
+      sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`
+    ),
+  ]
+);
+
+export type RunnerTeamMemberSkill = InferSelectModel<
+  typeof runnerTeamMemberSkill
+>;
+
+export const runnerTeamRun = pgTable(
+  "RunnerTeamRun",
+  {
+    authVersion: integer("authVersion").notNull(),
+    completedAt: timestamp("completedAt"),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    createdByUserId: uuid("createdByUserId").notNull(),
+    currentPosition: integer("currentPosition").notNull().default(0),
+    error: jsonb("error").$type<RunError>(),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    mission: varchar("mission", {
+      length: TEAM_LIMITS.maxMissionLength,
+    }).notNull(),
+    operationId: uuid("operationId").notNull(),
+    requestHash: varchar("requestHash", { length: 64 }).notNull(),
+    startedAt: timestamp("startedAt"),
+    status: varchar("status", {
+      enum: [
+        "queued",
+        "running",
+        "waiting_approval",
+        "completed",
+        "completed_with_warnings",
+        "failed",
+        "cancelled",
+      ],
+      length: 24,
+    })
+      .notNull()
+      .default("queued"),
+    teamId: uuid("teamId").notNull(),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+    version: integer("version").notNull().default(0),
+  },
+  (table) => [
+    unique("RTRun_id_tenant_uq").on(table.id, table.tenant),
+    unique("RTRun_team_operation_uq").on(
+      table.teamId,
+      table.tenant,
+      table.operationId
+    ),
+    foreignKey({
+      columns: [table.teamId, table.tenant],
+      foreignColumns: [runnerTeam.id, runnerTeam.tenant],
+      name: "RTRun_team_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.createdByUserId],
+      foreignColumns: [user.id],
+      name: "RTRun_createdByUser_fk",
+    }).onDelete("restrict"),
+    index("RTRun_tenant_created_idx").on(table.tenant, table.createdAt),
+    index("RTRun_status_updated_idx").on(table.status, table.updatedAt),
+    check("RTRun_tenant_valid", sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`),
+    check(
+      "RTRun_status_valid",
+      sql`${table.status} in ('queued', 'running', 'waiting_approval', 'completed', 'completed_with_warnings', 'failed', 'cancelled')`
+    ),
+    check(
+      "RTRun_position_valid",
+      sql`${table.currentPosition} >= 0 and ${table.currentPosition} <= ${teamMaxMembersSql}`
+    ),
+    check("RTRun_version_valid", sql`${table.version} >= 0`),
+    check("RTRun_authVersion_valid", sql`${table.authVersion} >= 0`),
+    check(
+      "RTRun_requestHash_valid",
+      sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`
+    ),
+    check(
+      "RTRun_timestamps_valid",
+      sql`(${table.startedAt} is null or ${table.startedAt} >= ${table.createdAt}) and (${table.completedAt} is null or (${table.completedAt} >= ${table.createdAt} and (${table.startedAt} is null or ${table.completedAt} >= ${table.startedAt})))`
+    ),
+    check(
+      "RTRun_error_bounded",
+      sql`${table.error} is null or (jsonb_typeof(${table.error}) = 'object' and ${table.error} ?& array['code', 'message', 'retryable'] and (${table.error} - 'code' - 'message' - 'retryable' - 'details') = '{}'::jsonb and jsonb_typeof(${table.error}->'code') = 'string' and char_length(${table.error}->>'code') between 1 and 64 and jsonb_typeof(${table.error}->'message') = 'string' and char_length(${table.error}->>'message') between 1 and ${runnerMaxMessageLengthSql} and jsonb_typeof(${table.error}->'retryable') = 'boolean' and (not (${table.error} ? 'details') or (jsonb_typeof(${table.error}->'details') = 'string' and char_length(${table.error}->>'details') between 1 and ${runnerMaxDetailsLengthSql})))`
+    ),
+  ]
+);
+
+export type RunnerTeamRun = InferSelectModel<typeof runnerTeamRun>;
+
+export const runnerTeamStep = pgTable(
+  "RunnerTeamStep",
+  {
+    agentId: uuid("agentId").notNull(),
+    agentInstructions: varchar("agentInstructions", {
+      length: AGENT_RUNNER_LIMITS.maxInstructionsLength,
+    }).notNull(),
+    agentModel: varchar("agentModel", {
+      length: AGENT_RUNNER_LIMITS.maxModelLength,
+    }).notNull(),
+    agentRuntime: varchar("agentRuntime", {
+      enum: ["codex", "claude", "copilot"],
+      length: 16,
+    }).notNull(),
+    agentWorkspace: varchar("agentWorkspace", {
+      length: AGENT_RUNNER_LIMITS.maxWorkspaceLength,
+    }),
+    approvalActorUserId: uuid("approvalActorUserId"),
+    approvalDecidedAt: timestamp("approvalDecidedAt"),
+    approvalStatus: varchar("approvalStatus", {
+      enum: ["not_required", "pending", "approved", "rejected"],
+      length: 16,
+    })
+      .notNull()
+      .default("not_required"),
+    approvedCapabilities: jsonb("approvedCapabilities")
+      .$type<TeamCapability[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    completedAt: timestamp("completedAt"),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    error: jsonb("error").$type<RunError>(),
+    handoff: jsonb("handoff").$type<TeamHandoff>(),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    memberId: uuid("memberId").notNull(),
+    plannedOperationId: uuid("plannedOperationId"),
+    plannedRunnerRunId: uuid("plannedRunnerRunId"),
+    position: integer("position").notNull(),
+    required: boolean("required").notNull(),
+    responsibility: varchar("responsibility", {
+      length: AGENT_RUNNER_LIMITS.maxInstructionsLength,
+    }).notNull(),
+    runnerRunId: uuid("runnerRunId"),
+    skillIds: jsonb("skillIds")
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    skillSnapshots: jsonb("skillSnapshots")
+      .$type<RunnerTeamSkillSnapshot[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    startedAt: timestamp("startedAt"),
+    status: varchar("status", {
+      enum: [
+        "pending",
+        "queued",
+        "running",
+        "waiting_approval",
+        "completed",
+        "failed",
+        "cancelled",
+        "skipped",
+      ],
+      length: 24,
+    })
+      .notNull()
+      .default("pending"),
+    teamRunId: uuid("teamRunId").notNull(),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+    version: integer("version").notNull().default(0),
+  },
+  (table) => [
+    unique("RTStep_id_tenant_uq").on(table.id, table.tenant),
+    unique("RTStep_run_position_uq").on(
+      table.teamRunId,
+      table.tenant,
+      table.position
+    ),
+    uniqueIndex("RTStep_runnerRun_uq").on(table.runnerRunId),
+    uniqueIndex("RTStep_plannedOperation_uq").on(table.plannedOperationId),
+    uniqueIndex("RTStep_plannedRunnerRun_uq").on(table.plannedRunnerRunId),
+    foreignKey({
+      columns: [table.teamRunId, table.tenant],
+      foreignColumns: [runnerTeamRun.id, runnerTeamRun.tenant],
+      name: "RTStep_teamRun_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.agentId, table.tenant],
+      foreignColumns: [runnerAgent.id, runnerAgent.tenant],
+      name: "RTStep_agent_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.runnerRunId, table.tenant],
+      foreignColumns: [runnerRun.id, runnerRun.tenant],
+      name: "RTStep_runnerRun_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.approvalActorUserId],
+      foreignColumns: [user.id],
+      name: "RTStep_approvalActorUser_fk",
+    }).onDelete("restrict"),
+    index("RTStep_status_updated_idx").on(table.status, table.updatedAt),
+    check("RTStep_tenant_valid", sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`),
+    check(
+      "RTStep_position_valid",
+      sql`${table.position} >= 0 and ${table.position} < ${teamMaxMembersSql}`
+    ),
+    check(
+      "RTStep_status_valid",
+      sql`${table.status} in ('pending', 'queued', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled', 'skipped')`
+    ),
+    check(
+      "RTStep_approval_valid",
+      sql`${table.approvalStatus} in ('not_required', 'pending', 'approved', 'rejected')`
+    ),
+    check(
+      "RTStep_approvedCapabilities_valid",
+      sql`jsonb_typeof(${table.approvedCapabilities}) = 'array' and jsonb_array_length(${table.approvedCapabilities}) <= ${teamMaxSkillsPerMemberSql} and ${table.approvedCapabilities} <@ '["github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb`
+    ),
+    check(
+      "RTStep_approval_audit_valid",
+      sql`((${table.approvalStatus} in ('not_required', 'pending')) and ${table.approvalActorUserId} is null and ${table.approvalDecidedAt} is null and jsonb_array_length(${table.approvedCapabilities}) = 0) or (${table.approvalStatus} = 'approved' and ${table.approvalActorUserId} is not null and ${table.approvalDecidedAt} is not null and ${table.approvalDecidedAt} >= ${table.createdAt} and jsonb_array_length(${table.approvedCapabilities}) between 1 and ${teamMaxSkillsPerMemberSql}) or (${table.approvalStatus} = 'rejected' and ${table.approvalActorUserId} is not null and ${table.approvalDecidedAt} is not null and ${table.approvalDecidedAt} >= ${table.createdAt} and jsonb_array_length(${table.approvedCapabilities}) = 0)`
+    ),
+    check(
+      "RTStep_childReservation_valid",
+      sql`((${table.plannedOperationId} is null and ${table.plannedRunnerRunId} is null) or (${table.plannedOperationId} is not null and ${table.plannedRunnerRunId} is not null)) and (${table.runnerRunId} is null or ${table.runnerRunId} = ${table.plannedRunnerRunId})`
+    ),
+    check(
+      "RTStep_agentSnapshot_valid",
+      sql`char_length(btrim(${table.agentInstructions})) between 1 and ${sql.raw(String(AGENT_RUNNER_LIMITS.maxInstructionsLength))} and char_length(btrim(${table.agentModel})) between 1 and ${sql.raw(String(AGENT_RUNNER_LIMITS.maxModelLength))} and ${table.agentRuntime} in ('codex', 'claude', 'copilot')`
+    ),
+    check("RTStep_version_valid", sql`${table.version} >= 0`),
+    check(
+      "RTStep_skillIds_valid",
+      sql`jsonb_typeof(${table.skillIds}) = 'array' and jsonb_array_length(${table.skillIds}) <= ${teamMaxSkillsPerMemberSql}`
+    ),
+    check(
+      "RTStep_skillSnapshots_valid",
+      sql`jsonb_typeof(${table.skillSnapshots}) = 'array' and jsonb_array_length(${table.skillSnapshots}) <= ${teamMaxSkillsPerMemberSql}`
+    ),
+    check(
+      "RTStep_handoff_bounded",
+      sql`${table.handoff} is null or (jsonb_typeof(${table.handoff}) = 'object' and ${table.handoff} ?& array['output', 'commandEvidence', 'fileEvidence'] and (${table.handoff} - 'output' - 'commandEvidence' - 'fileEvidence') = '{}'::jsonb and octet_length(${table.handoff}::text) <= ${teamMaxPersistedHandoffLengthSql} and jsonb_typeof(${table.handoff}->'output') = 'string' and jsonb_typeof(${table.handoff}->'commandEvidence') = 'array' and jsonb_array_length(${table.handoff}->'commandEvidence') <= ${runnerMaxCommandResultsSql} and jsonb_typeof(${table.handoff}->'fileEvidence') = 'array' and jsonb_array_length(${table.handoff}->'fileEvidence') <= ${runnerMaxFileOperationsSql})`
+    ),
+    check(
+      "RTStep_error_bounded",
+      sql`${table.error} is null or (jsonb_typeof(${table.error}) = 'object' and ${table.error} ?& array['code', 'message', 'retryable'] and (${table.error} - 'code' - 'message' - 'retryable' - 'details') = '{}'::jsonb and jsonb_typeof(${table.error}->'code') = 'string' and char_length(${table.error}->>'code') between 1 and 64 and jsonb_typeof(${table.error}->'message') = 'string' and char_length(${table.error}->>'message') between 1 and ${runnerMaxMessageLengthSql} and jsonb_typeof(${table.error}->'retryable') = 'boolean' and (not (${table.error} ? 'details') or (jsonb_typeof(${table.error}->'details') = 'string' and char_length(${table.error}->>'details') between 1 and ${runnerMaxDetailsLengthSql})))`
+    ),
+    check(
+      "RTStep_timestamps_valid",
+      sql`(${table.startedAt} is null or ${table.startedAt} >= ${table.createdAt}) and (${table.completedAt} is null or (${table.completedAt} >= ${table.createdAt} and (${table.startedAt} is null or ${table.completedAt} >= ${table.startedAt})))`
+    ),
+  ]
+);
+
+export type RunnerTeamStep = InferSelectModel<typeof runnerTeamStep>;
+
+export const runnerGitHubConnection = pgTable(
+  "RunnerGitHubConnection",
+  {
+    accountId: varchar("accountId", { length: 20 }).notNull(),
+    accountLogin: varchar("accountLogin", { length: 100 }).notNull(),
+    accountType: varchar("accountType", {
+      enum: ["Organization", "User"],
+      length: 16,
+    }).notNull(),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    installationId: varchar("installationId", { length: 20 }).notNull(),
+    repositoryId: varchar("repositoryId", { length: 20 }).notNull(),
+    repositoryName: varchar("repositoryName", { length: 100 }).notNull(),
+    repositoryNodeId: varchar("repositoryNodeId", { length: 256 }).notNull(),
+    repositoryOwner: varchar("repositoryOwner", { length: 100 }).notNull(),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+    version: integer("version").notNull().default(0),
+  },
+  (table) => [
+    unique("RGHConn_id_tenant_uq").on(table.id, table.tenant),
+    unique("RGHConn_tenant_repo_uq").on(table.tenant, table.repositoryId),
+    index("RGHConn_installation_idx").on(table.installationId),
+    check(
+      "RGHConn_tenant_valid",
+      sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`
+    ),
+    check(
+      "RGHConn_decimal_ids",
+      sql`${table.installationId} ~ '^(0|[1-9][0-9]{0,19})$' and ${table.accountId} ~ '^(0|[1-9][0-9]{0,19})$' and ${table.repositoryId} ~ '^(0|[1-9][0-9]{0,19})$'`
+    ),
+    check(
+      "RGHConn_accountType_valid",
+      sql`${table.accountType} in ('Organization', 'User')`
+    ),
+    check("RGHConn_version_valid", sql`${table.version} >= 0`),
+  ]
+);
+
+export type RunnerGitHubConnection = InferSelectModel<
+  typeof runnerGitHubConnection
+>;
+
+export const runnerGitHubCapability = pgTable(
+  "RunnerGitHubCapability",
+  {
+    approvedCapabilities: jsonb("approvedCapabilities")
+      .$type<TeamCapability[]>()
+      .notNull(),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    expiresAt: timestamp("expiresAt").notNull(),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    maxCallCount: integer("maxCallCount").notNull(),
+    repositoryAllowlist: jsonb("repositoryAllowlist")
+      .$type<string[]>()
+      .notNull(),
+    revokedAt: timestamp("revokedAt"),
+    teamStepId: uuid("teamStepId").notNull(),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+    tokenHash: varchar("tokenHash", { length: 64 }).notNull(),
+    usedCallCount: integer("usedCallCount").notNull().default(0),
+    version: integer("version").notNull().default(0),
+  },
+  (table) => [
+    unique("RGHCap_id_tenant_uq").on(table.id, table.tenant),
+    unique("RGHCap_step_owner_uq").on(table.id, table.tenant, table.teamStepId),
+    unique("RGHCap_tokenHash_uq").on(table.tokenHash),
+    foreignKey({
+      columns: [table.teamStepId, table.tenant],
+      foreignColumns: [runnerTeamStep.id, runnerTeamStep.tenant],
+      name: "RGHCap_step_fk",
+    }).onDelete("cascade"),
+    index("RGHCap_expiry_idx").on(table.expiresAt),
+    check("RGHCap_tenant_valid", sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`),
+    check("RGHCap_tokenHash_valid", sql`${table.tokenHash} ~ '^[a-f0-9]{64}$'`),
+    check(
+      "RGHCap_caps_valid",
+      sql`jsonb_typeof(${table.approvedCapabilities}) = 'array' and jsonb_array_length(${table.approvedCapabilities}) between 1 and ${teamMaxSkillsPerMemberSql} and ${table.approvedCapabilities} <@ '["github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb`
+    ),
+    check(
+      "RGHCap_repos_valid",
+      sql`jsonb_typeof(${table.repositoryAllowlist}) = 'array' and jsonb_array_length(${table.repositoryAllowlist}) between 1 and 16`
+    ),
+    check(
+      "RGHCap_calls_valid",
+      sql`${table.maxCallCount} between 1 and 32 and ${table.usedCallCount} between 0 and ${table.maxCallCount}`
+    ),
+    check(
+      "RGHCap_timestamps_valid",
+      sql`${table.expiresAt} > ${table.createdAt} and (${table.revokedAt} is null or ${table.revokedAt} >= ${table.createdAt})`
+    ),
+    check("RGHCap_version_valid", sql`${table.version} >= 0`),
+  ]
+);
+
+export type RunnerGitHubCapability = InferSelectModel<
+  typeof runnerGitHubCapability
+>;
+
+export const runnerGitHubOperation = pgTable(
+  "RunnerGitHubOperation",
+  {
+    capabilityId: uuid("capabilityId").notNull(),
+    completedAt: timestamp("completedAt"),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    error: jsonb("error").$type<RunError>(),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    kind: varchar("kind", {
+      enum: [
+        "issue.get",
+        "issue.search",
+        "issue.create",
+        "issue.comment",
+        "pull.get",
+        "pull.create",
+        "pull.comment",
+        "pull.review",
+        "project.item.add",
+        "project.item.field.update",
+      ],
+      length: 32,
+    })
+      .$type<GitHubOperationKind>()
+      .notNull(),
+    operationId: uuid("operationId").notNull(),
+    providerRequestId: varchar("providerRequestId", { length: 256 }),
+    requestHash: varchar("requestHash", { length: 64 }).notNull(),
+    resultNodeId: varchar("resultNodeId", { length: 256 }),
+    resultUrl: varchar("resultUrl", { length: 2048 }),
+    startedAt: timestamp("startedAt"),
+    status: varchar("status", {
+      enum: ["pending", "running", "completed", "failed"],
+      length: 16,
+    })
+      .notNull()
+      .default("pending"),
+    target: varchar("target", { length: 512 }).notNull(),
+    teamStepId: uuid("teamStepId").notNull(),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+    version: integer("version").notNull().default(0),
+  },
+  (table) => [
+    unique("RGHOp_id_tenant_uq").on(table.id, table.tenant),
+    unique("RGHOp_step_operation_uq").on(
+      table.teamStepId,
+      table.tenant,
+      table.operationId
+    ),
+    foreignKey({
+      columns: [table.teamStepId, table.tenant],
+      foreignColumns: [runnerTeamStep.id, runnerTeamStep.tenant],
+      name: "RGHOp_step_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.capabilityId, table.tenant, table.teamStepId],
+      foreignColumns: [
+        runnerGitHubCapability.id,
+        runnerGitHubCapability.tenant,
+        runnerGitHubCapability.teamStepId,
+      ],
+      name: "RGHOp_capability_fk",
+    }).onDelete("restrict"),
+    index("RGHOp_status_updated_idx").on(table.status, table.updatedAt),
+    check("RGHOp_tenant_valid", sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`),
+    check(
+      "RGHOp_kind_valid",
+      sql`${table.kind} in ('issue.get', 'issue.search', 'issue.create', 'issue.comment', 'pull.get', 'pull.create', 'pull.comment', 'pull.review', 'project.item.add', 'project.item.field.update')`
+    ),
+    check(
+      "RGHOp_status_valid",
+      sql`${table.status} in ('pending', 'running', 'completed', 'failed')`
+    ),
+    check(
+      "RGHOp_requestHash_valid",
+      sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`
+    ),
+    check("RGHOp_version_valid", sql`${table.version} >= 0`),
+    check(
+      "RGHOp_resultUrl_valid",
+      sql`${table.resultUrl} is null or ${table.resultUrl} ~ '^https://github\\.com/'`
+    ),
+    check(
+      "RGHOp_timestamps_valid",
+      sql`(${table.startedAt} is null or ${table.startedAt} >= ${table.createdAt}) and (${table.completedAt} is null or (${table.completedAt} >= ${table.createdAt} and (${table.startedAt} is null or ${table.completedAt} >= ${table.startedAt})))`
+    ),
+    check(
+      "RGHOp_error_bounded",
+      sql`${table.error} is null or (jsonb_typeof(${table.error}) = 'object' and ${table.error} ?& array['code', 'message', 'retryable'] and (${table.error} - 'code' - 'message' - 'retryable' - 'details') = '{}'::jsonb and jsonb_typeof(${table.error}->'code') = 'string' and char_length(${table.error}->>'code') between 1 and 64 and jsonb_typeof(${table.error}->'message') = 'string' and char_length(${table.error}->>'message') between 1 and ${runnerMaxMessageLengthSql} and jsonb_typeof(${table.error}->'retryable') = 'boolean' and (not (${table.error} ? 'details') or (jsonb_typeof(${table.error}->'details') = 'string' and char_length(${table.error}->>'details') between 1 and ${runnerMaxDetailsLengthSql})))`
+    ),
+  ]
+);
+
+export type RunnerGitHubOperation = InferSelectModel<
+  typeof runnerGitHubOperation
+>;
 
 /**
  * Attempt-scoped encrypted material used solely to redact later Daytona logs.

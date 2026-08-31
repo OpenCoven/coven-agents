@@ -5,6 +5,10 @@ export type BoundedBodyResult<T> =
   | { kind: "ok"; value: T }
   | { kind: "too_large" };
 
+export type BoundedBytesResult =
+  | BoundedBodyResult<Uint8Array>
+  | { error: unknown; kind: "read_error" };
+
 function declaredContentLength(headers: Headers): number | "invalid" | null {
   const header = headers.get("content-length");
   if (header === null) {
@@ -24,17 +28,10 @@ export async function readBoundedJson<T>(
   schema: z.ZodType<T>,
   options: { emptyBody?: unknown } = {}
 ): Promise<BoundedBodyResult<T>> {
-  validateMaximum(maximumBytes);
-
-  const preflight = bodyPreflight(request, maximumBytes);
-  if (preflight) {
-    return preflight;
+  const body = await readBoundedBytes(request, maximumBytes);
+  if (body.kind === "read_error") {
+    return { kind: "invalid" };
   }
-
-  const body =
-    request.body === null
-      ? { kind: "ok" as const, value: new Uint8Array() }
-      : await readBoundedBytes(request, maximumBytes);
   if (body.kind !== "ok") {
     return body;
   }
@@ -63,14 +60,10 @@ export async function readBoundedFormData(
   request: Request,
   maximumBytes: number
 ): Promise<BoundedBodyResult<FormData>> {
-  validateMaximum(maximumBytes);
-
-  const preflight = bodyPreflight(request, maximumBytes);
-  if (preflight) {
-    return preflight;
-  }
-
   const body = await readBoundedBytes(request, maximumBytes);
+  if (body.kind === "read_error") {
+    return { kind: "invalid" };
+  }
   if (body.kind !== "ok" || body.value.byteLength === 0) {
     return body.kind === "ok" ? { kind: "invalid" } : body;
   }
@@ -108,15 +101,27 @@ function bodyPreflight(
   return null;
 }
 
-async function readBoundedBytes(
+export async function readBoundedBytes(
   request: Request,
   maximumBytes: number
-): Promise<BoundedBodyResult<Uint8Array>> {
-  if (request.body === null) {
-    return { kind: "invalid" };
+): Promise<BoundedBytesResult> {
+  validateMaximum(maximumBytes);
+
+  const preflight = bodyPreflight(request, maximumBytes);
+  if (preflight) {
+    return preflight;
   }
 
-  const reader = request.body.getReader();
+  if (request.body === null) {
+    return { kind: "ok", value: new Uint8Array() };
+  }
+
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    reader = request.body.getReader();
+  } catch (error) {
+    return { error, kind: "read_error" };
+  }
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
 
@@ -129,13 +134,17 @@ async function readBoundedBytes(
       }
       totalBytes += value.byteLength;
       if (totalBytes > maximumBytes) {
-        await reader.cancel().catch(() => undefined);
+        try {
+          await reader.cancel();
+        } catch {
+          // The limit decision is authoritative; cancellation is best-effort cleanup.
+        }
         return { kind: "too_large" };
       }
       chunks.push(value);
     }
-  } catch {
-    return { kind: "invalid" };
+  } catch (error) {
+    return { error, kind: "read_error" };
   } finally {
     reader.releaseLock();
   }

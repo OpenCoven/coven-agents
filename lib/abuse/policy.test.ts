@@ -6,6 +6,8 @@ import { ABUSE_ROUTES, type AbusePolicy, type AbuseRoute } from "./types";
 const EXPECTED_ROUTES = [
   "auth_start",
   "auth_callback",
+  "auth_session_update_ip",
+  "auth_session_update",
   "chat",
   "chat_delete",
   "document_read",
@@ -19,6 +21,7 @@ const EXPECTED_ROUTES = [
   "vote_write",
   "upload",
   "checkout",
+  "subscription_read",
   "avatar_read",
   "avatar_write",
   "credential_list",
@@ -39,11 +42,23 @@ const EXPECTED_ROUTES = [
   "runner_stop",
   "runner_diagnostic",
   "runner_reconcile",
+  "skill_read",
+  "skill_write",
+  "skill_delete",
+  "team_read",
+  "team_write",
+  "team_delete",
+  "team_run_read",
+  "team_run_start",
+  "team_run_stop",
+  "team_run_approve",
 ] as const satisfies readonly AbuseRoute[];
 
 const EXPECTED_POLICIES = {
   analytics_read: expectedPolicy(["ip", "user"], 0, 20, 60, 100, 3600),
   auth_callback: expectedPolicy(["ip"], 16_384, 10, 60, 40, 3600),
+  auth_session_update: expectedPolicy(["user"], 16_384, 20, 60, 100, 3600),
+  auth_session_update_ip: expectedPolicy(["ip"], 16_384, 120, 60, 1200, 3600),
   auth_start: expectedPolicy(["ip"], 0, 5, 60, 20, 3600),
   avatar_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   avatar_write: expectedPolicy(["ip", "user"], 8192, 10, 60, 40, 3600),
@@ -78,8 +93,19 @@ const EXPECTED_POLICIES = {
   runner_run_start: expectedPolicy(["ip", "tenant"], 64_000, 5, 60, 25, 86_400),
   runner_stop: expectedPolicy(["ip", "tenant"], 1024, 5, 60, 20, 3600),
   runner_write: expectedPolicy(["ip", "user"], 64_000, 10, 60, 40, 3600),
-  stripe_webhook: expectedPolicy(["ip"], 262_144, 60, 60, 600, 3600),
+  skill_delete: expectedPolicy(["ip", "tenant"], 0, 5, 60, 20, 3600),
+  skill_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
+  skill_write: expectedPolicy(["ip", "tenant"], 8192, 10, 60, 40, 3600),
+  stripe_webhook: expectedPolicy(["ip"], 262_144, 600, 60, 10_000, 3600),
+  subscription_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   suggestions_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
+  team_delete: expectedPolicy(["ip", "tenant"], 0, 5, 60, 20, 3600),
+  team_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
+  team_run_approve: expectedPolicy(["ip", "tenant"], 4096, 10, 60, 40, 3600),
+  team_run_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
+  team_run_start: expectedPolicy(["ip", "tenant"], 64_000, 5, 60, 25, 86_400),
+  team_run_stop: expectedPolicy(["ip", "tenant"], 1024, 5, 60, 20, 3600),
+  team_write: expectedPolicy(["ip", "tenant"], 131_072, 10, 60, 40, 3600),
   upload: expectedPolicy(["ip", "user"], 5_250_000, 2, 60, 20, 3600),
   usage_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   vote_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
@@ -104,6 +130,13 @@ test("every declared route initially fails closed", () => {
   for (const route of EXPECTED_ROUTES) {
     assert.equal(abusePolicyFor(route).failureMode, "closed", route);
   }
+});
+
+test("Stripe webhook admission is IP-only and preserves the registered budget", () => {
+  assert.deepEqual(
+    abusePolicyFor("stripe_webhook"),
+    expectedPolicy(["ip"], 262_144, 600, 60, 10_000, 3600)
+  );
 });
 
 test("every policy has valid finite integer bounds and subjects", () => {
