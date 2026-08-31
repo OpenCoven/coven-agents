@@ -72,7 +72,11 @@ const applicationRouteFiles = [
   "app/api/runs/[id]/events/route.ts",
   "app/api/runs/[id]/route.ts",
   "app/api/runs/[id]/stop/route.ts",
+  "app/api/skills/[id]/route.ts",
+  "app/api/skills/route.ts",
   "app/api/stripe/webhook/route.ts",
+  "app/api/teams/[id]/route.ts",
+  "app/api/teams/route.ts",
   "app/api/tenant/prewarm/route.ts",
   "app/api/usage/route.ts",
 ] as const;
@@ -96,6 +100,7 @@ const contractSourceFiles = [
   "packages/agent-contracts/src/identity.ts",
   "packages/agent-contracts/src/index.test.ts",
   "packages/agent-contracts/src/index.ts",
+  "packages/agent-contracts/src/team.test.ts",
 ] as const;
 const credentialSourceFiles = [
   "lib/credentials/aad-policy.test.ts",
