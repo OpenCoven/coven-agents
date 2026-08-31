@@ -188,29 +188,6 @@ test("stored paid period promotes a current session update", async () => {
   assert.equal(refreshed?.subscribedUntil, LATER.toISOString());
 });
 
-test("a subscription refresh expected for another token owner is rejected before lookup", async () => {
-  let lookupCalls = 0;
-  const refreshed = await refreshClaimsForSessionUpdate(
-    sessionToken(),
-    {
-      expectedUserId: "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa",
-      refreshSubscription: true,
-    },
-    () => {
-      lookupCalls += 1;
-      return Promise.resolve({
-        authVersion: 4,
-        image: null,
-        subscribedUntil: LATER,
-      });
-    },
-    NOW
-  );
-
-  assert.equal(refreshed, null);
-  assert.equal(lookupCalls, 0);
-});
-
 test("invalid IDs and missing users clear the update without promotion", async () => {
   let lookupCalls = 0;
   const invalidUpdates = await Promise.all(

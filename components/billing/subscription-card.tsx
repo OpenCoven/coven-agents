@@ -1,18 +1,16 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { browserApplicationPath } from "@/lib/application-path";
-import { refreshSubscriberSession } from "@/lib/auth/session-refresh.client";
 import { parseRetryAfter } from "@/lib/http/retry-after";
 
 const MAX_CONFIRMATION_ATTEMPTS = 15;
 const CONFIRMATION_INTERVAL_MS = 1000;
 const CONFIRMATION_FOREGROUND_BUDGET_MS = 15_000;
-const SESSION_REFRESH_RELOAD_MARKER =
-  "opencoven:subscriber-session-refresh-reload";
 const ALLOWANCE_MARKERS = Array.from(
   { length: 15 },
   (_, index) => `allowance-${index + 1}`
@@ -27,6 +25,7 @@ export type SubscriptionCardProps = {
   isSubscriber: boolean;
   onCheckoutConfirmed?: () => void;
   onConfirmationOwnerEstablished?: (userId: string) => void;
+  subscribedUntil?: string | null;
 };
 
 type Notice = {
@@ -50,12 +49,6 @@ type CheckoutAttempt = {
 
 type CheckoutKey = {
   idempotencyKey: string;
-  userId: string;
-};
-
-type SessionRefreshAttempt = {
-  controller: AbortController;
-  generation: number;
   userId: string;
 };
 
@@ -169,38 +162,6 @@ function retryTime(retryAt: number): string {
   }).format(retryAt);
 }
 
-function clearSessionRefreshReloadMarker(): void {
-  try {
-    window.sessionStorage.removeItem(SESSION_REFRESH_RELOAD_MARKER);
-  } catch {
-    // Storage is optional; identity and abort fences remain authoritative.
-  }
-}
-
-function hasSessionRefreshReloadMarker(userId: string): boolean {
-  try {
-    const raw = window.sessionStorage.getItem(SESSION_REFRESH_RELOAD_MARKER);
-    if (!raw) {
-      return false;
-    }
-    const marker = JSON.parse(raw) as { href?: unknown; userId?: unknown };
-    return marker.href === window.location.href && marker.userId === userId;
-  } catch {
-    return false;
-  }
-}
-
-function markSessionRefreshReload(userId: string): void {
-  try {
-    window.sessionStorage.setItem(
-      SESSION_REFRESH_RELOAD_MARKER,
-      JSON.stringify({ href: window.location.href, userId })
-    );
-  } catch {
-    // A same-URL replacement still succeeds when storage is unavailable.
-  }
-}
-
 export function SubscriptionCard({
   checkoutEnabled,
   checkoutResult = null,
@@ -208,8 +169,10 @@ export function SubscriptionCard({
   isSubscriber,
   onCheckoutConfirmed,
   onConfirmationOwnerEstablished,
+  subscribedUntil = null,
 }: SubscriptionCardProps) {
   const titleId = useId();
+  const router = useRouter();
   const session = useSession();
   const loginPath = useApplicationLoginPath();
   const userId = session.data?.user?.id ?? null;
@@ -220,8 +183,10 @@ export function SubscriptionCard({
   const checkoutUserIdRef = useRef(checkoutUserId);
   checkoutUserIdRef.current = checkoutUserId;
 
-  const [activeConfirmed, setActiveConfirmed] = useState(false);
-  const [paidThrough, setPaidThrough] = useState<Date | null>(null);
+  const [activeConfirmed, setActiveConfirmed] = useState(isSubscriber);
+  const [paidThrough, setPaidThrough] = useState<Date | null>(() =>
+    isSubscriber ? paidThroughDate(subscribedUntil) : null
+  );
   const [notice, setNotice] = useState<Notice | null>(() =>
     initialNotice(checkoutResult, isSubscriber)
   );
@@ -240,11 +205,10 @@ export function SubscriptionCard({
     null
   );
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const sessionRefreshAttemptRef = useRef<SessionRefreshAttempt | null>(null);
-  const sessionRefreshGenerationRef = useRef(0);
+  const refreshRequestedGenerationRef = useRef<number | null>(null);
   const pollGenerationRef = useRef(0);
   const internalConfirmationOwnerRef = useRef<string | null>(null);
-  const authorityRef = useRef({ isSubscriber, userId });
+  const authorityRef = useRef({ isSubscriber, subscribedUntil, userId });
   const checkoutIdentityRef = useRef(checkoutUserId);
 
   const publishNotice = useCallback(
@@ -265,6 +229,7 @@ export function SubscriptionCard({
 
   const stopPolling = useCallback(() => {
     pollGenerationRef.current += 1;
+    refreshRequestedGenerationRef.current = null;
     pollAbortRef.current?.abort();
     pollAbortRef.current = null;
     if (pollDeadlineTimerRef.current) {
@@ -275,24 +240,56 @@ export function SubscriptionCard({
       clearTimeout(pollTimerRef.current);
       pollTimerRef.current = null;
     }
-    sessionRefreshGenerationRef.current += 1;
-    sessionRefreshAttemptRef.current?.controller.abort();
-    sessionRefreshAttemptRef.current = null;
   }, []);
+
+  const finishActivation = useCallback(
+    (activationUserId: string, paidUntil: Date) => {
+      if (
+        userIdRef.current !== activationUserId ||
+        !authorityRef.current.isSubscriber ||
+        authorityRef.current.userId !== activationUserId
+      ) {
+        return;
+      }
+      stopPolling();
+      setCanCheckAgain(false);
+      setNeedsSignIn(false);
+      setPaidThrough(paidUntil);
+      setActiveConfirmed(true);
+      publishNotice({
+        detail: "Subscriber access is ready on this account.",
+        title: "Subscription active",
+        tone: "success",
+      });
+      const url = new URL(window.location.href);
+      if (url.searchParams.get("checkout") === "success") {
+        url.searchParams.delete("checkout");
+        window.history.replaceState(
+          window.history.state,
+          "",
+          `${url.pathname}${url.search}${url.hash}`
+        );
+      }
+      onCheckoutConfirmed?.();
+    },
+    [onCheckoutConfirmed, publishNotice, stopPolling]
+  );
 
   useEffect(() => {
     const previous = authorityRef.current;
-    authorityRef.current = { isSubscriber, userId };
-    if (previous.userId === userId && previous.isSubscriber === isSubscriber) {
-      return;
-    }
+    authorityRef.current = { isSubscriber, subscribedUntil, userId };
 
     const identityChanged = previous.userId !== userId;
     if (identityChanged) {
       stopPolling();
     }
-    setActiveConfirmed(false);
-    setPaidThrough(null);
+    const authorityPaidThrough = isSubscriber
+      ? paidThroughDate(subscribedUntil)
+      : null;
+    setActiveConfirmed(isSubscriber);
+    setPaidThrough((current) =>
+      isSubscriber ? (authorityPaidThrough ?? current) : null
+    );
     setCanCheckAgain(false);
     setNeedsSignIn(false);
     setCheckoutSuppressed(false);
@@ -315,10 +312,29 @@ export function SubscriptionCard({
       setNotice((current) =>
         current?.tone === "success" ? CONFIRMING_NOTICE : current
       );
+    } else if (isSubscriber) {
+      setNotice((current) =>
+        current?.tone === "success"
+          ? current
+          : authorityPaidThrough
+            ? {
+                detail: "Subscriber access is ready on this account.",
+                title: "Subscription active",
+                tone: "success",
+              }
+            : initialNotice(checkoutResult, isSubscriber)
+      );
     } else {
       setNotice(initialNotice(checkoutResult, isSubscriber));
     }
-  }, [checkoutResult, isSubscriber, publishNotice, stopPolling, userId]);
+  }, [
+    checkoutResult,
+    isSubscriber,
+    publishNotice,
+    stopPolling,
+    subscribedUntil,
+    userId,
+  ]);
 
   useEffect(() => {
     const previousUserId = checkoutIdentityRef.current;
@@ -350,8 +366,20 @@ export function SubscriptionCard({
     let attempts = 0;
     let deadlineFinished = false;
 
-    setActiveConfirmed(false);
-    setPaidThrough(null);
+    const authoritativePaidThrough = paidThroughDate(
+      authorityRef.current.subscribedUntil
+    );
+    if (
+      confirmationUserId &&
+      authorityRef.current.isSubscriber &&
+      authoritativePaidThrough
+    ) {
+      finishActivation(confirmationUserId, authoritativePaidThrough);
+      return;
+    }
+
+    setActiveConfirmed(authorityRef.current.isSubscriber);
+    setPaidThrough(authoritativePaidThrough);
     setCanCheckAgain(false);
     setNeedsSignIn(false);
     publishNotice(CONFIRMING_NOTICE);
@@ -375,32 +403,6 @@ export function SubscriptionCard({
       }
       deadlineFinished = true;
       finishForRetry(PROCESSING_NOTICE);
-    };
-
-    const finishActivation = (paidUntil: Date) => {
-      if (!isCurrent()) {
-        return;
-      }
-      clearSessionRefreshReloadMarker();
-      setCanCheckAgain(false);
-      setNeedsSignIn(false);
-      setPaidThrough(paidUntil);
-      setActiveConfirmed(true);
-      publishNotice({
-        detail: "Subscriber access is ready on this account.",
-        title: "Subscription active",
-        tone: "success",
-      });
-      const url = new URL(window.location.href);
-      if (url.searchParams.get("checkout") === "success") {
-        url.searchParams.delete("checkout");
-        window.history.replaceState(
-          window.history.state,
-          "",
-          `${url.pathname}${url.search}${url.hash}`
-        );
-      }
-      onCheckoutConfirmed?.();
     };
 
     const scheduleNext = (
@@ -578,97 +580,26 @@ export function SubscriptionCard({
           });
           return;
         }
-        if (authorityRef.current.isSubscriber) {
-          finishActivation(paidUntil);
+        setPaidThrough(paidUntil);
+        if (confirmationUserId && authorityRef.current.isSubscriber) {
+          finishActivation(confirmationUserId, paidUntil);
           return;
         }
-        if (
-          confirmationUserId &&
-          hasSessionRefreshReloadMarker(confirmationUserId)
-        ) {
-          clearSessionRefreshReloadMarker();
-          finishForRetry({
-            detail:
-              "The paid status is recorded. Check this account again to refresh access.",
-            title: "Account access still needs refreshing.",
-            tone: "neutral",
-          });
-          return;
-        }
-        publishNotice({
-          detail: "Refreshing this signed-in account before access changes.",
-          title: "Refreshing account access",
-          tone: "pending",
-        });
         if (!confirmationUserId) {
           return;
         }
-        const refreshAttempt: SessionRefreshAttempt = {
-          controller: new AbortController(),
-          generation: sessionRefreshGenerationRef.current + 1,
-          userId: confirmationUserId,
-        };
-        sessionRefreshGenerationRef.current = refreshAttempt.generation;
-        sessionRefreshAttemptRef.current = refreshAttempt;
-        const isCurrentRefresh = () =>
-          isCurrent() &&
-          sessionRefreshAttemptRef.current === refreshAttempt &&
-          sessionRefreshGenerationRef.current === refreshAttempt.generation &&
-          userIdRef.current === refreshAttempt.userId &&
-          !refreshAttempt.controller.signal.aborted;
-        const refreshTimer = setTimeout(
-          () => refreshAttempt.controller.abort(),
-          remainingTime()
-        );
-        try {
-          const refreshed = await refreshSubscriberSession(
-            refreshAttempt.userId,
-            refreshAttempt.controller.signal
-          );
-          if (!isCurrentRefresh()) {
-            return;
-          }
-          if (remainingTime() <= 0) {
-            finishAtDeadline();
-            return;
-          }
-          if (!refreshed) {
-            scheduleNext({
-              detail:
-                "The paid status is recorded. Account access will be checked again.",
-              title: "Refreshing account access",
-              tone: "pending",
-            });
-            return;
-          }
-          markSessionRefreshReload(refreshAttempt.userId);
-          window.location.reload();
-        } catch (error) {
-          if (!isCurrent()) {
-            return;
-          }
-          if (
-            refreshAttempt.controller.signal.aborted ||
-            remainingTime() <= 0
-          ) {
-            finishAtDeadline();
-            return;
-          }
-          if (error instanceof DOMException && error.name === "AbortError") {
-            return;
-          }
-          scheduleNext({
-            detail:
-              "The paid status is recorded. Account access will be checked again.",
-            title: "Refreshing account access",
-            tone: "pending",
-          });
-        } finally {
-          clearTimeout(refreshTimer);
-          if (sessionRefreshAttemptRef.current === refreshAttempt) {
-            sessionRefreshAttemptRef.current = null;
-          }
+        publishNotice({
+          detail:
+            "Payment is recorded. Loading subscriber access from this account.",
+          title: "Finalizing subscription",
+          tone: "pending",
+        });
+        if (refreshRequestedGenerationRef.current === generation) {
+          return;
         }
+        refreshRequestedGenerationRef.current = generation;
+        router.refresh();
+        pollTimerRef.current = setTimeout(finishAtDeadline, remainingTime());
       } catch (error) {
         if (!isCurrent()) {
           return;
@@ -709,7 +640,30 @@ export function SubscriptionCard({
         tone: "error",
       });
     });
-  }, [onCheckoutConfirmed, publishNotice, stopPolling, userId]);
+  }, [finishActivation, publishNotice, router, stopPolling, userId]);
+
+  useEffect(() => {
+    if (!(checkoutResult === "success" && userId && isSubscriber)) {
+      return;
+    }
+    const owner =
+      confirmationOwner === undefined
+        ? internalConfirmationOwnerRef.current
+        : confirmationOwner;
+    const activationPaidThrough =
+      paidThroughDate(subscribedUntil) ?? paidThrough;
+    if (owner === userId && activationPaidThrough) {
+      finishActivation(userId, activationPaidThrough);
+    }
+  }, [
+    checkoutResult,
+    confirmationOwner,
+    finishActivation,
+    isSubscriber,
+    paidThrough,
+    subscribedUntil,
+    userId,
+  ]);
 
   useEffect(() => {
     if (checkoutResult !== "success") {
@@ -766,14 +720,14 @@ export function SubscriptionCard({
         isSubscriber &&
         checkoutResult !== "success" &&
         userId &&
-        !activeConfirmed
+        !paidThroughDate(subscribedUntil) &&
+        !paidThrough
       )
     ) {
       return;
     }
     const controller = new AbortController();
-    setActiveConfirmed(false);
-    setPaidThrough(null);
+    setActiveConfirmed(true);
     publishNotice({
       detail: "Reading the current paid-through date from your account.",
       title: "Checking subscription",
@@ -900,7 +854,14 @@ export function SubscriptionCard({
       clearTimeout(kickoff);
       controller.abort();
     };
-  }, [activeConfirmed, checkoutResult, isSubscriber, publishNotice, userId]);
+  }, [
+    checkoutResult,
+    isSubscriber,
+    paidThrough,
+    publishNotice,
+    subscribedUntil,
+    userId,
+  ]);
 
   useEffect(
     () => () => {

@@ -20,6 +20,11 @@ import { SubscriptionCard } from "@/components/billing/subscription-card";
 import { BrandMark } from "@/components/brand/brand-mark";
 import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { useResponsiveTabOrientation } from "@/hooks/use-responsive-tab-orientation";
+import { useSubscriptionAuthorityRefresh } from "@/hooks/use-subscription-authority-refresh";
+import {
+  effectiveSubscriptionAuthority,
+  type SubscriptionAuthority,
+} from "@/lib/subscription-authority";
 import { cn } from "@/lib/utils";
 
 type CheckoutResult = "cancelled" | "success" | null;
@@ -27,6 +32,7 @@ type CheckoutResult = "cancelled" | "success" | null;
 type AccountSettingsProps = {
   checkoutEnabled: boolean;
   checkoutResult?: CheckoutResult;
+  subscriptionAuthority: SubscriptionAuthority;
 };
 
 /**
@@ -66,6 +72,7 @@ function accountTabId(tab: TabId): string {
 export function AccountSettings({
   checkoutEnabled,
   checkoutResult = null,
+  subscriptionAuthority,
 }: AccountSettingsProps) {
   const [effectiveCheckoutResult, setEffectiveCheckoutResult] =
     useState(checkoutResult);
@@ -79,11 +86,20 @@ export function AccountSettings({
       : "copilot"
   );
   const { data: session, status } = useSession();
+  useSubscriptionAuthorityRefresh({
+    enabled: effectiveCheckoutResult !== "success",
+    status,
+    type: session?.user?.type,
+    userId: session?.user?.id,
+  });
   const loginPath = useApplicationLoginPath();
   const tabOrientation = useResponsiveTabOrientation(
     HORIZONTAL_ACCOUNT_TABS_QUERY
   );
-  const isSubscriber = session?.user?.type === "subscriber";
+  const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
+    subscriptionAuthority,
+    session?.user?.id
+  );
   const showBilling =
     checkoutEnabled || isSubscriber || effectiveCheckoutResult === "success";
   const visibleTabs = TABS.filter(
@@ -351,6 +367,7 @@ export function AccountSettings({
                     isSubscriber={isSubscriber}
                     onCheckoutConfirmed={checkoutConfirmed}
                     onConfirmationOwnerEstablished={establishConfirmationOwner}
+                    subscribedUntil={subscribedUntil}
                   />
                 ) : null}
                 {active && entry.id === "data" ? <DeleteAllChats /> : null}

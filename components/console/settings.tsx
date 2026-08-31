@@ -207,6 +207,7 @@ export function Settings({
   isSubscriber,
   onCredentialsChange,
   operationContext,
+  subscribedUntil,
 }: {
   /** The signed-in email, or null. Not a display string — the panel decides
    *  how to render "nobody", so a fallback sentence can never be mistaken for
@@ -216,6 +217,7 @@ export function Settings({
   isSubscriber: boolean;
   onCredentialsChange: (harnessIds: readonly string[]) => void;
   operationContext: SessionOperationContext | null;
+  subscribedUntil: string | null;
 }) {
   const [tab, setTab] = useState<Tab>("harness");
   const tabOrientation = useResponsiveTabOrientation(HORIZONTAL_SETTINGS_QUERY);
@@ -953,6 +955,7 @@ export function Settings({
                 <SubscriptionCard
                   checkoutEnabled={checkoutEnabled}
                   isSubscriber={isSubscriber}
+                  subscribedUntil={subscribedUntil}
                 />
               </div>
             ) : null}

@@ -1,3 +1,5 @@
+import { connection } from "next/server";
+import { subscriptionPageAuthority } from "@/app/(auth)/auth";
 import { AccountSettings } from "@/components/account/account-settings";
 import { subscriptionCheckoutEnabled } from "@/lib/billing/config";
 
@@ -12,7 +14,12 @@ type AccountPageProps = {
 export const instant = false;
 
 export default async function AccountPage({ searchParams }: AccountPageProps) {
-  const { checkout } = await searchParams;
+  await connection();
+  const now = new Date();
+  const [{ checkout }, subscriptionAuthority] = await Promise.all([
+    searchParams,
+    subscriptionPageAuthority(now),
+  ]);
   const checkoutResult =
     checkout === "success" || checkout === "cancelled" ? checkout : null;
 
@@ -23,6 +30,7 @@ export default async function AccountPage({ searchParams }: AccountPageProps) {
           process.env.SUBSCRIPTION_CHECKOUT_ENABLED,
       })}
       checkoutResult={checkoutResult}
+      subscriptionAuthority={subscriptionAuthority}
     />
   );
 }

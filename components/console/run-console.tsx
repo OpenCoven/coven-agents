@@ -52,6 +52,7 @@ import {
   type as type_,
   well,
 } from "@/components/console/styles";
+import { useSubscriptionAuthorityRefresh } from "@/hooks/use-subscription-authority-refresh";
 import { RunnerApiError, RunnerClient } from "@/lib/agents/client";
 import {
   type ApplicationRunnerStatusKind,
@@ -70,6 +71,10 @@ import {
   resetCredentialCache,
   updateCredentialEligibility,
 } from "@/lib/credentials/client";
+import {
+  effectiveSubscriptionAuthority,
+  type SubscriptionAuthority,
+} from "@/lib/subscription-authority";
 
 const TICK_MS = 1000;
 const COMPACT_VIEWPORT_MAX = 720;
@@ -106,7 +111,13 @@ type View = "analytics" | "composer" | "create" | "settings" | "thread";
  * it on the right. The record is the product — everything else is a way to get
  * to one, or a way to start one that will produce another.
  */
-export function RunConsole({ checkoutEnabled }: { checkoutEnabled: boolean }) {
+export function RunConsole({
+  checkoutEnabled,
+  subscriptionAuthority,
+}: {
+  checkoutEnabled: boolean;
+  subscriptionAuthority: SubscriptionAuthority;
+}) {
   const session = useSession();
   /**
    * Who the console attributes a mission to.
@@ -124,10 +135,19 @@ export function RunConsole({ checkoutEnabled }: { checkoutEnabled: boolean }) {
    * change when someone changes their address.
    */
   const accountId = session.data?.user?.id ?? null;
+  const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
+    subscriptionAuthority,
+    accountId
+  );
+  useSubscriptionAuthorityRefresh({
+    status: session.status,
+    type: session.data?.user?.type,
+    userId: accountId,
+  });
   const sessionIdentity = [
     session.status,
     accountId ?? "",
-    session.data?.user?.type ?? "",
+    isSubscriber ? "subscriber" : "demo",
     session.data?.user?.authVersion ?? "",
   ].join(":");
   const avatarSrc = accountId
@@ -495,7 +515,7 @@ export function RunConsole({ checkoutEnabled }: { checkoutEnabled: boolean }) {
       resetCredentialCache();
       return () => controller.abort();
     }
-    if (session.data.user.type !== "subscriber") {
+    if (!isSubscriber) {
       setRunnerStatus("subscription_required");
       setHasCredential(null);
       credentialOwnerRef.current = null;
@@ -532,36 +552,28 @@ export function RunConsole({ checkoutEnabled }: { checkoutEnabled: boolean }) {
     client,
     isCurrentSession,
     refresh,
-    session.data?.user?.type,
+    isSubscriber,
     session.status,
     sessionIdentity,
   ]);
 
   const refreshCurrent = useCallback(() => {
     const controller = sessionAbortRef.current;
-    if (
-      !(
-        controller &&
-        session.status === "authenticated" &&
-        session.data.user.type === "subscriber"
-      )
-    ) {
+    if (!(controller && session.status === "authenticated" && isSubscriber)) {
       return Promise.resolve();
     }
     return refresh(sessionGenerationRef.current, controller.signal);
-  }, [refresh, session.data?.user?.type, session.status]);
+  }, [isSubscriber, refresh, session.status]);
 
   const currentSessionContext = useCallback(() => {
     const controller = sessionAbortRef.current;
-    return controller &&
-      session.status === "authenticated" &&
-      session.data.user.type === "subscriber"
+    return controller && session.status === "authenticated" && isSubscriber
       ? {
           generation: sessionGenerationRef.current,
           signal: controller.signal,
         }
       : null;
-  }, [session.data?.user?.type, session.status]);
+  }, [isSubscriber, session.status]);
 
   useEffect(() => {
     if (session.status !== "authenticated" || runnerStatus !== "rate_limited") {
@@ -1390,9 +1402,10 @@ export function RunConsole({ checkoutEnabled }: { checkoutEnabled: boolean }) {
           <Settings
             account={account}
             checkoutEnabled={checkoutEnabled}
-            isSubscriber={session.data?.user?.type === "subscriber"}
+            isSubscriber={isSubscriber}
             onCredentialsChange={onCredentialsChange}
             operationContext={settingsOperationContext}
+            subscribedUntil={subscribedUntil}
           />
         ) : view === "create" ? (
           <CreateAgent

@@ -1,5 +1,11 @@
-import { expect, type Page, type Request, test } from "@playwright/test";
-import { E2E_USER_ID } from "./session";
+import {
+  type BrowserContext,
+  expect,
+  type Page,
+  type Request,
+  test,
+} from "@playwright/test";
+import { E2E_USER_ID, sessionCookies } from "./session";
 
 const CHECKOUT_ENABLED = process.env.SUBSCRIPTION_CHECKOUT_ENABLED === "on";
 const SUBSCRIBED_UNTIL = "2099-01-15T12:00:00.000Z";
@@ -38,12 +44,21 @@ async function notifySessionChange(page: Page): Promise<void> {
 }
 
 async function mockSession(page: Page, type: SessionType): Promise<void> {
+  await setServerSession(page.context(), type);
   await page.route("**/api/auth/csrf", (route) =>
     route.fulfill({ json: { csrfToken: "e2e-csrf" } })
   );
   await page.route("**/api/auth/session", (route) =>
     route.fulfill({ json: sessionFor(type) })
   );
+}
+
+async function setServerSession(
+  context: BrowserContext,
+  type: SessionType,
+  options: { email?: string; id?: string } = {}
+): Promise<void> {
+  await context.addCookies(await sessionCookies(type, options));
 }
 
 async function mockAccountDependencies(page: Page): Promise<void> {
@@ -93,6 +108,11 @@ function subscriptionStatus(active: boolean) {
     checkoutEnabled: CHECKOUT_ENABLED,
     subscribedUntil: active ? SUBSCRIBED_UNTIL : null,
   };
+}
+
+function isServerComponentRequest(request: Request): boolean {
+  const url = new URL(request.url());
+  return request.headers().rsc === "1" || url.searchParams.has("_rsc");
 }
 
 function checkoutButton(page: Page) {
@@ -196,51 +216,6 @@ async function installSubscriptionBodyMock(
       activeBody: JSON.stringify(subscriptionStatus(true)),
       delay: closeAfterMs,
     }
-  );
-}
-
-async function installAuthRefreshSignalProbe(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    const originalFetch = window.fetch;
-    const state = { aborts: 0, posts: 0 };
-    Object.assign(window, { __authRefreshSignalProbe: state });
-    window.fetch = (input, init) => {
-      const rawUrl =
-        typeof input === "string"
-          ? input
-          : input instanceof URL
-            ? input.href
-            : input.url;
-      if (
-        init?.method === "POST" &&
-        new URL(rawUrl, window.location.href).pathname.endsWith(
-          "/api/auth/session"
-        )
-      ) {
-        state.posts += 1;
-        init.signal?.addEventListener(
-          "abort",
-          () => {
-            state.aborts += 1;
-          },
-          { once: true }
-        );
-      }
-      return originalFetch.call(window, input, init);
-    };
-  });
-}
-
-function authRefreshSignalProbe(
-  page: Page
-): Promise<{ aborts: number; posts: number }> {
-  return page.evaluate(
-    () =>
-      (
-        window as typeof window & {
-          __authRefreshSignalProbe: { aborts: number; posts: number };
-        }
-      ).__authRefreshSignalProbe
   );
 }
 
@@ -397,18 +372,9 @@ test.describe("Subscriber checkout", () => {
     page,
   }) => {
     test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
-    let sessionType: SessionType = "demo";
+    await mockSession(page, "demo");
     let active = false;
     let statusReads = 0;
-    await page.route("**/api/auth/csrf", (route) =>
-      route.fulfill({ json: { csrfToken: "e2e-csrf" } })
-    );
-    await page.route("**/api/auth/session", (route) => {
-      if (route.request().method() === "POST" && active) {
-        sessionType = "subscriber";
-      }
-      return route.fulfill({ json: sessionFor(sessionType) });
-    });
     await mockAccountDependencies(page);
     await page.route("**/api/subscription", (route) => {
       statusReads += 1;
@@ -427,6 +393,7 @@ test.describe("Subscriber checkout", () => {
     );
     await expect.poll(() => statusReads).toBeGreaterThan(readsBeforeReload);
 
+    await setServerSession(page.context(), "subscriber");
     active = true;
 
     await expect(page.getByText("Subscription active")).toBeVisible();
@@ -437,27 +404,21 @@ test.describe("Subscriber checkout", () => {
     page,
   }) => {
     test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
-    let currentSession = sessionFor("demo");
+    const currentSession = sessionFor("demo");
     let releaseStatus!: () => void;
     const statusGate = new Promise<void>((resolve) => {
       releaseStatus = resolve;
     });
-    let updates = 0;
     let reads = 0;
-    await page.route("**/api/auth/csrf", (route) =>
-      route.fulfill({ json: { csrfToken: "e2e-csrf" } })
+    await setServerSession(page.context(), "demo");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
     );
-    await page.route("**/api/auth/session", (route) => {
-      if (route.request().method() === "POST") {
-        updates += 1;
-        currentSession = sessionFor("subscriber");
-      }
-      return route.fulfill({ json: currentSession });
-    });
     await mockAccountDependencies(page);
     await page.route("**/api/subscription", async (route) => {
       reads += 1;
       await statusGate;
+      await setServerSession(page.context(), "subscriber");
       await route
         .fulfill({ json: subscriptionStatus(true) })
         .catch(() => undefined);
@@ -468,7 +429,6 @@ test.describe("Subscriber checkout", () => {
     await page.getByRole("tab", { name: "Profile" }).click();
     releaseStatus();
 
-    await expect.poll(() => updates).toBe(1);
     await page.getByRole("tab", { name: "Billing" }).click();
     await expect(page.getByText("Subscription active")).toBeVisible();
     await expect(page).toHaveURL("/account");
@@ -547,94 +507,91 @@ test.describe("Subscriber checkout", () => {
     expect(reads).toBe(1);
   });
 
-  test("database activation refreshes Auth.js and reloads once before cleaning the return query", async ({
+  test("database activation refreshes the server route once without an Auth.js mutation or reload", async ({
     page,
   }) => {
     test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
-    let currentSession = sessionFor("demo");
-    let updateBody: unknown;
-    let updates = 0;
+    await mockSession(page, "demo");
+    let authSessionPosts = 0;
+    const authSessionSetCookies: string[] = [];
     let accountDocuments = 0;
-
-    await page.route("**/api/auth/csrf", (route) =>
-      route.fulfill({ json: { csrfToken: "e2e-csrf" } })
-    );
-    await page.route("**/api/auth/session", (route) => {
-      if (route.request().method() !== "POST") {
-        return route.fulfill({ json: currentSession });
-      }
-      updateBody = route.request().postDataJSON();
-      updates += 1;
-      currentSession = sessionFor("subscriber");
-      return route.fulfill({ json: currentSession });
-    });
-    await mockAccountDependencies(page);
-    await page.route("**/api/subscription", (route) =>
-      route.fulfill({ json: subscriptionStatus(true) })
-    );
+    let serverRefreshes = 0;
     page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (url.pathname === "/api/auth/session" && request.method() === "POST") {
+        authSessionPosts += 1;
+      }
+      if (url.pathname === "/account" && isServerComponentRequest(request)) {
+        serverRefreshes += 1;
+      }
       if (
         request.resourceType() === "document" &&
-        new URL(request.url()).pathname === "/account"
+        url.pathname === "/account"
       ) {
         accountDocuments += 1;
       }
+    });
+    page.on("response", (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return;
+      }
+      const setCookie = response.headers()["set-cookie"];
+      if (setCookie) {
+        authSessionSetCookies.push(setCookie);
+      }
+    });
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", async (route) => {
+      await setServerSession(page.context(), "subscriber");
+      await route.fulfill({ json: subscriptionStatus(true) });
     });
 
     await page.goto("/account?source=ledger&checkout=success#allowance");
     await expect(page.getByText("Subscription active")).toBeVisible();
     await expect(page).toHaveURL("/account?source=ledger#allowance");
-    expect(accountDocuments).toBe(2);
-    expect(updates).toBe(1);
-    expect(updateBody).toMatchObject({
-      data: {
-        expectedUserId: E2E_USER_ID,
-        refreshSubscription: true,
-      },
-    });
+    expect(accountDocuments).toBe(1);
+    expect(serverRefreshes).toBe(1);
+    expect(authSessionPosts).toBe(0);
+    expect(authSessionSetCookies).toEqual([]);
   });
 
-  test("a refresh reload that still sees a demo session stops without looping or cleaning the query", async ({
+  test("an unchanged server authority stops at the deadline without a refresh loop and Check again starts one new generation", async ({
     page,
   }) => {
     test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
-    let updates = 0;
-    let accountDocuments = 0;
-    await page.route("**/api/auth/csrf", (route) =>
-      route.fulfill({ json: { csrfToken: "e2e-csrf" } })
-    );
-    await page.route("**/api/auth/session", (route) => {
-      if (route.request().method() !== "POST") {
-        return route.fulfill({ json: sessionFor("demo") });
+    await page.clock.install({
+      time: new Date("2026-08-31T14:25:01.000Z"),
+    });
+    await mockSession(page, "demo");
+    let serverRefreshes = 0;
+    page.on("request", (request) => {
+      if (
+        new URL(request.url()).pathname === "/account" &&
+        isServerComponentRequest(request)
+      ) {
+        serverRefreshes += 1;
       }
-      updates += 1;
-      return route.fulfill({ json: sessionFor("subscriber") });
     });
     await mockAccountDependencies(page);
     await page.route("**/api/subscription", (route) =>
       route.fulfill({ json: subscriptionStatus(true) })
     );
-    page.on("request", (request) => {
-      if (
-        request.resourceType() === "document" &&
-        new URL(request.url()).pathname === "/account"
-      ) {
-        accountDocuments += 1;
-      }
-    });
 
     await page.goto("/account?checkout=success");
-
+    await expect(page.getByRole("status")).toContainText("Finalizing");
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await page.clock.runFor(15_000);
     await expect(page.getByRole("status")).toContainText(
-      "Account access still needs refreshing."
+      "Payment may still be processing."
     );
     await expect(page).toHaveURL("/account?checkout=success");
-    await page.waitForTimeout(1200);
-    expect(accountDocuments).toBe(2);
-    expect(updates).toBe(1);
+    expect(serverRefreshes).toBe(1);
+
+    await page.getByRole("button", { name: "Check again" }).click();
+    await expect.poll(() => serverRefreshes).toBe(2);
   });
 
-  test("a delayed user-A refresh cannot replace user B or reload after the identity changes", async ({
+  test("a delayed user-A refresh cannot activate user B or overwrite B cookies after the identity changes", async ({
     page,
   }) => {
     test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
@@ -644,41 +601,29 @@ test.describe("Subscriber checkout", () => {
     const refreshGate = new Promise<void>((resolve) => {
       releaseRefresh = resolve;
     });
-    let refreshes = 0;
-    let accountDocuments = 0;
-    await page.route("**/api/auth/csrf", (route) =>
-      route.fulfill({ json: { csrfToken: "e2e-csrf" } })
+    let serverRefreshes = 0;
+    await setServerSession(page.context(), "demo");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
     );
-    await page.route("**/api/auth/session", async (route) => {
-      if (route.request().method() !== "POST") {
-        return route.fulfill({ json: currentSession });
+    await page.route("**/account?**", async (route) => {
+      if (isServerComponentRequest(route.request())) {
+        serverRefreshes += 1;
+        await refreshGate;
       }
-      refreshes += 1;
-      await refreshGate;
-      await route
-        .fulfill({
-          headers: {
-            "set-cookie": "activation-owner=user-a; Path=/; SameSite=Lax",
-          },
-          json: sessionFor("subscriber"),
-        })
-        .catch(() => undefined);
+      await route.continue();
     });
     await mockAccountDependencies(page);
-    await page.route("**/api/subscription", (route) =>
-      route.fulfill({ json: subscriptionStatus(true) })
-    );
-    page.on("request", (request) => {
-      if (
-        request.resourceType() === "document" &&
-        new URL(request.url()).pathname === "/account"
-      ) {
-        accountDocuments += 1;
-      }
+    await page.route("**/api/subscription", async (route) => {
+      await setServerSession(page.context(), "subscriber", {
+        email: "second@example.invalid",
+        id: secondUserId,
+      });
+      await route.fulfill({ json: subscriptionStatus(true) });
     });
 
     await page.goto("/account?checkout=success");
-    await expect.poll(() => refreshes).toBe(1);
+    await expect.poll(() => serverRefreshes).toBe(1);
     await page.context().addCookies([
       {
         name: "activation-owner",
@@ -697,13 +642,89 @@ test.describe("Subscriber checkout", () => {
     await expect(page.getByRole("status")).toContainText(
       "The signed-in account changed."
     );
-    await page.waitForTimeout(200);
-    expect(accountDocuments).toBe(1);
+    await expect(page.getByText("Subscription active")).toHaveCount(0);
+    await expect(page).toHaveURL("/account?checkout=success");
+    expect(serverRefreshes).toBe(1);
     expect(
       (await page.context().cookies()).find(
         (cookie) => cookie.name === "activation-owner"
       )?.value
     ).toBe("user-b");
+  });
+
+  test("a full reload uses paid server authority despite a stale demo client session", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("demo") })
+    );
+    await mockAccountDependencies(page);
+    await page.route("**/api/subscription", (route) =>
+      route.fulfill({ json: subscriptionStatus(true) })
+    );
+
+    await page.goto("/account?source=ledger&checkout=success#allowance");
+
+    await expect(page.getByText("Subscription active")).toBeVisible();
+    await expect(page.getByText("January 15, 2099")).toBeVisible();
+    await expect(page).toHaveURL("/account?source=ledger#allowance");
+  });
+
+  test("agents uses same-user server authority for gating and Billing despite a stale demo client session", async ({
+    page,
+  }) => {
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("demo") })
+    );
+    await mockSubscriberConsoleDependencies(page);
+    await page.route("**/api/subscription", (route) =>
+      route.fulfill({ json: subscriptionStatus(true) })
+    );
+
+    await openConsoleSettings(page);
+
+    await expect(
+      page.getByTitle(
+        "The Daytona runner answered for this authenticated session."
+      )
+    ).toBeVisible();
+    const billing = page.getByRole("tab", { name: "Billing" });
+    await expect(billing).toBeVisible();
+    await billing.click();
+    await expect(page.getByText("Subscription active")).toBeVisible();
+    await expect(page.getByText("January 15, 2099")).toBeVisible();
+  });
+
+  test("agents ignores subscriber authority belonging to another current client identity", async ({
+    page,
+  }) => {
+    test.skip(CHECKOUT_ENABLED, "This is the launch-flag-off contract.");
+    const secondUserId = "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa";
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({
+        json: sessionFor("subscriber", {
+          email: "second@example.invalid",
+          id: secondUserId,
+        }),
+      })
+    );
+    let protectedReads = 0;
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      protectedReads += 1;
+      return route.fulfill({ json: { agents: [] } });
+    });
+
+    await openConsoleSettings(page);
+
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
+    expect(protectedReads).toBe(0);
   });
 
   test("a cancelled return is neutral and restores the checkout action", async ({
@@ -1109,64 +1130,6 @@ test.describe("Subscriber checkout", () => {
     });
   });
 
-  test("a stalled session refresh times out and its late completion cannot overwrite a fresh check", async ({
-    page,
-  }) => {
-    test.skip(CHECKOUT_ENABLED, "This is the in-flight flag-off contract.");
-    await page.clock.install({
-      time: new Date("2026-08-31T14:25:01.000Z"),
-    });
-    await installAuthRefreshSignalProbe(page);
-    let releaseRefresh!: () => void;
-    const refreshGate = new Promise<void>((resolve) => {
-      releaseRefresh = resolve;
-    });
-    let refreshes = 0;
-    let statusReads = 0;
-    await page.route("**/api/auth/csrf", (route) =>
-      route.fulfill({ json: { csrfToken: "e2e-csrf" } })
-    );
-    await page.route("**/api/auth/session", async (route) => {
-      if (route.request().method() !== "POST") {
-        return route.fulfill({ json: sessionFor("demo") });
-      }
-      refreshes += 1;
-      await refreshGate;
-      return route.fulfill({ json: sessionFor("subscriber") });
-    });
-    await mockAccountDependencies(page);
-    await page.route("**/api/subscription", (route) => {
-      statusReads += 1;
-      return route.fulfill({
-        json: subscriptionStatus(statusReads === 1),
-      });
-    });
-
-    await page.goto("/account?checkout=success");
-    await expect.poll(() => refreshes).toBe(1);
-    await page.clock.runFor(15_000);
-
-    await expect(
-      page.getByRole("button", { name: "Check again" })
-    ).toBeVisible();
-    await expect
-      .poll(() => authRefreshSignalProbe(page))
-      .toEqual({
-        aborts: 1,
-        posts: 1,
-      });
-    await page.getByRole("button", { name: "Check again" }).click();
-    await expect.poll(() => statusReads).toBe(2);
-    await expect(page.getByRole("status")).toContainText("Confirming payment");
-
-    releaseRefresh();
-    await page.clock.runFor(0);
-
-    await expect(page.getByText("Subscription active")).toHaveCount(0);
-    await expect(page.getByRole("status")).toContainText("Confirming payment");
-    await expect(page).toHaveURL("/account?checkout=success");
-  });
-
   test("a short Retry-After delays confirmation without an early request", async ({
     page,
   }) => {
@@ -1238,6 +1201,7 @@ test.describe("Subscriber checkout", () => {
   }) => {
     test.skip(CHECKOUT_ENABLED, "This is the launch-flag-off contract.");
     let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
     await page.route("**/api/auth/session", (route) =>
       route.fulfill({ json: currentSession })
     );
@@ -1252,6 +1216,7 @@ test.describe("Subscriber checkout", () => {
     await billing.focus();
 
     currentSession = sessionFor("demo");
+    await setServerSession(page.context(), "demo");
     await notifySessionChange(page);
 
     await expect(billing).toHaveCount(0);
@@ -1267,6 +1232,7 @@ test.describe("Subscriber checkout", () => {
   }) => {
     test.skip(CHECKOUT_ENABLED, "This is the launch-flag-off contract.");
     let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
     await page.route("**/api/auth/session", (route) =>
       route.fulfill({ json: currentSession })
     );
@@ -1281,6 +1247,7 @@ test.describe("Subscriber checkout", () => {
     await accountButton.focus();
 
     currentSession = sessionFor("demo");
+    await setServerSession(page.context(), "demo");
     await notifySessionChange(page);
 
     await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
@@ -1296,6 +1263,7 @@ test.describe("Subscriber checkout", () => {
   }) => {
     test.skip(CHECKOUT_ENABLED, "This is the launch-flag-off contract.");
     let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
     await page.route("**/api/auth/session", (route) =>
       route.fulfill({ json: currentSession })
     );
@@ -1311,6 +1279,7 @@ test.describe("Subscriber checkout", () => {
     await expect(notice).toBeFocused();
 
     currentSession = sessionFor("demo");
+    await setServerSession(page.context(), "demo");
     await notifySessionChange(page);
 
     const copilot = page.getByRole("tab", { name: "Copilot" });
@@ -1324,6 +1293,7 @@ test.describe("Subscriber checkout", () => {
   }) => {
     test.skip(!CHECKOUT_ENABLED, "This is the launch-flag-on contract.");
     let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
     let releaseStatus!: () => void;
     const statusGate = new Promise<void>((resolve) => {
       releaseStatus = resolve;
@@ -1341,6 +1311,10 @@ test.describe("Subscriber checkout", () => {
     await expect(page.getByText("Checking subscription")).toBeVisible();
 
     currentSession = sessionFor("demo", {
+      email: "second@example.invalid",
+      id: "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa",
+    });
+    await setServerSession(page.context(), "demo", {
       email: "second@example.invalid",
       id: "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa",
     });
@@ -1444,6 +1418,7 @@ test.describe("Subscriber checkout", () => {
   }) => {
     test.skip(CHECKOUT_ENABLED, "This is the launch-flag-off contract.");
     let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
     await page.route("**/api/auth/session", (route) =>
       route.fulfill({ json: currentSession })
     );
@@ -1458,6 +1433,7 @@ test.describe("Subscriber checkout", () => {
     await billing.focus();
 
     currentSession = sessionFor("demo");
+    await setServerSession(page.context(), "demo");
     await notifySessionChange(page);
 
     await expect(billing).toHaveCount(0);
@@ -1474,6 +1450,7 @@ test.describe("Subscriber checkout", () => {
   }) => {
     test.skip(CHECKOUT_ENABLED, "This is the launch-flag-off contract.");
     let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
     await page.route("**/api/auth/session", (route) =>
       route.fulfill({ json: currentSession })
     );
@@ -1490,6 +1467,7 @@ test.describe("Subscriber checkout", () => {
     await externalButton.focus();
 
     currentSession = sessionFor("demo");
+    await setServerSession(page.context(), "demo");
     await notifySessionChange(page);
 
     await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
@@ -1504,6 +1482,7 @@ test.describe("Subscriber checkout", () => {
   }) => {
     test.skip(CHECKOUT_ENABLED, "This is the launch-flag-off contract.");
     let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
     await page.route("**/api/auth/session", (route) =>
       route.fulfill({ json: currentSession })
     );
@@ -1519,6 +1498,7 @@ test.describe("Subscriber checkout", () => {
     await expect(notice).toBeFocused();
 
     currentSession = sessionFor("demo");
+    await setServerSession(page.context(), "demo");
     await notifySessionChange(page);
 
     const harness = page.getByRole("tab", { name: "Harness credentials" });
@@ -1683,6 +1663,7 @@ test.describe("Subscriber checkout", () => {
       "href",
       "/login?callbackUrl=%2Faccount%3Fsource%3Dledger%26checkout%3Dsuccess%23allowance"
     );
+    await page.context().clearCookies({ name: /authjs\.session-token/u });
     await signIn.click();
 
     await expect(page).toHaveURL(

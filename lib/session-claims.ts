@@ -26,10 +26,9 @@ type RefreshableToken = {
  * source of truth; a `type` already in the token is never trusted, because a
  * stale one is precisely the bug being fixed.
  *
- * This fixes expiry, not upgrade: a user who pays mid-session still carries an
- * old date until their session refreshes. That belongs with checkout, which
- * knows when payment succeeded and can refresh deliberately, rather than being
- * approximated here by polling the database on every request.
+ * This fixes expiry in the token. Mid-session subscription upgrades are
+ * rendered from server-page database authority instead of rewriting the
+ * Auth.js cookie in the background.
  */
 export function refreshTokenType<T extends RefreshableToken>(
   token: T,
@@ -72,7 +71,7 @@ export function claimsFromStoredUser(
  */
 export async function refreshClaimsForSessionUpdate(
   token: JWT,
-  clientUpdate: unknown,
+  _clientUpdate: unknown,
   findUser: (userId: string) => Promise<StoredUserClaims | null>,
   now: Date
 ): Promise<JWT | null> {
@@ -84,15 +83,6 @@ export async function refreshClaimsForSessionUpdate(
   ) {
     return null;
   }
-  if (
-    clientUpdate &&
-    typeof clientUpdate === "object" &&
-    (clientUpdate as Record<string, unknown>).refreshSubscription === true &&
-    (clientUpdate as Record<string, unknown>).expectedUserId !== userId
-  ) {
-    return null;
-  }
-
   let user: StoredUserClaims | null;
   try {
     user = await findUser(userId);
