@@ -77,15 +77,16 @@ test("warming routes declare the duration required by after and synchronous work
   );
 });
 
-test("the reconciliation route supports Vercel Cron GET and a one-minute schedule", () => {
+test("the reconciliation route supports GET invocation", () => {
   assert.match(
     source("../../app/api/internal/runner-reconcile/route.ts"),
     /export function GET/
   );
+});
+
+test("Vercel does not schedule the reconciliation route", () => {
   const vercel = JSON.parse(source("../../vercel.json")) as {
-    crons?: { path: string; schedule: string }[];
+    crons?: unknown;
   };
-  assert.deepEqual(vercel.crons, [
-    { path: "/api/internal/runner-reconcile", schedule: "* * * * *" },
-  ]);
+  assert.equal(vercel.crons, undefined);
 });

@@ -71,7 +71,7 @@ export function isVercelDeploymentDisableConfig(content: string): boolean {
     return false;
   }
 
-  const git = parsed.git;
+  const { git } = parsed;
   return (
     isRecord(git) &&
     Object.keys(git).length === 1 &&
@@ -110,9 +110,7 @@ export function findDeploymentDocumentationViolations(
     return [];
   }
 
-  const documentation = entriesByPath.get(
-    VERCEL_DEPLOYMENT_DOCUMENTATION_PATH
-  );
+  const documentation = entriesByPath.get(VERCEL_DEPLOYMENT_DOCUMENTATION_PATH);
   if (documentation === undefined) {
     return [
       {
