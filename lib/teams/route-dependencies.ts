@@ -1,6 +1,7 @@
 import "server-only";
 
 import { ipAddress } from "@vercel/functions";
+import { after } from "next/server";
 import { enforceAbusePolicy } from "@/lib/abuse/enforce";
 import type { IdempotencyStore } from "@/lib/abuse/idempotency";
 import { configuredApplicationOrigin } from "@/lib/auth/application-origin";
@@ -42,6 +43,7 @@ async function authorizeSubscriberAccess(session: SessionLike) {
 
 export function productionTeamHttpHandlers(): TeamHttpHandlers {
   return createTeamHttpHandlers({
+    after,
     appOrigin: () => configuredApplicationOrigin(process.env),
     auth: createRunnerAuth({
       authenticate,
@@ -54,6 +56,13 @@ export function productionTeamHttpHandlers(): TeamHttpHandlers {
         import("./store"),
       ]);
       return service.createTeamService({
+        cancelChild: async (principal, runId) => {
+          const runtime = await import("@/lib/runner/runtime");
+          const runner = await runtime.createProductionRunnerService(
+            subscriber.session
+          );
+          return runner.stopRun(principal, runId);
+        },
         store: store.createTeamStore(
           store.drizzleTeamStoreDatabase(access.databaseFor(subscriber.session))
         ),
@@ -62,5 +71,10 @@ export function productionTeamHttpHandlers(): TeamHttpHandlers {
     enforceAbuse: enforceAbusePolicy,
     idempotencyStore: lazyDatabaseIdempotencyStore,
     ipAddress: (request) => ipAddress(request) ?? null,
+    reconcile: async () => {
+      const runtime = await import("@/lib/runner/runtime");
+      const service = await runtime.createProductionRunnerOperatorService();
+      await service.reconcileAndDispatch();
+    },
   });
 }

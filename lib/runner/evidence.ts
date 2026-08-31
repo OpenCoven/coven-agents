@@ -18,6 +18,7 @@ import {
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
 import type { RunEvent as HarnessRunEvent } from "@opencoven/harness";
+import type { RunnerExecutionPermission } from "./types";
 
 export const MAX_COMMAND_RESULTS_PER_RUN =
   AGENT_RUNNER_LIMITS.maxCommandResults;
@@ -306,9 +307,17 @@ export function createAcceptedRunEvent(
 /**
  * Computes the immutable request identity used to detect operation ID reuse.
  */
-export function hashRunRequest(agentId: string, task: string): string {
+export function hashRunRequest(
+  agentId: string,
+  task: string,
+  executionPermission: RunnerExecutionPermission = "unrestricted"
+): string {
+  const identity =
+    executionPermission === "unrestricted"
+      ? { agentId, task }
+      : { agentId, executionPermission, task };
   return createHash("sha256")
-    .update(JSON.stringify({ agentId, task }), "utf8")
+    .update(JSON.stringify(identity), "utf8")
     .digest("hex");
 }
 

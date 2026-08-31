@@ -375,9 +375,9 @@ function configuredClaimDispatcher(
           credentials.drizzleRunnerCredentialDependencies(database);
         const dependencies = admission.daytonaRunnerDispatchDependencies({
           credentialDependencies,
-          credentialInput: (run, agent) => ({
+          credentialInput: (run, _agent) => ({
             ...context,
-            harnessId: agent.runtime,
+            harnessId: run.agentRuntime,
             operationId: run.operationId,
             runId: run.id,
             tenant: run.tenant,
@@ -471,6 +471,8 @@ function productionReconcile(
             errors,
             reconciliation,
             sandbox,
+            teamOrchestration,
+            teamStoreModule,
           ] = await Promise.all([
             import("./admission"),
             import("./daytona/client"),
@@ -478,6 +480,8 @@ function productionReconcile(
             import("./errors"),
             import("./reconcile"),
             import("./daytona/sandbox"),
+            import("@/lib/teams/orchestrate"),
+            import("@/lib/teams/store"),
           ]);
           const daytona = client.daytonaClient();
           const credentialDependencies =
@@ -497,15 +501,42 @@ function productionReconcile(
               sandboxConfiguration: sandbox.daytonaSandboxConfiguration(),
               store,
             });
+          const teams = teamOrchestration.createTeamOrchestrator({
+            admit: (input) => admission.admitRunnerRun(input, { store }),
+            cancelRun: (_principal, runId) =>
+              reconciliation.cancelRunnerRun(
+                runId,
+                reconciliation.daytonaRunnerCancellationDependencies({
+                  credentialDependencies,
+                  daytona,
+                  operator: OPERATOR,
+                  store,
+                })
+              ),
+            operator: OPERATOR,
+            store: teamStoreModule.createTeamStore(
+              teamStoreModule.drizzleTeamStoreDatabase(database)
+            ),
+          });
+          const dispatchClaim = configuredClaimDispatcher(
+            database,
+            store,
+            daytona,
+            undefined,
+            findAccount
+          );
           stage = "reconcile";
           return reconciliation.reconcileAndDispatch({
             ...composition,
+            claimTeamRuns: teams.claimReadySteps,
             dispatch: configuredDispatcher(
               database,
               store,
               daytona,
               findAccount
             ),
+            dispatchClaim,
+            projectTeamRuns: teams.projectTerminalSteps,
           });
         },
         store,

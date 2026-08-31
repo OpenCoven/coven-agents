@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { NextRequest } from "next/server";
 import { encode } from "next-auth/jwt";
 import { type AbuseStore, MemoryAbuseStore } from "@/lib/abuse/store";
 import { verifiedJwtIdentity } from "@/lib/auth/verified-jwt";
@@ -93,6 +94,33 @@ test("the wrapper enforces OAuth limits beneath the configured base path", async
   assert.equal(response.status, 204);
   assert.equal(consumedKeys.length, 2);
   assert.ok(consumedKeys.every((key) => key.startsWith("auth_start:")));
+});
+
+test("session replay preserves NextRequest base-path metadata", async () => {
+  const request = new NextRequest(`${TEST_ORIGIN}/demo/api/auth/session`, {
+    body: JSON.stringify({ csrfToken: "csrf", data: {} }),
+    headers: { "x-real-ip": "203.0.113.43" },
+    method: "POST",
+    nextConfig: { basePath: "/demo" },
+  });
+  assert.equal(request.nextUrl.basePath, "/demo");
+  assert.equal(request.nextUrl.pathname, "/api/auth/session");
+  const wrapped = withAuthAbusePolicy(
+    (receivedRequest: NextRequest) => {
+      assert.equal(receivedRequest.nextUrl.basePath, "/demo");
+      assert.equal(receivedRequest.nextUrl.pathname, "/api/auth/session");
+      return new Response(null, { status: 204 });
+    },
+    {
+      basePath: "/demo",
+      enforceAbuse: () => Promise.resolve({ kind: "allowed" }),
+      readIdentity: () => Promise.resolve(null),
+    }
+  );
+
+  const response = await wrapped(request);
+
+  assert.equal(response.status, 204);
 });
 
 test("wraps protected auth actions while leaving other auth actions untouched", async () => {
