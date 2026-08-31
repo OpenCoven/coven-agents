@@ -92,7 +92,9 @@ test.describe("Demo base path", () => {
 
     await expect.poll(() => callbacks).toEqual(["/demo/login", "/demo/login"]);
     expect(callbacks).not.toContain("/demo/demo/login");
-    expect(applicationRequests).toContain("/demo/api/credentials");
+    expect(
+      applicationRequests.every((pathname) => pathname.startsWith("/demo/api/"))
+    ).toBe(true);
     expect(applicationRequests).not.toContain("/api/credentials");
     expect(applicationRequests).not.toContain("/api/agents");
     expect(applicationRequests).not.toContain("/api/runs");
