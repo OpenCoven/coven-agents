@@ -326,12 +326,19 @@ test("redacts complete structured values for loose sensitive properties", () => 
 });
 
 test("fails closed for malformed escaped and unquoted sensitive keys", () => {
-  const markers = ["HEX_PASSWORD_SURVIVES", "UNQUOTED_TOKEN_SURVIVES"];
+  const markers = [
+    "HEX_PASSWORD_SURVIVES",
+    "UNQUOTED_TOKEN_SURVIVES",
+    "UNQUOTED_UNICODE_TOKEN_SURVIVES",
+    "UNQUOTED_UNICODE_PROVIDER_SURVIVES",
+  ];
   const result = built(
     buildTeamHandoff({
       output: [
         `{"safe":1 "\\x70assword":["first","${markers[0]}"]}`,
         `{"safe":1 token:["first","${markers[1]}"]}`,
+        `{"safe":1 \\u0074oken:["first","${markers[2]}"]}`,
+        `{"safe":1 \\u0070roviderLogs:["first","${markers[3]}"]}`,
       ].join("\n"),
     })
   );

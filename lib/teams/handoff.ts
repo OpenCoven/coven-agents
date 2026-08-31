@@ -170,9 +170,10 @@ function containsOperationalMetadataKey(value: string): boolean {
     return true;
   }
   const unquotedProperty =
-    /(?:^|[,{;]\s*|\s+)([A-Za-z_$][A-Za-z0-9_$.-]*)\s*[:=]/gmu;
+    /(?:^|[,{;]\s*|\s+)((?:(?:\\u[\dA-Fa-f]{4})|(?:\\x[\dA-Fa-f]{2})|[A-Za-z0-9_$.-])+)\s*[:=]/gmu;
   for (const match of value.matchAll(unquotedProperty)) {
-    if (match[1] && isOperationalMetadataKey(match[1])) {
+    const decoded = match[1] && decodeJsonKeyEscapes(match[1]);
+    if (decoded && isOperationalMetadataKey(decoded)) {
       return true;
     }
   }
