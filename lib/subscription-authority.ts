@@ -1,21 +1,13 @@
 export type SubscriptionAuthority = Readonly<{
-  authorityExpiresAt?: string | null;
+  checkedAt: string;
   isSubscriber: boolean;
   subscribedUntil: string | null;
-  userId: string;
-}> | null;
+  userId: string | null;
+}>;
 
 export type EffectiveSubscriptionAuthority = Readonly<{
   isSubscriber: boolean;
   subscribedUntil: string | null;
-}>;
-
-type SubscriptionAuthoritySession = Readonly<{
-  user?: Readonly<{
-    id?: string | null;
-    subscriptionAuthorityExpiresAt?: string | null;
-    type?: string | null;
-  }> | null;
 }>;
 
 const INACTIVE_AUTHORITY: EffectiveSubscriptionAuthority = {
@@ -23,54 +15,71 @@ const INACTIVE_AUTHORITY: EffectiveSubscriptionAuthority = {
   subscribedUntil: null,
 };
 
-export function storageUnavailableSubscriptionAuthority(
-  session: SubscriptionAuthoritySession,
-  now: Date
-): SubscriptionAuthority {
-  const userId = session.user?.id;
-  if (!userId) {
-    return null;
-  }
-  const subscribedUntil = session.user?.subscriptionAuthorityExpiresAt;
-  const boundary =
-    typeof subscribedUntil === "string"
-      ? Date.parse(subscribedUntil)
-      : Number.NaN;
-  const isSubscriber =
-    session.user?.type === "subscriber" &&
-    Number.isFinite(boundary) &&
-    boundary > now.getTime();
+function finiteFutureTimestamp(
+  value: Date | string | null | undefined,
+  nowMs: number
+): string | null {
+  const timestamp =
+    value instanceof Date
+      ? value.getTime()
+      : typeof value === "string"
+        ? Date.parse(value)
+        : Number.NaN;
+  return Number.isFinite(timestamp) && timestamp > nowMs
+    ? new Date(timestamp).toISOString()
+    : null;
+}
+
+export function serializeSubscriptionAuthority({
+  checkedAt,
+  isSubscriber,
+  subscribedUntil,
+  userId,
+}: {
+  checkedAt: Date;
+  isSubscriber: boolean;
+  subscribedUntil: Date | string | null | undefined;
+  userId: string | null;
+}): SubscriptionAuthority {
+  const checkedAtMs = checkedAt.getTime();
+  const checkedAtIso = Number.isFinite(checkedAtMs)
+    ? checkedAt.toISOString()
+    : "";
+  const activeUntil =
+    isSubscriber && Number.isFinite(checkedAtMs)
+      ? finiteFutureTimestamp(subscribedUntil, checkedAtMs)
+      : null;
+
   return {
-    authorityExpiresAt: isSubscriber ? subscribedUntil : null,
-    isSubscriber,
-    subscribedUntil: null,
+    checkedAt: checkedAtIso,
+    isSubscriber: activeUntil !== null,
+    subscribedUntil: activeUntil,
     userId,
   };
 }
 
-export function subscriptionAuthorityExpiryBoundary(
-  authority: SubscriptionAuthority,
-  sessionUserId: string | null | undefined
-): string | null {
-  if (!(sessionUserId && authority?.userId === sessionUserId)) {
-    return null;
-  }
-  return authority.subscribedUntil ?? authority.authorityExpiresAt ?? null;
-}
-
 export function effectiveSubscriptionAuthority(
-  authority: SubscriptionAuthority,
+  authority: SubscriptionAuthority | null,
   sessionUserId: string | null | undefined,
-  authorityPending = false
+  authorityPending = false,
+  nowMs = Date.now()
 ): EffectiveSubscriptionAuthority {
   if (
     authorityPending ||
-    !(sessionUserId && authority?.userId === sessionUserId)
+    !(sessionUserId && authority?.userId === sessionUserId) ||
+    !Number.isFinite(Date.parse(authority.checkedAt)) ||
+    !authority.isSubscriber
   ) {
     return INACTIVE_AUTHORITY;
   }
+
+  const activeUntil = finiteFutureTimestamp(authority.subscribedUntil, nowMs);
+  if (!activeUntil) {
+    return INACTIVE_AUTHORITY;
+  }
+
   return {
-    isSubscriber: authority.isSubscriber,
-    subscribedUntil: authority.isSubscriber ? authority.subscribedUntil : null,
+    isSubscriber: true,
+    subscribedUntil: activeUntil,
   };
 }

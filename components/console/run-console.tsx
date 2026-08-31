@@ -61,7 +61,6 @@ import {
 } from "@/lib/agents/connection-status";
 import type { Formation } from "@/lib/agents/formations";
 import { memberName } from "@/lib/agents/formations";
-import { browserApplicationLoginHref } from "@/lib/application-path";
 import { avatarFor } from "@/lib/avatar";
 import { isTerminal, projectRun } from "@/lib/console/blocks";
 import { formatDuration, glyphFor, spanBetween } from "@/lib/console/format";
@@ -72,11 +71,7 @@ import {
   resetCredentialCache,
   updateCredentialEligibility,
 } from "@/lib/credentials/client";
-import {
-  effectiveSubscriptionAuthority,
-  type SubscriptionAuthority,
-  subscriptionAuthorityExpiryBoundary,
-} from "@/lib/subscription-authority";
+import type { SubscriptionAuthority } from "@/lib/subscription-authority";
 
 const TICK_MS = 1000;
 const COMPACT_VIEWPORT_MAX = 720;
@@ -137,30 +132,24 @@ export function RunConsole({
    * change when someone changes their address.
    */
   const accountId = session.data?.user?.id ?? null;
-  const serverAuthority = effectiveSubscriptionAuthority(
-    subscriptionAuthority,
-    accountId
-  );
-  const authorityPending = useSubscriptionAuthorityRefresh({
-    isSubscriber: serverAuthority.isSubscriber,
+  const {
+    authorityRevision,
+    invalidateAndRefresh,
+    isSubscriber,
+    subscribedUntil,
+  } = useSubscriptionAuthorityRefresh({
+    authority: subscriptionAuthority,
+    authVersion: session.data?.user?.authVersion,
     status: session.status,
-    subscribedUntil: subscriptionAuthorityExpiryBoundary(
-      subscriptionAuthority,
-      accountId
-    ),
     type: session.data?.user?.type,
     userId: accountId,
   });
-  const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
-    subscriptionAuthority,
-    accountId,
-    authorityPending
-  );
   const sessionIdentity = [
     session.status,
     accountId ?? "",
     isSubscriber ? "subscriber" : "demo",
     session.data?.user?.authVersion ?? "",
+    authorityRevision ?? "",
   ].join(":");
   const avatarSrc = accountId
     ? avatarFor({ id: accountId, image: session.data?.user?.image })
@@ -1126,11 +1115,7 @@ export function RunConsole({
 
   const openCreate = useCallback(() => {
     if (session.status !== "authenticated") {
-      window.location.assign(
-        browserApplicationLoginHref(
-          `${window.location.pathname}${window.location.search}${window.location.hash}`
-        )
-      );
+      window.location.assign("/login");
       return;
     }
     setView("create");
@@ -1417,7 +1402,9 @@ export function RunConsole({
         ) : view === "settings" ? (
           <Settings
             account={account}
+            authorityRevision={authorityRevision}
             checkoutEnabled={checkoutEnabled}
+            invalidateSubscriptionAuthority={invalidateAndRefresh}
             isSubscriber={isSubscriber}
             onCredentialsChange={onCredentialsChange}
             operationContext={settingsOperationContext}

@@ -1,45 +1,89 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  effectiveSubscriptionAuthority,
+  type SubscriptionAuthority,
+} from "@/lib/subscription-authority";
 import { scheduleSubscriptionAuthorityExpiry } from "@/lib/subscription-authority-expiry";
+import {
+  createSubscriptionAuthorityInvalidationFence,
+  type SubscriptionAuthorityRevision,
+  subscriptionAuthorityRevision,
+  subscriptionAuthorityRevisionContext,
+} from "@/lib/subscription-authority-refresh";
 
 type SessionAuthorityIdentity = {
+  authority: SubscriptionAuthority;
+  authVersion: number | null | undefined;
   enabled?: boolean;
-  isSubscriber: boolean;
   status: "authenticated" | "loading" | "unauthenticated";
-  subscribedUntil: string | null;
   type: string | null | undefined;
   userId: string | null | undefined;
 };
 
+type SubscriptionAuthorityState = Readonly<{
+  authorityPending: boolean;
+  authorityRevision: string | null;
+  invalidateAndRefresh: () => void;
+  isSubscriber: boolean;
+  subscribedUntil: string | null;
+}>;
+
 export function useSubscriptionAuthorityRefresh({
+  authority,
+  authVersion,
   enabled = true,
-  isSubscriber,
   status,
-  subscribedUntil,
   type,
   userId,
-}: SessionAuthorityIdentity): boolean {
+}: SessionAuthorityIdentity): SubscriptionAuthorityState {
   const router = useRouter();
   const previousIdentityRef = useRef<string | null>(null);
   const hasResolvedIdentityRef = useRef(false);
   const refreshedBoundaryRef = useRef<string | null>(null);
+  const invalidationFence = useRef(
+    createSubscriptionAuthorityInvalidationFence()
+  ).current;
+  const [manualInvalidation, setManualInvalidation] =
+    useState<SubscriptionAuthorityRevision | null>(null);
+  const revision = subscriptionAuthorityRevision(
+    authority,
+    userId,
+    authVersion
+  );
+  const revisionRef = useRef(revision);
+  revisionRef.current = revision;
+  const revisionContext = subscriptionAuthorityRevisionContext(
+    userId,
+    authVersion
+  );
+  const serverAuthority = effectiveSubscriptionAuthority(authority, userId);
   const authorityKey =
-    isSubscriber && userId && subscribedUntil
-      ? `${userId}:${subscribedUntil}`
+    serverAuthority.isSubscriber && userId && serverAuthority.subscribedUntil
+      ? `${userId}:${serverAuthority.subscribedUntil}`
       : null;
   const [expiredAuthorityKey, setExpiredAuthorityKey] = useState<string | null>(
     null
   );
-  const authorityPending =
+  const boundaryPending =
     authorityKey !== null && expiredAuthorityKey === authorityKey;
+  const invalidationPending =
+    manualInvalidation !== null &&
+    invalidationFence.isPending(revision, revisionContext);
+  const authorityPending = boundaryPending || invalidationPending;
+  const effectiveAuthority = effectiveSubscriptionAuthority(
+    authority,
+    userId,
+    authorityPending
+  );
 
   useEffect(() => {
     if (status === "loading") {
       return;
     }
-    const identity = `${status}:${userId ?? ""}:${type ?? ""}`;
+    const identity = `${status}:${userId ?? ""}:${type ?? ""}:${authVersion ?? ""}`;
     if (!hasResolvedIdentityRef.current) {
       hasResolvedIdentityRef.current = true;
       previousIdentityRef.current = identity;
@@ -52,26 +96,22 @@ export function useSubscriptionAuthorityRefresh({
     if (enabled) {
       router.refresh();
     }
-  }, [enabled, router, status, type, userId]);
+  }, [authVersion, enabled, router, status, type, userId]);
 
   useEffect(() => {
-    if (!authorityKey || !subscribedUntil) {
+    if (!(authorityKey && serverAuthority.subscribedUntil)) {
       return;
     }
-    const boundary = Date.parse(subscribedUntil);
-    if (!Number.isFinite(boundary)) {
-      setExpiredAuthorityKey(authorityKey);
-      return;
-    }
+    const boundary = Date.parse(serverAuthority.subscribedUntil);
     return scheduleSubscriptionAuthorityExpiry(boundary, () => {
       setExpiredAuthorityKey(authorityKey);
     });
-  }, [authorityKey, subscribedUntil]);
+  }, [authorityKey, serverAuthority.subscribedUntil]);
 
   // Refresh separately so every consumer renders the closed gate first.
   useEffect(() => {
     if (
-      !authorityPending ||
+      !boundaryPending ||
       !authorityKey ||
       refreshedBoundaryRef.current === authorityKey
     ) {
@@ -79,7 +119,27 @@ export function useSubscriptionAuthorityRefresh({
     }
     refreshedBoundaryRef.current = authorityKey;
     router.refresh();
-  }, [authorityKey, authorityPending, router]);
+  }, [authorityKey, boundaryPending, router]);
 
-  return authorityPending;
+  useEffect(() => {
+    if (invalidationFence.reconcile(revision, revisionContext)) {
+      setManualInvalidation(null);
+    }
+  }, [invalidationFence, revision, revisionContext]);
+
+  const invalidateAndRefresh = useCallback(() => {
+    const currentRevision = revisionRef.current;
+    if (!currentRevision || !invalidationFence.invalidate(currentRevision)) {
+      return;
+    }
+    setManualInvalidation(currentRevision);
+    router.refresh();
+  }, [invalidationFence, router]);
+
+  return {
+    authorityPending,
+    authorityRevision: revision?.checkedAt ?? null,
+    invalidateAndRefresh,
+    ...effectiveAuthority,
+  };
 }

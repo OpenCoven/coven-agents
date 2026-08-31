@@ -21,11 +21,7 @@ import { BrandMark } from "@/components/brand/brand-mark";
 import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { useResponsiveTabOrientation } from "@/hooks/use-responsive-tab-orientation";
 import { useSubscriptionAuthorityRefresh } from "@/hooks/use-subscription-authority-refresh";
-import {
-  effectiveSubscriptionAuthority,
-  type SubscriptionAuthority,
-  subscriptionAuthorityExpiryBoundary,
-} from "@/lib/subscription-authority";
+import type { SubscriptionAuthority } from "@/lib/subscription-authority";
 import { cn } from "@/lib/utils";
 
 type CheckoutResult = "cancelled" | "success" | null;
@@ -91,26 +87,19 @@ export function AccountSettings({
   const tabOrientation = useResponsiveTabOrientation(
     HORIZONTAL_ACCOUNT_TABS_QUERY
   );
-  const serverAuthority = effectiveSubscriptionAuthority(
-    subscriptionAuthority,
-    session?.user?.id
-  );
-  const authorityPending = useSubscriptionAuthorityRefresh({
+  const {
+    authorityRevision,
+    invalidateAndRefresh,
+    isSubscriber,
+    subscribedUntil,
+  } = useSubscriptionAuthorityRefresh({
+    authority: subscriptionAuthority,
+    authVersion: session?.user?.authVersion,
     enabled: effectiveCheckoutResult !== "success",
-    isSubscriber: serverAuthority.isSubscriber,
     status,
-    subscribedUntil: subscriptionAuthorityExpiryBoundary(
-      subscriptionAuthority,
-      session?.user?.id
-    ),
     type: session?.user?.type,
     userId: session?.user?.id,
   });
-  const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
-    subscriptionAuthority,
-    session?.user?.id,
-    authorityPending
-  );
   const showBilling =
     checkoutEnabled || isSubscriber || effectiveCheckoutResult === "success";
   const visibleTabs = TABS.filter(
@@ -279,21 +268,12 @@ export function AccountSettings({
               Harness credentials, usage, profile, and account data are
               available after GitHub sign-in.
             </p>
-            {loginPath ? (
-              <Link
-                className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white transition-opacity hover:opacity-90"
-                href={loginPath}
-              >
-                Sign in with GitHub
-              </Link>
-            ) : (
-              <span
-                aria-disabled="true"
-                className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white opacity-60"
-              >
-                Sign in with GitHub
-              </span>
-            )}
+            <Link
+              className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white transition-opacity hover:opacity-90"
+              href={loginPath}
+            >
+              Sign in with GitHub
+            </Link>
           </div>
         </main>
       </div>
@@ -375,7 +355,11 @@ export function AccountSettings({
                 role="tabpanel"
               >
                 {active && entry.id === "copilot" ? (
-                  <HarnessCredentials userId={session.user.id} />
+                  <HarnessCredentials
+                    authorityRevision={authorityRevision}
+                    isSubscriber={isSubscriber}
+                    onAuthorityInvalidated={invalidateAndRefresh}
+                  />
                 ) : null}
                 {active && entry.id === "profile" ? <AvatarSettings /> : null}
                 {active && entry.id === "usage" ? <UsageMeter /> : null}

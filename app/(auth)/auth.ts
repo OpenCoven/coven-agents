@@ -16,7 +16,7 @@ import {
 import { isSubscribedAt, userTypeFor } from "@/lib/subscription";
 import {
   type SubscriptionAuthority,
-  storageUnavailableSubscriptionAuthority,
+  serializeSubscriptionAuthority,
 } from "@/lib/subscription-authority";
 import { authConfig } from "./auth.config";
 
@@ -27,7 +27,6 @@ declare module "next-auth" {
     user: {
       authVersion: number;
       id: string;
-      subscriptionAuthorityExpiresAt?: string | null;
       type: UserType;
     } & DefaultSession["user"];
   }
@@ -128,9 +127,13 @@ export const {
         }
         session.user.type = token.type;
         session.user.image = token.picture ?? null;
-        session.user.subscriptionAuthorityExpiresAt =
+        const subscribedUntil =
           typeof token.subscribedUntil === "string"
-            ? token.subscribedUntil
+            ? new Date(token.subscribedUntil)
+            : null;
+        session.user.subscribedUntil =
+          subscribedUntil && Number.isFinite(subscribedUntil.getTime())
+            ? subscribedUntil
             : null;
       }
 
@@ -230,14 +233,25 @@ export async function subscriptionPageAuthority(
 ): Promise<SubscriptionAuthority> {
   const resolved = await resolveAuth(now);
   if (!resolved) {
-    return null;
+    return serializeSubscriptionAuthority({
+      checkedAt: now,
+      isSubscriber: false,
+      subscribedUntil: null,
+      userId: null,
+    });
   }
   if (resolved.kind === "storage-unavailable") {
-    return storageUnavailableSubscriptionAuthority(resolved.session, now);
+    return serializeSubscriptionAuthority({
+      checkedAt: now,
+      isSubscriber: resolved.session.user.type === "subscriber",
+      subscribedUntil: resolved.session.user.subscribedUntil,
+      userId: resolved.session.user.id,
+    });
   }
-  return {
+  return serializeSubscriptionAuthority({
+    checkedAt: now,
     isSubscriber: isSubscribedAt(resolved.user, now),
-    subscribedUntil: resolved.user.subscribedUntil?.toISOString() ?? null,
+    subscribedUntil: resolved.user.subscribedUntil,
     userId: resolved.session.user.id,
-  };
+  });
 }
