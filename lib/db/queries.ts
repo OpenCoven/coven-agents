@@ -11,6 +11,7 @@ import {
   inArray,
   lt,
   lte,
+  ne,
   type SQL,
   sql,
 } from "drizzle-orm";
@@ -24,6 +25,15 @@ import type {
   IdempotencyStore,
 } from "../abuse/idempotency";
 import { parseStoredIdempotencyResponseEnvelope } from "../abuse/idempotency-response";
+import {
+  CHECKOUT_ATTEMPT_KEY_HASH,
+  CHECKOUT_ATTEMPT_OPERATION,
+  type CheckoutAttemptLease,
+  type CheckoutAttemptLeaseStore,
+  parseCheckoutAttemptState,
+  serializeCheckoutAttemptLeaseOwner,
+  serializeCheckoutAttemptState,
+} from "../billing/checkout-lease";
 import type { DayCount } from "../billing/history";
 import { fillDays, runsByDay } from "../billing/history";
 import {
@@ -196,12 +206,23 @@ export async function findUserByStripeCustomerId(
   }
 }
 
-export async function attachStripeCustomer(userId: string, customerId: string) {
+export async function attachStripeCustomer(
+  userId: string,
+  customerId: string
+): Promise<string> {
   try {
-    return await db
+    const [owner] = await db
       .update(user)
-      .set({ stripeCustomerId: customerId })
-      .where(eq(user.id, userId));
+      .set({
+        stripeCustomerId: sql<string>`coalesce(${user.stripeCustomerId}, ${customerId})`,
+      })
+      .where(eq(user.id, userId))
+      .returning({ stripeCustomerId: user.stripeCustomerId });
+
+    if (!owner?.stripeCustomerId) {
+      throw new Error("Stripe Customer owner does not exist.");
+    }
+    return owner.stripeCustomerId;
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
   }
@@ -246,6 +267,222 @@ export async function claimStripeEvent(eventId: string): Promise<boolean> {
   }
 }
 
+export const databaseCheckoutAttemptLeaseStore: CheckoutAttemptLeaseStore = {
+  async checkpoint(input) {
+    try {
+      const [checkpointed] = await db
+        .update(idempotencyRecord)
+        .set({
+          expiresAt: input.leaseExpiresAt,
+          requestHash: serializeCheckoutAttemptLeaseOwner(
+            input.lease.ownerToken,
+            input.state
+          ),
+          updatedAt: input.updatedAt,
+        })
+        .where(
+          and(
+            checkoutAttemptLeaseScope(input.lease.ownerId),
+            eq(idempotencyRecord.id, input.lease.attemptId),
+            eq(
+              idempotencyRecord.requestHash,
+              serializeCheckoutAttemptLeaseOwner(
+                input.lease.ownerToken,
+                input.lease.attemptState
+              )
+            ),
+            eq(idempotencyRecord.state, "in_progress"),
+            gt(idempotencyRecord.expiresAt, input.updatedAt)
+          )
+        )
+        .returning({ id: idempotencyRecord.id });
+      if (!checkpointed) {
+        return { kind: "lost" };
+      }
+      return {
+        kind: "checkpointed",
+        lease: {
+          ...input.lease,
+          attemptState: input.state,
+          expiresAt: input.leaseExpiresAt,
+        },
+      };
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
+  async claim(input) {
+    try {
+      return await db.transaction(async (transaction) => {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          // biome-ignore lint/performance/noAwaitInLoops: retries must observe the prior transactional write.
+          const [inserted] = await transaction
+            .insert(idempotencyRecord)
+            .values({
+              createdAt: input.now,
+              expiresAt: input.leaseExpiresAt,
+              keyHash: CHECKOUT_ATTEMPT_KEY_HASH,
+              operation: CHECKOUT_ATTEMPT_OPERATION,
+              ownerId: input.ownerId,
+              requestHash: serializeCheckoutAttemptLeaseOwner(
+                input.ownerToken,
+                { kind: "fresh" }
+              ),
+              state: "in_progress",
+              updatedAt: input.now,
+            })
+            .onConflictDoNothing()
+            .returning({ attemptId: idempotencyRecord.id });
+
+          if (inserted) {
+            return {
+              kind: "claimed",
+              lease: checkoutAttemptLease(input, inserted.attemptId, {
+                kind: "fresh",
+              }),
+            } as const;
+          }
+
+          const [existing] = await transaction
+            .select({
+              attemptId: idempotencyRecord.id,
+              expiresAt: idempotencyRecord.expiresAt,
+              requestHash: idempotencyRecord.requestHash,
+              state: idempotencyRecord.state,
+            })
+            .from(idempotencyRecord)
+            .where(checkoutAttemptLeaseScope(input.ownerId))
+            .limit(1);
+          if (!existing) {
+            continue;
+          }
+          if (existing.state !== "in_progress") {
+            throw new Error("Checkout lease entered an invalid state.");
+          }
+          if (existing.expiresAt.getTime() > input.now.getTime()) {
+            return { kind: "in_progress" } as const;
+          }
+
+          const attemptState = parseCheckoutAttemptState(existing.requestHash);
+          const [reclaimed] = await transaction
+            .update(idempotencyRecord)
+            .set({
+              expiresAt: input.leaseExpiresAt,
+              requestHash: serializeCheckoutAttemptLeaseOwner(
+                input.ownerToken,
+                attemptState
+              ),
+              updatedAt: input.now,
+            })
+            .where(
+              and(
+                checkoutAttemptLeaseScope(input.ownerId),
+                eq(idempotencyRecord.id, existing.attemptId),
+                eq(idempotencyRecord.requestHash, existing.requestHash),
+                eq(idempotencyRecord.state, "in_progress"),
+                eq(idempotencyRecord.expiresAt, existing.expiresAt),
+                lte(idempotencyRecord.expiresAt, input.now)
+              )
+            )
+            .returning({ attemptId: idempotencyRecord.id });
+
+          if (reclaimed) {
+            return {
+              kind: "claimed",
+              lease: checkoutAttemptLease(
+                input,
+                reclaimed.attemptId,
+                attemptState
+              ),
+            } as const;
+          }
+        }
+
+        throw new Error("Checkout lease changed during acquisition.");
+      });
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
+
+  async release(input) {
+    try {
+      const fence = and(
+        checkoutAttemptLeaseScope(input.lease.ownerId),
+        eq(idempotencyRecord.id, input.lease.attemptId),
+        eq(
+          idempotencyRecord.requestHash,
+          serializeCheckoutAttemptLeaseOwner(
+            input.lease.ownerToken,
+            input.lease.attemptState
+          )
+        ),
+        eq(idempotencyRecord.state, "in_progress"),
+        gt(idempotencyRecord.expiresAt, input.releasedAt)
+      );
+      const released =
+        input.disposition.kind === "retire_attempt"
+          ? await db
+              .delete(idempotencyRecord)
+              .where(fence)
+              .returning({ id: idempotencyRecord.id })
+          : await db
+              .update(idempotencyRecord)
+              .set({
+                expiresAt: input.releasedAt,
+                requestHash: serializeCheckoutAttemptState(
+                  input.disposition.state
+                ),
+                updatedAt: input.releasedAt,
+              })
+              .where(fence)
+              .returning({ id: idempotencyRecord.id });
+      return released.length === 1 ? "released" : "lost";
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
+
+  async renew(input) {
+    try {
+      const [renewed] = await db
+        .update(idempotencyRecord)
+        .set({
+          expiresAt: input.leaseExpiresAt,
+          updatedAt: input.now,
+        })
+        .where(
+          and(
+            checkoutAttemptLeaseScope(input.lease.ownerId),
+            eq(idempotencyRecord.id, input.lease.attemptId),
+            eq(
+              idempotencyRecord.requestHash,
+              serializeCheckoutAttemptLeaseOwner(
+                input.lease.ownerToken,
+                input.lease.attemptState
+              )
+            ),
+            eq(idempotencyRecord.state, "in_progress"),
+            gt(idempotencyRecord.expiresAt, input.now)
+          )
+        )
+        .returning({ id: idempotencyRecord.id });
+      if (!renewed) {
+        return { kind: "lost" };
+      }
+      return {
+        kind: "renewed",
+        lease: {
+          ...input.lease,
+          expiresAt: input.leaseExpiresAt,
+        },
+      };
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
+};
+
 export const databaseIdempotencyStore: IdempotencyStore = {
   async claim(input) {
     try {
@@ -260,7 +497,7 @@ export const databaseIdempotencyStore: IdempotencyStore = {
               keyHash: input.keyHash,
               operation: input.operation,
               ownerId: input.ownerId,
-              requestHash: input.requestHash,
+              requestHash: storedIdempotencyClaimHash(input),
               state: "in_progress",
               updatedAt: input.now,
             })
@@ -271,11 +508,36 @@ export const databaseIdempotencyStore: IdempotencyStore = {
             return { claim: claimHandle(input), kind: "claimed" } as const;
           }
 
+          if (input.reclaimCompleted) {
+            const [reclaimedCompleted] = await transaction
+              .update(idempotencyRecord)
+              .set({
+                expiresAt: input.claimExpiresAt,
+                requestHash: storedIdempotencyClaimHash(input),
+                responseJson: null,
+                responseStatus: null,
+                state: "in_progress",
+                updatedAt: input.now,
+              })
+              .where(
+                and(
+                  idempotencyScope(input),
+                  eq(idempotencyRecord.state, "completed"),
+                  sql`left(${idempotencyRecord.requestHash}, 64) = ${input.requestHash}`
+                )
+              )
+              .returning({ id: idempotencyRecord.id });
+
+            if (reclaimedCompleted) {
+              return { claim: claimHandle(input), kind: "claimed" } as const;
+            }
+          }
+
           const [reclaimed] = await transaction
             .update(idempotencyRecord)
             .set({
               expiresAt: input.claimExpiresAt,
-              requestHash: input.requestHash,
+              requestHash: storedIdempotencyClaimHash(input),
               responseJson: null,
               responseStatus: null,
               state: "in_progress",
@@ -307,7 +569,9 @@ export const databaseIdempotencyStore: IdempotencyStore = {
           if (!existing) {
             continue;
           }
-          if (existing.requestHash !== input.requestHash) {
+          if (
+            idempotencyRequestHash(existing.requestHash) !== input.requestHash
+          ) {
             return { kind: "conflict" } as const;
           }
           if (existing.state === "in_progress") {
@@ -341,7 +605,12 @@ export const databaseIdempotencyStore: IdempotencyStore = {
       const expired = db
         .select({ id: idempotencyRecord.id })
         .from(idempotencyRecord)
-        .where(lte(idempotencyRecord.expiresAt, input.before))
+        .where(
+          and(
+            lte(idempotencyRecord.expiresAt, input.before),
+            ne(idempotencyRecord.operation, CHECKOUT_ATTEMPT_OPERATION)
+          )
+        )
         .orderBy(asc(idempotencyRecord.expiresAt))
         .limit(input.limit);
 
@@ -350,7 +619,8 @@ export const databaseIdempotencyStore: IdempotencyStore = {
         .where(
           and(
             inArray(idempotencyRecord.id, expired),
-            lte(idempotencyRecord.expiresAt, input.before)
+            lte(idempotencyRecord.expiresAt, input.before),
+            ne(idempotencyRecord.operation, CHECKOUT_ATTEMPT_OPERATION)
           )
         );
     } catch (error) {
@@ -372,7 +642,10 @@ export const databaseIdempotencyStore: IdempotencyStore = {
         .where(
           and(
             idempotencyScope(input.claim),
-            eq(idempotencyRecord.requestHash, input.claim.requestHash),
+            eq(
+              idempotencyRecord.requestHash,
+              storedIdempotencyClaimHash(input.claim)
+            ),
             eq(idempotencyRecord.state, "in_progress"),
             eq(idempotencyRecord.expiresAt, input.claim.claimExpiresAt)
           )
@@ -380,8 +653,9 @@ export const databaseIdempotencyStore: IdempotencyStore = {
         .returning({ id: idempotencyRecord.id });
 
       if (completed.length !== 1) {
-        throw new Error("Idempotency claim expired before completion.");
+        return "lost";
       }
+      return "completed";
     } catch (error) {
       throw new ChatbotError("bad_request:database", { cause: error });
     }
@@ -389,21 +663,88 @@ export const databaseIdempotencyStore: IdempotencyStore = {
 
   async release(input) {
     try {
-      await db
+      const released = await db
         .delete(idempotencyRecord)
         .where(
           and(
             idempotencyScope(input.claim),
-            eq(idempotencyRecord.requestHash, input.claim.requestHash),
+            eq(
+              idempotencyRecord.requestHash,
+              storedIdempotencyClaimHash(input.claim)
+            ),
             eq(idempotencyRecord.state, "in_progress"),
             eq(idempotencyRecord.expiresAt, input.claim.claimExpiresAt)
           )
-        );
+        )
+        .returning({ id: idempotencyRecord.id });
+      return released.length === 1 ? "released" : "lost";
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
+
+  async renew(input) {
+    try {
+      const [renewed] = await db
+        .update(idempotencyRecord)
+        .set({
+          expiresAt: input.claimExpiresAt,
+          updatedAt: input.now,
+        })
+        .where(
+          and(
+            idempotencyScope(input.claim),
+            eq(
+              idempotencyRecord.requestHash,
+              storedIdempotencyClaimHash(input.claim)
+            ),
+            eq(idempotencyRecord.state, "in_progress"),
+            eq(idempotencyRecord.expiresAt, input.claim.claimExpiresAt),
+            gt(idempotencyRecord.expiresAt, input.now)
+          )
+        )
+        .returning({ id: idempotencyRecord.id });
+      if (!renewed) {
+        return { kind: "lost" };
+      }
+      return {
+        claim: {
+          ...input.claim,
+          claimExpiresAt: input.claimExpiresAt,
+        },
+        kind: "renewed",
+      };
     } catch (error) {
       throw new ChatbotError("bad_request:database", { cause: error });
     }
   },
 };
+
+function checkoutAttemptLease(
+  input: {
+    leaseExpiresAt: Date;
+    ownerId: string;
+    ownerToken: string;
+  },
+  attemptId: string,
+  attemptState: CheckoutAttemptLease["attemptState"]
+): CheckoutAttemptLease {
+  return {
+    attemptId,
+    attemptState,
+    expiresAt: input.leaseExpiresAt,
+    ownerId: input.ownerId,
+    ownerToken: input.ownerToken,
+  };
+}
+
+function checkoutAttemptLeaseScope(ownerId: string) {
+  return and(
+    eq(idempotencyRecord.ownerId, ownerId),
+    eq(idempotencyRecord.operation, CHECKOUT_ATTEMPT_OPERATION),
+    eq(idempotencyRecord.keyHash, CHECKOUT_ATTEMPT_KEY_HASH)
+  );
+}
 
 function idempotencyScope(input: {
   keyHash: string;
@@ -421,6 +762,7 @@ function claimHandle(input: {
   claimExpiresAt: Date;
   keyHash: string;
   operation: string;
+  ownerToken?: string;
   ownerId: string;
   requestHash: string;
 }): IdempotencyClaimHandle {
@@ -428,9 +770,25 @@ function claimHandle(input: {
     claimExpiresAt: input.claimExpiresAt,
     keyHash: input.keyHash,
     operation: input.operation,
+    ...(input.ownerToken ? { ownerToken: input.ownerToken } : {}),
     ownerId: input.ownerId,
     requestHash: input.requestHash,
   };
+}
+
+function storedIdempotencyClaimHash(input: {
+  ownerToken?: string;
+  requestHash: string;
+}): string {
+  return input.ownerToken
+    ? `${input.requestHash}:${input.ownerToken}`
+    : input.requestHash;
+}
+
+function idempotencyRequestHash(storedRequestHash: string): string {
+  return storedRequestHash.length > 64 && storedRequestHash[64] === ":"
+    ? storedRequestHash.slice(0, 64)
+    : storedRequestHash;
 }
 
 /** Runs counted for a tenant since the start of the current period. */
