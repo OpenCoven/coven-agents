@@ -6,7 +6,7 @@ import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { avatarSessionRefreshStatus } from "@/lib/avatar";
+import { refreshAvatarSession } from "@/lib/avatar";
 
 type AvatarState = { avatar: string; custom: boolean };
 
@@ -23,7 +23,6 @@ export function AvatarSettings() {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [locked, setLocked] = useState(false);
-  // Signals the server to reload stored claims; no browser field is authority.
   const { update } = useSession();
 
   const load = useCallback(async () => {
@@ -72,10 +71,10 @@ export function AvatarSettings() {
 
         setState((await response.json()) as AvatarState);
         setUrl("");
-        const refreshedSession = await update().catch(() => null);
-        if (
-          avatarSessionRefreshStatus(image, refreshedSession) === "deferred"
-        ) {
+        const refreshStatus = await refreshAvatarSession(image, update).catch(
+          () => "deferred" as const
+        );
+        if (refreshStatus === "deferred") {
           toast({
             description:
               "Avatar saved, but the session could not refresh. It will update later.",

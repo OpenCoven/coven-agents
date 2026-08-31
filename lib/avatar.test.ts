@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   avatarFor,
   avatarSessionRefreshStatus,
   generatedAvatar,
   isStorableAvatarUrl,
+  refreshAvatarSession,
 } from "./avatar";
 
 const UUID_A = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
@@ -119,14 +119,18 @@ test("avatar refresh status distinguishes updated, stale, and missing sessions",
   assert.equal(avatarSessionRefreshStatus(null, null), "deferred");
 });
 
-test("avatar settings sends only an update signal and reports a deferred session refresh", () => {
-  const source = readFileSync(
-    new URL("../components/account/avatar-settings.tsx", import.meta.url),
-    "utf8"
+test("avatar refresh posts an empty signal and succeeds only with the stored image", async () => {
+  const argumentsReceived: unknown[] = [];
+  const expectedImage = "https://example.com/new.png";
+  const refreshed = await refreshAvatarSession(expectedImage, (data) => {
+    argumentsReceived.push(data);
+    return Promise.resolve({ user: { image: expectedImage } });
+  });
+  const stale = await refreshAvatarSession(expectedImage, () =>
+    Promise.resolve({ user: { image: "https://example.com/old.png" } })
   );
 
-  assert.match(source, /const refreshedSession = await update\(\)/);
-  assert.match(source, /avatarSessionRefreshStatus\(image, refreshedSession\)/);
-  assert.match(source, /session could not refresh/i);
-  assert.doesNotMatch(source, /update\(\{\s*image\s*\}\)/);
+  assert.deepEqual(argumentsReceived, [{}]);
+  assert.equal(refreshed, "refreshed");
+  assert.equal(stale, "deferred");
 });

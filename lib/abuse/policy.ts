@@ -9,6 +9,11 @@ const STANDARD_WRITE = rateClass(20, 60, 100, 3600);
 const SENSITIVE_READ = rateClass(30, 60, 200, 3600);
 const SENSITIVE_WRITE = rateClass(10, 60, 40, 3600);
 const DESTRUCTIVE_WRITE = rateClass(5, 60, 20, 3600);
+// Session-update POSTs are tiny, but they reach Auth.js' CSRF/JWE machinery.
+// Admit every source before body or cookie work, while leaving enough room
+// for many normal clients behind one NAT. Verified users keep the stricter
+// existing 20/minute and 100/hour write budget below.
+const AUTH_SESSION_UPDATE_IP = rateClass(120, 60, 1200, 3600);
 // Stripe retries and renewal batches can legitimately share an egress IP.
 // This route still has its own IP-only budget and a bounded 256 KiB reader.
 const WEBHOOK_WRITE = rateClass(600, 60, 10_000, 3600);
@@ -16,7 +21,11 @@ const WEBHOOK_WRITE = rateClass(600, 60, 10_000, 3600);
 const POLICIES = Object.freeze({
   analytics_read: closedPolicy(["ip", "user"], 0, EXPENSIVE_READ),
   auth_callback: closedPolicy(["ip"], 16_384, rateClass(10, 60, 40, 3600)),
-  auth_session_update: closedPolicy(["ip", "user"], 0, STANDARD_WRITE),
+  // Auth.js session-update and CSRF JSON is normally under 1 KiB. A 16 KiB
+  // raw-byte ceiling leaves generous protocol headroom without allowing its
+  // internal parser to buffer an attacker-controlled body.
+  auth_session_update: closedPolicy(["user"], 16_384, STANDARD_WRITE),
+  auth_session_update_ip: closedPolicy(["ip"], 16_384, AUTH_SESSION_UPDATE_IP),
   auth_start: closedPolicy(["ip"], 0, rateClass(5, 60, 20, 3600)),
   avatar_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   avatar_write: closedPolicy(["ip", "user"], 8192, SENSITIVE_WRITE),

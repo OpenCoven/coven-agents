@@ -120,7 +120,7 @@ test("wraps POST starts and callback methods but bypasses GET sign-in and cheap 
     ["POST", "/api/auth/callback/github", "auth_callback"],
     ["PUT", "/api/auth/callback/github", null],
     ["GET", "/api/auth/session", null],
-    ["POST", "/api/auth/session", null],
+    ["POST", "/api/auth/session", "auth_session_update_ip"],
     ["GET", "/api/auth/providers", null],
     ["GET", "/api/auth/csrf", null],
     ["POST", "/api/auth/signout", null],
@@ -133,7 +133,11 @@ test("wraps POST starts and callback methods but bypasses GET sign-in and cheap 
     const response = await wrapped(request);
 
     assert.equal(response.status, 204, `${method} ${pathname}`);
-    assert.strictEqual(handled.at(-1), request, `${method} ${pathname}`);
+    if (expectedRoute === "auth_session_update_ip") {
+      assert.notStrictEqual(handled.at(-1), request, `${method} ${pathname}`);
+    } else {
+      assert.strictEqual(handled.at(-1), request, `${method} ${pathname}`);
+    }
     if (expectedRoute) {
       assert.equal(consumedKeys.length, 2, `${method} ${pathname}`);
       assert.ok(
@@ -146,42 +150,70 @@ test("wraps POST starts and callback methods but bypasses GET sign-in and cheap 
   }
 });
 
-test("session update admission uses verified cookie identity before the handler without reading the body", async () => {
+test("session updates admit IP, bound the body, verify identity, admit user, then invoke Auth.js", async () => {
   const calls: string[] = [];
-  const request = new Request(`${TEST_ORIGIN}/api/auth/session`, {
-    body: JSON.stringify({
-      data: { type: "subscriber", userId: "attacker" },
-    }),
+  const controller = new AbortController();
+  const expectedBody = new TextEncoder().encode(
+    JSON.stringify({ csrfToken: "csrf", data: {} })
+  );
+  const request = new FrameworkRequest(`${TEST_ORIGIN}/api/auth/session`, {
+    body: expectedBody,
+    duplex: "half",
     headers: {
       "content-type": "application/json",
+      cookie: `${SECURE_SESSION_COOKIE}=opaque`,
+      "x-preserved": "yes",
       "x-real-ip": "203.0.113.44",
     },
     method: "POST",
-  });
+    signal: controller.signal,
+  } as RequestInit & { duplex: "half" });
+  recordBodyOpen(request, calls);
+  const replayedSignals: AbortSignal[] = [];
   const wrapped = withAuthAbusePolicy(
-    (receivedRequest: Request) => {
+    async (receivedRequest: FrameworkRequest) => {
       calls.push("handler");
-      assert.strictEqual(receivedRequest, request);
-      assert.equal(receivedRequest.bodyUsed, false);
+      assert.notStrictEqual(receivedRequest, request);
+      assert.ok(receivedRequest instanceof FrameworkRequest);
+      assert.equal(receivedRequest.nextUrl.pathname, "/api/auth/session");
+      assert.equal(receivedRequest.url, request.url);
+      assert.equal(receivedRequest.method, request.method);
+      assert.deepEqual(
+        Object.fromEntries(receivedRequest.headers),
+        Object.fromEntries(request.headers)
+      );
+      assert.deepEqual(
+        new Uint8Array(await receivedRequest.arrayBuffer()),
+        expectedBody
+      );
+      replayedSignals.push(receivedRequest.signal);
       return new Response(null, { status: 204 });
     },
     {
       enforceAbuse: (input) => {
-        calls.push("abuse");
-        assert.deepEqual(input, {
-          ip: "203.0.113.44",
-          route: "auth_session_update",
-          userId: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-        });
+        if (input.route === "auth_session_update_ip") {
+          calls.push("ip");
+          assert.deepEqual(input, {
+            ip: "203.0.113.44",
+            route: "auth_session_update_ip",
+          });
+        } else {
+          calls.push("user");
+          assert.deepEqual(input, {
+            ip: null,
+            route: "auth_session_update",
+            userId: USER_ID,
+          });
+        }
         return Promise.resolve({ kind: "allowed" });
       },
       readIdentity: (receivedRequest) => {
         calls.push("identity");
-        assert.strictEqual(receivedRequest, request);
+        assert.notStrictEqual(receivedRequest, request);
         assert.equal(receivedRequest.bodyUsed, false);
         return Promise.resolve({
           authVersion: 4,
-          userId: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+          userId: USER_ID,
         });
       },
     }
@@ -190,20 +222,26 @@ test("session update admission uses verified cookie identity before the handler 
   const response = await wrapped(request);
 
   assert.equal(response.status, 204);
-  assert.deepEqual(calls, ["identity", "abuse", "handler"]);
-  assert.equal(request.bodyUsed, false);
+  assert.deepEqual(calls, ["ip", "body", "identity", "user", "handler"]);
+  const [replayedSignal] = replayedSignals;
+  assert.ok(replayedSignal);
+  assert.equal(replayedSignal.aborted, false);
+  controller.abort();
+  assert.equal(replayedSignal.aborted, true);
 });
 
-test("session update denial stops before the Auth.js handler", async () => {
+test("IP denial stops before body reading, JWE work, and the Auth.js handler", async () => {
   const calls: string[] = [];
+  const request = postRequest('{"csrfToken":"csrf","data":{}}');
+  recordBodyOpen(request, calls);
   const wrapped = withAuthAbusePolicy(
     () => {
       calls.push("handler");
       return new Response(null, { status: 204 });
     },
     {
-      enforceAbuse: () => {
-        calls.push("abuse");
+      enforceAbuse: (input) => {
+        calls.push(input.route);
         return Promise.resolve({
           kind: "denied",
           responseStatus: 429,
@@ -220,12 +258,48 @@ test("session update denial stops before the Auth.js handler", async () => {
     }
   );
 
-  const response = await wrapped(
-    authRequest("/api/auth/session", "POST", "203.0.113.45")
-  );
+  const response = await wrapped(withIp(request, "203.0.113.45"));
 
   assert.equal(response.status, 429);
-  assert.deepEqual(calls, ["identity", "abuse"]);
+  assert.deepEqual(calls, ["auth_session_update_ip"]);
+});
+
+test("user denial occurs after bounded body reading and identity verification", async () => {
+  const calls: string[] = [];
+  const request = withIp(
+    postRequest('{"csrfToken":"csrf","data":{}}'),
+    "203.0.113.45"
+  );
+  recordBodyOpen(request, calls);
+  const wrapped = withAuthAbusePolicy(
+    () => {
+      calls.push("handler");
+      return new Response(null, { status: 204 });
+    },
+    {
+      enforceAbuse: (input) => {
+        if (input.route === "auth_session_update_ip") {
+          calls.push("ip");
+          return Promise.resolve({ kind: "allowed" });
+        }
+        calls.push("user");
+        return Promise.resolve({
+          kind: "denied",
+          responseStatus: 429,
+          retryAfterSeconds: 12,
+        });
+      },
+      readIdentity: () => {
+        calls.push("identity");
+        return Promise.resolve({ authVersion: 4, userId: USER_ID });
+      },
+    }
+  );
+
+  const response = await wrapped(request);
+
+  assert.equal(response.status, 429);
+  assert.deepEqual(calls, ["ip", "body", "identity", "user"]);
 });
 
 test("a real Auth.js cookie consumes the session update IP and verified-user budgets", async () => {
@@ -267,7 +341,7 @@ test("a real Auth.js cookie consumes the session update IP and verified-user bud
   assert.equal(consumedKeys.length, 4);
   assert.ok(
     consumedKeys.some((key) =>
-      key.startsWith("auth_session_update:burst:ip:203.0.113.46:20:60")
+      key.startsWith("auth_session_update_ip:burst:ip:203.0.113.46:120:60")
     )
   );
   assert.ok(
@@ -277,16 +351,166 @@ test("a real Auth.js cookie consumes the session update IP and verified-user bud
   );
 });
 
-test("anonymous and invalid session cookies reach Auth.js without a database-bearing update callback", async () => {
+test("absent, invalid, and expired cookies still consume IP quota and reach Auth.js without user quota", async () => {
+  const expired = await encode({
+    maxAge: -60,
+    salt: SECURE_SESSION_COOKIE,
+    secret: AUTH_SECRET,
+    token: { authVersion: 4, id: USER_ID, type: "demo" },
+  });
+  const cases = [
+    ["absent", null],
+    ["invalid", "not-a-jwe"],
+    ["expired", expired],
+  ] as const;
+
+  for (const [label, cookieValue] of cases) {
+    const calls: string[] = [];
+    const request = postRequest('{"csrfToken":"csrf","data":{}}');
+    request.headers.set("x-real-ip", "203.0.113.47");
+    if (cookieValue) {
+      request.headers.set("cookie", `${SECURE_SESSION_COOKIE}=${cookieValue}`);
+    }
+    recordBodyOpen(request, calls);
+    const wrapped = withAuthAbusePolicy(
+      async (receivedRequest: Request) => {
+        calls.push("handler");
+        assert.equal(
+          await receivedRequest.text(),
+          '{"csrfToken":"csrf","data":{}}'
+        );
+        return new Response(null, { status: 204 });
+      },
+      {
+        enforceAbuse: (input) => {
+          calls.push(input.route);
+          return Promise.resolve({ kind: "allowed" });
+        },
+        readIdentity: (receivedRequest) =>
+          verifiedJwtIdentity(receivedRequest, {
+            environment: {
+              AUTH_SECRET,
+              AUTH_URL: TEST_ORIGIN,
+            },
+          }),
+      }
+    );
+
+    // biome-ignore lint/performance/noAwaitInLoops: each cookie disposition owns its call trace
+    const response = await wrapped(request);
+
+    assert.equal(response.status, 204, label);
+    assert.deepEqual(
+      calls,
+      ["auth_session_update_ip", "body", "handler"],
+      label
+    );
+  }
+});
+
+test("declared and chunked 1 MiB session updates return 413 before JWE work or Auth.js", async () => {
+  const cases = [
+    {
+      label: "declared",
+      request: postRequest("x", {
+        "content-length": String(1024 * 1024),
+      }),
+    },
+    {
+      label: "chunked",
+      request: new Request(`${TEST_ORIGIN}/api/auth/session`, {
+        body: new Uint8Array(1024 * 1024),
+        method: "POST",
+      }),
+    },
+  ];
+
+  for (const { label, request } of cases) {
+    const calls: string[] = [];
+    recordBodyOpen(request, calls);
+    const wrapped = withAuthAbusePolicy(
+      () => {
+        calls.push("handler");
+        return new Response(null, { status: 204 });
+      },
+      {
+        enforceAbuse: (input) => {
+          calls.push(input.route);
+          return Promise.resolve({ kind: "allowed" });
+        },
+        readIdentity: () => {
+          calls.push("identity");
+          return Promise.resolve(null);
+        },
+      }
+    );
+
+    // biome-ignore lint/performance/noAwaitInLoops: each body framing owns its call trace
+    const response = await wrapped(request);
+
+    assert.equal(response.status, 413, label);
+    assert.deepEqual(
+      calls,
+      label === "declared"
+        ? ["auth_session_update_ip"]
+        : ["auth_session_update_ip", "body"],
+      label
+    );
+    assert.deepEqual(await response.json(), {
+      error: "payload_too_large",
+      message: "Session update payload is too large.",
+    });
+  }
+});
+
+test("an exact-limit multibyte session body is preserved byte-for-byte", async () => {
+  const suffix = new TextEncoder().encode("🧙");
+  const expected = new Uint8Array(16_384);
+  expected.fill(0x20);
+  expected.set(suffix, expected.byteLength - suffix.byteLength);
+  let received: Uint8Array | null = null;
+  const wrapped = withAuthAbusePolicy(
+    async (request: Request) => {
+      received = new Uint8Array(await request.arrayBuffer());
+      return new Response(null, { status: 204 });
+    },
+    {
+      enforceAbuse: () => Promise.resolve({ kind: "allowed" }),
+      readIdentity: () => Promise.resolve({ authVersion: 4, userId: USER_ID }),
+    }
+  );
+
+  const response = await wrapped(
+    new Request(`${TEST_ORIGIN}/api/auth/session`, {
+      body: expected,
+      headers: { "content-length": String(expected.byteLength) },
+      method: "POST",
+    })
+  );
+
+  assert.equal(response.status, 204);
+  assert.deepEqual(received, expected);
+});
+
+test("session body stream failures return an explicit retryable read error", async () => {
   const calls: string[] = [];
+  const request = new Request(`${TEST_ORIGIN}/api/auth/session`, {
+    body: new ReadableStream({
+      pull(controller) {
+        controller.error(new Error("connection reset"));
+      },
+    }),
+    duplex: "half",
+    method: "POST",
+  } as RequestInit & { duplex: "half" });
   const wrapped = withAuthAbusePolicy(
     () => {
       calls.push("handler");
       return new Response(null, { status: 204 });
     },
     {
-      enforceAbuse: () => {
-        calls.push("abuse");
+      enforceAbuse: (input) => {
+        calls.push(input.route);
         return Promise.resolve({ kind: "allowed" });
       },
       readIdentity: () => {
@@ -296,10 +520,14 @@ test("anonymous and invalid session cookies reach Auth.js without a database-bea
     }
   );
 
-  const response = await wrapped(authRequest("/api/auth/session", "POST"));
+  const response = await wrapped(request);
 
-  assert.equal(response.status, 204);
-  assert.deepEqual(calls, ["identity", "handler"]);
+  assert.equal(response.status, 400);
+  assert.deepEqual(calls, ["auth_session_update_ip"]);
+  assert.deepEqual(await response.json(), {
+    error: "request_body_unreadable",
+    message: "Could not read the session update payload. Retry the request.",
+  });
 });
 
 test("ordinary GET session reads do not verify identity or consume update quota", async () => {
@@ -583,4 +811,40 @@ function authRequest(pathname: string, method: string, ip?: string): Request {
     headers.set("x-real-ip", ip);
   }
   return new Request(`${TEST_ORIGIN}${pathname}`, { headers, method });
+}
+
+function postRequest(body: BodyInit, headers: HeadersInit = {}): Request {
+  return new Request(`${TEST_ORIGIN}/api/auth/session`, {
+    body,
+    headers,
+    method: "POST",
+  });
+}
+
+function withIp<T extends Request>(request: T, ip: string): T {
+  request.headers.set("x-real-ip", ip);
+  return request;
+}
+
+function recordBodyOpen(request: Request, calls: string[]): void {
+  const { body } = request;
+  assert.ok(body);
+  Object.defineProperty(request, "body", {
+    configurable: true,
+    value: {
+      getReader() {
+        calls.push("body");
+        return body.getReader();
+      },
+    },
+  });
+}
+
+class FrameworkRequest extends Request {
+  readonly nextUrl: URL;
+
+  constructor(input: RequestInfo | URL, init?: RequestInit) {
+    super(input, init);
+    this.nextUrl = new URL(this.url);
+  }
 }

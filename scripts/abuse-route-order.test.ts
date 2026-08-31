@@ -714,6 +714,14 @@ test("checkout leases preserve attempt identity and fence renewals and releases"
 test("Auth.js handlers use method-aware abuse classification", () => {
   const routeSource = read("app/(auth)/api/auth/[...nextauth]/route.ts");
   const wrapperSource = read("lib/auth/abuse.ts");
+  const sessionUpdate = functionBlock(wrapperSource, "withAuthAbusePolicy");
+  const ipAdmission = sessionUpdate.indexOf('route: "auth_session_update_ip"');
+  const bodyRead = sessionUpdate.indexOf("readBoundedBytes(");
+  const identity = sessionUpdate.indexOf(
+    "options.readIdentity ?? readVerifiedJwtIdentity"
+  );
+  const userAdmission = sessionUpdate.indexOf('route: "auth_session_update",');
+  const handler = sessionUpdate.indexOf("return handler(boundedRequest");
 
   assert.match(
     routeSource,
@@ -727,6 +735,11 @@ test("Auth.js handlers use method-aware abuse classification", () => {
     wrapperSource,
     /authAbuseRoute\(\s*request\.method,\s*new URL\(request\.url\)\.pathname,\s*options\.basePath \?\? process\.env\.NEXT_PUBLIC_BASE_PATH\s*\)/
   );
+  assert.ok(ipAdmission >= 0);
+  assert.ok(bodyRead > ipAdmission);
+  assert.ok(identity > bodyRead);
+  assert.ok(userAdmission > identity);
+  assert.ok(handler > userAdmission);
 });
 
 test("handler extraction does not include markers from a later handler", () => {
