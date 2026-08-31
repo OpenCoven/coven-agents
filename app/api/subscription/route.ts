@@ -1,6 +1,6 @@
 import { ipAddress } from "@vercel/functions";
-import { auth } from "@/app/(auth)/auth";
 import { enforceAbusePolicy } from "@/lib/abuse/enforce";
+import { verifiedJwtIdentity } from "@/lib/auth/verified-jwt";
 import { subscriptionCheckoutEnabled } from "@/lib/billing/config";
 import {
   type SubscriptionStatusDependencies,
@@ -9,7 +9,7 @@ import {
 import { findUserById } from "@/lib/db/queries";
 
 const subscriptionStatusDependencies: SubscriptionStatusDependencies = {
-  authenticate: auth,
+  authenticate: verifiedJwtIdentity,
   checkoutEnabled: () =>
     subscriptionCheckoutEnabled(
       process.env as unknown as Pick<

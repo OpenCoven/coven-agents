@@ -2,7 +2,11 @@ import {
   abuseAdmissionResponse,
   type enforceAbusePolicy,
 } from "@/lib/abuse/enforce";
-import type { SessionLike } from "@/lib/auth/subscriber-access";
+import {
+  authVersionMatches,
+  validAuthVersion,
+} from "@/lib/auth/session-revocation";
+import type { VerifiedJwtIdentity } from "@/lib/auth/verified-jwt";
 import { isCanonicalUuid } from "@/lib/session";
 import { isSubscribedAt } from "@/lib/subscription";
 
@@ -13,24 +17,33 @@ export type SubscriptionStatusResponse = {
 };
 
 export type SubscriptionStatusDependencies = {
-  authenticate: () => Promise<SessionLike>;
+  authenticate: (request: Request) => Promise<VerifiedJwtIdentity | null>;
   checkoutEnabled: () => boolean;
   enforceAbuse: typeof enforceAbusePolicy;
   findUser: (
     userId: string
-  ) => Promise<{ subscribedUntil: Date | null } | null>;
+  ) => Promise<{ authVersion: number; subscribedUntil: Date | null } | null>;
   now: () => Date;
 };
 
 export async function subscriptionResponse(
-  _request: Request,
+  request: Request,
   dependencies: SubscriptionStatusDependencies,
   sourceIp: string | null
 ): Promise<Response> {
-  const session = await dependencies.authenticate();
-  const userId = session?.user?.id;
+  let identity: VerifiedJwtIdentity | null;
+  try {
+    identity = await dependencies.authenticate(request);
+  } catch {
+    return noStoreJson({ error: "subscription_unavailable" }, 503);
+  }
+  const userId = identity?.userId;
+  const tokenAuthVersion = identity?.authVersion;
 
-  if (!(userId && isCanonicalUuid(userId))) {
+  if (
+    !(userId && isCanonicalUuid(userId)) ||
+    !validAuthVersion(tokenAuthVersion)
+  ) {
     return noStoreJson({ error: "unauthorized" }, 401);
   }
 
@@ -43,13 +56,16 @@ export async function subscriptionResponse(
     return abuseAdmissionResponse(admission);
   }
 
-  let owner: { subscribedUntil: Date | null } | null;
+  let owner: {
+    authVersion: number;
+    subscribedUntil: Date | null;
+  } | null;
   try {
     owner = await dependencies.findUser(userId);
   } catch {
     return noStoreJson({ error: "subscription_unavailable" }, 503);
   }
-  if (!owner) {
+  if (!owner || !authVersionMatches(owner.authVersion, tokenAuthVersion)) {
     return noStoreJson({ error: "unauthorized" }, 401);
   }
 

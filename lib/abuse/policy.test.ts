@@ -6,6 +6,7 @@ import { ABUSE_ROUTES, type AbusePolicy, type AbuseRoute } from "./types";
 const EXPECTED_ROUTES = [
   "auth_start",
   "auth_callback",
+  "auth_session_update",
   "chat",
   "chat_delete",
   "document_read",
@@ -51,6 +52,7 @@ const EXPECTED_ROUTES = [
 const EXPECTED_POLICIES = {
   analytics_read: expectedPolicy(["ip", "user"], 0, 20, 60, 100, 3600),
   auth_callback: expectedPolicy(["ip"], 16_384, 10, 60, 40, 3600),
+  auth_session_update: expectedPolicy(["ip", "user"], 0, 20, 60, 100, 3600),
   auth_start: expectedPolicy(["ip"], 0, 5, 60, 20, 3600),
   avatar_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   avatar_write: expectedPolicy(["ip", "user"], 8192, 10, 60, 40, 3600),

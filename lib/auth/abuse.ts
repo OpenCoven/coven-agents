@@ -5,16 +5,26 @@ import {
 } from "@/lib/abuse/enforce";
 import type { AbuseStore } from "@/lib/abuse/store";
 import type { AbuseRoute } from "@/lib/abuse/types";
+import {
+  type VerifiedJwtIdentity,
+  verifiedJwtIdentity,
+} from "@/lib/auth/verified-jwt";
 
-type AuthAbuseRoute = Extract<AbuseRoute, "auth_callback" | "auth_start">;
+type AuthAbuseRoute = Extract<
+  AbuseRoute,
+  "auth_callback" | "auth_session_update" | "auth_start"
+>;
 
 type AuthAbuseOptions = {
   basePath?: string;
+  enforceAbuse?: typeof enforceAbusePolicy;
+  readIdentity?: (request: Request) => Promise<VerifiedJwtIdentity | null>;
   store?: AbuseStore;
 };
 
 const AUTH_SIGNIN_PATH = /^\/api\/auth\/signin(?:\/[^/]+)?\/?$/;
 const AUTH_CALLBACK_PATH = /^\/api\/auth\/callback\/[^/]+\/?$/;
+const AUTH_SESSION_PATH = /^\/api\/auth\/session\/?$/;
 
 export function authAbuseRoute(
   method: string,
@@ -30,6 +40,9 @@ export function authAbuseRoute(
     AUTH_CALLBACK_PATH.test(normalizedPathname)
   ) {
     return "auth_callback";
+  }
+  if (method === "POST" && AUTH_SESSION_PATH.test(normalizedPathname)) {
+    return "auth_session_update";
   }
   return null;
 }
@@ -51,7 +64,24 @@ export function withAuthAbusePolicy<
       options.basePath ?? process.env.NEXT_PUBLIC_BASE_PATH
     );
     if (route) {
-      const admission = await enforceAbusePolicy({
+      let identity: VerifiedJwtIdentity | null = null;
+      if (route === "auth_session_update") {
+        try {
+          identity = await (options.readIdentity ?? verifiedJwtIdentity)(
+            request
+          );
+        } catch {
+          return abuseAdmissionResponse({
+            kind: "unavailable",
+            responseStatus: 503,
+          });
+        }
+        if (!identity) {
+          return handler(request, ...args);
+        }
+      }
+
+      const admission = await (options.enforceAbuse ?? enforceAbusePolicy)({
         /**
          * Degrades on store failure like every other route, and this is the
          * second reversal of this exact decision in one night, so the record
@@ -65,7 +95,8 @@ export function withAuthAbusePolicy<
          */
         ip: ipAddress(request) ?? null,
         route,
-        store: options.store,
+        ...(options.store ? { store: options.store } : {}),
+        ...(identity ? { userId: identity.userId } : {}),
       });
       if (admission.kind !== "allowed") {
         return abuseAdmissionResponse(admission);

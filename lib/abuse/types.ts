@@ -1,6 +1,7 @@
 export const ABUSE_ROUTES = Object.freeze([
   "auth_start",
   "auth_callback",
+  "auth_session_update",
   "chat",
   "chat_delete",
   "document_read",

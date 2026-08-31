@@ -108,3 +108,15 @@ export function avatarFor(user: { id: string; image?: string | null }): string {
     ? stored
     : generatedAvatar(user.id);
 }
+
+export function avatarSessionRefreshStatus(
+  expectedImage: string | null,
+  session: { user?: { image?: string | null } | null } | null
+): "deferred" | "refreshed" {
+  if (!session?.user) {
+    return "deferred";
+  }
+  return (session.user.image ?? null) === expectedImage
+    ? "refreshed"
+    : "deferred";
+}

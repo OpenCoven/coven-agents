@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { encode } from "next-auth/jwt";
 import { type AbuseStore, MemoryAbuseStore } from "@/lib/abuse/store";
+import { verifiedJwtIdentity } from "@/lib/auth/verified-jwt";
 import { authAbuseRoute, withAuthAbusePolicy } from "./abuse";
 
 const TEST_ORIGIN = "https://coven.test";
+const AUTH_SECRET = "auth-abuse-verified-session-secret";
+const SECURE_SESSION_COOKIE = "__Secure-authjs.session-token";
+const USER_ID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
 test("classifies only Auth.js OAuth initiation and callback methods", () => {
   const cases = [
@@ -22,7 +27,8 @@ test("classifies only Auth.js OAuth initiation and callback methods", () => {
     ["POST", "/api/auth/callback/github/", "auth_callback"],
     ["PUT", "/api/auth/callback/github", null],
     ["GET", "/api/auth/session", null],
-    ["POST", "/api/auth/session/", null],
+    ["POST", "/api/auth/session", "auth_session_update"],
+    ["POST", "/api/auth/session/", "auth_session_update"],
     ["GET", "/api/auth/csrf", null],
     ["GET", "/api/auth/providers", null],
     ["GET", "/api/auth/error", null],
@@ -53,6 +59,10 @@ test("classifies OAuth routes beneath the configured base path", () => {
     "auth_callback"
   );
   assert.equal(authAbuseRoute("GET", "/demo/api/auth/session", "/demo"), null);
+  assert.equal(
+    authAbuseRoute("POST", "/demo/api/auth/session", "/demo"),
+    "auth_session_update"
+  );
 });
 
 test("the wrapper enforces OAuth limits beneath the configured base path", async () => {
@@ -134,6 +144,187 @@ test("wraps POST starts and callback methods but bypasses GET sign-in and cheap 
       assert.deepEqual(consumedKeys, [], `${method} ${pathname}`);
     }
   }
+});
+
+test("session update admission uses verified cookie identity before the handler without reading the body", async () => {
+  const calls: string[] = [];
+  const request = new Request(`${TEST_ORIGIN}/api/auth/session`, {
+    body: JSON.stringify({
+      data: { type: "subscriber", userId: "attacker" },
+    }),
+    headers: {
+      "content-type": "application/json",
+      "x-real-ip": "203.0.113.44",
+    },
+    method: "POST",
+  });
+  const wrapped = withAuthAbusePolicy(
+    (receivedRequest: Request) => {
+      calls.push("handler");
+      assert.strictEqual(receivedRequest, request);
+      assert.equal(receivedRequest.bodyUsed, false);
+      return new Response(null, { status: 204 });
+    },
+    {
+      enforceAbuse: (input) => {
+        calls.push("abuse");
+        assert.deepEqual(input, {
+          ip: "203.0.113.44",
+          route: "auth_session_update",
+          userId: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+        });
+        return Promise.resolve({ kind: "allowed" });
+      },
+      readIdentity: (receivedRequest) => {
+        calls.push("identity");
+        assert.strictEqual(receivedRequest, request);
+        assert.equal(receivedRequest.bodyUsed, false);
+        return Promise.resolve({
+          authVersion: 4,
+          userId: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+        });
+      },
+    }
+  );
+
+  const response = await wrapped(request);
+
+  assert.equal(response.status, 204);
+  assert.deepEqual(calls, ["identity", "abuse", "handler"]);
+  assert.equal(request.bodyUsed, false);
+});
+
+test("session update denial stops before the Auth.js handler", async () => {
+  const calls: string[] = [];
+  const wrapped = withAuthAbusePolicy(
+    () => {
+      calls.push("handler");
+      return new Response(null, { status: 204 });
+    },
+    {
+      enforceAbuse: () => {
+        calls.push("abuse");
+        return Promise.resolve({
+          kind: "denied",
+          responseStatus: 429,
+          retryAfterSeconds: 12,
+        });
+      },
+      readIdentity: () => {
+        calls.push("identity");
+        return Promise.resolve({
+          authVersion: 4,
+          userId: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+        });
+      },
+    }
+  );
+
+  const response = await wrapped(
+    authRequest("/api/auth/session", "POST", "203.0.113.45")
+  );
+
+  assert.equal(response.status, 429);
+  assert.deepEqual(calls, ["identity", "abuse"]);
+});
+
+test("a real Auth.js cookie consumes the session update IP and verified-user budgets", async () => {
+  const consumedKeys: string[] = [];
+  const value = await encode({
+    salt: SECURE_SESSION_COOKIE,
+    secret: AUTH_SECRET,
+    token: { authVersion: 4, id: USER_ID, type: "demo" },
+  });
+  const store: AbuseStore = {
+    consume(key, limit, windowSeconds) {
+      consumedKeys.push(`${key}:${limit}:${windowSeconds}`);
+      return Promise.resolve({
+        allowed: true,
+        remaining: limit - 1,
+        retryAfterSeconds: windowSeconds,
+      });
+    },
+  };
+  const wrapped = withAuthAbusePolicy(
+    () => new Response(null, { status: 204 }),
+    {
+      readIdentity: (receivedRequest) =>
+        verifiedJwtIdentity(receivedRequest, {
+          environment: {
+            AUTH_SECRET,
+            AUTH_URL: TEST_ORIGIN,
+          },
+        }),
+      store,
+    }
+  );
+  const request = authRequest("/api/auth/session", "POST", "203.0.113.46");
+  request.headers.set("cookie", `${SECURE_SESSION_COOKIE}=${value}`);
+
+  const response = await wrapped(request);
+
+  assert.equal(response.status, 204);
+  assert.equal(consumedKeys.length, 4);
+  assert.ok(
+    consumedKeys.some((key) =>
+      key.startsWith("auth_session_update:burst:ip:203.0.113.46:20:60")
+    )
+  );
+  assert.ok(
+    consumedKeys.some((key) =>
+      key.startsWith(`auth_session_update:sustained:user:${USER_ID}:100:3600`)
+    )
+  );
+});
+
+test("anonymous and invalid session cookies reach Auth.js without a database-bearing update callback", async () => {
+  const calls: string[] = [];
+  const wrapped = withAuthAbusePolicy(
+    () => {
+      calls.push("handler");
+      return new Response(null, { status: 204 });
+    },
+    {
+      enforceAbuse: () => {
+        calls.push("abuse");
+        return Promise.resolve({ kind: "allowed" });
+      },
+      readIdentity: () => {
+        calls.push("identity");
+        return Promise.resolve(null);
+      },
+    }
+  );
+
+  const response = await wrapped(authRequest("/api/auth/session", "POST"));
+
+  assert.equal(response.status, 204);
+  assert.deepEqual(calls, ["identity", "handler"]);
+});
+
+test("ordinary GET session reads do not verify identity or consume update quota", async () => {
+  const calls: string[] = [];
+  const wrapped = withAuthAbusePolicy(
+    () => {
+      calls.push("handler");
+      return new Response(null, { status: 204 });
+    },
+    {
+      enforceAbuse: () => {
+        calls.push("abuse");
+        return Promise.resolve({ kind: "allowed" });
+      },
+      readIdentity: () => {
+        calls.push("identity");
+        return Promise.resolve(null);
+      },
+    }
+  );
+
+  const response = await wrapped(authRequest("/api/auth/session", "GET"));
+
+  assert.equal(response.status, 204);
+  assert.deepEqual(calls, ["handler"]);
 });
 
 test("repeated GET sign-in pages do not consume the store but POST initiation does", async () => {

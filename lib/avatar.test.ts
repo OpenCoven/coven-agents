@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { avatarFor, generatedAvatar, isStorableAvatarUrl } from "./avatar";
+import {
+  avatarFor,
+  avatarSessionRefreshStatus,
+  generatedAvatar,
+  isStorableAvatarUrl,
+} from "./avatar";
 
 const UUID_A = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
 const UUID_B = "9c858901-8a57-4791-81fe-4c455b099bc9";
@@ -95,4 +101,32 @@ test("the avatar follows the id, not the email", () => {
     avatarFor({ id: UUID_A, image: null }),
     avatarFor({ id: UUID_A, image: null })
   );
+});
+
+test("avatar refresh status distinguishes updated, stale, and missing sessions", () => {
+  assert.equal(
+    avatarSessionRefreshStatus("https://example.com/new.png", {
+      user: { image: "https://example.com/new.png" },
+    }),
+    "refreshed"
+  );
+  assert.equal(
+    avatarSessionRefreshStatus("https://example.com/new.png", {
+      user: { image: "https://example.com/old.png" },
+    }),
+    "deferred"
+  );
+  assert.equal(avatarSessionRefreshStatus(null, null), "deferred");
+});
+
+test("avatar settings sends only an update signal and reports a deferred session refresh", () => {
+  const source = readFileSync(
+    new URL("../components/account/avatar-settings.tsx", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(source, /const refreshedSession = await update\(\)/);
+  assert.match(source, /avatarSessionRefreshStatus\(image, refreshedSession\)/);
+  assert.match(source, /session could not refresh/i);
+  assert.doesNotMatch(source, /update\(\{\s*image\s*\}\)/);
 });

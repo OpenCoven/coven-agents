@@ -16,6 +16,7 @@ const WEBHOOK_WRITE = rateClass(600, 60, 10_000, 3600);
 const POLICIES = Object.freeze({
   analytics_read: closedPolicy(["ip", "user"], 0, EXPENSIVE_READ),
   auth_callback: closedPolicy(["ip"], 16_384, rateClass(10, 60, 40, 3600)),
+  auth_session_update: closedPolicy(["ip", "user"], 0, STANDARD_WRITE),
   auth_start: closedPolicy(["ip"], 0, rateClass(5, 60, 20, 3600)),
   avatar_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   avatar_write: closedPolicy(["ip", "user"], 8192, SENSITIVE_WRITE),

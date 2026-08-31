@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { JWT } from "next-auth/jwt";
+import { ChatbotError } from "./errors";
 import {
   claimsFromStoredUser,
   refreshClaimsForSessionUpdate,
@@ -220,6 +221,26 @@ test("invalid IDs and missing users clear the update without promotion", async (
   assert.equal(missing, null);
 });
 
+test("an invalid token auth version clears before stored-user lookup", async () => {
+  let lookupCalls = 0;
+  const refreshed = await refreshClaimsForSessionUpdate(
+    { ...sessionToken(), authVersion: Number.NaN },
+    {},
+    () => {
+      lookupCalls += 1;
+      return Promise.resolve({
+        authVersion: 4,
+        image: null,
+        subscribedUntil: LATER,
+      });
+    },
+    NOW
+  );
+
+  assert.equal(refreshed, null);
+  assert.equal(lookupCalls, 0);
+});
+
 test("a changed auth version revokes rather than refreshing the stale token", async () => {
   const refreshed = await refreshClaimsForSessionUpdate(
     sessionToken(),
@@ -236,7 +257,27 @@ test("a changed auth version revokes rather than refreshing the stale token", as
   assert.equal(refreshed, null);
 });
 
-test("stored-user lookup failures propagate to Auth.js", async () => {
+test("a classified database lookup failure preserves the exact existing token", async () => {
+  const token = sessionToken();
+  const refreshed = await refreshClaimsForSessionUpdate(
+    token,
+    {
+      authVersion: 999,
+      image: "https://attacker.test/avatar.png",
+      picture: "https://attacker.test/picture.png",
+      subscribedUntil: LATER.toISOString(),
+      type: "subscriber",
+    },
+    () => Promise.reject(new ChatbotError("bad_request:database")),
+    NOW
+  );
+
+  assert.strictEqual(refreshed, token);
+  assert.deepEqual(refreshed, sessionToken());
+  assert.equal("image" in refreshed, false);
+});
+
+test("unclassified stored-user lookup failures still propagate", async () => {
   await assert.rejects(
     refreshClaimsForSessionUpdate(
       sessionToken(),

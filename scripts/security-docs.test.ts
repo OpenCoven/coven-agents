@@ -268,5 +268,6 @@ test("auth callbacks and the client update preserve server-owned identity", () =
   assert.match(authSource, /token\.authVersion = row\.authVersion/);
   assert.match(authSource, /session\.user\.authVersion = token\.authVersion/);
   assert.match(authSource, /return refreshTokenType\(token, new Date\(\)\)/);
-  assert.match(avatarSource, /await update\(\{ image \}\)/);
+  assert.match(avatarSource, /const refreshedSession = await update\(\)/);
+  assert.doesNotMatch(avatarSource, /update\(\{\s*image\s*\}\)/);
 });

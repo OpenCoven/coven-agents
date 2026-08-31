@@ -1,5 +1,9 @@
 import type { JWT } from "next-auth/jwt";
-import { authVersionMatches } from "./auth/session-revocation";
+import {
+  authVersionMatches,
+  validAuthVersion,
+} from "./auth/session-revocation";
+import { ChatbotError } from "./errors";
 import { isCanonicalUuid } from "./session";
 import { userTypeFor } from "./subscription";
 
@@ -62,8 +66,9 @@ export function claimsFromStoredUser(
 /**
  * Reloads an update from storage without trusting any authority or presentation
  * field in the browser payload. Returning null is Auth.js' instruction to
- * clear an invalid or revoked JWT; lookup failures remain errors so an
- * infrastructure outage is never mistaken for a successful refresh.
+ * clear an invalid or revoked JWT. A classified database outage instead keeps
+ * the exact old token: no claim is promoted, while Auth.js also avoids
+ * mistaking an unavailable lookup for a broken cookie and deleting it.
  */
 export async function refreshClaimsForSessionUpdate(
   token: JWT,
@@ -72,11 +77,23 @@ export async function refreshClaimsForSessionUpdate(
   now: Date
 ): Promise<JWT | null> {
   const userId = token.id;
-  if (typeof userId !== "string" || !isCanonicalUuid(userId)) {
+  if (
+    typeof userId !== "string" ||
+    !isCanonicalUuid(userId) ||
+    !validAuthVersion(token.authVersion)
+  ) {
     return null;
   }
 
-  const user = await findUser(userId);
+  let user: StoredUserClaims | null;
+  try {
+    user = await findUser(userId);
+  } catch (error) {
+    if (error instanceof ChatbotError && error.surface === "database") {
+      return token;
+    }
+    throw error;
+  }
   if (!user || !authVersionMatches(user.authVersion, token.authVersion)) {
     return null;
   }

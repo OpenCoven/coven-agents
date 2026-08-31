@@ -6,6 +6,7 @@ import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { avatarSessionRefreshStatus } from "@/lib/avatar";
 
 type AvatarState = { avatar: string; custom: boolean };
 
@@ -22,8 +23,7 @@ export function AvatarSettings() {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [locked, setLocked] = useState(false);
-  // Pushes the new picture onto the session token, so the account menu
-  // updates with the page instead of at the next sign-in.
+  // Signals the server to reload stored claims; no browser field is authority.
   const { update } = useSession();
 
   const load = useCallback(async () => {
@@ -72,7 +72,17 @@ export function AvatarSettings() {
 
         setState((await response.json()) as AvatarState);
         setUrl("");
-        await update({ image });
+        const refreshedSession = await update().catch(() => null);
+        if (
+          avatarSessionRefreshStatus(image, refreshedSession) === "deferred"
+        ) {
+          toast({
+            description:
+              "Avatar saved, but the session could not refresh. It will update later.",
+            type: "error",
+          });
+          return;
+        }
         toast({
           description: image ? "Avatar updated." : "Back to the generated one.",
           type: "success",
