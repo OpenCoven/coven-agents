@@ -203,6 +203,8 @@ function isRequiredPlanningPath(path: string): boolean {
   return (
     path === "POLISH.md" ||
     path === "ROADMAP.md" ||
+    path === "docs/beads-project-sync.md" ||
+    /^docs\/operations\/.+\.md$/u.test(path) ||
     /^docs\/roadmap\/.+\.md$/u.test(path) ||
     /^docs\/proposals\/.+\.md$/u.test(path) ||
     path === "docs/superpowers/README.md"

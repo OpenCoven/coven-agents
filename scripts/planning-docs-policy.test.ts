@@ -214,6 +214,35 @@ test("requires nested roadmap and proposal documents to be indexed", () => {
   );
 });
 
+test("requires planning operations and sync guidance to be indexed", () => {
+  assert.deepEqual(
+    findPlanningDocumentViolations(
+      input({
+        trackedPaths: [
+          ...trackedPaths,
+          "docs/beads-project-sync.md",
+          "docs/operations/cutover.md",
+          "docs/operations/deployment.md",
+        ],
+      })
+    ),
+    [
+      {
+        path: "docs/beads-project-sync.md",
+        reason: "unindexed-planning-document",
+      },
+      {
+        path: "docs/operations/cutover.md",
+        reason: "unindexed-planning-document",
+      },
+      {
+        path: "docs/operations/deployment.md",
+        reason: "unindexed-planning-document",
+      },
+    ]
+  );
+});
+
 test("requires historical and superseded documents to link current guidance", () => {
   const missingGuidance = registry.replace(
     "| [`POLISH.md`](../../POLISH.md) | Decision log | Historical | Repository evidence | 2026-08-31 | [Current state](current-state.md) |",
