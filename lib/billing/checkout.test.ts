@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type Stripe from "stripe";
-import { checkoutDecision, stableIntegrationIdentifier } from "./checkout";
+import {
+  checkoutDecision,
+  isBlockingSubscriptionStatus,
+  stableIntegrationIdentifier,
+} from "./checkout";
 import { createStripeClient } from "./stripe-client";
 
 const BLOCKING_STATUSES = [
@@ -15,14 +19,7 @@ const BLOCKING_STATUSES = [
 
 test("every live subscription status blocks checkout", () => {
   for (const status of BLOCKING_STATUSES) {
-    assert.equal(
-      checkoutDecision({
-        subscriptions: [{ status }],
-        userId: "user-1",
-      }).kind,
-      "already_subscribed",
-      status
-    );
+    assert.equal(isBlockingSubscriptionStatus(status), true, status);
   }
 });
 
@@ -31,21 +28,14 @@ test("terminal subscriptions allow a new checkout", () => {
     "canceled",
     "incomplete_expired",
   ] satisfies Stripe.Subscription.Status[]) {
-    assert.equal(
-      checkoutDecision({
-        subscriptions: [{ status }],
-        userId: "user-1",
-      }).kind,
-      "allowed",
-      status
-    );
+    assert.equal(isBlockingSubscriptionStatus(status), false, status);
   }
 });
 
 test("an anonymous caller is refused before subscription state is disclosed", () => {
   assert.equal(
     checkoutDecision({
-      subscriptions: [{ status: "active" }],
+      hasBlockingSubscription: true,
       userId: null,
     }).kind,
     "unauthorized"
@@ -54,7 +44,7 @@ test("an anonymous caller is refused before subscription state is disclosed", ()
 
 test("an allowed decision carries the authenticated user", () => {
   const decision = checkoutDecision({
-    subscriptions: [],
+    hasBlockingSubscription: false,
     userId: "user-1",
   });
 

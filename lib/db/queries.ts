@@ -196,12 +196,23 @@ export async function findUserByStripeCustomerId(
   }
 }
 
-export async function attachStripeCustomer(userId: string, customerId: string) {
+export async function attachStripeCustomer(
+  userId: string,
+  customerId: string
+): Promise<string> {
   try {
-    return await db
+    const [owner] = await db
       .update(user)
-      .set({ stripeCustomerId: customerId })
-      .where(eq(user.id, userId));
+      .set({
+        stripeCustomerId: sql<string>`coalesce(${user.stripeCustomerId}, ${customerId})`,
+      })
+      .where(eq(user.id, userId))
+      .returning({ stripeCustomerId: user.stripeCustomerId });
+
+    if (!owner?.stripeCustomerId) {
+      throw new Error("Stripe Customer owner does not exist.");
+    }
+    return owner.stripeCustomerId;
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
   }

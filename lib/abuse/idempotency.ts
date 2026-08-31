@@ -68,6 +68,50 @@ export type IdempotencyResult =
       response: IdempotencyResponse;
     };
 
+export type IdempotencyLeaseResult<T> =
+  | { kind: "in_progress" }
+  | { kind: "performed"; value: T };
+
+export async function runWithIdempotencyLease<T>(options: {
+  idempotencyKey: string;
+  now?: () => Date;
+  operation: string;
+  ownerId: string;
+  perform: () => Promise<T>;
+  store: IdempotencyStore;
+}): Promise<IdempotencyLeaseResult<T>> {
+  const now = options.now ?? (() => new Date());
+  const claimedAt = now();
+  assertValidDate(claimedAt);
+
+  const claimExpiresAt = new Date(claimedAt.getTime() + CLAIM_TTL_MS);
+  await options.store.cleanupExpired({
+    before: claimedAt,
+    limit: CLEANUP_LIMIT,
+  });
+  const claimResult = await options.store.claim({
+    claimExpiresAt,
+    keyHash: sha256(options.idempotencyKey),
+    now: claimedAt,
+    operation: options.operation,
+    ownerId: options.ownerId,
+    requestHash: sha256("lease"),
+  });
+
+  if (claimResult.kind === "in_progress") {
+    return claimResult;
+  }
+  if (claimResult.kind !== "claimed") {
+    throw new Error("Idempotency lease entered an invalid persisted state.");
+  }
+
+  try {
+    return { kind: "performed", value: await options.perform() };
+  } finally {
+    await options.store.release({ claim: claimResult.claim });
+  }
+}
+
 export async function runIdempotentOperation(options: {
   idempotencyKey: string | null;
   now?: () => Date;

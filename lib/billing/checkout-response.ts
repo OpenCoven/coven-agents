@@ -8,6 +8,7 @@ import {
   type IdempotencyStore,
   idempotencyResultResponse,
   runIdempotentOperation,
+  runWithIdempotencyLease,
 } from "@/lib/abuse/idempotency";
 import { plaintextIdempotencyResponseStorage } from "@/lib/abuse/idempotency-response";
 import type { SessionLike } from "@/lib/auth/subscriber-access";
@@ -18,12 +19,12 @@ import {
 import type { SubscriptionCheckoutConfig } from "@/lib/billing/config";
 
 const CHECKOUT_RESULT_RETENTION_MS = 24 * 60 * 60_000;
+const CHECKOUT_ATTEMPT_LEASE_KEY = "checkout-attempt-lease";
+const CHECKOUT_ATTEMPT_OPERATION = "checkout-attempt";
 
 type ProviderRequestOptions = {
   idempotencyKey: string;
 };
-
-type CheckoutSubscription = Pick<Stripe.Subscription, "status">;
 
 export type CheckoutProvider = {
   createCheckoutSession: (
@@ -34,13 +35,15 @@ export type CheckoutProvider = {
     input: Stripe.CustomerCreateParams,
     options: ProviderRequestOptions
   ) => Promise<{ id: string }>;
-  listSubscriptions: (
-    input: Stripe.SubscriptionListParams
-  ) => Promise<{ data: CheckoutSubscription[] }>;
+  findOpenCheckoutSession: (
+    customerId: string,
+    userId: string
+  ) => Promise<{ url: string | null } | null>;
+  hasBlockingSubscription: (customerId: string) => Promise<boolean>;
 };
 
 export type CheckoutDependencies = {
-  attachCustomer: (userId: string, customerId: string) => Promise<unknown>;
+  attachCustomer: (userId: string, customerId: string) => Promise<string>;
   authenticate: () => Promise<SessionLike>;
   checkoutEnabled: () => boolean;
   createProvider: (apiKey: string) => CheckoutProvider;
@@ -101,72 +104,96 @@ export async function checkoutResponse(
           status: 404,
         };
       }
-
-      const row = await dependencies.findUser(userId);
-      let provider: CheckoutProvider;
-      let subscriptions: CheckoutSubscription[] = [];
+      const enabledConfig = config;
 
       try {
-        provider = dependencies.createProvider(config.apiKey);
-        if (row?.stripeCustomerId) {
-          subscriptions = (
-            await provider.listSubscriptions({
-              customer: row.stripeCustomerId,
-              limit: 100,
-              status: "all",
-            })
-          ).data;
-        }
-      } catch {
-        return checkoutFailure();
-      }
+        const attempt = await runWithIdempotencyLease({
+          idempotencyKey: CHECKOUT_ATTEMPT_LEASE_KEY,
+          operation: CHECKOUT_ATTEMPT_OPERATION,
+          ownerId: userId,
+          perform: async (): Promise<IdempotencyResponse> => {
+            const row = await dependencies.findUser(userId);
+            const provider = dependencies.createProvider(enabledConfig.apiKey);
+            const hasBlockingSubscription = row?.stripeCustomerId
+              ? await provider.hasBlockingSubscription(row.stripeCustomerId)
+              : false;
 
-      const decision = checkoutDecision({ subscriptions, userId });
-      if (decision.kind === "already_subscribed") {
-        return { body: { error: "already_subscribed" }, status: 409 };
-      }
-      if (decision.kind === "unauthorized") {
-        return { body: { error: "unauthorized" }, status: 401 };
-      }
+            const decision = checkoutDecision({
+              hasBlockingSubscription,
+              userId,
+            });
+            if (decision.kind === "already_subscribed") {
+              return {
+                body: { error: "already_subscribed" },
+                status: 409,
+              };
+            }
+            if (decision.kind === "unauthorized") {
+              return { body: { error: "unauthorized" }, status: 401 };
+            }
 
-      const customerIdempotencyKey = `${providerIdempotencyKey}:customer`;
-      const sessionIdempotencyKey = `${providerIdempotencyKey}:session`;
-      let customerId = row?.stripeCustomerId ?? null;
+            if (row?.stripeCustomerId) {
+              const openCheckout = await provider.findOpenCheckoutSession(
+                row.stripeCustomerId,
+                decision.userId
+              );
+              if (openCheckout) {
+                return openCheckout.url
+                  ? { body: { url: openCheckout.url }, status: 200 }
+                  : checkoutFailure();
+              }
+            }
 
-      try {
-        if (!customerId) {
-          customerId = (
-            await provider.createCustomer(
-              { metadata: { userId: decision.userId } },
-              { idempotencyKey: customerIdempotencyKey }
-            )
-          ).id;
-          await dependencies.attachCustomer(decision.userId, customerId);
-        }
+            const customerIdempotencyKey = `${providerIdempotencyKey}:customer`;
+            const sessionIdempotencyKey = `${providerIdempotencyKey}:session`;
+            let customerId = row?.stripeCustomerId ?? null;
 
-        const origin = dependencies.origin();
-        const checkout = await provider.createCheckoutSession(
-          {
-            cancel_url: `${origin}/account?checkout=cancelled`,
-            client_reference_id: decision.userId,
-            customer: customerId,
-            integration_identifier: stableIntegrationIdentifier(
-              providerIdempotencyKey
-            ),
-            line_items: [{ price: config.priceId, quantity: 1 }],
-            metadata: { userId: decision.userId },
-            mode: "subscription",
-            subscription_data: { metadata: { userId: decision.userId } },
-            success_url: `${origin}/account?checkout=success`,
+            if (!customerId) {
+              customerId = (
+                await provider.createCustomer(
+                  { metadata: { userId: decision.userId } },
+                  { idempotencyKey: customerIdempotencyKey }
+                )
+              ).id;
+              customerId = await dependencies.attachCustomer(
+                decision.userId,
+                customerId
+              );
+            }
+
+            const origin = dependencies.origin();
+            const checkout = await provider.createCheckoutSession(
+              {
+                cancel_url: `${origin}/account?checkout=cancelled`,
+                client_reference_id: decision.userId,
+                customer: customerId,
+                integration_identifier: stableIntegrationIdentifier(
+                  providerIdempotencyKey
+                ),
+                line_items: [{ price: enabledConfig.priceId, quantity: 1 }],
+                metadata: { userId: decision.userId },
+                mode: "subscription",
+                subscription_data: { metadata: { userId: decision.userId } },
+                success_url: `${origin}/account?checkout=success`,
+              },
+              { idempotencyKey: sessionIdempotencyKey }
+            );
+
+            if (!checkout.url) {
+              return checkoutFailure();
+            }
+
+            return { body: { url: checkout.url }, status: 200 };
           },
-          { idempotencyKey: sessionIdempotencyKey }
-        );
-
-        if (!checkout.url) {
-          return checkoutFailure();
+          store: dependencies.idempotencyStore,
+        });
+        if (attempt.kind === "in_progress") {
+          return {
+            body: { error: "request_in_progress" },
+            status: 409,
+          };
         }
-
-        return { body: { url: checkout.url }, status: 200 };
+        return attempt.value;
       } catch {
         return checkoutFailure();
       }

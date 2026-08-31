@@ -15,6 +15,11 @@ export type CheckoutDecision =
   | { kind: "already_subscribed" }
   | { kind: "unauthorized" };
 
+export type CheckoutSubscriptionPage = {
+  data: Pick<Stripe.Subscription, "id" | "status">[];
+  hasMore: boolean;
+};
+
 /**
  * Whether this user may open a checkout session.
  *
@@ -27,22 +32,57 @@ export type CheckoutDecision =
  * account is subscribed.
  */
 export function checkoutDecision(input: {
-  subscriptions: readonly Pick<Stripe.Subscription, "status">[];
+  hasBlockingSubscription: boolean;
   userId: string | null;
 }): CheckoutDecision {
   if (!input.userId) {
     return { kind: "unauthorized" };
   }
 
-  if (
-    input.subscriptions.some(({ status }) =>
-      BLOCKING_SUBSCRIPTION_STATUSES.has(status)
-    )
-  ) {
+  if (input.hasBlockingSubscription) {
     return { kind: "already_subscribed" };
   }
 
   return { kind: "allowed", userId: input.userId };
+}
+
+export function isBlockingSubscriptionStatus(
+  status: Stripe.Subscription.Status
+): boolean {
+  return BLOCKING_SUBSCRIPTION_STATUSES.has(status);
+}
+
+export async function hasBlockingSubscription(
+  customerId: string,
+  listPage: (
+    input: Stripe.SubscriptionListParams
+  ) => Promise<CheckoutSubscriptionPage>
+): Promise<boolean> {
+  let startingAfter: string | undefined;
+
+  do {
+    // biome-ignore lint/performance/noAwaitInLoops: each Stripe page supplies the cursor for the next.
+    const page = await listPage({
+      customer: customerId,
+      limit: 100,
+      starting_after: startingAfter,
+      status: "all",
+    });
+    if (page.data.some(({ status }) => isBlockingSubscriptionStatus(status))) {
+      return true;
+    }
+    if (!page.hasMore) {
+      return false;
+    }
+
+    const lastSubscription = page.data.at(-1);
+    if (!lastSubscription) {
+      throw new Error("Stripe returned an empty non-terminal page.");
+    }
+    startingAfter = lastSubscription.id;
+  } while (startingAfter);
+
+  return false;
 }
 
 export function stableIntegrationIdentifier(

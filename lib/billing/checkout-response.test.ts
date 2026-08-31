@@ -10,6 +10,7 @@ import type {
   IdempotencyStore,
   StoredIdempotencyResponse,
 } from "@/lib/abuse/idempotency";
+import { hasBlockingSubscription } from "@/lib/billing/checkout";
 import {
   type CheckoutDependencies,
   type CheckoutProvider,
@@ -101,7 +102,7 @@ test("enabled checkout preserves the required operation order", async () => {
   const dependencies = dependenciesFor({
     attachCustomer: () => {
       calls.push("attach customer");
-      return Promise.resolve();
+      return Promise.resolve("cus_new");
     },
     authenticate: () => {
       calls.push("authenticate");
@@ -158,11 +159,14 @@ test("enabled checkout preserves the required operation order", async () => {
     "idempotency cleanup",
     "idempotency claim",
     "configuration",
+    "idempotency cleanup",
+    "idempotency claim",
     "read user",
     "create Stripe client",
     "create Customer",
     "attach customer",
     "create Checkout",
+    "idempotency release",
     "idempotency complete",
   ]);
 });
@@ -207,6 +211,106 @@ test("same browser key reuses provider keys and integration identifier on retry"
   assert.match(integrationIdentifiers[0] ?? "", /[a-z]{8}$/);
 });
 
+test("concurrent distinct browser keys create only one payable Checkout attempt", async () => {
+  let attachedCustomerId: string | null = null;
+  let customerCalls = 0;
+  let releaseFirstCustomer!: () => void;
+  let sessionCalls = 0;
+  let signalFirstCustomerStarted!: () => void;
+  const firstCustomerStarted = new Promise<void>((resolve) => {
+    signalFirstCustomerStarted = resolve;
+  });
+  const firstCustomerGate = new Promise<void>((resolve) => {
+    releaseFirstCustomer = resolve;
+  });
+  const dependencies = dependenciesFor({
+    attachCustomer: (_userId, customerId) => {
+      attachedCustomerId ??= customerId;
+      return Promise.resolve(attachedCustomerId);
+    },
+    createProvider: () =>
+      defaultProvider({
+        createCheckoutSession(input) {
+          sessionCalls += 1;
+          return Promise.resolve({
+            url: `https://checkout.stripe.test/${input.customer}`,
+          });
+        },
+        async createCustomer() {
+          customerCalls += 1;
+          if (customerCalls === 1) {
+            signalFirstCustomerStarted();
+            await firstCustomerGate;
+          }
+          return { id: `cus_${customerCalls}` };
+        },
+      }),
+    findUser: () => Promise.resolve({ stripeCustomerId: attachedCustomerId }),
+  });
+
+  const first = checkoutResponse(
+    request("checkout-request-distinct-one"),
+    dependencies,
+    null
+  );
+  await firstCustomerStarted;
+  const concurrent = await checkoutResponse(
+    request("checkout-request-distinct-two"),
+    dependencies,
+    null
+  );
+
+  assert.equal(concurrent.status, 409);
+  assert.deepEqual(await concurrent.json(), { error: "request_in_progress" });
+
+  releaseFirstCustomer();
+  const completed = await first;
+
+  assert.equal(completed.status, 200);
+  assert.equal(customerCalls, 1);
+  assert.equal(sessionCalls, 1);
+  assert.equal(attachedCustomerId, "cus_1");
+});
+
+test("a later distinct browser key reuses the open Checkout Session", async () => {
+  let openCheckout: { url: string | null } | null = null;
+  let sessionCalls = 0;
+  const dependencies = dependenciesFor({
+    createProvider: () =>
+      defaultProvider({
+        createCheckoutSession() {
+          sessionCalls += 1;
+          openCheckout = {
+            url: `https://checkout.stripe.test/session-${sessionCalls}`,
+          };
+          return Promise.resolve(openCheckout);
+        },
+        findOpenCheckoutSession: () => Promise.resolve(openCheckout),
+      }),
+  });
+
+  const first = await checkoutResponse(
+    request("checkout-request-distinct-one"),
+    dependencies,
+    null
+  );
+  const later = await checkoutResponse(
+    request("checkout-request-distinct-two"),
+    dependencies,
+    null
+  );
+
+  assert.equal(first.status, 200);
+  assert.equal(later.status, 200);
+  assert.deepEqual(await first.json(), {
+    url: "https://checkout.stripe.test/session-1",
+  });
+  assert.deepEqual(await later.json(), {
+    url: "https://checkout.stripe.test/session-1",
+  });
+  assert.equal(sessionCalls, 1);
+});
+
 test("Customer and Checkout creation use separate derived idempotency keys", async () => {
   let customerKey = "";
   let sessionKey = "";
@@ -235,6 +339,30 @@ test("Customer and Checkout creation use separate derived idempotency keys", asy
   assert.notEqual(customerKey, sessionKey);
 });
 
+test("Checkout uses the Customer that won the atomic ownership attachment", async () => {
+  let checkoutCustomer: string | undefined;
+  const dependencies = dependenciesFor({
+    attachCustomer: () => Promise.resolve("cus_owned"),
+    createProvider: () =>
+      defaultProvider({
+        createCheckoutSession(input) {
+          checkoutCustomer =
+            typeof input.customer === "string" ? input.customer : undefined;
+          return Promise.resolve({
+            url: "https://checkout.stripe.test/session",
+          });
+        },
+        createCustomer: () => Promise.resolve({ id: "cus_racing" }),
+      }),
+    findUser: () => Promise.resolve({ stripeCustomerId: null }),
+  });
+
+  const response = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(response.status, 200);
+  assert.equal(checkoutCustomer, "cus_owned");
+});
+
 test("every blocking subscription status returns already_subscribed", async (t) => {
   await Promise.all(
     (
@@ -256,7 +384,7 @@ test("every blocking subscription status returns already_subscribed", async (t) 
                 checkoutCalls += 1;
                 return Promise.resolve({ url: "impossible" });
               },
-              listSubscriptions: () => Promise.resolve({ data: [{ status }] }),
+              hasBlockingSubscription: () => Promise.resolve(true),
             }),
         });
 
@@ -272,6 +400,42 @@ test("every blocking subscription status returns already_subscribed", async (t) 
   );
 });
 
+test("a blocking subscription on a later page prevents Checkout", async () => {
+  const firstPage = Array.from({ length: 100 }, (_, index) => ({
+    id: `sub_terminal_${index}`,
+    status: "canceled" as const,
+  }));
+  const startingAfter: Array<string | undefined> = [];
+  let checkoutCalls = 0;
+  const dependencies = dependenciesFor({
+    createProvider: () =>
+      defaultProvider({
+        createCheckoutSession() {
+          checkoutCalls += 1;
+          return Promise.resolve({ url: "impossible" });
+        },
+        hasBlockingSubscription: (customerId) =>
+          hasBlockingSubscription(customerId, (input) => {
+            startingAfter.push(input.starting_after);
+            if (input.starting_after === firstPage.at(-1)?.id) {
+              return Promise.resolve({
+                data: [{ id: "sub_blocking", status: "active" as const }],
+                hasMore: false,
+              });
+            }
+            return Promise.resolve({ data: firstPage, hasMore: true });
+          }),
+      }),
+  });
+
+  const response = await checkoutResponse(request(), dependencies, null);
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: "already_subscribed" });
+  assert.deepEqual(startingAfter, [undefined, firstPage.at(-1)?.id]);
+  assert.equal(checkoutCalls, 0);
+});
+
 test("terminal subscriptions allow a new Checkout Session", async (t) => {
   await Promise.all(
     (
@@ -281,7 +445,7 @@ test("terminal subscriptions allow a new Checkout Session", async (t) => {
         const dependencies = dependenciesFor({
           createProvider: () =>
             defaultProvider({
-              listSubscriptions: () => Promise.resolve({ data: [{ status }] }),
+              hasBlockingSubscription: () => Promise.resolve(false),
             }),
         });
 
@@ -305,7 +469,7 @@ test("Checkout carries the user, configured Price, and account return URLs", asy
   const dependencies = dependenciesFor({
     attachCustomer(userId, customerId) {
       attached = { customerId, userId };
-      return Promise.resolve();
+      return Promise.resolve(customerId);
     },
     createProvider: () =>
       defaultProvider({
@@ -378,7 +542,8 @@ test("Stripe failures return explicit non-success responses", async (t) => {
     {
       createProvider: () =>
         defaultProvider({
-          listSubscriptions: () => Promise.reject(new Error("Stripe failed")),
+          hasBlockingSubscription: () =>
+            Promise.reject(new Error("Stripe failed")),
         }),
       name: "subscription lookup",
       userHasCustomer: true,
@@ -426,7 +591,7 @@ function dependenciesFor(
   overrides: Partial<CheckoutDependencies> = {}
 ): CheckoutDependencies {
   return {
-    attachCustomer: () => Promise.resolve(),
+    attachCustomer: (_userId, customerId) => Promise.resolve(customerId),
     authenticate: () => Promise.resolve(session()),
     checkoutEnabled: () => true,
     createProvider: () => defaultProvider(),
@@ -451,14 +616,15 @@ function defaultProvider(
     createCheckoutSession: () =>
       Promise.resolve({ url: "https://checkout.stripe.test/session" }),
     createCustomer: () => Promise.resolve({ id: "cus_new" }),
-    listSubscriptions: () => Promise.resolve({ data: [] }),
+    findOpenCheckoutSession: () => Promise.resolve(null),
+    hasBlockingSubscription: () => Promise.resolve(false),
     ...overrides,
   };
 }
 
-function request() {
+function request(idempotencyKey = REQUEST_IDENTIFIER) {
   return new Request(`${ORIGIN}/api/checkout`, {
-    headers: { "idempotency-key": REQUEST_IDENTIFIER },
+    headers: { "idempotency-key": idempotencyKey },
     method: "POST",
   });
 }
@@ -491,12 +657,13 @@ function throwingStore(calls: string[]): IdempotencyStore {
 class MemoryIdempotencyStore implements IdempotencyStore {
   private readonly recordOperation: (operation: string) => void;
 
-  private record:
-    | {
-        claim: IdempotencyClaimHandle;
-        response: StoredIdempotencyResponse | null;
-      }
-    | undefined;
+  private readonly records = new Map<
+    string,
+    {
+      claim: IdempotencyClaimHandle;
+      response: StoredIdempotencyResponse | null;
+    }
+  >();
 
   constructor(recordOperation: (operation: string) => void = () => undefined) {
     this.recordOperation = recordOperation;
@@ -504,7 +671,9 @@ class MemoryIdempotencyStore implements IdempotencyStore {
 
   claim(input: IdempotencyClaimInput): Promise<IdempotencyClaimResult> {
     this.recordOperation("idempotency claim");
-    if (!this.record) {
+    const scope = idempotencyScope(input);
+    const record = this.records.get(scope);
+    if (!record) {
       const claim = {
         claimExpiresAt: input.claimExpiresAt,
         keyHash: input.keyHash,
@@ -512,18 +681,18 @@ class MemoryIdempotencyStore implements IdempotencyStore {
         ownerId: input.ownerId,
         requestHash: input.requestHash,
       };
-      this.record = { claim, response: null };
+      this.records.set(scope, { claim, response: null });
       return Promise.resolve({ claim, kind: "claimed" });
     }
-    if (this.record.claim.requestHash !== input.requestHash) {
+    if (record.claim.requestHash !== input.requestHash) {
       return Promise.resolve({ kind: "conflict" });
     }
-    if (!this.record.response) {
+    if (!record.response) {
       return Promise.resolve({ kind: "in_progress" });
     }
     return Promise.resolve({
       kind: "completed",
-      response: this.record.response,
+      response: record.response,
     });
   }
 
@@ -534,14 +703,23 @@ class MemoryIdempotencyStore implements IdempotencyStore {
 
   complete(input: IdempotencyCompleteInput): Promise<void> {
     this.recordOperation("idempotency complete");
-    assert.ok(this.record);
-    this.record.response = input.response;
+    const record = this.records.get(idempotencyScope(input.claim));
+    assert.ok(record);
+    record.response = input.response;
     return Promise.resolve();
   }
 
-  release(_input: IdempotencyReleaseInput): Promise<void> {
+  release(input: IdempotencyReleaseInput): Promise<void> {
     this.recordOperation("idempotency release");
-    this.record = undefined;
+    this.records.delete(idempotencyScope(input.claim));
     return Promise.resolve();
   }
+}
+
+function idempotencyScope(input: {
+  keyHash: string;
+  operation: string;
+  ownerId: string;
+}) {
+  return `${input.ownerId}\0${input.operation}\0${input.keyHash}`;
 }

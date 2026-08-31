@@ -64,29 +64,36 @@ administrative revoke clears the period immediately.
 
 `app/api/checkout/route.ts` owns checkout initiation:
 
-1. Require an authenticated application user and pass abuse admission before
-   contacting Stripe.
-2. Claim a durable application idempotency key before provider work.
+1. Require an authenticated application user, then require the default-off
+   checkout launch gate before abuse admission or provider work.
+2. Pass abuse admission, then claim the caller's durable application
+   idempotency key.
 3. Require `STRIPE_SECRET_KEY` and `STRIPE_PRICE_ID`; otherwise return
    `billing_unavailable` without changing subscription state.
-4. Reuse the user's Stripe Customer or create one with `metadata.userId`, then
-   persist the unique customer-to-user link.
-5. Enforce the **At most one active subscription** policy by asking Stripe for
-   an existing subscription whose status is exactly `active` before opening
-   Checkout.
-6. Permit cancel-then-resubscribe with the same Customer. Historical or
+4. Acquire a short-lived durable per-user checkout lease. A concurrent request
+   with a distinct browser key receives `request_in_progress`; no database
+   transaction remains open during Stripe calls.
+5. Reuse the user's Stripe Customer or create one with `metadata.userId`, then
+   atomically attach it without replacing a Customer already owned by the
+   account.
+6. Page through every Stripe subscription until a blocking status is found or
+   all pages are exhausted.
+7. Reuse an existing open hosted subscription Checkout Session for the same
+   Customer and user. Completed and expired Sessions are not reused.
+8. Permit cancel-then-resubscribe with the same Customer. Historical or
    cancelled subscriptions are expected and do not violate the invariant.
-7. Create the hosted subscription Checkout Session with provider idempotency
-   keys derived from the claimed application operation.
+9. Create the hosted subscription Checkout Session with distinct provider
+   idempotency keys derived from the claimed application operation.
 
 The decision helper is `lib/billing/checkout.ts`; the route and
 `lib/billing/checkout.test.ts` are the current enforcement sources. A user row
 stores one Customer ID, and the unique `stripeCustomerId` index prevents that
 ID from belonging to two users; it is not the one-active-subscription control.
-The provider query and Checkout creation are not one cross-request atomic
-operation. Concurrent first checkouts using different idempotency keys, orphan
-Customers, and non-`active` provider states require operational reconciliation
-and must be included in production verification.
+The **At most one active subscription** policy also treats non-terminal
+payment states as blocking so a second payable Checkout cannot bypass an
+incomplete first attempt.
+The durable lease serializes provider inspection and creation across instances;
+Stripe remains the durable source for open Checkout and subscription state.
 
 ## Webhook responsibilities
 

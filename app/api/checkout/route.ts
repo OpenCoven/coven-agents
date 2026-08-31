@@ -1,6 +1,7 @@
 import { ipAddress } from "@vercel/functions";
 import { auth } from "@/app/(auth)/auth";
 import { enforceAbusePolicy } from "@/lib/abuse/enforce";
+import { hasBlockingSubscription } from "@/lib/billing/checkout";
 import {
   type CheckoutDependencies,
   checkoutResponse as checkoutResponseWithDependencies,
@@ -34,11 +35,30 @@ const checkoutDependencies: CheckoutDependencies = {
         const customer = await stripe.customers.create(input, options);
         return { id: customer.id };
       },
-      async listSubscriptions(input) {
-        const subscriptions = await stripe.subscriptions.list(input);
-        return {
-          data: subscriptions.data.map(({ status }) => ({ status })),
-        };
+      async findOpenCheckoutSession(customerId, userId) {
+        for await (const session of stripe.checkout.sessions.list({
+          customer: customerId,
+          limit: 100,
+          status: "open",
+        })) {
+          if (
+            session.client_reference_id === userId &&
+            session.metadata?.userId === userId &&
+            session.mode === "subscription"
+          ) {
+            return { url: session.url };
+          }
+        }
+        return null;
+      },
+      hasBlockingSubscription(customerId) {
+        return hasBlockingSubscription(customerId, async (input) => {
+          const subscriptions = await stripe.subscriptions.list(input);
+          return {
+            data: subscriptions.data.map(({ id, status }) => ({ id, status })),
+            hasMore: subscriptions.has_more,
+          };
+        });
       },
     };
   },
