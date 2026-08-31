@@ -316,6 +316,7 @@ test.describe("Run console", () => {
       const selector = page.getByRole("dialog", {
         name: "Choose execution profile",
       });
+      await expect(selector).toHaveAttribute("aria-modal", "true");
       await selector
         .getByRole("button", {
           name: new RegExp(`${template.name}.*${profile.mode}`, "u"),

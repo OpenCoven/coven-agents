@@ -153,6 +153,7 @@ export function ProfileSelector({
           {/* biome-ignore lint/a11y/noNoninteractiveElementInteractions: the dialog owns Escape and focus containment. */}
           <dialog
             aria-label="Choose execution profile"
+            aria-modal="true"
             className="oc-profile-selector__dialog"
             onKeyDown={(event) => {
               if (event.key === "Escape") {
