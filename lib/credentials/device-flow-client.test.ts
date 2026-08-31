@@ -8,6 +8,7 @@ import {
 } from "./device-flow-client";
 
 const STARTED = {
+  binding: "owner-binding",
   deviceCode: "device-secret",
   interval: 1,
   userCode: "ABCD-EFGH",
@@ -45,6 +46,7 @@ function createHarness({
     Response | ((signal: AbortSignal, method: string) => Promise<Response>)
   > = [];
   const requests: Array<{
+    body: BodyInit | null | undefined;
     idempotencyKey: string | null;
     input: string;
     method: string;
@@ -69,6 +71,7 @@ function createHarness({
       const signal = init?.signal;
       assert.ok(signal);
       requests.push({
+        body: init?.body,
         idempotencyKey:
           new Headers(init?.headers).get("idempotency-key") ?? null,
         input: String(input),
@@ -353,6 +356,22 @@ test("successful device flow still opens GitHub, clears the code, and connects",
     harness.requests[0]?.idempotencyKey,
     harness.requests[1]?.idempotencyKey
   );
+});
+
+test("polls return the opaque start binding to prove flow ownership", async () => {
+  const harness = createHarness();
+  harness.responses.push(
+    jsonResponse(STARTED),
+    jsonResponse({ status: "pending" })
+  );
+
+  await harness.controller.start();
+  await harness.runNext();
+
+  assert.deepEqual(JSON.parse(String(harness.requests[1]?.body)), {
+    binding: STARTED.binding,
+    deviceCode: STARTED.deviceCode,
+  });
 });
 
 test("start and poll use the injected application-path endpoint", async () => {

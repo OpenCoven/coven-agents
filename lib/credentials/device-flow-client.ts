@@ -66,8 +66,10 @@ function startedDeviceFlow(value: unknown): StartedDeviceFlow | null {
   if (!isRecord(value)) {
     return null;
   }
-  const { deviceCode, interval, userCode, verificationUri } = value;
+  const { binding, deviceCode, interval, userCode, verificationUri } = value;
   if (
+    typeof binding !== "string" ||
+    !binding ||
     typeof deviceCode !== "string" ||
     !deviceCode ||
     typeof interval !== "number" ||
@@ -80,7 +82,7 @@ function startedDeviceFlow(value: unknown): StartedDeviceFlow | null {
   ) {
     return null;
   }
-  return { deviceCode, interval, userCode, verificationUri };
+  return { binding, deviceCode, interval, userCode, verificationUri };
 }
 
 function pollStatus(value: unknown): PollStatus | null {
@@ -323,7 +325,10 @@ export function createDeviceFlowController(
     let response: Response;
     try {
       response = await dependencies.fetcher(dependencies.deviceEndpoint, {
-        body: JSON.stringify({ deviceCode: session.deviceCode }),
+        body: JSON.stringify({
+          binding: session.binding,
+          deviceCode: session.deviceCode,
+        }),
         headers: {
           "content-type": "application/json",
           "idempotency-key": flow.pollIdempotencyKey,

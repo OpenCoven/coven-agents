@@ -4,6 +4,7 @@ export type DeviceFlowAttempt = {
 };
 
 export type StartedDeviceFlow = {
+  binding: string;
   deviceCode: string;
   interval: number;
   userCode: string;
