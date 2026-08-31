@@ -36,6 +36,12 @@ export const ABUSE_ROUTES = Object.freeze([
   "runner_stop",
   "runner_diagnostic",
   "runner_reconcile",
+  "skill_read",
+  "skill_write",
+  "skill_delete",
+  "team_read",
+  "team_write",
+  "team_delete",
 ] as const);
 
 export type AbuseRoute = (typeof ABUSE_ROUTES)[number];

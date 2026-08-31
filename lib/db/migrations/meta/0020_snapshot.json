@@ -1,5 +1,5 @@
 {
-  "id": "b0f4e62a-4b52-4a8a-b370-05324b34ce44",
+  "id": "34ac7f3c-998c-4328-8a1e-0f307c4543cd",
   "prevId": "605d30b0-b7ae-4168-b441-3f31793f676b",
   "version": "7",
   "dialect": "postgresql",
@@ -1060,6 +1060,516 @@
       },
       "isRLSEnabled": false
     },
+    "public.RunnerGitHubCapability": {
+      "name": "RunnerGitHubCapability",
+      "schema": "",
+      "columns": {
+        "approvedCapabilities": {
+          "name": "approvedCapabilities",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "expiresAt": {
+          "name": "expiresAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "maxCallCount": {
+          "name": "maxCallCount",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "repositoryAllowlist": {
+          "name": "repositoryAllowlist",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revokedAt": {
+          "name": "revokedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "teamStepId": {
+          "name": "teamStepId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tenant": {
+          "name": "tenant",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tokenHash": {
+          "name": "tokenHash",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "usedCallCount": {
+          "name": "usedCallCount",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        }
+      },
+      "indexes": {
+        "RGHCap_expiry_idx": {
+          "name": "RGHCap_expiry_idx",
+          "columns": [
+            {
+              "expression": "expiresAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "RGHCap_step_fk": {
+          "name": "RGHCap_step_fk",
+          "tableFrom": "RunnerGitHubCapability",
+          "tableTo": "RunnerTeamStep",
+          "columnsFrom": ["teamStepId", "tenant"],
+          "columnsTo": ["id", "tenant"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "RGHCap_id_tenant_uq": {
+          "name": "RGHCap_id_tenant_uq",
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
+        },
+        "RGHCap_step_owner_uq": {
+          "name": "RGHCap_step_owner_uq",
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant", "teamStepId"]
+        },
+        "RGHCap_tokenHash_uq": {
+          "name": "RGHCap_tokenHash_uq",
+          "nullsNotDistinct": false,
+          "columns": ["tokenHash"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "RGHCap_tenant_valid": {
+          "name": "RGHCap_tenant_valid",
+          "value": "\"RunnerGitHubCapability\".\"tenant\" ~ '^[A-Za-z0-9_]{1,64}$'"
+        },
+        "RGHCap_tokenHash_valid": {
+          "name": "RGHCap_tokenHash_valid",
+          "value": "\"RunnerGitHubCapability\".\"tokenHash\" ~ '^[a-f0-9]{64}$'"
+        },
+        "RGHCap_caps_valid": {
+          "name": "RGHCap_caps_valid",
+          "value": "jsonb_typeof(\"RunnerGitHubCapability\".\"approvedCapabilities\") = 'array' and jsonb_array_length(\"RunnerGitHubCapability\".\"approvedCapabilities\") between 1 and 8 and \"RunnerGitHubCapability\".\"approvedCapabilities\" <@ '[\"github.issues.read\",\"github.issues.write\",\"github.pull_requests.read\",\"github.pull_requests.write\",\"github.projects.read\",\"github.projects.write\"]'::jsonb"
+        },
+        "RGHCap_repos_valid": {
+          "name": "RGHCap_repos_valid",
+          "value": "jsonb_typeof(\"RunnerGitHubCapability\".\"repositoryAllowlist\") = 'array' and jsonb_array_length(\"RunnerGitHubCapability\".\"repositoryAllowlist\") between 1 and 16"
+        },
+        "RGHCap_calls_valid": {
+          "name": "RGHCap_calls_valid",
+          "value": "\"RunnerGitHubCapability\".\"maxCallCount\" between 1 and 32 and \"RunnerGitHubCapability\".\"usedCallCount\" between 0 and \"RunnerGitHubCapability\".\"maxCallCount\""
+        },
+        "RGHCap_timestamps_valid": {
+          "name": "RGHCap_timestamps_valid",
+          "value": "\"RunnerGitHubCapability\".\"expiresAt\" > \"RunnerGitHubCapability\".\"createdAt\" and (\"RunnerGitHubCapability\".\"revokedAt\" is null or \"RunnerGitHubCapability\".\"revokedAt\" >= \"RunnerGitHubCapability\".\"createdAt\")"
+        },
+        "RGHCap_version_valid": {
+          "name": "RGHCap_version_valid",
+          "value": "\"RunnerGitHubCapability\".\"version\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.RunnerGitHubConnection": {
+      "name": "RunnerGitHubConnection",
+      "schema": "",
+      "columns": {
+        "accountId": {
+          "name": "accountId",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "accountLogin": {
+          "name": "accountLogin",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "accountType": {
+          "name": "accountType",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "installationId": {
+          "name": "installationId",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "repositoryId": {
+          "name": "repositoryId",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "repositoryName": {
+          "name": "repositoryName",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "repositoryNodeId": {
+          "name": "repositoryNodeId",
+          "type": "varchar(256)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "repositoryOwner": {
+          "name": "repositoryOwner",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tenant": {
+          "name": "tenant",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        }
+      },
+      "indexes": {
+        "RGHConn_installation_idx": {
+          "name": "RGHConn_installation_idx",
+          "columns": [
+            {
+              "expression": "installationId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "RGHConn_id_tenant_uq": {
+          "name": "RGHConn_id_tenant_uq",
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
+        },
+        "RGHConn_tenant_repo_uq": {
+          "name": "RGHConn_tenant_repo_uq",
+          "nullsNotDistinct": false,
+          "columns": ["tenant", "repositoryId"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "RGHConn_tenant_valid": {
+          "name": "RGHConn_tenant_valid",
+          "value": "\"RunnerGitHubConnection\".\"tenant\" ~ '^[A-Za-z0-9_]{1,64}$'"
+        },
+        "RGHConn_decimal_ids": {
+          "name": "RGHConn_decimal_ids",
+          "value": "\"RunnerGitHubConnection\".\"installationId\" ~ '^(0|[1-9][0-9]{0,19})$' and \"RunnerGitHubConnection\".\"accountId\" ~ '^(0|[1-9][0-9]{0,19})$' and \"RunnerGitHubConnection\".\"repositoryId\" ~ '^(0|[1-9][0-9]{0,19})$'"
+        },
+        "RGHConn_accountType_valid": {
+          "name": "RGHConn_accountType_valid",
+          "value": "\"RunnerGitHubConnection\".\"accountType\" in ('Organization', 'User')"
+        },
+        "RGHConn_version_valid": {
+          "name": "RGHConn_version_valid",
+          "value": "\"RunnerGitHubConnection\".\"version\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.RunnerGitHubOperation": {
+      "name": "RunnerGitHubOperation",
+      "schema": "",
+      "columns": {
+        "capabilityId": {
+          "name": "capabilityId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "completedAt": {
+          "name": "completedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "error": {
+          "name": "error",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "kind": {
+          "name": "kind",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "operationId": {
+          "name": "operationId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "providerRequestId": {
+          "name": "providerRequestId",
+          "type": "varchar(256)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "requestHash": {
+          "name": "requestHash",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "resultNodeId": {
+          "name": "resultNodeId",
+          "type": "varchar(256)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resultUrl": {
+          "name": "resultUrl",
+          "type": "varchar(2048)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "startedAt": {
+          "name": "startedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "target": {
+          "name": "target",
+          "type": "varchar(512)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "teamStepId": {
+          "name": "teamStepId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tenant": {
+          "name": "tenant",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        }
+      },
+      "indexes": {
+        "RGHOp_status_updated_idx": {
+          "name": "RGHOp_status_updated_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "updatedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "RGHOp_step_fk": {
+          "name": "RGHOp_step_fk",
+          "tableFrom": "RunnerGitHubOperation",
+          "tableTo": "RunnerTeamStep",
+          "columnsFrom": ["teamStepId", "tenant"],
+          "columnsTo": ["id", "tenant"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "RGHOp_capability_fk": {
+          "name": "RGHOp_capability_fk",
+          "tableFrom": "RunnerGitHubOperation",
+          "tableTo": "RunnerGitHubCapability",
+          "columnsFrom": ["capabilityId", "tenant", "teamStepId"],
+          "columnsTo": ["id", "tenant", "teamStepId"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "RGHOp_id_tenant_uq": {
+          "name": "RGHOp_id_tenant_uq",
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
+        },
+        "RGHOp_step_operation_uq": {
+          "name": "RGHOp_step_operation_uq",
+          "nullsNotDistinct": false,
+          "columns": ["teamStepId", "tenant", "operationId"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "RGHOp_tenant_valid": {
+          "name": "RGHOp_tenant_valid",
+          "value": "\"RunnerGitHubOperation\".\"tenant\" ~ '^[A-Za-z0-9_]{1,64}$'"
+        },
+        "RGHOp_kind_valid": {
+          "name": "RGHOp_kind_valid",
+          "value": "\"RunnerGitHubOperation\".\"kind\" in ('issue.get', 'issue.search', 'issue.create', 'issue.comment', 'pull.get', 'pull.create', 'pull.comment', 'pull.review', 'project.item.add', 'project.item.field.update')"
+        },
+        "RGHOp_status_valid": {
+          "name": "RGHOp_status_valid",
+          "value": "\"RunnerGitHubOperation\".\"status\" in ('pending', 'running', 'completed', 'failed')"
+        },
+        "RGHOp_requestHash_valid": {
+          "name": "RGHOp_requestHash_valid",
+          "value": "\"RunnerGitHubOperation\".\"requestHash\" ~ '^[a-f0-9]{64}$'"
+        },
+        "RGHOp_version_valid": {
+          "name": "RGHOp_version_valid",
+          "value": "\"RunnerGitHubOperation\".\"version\" >= 0"
+        },
+        "RGHOp_resultUrl_valid": {
+          "name": "RGHOp_resultUrl_valid",
+          "value": "\"RunnerGitHubOperation\".\"resultUrl\" is null or \"RunnerGitHubOperation\".\"resultUrl\" ~ '^https://github\\.com/'"
+        },
+        "RGHOp_timestamps_valid": {
+          "name": "RGHOp_timestamps_valid",
+          "value": "(\"RunnerGitHubOperation\".\"startedAt\" is null or \"RunnerGitHubOperation\".\"startedAt\" >= \"RunnerGitHubOperation\".\"createdAt\") and (\"RunnerGitHubOperation\".\"completedAt\" is null or (\"RunnerGitHubOperation\".\"completedAt\" >= \"RunnerGitHubOperation\".\"createdAt\" and (\"RunnerGitHubOperation\".\"startedAt\" is null or \"RunnerGitHubOperation\".\"completedAt\" >= \"RunnerGitHubOperation\".\"startedAt\")))"
+        },
+        "RGHOp_error_bounded": {
+          "name": "RGHOp_error_bounded",
+          "value": "\"RunnerGitHubOperation\".\"error\" is null or (jsonb_typeof(\"RunnerGitHubOperation\".\"error\") = 'object' and \"RunnerGitHubOperation\".\"error\" ?& array['code', 'message', 'retryable'] and (\"RunnerGitHubOperation\".\"error\" - 'code' - 'message' - 'retryable' - 'details') = '{}'::jsonb and jsonb_typeof(\"RunnerGitHubOperation\".\"error\"->'code') = 'string' and char_length(\"RunnerGitHubOperation\".\"error\"->>'code') between 1 and 64 and jsonb_typeof(\"RunnerGitHubOperation\".\"error\"->'message') = 'string' and char_length(\"RunnerGitHubOperation\".\"error\"->>'message') between 1 and 500 and jsonb_typeof(\"RunnerGitHubOperation\".\"error\"->'retryable') = 'boolean' and (not (\"RunnerGitHubOperation\".\"error\" ? 'details') or (jsonb_typeof(\"RunnerGitHubOperation\".\"error\"->'details') = 'string' and char_length(\"RunnerGitHubOperation\".\"error\"->>'details') between 1 and 2000)))"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.RunnerRun": {
       "name": "RunnerRun",
       "schema": "",
@@ -1444,7 +1954,13 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "RunnerRun_id_tenant_key": {
+          "name": "RunnerRun_id_tenant_key",
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
+        }
+      },
       "policies": {},
       "checkConstraints": {
         "RunnerRun_tenant_valid": {
@@ -1656,6 +2172,868 @@
       },
       "isRLSEnabled": false
     },
+    "public.RunnerSkill": {
+      "name": "RunnerSkill",
+      "schema": "",
+      "columns": {
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "description": {
+          "name": "description",
+          "type": "varchar(240)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "instructions": {
+          "name": "instructions",
+          "type": "varchar(4000)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requiredCapabilities": {
+          "name": "requiredCapabilities",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "tenant": {
+          "name": "tenant",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        }
+      },
+      "indexes": {
+        "RSkill_tenant_updated_idx": {
+          "name": "RSkill_tenant_updated_idx",
+          "columns": [
+            {
+              "expression": "tenant",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "updatedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "RSkill_id_tenant_uq": {
+          "name": "RSkill_id_tenant_uq",
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "RSkill_tenant_valid": {
+          "name": "RSkill_tenant_valid",
+          "value": "\"RunnerSkill\".\"tenant\" ~ '^[A-Za-z0-9_]{1,64}$'"
+        },
+        "RSkill_version_valid": {
+          "name": "RSkill_version_valid",
+          "value": "\"RunnerSkill\".\"version\" >= 0"
+        },
+        "RSkill_caps_valid": {
+          "name": "RSkill_caps_valid",
+          "value": "jsonb_typeof(\"RunnerSkill\".\"requiredCapabilities\") = 'array' and jsonb_array_length(\"RunnerSkill\".\"requiredCapabilities\") <= 8 and \"RunnerSkill\".\"requiredCapabilities\" <@ '[\"workspace.read\",\"workspace.write\",\"github.issues.read\",\"github.issues.write\",\"github.pull_requests.read\",\"github.pull_requests.write\",\"github.projects.read\",\"github.projects.write\"]'::jsonb"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.RunnerTeam": {
+      "name": "RunnerTeam",
+      "schema": "",
+      "columns": {
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "description": {
+          "name": "description",
+          "type": "varchar(240)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tenant": {
+          "name": "tenant",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        }
+      },
+      "indexes": {
+        "RTeam_tenant_updated_idx": {
+          "name": "RTeam_tenant_updated_idx",
+          "columns": [
+            {
+              "expression": "tenant",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "updatedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "RTeam_id_tenant_uq": {
+          "name": "RTeam_id_tenant_uq",
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "RTeam_tenant_valid": {
+          "name": "RTeam_tenant_valid",
+          "value": "\"RunnerTeam\".\"tenant\" ~ '^[A-Za-z0-9_]{1,64}$'"
+        },
+        "RTeam_version_valid": {
+          "name": "RTeam_version_valid",
+          "value": "\"RunnerTeam\".\"version\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.RunnerTeamMember": {
+      "name": "RunnerTeamMember",
+      "schema": "",
+      "columns": {
+        "agentId": {
+          "name": "agentId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "position": {
+          "name": "position",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "required": {
+          "name": "required",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "responsibility": {
+          "name": "responsibility",
+          "type": "varchar(12000)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "teamId": {
+          "name": "teamId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tenant": {
+          "name": "tenant",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "RTMember_team_fk": {
+          "name": "RTMember_team_fk",
+          "tableFrom": "RunnerTeamMember",
+          "tableTo": "RunnerTeam",
+          "columnsFrom": ["teamId", "tenant"],
+          "columnsTo": ["id", "tenant"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "RTMember_agent_fk": {
+          "name": "RTMember_agent_fk",
+          "tableFrom": "RunnerTeamMember",
+          "tableTo": "RunnerAgent",
+          "columnsFrom": ["agentId", "tenant"],
+          "columnsTo": ["id", "tenant"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "RTMember_id_tenant_uq": {
+          "name": "RTMember_id_tenant_uq",
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
+        },
+        "RTMember_team_pos_uq": {
+          "name": "RTMember_team_pos_uq",
+          "nullsNotDistinct": false,
+          "columns": ["teamId", "tenant", "position"]
+        },
+        "RTMember_team_agent_uq": {
+          "name": "RTMember_team_agent_uq",
+          "nullsNotDistinct": false,
+          "columns": ["teamId", "tenant", "agentId"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "RTMember_tenant_valid": {
+          "name": "RTMember_tenant_valid",
+          "value": "\"RunnerTeamMember\".\"tenant\" ~ '^[A-Za-z0-9_]{1,64}$'"
+        },
+        "RTMember_position_valid": {
+          "name": "RTMember_position_valid",
+          "value": "\"RunnerTeamMember\".\"position\" >= 0 and \"RunnerTeamMember\".\"position\" < 8"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.RunnerTeamMemberSkill": {
+      "name": "RunnerTeamMemberSkill",
+      "schema": "",
+      "columns": {
+        "memberId": {
+          "name": "memberId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "skillId": {
+          "name": "skillId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tenant": {
+          "name": "tenant",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "RTMemberSkill_skill_idx": {
+          "name": "RTMemberSkill_skill_idx",
+          "columns": [
+            {
+              "expression": "skillId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "tenant",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "RTMemberSkill_member_fk": {
+          "name": "RTMemberSkill_member_fk",
+          "tableFrom": "RunnerTeamMemberSkill",
+          "tableTo": "RunnerTeamMember",
+          "columnsFrom": ["memberId", "tenant"],
+          "columnsTo": ["id", "tenant"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "RTMemberSkill_skill_fk": {
+          "name": "RTMemberSkill_skill_fk",
+          "tableFrom": "RunnerTeamMemberSkill",
+          "tableTo": "RunnerSkill",
+          "columnsFrom": ["skillId", "tenant"],
+          "columnsTo": ["id", "tenant"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "RTMemberSkill_pk": {
+          "name": "RTMemberSkill_pk",
+          "columns": ["memberId", "tenant", "skillId"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "RTMemberSkill_tenant_valid": {
+          "name": "RTMemberSkill_tenant_valid",
+          "value": "\"RunnerTeamMemberSkill\".\"tenant\" ~ '^[A-Za-z0-9_]{1,64}$'"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.RunnerTeamRun": {
+      "name": "RunnerTeamRun",
+      "schema": "",
+      "columns": {
+        "completedAt": {
+          "name": "completedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "currentPosition": {
+          "name": "currentPosition",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "error": {
+          "name": "error",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "mission": {
+          "name": "mission",
+          "type": "varchar(40000)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "operationId": {
+          "name": "operationId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requestHash": {
+          "name": "requestHash",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "startedAt": {
+          "name": "startedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(24)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'queued'"
+        },
+        "teamId": {
+          "name": "teamId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tenant": {
+          "name": "tenant",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        }
+      },
+      "indexes": {
+        "RTRun_tenant_created_idx": {
+          "name": "RTRun_tenant_created_idx",
+          "columns": [
+            {
+              "expression": "tenant",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RTRun_status_updated_idx": {
+          "name": "RTRun_status_updated_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "updatedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "RTRun_team_fk": {
+          "name": "RTRun_team_fk",
+          "tableFrom": "RunnerTeamRun",
+          "tableTo": "RunnerTeam",
+          "columnsFrom": ["teamId", "tenant"],
+          "columnsTo": ["id", "tenant"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "RTRun_id_tenant_uq": {
+          "name": "RTRun_id_tenant_uq",
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
+        },
+        "RTRun_team_operation_uq": {
+          "name": "RTRun_team_operation_uq",
+          "nullsNotDistinct": false,
+          "columns": ["teamId", "tenant", "operationId"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "RTRun_tenant_valid": {
+          "name": "RTRun_tenant_valid",
+          "value": "\"RunnerTeamRun\".\"tenant\" ~ '^[A-Za-z0-9_]{1,64}$'"
+        },
+        "RTRun_status_valid": {
+          "name": "RTRun_status_valid",
+          "value": "\"RunnerTeamRun\".\"status\" in ('queued', 'running', 'waiting_approval', 'completed', 'completed_with_warnings', 'failed', 'cancelled')"
+        },
+        "RTRun_position_valid": {
+          "name": "RTRun_position_valid",
+          "value": "\"RunnerTeamRun\".\"currentPosition\" >= 0 and \"RunnerTeamRun\".\"currentPosition\" <= 8"
+        },
+        "RTRun_version_valid": {
+          "name": "RTRun_version_valid",
+          "value": "\"RunnerTeamRun\".\"version\" >= 0"
+        },
+        "RTRun_requestHash_valid": {
+          "name": "RTRun_requestHash_valid",
+          "value": "\"RunnerTeamRun\".\"requestHash\" ~ '^[a-f0-9]{64}$'"
+        },
+        "RTRun_timestamps_valid": {
+          "name": "RTRun_timestamps_valid",
+          "value": "(\"RunnerTeamRun\".\"startedAt\" is null or \"RunnerTeamRun\".\"startedAt\" >= \"RunnerTeamRun\".\"createdAt\") and (\"RunnerTeamRun\".\"completedAt\" is null or (\"RunnerTeamRun\".\"completedAt\" >= \"RunnerTeamRun\".\"createdAt\" and (\"RunnerTeamRun\".\"startedAt\" is null or \"RunnerTeamRun\".\"completedAt\" >= \"RunnerTeamRun\".\"startedAt\")))"
+        },
+        "RTRun_error_bounded": {
+          "name": "RTRun_error_bounded",
+          "value": "\"RunnerTeamRun\".\"error\" is null or (jsonb_typeof(\"RunnerTeamRun\".\"error\") = 'object' and \"RunnerTeamRun\".\"error\" ?& array['code', 'message', 'retryable'] and (\"RunnerTeamRun\".\"error\" - 'code' - 'message' - 'retryable' - 'details') = '{}'::jsonb and jsonb_typeof(\"RunnerTeamRun\".\"error\"->'code') = 'string' and char_length(\"RunnerTeamRun\".\"error\"->>'code') between 1 and 64 and jsonb_typeof(\"RunnerTeamRun\".\"error\"->'message') = 'string' and char_length(\"RunnerTeamRun\".\"error\"->>'message') between 1 and 500 and jsonb_typeof(\"RunnerTeamRun\".\"error\"->'retryable') = 'boolean' and (not (\"RunnerTeamRun\".\"error\" ? 'details') or (jsonb_typeof(\"RunnerTeamRun\".\"error\"->'details') = 'string' and char_length(\"RunnerTeamRun\".\"error\"->>'details') between 1 and 2000)))"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.RunnerTeamStep": {
+      "name": "RunnerTeamStep",
+      "schema": "",
+      "columns": {
+        "agentId": {
+          "name": "agentId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "approvalStatus": {
+          "name": "approvalStatus",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'not_required'"
+        },
+        "completedAt": {
+          "name": "completedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "error": {
+          "name": "error",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "handoff": {
+          "name": "handoff",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "memberId": {
+          "name": "memberId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "position": {
+          "name": "position",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "required": {
+          "name": "required",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "responsibility": {
+          "name": "responsibility",
+          "type": "varchar(12000)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "runnerRunId": {
+          "name": "runnerRunId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "skillIds": {
+          "name": "skillIds",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "skillSnapshots": {
+          "name": "skillSnapshots",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "startedAt": {
+          "name": "startedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(24)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "teamRunId": {
+          "name": "teamRunId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tenant": {
+          "name": "tenant",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        }
+      },
+      "indexes": {
+        "RTStep_runnerRun_uq": {
+          "name": "RTStep_runnerRun_uq",
+          "columns": [
+            {
+              "expression": "runnerRunId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "RTStep_status_updated_idx": {
+          "name": "RTStep_status_updated_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "updatedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "RTStep_teamRun_fk": {
+          "name": "RTStep_teamRun_fk",
+          "tableFrom": "RunnerTeamStep",
+          "tableTo": "RunnerTeamRun",
+          "columnsFrom": ["teamRunId", "tenant"],
+          "columnsTo": ["id", "tenant"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "RTStep_agent_fk": {
+          "name": "RTStep_agent_fk",
+          "tableFrom": "RunnerTeamStep",
+          "tableTo": "RunnerAgent",
+          "columnsFrom": ["agentId", "tenant"],
+          "columnsTo": ["id", "tenant"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "RTStep_runnerRun_fk": {
+          "name": "RTStep_runnerRun_fk",
+          "tableFrom": "RunnerTeamStep",
+          "tableTo": "RunnerRun",
+          "columnsFrom": ["runnerRunId", "tenant"],
+          "columnsTo": ["id", "tenant"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "RTStep_id_tenant_uq": {
+          "name": "RTStep_id_tenant_uq",
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
+        },
+        "RTStep_run_position_uq": {
+          "name": "RTStep_run_position_uq",
+          "nullsNotDistinct": false,
+          "columns": ["teamRunId", "tenant", "position"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "RTStep_tenant_valid": {
+          "name": "RTStep_tenant_valid",
+          "value": "\"RunnerTeamStep\".\"tenant\" ~ '^[A-Za-z0-9_]{1,64}$'"
+        },
+        "RTStep_position_valid": {
+          "name": "RTStep_position_valid",
+          "value": "\"RunnerTeamStep\".\"position\" >= 0 and \"RunnerTeamStep\".\"position\" < 8"
+        },
+        "RTStep_status_valid": {
+          "name": "RTStep_status_valid",
+          "value": "\"RunnerTeamStep\".\"status\" in ('pending', 'queued', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled', 'skipped')"
+        },
+        "RTStep_approval_valid": {
+          "name": "RTStep_approval_valid",
+          "value": "\"RunnerTeamStep\".\"approvalStatus\" in ('not_required', 'pending', 'approved', 'rejected')"
+        },
+        "RTStep_version_valid": {
+          "name": "RTStep_version_valid",
+          "value": "\"RunnerTeamStep\".\"version\" >= 0"
+        },
+        "RTStep_skillIds_valid": {
+          "name": "RTStep_skillIds_valid",
+          "value": "jsonb_typeof(\"RunnerTeamStep\".\"skillIds\") = 'array' and jsonb_array_length(\"RunnerTeamStep\".\"skillIds\") <= 8"
+        },
+        "RTStep_skillSnapshots_valid": {
+          "name": "RTStep_skillSnapshots_valid",
+          "value": "jsonb_typeof(\"RunnerTeamStep\".\"skillSnapshots\") = 'array' and jsonb_array_length(\"RunnerTeamStep\".\"skillSnapshots\") <= 8"
+        },
+        "RTStep_handoff_bounded": {
+          "name": "RTStep_handoff_bounded",
+          "value": "\"RunnerTeamStep\".\"handoff\" is null or (jsonb_typeof(\"RunnerTeamStep\".\"handoff\") = 'object' and \"RunnerTeamStep\".\"handoff\" ?& array['output', 'commandEvidence', 'fileEvidence'] and (\"RunnerTeamStep\".\"handoff\" - 'output' - 'commandEvidence' - 'fileEvidence') = '{}'::jsonb and octet_length(\"RunnerTeamStep\".\"handoff\"::text) <= 16384 and jsonb_typeof(\"RunnerTeamStep\".\"handoff\"->'output') = 'string' and jsonb_typeof(\"RunnerTeamStep\".\"handoff\"->'commandEvidence') = 'array' and jsonb_array_length(\"RunnerTeamStep\".\"handoff\"->'commandEvidence') <= 256 and jsonb_typeof(\"RunnerTeamStep\".\"handoff\"->'fileEvidence') = 'array' and jsonb_array_length(\"RunnerTeamStep\".\"handoff\"->'fileEvidence') <= 256)"
+        },
+        "RTStep_error_bounded": {
+          "name": "RTStep_error_bounded",
+          "value": "\"RunnerTeamStep\".\"error\" is null or (jsonb_typeof(\"RunnerTeamStep\".\"error\") = 'object' and \"RunnerTeamStep\".\"error\" ?& array['code', 'message', 'retryable'] and (\"RunnerTeamStep\".\"error\" - 'code' - 'message' - 'retryable' - 'details') = '{}'::jsonb and jsonb_typeof(\"RunnerTeamStep\".\"error\"->'code') = 'string' and char_length(\"RunnerTeamStep\".\"error\"->>'code') between 1 and 64 and jsonb_typeof(\"RunnerTeamStep\".\"error\"->'message') = 'string' and char_length(\"RunnerTeamStep\".\"error\"->>'message') between 1 and 500 and jsonb_typeof(\"RunnerTeamStep\".\"error\"->'retryable') = 'boolean' and (not (\"RunnerTeamStep\".\"error\" ? 'details') or (jsonb_typeof(\"RunnerTeamStep\".\"error\"->'details') = 'string' and char_length(\"RunnerTeamStep\".\"error\"->>'details') between 1 and 2000)))"
+        },
+        "RTStep_timestamps_valid": {
+          "name": "RTStep_timestamps_valid",
+          "value": "(\"RunnerTeamStep\".\"startedAt\" is null or \"RunnerTeamStep\".\"startedAt\" >= \"RunnerTeamStep\".\"createdAt\") and (\"RunnerTeamStep\".\"completedAt\" is null or (\"RunnerTeamStep\".\"completedAt\" >= \"RunnerTeamStep\".\"createdAt\" and (\"RunnerTeamStep\".\"startedAt\" is null or \"RunnerTeamStep\".\"completedAt\" >= \"RunnerTeamStep\".\"startedAt\")))"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.Stream": {
       "name": "Stream",
       "schema": "",
@@ -1727,74 +3105,6 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.StripeReconciliation": {
-      "name": "StripeReconciliation",
-      "schema": "",
-      "columns": {
-        "createdAt": {
-          "name": "createdAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "eventId": {
-          "name": "eventId",
-          "type": "varchar(64)",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "eventType": {
-          "name": "eventType",
-          "type": "varchar(32)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "reason": {
-          "name": "reason",
-          "type": "varchar(64)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "varchar(16)",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'pending'"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "StripeReconciliation_eventId_StripeEvent_id_fk": {
-          "name": "StripeReconciliation_eventId_StripeEvent_id_fk",
-          "tableFrom": "StripeReconciliation",
-          "tableTo": "StripeEvent",
-          "columnsFrom": ["eventId"],
-          "columnsTo": ["id"],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "StripeReconciliation_eventType_check": {
-          "name": "StripeReconciliation_eventType_check",
-          "value": "\"StripeReconciliation\".\"eventType\" in ('invoice.paid', 'invoice.payment_failed')"
-        },
-        "StripeReconciliation_reason_check": {
-          "name": "StripeReconciliation_reason_check",
-          "value": "\"StripeReconciliation\".\"reason\" in ('invoice_ambiguous_entitlement', 'invoice_conflicting_paid_interval', 'invoice_contradictory_subscription', 'invoice_invalid_period', 'invoice_invalid_reference')"
-        },
-        "StripeReconciliation_status_check": {
-          "name": "StripeReconciliation_status_check",
-          "value": "\"StripeReconciliation\".\"status\" in ('pending', 'acknowledged', 'resolved')"
-        }
-      },
       "isRLSEnabled": false
     },
     "public.Suggestion": {

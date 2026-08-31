@@ -12,6 +12,8 @@ import {
 } from "./checkout";
 import { createStripeClient } from "./stripe-client";
 
+type CheckoutSessionStatus = Parameters<typeof checkoutSession>[0]["status"];
+
 const BLOCKING_STATUSES = [
   "active",
   "trialing",
@@ -212,7 +214,7 @@ test("an app-owned open Session from another attempt is expired instead of reuse
     id: "cs_older_attempt",
     status: "open",
   });
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: CheckoutSessionStatus = "open";
   const expired: string[] = [];
   const result = await reconcileCheckoutSessions({
     attemptId: "attempt-current",
@@ -287,7 +289,7 @@ test("an app-owned retrieved Session with changed attempt metadata is expired be
     id: "cs_changed_attempt",
     status: "open",
   });
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: CheckoutSessionStatus = "open";
   const expired: string[] = [];
   const result = await reconcileCheckoutSessions({
     attemptId: "attempt-current",
@@ -331,7 +333,7 @@ test("an app-owned retrieved Session with changed attempt metadata is expired be
 test("Stripe clients use the pinned Dahlia API version", () => {
   const client = createStripeClient("sk_test_checkout");
 
-  assert.equal(client.getApiField("version"), "2026-07-29.dahlia");
+  assert.equal(client.getApiField("version"), "2026-08-26.dahlia");
 });
 
 function checkoutSession(input: {

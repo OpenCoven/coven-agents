@@ -79,7 +79,7 @@ test("checkout attempt provenance lookup is scoped by attempt, operation, and ow
 
 test("Stripe reconciliation schema and generated migration retain only bounded operational evidence", () => {
   const schema = readFileSync(new URL("./schema.ts", import.meta.url), "utf8");
-  const migrationTag = "0020_luxuriant_siren";
+  const migrationTag = "0021_lovely_loners";
   const migration = readFileSync(
     new URL(`./migrations/${migrationTag}.sql`, import.meta.url),
     "utf8"

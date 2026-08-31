@@ -41,6 +41,9 @@ import { classifyStripeRequestOutcome } from "./stripe-error";
 const USER_ID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 const REQUEST_IDENTIFIER = "checkout-request-1234567890";
 const ORIGIN = "https://app.opencoven.dev";
+type CheckoutSessionStatus = Parameters<
+  typeof reconciledCheckoutSession
+>[0]["status"];
 
 test("disabled checkout performs no abuse, database, or Stripe work", async () => {
   const calls: string[] = [];
@@ -871,7 +874,7 @@ test("an expired current attempt is retired before one fresh Session is created"
 });
 
 test("a completed Session with a blocking subscription preserves the attempt until cancel-then-resubscribe", async () => {
-  let currentStatus: Stripe.Checkout.Session.Status = "open";
+  let currentStatus: CheckoutSessionStatus = "open";
   let subscriptionStatus: Stripe.Subscription.Status = "active";
   const sessions: ReturnType<typeof reconciledCheckoutSession>[] = [];
   const sessionKeys: string[] = [];
@@ -969,7 +972,7 @@ test("a completed Session with a blocking subscription preserves the attempt unt
 });
 
 test("a completed Session with an incomplete-expired subscription permits exactly one fresh retry", async () => {
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: CheckoutSessionStatus = "open";
   const sessions: ReturnType<typeof reconciledCheckoutSession>[] = [];
   const sessionKeys: string[] = [];
   const provider = Object.assign(
@@ -1042,7 +1045,7 @@ test("a completed Session with an incomplete-expired subscription permits exactl
 });
 
 test("a completed Session without a resolvable subscription fails retryably without replacement", async () => {
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: CheckoutSessionStatus = "open";
   let session: ReturnType<typeof reconciledCheckoutSession> | null = null;
   let sessionCalls = 0;
   const provider = Object.assign(
@@ -1092,7 +1095,7 @@ test("a completed Session without a resolvable subscription fails retryably with
 });
 
 test("a completed Session subscription retrieval failure preserves the attempt without replacement", async () => {
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: CheckoutSessionStatus = "open";
   let session: ReturnType<typeof reconciledCheckoutSession> | null = null;
   let sessionCalls = 0;
   let retrievalCalls = 0;
@@ -2293,7 +2296,7 @@ test("a racing Customer winner reuses its matching open Checkout Session", async
 
 test("a blocking subscription expires a prior payable Session and retires the attempt", async () => {
   let blocking = true;
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: CheckoutSessionStatus = "open";
   let sessionCalls = 0;
   const createdAttemptIds: string[] = [];
   const prior = reconciledCheckoutSession({
@@ -2352,7 +2355,7 @@ test("a stale blocking cleanup is fenced after its successor drains the durable 
   let blocking = true;
   let expirationCalls = 0;
   let retrieveCalls = 0;
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: CheckoutSessionStatus = "open";
   let releaseStaleRetrieve!: () => void;
   let signalStaleRetrieveStarted!: () => void;
   const staleRetrieveStarted = new Promise<void>((resolve) => {
@@ -2513,7 +2516,7 @@ test("a takeover reconciles an uncertain expiration with the persisted provider 
   const leaseStore = new MemoryCheckoutAttemptLeaseStore();
   let blocking = true;
   let sessionCalls = 0;
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: CheckoutSessionStatus = "open";
   let releaseExpiration!: () => void;
   let signalExpirationStarted!: () => void;
   const expirationStarted = new Promise<void>((resolve) => {
@@ -3019,7 +3022,7 @@ test("blocking cleanup leaves the second Session untouched when the first expira
 
 test("blocking cleanup retrieves the durable Session when open listing lags", async () => {
   let blocking = false;
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: CheckoutSessionStatus = "open";
   let session: ReturnType<typeof reconciledCheckoutSession> | null = null;
   let sessionCalls = 0;
   const provider = Object.assign(

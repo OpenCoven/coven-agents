@@ -778,9 +778,11 @@ function supportedBillingReason(
 ): "subscription_create" | "subscription_cycle" | "subscription_update" | null {
   switch (reason) {
     case "subscription_create":
+      return "subscription_create";
     case "subscription_cycle":
+      return "subscription_cycle";
     case "subscription_update":
-      return reason;
+      return "subscription_update";
     default:
       return null;
   }
