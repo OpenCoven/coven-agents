@@ -3,6 +3,7 @@ import { browserApplicationPath } from "@/lib/application-path";
 export type DeviceFlowAttempt = {
   key: () => string;
   reset: () => void;
+  resetIfOwned: (key: string) => boolean;
 };
 
 export type StartedDeviceFlow = {
@@ -36,6 +37,13 @@ export function createDeviceFlowAttempt(
     reset() {
       idempotencyKey = null;
     },
+    resetIfOwned(key) {
+      if (idempotencyKey !== key) {
+        return false;
+      }
+      idempotencyKey = null;
+      return true;
+    },
   };
 }
 
@@ -43,10 +51,11 @@ export async function requestDeviceFlowStart(input: {
   attempt: DeviceFlowAttempt;
   fetcher: typeof fetch;
 }): Promise<StartedDeviceFlow> {
+  const idempotencyKey = input.attempt.key();
   const response = await input.fetcher(
     browserApplicationPath("/api/credentials/device"),
     {
-      headers: { "idempotency-key": input.attempt.key() },
+      headers: { "idempotency-key": idempotencyKey },
       method: "POST",
     }
   );
@@ -56,6 +65,6 @@ export async function requestDeviceFlowStart(input: {
   }
 
   const started = (await response.json()) as StartedDeviceFlow;
-  input.attempt.reset();
+  input.attempt.resetIfOwned(idempotencyKey);
   return started;
 }

@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { browserApplicationPath } from "@/lib/application-path";
+import { createCredentialRefreshFence } from "@/lib/credentials/client";
 
 /**
  * Where a tenant supplies their own harness credential.
@@ -76,7 +77,8 @@ export function HarnessCredentials({
   const authorityContext = `${userId}:${authVersion ?? ""}:${authorityRevision ?? ""}:${isSubscriber ? "subscriber" : "demo"}`;
   const authorityContextRef = useRef(authorityContext);
   authorityContextRef.current = authorityContext;
-  const credentialMemoryContextRef = useRef(authorityContext);
+  const credentialMemoryContextRef = useRef<string | null>(null);
+  const refreshFence = useRef(createCredentialRefreshFence()).current;
   const locked = isSubscriber
     ? lockedAuthority?.context === authorityContext
       ? lockedAuthority.kind
@@ -88,10 +90,18 @@ export function HarnessCredentials({
       return;
     }
     credentialMemoryContextRef.current = authorityContext;
+    refreshFence.activate();
     setConfigured([]);
     setValues({});
     setBusy(null);
-  }, [authorityContext]);
+  }, [authorityContext, refreshFence]);
+
+  useEffect(() => {
+    refreshFence.activate();
+    return () => {
+      refreshFence.deactivate();
+    };
+  }, [refreshFence]);
 
   const closeForAuthorityLoss = useCallback(
     (status: number, requestAuthorityContext: string) => {
@@ -103,6 +113,7 @@ export function HarnessCredentials({
       }
       setConfigured([]);
       setValues({});
+      refreshFence.advanceMutation();
       setLockedAuthority({
         context: requestAuthorityContext,
         kind: status === 401 ? "session" : "subscription",
@@ -112,7 +123,7 @@ export function HarnessCredentials({
       }
       return true;
     },
-    [onAuthorityInvalidated]
+    [onAuthorityInvalidated, refreshFence]
   );
 
   const refresh = useCallback(async () => {
@@ -120,6 +131,7 @@ export function HarnessCredentials({
       return;
     }
     const requestAuthorityContext = authorityContext;
+    const ticket = refreshFence.beginRefresh();
     const response = await fetch(browserApplicationPath("/api/credentials"));
     if (authorityContextRef.current !== requestAuthorityContext) {
       return;
@@ -128,6 +140,9 @@ export function HarnessCredentials({
     if (closeForAuthorityLoss(response.status, requestAuthorityContext)) {
       // A guest account cannot store one, and saying so beats a form that
       // fails on submit.
+      return;
+    }
+    if (!refreshFence.isCurrent(ticket)) {
       return;
     }
 
@@ -139,8 +154,11 @@ export function HarnessCredentials({
     if (authorityContextRef.current !== requestAuthorityContext) {
       return;
     }
+    if (!refreshFence.isCurrent(ticket)) {
+      return;
+    }
     setConfigured(body.harnessIds ?? []);
-  }, [authorityContext, closeForAuthorityLoss, isSubscriber]);
+  }, [authorityContext, closeForAuthorityLoss, isSubscriber, refreshFence]);
 
   const reload = useCallback(() => {
     refresh().catch(() => undefined);
@@ -149,6 +167,12 @@ export function HarnessCredentials({
   useEffect(() => {
     reload();
   }, [reload]);
+
+  const credentialChanged = useCallback(() => {
+    if (refreshFence.advanceMutation()) {
+      reload();
+    }
+  }, [refreshFence, reload]);
 
   const change = useCallback((harnessId: string, next: string) => {
     setValues((current) => ({ ...current, [harnessId]: next }));
@@ -201,6 +225,9 @@ export function HarnessCredentials({
         if (!response.ok) {
           throw new Error(String(response.status));
         }
+        if (!refreshFence.advanceMutation()) {
+          return false;
+        }
 
         // Cleared immediately: there is no reason for the secret to sit in
         // component state after the write succeeded.
@@ -222,7 +249,7 @@ export function HarnessCredentials({
         }
       }
     },
-    [closeForAuthorityLoss, refresh, values]
+    [closeForAuthorityLoss, refresh, refreshFence, values]
   );
 
   const remove = useCallback(
@@ -250,6 +277,9 @@ export function HarnessCredentials({
         if (!response.ok) {
           throw new Error(String(response.status));
         }
+        if (!refreshFence.advanceMutation()) {
+          return;
+        }
 
         toast({ description: "Credential removed.", type: "success" });
         await refresh();
@@ -266,7 +296,7 @@ export function HarnessCredentials({
         }
       }
     },
-    [closeForAuthorityLoss, refresh]
+    [closeForAuthorityLoss, refresh, refreshFence]
   );
 
   return (
@@ -295,7 +325,7 @@ export function HarnessCredentials({
             key={`${authorityContext}:${harness.id}`}
             onAuthorityInvalidated={onAuthorityInvalidated}
             onChange={change}
-            onConnected={reload}
+            onConnected={credentialChanged}
             onRemove={remove}
             onSave={save}
             value={values[harness.id] ?? ""}

@@ -1471,9 +1471,10 @@ test.describe("Subscriber checkout", () => {
       releaseSecondCredentials = resolve;
     });
     let credentialGets = 0;
+    let secondUserActive = false;
     await page.route("**/api/credentials", async (route) => {
       credentialGets += 1;
-      if (credentialGets === 1) {
+      if (!secondUserActive) {
         return route.fulfill({ json: { harnessIds: ["copilot"] } });
       }
       await secondCredentialsGate;
@@ -1484,6 +1485,7 @@ test.describe("Subscriber checkout", () => {
     await expect(page.getByText("Connected", { exact: true })).toBeVisible();
     const initialCredentialGets = credentialGets;
 
+    secondUserActive = true;
     await setServerSession(page.context(), "subscriber", { id: secondUserId });
     currentSession = sessionFor("subscriber", {
       email: "second@example.invalid",
@@ -1497,6 +1499,43 @@ test.describe("Subscriber checkout", () => {
 
     releaseSecondCredentials();
     await expect(page.getByText("Connected", { exact: true })).toHaveCount(0);
+  });
+
+  test("an older account credential snapshot cannot overwrite a successful save", async ({
+    page,
+  }) => {
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("subscriber") })
+    );
+    let releaseInitialGet!: () => void;
+    const initialGetGate = new Promise<void>((resolve) => {
+      releaseInitialGet = resolve;
+    });
+    let credentialSaved = false;
+    await page.route("**/api/credentials", async (route) => {
+      if (route.request().method() === "POST") {
+        credentialSaved = true;
+        return route.fulfill({ json: {} });
+      }
+      if (!credentialSaved) {
+        await initialGetGate;
+        return route.fulfill({ json: { harnessIds: [] } });
+      }
+      return route.fulfill({ json: { harnessIds: ["copilot"] } });
+    });
+
+    await page.goto("/account");
+    const credential = page.getByLabel("GitHub Copilot CLI");
+    await expect(credential).toBeVisible();
+    await credential.fill("saved-after-initial-read");
+    await page.getByRole("button", { exact: true, name: "Save" }).click();
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+
+    releaseInitialGet();
+    await page.waitForTimeout(100);
+
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
   });
 
   for (const initialMismatch of ["auth-version", "user"] as const) {
