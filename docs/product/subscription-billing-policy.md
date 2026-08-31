@@ -171,6 +171,20 @@ state.
    back and returns `503`. Sanitized logging occurs only after commit and may
    fail without losing the durable evidence.
 
+For a backed interval on the same Subscription, compare the incoming tuple to
+the stored tuple without merging endpoints:
+
+| Incoming start | Incoming end | Outcome |
+| --- | --- | --- |
+| Earlier | Earlier or equal | Claimed stale no-op |
+| Earlier | Later | Atomic `invoice_conflicting_paid_interval` reconciliation |
+| Equal | Earlier or equal | Claimed stale no-op, including exact duplicates |
+| Equal | Later | Apply the exact incoming tuple |
+| Later | Earlier or equal | Claimed contained/stale no-op |
+| Later | Later | Apply the exact incoming tuple |
+
+Only the apply outcomes reset the billing-period start and usage window.
+
 Failed-payment grace is `GRACE_PERIOD_DAYS = 3` from
 `lib/billing/limits.ts`. `lib/billing/grace.ts` grants it only for
 `billing_reason: "subscription_cycle"`, only when a paid period already

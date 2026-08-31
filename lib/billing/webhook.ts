@@ -802,12 +802,14 @@ function paidInvoiceMutation(
     current.stripeSubscriptionId === input.stripeSubscriptionId;
 
   if (hasBackedPaidInterval && sameSubscription) {
-    if (
-      incomingStart < currentStart ||
-      incomingEnd <= currentEnd ||
-      incomingEnd <= incomingStart
-    ) {
+    if (incomingEnd <= incomingStart || incomingEnd <= currentEnd) {
       return null;
+    }
+    if (incomingStart < currentStart) {
+      return {
+        kind: "manual_reconciliation",
+        reason: "invoice_conflicting_paid_interval",
+      };
     }
   } else if (
     hasBackedPaidInterval &&

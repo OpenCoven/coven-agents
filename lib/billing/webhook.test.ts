@@ -511,6 +511,81 @@ test("a same-subscription renewal advances the exact paid interval", () => {
   });
 });
 
+test("an exact same-subscription paid interval is a no-op", () => {
+  assert.equal(
+    stripeEventMutation(
+      paidUser(),
+      paidIntent({
+        eventId: "evt_same_subscription_duplicate_interval",
+        periodEnd: PAID_UNTIL,
+        periodStart: PAID_FROM,
+      })
+    ),
+    null
+  );
+});
+
+test("an earlier same-subscription start with an equal or earlier end is stale", () => {
+  const earlierStart = new Date("2026-08-01T12:00:00.000Z");
+
+  for (const [label, periodEnd] of [
+    ["earlier", new Date("2026-09-01T12:00:00.000Z")],
+    ["equal", PAID_UNTIL],
+  ] as const) {
+    assert.equal(
+      stripeEventMutation(
+        paidUser(),
+        paidIntent({
+          eventId: `evt_same_subscription_earlier_start_${label}_end`,
+          periodEnd,
+          periodStart: earlierStart,
+        })
+      ),
+      null,
+      label
+    );
+  }
+});
+
+test("an earlier same-subscription start with a later end requires reconciliation", () => {
+  assert.deepEqual(
+    stripeEventMutation(
+      paidUser(),
+      paidIntent({
+        eventId: "evt_same_subscription_crossing_interval",
+        periodEnd: NEXT_PERIOD_END,
+        periodStart: new Date("2026-08-01T12:00:00.000Z"),
+      })
+    ),
+    {
+      kind: "manual_reconciliation",
+      reason: "invoice_conflicting_paid_interval",
+    }
+  );
+});
+
+test("a later same-subscription start with an equal or earlier end is contained and stale", () => {
+  const laterStart = new Date("2026-09-01T12:00:00.000Z");
+
+  for (const [label, periodEnd] of [
+    ["earlier", new Date("2026-09-10T12:00:00.000Z")],
+    ["equal", PAID_UNTIL],
+  ] as const) {
+    assert.equal(
+      stripeEventMutation(
+        paidUser(),
+        paidIntent({
+          eventId: `evt_same_subscription_contained_${label}_end`,
+          periodEnd,
+          periodStart: laterStart,
+        })
+      ),
+      null,
+      label
+    );
+  }
+});
+
 test("overlapping replacement intervals require manual reconciliation regardless of end", () => {
   const current = {
     ...paidUser(),
@@ -2185,6 +2260,57 @@ test("overlapping paid replacement is durably reconciled without mutating entitl
     reason: "invoice_conflicting_paid_interval",
     status: "pending",
   });
+});
+
+test("a crossing same-subscription interval is reconciled atomically and deduped on redelivery", async () => {
+  const writer = new MemoryStripeEventWriter([paidUser()]);
+  const alerts: StripeWebhookManualReconciliationRecord[] = [];
+  const event = invoiceEvent({
+    id: "evt_same_subscription_crossing_reconciliation",
+    lines: [
+      invoiceLine({
+        periodEnd: NEXT_PERIOD_END,
+        periodStart: new Date("2026-08-01T12:00:00.000Z"),
+      }),
+    ],
+    type: "invoice.paid",
+  });
+  const dependencies = dependenciesFor(event, {
+    applyEventUpdate: writer.apply,
+    findUserByStripeCustomerId: writer.findByCustomer,
+    reportManualReconciliation: (record) => {
+      alerts.push(record);
+    },
+  });
+
+  const first = await webhookResponse(
+    request({ signature: "valid" }),
+    dependencies,
+    null
+  );
+  const duplicate = await webhookResponse(
+    request({ signature: "valid" }),
+    dependencies,
+    null
+  );
+
+  assert.equal(first.status, 200);
+  assert.deepEqual(await first.json(), {
+    reason: "invoice_conflicting_paid_interval",
+    reconciliation: true,
+  });
+  assert.equal(duplicate.status, 200);
+  assert.deepEqual(await duplicate.json(), { deduped: true });
+  assert.deepEqual(writer.users.get(USER_ID), paidUser());
+  assert.equal(writer.updateCount, 0);
+  assert.deepEqual(writer.reconciliations.get(event.id), {
+    eventId: event.id,
+    eventType: "invoice.paid",
+    reason: "invoice_conflicting_paid_interval",
+    status: "pending",
+  });
+  assert.equal(writer.events.has(event.id), true);
+  assert.equal(alerts.length, 1);
 });
 
 test("supported paid billing reasons use an exact non-proration period", async (t) => {
