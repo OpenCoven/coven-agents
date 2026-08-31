@@ -262,6 +262,24 @@ test("skill CRUD always binds tenant and hides cross-tenant rows", async () => {
   );
 });
 
+test("skill creation retries return an identical deterministic resource", async () => {
+  const duplicate = scripted([], [skillRow({ version: 0 })]);
+  const result = await duplicate.store.createSkill(principal, {
+    description: "Requires release evidence.",
+    id: SKILL_A,
+    instructions: "Run the build and focused tests.",
+    name: "Release evidence",
+    requiredCapabilities: ["workspace.read", "workspace.write"],
+  });
+
+  assert.equal(result.kind, "duplicate");
+  assert.equal(result.kind === "duplicate" ? result.skill.id : null, SKILL_A);
+  assert.deepEqual(
+    duplicate.statements.map(({ name }) => name),
+    ["create-skill", "get-duplicate-skill"]
+  );
+});
+
 test("referenced skill deletion returns conflict and is version fenced", async () => {
   const referenced = scripted(
     [skillRow({ version: 3 })],
@@ -411,6 +429,49 @@ test("team creation fails closed when any agent or skill belongs elsewhere", asy
     { kind: "not_found" }
   );
   assert.equal(missingSkill.statements.length, 2);
+});
+
+test("team creation retries return an identical deterministic resource", async () => {
+  const duplicate = scripted(
+    [{ id: AGENT_A }, { id: AGENT_B }],
+    [{ id: SKILL_A }, { id: SKILL_B }],
+    [],
+    [teamRow()]
+  );
+
+  const result = await duplicate.store.createTeam(principal, {
+    description: "Ships approved work.",
+    id: TEAM_A,
+    members: [
+      {
+        agentId: AGENT_A,
+        id: MEMBER_A,
+        required: true,
+        responsibility: "Build the change.",
+        skillIds: [SKILL_A],
+      },
+      {
+        agentId: AGENT_B,
+        id: MEMBER_B,
+        required: false,
+        responsibility: "Review the change.",
+        skillIds: [SKILL_B],
+      },
+    ],
+    name: "Delivery team",
+  });
+
+  assert.equal(result.kind, "duplicate");
+  assert.equal(result.kind === "duplicate" ? result.team.id : null, TEAM_A);
+  assert.deepEqual(
+    duplicate.statements.map(({ name }) => name),
+    [
+      "validate-team-agents",
+      "validate-team-skills",
+      "insert-team",
+      "get-duplicate-team",
+    ]
+  );
 });
 
 test("team hydration is stable by member position and skill id", async () => {
@@ -731,6 +792,14 @@ test("team step updates are tenant scoped, monotonic, and version fenced", async
   assert.match(
     queryText(captured(updated.statements, 1)),
     /"version" = \$\d+/u
+  );
+  assert.match(
+    queryText(captured(updated.statements, 0)),
+    /WITH "lockedTeamRun" AS MATERIALIZED/u
+  );
+  assert.match(
+    queryText(captured(updated.statements, 0)),
+    /FOR UPDATE OF "teamRun"/u
   );
 });
 

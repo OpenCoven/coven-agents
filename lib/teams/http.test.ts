@@ -528,6 +528,42 @@ test("same creation key with a different request returns a stable conflict", asy
   assert.equal(fixture.serviceRequests(), 1);
 });
 
+test("creation passes only the derived opaque key into deterministic ID generation", async () => {
+  const creationKeys: string[] = [];
+  const fixture = handlers({
+    service: service({
+      createSkill: (_principal, _input, creationKey) => {
+        assert.ok(creationKey);
+        creationKeys.push(creationKey);
+        return Promise.resolve({ kind: "created", skill });
+      },
+      createTeam: (_principal, _input, creationKey) => {
+        assert.ok(creationKey);
+        creationKeys.push(creationKey);
+        return Promise.resolve({ kind: "created", team });
+      },
+    }),
+  });
+
+  await fixture.handlers.createSkill(
+    new Request("https://app.test/api/skills", {
+      body: skillBody(),
+      method: "POST",
+    })
+  );
+  await fixture.handlers.createTeam(
+    new Request("https://app.test/api/teams", {
+      body: teamBody(),
+      method: "POST",
+    })
+  );
+
+  assert.equal(creationKeys.length, 2);
+  assert.ok(creationKeys.every((key) => /^coven_[a-f0-9]{64}$/u.test(key)));
+  assert.notEqual(creationKeys[0], REPLAY_HEADER_VALUE);
+  assert.notEqual(creationKeys[1], REPLAY_HEADER_VALUE);
+});
+
 test("skill and team creation use separate tenant-scoped operation namespaces", async () => {
   const store = new MemoryIdempotencyStore();
   const fixture = handlers({ idempotencyStore: store });

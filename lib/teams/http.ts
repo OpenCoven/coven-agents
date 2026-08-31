@@ -496,11 +496,12 @@ export function createTeamHttpHandlers(
             subscriber.principal.tenant
           ),
           ownerId: subscriber.userId,
-          perform: async () => {
+          perform: async ({ providerIdempotencyKey }) => {
             const service = await dependencies.createService(subscriber);
             const serviceResult = await service.createSkill(
               subscriber.principal,
-              body
+              body,
+              providerIdempotencyKey
             );
             switch (serviceResult.kind) {
               case "created":
@@ -552,11 +553,12 @@ export function createTeamHttpHandlers(
             subscriber.principal.tenant
           ),
           ownerId: subscriber.userId,
-          perform: async () => {
+          perform: async ({ providerIdempotencyKey }) => {
             const service = await dependencies.createService(subscriber);
             const serviceResult = await service.createTeam(
               subscriber.principal,
-              body
+              body,
+              providerIdempotencyKey
             );
             switch (serviceResult.kind) {
               case "created":

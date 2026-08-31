@@ -617,6 +617,54 @@ function normalizedMembers(
   }));
 }
 
+function sameValues(
+  left: readonly string[],
+  right: readonly string[]
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function sameSkill(
+  skill: TeamSkillRecord,
+  input: CreateSkillStoreInput
+): boolean {
+  return (
+    skill.id === input.id &&
+    skill.name === input.name &&
+    skill.description === (input.description ?? "") &&
+    skill.instructions === input.instructions &&
+    sameValues(skill.requiredCapabilities, input.requiredCapabilities ?? [])
+  );
+}
+
+function sameTeam(
+  team: TeamRecord,
+  input: CreateTeamStoreInput,
+  members: readonly TeamMemberRecord[]
+): boolean {
+  return (
+    team.id === input.id &&
+    team.name === input.name &&
+    team.description === (input.description ?? "") &&
+    team.members.length === members.length &&
+    team.members.every((member, index) => {
+      const expected = members[index];
+      return (
+        expected !== undefined &&
+        member.id === expected.id &&
+        member.agentId === expected.agentId &&
+        member.position === expected.position &&
+        member.required === expected.required &&
+        member.responsibility === expected.responsibility &&
+        sameValues(member.skillIds, expected.skillIds)
+      );
+    })
+  );
+}
+
 async function insertTeamMembers(
   transaction: TeamStoreTransaction,
   tenant: string,
@@ -1285,9 +1333,26 @@ export function createTeamStore(database: TeamStoreDatabase) {
               RETURNING *`
           )
         );
-        return row
-          ? { kind: "created" as const, skill: asSkill(row) }
-          : { kind: "conflict" as const };
+        if (row) {
+          return { kind: "created" as const, skill: asSkill(row) };
+        }
+        const [existing] = await transaction.execute(
+          statement(
+            "get-duplicate-skill",
+            { id: input.id, tenant: principal.tenant },
+            sql`SELECT * FROM "RunnerSkill"
+              WHERE "id" = ${input.id}
+                AND "tenant" = ${principal.tenant}
+              FOR SHARE`
+          )
+        );
+        if (existing) {
+          const skill = asSkill(existing);
+          if (sameSkill(skill, input)) {
+            return { kind: "duplicate" as const, skill };
+          }
+        }
+        return { kind: "conflict" as const };
       });
     },
 
@@ -1297,6 +1362,7 @@ export function createTeamStore(database: TeamStoreDatabase) {
     ) => {
       validateTeamInput(input);
       return await database.transaction(async (transaction) => {
+        const members = normalizedMembers(input.members);
         if (
           !(await validateTeamOwnership(
             transaction,
@@ -1319,9 +1385,25 @@ export function createTeamStore(database: TeamStoreDatabase) {
           )
         );
         if (!team) {
+          const [existing] = await transaction.execute(
+            statement(
+              "get-duplicate-team",
+              { id: input.id, tenant: principal.tenant },
+              teamSelect(
+                sql`"team"."id" = ${input.id}
+                  AND "team"."tenant" = ${principal.tenant}`,
+                sql`FOR SHARE`
+              )
+            )
+          );
+          if (existing) {
+            const duplicate = asTeam(existing);
+            if (sameTeam(duplicate, input, members)) {
+              return { kind: "duplicate" as const, team: duplicate };
+            }
+          }
           return { kind: "conflict" as const };
         }
-        const members = normalizedMembers(input.members);
         await insertTeamMembers(
           transaction,
           principal.tenant,
@@ -2004,10 +2086,23 @@ export function createTeamStore(database: TeamStoreDatabase) {
           statement(
             "lock-team-step-for-update",
             { id: input.id, tenant: principal.tenant },
-            sql`SELECT * FROM "RunnerTeamStep"
-              WHERE "id" = ${input.id}
-                AND "tenant" = ${principal.tenant}
-              FOR UPDATE`
+            sql`WITH "lockedTeamRun" AS MATERIALIZED (
+                SELECT "teamRun"."id"
+                FROM "RunnerTeamRun" AS "teamRun"
+                JOIN "RunnerTeamStep" AS "candidate"
+                  ON "candidate"."teamRunId" = "teamRun"."id"
+                  AND "candidate"."tenant" = "teamRun"."tenant"
+                WHERE "candidate"."id" = ${input.id}
+                  AND "candidate"."tenant" = ${principal.tenant}
+                FOR UPDATE OF "teamRun"
+              )
+              SELECT "step".*
+              FROM "RunnerTeamStep" AS "step"
+              JOIN "lockedTeamRun"
+                ON "lockedTeamRun"."id" = "step"."teamRunId"
+              WHERE "step"."id" = ${input.id}
+                AND "step"."tenant" = ${principal.tenant}
+              FOR UPDATE OF "step"`
           )
         );
         if (!current) {

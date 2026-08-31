@@ -266,6 +266,66 @@ test("team CRUD generates member IDs, preserves order, and maps ownership failur
   assert.equal(JSON.stringify(created).includes(TENANT), false);
 });
 
+test("creation keys produce stable resource and member IDs across crash retries", async () => {
+  const skillIds: string[] = [];
+  const teamIds: string[] = [];
+  const memberIds: string[][] = [];
+  const retryStore = store({
+    createSkill: (_principal, input) => {
+      skillIds.push(input.id);
+      return Promise.resolve({
+        kind: "created",
+        skill: skillRecord({
+          ...input,
+          createdAt: NOW,
+          description: input.description ?? "",
+          requiredCapabilities: input.requiredCapabilities ?? [],
+          tenant: TENANT,
+          updatedAt: NOW,
+          version: 0,
+        }),
+      });
+    },
+    createTeam: (_principal, input) => {
+      teamIds.push(input.id);
+      memberIds.push(input.members.map(({ id }) => id));
+      return Promise.resolve({
+        kind: "created",
+        team: teamRecord({
+          createdAt: NOW,
+          description: input.description ?? "",
+          id: input.id,
+          members: input.members.map((member, position) => ({
+            agentId: member.agentId,
+            id: member.id,
+            position,
+            required: member.required ?? true,
+            responsibility: member.responsibility,
+            skillIds: [...(member.skillIds ?? [])].sort(),
+          })),
+          name: input.name,
+          tenant: TENANT,
+          updatedAt: NOW,
+          version: 0,
+        }),
+      });
+    },
+  });
+  const first = createTeamService({ store: retryStore });
+  const retry = createTeamService({ store: retryStore });
+
+  await first.createSkill(principal, validSkill, "coven_stable_create");
+  await retry.createSkill(principal, validSkill, "coven_stable_create");
+  await first.createTeam(principal, validTeam, "coven_stable_create");
+  await retry.createTeam(principal, validTeam, "coven_stable_create");
+
+  assert.equal(skillIds[0], skillIds[1]);
+  assert.equal(teamIds[0], teamIds[1]);
+  assert.deepEqual(memberIds[0], memberIds[1]);
+  assert.notEqual(skillIds[0], teamIds[0]);
+  assert.ok(memberIds[0]?.every((id) => id !== teamIds[0]));
+});
+
 test("strict invalid service inputs do not reach the store", async () => {
   let calls = 0;
   const unavailable = () => {

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   createSkillInputSchema,
   createTeamInputSchema,
@@ -65,11 +65,13 @@ export type TeamDeleteResult =
 export type TeamService = Readonly<{
   createSkill: (
     principal: RunnerPrincipal,
-    input: unknown
+    input: unknown,
+    creationKey?: string
   ) => Promise<TeamCreateSkillResult>;
   createTeam: (
     principal: RunnerPrincipal,
-    input: unknown
+    input: unknown,
+    creationKey?: string
   ) => Promise<TeamCreateTeamResult>;
   deleteSkill: (
     principal: RunnerPrincipal,
@@ -104,7 +106,7 @@ export type TeamService = Readonly<{
 }>;
 
 export type TeamServiceDependencies = Readonly<{
-  createId?: () => string;
+  createId?: (scope?: string) => string;
   store: TeamCrudStore;
 }>;
 
@@ -141,14 +143,32 @@ function projectTeam(record: TeamRecord): TeamResource {
 }
 
 function generatedId(
-  createId: () => string,
+  createId: (scope?: string) => string,
+  scope: string | undefined,
   schema: typeof skillIdSchema | typeof teamIdSchema
 ): string {
-  const id = createId();
+  const id = createId(scope);
   if (!schema.safeParse(id).success) {
     throw new Error("Team service ID generation failed.");
   }
   return id;
+}
+
+function deterministicUuid(scope: string): string {
+  const bytes = createHash("sha256")
+    .update(scope, "utf8")
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join("-");
 }
 
 function unreachable(value: never, operation: string): never {
@@ -160,20 +180,27 @@ function unreachable(value: never, operation: string): never {
 export function createTeamService(
   dependencies: TeamServiceDependencies
 ): TeamService {
-  const createId = dependencies.createId ?? randomUUID;
+  const createId =
+    dependencies.createId ??
+    ((scope?: string) => (scope ? deterministicUuid(scope) : randomUUID()));
 
   return {
-    createSkill: async (principal, input) => {
+    createSkill: async (principal, input, creationKey) => {
       const parsed = createSkillInputSchema.safeParse(input);
       if (!parsed.success) {
         return { kind: "invalid" };
       }
       const result = await dependencies.store.createSkill(principal, {
         ...parsed.data,
-        id: generatedId(createId, skillIdSchema),
+        id: generatedId(
+          createId,
+          creationKey ? `skill:${creationKey}` : undefined,
+          skillIdSchema
+        ),
       });
       switch (result.kind) {
         case "created":
+        case "duplicate":
           return { kind: "created", skill: projectSkill(result.skill) };
         case "conflict":
           return result;
@@ -182,21 +209,30 @@ export function createTeamService(
       }
     },
 
-    createTeam: async (principal, input) => {
+    createTeam: async (principal, input, creationKey) => {
       const parsed = createTeamInputSchema.safeParse(input);
       if (!parsed.success) {
         return { kind: "invalid" };
       }
       const result = await dependencies.store.createTeam(principal, {
         ...parsed.data,
-        id: generatedId(createId, teamIdSchema),
-        members: parsed.data.members.map((member) => ({
+        id: generatedId(
+          createId,
+          creationKey ? `team:${creationKey}` : undefined,
+          teamIdSchema
+        ),
+        members: parsed.data.members.map((member, position) => ({
           ...member,
-          id: generatedId(createId, teamIdSchema),
+          id: generatedId(
+            createId,
+            creationKey ? `team:${creationKey}:member:${position}` : undefined,
+            teamIdSchema
+          ),
         })),
       });
       switch (result.kind) {
         case "created":
+        case "duplicate":
           return { kind: "created", team: projectTeam(result.team) };
         case "conflict":
         case "not_found":
@@ -312,7 +348,7 @@ export function createTeamService(
         id,
         members: parsed.data.members.map((member) => ({
           ...member,
-          id: generatedId(createId, teamIdSchema),
+          id: generatedId(createId, undefined, teamIdSchema),
         })),
       });
       switch (result.kind) {
