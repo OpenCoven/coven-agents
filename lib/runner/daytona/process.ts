@@ -22,7 +22,11 @@ import {
   summarizeRun,
 } from "../harness";
 import type { RunnerDaytonaAttemptId, RunnerDispatchAuthority } from "../types";
-import { daytonaRunCredentialPath, daytonaRunSessionName } from "./names";
+import {
+  daytonaRunConfigDirectory,
+  daytonaRunCredentialPath,
+  daytonaRunSessionName,
+} from "./names";
 import { classifyDaytonaProviderError } from "./sandbox";
 
 const STAGING_TIMEOUT_SECONDS = 15;
@@ -147,6 +151,7 @@ function stagingCommand(authName: string, path: string): string {
 function asyncCommand(
   authName: string,
   credentialPath: string,
+  configDirectory: string,
   workspace: string,
   harnessCommand: string
 ): string {
@@ -164,12 +169,15 @@ function asyncCommand(
   ].filter((name) => name !== authName);
   return [
     "set -eu",
+    `rm -rf -- ${shellQuote(configDirectory)}`,
+    `mkdir -p -- ${shellQuote(configDirectory)}`,
+    `chmod 700 ${shellQuote(configDirectory)}`,
+    `export HOME=${shellQuote(configDirectory)}`,
     `${authName}="$(cat -- ${shellQuote(credentialPath)})"`,
     `export ${authName}`,
     `rm -f -- ${shellQuote(credentialPath)}`,
     `unset ${credentialVariables.join(" ")}`,
     "export CI=true",
-    `export HOME=${shellQuote(workspace)}`,
     `mkdir -p -- ${shellQuote(workspace)}`,
     `cd -- ${shellQuote(workspace)}`,
     `exec ${harnessCommand}`,
@@ -478,6 +486,7 @@ export async function startDaytonaProcess(input: {
   }
   const sessionId = daytonaRunSessionName(input.runId, attemptId);
   const credentialPath = daytonaRunCredentialPath(input.runId, attemptId);
+  const configDirectory = daytonaRunConfigDirectory(input.runId, attemptId);
 
   try {
     if (
@@ -601,8 +610,10 @@ export async function startDaytonaProcess(input: {
       command: asyncCommand(
         auth.name,
         credentialPath,
+        configDirectory,
         workspace,
         buildHarnessCommand({
+          configDirectory,
           harness: spec.id,
           instructions: input.instructions,
           model: input.model,

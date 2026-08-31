@@ -26,6 +26,7 @@ const PREPARATION_CLAIM =
   "53af1a29-4e98-43d6-ac5b-3b9dcba5e731" as DaytonaAttemptId;
 const SESSION = daytonaRunSessionName(RUN_ID, PREPARATION_CLAIM);
 const PATH = daytonaRunCredentialPath(RUN_ID, PREPARATION_CLAIM);
+const CONFIG_DIRECTORY = `/run/coven-agents/${SESSION}/copilot`;
 const PROBE_SESSION_ID = `coven-probe-${"a".repeat(40)}`;
 const LAUNCH_AUTHORITY = {
   expectedVersion: 9,
@@ -980,19 +981,22 @@ test("stages only through per-call env and starts a safe asynchronous session", 
     launch?.command,
     [
       "set -eu",
+      `rm -rf -- '${CONFIG_DIRECTORY}'`,
+      `mkdir -p -- '${CONFIG_DIRECTORY}'`,
+      `chmod 700 '${CONFIG_DIRECTORY}'`,
+      `export HOME='${CONFIG_DIRECTORY}'`,
       `COPILOT_GITHUB_TOKEN="$(cat -- '${PATH}')"`,
       "export COPILOT_GITHUB_TOKEN",
       `rm -f -- '${PATH}'`,
       "unset GH_TOKEN GITHUB_TOKEN CODEX_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY AZURE_OPENAI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY",
       "export CI=true",
-      "export HOME='/workspace/repo'",
       "mkdir -p -- '/workspace/repo'",
       "cd -- '/workspace/repo'",
-      "exec 'copilot' '-s' '-p' 'Use tests.\n\nMission:\nPrint safe output.' '--yolo' '--no-ask-user' '--no-auto-update' '--no-color' '--output-format' 'json' '--log-level' 'none'",
+      `exec 'copilot' '-s' '-p' 'Use tests.\n\nMission:\nPrint safe output.' '--yolo' '--no-ask-user' '--config-dir' '${CONFIG_DIRECTORY}' '--no-auto-update' '--no-color' '--output-format' 'json' '--log-level' 'none'`,
     ].join("; ")
   );
   assert.ok(launch?.command.includes("export CI=true"));
-  assert.ok(launch?.command.includes("export HOME='/workspace/repo'"));
+  assert.ok(launch?.command.includes(`export HOME='${CONFIG_DIRECTORY}'`));
   assert.ok(launch?.command.includes("exec 'copilot'"));
   assert.equal(allReturnedText(started).includes(SECRET), false);
   assert.deepEqual(

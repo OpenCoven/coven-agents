@@ -37,6 +37,7 @@ test("bounds workspaces and only admits the supported Copilot harness", () => {
 
 test("quotes Copilot invocation and keeps incomplete JSONL outside the cursor", () => {
   const command = buildHarnessCommand({
+    configDirectory: "/run/coven-agents/attempt/copilot",
     harness: "copilot",
     instructions: "Do not execute $(unsafe).",
     model: "auto",
@@ -84,6 +85,7 @@ test("quotes Copilot invocation and keeps incomplete JSONL outside the cursor", 
 
 test("team child tasks cannot access shell, network, or GitHub tools", () => {
   const command = buildHarnessCommand({
+    configDirectory: "/run/coven-agents/attempt/copilot",
     harness: "copilot",
     instructions: "Keep evidence concise.",
     model: "auto",
@@ -94,6 +96,10 @@ test("team child tasks cannot access shell, network, or GitHub tools", () => {
   assert.doesNotMatch(command, /--yolo/u);
   assert.match(command, /--available-tools' 'view,edit,grep,glob/u);
   assert.match(command, /--allow-tool' 'read,write/u);
+  assert.match(
+    command,
+    /--config-dir' '\/run\/coven-agents\/attempt\/copilot/u
+  );
   assert.doesNotMatch(command, /shell|github-mcp|web_fetch|web_search/iu);
 });
 

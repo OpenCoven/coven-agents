@@ -7,6 +7,8 @@ export interface Invocation {
 }
 
 export interface InvocationRequest {
+  /** Fresh configuration directory outside caller-controlled workspace files. */
+  configDir?: string;
   /** Working directory the harness runs in. Callers resolve and sandbox this. */
   cwd: string;
   harness: string;
@@ -29,6 +31,11 @@ function modelArgs(model: string): string[] {
 }
 
 function copilotArgs(request: InvocationRequest): string[] {
+  if (request.permissionMode === "workspace" && !request.configDir) {
+    throw new Error(
+      "Restricted Copilot runs require an isolated config directory."
+    );
+  }
   const permissionArgs =
     request.permissionMode === "workspace"
       ? [
@@ -38,12 +45,16 @@ function copilotArgs(request: InvocationRequest): string[] {
           "read,write",
         ]
       : ["--yolo"];
+  const configArgs = request.configDir
+    ? ["--config-dir", request.configDir]
+    : [];
   return [
     "-s",
     "-p",
     buildMission(request.instructions, request.task),
     ...permissionArgs,
     "--no-ask-user",
+    ...configArgs,
     "--no-auto-update",
     "--no-color",
     // JSONL carries tool calls, file writes and usage. Plain text collapses all

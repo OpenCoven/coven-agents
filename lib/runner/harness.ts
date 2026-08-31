@@ -337,6 +337,7 @@ export function parseHarnessLog(
 }
 
 export function buildHarnessCommand(input: {
+  configDirectory?: string;
   harness: HarnessId;
   instructions: string;
   model: string;
@@ -345,6 +346,7 @@ export function buildHarnessCommand(input: {
 }): string {
   return toShellCommand(
     buildInvocation({
+      configDir: input.configDirectory,
       cwd: input.workspace,
       harness: input.harness,
       instructions: input.instructions,

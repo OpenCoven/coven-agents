@@ -27,8 +27,18 @@ test("copilot runs headless with pre-approved tools", () => {
 });
 
 test("restricted Copilot runs expose only workspace tools without yolo or shell", () => {
+  assert.throws(
+    () =>
+      buildInvocation({
+        ...BASE,
+        harness: "copilot",
+        permissionMode: "workspace",
+      }),
+    /isolated config directory/u
+  );
   const invocation = buildInvocation({
     ...BASE,
+    configDir: "/run/coven-agents/attempt/copilot",
     harness: "copilot",
     permissionMode: "workspace",
   });
@@ -42,6 +52,13 @@ test("restricted Copilot runs expose only workspace tools without yolo or shell"
     ["--available-tools", "view,edit,grep,glob", "--allow-tool", "read,write"]
   );
   assert.ok(invocation.args.includes("--no-ask-user"));
+  assert.deepEqual(
+    invocation.args.slice(
+      invocation.args.indexOf("--config-dir"),
+      invocation.args.indexOf("--config-dir") + 2
+    ),
+    ["--config-dir", "/run/coven-agents/attempt/copilot"]
+  );
   assert.equal(
     invocation.args.some((argument) => argument.includes("shell")),
     false
