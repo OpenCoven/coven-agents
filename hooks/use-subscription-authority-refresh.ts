@@ -73,6 +73,7 @@ export function useSubscriptionAuthorityRefresh({
     userId,
     authVersion
   );
+  const authorityMatchesIdentity = revision !== null;
   const revisionRef = useRef(revision);
   revisionRef.current = revision;
   const revisionContext = subscriptionAuthorityRevisionContext(
@@ -81,15 +82,23 @@ export function useSubscriptionAuthorityRefresh({
   );
   const boundaryRevision = useMemo(
     () =>
-      subscriptionAuthorityBoundaryRevision(
-        {
-          checkedAt: authority.checkedAt,
-          subscribedUntil: authority.subscribedUntil,
-          userId: authority.userId,
-        },
-        userId
-      ),
-    [authority.checkedAt, authority.subscribedUntil, authority.userId, userId]
+      authorityMatchesIdentity
+        ? subscriptionAuthorityBoundaryRevision(
+            {
+              checkedAt: authority.checkedAt,
+              subscribedUntil: authority.subscribedUntil,
+              userId: authority.userId,
+            },
+            userId
+          )
+        : null,
+    [
+      authority.checkedAt,
+      authority.subscribedUntil,
+      authority.userId,
+      authorityMatchesIdentity,
+      userId,
+    ]
   );
   const [expiryState, dispatchExpiry] = useReducer(
     reduceSubscriptionAuthorityExpiry,
@@ -106,6 +115,7 @@ export function useSubscriptionAuthorityRefresh({
   const effectiveAuthority = effectiveSubscriptionAuthority(
     authority,
     userId,
+    authVersion,
     authorityPending
   );
 
@@ -117,6 +127,14 @@ export function useSubscriptionAuthorityRefresh({
     if (!hasResolvedIdentityRef.current) {
       hasResolvedIdentityRef.current = true;
       previousIdentityRef.current = identity;
+      if (
+        enabled &&
+        status === "authenticated" &&
+        userId &&
+        !authorityMatchesIdentity
+      ) {
+        router.refresh();
+      }
       return;
     }
     if (previousIdentityRef.current === identity) {
@@ -126,7 +144,15 @@ export function useSubscriptionAuthorityRefresh({
     if (enabled) {
       router.refresh();
     }
-  }, [authVersion, enabled, router, status, type, userId]);
+  }, [
+    authorityMatchesIdentity,
+    authVersion,
+    enabled,
+    router,
+    status,
+    type,
+    userId,
+  ]);
 
   useEffect(() => {
     dispatchExpiry({
@@ -151,7 +177,6 @@ export function useSubscriptionAuthorityRefresh({
     );
   }, [boundaryRevision]);
 
-  // Refresh separately so every consumer renders the closed gate first.
   useEffect(() => {
     const revisionKey = boundaryRevision?.key ?? null;
     if (boundaryRequestRef.current.observedKey !== revisionKey) {
@@ -186,16 +211,19 @@ export function useSubscriptionAuthorityRefresh({
 
   const invalidateAndRefresh = useCallback(() => {
     const currentRevision = revisionRef.current;
-    if (!currentRevision || !invalidationFence.invalidate(currentRevision)) {
+    if (!currentRevision) {
       return;
     }
+    const shouldRefresh = invalidationFence.invalidate(currentRevision);
     setManualInvalidation(currentRevision);
-    router.refresh();
+    if (shouldRefresh) {
+      router.refresh();
+    }
   }, [invalidationFence, router]);
 
   return {
     authorityPending,
-    authorityRevision: revision?.checkedAt ?? null,
+    authorityRevision: revision?.resolutionId ?? null,
     invalidateAndRefresh,
     ...effectiveAuthority,
   };

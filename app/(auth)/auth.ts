@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import NextAuth, { type DefaultSession, type Session } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
 import GitHub from "next-auth/providers/github";
@@ -27,6 +28,7 @@ declare module "next-auth" {
     user: {
       authVersion: number;
       id: string;
+      subscriptionAuthorityExpiresAt?: string | null;
       type: UserType;
     } & DefaultSession["user"];
   }
@@ -127,13 +129,9 @@ export const {
         }
         session.user.type = token.type;
         session.user.image = token.picture ?? null;
-        const subscribedUntil =
+        session.user.subscriptionAuthorityExpiresAt =
           typeof token.subscribedUntil === "string"
-            ? new Date(token.subscribedUntil)
-            : null;
-        session.user.subscribedUntil =
-          subscribedUntil && Number.isFinite(subscribedUntil.getTime())
-            ? subscribedUntil
+            ? token.subscribedUntil
             : null;
       }
 
@@ -232,25 +230,33 @@ export async function subscriptionPageAuthority(
   now: Date
 ): Promise<SubscriptionAuthority> {
   const resolved = await resolveAuth(now);
+  const resolutionId = randomUUID();
   if (!resolved) {
     return serializeSubscriptionAuthority({
+      authVersion: null,
       checkedAt: now,
       isSubscriber: false,
+      resolutionId,
       subscribedUntil: null,
       userId: null,
     });
   }
   if (resolved.kind === "storage-unavailable") {
     return serializeSubscriptionAuthority({
+      authVersion: resolved.session.user.authVersion,
       checkedAt: now,
       isSubscriber: resolved.session.user.type === "subscriber",
-      subscribedUntil: resolved.session.user.subscribedUntil,
+      resolutionId,
+      subscribedUntil:
+        resolved.session.user.subscriptionAuthorityExpiresAt ?? null,
       userId: resolved.session.user.id,
     });
   }
   return serializeSubscriptionAuthority({
+    authVersion: resolved.session.user.authVersion,
     checkedAt: now,
     isSubscriber: isSubscribedAt(resolved.user, now),
+    resolutionId,
     subscribedUntil: resolved.user.subscribedUntil,
     userId: resolved.session.user.id,
   });

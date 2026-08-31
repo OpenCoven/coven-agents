@@ -1,6 +1,8 @@
 export type SubscriptionAuthority = Readonly<{
+  authVersion: number | null;
   checkedAt: string;
   isSubscriber: boolean;
+  resolutionId: string;
   subscribedUntil: string | null;
   userId: string | null;
 }>;
@@ -31,13 +33,17 @@ function finiteFutureTimestamp(
 }
 
 export function serializeSubscriptionAuthority({
+  authVersion,
   checkedAt,
   isSubscriber,
+  resolutionId,
   subscribedUntil,
   userId,
 }: {
+  authVersion: number | null | undefined;
   checkedAt: Date;
   isSubscriber: boolean;
+  resolutionId: string;
   subscribedUntil: Date | string | null | undefined;
   userId: string | null;
 }): SubscriptionAuthority {
@@ -51,8 +57,13 @@ export function serializeSubscriptionAuthority({
       : null;
 
   return {
+    authVersion:
+      Number.isInteger(authVersion) && (authVersion ?? -1) >= 0
+        ? (authVersion ?? null)
+        : null,
     checkedAt: checkedAtIso,
     isSubscriber: activeUntil !== null,
+    resolutionId,
     subscribedUntil: activeUntil,
     userId,
   };
@@ -61,14 +72,22 @@ export function serializeSubscriptionAuthority({
 export function effectiveSubscriptionAuthority(
   authority: SubscriptionAuthority | null,
   sessionUserId: string | null | undefined,
+  sessionAuthVersion: number | null | undefined,
   authorityPending = false,
   nowMs = Date.now()
 ): EffectiveSubscriptionAuthority {
   if (
     authorityPending ||
-    !(sessionUserId && authority?.userId === sessionUserId) ||
+    !(
+      sessionUserId &&
+      authority?.userId === sessionUserId &&
+      Number.isInteger(sessionAuthVersion) &&
+      authority.authVersion === sessionAuthVersion
+    ) ||
     !Number.isFinite(Date.parse(authority.checkedAt)) ||
-    !authority.isSubscriber
+    !authority.isSubscriber ||
+    typeof authority.resolutionId !== "string" ||
+    authority.resolutionId.length === 0
   ) {
     return INACTIVE_AUTHORITY;
   }

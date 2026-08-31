@@ -3,9 +3,37 @@ import test from "node:test";
 import {
   createCredentialRefreshFence,
   fetchHasCredential,
+  isCredentialAuthorityRequestCurrent,
   resetCredentialCache,
   updateCredentialEligibility,
 } from "./client";
+
+test("credential responses require both their operation and authority contexts to remain current", () => {
+  assert.equal(
+    isCredentialAuthorityRequestCurrent({
+      currentAuthorityContext: "user:revision-2",
+      operationIsCurrent: true,
+      requestAuthorityContext: "user:revision-1",
+    }),
+    false
+  );
+  assert.equal(
+    isCredentialAuthorityRequestCurrent({
+      currentAuthorityContext: "user:revision-1",
+      operationIsCurrent: false,
+      requestAuthorityContext: "user:revision-1",
+    }),
+    false
+  );
+  assert.equal(
+    isCredentialAuthorityRequestCurrent({
+      currentAuthorityContext: "user:revision-1",
+      operationIsCurrent: true,
+      requestAuthorityContext: "user:revision-1",
+    }),
+    true
+  );
+});
 
 test("the browser credential summary is fetched once", async () => {
   resetCredentialCache();

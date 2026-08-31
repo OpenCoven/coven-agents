@@ -31,7 +31,10 @@ import {
   isSessionOperationCurrent,
   type SessionOperationContext,
 } from "@/lib/console/session-operation";
-import { createCredentialRefreshFence } from "@/lib/credentials/client";
+import {
+  createCredentialRefreshFence,
+  isCredentialAuthorityRequestCurrent,
+} from "@/lib/credentials/client";
 
 /**
  * Settings, inside the console shell.
@@ -353,15 +356,28 @@ export function Settings({
     [isCurrentOperation, onCredentialsChange]
   );
 
-  const invalidateCredentialAuthority = useCallback(
-    (context: SessionOperationContext | null) => {
-      if (!context || !isCurrentOperation(context)) {
-        return;
+  const closeCredentialAuthority = useCallback(
+    (
+      status: number,
+      context: SessionOperationContext | null,
+      requestAuthorityContext: string
+    ) => {
+      if (
+        (status !== 401 && status !== 403) ||
+        !context ||
+        !isCredentialAuthorityRequestCurrent({
+          currentAuthorityContext: credentialAuthorityContextRef.current,
+          operationIsCurrent: isCurrentOperation(context),
+          requestAuthorityContext,
+        })
+      ) {
+        return false;
       }
-      setLockedAuthorityContext(credentialAuthorityContextRef.current);
+      setLockedAuthorityContext(requestAuthorityContext);
       setDrafts({});
       publishCredentials([], context);
       invalidateSubscriptionAuthority();
+      return true;
     },
     [invalidateSubscriptionAuthority, isCurrentOperation, publishCredentials]
   );
@@ -371,28 +387,50 @@ export function Settings({
       if (!context || !isCurrentOperation(context)) {
         return null;
       }
+      const requestAuthorityContext = credentialAuthorityContextRef.current;
       const ticket = refreshFence.beginRefresh();
       const response = await fetch(`${BASE_PATH}/api/credentials`, {
         signal: context.signal,
       });
-      if (!isCurrentOperation(context) || !refreshFence.isCurrent(ticket)) {
+      if (
+        !isCredentialAuthorityRequestCurrent({
+          currentAuthorityContext: credentialAuthorityContextRef.current,
+          operationIsCurrent: isCurrentOperation(context),
+          requestAuthorityContext,
+        })
+      ) {
         return null;
       }
-      if (response.status === 401 || response.status === 403) {
-        invalidateCredentialAuthority(context);
+      if (
+        closeCredentialAuthority(
+          response.status,
+          context,
+          requestAuthorityContext
+        )
+      ) {
         return [];
+      }
+      if (!refreshFence.isCurrent(ticket)) {
+        return null;
       }
       if (!response.ok) {
         return null;
       }
       const body = (await response.json()) as { harnessIds?: string[] };
-      if (!isCurrentOperation(context) || !refreshFence.isCurrent(ticket)) {
+      if (
+        !isCredentialAuthorityRequestCurrent({
+          currentAuthorityContext: credentialAuthorityContextRef.current,
+          operationIsCurrent: isCurrentOperation(context),
+          requestAuthorityContext,
+        }) ||
+        !refreshFence.isCurrent(ticket)
+      ) {
         return null;
       }
       return publishCredentials(body.harnessIds ?? [], context);
     },
     [
-      invalidateCredentialAuthority,
+      closeCredentialAuthority,
       isCurrentOperation,
       publishCredentials,
       refreshFence,
@@ -519,6 +557,7 @@ export function Settings({
       return;
     }
     setBusy(true);
+    const requestAuthorityContext = credentialAuthorityContextRef.current;
     let stored = 0;
     let nextConfigured = configured;
     try {
@@ -536,7 +575,13 @@ export function Settings({
           method: "POST",
           signal: context.signal,
         });
-        if (!isCurrentOperation(context)) {
+        if (
+          !isCredentialAuthorityRequestCurrent({
+            currentAuthorityContext: credentialAuthorityContextRef.current,
+            operationIsCurrent: isCurrentOperation(context),
+            requestAuthorityContext,
+          })
+        ) {
           return;
         }
 
@@ -550,8 +595,13 @@ export function Settings({
           }
           return;
         }
-        if (response.status === 401 || response.status === 403) {
-          invalidateCredentialAuthority(context);
+        if (
+          closeCredentialAuthority(
+            response.status,
+            context,
+            requestAuthorityContext
+          )
+        ) {
           toast.error(
             response.status === 401
               ? "Sign in again."
@@ -604,6 +654,7 @@ export function Settings({
       return;
     }
     setBusy(true);
+    const requestAuthorityContext = credentialAuthorityContextRef.current;
     try {
       const response = await fetch(`${BASE_PATH}/api/credentials`, {
         body: JSON.stringify({ harnessId }),
@@ -611,11 +662,22 @@ export function Settings({
         method: "DELETE",
         signal: context.signal,
       });
-      if (!isCurrentOperation(context)) {
+      if (
+        !isCredentialAuthorityRequestCurrent({
+          currentAuthorityContext: credentialAuthorityContextRef.current,
+          operationIsCurrent: isCurrentOperation(context),
+          requestAuthorityContext,
+        })
+      ) {
         return;
       }
-      if (response.status === 401 || response.status === 403) {
-        invalidateCredentialAuthority(context);
+      if (
+        closeCredentialAuthority(
+          response.status,
+          context,
+          requestAuthorityContext
+        )
+      ) {
         toast.error(
           response.status === 401 ? "Sign in again." : "Subscription required."
         );

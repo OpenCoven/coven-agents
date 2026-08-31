@@ -152,6 +152,9 @@ export function RunConsole({
     session.data?.user?.authVersion ?? "",
     authorityRevision ?? "",
   ].join(":");
+  const credentialOwner = accountId
+    ? `${accountId}:${session.data?.user?.authVersion ?? ""}`
+    : null;
   const avatarSrc = accountId
     ? avatarFor({ id: accountId, image: session.data?.user?.image })
     : null;
@@ -531,13 +534,23 @@ export function RunConsole({
       isCurrent: () => isCurrentSession(generation, controller.signal),
       signal: controller.signal,
     });
-    if (credentialOwnerRef.current !== accountId) {
-      credentialOwnerRef.current = accountId;
+    if (credentialOwnerRef.current !== credentialOwner) {
+      credentialOwnerRef.current = credentialOwner;
       resetCredentialCache();
     }
     fetchHasCredential()
       .then((has) => {
-        if (has !== null && isCurrentSession(generation, controller.signal)) {
+        if (!isCurrentSession(generation, controller.signal)) {
+          return;
+        }
+        if (
+          has === "authentication_required" ||
+          has === "subscription_required"
+        ) {
+          invalidateAndRefresh();
+          return;
+        }
+        if (has !== null) {
           setHasCredential(has);
         }
       })
@@ -552,9 +565,11 @@ export function RunConsole({
   }, [
     accountId,
     client,
+    credentialOwner,
     isCurrentSession,
     refresh,
     isSubscriber,
+    invalidateAndRefresh,
     session.status,
     sessionIdentity,
   ]);

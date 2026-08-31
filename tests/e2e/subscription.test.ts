@@ -1665,7 +1665,7 @@ test.describe("Subscriber checkout", () => {
             json: {
               binding: "signed-device-binding",
               deviceCode: "device-secret",
-              interval: 0,
+              interval: 0.01,
               userCode: "ABCD-EFGH",
               verificationUri: "https://github.com/login/device",
             },
