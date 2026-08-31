@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { browserApplicationPath } from "@/lib/application-path";
 
 type Usage = {
   cap: number;
@@ -26,7 +27,7 @@ export function UsageMeter() {
   useEffect(() => {
     let cancelled = false;
 
-    fetch("/api/usage")
+    fetch(browserApplicationPath("/api/usage"))
       .then(async (response) => {
         if (response.status === 401 || response.status === 403) {
           return null;

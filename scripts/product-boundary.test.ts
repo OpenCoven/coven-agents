@@ -116,6 +116,8 @@ const credentialSourceFiles = [
   "lib/credentials/client.ts",
   "lib/credentials/device-flow-attempt.test.ts",
   "lib/credentials/device-flow-attempt.ts",
+  "lib/credentials/device-flow-binding.test.ts",
+  "lib/credentials/device-flow-binding.ts",
   "lib/credentials/envelope.test.ts",
   "lib/credentials/envelope.ts",
   "lib/credentials/github-device.test.ts",
@@ -162,6 +164,7 @@ const browserTransportHeaderNames = [
   "last-event-id",
 ] as const;
 const browserTransportImports = [
+  "@/lib/application-path",
   "@opencoven/agent-contracts",
   "@opencoven/harness",
   "zod",

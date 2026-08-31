@@ -64,18 +64,6 @@ const protectedHandlers: RouteExpectation[] = [
     implementation: "checkoutResponse",
     implementationFile: "lib/billing/checkout-response.ts",
   },
-  {
-    ...route(
-      "app/api/subscription/route.ts",
-      "GET",
-      "dependencies.authenticate(",
-      ["dependencies.findUser("],
-      "subscription_read"
-    ),
-    admissionMarker: "dependencies.enforceAbuse({",
-    implementation: "subscriptionResponse",
-    implementationFile: "lib/billing/subscription-status.ts",
-  },
   route(
     "app/api/credentials/device/route.ts",
     "POST",
@@ -273,6 +261,34 @@ test("resource-bearing handlers admit after identity and before expensive work",
       );
     }
   }
+});
+
+test("subscription status admits IP before verification and user before database work", () => {
+  const routeSource = read("app/api/subscription/route.ts");
+  const response = functionBlock(
+    read("lib/billing/subscription-status.ts"),
+    "subscriptionResponse"
+  );
+  const ipAdmission = response.indexOf('route: "subscription_read_ip"');
+  const authenticate = response.indexOf("dependencies.authenticate(");
+  const userAdmission = response.indexOf('route: "subscription_read"');
+  const database = response.indexOf("dependencies.findUser(");
+
+  assert.match(routeSource, /from "@\/lib\/abuse\/enforce"/);
+  assert.match(routeSource, /from "@vercel\/functions"/);
+  assert.ok(ipAdmission >= 0, "subscription status needs IP admission");
+  assert.ok(
+    ipAdmission < authenticate,
+    "subscription IP admission must precede JWT verification"
+  );
+  assert.ok(
+    authenticate < userAdmission,
+    "subscription user admission must follow JWT verification"
+  );
+  assert.ok(
+    userAdmission < database,
+    "subscription user admission must precede database work"
+  );
 });
 
 test("Stripe webhook admission precedes body and provider work", () => {
@@ -715,6 +731,16 @@ test("Auth.js handlers use method-aware abuse classification", () => {
   const routeSource = read("app/(auth)/api/auth/[...nextauth]/route.ts");
   const wrapperSource = read("lib/auth/abuse.ts");
   const sessionUpdate = functionBlock(wrapperSource, "withAuthAbusePolicy");
+  const sessionReadRoute = sessionUpdate.indexOf(
+    'route === "auth_session_read_ip"'
+  );
+  const sessionReadAdmission = sessionUpdate.indexOf(
+    'route: "auth_session_read_ip"'
+  );
+  const sessionReadHandler = sessionUpdate.indexOf(
+    "return handler(request, ...args)",
+    sessionReadAdmission
+  );
   const ipAdmission = sessionUpdate.indexOf('route: "auth_session_update_ip"');
   const bodyRead = sessionUpdate.indexOf("readBoundedBytes(");
   const identity = sessionUpdate.indexOf(
@@ -735,11 +761,34 @@ test("Auth.js handlers use method-aware abuse classification", () => {
     wrapperSource,
     /authAbuseRoute\(\s*request\.method,\s*new URL\(request\.url\)\.pathname,\s*options\.basePath \?\? process\.env\.NEXT_PUBLIC_BASE_PATH\s*\)/
   );
+  assert.ok(sessionReadRoute >= 0);
+  assert.ok(sessionReadAdmission > sessionReadRoute);
+  assert.ok(sessionReadHandler > sessionReadAdmission);
+  assert.doesNotMatch(
+    sessionUpdate.slice(sessionReadRoute, sessionReadHandler),
+    /readBoundedBytes|readIdentity|auth_session_update/
+  );
   assert.ok(ipAdmission >= 0);
   assert.ok(bodyRead > ipAdmission);
   assert.ok(identity > bodyRead);
   assert.ok(userAdmission > identity);
   assert.ok(handler > userAdmission);
+});
+
+test("device flow redemption verifies start ownership before provider exchange", () => {
+  const source = functionBlock(
+    read("app/api/credentials/device/route.ts"),
+    "PUT"
+  );
+  const parse = source.indexOf("devicePollSchema");
+  const ownership = source.indexOf("verifyDeviceFlowBinding(");
+  const exchange = source.indexOf("exchangeDeviceCode(");
+  const store = source.indexOf("putCredential(");
+
+  assert.ok(parse >= 0);
+  assert.ok(ownership > parse);
+  assert.ok(exchange > ownership);
+  assert.ok(store > exchange);
 });
 
 test("handler extraction does not include markers from a later handler", () => {

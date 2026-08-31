@@ -18,6 +18,10 @@ import { abusePolicyFor } from "@/lib/abuse/policy";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import {
+  createDeviceFlowBinding,
+  verifyDeviceFlowBinding,
+} from "@/lib/credentials/device-flow-binding";
+import {
   exchangeDeviceCode,
   startDeviceFlow,
 } from "@/lib/credentials/github-device";
@@ -27,7 +31,8 @@ import { putCredential } from "@/lib/credentials/store";
 import { databaseIdempotencyStore } from "@/lib/db/queries";
 
 const devicePollSchema = z.object({
-  deviceCode: z.string().min(1),
+  binding: z.string().min(1).max(128),
+  deviceCode: z.string().min(1).max(2048),
 });
 
 const DEVICE_RESULT_RETENTION_MS = 15 * 60_000;
@@ -51,6 +56,10 @@ function clientId(): string | null {
   return process.env.AUTH_GITHUB_ID ?? null;
 }
 
+function bindingSecret(): string | null {
+  return process.env.AUTH_SECRET ?? null;
+}
+
 export async function POST(request: Request) {
   const access = await authorizeSubscriberAccess(await auth());
   if (access.kind !== "allowed") {
@@ -72,7 +81,8 @@ export async function POST(request: Request) {
     ownerId: access.userId,
     perform: async (): Promise<IdempotencyResponse> => {
       const id = clientId();
-      if (!id) {
+      const secret = bindingSecret();
+      if (!(id && secret)) {
         return {
           body: { error: "github_unconfigured" },
           status: 503,
@@ -81,7 +91,17 @@ export async function POST(request: Request) {
 
       const started = await startDeviceFlow(id);
       return started
-        ? { body: { ...started }, status: 200 }
+        ? {
+            body: {
+              ...started,
+              binding: await createDeviceFlowBinding(
+                secret,
+                access.userId,
+                started.deviceCode
+              ),
+            },
+            status: 200,
+          }
         : { body: { error: "device_flow_failed" }, status: 502 };
     },
     request: {},
@@ -124,6 +144,20 @@ export async function PUT(request: Request) {
   }
   if (body.kind === "invalid") {
     return Response.json({ error: "invalid_request" }, { status: 400 });
+  }
+
+  const secret = bindingSecret();
+  if (!secret) {
+    return Response.json({ error: "github_unconfigured" }, { status: 503 });
+  }
+  const ownsStart = await verifyDeviceFlowBinding(
+    secret,
+    access.userId,
+    body.value.deviceCode,
+    body.value.binding
+  );
+  if (!ownsStart) {
+    return Response.json({ status: "owner_changed" }, { status: 409 });
   }
 
   const result = await exchangeDeviceCode(

@@ -1,7 +1,8 @@
 import { withBotId } from "botid/next/config";
 import type { NextConfig } from "next";
+import { configuredApplicationBasePath } from "./lib/application-path";
 
-const basePath = process.env.IS_DEMO === "1" ? "/demo" : "";
+const basePath = configuredApplicationBasePath(process.env);
 const loginDestination = `${basePath}/login`;
 const rootDestination = basePath || "/agents";
 

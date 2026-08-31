@@ -1,6 +1,7 @@
 export const ABUSE_ROUTES = Object.freeze([
   "auth_start",
   "auth_callback",
+  "auth_session_read_ip",
   "auth_session_update_ip",
   "auth_session_update",
   "chat",
@@ -16,6 +17,7 @@ export const ABUSE_ROUTES = Object.freeze([
   "vote_write",
   "upload",
   "checkout",
+  "subscription_read_ip",
   "subscription_read",
   "avatar_read",
   "avatar_write",

@@ -2,7 +2,7 @@
 
 import { Suspense } from "react";
 import { BetaNotice } from "@/components/chat/beta-notice";
-import { GithubSignIn } from "@/components/chat/github-sign-in";
+import { GithubSignInWithCallback } from "@/components/chat/github-sign-in";
 
 /**
  * GitHub is the only way in.
@@ -32,7 +32,9 @@ export default function Page() {
       </p>
 
       <div className="pt-2">
-        <GithubSignIn callbackUrl="/" />
+        <Suspense fallback={null}>
+          <GithubSignInWithCallback />
+        </Suspense>
       </div>
     </>
   );

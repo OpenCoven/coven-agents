@@ -11,6 +11,8 @@ import {
   runIdempotentOperation,
 } from "@/lib/abuse/idempotency";
 import { plaintextIdempotencyResponseStorage } from "@/lib/abuse/idempotency-response";
+import { applicationPath } from "@/lib/application-path";
+import { parseCanonicalApplicationOrigin } from "@/lib/auth/application-origin";
 import type { SessionLike } from "@/lib/auth/subscriber-access";
 import {
   CHECKOUT_ATTEMPT_METADATA_KEY,
@@ -116,6 +118,7 @@ export type CheckoutProvider = {
 };
 
 export type CheckoutDependencies = {
+  appBasePath: () => string;
   attachCustomer: (userId: string, customerId: string) => Promise<string>;
   authenticate: () => Promise<SessionLike>;
   checkoutLeaseStore: CheckoutAttemptLeaseStore;
@@ -654,7 +657,20 @@ export async function checkoutResponse(
               }
             }
 
-            const origin = dependencies.origin();
+            const appBasePath = dependencies.appBasePath();
+            const origin = parseCanonicalApplicationOrigin(
+              "Checkout application origin",
+              dependencies.origin(),
+              { allowTrailingSlash: true }
+            );
+            const cancelUrl = new URL(
+              applicationPath("/account?checkout=cancelled", appBasePath),
+              `${origin}/`
+            ).href;
+            const successUrl = new URL(
+              applicationPath("/account?checkout=success", appBasePath),
+              `${origin}/`
+            ).href;
             let checkout: Awaited<
               ReturnType<CheckoutProvider["createCheckoutSession"]>
             >;
@@ -662,7 +678,7 @@ export async function checkoutResponse(
               await expiration.checkpoint({ kind: "create_uncertain" });
               checkout = await provider.createCheckoutSession(
                 {
-                  cancel_url: `${origin}/account?checkout=cancelled`,
+                  cancel_url: cancelUrl,
                   client_reference_id: decision.userId,
                   customer: customerId,
                   integration_identifier: stableIntegrationIdentifier(
@@ -677,7 +693,7 @@ export async function checkoutResponse(
                   },
                   mode: "subscription",
                   subscription_data: { metadata: { userId: decision.userId } },
-                  success_url: `${origin}/account?checkout=success`,
+                  success_url: successUrl,
                 },
                 { idempotencyKey: sessionIdempotencyKey }
               );

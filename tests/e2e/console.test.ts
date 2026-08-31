@@ -1,7 +1,13 @@
-import { type BrowserContext, expect, type Page, test } from "@playwright/test";
+import {
+  type BrowserContext,
+  expect,
+  type Page,
+  type Route,
+  test,
+} from "@playwright/test";
 import { TEMPLATES } from "@/lib/agents/formations";
 import { executionProfileForTemplate } from "@/lib/console/agent-profile";
-import { subscriberCookies } from "./session";
+import { sessionCookies, subscriberCookies } from "./session";
 
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const RUN_ID = "22222222-2222-4222-8222-222222222222";
@@ -92,6 +98,30 @@ async function notifySessionChange(page: Page): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 50));
     channel.close();
   });
+}
+
+async function subscriberSessionSetCookie(
+  email: string,
+  id: string
+): Promise<string> {
+  const [cookie] = await sessionCookies("subscriber", { email, id });
+  if (!cookie) {
+    throw new Error("Subscriber session cookie was not created.");
+  }
+  return `${cookie.name}=${cookie.value}; Path=/; HttpOnly; SameSite=Lax`;
+}
+
+function fulfillSessionOverride(
+  route: Route,
+  sessionOverride: Record<string, unknown> | undefined,
+  setCookie: string | undefined
+) {
+  return sessionOverride === undefined
+    ? route.continue()
+    : route.fulfill({
+        headers: setCookie ? { "set-cookie": setCookie } : undefined,
+        json: sessionOverride,
+      });
 }
 
 async function openAuthenticatedProfileCreator(
@@ -389,10 +419,9 @@ test.describe("Run console", () => {
   }) => {
     await context.addCookies(await subscriberCookies("first@example.invalid"));
     let sessionOverride: Record<string, unknown> | undefined;
+    let sessionSetCookie: string | undefined;
     await page.route("**/api/auth/session", (route) =>
-      sessionOverride === undefined
-        ? route.continue()
-        : route.fulfill({ json: sessionOverride })
+      fulfillSessionOverride(route, sessionOverride, sessionSetCookie)
     );
     let prewarmRequests = 0;
     let firstPrewarmStarted!: () => void;
@@ -456,7 +485,19 @@ test.describe("Run console", () => {
         type: "subscriber",
       },
     };
+    sessionSetCookie = await subscriberSessionSetCookie(
+      "second@example.invalid",
+      "00000000-0000-4000-8000-000000000002"
+    );
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      const body = (await response.json()) as { user?: { email?: string } };
+      return body.user?.email === "second@example.invalid";
+    });
     await notifySessionChange(page);
+    await sessionRefresh;
 
     await stalePrewarmAborted;
     await expect.poll(() => prewarmRequests).toBe(2);
@@ -603,6 +644,14 @@ test.describe("Run console", () => {
   test("signed-out settings show a sign-in gate instead of credential controls", async ({
     page,
   }) => {
+    const billingRequests: string[] = [];
+    page.on("request", (request) => {
+      const { pathname } = new URL(request.url());
+      if (pathname === "/api/subscription" || pathname === "/api/checkout") {
+        billingRequests.push(pathname);
+      }
+    });
+
     await page.goto("/agents");
     await expect(
       page
@@ -623,6 +672,7 @@ test.describe("Run console", () => {
       page.getByRole("link", { name: "Sign in with GitHub" })
     ).toBeVisible();
     await expect(page.getByLabel("GitHub Copilot credential")).toHaveCount(0);
+    expect(billingRequests).toEqual([]);
   });
 
   test("the navigation rail groups and filters profile conversations", async ({
@@ -1923,10 +1973,9 @@ test.describe("Run console", () => {
   }) => {
     await context.addCookies(await subscriberCookies("first@example.invalid"));
     let sessionOverride: Record<string, unknown> | undefined;
+    let sessionSetCookie: string | undefined;
     await page.route("**/api/auth/session", (route) =>
-      sessionOverride === undefined
-        ? route.continue()
-        : route.fulfill({ json: sessionOverride })
+      fulfillSessionOverride(route, sessionOverride, sessionSetCookie)
     );
     await page.route("**/api/credentials", (route) =>
       route.fulfill({ json: { harnessIds: ["copilot"] } })
@@ -1993,6 +2042,10 @@ test.describe("Run console", () => {
         type: "subscriber",
       },
     };
+    sessionSetCookie = await subscriberSessionSetCookie(
+      "second@example.invalid",
+      "00000000-0000-4000-8000-000000000002"
+    );
     const sessionRefresh = page.waitForResponse(async (response) => {
       if (new URL(response.url()).pathname !== "/api/auth/session") {
         return false;
@@ -2016,10 +2069,9 @@ test.describe("Run console", () => {
   }) => {
     await context.addCookies(await subscriberCookies("first@example.invalid"));
     let sessionOverride: Record<string, unknown> | undefined;
+    let sessionSetCookie: string | undefined;
     await page.route("**/api/auth/session", (route) =>
-      sessionOverride === undefined
-        ? route.continue()
-        : route.fulfill({ json: sessionOverride })
+      fulfillSessionOverride(route, sessionOverride, sessionSetCookie)
     );
     await page.route("**/api/credentials", (route) =>
       route.fulfill({ json: { harnessIds: ["copilot"] } })
@@ -2094,6 +2146,10 @@ test.describe("Run console", () => {
         type: "subscriber",
       },
     };
+    sessionSetCookie = await subscriberSessionSetCookie(
+      "second@example.invalid",
+      "00000000-0000-4000-8000-000000000002"
+    );
     const sessionRefresh = page.waitForResponse(async (response) => {
       if (new URL(response.url()).pathname !== "/api/auth/session") {
         return false;
@@ -2120,10 +2176,9 @@ test.describe("Run console", () => {
   }) => {
     await context.addCookies(await subscriberCookies("first@example.invalid"));
     let sessionOverride: Record<string, unknown> | undefined;
+    let sessionSetCookie: string | undefined;
     await page.route("**/api/auth/session", (route) =>
-      sessionOverride === undefined
-        ? route.continue()
-        : route.fulfill({ json: sessionOverride })
+      fulfillSessionOverride(route, sessionOverride, sessionSetCookie)
     );
     let delayNextList = false;
     let releaseList!: () => Promise<void>;
@@ -2197,6 +2252,10 @@ test.describe("Run console", () => {
         type: "subscriber",
       },
     };
+    sessionSetCookie = await subscriberSessionSetCookie(
+      "second@example.invalid",
+      "00000000-0000-4000-8000-000000000002"
+    );
     const sessionRefresh = page.waitForResponse(async (response) => {
       if (new URL(response.url()).pathname !== "/api/auth/session") {
         return false;
@@ -2206,12 +2265,12 @@ test.describe("Run console", () => {
     });
     await notifySessionChange(page);
     await sessionRefresh;
-    await page.getByRole("button", { exact: true, name: "Account" }).click();
+    await page.getByRole("tab", { exact: true, name: "Account" }).click();
     await expect(
       page.getByText("second@example.invalid", { exact: true })
     ).toBeVisible();
     await page
-      .getByRole("button", { exact: true, name: "Harness credentials" })
+      .getByRole("tab", { exact: true, name: "Harness credentials" })
       .click();
     await releaseList();
     await releaseSave();
@@ -2296,10 +2355,9 @@ test.describe("Run console", () => {
   }) => {
     await context.addCookies(await subscriberCookies("first@example.invalid"));
     let sessionOverride: Record<string, unknown> | undefined;
+    let sessionSetCookie: string | undefined;
     await page.route("**/api/auth/session", (route) =>
-      sessionOverride === undefined
-        ? route.continue()
-        : route.fulfill({ json: sessionOverride })
+      fulfillSessionOverride(route, sessionOverride, sessionSetCookie)
     );
     await page.route("**/api/credentials", (route) =>
       route.fulfill({ json: { harnessIds: [] } })
@@ -2338,7 +2396,7 @@ test.describe("Run console", () => {
 
     await page.goto("/agents");
     await page.getByRole("button", { name: "Account and settings" }).click();
-    await page.getByRole("button", { name: "Data" }).click();
+    await page.getByRole("tab", { name: "Data" }).click();
     await page.getByRole("button", { name: "Delete all chats…" }).click();
     await page.getByRole("button", { name: "Yes, delete every chat" }).click();
     await started;
@@ -2353,6 +2411,10 @@ test.describe("Run console", () => {
         type: "subscriber",
       },
     };
+    sessionSetCookie = await subscriberSessionSetCookie(
+      "second@example.invalid",
+      "00000000-0000-4000-8000-000000000002"
+    );
     const sessionRefresh = page.waitForResponse(async (response) => {
       if (new URL(response.url()).pathname !== "/api/auth/session") {
         return false;
@@ -2362,7 +2424,7 @@ test.describe("Run console", () => {
     });
     await notifySessionChange(page);
     await sessionRefresh;
-    await page.getByRole("button", { exact: true, name: "Account" }).click();
+    await page.getByRole("tab", { exact: true, name: "Account" }).click();
     await expect(
       page.getByText("second@example.invalid", { exact: true })
     ).toBeVisible();

@@ -5,8 +5,15 @@
 import { HARNESS_SPECS } from "@opencoven/harness";
 import Link from "next/link";
 import { signOut } from "next-auth/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
+import { SubscriptionCard } from "@/components/billing/subscription-card";
 import { Btn, Caret, Eyebrow } from "@/components/console/primitives";
 import {
   hairline,
@@ -16,6 +23,9 @@ import {
   type as type_,
   well,
 } from "@/components/console/styles";
+import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
+import { useResponsiveTabOrientation } from "@/hooks/use-responsive-tab-orientation";
+import { browserApplicationPath } from "@/lib/application-path";
 import { glyphFor } from "@/lib/console/format";
 import {
   isSessionOperationCurrent,
@@ -32,9 +42,9 @@ import { createCredentialRefreshFence } from "@/lib/credentials/client";
  * cannot drift.
  */
 
-type Tab = "account" | "data" | "harness" | "usage";
+type Tab = "account" | "billing" | "data" | "harness" | "usage";
 
-const TABS: { id: Tab; label: string }[] = [
+const TABS: { id: Exclude<Tab, "billing">; label: string }[] = [
   { id: "harness", label: "Harness credentials" },
   { id: "usage", label: "Usage" },
   { id: "data", label: "Data" },
@@ -53,6 +63,15 @@ const REFUSED = HARNESS_SPECS.filter((spec) => !spec.supported);
 
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const MS_PER_DAY = 86_400_000;
+const HORIZONTAL_SETTINGS_QUERY = "(max-width: 720px)";
+
+function settingsPanelId(tab: Tab): string {
+  return `console-settings-panel-${tab}`;
+}
+
+function settingsTabId(tab: Tab): string {
+  return `console-settings-tab-${tab}`;
+}
 
 type Usage = { cap: number; resetsAt: string | null; used: number };
 
@@ -89,6 +108,7 @@ function HarnessCard({
   configured,
   draft,
   harness,
+  locked,
   onDraft,
   onRemove,
   runnable,
@@ -97,6 +117,7 @@ function HarnessCard({
   configured: boolean;
   draft: string;
   harness: { id: string; label: string };
+  locked: boolean;
   onDraft: (id: string, value: string) => void;
   onRemove: (id: string) => void;
   runnable: boolean;
@@ -107,7 +128,7 @@ function HarnessCard({
         background: "var(--bg-raised)",
         border: hairline,
         borderRadius: "var(--radius-card)",
-        opacity: runnable ? 1 : 0.72,
+        opacity: runnable && !locked ? 1 : 0.72,
         overflow: "hidden",
       }}
     >
@@ -145,6 +166,7 @@ function HarnessCard({
             <input
               aria-label={`${harness.label} credential`}
               autoComplete="off"
+              disabled={locked}
               onChange={(event) => onDraft(harness.id, event.target.value)}
               placeholder={
                 configured
@@ -167,7 +189,7 @@ function HarnessCard({
               </p>
               {configured ? (
                 <Btn
-                  disabled={busy}
+                  disabled={busy || locked}
                   onClick={() => onRemove(harness.id)}
                   size="xs"
                   variant="danger-ghost"
@@ -191,17 +213,39 @@ function HarnessCard({
 
 export function Settings({
   account,
+  checkoutEnabled,
+  isSubscriber,
   onCredentialsChange,
   operationContext,
+  subscribedUntil,
 }: {
   /** The signed-in email, or null. Not a display string — the panel decides
    *  how to render "nobody", so a fallback sentence can never be mistaken for
    *  an account name or have an initial derived from it. */
   account: string | null;
+  checkoutEnabled: boolean;
+  isSubscriber: boolean;
   onCredentialsChange: (harnessIds: readonly string[]) => void;
   operationContext: SessionOperationContext | null;
+  subscribedUntil: string | null;
 }) {
+  const loginPath = useApplicationLoginPath();
   const [tab, setTab] = useState<Tab>("harness");
+  const tabOrientation = useResponsiveTabOrientation(HORIZONTAL_SETTINGS_QUERY);
+  const horizontalTabs = tabOrientation === "horizontal";
+  const showBilling = checkoutEnabled || isSubscriber;
+  const tabs: { id: Tab; label: string }[] = showBilling
+    ? [
+        ...TABS.slice(0, 2),
+        { id: "billing", label: "Billing" },
+        ...TABS.slice(2),
+      ]
+    : TABS;
+  const selectedTab = tabs.some((entry) => entry.id === tab) ? tab : tabs[0].id;
+  const tabRefs = useRef(new Map<Tab, HTMLButtonElement>());
+  const billingTabRef = useRef<HTMLButtonElement | null>(null);
+  const billingPanelRef = useRef<HTMLDivElement | null>(null);
+  const removedBillingOwnedFocusRef = useRef(false);
 
   const [configured, setConfigured] = useState<string[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -219,6 +263,61 @@ export function Settings({
     (context: SessionOperationContext | null) =>
       isSessionOperationCurrent(context, operationContextRef.current),
     []
+  );
+  const credentialAuthorityValid =
+    isSubscriber &&
+    operationContext !== null &&
+    isCurrentOperation(operationContext);
+  const credentialsLocked = locked || !credentialAuthorityValid;
+  const credentialsLockedRef = useRef(credentialsLocked);
+  credentialsLockedRef.current = credentialsLocked;
+  const credentialMemoryFence = [
+    account ?? "",
+    isSubscriber ? "subscriber" : "demo",
+    operationContext?.generation ?? "",
+    credentialsLocked ? "locked" : "unlocked",
+  ].join(":");
+  const credentialMemoryFenceRef = useRef(credentialMemoryFence);
+
+  const captureRemovedBillingFocus = useCallback(
+    (element: HTMLElement | null) => {
+      const { activeElement } = document;
+      if (
+        element &&
+        (activeElement === element ||
+          (activeElement && element.contains(activeElement)))
+      ) {
+        removedBillingOwnedFocusRef.current = true;
+      }
+    },
+    []
+  );
+
+  const registerBillingTab = useCallback(
+    (element: HTMLButtonElement | null) => {
+      if (element) {
+        removedBillingOwnedFocusRef.current = false;
+        billingTabRef.current = element;
+        tabRefs.current.set("billing", element);
+        return;
+      }
+      captureRemovedBillingFocus(billingTabRef.current);
+      billingTabRef.current = null;
+      tabRefs.current.delete("billing");
+    },
+    [captureRemovedBillingFocus]
+  );
+
+  const registerBillingPanel = useCallback(
+    (element: HTMLDivElement | null) => {
+      if (element) {
+        billingPanelRef.current = element;
+        return;
+      }
+      captureRemovedBillingFocus(billingPanelRef.current);
+      billingPanelRef.current = null;
+    },
+    [captureRemovedBillingFocus]
   );
 
   const publishCredentials = useCallback(
@@ -249,10 +348,11 @@ export function Settings({
       if (!isCurrentOperation(context) || !refreshFence.isCurrent(ticket)) {
         return null;
       }
-      if (response.status === 403) {
+      if (response.status === 401 || response.status === 403) {
         // A demo session cannot store one, and saying so beats a form that
         // fails on submit.
         setLocked(true);
+        setDrafts({});
         return publishCredentials([], context);
       }
       if (!response.ok) {
@@ -277,12 +377,70 @@ export function Settings({
     setRefusedOpen(false);
     setUsage(null);
     setConfirmWipe(false);
-    if (!account || !operationContext) {
+    if (!(account && isSubscriber && operationContext)) {
       return () => refreshFence.deactivate();
     }
     refreshCredentials(operationContext).catch(() => undefined);
     return () => refreshFence.deactivate();
-  }, [account, operationContext, refreshCredentials, refreshFence]);
+  }, [
+    account,
+    isSubscriber,
+    operationContext,
+    refreshCredentials,
+    refreshFence,
+  ]);
+
+  useLayoutEffect(() => {
+    if (credentialMemoryFenceRef.current === credentialMemoryFence) {
+      return;
+    }
+    credentialMemoryFenceRef.current = credentialMemoryFence;
+    setDrafts({});
+  }, [credentialMemoryFence]);
+
+  useEffect(() => {
+    if (tab === selectedTab) {
+      return;
+    }
+    const shouldFocus =
+      tab === "billing" && removedBillingOwnedFocusRef.current;
+    removedBillingOwnedFocusRef.current = false;
+    setTab(selectedTab);
+    if (!shouldFocus) {
+      return;
+    }
+    queueMicrotask(() => {
+      tabRefs.current.get(selectedTab)?.focus();
+    });
+  }, [selectedTab, tab]);
+
+  const handleTabKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>, id: Tab) => {
+      const index = tabs.findIndex((entry) => entry.id === id);
+      if (index < 0) {
+        return;
+      }
+      let destination: Tab | null = null;
+      const nextKey = horizontalTabs ? "ArrowRight" : "ArrowDown";
+      const previousKey = horizontalTabs ? "ArrowLeft" : "ArrowUp";
+      if (event.key === nextKey) {
+        destination = tabs[(index + 1) % tabs.length].id;
+      } else if (event.key === previousKey) {
+        destination = tabs[(index - 1 + tabs.length) % tabs.length].id;
+      } else if (event.key === "Home") {
+        destination = tabs[0].id;
+      } else if (event.key === "End") {
+        destination = tabs.at(-1)?.id ?? null;
+      }
+      if (!destination) {
+        return;
+      }
+      event.preventDefault();
+      setTab(destination);
+      tabRefs.current.get(destination)?.focus();
+    },
+    [horizontalTabs, tabs]
+  );
 
   useEffect(() => {
     const context = operationContext;
@@ -308,7 +466,11 @@ export function Settings({
     load().catch(() => undefined);
   }, [account, isCurrentOperation, operationContext]);
 
-  const dirty = Object.values(drafts).some((value) => value.trim().length > 0);
+  const visibleConfigured = credentialsLocked ? [] : configured;
+  const visibleDrafts = credentialsLocked ? {} : drafts;
+  const dirty = Object.values(visibleDrafts).some(
+    (value) => value.trim().length > 0
+  );
 
   const onDraft = (id: string, value: string) => {
     setDrafts((current) => ({ ...current, [id]: value }));
@@ -316,14 +478,20 @@ export function Settings({
 
   const save = async () => {
     const context = operationContextRef.current;
-    if (!context || !isCurrentOperation(context)) {
+    if (
+      credentialsLockedRef.current ||
+      !context ||
+      !isCurrentOperation(context)
+    ) {
+      setDrafts({});
+      toast.error("Subscription required.");
       return;
     }
     setBusy(true);
     let stored = 0;
     let nextConfigured = configured;
     try {
-      for (const [harnessId, value] of Object.entries(drafts)) {
+      for (const [harnessId, value] of Object.entries(visibleDrafts)) {
         const credential = value.trim();
         if (!credential) {
           continue;
@@ -349,6 +517,17 @@ export function Settings({
           if (isCurrentOperation(context)) {
             toast.error(body.message ?? "That token was rejected.");
           }
+          return;
+        }
+        if (response.status === 401 || response.status === 403) {
+          setLocked(true);
+          setDrafts({});
+          publishCredentials([], context);
+          toast.error(
+            response.status === 401
+              ? "Sign in again."
+              : "Subscription required."
+          );
           return;
         }
         if (!response.ok) {
@@ -387,7 +566,12 @@ export function Settings({
 
   const remove = async (harnessId: string) => {
     const context = operationContextRef.current;
-    if (!context || !isCurrentOperation(context)) {
+    if (
+      credentialsLockedRef.current ||
+      !context ||
+      !isCurrentOperation(context)
+    ) {
+      toast.error("Subscription required.");
       return;
     }
     setBusy(true);
@@ -399,6 +583,15 @@ export function Settings({
         signal: context.signal,
       });
       if (!isCurrentOperation(context)) {
+        return;
+      }
+      if (response.status === 401 || response.status === 403) {
+        setLocked(true);
+        setDrafts({});
+        publishCredentials([], context);
+        toast.error(
+          response.status === 401 ? "Sign in again." : "Subscription required."
+        );
         return;
       }
       if (!response.ok) {
@@ -490,18 +683,33 @@ export function Settings({
             Harness credentials, usage, and account data are available only
             after GitHub sign-in.
           </p>
-          <Link
-            href="/login"
-            style={{
-              ...pill("accent"),
-              display: "inline-flex",
-              marginTop: 20,
-              padding: "9px 14px",
-              textDecoration: "none",
-            }}
-          >
-            Sign in with GitHub
-          </Link>
+          {loginPath ? (
+            <Link
+              href={loginPath}
+              style={{
+                ...pill("accent"),
+                display: "inline-flex",
+                marginTop: 20,
+                padding: "9px 14px",
+                textDecoration: "none",
+              }}
+            >
+              Sign in with GitHub
+            </Link>
+          ) : (
+            <span
+              aria-disabled="true"
+              style={{
+                ...pill("accent"),
+                display: "inline-flex",
+                marginTop: 20,
+                opacity: 0.6,
+                padding: "9px 14px",
+              }}
+            >
+              Sign in with GitHub
+            </span>
+          )}
         </div>
       </div>
     );
@@ -516,10 +724,12 @@ export function Settings({
         flex: 1,
         flexDirection: "column",
         minHeight: 0,
+        minWidth: 0,
       }}
     >
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         <nav
+          aria-label="Console settings navigation"
           className="oc-settings-nav"
           style={{
             borderRight: hairline,
@@ -531,46 +741,73 @@ export function Settings({
             width: 212,
           }}
         >
-          <Eyebrow
-            style={{
-              color: "var(--text-muted)",
-              letterSpacing: "0.14em",
-              padding: "0 10px 8px",
-            }}
+          <div
+            aria-label="Console settings"
+            aria-orientation={tabOrientation}
+            role="tablist"
+            style={{ display: "contents" }}
           >
-            Settings
-          </Eyebrow>
-          {TABS.map((entry) => (
-            <button
-              className="oc-row"
-              key={entry.id}
-              onClick={() => setTab(entry.id)}
+            <Eyebrow
               style={{
-                background:
-                  tab === entry.id
-                    ? "color-mix(in oklch, var(--accent-presence) 14%, transparent)"
-                    : "transparent",
-                border: 0,
-                borderRadius: "var(--radius-md)",
-                color:
-                  tab === entry.id
-                    ? "var(--text-primary)"
-                    : "var(--text-secondary)",
-                cursor: "pointer",
-                font: "500 12px/1.3 var(--font-ui)",
-                padding: "8px 10px",
-                textAlign: "left",
-                width: "100%",
+                color: "var(--text-muted)",
+                letterSpacing: "0.14em",
+                padding: "0 10px 8px",
               }}
-              type="button"
             >
-              {entry.label}
-            </button>
-          ))}
+              Settings
+            </Eyebrow>
+            {tabs.map((entry) => (
+              <button
+                aria-controls={settingsPanelId(entry.id)}
+                aria-selected={selectedTab === entry.id}
+                className="oc-row"
+                id={settingsTabId(entry.id)}
+                key={entry.id}
+                onClick={() => setTab(entry.id)}
+                onKeyDown={(event) => handleTabKeyDown(event, entry.id)}
+                ref={
+                  entry.id === "billing"
+                    ? registerBillingTab
+                    : (element) => {
+                        if (element) {
+                          tabRefs.current.set(entry.id, element);
+                        } else {
+                          tabRefs.current.delete(entry.id);
+                        }
+                      }
+                }
+                role="tab"
+                style={{
+                  background:
+                    selectedTab === entry.id
+                      ? "color-mix(in oklch, var(--accent-presence) 14%, transparent)"
+                      : "transparent",
+                  border: 0,
+                  borderRadius: "var(--radius-md)",
+                  color:
+                    selectedTab === entry.id
+                      ? "var(--text-primary)"
+                      : "var(--text-secondary)",
+                  cursor: "pointer",
+                  font: "500 12px/1.3 var(--font-ui)",
+                  padding: "8px 10px",
+                  textAlign: "left",
+                  width: "100%",
+                }}
+                tabIndex={selectedTab === entry.id ? 0 : -1}
+                type="button"
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
         </nav>
 
         <div
+          aria-labelledby={settingsTabId(selectedTab)}
           className="oc-settings-content oc-scroll"
+          id={settingsPanelId(selectedTab)}
+          role="tabpanel"
           style={{
             background: "var(--bg-base)",
             flex: 1,
@@ -587,30 +824,34 @@ export function Settings({
               maxWidth: 640,
             }}
           >
-            {tab === "harness" ? (
+            {selectedTab === "harness" ? (
               <>
                 <Heading
                   blurb="Your credential, envelope-encrypted, fetched for the duration of one run and redacted from evidence. Never shared with another account."
                   title="Harness credentials"
                 />
-                {locked ? (
-                  <p style={type_.body}>
-                    Storing a credential needs an active subscription.
-                  </p>
-                ) : (
-                  RUNNABLE.map((spec) => (
-                    <HarnessCard
-                      busy={busy}
-                      configured={configured.includes(spec.id)}
-                      draft={drafts[spec.id] ?? ""}
-                      harness={spec}
-                      key={spec.id}
-                      onDraft={onDraft}
-                      onRemove={remove}
-                      runnable
-                    />
-                  ))
-                )}
+                {credentialsLocked ? (
+                  <div role="status" style={type_.body}>
+                    <strong>Subscription required</strong>
+                    <p>
+                      An active subscription is required to store harness
+                      credentials.
+                    </p>
+                  </div>
+                ) : null}
+                {RUNNABLE.map((spec) => (
+                  <HarnessCard
+                    busy={busy}
+                    configured={visibleConfigured.includes(spec.id)}
+                    draft={visibleDrafts[spec.id] ?? ""}
+                    harness={spec}
+                    key={spec.id}
+                    locked={credentialsLocked}
+                    onDraft={onDraft}
+                    onRemove={remove}
+                    runnable
+                  />
+                ))}
 
                 <button
                   aria-expanded={refusedOpen}
@@ -653,6 +894,7 @@ export function Settings({
                         draft=""
                         harness={spec}
                         key={spec.id}
+                        locked={false}
                         onDraft={onDraft}
                         onRemove={remove}
                         runnable={false}
@@ -662,7 +904,7 @@ export function Settings({
               </>
             ) : null}
 
-            {tab === "usage" ? (
+            {selectedTab === "usage" ? (
               <>
                 <Heading
                   blurb="A run is counted when an agent starts, whether it succeeds or not."
@@ -803,7 +1045,17 @@ export function Settings({
               </>
             ) : null}
 
-            {tab === "data" ? (
+            {selectedTab === "billing" && showBilling ? (
+              <div ref={registerBillingPanel}>
+                <SubscriptionCard
+                  checkoutEnabled={checkoutEnabled}
+                  isSubscriber={isSubscriber}
+                  subscribedUntil={subscribedUntil}
+                />
+              </div>
+            ) : null}
+
+            {selectedTab === "data" ? (
               <>
                 <Heading
                   blurb="What this account stores, and how to remove it."
@@ -894,7 +1146,7 @@ export function Settings({
               </>
             ) : null}
 
-            {tab === "account" ? (
+            {selectedTab === "account" ? (
               <>
                 <Heading
                   blurb="Sign-in is GitHub-only. There is no password to change."
@@ -924,14 +1176,18 @@ export function Settings({
                       {account ?? "not signed in"}
                     </div>
                     <div style={{ ...type_.meta, marginTop: 2 }}>
-                      {configured.length > 0
-                        ? `${configured.length} harness credential(s) stored`
+                      {visibleConfigured.length > 0
+                        ? `${visibleConfigured.length} harness credential(s) stored`
                         : "no harness credential stored"}
                     </div>
                   </div>
                   {account ? (
                     <Btn
-                      onClick={() => signOut({ redirectTo: "/login" })}
+                      onClick={() =>
+                        signOut({
+                          redirectTo: browserApplicationPath("/login"),
+                        })
+                      }
                       variant="ghost"
                     >
                       Sign out
@@ -942,7 +1198,11 @@ export function Settings({
                     // opposite.
                     <Btn
                       onClick={() => {
-                        window.location.href = "/login";
+                        if (loginPath) {
+                          window.location.assign(
+                            browserApplicationPath(loginPath)
+                          );
+                        }
                       }}
                       variant="secondary"
                     >
@@ -992,14 +1252,14 @@ export function Settings({
         </span>
         <div style={{ flex: 1 }} />
         <Btn
-          disabled={!dirty || busy}
+          disabled={!dirty || busy || credentialsLocked}
           onClick={() => setDrafts({})}
           variant="ghost"
         >
           Discard
         </Btn>
         <Btn
-          disabled={!dirty || busy}
+          disabled={!dirty || busy || credentialsLocked}
           onClick={() => {
             save().catch(() => undefined);
           }}
