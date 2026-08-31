@@ -2,13 +2,20 @@
 
 import { HARNESS_SPECS } from "@opencoven/harness";
 import { Check, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { ConnectCopilot } from "@/components/account/connect-copilot";
 import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { browserApplicationPath } from "@/lib/application-path";
+import { createCredentialRefreshFence } from "@/lib/credentials/client";
 
 /**
  * Where a tenant supplies their own harness credential.
@@ -47,28 +54,95 @@ const HARNESSES = HARNESS_SPECS.filter((spec) => spec.supported).map(
   })
 );
 
-export function HarnessCredentials({ userId }: { userId: string }) {
+export function HarnessCredentials({
+  authorityRevision,
+  authVersion,
+  isSubscriber,
+  onAuthorityInvalidated,
+  userId,
+}: {
+  authorityRevision: string | null;
+  authVersion: number | null | undefined;
+  isSubscriber: boolean;
+  onAuthorityInvalidated: () => void;
+  userId: string;
+}) {
   const [configured, setConfigured] = useState<string[]>([]);
   const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
-  const [locked, setLocked] = useState<"session" | "subscription" | null>(null);
+  const [lockedAuthority, setLockedAuthority] = useState<{
+    context: string;
+    kind: "session" | "subscription";
+  } | null>(null);
+  const authorityContext = `${userId}:${authVersion ?? ""}:${authorityRevision ?? ""}:${isSubscriber ? "subscriber" : "demo"}`;
+  const authorityContextRef = useRef(authorityContext);
+  authorityContextRef.current = authorityContext;
+  const credentialMemoryContextRef = useRef<string | null>(null);
+  const refreshFence = useRef(createCredentialRefreshFence()).current;
+  const locked = isSubscriber
+    ? lockedAuthority?.context === authorityContext
+      ? lockedAuthority.kind
+      : null
+    : "subscription";
 
-  const closeForAuthorityLoss = useCallback((status: number) => {
-    if (status !== 401 && status !== 403) {
-      return false;
+  useLayoutEffect(() => {
+    if (credentialMemoryContextRef.current === authorityContext) {
+      return;
     }
+    credentialMemoryContextRef.current = authorityContext;
+    refreshFence.activate();
     setConfigured([]);
     setValues({});
-    setLocked(status === 401 ? "session" : "subscription");
-    return true;
-  }, []);
+    setBusy(null);
+  }, [authorityContext, refreshFence]);
+
+  useEffect(() => {
+    refreshFence.activate();
+    return () => {
+      refreshFence.deactivate();
+    };
+  }, [refreshFence]);
+
+  const closeForAuthorityLoss = useCallback(
+    (status: number, requestAuthorityContext: string) => {
+      if (
+        authorityContextRef.current !== requestAuthorityContext ||
+        (status !== 401 && status !== 403)
+      ) {
+        return false;
+      }
+      setConfigured([]);
+      setValues({});
+      refreshFence.advanceMutation();
+      setLockedAuthority({
+        context: requestAuthorityContext,
+        kind: status === 401 ? "session" : "subscription",
+      });
+      if (status === 401 || status === 403) {
+        onAuthorityInvalidated();
+      }
+      return true;
+    },
+    [onAuthorityInvalidated, refreshFence]
+  );
 
   const refresh = useCallback(async () => {
+    if (!isSubscriber) {
+      return;
+    }
+    const requestAuthorityContext = authorityContext;
+    const ticket = refreshFence.beginRefresh();
     const response = await fetch(browserApplicationPath("/api/credentials"));
+    if (authorityContextRef.current !== requestAuthorityContext) {
+      return;
+    }
 
-    if (closeForAuthorityLoss(response.status)) {
+    if (closeForAuthorityLoss(response.status, requestAuthorityContext)) {
       // A guest account cannot store one, and saying so beats a form that
       // fails on submit.
+      return;
+    }
+    if (!refreshFence.isCurrent(ticket)) {
       return;
     }
 
@@ -77,8 +151,14 @@ export function HarnessCredentials({ userId }: { userId: string }) {
     }
 
     const body = (await response.json()) as { harnessIds?: string[] };
+    if (authorityContextRef.current !== requestAuthorityContext) {
+      return;
+    }
+    if (!refreshFence.isCurrent(ticket)) {
+      return;
+    }
     setConfigured(body.harnessIds ?? []);
-  }, [closeForAuthorityLoss]);
+  }, [authorityContext, closeForAuthorityLoss, isSubscriber, refreshFence]);
 
   const reload = useCallback(() => {
     refresh().catch(() => undefined);
@@ -87,6 +167,12 @@ export function HarnessCredentials({ userId }: { userId: string }) {
   useEffect(() => {
     reload();
   }, [reload]);
+
+  const credentialChanged = useCallback(() => {
+    if (refreshFence.advanceMutation()) {
+      reload();
+    }
+  }, [refreshFence, reload]);
 
   const change = useCallback((harnessId: string, next: string) => {
     setValues((current) => ({ ...current, [harnessId]: next }));
@@ -101,6 +187,7 @@ export function HarnessCredentials({ userId }: { userId: string }) {
       }
 
       setBusy(harnessId);
+      const requestAuthorityContext = authorityContextRef.current;
 
       try {
         const response = await fetch(
@@ -111,8 +198,11 @@ export function HarnessCredentials({ userId }: { userId: string }) {
             method: "POST",
           }
         );
+        if (authorityContextRef.current !== requestAuthorityContext) {
+          return false;
+        }
 
-        if (closeForAuthorityLoss(response.status)) {
+        if (closeForAuthorityLoss(response.status, requestAuthorityContext)) {
           return false;
         }
 
@@ -121,6 +211,9 @@ export function HarnessCredentials({ userId }: { userId: string }) {
           // rather than folded into a generic failure. The typed value is
           // deliberately kept so they can see and correct it.
           const body = (await response.json()) as { message?: string };
+          if (authorityContextRef.current !== requestAuthorityContext) {
+            return false;
+          }
 
           toast({
             description: body.message ?? "That token was rejected.",
@@ -132,6 +225,9 @@ export function HarnessCredentials({ userId }: { userId: string }) {
         if (!response.ok) {
           throw new Error(String(response.status));
         }
+        if (!refreshFence.advanceMutation()) {
+          return false;
+        }
 
         // Cleared immediately: there is no reason for the secret to sit in
         // component state after the write succeeded.
@@ -140,21 +236,26 @@ export function HarnessCredentials({ userId }: { userId: string }) {
         await refresh();
         return true;
       } catch {
-        toast({
-          description: "Could not store the credential.",
-          type: "error",
-        });
+        if (authorityContextRef.current === requestAuthorityContext) {
+          toast({
+            description: "Could not store the credential.",
+            type: "error",
+          });
+        }
         return false;
       } finally {
-        setBusy(null);
+        if (authorityContextRef.current === requestAuthorityContext) {
+          setBusy(null);
+        }
       }
     },
-    [closeForAuthorityLoss, refresh, values]
+    [closeForAuthorityLoss, refresh, refreshFence, values]
   );
 
   const remove = useCallback(
     async (harnessId: string) => {
       setBusy(harnessId);
+      const requestAuthorityContext = authorityContextRef.current;
 
       try {
         const response = await fetch(
@@ -165,27 +266,37 @@ export function HarnessCredentials({ userId }: { userId: string }) {
             method: "DELETE",
           }
         );
+        if (authorityContextRef.current !== requestAuthorityContext) {
+          return;
+        }
 
-        if (closeForAuthorityLoss(response.status)) {
+        if (closeForAuthorityLoss(response.status, requestAuthorityContext)) {
           return;
         }
 
         if (!response.ok) {
           throw new Error(String(response.status));
         }
+        if (!refreshFence.advanceMutation()) {
+          return;
+        }
 
         toast({ description: "Credential removed.", type: "success" });
         await refresh();
       } catch {
-        toast({
-          description: "Could not remove the credential.",
-          type: "error",
-        });
+        if (authorityContextRef.current === requestAuthorityContext) {
+          toast({
+            description: "Could not remove the credential.",
+            type: "error",
+          });
+        }
       } finally {
-        setBusy(null);
+        if (authorityContextRef.current === requestAuthorityContext) {
+          setBusy(null);
+        }
       }
     },
-    [closeForAuthorityLoss, refresh]
+    [closeForAuthorityLoss, refresh, refreshFence]
   );
 
   return (
@@ -207,15 +318,16 @@ export function HarnessCredentials({ userId }: { userId: string }) {
       ) : (
         HARNESSES.map((harness) => (
           <HarnessRow
+            authorityContext={authorityContext}
             busy={busy === harness.id}
             configured={configured.includes(harness.id)}
             harness={harness}
-            key={harness.id}
+            key={`${authorityContext}:${harness.id}`}
+            onAuthorityInvalidated={onAuthorityInvalidated}
             onChange={change}
-            onConnected={reload}
+            onConnected={credentialChanged}
             onRemove={remove}
             onSave={save}
-            userId={userId}
             value={values[harness.id] ?? ""}
           />
         ))
@@ -225,24 +337,26 @@ export function HarnessCredentials({ userId }: { userId: string }) {
 }
 
 function HarnessRow({
+  authorityContext,
   busy,
   configured,
   harness,
   onChange,
+  onAuthorityInvalidated,
   onConnected,
   onRemove,
   onSave,
-  userId,
   value,
 }: {
+  authorityContext: string;
   busy: boolean;
   configured: boolean;
   onConnected: () => void;
   harness: { help: string; id: string; label: string };
   onChange: (harnessId: string, next: string) => void;
+  onAuthorityInvalidated: () => void;
   onRemove: (harnessId: string) => void;
   onSave: (harnessId: string) => Promise<boolean>;
-  userId: string;
   value: string;
 }) {
   /**
@@ -343,9 +457,10 @@ function HarnessRow({
       {showEditor && harness.id === "copilot" ? (
         <>
           <ConnectCopilot
+            authorityContext={authorityContext}
             configured={configured}
+            onAuthorityInvalidated={onAuthorityInvalidated}
             onConnected={handleConnected}
-            userId={userId}
           />
           <div className="flex items-center gap-3 py-1">
             <span className="h-px flex-1 bg-border" />

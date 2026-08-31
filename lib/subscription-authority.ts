@@ -1,6 +1,9 @@
 export type SubscriptionAuthority = Readonly<{
   authorityExpiresAt?: string | null;
+  authVersion: number | null;
+  checkedAt: string;
   isSubscriber: boolean;
+  resolutionId: string;
   subscribedUntil: string | null;
   userId: string;
 }> | null;
@@ -12,6 +15,7 @@ export type EffectiveSubscriptionAuthority = Readonly<{
 
 type SubscriptionAuthoritySession = Readonly<{
   user?: Readonly<{
+    authVersion?: number | null;
     id?: string | null;
     subscriptionAuthorityExpiresAt?: string | null;
     type?: string | null;
@@ -25,13 +29,15 @@ const INACTIVE_AUTHORITY: EffectiveSubscriptionAuthority = {
 
 export function storageUnavailableSubscriptionAuthority(
   session: SubscriptionAuthoritySession,
-  now: Date
+  now: Date,
+  resolutionId: string
 ): SubscriptionAuthority {
   const userId = session.user?.id;
   if (!userId) {
     return null;
   }
   const subscribedUntil = session.user?.subscriptionAuthorityExpiresAt;
+  const authVersion = session.user?.authVersion;
   const boundary =
     typeof subscribedUntil === "string"
       ? Date.parse(subscribedUntil)
@@ -42,7 +48,10 @@ export function storageUnavailableSubscriptionAuthority(
     boundary > now.getTime();
   return {
     authorityExpiresAt: isSubscriber ? subscribedUntil : null,
+    authVersion: Number.isInteger(authVersion) ? (authVersion ?? null) : null,
+    checkedAt: now.toISOString(),
     isSubscriber,
+    resolutionId,
     subscribedUntil: null,
     userId,
   };
@@ -50,9 +59,16 @@ export function storageUnavailableSubscriptionAuthority(
 
 export function subscriptionAuthorityExpiryBoundary(
   authority: SubscriptionAuthority,
-  sessionUserId: string | null | undefined
+  sessionUserId: string | null | undefined,
+  sessionAuthVersion: number | null | undefined
 ): string | null {
-  if (!(sessionUserId && authority?.userId === sessionUserId)) {
+  if (
+    !(
+      sessionUserId &&
+      authority?.userId === sessionUserId &&
+      authority.authVersion === sessionAuthVersion
+    )
+  ) {
     return null;
   }
   return authority.subscribedUntil ?? authority.authorityExpiresAt ?? null;
@@ -61,11 +77,16 @@ export function subscriptionAuthorityExpiryBoundary(
 export function effectiveSubscriptionAuthority(
   authority: SubscriptionAuthority,
   sessionUserId: string | null | undefined,
+  sessionAuthVersion: number | null | undefined,
   authorityPending = false
 ): EffectiveSubscriptionAuthority {
   if (
     authorityPending ||
-    !(sessionUserId && authority?.userId === sessionUserId)
+    !(
+      sessionUserId &&
+      authority?.userId === sessionUserId &&
+      authority.authVersion === sessionAuthVersion
+    )
   ) {
     return INACTIVE_AUTHORITY;
   }

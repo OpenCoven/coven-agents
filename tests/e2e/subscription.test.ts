@@ -3,6 +3,7 @@ import {
   expect,
   type Page,
   type Request,
+  type Route,
   test,
 } from "@playwright/test";
 import { E2E_USER_ID, sessionCookies } from "./session";
@@ -15,14 +16,15 @@ type SessionType = "demo" | "subscriber";
 function sessionFor(
   type: SessionType,
   {
+    authVersion = 1,
     email = "e2e-user@example.invalid",
     id = E2E_USER_ID,
-  }: { email?: string; id?: string } = {}
+  }: { authVersion?: number; email?: string; id?: string } = {}
 ) {
   return {
     expires: "2099-01-01T00:00:00.000Z",
     user: {
-      authVersion: 1,
+      authVersion,
       email,
       id,
       image: null,
@@ -56,7 +58,7 @@ async function mockSession(page: Page, type: SessionType): Promise<void> {
 async function setServerSession(
   context: BrowserContext,
   type: SessionType,
-  options: { email?: string; id?: string } = {}
+  options: { authVersion?: number; email?: string; id?: string } = {}
 ): Promise<void> {
   await context.addCookies(await sessionCookies(type, options));
 }
@@ -809,6 +811,881 @@ test.describe("Subscriber checkout", () => {
     await expect(credential).toBeDisabled();
     await expect(credential).toHaveValue("");
     await expect(save).toBeDisabled();
+  });
+
+  for (const refusedMethod of ["GET", "POST", "DELETE"] as const) {
+    test(`credential ${refusedMethod} 403 invalidates shared authority once and a newer active revision recovers`, async ({
+      page,
+    }) => {
+      await setServerSession(page.context(), "subscriber");
+      await page.route("**/api/auth/session", (route) =>
+        route.fulfill({ json: sessionFor("subscriber") })
+      );
+      await page.route("**/api/tenant/prewarm", (route) =>
+        route.fulfill({ status: 204 })
+      );
+      await page.route("**/api/usage", (route) =>
+        route.fulfill({
+          json: {
+            cap: 750,
+            resetsAt: "2099-02-01T00:00:00.000Z",
+            used: 0,
+          },
+        })
+      );
+      await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+        const { pathname } = new URL(route.request().url());
+        return route.fulfill(
+          pathname === "/api/agents"
+            ? { json: { agents: [] } }
+            : { json: { apiVersion: "1.0", runs: [] } }
+        );
+      });
+
+      await page.route("**/api/credentials", (route) => {
+        const method = route.request().method();
+        if (method === "GET") {
+          return route.fulfill({
+            json: {
+              harnessIds: refusedMethod === "DELETE" ? ["copilot"] : [],
+            },
+          });
+        }
+        if (method === refusedMethod) {
+          return route.fulfill({
+            json: { error: "subscription_required" },
+            status: 403,
+          });
+        }
+        return route.fulfill({ json: {}, status: 500 });
+      });
+
+      let releaseRefresh!: () => void;
+      const refreshGate = new Promise<void>((resolve) => {
+        releaseRefresh = resolve;
+      });
+      let serverRefreshes = 0;
+      await page.route("**/agents?**", async (route) => {
+        if (isServerComponentRequest(route.request())) {
+          serverRefreshes += 1;
+          await refreshGate;
+        }
+        await route.continue();
+      });
+
+      let refusedGetHandler: ((route: Route) => Promise<void>) | null = null;
+      if (refusedMethod === "GET") {
+        await page.goto("/agents");
+        await expect(
+          page.getByTitle(
+            "The Daytona runner answered for this authenticated session."
+          )
+        ).toBeVisible();
+        refusedGetHandler = (route) =>
+          route.fulfill({
+            json: { error: "subscription_required" },
+            status: 403,
+          });
+        await page.route("**/api/credentials", refusedGetHandler);
+        await page
+          .getByRole("button", { name: "Account and settings" })
+          .click();
+      } else {
+        await openConsoleSettings(page);
+      }
+      const credential = page.getByLabel("GitHub Copilot CLI credential");
+      const billing = page.getByRole("tab", { name: "Billing" });
+      if (refusedMethod !== "GET") {
+        await expect(credential).toBeEnabled();
+        await expect(billing).toBeVisible();
+      }
+
+      if (refusedMethod === "POST") {
+        await credential.fill("must-clear-after-refusal");
+        await page.getByRole("button", { exact: true, name: "Save" }).click();
+      } else if (refusedMethod === "DELETE") {
+        await page.getByRole("button", { exact: true, name: "Remove" }).click();
+      }
+
+      await expect.poll(() => serverRefreshes).toBe(1);
+      await expect(
+        page.getByTitle("An active subscription is required to run agents.")
+      ).toBeVisible();
+      await expect(credential).toBeDisabled();
+      await expect(credential).toHaveValue("");
+      await expect(
+        page.getByText("Subscription required", { exact: true })
+      ).toBeVisible();
+      await expect(page.getByText("Subscription active")).toHaveCount(0);
+      if (CHECKOUT_ENABLED) {
+        await expect(billing).toBeVisible();
+      } else {
+        await expect(billing).toHaveCount(0);
+      }
+      await page.waitForTimeout(100);
+      expect(serverRefreshes).toBe(1);
+
+      if (refusedGetHandler) {
+        await page.unroute("**/api/credentials", refusedGetHandler);
+      }
+      releaseRefresh();
+
+      await expect(credential).toBeEnabled();
+      await expect(
+        page.getByTitle(
+          "The Daytona runner answered for this authenticated session."
+        )
+      ).toBeVisible();
+      await expect(page.getByRole("tab", { name: "Billing" })).toBeVisible();
+      expect(serverRefreshes).toBe(1);
+    });
+  }
+
+  test("an initial credential 403 closes console authority before Settings opens", async ({
+    page,
+  }) => {
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("subscriber") })
+    );
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/usage", (route) =>
+      route.fulfill({
+        json: {
+          cap: 750,
+          resetsAt: "2099-02-01T00:00:00.000Z",
+          used: 0,
+        },
+      })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+    let credentialGets = 0;
+    await page.route("**/api/credentials", (route) => {
+      credentialGets += 1;
+      return credentialGets === 1
+        ? route.fulfill({
+            json: { error: "subscription_required" },
+            status: 403,
+          })
+        : route.fulfill({ json: { harnessIds: [] } });
+    });
+
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let serverRefreshes = 0;
+    await page.route("**/agents?**", async (route) => {
+      if (isServerComponentRequest(route.request())) {
+        serverRefreshes += 1;
+        await refreshGate;
+      }
+      await route.continue();
+    });
+
+    await page.goto("/agents");
+
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+    await page.waitForTimeout(100);
+    expect(serverRefreshes).toBe(1);
+
+    releaseRefresh();
+
+    await expect(
+      page.getByTitle(
+        "The Daytona runner answered for this authenticated session."
+      )
+    ).toBeVisible();
+    expect(serverRefreshes).toBe(1);
+  });
+
+  test("persistent credential refusal stays closed after one recovery refresh", async ({
+    page,
+  }) => {
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("subscriber") })
+    );
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({
+        json: { error: "subscription_required" },
+        status: 403,
+      })
+    );
+    let serverRefreshes = 0;
+    page.on("request", (request) => {
+      if (
+        new URL(request.url()).pathname === "/agents" &&
+        isServerComponentRequest(request)
+      ) {
+        serverRefreshes += 1;
+      }
+    });
+
+    await page.goto("/agents");
+
+    await expect.poll(() => serverRefreshes).toBeGreaterThanOrEqual(1);
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+    await page.waitForTimeout(500);
+    expect(serverRefreshes).toBe(1);
+  });
+
+  test("console credential bootstrap starts fresh after a same-user auth-version change", async ({
+    page,
+  }) => {
+    let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+    let releaseCredentials!: () => void;
+    const credentialsGate = new Promise<void>((resolve) => {
+      releaseCredentials = resolve;
+    });
+    let credentialGets = 0;
+    await page.route("**/api/credentials", async (route) => {
+      credentialGets += 1;
+      if (credentialGets === 1) {
+        await credentialsGate;
+        return route.fulfill({
+          json: { error: "subscription_required" },
+          status: 403,
+        });
+      }
+      return route.fulfill({ json: { harnessIds: [] } });
+    });
+    let serverRefreshes = 0;
+    page.on("request", (request) => {
+      if (
+        new URL(request.url()).pathname === "/agents" &&
+        isServerComponentRequest(request)
+      ) {
+        serverRefreshes += 1;
+      }
+    });
+
+    await page.goto("/agents");
+    await expect(
+      page.getByTitle(
+        "The Daytona runner answered for this authenticated session."
+      )
+    ).toBeVisible();
+    await setServerSession(page.context(), "subscriber", { authVersion: 2 });
+    currentSession = sessionFor("subscriber", { authVersion: 2 });
+    await notifySessionChange(page);
+
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await expect.poll(() => credentialGets).toBe(2);
+    releaseCredentials();
+    await page.waitForTimeout(100);
+
+    await expect(
+      page.getByTitle(
+        "The Daytona runner answered for this authenticated session."
+      )
+    ).toBeVisible();
+    expect(serverRefreshes).toBe(1);
+  });
+
+  test("a same-user auth-version change fails closed before refreshed authority returns", async ({
+    page,
+  }) => {
+    let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await mockSubscriberConsoleDependencies(page);
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let serverRefreshes = 0;
+    await page.route("**/agents?**", async (route) => {
+      if (isServerComponentRequest(route.request())) {
+        serverRefreshes += 1;
+        await refreshGate;
+      }
+      await route.continue();
+    });
+
+    await page.goto("/agents");
+    await expect(
+      page.getByTitle(
+        "The Daytona runner answered for this authenticated session."
+      )
+    ).toBeVisible();
+
+    await setServerSession(page.context(), "demo", { authVersion: 2 });
+    currentSession = sessionFor("demo", { authVersion: 2 });
+    await notifySessionChange(page);
+
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+
+    releaseRefresh();
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+  });
+
+  test("a current credential 401 closes shared console authority", async ({
+    page,
+  }) => {
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("subscriber") })
+    );
+    await mockSubscriberConsoleDependencies(page);
+    await page.unroute("**/api/credentials");
+    await page.route("**/api/credentials", async (route) => {
+      if (route.request().method() === "POST") {
+        await setServerSession(page.context(), "demo");
+        return route.fulfill({
+          json: { error: "authentication_required" },
+          status: 401,
+        });
+      }
+      return route.fulfill({ json: { harnessIds: [] } });
+    });
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let serverRefreshes = 0;
+    await page.route("**/agents?**", async (route) => {
+      if (isServerComponentRequest(route.request())) {
+        serverRefreshes += 1;
+        await refreshGate;
+      }
+      await route.continue();
+    });
+
+    await openConsoleSettings(page);
+    const credential = page.getByLabel("GitHub Copilot CLI credential");
+    await credential.fill("must-close-shared-authority");
+    await page.getByRole("button", { exact: true, name: "Save" }).click();
+
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+    await expect(credential).toBeDisabled();
+
+    releaseRefresh();
+  });
+
+  test("a stale credential snapshot still propagates a current authority refusal", async ({
+    page,
+  }) => {
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("subscriber") })
+    );
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/usage", (route) =>
+      route.fulfill({
+        json: {
+          cap: 750,
+          resetsAt: "2099-02-01T00:00:00.000Z",
+          used: 0,
+        },
+      })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+    let releaseRefusedGet!: () => void;
+    const refusedGetGate = new Promise<void>((resolve) => {
+      releaseRefusedGet = resolve;
+    });
+    let credentialGets = 0;
+    await page.route("**/api/credentials", async (route) => {
+      if (route.request().method() === "POST") {
+        return route.fulfill({ json: {} });
+      }
+      credentialGets += 1;
+      if (credentialGets === 2) {
+        await refusedGetGate;
+        return route.fulfill({
+          json: { error: "subscription_required" },
+          status: 403,
+        });
+      }
+      return route.fulfill({ json: { harnessIds: [] } });
+    });
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let serverRefreshes = 0;
+    await page.route("**/agents?**", async (route) => {
+      if (isServerComponentRequest(route.request())) {
+        serverRefreshes += 1;
+        await refreshGate;
+      }
+      await route.continue();
+    });
+
+    await openConsoleSettings(page);
+    const credential = page.getByLabel("GitHub Copilot CLI credential");
+    await credential.fill("advances-the-snapshot-ticket");
+    const credentialGetsBeforeSave = credentialGets;
+    await page.getByRole("button", { exact: true, name: "Save" }).click();
+    await expect
+      .poll(() => credentialGets > credentialGetsBeforeSave)
+      .toBe(true);
+
+    releaseRefusedGet();
+
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+    releaseRefresh();
+  });
+
+  test("credential 403 remains fail-closed when the newer server revision is inactive", async ({
+    page,
+  }) => {
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("subscriber") })
+    );
+    await mockSubscriberConsoleDependencies(page);
+    await page.unroute("**/api/credentials");
+    await page.route("**/api/credentials", async (route) => {
+      if (route.request().method() === "POST") {
+        await setServerSession(page.context(), "demo");
+        return route.fulfill({
+          json: { error: "subscription_required" },
+          status: 403,
+        });
+      }
+      return route.fulfill({ json: { harnessIds: [] } });
+    });
+    let serverRefreshes = 0;
+    page.on("request", (request) => {
+      if (
+        new URL(request.url()).pathname === "/agents" &&
+        isServerComponentRequest(request)
+      ) {
+        serverRefreshes += 1;
+      }
+    });
+
+    await openConsoleSettings(page);
+    const credential = page.getByLabel("GitHub Copilot CLI credential");
+    await credential.fill("must-not-reactivate");
+    await page.getByRole("button", { exact: true, name: "Save" }).click();
+
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+    await expect(credential).toBeDisabled();
+    await expect(credential).toHaveValue("");
+    if (CHECKOUT_ENABLED) {
+      await page.getByRole("tab", { name: "Billing" }).click();
+      await expect(checkoutButton(page)).toBeVisible();
+    } else {
+      await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
+    }
+    await page.waitForTimeout(100);
+    expect(serverRefreshes).toBe(1);
+  });
+
+  test("an account credential 403 closes the menu and Billing until a newer active revision reloads", async ({
+    page,
+  }) => {
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("subscriber") })
+    );
+    let credentialGets = 0;
+    await page.route("**/api/credentials", (route) => {
+      credentialGets += 1;
+      return credentialGets === 1
+        ? route.fulfill({
+            json: { error: "subscription_required" },
+            status: 403,
+          })
+        : route.fulfill({ json: { harnessIds: [] } });
+    });
+
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let serverRefreshes = 0;
+    await page.route("**/account?**", async (route) => {
+      if (isServerComponentRequest(route.request())) {
+        serverRefreshes += 1;
+        await refreshGate;
+      }
+      await route.continue();
+    });
+
+    await page.goto("/account");
+
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await page.getByRole("button", { name: "Account" }).click();
+    await expect(page.getByText("Guest", { exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(
+      page.getByText("Storing a credential needs an active subscription.")
+    ).toBeVisible();
+    await expect(page.getByLabel("GitHub Copilot CLI")).toHaveCount(0);
+    await expect(page.getByText("Subscription active")).toHaveCount(0);
+    if (CHECKOUT_ENABLED) {
+      await expect(page.getByRole("tab", { name: "Billing" })).toBeVisible();
+    } else {
+      await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
+    }
+
+    releaseRefresh();
+
+    await expect(page.getByLabel("GitHub Copilot CLI")).toBeVisible();
+    await page.getByRole("button", { name: "Account" }).click();
+    await expect(page.getByText("Subscriber", { exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("tab", { name: "Billing" })).toBeVisible();
+    expect(serverRefreshes).toBe(1);
+  });
+
+  test("an old account credential refusal cannot invalidate a newer auth version", async ({
+    page,
+  }) => {
+    let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    let releaseCredentials!: () => void;
+    const credentialsGate = new Promise<void>((resolve) => {
+      releaseCredentials = resolve;
+    });
+    let credentialGets = 0;
+    await page.route("**/api/credentials", async (route) => {
+      credentialGets += 1;
+      if (credentialGets === 1) {
+        await credentialsGate;
+        return route.fulfill({
+          json: { error: "subscription_required" },
+          status: 403,
+        });
+      }
+      return route.fulfill({ json: { harnessIds: [] } });
+    });
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let serverRefreshes = 0;
+    await page.route("**/account?**", async (route) => {
+      if (isServerComponentRequest(route.request())) {
+        serverRefreshes += 1;
+        await refreshGate;
+      }
+      await route.continue();
+    });
+
+    await page.goto("/account");
+    const credential = page.getByLabel("GitHub Copilot CLI");
+    await expect(credential).toBeVisible();
+    await credential.fill("belongs-to-new-auth-version");
+
+    currentSession = sessionFor("subscriber", { authVersion: 2 });
+    await setServerSession(page.context(), "subscriber", { authVersion: 2 });
+    await notifySessionChange(page);
+    await expect.poll(() => serverRefreshes).toBe(1);
+    releaseCredentials();
+
+    await page.waitForTimeout(100);
+    await expect(credential).toHaveCount(0);
+    expect(serverRefreshes).toBe(1);
+
+    releaseRefresh();
+
+    await expect(credential).toBeVisible();
+    await expect(credential).toHaveValue("");
+    expect(serverRefreshes).toBe(1);
+  });
+
+  test("account credential memory clears before a new subscriber response arrives", async ({
+    page,
+  }) => {
+    const secondUserId = "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa";
+    let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    let releaseSecondCredentials!: () => void;
+    const secondCredentialsGate = new Promise<void>((resolve) => {
+      releaseSecondCredentials = resolve;
+    });
+    let credentialGets = 0;
+    let secondUserActive = false;
+    await page.route("**/api/credentials", async (route) => {
+      credentialGets += 1;
+      if (!secondUserActive) {
+        return route.fulfill({ json: { harnessIds: ["copilot"] } });
+      }
+      await secondCredentialsGate;
+      return route.fulfill({ json: { harnessIds: [] } });
+    });
+
+    await page.goto("/account");
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    const initialCredentialGets = credentialGets;
+
+    secondUserActive = true;
+    await setServerSession(page.context(), "subscriber", { id: secondUserId });
+    currentSession = sessionFor("subscriber", {
+      email: "second@example.invalid",
+      id: secondUserId,
+    });
+    await notifySessionChange(page);
+
+    await expect(page.getByLabel("GitHub Copilot CLI")).toBeVisible();
+    await expect.poll(() => credentialGets > initialCredentialGets).toBe(true);
+    await expect(page.getByText("Connected", { exact: true })).toHaveCount(0);
+
+    releaseSecondCredentials();
+    await expect(page.getByText("Connected", { exact: true })).toHaveCount(0);
+  });
+
+  test("an older account credential snapshot cannot overwrite a successful save", async ({
+    page,
+  }) => {
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("subscriber") })
+    );
+    let releaseInitialGet!: () => void;
+    const initialGetGate = new Promise<void>((resolve) => {
+      releaseInitialGet = resolve;
+    });
+    let credentialSaved = false;
+    await page.route("**/api/credentials", async (route) => {
+      if (route.request().method() === "POST") {
+        credentialSaved = true;
+        return route.fulfill({ json: {} });
+      }
+      if (!credentialSaved) {
+        await initialGetGate;
+        return route.fulfill({ json: { harnessIds: [] } });
+      }
+      return route.fulfill({ json: { harnessIds: ["copilot"] } });
+    });
+
+    await page.goto("/account");
+    const credential = page.getByLabel("GitHub Copilot CLI");
+    await expect(credential).toBeVisible();
+    await credential.fill("saved-after-initial-read");
+    await page.getByRole("button", { exact: true, name: "Save" }).click();
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+
+    releaseInitialGet();
+    await page.waitForTimeout(100);
+
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  });
+
+  for (const initialMismatch of ["auth-version", "user"] as const) {
+    test(`initial client ${initialMismatch} mismatch refreshes server authority once`, async ({
+      page,
+    }) => {
+      const secondUserId = "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa";
+      const nextSession =
+        initialMismatch === "user"
+          ? sessionFor("subscriber", {
+              email: "second@example.invalid",
+              id: secondUserId,
+            })
+          : sessionFor("subscriber", { authVersion: 2 });
+      const nextServerOptions =
+        initialMismatch === "user" ? { id: secondUserId } : { authVersion: 2 };
+      await setServerSession(page.context(), "subscriber");
+      await page.route("**/api/auth/session", async (route) => {
+        await setServerSession(page.context(), "subscriber", nextServerOptions);
+        return route.fulfill({ json: nextSession });
+      });
+      await mockAccountDependencies(page);
+      let serverRefreshes = 0;
+      page.on("request", (request) => {
+        if (
+          new URL(request.url()).pathname === "/account" &&
+          isServerComponentRequest(request)
+        ) {
+          serverRefreshes += 1;
+        }
+      });
+
+      await page.goto("/account");
+
+      await expect.poll(() => serverRefreshes).toBe(1);
+      await expect(page.getByLabel("GitHub Copilot CLI")).toBeVisible();
+      expect(serverRefreshes).toBe(1);
+    });
+  }
+
+  for (const refusedMethod of ["POST", "PUT"] as const) {
+    test(`device-flow ${refusedMethod} refusal closes shared account authority`, async ({
+      page,
+    }) => {
+      await setServerSession(page.context(), "subscriber");
+      await page.route("**/api/auth/session", (route) =>
+        route.fulfill({ json: sessionFor("subscriber") })
+      );
+      await mockAccountDependencies(page);
+      await page.route("**/api/credentials/device", (route) => {
+        const method = route.request().method();
+        if (method === refusedMethod) {
+          return route.fulfill({
+            json: { error: "subscription_required" },
+            status: 403,
+          });
+        }
+        if (method === "POST") {
+          return route.fulfill({
+            json: {
+              binding: "signed-device-binding",
+              deviceCode: "device-secret",
+              interval: 0,
+              userCode: "ABCD-EFGH",
+              verificationUri: "https://github.com/login/device",
+            },
+          });
+        }
+        return route.fulfill({ json: {}, status: 500 });
+      });
+      let releaseRefresh!: () => void;
+      const refreshGate = new Promise<void>((resolve) => {
+        releaseRefresh = resolve;
+      });
+      let serverRefreshes = 0;
+      await page.route("**/account?**", async (route) => {
+        if (isServerComponentRequest(route.request())) {
+          serverRefreshes += 1;
+          await refreshGate;
+        }
+        await route.continue();
+      });
+
+      await page.goto("/account");
+      await page
+        .getByRole("button", { name: "Connect GitHub Copilot" })
+        .click();
+
+      await expect.poll(() => serverRefreshes).toBe(1);
+      await expect(
+        page.getByText("Storing a credential needs an active subscription.", {
+          exact: true,
+        })
+      ).toBeVisible();
+      await expect(page.getByLabel("GitHub Copilot CLI")).toHaveCount(0);
+
+      releaseRefresh();
+    });
+  }
+
+  test("a stale device-flow start refusal cannot invalidate a replacement authority", async ({
+    page,
+  }) => {
+    const secondUserId = "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa";
+    let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await mockAccountDependencies(page);
+    let releaseDeviceStart!: () => void;
+    const deviceStartGate = new Promise<void>((resolve) => {
+      releaseDeviceStart = resolve;
+    });
+    await page.route("**/api/credentials/device", async (route) => {
+      await deviceStartGate;
+      return route.fulfill({
+        json: { error: "subscription_required" },
+        status: 403,
+      });
+    });
+    let serverRefreshes = 0;
+    page.on("request", (request) => {
+      if (
+        new URL(request.url()).pathname === "/account" &&
+        isServerComponentRequest(request)
+      ) {
+        serverRefreshes += 1;
+      }
+    });
+
+    await page.goto("/account");
+    await page.getByRole("button", { name: "Connect GitHub Copilot" }).click();
+
+    await setServerSession(page.context(), "subscriber", { id: secondUserId });
+    currentSession = sessionFor("subscriber", {
+      email: "second@example.invalid",
+      id: secondUserId,
+    });
+    await notifySessionChange(page);
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await expect(
+      page.getByRole("button", { name: "Connect GitHub Copilot" })
+    ).toBeVisible();
+
+    releaseDeviceStart();
+    await page.waitForTimeout(100);
+
+    expect(serverRefreshes).toBe(1);
+    await expect(page.getByLabel("GitHub Copilot CLI")).toBeVisible();
   });
 
   test("agents ignores subscriber authority belonging to another current client identity", async ({

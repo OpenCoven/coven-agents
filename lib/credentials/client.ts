@@ -2,6 +2,20 @@ import { browserApplicationPath } from "@/lib/application-path";
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+export function isCredentialAuthorityRequestCurrent({
+  currentAuthorityContext,
+  operationIsCurrent,
+  requestAuthorityContext,
+}: {
+  currentAuthorityContext: string;
+  operationIsCurrent: boolean;
+  requestAuthorityContext: string;
+}): boolean {
+  return (
+    operationIsCurrent && requestAuthorityContext === currentAuthorityContext
+  );
+}
+
 export type CredentialRefreshTicket = Readonly<{
   generation: number;
   mutationEpoch: number;
@@ -48,13 +62,19 @@ export function createCredentialRefreshFence(): CredentialRefreshFence {
   };
 }
 
-let credentialsInFlight: Promise<boolean | null> | null = null;
+export type CredentialEligibility =
+  | "authentication_required"
+  | boolean
+  | "subscription_required"
+  | null;
+
+let credentialsInFlight: Promise<CredentialEligibility> | null = null;
 let credentialEligibility: boolean | null = null;
 let credentialVersion = 0;
 
 export function fetchHasCredential(
   fetchImpl: FetchLike = (input, init) => fetch(input, init)
-): Promise<boolean | null> {
+): Promise<CredentialEligibility> {
   credentialsInFlight ??= (async () => {
     const requestVersion = credentialVersion;
     try {
@@ -63,11 +83,17 @@ export function fetchHasCredential(
       );
 
       if (!response.ok) {
+        const authorityRefusal =
+          response.status === 401
+            ? "authentication_required"
+            : response.status === 403
+              ? "subscription_required"
+              : null;
         if (requestVersion === credentialVersion) {
           credentialsInFlight = null;
           credentialEligibility = null;
         }
-        return credentialEligibility;
+        return authorityRefusal ?? credentialEligibility;
       }
 
       const body = (await response.json()) as { harnessIds?: string[] };

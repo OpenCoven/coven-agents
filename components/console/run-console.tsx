@@ -139,21 +139,27 @@ export function RunConsole({
   const accountId = session.data?.user?.id ?? null;
   const serverAuthority = effectiveSubscriptionAuthority(
     subscriptionAuthority,
-    accountId
+    accountId,
+    session.data?.user?.authVersion
   );
-  const authorityPending = useSubscriptionAuthorityRefresh({
-    isSubscriber: serverAuthority.isSubscriber,
-    status: session.status,
-    subscribedUntil: subscriptionAuthorityExpiryBoundary(
-      subscriptionAuthority,
-      accountId
-    ),
-    type: session.data?.user?.type,
-    userId: accountId,
-  });
+  const { authorityPending, authorityRevision, invalidateAndRefresh } =
+    useSubscriptionAuthorityRefresh({
+      authority: subscriptionAuthority,
+      authVersion: session.data?.user?.authVersion,
+      isSubscriber: serverAuthority.isSubscriber,
+      status: session.status,
+      subscribedUntil: subscriptionAuthorityExpiryBoundary(
+        subscriptionAuthority,
+        accountId,
+        session.data?.user?.authVersion
+      ),
+      type: session.data?.user?.type,
+      userId: accountId,
+    });
   const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
     subscriptionAuthority,
     accountId,
+    session.data?.user?.authVersion,
     authorityPending
   );
   const sessionIdentity = [
@@ -161,7 +167,11 @@ export function RunConsole({
     accountId ?? "",
     isSubscriber ? "subscriber" : "demo",
     session.data?.user?.authVersion ?? "",
+    authorityRevision ?? "",
   ].join(":");
+  const credentialOwner = accountId
+    ? `${accountId}:${session.data?.user?.authVersion ?? ""}`
+    : null;
   const avatarSrc = accountId
     ? avatarFor({ id: accountId, image: session.data?.user?.image })
     : null;
@@ -541,13 +551,23 @@ export function RunConsole({
       isCurrent: () => isCurrentSession(generation, controller.signal),
       signal: controller.signal,
     });
-    if (credentialOwnerRef.current !== accountId) {
-      credentialOwnerRef.current = accountId;
+    if (credentialOwnerRef.current !== credentialOwner) {
+      credentialOwnerRef.current = credentialOwner;
       resetCredentialCache();
     }
     fetchHasCredential()
       .then((has) => {
-        if (has !== null && isCurrentSession(generation, controller.signal)) {
+        if (!isCurrentSession(generation, controller.signal)) {
+          return;
+        }
+        if (
+          has === "authentication_required" ||
+          has === "subscription_required"
+        ) {
+          invalidateAndRefresh();
+          return;
+        }
+        if (has !== null) {
           setHasCredential(has);
         }
       })
@@ -562,9 +582,11 @@ export function RunConsole({
   }, [
     accountId,
     client,
+    credentialOwner,
     isCurrentSession,
     refresh,
     isSubscriber,
+    invalidateAndRefresh,
     session.status,
     sessionIdentity,
   ]);
@@ -1417,7 +1439,9 @@ export function RunConsole({
         ) : view === "settings" ? (
           <Settings
             account={account}
+            authorityRevision={authorityRevision}
             checkoutEnabled={checkoutEnabled}
+            invalidateSubscriptionAuthority={invalidateAndRefresh}
             isSubscriber={isSubscriber}
             onCredentialsChange={onCredentialsChange}
             operationContext={settingsOperationContext}

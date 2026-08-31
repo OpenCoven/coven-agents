@@ -93,22 +93,28 @@ export function AccountSettings({
   );
   const serverAuthority = effectiveSubscriptionAuthority(
     subscriptionAuthority,
-    session?.user?.id
+    session?.user?.id,
+    session?.user?.authVersion
   );
-  const authorityPending = useSubscriptionAuthorityRefresh({
-    enabled: effectiveCheckoutResult !== "success",
-    isSubscriber: serverAuthority.isSubscriber,
-    status,
-    subscribedUntil: subscriptionAuthorityExpiryBoundary(
-      subscriptionAuthority,
-      session?.user?.id
-    ),
-    type: session?.user?.type,
-    userId: session?.user?.id,
-  });
+  const { authorityPending, authorityRevision, invalidateAndRefresh } =
+    useSubscriptionAuthorityRefresh({
+      authority: subscriptionAuthority,
+      authVersion: session?.user?.authVersion,
+      enabled: effectiveCheckoutResult !== "success",
+      isSubscriber: serverAuthority.isSubscriber,
+      status,
+      subscribedUntil: subscriptionAuthorityExpiryBoundary(
+        subscriptionAuthority,
+        session?.user?.id,
+        session?.user?.authVersion
+      ),
+      type: session?.user?.type,
+      userId: session?.user?.id,
+    });
   const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
     subscriptionAuthority,
     session?.user?.id,
+    session?.user?.authVersion,
     authorityPending
   );
   const showBilling =
@@ -375,7 +381,13 @@ export function AccountSettings({
                 role="tabpanel"
               >
                 {active && entry.id === "copilot" ? (
-                  <HarnessCredentials userId={session.user.id} />
+                  <HarnessCredentials
+                    authorityRevision={authorityRevision}
+                    authVersion={session.user.authVersion}
+                    isSubscriber={isSubscriber}
+                    onAuthorityInvalidated={invalidateAndRefresh}
+                    userId={session.user.id}
+                  />
                 ) : null}
                 {active && entry.id === "profile" ? <AvatarSettings /> : null}
                 {active && entry.id === "usage" ? <UsageMeter /> : null}

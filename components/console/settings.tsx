@@ -31,7 +31,10 @@ import {
   isSessionOperationCurrent,
   type SessionOperationContext,
 } from "@/lib/console/session-operation";
-import { createCredentialRefreshFence } from "@/lib/credentials/client";
+import {
+  createCredentialRefreshFence,
+  isCredentialAuthorityRequestCurrent,
+} from "@/lib/credentials/client";
 
 /**
  * Settings, inside the console shell.
@@ -213,7 +216,9 @@ function HarnessCard({
 
 export function Settings({
   account,
+  authorityRevision,
   checkoutEnabled,
+  invalidateSubscriptionAuthority,
   isSubscriber,
   onCredentialsChange,
   operationContext,
@@ -223,7 +228,9 @@ export function Settings({
    *  how to render "nobody", so a fallback sentence can never be mistaken for
    *  an account name or have an initial derived from it. */
   account: string | null;
+  authorityRevision: string | null;
   checkoutEnabled: boolean;
+  invalidateSubscriptionAuthority: () => void;
   isSubscriber: boolean;
   onCredentialsChange: (harnessIds: readonly string[]) => void;
   operationContext: SessionOperationContext | null;
@@ -249,7 +256,9 @@ export function Settings({
 
   const [configured, setConfigured] = useState<string[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [locked, setLocked] = useState(false);
+  const [lockedAuthorityContext, setLockedAuthorityContext] = useState<
+    string | null
+  >(null);
   const [busy, setBusy] = useState(false);
   const [refusedOpen, setRefusedOpen] = useState(false);
 
@@ -268,11 +277,22 @@ export function Settings({
     isSubscriber &&
     operationContext !== null &&
     isCurrentOperation(operationContext);
-  const credentialsLocked = locked || !credentialAuthorityValid;
+  const credentialAuthorityContext = [
+    account ?? "",
+    authorityRevision ?? "",
+    isSubscriber ? "subscriber" : "demo",
+    operationContext?.generation ?? "",
+  ].join(":");
+  const credentialAuthorityContextRef = useRef(credentialAuthorityContext);
+  credentialAuthorityContextRef.current = credentialAuthorityContext;
+  const credentialsLocked =
+    !credentialAuthorityValid ||
+    lockedAuthorityContext === credentialAuthorityContext;
   const credentialsLockedRef = useRef(credentialsLocked);
   credentialsLockedRef.current = credentialsLocked;
   const credentialMemoryFence = [
     account ?? "",
+    authorityRevision ?? "",
     isSubscriber ? "subscriber" : "demo",
     operationContext?.generation ?? "",
     credentialsLocked ? "locked" : "unlocked",
@@ -336,35 +356,89 @@ export function Settings({
     [isCurrentOperation, onCredentialsChange]
   );
 
+  const closeCredentialAuthority = useCallback(
+    (
+      status: number,
+      context: SessionOperationContext | null,
+      requestAuthorityContext: string
+    ) => {
+      if (
+        (status !== 401 && status !== 403) ||
+        !context ||
+        !isCredentialAuthorityRequestCurrent({
+          currentAuthorityContext: credentialAuthorityContextRef.current,
+          operationIsCurrent: isCurrentOperation(context),
+          requestAuthorityContext,
+        })
+      ) {
+        return false;
+      }
+      setLockedAuthorityContext(requestAuthorityContext);
+      setDrafts({});
+      publishCredentials([], context);
+      if (status === 401 || status === 403) {
+        invalidateSubscriptionAuthority();
+      }
+      return true;
+    },
+    [invalidateSubscriptionAuthority, isCurrentOperation, publishCredentials]
+  );
+
   const refreshCredentials = useCallback(
     async (context: SessionOperationContext | null) => {
       if (!context || !isCurrentOperation(context)) {
         return null;
       }
+      const requestAuthorityContext = credentialAuthorityContextRef.current;
       const ticket = refreshFence.beginRefresh();
       const response = await fetch(`${BASE_PATH}/api/credentials`, {
         signal: context.signal,
       });
-      if (!isCurrentOperation(context) || !refreshFence.isCurrent(ticket)) {
+      if (
+        !isCredentialAuthorityRequestCurrent({
+          currentAuthorityContext: credentialAuthorityContextRef.current,
+          operationIsCurrent: isCurrentOperation(context),
+          requestAuthorityContext,
+        })
+      ) {
         return null;
       }
-      if (response.status === 401 || response.status === 403) {
+      if (
+        closeCredentialAuthority(
+          response.status,
+          context,
+          requestAuthorityContext
+        )
+      ) {
         // A demo session cannot store one, and saying so beats a form that
         // fails on submit.
-        setLocked(true);
-        setDrafts({});
-        return publishCredentials([], context);
+        return [];
+      }
+      if (!refreshFence.isCurrent(ticket)) {
+        return null;
       }
       if (!response.ok) {
         return null;
       }
       const body = (await response.json()) as { harnessIds?: string[] };
-      if (!isCurrentOperation(context) || !refreshFence.isCurrent(ticket)) {
+      if (
+        !isCredentialAuthorityRequestCurrent({
+          currentAuthorityContext: credentialAuthorityContextRef.current,
+          operationIsCurrent: isCurrentOperation(context),
+          requestAuthorityContext,
+        }) ||
+        !refreshFence.isCurrent(ticket)
+      ) {
         return null;
       }
       return publishCredentials(body.harnessIds ?? [], context);
     },
-    [isCurrentOperation, publishCredentials, refreshFence]
+    [
+      closeCredentialAuthority,
+      isCurrentOperation,
+      publishCredentials,
+      refreshFence,
+    ]
   );
 
   useEffect(() => {
@@ -372,7 +446,6 @@ export function Settings({
     setTab("harness");
     setConfigured([]);
     setDrafts({});
-    setLocked(false);
     setBusy(false);
     setRefusedOpen(false);
     setUsage(null);
@@ -488,6 +561,7 @@ export function Settings({
       return;
     }
     setBusy(true);
+    const requestAuthorityContext = credentialAuthorityContextRef.current;
     let stored = 0;
     let nextConfigured = configured;
     try {
@@ -505,7 +579,13 @@ export function Settings({
           method: "POST",
           signal: context.signal,
         });
-        if (!isCurrentOperation(context)) {
+        if (
+          !isCredentialAuthorityRequestCurrent({
+            currentAuthorityContext: credentialAuthorityContextRef.current,
+            operationIsCurrent: isCurrentOperation(context),
+            requestAuthorityContext,
+          })
+        ) {
           return;
         }
 
@@ -519,10 +599,13 @@ export function Settings({
           }
           return;
         }
-        if (response.status === 401 || response.status === 403) {
-          setLocked(true);
-          setDrafts({});
-          publishCredentials([], context);
+        if (
+          closeCredentialAuthority(
+            response.status,
+            context,
+            requestAuthorityContext
+          )
+        ) {
           toast.error(
             response.status === 401
               ? "Sign in again."
@@ -575,6 +658,7 @@ export function Settings({
       return;
     }
     setBusy(true);
+    const requestAuthorityContext = credentialAuthorityContextRef.current;
     try {
       const response = await fetch(`${BASE_PATH}/api/credentials`, {
         body: JSON.stringify({ harnessId }),
@@ -582,13 +666,22 @@ export function Settings({
         method: "DELETE",
         signal: context.signal,
       });
-      if (!isCurrentOperation(context)) {
+      if (
+        !isCredentialAuthorityRequestCurrent({
+          currentAuthorityContext: credentialAuthorityContextRef.current,
+          operationIsCurrent: isCurrentOperation(context),
+          requestAuthorityContext,
+        })
+      ) {
         return;
       }
-      if (response.status === 401 || response.status === 403) {
-        setLocked(true);
-        setDrafts({});
-        publishCredentials([], context);
+      if (
+        closeCredentialAuthority(
+          response.status,
+          context,
+          requestAuthorityContext
+        )
+      ) {
         toast.error(
           response.status === 401 ? "Sign in again." : "Subscription required."
         );
