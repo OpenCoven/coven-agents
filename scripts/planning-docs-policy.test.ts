@@ -25,13 +25,13 @@ const registry = `# Planning document registry
 <!-- coven-agents-planning-registry:v1:start -->
 | Path | Role | Lifecycle | Authority | Last reviewed | Current guidance |
 | --- | --- | --- | --- | --- | --- |
-| \`ROADMAP.md\` | Strategy | Current | Beads-derived aggregate | 2026-08-31 | — |
-| \`POLISH.md\` | Decision log | Historical | Repository evidence | 2026-08-31 | [Current state](current-state.md) |
-| \`docs/roadmap/README.md\` | Registry | Current | Operating policy | 2026-08-31 | — |
-| \`docs/roadmap/current-state.md\` | State | Current | Repository evidence | 2026-08-31 | — |
-| \`docs/roadmap/old-audit.md\` | Evidence | Historical | Repository evidence | 2026-08-31 | [Current state](current-state.md) |
-| \`docs/proposals/example.md\` | Proposal | Proposed | Non-authoritative proposal | 2026-08-31 | — |
-| \`docs/superpowers/README.md\` | Tombstone | Superseded | Repository evidence | 2026-08-31 | [Planning registry](../roadmap/README.md) |
+| [\`ROADMAP.md\`](../../ROADMAP.md) | Strategy | Current | Beads-derived aggregate | 2026-08-31 | — |
+| [\`POLISH.md\`](../../POLISH.md) | Decision log | Historical | Repository evidence | 2026-08-31 | [Current state](current-state.md) |
+| [\`docs/roadmap/README.md\`](README.md) | Registry | Current | Operating policy | 2026-08-31 | — |
+| [\`docs/roadmap/current-state.md\`](current-state.md) | State | Current | Repository evidence | 2026-08-31 | — |
+| [\`docs/roadmap/old-audit.md\`](old-audit.md) | Evidence | Historical | Repository evidence | 2026-08-31 | [Current state](current-state.md) |
+| [\`docs/proposals/example.md\`](../proposals/example.md) | Proposal | Proposed | Non-authoritative proposal | 2026-08-31 | — |
+| [\`docs/superpowers/README.md\`](../superpowers/README.md) | Tombstone | Superseded | Repository evidence | 2026-08-31 | [Planning registry](../roadmap/README.md) |
 <!-- coven-agents-planning-registry:v1:end -->
 
 A disabled deployment may require [a future runbook](../runbooks/vercel-deployment.md).
@@ -67,6 +67,7 @@ test("parses the canonical planning registry", () => {
     lastReviewed: "2026-08-31",
     lifecycle: "Historical",
     path: "POLISH.md",
+    registryTarget: "POLISH.md",
     role: "Decision log",
   });
 });
@@ -78,7 +79,7 @@ test("accepts complete planning coverage and ignores conditional future links", 
 test("rejects duplicate registry paths", () => {
   const duplicate = registry.replace(
     "<!-- coven-agents-planning-registry:v1:end -->",
-    "| `ROADMAP.md` | Strategy | Current | Beads-derived aggregate | 2026-08-31 | — |\n<!-- coven-agents-planning-registry:v1:end -->"
+    "| [`ROADMAP.md`](../../ROADMAP.md) | Strategy | Current | Beads-derived aggregate | 2026-08-31 | — |\n<!-- coven-agents-planning-registry:v1:end -->"
   );
 
   assert.deepEqual(
@@ -120,7 +121,7 @@ test("rejects unknown authority and invalid review dates", () => {
     )
     .replace(
       "| Proposal | Proposed | Non-authoritative proposal | 2026-08-31 |",
-      "| Proposal | Proposed | Non-authoritative proposal | yesterday |"
+      "| Proposal | Proposed | Non-authoritative proposal | 2026-02-30 |"
     );
 
   assert.deepEqual(
@@ -151,6 +152,23 @@ test("rejects registry paths that are not tracked", () => {
       {
         path: "docs/proposals/example.md",
         reason: "missing-tracked-file",
+      },
+    ]
+  );
+});
+
+test("rejects registry links that do not target their labeled path", () => {
+  const invalidLink = registry.replace(
+    "[`ROADMAP.md`](../../ROADMAP.md)",
+    "[`ROADMAP.md`](missing.md)"
+  );
+
+  assert.deepEqual(
+    findPlanningDocumentViolations(input({ registryMarkdown: invalidLink })),
+    [
+      {
+        path: "ROADMAP.md",
+        reason: "invalid-registry-link",
       },
     ]
   );
@@ -198,8 +216,8 @@ test("requires nested roadmap and proposal documents to be indexed", () => {
 
 test("requires historical and superseded documents to link current guidance", () => {
   const missingGuidance = registry.replace(
-    "| `POLISH.md` | Decision log | Historical | Repository evidence | 2026-08-31 | [Current state](current-state.md) |",
-    "| `POLISH.md` | Decision log | Historical | Repository evidence | 2026-08-31 | — |"
+    "| [`POLISH.md`](../../POLISH.md) | Decision log | Historical | Repository evidence | 2026-08-31 | [Current state](current-state.md) |",
+    "| [`POLISH.md`](../../POLISH.md) | Decision log | Historical | Repository evidence | 2026-08-31 | — |"
   );
 
   assert.deepEqual(
@@ -273,8 +291,8 @@ test("repository scanning does not treat untracked files as tracked", () => {
 <!-- coven-agents-planning-registry:v1:start -->
 | Path | Role | Lifecycle | Authority | Last reviewed | Current guidance |
 | --- | --- | --- | --- | --- | --- |
-| \`ROADMAP.md\` | Strategy | Current | Beads-derived aggregate | 2026-08-31 | — |
-| \`docs/roadmap/README.md\` | Registry | Current | Operating policy | 2026-08-31 | — |
+| [\`ROADMAP.md\`](../../ROADMAP.md) | Strategy | Current | Beads-derived aggregate | 2026-08-31 | — |
+| [\`docs/roadmap/README.md\`](README.md) | Registry | Current | Operating policy | 2026-08-31 | — |
 <!-- coven-agents-planning-registry:v1:end -->
 `
     );

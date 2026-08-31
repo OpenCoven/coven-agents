@@ -39,6 +39,7 @@ export type PlanningDocument = {
   lastReviewed: string;
   lifecycle: (typeof PLANNING_LIFECYCLES)[number] | string;
   path: string;
+  registryTarget: string | undefined;
   role: (typeof PLANNING_ROLES)[number] | string;
 };
 
@@ -55,6 +56,7 @@ export type PlanningDocumentViolation = {
     | "invalid-authority"
     | "invalid-last-reviewed"
     | "invalid-lifecycle"
+    | "invalid-registry-link"
     | "invalid-role"
     | "missing-current-guidance"
     | "missing-tracked-file"
@@ -64,6 +66,37 @@ export type PlanningDocumentViolation = {
 
 const START_MARKER = "<!-- coven-agents-planning-registry:v1:start -->";
 const END_MARKER = "<!-- coven-agents-planning-registry:v1:end -->";
+
+function isValidReviewDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
+  if (match === null) {
+    return false;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1 || month < 1 || month > 12) {
+    return false;
+  }
+
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [
+    31,
+    leapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ];
+  return day >= 1 && day <= (daysInMonth[month - 1] ?? 0);
+}
 
 function registryBlock(markdown: string): string {
   const start = markdown.indexOf(START_MARKER);
@@ -147,7 +180,12 @@ export function parsePlanningRegistry(markdown: string): PlanningDocument[] {
       throw new Error("Planning registry row is incomplete");
     }
 
-    const path = pathCell.match(/`([^`]+)`/u)?.[1] ?? pathCell;
+    const registryLink = /^\[`([^`]+)`\]\(([^)]+)\)$/u.exec(pathCell);
+    const path = registryLink?.[1] ?? pathCell;
+    const registryTarget =
+      registryLink?.[2] === undefined
+        ? undefined
+        : normalizeGuidancePath(registryLink[2]);
 
     return {
       authority,
@@ -155,6 +193,7 @@ export function parsePlanningRegistry(markdown: string): PlanningDocument[] {
       lastReviewed,
       lifecycle,
       path,
+      registryTarget,
       role,
     };
   });
@@ -223,7 +262,7 @@ export function findPlanningDocumentViolations(
       });
     }
 
-    if (!/^\d{4}-\d{2}-\d{2}$/u.test(document.lastReviewed)) {
+    if (!isValidReviewDate(document.lastReviewed)) {
       violations.push({
         path: document.path,
         reason: "invalid-last-reviewed",
@@ -234,6 +273,13 @@ export function findPlanningDocumentViolations(
       violations.push({
         path: document.path,
         reason: "missing-tracked-file",
+      });
+    }
+
+    if (document.registryTarget !== document.path) {
+      violations.push({
+        path: document.path,
+        reason: "invalid-registry-link",
       });
     }
 
