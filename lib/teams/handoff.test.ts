@@ -264,6 +264,38 @@ test("rejects malformed metadata with escaped sensitive keys before handoff task
   assert.match(serialized, /\[REDACTED\]/u);
 });
 
+test("fails closed for malformed JSON containing generic secret keys", () => {
+  const cases = [
+    ["password", "MALFORMED_PASSWORD_VALUE"],
+    ["token", "MALFORMED_TOKEN_VALUE"],
+    ["authorization", "MALFORMED_AUTHORIZATION_VALUE"],
+    ["apiKey", "MALFORMED_API_KEY_VALUE"],
+    ["cookie", "MALFORMED_COOKIE_VALUE"],
+    ["accessKey", "MALFORMED_ACCESS_KEY_VALUE"],
+    ["secret", "MALFORMED_SECRET_VALUE"],
+    ["privateKey", "MALFORMED_PRIVATE_KEY_VALUE"],
+  ] as const;
+  const output = cases
+    .map(([key, marker]) => `{"safe":1 "${key}":"${marker}"}`)
+    .join("\n");
+  const result = built(buildTeamHandoff({ output }));
+  const task = buildTeamStepTask({
+    githubCapability: "none",
+    memberResponsibility: "Continue the verified team task.",
+    mission: "Complete the requested work.",
+    priorHandoffs: [result.handoff],
+    profileInstructions: "Use only public-safe evidence.",
+    skillSnapshots: [],
+  });
+  const serialized = JSON.stringify(result.handoff);
+
+  for (const [, marker] of cases) {
+    assert.equal(serialized.includes(marker), false);
+    assert.equal(task.includes(marker), false);
+  }
+  assert.match(serialized, /\[REDACTED\]/u);
+});
+
 test("fails closed for balanced malformed JSON with sensitive keys anywhere in the candidate", () => {
   const cases = [
     ["raw\\u004cogs", "BALANCED_RAW_LOG_SECRET"],

@@ -81,8 +81,18 @@ function isOperationalMetadataKey(value: string): boolean {
     normalized === "log" ||
     normalized.endsWith("logs") ||
     normalized.includes("rawlog");
+  const isSensitiveField =
+    normalized.includes("apikey") ||
+    normalized.includes("accesskey") ||
+    normalized.includes("privatekey") ||
+    normalized.includes("authorization") ||
+    normalized.includes("password") ||
+    normalized.includes("token") ||
+    normalized.includes("secret") ||
+    normalized.includes("cookie");
   return (
     isLogField ||
+    isSensitiveField ||
     normalized.includes("credential") ||
     normalized.includes("encrypted") ||
     normalized.includes("provider") ||
