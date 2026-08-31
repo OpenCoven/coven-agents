@@ -399,8 +399,7 @@ export function Settings({
           currentAuthorityContext: credentialAuthorityContextRef.current,
           operationIsCurrent: isCurrentOperation(context),
           requestAuthorityContext,
-        }) ||
-        !refreshFence.isCurrent(ticket)
+        })
       ) {
         return null;
       }
@@ -414,6 +413,9 @@ export function Settings({
         // A demo session cannot store one, and saying so beats a form that
         // fails on submit.
         return [];
+      }
+      if (!refreshFence.isCurrent(ticket)) {
+        return null;
       }
       if (!response.ok) {
         return null;

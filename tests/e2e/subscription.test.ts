@@ -1213,6 +1213,83 @@ test.describe("Subscriber checkout", () => {
     releaseRefresh();
   });
 
+  test("a stale credential snapshot still propagates a current authority refusal", async ({
+    page,
+  }) => {
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: sessionFor("subscriber") })
+    );
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/usage", (route) =>
+      route.fulfill({
+        json: {
+          cap: 750,
+          resetsAt: "2099-02-01T00:00:00.000Z",
+          used: 0,
+        },
+      })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+    let releaseRefusedGet!: () => void;
+    const refusedGetGate = new Promise<void>((resolve) => {
+      releaseRefusedGet = resolve;
+    });
+    let credentialGets = 0;
+    await page.route("**/api/credentials", async (route) => {
+      if (route.request().method() === "POST") {
+        return route.fulfill({ json: {} });
+      }
+      credentialGets += 1;
+      if (credentialGets === 2) {
+        await refusedGetGate;
+        return route.fulfill({
+          json: { error: "subscription_required" },
+          status: 403,
+        });
+      }
+      return route.fulfill({ json: { harnessIds: [] } });
+    });
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let serverRefreshes = 0;
+    await page.route("**/agents?**", async (route) => {
+      if (isServerComponentRequest(route.request())) {
+        serverRefreshes += 1;
+        await refreshGate;
+      }
+      await route.continue();
+    });
+
+    await openConsoleSettings(page);
+    const credential = page.getByLabel("GitHub Copilot CLI credential");
+    await credential.fill("advances-the-snapshot-ticket");
+    const credentialGetsBeforeSave = credentialGets;
+    await page.getByRole("button", { exact: true, name: "Save" }).click();
+    await expect
+      .poll(() => credentialGets > credentialGetsBeforeSave)
+      .toBe(true);
+
+    releaseRefusedGet();
+
+    await expect.poll(() => serverRefreshes).toBe(1);
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+    releaseRefresh();
+  });
+
   test("credential 403 remains fail-closed when the newer server revision is inactive", async ({
     page,
   }) => {
