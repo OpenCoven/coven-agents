@@ -26,6 +26,34 @@ test("copilot runs headless with pre-approved tools", () => {
   );
 });
 
+test("restricted Copilot runs expose only workspace tools without yolo or shell", () => {
+  const invocation = buildInvocation({
+    ...BASE,
+    harness: "copilot",
+    permissionMode: "workspace",
+  });
+
+  assert.ok(!invocation.args.includes("--yolo"));
+  assert.deepEqual(
+    invocation.args.slice(
+      invocation.args.indexOf("--available-tools"),
+      invocation.args.indexOf("--available-tools") + 4
+    ),
+    ["--available-tools", "view,edit,grep,glob", "--allow-tool", "read,write"]
+  );
+  assert.ok(invocation.args.includes("--no-ask-user"));
+  assert.equal(
+    invocation.args.some((argument) => argument.includes("shell")),
+    false
+  );
+  assert.equal(
+    invocation.args.some((argument) =>
+      argument.toLowerCase().includes("github")
+    ),
+    false
+  );
+});
+
 test("`auto` passes no --model flag so the harness picks", () => {
   const invocation = buildInvocation({ ...BASE, harness: "copilot" });
   assert.ok(!invocation.args.includes("--model"));

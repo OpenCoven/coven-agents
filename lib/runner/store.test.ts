@@ -2078,6 +2078,11 @@ test("terminal retention prunes cleanup-free runs beyond capacity", async () => 
     query,
     /NOT EXISTS \([\s\S]*FROM "RunnerTeamStep"[\s\S]*"runnerRunId" = "RunnerRun"\."id"/u
   );
+  assert.match(
+    query,
+    /"plannedRunnerRunId" = "RunnerRun"\."id"/u,
+    "a reserved team child must remain retained before durable attachment"
+  );
 });
 
 test("global scans require the operator authority and do not manufacture tenant scope", async () => {

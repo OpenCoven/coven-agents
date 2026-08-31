@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   AGENT_RUNNER_API_VERSION,
   type RunSnapshot,
+  type TeamCapability,
 } from "@opencoven/agent-contracts";
 import { RunnerAdmissionError } from "@/lib/runner/admission";
 import type { RunnerOperator, RunnerPrincipal } from "@/lib/runner/types";
@@ -45,7 +46,17 @@ function snapshot(
   };
 }
 
-function readyClaim() {
+type ReadyClaim = ReturnType<typeof readyClaimBase>;
+
+function readyClaim(
+  overrides: Partial<Omit<ReadyClaim, "declaredCapabilities">> & {
+    declaredCapabilities?: readonly TeamCapability[];
+  } = {}
+) {
+  return { ...readyClaimBase(), ...overrides };
+}
+
+function readyClaimBase() {
   return {
     agentId: AGENT_ID,
     agentSnapshot: {
@@ -55,10 +66,7 @@ function readyClaim() {
       workspace: "/workspace/repo",
     },
     authVersion: 7,
-    declaredCapabilities: [
-      "workspace.read",
-      "github.pull_requests.write",
-    ] as const,
+    declaredCapabilities: ["workspace.read", "workspace.write"] as const,
     kind: "ready" as const,
     mission: "Ship the approved change.",
     plannedOperationId: PLANNED_OPERATION_ID,
@@ -130,13 +138,62 @@ test("ready team steps admit exactly the durable reserved child identifiers", as
   assert.match(String(admission.task), /Implement the change/u);
   assert.match(String(admission.task), /Keep execution evidence concise/u);
   assert.match(String(admission.task), /Release evidence/u);
-  assert.match(String(admission.task), /Scope: read and write/u);
+  assert.match(String(admission.task), /Scope: none/u);
   assert.deepEqual(calls[1], [
     "attach",
     {
       expectedVersion: 2,
       operationId: PLANNED_OPERATION_ID,
       runnerRunId: PLANNED_RUN_ID,
+      teamStepId: TEAM_STEP_ID,
+    },
+  ]);
+});
+
+test("GitHub-capable team steps fail closed before broad runner credentials are acquired", async () => {
+  const failures: unknown[] = [];
+  let claimed = false;
+  const orchestrator = createTeamOrchestrator({
+    admit: async () => {
+      throw new Error("GitHub-capable team steps must not reach admission");
+    },
+    cancelRun: async () => ({ kind: "already_terminal" as const }),
+    operator,
+    store: {
+      attachTeamStepRunnerRun: async () => ({ kind: "attached" as const }),
+      claimNextTeamStep: async () => {
+        if (claimed) {
+          return { kind: "idle" as const };
+        }
+        claimed = true;
+        return readyClaim({
+          declaredCapabilities: ["github.issues.read"],
+        });
+      },
+      failTeamStepAdmission: async (_authority, input) => {
+        failures.push(input);
+        return { kind: "failed" as const };
+      },
+      findNextCancelledTeamChild: async () => ({ kind: "idle" as const }),
+      projectNextTerminalTeamStep: async () => ({ kind: "idle" as const }),
+    },
+  });
+
+  assert.deepEqual(await orchestrator.claimReadySteps(), {
+    admitted: 0,
+    claimedDispatches: [],
+    deferred: 0,
+    failures: 1,
+    waitingApproval: 0,
+  });
+  assert.deepEqual(failures, [
+    {
+      error: {
+        code: "github_broker_unavailable",
+        message: "GitHub operations require brokered execution.",
+        retryable: false,
+      },
+      expectedVersion: 2,
       teamStepId: TEAM_STEP_ID,
     },
   ]);

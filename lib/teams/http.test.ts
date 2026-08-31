@@ -185,7 +185,11 @@ function service(overrides: Partial<TeamService> = {}): TeamService {
     getRun: async () => ({ kind: "found", teamRun }),
     getSkill: async () => ({ kind: "found", skill }),
     getTeam: async () => ({ kind: "found", team }),
-    listRuns: async () => ({ kind: "found", teamRuns: [teamRun] }),
+    listRuns: async () => ({
+      kind: "found",
+      nextCursor: null,
+      teamRuns: [teamRun],
+    }),
     listSkills: async () => [skill],
     listTeams: async () => [team],
     stopRun: async () => ({
@@ -696,6 +700,36 @@ test("team run list and get return strict tenant-free contract envelopes", async
   assert.equal(parsed.teamRun.version, 3);
   assert.equal(JSON.stringify(parsed).includes(TENANT), false);
   assert.equal(JSON.stringify(parsed).includes(USER_ID), false);
+});
+
+test("team run list forwards an opaque cursor and returns bounded-page metadata", async () => {
+  const calls: unknown[][] = [];
+  const fixture = handlers({
+    service: service({
+      listRuns: async (...args) => {
+        calls.push(args);
+        return {
+          kind: "found",
+          nextCursor: TEAM_RUN_ID,
+          teamRuns: [teamRun],
+        };
+      },
+    }),
+  });
+
+  const response = await fixture.handlers.listTeamRuns(
+    new Request(
+      `https://app.test/api/teams/${TEAM_ID}/runs?cursor=${TEAM_RUN_ID}`
+    ),
+    TEAM_ID
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(calls, [[subscriber.principal, TEAM_ID, TEAM_RUN_ID]]);
+  assert.deepEqual(await response.json(), {
+    nextCursor: TEAM_RUN_ID,
+    teamRuns: [teamRun],
+  });
 });
 
 test("team run list returns not found for a missing tenant-fenced parent", async () => {

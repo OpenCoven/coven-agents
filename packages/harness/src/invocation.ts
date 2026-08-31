@@ -13,6 +13,8 @@ export interface InvocationRequest {
   instructions: string;
   /** `auto` lets the harness pick, so no `--model` flag is passed. */
   model: string;
+  /** Restrict tools for tasks that must not inherit broad harness authority. */
+  permissionMode?: "unrestricted" | "workspace";
   /** Ask for the harness's structured event stream instead of a text blob. */
   stream?: boolean;
   task: string;
@@ -27,11 +29,20 @@ function modelArgs(model: string): string[] {
 }
 
 function copilotArgs(request: InvocationRequest): string[] {
+  const permissionArgs =
+    request.permissionMode === "workspace"
+      ? [
+          "--available-tools",
+          "view,edit,grep,glob",
+          "--allow-tool",
+          "read,write",
+        ]
+      : ["--yolo"];
   return [
     "-s",
     "-p",
     buildMission(request.instructions, request.task),
-    "--yolo",
+    ...permissionArgs,
     "--no-ask-user",
     "--no-auto-update",
     "--no-color",

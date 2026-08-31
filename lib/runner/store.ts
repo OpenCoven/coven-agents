@@ -790,6 +790,7 @@ async function pruneTerminalRunsInTransaction(
             SELECT 1
             FROM "RunnerTeamStep" AS "teamStep"
             WHERE "teamStep"."runnerRunId" = "RunnerRun"."id"
+              OR "teamStep"."plannedRunnerRunId" = "RunnerRun"."id"
           )
         ORDER BY "completedAt" DESC NULLS LAST, "id" DESC
         OFFSET 20

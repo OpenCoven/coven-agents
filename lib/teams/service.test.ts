@@ -1,6 +1,7 @@
 // biome-ignore-all lint/suspicious/useAwait: Dependency doubles keep async signatures for readability.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { TEAM_LIMITS } from "@opencoven/agent-contracts";
 import type { RunnerPrincipal } from "@/lib/runner/types";
 import {
   createTeamService,
@@ -595,8 +596,41 @@ test("team run reads are tenant-free and expose optimistic versions", async () =
   assert.equal(found.kind === "found" && found.teamRun.steps[0]?.version, 0);
   assert.equal(listed.kind, "found");
   assert.equal(listed.kind === "found" && listed.teamRuns[0]?.id, TEAM_RUN_ID);
+  assert.equal(listed.kind === "found" && listed.nextCursor, null);
   assert.equal(JSON.stringify({ found, listed }).includes(TENANT), false);
   assert.equal(JSON.stringify({ found, listed }).includes(USER_ID), false);
+});
+
+test("team run listing returns one bounded page and an opaque continuation cursor", async () => {
+  let observedCursor: string | null | undefined;
+  const records = Array.from(
+    { length: TEAM_LIMITS.maxTeamRunsPerPage + 1 },
+    (_, index) =>
+      teamRunRecord({
+        id: `70000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      })
+  );
+  const teamService = createTeamService({
+    store: store({
+      listTeamRuns: async (_principal, _teamId, cursor) => {
+        observedCursor = cursor;
+        return records;
+      },
+    }),
+  });
+
+  const result = await teamService.listRuns(principal, TEAM_ID, TEAM_RUN_ID);
+
+  assert.equal(result.kind, "found");
+  assert.equal(observedCursor, TEAM_RUN_ID);
+  assert.equal(
+    result.kind === "found" && result.teamRuns.length,
+    TEAM_LIMITS.maxTeamRunsPerPage
+  );
+  assert.equal(
+    result.kind === "found" && result.nextCursor,
+    records[TEAM_LIMITS.maxTeamRunsPerPage - 1]?.id
+  );
 });
 
 test("team run listing returns not found for a missing or cross-tenant parent", async () => {

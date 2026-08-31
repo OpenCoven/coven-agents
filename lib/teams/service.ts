@@ -10,6 +10,7 @@ import {
   type SkillResource,
   skillIdSchema,
   skillResourceSchema,
+  TEAM_LIMITS,
   type TeamResource,
   type TeamRun,
   teamIdSchema,
@@ -89,7 +90,11 @@ export type TeamReadRunResult =
   | Readonly<{ kind: "not_found" }>;
 
 export type TeamListRunsResult =
-  | Readonly<{ kind: "found"; teamRuns: readonly TeamRun[] }>
+  | Readonly<{
+      kind: "found";
+      nextCursor: string | null;
+      teamRuns: readonly TeamRun[];
+    }>
   | Readonly<{ kind: "not_found" }>;
 
 export type TeamApproveRunResult =
@@ -162,7 +167,8 @@ export type TeamService = Readonly<{
   listTeams: (principal: RunnerPrincipal) => Promise<readonly TeamResource[]>;
   listRuns: (
     principal: RunnerPrincipal,
-    teamId: string
+    teamId: string,
+    cursor?: string | null
   ) => Promise<TeamListRunsResult>;
   stopRun: (
     principal: RunnerPrincipal,
@@ -539,18 +545,29 @@ export function createTeamService(
         : { kind: "not_found" };
     },
 
-    listRuns: async (principal, teamId) => {
-      if (!teamIdSchema.safeParse(teamId).success) {
+    listRuns: async (principal, teamId, cursor = null) => {
+      if (
+        !teamIdSchema.safeParse(teamId).success ||
+        (cursor !== null && !teamRunIdSchema.safeParse(cursor).success)
+      ) {
         return { kind: "not_found" };
       }
       if (!(await dependencies.store.getTeam(principal, teamId))) {
         return { kind: "not_found" };
       }
+      const records = await dependencies.store.listTeamRuns(
+        principal,
+        teamId,
+        cursor
+      );
+      const page = records.slice(0, TEAM_LIMITS.maxTeamRunsPerPage);
       return {
         kind: "found",
-        teamRuns: (
-          await dependencies.store.listTeamRuns(principal, teamId)
-        ).map(projectTeamRun),
+        nextCursor:
+          records.length > TEAM_LIMITS.maxTeamRunsPerPage
+            ? (page.at(-1)?.id ?? null)
+            : null,
+        teamRuns: page.map(projectTeamRun),
       };
     },
 

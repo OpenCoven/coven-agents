@@ -463,6 +463,24 @@ function invalidId(
     : errorResponse(dependencies, "invalid_request");
 }
 
+function teamRunCursor(
+  request: Request,
+  dependencies: TeamHttpDependencies
+): string | null | Response {
+  const entries = [...new URL(request.url).searchParams.entries()];
+  if (entries.length === 0) {
+    return null;
+  }
+  if (
+    entries.length !== 1 ||
+    entries[0]?.[0] !== "cursor" ||
+    !teamRunIdSchema.safeParse(entries[0][1]).success
+  ) {
+    return errorResponse(dependencies, "invalid_request");
+  }
+  return entries[0][1];
+}
+
 function scheduleReconciliation(dependencies: TeamHttpDependencies): void {
   if (!(dependencies.after && dependencies.reconcile)) {
     return;
@@ -902,10 +920,19 @@ export function createTeamHttpHandlers(
         if (invalid) {
           return invalid;
         }
+        const cursor = teamRunCursor(request, dependencies);
+        if (cursor instanceof Response) {
+          return cursor;
+        }
         const service = await dependencies.createService(subscriber);
-        const result = await service.listRuns(subscriber.principal, teamId);
+        const result = await service.listRuns(
+          subscriber.principal,
+          teamId,
+          cursor
+        );
         return result.kind === "found"
           ? jsonResponse(teamRunsEnvelopeSchema, {
+              nextCursor: result.nextCursor,
               teamRuns: result.teamRuns,
             })
           : errorResponse(dependencies, "not_found");

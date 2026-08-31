@@ -2930,16 +2930,35 @@ export function createTeamStore(database: TeamStoreDatabase) {
         return rows.map(asSkill);
       }),
 
-    listTeamRuns: (principal: RunnerPrincipal, teamId: string) =>
+    listTeamRuns: (
+      principal: RunnerPrincipal,
+      teamId: string,
+      cursor: string | null = null
+    ) =>
       database.transaction(async (transaction) => {
+        const limit = TEAM_LIMITS.maxTeamRunsPerPage + 1;
         const rows = await transaction.execute(
           statement(
             "list-team-runs",
-            { teamId, tenant: principal.tenant },
+            { cursor, limit, teamId, tenant: principal.tenant },
             teamRunSelect(
               sql`"teamRun"."teamId" = ${teamId}
-                AND "teamRun"."tenant" = ${principal.tenant}`,
-              sql`ORDER BY "teamRun"."createdAt" DESC, "teamRun"."id"`
+                AND "teamRun"."tenant" = ${principal.tenant}
+                ${
+                  cursor
+                    ? sql`AND EXISTS (
+                        SELECT 1
+                        FROM "RunnerTeamRun" AS "cursorRun"
+                        WHERE "cursorRun"."id" = ${cursor}
+                          AND "cursorRun"."teamId" = ${teamId}
+                          AND "cursorRun"."tenant" = ${principal.tenant}
+                          AND ("teamRun"."createdAt", "teamRun"."id")
+                            < ("cursorRun"."createdAt", "cursorRun"."id")
+                      )`
+                    : sql``
+                }`,
+              sql`ORDER BY "teamRun"."createdAt" DESC, "teamRun"."id" DESC
+                LIMIT ${limit}`
             )
           )
         );

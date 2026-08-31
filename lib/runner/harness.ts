@@ -349,6 +349,9 @@ export function buildHarnessCommand(input: {
       harness: input.harness,
       instructions: input.instructions,
       model: input.model,
+      permissionMode: input.task.startsWith("# Team Step Task\n")
+        ? "workspace"
+        : "unrestricted",
       stream: true,
       task: input.task,
     })

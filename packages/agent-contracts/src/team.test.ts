@@ -502,9 +502,23 @@ test("team run envelopes expose versions but reject internal authority", () => {
   });
 
   assert.deepEqual(teamRunEnvelopeSchema.parse({ teamRun }), { teamRun });
-  assert.deepEqual(teamRunsEnvelopeSchema.parse({ teamRuns: [teamRun] }), {
-    teamRuns: [teamRun],
-  });
+  assert.deepEqual(
+    teamRunsEnvelopeSchema.parse({ nextCursor: null, teamRuns: [teamRun] }),
+    {
+      nextCursor: null,
+      teamRuns: [teamRun],
+    }
+  );
+  assert.equal(
+    teamRunsEnvelopeSchema.safeParse({
+      nextCursor: TEAM_RUN_A,
+      teamRuns: Array.from(
+        { length: TEAM_LIMITS.maxTeamRunsPerPage + 1 },
+        () => teamRun
+      ),
+    }).success,
+    false
+  );
   for (const value of [
     { ...teamRun, authVersion: 7 },
     { ...teamRun, createdByUserId: AGENT_A },

@@ -39,6 +39,7 @@ export const TEAM_LIMITS = Object.freeze({
   maxNameLength: 64,
   maxSkillInstructionsLength: 4000,
   maxSkillsPerMember: 8,
+  maxTeamRunsPerPage: 10,
   maxTotalHandoffLength: 49_152,
 });
 
@@ -861,7 +862,8 @@ export const teamEnvelopeSchema = z
 
 export const teamRunsEnvelopeSchema = z
   .object({
-    teamRuns: z.array(teamRunSchema),
+    nextCursor: teamRunIdSchema.nullable(),
+    teamRuns: z.array(teamRunSchema).max(TEAM_LIMITS.maxTeamRunsPerPage),
   })
   .strict();
 

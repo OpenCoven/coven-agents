@@ -82,6 +82,21 @@ test("quotes Copilot invocation and keeps incomplete JSONL outside the cursor", 
   assert.deepEqual(duplicate.events, []);
 });
 
+test("team child tasks cannot access shell, network, or GitHub tools", () => {
+  const command = buildHarnessCommand({
+    harness: "copilot",
+    instructions: "Keep evidence concise.",
+    model: "auto",
+    task: "# Team Step Task\n\n## Mission\nEdit the requested files.",
+    workspace: "/workspace/repo",
+  });
+
+  assert.doesNotMatch(command, /--yolo/u);
+  assert.match(command, /--available-tools' 'view,edit,grep,glob/u);
+  assert.match(command, /--allow-tool' 'read,write/u);
+  assert.doesNotMatch(command, /shell|github-mcp|web_fetch|web_search/iu);
+});
+
 test("sanitizes every harness-controlled string field through the event contract", () => {
   const contaminatedAt = `not-a-timestamp-${SECRET}`;
   const events: RunEvent[] = [

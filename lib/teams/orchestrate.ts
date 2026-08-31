@@ -1,7 +1,6 @@
 // biome-ignore-all lint/performance/noAwaitInLoops: Team claims, attachments, cancellations, and projections are intentionally serialized.
 import "server-only";
 
-import type { TeamCapability } from "@opencoven/agent-contracts";
 import type {
   AdmitRunnerRunInput,
   AdmitRunnerRunResult,
@@ -14,7 +13,7 @@ import type {
 } from "@/lib/runner/types";
 import type { TeamChildRunnerIds } from "./child-ids";
 import type { createTeamStore } from "./store";
-import { buildTeamStepTask, type GitHubCapability } from "./task";
+import { buildTeamStepTask } from "./task";
 
 export { type TeamChildRunnerIds, teamChildRunnerIds } from "./child-ids";
 
@@ -68,22 +67,6 @@ function reconciliationLimit(value: number | undefined): number {
     );
   }
   return resolved;
-}
-
-function githubCapabilityMode(
-  capabilities: readonly TeamCapability[]
-): GitHubCapability {
-  if (
-    capabilities.some(
-      (capability) =>
-        capability.startsWith("github.") && capability.endsWith(".write")
-    )
-  ) {
-    return "write";
-  }
-  return capabilities.some((capability) => capability.startsWith("github."))
-    ? "read"
-    : "none";
 }
 
 export function createTeamOrchestrator(
@@ -144,6 +127,23 @@ export function createTeamOrchestrator(
         if (deferredTeamRunIds.has(claim.teamRunId)) {
           break;
         }
+        if (
+          claim.declaredCapabilities.some((capability) =>
+            capability.startsWith("github.")
+          )
+        ) {
+          failures += 1;
+          if (
+            await failAdmission(claim, {
+              code: "github_broker_unavailable",
+              message: "GitHub operations require brokered execution.",
+              retryable: false,
+            })
+          ) {
+            continue;
+          }
+          break;
+        }
 
         const ids: TeamChildRunnerIds = {
           operationId: claim.plannedOperationId,
@@ -152,7 +152,7 @@ export function createTeamOrchestrator(
         let result: AdmitRunnerRunResult;
         try {
           const task = buildTeamStepTask({
-            githubCapability: githubCapabilityMode(claim.declaredCapabilities),
+            githubCapability: "none",
             memberResponsibility: claim.responsibility,
             mission: claim.mission,
             priorHandoffs: claim.priorHandoffs,

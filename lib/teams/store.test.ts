@@ -344,6 +344,27 @@ test("forward migration persists team authority, approval audit, and execution s
   );
 });
 
+test("team run listing is cursor-stable and fetches only one bounded page", async () => {
+  const { statements, store } = scripted([]);
+
+  await store.listTeamRuns(principal, TEAM_A, TEAM_RUN_A);
+
+  const list = captured(statements, 0);
+  const query = queryText(list);
+  assert.equal(
+    list.args.limit,
+    TEAM_LIMITS.maxTeamRunsPerPage + 1,
+    "the store fetches only one lookahead row beyond the public page"
+  );
+  assert.equal(list.args.cursor, TEAM_RUN_A);
+  assert.match(query, /"cursorRun"\."id"/u);
+  assert.match(
+    query,
+    /\("teamRun"\."createdAt", "teamRun"\."id"\)\s*< \("cursorRun"\."createdAt", "cursorRun"\."id"\)/u
+  );
+  assert.match(query, /LIMIT \$\d+/u);
+});
+
 test("skill CRUD always binds tenant and hides cross-tenant rows", async () => {
   const created = scripted([skillRow()]);
   const result = await created.store.createSkill(principal, {
