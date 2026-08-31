@@ -9,11 +9,9 @@ import {
   gt,
   gte,
   inArray,
-  isNull,
   lt,
   lte,
   ne,
-  or,
   type SQL,
   sql,
 } from "drizzle-orm";
@@ -43,7 +41,10 @@ import {
   reservationUsage,
 } from "../billing/run-reservations";
 import { countRun, usageFor } from "../billing/usage";
-import type { StripeEventUpdateInput } from "../billing/webhook";
+import {
+  type StripeEventUpdateInput,
+  stripeEventMutation,
+} from "../billing/webhook";
 import { ChatbotError } from "../errors";
 import {
   type Chat,
@@ -60,6 +61,7 @@ import {
   user,
   vote,
 } from "./schema";
+import { stripeEventOwnerWhere } from "./stripe-event";
 
 const client = postgres(process.env.POSTGRES_URL ?? "");
 export const db = drizzle(client);
@@ -247,33 +249,29 @@ export async function applyStripeEventUpdate(
         return "duplicate";
       }
 
+      const [owner] = await transaction
+        .select()
+        .from(user)
+        .where(stripeEventOwnerWhere(input))
+        .for("update")
+        .limit(1);
+      if (!owner) {
+        throw new Error("Stripe webhook owner does not exist.");
+      }
+
+      const mutation = stripeEventMutation(owner, input);
+      if (!mutation) {
+        return "applied";
+      }
+
       const updated = await transaction
         .update(user)
-        .set({
-          ...(input.billingPeriodStart
-            ? { billingPeriodStart: input.billingPeriodStart }
-            : {}),
-          stripeCustomerId: input.customerId,
-          ...(input.stripeSubscriptionId
-            ? { stripeSubscriptionId: input.stripeSubscriptionId }
-            : {}),
-          ...(input.subscribedUntil
-            ? { subscribedUntil: input.subscribedUntil }
-            : {}),
-        })
-        .where(
-          and(
-            eq(user.id, input.userId),
-            or(
-              isNull(user.stripeCustomerId),
-              eq(user.stripeCustomerId, input.customerId)
-            )
-          )
-        )
+        .set(mutation)
+        .where(eq(user.id, owner.id))
         .returning({ id: user.id });
 
       if (updated.length !== 1) {
-        throw new Error("Stripe Customer owner does not match.");
+        throw new Error("Stripe webhook owner update failed.");
       }
       return "applied";
     });

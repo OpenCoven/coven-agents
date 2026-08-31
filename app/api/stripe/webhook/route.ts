@@ -5,11 +5,7 @@ import {
   type StripeWebhookDependencies,
   stripeWebhookResponse,
 } from "@/lib/billing/webhook";
-import {
-  applyStripeEventUpdate,
-  findUserById,
-  findUserByStripeCustomerId,
-} from "@/lib/db/queries";
+import { applyStripeEventUpdate } from "@/lib/db/queries";
 
 const webhookDependencies: StripeWebhookDependencies = {
   applyEventUpdate: applyStripeEventUpdate,
@@ -17,7 +13,17 @@ const webhookDependencies: StripeWebhookDependencies = {
     const stripe = createStripeClient(apiKey);
     return {
       constructEvent(raw, signature, secret) {
-        return stripe.webhooks.constructEventAsync(raw, signature, secret);
+        return stripe.webhooks.constructEventAsync(
+          Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength),
+          signature,
+          secret
+        );
+      },
+      listInvoiceLines(invoiceId, startingAfter) {
+        return stripe.invoices.listLineItems(invoiceId, {
+          limit: 100,
+          ...(startingAfter ? { starting_after: startingAfter } : {}),
+        });
       },
       retrieveCustomer(customerId) {
         return stripe.customers.retrieve(customerId);
@@ -25,12 +31,13 @@ const webhookDependencies: StripeWebhookDependencies = {
     };
   },
   enforceAbuse: enforceAbusePolicy,
-  findUserById,
-  findUserByStripeCustomerId,
   getConfig() {
     const apiKey = process.env.STRIPE_SECRET_KEY?.trim();
+    const priceId = process.env.STRIPE_PRICE_ID?.trim();
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim();
-    return apiKey && webhookSecret ? { apiKey, webhookSecret } : null;
+    return apiKey && priceId && webhookSecret
+      ? { apiKey, priceId, webhookSecret }
+      : null;
   },
 };
 

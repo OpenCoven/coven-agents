@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { z } from "zod";
-import { readBoundedFormData, readBoundedJson } from "./body";
+import { readBoundedBytes, readBoundedFormData, readBoundedJson } from "./body";
 
 const jsonSchema = z.object({ name: z.string() });
 
@@ -72,6 +72,122 @@ test("bounds a streamed JSON body when content length is absent", async () => {
     kind: "too_large",
   });
   assert.equal(cancelled, true);
+});
+
+test("rejects declared oversized raw bytes before opening the stream", async () => {
+  let opened = false;
+  const request = {
+    body: {
+      getReader() {
+        opened = true;
+        throw new Error("body stream must not be opened");
+      },
+    },
+    headers: new Headers({ "content-length": "9" }),
+  } as unknown as Request;
+
+  assert.deepEqual(await readBoundedBytes(request, 8), {
+    kind: "too_large",
+  });
+  assert.equal(opened, false);
+});
+
+test("bounds a chunked raw body as streamed bytes cross the limit", async () => {
+  let cancelled = false;
+  const request = streamRequest(
+    new ReadableStream({
+      cancel() {
+        cancelled = true;
+      },
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3, 4]));
+        controller.enqueue(new Uint8Array([5]));
+      },
+    }),
+    {}
+  );
+
+  assert.deepEqual(await readBoundedBytes(request, 4), {
+    kind: "too_large",
+  });
+  assert.equal(cancelled, true);
+});
+
+test("accepts a raw body at the exact byte limit", async () => {
+  const expected = new Uint8Array([0, 1, 2, 3]);
+  const request = streamRequest(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(expected);
+        controller.close();
+      },
+    }),
+    { "content-length": String(expected.byteLength) }
+  );
+
+  assert.deepEqual(await readBoundedBytes(request, expected.byteLength), {
+    kind: "ok",
+    value: expected,
+  });
+});
+
+test("preserves exact multibyte raw-body bytes", async () => {
+  const expected = new TextEncoder().encode('{"name":"🧙"}');
+  const request = streamRequest(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(expected.subarray(0, 10));
+        controller.enqueue(expected.subarray(10));
+        controller.close();
+      },
+    }),
+    {}
+  );
+
+  const result = await readBoundedBytes(request, expected.byteLength);
+
+  assert.equal(result.kind, "ok");
+  if (result.kind === "ok") {
+    assert.deepEqual(result.value, expected);
+  }
+});
+
+test("reports raw stream failures distinctly", async () => {
+  const failure = new Error("stream failed");
+  const request = streamRequest(
+    new ReadableStream({
+      pull(controller) {
+        controller.error(failure);
+      },
+    }),
+    {}
+  );
+
+  const result = await readBoundedBytes(request, 64);
+
+  assert.equal(result.kind, "read_error");
+  if (result.kind === "read_error") {
+    assert.equal(result.error, failure);
+  }
+});
+
+test("reports raw stream reader failures distinctly", async () => {
+  const failure = new Error("reader unavailable");
+  const request = {
+    body: {
+      getReader() {
+        throw failure;
+      },
+    },
+    headers: new Headers(),
+  } as unknown as Request;
+
+  const result = await readBoundedBytes(request, 64);
+
+  assert.equal(result.kind, "read_error");
+  if (result.kind === "read_error") {
+    assert.equal(result.error, failure);
+  }
 });
 
 test("accepts valid bounded JSON and applies the supplied schema", async () => {

@@ -272,7 +272,7 @@ test("Stripe webhook admission precedes body and provider work", () => {
     "stripeWebhookResponse"
   );
   const admissionIndex = response.indexOf("dependencies.enforceAbuse({");
-  const bodyIndex = response.indexOf("request.text()");
+  const bodyIndex = response.indexOf("readBoundedBytes(");
   const providerIndex = response.indexOf("dependencies.createProvider(");
 
   assert.match(routeSource, /from "@\/lib\/abuse\/enforce"/);
@@ -282,7 +282,8 @@ test("Stripe webhook admission precedes body and provider work", () => {
   assert.ok(admissionIndex >= 0);
   assert.match(response, /route: "stripe_webhook"/);
   assert.ok(bodyIndex > admissionIndex);
-  assert.ok(providerIndex > admissionIndex);
+  assert.ok(providerIndex > bodyIndex);
+  assert.match(response, /status: 413/);
 });
 
 test("Stripe webhook path never reads the Checkout launch flag", () => {
@@ -294,9 +295,13 @@ test("Stripe webhook path never reads the Checkout launch flag", () => {
     assert.doesNotMatch(source, /SUBSCRIPTION_CHECKOUT_ENABLED/);
     assert.doesNotMatch(source, /@\/lib\/billing\/config/);
   }
+  assert.match(
+    read("app/api/stripe/webhook/route.ts"),
+    /process\.env\.STRIPE_PRICE_ID/
+  );
 });
 
-test("Stripe event claims and User writes share one transaction", () => {
+test("Stripe event claims, User row locks, decisions, and writes share one transaction", () => {
   const source = read("lib/db/queries.ts");
   const start = source.indexOf("export async function applyStripeEventUpdate");
   const end = source.indexOf(
@@ -310,9 +315,21 @@ test("Stripe event claims and User writes share one transaction", () => {
   assert.match(update, /db\.transaction\(/);
   assert.match(update, /\.insert\(stripeEvent\)/);
   assert.match(update, /\.onConflictDoNothing\(\)/);
+  assert.match(update, /\.select\(\)/);
+  assert.match(update, /\.from\(user\)/);
+  assert.match(update, /\.for\("update"\)/);
+  assert.match(update, /stripeEventMutation\(owner, input\)/);
   assert.match(update, /\.update\(user\)/);
   assert.match(update, /\.returning\(\{ id: user\.id \}\)/);
   assert.match(update, /throw new Error/);
+
+  const claimIndex = update.indexOf(".insert(stripeEvent)");
+  const lockIndex = update.indexOf('.for("update")');
+  const decisionIndex = update.indexOf("stripeEventMutation(owner, input)");
+  const writeIndex = update.indexOf(".update(user)");
+  assert.ok(lockIndex > claimIndex);
+  assert.ok(decisionIndex > lockIndex);
+  assert.ok(writeIndex > decisionIndex);
 });
 
 test("analytics revalidates subscriber authority before reading history", () => {
