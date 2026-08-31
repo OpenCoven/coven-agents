@@ -4,6 +4,7 @@ import type {
   IdempotencyCompleteInput,
   StoredIdempotencyResponse,
 } from "../abuse/idempotency";
+import type { SessionAuthority } from "../auth/session-revocation";
 import type { CredentialDevicePollClaim } from "./device-poll";
 import {
   type CredentialDevicePollCommitDatabase,
@@ -33,8 +34,13 @@ type State = {
 };
 
 class MemoryDatabase implements CredentialDevicePollCommitDatabase<string> {
-  authorityValid = true;
+  authority: SessionAuthority | null = {
+    authVersion: 4,
+    subscribedUntil: new Date(NOW.getTime() + 600_000),
+  };
+  completedInput: IdempotencyCompleteInput | null = null;
   completeSucceeds = true;
+  now = NOW;
   state: State = { completed: null, credential: null, fence: true };
   transactions = 0;
   upserts = 0;
@@ -47,7 +53,8 @@ class MemoryDatabase implements CredentialDevicePollCommitDatabase<string> {
     this.transactions += 1;
     const draft = structuredClone(this.state);
     const result = await callback({
-      completeClaim: () => {
+      completeClaim: (completionInput) => {
+        this.completedInput = completionInput;
         if (!this.completeSucceeds || !draft.fence) {
           return Promise.resolve(false);
         }
@@ -55,7 +62,8 @@ class MemoryDatabase implements CredentialDevicePollCommitDatabase<string> {
         draft.fence = false;
         return Promise.resolve(true);
       },
-      findAuthorityForUpdate: () => Promise.resolve(this.authorityValid),
+      currentTime: () => this.now,
+      findAuthorityForUpdate: () => Promise.resolve(this.authority),
       findClaimForUpdate: () => Promise.resolve(draft.fence),
       findCompleted: () => Promise.resolve(draft.completed),
       upsertCredential: (input) => {
@@ -128,7 +136,7 @@ test("a lost fence returns lost without writing the credential", async () => {
 
 test("lost session authority refuses the credential before either durable write", async () => {
   const database = new MemoryDatabase();
-  database.authorityValid = false;
+  database.authority = null;
 
   assert.equal(
     await commitCredentialDevicePollAuthorized(database, completion()),
@@ -140,6 +148,54 @@ test("lost session authority refuses the credential before either durable write"
     credential: null,
     fence: true,
   });
+});
+
+test("a claim that expires while waiting for transaction locks cannot commit", async () => {
+  const database = new MemoryDatabase();
+  database.now = new Date(CLAIM.claimExpiresAt.getTime() + 1);
+
+  assert.equal(
+    await commitCredentialDevicePollAuthorized(database, completion()),
+    "lost"
+  );
+  assert.equal(database.upserts, 0);
+  assert.equal(database.completedInput, null);
+});
+
+test("subscription authority that expires before the locked commit cannot write", async () => {
+  const database = new MemoryDatabase();
+  database.now = new Date(NOW.getTime() + 10_000);
+  database.authority = {
+    authVersion: 4,
+    subscribedUntil: database.now,
+  };
+
+  assert.equal(
+    await commitCredentialDevicePollAuthorized(database, completion()),
+    "authority_lost"
+  );
+  assert.equal(database.upserts, 0);
+  assert.equal(database.completedInput, null);
+});
+
+test("successful completion is timestamped after locks while preserving retention", async () => {
+  const database = new MemoryDatabase();
+  database.now = new Date(NOW.getTime() + 10_000);
+  const input = completion();
+
+  assert.equal(
+    await commitCredentialDevicePollAuthorized(database, input),
+    "completed"
+  );
+  assert.equal(
+    database.completedInput?.completedAt.getTime(),
+    database.now.getTime()
+  );
+  assert.equal(
+    (database.completedInput?.expiresAt.getTime() ?? 0) -
+      database.now.getTime(),
+    input.expiresAt.getTime() - input.completedAt.getTime()
+  );
 });
 
 test("an exact completed authorized record replays without another credential write", async () => {

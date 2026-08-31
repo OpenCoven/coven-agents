@@ -1,4 +1,8 @@
 import type { StoredIdempotencyResponse } from "../abuse/idempotency";
+import {
+  type SessionAuthority,
+  sessionAuthorityMatches,
+} from "../auth/session-revocation";
 import type {
   CredentialDevicePollCommitInput,
   CredentialDevicePollCommitResult,
@@ -8,9 +12,10 @@ export interface CredentialDevicePollCommitTransaction<TCredential> {
   completeClaim: (
     input: CredentialDevicePollCommitInput<TCredential>
   ) => Promise<boolean>;
+  currentTime: () => Date;
   findAuthorityForUpdate: (
     input: CredentialDevicePollCommitInput<TCredential>
-  ) => Promise<boolean>;
+  ) => Promise<SessionAuthority | null>;
   findClaimForUpdate: (
     input: CredentialDevicePollCommitInput<TCredential>
   ) => Promise<boolean>;
@@ -38,23 +43,54 @@ export async function commitCredentialDevicePollAuthorized<TCredential>(
 
   return await database.transaction(async (transaction) => {
     if (!(await transaction.findClaimForUpdate(input))) {
-      const completed = await transaction.findCompleted(input);
+      const completed = await transaction.findCompleted({
+        ...input,
+        completedAt: transaction.currentTime(),
+      });
       return isAuthorizedResponse(completed)
         ? { kind: "replayed", response: completed }
         : "lost";
     }
-    if (!(await transaction.findAuthorityForUpdate(input))) {
+    const authority = await transaction.findAuthorityForUpdate(input);
+    const completedAt = transaction.currentTime();
+    assertValidDate(completedAt);
+    if (input.claim.claimExpiresAt.getTime() <= completedAt.getTime()) {
+      return "lost";
+    }
+    if (
+      !authority ||
+      !sessionAuthorityMatches({
+        database: authority,
+        now: completedAt,
+        tokenAuthVersion: input.authVersion,
+      })
+    ) {
       return "authority_lost";
     }
 
-    await transaction.upsertCredential(input);
-    if (!(await transaction.completeClaim(input))) {
+    const retentionMs = input.expiresAt.getTime() - input.completedAt.getTime();
+    if (!Number.isFinite(retentionMs) || retentionMs <= 0) {
+      throw new Error("Credential device-poll retention is invalid.");
+    }
+    const lockedCompletion = {
+      ...input,
+      completedAt,
+      expiresAt: new Date(completedAt.getTime() + retentionMs),
+    };
+    await transaction.upsertCredential(lockedCompletion);
+    if (!(await transaction.completeClaim(lockedCompletion))) {
       throw new Error(
         "Credential device-poll claim changed before completion."
       );
     }
     return "completed";
   });
+}
+
+function assertValidDate(value: Date): void {
+  if (!Number.isFinite(value.getTime())) {
+    throw new Error("Credential device-poll commit time is invalid.");
+  }
 }
 
 function assertAuthorizedResponse(response: StoredIdempotencyResponse): void {

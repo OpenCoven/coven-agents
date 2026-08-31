@@ -1,7 +1,6 @@
 import "server-only";
 
 import { and, eq, gt, sql } from "drizzle-orm";
-import { sessionAuthorityMatches } from "@/lib/auth/session-revocation";
 import type { databaseFor } from "@/lib/db/access";
 import { tenantForUser } from "@/lib/session";
 import { parseStoredIdempotencyResponseEnvelope } from "../abuse/idempotency-response";
@@ -33,10 +32,11 @@ export function drizzleCredentialDevicePollDatabase(
                 state: "completed",
                 updatedAt: input.completedAt,
               })
-              .where(liveClaimFence(input))
+              .where(liveCompletionFence(input))
               .returning({ id: idempotencyRecord.id });
             return completed.length === 1;
           },
+          currentTime: () => new Date(),
           async findAuthorityForUpdate(input) {
             const [owner] = await transaction
               .select({
@@ -47,20 +47,13 @@ export function drizzleCredentialDevicePollDatabase(
               .where(eq(user.id, input.claim.ownerId))
               .for("update")
               .limit(1);
-            return Boolean(
-              owner &&
-                sessionAuthorityMatches({
-                  database: owner,
-                  now: input.completedAt,
-                  tokenAuthVersion: input.authVersion,
-                })
-            );
+            return owner ?? null;
           },
           async findClaimForUpdate(input) {
             const [claim] = await transaction
               .select({ id: idempotencyRecord.id })
               .from(idempotencyRecord)
-              .where(liveClaimFence(input))
+              .where(inProgressClaimFence(input))
               .for("update")
               .limit(1);
             return claim !== undefined;
@@ -121,12 +114,18 @@ export function drizzleCredentialDevicePollDatabase(
   };
 }
 
-function liveClaimFence(input: CommitInput) {
+function inProgressClaimFence(input: CommitInput) {
   return and(
     exactClaimScope(input),
     eq(idempotencyRecord.requestHash, storedIdempotencyClaimHash(input.claim)),
     eq(idempotencyRecord.state, "in_progress"),
-    eq(idempotencyRecord.expiresAt, input.claim.claimExpiresAt),
+    eq(idempotencyRecord.expiresAt, input.claim.claimExpiresAt)
+  );
+}
+
+function liveCompletionFence(input: CommitInput) {
+  return and(
+    inProgressClaimFence(input),
     gt(idempotencyRecord.expiresAt, input.completedAt)
   );
 }
