@@ -34,10 +34,7 @@ test("passes when Vercel deployment configuration is absent", () => {
 });
 
 test("allows only the deny-only Vercel Git deployment control", () => {
-  assert.equal(
-    isVercelDeploymentDisableConfig(disabledDeploymentConfig),
-    true
-  );
+  assert.equal(isVercelDeploymentDisableConfig(disabledDeploymentConfig), true);
   assert.deepEqual(
     findDeploymentDocumentationViolations([
       { content: disabledDeploymentConfig, path: "vercel.json" },
@@ -87,9 +84,7 @@ test("rejects an incomplete Vercel deployment runbook", () => {
 });
 
 test("allows documented Vercel deployment configuration", () => {
-  const documentation = `${VERCEL_DEPLOYMENT_REQUIRED_HEADINGS.join(
-    "\n\n"
-  )}\n`;
+  const documentation = `${VERCEL_DEPLOYMENT_REQUIRED_HEADINGS.join("\n\n")}\n`;
 
   assert.deepEqual(
     findDeploymentDocumentationViolations([
