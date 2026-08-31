@@ -23,9 +23,14 @@ async function notifySessionChange(page: Page): Promise<void> {
 
 async function subscriberSessionSetCookie(
   email: string,
-  id: string
+  id: string,
+  authVersion = 1
 ): Promise<string> {
-  const [cookie] = await sessionCookies("subscriber", { email, id });
+  const [cookie] = await sessionCookies("subscriber", {
+    authVersion,
+    email,
+    id,
+  });
   if (!cookie) {
     throw new Error("Subscriber session cookie was not created.");
   }
@@ -468,7 +473,8 @@ test.describe("Account settings", () => {
     };
     sessionSetCookie = await subscriberSessionSetCookie(
       "second@example.invalid",
-      secondId
+      secondId,
+      2
     );
     const sessionRefresh = page.waitForResponse(async (response) => {
       if (new URL(response.url()).pathname !== "/api/auth/session") {
@@ -539,7 +545,8 @@ test.describe("Account settings", () => {
     };
     sessionSetCookie = await subscriberSessionSetCookie(
       "second@example.invalid",
-      secondId
+      secondId,
+      2
     );
     const sessionRefresh = page.waitForResponse(async (response) => {
       if (new URL(response.url()).pathname !== "/api/auth/session") {
