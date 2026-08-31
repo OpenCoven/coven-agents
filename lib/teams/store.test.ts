@@ -282,19 +282,19 @@ test("forward migration persists team authority, approval audit, and execution s
   const migrationDirectory = new URL("../db/migrations/", import.meta.url);
   const { readdir } = await import("node:fs/promises");
   const migrationName = (await readdir(migrationDirectory)).find((name) =>
-    name.startsWith("0021_")
+    name.startsWith("0022_")
   );
-  assert.ok(migrationName, "Task 5 must add a forward 0021 migration");
+  assert.ok(migrationName, "team authority requires forward migration 0022");
   const authorityMigration = await readFile(
     new URL(migrationName, migrationDirectory),
     "utf8"
   );
   const reservationMigrationName = (await readdir(migrationDirectory)).find(
-    (name) => name.startsWith("0022_")
+    (name) => name.startsWith("0023_")
   );
   assert.ok(
     reservationMigrationName,
-    "planned child reservations must advance through migration 0022"
+    "planned child reservations must advance through migration 0023"
   );
   const reservationMigration = await readFile(
     new URL(reservationMigrationName, migrationDirectory),
