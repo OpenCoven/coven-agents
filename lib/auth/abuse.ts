@@ -185,17 +185,31 @@ function requestWithBody<RequestType extends Request>(
   request: RequestType,
   body: Uint8Array
 ): RequestType {
+  type ReplayRequestInit = RequestInit & {
+    nextConfig?: { basePath?: string };
+  };
   const RequestConstructor = request.constructor as new (
     input: RequestInfo | URL,
     init?: RequestInit
   ) => RequestType;
-
-  return new RequestConstructor(request.url, {
+  const init: ReplayRequestInit = {
     body: body as BodyInit,
     headers: new Headers(request.headers),
     method: request.method,
     signal: request.signal,
-  });
+  };
+  const basePath = nextRequestBasePath(request);
+  if (basePath) {
+    init.nextConfig = { basePath };
+  }
+
+  return new RequestConstructor(request.url, init);
+}
+
+function nextRequestBasePath(request: Request): string | undefined {
+  const basePath = (request as Request & { nextUrl?: { basePath?: unknown } })
+    .nextUrl?.basePath;
+  return typeof basePath === "string" && basePath ? basePath : undefined;
 }
 
 async function readVerifiedJwtIdentity(
