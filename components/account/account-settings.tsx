@@ -273,12 +273,21 @@ export function AccountSettings({
               Harness credentials, usage, profile, and account data are
               available after GitHub sign-in.
             </p>
-            <Link
-              className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white transition-opacity hover:opacity-90"
-              href={loginPath}
-            >
-              Sign in with GitHub
-            </Link>
+            {loginPath ? (
+              <Link
+                className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white transition-opacity hover:opacity-90"
+                href={loginPath}
+              >
+                Sign in with GitHub
+              </Link>
+            ) : (
+              <span
+                aria-disabled="true"
+                className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white opacity-60"
+              >
+                Sign in with GitHub
+              </span>
+            )}
           </div>
         </main>
       </div>

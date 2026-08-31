@@ -797,13 +797,15 @@ test("device flow redemption verifies start ownership before provider exchange",
   );
   const parse = source.indexOf("devicePollSchema");
   const ownership = source.indexOf("verifyDeviceFlowBinding(");
+  const poll = source.indexOf("runCredentialDevicePoll({");
   const exchange = source.indexOf("exchangeDeviceCode(");
-  const store = source.indexOf("putCredential(");
+  const prepare = source.indexOf("prepareCredentialWrite(");
 
   assert.ok(parse >= 0);
   assert.ok(ownership > parse);
-  assert.ok(exchange > ownership);
-  assert.ok(store > exchange);
+  assert.ok(poll > ownership);
+  assert.ok(exchange > poll);
+  assert.ok(prepare > exchange);
 });
 
 test("handler extraction does not include markers from a later handler", () => {
