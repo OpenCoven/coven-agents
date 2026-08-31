@@ -9,7 +9,9 @@ const STANDARD_WRITE = rateClass(20, 60, 100, 3600);
 const SENSITIVE_READ = rateClass(30, 60, 200, 3600);
 const SENSITIVE_WRITE = rateClass(10, 60, 40, 3600);
 const DESTRUCTIVE_WRITE = rateClass(5, 60, 20, 3600);
-const WEBHOOK_WRITE = rateClass(60, 60, 600, 3600);
+// Stripe retries and renewal batches can legitimately share an egress IP.
+// This route still has its own IP-only budget and a bounded 256 KiB reader.
+const WEBHOOK_WRITE = rateClass(600, 60, 10_000, 3600);
 
 const POLICIES = Object.freeze({
   analytics_read: closedPolicy(["ip", "user"], 0, EXPENSIVE_READ),

@@ -235,6 +235,21 @@ export async function attachStripeCustomer(
 
 export type StripeEventWriteResult = "applied" | "duplicate";
 
+export async function claimStripeEventDisposition(
+  eventId: string
+): Promise<StripeEventWriteResult> {
+  try {
+    const claimed = await db
+      .insert(stripeEvent)
+      .values({ id: eventId })
+      .onConflictDoNothing()
+      .returning({ id: stripeEvent.id });
+    return claimed.length === 0 ? "duplicate" : "applied";
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
 export async function applyStripeEventUpdate(
   input: StripeEventUpdateInput
 ): Promise<StripeEventWriteResult> {

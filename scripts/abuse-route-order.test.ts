@@ -332,6 +332,23 @@ test("Stripe event claims, User row locks, decisions, and writes share one trans
   assert.ok(writeIndex > decisionIndex);
 });
 
+test("terminal Stripe dispositions claim atomically without a fake User update", () => {
+  const source = read("lib/db/queries.ts");
+  const start = source.indexOf(
+    "export async function claimStripeEventDisposition"
+  );
+  const end = source.indexOf("export async function applyStripeEventUpdate");
+  const claim = source.slice(start, end);
+
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  assert.match(claim, /\.insert\(stripeEvent\)/);
+  assert.match(claim, /\.onConflictDoNothing\(\)/);
+  assert.match(claim, /\.returning\(\{ id: stripeEvent\.id \}\)/);
+  assert.doesNotMatch(claim, /\.update\(user\)/);
+  assert.doesNotMatch(claim, /\.from\(user\)/);
+});
+
 test("analytics revalidates subscriber authority before reading history", () => {
   const source = read("lib/analytics/response.ts");
   const authorityIndex = source.indexOf("dependencies.authorize(");

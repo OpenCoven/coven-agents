@@ -15,6 +15,8 @@ const PAID_FROM = new Date("2026-08-20T12:00:00.000Z");
 const NEXT_PERIOD_END = new Date("2026-10-20T12:00:00.000Z");
 const PRICE_ID = "price_webhook";
 const USER_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+const CHECKOUT_ATTEMPT_ID = "11111111-1111-4111-8111-111111111111";
+const CHECKOUT_INTEGRATION_IDENTIFIER = "opencoven_coven_agents_qohuikyr";
 
 test("a paid invoice sets the period end", () => {
   const update = subscriptionUpdate({
@@ -290,31 +292,135 @@ test("a late Checkout reference cannot replace later paid authority", async () =
   assert.equal(writer.events.has("evt_checkout_stale"), true);
 });
 
-test("an older paid event cannot replace a later unbacked subscription reference", async () => {
+test("paid authority replaces an unbacked Checkout subscription reference", async () => {
+  const writer = new MemoryStripeEventWriter([
+    {
+      billingPeriodStart: null,
+      id: USER_ID,
+      stripeCustomerId: null,
+      stripeSubscriptionId: null,
+      subscribedUntil: null,
+    },
+  ]);
+  const checkoutReference: StripeEventUpdateInput = {
+    customerId: "cus_webhook",
+    eventId: "evt_checkout_sub_a",
+    eventType: "checkout_reference",
+    stripeSubscriptionId: "sub_A",
+    userId: USER_ID,
+  };
+  const paid = paidIntent({
+    eventId: "evt_paid_replacement",
+    periodEnd: PAID_UNTIL,
+    periodStart: PAID_FROM,
+    stripeSubscriptionId: "sub_B",
+  });
+
+  assert.equal(await writer.apply(checkoutReference), "applied");
+  assert.equal(writer.users.get(USER_ID)?.stripeSubscriptionId, "sub_A");
+  assert.equal(await writer.apply(paid), "applied");
+  assert.deepEqual(writer.users.get(USER_ID), {
+    billingPeriodStart: PAID_FROM,
+    id: USER_ID,
+    stripeCustomerId: "cus_webhook",
+    stripeSubscriptionId: "sub_B",
+    subscribedUntil: PAID_UNTIL,
+  });
+  assert.equal(writer.events.has(paid.eventId), true);
+});
+
+test("initial failure cannot block a later paid replacement subscription", async () => {
   const writer = new MemoryStripeEventWriter([
     {
       billingPeriodStart: null,
       id: USER_ID,
       stripeCustomerId: "cus_webhook",
-      stripeSubscriptionId: "sub_later",
+      stripeSubscriptionId: null,
       subscribedUntil: null,
     },
   ]);
-  const stale = paidIntent({
-    eventId: "evt_paid_before_later_checkout",
+  const failed = failedIntent("evt_initial_sub_a", {
+    billingReason: "subscription_create",
+    stripeSubscriptionId: "sub_A",
+  });
+  const paid = paidIntent({
+    eventId: "evt_paid_sub_b",
     periodEnd: PAID_UNTIL,
     periodStart: PAID_FROM,
+    stripeSubscriptionId: "sub_B",
   });
 
-  assert.equal(await writer.apply(stale), "applied");
+  assert.equal(await writer.apply(failed), "applied");
   assert.deepEqual(writer.users.get(USER_ID), {
     billingPeriodStart: null,
     id: USER_ID,
     stripeCustomerId: "cus_webhook",
-    stripeSubscriptionId: "sub_later",
+    stripeSubscriptionId: null,
     subscribedUntil: null,
   });
-  assert.equal(writer.events.has(stale.eventId), true);
+
+  assert.equal(await writer.apply(paid), "applied");
+  assert.deepEqual(writer.users.get(USER_ID), {
+    billingPeriodStart: PAID_FROM,
+    id: USER_ID,
+    stripeCustomerId: "cus_webhook",
+    stripeSubscriptionId: "sub_B",
+    subscribedUntil: PAID_UNTIL,
+  });
+});
+
+test("stale paid and failed events cannot replace newer paid subscription authority", async () => {
+  const newerEnd = new Date("2026-11-20T12:00:00.000Z");
+  const writer = new MemoryStripeEventWriter([
+    {
+      ...paidUser(),
+      billingPeriodStart: NEXT_PERIOD_END,
+      stripeSubscriptionId: "sub_B",
+      subscribedUntil: newerEnd,
+    },
+  ]);
+  const stalePaid = paidIntent({
+    eventId: "evt_stale_paid_sub_a",
+    periodEnd: NEXT_PERIOD_END,
+    periodStart: PAID_UNTIL,
+    stripeSubscriptionId: "sub_A",
+  });
+  const staleFailure = failedIntent("evt_stale_failed_sub_a", {
+    stripeSubscriptionId: "sub_A",
+  });
+
+  assert.equal(await writer.apply(stalePaid), "applied");
+  assert.equal(await writer.apply(staleFailure), "applied");
+  assert.deepEqual(writer.users.get(USER_ID), {
+    ...paidUser(),
+    billingPeriodStart: NEXT_PERIOD_END,
+    stripeSubscriptionId: "sub_B",
+    subscribedUntil: newerEnd,
+  });
+  assert.equal(writer.updateCount, 0);
+});
+
+test("a newer paid period can replace an older paid subscription ID", async () => {
+  const writer = new MemoryStripeEventWriter([
+    {
+      ...paidUser(),
+      stripeSubscriptionId: "sub_A",
+    },
+  ]);
+  const replacement = paidIntent({
+    eventId: "evt_newer_paid_sub_b",
+    periodEnd: NEXT_PERIOD_END,
+    periodStart: PAID_UNTIL,
+    stripeSubscriptionId: "sub_B",
+  });
+
+  assert.equal(await writer.apply(replacement), "applied");
+  assert.deepEqual(writer.users.get(USER_ID), {
+    ...paidUser(),
+    billingPeriodStart: PAID_UNTIL,
+    stripeSubscriptionId: "sub_B",
+    subscribedUntil: NEXT_PERIOD_END,
+  });
 });
 
 test("a conflicting Stripe Customer owner rejects the mutation", () => {
@@ -796,7 +902,7 @@ test("paid Checkout completion links references without granting a period", asyn
   ]);
 });
 
-test("unpaid Checkout completion is an explicit no-op", async () => {
+test("unpaid Checkout completion is unrelated to the app-owned paid flow", async () => {
   let writes = 0;
   const response = await webhookResponse(
     request({ signature: "valid" }),
@@ -818,9 +924,209 @@ test("unpaid Checkout completion is an explicit no-op", async () => {
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
     ignored: true,
-    reason: "unpaid",
+    reason: "checkout_unrelated",
   });
   assert.equal(writes, 0);
+});
+
+test("Checkout reference events require every app-owned flow marker", async (t) => {
+  const cases: Array<{
+    name: string;
+    session: Partial<Stripe.Checkout.Session>;
+  }> = [
+    {
+      name: "Payment Link or foreign integration",
+      session: {
+        client_reference_id: null,
+        integration_identifier: null,
+        metadata: {},
+      },
+    },
+    { name: "missing mode", session: { mode: undefined } },
+    {
+      name: "non-subscription mode",
+      session: { mode: "payment" },
+    },
+    {
+      name: "missing client reference",
+      session: { client_reference_id: null },
+    },
+    {
+      name: "missing metadata user",
+      session: {
+        metadata: {
+          checkoutAttemptId: CHECKOUT_ATTEMPT_ID,
+          checkoutFlowVersion: "1",
+          priceId: PRICE_ID,
+        },
+      },
+    },
+    {
+      name: "mismatched user markers",
+      session: {
+        metadata: {
+          checkoutAttemptId: CHECKOUT_ATTEMPT_ID,
+          checkoutFlowVersion: "1",
+          priceId: PRICE_ID,
+          userId: "4f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        },
+      },
+    },
+    {
+      name: "missing flow version",
+      session: {
+        metadata: {
+          checkoutAttemptId: CHECKOUT_ATTEMPT_ID,
+          priceId: PRICE_ID,
+          userId: USER_ID,
+        },
+      },
+    },
+    {
+      name: "wrong flow version",
+      session: {
+        metadata: {
+          checkoutAttemptId: CHECKOUT_ATTEMPT_ID,
+          checkoutFlowVersion: "0",
+          priceId: PRICE_ID,
+          userId: USER_ID,
+        },
+      },
+    },
+    {
+      name: "missing price",
+      session: {
+        metadata: {
+          checkoutAttemptId: CHECKOUT_ATTEMPT_ID,
+          checkoutFlowVersion: "1",
+          userId: USER_ID,
+        },
+      },
+    },
+    {
+      name: "wrong price",
+      session: {
+        metadata: {
+          checkoutAttemptId: CHECKOUT_ATTEMPT_ID,
+          checkoutFlowVersion: "1",
+          priceId: "price_other",
+          userId: USER_ID,
+        },
+      },
+    },
+    {
+      name: "missing attempt id",
+      session: {
+        metadata: {
+          checkoutFlowVersion: "1",
+          priceId: PRICE_ID,
+          userId: USER_ID,
+        },
+      },
+    },
+    {
+      name: "invalid attempt id",
+      session: {
+        metadata: {
+          checkoutAttemptId: "attempt-not-durable",
+          checkoutFlowVersion: "1",
+          priceId: PRICE_ID,
+          userId: USER_ID,
+        },
+      },
+    },
+    {
+      name: "missing integration identifier",
+      session: { integration_identifier: null },
+    },
+    {
+      name: "wrong integration identifier",
+      session: { integration_identifier: "opencoven_coven_agents_aaaaaaaa" },
+    },
+    {
+      name: "missing Customer",
+      session: { customer: null },
+    },
+    {
+      name: "invalid Customer",
+      session: { customer: "customer_foreign" },
+    },
+    {
+      name: "missing Subscription",
+      session: { subscription: null },
+    },
+    {
+      name: "invalid Subscription",
+      session: { subscription: "subscription_foreign" },
+    },
+  ];
+
+  await Promise.all(
+    cases.map(({ name, session }) =>
+      t.test(name, async () => {
+        let claims = 0;
+        let writes = 0;
+        const response = await webhookResponse(
+          request({ signature: "valid" }),
+          dependenciesFor(
+            checkoutEvent({
+              id: `evt_checkout_marker_${name.replaceAll(" ", "_")}`,
+              paymentStatus: "paid",
+              session,
+            }),
+            {
+              applyEventUpdate: () => {
+                writes += 1;
+                return Promise.resolve("applied");
+              },
+              claimEventDisposition: () => {
+                claims += 1;
+                return Promise.resolve("applied");
+              },
+            }
+          ),
+          null
+        );
+
+        assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), {
+          ignored: true,
+          reason: "checkout_unrelated",
+        });
+        assert.equal(writes, 0);
+        assert.equal(claims, 0);
+      })
+    )
+  );
+});
+
+test("Checkout reference events accept valid string and expanded IDs", async (t) => {
+  await Promise.all(
+    [false, true].map((expanded) =>
+      t.test(expanded ? "expanded objects" : "string IDs", async () => {
+        const writes: StripeEventUpdateInput[] = [];
+        const event = checkoutEvent({
+          expanded,
+          id: `evt_checkout_${expanded ? "expanded" : "string"}`,
+          paymentStatus: "paid",
+        });
+        const response = await webhookResponse(
+          request({ signature: "valid" }),
+          dependenciesFor(event, {
+            applyEventUpdate: (input) => {
+              writes.push(input);
+              return Promise.resolve("applied");
+            },
+          }),
+          null
+        );
+
+        assert.equal(response.status, 200);
+        assert.equal(writes[0]?.customerId, "cus_webhook");
+        assert.equal(writes[0]?.stripeSubscriptionId, "sub_webhook");
+      })
+    )
+  );
 });
 
 test("async Checkout payment success follows paid reference linking", async () => {
@@ -993,8 +1299,9 @@ test("a later paginated invoice line can supply the entitlement period", async (
   assert.equal(writes[0]?.stripeSubscriptionId, "sub_webhook");
 });
 
-test("ambiguous duplicate entitlement lines fail retryably", async () => {
-  let writes = 0;
+test("ambiguous entitlement invoices are claimed once for manual reconciliation", async () => {
+  const writer = new MemoryStripeEventWriter([paidUser()]);
+  const alerts: unknown[] = [];
   const event = invoiceEvent({
     id: "evt_duplicate_lines",
     lines: [
@@ -1006,20 +1313,48 @@ test("ambiguous duplicate entitlement lines fail retryably", async () => {
   const response = await webhookResponse(
     request({ signature: "valid" }),
     dependenciesFor(event, {
-      applyEventUpdate: () => {
-        writes += 1;
-        return Promise.resolve("applied");
+      applyEventUpdate: writer.apply,
+      claimEventDisposition: writer.claim,
+      reportManualReconciliation: (alert) => {
+        alerts.push(alert);
       },
-      findUserByStripeCustomerId: () => Promise.resolve(paidUser()),
     }),
     null
   );
 
-  assert.equal(response.status, 503);
-  assert.equal(writes, 0);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    reason: "invoice_ambiguous_entitlement",
+    reconciliation: true,
+  });
+  assert.equal(writer.events.has(event.id), true);
+  assert.equal(writer.updateCount, 0);
+  assert.deepEqual(alerts, [
+    {
+      eventId: event.id,
+      eventType: "invoice.paid",
+      reason: "invoice_ambiguous_entitlement",
+    },
+  ]);
+
+  const duplicate = await webhookResponse(
+    request({ signature: "valid" }),
+    dependenciesFor(event, {
+      applyEventUpdate: writer.apply,
+      claimEventDisposition: writer.claim,
+      reportManualReconciliation: (alert) => {
+        alerts.push(alert);
+      },
+    }),
+    null
+  );
+
+  assert.equal(duplicate.status, 200);
+  assert.deepEqual(await duplicate.json(), { deduped: true });
+  assert.equal(alerts.length, 1);
 });
 
-test("proration-only, wrong-price, and manual invoices fail retryably", async (t) => {
+test("unrelated permanent invoices return 2xx without claims or User updates", async (t) => {
   const cases: Array<{
     event: Stripe.Event;
     name: string;
@@ -1048,6 +1383,48 @@ test("proration-only, wrong-price, and manual invoices fail retryably", async (t
       }),
       name: "manual",
     },
+  ];
+
+  await Promise.all(
+    cases.map(({ event, name }) =>
+      t.test(name, async () => {
+        let claims = 0;
+        let writes = 0;
+        const dependencies = dependenciesFor(event, {
+          applyEventUpdate: () => {
+            writes += 1;
+            return Promise.resolve("applied");
+          },
+          claimEventDisposition: () => {
+            claims += 1;
+            return Promise.resolve("applied");
+          },
+        });
+        const first = await webhookResponse(
+          request({ signature: "valid" }),
+          dependencies,
+          null
+        );
+        const repeated = await webhookResponse(
+          request({ signature: "valid" }),
+          dependencies,
+          null
+        );
+
+        assert.equal(first.status, 200);
+        assert.equal(repeated.status, 200);
+        assert.equal(writes, 0);
+        assert.equal(claims, 0);
+      })
+    )
+  );
+});
+
+test("malformed entitlement invoices are terminalized with sanitized reasons", async (t) => {
+  const cases: Array<{
+    event: Stripe.Event;
+    reason: string;
+  }> = [
     {
       event: invoiceEvent({
         id: "evt_malformed_period",
@@ -1059,31 +1436,144 @@ test("proration-only, wrong-price, and manual invoices fail retryably", async (t
         ],
         type: "invoice.paid",
       }),
-      name: "malformed period",
+      reason: "invoice_invalid_period",
+    },
+    {
+      event: invoiceEvent({
+        id: "evt_contradictory_subscription",
+        lines: [
+          {
+            ...invoiceLine({ subscriptionId: "sub_line" }),
+            parent: {
+              ...invoiceLine({ subscriptionId: "sub_detail" }).parent,
+            },
+          } as Stripe.InvoiceLineItem,
+        ],
+        type: "invoice.paid",
+      }),
+      reason: "invoice_contradictory_subscription",
     },
   ];
 
   await Promise.all(
-    cases.map(({ event, name }) =>
-      t.test(name, async () => {
-        let writes = 0;
+    cases.map(({ event, reason }) =>
+      t.test(reason, async () => {
+        const writer = new MemoryStripeEventWriter([paidUser()]);
+        const alerts: Record<string, unknown>[] = [];
         const response = await webhookResponse(
           request({ signature: "valid" }),
           dependenciesFor(event, {
-            applyEventUpdate: () => {
-              writes += 1;
-              return Promise.resolve("applied");
+            applyEventUpdate: writer.apply,
+            claimEventDisposition: writer.claim,
+            reportManualReconciliation: (alert) => {
+              alerts.push(alert);
             },
-            findUserByStripeCustomerId: () => Promise.resolve(paidUser()),
           }),
           null
         );
 
-        assert.equal(response.status, 503);
-        assert.equal(writes, 0);
+        assert.equal(response.status, 200);
+        assert.equal(writer.events.has(event.id), true);
+        assert.equal(writer.updateCount, 0);
+        assert.deepEqual(alerts, [
+          {
+            eventId: event.id,
+            eventType: "invoice.paid",
+            reason,
+          },
+        ]);
+        assert.deepEqual(Object.keys(alerts[0] ?? {}).sort(), [
+          "eventId",
+          "eventType",
+          "reason",
+        ]);
       })
     )
   );
+});
+
+test("provider lookup failures remain retryable and unclaimed", async () => {
+  const writer = new MemoryStripeEventWriter([paidUser()]);
+  const event = invoiceEvent({
+    hasMore: true,
+    id: "evt_provider_failure",
+    type: "invoice.paid",
+  });
+  const response = await webhookResponse(
+    request({ signature: "valid" }),
+    dependenciesFor(event, {
+      applyEventUpdate: writer.apply,
+      claimEventDisposition: writer.claim,
+      createProvider: () => ({
+        constructEvent: () => Promise.resolve(event),
+        listInvoiceLines: () => Promise.reject(new Error("Stripe unavailable")),
+        retrieveCustomer: () => {
+          throw new Error("unexpected Customer lookup");
+        },
+      }),
+    }),
+    null
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(writer.events.has(event.id), false);
+  assert.equal(writer.updateCount, 0);
+});
+
+test("Customer retrieval failures remain retryable and unclaimed", async () => {
+  const writer = new MemoryStripeEventWriter([paidUser()]);
+  const event = invoiceEvent({
+    id: "evt_customer_lookup_failure",
+    type: "invoice.paid",
+  });
+  const response = await webhookResponse(
+    request({ signature: "valid" }),
+    dependenciesFor(event, {
+      applyEventUpdate: writer.apply,
+      claimEventDisposition: writer.claim,
+      createProvider: () => ({
+        constructEvent: () => Promise.resolve(event),
+        listInvoiceLines: () => {
+          throw new Error("unexpected invoice line lookup");
+        },
+        retrieveCustomer: () => Promise.reject(new Error("Stripe unavailable")),
+      }),
+    }),
+    null
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(writer.events.has(event.id), false);
+  assert.equal(writer.updateCount, 0);
+});
+
+test("manual reconciliation claim database failures remain retryable and unclaimed", async () => {
+  const writer = new MemoryStripeEventWriter([paidUser()]);
+  writer.failNextClaim = true;
+  const event = invoiceEvent({
+    id: "evt_claim_failure",
+    lines: [
+      { ...invoiceLine(), id: "il_duplicate_one" },
+      { ...invoiceLine(), id: "il_duplicate_two" },
+    ],
+    type: "invoice.paid",
+  });
+  const alerts: unknown[] = [];
+  const response = await webhookResponse(
+    request({ signature: "valid" }),
+    dependenciesFor(event, {
+      applyEventUpdate: writer.apply,
+      claimEventDisposition: writer.claim,
+      reportManualReconciliation: (alert) => {
+        alerts.push(alert);
+      },
+    }),
+    null
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(writer.events.has(event.id), false);
+  assert.deepEqual(alerts, []);
 });
 
 test("supported paid billing reasons use an exact non-proration period", async (t) => {
@@ -1157,7 +1647,7 @@ test("an initial invoice.payment_failed grants nothing", async () => {
     billingPeriodStart: null,
     id: USER_ID,
     stripeCustomerId: "cus_webhook",
-    stripeSubscriptionId: "sub_webhook",
+    stripeSubscriptionId: null,
     subscribedUntil: null,
   });
 });
@@ -1294,6 +1784,7 @@ function paidIntent(input: {
   eventId: string;
   periodEnd: Date;
   periodStart: Date;
+  stripeSubscriptionId?: string;
 }): StripeEventUpdateInput {
   return {
     billingReason: "subscription_cycle",
@@ -1302,20 +1793,29 @@ function paidIntent(input: {
     eventType: "invoice_paid",
     periodEnd: input.periodEnd,
     periodStart: input.periodStart,
-    stripeSubscriptionId: "sub_webhook",
+    stripeSubscriptionId: input.stripeSubscriptionId ?? "sub_webhook",
     userId: USER_ID,
   };
 }
 
-function failedIntent(eventId: string): StripeEventUpdateInput {
+function failedIntent(
+  eventId: string,
+  input: {
+    billingReason?:
+      | "subscription_create"
+      | "subscription_cycle"
+      | "subscription_update";
+    stripeSubscriptionId?: string;
+  } = {}
+): StripeEventUpdateInput {
   return {
-    billingReason: "subscription_cycle",
+    billingReason: input.billingReason ?? "subscription_cycle",
     customerId: "cus_webhook",
     eventId,
     eventType: "invoice_payment_failed",
     periodEnd: NEXT_PERIOD_END,
     periodStart: PAID_UNTIL,
-    stripeSubscriptionId: "sub_webhook",
+    stripeSubscriptionId: input.stripeSubscriptionId ?? "sub_webhook",
     userId: USER_ID,
   };
 }
@@ -1332,6 +1832,7 @@ type WebhookDependencies = {
   applyEventUpdate: (
     input: StripeEventUpdateInput
   ) => Promise<"applied" | "duplicate">;
+  claimEventDisposition: (eventId: string) => Promise<"applied" | "duplicate">;
   createProvider: (apiKey: string) => {
     constructEvent: (
       raw: Uint8Array,
@@ -1366,6 +1867,11 @@ type WebhookDependencies = {
     priceId: string;
     webhookSecret: string;
   } | null;
+  reportManualReconciliation: (alert: {
+    eventId: string;
+    eventType: string;
+    reason: string;
+  }) => void;
 };
 
 function webhookResponse(
@@ -1423,6 +1929,7 @@ function dependenciesFor(
 ): WebhookDependencies {
   const dependencies: WebhookDependencies = {
     applyEventUpdate: () => Promise.resolve("applied"),
+    claimEventDisposition: () => Promise.resolve("applied"),
     createProvider: () => providerForEvent(event, dependencies),
     enforceAbuse: () => Promise.resolve({ kind: "allowed" }),
     findUserById: () =>
@@ -1439,6 +1946,7 @@ function dependenciesFor(
       priceId: PRICE_ID,
       webhookSecret: "whsec_test",
     }),
+    reportManualReconciliation: () => undefined,
     ...overrides,
   };
   return dependencies;
@@ -1467,19 +1975,46 @@ function providerForEvent(
 }
 
 function checkoutEvent(input: {
+  expanded?: boolean;
   id: string;
   paymentStatus: Stripe.Checkout.Session.PaymentStatus;
+  session?: Partial<Stripe.Checkout.Session>;
   type?:
     | "checkout.session.async_payment_succeeded"
     | "checkout.session.completed";
 }): Stripe.Event {
-  return stripeEvent(input.id, input.type ?? "checkout.session.completed", {
+  const customer = input.expanded
+    ? ({
+        id: "cus_webhook",
+        metadata: { userId: USER_ID },
+        object: "customer",
+      } as unknown as Stripe.Customer)
+    : "cus_webhook";
+  const subscription = input.expanded
+    ? ({ id: "sub_webhook", object: "subscription" } as Stripe.Subscription)
+    : "sub_webhook";
+  const base = {
     client_reference_id: USER_ID,
-    customer: "cus_webhook",
-    metadata: { userId: USER_ID },
+    customer,
+    integration_identifier: CHECKOUT_INTEGRATION_IDENTIFIER,
+    metadata: {
+      checkoutAttemptId: CHECKOUT_ATTEMPT_ID,
+      checkoutFlowVersion: "1",
+      priceId: PRICE_ID,
+      userId: USER_ID,
+    },
+    mode: "subscription",
     object: "checkout.session",
     payment_status: input.paymentStatus,
-    subscription: "sub_webhook",
+    subscription,
+  } satisfies Partial<Stripe.Checkout.Session>;
+  return stripeEvent(input.id, input.type ?? "checkout.session.completed", {
+    ...base,
+    ...input.session,
+    metadata:
+      input.session && Object.hasOwn(input.session, "metadata")
+        ? input.session.metadata
+        : base.metadata,
   } as unknown as Stripe.Checkout.Session);
 }
 
@@ -1621,6 +2156,7 @@ function stripeEvent(
 
 class MemoryStripeEventWriter {
   readonly events = new Set<string>();
+  failNextClaim = false;
   failNextUpdate = false;
   private transactionTail = Promise.resolve();
   updateCount = 0;
@@ -1653,6 +2189,18 @@ class MemoryStripeEventWriter {
     } finally {
       release();
     }
+  };
+
+  readonly claim = (eventId: string): Promise<"applied" | "duplicate"> => {
+    if (this.failNextClaim) {
+      this.failNextClaim = false;
+      return Promise.reject(new Error("simulated claim failure"));
+    }
+    if (this.events.has(eventId)) {
+      return Promise.resolve("duplicate");
+    }
+    this.events.add(eventId);
+    return Promise.resolve("applied");
   };
 
   private applyLocked(input: StripeEventUpdateInput): "applied" | "duplicate" {

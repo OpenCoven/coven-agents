@@ -509,7 +509,7 @@ export function serializeCheckoutAttemptLeaseOwner(
   return serialized;
 }
 
-function checkoutProviderIdempotencyKey(
+export function checkoutProviderIdempotencyKey(
   ownerId: string,
   attemptId: string
 ): string {

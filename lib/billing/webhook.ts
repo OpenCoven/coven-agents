@@ -6,6 +6,12 @@ import {
 } from "@/lib/abuse/enforce";
 import { abusePolicyFor } from "@/lib/abuse/policy";
 import { isCanonicalUuid } from "@/lib/session";
+import {
+  CHECKOUT_ATTEMPT_METADATA_KEY,
+  CHECKOUT_FLOW_VERSION,
+  stableIntegrationIdentifier,
+} from "./checkout";
+import { checkoutProviderIdempotencyKey } from "./checkout-lease";
 import { graceExtension } from "./grace";
 import { periodStart } from "./period";
 
@@ -74,6 +80,7 @@ export type StripeWebhookDependencies = {
   applyEventUpdate: (
     input: StripeEventUpdateInput
   ) => Promise<StripeEventWriteResult>;
+  claimEventDisposition: (eventId: string) => Promise<StripeEventWriteResult>;
   createProvider: (apiKey: string) => StripeWebhookProvider;
   enforceAbuse: typeof enforceAbusePolicy;
   getConfig: () => {
@@ -81,6 +88,21 @@ export type StripeWebhookDependencies = {
     priceId: string;
     webhookSecret: string;
   } | null;
+  reportManualReconciliation: (
+    alert: StripeWebhookManualReconciliationAlert
+  ) => void;
+};
+
+type StripeWebhookManualReconciliationReason =
+  | "invoice_ambiguous_entitlement"
+  | "invoice_contradictory_subscription"
+  | "invoice_invalid_period"
+  | "invoice_invalid_reference";
+
+export type StripeWebhookManualReconciliationAlert = {
+  eventId: string;
+  eventType: string;
+  reason: StripeWebhookManualReconciliationReason;
 };
 
 export type SubscriptionUpdate = {
@@ -236,6 +258,25 @@ export async function stripeWebhookResponse(
     if (result.kind === "ignored") {
       return Response.json({ ignored: true, reason: result.reason });
     }
+    if (result.kind === "manual_reconciliation") {
+      const write = await dependencies.claimEventDisposition(event.id);
+      if (write === "duplicate") {
+        return Response.json({ deduped: true });
+      }
+      try {
+        dependencies.reportManualReconciliation({
+          eventId: event.id,
+          eventType: event.type,
+          reason: result.reason,
+        });
+      } catch {
+        // The durable terminal claim must not become retryable after logging.
+      }
+      return Response.json({
+        reason: result.reason,
+        reconciliation: true,
+      });
+    }
     if (result.write === "duplicate") {
       return Response.json({ deduped: true });
     }
@@ -246,7 +287,18 @@ export async function stripeWebhookResponse(
 }
 
 type WebhookEventResult =
-  | { kind: "ignored"; reason: "unpaid" | "unsupported" }
+  | {
+      kind: "ignored";
+      reason:
+        | "checkout_unrelated"
+        | "invoice_no_entitlement"
+        | "invoice_unsupported_billing_reason"
+        | "unsupported";
+    }
+  | {
+      kind: "manual_reconciliation";
+      reason: StripeWebhookManualReconciliationReason;
+    }
   | { kind: "written"; write: StripeEventWriteResult };
 
 async function applyWebhookEvent(
@@ -258,7 +310,7 @@ async function applyWebhookEvent(
   switch (event.type) {
     case "checkout.session.async_payment_succeeded":
     case "checkout.session.completed":
-      return await applyCheckoutEvent(event, dependencies);
+      return await applyCheckoutEvent(event, dependencies, priceId);
     case "invoice.paid":
     case "invoice.payment_failed":
       return await applyInvoiceEvent(event, provider, dependencies, priceId);
@@ -271,22 +323,34 @@ async function applyCheckoutEvent(
   event:
     | Stripe.CheckoutSessionAsyncPaymentSucceededEvent
     | Stripe.CheckoutSessionCompletedEvent,
-  dependencies: StripeWebhookDependencies
+  dependencies: StripeWebhookDependencies,
+  priceId: string
 ): Promise<WebhookEventResult> {
   const session = event.data.object;
-  if (session.payment_status !== "paid") {
-    return { kind: "ignored", reason: "unpaid" };
-  }
-
+  const userId = checkoutUserId(session);
+  const attemptId = session.metadata?.[CHECKOUT_ATTEMPT_METADATA_KEY] ?? null;
   const customerId = stripeResourceId(session.customer, "customer", "cus_");
   const stripeSubscriptionId = stripeResourceId(
     session.subscription,
     "subscription",
     "sub_"
   );
-  const userId = checkoutUserId(session);
-  if (!(customerId && stripeSubscriptionId && userId)) {
-    throw new Error("Webhook owner is unresolved.");
+  if (
+    session.mode !== "subscription" ||
+    session.payment_status !== "paid" ||
+    !userId ||
+    !attemptId ||
+    !isCanonicalUuid(attemptId) ||
+    session.metadata?.checkoutFlowVersion !== CHECKOUT_FLOW_VERSION ||
+    session.metadata?.priceId !== priceId ||
+    session.integration_identifier !==
+      stableIntegrationIdentifier(
+        checkoutProviderIdempotencyKey(userId, attemptId)
+      ) ||
+    !customerId ||
+    !stripeSubscriptionId
+  ) {
+    return { kind: "ignored", reason: "checkout_unrelated" };
   }
 
   return {
@@ -308,35 +372,62 @@ async function applyInvoiceEvent(
   priceId: string
 ): Promise<WebhookEventResult> {
   const invoice = event.data.object;
-  const customerId = stripeResourceId(invoice.customer, "customer", "cus_");
-  if (!customerId) {
-    throw new Error("Webhook owner is unresolved.");
-  }
-
   const billingReason = supportedBillingReason(invoice.billing_reason);
   if (!billingReason) {
-    throw new Error("Webhook invoice billing reason is unsupported.");
+    return {
+      kind: "ignored",
+      reason: "invoice_unsupported_billing_reason",
+    };
   }
 
-  const entitlement = await invoiceEntitlementLine(invoice, provider, priceId);
-  const parentSubscription = optionalStripeResourceId(
+  const entitlementResult = await invoiceEntitlementLine(
+    invoice,
+    provider,
+    priceId
+  );
+  if (entitlementResult.kind !== "accepted") {
+    return entitlementResult;
+  }
+  const { entitlement } = entitlementResult;
+  const parentSubscription = stripeResourceReference(
     invoice.parent?.subscription_details?.subscription,
     "subscription",
     "sub_"
   );
+  if (parentSubscription.kind === "invalid") {
+    return {
+      kind: "manual_reconciliation",
+      reason: "invoice_invalid_reference",
+    };
+  }
   if (
-    parentSubscription &&
-    parentSubscription !== entitlement.stripeSubscriptionId
+    parentSubscription.kind === "valid" &&
+    parentSubscription.id !== entitlement.stripeSubscriptionId
   ) {
-    throw new Error("Webhook invoice subscription is ambiguous.");
+    return {
+      kind: "manual_reconciliation",
+      reason: "invoice_contradictory_subscription",
+    };
   }
 
-  const userId = await invoiceUserId(invoice.customer, customerId, provider);
+  const customer = stripeResourceReference(
+    invoice.customer,
+    "customer",
+    "cus_"
+  );
+  if (customer.kind !== "valid") {
+    return {
+      kind: "manual_reconciliation",
+      reason: "invoice_invalid_reference",
+    };
+  }
+
+  const userId = await invoiceUserId(invoice.customer, customer.id, provider);
   return {
     kind: "written",
     write: await dependencies.applyEventUpdate({
       billingReason,
-      customerId,
+      customerId: customer.id,
       eventId: event.id,
       eventType:
         event.type === "invoice.paid"
@@ -356,30 +447,42 @@ type EntitlementLine = {
   stripeSubscriptionId: string;
 };
 
+type EntitlementLineDisposition =
+  | { entitlement: EntitlementLine; kind: "accepted" }
+  | { kind: "ignored"; reason: "invoice_no_entitlement" }
+  | {
+      kind: "manual_reconciliation";
+      reason: StripeWebhookManualReconciliationReason;
+    };
+
 async function invoiceEntitlementLine(
   invoice: Stripe.Invoice,
   provider: StripeWebhookProvider,
   priceId: string
-): Promise<EntitlementLine> {
+): Promise<EntitlementLineDisposition> {
   const embedded = entitlementLines(invoice.lines.data, priceId);
-  if (!invoice.lines.has_more && embedded.supported.length === 1) {
-    return embedded.supported[0] as EntitlementLine;
-  }
-  if (!invoice.lines.has_more && embedded.supported.length > 1) {
-    throw new Error("Webhook invoice entitlement line is ambiguous.");
+  if (!invoice.lines.has_more) {
+    return entitlementLineDisposition(embedded);
   }
 
   const supported: EntitlementLine[] = [];
-  let matchingProrations = 0;
   let startingAfter: string | undefined;
   while (true) {
     // biome-ignore lint/performance/noAwaitInLoops: Stripe pages are cursor-dependent.
     const page = await provider.listInvoiceLines(invoice.id, startingAfter);
     const inspected = entitlementLines(page.data, priceId);
+    if (inspected.manualReason) {
+      return {
+        kind: "manual_reconciliation",
+        reason: inspected.manualReason,
+      };
+    }
     supported.push(...inspected.supported);
-    matchingProrations += inspected.matchingProrations;
     if (supported.length > 1) {
-      throw new Error("Webhook invoice entitlement line is ambiguous.");
+      return {
+        kind: "manual_reconciliation",
+        reason: "invoice_ambiguous_entitlement",
+      };
     }
     if (!page.has_more) {
       break;
@@ -391,21 +494,17 @@ async function invoiceEntitlementLine(
     startingAfter = lastId;
   }
 
-  if (supported.length === 1) {
-    return supported[0] as EntitlementLine;
-  }
-  if (matchingProrations > 0) {
-    throw new Error("Webhook invoice contains only proration entitlement.");
-  }
-  throw new Error("Webhook invoice entitlement line is missing.");
+  return entitlementLineDisposition({ manualReason: null, supported });
 }
 
 function entitlementLines(
   lines: Stripe.InvoiceLineItem[],
   priceId: string
-): { matchingProrations: number; supported: EntitlementLine[] } {
+): {
+  manualReason: StripeWebhookManualReconciliationReason | null;
+  supported: EntitlementLine[];
+} {
   const supported: EntitlementLine[] = [];
-  let matchingProrations = 0;
 
   for (const line of lines) {
     const details =
@@ -416,41 +515,73 @@ function entitlementLines(
       continue;
     }
     if (details.proration) {
-      matchingProrations += 1;
       continue;
     }
 
-    const lineSubscription = optionalStripeResourceId(
+    const lineSubscription = stripeResourceReference(
       line.subscription,
       "subscription",
       "sub_"
     );
-    const detailSubscription = optionalStripeResourceId(
+    const detailSubscription = stripeResourceReference(
       details.subscription,
       "subscription",
       "sub_"
     );
     if (
-      lineSubscription &&
-      detailSubscription &&
-      lineSubscription !== detailSubscription
+      lineSubscription.kind === "invalid" ||
+      detailSubscription.kind === "invalid"
     ) {
-      throw new Error("Webhook invoice line subscription is ambiguous.");
+      return { manualReason: "invoice_invalid_reference", supported };
     }
-    const stripeSubscriptionId = lineSubscription ?? detailSubscription;
+    if (
+      lineSubscription.kind === "valid" &&
+      detailSubscription.kind === "valid" &&
+      lineSubscription.id !== detailSubscription.id
+    ) {
+      return {
+        manualReason: "invoice_contradictory_subscription",
+        supported,
+      };
+    }
+    const stripeSubscriptionId =
+      lineSubscription.kind === "valid"
+        ? lineSubscription.id
+        : detailSubscription.kind === "valid"
+          ? detailSubscription.id
+          : null;
     if (!stripeSubscriptionId) {
-      throw new Error("Webhook invoice line subscription is invalid.");
+      return { manualReason: "invoice_invalid_reference", supported };
     }
 
     const start = dateFromStripeSeconds(line.period.start);
     const end = dateFromStripeSeconds(line.period.end);
     if (!(start && end && end > start)) {
-      throw new Error("Webhook invoice period is invalid.");
+      return { manualReason: "invoice_invalid_period", supported };
     }
     supported.push({ end, start, stripeSubscriptionId });
   }
 
-  return { matchingProrations, supported };
+  return { manualReason: null, supported };
+}
+
+function entitlementLineDisposition(input: {
+  manualReason: StripeWebhookManualReconciliationReason | null;
+  supported: EntitlementLine[];
+}): EntitlementLineDisposition {
+  if (input.manualReason) {
+    return { kind: "manual_reconciliation", reason: input.manualReason };
+  }
+  if (input.supported.length > 1) {
+    return {
+      kind: "manual_reconciliation",
+      reason: "invoice_ambiguous_entitlement",
+    };
+  }
+  const [entitlement] = input.supported;
+  return entitlement
+    ? { entitlement, kind: "accepted" }
+    : { kind: "ignored", reason: "invoice_no_entitlement" };
 }
 
 function invoiceLinePriceId(line: Stripe.InvoiceLineItem): string | null {
@@ -484,20 +615,14 @@ async function invoiceUserId(
 }
 
 function checkoutUserId(session: Stripe.Checkout.Session): string | null {
-  const candidates = [
-    session.client_reference_id,
-    session.metadata?.userId ?? null,
-  ].filter((value): value is string => Boolean(value));
-
-  if (
-    candidates.length === 0 ||
-    candidates.some((candidate) => !isCanonicalUuid(candidate))
-  ) {
-    return null;
-  }
-
-  const [first] = candidates;
-  return candidates.every((candidate) => candidate === first) ? first : null;
+  const clientReferenceId = session.client_reference_id;
+  const metadataUserId = session.metadata?.userId;
+  return clientReferenceId &&
+    metadataUserId &&
+    clientReferenceId === metadataUserId &&
+    isCanonicalUuid(clientReferenceId)
+    ? clientReferenceId
+    : null;
 }
 
 function userIdFromCustomer(
@@ -514,7 +639,12 @@ function userIdFromCustomer(
   return userId && isCanonicalUuid(userId) ? userId : null;
 }
 
-function optionalStripeResourceId(
+type StripeResourceReference =
+  | { kind: "invalid" }
+  | { kind: "missing" }
+  | { id: string; kind: "valid" };
+
+function stripeResourceReference(
   resource:
     | string
     | {
@@ -525,15 +655,17 @@ function optionalStripeResourceId(
     | undefined,
   expectedObject: "customer" | "subscription",
   prefix: "cus_" | "sub_"
-): string | null {
+): StripeResourceReference {
   if (resource === null || resource === undefined) {
-    return null;
+    return { kind: "missing" };
   }
-  const id = stripeResourceId(resource, expectedObject, prefix);
-  if (!id) {
-    throw new Error(`Webhook ${expectedObject} reference is invalid.`);
-  }
-  return id;
+  const id =
+    typeof resource === "string"
+      ? validStripeId(resource, prefix)
+      : resource.object === expectedObject
+        ? validStripeId(resource.id, prefix)
+        : null;
+  return id ? { id, kind: "valid" } : { kind: "invalid" };
 }
 
 function stripeResourceId(
@@ -548,20 +680,17 @@ function stripeResourceId(
   expectedObject: "customer" | "subscription",
   prefix: "cus_" | "sub_"
 ): string | null {
-  const id =
-    typeof resource === "string"
-      ? resource
-      : resource?.object === expectedObject
-        ? resource.id
-        : null;
-  return id ? validStripeId(id, prefix) : null;
+  const reference = stripeResourceReference(resource, expectedObject, prefix);
+  return reference.kind === "valid" ? reference.id : null;
 }
 
 function validStripeId(
   id: string,
   prefix: "cus_" | "price_" | "sub_"
 ): string | null {
-  return id.startsWith(prefix) && id.length <= 64 ? id : null;
+  return id.startsWith(prefix) && id.length > prefix.length && id.length <= 64
+    ? id
+    : null;
 }
 
 function supportedBillingReason(
@@ -598,13 +727,6 @@ function paidInvoiceMutation(
   }
   if (
     currentStart === null &&
-    current.stripeSubscriptionId &&
-    current.stripeSubscriptionId !== input.stripeSubscriptionId
-  ) {
-    return null;
-  }
-  if (
-    currentStart === null &&
     currentEnd !== null &&
     currentEnd > incomingEnd
   ) {
@@ -632,19 +754,10 @@ function failedInvoiceMutation(
   >
 ): StripeUserMutation | null {
   if (input.billingReason === "subscription_create") {
-    if (
-      current.billingPeriodStart ||
-      current.subscribedUntil ||
-      (current.stripeSubscriptionId &&
-        current.stripeSubscriptionId !== input.stripeSubscriptionId)
-    ) {
+    if (current.billingPeriodStart || current.subscribedUntil) {
       return null;
     }
-    const mutation = customerMutation(current, input.customerId);
-    if (!current.stripeSubscriptionId) {
-      mutation.stripeSubscriptionId = input.stripeSubscriptionId;
-    }
-    return nonEmptyMutation(mutation);
+    return nonEmptyMutation(customerMutation(current, input.customerId));
   }
 
   if (

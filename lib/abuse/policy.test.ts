@@ -78,7 +78,7 @@ const EXPECTED_POLICIES = {
   runner_run_start: expectedPolicy(["ip", "tenant"], 64_000, 5, 60, 25, 86_400),
   runner_stop: expectedPolicy(["ip", "tenant"], 1024, 5, 60, 20, 3600),
   runner_write: expectedPolicy(["ip", "user"], 64_000, 10, 60, 40, 3600),
-  stripe_webhook: expectedPolicy(["ip"], 262_144, 60, 60, 600, 3600),
+  stripe_webhook: expectedPolicy(["ip"], 262_144, 600, 60, 10_000, 3600),
   suggestions_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   upload: expectedPolicy(["ip", "user"], 5_250_000, 2, 60, 20, 3600),
   usage_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
@@ -109,7 +109,7 @@ test("every declared route initially fails closed", () => {
 test("Stripe webhook admission is IP-only and preserves the registered budget", () => {
   assert.deepEqual(
     abusePolicyFor("stripe_webhook"),
-    expectedPolicy(["ip"], 262_144, 60, 60, 600, 3600)
+    expectedPolicy(["ip"], 262_144, 600, 60, 10_000, 3600)
   );
 });
 

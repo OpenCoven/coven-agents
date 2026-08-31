@@ -5,10 +5,14 @@ import {
   type StripeWebhookDependencies,
   stripeWebhookResponse,
 } from "@/lib/billing/webhook";
-import { applyStripeEventUpdate } from "@/lib/db/queries";
+import {
+  applyStripeEventUpdate,
+  claimStripeEventDisposition,
+} from "@/lib/db/queries";
 
 const webhookDependencies: StripeWebhookDependencies = {
   applyEventUpdate: applyStripeEventUpdate,
+  claimEventDisposition: claimStripeEventDisposition,
   createProvider(apiKey) {
     const stripe = createStripeClient(apiKey);
     return {
@@ -38,6 +42,9 @@ const webhookDependencies: StripeWebhookDependencies = {
     return apiKey && priceId && webhookSecret
       ? { apiKey, priceId, webhookSecret }
       : null;
+  },
+  reportManualReconciliation(alert) {
+    console.error(alert);
   },
 };
 
