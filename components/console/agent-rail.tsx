@@ -199,7 +199,7 @@ function MiniRail({
       >
         {agents.map((agent) => (
           <button
-            aria-label={sanitizeEvidenceText(agent.name)}
+            aria-label={`${sanitizeEvidenceText(agent.name)}, ${agent.runtime}, ${agent.status}`}
             className="oc-tint"
             key={agent.id}
             onClick={() => onSelectAgent(agent.id)}

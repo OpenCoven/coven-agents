@@ -752,6 +752,51 @@ test.describe("Run console", () => {
     ).toBe(true);
   });
 
+  test("collapsed profile controls include runtime and status context", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    const duplicateAgent = {
+      ...retainedAgent,
+      id: OTHER_AGENT_ID,
+      status: "running",
+    };
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({
+          json: { agents: [retainedAgent, duplicateAgent] },
+        });
+      }
+      if (pathname.includes("/runs")) {
+        return route.fulfill({ json: { apiVersion: "1.0", runs: [] } });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.setViewportSize({ height: 844, width: 390 });
+    await page.goto("/agents");
+
+    const collapsed = page.getByLabel("Navigation, collapsed");
+    await expect(
+      collapsed.getByRole("button", {
+        name: "Timeline auditor, copilot, idle",
+      })
+    ).toBeVisible();
+    await expect(
+      collapsed.getByRole("button", {
+        name: "Timeline auditor, copilot, running",
+      })
+    ).toBeVisible();
+  });
+
   test("the empty console stacks before it crowds and scrolls in short landscapes", async ({
     page,
   }) => {
