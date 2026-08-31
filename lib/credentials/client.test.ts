@@ -146,6 +146,28 @@ test("an older in-flight summary cannot overwrite a successful credential update
   assert.equal(await fetchHasCredential(), true);
 });
 
+for (const refusal of [
+  { result: "authentication_required", status: 401 },
+  { result: "subscription_required", status: 403 },
+] as const) {
+  test(`an in-flight ${refusal.status} remains authoritative after a credential cache update`, async () => {
+    resetCredentialCache();
+    let resolveResponse!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => {
+      resolveResponse = resolve;
+    });
+
+    const pending = fetchHasCredential(() => response);
+    updateCredentialEligibility(["copilot"]);
+    resolveResponse(
+      Response.json({ error: refusal.result }, { status: refusal.status })
+    );
+
+    assert.equal(await pending, refusal.result);
+    assert.equal(await fetchHasCredential(), true);
+  });
+}
+
 test("credential refresh fencing rejects stale epochs, overlapping reads, and unmounted updates", () => {
   const fence = createCredentialRefreshFence();
   fence.activate();

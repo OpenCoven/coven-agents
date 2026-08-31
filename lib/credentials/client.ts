@@ -83,15 +83,17 @@ export function fetchHasCredential(
       );
 
       if (!response.ok) {
-        if (requestVersion !== credentialVersion) {
-          return credentialEligibility;
+        const authorityRefusal =
+          response.status === 401
+            ? "authentication_required"
+            : response.status === 403
+              ? "subscription_required"
+              : null;
+        if (requestVersion === credentialVersion) {
+          credentialsInFlight = null;
+          credentialEligibility = null;
         }
-        credentialsInFlight = null;
-        credentialEligibility = null;
-        if (response.status === 401) {
-          return "authentication_required";
-        }
-        return response.status === 403 ? "subscription_required" : null;
+        return authorityRefusal ?? credentialEligibility;
       }
 
       const body = (await response.json()) as { harnessIds?: string[] };
