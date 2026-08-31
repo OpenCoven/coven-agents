@@ -93,7 +93,7 @@ export type TeamListRunsResult =
   | Readonly<{ kind: "not_found" }>;
 
 export type TeamApproveRunResult =
-  | Readonly<{ kind: "approved"; teamRun: TeamRun }>
+  | Readonly<{ kind: "approved" | "rejected"; teamRun: TeamRun }>
   | Readonly<{
       kind:
         | "invalid"
@@ -329,7 +329,6 @@ export function createTeamService(
         principal,
         {
           ...parsed.data,
-          decision: "approve",
           id: step.id,
         }
       );
@@ -337,9 +336,12 @@ export function createTeamService(
         case "updated": {
           const updated = await dependencies.store.getTeamRun(principal, id);
           if (!updated) {
-            throw new Error("Approved team run disappeared.");
+            throw new Error("Decided team run disappeared.");
           }
-          return { kind: "approved", teamRun: projectTeamRun(updated) };
+          return {
+            kind: parsed.data.decision === "approve" ? "approved" : "rejected",
+            teamRun: projectTeamRun(updated),
+          };
         }
         case "invalid_capabilities":
         case "invalid_transition":

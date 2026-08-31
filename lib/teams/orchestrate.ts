@@ -1,7 +1,6 @@
 // biome-ignore-all lint/performance/noAwaitInLoops: Team claims, attachments, cancellations, and projections are intentionally serialized.
 import "server-only";
 
-import { createHash } from "node:crypto";
 import type { TeamCapability } from "@opencoven/agent-contracts";
 import type {
   AdmitRunnerRunInput,
@@ -13,8 +12,11 @@ import type {
   RunnerOperator,
   RunnerPrincipal,
 } from "@/lib/runner/types";
+import type { TeamChildRunnerIds } from "./child-ids";
 import type { createTeamStore } from "./store";
 import { buildTeamStepTask, type GitHubCapability } from "./task";
+
+export { type TeamChildRunnerIds, teamChildRunnerIds } from "./child-ids";
 
 const DEFAULT_RECONCILIATION_LIMIT = 20;
 const MAX_RECONCILIATION_LIMIT = 100;
@@ -27,11 +29,6 @@ type TeamOrchestrationStore = Pick<
   | "findNextCancelledTeamChild"
   | "projectNextTerminalTeamStep"
 >;
-
-export type TeamChildRunnerIds = Readonly<{
-  operationId: string;
-  runId: string;
-}>;
 
 export type TeamClaimReconciliationResult = Readonly<{
   admitted: number;
@@ -58,30 +55,6 @@ export type TeamOrchestratorDependencies = Readonly<{
   operator: RunnerOperator;
   store: TeamOrchestrationStore;
 }>;
-
-function deterministicUuid(scope: string): string {
-  const bytes = createHash("sha256")
-    .update(scope, "utf8")
-    .digest()
-    .subarray(0, 16);
-  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
-  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
-  const hex = bytes.toString("hex");
-  return [
-    hex.slice(0, 8),
-    hex.slice(8, 12),
-    hex.slice(12, 16),
-    hex.slice(16, 20),
-    hex.slice(20),
-  ].join("-");
-}
-
-export function teamChildRunnerIds(teamStepId: string): TeamChildRunnerIds {
-  return {
-    operationId: deterministicUuid(`team-step:${teamStepId}:operation`),
-    runId: deterministicUuid(`team-step:${teamStepId}:runner-run`),
-  };
-}
 
 function reconciliationLimit(value: number | undefined): number {
   const resolved = value ?? DEFAULT_RECONCILIATION_LIMIT;
@@ -172,7 +145,10 @@ export function createTeamOrchestrator(
           break;
         }
 
-        const ids = teamChildRunnerIds(claim.teamStepId);
+        const ids: TeamChildRunnerIds = {
+          operationId: claim.plannedOperationId,
+          runId: claim.plannedRunnerRunId,
+        };
         let result: AdmitRunnerRunResult;
         try {
           const task = buildTeamStepTask({

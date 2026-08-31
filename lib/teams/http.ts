@@ -538,6 +538,7 @@ export function createTeamHttpHandlers(
         const result = await service.approveRun(subscriber.principal, id, body);
         switch (result.kind) {
           case "approved":
+          case "rejected":
             scheduleReconciliation(dependencies);
             return jsonResponse(teamRunEnvelopeSchema, {
               teamRun: result.teamRun,

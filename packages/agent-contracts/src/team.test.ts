@@ -386,10 +386,23 @@ test("team run mutation inputs are strict and capability bounded", () => {
   assert.deepEqual(
     approveTeamRunInputSchema.parse({
       capabilities: ["github.issues.read", "github.pull_requests.write"],
+      decision: "approve",
       expectedVersion: 3,
     }),
     {
       capabilities: ["github.issues.read", "github.pull_requests.write"],
+      decision: "approve",
+      expectedVersion: 3,
+    }
+  );
+  assert.deepEqual(
+    approveTeamRunInputSchema.parse({
+      decision: "reject",
+      expectedVersion: 3,
+    }),
+    {
+      capabilities: [],
+      decision: "reject",
       expectedVersion: 3,
     }
   );
@@ -402,20 +415,50 @@ test("team run mutation inputs are strict and capability bounded", () => {
     assert.equal(createTeamRunInputSchema.safeParse(value).success, false);
   }
   for (const value of [
-    { capabilities: [], expectedVersion: 3 },
-    { capabilities: ["workspace.write"], expectedVersion: 3 },
-    { capabilities: ["github.issues.read"], expectedVersion: 3 },
+    {
+      capabilities: ["github.pull_requests.write"],
+      decision: "maybe",
+      expectedVersion: 3,
+    },
+    { capabilities: [], decision: "approve", expectedVersion: 3 },
+    {
+      capabilities: ["workspace.write"],
+      decision: "approve",
+      expectedVersion: 3,
+    },
+    {
+      capabilities: ["github.issues.read"],
+      decision: "approve",
+      expectedVersion: 3,
+    },
     {
       capabilities: [
         "github.pull_requests.write",
         "github.pull_requests.write",
       ],
+      decision: "approve",
       expectedVersion: 3,
     },
     {
       capabilities: ["github.pull_requests.write"],
+      decision: "reject",
+      expectedVersion: 3,
+    },
+    {
+      capabilities: ["github.pull_requests.write"],
+      decision: "approve",
       expectedVersion: 3,
       userId: AGENT_A,
+    },
+    {
+      capabilities: [],
+      decision: "reject",
+      expectedVersion: 3,
+      reason: "caller-controlled text",
+    },
+    {
+      capabilities: ["github.pull_requests.write"],
+      expectedVersion: 3,
     },
   ]) {
     assert.equal(approveTeamRunInputSchema.safeParse(value).success, false);

@@ -7,7 +7,7 @@ import {
 } from "@opencoven/agent-contracts";
 import { RunnerAdmissionError } from "@/lib/runner/admission";
 import type { RunnerOperator, RunnerPrincipal } from "@/lib/runner/types";
-import { createTeamOrchestrator, teamChildRunnerIds } from "./orchestrate";
+import { createTeamOrchestrator } from "./orchestrate";
 
 const operator: RunnerOperator = { kind: "runner-operator" };
 const principal: RunnerPrincipal = {
@@ -18,6 +18,8 @@ const principal: RunnerPrincipal = {
 const TEAM_RUN_ID = "11111111-1111-4111-8111-111111111111";
 const TEAM_STEP_ID = "22222222-2222-4222-8222-222222222222";
 const AGENT_ID = "33333333-3333-4333-8333-333333333333";
+const PLANNED_RUN_ID = "44444444-4444-4444-8444-444444444444";
+const PLANNED_OPERATION_ID = "55555555-5555-4555-8555-555555555555";
 
 function snapshot(id: string, operationId: string, task: string): RunSnapshot {
   return {
@@ -53,6 +55,8 @@ function readyClaim() {
     ] as const,
     kind: "ready" as const,
     mission: "Ship the approved change.",
+    plannedOperationId: PLANNED_OPERATION_ID,
+    plannedRunnerRunId: PLANNED_RUN_ID,
     principal,
     priorHandoffs: [],
     responsibility: "Implement the change and report bounded evidence.",
@@ -68,9 +72,8 @@ function readyClaim() {
   };
 }
 
-test("ready team steps become one deterministic admitted RunnerRun with immutable authority", async () => {
+test("ready team steps admit exactly the durable reserved child identifiers", async () => {
   const calls: unknown[][] = [];
-  const ids = teamChildRunnerIds(TEAM_STEP_ID);
   let claimed = false;
   const orchestrator = createTeamOrchestrator({
     admit: async (input) => {
@@ -111,8 +114,8 @@ test("ready team steps become one deterministic admitted RunnerRun with immutabl
   });
   assert.equal(calls.length, 2);
   const admission = calls[0]?.[1] as Record<string, unknown>;
-  assert.equal(admission.id, ids.runId);
-  assert.equal(admission.operationId, ids.operationId);
+  assert.equal(admission.id, PLANNED_RUN_ID);
+  assert.equal(admission.operationId, PLANNED_OPERATION_ID);
   assert.equal(admission.agentId, AGENT_ID);
   assert.equal(admission.authVersion, 7);
   assert.deepEqual(admission.principal, principal);
@@ -126,8 +129,8 @@ test("ready team steps become one deterministic admitted RunnerRun with immutabl
     "attach",
     {
       expectedVersion: 2,
-      operationId: ids.operationId,
-      runnerRunId: ids.runId,
+      operationId: PLANNED_OPERATION_ID,
+      runnerRunId: PLANNED_RUN_ID,
       teamStepId: TEAM_STEP_ID,
     },
   ]);
@@ -169,7 +172,6 @@ test("write-capable pending steps wait for approval without runner admission", a
 });
 
 test("duplicate admission safely reattaches the same deterministic child", async () => {
-  const ids = teamChildRunnerIds(TEAM_STEP_ID);
   let claimed = false;
   let attachedRunId: string | null = null;
   const orchestrator = createTeamOrchestrator({
@@ -199,9 +201,71 @@ test("duplicate admission safely reattaches the same deterministic child", async
 
   const result = await orchestrator.claimReadySteps();
 
-  assert.equal(attachedRunId, ids.runId);
+  assert.equal(attachedRunId, PLANNED_RUN_ID);
   assert.equal(result.admitted, 1);
   assert.equal(result.failures, 0);
+});
+
+test("a crash after admission leaves a reserved child discoverable and non-dispatchable after cancellation", async () => {
+  const children = new Map<string, "cancelled" | "queued">();
+  let claimed = false;
+  let teamCancelled = false;
+  const orchestrator = createTeamOrchestrator({
+    admit: async (input) => {
+      children.set(input.id, "queued");
+      return {
+        kind: "created" as const,
+        run: snapshot(input.id, input.operationId, input.task),
+      };
+    },
+    cancelRun: async (_authority, runId) => {
+      if (children.get(runId) !== "queued") {
+        return { kind: "already_terminal" as const };
+      }
+      children.set(runId, "cancelled");
+      return { kind: "stopped" as const };
+    },
+    operator,
+    store: {
+      attachTeamStepRunnerRun: async () => {
+        throw new Error("simulated crash before attachment commits");
+      },
+      claimNextTeamStep: async () => {
+        if (claimed) {
+          return { kind: "idle" as const };
+        }
+        claimed = true;
+        return readyClaim();
+      },
+      failTeamStepAdmission: async () => ({ kind: "failed" as const }),
+      findNextCancelledTeamChild: async () =>
+        teamCancelled && children.get(PLANNED_RUN_ID) === "queued"
+          ? {
+              kind: "found" as const,
+              principal,
+              runnerRunId: PLANNED_RUN_ID,
+              teamRunId: TEAM_RUN_ID,
+            }
+          : { kind: "idle" as const },
+      projectNextTerminalTeamStep: async () => ({ kind: "idle" as const }),
+    },
+  });
+
+  assert.equal((await orchestrator.claimReadySteps()).failures, 1);
+  teamCancelled = true;
+  assert.equal(
+    (await orchestrator.projectTerminalSteps()).cancellationRequested,
+    1
+  );
+
+  let executions = 0;
+  for (const status of children.values()) {
+    if (status === "queued") {
+      executions += 1;
+    }
+  }
+  assert.equal(children.get(PLANNED_RUN_ID), "cancelled");
+  assert.equal(executions, 0);
 });
 
 test("projection retries cancellation for only the recorded team child", async () => {
@@ -261,6 +325,8 @@ test("nonretryable admission failure terminalizes one team and continues unrelat
     readyClaim(),
     {
       ...readyClaim(),
+      plannedOperationId: "66666666-6666-4666-8666-666666666665",
+      plannedRunnerRunId: "66666666-6666-4666-8666-666666666664",
       teamRunId: "66666666-6666-4666-8666-666666666666",
       teamStepId: nextStepId,
     },
@@ -268,7 +334,7 @@ test("nonretryable admission failure terminalizes one team and continues unrelat
   const failed: unknown[] = [];
   const orchestrator = createTeamOrchestrator({
     admit: async (input) =>
-      input.id === teamChildRunnerIds(failedStepId).runId
+      input.id === PLANNED_RUN_ID
         ? {
             error: new RunnerAdmissionError(
               "agent_not_found",
@@ -314,7 +380,6 @@ test("nonretryable admission failure terminalizes one team and continues unrelat
 });
 
 test("a cancellation race durably attaches and stops the just-admitted child", async () => {
-  const ids = teamChildRunnerIds(TEAM_STEP_ID);
   const cancellations: unknown[][] = [];
   let claimed = false;
   const orchestrator = createTeamOrchestrator({
@@ -348,23 +413,24 @@ test("a cancellation race durably attaches and stops the just-admitted child", a
 
   assert.equal(result.admitted, 0);
   assert.equal(result.failures, 0);
-  assert.deepEqual(cancellations, [[principal, ids.runId]]);
+  assert.deepEqual(cancellations, [[principal, PLANNED_RUN_ID]]);
 });
 
 test("retryable admission defers one team without aborting a later ready team", async () => {
-  const deferredStepId = TEAM_STEP_ID;
   const readyStepId = "55555555-5555-4555-8555-555555555555";
   const claims = [
     readyClaim(),
     {
       ...readyClaim(),
+      plannedOperationId: "66666666-6666-4666-8666-666666666665",
+      plannedRunnerRunId: "66666666-6666-4666-8666-666666666664",
       teamRunId: "66666666-6666-4666-8666-666666666666",
       teamStepId: readyStepId,
     },
   ];
   const orchestrator = createTeamOrchestrator({
     admit: async (input) =>
-      input.id === teamChildRunnerIds(deferredStepId).runId
+      input.id === PLANNED_RUN_ID
         ? {
             error: new RunnerAdmissionError(
               "tenant_queue_full",
@@ -394,6 +460,44 @@ test("retryable admission defers one team without aborting a later ready team", 
   assert.equal(result.admitted, 1);
   assert.equal(result.deferred, 1);
   assert.equal(result.failures, 0);
+});
+
+test("cancel-before-admit forces a stale worker to cancel the exact reserved child", async () => {
+  const cancellations: string[] = [];
+  let claimed = false;
+  const orchestrator = createTeamOrchestrator({
+    admit: async (input) => ({
+      kind: "created" as const,
+      run: snapshot(input.id, input.operationId, input.task),
+    }),
+    cancelRun: async (_authority, runId) => {
+      cancellations.push(runId);
+      return { kind: "stopped" as const };
+    },
+    operator,
+    store: {
+      attachTeamStepRunnerRun: async (_authority, input) =>
+        input.runnerRunId === PLANNED_RUN_ID &&
+        input.operationId === PLANNED_OPERATION_ID
+          ? { kind: "cancel_required" as const }
+          : { kind: "invalid_transition" as const },
+      claimNextTeamStep: async () => {
+        if (claimed) {
+          return { kind: "idle" as const };
+        }
+        claimed = true;
+        return readyClaim();
+      },
+      failTeamStepAdmission: async () => ({ kind: "failed" as const }),
+      findNextCancelledTeamChild: async () => ({ kind: "idle" as const }),
+      projectNextTerminalTeamStep: async () => ({ kind: "idle" as const }),
+    },
+  });
+
+  const result = await orchestrator.claimReadySteps();
+
+  assert.equal(result.failures, 0);
+  assert.deepEqual(cancellations, [PLANNED_RUN_ID]);
 });
 
 test("deferred cancellation does not abort another cancelled team child", async () => {

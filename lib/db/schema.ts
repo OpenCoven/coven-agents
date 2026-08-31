@@ -991,6 +991,8 @@ export const runnerTeamStep = pgTable(
     handoff: jsonb("handoff").$type<TeamHandoff>(),
     id: uuid("id").primaryKey().notNull().defaultRandom(),
     memberId: uuid("memberId").notNull(),
+    plannedOperationId: uuid("plannedOperationId"),
+    plannedRunnerRunId: uuid("plannedRunnerRunId"),
     position: integer("position").notNull(),
     required: boolean("required").notNull(),
     responsibility: varchar("responsibility", {
@@ -1034,6 +1036,8 @@ export const runnerTeamStep = pgTable(
       table.position
     ),
     uniqueIndex("RTStep_runnerRun_uq").on(table.runnerRunId),
+    uniqueIndex("RTStep_plannedOperation_uq").on(table.plannedOperationId),
+    uniqueIndex("RTStep_plannedRunnerRun_uq").on(table.plannedRunnerRunId),
     foreignKey({
       columns: [table.teamRunId, table.tenant],
       foreignColumns: [runnerTeamRun.id, runnerTeamRun.tenant],
@@ -1075,6 +1079,10 @@ export const runnerTeamStep = pgTable(
     check(
       "RTStep_approval_audit_valid",
       sql`((${table.approvalStatus} in ('not_required', 'pending')) and ${table.approvalActorUserId} is null and ${table.approvalDecidedAt} is null and jsonb_array_length(${table.approvedCapabilities}) = 0) or (${table.approvalStatus} = 'approved' and ${table.approvalActorUserId} is not null and ${table.approvalDecidedAt} is not null and ${table.approvalDecidedAt} >= ${table.createdAt} and jsonb_array_length(${table.approvedCapabilities}) between 1 and ${teamMaxSkillsPerMemberSql}) or (${table.approvalStatus} = 'rejected' and ${table.approvalActorUserId} is not null and ${table.approvalDecidedAt} is not null and ${table.approvalDecidedAt} >= ${table.createdAt} and jsonb_array_length(${table.approvedCapabilities}) = 0)`
+    ),
+    check(
+      "RTStep_childReservation_valid",
+      sql`((${table.plannedOperationId} is null and ${table.plannedRunnerRunId} is null) or (${table.plannedOperationId} is not null and ${table.plannedRunnerRunId} is not null)) and (${table.runnerRunId} is null or ${table.runnerRunId} = ${table.plannedRunnerRunId})`
     ),
     check(
       "RTStep_agentSnapshot_valid",

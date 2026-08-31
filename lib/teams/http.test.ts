@@ -722,7 +722,13 @@ test("team run stop and approval require strict JSON versions and schedule durab
     service: service({
       approveRun: async (...args) => {
         calls.push(["approve", ...args]);
-        return { kind: "approved", teamRun };
+        return {
+          kind:
+            (args[2] as { decision?: string }).decision === "reject"
+              ? "rejected"
+              : "approved",
+          teamRun,
+        };
       },
       stopRun: async (...args) => {
         calls.push(["stop", ...args]);
@@ -747,6 +753,17 @@ test("team run stop and approval require strict JSON versions and schedule durab
     new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}/approve`, {
       body: JSON.stringify({
         capabilities: ["github.pull_requests.write"],
+        decision: "approve",
+        expectedVersion: 2,
+      }),
+      method: "POST",
+    }),
+    TEAM_RUN_ID
+  );
+  const rejected = await fixture.handlers.approveTeamRun(
+    new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}/approve`, {
+      body: JSON.stringify({
+        decision: "reject",
         expectedVersion: 2,
       }),
       method: "POST",
@@ -756,8 +773,10 @@ test("team run stop and approval require strict JSON versions and schedule durab
 
   assert.equal(stopped.status, 200);
   assert.equal(approved.status, 200);
+  assert.equal(rejected.status, 200);
   teamRunEnvelopeSchema.parse(await stopped.json());
   teamRunEnvelopeSchema.parse(await approved.json());
+  teamRunEnvelopeSchema.parse(await rejected.json());
   assert.deepEqual(calls, [
     ["stop", subscriber.principal, TEAM_RUN_ID, 3],
     [
@@ -766,25 +785,71 @@ test("team run stop and approval require strict JSON versions and schedule durab
       TEAM_RUN_ID,
       {
         capabilities: ["github.pull_requests.write"],
+        decision: "approve",
+        expectedVersion: 2,
+      },
+    ],
+    [
+      "approve",
+      subscriber.principal,
+      TEAM_RUN_ID,
+      {
+        capabilities: [],
+        decision: "reject",
         expectedVersion: 2,
       },
     ],
   ]);
-  assert.equal(scheduled.length, 2);
+  assert.equal(scheduled.length, 3);
 
-  const invalid = await fixture.handlers.approveTeamRun(
-    new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}/approve`, {
-      body: JSON.stringify({
+  const invalidResponses = await Promise.all(
+    [
+      {
+        capabilities: ["github.pull_requests.write"],
+        expectedVersion: 2,
+      },
+      {
+        capabilities: ["github.pull_requests.write"],
+        decision: "reject",
+        expectedVersion: 2,
+      },
+      {
+        capabilities: [],
+        decision: "approve",
+        expectedVersion: 2,
+      },
+      {
+        capabilities: ["github.pull_requests.write"],
+        decision: "maybe",
+        expectedVersion: 2,
+      },
+      {
         capabilities: ["github.projects.write"],
+        decision: "approve",
         expectedVersion: 2,
         userId: USER_ID,
-      }),
-      method: "POST",
-    }),
-    TEAM_RUN_ID
+      },
+    ].map((body) =>
+      fixture.handlers.approveTeamRun(
+        new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}/approve`, {
+          body: JSON.stringify(body),
+          method: "POST",
+        }),
+        TEAM_RUN_ID
+      )
+    )
   );
-  assert.equal(invalid.status, 400);
-  assert.equal(await errorCode(invalid), "invalid_request");
+  assert.deepEqual(
+    invalidResponses.map(({ status }) => status),
+    [400, 400, 400, 400, 400]
+  );
+  assert.deepEqual(await Promise.all(invalidResponses.map(errorCode)), [
+    "invalid_request",
+    "invalid_request",
+    "invalid_request",
+    "invalid_request",
+    "invalid_request",
+  ]);
 });
 
 test("undeclared approval capability escalation has a stable safe error", async () => {
@@ -798,6 +863,7 @@ test("undeclared approval capability escalation has a stable safe error", async 
     new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}/approve`, {
       body: JSON.stringify({
         capabilities: ["github.projects.write"],
+        decision: "approve",
         expectedVersion: 2,
       }),
       method: "POST",
@@ -1280,6 +1346,7 @@ test("abuse requests use authenticated user or tenant scopes for each explicit r
     new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}/approve`, {
       body: JSON.stringify({
         capabilities: ["github.pull_requests.write"],
+        decision: "approve",
         expectedVersion: 2,
       }),
       method: "POST",

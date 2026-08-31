@@ -505,7 +505,7 @@ export const createTeamRunInputSchema = z
   })
   .strict();
 
-export const approveTeamRunInputSchema = z
+const approveTeamRunDecisionInputSchema = z
   .object({
     capabilities: z
       .array(
@@ -526,9 +526,23 @@ export const approveTeamRunInputSchema = z
           });
         }
       }),
+    decision: z.literal("approve"),
     expectedVersion: z.number().int().nonnegative(),
   })
   .strict();
+
+const rejectTeamRunDecisionInputSchema = z
+  .object({
+    capabilities: z.array(teamCapabilitySchema).length(0).default([]),
+    decision: z.literal("reject"),
+    expectedVersion: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const approveTeamRunInputSchema = z.discriminatedUnion("decision", [
+  approveTeamRunDecisionInputSchema,
+  rejectTeamRunDecisionInputSchema,
+]);
 
 export const teamHandoffSchema = z
   .object({

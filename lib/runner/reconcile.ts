@@ -235,6 +235,7 @@ export type ReconcileAndDispatchDependencies = Readonly<{
   claimTeamRuns?: () => Promise<
     Readonly<{
       claimedDispatches: readonly RunnerClaimedDispatch[];
+      deferred: number;
       failures: number;
     }>
   >;
@@ -254,7 +255,9 @@ export type ReconcileAndDispatchDependencies = Readonly<{
     scope: RunnerAttemptRedactionScope,
     envelope: RunnerAttemptRedactionEnvelope
   ) => Promise<string>;
-  projectTeamRuns?: () => Promise<Readonly<{ failures: number }>>;
+  projectTeamRuns?: () => Promise<
+    Readonly<{ cancellationDeferred: number; failures: number }>
+  >;
   releaseCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
   rollbackCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
   sandboxRecovery?: Omit<
@@ -1787,7 +1790,9 @@ export async function reconcileAndDispatch(
 
   if (dependencies.projectTeamRuns) {
     try {
-      result.failures += (await dependencies.projectTeamRuns()).failures;
+      const projected = await dependencies.projectTeamRuns();
+      result.deferred += projected.cancellationDeferred;
+      result.failures += projected.failures;
     } catch {
       result.failures += 1;
     }
@@ -1798,6 +1803,7 @@ export async function reconcileAndDispatch(
     try {
       const claimed = await dependencies.claimTeamRuns();
       ({ claimedDispatches } = claimed);
+      result.deferred += claimed.deferred;
       result.failures += claimed.failures;
     } catch {
       result.failures += 1;

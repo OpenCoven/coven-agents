@@ -51,3 +51,9 @@ ALTER TABLE "RunnerTeamStep" ADD CONSTRAINT "RTStep_agentSnapshot_valid" CHECK (
 --> statement-breakpoint
 ALTER TABLE "RunnerTeamStep" DROP CONSTRAINT "RTStep_handoff_bounded";--> statement-breakpoint
 ALTER TABLE "RunnerTeamStep" ADD CONSTRAINT "RTStep_handoff_bounded" CHECK ("RunnerTeamStep"."handoff" is null or (jsonb_typeof("RunnerTeamStep"."handoff") = 'object' and "RunnerTeamStep"."handoff" ?& array['output', 'commandEvidence', 'fileEvidence'] and ("RunnerTeamStep"."handoff" - 'output' - 'commandEvidence' - 'fileEvidence') = '{}'::jsonb and octet_length("RunnerTeamStep"."handoff"::text) <= 24576 and jsonb_typeof("RunnerTeamStep"."handoff"->'output') = 'string' and jsonb_typeof("RunnerTeamStep"."handoff"->'commandEvidence') = 'array' and jsonb_array_length("RunnerTeamStep"."handoff"->'commandEvidence') <= 256 and jsonb_typeof("RunnerTeamStep"."handoff"->'fileEvidence') = 'array' and jsonb_array_length("RunnerTeamStep"."handoff"->'fileEvidence') <= 256));
+--> statement-breakpoint
+ALTER TABLE "RunnerTeamStep" ADD COLUMN "plannedOperationId" uuid;--> statement-breakpoint
+ALTER TABLE "RunnerTeamStep" ADD COLUMN "plannedRunnerRunId" uuid;--> statement-breakpoint
+CREATE UNIQUE INDEX "RTStep_plannedOperation_uq" ON "RunnerTeamStep" USING btree ("plannedOperationId");--> statement-breakpoint
+CREATE UNIQUE INDEX "RTStep_plannedRunnerRun_uq" ON "RunnerTeamStep" USING btree ("plannedRunnerRunId");--> statement-breakpoint
+ALTER TABLE "RunnerTeamStep" ADD CONSTRAINT "RTStep_childReservation_valid" CHECK ((("RunnerTeamStep"."plannedOperationId" is null and "RunnerTeamStep"."plannedRunnerRunId" is null) or ("RunnerTeamStep"."plannedOperationId" is not null and "RunnerTeamStep"."plannedRunnerRunId" is not null)) and ("RunnerTeamStep"."runnerRunId" is null or "RunnerTeamStep"."runnerRunId" = "RunnerTeamStep"."plannedRunnerRunId"));

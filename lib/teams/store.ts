@@ -23,6 +23,7 @@ import type {
   RunnerOperator,
   RunnerPrincipal,
 } from "@/lib/runner/types";
+import { teamChildRunnerIds } from "./child-ids";
 import { buildTeamHandoff } from "./handoff";
 
 const UUID =
@@ -136,6 +137,8 @@ export type TeamStepRecord = {
   id: string;
   memberId: string;
   position: number;
+  plannedOperationId: string | null;
+  plannedRunnerRunId: string | null;
   required: boolean;
   responsibility: string;
   runnerRunId: string | null;
@@ -281,6 +284,8 @@ export type TeamStepExecutionClaim = Readonly<{
   mission: string;
   principal: RunnerPrincipal;
   priorHandoffs: readonly TeamHandoff[];
+  plannedOperationId: string;
+  plannedRunnerRunId: string;
   responsibility: string;
   skillSnapshots: readonly Readonly<{
     instructions: string;
@@ -453,6 +458,8 @@ function asStep(row: Record<string, unknown>): TeamStepRecord {
     handoff: column(row, "handoff"),
     id: column(row, "id"),
     memberId: column(row, "memberId"),
+    plannedOperationId: column(row, "plannedOperationId"),
+    plannedRunnerRunId: column(row, "plannedRunnerRunId"),
     position: column(row, "position"),
     required: column(row, "required"),
     responsibility: column(row, "responsibility"),
@@ -1050,6 +1057,14 @@ export function createTeamStore(database: TeamStoreDatabase) {
         if (currentRunnerRunId !== null) {
           return { kind: "invalid_transition" as const };
         }
+        if (
+          column<string | null>(current, "plannedRunnerRunId") !==
+            input.runnerRunId ||
+          column<string | null>(current, "plannedOperationId") !==
+            input.operationId
+        ) {
+          return { kind: "invalid_transition" as const };
+        }
         const currentVersion = column<number>(current, "version");
         const currentStatus = column<TeamStepStatus>(current, "status");
         const teamRunStatus = column<TeamRunStatus>(current, "teamRunStatus");
@@ -1113,6 +1128,8 @@ export function createTeamStore(database: TeamStoreDatabase) {
                     AND "tenant" = ${tenant}
                     AND "version" = ${currentVersion}
                     AND "runnerRunId" IS NULL
+                    AND "plannedRunnerRunId" = ${input.runnerRunId}
+                    AND "plannedOperationId" = ${input.operationId}
                     AND "status" IN ('skipped', 'cancelled')
                   RETURNING *`
               )
@@ -1131,6 +1148,8 @@ export function createTeamStore(database: TeamStoreDatabase) {
                     AND "tenant" = ${tenant}
                     AND "version" = ${input.expectedVersion}
                     AND "runnerRunId" IS NULL
+                    AND "plannedRunnerRunId" = ${input.runnerRunId}
+                    AND "plannedOperationId" = ${input.operationId}
                     AND "status" = 'queued'
                   RETURNING *`
               )
@@ -1321,10 +1340,16 @@ export function createTeamStore(database: TeamStoreDatabase) {
             sql`SELECT
                 "teamRun".*,
                 (
-                  SELECT "step"."runnerRunId"
+                  SELECT COALESCE(
+                    "step"."runnerRunId",
+                    "step"."plannedRunnerRunId"
+                  )
                   FROM "RunnerTeamStep" AS "step"
                   JOIN "RunnerRun" AS "runnerRun"
-                    ON "runnerRun"."id" = "step"."runnerRunId"
+                    ON "runnerRun"."id" = COALESCE(
+                      "step"."runnerRunId",
+                      "step"."plannedRunnerRunId"
+                    )
                     AND "runnerRun"."tenant" = "step"."tenant"
                   WHERE "step"."teamRunId" = "teamRun"."id"
                     AND "step"."tenant" = "teamRun"."tenant"
@@ -1333,10 +1358,16 @@ export function createTeamStore(database: TeamStoreDatabase) {
                   LIMIT 1
                 ) AS "liveChildRunId",
                 (
-                  SELECT "step"."runnerRunId"
+                  SELECT COALESCE(
+                    "step"."runnerRunId",
+                    "step"."plannedRunnerRunId"
+                  )
                   FROM "RunnerTeamStep" AS "step"
                   JOIN "RunnerRun" AS "runnerRun"
-                    ON "runnerRun"."id" = "step"."runnerRunId"
+                    ON "runnerRun"."id" = COALESCE(
+                      "step"."runnerRunId",
+                      "step"."plannedRunnerRunId"
+                    )
                     AND "runnerRun"."tenant" = "step"."tenant"
                   WHERE "step"."teamRunId" = "teamRun"."id"
                     AND "step"."tenant" = "teamRun"."tenant"
@@ -1397,7 +1428,10 @@ export function createTeamStore(database: TeamStoreDatabase) {
                   ), '[]'::jsonb) AS "priorHandoffs"
                 FROM "RunnerTeamStep" AS "step"
                 JOIN "RunnerRun" AS "runnerRun"
-                  ON "runnerRun"."id" = "step"."runnerRunId"
+                  ON "runnerRun"."id" = COALESCE(
+                    "step"."runnerRunId",
+                    "step"."plannedRunnerRunId"
+                  )
                   AND "runnerRun"."tenant" = "step"."tenant"
                 WHERE "step"."teamRunId" = ${input.id}
                   AND "step"."tenant" = ${principal.tenant}
@@ -1462,6 +1496,10 @@ export function createTeamStore(database: TeamStoreDatabase) {
               },
               sql`UPDATE "RunnerTeamStep"
                 SET "status" = ${completed ? "completed" : "failed"},
+                    "runnerRunId" = COALESCE(
+                      "runnerRunId",
+                      ${terminalChildRunId}
+                    ),
                     "handoff" = CAST(${jsonParameter(handoff)} AS jsonb),
                     "error" = CAST(${jsonParameter(error)} AS jsonb),
                     "completedAt" = now(),
@@ -1469,7 +1507,10 @@ export function createTeamStore(database: TeamStoreDatabase) {
                     "version" = "version" + 1
                 WHERE "id" = ${column(terminalChild, "id")}
                   AND "tenant" = ${principal.tenant}
-                  AND "runnerRunId" = ${terminalChildRunId}
+                  AND COALESCE(
+                    "runnerRunId",
+                    "plannedRunnerRunId"
+                  ) = ${terminalChildRunId}
                   AND "status" = 'running'
                 RETURNING "id"`
             )
@@ -1503,7 +1544,10 @@ export function createTeamStore(database: TeamStoreDatabase) {
             { id: input.id, tenant: principal.tenant },
             sql`UPDATE "RunnerTeamStep"
               SET "status" = CASE
-                    WHEN "runnerRunId" = ${liveChildRunId} THEN 'cancelled'
+                    WHEN COALESCE(
+                      "runnerRunId",
+                      "plannedRunnerRunId"
+                    ) = ${liveChildRunId} THEN 'cancelled'
                     ELSE 'skipped'
                   END,
                   "completedAt" = now(),
@@ -1624,6 +1668,23 @@ export function createTeamStore(database: TeamStoreDatabase) {
           return { kind: "waiting_approval" as const, teamRunId };
         }
 
+        let plannedOperationId = column<string | null>(
+          candidate,
+          "plannedOperationId"
+        );
+        let plannedRunnerRunId = column<string | null>(
+          candidate,
+          "plannedRunnerRunId"
+        );
+        if ((plannedOperationId === null) !== (plannedRunnerRunId === null)) {
+          throw new Error("Team step child reservation is inconsistent.");
+        }
+        if (plannedOperationId === null || plannedRunnerRunId === null) {
+          const planned = teamChildRunnerIds(column(candidate, "id"));
+          plannedOperationId = planned.operationId;
+          plannedRunnerRunId = planned.runId;
+        }
+
         let teamStepVersion = column<number>(candidate, "version");
         if (status !== "queued") {
           const [queued] = await transaction.execute(
@@ -1631,11 +1692,21 @@ export function createTeamStore(database: TeamStoreDatabase) {
               "queue-team-step-for-admission",
               {
                 expectedVersion: teamStepVersion,
+                plannedOperationId,
+                plannedRunnerRunId,
                 teamStepId: column(candidate, "id"),
                 tenant,
               },
               sql`UPDATE "RunnerTeamStep"
                 SET "status" = 'queued',
+                    "plannedOperationId" = COALESCE(
+                      "plannedOperationId",
+                      ${plannedOperationId}
+                    ),
+                    "plannedRunnerRunId" = COALESCE(
+                      "plannedRunnerRunId",
+                      ${plannedRunnerRunId}
+                    ),
                     "startedAt" = COALESCE("startedAt", now()),
                     "updatedAt" = now(),
                     "version" = "version" + 1
@@ -1643,15 +1714,64 @@ export function createTeamStore(database: TeamStoreDatabase) {
                   AND "tenant" = ${tenant}
                   AND "version" = ${teamStepVersion}
                   AND "runnerRunId" IS NULL
+                  AND (
+                    (
+                      "plannedOperationId" IS NULL
+                      AND "plannedRunnerRunId" IS NULL
+                    )
+                    OR (
+                      "plannedOperationId" = ${plannedOperationId}
+                      AND "plannedRunnerRunId" = ${plannedRunnerRunId}
+                    )
+                  )
                   AND "approvalStatus" IN ('not_required', 'approved')
                   AND "status" IN ('pending', 'waiting_approval')
-                RETURNING "version"`
+                RETURNING
+                  "plannedOperationId",
+                  "plannedRunnerRunId",
+                  "version"`
             )
           );
           if (!queued) {
             return { kind: "idle" as const };
           }
           teamStepVersion = column(queued, "version");
+        } else if (
+          column<string | null>(candidate, "plannedOperationId") === null
+        ) {
+          const [reserved] = await transaction.execute(
+            statement(
+              "reserve-team-step-child",
+              {
+                expectedVersion: teamStepVersion,
+                plannedOperationId,
+                plannedRunnerRunId,
+                teamStepId: column(candidate, "id"),
+                tenant,
+              },
+              sql`UPDATE "RunnerTeamStep"
+                SET "plannedOperationId" = ${plannedOperationId},
+                    "plannedRunnerRunId" = ${plannedRunnerRunId},
+                    "updatedAt" = now(),
+                    "version" = "version" + 1
+                WHERE "id" = ${column(candidate, "id")}
+                  AND "tenant" = ${tenant}
+                  AND "version" = ${teamStepVersion}
+                  AND "runnerRunId" IS NULL
+                  AND "plannedOperationId" IS NULL
+                  AND "plannedRunnerRunId" IS NULL
+                  AND "approvalStatus" IN ('not_required', 'approved')
+                  AND "status" = 'queued'
+                RETURNING
+                  "plannedOperationId",
+                  "plannedRunnerRunId",
+                  "version"`
+            )
+          );
+          if (!reserved) {
+            return { kind: "idle" as const };
+          }
+          teamStepVersion = column(reserved, "version");
         }
         await transaction.execute(
           statement(
@@ -1687,6 +1807,8 @@ export function createTeamStore(database: TeamStoreDatabase) {
           declaredCapabilities: effectiveCapabilities,
           kind: "ready" as const,
           mission: column(candidate, "mission"),
+          plannedOperationId,
+          plannedRunnerRunId,
           principal: {
             kind: "subscriber" as const,
             tenant,
@@ -2619,13 +2741,19 @@ export function createTeamStore(database: TeamStoreDatabase) {
                 "teamRun"."createdByUserId",
                 "teamRun"."id" AS "teamRunId",
                 "teamRun"."tenant",
-                "step"."runnerRunId"
+                COALESCE(
+                  "step"."runnerRunId",
+                  "step"."plannedRunnerRunId"
+                ) AS "runnerRunId"
               FROM "RunnerTeamRun" AS "teamRun"
               JOIN "RunnerTeamStep" AS "step"
                 ON "step"."teamRunId" = "teamRun"."id"
                 AND "step"."tenant" = "teamRun"."tenant"
               JOIN "RunnerRun" AS "runnerRun"
-                ON "runnerRun"."id" = "step"."runnerRunId"
+                ON "runnerRun"."id" = COALESCE(
+                  "step"."runnerRunId",
+                  "step"."plannedRunnerRunId"
+                )
                 AND "runnerRun"."tenant" = "step"."tenant"
               WHERE "teamRun"."status" = 'cancelled'
                 AND "runnerRun"."status" IN ('queued', 'running')

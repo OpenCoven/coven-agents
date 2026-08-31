@@ -71,7 +71,7 @@ test("reconciliation projects and claims teams before dispatch and retries termi
   const result = await reconcileAndDispatch({
     claimTeamRuns: async () => {
       calls.push("claim-team");
-      return { claimedDispatches: [claimed], failures: 0 };
+      return { claimedDispatches: [claimed], deferred: 0, failures: 0 };
     },
     dispatch: async () => {
       calls.push("dispatch-queued");
@@ -85,7 +85,7 @@ test("reconciliation projects and claims teams before dispatch and retries termi
     operator,
     projectTeamRuns: async () => {
       calls.push("project-team");
-      return { failures: 0 };
+      return { cancellationDeferred: 0, failures: 0 };
     },
     provider: {
       resolveSandbox: async () => null,
@@ -126,7 +126,7 @@ test("one team projection failure does not abort claims or unrelated runner disp
   const result = await reconcileAndDispatch({
     claimTeamRuns: async () => {
       calls.push("claim-team");
-      return { claimedDispatches: [], failures: 0 };
+      return { claimedDispatches: [], deferred: 0, failures: 0 };
     },
     dispatch: async () => {
       calls.push("dispatch");
@@ -149,6 +149,31 @@ test("one team projection failure does not abort claims or unrelated runner disp
   assert.deepEqual(calls, ["project-team", "claim-team", "dispatch"]);
   assert.equal(result.dispatched, 1);
   assert.equal(result.failures, 1);
+});
+
+test("team claim and cancellation deferrals accumulate without becoming failures", async () => {
+  const result = await reconcileAndDispatch({
+    claimTeamRuns: async () => ({
+      claimedDispatches: [],
+      deferred: 2,
+      failures: 3,
+    }),
+    operator,
+    projectTeamRuns: async () => ({
+      cancellationDeferred: 5,
+      failures: 7,
+    }),
+    provider: {
+      resolveSandbox: async () => null,
+      stop: async () => ({ kind: "stopped" as const }),
+    },
+    store: {
+      scanExpiredDispatchLeases: async () => [],
+    } as never,
+  });
+
+  assert.equal(result.deferred, 7);
+  assert.equal(result.failures, 10);
 });
 
 function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {

@@ -114,6 +114,8 @@ function teamRunRecord(overrides: Partial<TeamRunRecord> = {}): TeamRunRecord {
         handoff: null,
         id: TEAM_STEP_A,
         memberId: MEMBER_A,
+        plannedOperationId: null,
+        plannedRunnerRunId: null,
         position: 0,
         required: true,
         responsibility: "Implement the change.",
@@ -143,6 +145,8 @@ function teamRunRecord(overrides: Partial<TeamRunRecord> = {}): TeamRunRecord {
         handoff: null,
         id: TEAM_STEP_B,
         memberId: MEMBER_B,
+        plannedOperationId: null,
+        plannedRunnerRunId: null,
         position: 1,
         required: false,
         responsibility: "Review the result.",
@@ -658,6 +662,7 @@ test("approval targets only the current waiting step and preserves actor authori
 
   const result = await teamService.approveRun(principal, TEAM_RUN_ID, {
     capabilities: ["github.pull_requests.write"],
+    decision: "approve",
     expectedVersion: 4,
   });
 
@@ -673,6 +678,176 @@ test("approval targets only the current waiting step and preserves actor authori
       },
     ],
   ]);
+  assert.deepEqual(
+    await teamService.approveRun(principal, TEAM_RUN_ID, {
+      decision: "reject",
+      expectedVersion: 5,
+    }),
+    { kind: "invalid_transition" }
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("public rejection persists the actor decision and returns required failure", async () => {
+  const calls: unknown[][] = [];
+  const waiting = teamRunRecord({
+    status: "waiting_approval",
+    steps: teamRunRecord().steps.map((step, index) =>
+      index === 0
+        ? {
+            ...step,
+            approvalStatus: "pending",
+            status: "waiting_approval",
+            version: 4,
+          }
+        : step
+    ),
+  });
+  const rejected = teamRunRecord({
+    ...waiting,
+    completedAt: NOW,
+    error: {
+      code: "approval_rejected",
+      message: "GitHub operation approval was rejected.",
+      retryable: false,
+    },
+    status: "failed",
+    steps: waiting.steps.map((step, index) =>
+      index === 0
+        ? {
+            ...step,
+            approvalActorUserId: USER_ID,
+            approvalDecidedAt: NOW,
+            approvalStatus: "rejected",
+            completedAt: NOW,
+            error: {
+              code: "approval_rejected",
+              message: "GitHub operation approval was rejected.",
+              retryable: false,
+            },
+            status: "failed",
+            version: 5,
+          }
+        : step
+    ),
+  });
+  let reads = 0;
+  const teamService = createTeamService({
+    store: store({
+      decideTeamStepApproval: async (...args) => {
+        calls.push(args);
+        return { kind: "updated", value: rejected.steps[0] };
+      },
+      getTeamRun: async (authority) => {
+        assert.equal(authority.tenant, TENANT);
+        reads += 1;
+        return reads === 1 ? waiting : rejected;
+      },
+    }),
+  });
+
+  const result = await teamService.approveRun(principal, TEAM_RUN_ID, {
+    decision: "reject",
+    expectedVersion: 4,
+  });
+
+  assert.equal(result.kind, "rejected");
+  assert.equal(result.kind === "rejected" && result.teamRun.status, "failed");
+  assert.deepEqual(calls, [
+    [
+      principal,
+      {
+        capabilities: [],
+        decision: "reject",
+        expectedVersion: 4,
+        id: TEAM_STEP_A,
+      },
+    ],
+  ]);
+});
+
+test("optional rejection returns completed_with_warnings and stale or cross-tenant decisions stay fenced", async () => {
+  const waiting = teamRunRecord({
+    currentPosition: 1,
+    status: "waiting_approval",
+    steps: teamRunRecord().steps.map((step, index) =>
+      index === 1
+        ? {
+            ...step,
+            approvalStatus: "pending",
+            status: "waiting_approval",
+            version: 4,
+          }
+        : step
+    ),
+  });
+  const rejected = teamRunRecord({
+    ...waiting,
+    completedAt: NOW,
+    status: "completed_with_warnings",
+    steps: waiting.steps.map((step, index) =>
+      index === 1
+        ? {
+            ...step,
+            approvalActorUserId: USER_ID,
+            approvalDecidedAt: NOW,
+            approvalStatus: "rejected",
+            completedAt: NOW,
+            error: {
+              code: "approval_rejected",
+              message: "GitHub operation approval was rejected.",
+              retryable: false,
+            },
+            status: "failed",
+            version: 5,
+          }
+        : step
+    ),
+  });
+  let reads = 0;
+  const optional = createTeamService({
+    store: store({
+      decideTeamStepApproval: async () => ({
+        kind: "updated",
+        value: rejected.steps[1],
+      }),
+      getTeamRun: async () => {
+        reads += 1;
+        return reads === 1 ? waiting : rejected;
+      },
+    }),
+  });
+  const optionalResult = await optional.approveRun(principal, TEAM_RUN_ID, {
+    capabilities: [],
+    decision: "reject",
+    expectedVersion: 4,
+  });
+  assert.equal(
+    optionalResult.kind === "rejected" && optionalResult.teamRun.status,
+    "completed_with_warnings"
+  );
+
+  const stale = createTeamService({
+    store: store({
+      decideTeamStepApproval: async () => ({ kind: "stale_version" }),
+      getTeamRun: async (authority) =>
+        authority.tenant === TENANT ? waiting : null,
+    }),
+  });
+  assert.deepEqual(
+    await stale.approveRun(principal, TEAM_RUN_ID, {
+      decision: "reject",
+      expectedVersion: 3,
+    }),
+    { kind: "stale_version" }
+  );
+  assert.deepEqual(
+    await stale.approveRun(otherPrincipal, TEAM_RUN_ID, {
+      decision: "reject",
+      expectedVersion: 4,
+    }),
+    { kind: "not_found" }
+  );
 });
 
 test("stopping persists team cancellation before targeting only its attached child", async () => {
