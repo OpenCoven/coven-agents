@@ -152,7 +152,7 @@ test("a successor reuses the attempt key and a stale release cannot delete its l
   assert.equal(timers.activeCount, 0);
 });
 
-test("preserved attempt state survives reclaim while expiration identities rotate", async () => {
+test("preserved attempt state and expiration identities survive reclaim", async () => {
   const clock = new ManualClock();
   const store = new MemoryCheckoutAttemptLeaseStore();
   let firstExpirationKey = "";
@@ -195,10 +195,7 @@ test("preserved attempt state survives reclaim while expiration identities rotat
         sessionId: "cs_created",
       });
       assert.equal(providerIdempotencyKey, firstProviderKey);
-      assert.notEqual(
-        expirationIdempotencyKey("cs_obsolete"),
-        firstExpirationKey
-      );
+      assert.equal(expirationIdempotencyKey("cs_obsolete"), firstExpirationKey);
       return Promise.resolve({
         disposition: "retire_attempt",
         value: "retired",
@@ -293,6 +290,18 @@ test("checkout attempt state encoding fails closed for legacy or malformed value
   assert.deepEqual(parseCheckoutAttemptState("legacy-owner-token"), {
     kind: "create_uncertain",
   });
+  const expirationState = {
+    cleanupKind: "blocking",
+    customerId: "cus_recoverable",
+    expirationIdempotencyKey: "coven_expiration_key",
+    kind: "expiration_in_flight",
+    resumeState: { kind: "fresh" },
+    sessionId: "cs_recoverable",
+  } satisfies CheckoutAttemptLease["attemptState"];
+  assert.deepEqual(
+    parseCheckoutAttemptState(serializeCheckoutAttemptState(expirationState)),
+    expirationState
+  );
 });
 
 class ManualClock {

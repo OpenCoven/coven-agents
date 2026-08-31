@@ -101,8 +101,8 @@ test("current attempts are reconciled across paginated completed Sessions", asyn
     attemptId: "attempt-current",
     attemptState: { kind: "create_uncertain" },
     customerId: "cus_existing",
-    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
-    expire: () => Promise.resolve(),
+    expireSession: () =>
+      Promise.reject(new Error("Expiration was not expected.")),
     listPage(input) {
       cursors.push({
         startingAfter: input.starting_after,
@@ -149,8 +149,8 @@ test("a listed open current attempt routes a retrieved completed Session through
     attemptId: "attempt-current",
     attemptState: { kind: "session_created", sessionId: listed.id },
     customerId: "cus_existing",
-    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
-    expire: () => Promise.resolve(),
+    expireSession: () =>
+      Promise.reject(new Error("Expiration was not expected.")),
     listPage(input) {
       return Promise.resolve({
         data: input.status === "open" ? [listed] : [],
@@ -185,8 +185,8 @@ test("a listed reusable Session that expires before retrieve is retired", async 
     attemptId: "attempt-current",
     attemptState: { kind: "fresh" },
     customerId: "cus_existing",
-    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
-    expire: () => Promise.resolve(),
+    expireSession: () =>
+      Promise.reject(new Error("Expiration was not expected.")),
     listPage(input) {
       return Promise.resolve({
         data: input.status === "open" ? [listed] : [],
@@ -218,11 +218,10 @@ test("an app-owned open Session from another attempt is expired instead of reuse
     attemptId: "attempt-current",
     attemptState: { kind: "fresh" },
     customerId: "cus_existing",
-    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
-    expire(sessionId) {
-      expired.push(sessionId);
+    expireSession(input) {
+      expired.push(input.sessionId);
       status = "expired";
-      return Promise.resolve();
+      return Promise.resolve({ ...listed, status });
     },
     listPage(input) {
       return Promise.resolve({
@@ -252,10 +251,12 @@ test("a retrieved Session with another Customer fails closed without expiration"
       attemptId: "attempt-current",
       attemptState: { kind: "fresh" },
       customerId: "cus_existing",
-      expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
-      expire(sessionId) {
-        expired.push(sessionId);
-        return Promise.resolve();
+      expireSession(input) {
+        expired.push(input.sessionId);
+        return Promise.resolve({
+          ...listed,
+          customerId: "cus_unrelated",
+        });
       },
       listPage(input) {
         return Promise.resolve({
@@ -289,11 +290,17 @@ test("an app-owned retrieved Session with changed attempt metadata is expired be
     attemptId: "attempt-current",
     attemptState: { kind: "session_created", sessionId: listed.id },
     customerId: "cus_existing",
-    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
-    expire(sessionId) {
-      expired.push(sessionId);
+    expireSession(input) {
+      expired.push(input.sessionId);
       status = "expired";
-      return Promise.resolve();
+      return Promise.resolve({
+        ...listed,
+        metadata: {
+          ...listed.metadata,
+          [CHECKOUT_ATTEMPT_METADATA_KEY]: "another-attempt",
+        },
+        status,
+      });
     },
     listPage(input) {
       return Promise.resolve({

@@ -1250,7 +1250,7 @@ test("a definite pre-request create failure retires the attempt for a fresh prov
   assert.notEqual(sessionKeys[0], sessionKeys[1]);
 });
 
-test("expiration retries rotate their identity only after reconciling the Session as still open", async () => {
+test("expiration retries preserve their identity while reconciling an uncertain Session", async () => {
   let obsoleteStatus: "expired" | "open" = "open";
   const expirationKeys: string[] = [];
   let sessionCalls = 0;
@@ -1276,7 +1276,7 @@ test("expiration retries rotate their identity only after reconciling the Sessio
       },
       expireCheckoutSession(_sessionId, options) {
         expirationKeys.push(options.idempotencyKey);
-        if (new Set(expirationKeys).size === 1) {
+        if (expirationKeys.length === 1) {
           return Promise.reject(providerFailure("uncertain"));
         }
         obsoleteStatus = "expired";
@@ -1318,7 +1318,7 @@ test("expiration retries rotate their identity only after reconciling the Sessio
   assert.equal(uncertainCleanup.status, 409);
   assert.equal(recovered.status, 200);
   assert.equal(expirationKeys.length, 2);
-  assert.notEqual(expirationKeys[0], expirationKeys[1]);
+  assert.equal(expirationKeys[0], expirationKeys[1]);
   assert.equal(obsoleteStatus, "expired");
   assert.equal(sessionCalls, 1);
 });
@@ -2004,6 +2004,210 @@ test("a blocking subscription expires a prior payable Session and retires the at
   assert.deepEqual(createdAttemptIds, ["attempt-2"]);
 });
 
+test("a stale blocking cleanup cannot expire a Session after its successor returns the URL", async () => {
+  const leaseStore = new MemoryCheckoutAttemptLeaseStore();
+  let blocking = true;
+  let expirationCalls = 0;
+  let retrieveCalls = 0;
+  let status: Stripe.Checkout.Session.Status = "open";
+  let releaseStaleRetrieve!: () => void;
+  let signalStaleRetrieveStarted!: () => void;
+  const staleRetrieveStarted = new Promise<void>((resolve) => {
+    signalStaleRetrieveStarted = resolve;
+  });
+  const staleRetrieveGate = new Promise<void>((resolve) => {
+    releaseStaleRetrieve = resolve;
+  });
+  const prior = reconciledCheckoutSession({
+    customerId: "cus_existing",
+    id: "cs_stale_blocking_cleanup",
+    metadata: {
+      checkoutAttemptId: "attempt-1",
+      checkoutFlowVersion: "1",
+      priceId: "price_configured",
+      userId: USER_ID,
+    },
+    status: "open",
+    url: "https://checkout.stripe.test/still-payable",
+  });
+  const provider = Object.assign(
+    defaultProvider({
+      expireCheckoutSession() {
+        expirationCalls += 1;
+        status = "expired";
+        return Promise.resolve();
+      },
+      hasBlockingSubscription: () => Promise.resolve(blocking),
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return status === input.status ? [{ ...prior, status }] : [];
+      },
+      async retrieve() {
+        retrieveCalls += 1;
+        if (retrieveCalls === 2) {
+          signalStaleRetrieveStarted();
+          await staleRetrieveGate;
+        }
+        return { ...prior, status };
+      },
+    })
+  );
+  const dependencies = dependenciesFor({
+    checkoutLeaseStore: leaseStore,
+    createProvider: () => provider,
+  });
+
+  const stale = checkoutResponse(
+    request("checkout-request-stale-blocking-cleanup"),
+    dependencies,
+    null
+  );
+  await staleRetrieveStarted;
+  leaseStore.expireCheckoutLease();
+  blocking = false;
+
+  const successor = await checkoutResponse(
+    request("checkout-request-successor-reuse"),
+    dependencies,
+    null
+  );
+  assert.equal(successor.status, 200);
+  assert.deepEqual(await successor.json(), {
+    url: "https://checkout.stripe.test/still-payable",
+  });
+
+  releaseStaleRetrieve();
+  const staleResponse = await stale;
+  assert.equal(staleResponse.status, 409);
+  assert.deepEqual(await staleResponse.json(), {
+    error: "request_in_progress",
+  });
+  assert.equal(expirationCalls, 0);
+  assert.equal(status, "open");
+
+  const replay = await checkoutResponse(
+    request("checkout-request-after-stale-cleanup"),
+    dependencies,
+    null
+  );
+  assert.equal(replay.status, 200);
+  assert.deepEqual(await replay.json(), {
+    url: "https://checkout.stripe.test/still-payable",
+  });
+});
+
+test("a takeover reconciles an uncertain expiration with the persisted provider key", async () => {
+  const leaseStore = new MemoryCheckoutAttemptLeaseStore();
+  let blocking = true;
+  let sessionCalls = 0;
+  let status: Stripe.Checkout.Session.Status = "open";
+  let releaseExpiration!: () => void;
+  let signalExpirationStarted!: () => void;
+  const expirationStarted = new Promise<void>((resolve) => {
+    signalExpirationStarted = resolve;
+  });
+  const expirationGate = new Promise<void>((resolve) => {
+    releaseExpiration = resolve;
+  });
+  const expirationKeys: string[] = [];
+  const prior = reconciledCheckoutSession({
+    customerId: "cus_existing",
+    id: "cs_uncertain_expiration",
+    metadata: {
+      checkoutAttemptId: "attempt-1",
+      checkoutFlowVersion: "1",
+      priceId: "price_configured",
+      userId: USER_ID,
+    },
+    status: "open",
+  });
+  const provider = Object.assign(
+    defaultProvider({
+      createCheckoutSession() {
+        sessionCalls += 1;
+        return Promise.resolve({
+          id: "cs_replacement_after_expiration",
+          status: "open",
+          url: "https://checkout.stripe.test/replacement-after-expiration",
+        });
+      },
+      async expireCheckoutSession(_sessionId, options) {
+        expirationKeys.push(options.idempotencyKey);
+        if (expirationKeys.length === 1) {
+          signalExpirationStarted();
+          await expirationGate;
+          throw providerFailure("uncertain");
+        }
+        status = "expired";
+      },
+      hasBlockingSubscription: () => Promise.resolve(blocking),
+    }),
+    reconciledProviderMethods({
+      list(input) {
+        return status === input.status ? [{ ...prior, status }] : [];
+      },
+      retrieve() {
+        return { ...prior, status };
+      },
+    })
+  );
+  const dependencies = dependenciesFor({
+    checkoutLeaseStore: leaseStore,
+    createProvider: () => provider,
+  });
+
+  const stale = checkoutResponse(
+    request("checkout-request-uncertain-expiration"),
+    dependencies,
+    null
+  );
+  await expirationStarted;
+  leaseStore.expireCheckoutLease();
+  releaseExpiration();
+
+  const staleResponse = await stale;
+  assert.equal(staleResponse.status, 409);
+  assert.deepEqual(await staleResponse.json(), {
+    error: "request_in_progress",
+  });
+  assert.deepEqual(leaseStore.attemptState, {
+    cleanupKind: "blocking",
+    customerId: "cus_existing",
+    expirationIdempotencyKey: expirationKeys[0],
+    kind: "expiration_in_flight",
+    resumeState: { kind: "fresh" },
+    sessionId: "cs_uncertain_expiration",
+  });
+
+  blocking = false;
+  const successor = await checkoutResponse(
+    request("checkout-request-expiration-takeover"),
+    dependencies,
+    null
+  );
+
+  assert.equal(successor.status, 409);
+  assert.deepEqual(await successor.json(), {
+    error: "request_in_progress",
+  });
+  assert.equal(expirationKeys.length, 2);
+  assert.equal(expirationKeys[1], expirationKeys[0]);
+  assert.equal(status, "expired");
+  assert.equal(sessionCalls, 0);
+
+  const replacement = await checkoutResponse(
+    request("checkout-request-after-expiration-takeover"),
+    dependencies,
+    null
+  );
+  assert.equal(replacement.status, 200);
+  assert.deepEqual(await replacement.json(), {
+    url: "https://checkout.stripe.test/replacement-after-expiration",
+  });
+  assert.equal(sessionCalls, 1);
+});
+
 test("blocking cleanup retrieves the durable Session when open listing lags", async () => {
   let blocking = false;
   let status: Stripe.Checkout.Session.Status = "open";
@@ -2529,7 +2733,11 @@ function reconciledProviderMethods(input: {
   list: (
     params: Stripe.Checkout.SessionListParams
   ) => ReturnType<typeof reconciledCheckoutSession>[];
-  retrieve: (sessionId: string) => ReturnType<typeof reconciledCheckoutSession>;
+  retrieve: (
+    sessionId: string
+  ) =>
+    | Promise<ReturnType<typeof reconciledCheckoutSession>>
+    | ReturnType<typeof reconciledCheckoutSession>;
 }) {
   return {
     listCheckoutSessions(params: Stripe.Checkout.SessionListParams) {
@@ -2697,6 +2905,10 @@ class MemoryCheckoutAttemptLeaseStore implements CheckoutAttemptLeaseStore {
 
   constructor(recordOperation: (operation: string) => void = () => undefined) {
     this.recordOperation = recordOperation;
+  }
+
+  get attemptState(): unknown {
+    return this.record?.attemptState;
   }
 
   claim(

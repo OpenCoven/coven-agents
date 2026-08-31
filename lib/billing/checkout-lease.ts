@@ -15,11 +15,29 @@ export type CheckoutAttemptLease = {
   ownerToken: string;
 };
 
-export type CheckoutAttemptState =
+export type CheckoutAttemptStableState =
   | { kind: "create_uncertain" }
   | { customerId: string; kind: "customer_created" }
   | { kind: "fresh" }
   | { kind: "session_created"; sessionId: string };
+
+export type CheckoutExpirationCleanupKind = "blocking" | "obsolete";
+
+type CheckoutExpirationAttempt = {
+  cleanupKind: CheckoutExpirationCleanupKind;
+  customerId: string;
+  expirationIdempotencyKey: string;
+  resumeState: CheckoutAttemptStableState;
+  sessionId: string;
+};
+
+export type CheckoutAttemptState =
+  | CheckoutAttemptStableState
+  | (CheckoutExpirationAttempt & { kind: "expiration_in_flight" })
+  | (CheckoutExpirationAttempt & {
+      kind: "expiration_confirmed";
+      terminalStatus: "complete" | "expired";
+    });
 
 export type CheckoutAttemptLeaseClaimInput = {
   leaseExpiresAt: Date;
@@ -230,11 +248,7 @@ export async function runWithCheckoutAttemptLease<T>(options: {
       attemptState: lease.attemptState,
       checkpoint,
       expirationIdempotencyKey: (sessionId) =>
-        checkoutExpirationIdempotencyKey(
-          providerIdempotencyKey,
-          lease.ownerToken,
-          sessionId
-        ),
+        checkoutExpirationIdempotencyKey(providerIdempotencyKey, sessionId),
       providerIdempotencyKey,
     });
   } catch (error) {
@@ -321,6 +335,18 @@ export function parseCheckoutAttemptState(
       return { kind: "create_uncertain" };
     }
   }
+  const expirationPrefix = "checkout-attempt:v2:expiration:";
+  if (storedState.startsWith(expirationPrefix)) {
+    try {
+      const parsed = JSON.parse(
+        storedState.slice(expirationPrefix.length)
+      ) as unknown;
+      const expirationState = parseCheckoutExpirationState(parsed);
+      return expirationState ?? { kind: "create_uncertain" };
+    } catch {
+      return { kind: "create_uncertain" };
+    }
+  }
   if (storedState === "checkout-attempt:v1:fresh") {
     return { kind: "fresh" };
   }
@@ -347,6 +373,22 @@ export function parseCheckoutAttemptState(
 export function serializeCheckoutAttemptState(
   state: CheckoutAttemptState
 ): string {
+  if (
+    state.kind === "expiration_in_flight" ||
+    state.kind === "expiration_confirmed"
+  ) {
+    return `checkout-attempt:v2:expiration:${JSON.stringify({
+      cleanupKind: state.cleanupKind,
+      customerId: state.customerId,
+      expirationIdempotencyKey: state.expirationIdempotencyKey,
+      kind: state.kind,
+      resumeState: state.resumeState,
+      sessionId: state.sessionId,
+      ...(state.kind === "expiration_confirmed"
+        ? { terminalStatus: state.terminalStatus }
+        : {}),
+    })}`;
+  }
   if (state.kind === "session_created") {
     return `checkout-attempt:v1:session_created:${state.sessionId}`;
   }
@@ -354,6 +396,24 @@ export function serializeCheckoutAttemptState(
     return `checkout-attempt:v1:customer_created:${state.customerId}`;
   }
   return `checkout-attempt:v1:${state.kind}`;
+}
+
+export function checkoutAttemptResumeState(
+  state: CheckoutAttemptState
+): CheckoutAttemptStableState {
+  return state.kind === "expiration_in_flight" ||
+    state.kind === "expiration_confirmed"
+    ? state.resumeState
+    : state;
+}
+
+export function isCheckoutAttemptExpirationState(
+  state: CheckoutAttemptState
+): state is Exclude<CheckoutAttemptState, CheckoutAttemptStableState> {
+  return (
+    state.kind === "expiration_in_flight" ||
+    state.kind === "expiration_confirmed"
+  );
 }
 
 export function serializeCheckoutAttemptLeaseOwner(
@@ -378,17 +438,11 @@ function checkoutProviderIdempotencyKey(
 
 function checkoutExpirationIdempotencyKey(
   providerIdempotencyKey: string,
-  ownerToken: string,
   sessionId: string
 ): string {
   const digest = createHash("sha256")
     .update(
-      [
-        "checkout-expiration",
-        providerIdempotencyKey,
-        ownerToken,
-        sessionId,
-      ].join("\0"),
+      ["checkout-expiration", providerIdempotencyKey, sessionId].join("\0"),
       "utf8"
     )
     .digest("hex");
@@ -405,6 +459,81 @@ function validNow(now: () => Date): Date {
     throw new RangeError("now must return a valid Date");
   }
   return value;
+}
+
+function parseCheckoutExpirationState(
+  value: unknown
+): Exclude<CheckoutAttemptState, CheckoutAttemptStableState> | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    (candidate.kind !== "expiration_in_flight" &&
+      candidate.kind !== "expiration_confirmed") ||
+    (candidate.cleanupKind !== "blocking" &&
+      candidate.cleanupKind !== "obsolete") ||
+    typeof candidate.customerId !== "string" ||
+    candidate.customerId.length === 0 ||
+    typeof candidate.expirationIdempotencyKey !== "string" ||
+    candidate.expirationIdempotencyKey.length === 0 ||
+    typeof candidate.sessionId !== "string" ||
+    candidate.sessionId.length === 0
+  ) {
+    return null;
+  }
+  const resumeState = parseCheckoutStableState(candidate.resumeState);
+  if (!resumeState) {
+    return null;
+  }
+  const base: CheckoutExpirationAttempt = {
+    cleanupKind: candidate.cleanupKind as CheckoutExpirationCleanupKind,
+    customerId: candidate.customerId,
+    expirationIdempotencyKey: candidate.expirationIdempotencyKey,
+    resumeState,
+    sessionId: candidate.sessionId,
+  };
+  if (candidate.kind === "expiration_in_flight") {
+    return { ...base, kind: candidate.kind };
+  }
+  if (
+    candidate.terminalStatus !== "complete" &&
+    candidate.terminalStatus !== "expired"
+  ) {
+    return null;
+  }
+  return {
+    ...base,
+    kind: candidate.kind,
+    terminalStatus: candidate.terminalStatus,
+  };
+}
+
+function parseCheckoutStableState(
+  value: unknown
+): CheckoutAttemptStableState | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (candidate.kind === "fresh" || candidate.kind === "create_uncertain") {
+    return { kind: candidate.kind };
+  }
+  if (
+    candidate.kind === "customer_created" &&
+    typeof candidate.customerId === "string" &&
+    candidate.customerId.length > 0
+  ) {
+    return { customerId: candidate.customerId, kind: candidate.kind };
+  }
+  if (
+    candidate.kind === "session_created" &&
+    typeof candidate.sessionId === "string" &&
+    candidate.sessionId.length > 0
+  ) {
+    return { kind: candidate.kind, sessionId: candidate.sessionId };
+  }
+  return null;
 }
 
 class CheckoutAttemptLeaseLostError extends Error {}

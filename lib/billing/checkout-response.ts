@@ -25,10 +25,12 @@ import {
   reconcileCheckoutSessions,
   stableIntegrationIdentifier,
 } from "@/lib/billing/checkout";
+import { createCheckoutSessionExpirationGuard } from "@/lib/billing/checkout-expiration";
 import {
   type CheckoutAttemptLeaseStore,
   type CheckoutAttemptState,
   type CheckoutLeaseTimers,
+  isCheckoutAttemptExpirationState,
   runWithCheckoutAttemptLease,
 } from "@/lib/billing/checkout-lease";
 import type { SubscriptionCheckoutConfig } from "@/lib/billing/config";
@@ -201,6 +203,14 @@ export async function checkoutResponse(
               };
             }
 
+            const expiration = createCheckoutSessionExpirationGuard({
+              checkpoint,
+              expirationIdempotencyKey,
+              initialState: attemptState,
+              provider,
+            });
+            const resumeAttemptState = expiration.resumeState;
+
             const inspectCompletedSubscription = async (input: {
               sessionId: string;
               subscriptionId: string | null;
@@ -279,8 +289,7 @@ export async function checkoutResponse(
               try {
                 completedSessions = await reconcileBlockingCheckoutSessions({
                   customerId: candidateCustomerId,
-                  expirationIdempotencyKey,
-                  expire: provider.expireCheckoutSession,
+                  expireSession: expiration.expireSession,
                   knownSessionIds,
                   listPage: provider.listCheckoutSessions,
                   retrieve: provider.retrieveCheckoutSession,
@@ -290,7 +299,7 @@ export async function checkoutResponse(
                 if (error instanceof CheckoutSessionCleanupError) {
                   return {
                     disposition: "preserve_attempt",
-                    state: retainedState ?? attemptState,
+                    state: expiration.currentAttemptState(),
                     value: checkoutSessionConflict(),
                   };
                 }
@@ -350,6 +359,34 @@ export async function checkoutResponse(
               };
             };
 
+            if (isCheckoutAttemptExpirationState(attemptState)) {
+              let recoveredExpiration: CheckoutSessionSnapshot;
+              try {
+                recoveredExpiration = await expiration.expireSession({
+                  cleanupKind: attemptState.cleanupKind,
+                  customerId: attemptState.customerId,
+                  sessionId: attemptState.sessionId,
+                  userId: decision.userId,
+                });
+              } catch (error) {
+                if (error instanceof CheckoutSessionCleanupError) {
+                  return {
+                    disposition: "preserve_attempt",
+                    state: expiration.currentAttemptState(),
+                    value: checkoutSessionConflict(),
+                  };
+                }
+                throw error;
+              }
+              if (recoveredExpiration.status === "complete") {
+                return completedSessionResult({
+                  candidateCustomerId: attemptState.customerId,
+                  sessionId: recoveredExpiration.id,
+                  subscriptionId: recoveredExpiration.subscriptionId,
+                });
+              }
+            }
+
             const inspectCustomer = async (
               candidateCustomerId: string
             ): Promise<CheckoutAttemptResult | null> => {
@@ -359,10 +396,9 @@ export async function checkoutResponse(
               try {
                 reconciliation = await reconcileCheckoutSessions({
                   attemptId,
-                  attemptState,
+                  attemptState: resumeAttemptState,
                   customerId: candidateCustomerId,
-                  expirationIdempotencyKey,
-                  expire: provider.expireCheckoutSession,
+                  expireSession: expiration.expireSession,
                   listPage: provider.listCheckoutSessions,
                   priceId: enabledConfig.priceId,
                   providerIdempotencyKey,
@@ -373,7 +409,7 @@ export async function checkoutResponse(
                 if (error instanceof CheckoutSessionCleanupError) {
                   return {
                     disposition: "preserve_attempt",
-                    state: attemptState,
+                    state: expiration.currentAttemptState(),
                     value: {
                       body: { error: "checkout_session_conflict" },
                       status: 409,
@@ -394,13 +430,13 @@ export async function checkoutResponse(
                   reconciliation.kind === "reused" ||
                   reconciliation.kind === "invalid_url"
                     ? [reconciliation.sessionId]
-                    : attemptState.kind === "session_created"
-                      ? [attemptState.sessionId]
+                    : resumeAttemptState.kind === "session_created"
+                      ? [resumeAttemptState.sessionId]
                       : [];
                 return blockingSubscriptionResult(
                   candidateCustomerId,
-                  attemptState.kind === "create_uncertain"
-                    ? attemptState
+                  resumeAttemptState.kind === "create_uncertain"
+                    ? resumeAttemptState
                     : null,
                   knownSessionIds
                 );
@@ -408,7 +444,7 @@ export async function checkoutResponse(
               if (reconciliation.kind === "retry_required") {
                 return {
                   disposition: "preserve_attempt",
-                  state: attemptState,
+                  state: expiration.currentAttemptState(),
                   value: requestInProgress(),
                 } as const;
               }
@@ -457,8 +493,8 @@ export async function checkoutResponse(
             const sessionIdempotencyKey = `${providerIdempotencyKey}:session`;
             let customerId =
               row?.stripeCustomerId ??
-              (attemptState.kind === "customer_created"
-                ? attemptState.customerId
+              (resumeAttemptState.kind === "customer_created"
+                ? resumeAttemptState.customerId
                 : null);
 
             if (!customerId) {
@@ -481,7 +517,7 @@ export async function checkoutResponse(
                       value: checkoutFailure(),
                     };
               }
-              await checkpoint({
+              await expiration.checkpoint({
                 customerId,
                 kind: "customer_created",
               });
@@ -506,7 +542,7 @@ export async function checkoutResponse(
               ReturnType<CheckoutProvider["createCheckoutSession"]>
             >;
             try {
-              await checkpoint({ kind: "create_uncertain" });
+              await expiration.checkpoint({ kind: "create_uncertain" });
               checkout = await provider.createCheckoutSession(
                 {
                   cancel_url: `${origin}/account?checkout=cancelled`,

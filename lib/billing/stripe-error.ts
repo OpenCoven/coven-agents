@@ -11,6 +11,12 @@ export function classifyStripeRequestOutcome(
   ) {
     return "uncertain";
   }
+  if (
+    error instanceof Stripe.errors.StripeIdempotencyError ||
+    stripeErrorType(error) === "StripeIdempotencyError"
+  ) {
+    return "uncertain";
+  }
 
   if (!isStripeError(error)) {
     return "uncertain";

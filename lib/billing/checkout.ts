@@ -42,6 +42,13 @@ export type CheckoutSessionPage = {
   hasMore: boolean;
 };
 
+export type CheckoutSessionExpiration = (input: {
+  cleanupKind: "blocking" | "obsolete";
+  customerId: string;
+  sessionId: string;
+  userId: string;
+}) => Promise<CheckoutSessionSnapshot>;
+
 export class CheckoutSessionCleanupError extends Error {}
 
 /**
@@ -121,11 +128,7 @@ export async function reconcileCheckoutSessions(input: {
   attemptId: string;
   attemptState: CheckoutAttemptState;
   customerId: string;
-  expire: (
-    sessionId: string,
-    options: { idempotencyKey: string }
-  ) => Promise<void>;
-  expirationIdempotencyKey: (sessionId: string) => string;
+  expireSession: CheckoutSessionExpiration;
   listPage: (
     input: Stripe.Checkout.SessionListParams
   ) => Promise<CheckoutSessionPage>;
@@ -158,7 +161,7 @@ export async function reconcileCheckoutSessions(input: {
   );
   if (currentSession) {
     const current = await input.retrieve(currentSession.id);
-    if (!isAppOwned(current, input)) {
+    if (!isAppOwnedCheckoutSession(current, input)) {
       throw new CheckoutSessionCleanupError(
         "A Checkout Session is not safely app-owned."
       );
@@ -187,7 +190,7 @@ export async function reconcileCheckoutSessions(input: {
         if (
           session.id !== current.id &&
           session.status === "open" &&
-          isAppOwned(session, input)
+          isAppOwnedCheckoutSession(session, input)
         ) {
           // biome-ignore lint/performance/noAwaitInLoops: reusable Checkout is returned only after every competing Session is expired.
           await expireAndVerify(await input.retrieve(session.id), input);
@@ -208,7 +211,8 @@ export async function reconcileCheckoutSessions(input: {
   }
 
   const appOwnedOpen = [...byId.values()].filter(
-    (session) => session.status === "open" && isAppOwned(session, input)
+    (session) =>
+      session.status === "open" && isAppOwnedCheckoutSession(session, input)
   );
   const reusable = appOwnedOpen.find((session) =>
     matchesCurrentFlow(session, input.priceId)
@@ -234,11 +238,7 @@ export async function reconcileCheckoutSessions(input: {
 
 export async function reconcileBlockingCheckoutSessions(input: {
   customerId: string;
-  expire: (
-    sessionId: string,
-    options: { idempotencyKey: string }
-  ) => Promise<void>;
-  expirationIdempotencyKey: (sessionId: string) => string;
+  expireSession: CheckoutSessionExpiration;
   knownSessionIds?: readonly string[];
   listPage: (
     input: Stripe.Checkout.SessionListParams
@@ -257,7 +257,7 @@ export async function reconcileBlockingCheckoutSessions(input: {
   const completed = await Promise.all(
     [...sessionIds].map(async (sessionId) => {
       const session = await input.retrieve(sessionId);
-      if (!isAppOwned(session, input)) {
+      if (!isAppOwnedCheckoutSession(session, input)) {
         throw new CheckoutSessionCleanupError(
           "A Checkout Session is not safely app-owned."
         );
@@ -286,11 +286,7 @@ async function reconcileRetrievedReusable(
   input: {
     attemptId: string;
     customerId: string;
-    expire: (
-      sessionId: string,
-      options: { idempotencyKey: string }
-    ) => Promise<void>;
-    expirationIdempotencyKey: (sessionId: string) => string;
+    expireSession: CheckoutSessionExpiration;
     priceId: string;
     providerIdempotencyKey: string;
     retrieve: (sessionId: string) => Promise<CheckoutSessionSnapshot>;
@@ -303,7 +299,7 @@ async function reconcileRetrievedReusable(
   | { kind: "retry_required" }
   | { kind: "reused"; sessionId: string; url: string }
 > {
-  if (!isAppOwned(session, input)) {
+  if (!isAppOwnedCheckoutSession(session, input)) {
     throw new CheckoutSessionCleanupError(
       "A Checkout Session is not safely app-owned."
     );
@@ -392,16 +388,11 @@ async function expireAndVerify(
   session: CheckoutSessionSnapshot,
   input: {
     customerId: string;
-    expire: (
-      sessionId: string,
-      options: { idempotencyKey: string }
-    ) => Promise<void>;
-    expirationIdempotencyKey: (sessionId: string) => string;
-    retrieve: (sessionId: string) => Promise<CheckoutSessionSnapshot>;
+    expireSession: CheckoutSessionExpiration;
     userId: string;
   }
 ): Promise<void> {
-  if (!isAppOwned(session, input)) {
+  if (!isAppOwnedCheckoutSession(session, input)) {
     throw new CheckoutSessionCleanupError(
       "An obsolete Checkout Session is not safely app-owned."
     );
@@ -415,11 +406,16 @@ async function expireAndVerify(
     );
   }
   try {
-    await input.expire(session.id, {
-      idempotencyKey: input.expirationIdempotencyKey(session.id),
+    const reconciled = await input.expireSession({
+      cleanupKind: "obsolete",
+      customerId: input.customerId,
+      sessionId: session.id,
+      userId: input.userId,
     });
-    const reconciled = await input.retrieve(session.id);
-    if (!isAppOwned(reconciled, input) || reconciled.status !== "expired") {
+    if (
+      !isAppOwnedCheckoutSession(reconciled, input) ||
+      reconciled.status !== "expired"
+    ) {
       throw new Error("Stripe did not confirm Checkout Session expiration.");
     }
   } catch (error) {
@@ -434,40 +430,30 @@ async function expireBlockingSession(
   session: CheckoutSessionSnapshot,
   input: {
     customerId: string;
-    expire: (
-      sessionId: string,
-      options: { idempotencyKey: string }
-    ) => Promise<void>;
-    expirationIdempotencyKey: (sessionId: string) => string;
-    retrieve: (sessionId: string) => Promise<CheckoutSessionSnapshot>;
+    expireSession: CheckoutSessionExpiration;
     userId: string;
   }
 ): Promise<{
   sessionId: string;
   subscriptionId: string | null;
 } | null> {
-  let expirationError: unknown;
-  try {
-    await input.expire(session.id, {
-      idempotencyKey: input.expirationIdempotencyKey(session.id),
-    });
-  } catch (error) {
-    expirationError = error;
-  }
-
   let reconciled: CheckoutSessionSnapshot;
   try {
-    reconciled = await input.retrieve(session.id);
+    reconciled = await input.expireSession({
+      cleanupKind: "blocking",
+      customerId: input.customerId,
+      sessionId: session.id,
+      userId: input.userId,
+    });
   } catch (error) {
     throw new CheckoutSessionCleanupError(
       "A Checkout Session could not be reconciled after expiration.",
       { cause: error }
     );
   }
-  if (!isAppOwned(reconciled, input)) {
+  if (!isAppOwnedCheckoutSession(reconciled, input)) {
     throw new CheckoutSessionCleanupError(
-      "A Checkout Session is not safely app-owned.",
-      { cause: expirationError }
+      "A Checkout Session is not safely app-owned."
     );
   }
   if (reconciled.status === "expired") {
@@ -477,8 +463,7 @@ async function expireBlockingSession(
     return completedSession(reconciled);
   }
   throw new CheckoutSessionCleanupError(
-    "A Checkout Session could not be safely closed.",
-    { cause: expirationError }
+    "A Checkout Session could not be safely closed."
   );
 }
 
@@ -491,7 +476,7 @@ function assertOpenSubscriptionSessionOwnership(
       (session) =>
         session.status === "open" &&
         session.mode === "subscription" &&
-        !isAppOwned(session, input)
+        !isAppOwnedCheckoutSession(session, input)
     )
   ) {
     throw new CheckoutSessionCleanupError(
@@ -500,7 +485,7 @@ function assertOpenSubscriptionSessionOwnership(
   }
 }
 
-function isAppOwned(
+export function isAppOwnedCheckoutSession(
   session: CheckoutSessionSnapshot,
   input: { customerId: string; userId: string }
 ): boolean {
