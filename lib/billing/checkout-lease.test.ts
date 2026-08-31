@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   CHECKOUT_ATTEMPT_LEASE_TTL_MS,
+  CHECKOUT_ATTEMPT_STATE_MAX_BYTES,
+  CHECKOUT_CLEANUP_QUEUE_MAX_LENGTH,
+  CHECKOUT_PROVIDER_IDENTIFIER_MAX_LENGTH,
   type CheckoutAttemptLease,
   type CheckoutAttemptLeaseClaimInput,
   type CheckoutAttemptLeaseClaimResult,
@@ -9,6 +12,8 @@ import {
   type CheckoutAttemptLeaseRenewInput,
   type CheckoutAttemptLeaseStore,
   type CheckoutLeaseTimers,
+  checkoutAttemptProvesCustomer,
+  checkoutAttemptProvesResources,
   parseCheckoutAttemptState,
   runWithCheckoutAttemptLease,
   serializeCheckoutAttemptState,
@@ -152,10 +157,11 @@ test("a successor reuses the attempt key and a stale release cannot delete its l
   assert.equal(timers.activeCount, 0);
 });
 
-test("preserved attempt state survives reclaim while expiration identities rotate", async () => {
+test("preserved attempt state and expiration identities survive reclaim", async () => {
   const clock = new ManualClock();
   const store = new MemoryCheckoutAttemptLeaseStore();
   let firstExpirationKey = "";
+  let firstRotatedExpirationKey = "";
   let firstProviderKey = "";
 
   const first = await runWithCheckoutAttemptLease({
@@ -169,6 +175,8 @@ test("preserved attempt state survives reclaim while expiration identities rotat
     }) => {
       assert.deepEqual(attemptState, { kind: "fresh" });
       firstExpirationKey = expirationIdempotencyKey("cs_obsolete");
+      firstRotatedExpirationKey = expirationIdempotencyKey("cs_obsolete", 1);
+      assert.notEqual(firstRotatedExpirationKey, firstExpirationKey);
       firstProviderKey = providerIdempotencyKey;
       return Promise.resolve({
         disposition: "preserve_attempt",
@@ -195,9 +203,10 @@ test("preserved attempt state survives reclaim while expiration identities rotat
         sessionId: "cs_created",
       });
       assert.equal(providerIdempotencyKey, firstProviderKey);
-      assert.notEqual(
-        expirationIdempotencyKey("cs_obsolete"),
-        firstExpirationKey
+      assert.equal(expirationIdempotencyKey("cs_obsolete"), firstExpirationKey);
+      assert.equal(
+        expirationIdempotencyKey("cs_obsolete", 1),
+        firstRotatedExpirationKey
       );
       return Promise.resolve({
         disposition: "retire_attempt",
@@ -284,15 +293,245 @@ test("checkout attempt state encoding fails closed for legacy or malformed value
   assert.deepEqual(
     parseCheckoutAttemptState(
       serializeCheckoutAttemptState({
+        customerId: "cus_recoverable",
         kind: "session_created",
         sessionId: "cs_recoverable",
       })
     ),
-    { kind: "session_created", sessionId: "cs_recoverable" }
+    {
+      customerId: "cus_recoverable",
+      kind: "session_created",
+      sessionId: "cs_recoverable",
+    }
   );
   assert.deepEqual(parseCheckoutAttemptState("legacy-owner-token"), {
     kind: "create_uncertain",
   });
+});
+
+test("checkout attempt provenance proves only exact bounded Customer and Session ids", () => {
+  const direct = {
+    customerId: "cus_exact",
+    kind: "session_created",
+    sessionId: "cs_exact",
+  } as const;
+  const cleanup = {
+    cleanupKind: "obsolete",
+    currentIndex: 0,
+    customerId: "cus_exact",
+    expiration: null,
+    items: [{ sessionId: "cs_cleanup" }],
+    kind: "cleanup_queue",
+    resumeState: direct,
+  } satisfies CheckoutAttemptLease["attemptState"];
+
+  assert.equal(
+    checkoutAttemptProvesResources(direct, {
+      customerId: "cus_exact",
+      sessionId: "cs_exact",
+    }),
+    true
+  );
+  assert.equal(
+    checkoutAttemptProvesResources(cleanup, {
+      customerId: "cus_exact",
+      sessionId: "cs_cleanup",
+    }),
+    true
+  );
+  assert.equal(
+    checkoutAttemptProvesResources(cleanup, {
+      customerId: "cus_exact",
+      sessionId: "cs_exact",
+    }),
+    true
+  );
+  assert.equal(checkoutAttemptProvesCustomer(cleanup, "cus_exact"), true);
+
+  for (const [state, customerId, sessionId] of [
+    [direct, "cus_other", "cs_exact"],
+    [direct, "cus_exact", "cs_other"],
+    [
+      { customerId: "cus_exact", kind: "customer_created" },
+      "cus_exact",
+      "cs_exact",
+    ],
+    [{ kind: "invalid" }, "cus_exact", "cs_exact"],
+    [null, "cus_exact", "cs_exact"],
+  ] as const) {
+    assert.equal(
+      checkoutAttemptProvesResources(state, { customerId, sessionId }),
+      false
+    );
+  }
+});
+
+test("legacy Session-only attempt state is usable for recovery but not ownership proof", () => {
+  const state = parseCheckoutAttemptState(
+    "checkout-attempt:v1:session_created:cs_legacy"
+  );
+
+  assert.deepEqual(state, {
+    kind: "session_created",
+    sessionId: "cs_legacy",
+  });
+  assert.equal(
+    checkoutAttemptProvesResources(state, {
+      customerId: "cus_legacy",
+      sessionId: "cs_legacy",
+    }),
+    false
+  );
+  assert.equal(checkoutAttemptProvesCustomer(state, "cus_legacy"), false);
+});
+
+test("bounded cleanup queue state round-trips with deterministic expiration generations", () => {
+  const state = {
+    cleanupKind: "blocking",
+    currentIndex: 1,
+    customerId: "cus_recoverable",
+    expiration: {
+      generation: 2,
+      idempotencyKey: "coven_rotated_expiration_key",
+      status: "in_flight",
+    },
+    items: [
+      {
+        sessionId: "cs_first",
+        subscriptionId: null,
+        terminalStatus: "expired",
+      },
+      { sessionId: "cs_second" },
+    ],
+    kind: "cleanup_queue",
+    resumeState: { kind: "fresh" },
+  } satisfies CheckoutAttemptLease["attemptState"];
+
+  const serialized = serializeCheckoutAttemptState(state);
+
+  assert.ok(
+    Buffer.byteLength(serialized, "utf8") <= CHECKOUT_ATTEMPT_STATE_MAX_BYTES
+  );
+  assert.deepEqual(parseCheckoutAttemptState(serialized), state);
+});
+
+test("legacy v2 expiration state upgrades to a one-item cleanup queue without changing its key", () => {
+  const legacyState = {
+    cleanupKind: "obsolete",
+    customerId: "cus_legacy",
+    expirationIdempotencyKey: "coven_legacy_expiration_key",
+    kind: "expiration_in_flight",
+    resumeState: { kind: "session_created", sessionId: "cs_resume" },
+    sessionId: "cs_legacy",
+  };
+
+  const storedState = `checkout-attempt:v2:expiration:${JSON.stringify(
+    legacyState
+  )}`;
+  const expected = {
+    cleanupKind: "obsolete",
+    currentIndex: 0,
+    customerId: "cus_legacy",
+    expiration: {
+      generation: 0,
+      idempotencyKey: "coven_legacy_expiration_key",
+      status: "in_flight",
+    },
+    items: [{ sessionId: "cs_legacy" }],
+    kind: "cleanup_queue",
+    resumeState: { kind: "session_created", sessionId: "cs_resume" },
+  };
+
+  assert.deepEqual(parseCheckoutAttemptState(storedState), expected);
+  assert.deepEqual(
+    parseCheckoutAttemptState(
+      `checkout-attempt-owner:v1:${JSON.stringify({
+        ownerToken: "legacy-owner",
+        state: storedState,
+      })}`
+    ),
+    expected
+  );
+  assert.deepEqual(parseCheckoutAttemptState("checkout-attempt-owner:v1:{"), {
+    kind: "invalid",
+  });
+});
+
+test("malformed, oversized, or unbounded cleanup queues decode to an invalid fail-closed state", () => {
+  const base = {
+    cleanupKind: "blocking",
+    currentIndex: 0,
+    customerId: "cus_bounded",
+    expiration: null,
+    kind: "cleanup_queue",
+    resumeState: { kind: "fresh" },
+  };
+  const encoded = (value: unknown) =>
+    `checkout-attempt:v3:cleanup:${JSON.stringify(value)}`;
+
+  assert.deepEqual(
+    parseCheckoutAttemptState(
+      encoded({
+        ...base,
+        items: [{ sessionId: "cs_duplicate" }, { sessionId: "cs_duplicate" }],
+      })
+    ),
+    { kind: "invalid" }
+  );
+  assert.deepEqual(
+    parseCheckoutAttemptState(
+      encoded({
+        ...base,
+        items: Array.from(
+          { length: CHECKOUT_CLEANUP_QUEUE_MAX_LENGTH + 1 },
+          (_, index) => ({ sessionId: `cs_${index}` })
+        ),
+      })
+    ),
+    { kind: "invalid" }
+  );
+  assert.deepEqual(
+    parseCheckoutAttemptState(
+      `checkout-attempt:v3:cleanup:${"x".repeat(
+        CHECKOUT_ATTEMPT_STATE_MAX_BYTES
+      )}`
+    ),
+    { kind: "invalid" }
+  );
+});
+
+test("the largest accepted queue remains serializable after every item completes", () => {
+  assert.equal(CHECKOUT_PROVIDER_IDENTIFIER_MAX_LENGTH, 128);
+  const identifier = (prefix: string, index: number) =>
+    `${prefix}_${String(index).padStart(2, "0")}_`.padEnd(
+      CHECKOUT_PROVIDER_IDENTIFIER_MAX_LENGTH,
+      "a"
+    );
+  const items = Array.from(
+    { length: CHECKOUT_CLEANUP_QUEUE_MAX_LENGTH },
+    (_, index) => ({
+      sessionId: identifier("cs", index),
+      subscriptionId: identifier("sub", index),
+      terminalStatus: "complete" as const,
+    })
+  );
+
+  const serialized = serializeCheckoutAttemptState({
+    cleanupKind: "blocking",
+    currentIndex: items.length,
+    customerId: identifier("cus", 0),
+    expiration: null,
+    items,
+    kind: "cleanup_queue",
+    resumeState: {
+      kind: "session_created",
+      sessionId: identifier("cs_resume", 0),
+    },
+  });
+
+  assert.ok(
+    Buffer.byteLength(serialized, "utf8") <= CHECKOUT_ATTEMPT_STATE_MAX_BYTES
+  );
 });
 
 class ManualClock {

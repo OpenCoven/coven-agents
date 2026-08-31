@@ -6,11 +6,14 @@ import {
   CheckoutSessionCleanupError,
   checkoutDecision,
   checkoutSessionSubscriptionId,
+  hasBlockingSubscription,
   isBlockingSubscriptionStatus,
   reconcileCheckoutSessions,
   stableIntegrationIdentifier,
 } from "./checkout";
 import { createStripeClient } from "./stripe-client";
+
+type CheckoutSessionStatus = Parameters<typeof checkoutSession>[0]["status"];
 
 const BLOCKING_STATUSES = [
   "active",
@@ -34,6 +37,198 @@ test("terminal subscriptions allow a new checkout", () => {
   ] satisfies Stripe.Subscription.Status[]) {
     assert.equal(isBlockingSubscriptionStatus(status), false, status);
   }
+});
+
+test("subscription discovery stops after three endless pages", async () => {
+  let calls = 0;
+
+  await assert.rejects(
+    hasBlockingSubscription("cus_existing", () => {
+      calls += 1;
+      if (calls > 3) {
+        throw new Error("Unbounded fourth subscription page.");
+      }
+      return Promise.resolve({
+        data: [{ id: `sub_terminal_${calls}`, status: "canceled" }],
+        hasMore: true,
+      });
+    }),
+    /discovery limit/
+  );
+  assert.equal(calls, 3);
+});
+
+test("subscription discovery rejects a blocking third page when more results remain", async () => {
+  let calls = 0;
+
+  await assert.rejects(
+    hasBlockingSubscription("cus_existing", () => {
+      calls += 1;
+      return Promise.resolve({
+        data: [
+          {
+            id: `sub_${calls}`,
+            status: calls === 3 ? "active" : "canceled",
+          },
+        ],
+        hasMore: true,
+      });
+    }),
+    /discovery limit/
+  );
+  assert.equal(calls, 3);
+});
+
+test("subscription discovery accepts exactly three full terminal pages", async () => {
+  let calls = 0;
+
+  const result = await hasBlockingSubscription("cus_existing", () => {
+    calls += 1;
+    return Promise.resolve({
+      data: Array.from({ length: 100 }, (_, index) => ({
+        id: `sub_${calls}_${index}`,
+        status: "canceled" as const,
+      })),
+      hasMore: calls < 3,
+    });
+  });
+
+  assert.equal(result, false);
+  assert.equal(calls, 3);
+});
+
+test("Checkout Session discovery rejects an oversized history before cleanup", async () => {
+  let cleanupCalls = 0;
+  let completePageCalls = 0;
+
+  await assert.rejects(
+    reconcileCheckoutSessions({
+      attemptId: "attempt-current",
+      attemptState: { kind: "fresh" },
+      cleanupSessions: () => {
+        cleanupCalls += 1;
+        return Promise.resolve([]);
+      },
+      customerId: "cus_existing",
+      listPage(input) {
+        if (input.status !== "complete") {
+          return Promise.resolve({ data: [], hasMore: false });
+        }
+        completePageCalls += 1;
+        if (completePageCalls > 3) {
+          throw new Error("Unbounded fourth Checkout Session page.");
+        }
+        return Promise.resolve({
+          data: Array.from({ length: 100 }, (_, index) =>
+            checkoutSession({
+              attemptId: `other-attempt-${completePageCalls}-${index}`,
+              id: `cs_${completePageCalls}_${index}`,
+              status: "complete",
+            })
+          ),
+          hasMore: true,
+        });
+      },
+      priceId: "price_configured",
+      providerIdempotencyKey: "provider-key",
+      retrieve: () => Promise.reject(new Error("Retrieval was not expected.")),
+      userId: "user-1",
+    }),
+    /discovery limit/
+  );
+
+  assert.equal(completePageCalls, 3);
+  assert.equal(cleanupCalls, 0);
+});
+
+test("Checkout Session discovery caps aggregate requests across statuses", async () => {
+  let cleanupCalls = 0;
+  let requestCalls = 0;
+  const callsByStatus = new Map<string, number>();
+
+  await assert.rejects(
+    reconcileCheckoutSessions({
+      attemptId: "attempt-current",
+      attemptState: { kind: "fresh" },
+      cleanupSessions: () => {
+        cleanupCalls += 1;
+        return Promise.resolve([]);
+      },
+      customerId: "cus_existing",
+      listPage(input) {
+        requestCalls += 1;
+        const status = input.status ?? "open";
+        const statusCalls = (callsByStatus.get(status) ?? 0) + 1;
+        callsByStatus.set(status, statusCalls);
+        return Promise.resolve({
+          data: [
+            checkoutSession({
+              attemptId: `other-${status}-${statusCalls}`,
+              id: `cs_${status}_${statusCalls}`,
+              status,
+            }),
+          ],
+          hasMore: statusCalls === 1,
+        });
+      },
+      priceId: "price_configured",
+      providerIdempotencyKey: "provider-key",
+      retrieve: () => Promise.reject(new Error("Retrieval was not expected.")),
+      userId: "user-1",
+    }),
+    /discovery limit/
+  );
+
+  assert.equal(requestCalls, 5);
+  assert.equal(cleanupCalls, 0);
+});
+
+test("Checkout Session discovery accepts exactly 300 results", async () => {
+  let completePageCalls = 0;
+  const current = checkoutSession({
+    attemptId: "attempt-current",
+    id: "cs_current_exact_bound",
+    status: "complete",
+  });
+
+  const result = await reconcileCheckoutSessions({
+    attemptId: "attempt-current",
+    attemptState: { kind: "create_uncertain" },
+    cleanupSessions: () =>
+      Promise.reject(new Error("Cleanup was not expected.")),
+    customerId: "cus_existing",
+    listPage(input) {
+      if (input.status !== "complete") {
+        return Promise.resolve({ data: [], hasMore: false });
+      }
+      completePageCalls += 1;
+      const data = Array.from({ length: 100 }, (_, index) =>
+        checkoutSession({
+          attemptId: `other-attempt-${completePageCalls}-${index}`,
+          id: `cs_exact_${completePageCalls}_${index}`,
+          status: "complete",
+        })
+      );
+      if (completePageCalls === 3) {
+        data[99] = current;
+      }
+      return Promise.resolve({
+        data,
+        hasMore: completePageCalls < 3,
+      });
+    },
+    priceId: "price_configured",
+    providerIdempotencyKey: "provider-key",
+    retrieve: () => Promise.resolve(current),
+    userId: "user-1",
+  });
+
+  assert.deepEqual(result, {
+    kind: "complete",
+    sessionId: "cs_current_exact_bound",
+    subscriptionId: "sub_current",
+  });
+  assert.equal(completePageCalls, 3);
 });
 
 test("completed Checkout subscription references normalize string, expanded, and null values", () => {
@@ -100,9 +295,9 @@ test("current attempts are reconciled across paginated completed Sessions", asyn
   const result = await reconcileCheckoutSessions({
     attemptId: "attempt-current",
     attemptState: { kind: "create_uncertain" },
+    cleanupSessions: () =>
+      Promise.reject(new Error("Expiration was not expected.")),
     customerId: "cus_existing",
-    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
-    expire: () => Promise.resolve(),
     listPage(input) {
       cursors.push({
         startingAfter: input.starting_after,
@@ -148,9 +343,9 @@ test("a listed open current attempt routes a retrieved completed Session through
   const result = await reconcileCheckoutSessions({
     attemptId: "attempt-current",
     attemptState: { kind: "session_created", sessionId: listed.id },
+    cleanupSessions: () =>
+      Promise.reject(new Error("Expiration was not expected.")),
     customerId: "cus_existing",
-    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
-    expire: () => Promise.resolve(),
     listPage(input) {
       return Promise.resolve({
         data: input.status === "open" ? [listed] : [],
@@ -184,9 +379,9 @@ test("a listed reusable Session that expires before retrieve is retired", async 
   const result = await reconcileCheckoutSessions({
     attemptId: "attempt-current",
     attemptState: { kind: "fresh" },
+    cleanupSessions: () =>
+      Promise.reject(new Error("Expiration was not expected.")),
     customerId: "cus_existing",
-    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
-    expire: () => Promise.resolve(),
     listPage(input) {
       return Promise.resolve({
         data: input.status === "open" ? [listed] : [],
@@ -212,18 +407,23 @@ test("an app-owned open Session from another attempt is expired instead of reuse
     id: "cs_older_attempt",
     status: "open",
   });
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: CheckoutSessionStatus = "open";
   const expired: string[] = [];
   const result = await reconcileCheckoutSessions({
     attemptId: "attempt-current",
     attemptState: { kind: "fresh" },
-    customerId: "cus_existing",
-    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
-    expire(sessionId) {
-      expired.push(sessionId);
+    cleanupSessions(input) {
+      expired.push(...input.sessionIds);
       status = "expired";
-      return Promise.resolve();
+      return Promise.resolve(
+        input.sessionIds.map((sessionId) => ({
+          sessionId,
+          status: "expired" as const,
+          subscriptionId: null,
+        }))
+      );
     },
+    customerId: "cus_existing",
     listPage(input) {
       return Promise.resolve({
         data: input.status === "open" ? [listed] : [],
@@ -251,12 +451,11 @@ test("a retrieved Session with another Customer fails closed without expiration"
     reconcileCheckoutSessions({
       attemptId: "attempt-current",
       attemptState: { kind: "fresh" },
-      customerId: "cus_existing",
-      expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
-      expire(sessionId) {
-        expired.push(sessionId);
-        return Promise.resolve();
+      cleanupSessions(input) {
+        expired.push(...input.sessionIds);
+        return Promise.resolve([]);
       },
+      customerId: "cus_existing",
       listPage(input) {
         return Promise.resolve({
           data: input.status === "open" ? [listed] : [],
@@ -283,18 +482,23 @@ test("an app-owned retrieved Session with changed attempt metadata is expired be
     id: "cs_changed_attempt",
     status: "open",
   });
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: CheckoutSessionStatus = "open";
   const expired: string[] = [];
   const result = await reconcileCheckoutSessions({
     attemptId: "attempt-current",
     attemptState: { kind: "session_created", sessionId: listed.id },
-    customerId: "cus_existing",
-    expirationIdempotencyKey: (sessionId) => `expire-${sessionId}`,
-    expire(sessionId) {
-      expired.push(sessionId);
+    cleanupSessions(input) {
+      expired.push(...input.sessionIds);
       status = "expired";
-      return Promise.resolve();
+      return Promise.resolve(
+        input.sessionIds.map((sessionId) => ({
+          sessionId,
+          status: "expired" as const,
+          subscriptionId: null,
+        }))
+      );
     },
+    customerId: "cus_existing",
     listPage(input) {
       return Promise.resolve({
         data: input.status === "open" ? [listed] : [],

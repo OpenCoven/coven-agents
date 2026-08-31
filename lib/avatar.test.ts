@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { avatarFor, generatedAvatar, isStorableAvatarUrl } from "./avatar";
+import {
+  avatarFor,
+  avatarSessionRefreshStatus,
+  generatedAvatar,
+  isStorableAvatarUrl,
+  refreshAvatarSession,
+} from "./avatar";
 
 const UUID_A = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
 const UUID_B = "9c858901-8a57-4791-81fe-4c455b099bc9";
@@ -95,4 +101,36 @@ test("the avatar follows the id, not the email", () => {
     avatarFor({ id: UUID_A, image: null }),
     avatarFor({ id: UUID_A, image: null })
   );
+});
+
+test("avatar refresh status distinguishes updated, stale, and missing sessions", () => {
+  assert.equal(
+    avatarSessionRefreshStatus("https://example.com/new.png", {
+      user: { image: "https://example.com/new.png" },
+    }),
+    "refreshed"
+  );
+  assert.equal(
+    avatarSessionRefreshStatus("https://example.com/new.png", {
+      user: { image: "https://example.com/old.png" },
+    }),
+    "deferred"
+  );
+  assert.equal(avatarSessionRefreshStatus(null, null), "deferred");
+});
+
+test("avatar refresh posts an empty signal and succeeds only with the stored image", async () => {
+  const argumentsReceived: unknown[] = [];
+  const expectedImage = "https://example.com/new.png";
+  const refreshed = await refreshAvatarSession(expectedImage, (data) => {
+    argumentsReceived.push(data);
+    return Promise.resolve({ user: { image: expectedImage } });
+  });
+  const stale = await refreshAvatarSession(expectedImage, () =>
+    Promise.resolve({ user: { image: "https://example.com/old.png" } })
+  );
+
+  assert.deepEqual(argumentsReceived, [{}]);
+  assert.equal(refreshed, "refreshed");
+  assert.equal(stale, "deferred");
 });

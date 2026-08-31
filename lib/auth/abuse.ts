@@ -1,20 +1,29 @@
 import { ipAddress } from "@vercel/functions";
+import { readBoundedBytes } from "@/lib/abuse/body";
 import {
   abuseAdmissionResponse,
   enforceAbusePolicy,
 } from "@/lib/abuse/enforce";
+import { abusePolicyFor } from "@/lib/abuse/policy";
 import type { AbuseStore } from "@/lib/abuse/store";
 import type { AbuseRoute } from "@/lib/abuse/types";
+import type { VerifiedJwtIdentity } from "@/lib/auth/verified-jwt";
 
-type AuthAbuseRoute = Extract<AbuseRoute, "auth_callback" | "auth_start">;
+type AuthAbuseRoute = Extract<
+  AbuseRoute,
+  "auth_callback" | "auth_session_update" | "auth_start"
+>;
 
 type AuthAbuseOptions = {
   basePath?: string;
+  enforceAbuse?: typeof enforceAbusePolicy;
+  readIdentity?: (request: Request) => Promise<VerifiedJwtIdentity | null>;
   store?: AbuseStore;
 };
 
 const AUTH_SIGNIN_PATH = /^\/api\/auth\/signin(?:\/[^/]+)?\/?$/;
 const AUTH_CALLBACK_PATH = /^\/api\/auth\/callback\/[^/]+\/?$/;
+const AUTH_SESSION_PATH = /^\/api\/auth\/session\/?$/;
 
 export function authAbuseRoute(
   method: string,
@@ -30,6 +39,9 @@ export function authAbuseRoute(
     AUTH_CALLBACK_PATH.test(normalizedPathname)
   ) {
     return "auth_callback";
+  }
+  if (method === "POST" && AUTH_SESSION_PATH.test(normalizedPathname)) {
+    return "auth_session_update";
   }
   return null;
 }
@@ -51,7 +63,88 @@ export function withAuthAbusePolicy<
       options.basePath ?? process.env.NEXT_PUBLIC_BASE_PATH
     );
     if (route) {
-      const admission = await enforceAbusePolicy({
+      if (route === "auth_session_update") {
+        const ipAdmission = await (options.enforceAbuse ?? enforceAbusePolicy)({
+          ip: ipAddress(request) ?? null,
+          route: "auth_session_update_ip",
+          ...(options.store ? { store: options.store } : {}),
+        });
+        if (ipAdmission.kind !== "allowed") {
+          return abuseAdmissionResponse(ipAdmission);
+        }
+
+        const body = await readBoundedBytes(
+          request,
+          abusePolicyFor("auth_session_update").bodyBytes
+        );
+        if (body.kind === "too_large") {
+          return Response.json(
+            {
+              error: "payload_too_large",
+              message: "Session update payload is too large.",
+            },
+            {
+              headers: { "cache-control": "no-store" },
+              status: 413,
+            }
+          );
+        }
+        if (body.kind === "read_error") {
+          return Response.json(
+            {
+              error: "request_body_unreadable",
+              message:
+                "Could not read the session update payload. Retry the request.",
+            },
+            {
+              headers: { "cache-control": "no-store" },
+              status: 400,
+            }
+          );
+        }
+        if (body.kind === "invalid") {
+          return Response.json(
+            {
+              error: "invalid_request_body",
+              message: "Session update payload framing is invalid.",
+            },
+            {
+              headers: { "cache-control": "no-store" },
+              status: 400,
+            }
+          );
+        }
+
+        const boundedRequest = requestWithBody(request, body.value);
+        let identity: VerifiedJwtIdentity | null;
+        try {
+          identity = await (options.readIdentity ?? readVerifiedJwtIdentity)(
+            boundedRequest
+          );
+        } catch {
+          return abuseAdmissionResponse({
+            kind: "unavailable",
+            responseStatus: 503,
+          });
+        }
+        if (identity) {
+          const userAdmission = await (
+            options.enforceAbuse ?? enforceAbusePolicy
+          )({
+            ip: null,
+            route: "auth_session_update",
+            ...(options.store ? { store: options.store } : {}),
+            userId: identity.userId,
+          });
+          if (userAdmission.kind !== "allowed") {
+            return abuseAdmissionResponse(userAdmission);
+          }
+        }
+
+        return handler(boundedRequest, ...args);
+      }
+
+      const admission = await (options.enforceAbuse ?? enforceAbusePolicy)({
         /**
          * Degrades on store failure like every other route, and this is the
          * second reversal of this exact decision in one night, so the record
@@ -65,7 +158,7 @@ export function withAuthAbusePolicy<
          */
         ip: ipAddress(request) ?? null,
         route,
-        store: options.store,
+        ...(options.store ? { store: options.store } : {}),
       });
       if (admission.kind !== "allowed") {
         return abuseAdmissionResponse(admission);
@@ -86,4 +179,28 @@ function stripBasePath(pathname: string, basePath: string | undefined): string {
   return pathname.startsWith(`${normalizedBasePath}/`)
     ? pathname.slice(normalizedBasePath.length)
     : pathname;
+}
+
+function requestWithBody<RequestType extends Request>(
+  request: RequestType,
+  body: Uint8Array
+): RequestType {
+  const RequestConstructor = request.constructor as new (
+    input: RequestInfo | URL,
+    init?: RequestInit
+  ) => RequestType;
+
+  return new RequestConstructor(request.url, {
+    body: body as BodyInit,
+    headers: new Headers(request.headers),
+    method: request.method,
+    signal: request.signal,
+  });
+}
+
+async function readVerifiedJwtIdentity(
+  request: Request
+): Promise<VerifiedJwtIdentity | null> {
+  const { verifiedJwtIdentity } = await import("./verified-jwt");
+  return verifiedJwtIdentity(request);
 }

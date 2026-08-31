@@ -41,6 +41,14 @@ import {
   reservationUsage,
 } from "../billing/run-reservations";
 import { countRun, usageFor } from "../billing/usage";
+import {
+  type StripeEventUpdateInput,
+  type StripeEventWriteResult,
+  type StripeManualReconciliationWriteResult,
+  type StripeUserMutation,
+  type StripeWebhookManualReconciliationRecord,
+  stripeEventMutation,
+} from "../billing/webhook";
 import { ChatbotError } from "../errors";
 import {
   type Chat,
@@ -52,11 +60,16 @@ import {
   type Suggestion,
   stream,
   stripeEvent,
+  stripeReconciliation,
   suggestion,
   type User,
   user,
   vote,
 } from "./schema";
+import {
+  checkoutAttemptProvenanceWhere,
+  stripeEventOwnerWhere,
+} from "./stripe-event";
 
 const client = postgres(process.env.POSTGRES_URL ?? "");
 export const db = drizzle(client);
@@ -228,40 +241,110 @@ export async function attachStripeCustomer(
   }
 }
 
-export async function applySubscriptionUpdate(input: {
-  billingPeriodStart: Date;
-  customerId: string;
-  subscribedUntil: Date;
-  userId: string;
+export async function findCheckoutAttemptState(input: {
+  attemptId: string;
+  ownerId: string;
 }) {
   try {
-    return await db
-      .update(user)
-      .set({
-        billingPeriodStart: input.billingPeriodStart,
-        stripeCustomerId: input.customerId,
-        subscribedUntil: input.subscribedUntil,
-      })
-      .where(eq(user.id, input.userId));
+    const [record] = await db
+      .select({ requestHash: idempotencyRecord.requestHash })
+      .from(idempotencyRecord)
+      .where(checkoutAttemptProvenanceWhere(input))
+      .limit(1);
+    return record ? parseCheckoutAttemptState(record.requestHash) : null;
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
   }
 }
 
-/**
- * Records a Stripe event id, returning false if it was already processed.
- *
- * The insert IS the idempotency check. A lookup-then-write would race a
- * concurrent redelivery of the same event, and Stripe retries routinely.
- */
-export async function claimStripeEvent(eventId: string): Promise<boolean> {
+export async function recordStripeReconciliation(
+  record: StripeWebhookManualReconciliationRecord
+): Promise<StripeManualReconciliationWriteResult> {
   try {
-    const claimed = await db
-      .insert(stripeEvent)
-      .values({ id: eventId })
-      .onConflictDoNothing()
-      .returning({ id: stripeEvent.id });
-    return claimed.length > 0;
+    return await db.transaction(async (transaction) => {
+      const claimed = await transaction
+        .insert(stripeEvent)
+        .values({ id: record.eventId })
+        .onConflictDoNothing()
+        .returning({ id: stripeEvent.id });
+      if (claimed.length === 0) {
+        return "duplicate";
+      }
+
+      await transaction.insert(stripeReconciliation).values({
+        eventId: record.eventId,
+        eventType: record.eventType,
+        reason: record.reason,
+        status: "pending",
+      });
+      return {
+        kind: "manual_reconciliation",
+        record: { ...record, status: "pending" },
+      };
+    });
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
+export async function applyStripeEventUpdate(
+  input: StripeEventUpdateInput
+): Promise<StripeEventWriteResult> {
+  try {
+    return await db.transaction(async (transaction) => {
+      const claimed = await transaction
+        .insert(stripeEvent)
+        .values({ id: input.eventId })
+        .onConflictDoNothing()
+        .returning({ id: stripeEvent.id });
+      if (claimed.length === 0) {
+        return "duplicate";
+      }
+
+      const [owner] = await transaction
+        .select()
+        .from(user)
+        .where(stripeEventOwnerWhere(input))
+        .for("update")
+        .limit(1);
+      if (!owner) {
+        throw new Error("Stripe webhook owner does not exist.");
+      }
+
+      const decision = stripeEventMutation(owner, input);
+      if (
+        decision &&
+        "kind" in decision &&
+        decision.kind === "manual_reconciliation"
+      ) {
+        const record: StripeWebhookManualReconciliationRecord = {
+          eventId: input.eventId,
+          eventType:
+            input.eventType === "invoice_paid"
+              ? "invoice.paid"
+              : "invoice.payment_failed",
+          reason: decision.reason,
+          status: "pending",
+        };
+        await transaction.insert(stripeReconciliation).values(record);
+        return { kind: "manual_reconciliation", record };
+      }
+      const mutation = decision as StripeUserMutation | null;
+      if (!mutation) {
+        return "applied";
+      }
+
+      const updated = await transaction
+        .update(user)
+        .set(mutation)
+        .where(eq(user.id, owner.id))
+        .returning({ id: user.id });
+
+      if (updated.length !== 1) {
+        throw new Error("Stripe webhook owner update failed.");
+      }
+      return "applied";
+    });
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
   }

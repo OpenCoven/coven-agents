@@ -30,6 +30,11 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 import type { StoredIdempotencyResponseEnvelope } from "../abuse/idempotency-response";
+import {
+  STRIPE_RECONCILIATION_EVENT_TYPES,
+  STRIPE_RECONCILIATION_REASONS,
+  STRIPE_RECONCILIATION_STATUSES,
+} from "../billing/stripe-reconciliation";
 
 const runnerMaxCommandResultsSql = sql.raw(
   String(AGENT_RUNNER_LIMITS.maxCommandResults)
@@ -394,6 +399,57 @@ export const stripeEvent = pgTable("StripeEvent", {
 });
 
 export type StripeEvent = InferSelectModel<typeof stripeEvent>;
+
+/**
+ * Sanitized operator evidence for Stripe events that cannot be applied
+ * automatically.
+ *
+ * The event id is both the primary key and the only provider identifier
+ * retained here. User, Customer, Subscription, payload, and free-form fields
+ * are deliberately absent.
+ */
+export const stripeReconciliation = pgTable(
+  "StripeReconciliation",
+  {
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    eventId: varchar("eventId", { length: 64 })
+      .primaryKey()
+      .notNull()
+      .references(() => stripeEvent.id, { onDelete: "restrict" }),
+    eventType: varchar("eventType", {
+      enum: STRIPE_RECONCILIATION_EVENT_TYPES,
+      length: 32,
+    }).notNull(),
+    reason: varchar("reason", {
+      enum: STRIPE_RECONCILIATION_REASONS,
+      length: 64,
+    }).notNull(),
+    status: varchar("status", {
+      enum: STRIPE_RECONCILIATION_STATUSES,
+      length: 16,
+    })
+      .notNull()
+      .default("pending"),
+  },
+  (table) => [
+    check(
+      "StripeReconciliation_eventType_check",
+      sql`${table.eventType} in ('invoice.paid', 'invoice.payment_failed')`
+    ),
+    check(
+      "StripeReconciliation_reason_check",
+      sql`${table.reason} in ('invoice_ambiguous_entitlement', 'invoice_conflicting_paid_interval', 'invoice_contradictory_subscription', 'invoice_invalid_period', 'invoice_invalid_reference')`
+    ),
+    check(
+      "StripeReconciliation_status_check",
+      sql`${table.status} in ('pending', 'acknowledged', 'resolved')`
+    ),
+  ]
+);
+
+export type StripeReconciliation = InferSelectModel<
+  typeof stripeReconciliation
+>;
 
 /**
  * One durable claim for a costly request.
