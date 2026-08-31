@@ -215,6 +215,20 @@ test("does not leak nested or malformed operational metadata from prior handoffs
   assert.match(task, /\[REDACTED\]/u);
 });
 
+test("does not propagate balanced malformed operational metadata", () => {
+  const marker = "TASK_BALANCED_MALFORMED_SECRET";
+  const task = buildTeamStepTask(
+    baseInput({
+      priorHandoffs: [
+        priorHandoff(`{"safe":1 "raw\\u004cogs":{"nested":["${marker}"]}}`),
+      ],
+    })
+  );
+
+  assert.equal(task.includes(marker), false);
+  assert.match(task, /\[REDACTED\]/u);
+});
+
 test("bounds multibyte tasks at the runner limit with an explicit marker", () => {
   const task = buildTeamStepTask(
     baseInput({

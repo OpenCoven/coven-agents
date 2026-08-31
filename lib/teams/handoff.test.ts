@@ -264,6 +264,176 @@ test("rejects malformed metadata with escaped sensitive keys before handoff task
   assert.match(serialized, /\[REDACTED\]/u);
 });
 
+test("fails closed for balanced malformed JSON with sensitive keys anywhere in the candidate", () => {
+  const cases = [
+    ["raw\\u004cogs", "BALANCED_RAW_LOG_SECRET"],
+    ["PrOvIdErRegion", "BALANCED_PROVIDER_SECRET"],
+    ["se\\u0073sionContext", "BALANCED_SESSION_SECRET"],
+    ["TENANT-context", "BALANCED_TENANT_SECRET"],
+    ["creden\\u0074ialStore", "BALANCED_CREDENTIAL_SECRET"],
+    ["ENC\\u0052YPTEDPayload", "BALANCED_ENCRYPTED_SECRET"],
+  ] as const;
+  const output = cases
+    .map(([key, marker]) => `{"safe":1 "${key}":{"nested":["${marker}"]}}`)
+    .join("\n");
+  const result = built(buildTeamHandoff({ output }));
+  const serialized = JSON.stringify(result.handoff);
+
+  for (const [, marker] of cases) {
+    assert.equal(serialized.includes(marker), false);
+  }
+  assert.match(serialized, /\[REDACTED\]/u);
+});
+
+test("redacts provider-neutral operational keys after punctuation normalization", () => {
+  const markers = [
+    "PROVIDER_OPERATIONAL_SECRET",
+    "PROVIDER_REGION_SECRET",
+    "RAW_DOTTED_LOG_SECRET",
+    "SESSION_CONTEXT_SECRET",
+    "TENANT_CONTEXT_SECRET",
+    "CREDENTIAL_BUNDLE_SECRET",
+    "ENCRYPTED_PAYLOAD_SECRET",
+    "COMMAND_ID_SECRET",
+    "BUILD_LOG_SECRET",
+  ];
+  const result = built(
+    buildTeamHandoff({
+      output: JSON.stringify({
+        buildLogs: markers[8],
+        commandId: markers[7],
+        credentialBundle: markers[5],
+        encryptedPayload: markers[6],
+        providerOperationalMetadata: markers[0],
+        providerRegion: markers[1],
+        "raw.logs": markers[2],
+        safe: "PUBLIC_VALUE",
+        sessionContext: markers[3],
+        tenantContext: markers[4],
+      }),
+    })
+  );
+  const serialized = JSON.stringify(result.handoff);
+
+  for (const marker of markers) {
+    assert.equal(serialized.includes(marker), false);
+  }
+  assert.equal(serialized.includes("PUBLIC_VALUE"), true);
+});
+
+test("validates all evidence before preserving the earliest records at count limits", () => {
+  const commandEvidence = Array.from({ length: 257 }, (_, index) => ({
+    command: String(index),
+    exitCode: 0,
+    stderr: "",
+    stdout: "",
+  }));
+  const fileEvidence = Array.from({ length: 257 }, (_, index) => ({
+    operation: "create",
+    path: `lib/file-${index}.ts`,
+  }));
+  const commandResult = built(
+    buildTeamHandoff({
+      commandEvidence,
+      output: "Evidence summary.",
+    })
+  );
+  const fileResult = built(
+    buildTeamHandoff({
+      fileEvidence,
+      output: "Evidence summary.",
+    })
+  );
+
+  assert.equal(commandResult.handoff.commandEvidence.length, 256);
+  assert.equal(commandResult.handoff.commandEvidence[0]?.command, "0");
+  assert.equal(commandResult.handoff.commandEvidence.at(-1)?.command, "255");
+  assert.match(
+    commandResult.handoff.output,
+    /evidence (?:omitted|truncated)/iu
+  );
+  assert.equal(fileResult.handoff.fileEvidence.length, 256);
+  assert.equal(fileResult.handoff.fileEvidence[0]?.path, "lib/file-0.ts");
+  assert.equal(fileResult.handoff.fileEvidence.at(-1)?.path, "lib/file-255.ts");
+  assert.match(fileResult.handoff.output, /evidence (?:omitted|truncated)/iu);
+});
+
+test("malformed trailing evidence cannot crowd out earlier valid evidence", () => {
+  const result = built(
+    buildTeamHandoff({
+      commandEvidence: [
+        {
+          command: "earliest-valid-command",
+          exitCode: 0,
+          stderr: "",
+          stdout: "passed",
+        },
+        ...Array.from({ length: 256 }, () => ({
+          command: null,
+          stderr: "",
+          stdout: "",
+        })),
+      ],
+      fileEvidence: [
+        {
+          operation: "create",
+          path: "lib/earliest-valid-file.ts",
+        },
+        ...Array.from({ length: 256 }, () => ({
+          operation: "unsafe",
+          path: "lib/invalid.ts",
+        })),
+      ],
+      output: "x".repeat(TEAM_LIMITS.maxHandoffLength),
+    })
+  );
+
+  assert.equal(result.handoff.commandEvidence.length, 1);
+  assert.equal(
+    result.handoff.commandEvidence[0]?.command,
+    "earliest-valid-command"
+  );
+  assert.equal(result.handoff.fileEvidence.length, 1);
+  assert.equal(
+    result.handoff.fileEvidence[0]?.path,
+    "lib/earliest-valid-file.ts"
+  );
+  assert.match(result.handoff.output, /evidence (?:omitted|truncated)/iu);
+  assert.ok(result.handoff.output.endsWith(TEAM_HANDOFF_TRUNCATION_MARKER));
+});
+
+test("rejects unknown top-level input keys without exposing their values", () => {
+  const cases = [
+    { consumedByte: 1, output: "ok", secret: "MISSPELLED_BUDGET_SECRET" },
+    { output: "ok", provider: "UNEXPECTED_PROVIDER_SECRET" },
+    { output: "ok", sessionId: "UNEXPECTED_SESSION_SECRET" },
+    { output: "ok", tenantMetadata: "UNEXPECTED_TENANT_SECRET" },
+  ];
+
+  for (const candidate of cases) {
+    const result = buildTeamHandoff(
+      candidate as unknown as Parameters<typeof buildTeamHandoff>[0]
+    );
+    assert.equal(result.kind, "invalid");
+    if (result.kind === "invalid") {
+      assert.equal(result.code, "invalid-input");
+    }
+    for (const value of Object.values(candidate)) {
+      if (typeof value === "string" && value.endsWith("_SECRET")) {
+        assert.equal(JSON.stringify(result).includes(value), false);
+      }
+    }
+  }
+});
+
+test("preserves harmless valid JSON source text byte-for-byte", () => {
+  const source =
+    '{"note":"provider: public","large":9007199254740993,"duplicate":"first","duplicate":"second"}';
+  const result = built(buildTeamHandoff({ output: source }));
+
+  assert.equal(result.handoff.output, source);
+});
+
 test("keeps identical command records associated with their own output after truncation", () => {
   const firstOutput = `FIRST_COMMAND_OUTPUT:${"a".repeat(12_000)}`;
   const secondOutput = `SECOND_COMMAND_OUTPUT:${"b".repeat(12_000)}`;

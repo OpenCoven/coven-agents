@@ -18,16 +18,18 @@ export const TEAM_HANDOFF_TRUNCATION_MARKER =
   "\n[team handoff truncated for public safety]";
 
 const EVIDENCE_TRUNCATION_MARKER = "\n[evidence truncated for public safety]";
-const OPERATIONAL_METADATA_KEY =
-  "(?:tenant(?:[-_\\s]?(?:id|metadata))?|provider(?:[-_\\s]?(?:id|metadata|logs?))?|session(?:[-_\\s]?(?:id|metadata))?|command[-_\\s]?id|encrypted(?:[-_\\s]?(?:credential|record|records))?|credentials?(?:[-_\\s]?(?:id|record|records|metadata))?|daytona[-_\\s]?logs|raw[-_\\s]?logs|daytona[-_\\s]?(?:session|command)[-_\\s]?id)";
-const operationalMetadataLine = new RegExp(
-  String.raw`^(\s*["']?${OPERATIONAL_METADATA_KEY}["']?\s*[:=]\s*).*$`,
-  "gimu"
-);
-const operationalMetadataProperty = new RegExp(
-  String.raw`(["']?${OPERATIONAL_METADATA_KEY}["']?\s*:\s*)(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^,}\r\n]+)`,
-  "gimu"
-);
+const EVIDENCE_OMISSION_MARKER =
+  "\n[evidence omitted or truncated for public safety]";
+const TEAM_HANDOFF_INPUT_KEYS = new Set([
+  "commandEvidence",
+  "consumedBytes",
+  "fileEvidence",
+  "output",
+  "priorHandoffs",
+]);
+const metadataLine = /^(\s*["']?([^"'=:]+?)["']?\s*[:=]\s*).*$/gmu;
+const metadataProperty =
+  /(["']((?:\\[^\r\n]|[^"'\\\r\n])*)["']\s*:\s*)(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^,}\r\n]+)/gmu;
 
 export type BuildTeamHandoffInput = {
   commandEvidence?: readonly unknown[];
@@ -73,19 +75,20 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function isOperationalMetadataKey(value: string): boolean {
-  const compact = value.replace(/[-_\s]/gu, "");
-  const normalized = compact.toLowerCase();
+  const normalized = value.replace(/[^a-z0-9]/giu, "").toLowerCase();
   const isLogField =
     normalized === "logs" ||
-    /[-_\s]logs$/iu.test(value) ||
-    /Logs$/u.test(compact) ||
-    /^(?:daytona|provider|raw)logs$/u.test(normalized);
+    normalized === "log" ||
+    normalized.endsWith("logs") ||
+    normalized.includes("rawlog");
   return (
     isLogField ||
     normalized.includes("credential") ||
-    normalized.startsWith("encrypted") ||
-    /^(?:provider|session|tenant)(?:id|metadata)?$/u.test(normalized) ||
-    /^(?:daytona)?(?:command|session)id$/u.test(normalized)
+    normalized.includes("encrypted") ||
+    normalized.includes("provider") ||
+    normalized.includes("session") ||
+    normalized.includes("tenant") ||
+    normalized.includes("commandid")
   );
 }
 
@@ -133,23 +136,14 @@ function decodeJsonKeyEscapes(value: string): string | null {
 }
 
 function containsOperationalMetadataKey(value: string): boolean {
-  const doubleQuotedProperty =
-    /(?:^|[,{]\s*)"((?:\\[^\r\n]|[^"\\\r\n])*)"\s*:/gmu;
-  const singleQuotedProperty =
-    /(?:^|[,{]\s*)'((?:\\[^\r\n]|[^'\\\r\n])*)'\s*:/gmu;
+  const doubleQuotedProperty = /"((?:\\[^\r\n]|[^"\\\r\n])*)"\s*:/gmu;
+  const singleQuotedProperty = /'((?:\\[^\r\n]|[^'\\\r\n])*)'\s*:/gmu;
   for (const propertyKey of [doubleQuotedProperty, singleQuotedProperty]) {
     for (const match of value.matchAll(propertyKey)) {
       const decoded = match[1] && decodeJsonKeyEscapes(match[1]);
       if (decoded !== null && decoded && isOperationalMetadataKey(decoded)) {
         return true;
       }
-    }
-  }
-
-  const unquotedProperty = /(?:^|[,{]\s*)([^"'{}[\],:\\]+?)\s*:/gmu;
-  for (const match of value.matchAll(unquotedProperty)) {
-    if (match[1] && isOperationalMetadataKey(match[1])) {
-      return true;
     }
   }
   return false;
@@ -239,6 +233,7 @@ function filterStructuredMetadata(value: string): string {
     }
 
     const candidate = value.slice(start, end);
+    const hasOperationalMetadata = containsOperationalMetadataKey(candidate);
     let parsed: unknown;
     try {
       parsed = JSON.parse(candidate);
@@ -246,13 +241,13 @@ function filterStructuredMetadata(value: string): string {
       if (!(error instanceof SyntaxError)) {
         throw error;
       }
-      output += containsOperationalMetadataKey(candidate)
-        ? "[REDACTED]"
-        : candidate;
+      output += hasOperationalMetadata ? "[REDACTED]" : candidate;
       cursor = end;
       continue;
     }
-    output += JSON.stringify(filterStructuredValue(parsed));
+    output += hasOperationalMetadata
+      ? JSON.stringify(filterStructuredValue(parsed))
+      : candidate;
     cursor = end;
   }
   return output;
@@ -260,8 +255,15 @@ function filterStructuredMetadata(value: string): string {
 
 export function sanitizeTeamText(value: string): string {
   return sanitizeEvidenceText(filterStructuredMetadata(value))
-    .replace(operationalMetadataLine, "$1[REDACTED]")
-    .replace(operationalMetadataProperty, `$1"[REDACTED]"`);
+    .replace(metadataLine, (match, prefix: string, key: string) =>
+      isOperationalMetadataKey(key) ? `${prefix}[REDACTED]` : match
+    )
+    .replace(metadataProperty, (match, prefix: string, encodedKey: string) => {
+      const decodedKey = decodeJsonKeyEscapes(encodedKey);
+      return decodedKey && isOperationalMetadataKey(decodedKey)
+        ? `${prefix}"[REDACTED]"`
+        : match;
+    });
 }
 
 function boundedEvidenceText(value: string, maxLength: number): string {
@@ -353,6 +355,30 @@ function normalizeFile(value: unknown): FileEvidence | null {
   return parsed.success ? parsed.data : null;
 }
 
+function normalizeEvidence<T>(
+  values: readonly unknown[],
+  limit: number,
+  normalize: (value: unknown) => T | null
+): { evidence: T[]; omitted: boolean } {
+  const evidence: T[] = [];
+  let omitted = false;
+  for (const value of values) {
+    const normalized = normalize(value);
+    if (normalized === null) {
+      omitted = true;
+    } else {
+      evidence.push(normalized);
+    }
+  }
+  if (evidence.length > limit) {
+    omitted = true;
+  }
+  return {
+    evidence: evidence.slice(0, limit),
+    omitted,
+  };
+}
+
 function invalid(
   code: BuildTeamHandoffInvalidCode,
   message: string
@@ -438,10 +464,29 @@ function fitStringField(
   return `${characters.slice(0, low).join("")}${requiredSuffix}`;
 }
 
+function fitOutput(
+  value: string,
+  persistentSuffix: string,
+  limit: number,
+  render: (candidate: string) => TeamHandoff
+): string | null {
+  const complete = `${value}${persistentSuffix}`;
+  if (serializedBytes(render(complete)) <= limit) {
+    return complete;
+  }
+  return fitStringField(
+    value,
+    `${persistentSuffix}${TEAM_HANDOFF_TRUNCATION_MARKER}`,
+    limit,
+    render
+  );
+}
+
 function compactEvidence(
   commandEvidence: readonly CommandEvidence[],
   fileEvidence: readonly FileEvidence[],
-  limit: number
+  limit: number,
+  requiredOutput: string
 ): {
   commandEvidence: CommandEvidence[];
   commandSourceIndexes: number[];
@@ -459,23 +504,23 @@ function compactEvidence(
   const render = (): TeamHandoff => ({
     commandEvidence: commands.map((command) => command.evidence),
     fileEvidence: files,
-    output: TEAM_HANDOFF_TRUNCATION_MARKER,
+    output: requiredOutput,
   });
 
   while (serializedBytes(render()) > limit) {
     if (commands.length === 0 && files.length === 0) {
       return null;
     }
-    const commandBytes = commands[0]
-      ? serializedBytes(commands[0].evidence)
+    const commandBytes = commands.at(-1)
+      ? serializedBytes(commands.at(-1)?.evidence)
       : Number.NEGATIVE_INFINITY;
-    const fileBytes = files[0]
-      ? serializedBytes(files[0])
+    const fileBytes = files.at(-1)
+      ? serializedBytes(files.at(-1))
       : Number.NEGATIVE_INFINITY;
     if (commandBytes >= fileBytes) {
-      commands.shift();
+      commands.pop();
     } else {
-      files.shift();
+      files.pop();
     }
   }
   return {
@@ -493,7 +538,7 @@ function enrichCommandOutput(
 ): TeamHandoff {
   let current = handoff;
 
-  for (let index = current.commandEvidence.length - 1; index >= 0; index -= 1) {
+  for (let index = 0; index < current.commandEvidence.length; index += 1) {
     const evidence = current.commandEvidence[index];
     const sourceIndex = sourceIndexes[index];
     const sourceEvidence =
@@ -533,7 +578,17 @@ function enrichCommandOutput(
 export function buildTeamHandoff(
   input: BuildTeamHandoffInput
 ): BuildTeamHandoffResult {
-  if (!input || typeof input.output !== "string") {
+  const inputRecord = asRecord(input);
+  if (
+    !inputRecord ||
+    Object.keys(inputRecord).some((key) => !TEAM_HANDOFF_INPUT_KEYS.has(key))
+  ) {
+    return invalid(
+      "invalid-input",
+      "Team handoff input contains unexpected metadata."
+    );
+  }
+  if (typeof input.output !== "string") {
     return invalid("invalid-input", "Team handoff output must be a string.");
   }
   if (
@@ -565,32 +620,40 @@ export function buildTeamHandoff(
     );
   }
 
-  const commandEvidence = (input.commandEvidence ?? [])
-    .slice(-AGENT_RUNNER_LIMITS.maxCommandResults)
-    .map(normalizeCommand)
-    .filter((value): value is CommandEvidence => value !== null);
-  const fileEvidence = (input.fileEvidence ?? [])
-    .slice(-AGENT_RUNNER_LIMITS.maxFileOperations)
-    .map(normalizeFile)
-    .filter((value): value is FileEvidence => value !== null);
+  const normalizedCommands = normalizeEvidence(
+    input.commandEvidence ?? [],
+    AGENT_RUNNER_LIMITS.maxCommandResults,
+    normalizeCommand
+  );
+  const normalizedFiles = normalizeEvidence(
+    input.fileEvidence ?? [],
+    AGENT_RUNNER_LIMITS.maxFileOperations,
+    normalizeFile
+  );
+  const commandEvidence = normalizedCommands.evidence;
+  const fileEvidence = normalizedFiles.evidence;
+  const evidenceOmitted = normalizedCommands.omitted || normalizedFiles.omitted;
   const output = sanitizeTeamText(input.output);
-  const full = teamHandoffSchema.parse({
+  const renderFull = (candidateOutput: string): TeamHandoff => ({
     commandEvidence,
     fileEvidence,
-    output: truncateUtf8(
-      output,
-      TEAM_LIMITS.maxHandoffLength,
-      TEAM_LIMITS.maxHandoffLength,
-      TEAM_HANDOFF_TRUNCATION_MARKER
-    ),
+    output: candidateOutput,
   });
-
-  let handoff = full;
-  if (serializedBytes(handoff) > availableBytes) {
+  const persistentSuffix = evidenceOmitted ? EVIDENCE_OMISSION_MARKER : "";
+  const fittedFullOutput = fitOutput(
+    output,
+    persistentSuffix,
+    availableBytes,
+    renderFull
+  );
+  let handoff: TeamHandoff;
+  if (fittedFullOutput === null) {
+    const requiredOutput = `${EVIDENCE_OMISSION_MARKER}${TEAM_HANDOFF_TRUNCATION_MARKER}`;
     const compact = compactEvidence(
       commandEvidence,
       fileEvidence,
-      availableBytes
+      availableBytes,
+      requiredOutput
     );
     if (!compact) {
       return invalid(
@@ -605,7 +668,7 @@ export function buildTeamHandoff(
     });
     const fittedOutput = fitStringField(
       output,
-      TEAM_HANDOFF_TRUNCATION_MARKER,
+      requiredOutput,
       availableBytes,
       render
     );
@@ -621,6 +684,8 @@ export function buildTeamHandoff(
       compact.commandSourceIndexes,
       availableBytes
     );
+  } else {
+    handoff = renderFull(fittedFullOutput);
   }
 
   const parsed = teamHandoffSchema.safeParse(handoff);
