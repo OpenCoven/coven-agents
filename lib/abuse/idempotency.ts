@@ -118,6 +118,7 @@ export async function runIdempotentOperation(options: {
   request: JsonValue;
   responseStorage?: IdempotencyResponseStorage;
   retentionMs: number;
+  shouldCacheResponse?: (response: IdempotencyResponse) => boolean;
   store: IdempotencyStore;
 }): Promise<IdempotencyResult> {
   if (options.idempotencyKey === null) {
@@ -269,15 +270,19 @@ export async function runIdempotentOperation(options: {
     return { kind: "in_progress" };
   }
 
-  if (response.status < 200 || response.status >= 300) {
-    const releaseResult = await options.store.release({ claim });
-    if (releaseResult === "lost") {
-      return { kind: "in_progress" };
-    }
-    return { kind: "response", replayed: false, response };
+  let shouldCacheResponse =
+    response.status >= 200 &&
+    response.status < 300 &&
+    options.cacheSuccessfulResponse !== false;
+  try {
+    shouldCacheResponse =
+      shouldCacheResponse && (options.shouldCacheResponse?.(response) ?? true);
+  } catch (error) {
+    await options.store.release({ claim });
+    throw error;
   }
 
-  if (options.cacheSuccessfulResponse === false) {
+  if (!shouldCacheResponse) {
     const releaseResult = await options.store.release({ claim });
     if (releaseResult === "lost") {
       return { kind: "in_progress" };

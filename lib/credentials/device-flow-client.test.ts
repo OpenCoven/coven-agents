@@ -38,6 +38,7 @@ function createHarness({
     valid: true,
   };
   let clock = 1_000_000;
+  let nextKey = 1;
   let nextHandle = 1;
   const scheduled: ScheduledTask[] = [];
   const responses: Array<
@@ -80,7 +81,11 @@ function createHarness({
         ? response(signal, method)
         : Promise.resolve(response);
     },
-    generateKey: () => `attempt-${requests.length + 1}`,
+    generateKey: () => {
+      const key = `attempt-${nextKey}`;
+      nextKey += 1;
+      return key;
+    },
     getAuthority: () => authority,
     now: () => clock,
     onAuthorityInvalidated: (revision) => invalidations.push(revision),
@@ -343,6 +348,11 @@ test("successful device flow still opens GitHub, clears the code, and connects",
   assert.equal(harness.scheduled.length, 0);
   assert.deepEqual(harness.states.at(-1), { busy: false, started: null });
   assert.equal(harness.notices.at(-1)?.message, "Copilot connected.");
+  assert.ok(harness.requests[1]?.idempotencyKey);
+  assert.notEqual(
+    harness.requests[0]?.idempotencyKey,
+    harness.requests[1]?.idempotencyKey
+  );
 });
 
 test("start and poll use the injected application-path endpoint", async () => {
@@ -364,4 +374,67 @@ test("start and poll use the injected application-path endpoint", async () => {
       { input: "/demo/api/credentials/device", method: "PUT" },
     ]
   );
+});
+
+test("every retry in one device flow reuses its poll idempotency key", async () => {
+  const harness = createHarness();
+  harness.responses.push(
+    jsonResponse(STARTED),
+    () => Promise.reject(new Error("authorized response lost")),
+    jsonResponse({ status: "authorized" })
+  );
+
+  await harness.controller.start();
+  await harness.runNext();
+  await harness.runNext();
+
+  const pollKeys = harness.requests
+    .filter(({ method }) => method === "PUT")
+    .map(({ idempotencyKey }) => idempotencyKey);
+  assert.equal(pollKeys.length, 2);
+  assert.ok(pollKeys[0]);
+  assert.deepEqual(pollKeys, [pollKeys[0], pollKeys[0]]);
+  assert.equal(harness.connected, 1);
+});
+
+test("restarting a device flow creates a new poll idempotency key", async () => {
+  const harness = createHarness();
+  harness.responses.push(
+    jsonResponse(STARTED),
+    jsonResponse({ status: "denied" }),
+    jsonResponse(STARTED),
+    jsonResponse({ status: "authorized" })
+  );
+
+  await harness.controller.start();
+  await harness.runNext();
+  await harness.controller.start();
+  await harness.runNext();
+
+  const pollKeys = harness.requests
+    .filter(({ method }) => method === "PUT")
+    .map(({ idempotencyKey }) => idempotencyKey);
+  assert.equal(pollKeys.length, 2);
+  assert.ok(pollKeys[0]);
+  assert.ok(pollKeys[1]);
+  assert.notEqual(pollKeys[0], pollKeys[1]);
+});
+
+test("an in-progress replay response retries the same poll instead of failing", async () => {
+  const harness = createHarness();
+  harness.responses.push(
+    jsonResponse(STARTED),
+    jsonResponse({ error: "request_in_progress" }, 409),
+    jsonResponse({ status: "authorized" })
+  );
+
+  await harness.controller.start();
+  await harness.runNext();
+  await harness.runNext();
+
+  assert.equal(harness.connected, 1);
+  const pollKeys = harness.requests
+    .filter(({ method }) => method === "PUT")
+    .map(({ idempotencyKey }) => idempotencyKey);
+  assert.deepEqual(pollKeys, [pollKeys[0], pollKeys[0]]);
 });

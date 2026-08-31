@@ -51,6 +51,7 @@ type ActiveFlow = {
   authority: DeviceFlowAuthorityContext;
   deadline: number;
   generation: number;
+  pollIdempotencyKey: string;
   pollIntervalMs: number;
   transientRetryMs: number;
 };
@@ -323,7 +324,10 @@ export function createDeviceFlowController(
     try {
       response = await dependencies.fetcher(dependencies.deviceEndpoint, {
         body: JSON.stringify({ deviceCode: session.deviceCode }),
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": flow.pollIdempotencyKey,
+        },
         method: "PUT",
         signal: controller.signal,
       });
@@ -361,6 +365,23 @@ export function createDeviceFlowController(
         () => poll(flow, session),
         retryAfterDelay(response, flow)
       );
+      return;
+    }
+    if (response.status === 409) {
+      const body = await responseJson(response);
+      if (!isCurrent(flow)) {
+        return;
+      }
+      if (isRecord(body) && body.error === "request_in_progress") {
+        requestController = null;
+        scheduleWithinDeadline(
+          flow,
+          () => poll(flow, session),
+          transientDelay(flow, flow.pollIntervalMs)
+        );
+        return;
+      }
+      terminalHttpError("continue", response.status);
       return;
     }
     if (response.status >= 500 && response.status <= 599) {
@@ -538,6 +559,7 @@ export function createDeviceFlowController(
         authority,
         deadline: now() + DEVICE_FLOW_DEADLINE_MS,
         generation,
+        pollIdempotencyKey: dependencies.generateKey(),
         pollIntervalMs: MIN_RETRY_MS,
         transientRetryMs: MIN_RETRY_MS,
       };

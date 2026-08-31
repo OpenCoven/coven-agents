@@ -245,6 +245,59 @@ test("successful responses can release their claim instead of being cached", asy
   assert.equal(store.lastCompletedResponse, null);
 });
 
+test("callers can cache only a selected successful response", async () => {
+  const store = new MemoryIdempotencyStore();
+  let attempts = 0;
+  const runSelected = () =>
+    runIdempotentOperation({
+      idempotencyKey: KEY,
+      operation: OPERATION,
+      ownerId: OWNER,
+      perform: () => {
+        attempts += 1;
+        return Promise.resolve({
+          body:
+            attempts === 1 ? { status: "pending" } : { status: "authorized" },
+          status: 200,
+        });
+      },
+      request: {},
+      retentionMs: 60_000,
+      shouldCacheResponse: ({ body }) =>
+        typeof body === "object" &&
+        body !== null &&
+        !Array.isArray(body) &&
+        body.status === "authorized",
+      store,
+    });
+
+  const pending = await runSelected();
+  const authorized = await runSelected();
+  const replay = await runSelected();
+
+  assert.deepEqual(pending, {
+    kind: "response",
+    replayed: false,
+    response: { body: { status: "pending" }, status: 200 },
+  });
+  assert.deepEqual(authorized, {
+    kind: "response",
+    replayed: false,
+    response: { body: { status: "authorized" }, status: 200 },
+  });
+  assert.deepEqual(replay, {
+    kind: "response",
+    replayed: true,
+    response: { body: { status: "authorized" }, status: 200 },
+  });
+  assert.equal(attempts, 2);
+  assert.equal(store.releaseCount, 1);
+  assert.deepEqual(store.lastCompletedResponse, {
+    envelope: { body: { status: "authorized" }, kind: "plain_json" },
+    status: 200,
+  });
+});
+
 test("non-caching callers reclaim a seeded completed response instead of replaying it", async () => {
   const store = new MemoryIdempotencyStore();
   store.seedCompleted({

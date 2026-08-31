@@ -17,6 +17,7 @@ import { encryptedIdempotencyResponseStorage } from "@/lib/abuse/idempotency-res
 import { abusePolicyFor } from "@/lib/abuse/policy";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
+import { runCredentialDevicePoll } from "@/lib/credentials/device-poll";
 import {
   exchangeDeviceCode,
   startDeviceFlow,
@@ -108,12 +109,6 @@ export async function PUT(request: Request) {
     return abuseAdmissionResponse(admission);
   }
 
-  const id = clientId();
-
-  if (!id) {
-    return Response.json({ error: "github_unconfigured" }, { status: 503 });
-  }
-
   const body = await readBoundedJson(
     request,
     abusePolicyFor("credential_device_poll").bodyBytes,
@@ -126,20 +121,22 @@ export async function PUT(request: Request) {
     return Response.json({ error: "invalid_request" }, { status: 400 });
   }
 
-  const result = await exchangeDeviceCode(
-    { clientId: id, deviceCode: body.value.deviceCode },
-    Date.now()
-  );
+  const id = clientId();
+  const result = await runCredentialDevicePoll({
+    deviceCode: body.value.deviceCode,
+    exchange: () =>
+      id
+        ? exchangeDeviceCode(
+            { clientId: id, deviceCode: body.value.deviceCode },
+            Date.now()
+          )
+        : Promise.resolve({ kind: "unavailable" }),
+    idempotencyKey: request.headers.get("idempotency-key"),
+    ownerId: access.userId,
+    store: databaseIdempotencyStore,
+    storeCredential: (credential) =>
+      putCredential(access.session, "copilot", serializeCredential(credential)),
+  });
 
-  if (result.kind !== "authorized") {
-    return Response.json({ status: result.kind });
-  }
-
-  await putCredential(
-    access.session,
-    "copilot",
-    serializeCredential(result.credential)
-  );
-
-  return Response.json({ status: "authorized" });
+  return idempotencyResultResponse(result);
 }
