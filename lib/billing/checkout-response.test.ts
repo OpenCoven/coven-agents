@@ -865,7 +865,8 @@ test("an expired current attempt is retired before one fresh Session is created"
 });
 
 test("a completed Session with a blocking subscription preserves the attempt until cancel-then-resubscribe", async () => {
-  let currentStatus: Stripe.Checkout.Session.Status = "open";
+  let currentStatus: Parameters<typeof reconciledCheckoutSession>[0]["status"] =
+    "open";
   let subscriptionStatus: Stripe.Subscription.Status = "active";
   const sessions: ReturnType<typeof reconciledCheckoutSession>[] = [];
   const sessionKeys: string[] = [];
@@ -963,7 +964,8 @@ test("a completed Session with a blocking subscription preserves the attempt unt
 });
 
 test("a completed Session with an incomplete-expired subscription permits exactly one fresh retry", async () => {
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: Parameters<typeof reconciledCheckoutSession>[0]["status"] =
+    "open";
   const sessions: ReturnType<typeof reconciledCheckoutSession>[] = [];
   const sessionKeys: string[] = [];
   const provider = Object.assign(
@@ -1036,7 +1038,8 @@ test("a completed Session with an incomplete-expired subscription permits exactl
 });
 
 test("a completed Session without a resolvable subscription fails retryably without replacement", async () => {
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: Parameters<typeof reconciledCheckoutSession>[0]["status"] =
+    "open";
   let session: ReturnType<typeof reconciledCheckoutSession> | null = null;
   let sessionCalls = 0;
   const provider = Object.assign(
@@ -1086,7 +1089,8 @@ test("a completed Session without a resolvable subscription fails retryably with
 });
 
 test("a completed Session subscription retrieval failure preserves the attempt without replacement", async () => {
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: Parameters<typeof reconciledCheckoutSession>[0]["status"] =
+    "open";
   let session: ReturnType<typeof reconciledCheckoutSession> | null = null;
   let sessionCalls = 0;
   let retrievalCalls = 0;
@@ -1950,7 +1954,8 @@ test("a racing Customer winner reuses its matching open Checkout Session", async
 
 test("a blocking subscription expires a prior payable Session and retires the attempt", async () => {
   let blocking = true;
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: Parameters<typeof reconciledCheckoutSession>[0]["status"] =
+    "open";
   let sessionCalls = 0;
   const createdAttemptIds: string[] = [];
   const prior = reconciledCheckoutSession({
@@ -2006,7 +2011,8 @@ test("a blocking subscription expires a prior payable Session and retires the at
 
 test("blocking cleanup retrieves the durable Session when open listing lags", async () => {
   let blocking = false;
-  let status: Stripe.Checkout.Session.Status = "open";
+  let status: Parameters<typeof reconciledCheckoutSession>[0]["status"] =
+    "open";
   let session: ReturnType<typeof reconciledCheckoutSession> | null = null;
   let sessionCalls = 0;
   const provider = Object.assign(
