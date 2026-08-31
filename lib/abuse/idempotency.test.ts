@@ -308,6 +308,32 @@ test("non-caching callers reject a conflicting seeded completed response", async
 
   assert.deepEqual(result, { kind: "conflict" });
   assert.equal(providerCalls, 0);
+
+  const preserved = await runIdempotentOperation({
+    idempotencyKey: KEY,
+    operation: OPERATION,
+    ownerId: OWNER,
+    perform: () => {
+      providerCalls += 1;
+      return Promise.resolve({
+        body: { url: "https://checkout.test/unexpected" },
+        status: 200,
+      });
+    },
+    request: {},
+    retentionMs: 60_000,
+    store,
+  });
+
+  assert.deepEqual(preserved, {
+    kind: "response",
+    replayed: true,
+    response: {
+      body: { url: "https://checkout.test/stale" },
+      status: 200,
+    },
+  });
+  assert.equal(providerCalls, 0);
 });
 
 test("parallel non-caching claims safely reacquire one seeded completed record", async () => {
@@ -927,7 +953,7 @@ class MemoryIdempotencyStore implements IdempotencyStore {
       existing?.state === "completed" &&
       "reclaimCompleted" in input &&
       input.reclaimCompleted === true &&
-      existing.requestHash === input.requestHash
+      requestDigest(existing.requestHash) === input.requestHash
     ) {
       this.records.set(scope, {
         claimExpiresAt: input.claimExpiresAt,
@@ -966,7 +992,7 @@ class MemoryIdempotencyStore implements IdempotencyStore {
       });
     }
 
-    if (existing.requestHash !== input.requestHash) {
+    if (requestDigest(existing.requestHash) !== input.requestHash) {
       return Promise.resolve({ kind: "conflict" });
     }
     if (existing.state === "in_progress") {
@@ -993,7 +1019,7 @@ class MemoryIdempotencyStore implements IdempotencyStore {
       },
       expiresAt: new Date("2100-01-01T00:00:00.000Z"),
       ownerToken: null,
-      requestHash: sha256("{}"),
+      requestHash: `${sha256("{}")}:legacy-owner-token`,
       state: "completed",
       status: response.status,
     });
@@ -1081,6 +1107,10 @@ function scoped(input: {
   ownerId: string;
 }): string {
   return `${input.ownerId}:${input.operation}:${input.keyHash}`;
+}
+
+function requestDigest(storedRequestHash: string): string {
+  return storedRequestHash.slice(0, 64);
 }
 
 function claimHandle(input: IdempotencyClaimInput) {
