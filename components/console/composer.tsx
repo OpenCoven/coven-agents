@@ -88,6 +88,7 @@ export function Composer({
               ["role", profile.label],
               ["mode", profile.mode],
               ["runtime", agent.runtime],
+              ["model", sanitizeEvidenceText(agent.model)],
               [
                 "workspace",
                 sanitizeEvidencePath(agent.workspace ?? "/workspace"),
