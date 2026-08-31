@@ -40,9 +40,9 @@
     "*": "corepack pnpm run fix --"
   },
   "dependencies": {
-    "@ai-sdk/otel": "^1.0.79",
+    "@ai-sdk/otel": "^1.0.83",
     "@ai-sdk/provider": "^4.0.8",
-    "@ai-sdk/react": "4.0.82",
+    "@ai-sdk/react": "4.0.86",
     "@codemirror/lang-python": "^6.2.1",
     "@codemirror/state": "^6.7.1",
     "@codemirror/theme-one-dark": "^6.1.3",
@@ -50,7 +50,7 @@
     "@create-markdown/core": "2.0.3",
     "@create-markdown/preview": "2.0.3",
     "@daytona/sdk": "0.207.0",
-    "@next/env": "16.3.1",
+    "@next/env": "16.3.3",
     "@opencoven/agent-contracts": "workspace:*",
     "@opencoven/harness": "workspace:*",
     "@opentelemetry/api": "^1.9.1",
@@ -63,8 +63,8 @@
     "@vercel/analytics": "^2.0.1",
     "@vercel/blob": "^0.24.1",
     "@vercel/functions": "^3.9.5",
-    "@vercel/otel": "^2.1.3",
-    "ai": "7.0.79",
+    "@vercel/otel": "^1.14.2",
+    "ai": "7.0.83",
     "botid": "^1.5.11",
     "class-variance-authority": "^0.7.1",
     "classnames": "^2.5.1",
@@ -81,7 +81,7 @@
     "lucide-react": "^0.577.0",
     "motion": "^12.43.0",
     "nanoid": "^6.0.1",
-    "next": "16.3.1",
+    "next": "16.3.3",
     "next-auth": "5.0.0-beta.32",
     "next-themes": "^0.4.6",
     "orderedmap": "^2.1.1",
@@ -106,7 +106,7 @@
     "shiki": "^3.23.0",
     "sonner": "^2.0.8",
     "streamdown": "^2.6.0",
-    "stripe": "^22.5.0",
+    "stripe": "^22.6.0",
     "swr": "^2.5.1",
     "tailwind-merge": "^3.6.0",
     "tailwindcss-animate": "^1.0.7",
@@ -115,7 +115,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.9",
+    "@biomejs/biome": "2.5.11",
     "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4.3.3",
     "@tailwindcss/typography": "^0.5.20",
@@ -125,7 +125,7 @@
     "@types/pdf-parse": "^1.1.5",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
-    "@types/sanitize-html": "2.16.0",
+    "@types/sanitize-html": "2.16.1",
     "babel-plugin-react-compiler": "^1.0.0",
     "drizzle-kit": "^0.31.10",
     "husky": "^9.1.7",
@@ -135,7 +135,7 @@
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
     "typescript5": "npm:typescript@5.8.2",
-    "ultracite": "^7.10.6"
+    "ultracite": "^7.10.7"
   },
   "packageManager": "pnpm@10.32.1",
   "pnpm": {
