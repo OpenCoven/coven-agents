@@ -27,6 +27,7 @@ export type DeviceFlowNotice = Readonly<{
 
 type DeviceFlowControllerDependencies = Readonly<{
   cancel: (handle: unknown) => void;
+  deviceEndpoint: string;
   fetcher: typeof fetch;
   generateKey: () => string;
   getAuthority: () => DeviceFlowAuthorityContext;
@@ -320,7 +321,7 @@ export function createDeviceFlowController(
     }
     let response: Response;
     try {
-      response = await dependencies.fetcher("/api/credentials/device", {
+      response = await dependencies.fetcher(dependencies.deviceEndpoint, {
         body: JSON.stringify({ deviceCode: session.deviceCode }),
         headers: { "content-type": "application/json" },
         method: "PUT",
@@ -431,7 +432,7 @@ export function createDeviceFlowController(
     }
     let response: Response;
     try {
-      response = await dependencies.fetcher("/api/credentials/device", {
+      response = await dependencies.fetcher(dependencies.deviceEndpoint, {
         headers: { "idempotency-key": startAttempt.key() },
         method: "POST",
         signal: controller.signal,

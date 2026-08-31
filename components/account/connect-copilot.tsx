@@ -1,9 +1,16 @@
 "use client";
 
 import { Check, ExternalLink } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
+import { browserApplicationPath } from "@/lib/application-path";
 import type { StartedDeviceFlow } from "@/lib/credentials/device-flow-attempt";
 import {
   createDeviceFlowController,
@@ -11,6 +18,10 @@ import {
   type DeviceFlowController,
   type DeviceFlowViewState,
 } from "@/lib/credentials/device-flow-client";
+
+const DEVICE_CREDENTIAL_ENDPOINT = browserApplicationPath(
+  "/api/credentials/device"
+);
 
 /**
  * One-click Copilot connection.
@@ -41,6 +52,8 @@ export function ConnectCopilot({
   const [started, setStarted] = useState<StartedDeviceFlow | null>(null);
   const [busy, setBusy] = useState(false);
   const mountedRef = useRef(false);
+  const instructionRef = useRef<HTMLDivElement | null>(null);
+  const focusedDeviceCodeRef = useRef<string | null>(null);
   const authorityContext: DeviceFlowAuthorityContext = {
     key: `${authorityContextRevision}:${isSubscriber ? "subscriber" : "demo"}`,
     revision: authorityRevision,
@@ -69,6 +82,7 @@ export function ConnectCopilot({
       cancel: (handle) => {
         clearTimeout(handle as ReturnType<typeof setTimeout>);
       },
+      deviceEndpoint: DEVICE_CREDENTIAL_ENDPOINT,
       fetcher: fetch,
       generateKey: () => crypto.randomUUID(),
       getAuthority: () => authorityContextRef.current,
@@ -109,7 +123,7 @@ export function ConnectCopilot({
     };
   }, [controller]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     controller.authorityChanged({
       key: authorityContext.key,
       revision: authorityRevision,
@@ -121,6 +135,18 @@ export function ConnectCopilot({
     authorityRevision,
     controller,
   ]);
+
+  useLayoutEffect(() => {
+    if (!started) {
+      focusedDeviceCodeRef.current = null;
+      return;
+    }
+    if (focusedDeviceCodeRef.current === started.deviceCode) {
+      return;
+    }
+    focusedDeviceCodeRef.current = started.deviceCode;
+    instructionRef.current?.focus();
+  }, [started]);
 
   const connect = useCallback(() => {
     controller.start().catch(() => {
@@ -134,8 +160,17 @@ export function ConnectCopilot({
   }, [controller]);
 
   if (started) {
+    const instructionLabel = `GitHub device authorization. Enter code ${started.userCode} at github.com/login/device, then return to this page; it updates automatically.`;
     return (
-      <div className="flex flex-col gap-3 rounded-[8px] border border-[var(--oc-accent-line)] bg-[var(--oc-accent-soft)] p-5">
+      <div
+        aria-atomic="true"
+        aria-label={instructionLabel}
+        aria-live="polite"
+        className="flex flex-col gap-3 rounded-[8px] border border-[var(--oc-accent-line)] bg-[var(--oc-accent-soft)] p-5 outline-none focus-visible:ring-2 focus-visible:ring-[var(--oc-accent)] focus-visible:ring-offset-2"
+        ref={instructionRef}
+        role="status"
+        tabIndex={-1}
+      >
         <p className="text-[13px]">
           Enter this code on GitHub, then come back — this page updates itself.
         </p>
@@ -145,7 +180,7 @@ export function ConnectCopilot({
         </div>
 
         <a
-          className="flex w-fit items-center gap-1.5 text-[13px] text-[var(--oc-accent)] underline-offset-4 hover:underline"
+          className="flex w-fit items-center gap-1.5 rounded-sm text-[13px] text-[var(--oc-accent)] underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--oc-accent)] focus-visible:ring-offset-2"
           href={started.verificationUri}
           rel="noopener noreferrer"
           target="_blank"

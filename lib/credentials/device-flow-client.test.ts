@@ -27,7 +27,11 @@ function jsonResponse(body: unknown, status = 200, headers?: HeadersInit) {
   });
 }
 
-function createHarness() {
+function createHarness({
+  deviceEndpoint = "/api/credentials/device",
+}: {
+  deviceEndpoint?: string;
+} = {}) {
   let authority: DeviceFlowAuthorityContext = {
     key: "subscriber:revision-one",
     revision: "revision-one",
@@ -41,6 +45,7 @@ function createHarness() {
   > = [];
   const requests: Array<{
     idempotencyKey: string | null;
+    input: string;
     method: string;
     signal: AbortSignal;
   }> = [];
@@ -57,13 +62,15 @@ function createHarness() {
         scheduled.splice(index, 1);
       }
     },
-    fetcher: (_input, init) => {
+    deviceEndpoint,
+    fetcher: (input, init) => {
       const method = init?.method ?? "GET";
       const signal = init?.signal;
       assert.ok(signal);
       requests.push({
         idempotencyKey:
           new Headers(init?.headers).get("idempotency-key") ?? null,
+        input: String(input),
         method,
         signal,
       });
@@ -336,4 +343,25 @@ test("successful device flow still opens GitHub, clears the code, and connects",
   assert.equal(harness.scheduled.length, 0);
   assert.deepEqual(harness.states.at(-1), { busy: false, started: null });
   assert.equal(harness.notices.at(-1)?.message, "Copilot connected.");
+});
+
+test("start and poll use the injected application-path endpoint", async () => {
+  const harness = createHarness({
+    deviceEndpoint: "/demo/api/credentials/device",
+  });
+  harness.responses.push(
+    jsonResponse(STARTED),
+    jsonResponse({ status: "pending" })
+  );
+
+  await harness.controller.start();
+  await harness.runNext();
+
+  assert.deepEqual(
+    harness.requests.map(({ input, method }) => ({ input, method })),
+    [
+      { input: "/demo/api/credentials/device", method: "POST" },
+      { input: "/demo/api/credentials/device", method: "PUT" },
+    ]
+  );
 });
