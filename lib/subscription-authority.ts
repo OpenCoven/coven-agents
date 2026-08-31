@@ -16,9 +16,13 @@ const INACTIVE_AUTHORITY: EffectiveSubscriptionAuthority = {
 
 export function effectiveSubscriptionAuthority(
   authority: SubscriptionAuthority,
-  sessionUserId: string | null | undefined
+  sessionUserId: string | null | undefined,
+  authorityPending = false
 ): EffectiveSubscriptionAuthority {
-  if (!(sessionUserId && authority?.userId === sessionUserId)) {
+  if (
+    authorityPending ||
+    !(sessionUserId && authority?.userId === sessionUserId)
+  ) {
     return INACTIVE_AUTHORITY;
   }
   return {

@@ -86,19 +86,26 @@ export function AccountSettings({
       : "copilot"
   );
   const { data: session, status } = useSession();
-  useSubscriptionAuthorityRefresh({
-    enabled: effectiveCheckoutResult !== "success",
-    status,
-    type: session?.user?.type,
-    userId: session?.user?.id,
-  });
   const loginPath = useApplicationLoginPath();
   const tabOrientation = useResponsiveTabOrientation(
     HORIZONTAL_ACCOUNT_TABS_QUERY
   );
-  const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
+  const serverAuthority = effectiveSubscriptionAuthority(
     subscriptionAuthority,
     session?.user?.id
+  );
+  const authorityPending = useSubscriptionAuthorityRefresh({
+    enabled: effectiveCheckoutResult !== "success",
+    isSubscriber: serverAuthority.isSubscriber,
+    status,
+    subscribedUntil: serverAuthority.subscribedUntil,
+    type: session?.user?.type,
+    userId: session?.user?.id,
+  });
+  const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
+    subscriptionAuthority,
+    session?.user?.id,
+    authorityPending
   );
   const showBilling =
     checkoutEnabled || isSubscriber || effectiveCheckoutResult === "success";
@@ -309,7 +316,7 @@ export function AccountSettings({
               {session.user.email}
             </span>
           ) : null}
-          <AccountMenu />
+          <AccountMenu isSubscriber={isSubscriber} />
         </div>
       </header>
 

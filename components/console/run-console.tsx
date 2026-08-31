@@ -135,15 +135,22 @@ export function RunConsole({
    * change when someone changes their address.
    */
   const accountId = session.data?.user?.id ?? null;
-  const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
+  const serverAuthority = effectiveSubscriptionAuthority(
     subscriptionAuthority,
     accountId
   );
-  useSubscriptionAuthorityRefresh({
+  const authorityPending = useSubscriptionAuthorityRefresh({
+    isSubscriber: serverAuthority.isSubscriber,
     status: session.status,
+    subscribedUntil: serverAuthority.subscribedUntil,
     type: session.data?.user?.type,
     userId: accountId,
   });
+  const { isSubscriber, subscribedUntil } = effectiveSubscriptionAuthority(
+    subscriptionAuthority,
+    accountId,
+    authorityPending
+  );
   const sessionIdentity = [
     session.status,
     accountId ?? "",

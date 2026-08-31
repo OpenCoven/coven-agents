@@ -672,6 +672,29 @@ test.describe("Subscriber checkout", () => {
     await expect(page).toHaveURL("/account?source=ledger#allowance");
   });
 
+  test("the account menu plan follows effective server authority instead of a stale session type", async ({
+    page,
+  }) => {
+    let currentSession = sessionFor("demo");
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await mockAccountDependencies(page);
+    await page.goto("/account");
+
+    await page.getByRole("button", { name: "Account" }).click();
+    await expect(page.getByText("Subscriber", { exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "demo");
+    await notifySessionChange(page);
+
+    await page.getByRole("button", { name: "Account" }).click();
+    await expect(page.getByText("Guest", { exact: true })).toBeVisible();
+  });
+
   test("agents uses same-user server authority for gating and Billing despite a stale demo client session", async ({
     page,
   }) => {
@@ -696,6 +719,84 @@ test.describe("Subscriber checkout", () => {
     await billing.click();
     await expect(page.getByText("Subscription active")).toBeVisible();
     await expect(page.getByText("January 15, 2099")).toBeVisible();
+  });
+
+  test("console credential controls lock, clear, and re-enable with effective authority", async ({
+    page,
+  }) => {
+    let currentSession = sessionFor("subscriber");
+    let credentialMutations = 0;
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) => {
+      if (route.request().method() !== "GET") {
+        credentialMutations += 1;
+      }
+      return route.fulfill({ json: { harnessIds: [] } });
+    });
+    await page.route("**/api/usage", (route) =>
+      route.fulfill({
+        json: {
+          cap: 750,
+          resetsAt: "2099-02-01T00:00:00.000Z",
+          used: 0,
+        },
+      })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const { pathname } = new URL(route.request().url());
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+
+    await openConsoleSettings(page);
+    const credential = page.getByLabel("GitHub Copilot CLI credential");
+    const save = page.getByRole("button", { exact: true, name: "Save" });
+    await expect(credential).toBeEnabled();
+    await credential.fill("must-not-survive");
+    await expect(save).toBeEnabled();
+
+    currentSession = sessionFor("demo");
+    await setServerSession(page.context(), "demo");
+    await notifySessionChange(page);
+
+    await expect(page.getByText("Subscription required")).toBeVisible();
+    await expect(credential).toBeDisabled();
+    await expect(credential).toHaveValue("");
+    await expect(save).toBeDisabled();
+    await expect(page.getByText("No unsaved changes")).toBeVisible();
+    await expect(
+      page.getByText(
+        "An active subscription is required to store harness credentials."
+      )
+    ).toBeVisible();
+    expect(credentialMutations).toBe(0);
+    await expect(
+      page.getByTitle("An active subscription is required to run agents.")
+    ).toBeVisible();
+    if (CHECKOUT_ENABLED) {
+      await page.getByRole("tab", { name: "Billing" }).click();
+      await expect(checkoutButton(page)).toBeVisible();
+      await page.getByRole("tab", { name: "Harness credentials" }).click();
+    } else {
+      await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
+    }
+
+    currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
+    await notifySessionChange(page);
+
+    await expect(credential).toBeEnabled();
+    await credential.fill("new-authority-token");
+    await expect(save).toBeEnabled();
   });
 
   test("agents ignores subscriber authority belonging to another current client identity", async ({
@@ -734,13 +835,53 @@ test.describe("Subscriber checkout", () => {
     await mockSession(page, "demo");
     await mockAccountDependencies(page);
 
-    await page.goto("/account?checkout=cancelled");
+    await page.goto("/account?source=ledger&checkout=cancelled#allowance");
 
     await expect(
       page.getByText("Checkout cancelled. No payment was taken.")
     ).toBeVisible();
     await expect(checkoutButton(page)).toBeEnabled();
     await expect(page.getByText(/payment failed/i)).toHaveCount(0);
+    await expect(page).toHaveURL("/account?source=ledger#allowance");
+
+    await page.reload();
+    await expect(
+      page.getByText("Checkout cancelled. No payment was taken.")
+    ).toHaveCount(0);
+  });
+
+  test("already-subscribed recovery finalizes its polling generation when refreshed authority activates", async ({
+    page,
+  }) => {
+    test.skip(!CHECKOUT_ENABLED, "This is the launch-flag-on contract.");
+    await page.clock.install({
+      time: new Date("2026-08-31T14:25:01.000Z"),
+    });
+    await mockSession(page, "demo");
+    await mockAccountDependencies(page);
+    await page.route("**/api/checkout", (route) =>
+      route.fulfill({
+        json: { error: "already_subscribed" },
+        status: 409,
+      })
+    );
+    await page.route("**/api/subscription", async (route) => {
+      await setServerSession(page.context(), "subscriber");
+      await route.fulfill({ json: subscriptionStatus(true) });
+    });
+    await page.goto("/account");
+    await page.getByRole("tab", { name: "Billing" }).click();
+
+    await checkoutButton(page).click();
+    await page.getByRole("button", { name: "Check again" }).click();
+    await expect(page.getByRole("status")).toContainText("Subscription active");
+    await expect(page).toHaveURL("/account");
+
+    await page.clock.runFor(16_000);
+    await expect(page.getByRole("status")).toContainText("Subscription active");
+    await expect(page.getByRole("status")).not.toContainText(
+      "Payment may still be processing."
+    );
   });
 
   test("network and retryable server failures retain one idempotency key until a terminal response", async ({

@@ -5,7 +5,13 @@
 import { HARNESS_SPECS } from "@opencoven/harness";
 import Link from "next/link";
 import { signOut } from "next-auth/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { SubscriptionCard } from "@/components/billing/subscription-card";
 import { Btn, Caret, Eyebrow } from "@/components/console/primitives";
@@ -101,6 +107,7 @@ function HarnessCard({
   configured,
   draft,
   harness,
+  locked,
   onDraft,
   onRemove,
   runnable,
@@ -109,6 +116,7 @@ function HarnessCard({
   configured: boolean;
   draft: string;
   harness: { id: string; label: string };
+  locked: boolean;
   onDraft: (id: string, value: string) => void;
   onRemove: (id: string) => void;
   runnable: boolean;
@@ -119,7 +127,7 @@ function HarnessCard({
         background: "var(--bg-raised)",
         border: hairline,
         borderRadius: "var(--radius-card)",
-        opacity: runnable ? 1 : 0.72,
+        opacity: runnable && !locked ? 1 : 0.72,
         overflow: "hidden",
       }}
     >
@@ -157,6 +165,7 @@ function HarnessCard({
             <input
               aria-label={`${harness.label} credential`}
               autoComplete="off"
+              disabled={locked}
               onChange={(event) => onDraft(harness.id, event.target.value)}
               placeholder={
                 configured
@@ -179,7 +188,7 @@ function HarnessCard({
               </p>
               {configured ? (
                 <Btn
-                  disabled={busy}
+                  disabled={busy || locked}
                   onClick={() => onRemove(harness.id)}
                   size="xs"
                   variant="danger-ghost"
@@ -253,6 +262,20 @@ export function Settings({
       isSessionOperationCurrent(context, operationContextRef.current),
     []
   );
+  const credentialAuthorityValid =
+    isSubscriber &&
+    operationContext !== null &&
+    isCurrentOperation(operationContext);
+  const credentialsLocked = locked || !credentialAuthorityValid;
+  const credentialsLockedRef = useRef(credentialsLocked);
+  credentialsLockedRef.current = credentialsLocked;
+  const credentialMemoryFence = [
+    account ?? "",
+    isSubscriber ? "subscriber" : "demo",
+    operationContext?.generation ?? "",
+    credentialsLocked ? "locked" : "unlocked",
+  ].join(":");
+  const credentialMemoryFenceRef = useRef(credentialMemoryFence);
 
   const captureRemovedBillingFocus = useCallback(
     (element: HTMLElement | null) => {
@@ -351,12 +374,26 @@ export function Settings({
     setRefusedOpen(false);
     setUsage(null);
     setConfirmWipe(false);
-    if (!account || !operationContext) {
+    if (!(account && isSubscriber && operationContext)) {
       return () => refreshFence.deactivate();
     }
     refreshCredentials(operationContext).catch(() => undefined);
     return () => refreshFence.deactivate();
-  }, [account, operationContext, refreshCredentials, refreshFence]);
+  }, [
+    account,
+    isSubscriber,
+    operationContext,
+    refreshCredentials,
+    refreshFence,
+  ]);
+
+  useLayoutEffect(() => {
+    if (credentialMemoryFenceRef.current === credentialMemoryFence) {
+      return;
+    }
+    credentialMemoryFenceRef.current = credentialMemoryFence;
+    setDrafts({});
+  }, [credentialMemoryFence]);
 
   useEffect(() => {
     if (tab === selectedTab) {
@@ -426,7 +463,11 @@ export function Settings({
     load().catch(() => undefined);
   }, [account, isCurrentOperation, operationContext]);
 
-  const dirty = Object.values(drafts).some((value) => value.trim().length > 0);
+  const visibleConfigured = credentialsLocked ? [] : configured;
+  const visibleDrafts = credentialsLocked ? {} : drafts;
+  const dirty = Object.values(visibleDrafts).some(
+    (value) => value.trim().length > 0
+  );
 
   const onDraft = (id: string, value: string) => {
     setDrafts((current) => ({ ...current, [id]: value }));
@@ -434,14 +475,20 @@ export function Settings({
 
   const save = async () => {
     const context = operationContextRef.current;
-    if (!context || !isCurrentOperation(context)) {
+    if (
+      credentialsLockedRef.current ||
+      !context ||
+      !isCurrentOperation(context)
+    ) {
+      setDrafts({});
+      toast.error("Subscription required.");
       return;
     }
     setBusy(true);
     let stored = 0;
     let nextConfigured = configured;
     try {
-      for (const [harnessId, value] of Object.entries(drafts)) {
+      for (const [harnessId, value] of Object.entries(visibleDrafts)) {
         const credential = value.trim();
         if (!credential) {
           continue;
@@ -467,6 +514,13 @@ export function Settings({
           if (isCurrentOperation(context)) {
             toast.error(body.message ?? "That token was rejected.");
           }
+          return;
+        }
+        if (response.status === 403) {
+          setLocked(true);
+          setDrafts({});
+          publishCredentials([], context);
+          toast.error("Subscription required.");
           return;
         }
         if (!response.ok) {
@@ -505,7 +559,12 @@ export function Settings({
 
   const remove = async (harnessId: string) => {
     const context = operationContextRef.current;
-    if (!context || !isCurrentOperation(context)) {
+    if (
+      credentialsLockedRef.current ||
+      !context ||
+      !isCurrentOperation(context)
+    ) {
+      toast.error("Subscription required.");
       return;
     }
     setBusy(true);
@@ -517,6 +576,12 @@ export function Settings({
         signal: context.signal,
       });
       if (!isCurrentOperation(context)) {
+        return;
+      }
+      if (response.status === 403) {
+        setLocked(true);
+        publishCredentials([], context);
+        toast.error("Subscription required.");
         return;
       }
       if (!response.ok) {
@@ -740,24 +805,28 @@ export function Settings({
                   blurb="Your credential, envelope-encrypted, fetched for the duration of one run and redacted from evidence. Never shared with another account."
                   title="Harness credentials"
                 />
-                {locked ? (
-                  <p style={type_.body}>
-                    Storing a credential needs an active subscription.
-                  </p>
-                ) : (
-                  RUNNABLE.map((spec) => (
-                    <HarnessCard
-                      busy={busy}
-                      configured={configured.includes(spec.id)}
-                      draft={drafts[spec.id] ?? ""}
-                      harness={spec}
-                      key={spec.id}
-                      onDraft={onDraft}
-                      onRemove={remove}
-                      runnable
-                    />
-                  ))
-                )}
+                {credentialsLocked ? (
+                  <div role="status" style={type_.body}>
+                    <strong>Subscription required</strong>
+                    <p>
+                      An active subscription is required to store harness
+                      credentials.
+                    </p>
+                  </div>
+                ) : null}
+                {RUNNABLE.map((spec) => (
+                  <HarnessCard
+                    busy={busy}
+                    configured={visibleConfigured.includes(spec.id)}
+                    draft={visibleDrafts[spec.id] ?? ""}
+                    harness={spec}
+                    key={spec.id}
+                    locked={credentialsLocked}
+                    onDraft={onDraft}
+                    onRemove={remove}
+                    runnable
+                  />
+                ))}
 
                 <button
                   aria-expanded={refusedOpen}
@@ -800,6 +869,7 @@ export function Settings({
                         draft=""
                         harness={spec}
                         key={spec.id}
+                        locked={false}
                         onDraft={onDraft}
                         onRemove={remove}
                         runnable={false}
@@ -1081,8 +1151,8 @@ export function Settings({
                       {account ?? "not signed in"}
                     </div>
                     <div style={{ ...type_.meta, marginTop: 2 }}>
-                      {configured.length > 0
-                        ? `${configured.length} harness credential(s) stored`
+                      {visibleConfigured.length > 0
+                        ? `${visibleConfigured.length} harness credential(s) stored`
                         : "no harness credential stored"}
                     </div>
                   </div>
@@ -1153,14 +1223,14 @@ export function Settings({
         </span>
         <div style={{ flex: 1 }} />
         <Btn
-          disabled={!dirty || busy}
+          disabled={!dirty || busy || credentialsLocked}
           onClick={() => setDrafts({})}
           variant="ghost"
         >
           Discard
         </Btn>
         <Btn
-          disabled={!dirty || busy}
+          disabled={!dirty || busy || credentialsLocked}
           onClick={() => {
             save().catch(() => undefined);
           }}

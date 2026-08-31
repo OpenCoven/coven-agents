@@ -227,6 +227,22 @@ export function SubscriptionCard({
     }
   }, [focusRevision]);
 
+  useEffect(() => {
+    if (checkoutResult !== "cancelled") {
+      return;
+    }
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("checkout") !== "cancelled") {
+      return;
+    }
+    url.searchParams.delete("checkout");
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${url.pathname}${url.search}${url.hash}`
+    );
+  }, [checkoutResult]);
+
   const stopPolling = useCallback(() => {
     pollGenerationRef.current += 1;
     refreshRequestedGenerationRef.current = null;
@@ -643,13 +659,21 @@ export function SubscriptionCard({
   }, [finishActivation, publishNotice, router, stopPolling, userId]);
 
   useEffect(() => {
-    if (!(checkoutResult === "success" && userId && isSubscriber)) {
+    const generation = refreshRequestedGenerationRef.current;
+    if (
+      generation === null ||
+      generation !== pollGenerationRef.current ||
+      !userId ||
+      !isSubscriber
+    ) {
       return;
     }
     const owner =
-      confirmationOwner === undefined
-        ? internalConfirmationOwnerRef.current
-        : confirmationOwner;
+      checkoutResult === "success"
+        ? confirmationOwner === undefined
+          ? internalConfirmationOwnerRef.current
+          : confirmationOwner
+        : userId;
     const activationPaidThrough =
       paidThroughDate(subscribedUntil) ?? paidThrough;
     if (owner === userId && activationPaidThrough) {

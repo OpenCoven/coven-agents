@@ -56,3 +56,21 @@ test("authority for another user is ignored", () => {
     }
   );
 });
+
+test("a pending boundary refresh fails effective authority closed", () => {
+  assert.deepEqual(
+    effectiveSubscriptionAuthority(
+      {
+        isSubscriber: true,
+        subscribedUntil: PAID_UNTIL,
+        userId: USER_A,
+      },
+      USER_A,
+      true
+    ),
+    {
+      isSubscriber: false,
+      subscribedUntil: null,
+    }
+  );
+});

@@ -26,7 +26,7 @@ import { avatarFor } from "@/lib/avatar";
  * Renders nothing when there is no session, so a demo visitor is not offered
  * a sign-out that would do nothing.
  */
-export function AccountMenu() {
+export function AccountMenu({ isSubscriber }: { isSubscriber: boolean }) {
   const { data: session } = useSession();
   const [pending, setPending] = useState(false);
 
@@ -83,7 +83,7 @@ export function AccountMenu() {
         <div className="px-2 py-1.5">
           <p className="truncate font-medium text-[13px]">{email}</p>
           <p className="text-[11px] text-muted-foreground">
-            {session?.user?.type === "subscriber" ? "Subscriber" : "Guest"}
+            {isSubscriber ? "Subscriber" : "Guest"}
           </p>
         </div>
 
