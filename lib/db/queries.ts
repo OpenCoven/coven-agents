@@ -11,6 +11,7 @@ import {
   inArray,
   lt,
   lte,
+  ne,
   type SQL,
   sql,
 } from "drizzle-orm";
@@ -24,6 +25,12 @@ import type {
   IdempotencyStore,
 } from "../abuse/idempotency";
 import { parseStoredIdempotencyResponseEnvelope } from "../abuse/idempotency-response";
+import {
+  CHECKOUT_ATTEMPT_KEY_HASH,
+  CHECKOUT_ATTEMPT_OPERATION,
+  type CheckoutAttemptLease,
+  type CheckoutAttemptLeaseStore,
+} from "../billing/checkout-lease";
 import type { DayCount } from "../billing/history";
 import { fillDays, runsByDay } from "../billing/history";
 import {
@@ -257,6 +264,140 @@ export async function claimStripeEvent(eventId: string): Promise<boolean> {
   }
 }
 
+export const databaseCheckoutAttemptLeaseStore: CheckoutAttemptLeaseStore = {
+  async claim(input) {
+    try {
+      return await db.transaction(async (transaction) => {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          // biome-ignore lint/performance/noAwaitInLoops: retries must observe the prior transactional write.
+          const [inserted] = await transaction
+            .insert(idempotencyRecord)
+            .values({
+              createdAt: input.now,
+              expiresAt: input.leaseExpiresAt,
+              keyHash: CHECKOUT_ATTEMPT_KEY_HASH,
+              operation: CHECKOUT_ATTEMPT_OPERATION,
+              ownerId: input.ownerId,
+              requestHash: input.ownerToken,
+              state: "in_progress",
+              updatedAt: input.now,
+            })
+            .onConflictDoNothing()
+            .returning({ attemptId: idempotencyRecord.id });
+
+          if (inserted) {
+            return {
+              kind: "claimed",
+              lease: checkoutAttemptLease(input, inserted.attemptId),
+            } as const;
+          }
+
+          const [reclaimed] = await transaction
+            .update(idempotencyRecord)
+            .set({
+              expiresAt: input.leaseExpiresAt,
+              requestHash: input.ownerToken,
+              updatedAt: input.now,
+            })
+            .where(
+              and(
+                checkoutAttemptLeaseScope(input.ownerId),
+                eq(idempotencyRecord.state, "in_progress"),
+                lte(idempotencyRecord.expiresAt, input.now)
+              )
+            )
+            .returning({ attemptId: idempotencyRecord.id });
+
+          if (reclaimed) {
+            return {
+              kind: "claimed",
+              lease: checkoutAttemptLease(input, reclaimed.attemptId),
+            } as const;
+          }
+
+          const [existing] = await transaction
+            .select({ state: idempotencyRecord.state })
+            .from(idempotencyRecord)
+            .where(checkoutAttemptLeaseScope(input.ownerId))
+            .limit(1);
+          if (!existing) {
+            continue;
+          }
+          if (existing.state !== "in_progress") {
+            throw new Error("Checkout lease entered an invalid state.");
+          }
+          return { kind: "in_progress" } as const;
+        }
+
+        throw new Error("Checkout lease changed during acquisition.");
+      });
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
+
+  async release(input) {
+    try {
+      const fence = and(
+        checkoutAttemptLeaseScope(input.lease.ownerId),
+        eq(idempotencyRecord.id, input.lease.attemptId),
+        eq(idempotencyRecord.requestHash, input.lease.ownerToken),
+        eq(idempotencyRecord.state, "in_progress")
+      );
+      const released =
+        input.disposition === "retire_attempt"
+          ? await db
+              .delete(idempotencyRecord)
+              .where(fence)
+              .returning({ id: idempotencyRecord.id })
+          : await db
+              .update(idempotencyRecord)
+              .set({
+                expiresAt: input.releasedAt,
+                updatedAt: input.releasedAt,
+              })
+              .where(fence)
+              .returning({ id: idempotencyRecord.id });
+      return released.length === 1 ? "released" : "lost";
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
+
+  async renew(input) {
+    try {
+      const [renewed] = await db
+        .update(idempotencyRecord)
+        .set({
+          expiresAt: input.leaseExpiresAt,
+          updatedAt: input.now,
+        })
+        .where(
+          and(
+            checkoutAttemptLeaseScope(input.lease.ownerId),
+            eq(idempotencyRecord.id, input.lease.attemptId),
+            eq(idempotencyRecord.requestHash, input.lease.ownerToken),
+            eq(idempotencyRecord.state, "in_progress"),
+            gt(idempotencyRecord.expiresAt, input.now)
+          )
+        )
+        .returning({ id: idempotencyRecord.id });
+      if (!renewed) {
+        return { kind: "lost" };
+      }
+      return {
+        kind: "renewed",
+        lease: {
+          ...input.lease,
+          expiresAt: input.leaseExpiresAt,
+        },
+      };
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
+};
+
 export const databaseIdempotencyStore: IdempotencyStore = {
   async claim(input) {
     try {
@@ -352,7 +493,12 @@ export const databaseIdempotencyStore: IdempotencyStore = {
       const expired = db
         .select({ id: idempotencyRecord.id })
         .from(idempotencyRecord)
-        .where(lte(idempotencyRecord.expiresAt, input.before))
+        .where(
+          and(
+            lte(idempotencyRecord.expiresAt, input.before),
+            ne(idempotencyRecord.operation, CHECKOUT_ATTEMPT_OPERATION)
+          )
+        )
         .orderBy(asc(idempotencyRecord.expiresAt))
         .limit(input.limit);
 
@@ -361,7 +507,8 @@ export const databaseIdempotencyStore: IdempotencyStore = {
         .where(
           and(
             inArray(idempotencyRecord.id, expired),
-            lte(idempotencyRecord.expiresAt, input.before)
+            lte(idempotencyRecord.expiresAt, input.before),
+            ne(idempotencyRecord.operation, CHECKOUT_ATTEMPT_OPERATION)
           )
         );
     } catch (error) {
@@ -415,6 +562,30 @@ export const databaseIdempotencyStore: IdempotencyStore = {
     }
   },
 };
+
+function checkoutAttemptLease(
+  input: {
+    leaseExpiresAt: Date;
+    ownerId: string;
+    ownerToken: string;
+  },
+  attemptId: string
+): CheckoutAttemptLease {
+  return {
+    attemptId,
+    expiresAt: input.leaseExpiresAt,
+    ownerId: input.ownerId,
+    ownerToken: input.ownerToken,
+  };
+}
+
+function checkoutAttemptLeaseScope(ownerId: string) {
+  return and(
+    eq(idempotencyRecord.ownerId, ownerId),
+    eq(idempotencyRecord.operation, CHECKOUT_ATTEMPT_OPERATION),
+    eq(idempotencyRecord.keyHash, CHECKOUT_ATTEMPT_KEY_HASH)
+  );
+}
 
 function idempotencyScope(input: {
   keyHash: string;

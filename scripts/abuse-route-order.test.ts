@@ -524,7 +524,7 @@ test("database claims and reclaims idempotency records atomically", () => {
   );
 });
 
-test("database cleanup is bounded, state-agnostic, and awaited before claims", () => {
+test("database cleanup is bounded, state-agnostic, and preserves checkout recovery leases", () => {
   const source = read("lib/db/queries.ts");
   const coreSource = read("lib/abuse/idempotency.ts");
   const storeIndex = source.indexOf(
@@ -552,10 +552,51 @@ test("database cleanup is bounded, state-agnostic, and awaited before claims", (
   );
   assert.match(
     cleanupSource,
-    /\.where\(\s*and\(\s*inArray\(idempotencyRecord\.id, expired\),\s*lte\(idempotencyRecord\.expiresAt, input\.before\)\s*\)\s*\)/
+    /\.where\(\s*and\(\s*inArray\(idempotencyRecord\.id, expired\),\s*lte\(idempotencyRecord\.expiresAt, input\.before\),\s*ne\(idempotencyRecord\.operation, CHECKOUT_ATTEMPT_OPERATION\)\s*\)\s*\)/
   );
   assert.match(cleanupSource, /\.limit\(input\.limit\)/);
   assert.doesNotMatch(cleanupSource, /idempotencyRecord\.state/);
+  assert.equal(
+    cleanupSource.match(
+      /ne\(idempotencyRecord\.operation, CHECKOUT_ATTEMPT_OPERATION\)/g
+    )?.length,
+    2
+  );
+});
+
+test("checkout leases preserve attempt identity and fence renewals and releases", () => {
+  const source = read("lib/db/queries.ts");
+  const start = source.indexOf(
+    "export const databaseCheckoutAttemptLeaseStore"
+  );
+  const end = source.indexOf("export const databaseIdempotencyStore", start);
+  const leaseStore = source.slice(start, end);
+
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  assert.match(leaseStore, /\.transaction\(/);
+  assert.match(leaseStore, /\.onConflictDoNothing\(/);
+  assert.match(
+    leaseStore,
+    /returning\(\{ attemptId: idempotencyRecord\.id \}\)/
+  );
+  assert.match(leaseStore, /requestHash: input\.ownerToken/);
+  assert.match(leaseStore, /lte\(idempotencyRecord\.expiresAt, input\.now\)/);
+  assert.match(leaseStore, /gt\(idempotencyRecord\.expiresAt, input\.now\)/);
+  assert.ok(
+    (
+      leaseStore.match(
+        /eq\(idempotencyRecord\.requestHash, input\.lease\.ownerToken\)/g
+      ) ?? []
+    ).length >= 2
+  );
+  assert.ok(
+    (
+      leaseStore.match(
+        /eq\(idempotencyRecord\.id, input\.lease\.attemptId\)/g
+      ) ?? []
+    ).length >= 2
+  );
 });
 
 test("Auth.js handlers use method-aware abuse classification", () => {

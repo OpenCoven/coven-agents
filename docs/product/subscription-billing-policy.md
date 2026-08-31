@@ -70,20 +70,28 @@ administrative revoke clears the period immediately.
    idempotency key.
 3. Require `STRIPE_SECRET_KEY` and `STRIPE_PRICE_ID`; otherwise return
    `billing_unavailable` without changing subscription state.
-4. Acquire a short-lived durable per-user checkout lease. A concurrent request
-   with a distinct browser key receives `request_in_progress`; no database
-   transaction remains open during Stripe calls.
+4. Acquire a short-lived durable per-user checkout lease. The holder renews it
+   while Stripe work is active, and every renewal and release is fenced by a
+   random ownership token. A concurrent request with a distinct browser key
+   receives `request_in_progress`; no database transaction remains open during
+   Stripe calls.
 5. Reuse the user's Stripe Customer or create one with `metadata.userId`, then
    atomically attach it without replacing a Customer already owned by the
    account.
 6. Page through every Stripe subscription until a blocking status is found or
    all pages are exhausted.
-7. Reuse an existing open hosted subscription Checkout Session for the same
-   Customer and user. Completed and expired Sessions are not reused.
+7. Page through open hosted Checkout Sessions. Reuse only one matching the same
+   Customer, user, subscription mode, application checkout-flow version, and
+   configured Price. Expire older app-owned Sessions before creating a
+   replacement. An expiration failure returns `checkout_session_conflict`
+   without creating another payable Session.
 8. Permit cancel-then-resubscribe with the same Customer. Historical or
    cancelled subscriptions are expected and do not violate the invariant.
-9. Create the hosted subscription Checkout Session with distinct provider
-   idempotency keys derived from the claimed application operation.
+9. Create the hosted subscription Checkout Session with distinct Customer and
+   Session idempotency keys derived from the durable checkout-attempt identity.
+   If a lease expires, its successor keeps that identity and those keys. A
+   stale holder that later finishes cannot report success or delete the
+   successor's lease.
 
 The decision helper is `lib/billing/checkout.ts`; the route and
 `lib/billing/checkout.test.ts` are the current enforcement sources. A user row
@@ -92,8 +100,14 @@ ID from belonging to two users; it is not the one-active-subscription control.
 The **At most one active subscription** policy also treats non-terminal
 payment states as blocking so a second payable Checkout cannot bypass an
 incomplete first attempt.
-The durable lease serializes provider inspection and creation across instances;
-Stripe remains the durable source for open Checkout and subscription state.
+The checkout lease reuses the existing `IdempotencyRecord` row: its stable row
+ID identifies the provider attempt, `requestHash` carries the fencing token,
+and `expiresAt` is renewed before expiry. Retryable, uncertain, and
+Session-created outcomes keep the row so a successor recovers the same provider
+keys even if Stripe listing visibility lags. A blocking subscription or a
+retired flow attempt removes it. Generic route-idempotency cleanup excludes
+these recovery rows. Stripe remains the durable source for open Checkout and
+subscription state.
 
 ## Webhook responsibilities
 
@@ -148,6 +162,8 @@ the accounting read fails, the endpoint returns `capacity_unavailable`.
 | Failure | Current behavior | Recovery and verification |
 | --- | --- | --- |
 | Stripe unavailable during checkout | Checkout fails; no entitlement is written. | Retry with an application idempotency key after Stripe and local dependencies recover. Confirm no active subscription exists before opening a new session. |
+| Checkout lease expires during Stripe work | A successor reclaims the same durable attempt and provider keys; the stale holder returns `request_in_progress` rather than success. | Retry after the current owner settles. Inspect the open Session and Customer using the deterministic provider keys if manual reconciliation is required. |
+| Obsolete open Checkout Session cannot be expired | Checkout returns `checkout_session_conflict`; no replacement Session is created. | Restore Stripe access, retry cleanup with the same application key, and confirm only the current Price/version remains payable. |
 | Missing billing configuration | Checkout or webhook returns `billing_unavailable`. | Restore the deployment secrets and verify configuration without logging values. |
 | Missing or invalid webhook signature | `400`; no event is trusted. | Correct the endpoint secret or delivery configuration, then request a provider redelivery. |
 | Duplicate Stripe event | The event ID conflicts and the delivery returns `deduped`. | Confirm the original event produced the intended database period; do not bypass deduplication. |

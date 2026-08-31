@@ -385,7 +385,8 @@ export type StripeEvent = InferSelectModel<typeof stripeEvent>;
  * an owner, operation, and hashed browser key may reach its provider. The
  * expiry is also the claim lease while work is in progress, so a dead process
  * can be reclaimed without allowing a stale completion to overwrite its
- * replacement.
+ * replacement. The checkout-attempt scope additionally keeps `id` stable as
+ * the provider-attempt identity and uses `requestHash` as its ownership token.
  */
 export const idempotencyRecord = pgTable(
   "IdempotencyRecord",

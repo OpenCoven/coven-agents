@@ -10,6 +10,8 @@ const BLOCKING_SUBSCRIPTION_STATUSES = new Set<Stripe.Subscription.Status>([
   "unpaid",
 ]);
 
+export const CHECKOUT_FLOW_VERSION = "1";
+
 export type CheckoutDecision =
   | { kind: "allowed"; userId: string }
   | { kind: "already_subscribed" }
@@ -19,6 +21,22 @@ export type CheckoutSubscriptionPage = {
   data: Pick<Stripe.Subscription, "id" | "status">[];
   hasMore: boolean;
 };
+
+export type OpenCheckoutSession = {
+  clientReferenceId: string | null;
+  id: string;
+  integrationIdentifier: string | null;
+  metadata: Record<string, string>;
+  mode: Stripe.Checkout.Session.Mode;
+  url: string | null;
+};
+
+export type OpenCheckoutSessionPage = {
+  data: OpenCheckoutSession[];
+  hasMore: boolean;
+};
+
+export class CheckoutSessionCleanupError extends Error {}
 
 /**
  * Whether this user may open a checkout session.
@@ -83,6 +101,91 @@ export async function hasBlockingSubscription(
   } while (startingAfter);
 
   return false;
+}
+
+export async function recoverOpenCheckoutSession(input: {
+  customerId: string;
+  expire: (
+    sessionId: string,
+    options: { idempotencyKey: string }
+  ) => Promise<void>;
+  listPage: (
+    input: Stripe.Checkout.SessionListParams
+  ) => Promise<OpenCheckoutSessionPage>;
+  priceId: string;
+  providerIdempotencyKey: string;
+  userId: string;
+}): Promise<
+  | { kind: "none" }
+  | { kind: "retry_required" }
+  | { kind: "reused"; url: string | null }
+> {
+  const sessions: OpenCheckoutSession[] = [];
+  let startingAfter: string | undefined;
+
+  do {
+    // biome-ignore lint/performance/noAwaitInLoops: each Stripe page supplies the cursor for the next.
+    const page = await input.listPage({
+      customer: input.customerId,
+      limit: 100,
+      starting_after: startingAfter,
+      status: "open",
+    });
+    sessions.push(...page.data);
+    if (!page.hasMore) {
+      break;
+    }
+
+    const lastSession = page.data.at(-1);
+    if (!lastSession) {
+      throw new Error("Stripe returned an empty non-terminal page.");
+    }
+    startingAfter = lastSession.id;
+  } while (startingAfter);
+
+  const appOwned = sessions.filter(
+    (session) =>
+      session.clientReferenceId === input.userId &&
+      session.metadata.userId === input.userId &&
+      session.mode === "subscription"
+  );
+  const reusable = appOwned.find(
+    (session) =>
+      session.metadata.checkoutFlowVersion === CHECKOUT_FLOW_VERSION &&
+      session.metadata.priceId === input.priceId
+  );
+  let expiredCurrentAttempt = false;
+
+  for (const session of appOwned) {
+    if (session.id === reusable?.id) {
+      continue;
+    }
+    if (
+      session.integrationIdentifier ===
+      stableIntegrationIdentifier(input.providerIdempotencyKey)
+    ) {
+      expiredCurrentAttempt = true;
+    }
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: a replacement must not be created until every obsolete payable Session is expired.
+      await input.expire(session.id, {
+        idempotencyKey: `${input.providerIdempotencyKey}:expire:${session.id}`,
+      });
+    } catch (error) {
+      throw new CheckoutSessionCleanupError(
+        "An obsolete Checkout Session could not be expired.",
+        { cause: error }
+      );
+    }
+  }
+
+  if (reusable) {
+    return { kind: "reused", url: reusable.url };
+  }
+  if (expiredCurrentAttempt) {
+    return { kind: "retry_required" };
+  }
+  return { kind: "none" };
 }
 
 export function stableIntegrationIdentifier(

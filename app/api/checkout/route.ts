@@ -13,6 +13,7 @@ import {
 import { createStripeClient } from "@/lib/billing/stripe-client";
 import {
   attachStripeCustomer,
+  databaseCheckoutAttemptLeaseStore,
   databaseIdempotencyStore,
   findUserById,
 } from "@/lib/db/queries";
@@ -24,6 +25,7 @@ const checkoutDependencies: CheckoutDependencies = {
     subscriptionCheckoutEnabled({
       SUBSCRIPTION_CHECKOUT_ENABLED: process.env.SUBSCRIPTION_CHECKOUT_ENABLED,
     }),
+  checkoutLeaseStore: databaseCheckoutAttemptLeaseStore,
   createProvider(apiKey) {
     const stripe = createStripeClient(apiKey);
     return {
@@ -35,21 +37,8 @@ const checkoutDependencies: CheckoutDependencies = {
         const customer = await stripe.customers.create(input, options);
         return { id: customer.id };
       },
-      async findOpenCheckoutSession(customerId, userId) {
-        for await (const session of stripe.checkout.sessions.list({
-          customer: customerId,
-          limit: 100,
-          status: "open",
-        })) {
-          if (
-            session.client_reference_id === userId &&
-            session.metadata?.userId === userId &&
-            session.mode === "subscription"
-          ) {
-            return { url: session.url };
-          }
-        }
-        return null;
+      async expireCheckoutSession(sessionId, options) {
+        await stripe.checkout.sessions.expire(sessionId, {}, options);
       },
       hasBlockingSubscription(customerId) {
         return hasBlockingSubscription(customerId, async (input) => {
@@ -59,6 +48,20 @@ const checkoutDependencies: CheckoutDependencies = {
             hasMore: subscriptions.has_more,
           };
         });
+      },
+      async listOpenCheckoutSessions(input) {
+        const sessions = await stripe.checkout.sessions.list(input);
+        return {
+          data: sessions.data.map((session) => ({
+            clientReferenceId: session.client_reference_id,
+            id: session.id,
+            integrationIdentifier: session.integration_identifier,
+            metadata: session.metadata ?? {},
+            mode: session.mode,
+            url: session.url,
+          })),
+          hasMore: sessions.has_more,
+        };
       },
     };
   },
