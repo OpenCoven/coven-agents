@@ -1,5 +1,5 @@
 import { expect, type Page, type Route, test } from "@playwright/test";
-import { E2E_USER_ID } from "./session";
+import { E2E_USER_ID, subscriberCookies } from "./session";
 
 const IS_DEMO = process.env.IS_DEMO === "1";
 
@@ -146,6 +146,104 @@ test.describe("Demo base path", () => {
     await expect.poll(() => requestedPaths).toContain("/demo/api/checkout");
     expect(requestedPaths).not.toContain("/api/subscription");
     expect(requestedPaths).not.toContain("/api/checkout");
+  });
+
+  test("credential read, write, delete, device start, and poll use one demo prefix", async ({
+    context,
+    page,
+  }) => {
+    test.skip(!IS_DEMO, "This contract runs with IS_DEMO=1.");
+    await context.addCookies(await subscriberCookies());
+    const credentialRequests: Array<{ method: string; pathname: string }> = [];
+    let configured = false;
+    page.on("request", (request) => {
+      const { pathname } = new URL(request.url());
+      if (pathname.includes("/api/credentials")) {
+        credentialRequests.push({ method: request.method(), pathname });
+      }
+    });
+    await page.addInitScript(() => {
+      window.open = () => null;
+    });
+    await page.route("**/demo/api/auth/session", (route) =>
+      route.fulfill({
+        json: {
+          expires: "2099-01-01T00:00:00.000Z",
+          user: {
+            authVersion: 1,
+            email: "e2e-user@example.invalid",
+            id: E2E_USER_ID,
+            image: null,
+            name: "E2E subscriber",
+            type: "subscriber",
+          },
+        },
+      })
+    );
+    await page.route("**/demo/api/credentials", (route) => {
+      const method = route.request().method();
+      if (method === "GET") {
+        return route.fulfill({
+          json: { harnessIds: configured ? ["copilot"] : [] },
+        });
+      }
+      if (method === "POST") {
+        configured = true;
+        return route.fulfill({
+          json: { harnessId: "copilot", stored: true },
+        });
+      }
+      configured = false;
+      return route.fulfill({
+        json: { harnessId: "copilot", removed: true },
+      });
+    });
+    await page.route("**/demo/api/credentials/device", (route) =>
+      route.request().method() === "POST"
+        ? route.fulfill({
+            json: {
+              deviceCode: "demo-device-secret",
+              expiresIn: 900,
+              interval: 0.01,
+              userCode: "DEMO-CODE",
+              verificationUri: "https://github.com/login/device",
+            },
+          })
+        : route.fulfill({ json: { status: "denied" } })
+    );
+
+    await page.goto("/demo/account");
+    await page.getByRole("button", { name: "Connect GitHub Copilot" }).click();
+    await expect(page.getByText("DEMO-CODE")).toBeVisible();
+    await expect(page.getByText("Authorization was declined.")).toBeVisible();
+
+    const input = page.getByLabel("GitHub Copilot");
+    await input.fill("demo-token");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await page
+      .getByRole("button", { name: "Remove GitHub Copilot CLI credential" })
+      .click();
+    await expect(page.getByText("Connected", { exact: true })).toHaveCount(0);
+
+    await expect
+      .poll(() => credentialRequests)
+      .toEqual(
+        expect.arrayContaining([
+          { method: "GET", pathname: "/demo/api/credentials" },
+          { method: "POST", pathname: "/demo/api/credentials" },
+          { method: "DELETE", pathname: "/demo/api/credentials" },
+          { method: "POST", pathname: "/demo/api/credentials/device" },
+          { method: "PUT", pathname: "/demo/api/credentials/device" },
+        ])
+      );
+    expect(
+      credentialRequests.every(
+        ({ pathname }) =>
+          pathname.startsWith("/demo/api/credentials") &&
+          !pathname.startsWith("/demo/demo/")
+      )
+    ).toBe(true);
   });
 
   test("signed-out checkout recovery preserves the base path, query, and fragment through login", async ({

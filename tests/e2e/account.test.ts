@@ -1,5 +1,5 @@
-import { expect, test } from "@playwright/test";
-import { subscriberCookies } from "./session";
+import { expect, type Page, type Route, test } from "@playwright/test";
+import { sessionCookies, subscriberCookies } from "./session";
 
 const STARTED_DEVICE_FLOW = {
   deviceCode: "device-secret",
@@ -8,6 +8,41 @@ const STARTED_DEVICE_FLOW = {
   userCode: "ABCD-EFGH",
   verificationUri: "https://github.com/login/device",
 };
+
+async function notifySessionChange(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const channel = new BroadcastChannel("next-auth");
+    channel.postMessage({ event: "session" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    channel.postMessage({ event: "session" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    channel.close();
+  });
+}
+
+async function subscriberSessionSetCookie(
+  email: string,
+  id: string
+): Promise<string> {
+  const [cookie] = await sessionCookies("subscriber", { email, id });
+  if (!cookie) {
+    throw new Error("Subscriber session cookie was not created.");
+  }
+  return `${cookie.name}=${cookie.value}; Path=/; HttpOnly; SameSite=Lax`;
+}
+
+function fulfillSessionOverride(
+  route: Route,
+  sessionOverride: Record<string, unknown> | undefined,
+  setCookie: string | undefined
+) {
+  return sessionOverride === undefined
+    ? route.continue()
+    : route.fulfill({
+        headers: setCookie ? { "set-cookie": setCookie } : undefined,
+        json: sessionOverride,
+      });
+}
 
 test.describe("Account settings", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
@@ -222,6 +257,45 @@ test.describe("Account settings", () => {
     await expect(page.getByText(STARTED_DEVICE_FLOW.userCode)).toHaveCount(0);
   });
 
+  test("popup-blocked device flow focuses an atomic status instruction", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    await page.addInitScript(() => {
+      window.open = () => null;
+    });
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: [] } })
+    );
+    await page.route("**/api/credentials/device", (route) =>
+      route.request().method() === "POST"
+        ? route.fulfill({ json: STARTED_DEVICE_FLOW })
+        : route.fulfill({ json: { status: "pending" } })
+    );
+
+    await page.goto("/account");
+    await page.getByRole("button", { name: "Connect GitHub Copilot" }).click();
+
+    const instructions = page.getByRole("status", {
+      name: /ABCD-EFGH.*github\.com\/login\/device/i,
+    });
+    await expect(instructions).toBeVisible();
+    await expect(instructions).toHaveAttribute("aria-live", "polite");
+    await expect(instructions).toHaveAttribute("aria-atomic", "true");
+    await expect(instructions).toHaveAttribute("tabindex", "-1");
+    await expect(instructions).toContainText(STARTED_DEVICE_FLOW.userCode);
+    await expect(instructions).toContainText(
+      "Enter this code on GitHub, then come back"
+    );
+    await expect(instructions).toBeFocused();
+    await expect(
+      instructions.getByRole("link", {
+        name: /Open github\.com\/login\/device/i,
+      })
+    ).toHaveAttribute("href", STARTED_DEVICE_FLOW.verificationUri);
+  });
+
   test("leaving the credential tab cancels its pending device poll", async ({
     context,
     page,
@@ -276,5 +350,183 @@ test.describe("Account settings", () => {
 
     await expect(page.getByText("Copilot connected.")).toBeVisible();
     await expect(page.getByText(STARTED_DEVICE_FLOW.userCode)).toHaveCount(0);
+  });
+
+  test("an in-place account switch clears secrets and fences stale credential work", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies("first@example.invalid"));
+    let sessionOverride: Record<string, unknown> | undefined;
+    let sessionSetCookie: string | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      fulfillSessionOverride(route, sessionOverride, sessionSetCookie)
+    );
+
+    let getCount = 0;
+    let postCount = 0;
+    let releaseFirstGet!: () => Promise<void>;
+    let releaseFirstSave!: () => Promise<void>;
+    let firstSaveStarted!: () => void;
+    let secondGetStarted!: () => void;
+    const firstSave = new Promise<void>((resolve) => {
+      firstSaveStarted = resolve;
+    });
+    const secondGet = new Promise<void>((resolve) => {
+      secondGetStarted = resolve;
+    });
+    const savedCredentials: Array<{ credential: string; harnessId: string }> =
+      [];
+    await page.route("**/api/credentials", (route) => {
+      const method = route.request().method();
+      if (method === "GET") {
+        getCount += 1;
+        if (getCount === 1) {
+          return new Promise<void>((resolve) => {
+            releaseFirstGet = async () => {
+              await route
+                .fulfill({ json: { harnessIds: ["copilot"] } })
+                .catch(() => undefined);
+              resolve();
+            };
+          });
+        }
+        secondGetStarted();
+        return route.fulfill({ json: { harnessIds: [] } });
+      }
+      if (method === "POST") {
+        postCount += 1;
+        const body = route.request().postDataJSON() as {
+          credential: string;
+          harnessId: string;
+        };
+        savedCredentials.push(body);
+        if (postCount === 1) {
+          firstSaveStarted();
+          return new Promise<void>((resolve) => {
+            releaseFirstSave = async () => {
+              await route
+                .fulfill({
+                  json: { harnessId: body.harnessId, stored: true },
+                })
+                .catch(() => undefined);
+              resolve();
+            };
+          });
+        }
+        return route.fulfill({
+          json: { harnessId: body.harnessId, stored: true },
+        });
+      }
+      return route.fallback();
+    });
+
+    await page.goto("/account");
+    const input = page.getByLabel("GitHub Copilot");
+    await input.fill("first-account-secret");
+    await page.getByRole("button", { name: "Save" }).click();
+    await firstSave;
+
+    const secondId = "00000000-0000-4000-8000-000000000002";
+    sessionOverride = {
+      expires: "2099-01-01T00:00:00.000Z",
+      user: {
+        authVersion: 2,
+        email: "second@example.invalid",
+        id: secondId,
+        image: null,
+        name: "Second subscriber",
+        type: "subscriber",
+      },
+    };
+    sessionSetCookie = await subscriberSessionSetCookie(
+      "second@example.invalid",
+      secondId
+    );
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      const body = (await response.json()) as { user?: { id?: string } };
+      return body.user?.id === secondId;
+    });
+    await notifySessionChange(page);
+    await sessionRefresh;
+
+    await expect(input).toHaveValue("", { timeout: 1000 });
+    await secondGet;
+    await releaseFirstGet();
+    await releaseFirstSave();
+    await page.waitForTimeout(100);
+    await expect(input).toHaveValue("");
+    await expect(page.getByText("Connected", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Credential stored.")).toHaveCount(0);
+
+    await input.fill("second-account-secret");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(page.getByText("Credential stored.")).toBeVisible();
+    await expect(input).toHaveValue("");
+    expect(savedCredentials).toEqual([
+      { credential: "first-account-secret", harnessId: "copilot" },
+      { credential: "second-account-secret", harnessId: "copilot" },
+    ]);
+    expect(getCount).toBeGreaterThanOrEqual(3);
+  });
+
+  test("an account switch dismisses the previous account's credential notice", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies("first@example.invalid"));
+    let sessionOverride: Record<string, unknown> | undefined;
+    let sessionSetCookie: string | undefined;
+    await page.route("**/api/auth/session", (route) =>
+      fulfillSessionOverride(route, sessionOverride, sessionSetCookie)
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.request().method() === "GET"
+        ? route.fulfill({ json: { harnessIds: [] } })
+        : route.fulfill({
+            json: { message: "First account token rejected." },
+            status: 422,
+          })
+    );
+
+    await page.goto("/account");
+    const input = page.getByLabel("GitHub Copilot");
+    await input.fill("first-account-secret");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect(page.getByText("First account token rejected.")).toBeVisible();
+
+    const secondId = "00000000-0000-4000-8000-000000000002";
+    sessionOverride = {
+      expires: "2099-01-01T00:00:00.000Z",
+      user: {
+        authVersion: 2,
+        email: "second@example.invalid",
+        id: secondId,
+        image: null,
+        name: "Second subscriber",
+        type: "subscriber",
+      },
+    };
+    sessionSetCookie = await subscriberSessionSetCookie(
+      "second@example.invalid",
+      secondId
+    );
+    const sessionRefresh = page.waitForResponse(async (response) => {
+      if (new URL(response.url()).pathname !== "/api/auth/session") {
+        return false;
+      }
+      const body = (await response.json()) as { user?: { id?: string } };
+      return body.user?.id === secondId;
+    });
+    await notifySessionChange(page);
+    await sessionRefresh;
+
+    await expect(input).toHaveValue("");
+    await expect(page.getByText("First account token rejected.")).toHaveCount(
+      0
+    );
   });
 });
