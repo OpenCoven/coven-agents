@@ -233,6 +233,15 @@ test("schema and generated migration contain all nine tenant-safe tables", async
     migration,
     /FOREIGN KEY \("capabilityId","tenant","teamStepId"\).*"RunnerGitHubCapability"\("id","tenant","teamStepId"\)/u
   );
+  assert.ok(
+    migration.indexOf(
+      'ALTER TABLE "RunnerRun" ADD CONSTRAINT "RunnerRun_id_tenant_key"'
+    ) <
+      migration.indexOf(
+        'ALTER TABLE "RunnerTeamStep" ADD CONSTRAINT "RTStep_runnerRun_fk"'
+      ),
+    "the referenced RunnerRun tenant key must exist before its team-step foreign key"
+  );
   assert.doesNotMatch(
     migration,
     /accessToken|authorizationHeader|rawResponse/iu

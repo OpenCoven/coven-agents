@@ -191,6 +191,7 @@ CREATE TABLE "RunnerTeamStep" (
 	CONSTRAINT "RTStep_timestamps_valid" CHECK (("RunnerTeamStep"."startedAt" is null or "RunnerTeamStep"."startedAt" >= "RunnerTeamStep"."createdAt") and ("RunnerTeamStep"."completedAt" is null or ("RunnerTeamStep"."completedAt" >= "RunnerTeamStep"."createdAt" and ("RunnerTeamStep"."startedAt" is null or "RunnerTeamStep"."completedAt" >= "RunnerTeamStep"."startedAt"))))
 );
 --> statement-breakpoint
+ALTER TABLE "RunnerRun" ADD CONSTRAINT "RunnerRun_id_tenant_key" UNIQUE("id","tenant");--> statement-breakpoint
 ALTER TABLE "RunnerGitHubCapability" ADD CONSTRAINT "RGHCap_step_fk" FOREIGN KEY ("teamStepId","tenant") REFERENCES "public"."RunnerTeamStep"("id","tenant") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "RunnerGitHubOperation" ADD CONSTRAINT "RGHOp_step_fk" FOREIGN KEY ("teamStepId","tenant") REFERENCES "public"."RunnerTeamStep"("id","tenant") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "RunnerGitHubOperation" ADD CONSTRAINT "RGHOp_capability_fk" FOREIGN KEY ("capabilityId","tenant","teamStepId") REFERENCES "public"."RunnerGitHubCapability"("id","tenant","teamStepId") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
@@ -211,5 +212,4 @@ CREATE INDEX "RTMemberSkill_skill_idx" ON "RunnerTeamMemberSkill" USING btree ("
 CREATE INDEX "RTRun_tenant_created_idx" ON "RunnerTeamRun" USING btree ("tenant","createdAt");--> statement-breakpoint
 CREATE INDEX "RTRun_status_updated_idx" ON "RunnerTeamRun" USING btree ("status","updatedAt");--> statement-breakpoint
 CREATE UNIQUE INDEX "RTStep_runnerRun_uq" ON "RunnerTeamStep" USING btree ("runnerRunId");--> statement-breakpoint
-CREATE INDEX "RTStep_status_updated_idx" ON "RunnerTeamStep" USING btree ("status","updatedAt");--> statement-breakpoint
-ALTER TABLE "RunnerRun" ADD CONSTRAINT "RunnerRun_id_tenant_key" UNIQUE("id","tenant");
+CREATE INDEX "RTStep_status_updated_idx" ON "RunnerTeamStep" USING btree ("status","updatedAt");
