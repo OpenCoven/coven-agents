@@ -6,11 +6,13 @@ import type {
   DaytonaLaunchAuthorizer,
   DaytonaPreparationAuthorizer,
   DaytonaPreparationRelease,
+  DaytonaUnrestrictedExecutionAuthorizer,
 } from "./process";
 
 export type DaytonaDispatchAuthorizers = Readonly<{
   authorizeLaunch: DaytonaLaunchAuthorizer;
   authorizePreparation: DaytonaPreparationAuthorizer;
+  authorizeUnrestrictedExecution: DaytonaUnrestrictedExecutionAuthorizer;
   currentAuthority: () => RunnerDispatchAuthority;
   releasePreparation: DaytonaPreparationRelease;
 }>;
@@ -24,6 +26,7 @@ export function daytonaDispatchAuthorizers(
     RunnerStore,
     | "authorizeDaytonaLaunch"
     | "authorizeDaytonaPreparation"
+    | "authorizeUnrestrictedExecution"
     | "releaseDaytonaPreparation"
   >,
   operator: RunnerOperator,
@@ -70,6 +73,19 @@ export function daytonaDispatchAuthorizers(
       prepared = result.authority;
       latest = result.authority;
       return result.attemptId;
+    },
+    authorizeUnrestrictedExecution: async (execution) => {
+      if (
+        execution.runId !== authority.runId ||
+        !prepared ||
+        execution.attemptId !== prepared.attemptId
+      ) {
+        return false;
+      }
+      return (
+        (await store.authorizeUnrestrictedExecution(operator, prepared))
+          .kind === "authorized"
+      );
     },
     currentAuthority: () => latest,
     releasePreparation: async (release) => {

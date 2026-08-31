@@ -445,21 +445,6 @@ test("costly creates claim idempotency before calling their provider", () => {
   }
 });
 
-test("device polling parses its body and claims idempotency before provider and storage work", () => {
-  const source = read("app/api/credentials/device/route.ts");
-  const block = exportedFunctionBlock(source, "PUT");
-  const bodyIndex = block.indexOf("readBoundedJson(");
-  const idempotencyIndex = block.indexOf("runCredentialDevicePoll({");
-  const providerIndex = block.indexOf("exchangeDeviceCode(");
-  const storageIndex = block.indexOf("prepareCredentialWrite(");
-
-  assert.ok(bodyIndex >= 0);
-  assert.ok(idempotencyIndex > bodyIndex);
-  assert.ok(providerIndex > idempotencyIndex);
-  assert.ok(storageIndex > providerIndex);
-  assert.match(block, /store:\s*databaseCredentialDevicePollStore/);
-});
-
 test("device starts encrypt replay payloads while checkout uses tagged plaintext", () => {
   const deviceSource = read("app/api/credentials/device/route.ts");
   const checkoutSource = read("lib/billing/checkout-response.ts");
@@ -788,6 +773,22 @@ test("Auth.js handlers use method-aware abuse classification", () => {
   assert.ok(identity > bodyRead);
   assert.ok(userAdmission > identity);
   assert.ok(handler > userAdmission);
+});
+
+test("device flow redemption verifies start ownership before provider exchange", () => {
+  const source = functionBlock(
+    read("app/api/credentials/device/route.ts"),
+    "PUT"
+  );
+  const parse = source.indexOf("devicePollSchema");
+  const ownership = source.indexOf("verifyDeviceFlowBinding(");
+  const exchange = source.indexOf("exchangeDeviceCode(");
+  const store = source.indexOf("putCredential(");
+
+  assert.ok(parse >= 0);
+  assert.ok(ownership > parse);
+  assert.ok(exchange > ownership);
+  assert.ok(store > exchange);
 });
 
 test("handler extraction does not include markers from a later handler", () => {

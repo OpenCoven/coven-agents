@@ -3,7 +3,6 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
 
 const repositoryRoot = new URL("../", import.meta.url);
 const repositoryPath = fileURLToPath(repositoryRoot);
@@ -77,7 +76,11 @@ const applicationRouteFiles = [
   "app/api/skills/route.ts",
   "app/api/stripe/webhook/route.ts",
   "app/api/subscription/route.ts",
+  "app/api/team-runs/[id]/approve/route.ts",
+  "app/api/team-runs/[id]/route.ts",
+  "app/api/team-runs/[id]/stop/route.ts",
   "app/api/teams/[id]/route.ts",
+  "app/api/teams/[id]/runs/route.ts",
   "app/api/teams/route.ts",
   "app/api/tenant/prewarm/route.ts",
   "app/api/usage/route.ts",
@@ -115,12 +118,6 @@ const credentialSourceFiles = [
   "lib/credentials/device-flow-attempt.ts",
   "lib/credentials/device-flow-binding.test.ts",
   "lib/credentials/device-flow-binding.ts",
-  "lib/credentials/device-flow-client.test.ts",
-  "lib/credentials/device-flow-client.ts",
-  "lib/credentials/device-poll-commit.test.ts",
-  "lib/credentials/device-poll-commit.ts",
-  "lib/credentials/device-poll.test.ts",
-  "lib/credentials/device-poll.ts",
   "lib/credentials/envelope.test.ts",
   "lib/credentials/envelope.ts",
   "lib/credentials/github-device.test.ts",
@@ -167,6 +164,7 @@ const browserTransportHeaderNames = [
   "last-event-id",
 ] as const;
 const browserTransportImports = [
+  "@/lib/application-path",
   "@opencoven/agent-contracts",
   "@opencoven/harness",
   "zod",
@@ -531,19 +529,6 @@ test("the living subscription policy records current billing authorities", () =>
   assert.match(policy, /not.*production certification/is);
   assert.match(policy, /no (user|Customer|Subscription).*stored/is);
   assert.match(policy, /retention.*operator/is);
-});
-
-test("the subscriber offer renders the authoritative run cap without duplicating it", () => {
-  const source = readFileSync(
-    new URL("components/billing/subscription-card.tsx", repositoryRoot),
-    "utf8"
-  );
-
-  assert.match(
-    source,
-    /import \{ MONTHLY_RUN_CAP \} from "@\/lib\/billing\/limits";/
-  );
-  assert.equal(source.includes(String(MONTHLY_RUN_CAP)), false);
 });
 
 test("the README links the living subscription policy", () => {

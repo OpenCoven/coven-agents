@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  approveTeamRunInputSchema,
   createSkillInputSchema,
   createTeamInputSchema,
   createTeamRunInputSchema,
@@ -14,7 +15,9 @@ import {
   teamEnvelopeSchema,
   teamHandoffSchema,
   teamResourceSchema,
+  teamRunEnvelopeSchema,
   teamRunSchema,
+  teamRunsEnvelopeSchema,
   teamsEnvelopeSchema,
   updateSkillInputSchema,
   updateTeamInputSchema,
@@ -351,10 +354,12 @@ test("accepts a bounded team run with ordered strict steps", () => {
         startedAt: null,
         status: "pending",
         updatedAt: NOW,
+        version: 0,
       },
     ],
     teamId: TEAM_A,
     updatedAt: NOW,
+    version: 0,
   });
 
   assert.equal(parsed.steps[0].position, 0);
@@ -367,11 +372,176 @@ test("accepts a bounded team run with ordered strict steps", () => {
   );
 });
 
-test("bounds team mission, handoff evidence, and GitHub receipts", () => {
+test("team run mutation inputs are strict and capability bounded", () => {
+  assert.deepEqual(
+    createTeamRunInputSchema.parse({
+      operationId: OPERATION_A,
+      task: "Deliver the approved issue.",
+    }),
+    {
+      operationId: OPERATION_A,
+      task: "Deliver the approved issue.",
+    }
+  );
+  assert.deepEqual(
+    approveTeamRunInputSchema.parse({
+      capabilities: ["github.issues.read", "github.pull_requests.write"],
+      decision: "approve",
+      expectedVersion: 3,
+    }),
+    {
+      capabilities: ["github.issues.read", "github.pull_requests.write"],
+      decision: "approve",
+      expectedVersion: 3,
+    }
+  );
+  assert.deepEqual(
+    approveTeamRunInputSchema.parse({
+      decision: "reject",
+      expectedVersion: 3,
+    }),
+    {
+      capabilities: [],
+      decision: "reject",
+      expectedVersion: 3,
+    }
+  );
+
+  for (const value of [
+    { mission: "Old field.", operationId: OPERATION_A },
+    { operationId: OPERATION_A, task: "" },
+    { operationId: OPERATION_A, task: "Run.", tenant: "caller-controlled" },
+  ]) {
+    assert.equal(createTeamRunInputSchema.safeParse(value).success, false);
+  }
+  for (const value of [
+    {
+      capabilities: ["github.pull_requests.write"],
+      decision: "maybe",
+      expectedVersion: 3,
+    },
+    { capabilities: [], decision: "approve", expectedVersion: 3 },
+    {
+      capabilities: ["workspace.write"],
+      decision: "approve",
+      expectedVersion: 3,
+    },
+    {
+      capabilities: ["github.issues.read"],
+      decision: "approve",
+      expectedVersion: 3,
+    },
+    {
+      capabilities: [
+        "github.pull_requests.write",
+        "github.pull_requests.write",
+      ],
+      decision: "approve",
+      expectedVersion: 3,
+    },
+    {
+      capabilities: ["github.pull_requests.write"],
+      decision: "reject",
+      expectedVersion: 3,
+    },
+    {
+      capabilities: ["github.pull_requests.write"],
+      decision: "approve",
+      expectedVersion: 3,
+      userId: AGENT_A,
+    },
+    {
+      capabilities: [],
+      decision: "reject",
+      expectedVersion: 3,
+      reason: "caller-controlled text",
+    },
+    {
+      capabilities: ["github.pull_requests.write"],
+      expectedVersion: 3,
+    },
+  ]) {
+    assert.equal(approveTeamRunInputSchema.safeParse(value).success, false);
+  }
+});
+
+test("team run envelopes expose versions but reject internal authority", () => {
+  const teamRun = teamRunSchema.parse({
+    completedAt: null,
+    createdAt: NOW,
+    currentPosition: 0,
+    error: null,
+    id: TEAM_RUN_A,
+    mission: "Deliver the approved issue.",
+    operationId: OPERATION_A,
+    startedAt: null,
+    status: "queued",
+    steps: [
+      {
+        agentId: AGENT_A,
+        approvalStatus: "not_required",
+        completedAt: null,
+        createdAt: NOW,
+        error: null,
+        handoff: null,
+        id: TEAM_STEP_A,
+        position: 0,
+        required: true,
+        responsibility: "Clarify scope.",
+        runnerRunId: null,
+        skillIds: [SKILL_A],
+        startedAt: null,
+        status: "pending",
+        updatedAt: NOW,
+        version: 2,
+      },
+    ],
+    teamId: TEAM_A,
+    updatedAt: NOW,
+    version: 4,
+  });
+
+  assert.deepEqual(teamRunEnvelopeSchema.parse({ teamRun }), { teamRun });
+  assert.deepEqual(
+    teamRunsEnvelopeSchema.parse({ nextCursor: null, teamRuns: [teamRun] }),
+    {
+      nextCursor: null,
+      teamRuns: [teamRun],
+    }
+  );
+  assert.equal(
+    teamRunsEnvelopeSchema.safeParse({
+      nextCursor: TEAM_RUN_A,
+      teamRuns: Array.from(
+        { length: TEAM_LIMITS.maxTeamRunsPerPage + 1 },
+        () => teamRun
+      ),
+    }).success,
+    false
+  );
+  for (const value of [
+    { ...teamRun, authVersion: 7 },
+    { ...teamRun, createdByUserId: AGENT_A },
+    {
+      ...teamRun,
+      steps: [
+        {
+          ...teamRun.steps[0],
+          agentInstructions: "internal",
+          approvalActorUserId: AGENT_A,
+        },
+      ],
+    },
+  ]) {
+    assert.equal(teamRunSchema.safeParse(value).success, false);
+  }
+});
+
+test("bounds team task, handoff evidence, and GitHub receipts", () => {
   assert.equal(
     createTeamRunInputSchema.safeParse({
-      mission: "x".repeat(TEAM_LIMITS.maxMissionLength + 1),
       operationId: OPERATION_A,
+      task: "x".repeat(TEAM_LIMITS.maxMissionLength + 1),
     }).success,
     false
   );

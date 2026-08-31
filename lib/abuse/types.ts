@@ -46,6 +46,10 @@ export const ABUSE_ROUTES = Object.freeze([
   "team_read",
   "team_write",
   "team_delete",
+  "team_run_read",
+  "team_run_start",
+  "team_run_stop",
+  "team_run_approve",
 ] as const);
 
 export type AbuseRoute = (typeof ABUSE_ROUTES)[number];

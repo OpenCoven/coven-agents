@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { abusePolicyFor } from "./policy";
-import { MemoryAbuseStore } from "./store";
 import { ABUSE_ROUTES, type AbusePolicy, type AbuseRoute } from "./types";
 
 const EXPECTED_ROUTES = [
@@ -51,6 +50,10 @@ const EXPECTED_ROUTES = [
   "team_read",
   "team_write",
   "team_delete",
+  "team_run_read",
+  "team_run_start",
+  "team_run_stop",
+  "team_run_approve",
 ] as const satisfies readonly AbuseRoute[];
 
 const EXPECTED_POLICIES = {
@@ -69,9 +72,9 @@ const EXPECTED_POLICIES = {
   credential_device_poll: expectedPolicy(
     ["ip", "user"],
     8192,
-    90,
+    12,
     60,
-    1200,
+    60,
     3600
   ),
   credential_device_start: expectedPolicy(["ip", "user"], 0, 2, 300, 5, 3600),
@@ -102,6 +105,10 @@ const EXPECTED_POLICIES = {
   suggestions_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   team_delete: expectedPolicy(["ip", "tenant"], 0, 5, 60, 20, 3600),
   team_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
+  team_run_approve: expectedPolicy(["ip", "tenant"], 4096, 10, 60, 40, 3600),
+  team_run_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
+  team_run_start: expectedPolicy(["ip", "tenant"], 64_000, 5, 60, 25, 86_400),
+  team_run_stop: expectedPolicy(["ip", "tenant"], 1024, 5, 60, 20, 3600),
   team_write: expectedPolicy(["ip", "tenant"], 131_072, 10, 60, 40, 3600),
   upload: expectedPolicy(["ip", "user"], 5_250_000, 2, 60, 20, 3600),
   usage_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
@@ -152,46 +159,6 @@ test("session reads use the dedicated high-headroom IP-only budget", () => {
     abusePolicyFor("auth_session_read_ip"),
     expectedPolicy(["ip"], 0, 600, 60, 10_000, 3600)
   );
-});
-
-test("credential device polling admits complete flows with bounded retry and reconnect headroom", async () => {
-  const store = new MemoryAbuseStore();
-  const cadencePolls = 900 / 5;
-  const completeFlowEquivalents = abusePolicyFor("credential_device_start")
-    .sustained.limit;
-  let admitted = 0;
-
-  assert.equal(cadencePolls, 180);
-  assert.equal(completeFlowEquivalents, 5);
-
-  for (let poll = 0; poll < cadencePolls; poll += 1) {
-    const nowMs = poll * 5000;
-    const retryPolls = poll < 120 ? 2 : 1;
-
-    for (
-      let attempt = 0;
-      attempt < completeFlowEquivalents + retryPolls;
-      attempt += 1
-    ) {
-      // biome-ignore lint/performance/noAwaitInLoops: fixed-window simulation must consume in timestamp order
-      assert.equal(await consumeCredentialDevicePoll(store, nowMs), true);
-      admitted += 1;
-    }
-  }
-
-  assert.equal(admitted, 1200);
-  assert.equal(await consumeCredentialDevicePoll(store, 895_000), false);
-});
-
-test("credential device polling still rejects an excessive one-minute flood", async () => {
-  const store = new MemoryAbuseStore();
-
-  for (let attempt = 0; attempt < 90; attempt += 1) {
-    // biome-ignore lint/performance/noAwaitInLoops: fixed-window simulation must consume in request order
-    assert.equal(await consumeCredentialDevicePoll(store, 0), true);
-  }
-
-  assert.equal(await consumeCredentialDevicePoll(store, 0), false);
 });
 
 test("every policy has valid finite integer bounds and subjects", () => {
@@ -295,29 +262,4 @@ function assertPositiveWindow(
     window.windowSeconds > 0,
     `${label}.windowSeconds must be positive`
   );
-}
-
-async function consumeCredentialDevicePoll(
-  store: MemoryAbuseStore,
-  nowMs: number
-): Promise<boolean> {
-  const policy = abusePolicyFor("credential_device_poll");
-  const results = await Promise.all(
-    policy.subjects.flatMap((subject) => [
-      store.consume(
-        `credential_device_poll:burst:${subject}:shared`,
-        policy.burst.limit,
-        policy.burst.windowSeconds,
-        nowMs
-      ),
-      store.consume(
-        `credential_device_poll:sustained:${subject}:shared`,
-        policy.sustained.limit,
-        policy.sustained.windowSeconds,
-        nowMs
-      ),
-    ])
-  );
-
-  return results.every((result) => result.allowed);
 }

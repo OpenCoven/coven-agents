@@ -120,3 +120,13 @@ export function browserApplicationLoginPath(
     process.env.NEXT_PUBLIC_BASE_PATH ?? ""
   );
 }
+
+export function browserApplicationLoginHref(
+  callbackPath: string | null | undefined
+): string {
+  const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+  return applicationPath(
+    applicationLoginPath(callbackPath, basePath),
+    basePath
+  );
+}

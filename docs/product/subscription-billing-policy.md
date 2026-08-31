@@ -60,28 +60,6 @@ can carry subscriber type. Cancellation does not revoke an already paid
 period; authority ends when `subscribedUntil` passes. An explicit
 administrative revoke clears the period immediately.
 
-Copilot device authorization returns an encrypted-replay start response with an
-opaque HMAC binding over the initiating user and one-time provider code. Polls
-must return that binding and claim the same authenticated owner's hashed
-idempotency key before the server verifies ownership and exchanges the code.
-Every provider result is checked against the original session's current
-`authVersion` and subscription authority before it can be published. After
-GitHub returns a token, the server encrypts it in memory, then one database
-transaction locks and verifies both the current User authority and the exact
-live claim (record ID, owner, operation, key, request hash, owner token, and
-expiry), upserts that owner's credential, and marks the same record completed
-with only `{ "status": "authorized" }`. Authority loss returns `403` without a
-credential write. A failed credential write or completion rolls the whole
-transaction back; a lost HTTP response replays the completed result without
-another provider exchange. Retryable PostgreSQL serialization, deadlock, and
-conflict failures are retried three times inside the same request while the
-exchanged token remains in memory. An unrecoverable transaction failure returns
-`503` and attempts the same fenced claim release; a total database outage may
-leave it leased until expiry. The provider exchange and PostgreSQL cannot form
-one global transaction, so a provider success followed by that outage can still
-require a fresh device authorization, but no credential can now persist without
-its completed replay record.
-
 ## Checkout responsibilities
 
 `app/api/checkout/route.ts` owns checkout initiation:

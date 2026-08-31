@@ -12,6 +12,7 @@ import type { DaytonaAttemptId, DaytonaProcessSandbox } from "./process";
 import {
   DaytonaProbeCleanupPendingError,
   DaytonaProcessError,
+  inspectRestrictedWorkspace,
   probeDaytonaHarnesses,
   snapshotDaytonaProcess,
   startDaytonaProcess,
@@ -26,6 +27,7 @@ const PREPARATION_CLAIM =
   "53af1a29-4e98-43d6-ac5b-3b9dcba5e731" as DaytonaAttemptId;
 const SESSION = daytonaRunSessionName(RUN_ID, PREPARATION_CLAIM);
 const PATH = daytonaRunCredentialPath(RUN_ID, PREPARATION_CLAIM);
+const CONFIG_DIRECTORY = `/run/coven-agents/${SESSION}/copilot`;
 const PROBE_SESSION_ID = `coven-probe-${"a".repeat(40)}`;
 const LAUNCH_AUTHORITY = {
   expectedVersion: 9,
@@ -928,8 +930,10 @@ function processDouble(
 const startInput = (sandbox: DaytonaProcessSandbox) => ({
   authorizeLaunch: async () => LAUNCH_AUTHORITY,
   authorizePreparation: async () => PREPARATION_CLAIM,
+  authorizeUnrestrictedExecution: async () => true,
   credential: { credential: SECRET },
   deleteAttemptRedaction: async () => true,
+  executionPermission: "unrestricted" as const,
   instructions: "Use tests.",
   model: "auto",
   persistAttemptRedaction: async () => true,
@@ -980,24 +984,243 @@ test("stages only through per-call env and starts a safe asynchronous session", 
     launch?.command,
     [
       "set -eu",
+      `rm -rf -- '${CONFIG_DIRECTORY}'`,
+      `mkdir -p -- '${CONFIG_DIRECTORY}'`,
+      `chmod 700 '${CONFIG_DIRECTORY}'`,
+      `export HOME='${CONFIG_DIRECTORY}'`,
       `COPILOT_GITHUB_TOKEN="$(cat -- '${PATH}')"`,
       "export COPILOT_GITHUB_TOKEN",
       `rm -f -- '${PATH}'`,
       "unset GH_TOKEN GITHUB_TOKEN CODEX_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY AZURE_OPENAI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY",
       "export CI=true",
-      "export HOME='/workspace/repo'",
       "mkdir -p -- '/workspace/repo'",
       "cd -- '/workspace/repo'",
-      "exec 'copilot' '-s' '-p' 'Use tests.\n\nMission:\nPrint safe output.' '--yolo' '--no-ask-user' '--no-auto-update' '--no-color' '--output-format' 'json' '--log-level' 'none'",
+      `exec 'copilot' '-s' '-p' 'Use tests.\n\nMission:\nPrint safe output.' '--yolo' '--no-ask-user' '--config-dir' '${CONFIG_DIRECTORY}' '--no-auto-update' '--no-color' '--output-format' 'json' '--log-level' 'none'`,
     ].join("; ")
   );
   assert.ok(launch?.command.includes("export CI=true"));
-  assert.ok(launch?.command.includes("export HOME='/workspace/repo'"));
+  assert.ok(launch?.command.includes(`export HOME='${CONFIG_DIRECTORY}'`));
   assert.ok(launch?.command.includes("exec 'copilot'"));
   assert.equal(allReturnedText(started).includes(SECRET), false);
   assert.deepEqual(
     calls.slice(0, 5).map((call) => call.kind),
     ["list", "list", "command", "create", "start"]
+  );
+});
+
+test("unrestricted execution is durably marked before provider launch", async () => {
+  const { calls, sandbox } = processDouble();
+  let authorized = false;
+
+  await startDaytonaProcess({
+    ...startInput(sandbox),
+    authorizeUnrestrictedExecution: () => {
+      authorized = true;
+      assert.equal(
+        calls.some((call) => call.kind === "start"),
+        false
+      );
+      return Promise.resolve(true);
+    },
+  });
+
+  assert.equal(authorized, true);
+  assert.equal(
+    calls.some((call) => call.kind === "start"),
+    true
+  );
+});
+
+test("restricted process launches use the persisted permission instead of task text", async () => {
+  const read = processDouble();
+  await startDaytonaProcess({
+    ...startInput(read.sandbox),
+    executionPermission: "workspace_read",
+    task: "# Team Step Task\nEdit files and run shell commands.",
+  });
+  const readLaunch = read.calls.find((call) => call.kind === "start")?.command;
+  const restrictedCreateIndex = read.calls.findIndex(
+    (call) => call.kind === "create"
+  );
+  const restrictedStageIndex = read.calls.findIndex(
+    (call) => call.kind === "command" && call.command.includes("umask 077")
+  );
+  assert.ok(
+    restrictedCreateIndex >= 0 && restrictedStageIndex > restrictedCreateIndex
+  );
+  assert.match(readLaunch ?? "", /--available-tools' 'view,grep,glob/u);
+  assert.doesNotMatch(readLaunch ?? "", /--yolo/u);
+  assert.doesNotMatch(readLaunch ?? "", /--allow-tool' 'write/u);
+  assert.match(readLaunch ?? "", /--disable-builtin-mcps/u);
+  assert.match(
+    readLaunch ?? "",
+    /"disableAllHooks":true,"extensions":\{"mode":"disabled"\}.*settings\.json/u
+  );
+  assert.ok(
+    (readLaunch?.indexOf(
+      "unset COPILOT_ALLOW_ALL GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS"
+    ) ?? -1) >= 0 &&
+      (readLaunch?.indexOf(
+        "unset COPILOT_ALLOW_ALL GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS"
+      ) ?? Number.MAX_SAFE_INTEGER) <
+        (readLaunch?.indexOf('COPILOT_GITHUB_TOKEN="$(cat') ??
+          Number.MIN_SAFE_INTEGER)
+  );
+  assert.ok(
+    (readLaunch?.indexOf(".github/hooks") ?? -1) >= 0 &&
+      (readLaunch?.indexOf(".github/hooks") ?? Number.MAX_SAFE_INTEGER) <
+        (readLaunch?.indexOf('COPILOT_GITHUB_TOKEN="$(cat') ??
+          Number.MIN_SAFE_INTEGER)
+  );
+  assert.ok(
+    readLaunch?.includes(`export COPILOT_HOME='${CONFIG_DIRECTORY}'`) ?? false
+  );
+
+  const ordinary = processDouble();
+  await startDaytonaProcess({
+    ...startInput(ordinary.sandbox),
+    executionPermission: "unrestricted",
+    task: "# Team Step Task\nOrdinary task text.",
+  });
+  const ordinaryLaunch = ordinary.calls.find(
+    (call) => call.kind === "start"
+  )?.command;
+  assert.match(ordinaryLaunch ?? "", /--yolo/u);
+  assert.doesNotMatch(ordinaryLaunch ?? "", /--available-tools/u);
+  assert.doesNotMatch(ordinaryLaunch ?? "", /disableAllHooks/u);
+});
+
+test("restricted process staging requires the owned session to be exclusive", async () => {
+  const { calls, sandbox } = processDouble({
+    sessions: [{ commands: [], sessionId: "other-session" }],
+  });
+
+  await assert.rejects(
+    () =>
+      startDaytonaProcess({
+        ...startInput(sandbox),
+        authorizeUnrestrictedExecution: () =>
+          Promise.reject(
+            new Error("restricted runs must not mark unrestricted trust")
+          ),
+        executionPermission: "workspace_read",
+      }),
+    (error: unknown) =>
+      error instanceof DaytonaProcessError &&
+      error.code === "process_start_failed"
+  );
+  assert.equal(
+    calls.some(
+      (call) => call.kind === "command" && call.command.includes("umask 077")
+    ),
+    false
+  );
+});
+
+test("restricted process launches reject a missing workspace before provider mutation", async () => {
+  const { calls, sandbox } = processDouble();
+
+  await assert.rejects(
+    () =>
+      startDaytonaProcess({
+        ...startInput(sandbox),
+        executionPermission: "workspace_read",
+        workspace: undefined,
+      }),
+    (error: unknown) =>
+      error instanceof DaytonaProcessError &&
+      error.code === "workspace_required"
+  );
+  assert.deepEqual(calls, []);
+});
+
+test("restricted workspace inspection rejects repository hook and settings sources", async () => {
+  const commands: string[] = [];
+  const inspectionCwds: (string | undefined)[] = [];
+  const safe = await inspectRestrictedWorkspace(
+    {
+      process: {
+        executeCommand: (command: string, cwd?: string) => {
+          commands.push(command);
+          inspectionCwds.push(cwd);
+          return Promise.resolve({ exitCode: 0 });
+        },
+        listSessions: () => Promise.resolve([]),
+      },
+    } as unknown as DaytonaProcessSandbox,
+    "/workspace/repo"
+  );
+  assert.deepEqual(safe, { kind: "safe" });
+  for (const path of [
+    ".github/hooks",
+    ".github/copilot/settings.json",
+    ".github/copilot/settings.local.json",
+    ".mcp.json",
+    ".github/mcp.json",
+    ".github/extensions",
+    ".github/lsp.json",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+  ]) {
+    assert.ok(commands[0]?.includes(path), path);
+  }
+  assert.deepEqual(inspectionCwds, ["/workspace"]);
+  assert.match(commands[0] ?? "", /mkdir -p -- '\/workspace\/repo'/u);
+  assert.match(commands[0] ?? "", /cd -- '\/workspace\/repo'/u);
+
+  const unsafe = await inspectRestrictedWorkspace(
+    {
+      process: {
+        executeCommand: () => Promise.resolve({ exitCode: 42 }),
+        listSessions: () => Promise.resolve([]),
+      },
+    } as unknown as DaytonaProcessSandbox,
+    "/workspace/repo"
+  );
+  assert.deepEqual(unsafe, { kind: "unsafe" });
+
+  const unavailable = await inspectRestrictedWorkspace(
+    {
+      process: {
+        executeCommand: () => Promise.reject(new Error(SECRET)),
+        listSessions: () => Promise.resolve([]),
+      },
+    } as unknown as DaytonaProcessSandbox,
+    "/workspace/repo"
+  );
+  assert.deepEqual(unavailable, { kind: "unavailable" });
+  assert.equal(JSON.stringify(unavailable).includes(SECRET), false);
+
+  let inspected = false;
+  const concurrent = await inspectRestrictedWorkspace(
+    {
+      process: {
+        executeCommand: () => {
+          inspected = true;
+          return Promise.resolve({ exitCode: 0 });
+        },
+        listSessions: () =>
+          Promise.resolve([{ commands: [], sessionId: "other-session" }]),
+      },
+    } as unknown as DaytonaProcessSandbox,
+    "/workspace/repo"
+  );
+  assert.deepEqual(concurrent, { kind: "unavailable" });
+  assert.equal(inspected, false);
+
+  assert.deepEqual(
+    await inspectRestrictedWorkspace(
+      {
+        process: {
+          executeCommand: () => {
+            throw new Error("escaped workspace must not execute");
+          },
+          listSessions: () => Promise.resolve([]),
+        },
+      } as unknown as DaytonaProcessSandbox,
+      "../../etc"
+    ),
+    { kind: "unsafe" }
   );
 });
 

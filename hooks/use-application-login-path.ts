@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import { browserApplicationLoginPath } from "@/lib/application-path";
 
-export function useApplicationLoginPath(): string {
-  const [loginPath, setLoginPath] = useState("/login");
+export function useApplicationLoginPath(): string | null {
+  const [loginPath, setLoginPath] = useState<string | null>(null);
 
   useEffect(() => {
     setLoginPath(

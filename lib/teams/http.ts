@@ -3,8 +3,10 @@ import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 import {
   AGENT_RUNNER_LIMITS,
+  approveTeamRunInputSchema,
   createSkillInputSchema,
   createTeamInputSchema,
+  createTeamRunInputSchema,
   expectedVersionInputSchema,
   okEnvelopeSchema,
   skillEnvelopeSchema,
@@ -12,6 +14,9 @@ import {
   skillsEnvelopeSchema,
   teamEnvelopeSchema,
   teamIdSchema,
+  teamRunEnvelopeSchema,
+  teamRunIdSchema,
+  teamRunsEnvelopeSchema,
   teamsEnvelopeSchema,
   updateSkillInputSchema,
   updateTeamInputSchema,
@@ -40,9 +45,11 @@ import type { TeamService } from "./service";
 export const TEAM_ERROR_CODES = [
   "abuse_control_unavailable",
   "body_too_large",
+  "capability_escalation",
   "idempotency_conflict",
   "idempotency_key_required",
   "invalid_request",
+  "invalid_transition",
   "invalid_idempotency_key",
   "not_found",
   "origin_rejected",
@@ -75,6 +82,11 @@ const ERROR_DEFINITIONS = {
     retryable: false,
     status: 413,
   },
+  capability_escalation: {
+    message: "Requested capabilities exceed the immutable team declaration.",
+    retryable: false,
+    status: 400,
+  },
   idempotency_conflict: {
     message: "Idempotency key was already used for a different request.",
     retryable: false,
@@ -94,6 +106,11 @@ const ERROR_DEFINITIONS = {
     message: "Request validation failed.",
     retryable: false,
     status: 400,
+  },
+  invalid_transition: {
+    message: "The team run cannot perform that transition.",
+    retryable: false,
+    status: 409,
   },
   not_found: {
     message: "Resource was not found.",
@@ -151,7 +168,7 @@ const CREATE_RETENTION_MS = 24 * 60 * 60_000;
 const emptyObjectSchema = z.object({}).strict();
 
 function idempotencyOperation(
-  operation: "skill_create" | "team_create",
+  operation: "skill_create" | "team_create" | "team_run_create",
   tenant: string
 ): string {
   const tenantScope = createHash("sha256")
@@ -162,6 +179,7 @@ function idempotencyOperation(
 }
 
 export type TeamHttpDependencies = Readonly<{
+  after?: (operation: () => Promise<void>) => void;
   appOrigin?: string | (() => string | null);
   auth: RunnerAuth;
   createRequestId?: () => string;
@@ -171,17 +189,23 @@ export type TeamHttpDependencies = Readonly<{
   enforceAbuse: (input: AbuseEnforcementInput) => Promise<AbuseAdmission>;
   idempotencyStore: IdempotencyStore;
   ipAddress: (request: Request) => string | null;
+  reconcile?: () => Promise<void>;
 }>;
 
 export type TeamHttpHandlers = Readonly<{
+  approveTeamRun: (request: Request, id: string) => Promise<Response>;
   createSkill: (request: Request) => Promise<Response>;
   createTeam: (request: Request) => Promise<Response>;
+  createTeamRun: (request: Request, teamId: string) => Promise<Response>;
   deleteSkill: (request: Request, id: string) => Promise<Response>;
   deleteTeam: (request: Request, id: string) => Promise<Response>;
   getSkill: (request: Request, id: string) => Promise<Response>;
   getTeam: (request: Request, id: string) => Promise<Response>;
+  getTeamRun: (request: Request, id: string) => Promise<Response>;
   listSkills: (request: Request) => Promise<Response>;
   listTeams: (request: Request) => Promise<Response>;
+  listTeamRuns: (request: Request, teamId: string) => Promise<Response>;
+  stopTeamRun: (request: Request, id: string) => Promise<Response>;
   updateSkill: (request: Request, id: string) => Promise<Response>;
   updateTeam: (request: Request, id: string) => Promise<Response>;
 }>;
@@ -431,12 +455,47 @@ async function readEmptyBody(
 
 function invalidId(
   dependencies: TeamHttpDependencies,
-  schema: typeof skillIdSchema | typeof teamIdSchema,
+  schema: typeof skillIdSchema | typeof teamIdSchema | typeof teamRunIdSchema,
   id: string
 ): Response | null {
   return schema.safeParse(id).success
     ? null
     : errorResponse(dependencies, "invalid_request");
+}
+
+function teamRunCursor(
+  request: Request,
+  dependencies: TeamHttpDependencies
+): string | null | Response {
+  const entries = [...new URL(request.url).searchParams.entries()];
+  if (entries.length === 0) {
+    return null;
+  }
+  if (
+    entries.length !== 1 ||
+    entries[0]?.[0] !== "cursor" ||
+    !teamRunIdSchema.safeParse(entries[0][1]).success
+  ) {
+    return errorResponse(dependencies, "invalid_request");
+  }
+  return entries[0][1];
+}
+
+function scheduleReconciliation(dependencies: TeamHttpDependencies): void {
+  if (!(dependencies.after && dependencies.reconcile)) {
+    return;
+  }
+  try {
+    dependencies.after(async () => {
+      try {
+        await dependencies.reconcile?.();
+      } catch {
+        // Durable cron reconciliation is the correctness path.
+      }
+    });
+  } catch {
+    // Scheduling is a latency optimization and cannot change the response.
+  }
 }
 
 function deleteVersion(
@@ -469,6 +528,54 @@ export function createTeamHttpHandlers(
   dependencies: TeamHttpDependencies
 ): TeamHttpHandlers {
   return {
+    approveTeamRun: (request, id) =>
+      safely(dependencies, async () => {
+        const subscriber = await authorize(
+          request,
+          "team_run_approve",
+          dependencies,
+          "json"
+        );
+        if (isResponse(subscriber)) {
+          return subscriber;
+        }
+        const invalid = invalidId(dependencies, teamRunIdSchema, id);
+        if (invalid) {
+          return invalid;
+        }
+        const body = await readJson(
+          request,
+          "team_run_approve",
+          approveTeamRunInputSchema,
+          dependencies
+        );
+        if (body instanceof Response) {
+          return body;
+        }
+        const service = await dependencies.createService(subscriber);
+        const result = await service.approveRun(subscriber.principal, id, body);
+        switch (result.kind) {
+          case "approved":
+          case "rejected":
+            scheduleReconciliation(dependencies);
+            return jsonResponse(teamRunEnvelopeSchema, {
+              teamRun: result.teamRun,
+            });
+          case "invalid_capabilities":
+            return errorResponse(dependencies, "capability_escalation");
+          case "invalid_transition":
+            return errorResponse(dependencies, "invalid_transition");
+          case "not_found":
+            return errorResponse(dependencies, "not_found");
+          case "stale_version":
+            return errorResponse(dependencies, "stale_version");
+          case "invalid":
+            return errorResponse(dependencies, "invalid_request");
+          default:
+            return unreachable(result);
+        }
+      }),
+
     createSkill: (request) =>
       safely(dependencies, async () => {
         const subscriber = await authorize(
@@ -585,6 +692,79 @@ export function createTeamHttpHandlers(
         return createResponse(dependencies, result, teamEnvelopeSchema);
       }),
 
+    createTeamRun: (request, teamId) =>
+      safely(dependencies, async () => {
+        const subscriber = await authorize(
+          request,
+          "team_run_start",
+          dependencies,
+          "json"
+        );
+        if (isResponse(subscriber)) {
+          return subscriber;
+        }
+        const invalid = invalidId(dependencies, teamIdSchema, teamId);
+        if (invalid) {
+          return invalid;
+        }
+        const body = await readJson(
+          request,
+          "team_run_start",
+          createTeamRunInputSchema,
+          dependencies
+        );
+        if (body instanceof Response) {
+          return body;
+        }
+        const result = await runIdempotentOperation({
+          idempotencyKey: request.headers.get("idempotency-key"),
+          operation: idempotencyOperation(
+            "team_run_create",
+            subscriber.principal.tenant
+          ),
+          ownerId: subscriber.userId,
+          perform: async () => {
+            const service = await dependencies.createService(subscriber);
+            const serviceResult = await service.createRun(
+              subscriber.principal,
+              subscriber.authVersion,
+              teamId,
+              body
+            );
+            switch (serviceResult.kind) {
+              case "created":
+                scheduleReconciliation(dependencies);
+                return {
+                  body: teamRunEnvelopeSchema.parse({
+                    teamRun: serviceResult.teamRun,
+                  }),
+                  status: 201,
+                };
+              case "duplicate":
+                scheduleReconciliation(dependencies);
+                return {
+                  body: teamRunEnvelopeSchema.parse({
+                    teamRun: serviceResult.teamRun,
+                  }),
+                  status: 200,
+                };
+              case "conflict":
+                return idempotencyFailure(dependencies, "resource_conflict");
+              case "not_found":
+                return idempotencyFailure(dependencies, "not_found");
+              case "invalid":
+                return idempotencyFailure(dependencies, "invalid_request");
+              default:
+                return unreachable(serviceResult);
+            }
+          },
+          request: { ...body, teamId },
+          retentionMs: CREATE_RETENTION_MS,
+          store: dependencies.idempotencyStore,
+        });
+        return createResponse(dependencies, result, teamRunEnvelopeSchema);
+      }),
+
     deleteSkill: (request, id) =>
       safely(dependencies, async () => {
         const subscriber = await authorize(
@@ -691,6 +871,29 @@ export function createTeamHttpHandlers(
           : errorResponse(dependencies, "not_found");
       }),
 
+    getTeamRun: (request, id) =>
+      safely(dependencies, async () => {
+        const subscriber = await authorize(
+          request,
+          "team_run_read",
+          dependencies
+        );
+        if (isResponse(subscriber)) {
+          return subscriber;
+        }
+        const invalid = invalidId(dependencies, teamRunIdSchema, id);
+        if (invalid) {
+          return invalid;
+        }
+        const service = await dependencies.createService(subscriber);
+        const result = await service.getRun(subscriber.principal, id);
+        return result.kind === "found"
+          ? jsonResponse(teamRunEnvelopeSchema, {
+              teamRun: result.teamRun,
+            })
+          : errorResponse(dependencies, "not_found");
+      }),
+
     listSkills: (request) =>
       safely(dependencies, async () => {
         const subscriber = await authorize(request, "skill_read", dependencies);
@@ -703,6 +906,38 @@ export function createTeamHttpHandlers(
         });
       }),
 
+    listTeamRuns: (request, teamId) =>
+      safely(dependencies, async () => {
+        const subscriber = await authorize(
+          request,
+          "team_run_read",
+          dependencies
+        );
+        if (isResponse(subscriber)) {
+          return subscriber;
+        }
+        const invalid = invalidId(dependencies, teamIdSchema, teamId);
+        if (invalid) {
+          return invalid;
+        }
+        const cursor = teamRunCursor(request, dependencies);
+        if (cursor instanceof Response) {
+          return cursor;
+        }
+        const service = await dependencies.createService(subscriber);
+        const result = await service.listRuns(
+          subscriber.principal,
+          teamId,
+          cursor
+        );
+        return result.kind === "found"
+          ? jsonResponse(teamRunsEnvelopeSchema, {
+              nextCursor: result.nextCursor,
+              teamRuns: result.teamRuns,
+            })
+          : errorResponse(dependencies, "not_found");
+      }),
+
     listTeams: (request) =>
       safely(dependencies, async () => {
         const subscriber = await authorize(request, "team_read", dependencies);
@@ -713,6 +948,57 @@ export function createTeamHttpHandlers(
         return jsonResponse(teamsEnvelopeSchema, {
           teams: await service.listTeams(subscriber.principal),
         });
+      }),
+
+    stopTeamRun: (request, id) =>
+      safely(dependencies, async () => {
+        const subscriber = await authorize(
+          request,
+          "team_run_stop",
+          dependencies,
+          "json"
+        );
+        if (isResponse(subscriber)) {
+          return subscriber;
+        }
+        const invalid = invalidId(dependencies, teamRunIdSchema, id);
+        if (invalid) {
+          return invalid;
+        }
+        const body = await readJson(
+          request,
+          "team_run_stop",
+          expectedVersionInputSchema,
+          dependencies
+        );
+        if (body instanceof Response) {
+          return body;
+        }
+        const service = await dependencies.createService(subscriber);
+        const result = await service.stopRun(
+          subscriber.principal,
+          id,
+          body.expectedVersion
+        );
+        switch (result.kind) {
+          case "stopped":
+            if (result.scheduleReconciliation) {
+              scheduleReconciliation(dependencies);
+            }
+            return jsonResponse(teamRunEnvelopeSchema, {
+              teamRun: result.teamRun,
+            });
+          case "already_terminal":
+            return errorResponse(dependencies, "invalid_transition");
+          case "not_found":
+            return errorResponse(dependencies, "not_found");
+          case "stale_version":
+            return errorResponse(dependencies, "stale_version");
+          case "invalid":
+            return errorResponse(dependencies, "invalid_request");
+          default:
+            return unreachable(result);
+        }
       }),
 
     updateSkill: (request, id) =>

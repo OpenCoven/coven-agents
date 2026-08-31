@@ -6,6 +6,7 @@ import {
   applicationHomePath,
   applicationLoginPath,
   applicationPath,
+  browserApplicationLoginHref,
   browserApplicationPath,
   configuredApplicationBasePath,
   safeApplicationCallbackPath,
@@ -39,6 +40,10 @@ test("browser application paths use the inlined public base path", () => {
       "/demo/api/subscription"
     );
     assert.equal(browserApplicationPath("/api/checkout"), "/demo/api/checkout");
+    assert.equal(
+      browserApplicationLoginHref("/demo/account?checkout=success#allowance"),
+      "/demo/login?callbackUrl=%2Fdemo%2Faccount%3Fcheckout%3Dsuccess%23allowance"
+    );
   } finally {
     if (previous === undefined) {
       delete process.env.NEXT_PUBLIC_BASE_PATH;

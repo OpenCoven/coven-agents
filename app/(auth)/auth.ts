@@ -16,7 +16,7 @@ import {
 import { isSubscribedAt, userTypeFor } from "@/lib/subscription";
 import {
   type SubscriptionAuthority,
-  serializeSubscriptionAuthority,
+  storageUnavailableSubscriptionAuthority,
 } from "@/lib/subscription-authority";
 import { authConfig } from "./auth.config";
 
@@ -27,6 +27,7 @@ declare module "next-auth" {
     user: {
       authVersion: number;
       id: string;
+      subscriptionAuthorityExpiresAt?: string | null;
       type: UserType;
     } & DefaultSession["user"];
   }
@@ -127,13 +128,9 @@ export const {
         }
         session.user.type = token.type;
         session.user.image = token.picture ?? null;
-        const subscribedUntil =
+        session.user.subscriptionAuthorityExpiresAt =
           typeof token.subscribedUntil === "string"
-            ? new Date(token.subscribedUntil)
-            : null;
-        session.user.subscribedUntil =
-          subscribedUntil && Number.isFinite(subscribedUntil.getTime())
-            ? subscribedUntil
+            ? token.subscribedUntil
             : null;
       }
 
@@ -233,25 +230,14 @@ export async function subscriptionPageAuthority(
 ): Promise<SubscriptionAuthority> {
   const resolved = await resolveAuth(now);
   if (!resolved) {
-    return serializeSubscriptionAuthority({
-      checkedAt: now,
-      isSubscriber: false,
-      subscribedUntil: null,
-      userId: null,
-    });
+    return null;
   }
   if (resolved.kind === "storage-unavailable") {
-    return serializeSubscriptionAuthority({
-      checkedAt: now,
-      isSubscriber: resolved.session.user.type === "subscriber",
-      subscribedUntil: resolved.session.user.subscribedUntil,
-      userId: resolved.session.user.id,
-    });
+    return storageUnavailableSubscriptionAuthority(resolved.session, now);
   }
-  return serializeSubscriptionAuthority({
-    checkedAt: now,
+  return {
     isSubscriber: isSubscribedAt(resolved.user, now),
-    subscribedUntil: resolved.user.subscribedUntil,
+    subscribedUntil: resolved.user.subscribedUntil?.toISOString() ?? null,
     userId: resolved.session.user.id,
-  });
+  };
 }

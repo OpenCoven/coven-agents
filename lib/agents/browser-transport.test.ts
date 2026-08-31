@@ -282,6 +282,27 @@ test("owns every relative same-origin runner path and sends only browser session
   );
 });
 
+test("runner requests use the configured application base path", async () => {
+  const previous = process.env.NEXT_PUBLIC_BASE_PATH;
+  process.env.NEXT_PUBLIC_BASE_PATH = "/demo";
+  const paths: string[] = [];
+  try {
+    const transport = new BrowserRunnerTransport((input) => {
+      paths.push(String(input));
+      return Promise.resolve(json({ agents: [] }));
+    });
+
+    await transport.listAgents();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.NEXT_PUBLIC_BASE_PATH;
+    } else {
+      process.env.NEXT_PUBLIC_BASE_PATH = previous;
+    }
+  }
+  assert.deepEqual(paths, ["/demo/api/agents"]);
+});
+
 test("accepts only the strict v1 error envelope", async () => {
   const valid = new BrowserRunnerTransport(() =>
     Promise.resolve(

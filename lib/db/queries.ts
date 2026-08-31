@@ -49,11 +49,7 @@ import {
   type StripeWebhookManualReconciliationRecord,
   stripeEventMutation,
 } from "../billing/webhook";
-import type { CredentialDevicePollStore } from "../credentials/device-poll";
-import { commitCredentialDevicePollAuthorized } from "../credentials/device-poll-commit";
-import type { PreparedCredentialWrite } from "../credentials/store";
 import { ChatbotError } from "../errors";
-import { drizzleCredentialDevicePollDatabase } from "./credential-device-poll";
 import {
   type Chat,
   chat,
@@ -592,10 +588,7 @@ export const databaseIdempotencyStore: IdempotencyStore = {
             .returning({ id: idempotencyRecord.id });
 
           if (inserted) {
-            return {
-              claim: claimHandle(input, inserted.id),
-              kind: "claimed",
-            } as const;
+            return { claim: claimHandle(input), kind: "claimed" } as const;
           }
 
           if (input.reclaimCompleted) {
@@ -619,10 +612,7 @@ export const databaseIdempotencyStore: IdempotencyStore = {
               .returning({ id: idempotencyRecord.id });
 
             if (reclaimedCompleted) {
-              return {
-                claim: claimHandle(input, reclaimedCompleted.id),
-                kind: "claimed",
-              } as const;
+              return { claim: claimHandle(input), kind: "claimed" } as const;
             }
           }
 
@@ -645,10 +635,7 @@ export const databaseIdempotencyStore: IdempotencyStore = {
             .returning({ id: idempotencyRecord.id });
 
           if (reclaimed) {
-            return {
-              claim: claimHandle(input, reclaimed.id),
-              kind: "claimed",
-            } as const;
+            return { claim: claimHandle(input), kind: "claimed" } as const;
           }
 
           const [existing] = await transaction
@@ -816,19 +803,6 @@ export const databaseIdempotencyStore: IdempotencyStore = {
   },
 };
 
-export const databaseCredentialDevicePollStore: CredentialDevicePollStore<PreparedCredentialWrite> =
-  {
-    ...databaseIdempotencyStore,
-    commitAuthorized: (input) =>
-      commitCredentialDevicePollAuthorized(
-        drizzleCredentialDevicePollDatabase(db),
-        input
-      ),
-    renew: databaseIdempotencyStore.renew as NonNullable<
-      IdempotencyStore["renew"]
-    >,
-  };
-
 function checkoutAttemptLease(
   input: {
     leaseExpiresAt: Date;
@@ -867,24 +841,20 @@ function idempotencyScope(input: {
   );
 }
 
-function claimHandle(
-  input: {
-    claimExpiresAt: Date;
-    keyHash: string;
-    operation: string;
-    ownerToken?: string;
-    ownerId: string;
-    requestHash: string;
-  },
-  recordId: string
-): IdempotencyClaimHandle {
+function claimHandle(input: {
+  claimExpiresAt: Date;
+  keyHash: string;
+  operation: string;
+  ownerToken?: string;
+  ownerId: string;
+  requestHash: string;
+}): IdempotencyClaimHandle {
   return {
     claimExpiresAt: input.claimExpiresAt,
     keyHash: input.keyHash,
     operation: input.operation,
     ...(input.ownerToken ? { ownerToken: input.ownerToken } : {}),
     ownerId: input.ownerId,
-    recordId,
     requestHash: input.requestHash,
   };
 }

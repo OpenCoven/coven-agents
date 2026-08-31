@@ -10,8 +10,7 @@ export function sessionCookies(
   {
     email = "e2e-user@example.invalid",
     id = E2E_USER_ID,
-    subscribedUntil = type === "subscriber" ? "2099-01-01T00:00:00.000Z" : null,
-  }: { email?: string; id?: string; subscribedUntil?: string | null } = {}
+  }: { email?: string; id?: string } = {}
 ) {
   const secret = process.env.AUTH_SECRET;
   if (!secret) {
@@ -38,7 +37,8 @@ export function sessionCookies(
           email,
           id,
           name: "E2E subscriber",
-          subscribedUntil,
+          subscribedUntil:
+            type === "subscriber" ? "2099-01-01T00:00:00.000Z" : null,
           type,
         },
       }),

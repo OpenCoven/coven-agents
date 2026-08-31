@@ -18,7 +18,14 @@ import {
 } from "@opencoven/agent-contracts";
 import { type SQL, sql } from "drizzle-orm";
 import type { databaseFor } from "@/lib/db/access";
-import type { RunnerPrincipal } from "@/lib/runner/types";
+import type {
+  RunnerAgentExecutionSnapshot,
+  RunnerExecutionPermission,
+  RunnerOperator,
+  RunnerPrincipal,
+} from "@/lib/runner/types";
+import { teamChildRunnerIds } from "./child-ids";
+import { buildTeamHandoff } from "./handoff";
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -116,7 +123,14 @@ export type TeamSkillSnapshot = {
 
 export type TeamStepRecord = {
   agentId: string;
+  agentInstructions: string;
+  agentModel: string;
+  agentRuntime: RunnerAgentExecutionSnapshot["runtime"];
+  agentWorkspace: string | null;
+  approvalActorUserId: string | null;
+  approvalDecidedAt: Date | null;
   approvalStatus: TeamApprovalStatus;
+  approvedCapabilities: TeamCapability[];
   completedAt: Date | null;
   createdAt: Date;
   error: RunError | null;
@@ -124,6 +138,8 @@ export type TeamStepRecord = {
   id: string;
   memberId: string;
   position: number;
+  plannedOperationId: string | null;
+  plannedRunnerRunId: string | null;
   required: boolean;
   responsibility: string;
   runnerRunId: string | null;
@@ -131,14 +147,17 @@ export type TeamStepRecord = {
   skillSnapshots: TeamSkillSnapshot[];
   startedAt: Date | null;
   status: TeamStepStatus;
+  teamRunId: string;
   tenant: string;
   updatedAt: Date;
   version: number;
 };
 
 export type TeamRunRecord = {
+  authVersion: number;
   completedAt: Date | null;
   createdAt: Date;
+  createdByUserId: string;
   currentPosition: number;
   error: RunError | null;
   id: string;
@@ -238,6 +257,7 @@ export type UpdateTeamStoreInput = CreateTeamStoreInput & {
 };
 
 export type CreateTeamRunStoreInput = {
+  authVersion: number;
   id: string;
   mission: string;
   operationId: string;
@@ -255,6 +275,37 @@ export type UpdateTeamStepStoreInput = {
   runnerRunId: string | null;
   status: TeamStepStatus;
 };
+
+export type TeamStepExecutionClaim = Readonly<{
+  agentId: string;
+  agentSnapshot: RunnerAgentExecutionSnapshot;
+  approvedCapabilities: readonly TeamCapability[];
+  authVersion: number;
+  declaredCapabilities: readonly TeamCapability[];
+  executionPermission: Exclude<
+    RunnerExecutionPermission,
+    "unrestricted"
+  > | null;
+  kind: "ready";
+  mission: string;
+  principal: RunnerPrincipal;
+  priorHandoffs: readonly TeamHandoff[];
+  plannedOperationId: string;
+  plannedRunnerRunId: string;
+  responsibility: string;
+  skillSnapshots: readonly Readonly<{
+    instructions: string;
+    name: string;
+  }>[];
+  teamRunId: string;
+  teamStepId: string;
+  teamStepVersion: number;
+}>;
+
+export type ClaimNextTeamStepResult =
+  | TeamStepExecutionClaim
+  | Readonly<{ kind: "waiting_approval"; teamRunId: string }>
+  | Readonly<{ kind: "idle" }>;
 
 export type CreateGitHubCapabilityInput = {
   approvedCapabilities: TeamCapability[];
@@ -399,13 +450,22 @@ function asSkillSnapshot(value: unknown): TeamSkillSnapshot {
 function asStep(row: Record<string, unknown>): TeamStepRecord {
   return {
     agentId: column(row, "agentId"),
+    agentInstructions: column(row, "agentInstructions"),
+    agentModel: column(row, "agentModel"),
+    agentRuntime: column(row, "agentRuntime"),
+    agentWorkspace: column(row, "agentWorkspace"),
+    approvalActorUserId: column(row, "approvalActorUserId"),
+    approvalDecidedAt: nullableTimestampColumn(row, "approvalDecidedAt"),
     approvalStatus: column(row, "approvalStatus"),
+    approvedCapabilities: arrayColumn(row, "approvedCapabilities"),
     completedAt: nullableTimestampColumn(row, "completedAt"),
     createdAt: timestampColumn(row, "createdAt"),
     error: column(row, "error"),
     handoff: column(row, "handoff"),
     id: column(row, "id"),
     memberId: column(row, "memberId"),
+    plannedOperationId: column(row, "plannedOperationId"),
+    plannedRunnerRunId: column(row, "plannedRunnerRunId"),
     position: column(row, "position"),
     required: column(row, "required"),
     responsibility: column(row, "responsibility"),
@@ -416,6 +476,7 @@ function asStep(row: Record<string, unknown>): TeamStepRecord {
       .sort((left, right) => left.id.localeCompare(right.id)),
     startedAt: nullableTimestampColumn(row, "startedAt"),
     status: column(row, "status"),
+    teamRunId: column(row, "teamRunId"),
     tenant: column(row, "tenant"),
     updatedAt: timestampColumn(row, "updatedAt"),
     version: column(row, "version"),
@@ -424,8 +485,10 @@ function asStep(row: Record<string, unknown>): TeamStepRecord {
 
 function asRun(row: Record<string, unknown>): TeamRunRecord {
   return {
+    authVersion: column(row, "authVersion"),
     completedAt: nullableTimestampColumn(row, "completedAt"),
     createdAt: timestampColumn(row, "createdAt"),
+    createdByUserId: column(row, "createdByUserId"),
     currentPosition: column(row, "currentPosition"),
     error: column(row, "error"),
     id: column(row, "id"),
@@ -793,6 +856,55 @@ function validStepTransition(
   return transitions[current].includes(next);
 }
 
+function declaredGitHubCapabilities(
+  snapshots: readonly TeamSkillSnapshot[]
+): TeamCapability[] {
+  return [
+    ...new Set(
+      snapshots.flatMap(({ requiredCapabilities }) =>
+        requiredCapabilities.filter((capability) =>
+          GITHUB_CAPABILITIES.has(capability)
+        )
+      )
+    ),
+  ].sort();
+}
+
+function declaredCapabilities(
+  snapshots: readonly TeamSkillSnapshot[]
+): TeamCapability[] {
+  return [
+    ...new Set(
+      snapshots.flatMap(({ requiredCapabilities }) => requiredCapabilities)
+    ),
+  ].sort();
+}
+
+function teamExecutionPermission(
+  capabilities: readonly TeamCapability[]
+): TeamStepExecutionClaim["executionPermission"] {
+  if (capabilities.includes("workspace.write")) {
+    return "workspace_write";
+  }
+  return capabilities.includes("workspace.read") ? "workspace_read" : null;
+}
+
+function validApprovalCapabilities(
+  declared: readonly TeamCapability[],
+  requested: readonly TeamCapability[]
+): boolean {
+  return (
+    requested.length > 0 &&
+    requested.length <= TEAM_LIMITS.maxSkillsPerMember &&
+    new Set(requested).size === requested.length &&
+    requested.some((capability) => capability.endsWith(".write")) &&
+    requested.every(
+      (capability) =>
+        GITHUB_CAPABILITIES.has(capability) && declared.includes(capability)
+    )
+  );
+}
+
 function requiredCapability(kind: GitHubOperationKind): TeamCapability {
   const write = new Set<GitHubOperationKind>([
     "issue.create",
@@ -928,6 +1040,158 @@ function validateReceipt(input: {
 
 export function createTeamStore(database: TeamStoreDatabase) {
   return {
+    attachTeamStepRunnerRun: (
+      _operator: RunnerOperator,
+      input: {
+        expectedVersion: number;
+        operationId: string;
+        runnerRunId: string;
+        teamStepId: string;
+      }
+    ) =>
+      database.transaction(async (transaction) => {
+        assertVersion(input.expectedVersion);
+        assertUuid(input.operationId, "Runner operation id");
+        assertUuid(input.runnerRunId, "Runner run id");
+        assertUuid(input.teamStepId, "Team step id");
+        const [current] = await transaction.execute(
+          statement(
+            "lock-team-step-for-child-attachment",
+            input,
+            sql`SELECT "step".*
+              , "teamRun"."status" AS "teamRunStatus"
+              FROM "RunnerTeamStep" AS "step"
+              JOIN "RunnerTeamRun" AS "teamRun"
+                ON "teamRun"."id" = "step"."teamRunId"
+                AND "teamRun"."tenant" = "step"."tenant"
+              WHERE "step"."id" = ${input.teamStepId}
+                AND "step"."position" = "teamRun"."currentPosition"
+              FOR UPDATE OF "teamRun", "step"`
+          )
+        );
+        if (!current) {
+          return { kind: "not_found" as const };
+        }
+        const currentRunnerRunId = column<string | null>(
+          current,
+          "runnerRunId"
+        );
+        if (currentRunnerRunId === input.runnerRunId) {
+          return { kind: "duplicate" as const };
+        }
+        if (currentRunnerRunId !== null) {
+          return { kind: "invalid_transition" as const };
+        }
+        if (
+          column<string | null>(current, "plannedRunnerRunId") !==
+            input.runnerRunId ||
+          column<string | null>(current, "plannedOperationId") !==
+            input.operationId
+        ) {
+          return { kind: "invalid_transition" as const };
+        }
+        const currentVersion = column<number>(current, "version");
+        const currentStatus = column<TeamStepStatus>(current, "status");
+        const teamRunStatus = column<TeamRunStatus>(current, "teamRunStatus");
+        const cancellationRace =
+          teamRunStatus === "cancelled" &&
+          (currentStatus === "skipped" || currentStatus === "cancelled");
+        if (!cancellationRace) {
+          if (teamRunStatus !== "running") {
+            return { kind: "invalid_transition" as const };
+          }
+          if (currentVersion !== input.expectedVersion) {
+            return { kind: "stale_version" as const };
+          }
+          if (
+            currentStatus !== "queued" ||
+            !["not_required", "approved"].includes(
+              column<TeamApprovalStatus>(current, "approvalStatus")
+            )
+          ) {
+            return { kind: "invalid_transition" as const };
+          }
+        }
+        const tenant = column<string>(current, "tenant");
+        const [runnerRun] = await transaction.execute(
+          statement(
+            "validate-team-step-child-run",
+            {
+              agentId: column(current, "agentId"),
+              operationId: input.operationId,
+              runnerRunId: input.runnerRunId,
+              tenant,
+            },
+            sql`SELECT "runnerRun"."id"
+              FROM "RunnerRun" AS "runnerRun"
+              JOIN "RunnerTeamStep" AS "step"
+                ON "step"."id" = ${input.teamStepId}
+                AND "step"."tenant" = "runnerRun"."tenant"
+              WHERE "runnerRun"."id" = ${input.runnerRunId}
+                AND "runnerRun"."tenant" = "step"."tenant"
+                AND "runnerRun"."agentId" = "step"."agentId"
+                AND "runnerRun"."operationId" = ${input.operationId}
+                AND "runnerRun"."status" IN (
+                  'queued',
+                  'running',
+                  'completed',
+                  'failed',
+                  'cancelled'
+                )
+              FOR SHARE OF "runnerRun"`
+          )
+        );
+        if (!runnerRun) {
+          return { kind: "not_found" as const };
+        }
+        const [attached] = cancellationRace
+          ? await transaction.execute(
+              statement(
+                "attach-team-step-child-run",
+                { ...input, expectedVersion: currentVersion, tenant },
+                sql`UPDATE "RunnerTeamStep"
+                  SET "runnerRunId" = ${input.runnerRunId},
+                      "status" = 'cancelled',
+                      "completedAt" = COALESCE("completedAt", now()),
+                      "updatedAt" = now(),
+                      "version" = "version" + 1
+                  WHERE "id" = ${input.teamStepId}
+                    AND "tenant" = ${tenant}
+                    AND "version" = ${currentVersion}
+                    AND "runnerRunId" IS NULL
+                    AND "plannedRunnerRunId" = ${input.runnerRunId}
+                    AND "plannedOperationId" = ${input.operationId}
+                    AND "status" IN ('skipped', 'cancelled')
+                  RETURNING *`
+              )
+            )
+          : await transaction.execute(
+              statement(
+                "attach-team-step-child-run",
+                { ...input, tenant },
+                sql`UPDATE "RunnerTeamStep"
+                  SET "runnerRunId" = ${input.runnerRunId},
+                      "status" = 'running',
+                      "startedAt" = COALESCE("startedAt", now()),
+                      "updatedAt" = now(),
+                      "version" = "version" + 1
+                  WHERE "id" = ${input.teamStepId}
+                    AND "tenant" = ${tenant}
+                    AND "version" = ${input.expectedVersion}
+                    AND "runnerRunId" IS NULL
+                    AND "plannedRunnerRunId" = ${input.runnerRunId}
+                    AND "plannedOperationId" = ${input.operationId}
+                    AND "status" = 'queued'
+                  RETURNING *`
+              )
+            );
+        if (attached && cancellationRace) {
+          return { kind: "cancel_required" as const };
+        }
+        return attached
+          ? { kind: "attached" as const }
+          : { kind: "stale_version" as const };
+      }),
     beginGitHubOperation: async (
       principal: RunnerPrincipal,
       input: BeginGitHubOperationInput
@@ -1104,10 +1368,66 @@ export function createTeamStore(database: TeamStoreDatabase) {
           statement(
             "lock-team-run-for-cancel",
             { id: input.id, tenant: principal.tenant },
-            sql`SELECT * FROM "RunnerTeamRun"
-              WHERE "id" = ${input.id}
-                AND "tenant" = ${principal.tenant}
-              FOR UPDATE`
+            sql`SELECT
+                "teamRun".*,
+                (
+                  SELECT COALESCE(
+                    "step"."runnerRunId",
+                    "step"."plannedRunnerRunId"
+                  )
+                  FROM "RunnerTeamStep" AS "step"
+                  JOIN "RunnerRun" AS "runnerRun"
+                    ON "runnerRun"."id" = COALESCE(
+                      "step"."runnerRunId",
+                      "step"."plannedRunnerRunId"
+                    )
+                    AND "runnerRun"."tenant" = "step"."tenant"
+                    AND "runnerRun"."agentId" = "step"."agentId"
+                    AND (
+                      "step"."runnerRunId" = "runnerRun"."id"
+                      OR (
+                        "step"."runnerRunId" IS NULL
+                        AND "step"."plannedRunnerRunId" = "runnerRun"."id"
+                        AND "step"."plannedOperationId" = "runnerRun"."operationId"
+                      )
+                    )
+                  WHERE "step"."teamRunId" = "teamRun"."id"
+                    AND "step"."tenant" = "teamRun"."tenant"
+                    AND "step"."position" = "teamRun"."currentPosition"
+                    AND "runnerRun"."status" IN ('queued', 'running')
+                  LIMIT 1
+                ) AS "liveChildRunId",
+                (
+                  SELECT COALESCE(
+                    "step"."runnerRunId",
+                    "step"."plannedRunnerRunId"
+                  )
+                  FROM "RunnerTeamStep" AS "step"
+                  JOIN "RunnerRun" AS "runnerRun"
+                    ON "runnerRun"."id" = COALESCE(
+                      "step"."runnerRunId",
+                      "step"."plannedRunnerRunId"
+                    )
+                    AND "runnerRun"."tenant" = "step"."tenant"
+                    AND "runnerRun"."agentId" = "step"."agentId"
+                    AND (
+                      "step"."runnerRunId" = "runnerRun"."id"
+                      OR (
+                        "step"."runnerRunId" IS NULL
+                        AND "step"."plannedRunnerRunId" = "runnerRun"."id"
+                        AND "step"."plannedOperationId" = "runnerRun"."operationId"
+                      )
+                    )
+                  WHERE "step"."teamRunId" = "teamRun"."id"
+                    AND "step"."tenant" = "teamRun"."tenant"
+                    AND "step"."position" = "teamRun"."currentPosition"
+                    AND "runnerRun"."status" IN ('completed', 'failed', 'cancelled')
+                  LIMIT 1
+                ) AS "terminalChildRunId"
+              FROM "RunnerTeamRun" AS "teamRun"
+              WHERE "teamRun"."id" = ${input.id}
+                AND "teamRun"."tenant" = ${principal.tenant}
+              FOR UPDATE OF "teamRun"`
           )
         );
         if (!current) {
@@ -1125,6 +1445,166 @@ export function createTeamStore(database: TeamStoreDatabase) {
           ].includes(column<string>(current, "status"))
         ) {
           return { kind: "already_terminal" as const };
+        }
+        const liveChildRunId = column<string | null>(current, "liveChildRunId");
+        const terminalChildRunId = column<string | null>(
+          current,
+          "terminalChildRunId"
+        );
+        const classifiedChildRunId = terminalChildRunId ?? liveChildRunId;
+        let cancellationChildRunId: string | null = null;
+        if (classifiedChildRunId) {
+          const [currentChild] = await transaction.execute(
+            statement(
+              "lock-current-team-child-before-cancel",
+              {
+                id: input.id,
+                runnerRunId: classifiedChildRunId,
+                tenant: principal.tenant,
+              },
+              sql`SELECT
+                  "step".*,
+                  "runnerRun"."commandEvidence" AS "runnerCommandEvidence",
+                  "runnerRun"."error" AS "runnerError",
+                  "runnerRun"."fileEvidence" AS "runnerFileEvidence",
+                  "runnerRun"."output" AS "runnerOutput",
+                  "runnerRun"."status" AS "runnerStatus",
+                  COALESCE((
+                    SELECT jsonb_agg("prior"."handoff" ORDER BY "prior"."position")
+                    FROM "RunnerTeamStep" AS "prior"
+                    WHERE "prior"."teamRunId" = "step"."teamRunId"
+                      AND "prior"."tenant" = "step"."tenant"
+                      AND "prior"."position" < "step"."position"
+                      AND "prior"."handoff" IS NOT NULL
+                  ), '[]'::jsonb) AS "priorHandoffs"
+                FROM "RunnerTeamStep" AS "step"
+                JOIN "RunnerRun" AS "runnerRun"
+                  ON "runnerRun"."id" = COALESCE(
+                    "step"."runnerRunId",
+                    "step"."plannedRunnerRunId"
+                  )
+                  AND "runnerRun"."tenant" = "step"."tenant"
+                  AND "runnerRun"."agentId" = "step"."agentId"
+                  AND (
+                    "step"."runnerRunId" = "runnerRun"."id"
+                    OR (
+                      "step"."runnerRunId" IS NULL
+                      AND "step"."plannedRunnerRunId" = "runnerRun"."id"
+                      AND "step"."plannedOperationId" = "runnerRun"."operationId"
+                    )
+                  )
+                WHERE "step"."teamRunId" = ${input.id}
+                  AND "step"."tenant" = ${principal.tenant}
+                  AND "step"."position" = ${column(current, "currentPosition")}
+                  AND "step"."status" IN ('queued', 'running')
+                  AND "runnerRun"."id" = ${classifiedChildRunId}
+                FOR UPDATE OF "step", "runnerRun"`
+            )
+          );
+          if (
+            currentChild &&
+            ["queued", "running"].includes(
+              column<string>(currentChild, "runnerStatus")
+            )
+          ) {
+            cancellationChildRunId = classifiedChildRunId;
+          }
+          if (
+            currentChild &&
+            ["completed", "failed", "cancelled"].includes(
+              column<string>(currentChild, "runnerStatus")
+            )
+          ) {
+            const runnerStatus = column<"completed" | "failed" | "cancelled">(
+              currentChild,
+              "runnerStatus"
+            );
+            const built =
+              runnerStatus === "completed"
+                ? buildTeamHandoff({
+                    commandEvidence: arrayColumn(
+                      currentChild,
+                      "runnerCommandEvidence"
+                    ),
+                    fileEvidence: arrayColumn(
+                      currentChild,
+                      "runnerFileEvidence"
+                    ),
+                    output: column(currentChild, "runnerOutput"),
+                    priorHandoffs: arrayColumn(currentChild, "priorHandoffs"),
+                  })
+                : null;
+            const completed = built?.kind === "built";
+            const handoff = completed ? built.handoff : null;
+            const error: RunError | null = completed
+              ? null
+              : runnerStatus === "completed"
+                ? {
+                    code: "handoff_invalid",
+                    message: "Runner output could not be projected safely.",
+                    retryable: false,
+                  }
+                : (column<RunError | null>(currentChild, "runnerError") ?? {
+                    code:
+                      runnerStatus === "cancelled"
+                        ? "child_cancelled"
+                        : "child_failed",
+                    message:
+                      runnerStatus === "cancelled"
+                        ? "The team step runner was cancelled."
+                        : "The team step runner failed.",
+                    retryable: false,
+                  });
+            const [projected] = await transaction.execute(
+              statement(
+                "project-terminal-team-child-before-cancel",
+                {
+                  error,
+                  handoff,
+                  plannedOperationId: column(
+                    currentChild,
+                    "plannedOperationId"
+                  ),
+                  runnerRunId: classifiedChildRunId,
+                  teamStepId: column(currentChild, "id"),
+                  tenant: principal.tenant,
+                },
+                sql`UPDATE "RunnerTeamStep"
+                  SET "status" = ${completed ? "completed" : "failed"},
+                      "runnerRunId" = COALESCE(
+                        "runnerRunId",
+                        ${classifiedChildRunId}
+                      ),
+                      "handoff" = CAST(${jsonParameter(handoff)} AS jsonb),
+                      "error" = CAST(${jsonParameter(error)} AS jsonb),
+                      "completedAt" = now(),
+                      "updatedAt" = now(),
+                      "version" = "version" + 1
+                  WHERE "id" = ${column(currentChild, "id")}
+                    AND "tenant" = ${principal.tenant}
+                    AND COALESCE(
+                      "runnerRunId",
+                      "plannedRunnerRunId"
+                    ) = ${classifiedChildRunId}
+                    AND (
+                      "runnerRunId" = ${classifiedChildRunId}
+                      OR (
+                        "runnerRunId" IS NULL
+                        AND "plannedRunnerRunId" = ${classifiedChildRunId}
+                        AND "plannedOperationId" = ${column(
+                          currentChild,
+                          "plannedOperationId"
+                        )}
+                      )
+                    )
+                    AND "status" IN ('queued', 'running')
+                  RETURNING "id"`
+              )
+            );
+            if (!projected) {
+              throw new Error("Terminal team child projection was fenced.");
+            }
+          }
         }
         const [updated] = await transaction.execute(
           statement(
@@ -1150,7 +1630,13 @@ export function createTeamStore(database: TeamStoreDatabase) {
             "cancel-team-run-steps",
             { id: input.id, tenant: principal.tenant },
             sql`UPDATE "RunnerTeamStep"
-              SET "status" = 'cancelled',
+              SET "status" = CASE
+                    WHEN COALESCE(
+                      "runnerRunId",
+                      "plannedRunnerRunId"
+                    ) = ${cancellationChildRunId} THEN 'cancelled'
+                    ELSE 'skipped'
+                  END,
                   "completedAt" = now(),
                   "updatedAt" = now(),
                   "version" = "version" + 1
@@ -1173,7 +1659,255 @@ export function createTeamStore(database: TeamStoreDatabase) {
         if (!hydrated) {
           throw new Error("Cancelled team run disappeared.");
         }
-        return { kind: "updated" as const, value: asRun(hydrated) };
+        return {
+          childRunId: cancellationChildRunId,
+          kind: "updated" as const,
+          value: asRun(hydrated),
+        };
+      }),
+
+    claimNextTeamStep: (
+      _operator: RunnerOperator
+    ): Promise<ClaimNextTeamStepResult> =>
+      database.transaction(async (transaction) => {
+        const [candidate] = await transaction.execute(
+          statement(
+            "lock-next-team-step-for-claim",
+            {},
+            sql`SELECT
+                "step".*,
+                "teamRun"."authVersion",
+                "teamRun"."createdByUserId",
+                "teamRun"."mission",
+                COALESCE((
+                  SELECT jsonb_agg("prior"."handoff" ORDER BY "prior"."position")
+                  FROM "RunnerTeamStep" AS "prior"
+                  WHERE "prior"."teamRunId" = "teamRun"."id"
+                    AND "prior"."tenant" = "teamRun"."tenant"
+                    AND "prior"."position" < "step"."position"
+                    AND "prior"."handoff" IS NOT NULL
+                ), '[]'::jsonb) AS "priorHandoffs"
+              FROM "RunnerTeamRun" AS "teamRun"
+              JOIN "RunnerTeamStep" AS "step"
+                ON "step"."teamRunId" = "teamRun"."id"
+                AND "step"."tenant" = "teamRun"."tenant"
+                AND "step"."position" = "teamRun"."currentPosition"
+              WHERE "teamRun"."status" IN ('queued', 'running', 'waiting_approval')
+                AND "step"."runnerRunId" IS NULL
+                AND (
+                  "step"."status" = 'pending'
+                  OR (
+                    "step"."status" = 'queued'
+                    AND "step"."approvalStatus" IN ('not_required', 'approved')
+                  )
+                  OR (
+                    "step"."status" = 'waiting_approval'
+                    AND "step"."approvalStatus" = 'approved'
+                  )
+                )
+              ORDER BY "teamRun"."updatedAt", "teamRun"."id"
+              FOR UPDATE OF "teamRun", "step" SKIP LOCKED
+              LIMIT 1`
+          )
+        );
+        if (!candidate) {
+          return { kind: "idle" as const };
+        }
+        const teamRunId = column<string>(candidate, "teamRunId");
+        const tenant = column<string>(candidate, "tenant");
+        const approvalStatus = column<TeamApprovalStatus>(
+          candidate,
+          "approvalStatus"
+        );
+        const status = column<TeamStepStatus>(candidate, "status");
+        if (approvalStatus === "pending") {
+          if (status !== "waiting_approval") {
+            await transaction.execute(
+              statement(
+                "mark-team-step-waiting-approval",
+                { teamRunId, teamStepId: column(candidate, "id"), tenant },
+                sql`UPDATE "RunnerTeamStep"
+                  SET "status" = 'waiting_approval',
+                      "startedAt" = COALESCE("startedAt", now()),
+                      "updatedAt" = now(),
+                      "version" = "version" + 1
+                  WHERE "id" = ${column(candidate, "id")}
+                    AND "tenant" = ${tenant}
+                    AND "status" = 'pending'
+                    AND "approvalStatus" = 'pending'`
+              )
+            );
+          }
+          await transaction.execute(
+            statement(
+              "mark-team-run-waiting-approval",
+              { teamRunId, tenant },
+              sql`UPDATE "RunnerTeamRun"
+                SET "status" = 'waiting_approval',
+                    "startedAt" = COALESCE("startedAt", now()),
+                    "updatedAt" = now(),
+                    "version" = "version" + 1
+                WHERE "id" = ${teamRunId}
+                  AND "tenant" = ${tenant}
+                  AND "status" <> 'waiting_approval'`
+            )
+          );
+          return { kind: "waiting_approval" as const, teamRunId };
+        }
+
+        let plannedOperationId = column<string | null>(
+          candidate,
+          "plannedOperationId"
+        );
+        let plannedRunnerRunId = column<string | null>(
+          candidate,
+          "plannedRunnerRunId"
+        );
+        if ((plannedOperationId === null) !== (plannedRunnerRunId === null)) {
+          throw new Error("Team step child reservation is inconsistent.");
+        }
+        if (plannedOperationId === null || plannedRunnerRunId === null) {
+          const planned = teamChildRunnerIds(column(candidate, "id"));
+          plannedOperationId = planned.operationId;
+          plannedRunnerRunId = planned.runId;
+        }
+
+        let teamStepVersion = column<number>(candidate, "version");
+        if (status !== "queued") {
+          const [queued] = await transaction.execute(
+            statement(
+              "queue-team-step-for-admission",
+              {
+                expectedVersion: teamStepVersion,
+                plannedOperationId,
+                plannedRunnerRunId,
+                teamStepId: column(candidate, "id"),
+                tenant,
+              },
+              sql`UPDATE "RunnerTeamStep"
+                SET "status" = 'queued',
+                    "plannedOperationId" = COALESCE(
+                      "plannedOperationId",
+                      ${plannedOperationId}
+                    ),
+                    "plannedRunnerRunId" = COALESCE(
+                      "plannedRunnerRunId",
+                      ${plannedRunnerRunId}
+                    ),
+                    "startedAt" = COALESCE("startedAt", now()),
+                    "updatedAt" = now(),
+                    "version" = "version" + 1
+                WHERE "id" = ${column(candidate, "id")}
+                  AND "tenant" = ${tenant}
+                  AND "version" = ${teamStepVersion}
+                  AND "runnerRunId" IS NULL
+                  AND (
+                    (
+                      "plannedOperationId" IS NULL
+                      AND "plannedRunnerRunId" IS NULL
+                    )
+                    OR (
+                      "plannedOperationId" = ${plannedOperationId}
+                      AND "plannedRunnerRunId" = ${plannedRunnerRunId}
+                    )
+                  )
+                  AND "approvalStatus" IN ('not_required', 'approved')
+                  AND "status" IN ('pending', 'waiting_approval')
+                RETURNING
+                  "plannedOperationId",
+                  "plannedRunnerRunId",
+                  "version"`
+            )
+          );
+          if (!queued) {
+            return { kind: "idle" as const };
+          }
+          teamStepVersion = column(queued, "version");
+        } else if (
+          column<string | null>(candidate, "plannedOperationId") === null
+        ) {
+          const [reserved] = await transaction.execute(
+            statement(
+              "reserve-team-step-child",
+              {
+                expectedVersion: teamStepVersion,
+                plannedOperationId,
+                plannedRunnerRunId,
+                teamStepId: column(candidate, "id"),
+                tenant,
+              },
+              sql`UPDATE "RunnerTeamStep"
+                SET "plannedOperationId" = ${plannedOperationId},
+                    "plannedRunnerRunId" = ${plannedRunnerRunId},
+                    "updatedAt" = now(),
+                    "version" = "version" + 1
+                WHERE "id" = ${column(candidate, "id")}
+                  AND "tenant" = ${tenant}
+                  AND "version" = ${teamStepVersion}
+                  AND "runnerRunId" IS NULL
+                  AND "plannedOperationId" IS NULL
+                  AND "plannedRunnerRunId" IS NULL
+                  AND "approvalStatus" IN ('not_required', 'approved')
+                  AND "status" = 'queued'
+                RETURNING
+                  "plannedOperationId",
+                  "plannedRunnerRunId",
+                  "version"`
+            )
+          );
+          if (!reserved) {
+            return { kind: "idle" as const };
+          }
+          teamStepVersion = column(reserved, "version");
+        }
+        await transaction.execute(
+          statement(
+            "mark-team-run-running",
+            { teamRunId, tenant },
+            sql`UPDATE "RunnerTeamRun"
+              SET "status" = 'running',
+                  "startedAt" = COALESCE("startedAt", now()),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${teamRunId}
+                AND "tenant" = ${tenant}`
+          )
+        );
+        const snapshots = arrayColumn<unknown>(candidate, "skillSnapshots").map(
+          asSkillSnapshot
+        );
+        const immutableCapabilities = declaredCapabilities(snapshots);
+        return {
+          agentId: column(candidate, "agentId"),
+          agentSnapshot: {
+            instructions: column(candidate, "agentInstructions"),
+            model: column(candidate, "agentModel"),
+            runtime: column(candidate, "agentRuntime"),
+            workspace: column(candidate, "agentWorkspace"),
+          },
+          approvedCapabilities: arrayColumn(candidate, "approvedCapabilities"),
+          authVersion: column(candidate, "authVersion"),
+          declaredCapabilities: immutableCapabilities,
+          executionPermission: teamExecutionPermission(immutableCapabilities),
+          kind: "ready" as const,
+          mission: column(candidate, "mission"),
+          plannedOperationId,
+          plannedRunnerRunId,
+          principal: {
+            kind: "subscriber" as const,
+            tenant,
+            userId: column(candidate, "createdByUserId"),
+          },
+          priorHandoffs: arrayColumn(candidate, "priorHandoffs"),
+          responsibility: column(candidate, "responsibility"),
+          skillSnapshots: snapshots.map(({ instructions, name }) => ({
+            instructions,
+            name,
+          })),
+          teamRunId,
+          teamStepId: column(candidate, "id"),
+          teamStepVersion,
+        };
       }),
 
     completeGitHubOperation: async (
@@ -1270,6 +2004,11 @@ export function createTeamStore(database: TeamStoreDatabase) {
                 AND (
                   ${requiresWriteApproval} = false
                   OR "step"."approvalStatus" = 'approved'
+                )
+                AND (
+                  "step"."approvalStatus" = 'not_required'
+                  OR "step"."approvedCapabilities" @>
+                    CAST(${jsonParameter(input.approvedCapabilities)} AS jsonb)
                 )
                 AND NOT EXISTS (
                   SELECT 1
@@ -1421,10 +2160,12 @@ export function createTeamStore(database: TeamStoreDatabase) {
       principal: RunnerPrincipal,
       input: CreateTeamRunStoreInput
     ) => {
+      assertUuid(principal.userId, "Team run creator user id");
       assertUuid(input.id, "Team run id");
       assertUuid(input.teamId, "Team id");
       assertUuid(input.operationId, "Operation id");
       assertRequestHash(input.requestHash);
+      assertVersion(input.authVersion);
       if (
         !input.mission.trim() ||
         input.mission.length > TEAM_LIMITS.maxMissionLength
@@ -1485,6 +2226,10 @@ export function createTeamStore(database: TeamStoreDatabase) {
             sql`SELECT
                 "member"."id" AS "memberId",
                 "member"."agentId",
+                "agent"."instructions" AS "agentInstructions",
+                "agent"."model" AS "agentModel",
+                "agent"."runtime" AS "agentRuntime",
+                "agent"."workspace" AS "agentWorkspace",
                 "member"."position",
                 "member"."responsibility",
                 "member"."required",
@@ -1513,9 +2258,17 @@ export function createTeamStore(database: TeamStoreDatabase) {
               LEFT JOIN "RunnerSkill" AS "skill"
                 ON "skill"."id" = "memberSkill"."skillId"
                 AND "skill"."tenant" = "memberSkill"."tenant"
+              JOIN "RunnerAgent" AS "agent"
+                ON "agent"."id" = "member"."agentId"
+                AND "agent"."tenant" = "member"."tenant"
               WHERE "member"."teamId" = ${input.teamId}
                 AND "member"."tenant" = ${principal.tenant}
-              GROUP BY "member"."id"
+              GROUP BY
+                "member"."id",
+                "agent"."instructions",
+                "agent"."model",
+                "agent"."runtime",
+                "agent"."workspace"
               ORDER BY "member"."position"`
           )
         );
@@ -1528,11 +2281,18 @@ export function createTeamStore(database: TeamStoreDatabase) {
         const [inserted] = await transaction.execute(
           statement(
             "insert-team-run",
-            { ...input, stepIds: undefined, tenant: principal.tenant },
+            {
+              ...input,
+              createdByUserId: principal.userId,
+              stepIds: undefined,
+              tenant: principal.tenant,
+            },
             sql`INSERT INTO "RunnerTeamRun" (
-                "id", "tenant", "teamId", "operationId", "requestHash", "mission"
+                "id", "tenant", "teamId", "createdByUserId", "authVersion",
+                "operationId", "requestHash", "mission"
               ) VALUES (
-                ${input.id}, ${principal.tenant}, ${input.teamId}, ${input.operationId},
+                ${input.id}, ${principal.tenant}, ${input.teamId},
+                ${principal.userId}, ${input.authVersion}, ${input.operationId},
                 ${input.requestHash}, ${input.mission}
               )
               ON CONFLICT ("teamId", "tenant", "operationId") DO NOTHING
@@ -1571,6 +2331,13 @@ export function createTeamStore(database: TeamStoreDatabase) {
           );
           return {
             agentId: column<string>(snapshot, "agentId"),
+            agentInstructions: column<string>(snapshot, "agentInstructions"),
+            agentModel: column<string>(snapshot, "agentModel"),
+            agentRuntime: column<RunnerAgentExecutionSnapshot["runtime"]>(
+              snapshot,
+              "agentRuntime"
+            ),
+            agentWorkspace: column<string | null>(snapshot, "agentWorkspace"),
             approvalStatus: skillSnapshots.some(({ requiredCapabilities }) =>
               requiredCapabilities.some(
                 (capability) =>
@@ -1601,12 +2368,15 @@ export function createTeamStore(database: TeamStoreDatabase) {
             sql`INSERT INTO "RunnerTeamStep" (
                 "id", "tenant", "teamRunId", "memberId", "agentId", "position",
                 "responsibility", "required", "skillIds", "skillSnapshots",
-                "approvalStatus"
+                "agentInstructions", "agentModel", "agentRuntime",
+                "agentWorkspace", "approvalStatus"
               )
               SELECT
                 "step"."id", ${principal.tenant}, ${input.id}, "step"."memberId",
                 "step"."agentId", "step"."position", "step"."responsibility",
                 "step"."required", "step"."skillIds", "step"."skillSnapshots",
+                "step"."agentInstructions", "step"."agentModel",
+                "step"."agentRuntime", "step"."agentWorkspace",
                 "step"."approvalStatus"
               FROM jsonb_to_recordset(CAST(${jsonParameter(stepPayload)} AS jsonb))
                 AS "step"(
@@ -1618,6 +2388,10 @@ export function createTeamStore(database: TeamStoreDatabase) {
                   "required" boolean,
                   "skillIds" jsonb,
                   "skillSnapshots" jsonb,
+                  "agentInstructions" text,
+                  "agentModel" text,
+                  "agentRuntime" text,
+                  "agentWorkspace" text,
                   "approvalStatus" text
                 )
               ORDER BY "position"
@@ -1634,6 +2408,7 @@ export function createTeamStore(database: TeamStoreDatabase) {
     decideTeamStepApproval: (
       principal: RunnerPrincipal,
       input: {
+        capabilities: TeamCapability[];
         decision: "approve" | "reject";
         expectedVersion: number;
         id: string;
@@ -1645,10 +2420,17 @@ export function createTeamStore(database: TeamStoreDatabase) {
           statement(
             "lock-team-step-for-approval",
             { id: input.id, tenant: principal.tenant },
-            sql`SELECT * FROM "RunnerTeamStep"
-              WHERE "id" = ${input.id}
-                AND "tenant" = ${principal.tenant}
-              FOR UPDATE`
+            sql`SELECT "step".*
+              FROM "RunnerTeamStep" AS "step"
+              JOIN "RunnerTeamRun" AS "teamRun"
+                ON "teamRun"."id" = "step"."teamRunId"
+                AND "teamRun"."tenant" = "step"."tenant"
+              WHERE "step"."id" = ${input.id}
+                AND "step"."tenant" = ${principal.tenant}
+                AND "step"."position" = "teamRun"."currentPosition"
+                AND "step"."status" = 'waiting_approval'
+                AND "teamRun"."status" = 'waiting_approval'
+              FOR UPDATE OF "teamRun", "step"`
           )
         );
         if (!current) {
@@ -1660,14 +2442,32 @@ export function createTeamStore(database: TeamStoreDatabase) {
         if (column(current, "approvalStatus") !== "pending") {
           return { kind: "invalid_transition" as const };
         }
+        const declared = declaredGitHubCapabilities(
+          arrayColumn<unknown>(current, "skillSnapshots").map(asSkillSnapshot)
+        );
+        if (
+          input.decision === "approve"
+            ? !validApprovalCapabilities(declared, input.capabilities)
+            : input.capabilities.length !== 0
+        ) {
+          return { kind: "invalid_capabilities" as const };
+        }
         const approvalStatus =
           input.decision === "approve" ? "approved" : "rejected";
         const [updated] = await transaction.execute(
           statement(
             "decide-team-step-approval",
-            { ...input, approvalStatus, tenant: principal.tenant },
+            {
+              ...input,
+              approvalActorUserId: principal.userId,
+              approvalStatus,
+              tenant: principal.tenant,
+            },
             sql`UPDATE "RunnerTeamStep"
               SET "approvalStatus" = ${approvalStatus},
+                  "approvedCapabilities" = CAST(${jsonParameter(input.capabilities)} AS jsonb),
+                  "approvalActorUserId" = ${principal.userId},
+                  "approvalDecidedAt" = now(),
                   "status" = CASE
                     WHEN ${approvalStatus} = 'rejected' THEN 'failed'
                     ELSE "status"
@@ -1687,12 +2487,106 @@ export function createTeamStore(database: TeamStoreDatabase) {
                 AND "tenant" = ${principal.tenant}
                 AND "version" = ${input.expectedVersion}
                 AND "approvalStatus" = 'pending'
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements_text(
+                    CAST(${jsonParameter(input.capabilities)} AS jsonb)
+                  ) AS "requested"("capability")
+                  WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements("skillSnapshots")
+                      AS "skill"("snapshot")
+                    WHERE ("skill"."snapshot"->'requiredCapabilities')
+                      ? "requested"."capability"
+                  )
+                )
               RETURNING *`
           )
         );
-        return updated
-          ? { kind: "updated" as const, value: asStep(updated) }
-          : { kind: "stale_version" as const };
+        if (!updated) {
+          return { kind: "stale_version" as const };
+        }
+        if (approvalStatus === "approved") {
+          await transaction.execute(
+            statement(
+              "resume-team-run-after-approval",
+              { id: input.id, tenant: principal.tenant },
+              sql`UPDATE "RunnerTeamRun" AS "teamRun"
+                SET "status" = 'queued',
+                    "updatedAt" = now(),
+                    "version" = "version" + 1
+                FROM "RunnerTeamStep" AS "step"
+                WHERE "step"."id" = ${input.id}
+                  AND "step"."tenant" = ${principal.tenant}
+                  AND "teamRun"."id" = "step"."teamRunId"
+                  AND "teamRun"."tenant" = "step"."tenant"
+                  AND "teamRun"."status" = 'waiting_approval'`
+            )
+          );
+        } else {
+          await transaction.execute(
+            statement(
+              "skip-team-steps-after-approval-rejection",
+              { id: input.id, tenant: principal.tenant },
+              sql`UPDATE "RunnerTeamStep" AS "later"
+                SET "status" = 'skipped',
+                    "completedAt" = now(),
+                    "updatedAt" = now(),
+                    "version" = "version" + 1
+                FROM "RunnerTeamStep" AS "rejected"
+                WHERE "rejected"."id" = ${input.id}
+                  AND "rejected"."tenant" = ${principal.tenant}
+                  AND "later"."teamRunId" = "rejected"."teamRunId"
+                  AND "later"."tenant" = "rejected"."tenant"
+                  AND "later"."position" > "rejected"."position"
+                  AND "rejected"."required"
+                  AND "later"."status" IN ('pending', 'waiting_approval')`
+            )
+          );
+          await transaction.execute(
+            statement(
+              "advance-team-run-after-approval-rejection",
+              { id: input.id, tenant: principal.tenant },
+              sql`UPDATE "RunnerTeamRun" AS "teamRun"
+                SET "currentPosition" = CASE
+                      WHEN "step"."required" THEN "teamRun"."currentPosition"
+                      ELSE "teamRun"."currentPosition" + 1
+                    END,
+                    "status" = CASE
+                      WHEN "step"."required" THEN 'failed'
+                      WHEN EXISTS (
+                        SELECT 1 FROM "RunnerTeamStep" AS "later"
+                        WHERE "later"."teamRunId" = "teamRun"."id"
+                          AND "later"."tenant" = "teamRun"."tenant"
+                          AND "later"."position" > "step"."position"
+                      ) THEN 'queued'
+                      ELSE 'completed_with_warnings'
+                    END,
+                    "error" = CASE
+                      WHEN "step"."required" THEN "step"."error"
+                      ELSE NULL
+                    END,
+                    "completedAt" = CASE
+                      WHEN "step"."required" OR NOT EXISTS (
+                        SELECT 1 FROM "RunnerTeamStep" AS "later"
+                        WHERE "later"."teamRunId" = "teamRun"."id"
+                          AND "later"."tenant" = "teamRun"."tenant"
+                          AND "later"."position" > "step"."position"
+                      ) THEN now()
+                      ELSE NULL
+                    END,
+                    "updatedAt" = now(),
+                    "version" = "version" + 1
+                FROM "RunnerTeamStep" AS "step"
+                WHERE "step"."id" = ${input.id}
+                  AND "step"."tenant" = ${principal.tenant}
+                  AND "teamRun"."id" = "step"."teamRunId"
+                  AND "teamRun"."tenant" = "step"."tenant"
+                  AND "teamRun"."status" = 'waiting_approval'`
+            )
+          );
+        }
+        return { kind: "updated" as const, value: asStep(updated) };
       }),
 
     deleteSkill: (
@@ -1796,6 +2690,188 @@ export function createTeamStore(database: TeamStoreDatabase) {
           : { kind: "stale_version" as const };
       }),
 
+    failTeamStepAdmission: (
+      _operator: RunnerOperator,
+      input: {
+        error: RunError;
+        expectedVersion: number;
+        teamStepId: string;
+      }
+    ) =>
+      database.transaction(async (transaction) => {
+        assertVersion(input.expectedVersion);
+        assertUuid(input.teamStepId, "Team step id");
+        runErrorSchema.parse(input.error);
+        const [current] = await transaction.execute(
+          statement(
+            "lock-team-step-for-admission-failure",
+            input,
+            sql`SELECT
+                "step".*,
+                EXISTS (
+                  SELECT 1 FROM "RunnerTeamStep" AS "later"
+                  WHERE "later"."teamRunId" = "teamRun"."id"
+                    AND "later"."tenant" = "teamRun"."tenant"
+                    AND "later"."position" > "step"."position"
+                ) AS "hasLaterStep"
+              FROM "RunnerTeamStep" AS "step"
+              JOIN "RunnerTeamRun" AS "teamRun"
+                ON "teamRun"."id" = "step"."teamRunId"
+                AND "teamRun"."tenant" = "step"."tenant"
+              WHERE "step"."id" = ${input.teamStepId}
+                AND "step"."position" = "teamRun"."currentPosition"
+                AND "teamRun"."status" = 'running'
+              FOR UPDATE OF "teamRun", "step"`
+          )
+        );
+        if (!current) {
+          return { kind: "not_found" as const };
+        }
+        if (column<number>(current, "version") !== input.expectedVersion) {
+          return { kind: "stale_version" as const };
+        }
+        if (
+          column<TeamStepStatus>(current, "status") !== "queued" ||
+          column<string | null>(current, "runnerRunId") !== null
+        ) {
+          return { kind: "invalid_transition" as const };
+        }
+        const teamRunId = column<string>(current, "teamRunId");
+        const tenant = column<string>(current, "tenant");
+        const position = column<number>(current, "position");
+        const required = column<boolean>(current, "required");
+        const hasLaterStep = column<boolean>(current, "hasLaterStep");
+        const [failed] = await transaction.execute(
+          statement(
+            "fail-team-step-admission",
+            { ...input, tenant },
+            sql`UPDATE "RunnerTeamStep"
+              SET "status" = 'failed',
+                  "error" = CAST(${jsonParameter(input.error)} AS jsonb),
+                  "completedAt" = now(),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${input.teamStepId}
+                AND "tenant" = ${tenant}
+                AND "version" = ${input.expectedVersion}
+                AND "runnerRunId" IS NULL
+                AND "status" = 'queued'
+              RETURNING "id"`
+          )
+        );
+        if (!failed) {
+          return { kind: "stale_version" as const };
+        }
+        if (required) {
+          await transaction.execute(
+            statement(
+              "skip-team-steps-after-admission-failure",
+              { position, teamRunId, tenant },
+              sql`UPDATE "RunnerTeamStep"
+                SET "status" = 'skipped',
+                    "completedAt" = now(),
+                    "updatedAt" = now(),
+                    "version" = "version" + 1
+                WHERE "teamRunId" = ${teamRunId}
+                  AND "tenant" = ${tenant}
+                  AND "position" > ${position}
+                  AND "status" IN ('pending', 'waiting_approval')`
+            )
+          );
+        }
+        const status: TeamRunStatus = required
+          ? "failed"
+          : hasLaterStep
+            ? "queued"
+            : "completed_with_warnings";
+        await transaction.execute(
+          statement(
+            "fail-team-run-after-admission-failure",
+            {
+              error: required ? input.error : null,
+              nextPosition: required ? position : position + 1,
+              status,
+              teamRunId,
+              tenant,
+            },
+            sql`UPDATE "RunnerTeamRun"
+              SET "currentPosition" = ${required ? position : position + 1},
+                  "status" = ${status},
+                  "error" = CAST(${jsonParameter(required ? input.error : null)} AS jsonb),
+                  "completedAt" = CASE
+                    WHEN ${required || !hasLaterStep} THEN now()
+                    ELSE NULL
+                  END,
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${teamRunId}
+                AND "tenant" = ${tenant}
+                AND "status" = 'running'`
+          )
+        );
+        return { kind: "failed" as const };
+      }),
+
+    findNextCancelledTeamChild: (_operator: RunnerOperator) =>
+      database.transaction(async (transaction) => {
+        const [row] = await transaction.execute(
+          statement(
+            "find-next-cancelled-team-child",
+            {},
+            sql`SELECT
+                "teamRun"."createdByUserId",
+                "teamRun"."id" AS "teamRunId",
+                "teamRun"."tenant",
+                COALESCE(
+                  "step"."runnerRunId",
+                  "step"."plannedRunnerRunId"
+                ) AS "runnerRunId"
+              FROM "RunnerTeamRun" AS "teamRun"
+              JOIN "RunnerTeamStep" AS "step"
+                ON "step"."teamRunId" = "teamRun"."id"
+                AND "step"."tenant" = "teamRun"."tenant"
+              JOIN "RunnerRun" AS "runnerRun"
+                ON "runnerRun"."id" = COALESCE(
+                  "step"."runnerRunId",
+                  "step"."plannedRunnerRunId"
+                )
+                AND "runnerRun"."tenant" = "step"."tenant"
+              WHERE "teamRun"."status" = 'cancelled'
+                AND "runnerRun"."status" IN ('queued', 'running')
+              ORDER BY "teamRun"."updatedAt", "teamRun"."id"
+              FOR UPDATE OF "teamRun", "step" SKIP LOCKED
+              LIMIT 1`
+          )
+        );
+        if (!row) {
+          return { kind: "idle" as const };
+        }
+        const teamRunId = column<string>(row, "teamRunId");
+        const tenant = column<string>(row, "tenant");
+        await transaction.execute(
+          statement(
+            "rotate-cancelled-team-child",
+            { teamRunId, tenant },
+            sql`UPDATE "RunnerTeamRun"
+              SET "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${teamRunId}
+                AND "tenant" = ${tenant}
+                AND "status" = 'cancelled'`
+          )
+        );
+        return {
+          kind: "found" as const,
+          principal: {
+            kind: "subscriber" as const,
+            tenant,
+            userId: column<string>(row, "createdByUserId"),
+          },
+          runnerRunId: column<string>(row, "runnerRunId"),
+          teamRunId,
+        };
+      }),
+
     getGitHubConnection: (principal: RunnerPrincipal, repositoryId: string) =>
       database.transaction(async (transaction) => {
         if (!DECIMAL_ID.test(repositoryId)) {
@@ -1873,16 +2949,35 @@ export function createTeamStore(database: TeamStoreDatabase) {
         return rows.map(asSkill);
       }),
 
-    listTeamRuns: (principal: RunnerPrincipal, teamId: string) =>
+    listTeamRuns: (
+      principal: RunnerPrincipal,
+      teamId: string,
+      cursor: string | null = null
+    ) =>
       database.transaction(async (transaction) => {
+        const limit = TEAM_LIMITS.maxTeamRunsPerPage + 1;
         const rows = await transaction.execute(
           statement(
             "list-team-runs",
-            { teamId, tenant: principal.tenant },
+            { cursor, limit, teamId, tenant: principal.tenant },
             teamRunSelect(
               sql`"teamRun"."teamId" = ${teamId}
-                AND "teamRun"."tenant" = ${principal.tenant}`,
-              sql`ORDER BY "teamRun"."createdAt" DESC, "teamRun"."id"`
+                AND "teamRun"."tenant" = ${principal.tenant}
+                ${
+                  cursor
+                    ? sql`AND EXISTS (
+                        SELECT 1
+                        FROM "RunnerTeamRun" AS "cursorRun"
+                        WHERE "cursorRun"."id" = ${cursor}
+                          AND "cursorRun"."teamId" = ${teamId}
+                          AND "cursorRun"."tenant" = ${principal.tenant}
+                          AND ("teamRun"."createdAt", "teamRun"."id")
+                            < ("cursorRun"."createdAt", "cursorRun"."id")
+                      )`
+                    : sql``
+                }`,
+              sql`ORDER BY "teamRun"."createdAt" DESC, "teamRun"."id" DESC
+                LIMIT ${limit}`
             )
           )
         );
@@ -1902,6 +2997,190 @@ export function createTeamStore(database: TeamStoreDatabase) {
           )
         );
         return rows.map(asTeam);
+      }),
+
+    projectNextTerminalTeamStep: (_operator: RunnerOperator) =>
+      database.transaction(async (transaction) => {
+        const [candidate] = await transaction.execute(
+          statement(
+            "lock-next-terminal-team-step",
+            {},
+            sql`SELECT
+                "step".*,
+                "runnerRun"."commandEvidence" AS "runnerCommandEvidence",
+                "runnerRun"."error" AS "runnerError",
+                "runnerRun"."fileEvidence" AS "runnerFileEvidence",
+                "runnerRun"."output" AS "runnerOutput",
+                "runnerRun"."status" AS "runnerStatus",
+                EXISTS (
+                  SELECT 1 FROM "RunnerTeamStep" AS "later"
+                  WHERE "later"."teamRunId" = "teamRun"."id"
+                    AND "later"."tenant" = "teamRun"."tenant"
+                    AND "later"."position" > "step"."position"
+                ) AS "hasLaterStep",
+                EXISTS (
+                  SELECT 1 FROM "RunnerTeamStep" AS "warning"
+                  WHERE "warning"."teamRunId" = "teamRun"."id"
+                    AND "warning"."tenant" = "teamRun"."tenant"
+                    AND NOT "warning"."required"
+                    AND "warning"."status" = 'failed'
+                ) AS "hasOptionalFailure",
+                COALESCE((
+                  SELECT jsonb_agg("prior"."handoff" ORDER BY "prior"."position")
+                  FROM "RunnerTeamStep" AS "prior"
+                  WHERE "prior"."teamRunId" = "teamRun"."id"
+                    AND "prior"."tenant" = "teamRun"."tenant"
+                    AND "prior"."position" < "step"."position"
+                    AND "prior"."handoff" IS NOT NULL
+                ), '[]'::jsonb) AS "priorHandoffs"
+              FROM "RunnerTeamRun" AS "teamRun"
+              JOIN "RunnerTeamStep" AS "step"
+                ON "step"."teamRunId" = "teamRun"."id"
+                AND "step"."tenant" = "teamRun"."tenant"
+                AND "step"."position" = "teamRun"."currentPosition"
+              JOIN "RunnerRun" AS "runnerRun"
+                ON "runnerRun"."id" = "step"."runnerRunId"
+                AND "runnerRun"."tenant" = "step"."tenant"
+              WHERE "teamRun"."status" = 'running'
+                AND "step"."status" = 'running'
+                AND "runnerRun"."status" IN ('completed', 'failed', 'cancelled')
+              ORDER BY "runnerRun"."completedAt", "runnerRun"."id"
+              FOR UPDATE OF "teamRun", "step", "runnerRun" SKIP LOCKED
+              LIMIT 1`
+          )
+        );
+        if (!candidate) {
+          return { kind: "idle" as const };
+        }
+
+        const runnerStatus = column<"completed" | "failed" | "cancelled">(
+          candidate,
+          "runnerStatus"
+        );
+        const priorHandoffs = arrayColumn<TeamHandoff>(
+          candidate,
+          "priorHandoffs"
+        );
+        const built =
+          runnerStatus === "completed"
+            ? buildTeamHandoff({
+                commandEvidence: arrayColumn(
+                  candidate,
+                  "runnerCommandEvidence"
+                ),
+                fileEvidence: arrayColumn(candidate, "runnerFileEvidence"),
+                output: column(candidate, "runnerOutput"),
+                priorHandoffs,
+              })
+            : null;
+        const completed = built?.kind === "built";
+        const handoff = completed ? built.handoff : null;
+        const error: RunError | null = completed
+          ? null
+          : runnerStatus === "completed"
+            ? {
+                code: "handoff_invalid",
+                message: "Runner output could not be projected safely.",
+                retryable: false,
+              }
+            : (column<RunError | null>(candidate, "runnerError") ?? {
+                code:
+                  runnerStatus === "cancelled"
+                    ? "child_cancelled"
+                    : "child_failed",
+                message:
+                  runnerStatus === "cancelled"
+                    ? "The team step runner was cancelled."
+                    : "The team step runner failed.",
+                retryable: false,
+              });
+        const stepStatus: TeamStepStatus = completed ? "completed" : "failed";
+        const requiredFailure =
+          !completed && column<boolean>(candidate, "required");
+        const hasLaterStep = column<boolean>(candidate, "hasLaterStep");
+        const hasWarnings =
+          !completed || column<boolean>(candidate, "hasOptionalFailure");
+        const teamRunId = column<string>(candidate, "teamRunId");
+        const tenant = column<string>(candidate, "tenant");
+        const position = column<number>(candidate, "position");
+        const [projected] = await transaction.execute(
+          statement(
+            "project-terminal-team-step",
+            {
+              error,
+              handoff,
+              runnerRunId: column(candidate, "runnerRunId"),
+              teamStepId: column(candidate, "id"),
+              tenant,
+            },
+            sql`UPDATE "RunnerTeamStep"
+              SET "status" = ${stepStatus},
+                  "handoff" = CAST(${jsonParameter(handoff)} AS jsonb),
+                  "error" = CAST(${jsonParameter(error)} AS jsonb),
+                  "completedAt" = now(),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${column(candidate, "id")}
+                AND "tenant" = ${tenant}
+                AND "runnerRunId" = ${column(candidate, "runnerRunId")}
+                AND "status" = 'running'
+              RETURNING "id"`
+          )
+        );
+        if (!projected) {
+          return { kind: "idle" as const };
+        }
+        if (requiredFailure) {
+          await transaction.execute(
+            statement(
+              "skip-team-steps-after-required-failure",
+              { position, teamRunId, tenant },
+              sql`UPDATE "RunnerTeamStep"
+                SET "status" = 'skipped',
+                    "completedAt" = now(),
+                    "updatedAt" = now(),
+                    "version" = "version" + 1
+                WHERE "teamRunId" = ${teamRunId}
+                  AND "tenant" = ${tenant}
+                  AND "position" > ${position}
+                  AND "status" IN ('pending', 'waiting_approval')`
+            )
+          );
+        }
+        const nextStatus: TeamRunStatus = requiredFailure
+          ? "failed"
+          : hasLaterStep
+            ? "queued"
+            : hasWarnings
+              ? "completed_with_warnings"
+              : "completed";
+        await transaction.execute(
+          statement(
+            "advance-team-run-after-terminal-child",
+            {
+              completed: !hasLaterStep || requiredFailure,
+              error: requiredFailure ? error : null,
+              nextPosition: requiredFailure ? position : position + 1,
+              status: nextStatus,
+              teamRunId,
+              tenant,
+            },
+            sql`UPDATE "RunnerTeamRun"
+              SET "currentPosition" = ${requiredFailure ? position : position + 1},
+                  "status" = ${nextStatus},
+                  "error" = CAST(${jsonParameter(requiredFailure ? error : null)} AS jsonb),
+                  "completedAt" = CASE
+                    WHEN ${!hasLaterStep || requiredFailure} THEN now()
+                    ELSE NULL
+                  END,
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "id" = ${teamRunId}
+                AND "tenant" = ${tenant}
+                AND "status" = 'running'`
+          )
+        );
+        return { kind: "projected" as const, teamRunId };
       }),
 
     revokeGitHubCapability: (

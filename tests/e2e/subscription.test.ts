@@ -3,10 +3,8 @@ import {
   expect,
   type Page,
   type Request,
-  type Route,
   test,
 } from "@playwright/test";
-import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
 import { E2E_USER_ID, sessionCookies } from "./session";
 
 const CHECKOUT_ENABLED = process.env.SUBSCRIPTION_CHECKOUT_ENABLED === "on";
@@ -58,11 +56,7 @@ async function mockSession(page: Page, type: SessionType): Promise<void> {
 async function setServerSession(
   context: BrowserContext,
   type: SessionType,
-  options: {
-    email?: string;
-    id?: string;
-    subscribedUntil?: string | null;
-  } = {}
+  options: { email?: string; id?: string } = {}
 ): Promise<void> {
   await context.addCookies(await sessionCookies(type, options));
 }
@@ -83,7 +77,7 @@ async function mockSubscriberConsoleDependencies(page: Page): Promise<void> {
   await page.route("**/api/usage", (route) =>
     route.fulfill({
       json: {
-        cap: MONTHLY_RUN_CAP,
+        cap: 750,
         resetsAt: "2099-02-01T00:00:00.000Z",
         used: 0,
       },
@@ -294,7 +288,7 @@ test.describe("Subscriber checkout", () => {
     await expect(checkoutButton(page)).toHaveCount(0);
   });
 
-  test("flag on presents the same authoritative run cap on both account surfaces", async ({
+  test("flag on presents the same restrained 750-run offer on both account surfaces", async ({
     page,
   }) => {
     test.skip(!CHECKOUT_ENABLED, "This is the launch-flag-on contract.");
@@ -304,13 +298,7 @@ test.describe("Subscriber checkout", () => {
     await page.goto("/account");
     await page.getByRole("tab", { name: "Billing" }).click();
     const accountCard = page.locator(".oc-subscription-card");
-    await expect(accountCard).toContainText(`${MONTHLY_RUN_CAP} runs`);
-    await expect(
-      accountCard.getByRole("img", { name: "Monthly allowance" })
-    ).toHaveAttribute(
-      "aria-label",
-      `Monthly allowance: ${MONTHLY_RUN_CAP} agent runs`
-    );
+    await expect(accountCard).toContainText("750 runs");
     await expect(accountCard).toContainText("each month");
     await expect(accountCard).toContainText(
       "Stripe shows the configured amount before purchase"
@@ -321,7 +309,7 @@ test.describe("Subscriber checkout", () => {
     await openConsoleSettings(page);
     await page.getByRole("tab", { name: "Billing" }).click();
     const consoleCard = page.locator(".oc-subscription-card");
-    await expect(consoleCard).toContainText(`${MONTHLY_RUN_CAP} runs`);
+    await expect(consoleCard).toContainText("750 runs");
     await expect(checkoutButton(page)).toBeVisible();
     expect(await consoleCard.innerText()).toBe(accountOffer);
     expect(accountOffer).not.toMatch(/[$€£]|\b(?:USD|EUR|GBP)\b/);
@@ -343,10 +331,7 @@ test.describe("Subscriber checkout", () => {
     await page.goto("/account");
     await page.getByRole("tab", { name: "Billing" }).click();
     await expect(page.getByText("Subscription active")).toBeVisible();
-    await expect(page.locator(".oc-subscription-card time")).toHaveAttribute(
-      "datetime",
-      "2099-01-01T00:00:00.000Z"
-    );
+    await expect(page.getByText("January 15, 2099")).toBeVisible();
     await expect(checkoutButton(page)).toHaveCount(0);
     await expect(
       page.getByRole("button", { name: /manage|cancel/i })
@@ -356,7 +341,7 @@ test.describe("Subscriber checkout", () => {
     await page.getByRole("tab", { name: "Billing" }).click();
     await expect(page.getByText("Subscription active")).toBeVisible();
     await expect(checkoutButton(page)).toHaveCount(0);
-    expect(statusReads).toBe(0);
+    await expect.poll(() => statusReads).toBe(2);
   });
 
   test("a successful return opens billing while disabled, stays confirming while inactive, and preserves the full URL", async ({
@@ -683,10 +668,7 @@ test.describe("Subscriber checkout", () => {
     await page.goto("/account?source=ledger&checkout=success#allowance");
 
     await expect(page.getByText("Subscription active")).toBeVisible();
-    await expect(page.locator(".oc-subscription-card time")).toHaveAttribute(
-      "datetime",
-      "2099-01-01T00:00:00.000Z"
-    );
+    await expect(page.getByText("January 15, 2099")).toBeVisible();
     await expect(page).toHaveURL("/account?source=ledger#allowance");
   });
 
@@ -736,16 +718,14 @@ test.describe("Subscriber checkout", () => {
     await expect(billing).toBeVisible();
     await billing.click();
     await expect(page.getByText("Subscription active")).toBeVisible();
-    await expect(page.locator(".oc-subscription-card time")).toHaveAttribute(
-      "datetime",
-      "2099-01-01T00:00:00.000Z"
-    );
+    await expect(page.getByText("January 15, 2099")).toBeVisible();
   });
 
   test("console credential controls lock, clear, and re-enable with effective authority", async ({
     page,
   }) => {
     let currentSession = sessionFor("subscriber");
+    let credentialStatus = 200;
     let credentialMutations = 0;
     await setServerSession(page.context(), "subscriber");
     await page.route("**/api/auth/session", (route) =>
@@ -758,12 +738,15 @@ test.describe("Subscriber checkout", () => {
       if (route.request().method() !== "GET") {
         credentialMutations += 1;
       }
+      if (credentialStatus !== 200) {
+        return route.fulfill({ status: credentialStatus });
+      }
       return route.fulfill({ json: { harnessIds: [] } });
     });
     await page.route("**/api/usage", (route) =>
       route.fulfill({
         json: {
-          cap: MONTHLY_RUN_CAP,
+          cap: 750,
           resetsAt: "2099-02-01T00:00:00.000Z",
           used: 0,
         },
@@ -789,9 +772,7 @@ test.describe("Subscriber checkout", () => {
     await setServerSession(page.context(), "demo");
     await notifySessionChange(page);
 
-    await expect(
-      page.getByText("Subscription required", { exact: true })
-    ).toBeVisible();
+    await expect(page.getByText("Subscription required")).toBeVisible();
     await expect(credential).toBeDisabled();
     await expect(credential).toHaveValue("");
     await expect(save).toBeDisabled();
@@ -820,286 +801,14 @@ test.describe("Subscriber checkout", () => {
     await expect(credential).toBeEnabled();
     await credential.fill("new-authority-token");
     await expect(save).toBeEnabled();
-  });
 
-  for (const refusedMethod of ["GET", "POST", "DELETE"] as const) {
-    test(`credential ${refusedMethod} 403 invalidates shared authority once and a newer active revision recovers`, async ({
-      page,
-    }) => {
-      await setServerSession(page.context(), "subscriber");
-      await page.route("**/api/auth/session", (route) =>
-        route.fulfill({ json: sessionFor("subscriber") })
-      );
-      await page.route("**/api/tenant/prewarm", (route) =>
-        route.fulfill({ status: 204 })
-      );
-      await page.route("**/api/usage", (route) =>
-        route.fulfill({
-          json: {
-            cap: MONTHLY_RUN_CAP,
-            resetsAt: "2099-02-01T00:00:00.000Z",
-            used: 0,
-          },
-        })
-      );
-      await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
-        const { pathname } = new URL(route.request().url());
-        return route.fulfill(
-          pathname === "/api/agents"
-            ? { json: { agents: [] } }
-            : { json: { apiVersion: "1.0", runs: [] } }
-        );
-      });
+    credentialStatus = 401;
+    await save.click();
 
-      await page.route("**/api/credentials", (route) => {
-        const method = route.request().method();
-        if (method === "GET") {
-          return route.fulfill({
-            json: {
-              harnessIds: refusedMethod === "DELETE" ? ["copilot"] : [],
-            },
-          });
-        }
-        if (method === refusedMethod) {
-          return route.fulfill({
-            json: { error: "subscription_required" },
-            status: 403,
-          });
-        }
-        return route.fulfill({ json: {}, status: 500 });
-      });
-
-      let releaseRefresh!: () => void;
-      const refreshGate = new Promise<void>((resolve) => {
-        releaseRefresh = resolve;
-      });
-      let serverRefreshes = 0;
-      await page.route("**/agents?**", async (route) => {
-        if (isServerComponentRequest(route.request())) {
-          serverRefreshes += 1;
-          await refreshGate;
-        }
-        await route.continue();
-      });
-
-      let refusedGetHandler: ((route: Route) => Promise<void>) | null = null;
-      if (refusedMethod === "GET") {
-        await page.goto("/agents");
-        await expect(
-          page.getByTitle(
-            "The Daytona runner answered for this authenticated session."
-          )
-        ).toBeVisible();
-        refusedGetHandler = (route) =>
-          route.fulfill({
-            json: { error: "subscription_required" },
-            status: 403,
-          });
-        await page.route("**/api/credentials", refusedGetHandler);
-        await page
-          .getByRole("button", { name: "Account and settings" })
-          .click();
-      } else {
-        await openConsoleSettings(page);
-      }
-      const credential = page.getByLabel("GitHub Copilot CLI credential");
-      const billing = page.getByRole("tab", { name: "Billing" });
-      if (refusedMethod !== "GET") {
-        await expect(credential).toBeEnabled();
-        await expect(billing).toBeVisible();
-      }
-
-      if (refusedMethod === "POST") {
-        await credential.fill("must-clear-after-refusal");
-        await page.getByRole("button", { exact: true, name: "Save" }).click();
-      } else if (refusedMethod === "DELETE") {
-        await page.getByRole("button", { exact: true, name: "Remove" }).click();
-      }
-
-      await expect.poll(() => serverRefreshes).toBe(1);
-      await expect(
-        page.getByTitle("An active subscription is required to run agents.")
-      ).toBeVisible();
-      await expect(credential).toBeDisabled();
-      await expect(credential).toHaveValue("");
-      await expect(
-        page.getByText("Subscription required", { exact: true })
-      ).toBeVisible();
-      await expect(page.getByText("Subscription active")).toHaveCount(0);
-      if (CHECKOUT_ENABLED) {
-        await expect(billing).toBeVisible();
-      } else {
-        await expect(billing).toHaveCount(0);
-      }
-      await page.waitForTimeout(100);
-      expect(serverRefreshes).toBe(1);
-
-      if (refusedGetHandler) {
-        await page.unroute("**/api/credentials", refusedGetHandler);
-      }
-      releaseRefresh();
-
-      await expect(credential).toBeEnabled();
-      await expect(
-        page.getByTitle(
-          "The Daytona runner answered for this authenticated session."
-        )
-      ).toBeVisible();
-      await expect(page.getByRole("tab", { name: "Billing" })).toBeVisible();
-      await page.getByRole("tab", { name: "Billing" }).click();
-      await expect(page.getByText("Subscription active")).toBeVisible();
-      expect(serverRefreshes).toBe(1);
-    });
-  }
-
-  test("credential 403 remains fail-closed when the newer server revision is inactive", async ({
-    page,
-  }) => {
-    await setServerSession(page.context(), "subscriber");
-    await page.route("**/api/auth/session", (route) =>
-      route.fulfill({ json: sessionFor("subscriber") })
-    );
-    await mockSubscriberConsoleDependencies(page);
-    await page.unroute("**/api/credentials");
-    await page.route("**/api/credentials", async (route) => {
-      if (route.request().method() === "POST") {
-        await setServerSession(page.context(), "demo");
-        return route.fulfill({
-          json: { error: "subscription_required" },
-          status: 403,
-        });
-      }
-      return route.fulfill({ json: { harnessIds: [] } });
-    });
-    let serverRefreshes = 0;
-    page.on("request", (request) => {
-      if (
-        new URL(request.url()).pathname === "/agents" &&
-        isServerComponentRequest(request)
-      ) {
-        serverRefreshes += 1;
-      }
-    });
-
-    await openConsoleSettings(page);
-    const credential = page.getByLabel("GitHub Copilot CLI credential");
-    await credential.fill("must-not-reactivate");
-    await page.getByRole("button", { exact: true, name: "Save" }).click();
-
-    await expect.poll(() => serverRefreshes).toBe(1);
-    await expect(
-      page.getByTitle("An active subscription is required to run agents.")
-    ).toBeVisible();
+    await expect(page.getByText("Subscription required")).toBeVisible();
     await expect(credential).toBeDisabled();
     await expect(credential).toHaveValue("");
-    if (CHECKOUT_ENABLED) {
-      await page.getByRole("tab", { name: "Billing" }).click();
-      await expect(checkoutButton(page)).toBeVisible();
-    } else {
-      await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
-    }
-    await page.waitForTimeout(100);
-    expect(serverRefreshes).toBe(1);
-  });
-
-  test("an account credential 403 closes the menu and Billing until a newer active revision reloads", async ({
-    page,
-  }) => {
-    await setServerSession(page.context(), "subscriber");
-    await page.route("**/api/auth/session", (route) =>
-      route.fulfill({ json: sessionFor("subscriber") })
-    );
-    let credentialGets = 0;
-    await page.route("**/api/credentials", (route) => {
-      credentialGets += 1;
-      return credentialGets === 1
-        ? route.fulfill({
-            json: { error: "subscription_required" },
-            status: 403,
-          })
-        : route.fulfill({ json: { harnessIds: [] } });
-    });
-
-    let releaseRefresh!: () => void;
-    const refreshGate = new Promise<void>((resolve) => {
-      releaseRefresh = resolve;
-    });
-    let serverRefreshes = 0;
-    await page.route("**/account?**", async (route) => {
-      if (isServerComponentRequest(route.request())) {
-        serverRefreshes += 1;
-        await refreshGate;
-      }
-      await route.continue();
-    });
-
-    await page.goto("/account");
-
-    await expect.poll(() => serverRefreshes).toBe(1);
-    await page.getByRole("button", { name: "Account" }).click();
-    await expect(page.getByText("Guest", { exact: true })).toBeVisible();
-    await page.keyboard.press("Escape");
-    await expect(
-      page.getByText("Storing a credential needs an active subscription.")
-    ).toBeVisible();
-    await expect(page.getByLabel("GitHub Copilot CLI")).toHaveCount(0);
-    await expect(page.getByText("Subscription active")).toHaveCount(0);
-    if (CHECKOUT_ENABLED) {
-      await expect(page.getByRole("tab", { name: "Billing" })).toBeVisible();
-    } else {
-      await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
-    }
-
-    releaseRefresh();
-
-    await expect(page.getByLabel("GitHub Copilot CLI")).toBeVisible();
-    await page.getByRole("button", { name: "Account" }).click();
-    await expect(page.getByText("Subscriber", { exact: true })).toBeVisible();
-    await page.keyboard.press("Escape");
-    await expect(page.getByRole("tab", { name: "Billing" })).toBeVisible();
-    expect(serverRefreshes).toBe(1);
-  });
-
-  test("a signed subscriber shape without a finite boundary fails all console gates closed", async ({
-    page,
-  }) => {
-    await setServerSession(page.context(), "subscriber", {
-      subscribedUntil: "not-a-date",
-    });
-    await page.route("**/api/auth/session", (route) =>
-      route.fulfill({ json: sessionFor("subscriber") })
-    );
-    const protectedRequests: string[] = [];
-    page.on("request", (request) => {
-      const { pathname } = new URL(request.url());
-      if (
-        pathname === "/api/agents" ||
-        pathname === "/api/credentials" ||
-        pathname === "/api/tenant/prewarm"
-      ) {
-        protectedRequests.push(pathname);
-      }
-    });
-
-    await openConsoleSettings(page);
-
-    await expect(
-      page.getByTitle("An active subscription is required to run agents.")
-    ).toBeVisible();
-    await expect(
-      page.getByText(
-        "An active subscription is required to store harness credentials."
-      )
-    ).toBeVisible();
-    await expect(
-      page.getByLabel("GitHub Copilot CLI credential")
-    ).toBeDisabled();
-    if (CHECKOUT_ENABLED) {
-      await expect(page.getByRole("tab", { name: "Billing" })).toBeVisible();
-    } else {
-      await expect(page.getByRole("tab", { name: "Billing" })).toHaveCount(0);
-    }
-    expect(protectedRequests).toEqual([]);
+    await expect(save).toBeDisabled();
   });
 
   test("agents ignores subscriber authority belonging to another current client identity", async ({
@@ -1732,23 +1441,27 @@ test.describe("Subscriber checkout", () => {
     await expect(copilot).toBeFocused();
   });
 
-  test("switching users clears finite signed authority notices", async ({
+  test("switching users aborts stale subscription reads and clears old authority notices", async ({
     page,
   }) => {
     test.skip(!CHECKOUT_ENABLED, "This is the launch-flag-on contract.");
     let currentSession = sessionFor("subscriber");
     await setServerSession(page.context(), "subscriber");
+    let releaseStatus!: () => void;
+    const statusGate = new Promise<void>((resolve) => {
+      releaseStatus = resolve;
+    });
     await page.route("**/api/auth/session", (route) =>
       route.fulfill({ json: currentSession })
     );
     await mockAccountDependencies(page);
+    await page.route("**/api/subscription", async (route) => {
+      await statusGate;
+      return route.fulfill({ json: subscriptionStatus(true) });
+    });
     await page.goto("/account");
     await page.getByRole("tab", { name: "Billing" }).click();
-    await expect(page.getByText("Subscription active")).toBeVisible();
-    await expect(page.locator(".oc-subscription-card time")).toHaveAttribute(
-      "datetime",
-      "2099-01-01T00:00:00.000Z"
-    );
+    await expect(page.getByText("Checking subscription")).toBeVisible();
 
     currentSession = sessionFor("demo", {
       email: "second@example.invalid",
@@ -1759,10 +1472,12 @@ test.describe("Subscriber checkout", () => {
       id: "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa",
     });
     await notifySessionChange(page);
+    releaseStatus();
 
     await expect(checkoutButton(page)).toBeVisible();
+    await expect(page.getByText("Checking subscription")).toHaveCount(0);
     await expect(page.getByText("Subscription active")).toHaveCount(0);
-    await expect(page.locator(".oc-subscription-card time")).toHaveCount(0);
+    await expect(page.getByText("January 15, 2099")).toHaveCount(0);
   });
 
   test("desktop console settings expose vertical keyboard-operable ARIA tabs", async ({

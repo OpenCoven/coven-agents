@@ -138,7 +138,7 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     }),
     reconcileAndDispatch: async () => ({
       adopted: 0,
-      deferred: 0,
+      deferred: 7,
       dispatched: 1,
       execution: "executed",
       expiredScanned: 0,
@@ -631,9 +631,11 @@ async function executeFixture(): Promise<void> {
       );
       assert.equal(response.status, 200);
       const result = (await response.json()) as {
+        deferred: number;
         dispatched: number;
         execution: string;
       };
+      assert.equal(result.deferred, 7);
       assert.equal(result.dispatched, 1);
       assert.equal(result.execution, "executed");
     })

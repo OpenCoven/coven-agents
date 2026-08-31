@@ -16,18 +16,6 @@ import {
 
 export { credentialWhere } from "./scope";
 
-export type PreparedCredentialWrite = {
-  aadVersion: number;
-  ciphertext: string;
-  credentialRevision: string;
-  envelopeRevision: string;
-  harnessId: string;
-  iv: string;
-  kekVersion: string;
-  tenant: string;
-  wrappedKey: string;
-};
-
 /**
  * Tenant credential storage: the app is sole custodian of plaintext
  * credentials at rest. Every credential is sealed with `encryptCredential`
@@ -47,31 +35,6 @@ export async function putCredential(
   plaintext: string
 ): Promise<void> {
   const db = databaseFor(session);
-  const prepared = await prepareCredentialWrite(session, harnessId, plaintext);
-
-  await db
-    .insert(tenantCredential)
-    .values(prepared)
-    .onConflictDoUpdate({
-      set: {
-        aadVersion: prepared.aadVersion,
-        ciphertext: prepared.ciphertext,
-        credentialRevision: prepared.credentialRevision,
-        envelopeRevision: prepared.envelopeRevision,
-        iv: prepared.iv,
-        kekVersion: prepared.kekVersion,
-        updatedAt: new Date(),
-        wrappedKey: prepared.wrappedKey,
-      },
-      target: [tenantCredential.tenant, tenantCredential.harnessId],
-    });
-}
-
-export async function prepareCredentialWrite(
-  session: SubscriberSession,
-  harnessId: string,
-  plaintext: string
-): Promise<PreparedCredentialWrite> {
   const ring = await credentialKekRingFromEnvironment();
   const sealed = await encryptCredential(
     plaintext,
@@ -80,17 +43,32 @@ export async function prepareCredentialWrite(
     credentialAadContextForWrite(session.tenant, harnessId)
   );
 
-  return {
-    aadVersion: sealed.aadVersion,
-    ciphertext: sealed.ciphertext,
-    credentialRevision: crypto.randomUUID(),
-    envelopeRevision: crypto.randomUUID(),
-    harnessId,
-    iv: sealed.iv,
-    kekVersion: sealed.kekVersion,
-    tenant: session.tenant,
-    wrappedKey: sealed.wrappedKey,
-  };
+  await db
+    .insert(tenantCredential)
+    .values({
+      aadVersion: sealed.aadVersion,
+      ciphertext: sealed.ciphertext,
+      credentialRevision: crypto.randomUUID(),
+      envelopeRevision: crypto.randomUUID(),
+      harnessId,
+      iv: sealed.iv,
+      kekVersion: sealed.kekVersion,
+      tenant: session.tenant,
+      wrappedKey: sealed.wrappedKey,
+    })
+    .onConflictDoUpdate({
+      set: {
+        aadVersion: sealed.aadVersion,
+        ciphertext: sealed.ciphertext,
+        credentialRevision: crypto.randomUUID(),
+        envelopeRevision: crypto.randomUUID(),
+        iv: sealed.iv,
+        kekVersion: sealed.kekVersion,
+        updatedAt: new Date(),
+        wrappedKey: sealed.wrappedKey,
+      },
+      target: [tenantCredential.tenant, tenantCredential.harnessId],
+    });
 }
 
 export function prepareCredentialForTenant(

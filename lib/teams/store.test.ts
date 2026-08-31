@@ -7,19 +7,21 @@ import {
   type TeamHandoff,
 } from "@opencoven/agent-contracts";
 import { PgDialect } from "drizzle-orm/pg-core";
-import type { RunnerPrincipal } from "../runner/types";
+import type { RunnerOperator, RunnerPrincipal } from "../runner/types";
+import { teamChildRunnerIds } from "./orchestrate";
 import { createTeamStore, type TeamStoreStatement } from "./store";
 
 const principal: RunnerPrincipal = {
   kind: "subscriber",
   tenant: "tenant_a",
-  userId: "user_a",
+  userId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 };
 const otherPrincipal: RunnerPrincipal = {
   kind: "subscriber",
   tenant: "tenant_b",
-  userId: "user_b",
+  userId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 };
+const operator: RunnerOperator = { kind: "runner-operator" };
 const dialect = new PgDialect();
 
 const AGENT_A = "00000000-0000-4000-8000-000000000001";
@@ -122,11 +124,14 @@ function teamRunRow(
   overrides: Record<string, unknown> = {}
 ): Record<string, unknown> {
   return {
+    authVersion: 7,
     completedAt: null,
     createdAt: NOW,
+    createdByUserId: principal.userId,
     currentPosition: 0,
     error: null,
     id: TEAM_RUN_A,
+    liveChildRunId: null,
     mission: "Ship the approved change.",
     operationId: OPERATION_A,
     requestHash: "a".repeat(64),
@@ -135,13 +140,22 @@ function teamRunRow(
     steps: [
       {
         agentId: AGENT_A,
+        agentInstructions: "Keep execution evidence concise.",
+        agentModel: "auto",
+        agentRuntime: "copilot",
+        agentWorkspace: "/workspace/repo",
+        approvalActorUserId: null,
+        approvalDecidedAt: null,
         approvalStatus: "not_required",
+        approvedCapabilities: [],
         completedAt: null,
         createdAt: NOW,
         error: null,
         handoff: null,
         id: TEAM_STEP_A,
         memberId: MEMBER_A,
+        plannedOperationId: null,
+        plannedRunnerRunId: null,
         position: 0,
         required: true,
         responsibility: "Build the change.",
@@ -158,19 +172,29 @@ function teamRunRow(
         ],
         startedAt: null,
         status: "pending",
+        teamRunId: TEAM_RUN_A,
         tenant: principal.tenant,
         updatedAt: NOW,
         version: 0,
       },
       {
         agentId: AGENT_B,
+        agentInstructions: "Review the result.",
+        agentModel: "auto",
+        agentRuntime: "copilot",
+        agentWorkspace: null,
+        approvalActorUserId: null,
+        approvalDecidedAt: null,
         approvalStatus: "pending",
+        approvedCapabilities: [],
         completedAt: null,
         createdAt: NOW,
         error: null,
         handoff: null,
         id: TEAM_STEP_B,
         memberId: MEMBER_B,
+        plannedOperationId: null,
+        plannedRunnerRunId: null,
         position: 1,
         required: false,
         responsibility: "Review the change.",
@@ -179,6 +203,7 @@ function teamRunRow(
         skillSnapshots: [],
         startedAt: null,
         status: "pending",
+        teamRunId: TEAM_RUN_A,
         tenant: principal.tenant,
         updatedAt: NOW,
         version: 0,
@@ -186,6 +211,7 @@ function teamRunRow(
     ],
     teamId: TEAM_A,
     tenant: principal.tenant,
+    terminalChildRunId: null,
     updatedAt: NOW,
     version: 0,
     ...overrides,
@@ -246,6 +272,97 @@ test("schema and generated migration contain all nine tenant-safe tables", async
     migration,
     /accessToken|authorizationHeader|rawResponse/iu
   );
+});
+
+test("forward migration persists team authority, approval audit, and execution snapshots", async () => {
+  const schema = await readFile(
+    new URL("../db/schema.ts", import.meta.url),
+    "utf8"
+  );
+  const migrationDirectory = new URL("../db/migrations/", import.meta.url);
+  const { readdir } = await import("node:fs/promises");
+  const migrationName = (await readdir(migrationDirectory)).find((name) =>
+    name.startsWith("0022_")
+  );
+  assert.ok(migrationName, "team authority requires forward migration 0022");
+  const authorityMigration = await readFile(
+    new URL(migrationName, migrationDirectory),
+    "utf8"
+  );
+  const reservationMigrationName = (await readdir(migrationDirectory)).find(
+    (name) => name.startsWith("0023_")
+  );
+  assert.ok(
+    reservationMigrationName,
+    "planned child reservations must advance through migration 0023"
+  );
+  const reservationMigration = await readFile(
+    new URL(reservationMigrationName, migrationDirectory),
+    "utf8"
+  );
+
+  for (const field of [
+    "createdByUserId",
+    "authVersion",
+    "agentInstructions",
+    "agentModel",
+    "agentRuntime",
+    "agentWorkspace",
+    "approvedCapabilities",
+    "approvalActorUserId",
+    "approvalDecidedAt",
+  ]) {
+    assert.match(schema, new RegExp(field, "u"));
+    assert.match(authorityMigration, new RegExp(`"${field}"`, "u"));
+  }
+  for (const field of ["plannedOperationId", "plannedRunnerRunId"]) {
+    assert.match(schema, new RegExp(field, "u"));
+    assert.match(reservationMigration, new RegExp(`"${field}"`, "u"));
+  }
+  assert.match(authorityMigration, /RTRun_authVersion_valid/u);
+  assert.match(authorityMigration, /RTStep_approval_audit_valid/u);
+  assert.match(authorityMigration, /RTStep_approvedCapabilities_valid/u);
+  assert.match(reservationMigration, /RTStep_plannedOperation_uq/u);
+  assert.match(reservationMigration, /RTStep_plannedRunnerRun_uq/u);
+  assert.match(reservationMigration, /RTStep_childReservation_valid/u);
+  assert.match(authorityMigration, /RunnerRun_agentSnapshot_valid/u);
+  assert.match(
+    authorityMigration,
+    /RTStep_handoff_bounded[\s\S]*octet_length\("RunnerTeamStep"\."handoff"::text\) <= 24576/u
+  );
+  assert.match(
+    authorityMigration,
+    /FOREIGN KEY \("createdByUserId"\).*"User"\("id"\)/u
+  );
+  assert.match(
+    authorityMigration,
+    /FOREIGN KEY \("approvalActorUserId"\).*"User"\("id"\)/u
+  );
+  assert.doesNotMatch(
+    reservationMigration,
+    /FOREIGN KEY \("plannedRunnerRunId"[^)]*\).*"RunnerRun"/u
+  );
+});
+
+test("team run listing is cursor-stable and fetches only one bounded page", async () => {
+  const { statements, store } = scripted([]);
+
+  await store.listTeamRuns(principal, TEAM_A, TEAM_RUN_A);
+
+  const list = captured(statements, 0);
+  const query = queryText(list);
+  assert.equal(
+    list.args.limit,
+    TEAM_LIMITS.maxTeamRunsPerPage + 1,
+    "the store fetches only one lookahead row beyond the public page"
+  );
+  assert.equal(list.args.cursor, TEAM_RUN_A);
+  assert.match(query, /"cursorRun"\."id"/u);
+  assert.match(
+    query,
+    /\("teamRun"\."createdAt", "teamRun"\."id"\)\s*< \("cursorRun"\."createdAt", "cursorRun"\."id"\)/u
+  );
+  assert.match(query, /LIMIT \$\d+/u);
 });
 
 test("skill CRUD always binds tenant and hides cross-tenant rows", async () => {
@@ -640,6 +757,10 @@ test("team run creation copies immutable ordered member and skill snapshots", as
   const snapshots = [
     {
       agentId: AGENT_A,
+      agentInstructions: "Keep execution evidence concise.",
+      agentModel: "auto",
+      agentRuntime: "copilot",
+      agentWorkspace: "/workspace/repo",
       memberId: MEMBER_A,
       position: 0,
       required: true,
@@ -657,6 +778,10 @@ test("team run creation copies immutable ordered member and skill snapshots", as
     },
     {
       agentId: AGENT_B,
+      agentInstructions: "Review the result.",
+      agentModel: "auto",
+      agentRuntime: "copilot",
+      agentWorkspace: null,
       memberId: MEMBER_B,
       position: 1,
       required: false,
@@ -674,6 +799,7 @@ test("team run creation copies immutable ordered member and skill snapshots", as
   );
 
   const result = await created.store.createTeamRun(principal, {
+    authVersion: 7,
     id: TEAM_RUN_A,
     mission: "Ship the approved change.",
     operationId: OPERATION_A,
@@ -705,6 +831,8 @@ test("team run creation copies immutable ordered member and skill snapshots", as
     ]
   );
   assert.equal(created.statements[4]?.args.tenant, principal.tenant);
+  assert.equal(created.statements[3]?.args.createdByUserId, principal.userId);
+  assert.equal(created.statements[3]?.args.authVersion, 7);
   assert.deepEqual(created.statements[4]?.args.stepIds, [
     TEAM_STEP_A,
     TEAM_STEP_B,
@@ -718,6 +846,7 @@ test("team run creation copies immutable ordered member and skill snapshots", as
 test("team run operation replay is idempotent and hash conflicts fail closed", async () => {
   const duplicate = scripted([{ id: TEAM_A }], [teamRunRow()]);
   const duplicateResult = await duplicate.store.createTeamRun(principal, {
+    authVersion: 7,
     id: TEAM_RUN_A,
     mission: "Ship the approved change.",
     operationId: OPERATION_A,
@@ -733,6 +862,7 @@ test("team run operation replay is idempotent and hash conflicts fail closed", a
     [teamRunRow({ requestHash: "b".repeat(64) })]
   );
   const conflictResult = await conflict.store.createTeamRun(principal, {
+    authVersion: 7,
     id: TEAM_RUN_A,
     mission: "Different request.",
     operationId: OPERATION_A,
@@ -816,16 +946,29 @@ test("approval decisions require a pending approval and matching version", async
   const pending = {
     ...(teamRunRow().steps as Record<string, unknown>[])[1],
     approvalStatus: "pending",
+    skillSnapshots: [
+      {
+        description: "",
+        id: SKILL_B,
+        instructions: "Review pull requests.",
+        name: "Reviewer",
+        requiredCapabilities: ["github.pull_requests.write"],
+      },
+    ],
     version: 5,
   };
   const approved = {
     ...pending,
+    approvalActorUserId: principal.userId,
+    approvalDecidedAt: NOW,
     approvalStatus: "approved",
+    approvedCapabilities: ["github.pull_requests.write"],
     version: 6,
   };
   const { statements, store } = scripted([pending], [approved]);
 
   const result = await store.decideTeamStepApproval(principal, {
+    capabilities: ["github.pull_requests.write"],
     decision: "approve",
     expectedVersion: 5,
     id: TEAM_STEP_B,
@@ -837,16 +980,766 @@ test("approval decisions require a pending approval and matching version", async
     queryText(captured(statements, 1)),
     /"approvalStatus" = 'pending'/u
   );
+  assert.equal(statements[1]?.args.approvalActorUserId, principal.userId);
+  assert.deepEqual(statements[1]?.args.capabilities, [
+    "github.pull_requests.write",
+  ]);
+  assert.match(
+    queryText(captured(statements, 1)),
+    /skillSnapshots[\s\S]*requiredCapabilities/u
+  );
+  assert.match(queryText(captured(statements, 1)), /"approvalDecidedAt"/u);
 
   const alreadyDecided = scripted([approved]);
   assert.deepEqual(
     await alreadyDecided.store.decideTeamStepApproval(principal, {
+      capabilities: [],
       decision: "reject",
       expectedVersion: 6,
       id: TEAM_STEP_B,
     }),
     { kind: "invalid_transition" }
   );
+});
+
+test("approval rejects undeclared or read-only capability escalation before mutation", async () => {
+  const pending = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[1],
+    approvalStatus: "pending",
+    skillSnapshots: [
+      {
+        description: "",
+        id: SKILL_B,
+        instructions: "Review pull requests.",
+        name: "Reviewer",
+        requiredCapabilities: ["github.pull_requests.write"],
+      },
+    ],
+    status: "waiting_approval",
+    version: 5,
+  };
+  for (const capabilities of [
+    ["github.issues.write"],
+    ["github.pull_requests.read"],
+  ] as const) {
+    const attempt = scripted([pending]);
+    // biome-ignore lint/performance/noAwaitInLoops: Each capability is verified against an isolated transaction.
+    const result = await attempt.store.decideTeamStepApproval(principal, {
+      capabilities: [...capabilities],
+      decision: "approve",
+      expectedVersion: 5,
+      id: TEAM_STEP_B,
+    });
+    assert.deepEqual(result, { kind: "invalid_capabilities" });
+    assert.equal(attempt.statements.length, 1);
+  }
+});
+
+test("rejected required approval is actor-attributed and fails the run through normal progression", async () => {
+  const pending = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    approvalStatus: "pending",
+    skillSnapshots: [
+      {
+        description: "",
+        id: SKILL_A,
+        instructions: "Create the approved pull request.",
+        name: "Pull request delivery",
+        requiredCapabilities: ["github.pull_requests.write"],
+      },
+    ],
+    status: "waiting_approval",
+    version: 5,
+  };
+  const rejected = {
+    ...pending,
+    approvalActorUserId: principal.userId,
+    approvalDecidedAt: NOW,
+    approvalStatus: "rejected",
+    completedAt: NOW,
+    error: {
+      code: "approval_rejected",
+      message: "GitHub operation approval was rejected.",
+      retryable: false,
+    },
+    status: "failed",
+    version: 6,
+  };
+  const decision = scripted([pending], [rejected], [], []);
+
+  const result = await decision.store.decideTeamStepApproval(principal, {
+    capabilities: [],
+    decision: "reject",
+    expectedVersion: 5,
+    id: TEAM_STEP_A,
+  });
+
+  assert.equal(result.kind, "updated");
+  assert.deepEqual(
+    decision.statements.map(({ name }) => name),
+    [
+      "lock-team-step-for-approval",
+      "decide-team-step-approval",
+      "skip-team-steps-after-approval-rejection",
+      "advance-team-run-after-approval-rejection",
+    ]
+  );
+  assert.equal(
+    decision.statements[1]?.args.approvalActorUserId,
+    principal.userId
+  );
+  assert.deepEqual(decision.statements[1]?.args.capabilities, []);
+  assert.match(
+    queryText(captured(decision.statements, 3)),
+    /WHEN "step"\."required" THEN 'failed'/u
+  );
+});
+
+test("rejected optional approval advances to completed_with_warnings without granting capabilities", async () => {
+  const pending = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[1],
+    approvalStatus: "pending",
+    required: false,
+    skillSnapshots: [
+      {
+        description: "",
+        id: SKILL_B,
+        instructions: "Review pull requests.",
+        name: "Reviewer",
+        requiredCapabilities: ["github.pull_requests.write"],
+      },
+    ],
+    status: "waiting_approval",
+    version: 5,
+  };
+  const rejected = {
+    ...pending,
+    approvalActorUserId: principal.userId,
+    approvalDecidedAt: NOW,
+    approvalStatus: "rejected",
+    approvedCapabilities: [],
+    completedAt: NOW,
+    error: {
+      code: "approval_rejected",
+      message: "GitHub operation approval was rejected.",
+      retryable: false,
+    },
+    status: "failed",
+    version: 6,
+  };
+  const decision = scripted([pending], [rejected], [], []);
+
+  const result = await decision.store.decideTeamStepApproval(principal, {
+    capabilities: [],
+    decision: "reject",
+    expectedVersion: 5,
+    id: TEAM_STEP_B,
+  });
+
+  assert.equal(result.kind, "updated");
+  assert.deepEqual(decision.statements[1]?.args.capabilities, []);
+  assert.match(
+    queryText(captured(decision.statements, 3)),
+    /ELSE 'completed_with_warnings'/u
+  );
+  assert.match(
+    queryText(captured(decision.statements, 3)),
+    /WHEN "step"\."required" THEN "step"\."error"[\s\S]*ELSE NULL/u
+  );
+});
+
+test("child attachment is tenant-fenced, idempotent, and immutable", async () => {
+  const runnerRunId = "aaaaaaaa-0000-4000-8000-000000000001";
+  const operationId = "aaaaaaaa-0000-4000-8000-000000000010";
+  const current = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    plannedOperationId: operationId,
+    plannedRunnerRunId: runnerRunId,
+    status: "queued",
+    teamRunStatus: "running",
+    version: 2,
+  };
+  const attached = {
+    ...current,
+    runnerRunId,
+    status: "running",
+    version: 3,
+  };
+  const created = scripted([current], [{ id: runnerRunId }], [attached]);
+  assert.deepEqual(
+    await created.store.attachTeamStepRunnerRun(operator, {
+      expectedVersion: 2,
+      operationId,
+      runnerRunId,
+      teamStepId: TEAM_STEP_A,
+    }),
+    { kind: "attached" }
+  );
+  assert.match(
+    queryText(captured(created.statements, 0)),
+    /FOR UPDATE OF "teamRun", "step"/u
+  );
+  assert.match(
+    queryText(captured(created.statements, 1)),
+    /"RunnerRun"[\s\S]*"tenant" = "step"\."tenant"/u
+  );
+  assert.match(
+    queryText(captured(created.statements, 1)),
+    /"runnerRun"\."operationId" =/u
+  );
+  assert.match(queryText(captured(created.statements, 2)), /AND "tenant" =/u);
+
+  const duplicate = scripted([attached]);
+  assert.equal(
+    (
+      await duplicate.store.attachTeamStepRunnerRun(operator, {
+        expectedVersion: 2,
+        operationId,
+        runnerRunId,
+        teamStepId: TEAM_STEP_A,
+      })
+    ).kind,
+    "duplicate"
+  );
+
+  const changed = scripted([attached]);
+  assert.deepEqual(
+    await changed.store.attachTeamStepRunnerRun(operator, {
+      expectedVersion: 3,
+      operationId,
+      runnerRunId: "aaaaaaaa-0000-4000-8000-000000000002",
+      teamStepId: TEAM_STEP_A,
+    }),
+    { kind: "invalid_transition" }
+  );
+});
+
+test("an exact reserved child may attach after it terminalizes", async () => {
+  const runnerRunId = "aaaaaaaa-0000-4000-8000-000000000001";
+  const operationId = "aaaaaaaa-0000-4000-8000-000000000010";
+  const current = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    plannedOperationId: operationId,
+    plannedRunnerRunId: runnerRunId,
+    status: "queued",
+    teamRunStatus: "running",
+    version: 2,
+  };
+  const attached = {
+    ...current,
+    runnerRunId,
+    status: "running",
+    version: 3,
+  };
+  const terminal = scripted([current], [{ id: runnerRunId }], [attached]);
+
+  assert.deepEqual(
+    await terminal.store.attachTeamStepRunnerRun(operator, {
+      expectedVersion: 2,
+      operationId,
+      runnerRunId,
+      teamStepId: TEAM_STEP_A,
+    }),
+    { kind: "attached" }
+  );
+  assert.match(
+    queryText(captured(terminal.statements, 1)),
+    /"runnerRun"\."status" IN \(\s*'queued',\s*'running',\s*'completed',\s*'failed',\s*'cancelled'\s*\)/u
+  );
+  assert.match(
+    queryText(captured(terminal.statements, 2)),
+    /SET "runnerRunId" = [^,]+,\s*"status" = 'running'/u
+  );
+});
+
+test("child attachment refuses identifiers outside the durable reservation", async () => {
+  const planned = {
+    operationId: "aaaaaaaa-0000-4000-8000-000000000010",
+    runnerRunId: "aaaaaaaa-0000-4000-8000-000000000001",
+  };
+  const current = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    plannedOperationId: planned.operationId,
+    plannedRunnerRunId: planned.runnerRunId,
+    status: "queued",
+    teamRunStatus: "running",
+    version: 2,
+  };
+  const mismatch = scripted([current]);
+
+  assert.deepEqual(
+    await mismatch.store.attachTeamStepRunnerRun(operator, {
+      expectedVersion: 2,
+      operationId: planned.operationId,
+      runnerRunId: "aaaaaaaa-0000-4000-8000-000000000002",
+      teamStepId: TEAM_STEP_A,
+    }),
+    { kind: "invalid_transition" }
+  );
+  assert.equal(mismatch.statements.length, 1);
+});
+
+test("a cancellation race attaches the admitted child for durable exact cleanup", async () => {
+  const runnerRunId = "aaaaaaaa-0000-4000-8000-000000000001";
+  const operationId = "aaaaaaaa-0000-4000-8000-000000000010";
+  const cancelled = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    plannedOperationId: operationId,
+    plannedRunnerRunId: runnerRunId,
+    runnerRunId: null,
+    status: "skipped",
+    teamRunStatus: "cancelled",
+    version: 3,
+  };
+  const attached = {
+    ...cancelled,
+    runnerRunId,
+    status: "cancelled",
+    version: 4,
+  };
+  const race = scripted([cancelled], [{ id: runnerRunId }], [attached]);
+
+  assert.deepEqual(
+    await race.store.attachTeamStepRunnerRun(operator, {
+      expectedVersion: 2,
+      operationId,
+      runnerRunId,
+      teamStepId: TEAM_STEP_A,
+    }),
+    { kind: "cancel_required" }
+  );
+  assert.match(
+    queryText(captured(race.statements, 2)),
+    /"status" = 'cancelled'/u
+  );
+  assert.match(
+    queryText(captured(race.statements, 2)),
+    /"runnerRunId" IS NULL/u
+  );
+});
+
+test("nonretryable admission failure follows required failure progression under the parent lock", async () => {
+  const current = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    hasLaterStep: true,
+    status: "queued",
+    version: 2,
+  };
+  const failure = scripted([current], [{ id: TEAM_STEP_A }], [], []);
+  const error = {
+    code: "agent_not_found",
+    message: "The snapshotted runner agent is unavailable.",
+    retryable: false,
+  };
+
+  assert.deepEqual(
+    await failure.store.failTeamStepAdmission(operator, {
+      error,
+      expectedVersion: 2,
+      teamStepId: TEAM_STEP_A,
+    }),
+    { kind: "failed" }
+  );
+  assert.deepEqual(
+    failure.statements.map(({ name }) => name),
+    [
+      "lock-team-step-for-admission-failure",
+      "fail-team-step-admission",
+      "skip-team-steps-after-admission-failure",
+      "fail-team-run-after-admission-failure",
+    ]
+  );
+  assert.deepEqual(failure.statements[3]?.args.error, error);
+  assert.equal(failure.statements[3]?.args.status, "failed");
+});
+
+test("team step claiming uses database locks and never queues pending write approval", async () => {
+  const idle = scripted([]);
+  assert.deepEqual(await idle.store.claimNextTeamStep(operator), {
+    kind: "idle",
+  });
+  assert.match(
+    queryText(captured(idle.statements, 0)),
+    /FOR UPDATE OF "teamRun", "step" SKIP LOCKED/u
+  );
+  assert.match(
+    queryText(captured(idle.statements, 0)),
+    /"step"\."position" = "teamRun"\."currentPosition"/u
+  );
+  assert.match(
+    queryText(captured(idle.statements, 0)),
+    /"step"\."runnerRunId" IS NULL/u
+  );
+});
+
+test("team step claiming derives immutable workspace permission from skill snapshots", async () => {
+  const planned = teamChildRunnerIds(TEAM_STEP_A);
+  const candidate = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    authVersion: 7,
+    createdByUserId: principal.userId,
+    mission: "Ship the approved change.",
+    priorHandoffs: [],
+  };
+  const claimed = scripted(candidate ? [candidate] : [], [{ version: 1 }], []);
+
+  const result = await claimed.store.claimNextTeamStep(operator);
+
+  assert.equal(result.kind, "ready");
+  assert.deepEqual(
+    result.kind === "ready"
+      ? {
+          agentSnapshot: result.agentSnapshot,
+          approvedCapabilities: result.approvedCapabilities,
+          authVersion: result.authVersion,
+          declaredCapabilities: result.declaredCapabilities,
+          executionPermission: result.executionPermission,
+          plannedOperationId: result.plannedOperationId,
+          plannedRunnerRunId: result.plannedRunnerRunId,
+          principal: result.principal,
+          skillSnapshots: result.skillSnapshots,
+          teamStepVersion: result.teamStepVersion,
+        }
+      : null,
+    {
+      agentSnapshot: {
+        instructions: "Keep execution evidence concise.",
+        model: "auto",
+        runtime: "copilot",
+        workspace: "/workspace/repo",
+      },
+      approvedCapabilities: [],
+      authVersion: 7,
+      declaredCapabilities: ["workspace.read", "workspace.write"],
+      executionPermission: "workspace_write",
+      plannedOperationId: planned.operationId,
+      plannedRunnerRunId: planned.runId,
+      principal,
+      skillSnapshots: [
+        {
+          instructions: "Run the build and focused tests.",
+          name: "Release evidence",
+        },
+      ],
+      teamStepVersion: 1,
+    }
+  );
+  assert.deepEqual(
+    claimed.statements.map(({ name }) => name),
+    [
+      "lock-next-team-step-for-claim",
+      "queue-team-step-for-admission",
+      "mark-team-run-running",
+    ]
+  );
+  assert.equal(
+    claimed.statements[1]?.args.plannedOperationId,
+    planned.operationId
+  );
+  assert.equal(claimed.statements[1]?.args.plannedRunnerRunId, planned.runId);
+  assert.match(
+    queryText(captured(claimed.statements, 1)),
+    /"plannedOperationId"/u
+  );
+  assert.match(
+    queryText(captured(claimed.statements, 1)),
+    /"plannedRunnerRunId"/u
+  );
+  assert.doesNotMatch(
+    queryText(captured(claimed.statements, 0)),
+    /RunnerSkill/u,
+    "later skill edits must not participate in permission derivation"
+  );
+});
+
+test("approval preserves declarations and changes only the GitHub write subset", async () => {
+  const candidate = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    approvalActorUserId: principal.userId,
+    approvalDecidedAt: NOW,
+    approvalStatus: "approved",
+    approvedCapabilities: ["github.issues.write"],
+    authVersion: 7,
+    createdByUserId: principal.userId,
+    mission: "Ship the approved change.",
+    plannedOperationId: teamChildRunnerIds(TEAM_STEP_A).operationId,
+    plannedRunnerRunId: teamChildRunnerIds(TEAM_STEP_A).runId,
+    priorHandoffs: [],
+    skillSnapshots: [
+      {
+        description: "",
+        id: SKILL_A,
+        instructions: "Modify issues and pull requests.",
+        name: "GitHub delivery",
+        requiredCapabilities: [
+          "workspace.read",
+          "github.issues.write",
+          "github.pull_requests.write",
+        ],
+      },
+    ],
+    status: "queued",
+    version: 2,
+  };
+  const claim = scripted([candidate], []);
+
+  const result = await claim.store.claimNextTeamStep(operator);
+
+  assert.equal(result.kind, "ready");
+  assert.deepEqual(result.kind === "ready" ? result.declaredCapabilities : [], [
+    "github.issues.write",
+    "github.pull_requests.write",
+    "workspace.read",
+  ]);
+  assert.deepEqual(result.kind === "ready" ? result.approvedCapabilities : [], [
+    "github.issues.write",
+  ]);
+  assert.equal(
+    result.kind === "ready" ? result.executionPermission : null,
+    "workspace_read"
+  );
+  assert.deepEqual(result.kind === "ready" ? result.skillSnapshots : [], [
+    {
+      instructions: "Modify issues and pull requests.",
+      name: "GitHub delivery",
+    },
+  ]);
+});
+
+test("deferred queued claims rotate their parent row with database time", async () => {
+  const candidate = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    authVersion: 7,
+    createdByUserId: principal.userId,
+    mission: "Ship the approved change.",
+    priorHandoffs: [],
+    status: "queued",
+    version: 2,
+  };
+  const claim = scripted([candidate], [{ version: 3 }], []);
+
+  const result = await claim.store.claimNextTeamStep(operator);
+  assert.equal(result.kind, "ready");
+  assert.equal(result.kind === "ready" && result.teamStepVersion, 3);
+  assert.deepEqual(
+    claim.statements.map(({ name }) => name),
+    [
+      "lock-next-team-step-for-claim",
+      "reserve-team-step-child",
+      "mark-team-run-running",
+    ]
+  );
+  assert.doesNotMatch(
+    queryText(captured(claim.statements, 2)),
+    /"status" <> 'running'/u
+  );
+});
+
+test("duplicate queued claims reuse the exact persisted child reservation", async () => {
+  const planned = teamChildRunnerIds(TEAM_STEP_A);
+  const candidate = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    authVersion: 7,
+    createdByUserId: principal.userId,
+    mission: "Ship the approved change.",
+    plannedOperationId: planned.operationId,
+    plannedRunnerRunId: planned.runId,
+    priorHandoffs: [],
+    status: "queued",
+    version: 3,
+  };
+  const claim = scripted([candidate], []);
+
+  const result = await claim.store.claimNextTeamStep(operator);
+
+  assert.equal(result.kind, "ready");
+  assert.deepEqual(
+    result.kind === "ready"
+      ? {
+          plannedOperationId: result.plannedOperationId,
+          plannedRunnerRunId: result.plannedRunnerRunId,
+          teamStepVersion: result.teamStepVersion,
+        }
+      : null,
+    {
+      plannedOperationId: planned.operationId,
+      plannedRunnerRunId: planned.runId,
+      teamStepVersion: 3,
+    }
+  );
+  assert.deepEqual(
+    claim.statements.map(({ name }) => name),
+    ["lock-next-team-step-for-claim", "mark-team-run-running"]
+  );
+});
+
+test("cancelled child scans rotate the parent before external cancellation", async () => {
+  const row = {
+    createdByUserId: principal.userId,
+    runnerRunId: "aaaaaaaa-0000-4000-8000-000000000001",
+    teamRunId: TEAM_RUN_A,
+    tenant: principal.tenant,
+  };
+  const scan = scripted([row], []);
+
+  assert.equal(
+    (await scan.store.findNextCancelledTeamChild(operator)).kind,
+    "found"
+  );
+  assert.deepEqual(
+    scan.statements.map(({ name }) => name),
+    ["find-next-cancelled-team-child", "rotate-cancelled-team-child"]
+  );
+  assert.match(
+    queryText(captured(scan.statements, 0)),
+    /COALESCE\(\s*"step"\."runnerRunId",\s*"step"\."plannedRunnerRunId"\s*\)/u
+  );
+  assert.match(
+    queryText(captured(scan.statements, 1)),
+    /"updatedAt" = now\(\)/u
+  );
+});
+
+test("pending write approval becomes waiting without entering the runner queue", async () => {
+  const candidate = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[1],
+    authVersion: 7,
+    createdByUserId: principal.userId,
+    mission: "Ship the approved change.",
+    priorHandoffs: [],
+  };
+  const waiting = scripted([candidate], [], []);
+
+  assert.deepEqual(await waiting.store.claimNextTeamStep(operator), {
+    kind: "waiting_approval",
+    teamRunId: TEAM_RUN_A,
+  });
+  assert.deepEqual(
+    waiting.statements.map(({ name }) => name),
+    [
+      "lock-next-team-step-for-claim",
+      "mark-team-step-waiting-approval",
+      "mark-team-run-waiting-approval",
+    ]
+  );
+  assert.doesNotMatch(
+    waiting.statements.map(queryText).join("\n"),
+    /INSERT INTO "RunnerRun"/u
+  );
+});
+
+test("terminal child success projects one bounded handoff and advances one position", async () => {
+  const candidate = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    hasLaterStep: true,
+    hasOptionalFailure: false,
+    priorHandoffs: [],
+    runnerCommandEvidence: [],
+    runnerError: null,
+    runnerFileEvidence: [],
+    runnerOutput: "Completed without private metadata.",
+    runnerRunId: "aaaaaaaa-0000-4000-8000-000000000001",
+    runnerStatus: "completed",
+    status: "running",
+  };
+  const projected = scripted([candidate], [{ id: TEAM_STEP_A }], []);
+
+  assert.deepEqual(
+    await projected.store.projectNextTerminalTeamStep(operator),
+    {
+      kind: "projected",
+      teamRunId: TEAM_RUN_A,
+    }
+  );
+  assert.deepEqual(
+    projected.statements.map(({ name }) => name),
+    [
+      "lock-next-terminal-team-step",
+      "project-terminal-team-step",
+      "advance-team-run-after-terminal-child",
+    ]
+  );
+  assert.equal(
+    (
+      captured(projected.statements, 1).args.handoff as {
+        output: string;
+      }
+    ).output,
+    "Completed without private metadata."
+  );
+  assert.equal(projected.statements[2]?.args.nextPosition, 1);
+  assert.equal(projected.statements[2]?.args.status, "queued");
+
+  const duplicate = scripted([]);
+  assert.deepEqual(
+    await duplicate.store.projectNextTerminalTeamStep(operator),
+    { kind: "idle" }
+  );
+  assert.equal(duplicate.statements.length, 1);
+});
+
+test("required child failure fails the run and skips every later pending step", async () => {
+  const error = {
+    code: "runner_failed",
+    message: "The required child failed.",
+    retryable: false,
+  };
+  const candidate = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    hasLaterStep: true,
+    hasOptionalFailure: false,
+    priorHandoffs: [],
+    runnerCommandEvidence: [],
+    runnerError: error,
+    runnerFileEvidence: [],
+    runnerOutput: "",
+    runnerRunId: "aaaaaaaa-0000-4000-8000-000000000001",
+    runnerStatus: "failed",
+    status: "running",
+  };
+  const projected = scripted([candidate], [{ id: TEAM_STEP_A }], [], []);
+
+  assert.equal(
+    (await projected.store.projectNextTerminalTeamStep(operator)).kind,
+    "projected"
+  );
+  assert.deepEqual(
+    projected.statements.map(({ name }) => name),
+    [
+      "lock-next-terminal-team-step",
+      "project-terminal-team-step",
+      "skip-team-steps-after-required-failure",
+      "advance-team-run-after-terminal-child",
+    ]
+  );
+  assert.equal(projected.statements[3]?.args.nextPosition, 0);
+  assert.equal(projected.statements[3]?.args.status, "failed");
+  assert.deepEqual(projected.statements[3]?.args.error, error);
+});
+
+test("optional final child failure completes the run with warnings", async () => {
+  const candidate = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[1],
+    hasLaterStep: false,
+    hasOptionalFailure: false,
+    priorHandoffs: [],
+    runnerCommandEvidence: [],
+    runnerError: null,
+    runnerFileEvidence: [],
+    runnerOutput: "",
+    runnerRunId: "aaaaaaaa-0000-4000-8000-000000000002",
+    runnerStatus: "failed",
+    status: "running",
+  };
+  const projected = scripted([candidate], [{ id: TEAM_STEP_B }], []);
+
+  assert.equal(
+    (await projected.store.projectNextTerminalTeamStep(operator)).kind,
+    "projected"
+  );
+  assert.equal(projected.statements[2]?.args.nextPosition, 2);
+  assert.equal(projected.statements[2]?.args.status, "completed_with_warnings");
+  assert.equal(projected.statements[2]?.args.error, null);
 });
 
 test("ordinary step updates cannot self-approve a GitHub write", async () => {
@@ -921,14 +1814,31 @@ test("a pending approval cannot enter the execution queue", async () => {
   assert.equal(statements.length, 1);
 });
 
-test("cancelling a team run fences version and cancels only live steps", async () => {
+test("cancelling a team run fences version and targets only the locked live child", async () => {
+  const childRunId = "aaaaaaaa-0000-4000-8000-000000000001";
+  const current = teamRunRow({
+    liveChildRunId: childRunId,
+    version: 3,
+  });
+  const liveChild = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    priorHandoffs: [],
+    runnerCommandEvidence: [],
+    runnerError: null,
+    runnerFileEvidence: [],
+    runnerOutput: "",
+    runnerRunId: childRunId,
+    runnerStatus: "running",
+    status: "running",
+  };
   const cancelled = teamRunRow({
     completedAt: NOW,
     status: "cancelled",
     version: 4,
   });
   const { statements, store } = scripted(
-    [teamRunRow({ version: 3 })],
+    [current],
+    [liveChild],
     [cancelled],
     [],
     [cancelled]
@@ -940,13 +1850,283 @@ test("cancelling a team run fences version and cancels only live steps", async (
   });
 
   assert.equal(result.kind, "updated");
+  assert.equal(result.kind === "updated" && result.childRunId, childRunId);
   assert.match(
-    queryText(captured(statements, 2)),
+    queryText(captured(statements, 0)),
+    /COALESCE\(\s*"step"\."runnerRunId",\s*"step"\."plannedRunnerRunId"\s*\)/u
+  );
+  assert.match(
+    queryText(captured(statements, 3)),
     /"status" IN \('pending', 'queued', 'running', 'waiting_approval'\)/u
+  );
+  assert.match(
+    queryText(captured(statements, 3)),
+    /COALESCE\(\s*"runnerRunId",\s*"plannedRunnerRunId"\s*\)/u
   );
   for (const statement of statements) {
     assert.equal(statement.args.tenant, principal.tenant);
   }
+});
+
+test("cancellation without an exact current child skips steps without targeting a runner", async () => {
+  const cancelled = teamRunRow({
+    completedAt: NOW,
+    status: "cancelled",
+    version: 4,
+  });
+  const cancellation = scripted(
+    [teamRunRow({ version: 3 })],
+    [cancelled],
+    [],
+    [cancelled]
+  );
+
+  const result = await cancellation.store.cancelTeamRun(principal, {
+    expectedVersion: 3,
+    id: TEAM_RUN_A,
+  });
+
+  assert.equal(result.kind, "updated");
+  assert.equal(result.kind === "updated" && result.childRunId, null);
+  assert.deepEqual(
+    cancellation.statements.map(({ name }) => name),
+    [
+      "lock-team-run-for-cancel",
+      "cancel-team-run",
+      "cancel-team-run-steps",
+      "get-cancelled-team-run",
+    ]
+  );
+});
+
+test("cancellation projects an already-terminal attached child before skipping later steps", async () => {
+  const childRunId = "aaaaaaaa-0000-4000-8000-000000000001";
+  const current = teamRunRow({
+    terminalChildRunId: childRunId,
+    version: 3,
+  });
+  const terminalChild = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    priorHandoffs: [],
+    runnerCommandEvidence: [],
+    runnerError: null,
+    runnerFileEvidence: [],
+    runnerOutput: "Completed before cancellation.",
+    runnerRunId: childRunId,
+    runnerStatus: "completed",
+    status: "running",
+  };
+  const cancelled = teamRunRow({
+    completedAt: NOW,
+    status: "cancelled",
+    steps: [
+      {
+        ...(teamRunRow().steps as Record<string, unknown>[])[0],
+        completedAt: NOW,
+        handoff: {
+          commandEvidence: [],
+          fileEvidence: [],
+          output: "Completed before cancellation.",
+        },
+        runnerRunId: childRunId,
+        status: "completed",
+      },
+      {
+        ...(teamRunRow().steps as Record<string, unknown>[])[1],
+        completedAt: NOW,
+        status: "skipped",
+      },
+    ],
+    version: 4,
+  });
+  const cancellation = scripted(
+    [current],
+    [terminalChild],
+    [{ id: TEAM_STEP_A }],
+    [cancelled],
+    [],
+    [cancelled]
+  );
+
+  const result = await cancellation.store.cancelTeamRun(principal, {
+    expectedVersion: 3,
+    id: TEAM_RUN_A,
+  });
+
+  assert.equal(result.kind, "updated");
+  assert.deepEqual(
+    cancellation.statements.map(({ name }) => name),
+    [
+      "lock-team-run-for-cancel",
+      "lock-current-team-child-before-cancel",
+      "project-terminal-team-child-before-cancel",
+      "cancel-team-run",
+      "cancel-team-run-steps",
+      "get-cancelled-team-run",
+    ]
+  );
+  assert.equal(
+    (
+      captured(cancellation.statements, 2).args.handoff as {
+        output: string;
+      }
+    ).output,
+    "Completed before cancellation."
+  );
+  assert.equal(result.kind === "updated" && result.childRunId, null);
+});
+
+test("cancellation locks and re-reads a live child that terminalizes after parent classification", async () => {
+  const childRunId = "aaaaaaaa-0000-4000-8000-000000000001";
+  const current = teamRunRow({
+    liveChildRunId: childRunId,
+    terminalChildRunId: null,
+    version: 3,
+  });
+  const terminalChild = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    priorHandoffs: [],
+    runnerCommandEvidence: [],
+    runnerError: null,
+    runnerFileEvidence: [],
+    runnerOutput: "Completed during cancellation.",
+    runnerRunId: childRunId,
+    runnerStatus: "completed",
+    status: "running",
+  };
+  const cancelled = teamRunRow({
+    completedAt: NOW,
+    status: "cancelled",
+    version: 4,
+  });
+  const statements: TeamStoreStatement[] = [];
+  let childStatus: "running" | "completed" = "running";
+  const store = createTeamStore({
+    transaction: (callback) =>
+      callback({
+        execute: <Row extends Record<string, unknown>>(
+          currentStatement: TeamStoreStatement
+        ) => {
+          statements.push(currentStatement);
+          let rows: Record<string, unknown>[] = [];
+          switch (currentStatement.name) {
+            case "lock-team-run-for-cancel":
+              rows = [current];
+              childStatus = "completed";
+              break;
+            case "lock-current-team-child-before-cancel":
+              assert.equal(childStatus, "completed");
+              rows = [terminalChild];
+              break;
+            case "project-terminal-team-child-before-cancel":
+              rows = [{ id: TEAM_STEP_A }];
+              break;
+            case "cancel-team-run":
+            case "get-cancelled-team-run":
+              rows = [cancelled];
+              break;
+            case "cancel-team-run-steps":
+              break;
+            default:
+              assert.fail(`Unexpected statement: ${currentStatement.name}`);
+          }
+          return Promise.resolve(rows as Row[]);
+        },
+      }),
+  });
+
+  const result = await store.cancelTeamRun(principal, {
+    expectedVersion: 3,
+    id: TEAM_RUN_A,
+  });
+
+  assert.equal(result.kind, "updated");
+  assert.equal(result.kind === "updated" && result.childRunId, null);
+  const childLockSql = queryText(captured(statements, 1));
+  assert.match(childLockSql, /FOR UPDATE OF "step", "runnerRun"/u);
+  assert.match(
+    childLockSql,
+    /"step"\."plannedOperationId" = "runnerRun"\."operationId"/u
+  );
+  assert.match(childLockSql, /"step"\."position" =/u);
+  assert.deepEqual(
+    statements.map(({ name }) => name),
+    [
+      "lock-team-run-for-cancel",
+      "lock-current-team-child-before-cancel",
+      "project-terminal-team-child-before-cancel",
+      "cancel-team-run",
+      "cancel-team-run-steps",
+      "get-cancelled-team-run",
+    ]
+  );
+  assert.equal(
+    (
+      captured(statements, 2).args.handoff as {
+        output: string;
+      }
+    ).output,
+    "Completed during cancellation."
+  );
+});
+
+test("cancellation projects an exact terminal reserved queued child before skipping later steps", async () => {
+  const childRunId = "aaaaaaaa-0000-4000-8000-000000000001";
+  const operationId = "aaaaaaaa-0000-4000-8000-000000000010";
+  const current = teamRunRow({
+    terminalChildRunId: childRunId,
+    version: 3,
+  });
+  const terminalChild = {
+    ...(teamRunRow().steps as Record<string, unknown>[])[0],
+    plannedOperationId: operationId,
+    plannedRunnerRunId: childRunId,
+    priorHandoffs: [],
+    runnerCommandEvidence: [],
+    runnerError: null,
+    runnerFileEvidence: [],
+    runnerOperationId: operationId,
+    runnerOutput: "Completed before attachment.",
+    runnerRunId: null,
+    runnerStatus: "completed",
+    status: "queued",
+  };
+  const cancelled = teamRunRow({
+    completedAt: NOW,
+    status: "cancelled",
+    version: 4,
+  });
+  const cancellation = scripted(
+    [current],
+    [terminalChild],
+    [{ id: TEAM_STEP_A }],
+    [cancelled],
+    [],
+    [cancelled]
+  );
+
+  const result = await cancellation.store.cancelTeamRun(principal, {
+    expectedVersion: 3,
+    id: TEAM_RUN_A,
+  });
+
+  assert.equal(result.kind, "updated");
+  const lockSql = queryText(captured(cancellation.statements, 1));
+  assert.match(lockSql, /"runnerRun"\."agentId" = "step"\."agentId"/u);
+  assert.match(
+    lockSql,
+    /"step"\."plannedOperationId" = "runnerRun"\."operationId"/u
+  );
+  assert.match(lockSql, /"step"\."plannedRunnerRunId" = "runnerRun"\."id"/u);
+  const projectionSql = queryText(captured(cancellation.statements, 2));
+  assert.match(projectionSql, /"runnerRunId" = COALESCE/u);
+  assert.match(projectionSql, /"plannedRunnerRunId" =/u);
+  assert.match(projectionSql, /"plannedOperationId" =/u);
+  assert.match(projectionSql, /"status" IN \('queued', 'running'\)/u);
+  assert.equal(
+    captured(cancellation.statements, 2).args.runnerRunId,
+    childRunId
+  );
 });
 
 test("handoff validation rejects over-limit persisted text before querying", async () => {
@@ -1074,6 +2254,10 @@ test("GitHub capability persistence accepts only hashes, bounded budgets, and al
   assert.match(
     queryText(captured(created.statements, 0)),
     /"step"\."approvalStatus" = 'approved'/u
+  );
+  assert.match(
+    queryText(captured(created.statements, 0)),
+    /"step"\."approvedCapabilities" @>/u
   );
 
   const invalid = scripted();

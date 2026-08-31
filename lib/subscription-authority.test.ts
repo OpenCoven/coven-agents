@@ -2,27 +2,23 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   effectiveSubscriptionAuthority,
-  serializeSubscriptionAuthority,
+  storageUnavailableSubscriptionAuthority,
+  subscriptionAuthorityExpiryBoundary,
 } from "./subscription-authority";
 
 const USER_A = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 const USER_B = "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa";
-const NOW = new Date("2026-08-31T18:00:00.000Z");
-const CHECKED_AT = NOW.toISOString();
 const PAID_UNTIL = "2099-01-15T12:00:00.000Z";
 
 test("same-user server authority activates a stale demo client", () => {
   assert.deepEqual(
     effectiveSubscriptionAuthority(
       {
-        checkedAt: CHECKED_AT,
         isSubscriber: true,
         subscribedUntil: PAID_UNTIL,
         userId: USER_A,
       },
-      USER_A,
-      false,
-      NOW.getTime()
+      USER_A
     ),
     {
       isSubscriber: true,
@@ -35,14 +31,11 @@ test("server downgrade overrides a stale subscriber client", () => {
   assert.deepEqual(
     effectiveSubscriptionAuthority(
       {
-        checkedAt: CHECKED_AT,
         isSubscriber: false,
         subscribedUntil: null,
         userId: USER_A,
       },
-      USER_A,
-      false,
-      NOW.getTime()
+      USER_A
     ),
     {
       isSubscriber: false,
@@ -55,14 +48,11 @@ test("authority for another user is ignored", () => {
   assert.deepEqual(
     effectiveSubscriptionAuthority(
       {
-        checkedAt: CHECKED_AT,
         isSubscriber: true,
         subscribedUntil: PAID_UNTIL,
         userId: USER_A,
       },
-      USER_B,
-      false,
-      NOW.getTime()
+      USER_B
     ),
     {
       isSubscriber: false,
@@ -75,14 +65,12 @@ test("a pending boundary refresh fails effective authority closed", () => {
   assert.deepEqual(
     effectiveSubscriptionAuthority(
       {
-        checkedAt: CHECKED_AT,
         isSubscriber: true,
         subscribedUntil: PAID_UNTIL,
         userId: USER_A,
       },
       USER_A,
-      true,
-      NOW.getTime()
+      true
     ),
     {
       isSubscriber: false,
@@ -91,65 +79,87 @@ test("a pending boundary refresh fails effective authority closed", () => {
   );
 });
 
-test("storage-unavailable signed authority is inactive without a finite future boundary", () => {
-  for (const subscribedUntil of [null, "not-a-date", NOW.toISOString()]) {
-    assert.deepEqual(
-      serializeSubscriptionAuthority({
-        checkedAt: NOW,
-        isSubscriber: true,
-        subscribedUntil,
-        userId: USER_A,
-      }),
-      {
-        checkedAt: CHECKED_AT,
-        isSubscriber: false,
-        subscribedUntil: null,
-        userId: USER_A,
-      }
-    );
-  }
-});
-
-test("storage-unavailable signed authority is bounded to its exact future timestamp", () => {
+test("storage fallback preserves only a bounded same-session paid authority", () => {
+  const now = new Date("2099-01-15T11:00:00.000Z");
   assert.deepEqual(
-    serializeSubscriptionAuthority({
-      checkedAt: NOW,
-      isSubscriber: true,
-      subscribedUntil: PAID_UNTIL,
-      userId: USER_A,
-    }),
+    storageUnavailableSubscriptionAuthority(
+      {
+        user: {
+          id: USER_A,
+          subscriptionAuthorityExpiresAt: PAID_UNTIL,
+          type: "subscriber",
+        },
+      },
+      now
+    ),
     {
-      checkedAt: CHECKED_AT,
+      authorityExpiresAt: PAID_UNTIL,
       isSubscriber: true,
-      subscribedUntil: PAID_UNTIL,
+      subscribedUntil: null,
       userId: USER_A,
     }
   );
-});
 
-test("effective authority rejects null, malformed, and expired active shapes", () => {
   for (const subscribedUntil of [
     null,
     "not-a-date",
-    "2026-08-31T17:59:59.999Z",
-    CHECKED_AT,
+    "2099-01-15T11:00:00.000Z",
   ]) {
     assert.deepEqual(
-      effectiveSubscriptionAuthority(
+      storageUnavailableSubscriptionAuthority(
         {
-          checkedAt: CHECKED_AT,
-          isSubscriber: true,
-          subscribedUntil,
-          userId: USER_A,
+          user: {
+            id: USER_A,
+            subscriptionAuthorityExpiresAt: subscribedUntil,
+            type: "subscriber",
+          },
         },
-        USER_A,
-        false,
-        NOW.getTime()
+        now
       ),
       {
+        authorityExpiresAt: null,
         isSubscriber: false,
         subscribedUntil: null,
+        userId: USER_A,
       }
     );
   }
+});
+
+test("same-user expiry scheduling uses database or bounded fallback dates", () => {
+  assert.equal(
+    subscriptionAuthorityExpiryBoundary(
+      {
+        isSubscriber: true,
+        subscribedUntil: PAID_UNTIL,
+        userId: USER_A,
+      },
+      USER_A
+    ),
+    PAID_UNTIL
+  );
+  assert.equal(
+    subscriptionAuthorityExpiryBoundary(
+      {
+        authorityExpiresAt: PAID_UNTIL,
+        isSubscriber: true,
+        subscribedUntil: null,
+        userId: USER_A,
+      },
+      USER_A
+    ),
+    PAID_UNTIL
+  );
+  assert.equal(
+    subscriptionAuthorityExpiryBoundary(
+      {
+        authorityExpiresAt: PAID_UNTIL,
+        isSubscriber: true,
+        subscribedUntil: null,
+        userId: USER_A,
+      },
+      USER_B
+    ),
+    null
+  );
 });

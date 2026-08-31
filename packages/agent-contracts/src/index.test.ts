@@ -220,6 +220,34 @@ test("normalizes missing owner and warm on stored definitions", () => {
   });
 });
 
+test("agent workspaces cannot escape the sandbox workspace root", () => {
+  for (const workspace of ["../../etc", "/etc", "/workspace/../etc"]) {
+    assert.equal(
+      createAgentInputSchema.safeParse({
+        backend: "cloud",
+        instructions: "Run in Daytona.",
+        model: "auto",
+        name: "Escaping workspace",
+        runtime: "copilot",
+        workspace,
+      }).success,
+      false,
+      workspace
+    );
+  }
+  assert.equal(
+    createAgentInputSchema.safeParse({
+      backend: "cloud",
+      instructions: "Run in Daytona.",
+      model: "auto",
+      name: "Bounded workspace",
+      runtime: "copilot",
+      workspace: "repo/../project",
+    }).success,
+    true
+  );
+});
+
 test("refuses non-v1 deployment-class backend values", () => {
   for (const backend of ["daytona", "unsupported"]) {
     assert.equal(

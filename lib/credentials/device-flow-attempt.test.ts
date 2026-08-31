@@ -56,3 +56,32 @@ test("a lost response retries the request key and rotates only after success", a
   assert.deepEqual(requestedKeys, ["attempt-one", "attempt-one"]);
   assert.equal(attempt.key(), "attempt-two");
 });
+
+test("device flow starts beneath the configured application base path", async () => {
+  const previous = process.env.NEXT_PUBLIC_BASE_PATH;
+  process.env.NEXT_PUBLIC_BASE_PATH = "/demo";
+  const inputs: string[] = [];
+  try {
+    await requestDeviceFlowStart({
+      attempt: createDeviceFlowAttempt(() => "attempt-one"),
+      fetcher: (input) => {
+        inputs.push(String(input));
+        return Promise.resolve(
+          Response.json({
+            deviceCode: "device-secret",
+            interval: 5,
+            userCode: "ABCD-EFGH",
+            verificationUri: "https://github.com/login/device",
+          })
+        );
+      },
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.NEXT_PUBLIC_BASE_PATH;
+    } else {
+      process.env.NEXT_PUBLIC_BASE_PATH = previous;
+    }
+  }
+  assert.deepEqual(inputs, ["/demo/api/credentials/device"]);
+});

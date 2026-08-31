@@ -6,6 +6,7 @@ import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { browserApplicationPath } from "@/lib/application-path";
 import { refreshAvatarSession } from "@/lib/avatar";
 
 type AvatarState = { avatar: string; custom: boolean };
@@ -26,7 +27,7 @@ export function AvatarSettings() {
   const { update } = useSession();
 
   const load = useCallback(async () => {
-    const response = await fetch("/api/account/avatar");
+    const response = await fetch(browserApplicationPath("/api/account/avatar"));
 
     if (!response.ok) {
       return;
@@ -44,14 +45,18 @@ export function AvatarSettings() {
       setBusy(true);
 
       try {
-        const response = await fetch("/api/account/avatar", {
-          body: JSON.stringify({ image }),
-          headers: { "content-type": "application/json" },
-          method: "PUT",
-        });
+        const response = await fetch(
+          browserApplicationPath("/api/account/avatar"),
+          {
+            body: JSON.stringify({ image }),
+            headers: { "content-type": "application/json" },
+            method: "PUT",
+          }
+        );
 
-        if (response.status === 403) {
+        if (response.status === 401 || response.status === 403) {
           setLocked(true);
+          setUrl("");
           return;
         }
 
