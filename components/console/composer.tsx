@@ -16,6 +16,7 @@ import {
   statusTone,
 } from "@/components/console/primitives";
 import { truncate, type as type_ } from "@/components/console/styles";
+import { executionProfileForAgent } from "@/lib/console/agent-profile";
 import { formatAge } from "@/lib/console/format";
 import { quickPromptsForAgent } from "@/lib/console/quick-prompts";
 import type { ConsoleRun } from "@/lib/console/types";
@@ -54,6 +55,7 @@ export function Composer({
   starting: boolean;
 }) {
   const briefRef = useRef<HTMLTextAreaElement>(null);
+  const profile = executionProfileForAgent(agent);
   const quickPrompts = quickPromptsForAgent(agent);
   const safeAgentName = sanitizeEvidenceText(agent.name);
   const tooShort = draft.trim().length < MIN_MISSION;
@@ -77,15 +79,14 @@ export function Composer({
         <section className="oc-composer-main">
           <header className="oc-composer-heading">
             <Eyebrow>New autonomous run</Eyebrow>
-            <h2 style={type_.display}>What should it prove?</h2>
-            <p style={type_.body}>
-              Define the outcome and the evidence Scout must return. The brief
-              is the contract for the run.
-            </p>
+            <h2 style={type_.display}>What should {safeAgentName} prove?</h2>
+            <p style={type_.body}>{profile.composerGuidance}</p>
           </header>
 
           <div className="oc-composer-context">
             {[
+              ["role", profile.label],
+              ["mode", profile.mode],
               ["runtime", agent.runtime],
               ["model", sanitizeEvidenceText(agent.model)],
               [
@@ -166,8 +167,7 @@ export function Composer({
 
           <footer className="oc-composer-footnote">
             <span aria-hidden="true" className="oc-composer-footnote-dot" />
-            {safeAgentName} changes nothing unless the selected runtime grants
-            it.
+            {profile.safetyNote}
           </footer>
         </section>
 
