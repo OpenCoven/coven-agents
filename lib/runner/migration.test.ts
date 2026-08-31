@@ -196,10 +196,17 @@ test("generated migration 0019 normalizes legacy agents before replacing the run
   assert.equal(snapshot.includes(`'${retiredRuntime}'`), false);
 });
 
-test("migration 0021 is immutable and planned child reservations advance through 0022", () => {
+test("billing migration 0021 stays immutable and team migrations advance through 0023", () => {
   const directory = new URL("../db/migrations/", import.meta.url);
+  const migrationNames = readdirSync(directory);
+  assert.deepEqual(
+    migrationNames.filter((name) => name.startsWith("0021_")),
+    ["0021_lovely_loners.sql"],
+    "billing migration 0021 must remain the only migration at position 21"
+  );
+
   const migration21 = readFileSync(
-    new URL("0021_salty_the_stranger.sql", directory),
+    new URL("0021_lovely_loners.sql", directory),
     "utf8"
   );
   const snapshot21 = readFileSync(
@@ -208,48 +215,92 @@ test("migration 0021 is immutable and planned child reservations advance through
   );
   assert.equal(
     sha256(migration21),
-    "70d3f8a15cf5fb0d9742846696d76b5d48b9b077e0f5ad6c3840e80045cb6c35"
+    "76ad7a4b2c322498eda12b7397ab52c5027e17ed9a4eb3ef81333020a056bdb0"
   );
   assert.equal(
     sha256(snapshot21),
-    "f88d1d1be4e466b1e04d881e07307ec5a3814ca2140a0115bac114e5570231bc"
+    "09c44b63ee96620f880411b50b0a86160a2cb63290f9690be665579022e27faf"
   );
 
-  const migrationName22 = readdirSync(directory).find((name) =>
-    name.startsWith("0022_")
+  const migration22 = readFileSync(
+    new URL("0022_salty_the_stranger.sql", directory),
+    "utf8"
   );
-  assert.ok(
-    migrationName22,
-    "planned child reservations require migration 0022"
-  );
-  const migration22 = readFileSync(new URL(migrationName22, directory), "utf8");
-  assert.match(migration22, /ADD COLUMN "plannedOperationId" uuid/u);
-  assert.match(migration22, /ADD COLUMN "plannedRunnerRunId" uuid/u);
-  assert.match(migration22, /RTStep_plannedOperation_uq/u);
-  assert.match(migration22, /RTStep_plannedRunnerRun_uq/u);
-  assert.match(migration22, /RTStep_childReservation_valid/u);
-  assert.doesNotMatch(
+  assert.match(
     migration22,
-    /createdByUserId|authVersion|agentInstructions|approvalActorUserId/u
+    /0022 cannot reconstruct initiating authority for existing team runs/u
+  );
+  assert.match(migration22, /ADD COLUMN "createdByUserId" uuid/u);
+  assert.match(migration22, /ADD COLUMN "authVersion" integer/u);
+  assert.match(migration22, /ADD COLUMN "agentInstructions" varchar\(12000\)/u);
+  assert.match(migration22, /ADD COLUMN "approvalActorUserId" uuid/u);
+  assert.match(migration22, /UPDATE "RunnerRun" AS "run"/u);
+  assert.match(migration22, /UPDATE "RunnerTeamStep" AS "step"/u);
+  assert.doesNotMatch(migration22, /plannedOperationId|plannedRunnerRunId/u);
+  assert.doesNotMatch(migration22, /StripeReconciliation/u);
+
+  const migration23 = readFileSync(
+    new URL("0023_jittery_cardiac.sql", directory),
+    "utf8"
+  );
+  assert.match(migration23, /ADD COLUMN "plannedOperationId" uuid/u);
+  assert.match(migration23, /ADD COLUMN "plannedRunnerRunId" uuid/u);
+  assert.match(migration23, /RTStep_plannedOperation_uq/u);
+  assert.match(migration23, /RTStep_plannedRunnerRun_uq/u);
+  assert.match(migration23, /RTStep_childReservation_valid/u);
+  assert.doesNotMatch(
+    migration23,
+    /createdByUserId|authVersion|agentInstructions|approvalActorUserId|StripeReconciliation/u
   );
 
-  const journal = JSON.parse(
-    readFileSync(new URL("meta/_journal.json", directory), "utf8")
-  ) as { entries: { idx: number; tag: string }[] };
-  assert.equal(
-    journal.entries.find((entry) => entry.idx === 21)?.tag,
-    "0021_salty_the_stranger"
+  const journalSource = readFileSync(
+    new URL("meta/_journal.json", directory),
+    "utf8"
   );
-  assert.equal(
-    journal.entries.find((entry) => entry.idx === 22)?.tag,
-    migrationName22.replace(/\.sql$/u, "")
+  const authoritativeJournalEntry21 = `    {
+      "idx": 21,
+      "version": "7",
+      "when": 1788180027719,
+      "tag": "0021_lovely_loners",
+      "breakpoints": true
+    }`;
+  assert.ok(
+    journalSource.includes(authoritativeJournalEntry21),
+    "the billing 0021 journal entry must remain byte-for-byte authoritative"
   );
+  const journal = JSON.parse(journalSource) as {
+    entries: { idx: number; tag: string }[];
+  };
+  assert.deepEqual(
+    journal.entries.slice(21, 24).map(({ idx, tag }) => ({ idx, tag })),
+    [
+      { idx: 21, tag: "0021_lovely_loners" },
+      { idx: 22, tag: "0022_salty_the_stranger" },
+      { idx: 23, tag: "0023_jittery_cardiac" },
+    ]
+  );
+
+  const parsedSnapshots = [21, 22, 23].map((index) =>
+    JSON.parse(
+      readFileSync(new URL(`meta/00${index}_snapshot.json`, directory), "utf8")
+    )
+  ) as { id: string; prevId: string }[];
+  assert.equal(parsedSnapshots[1]?.prevId, parsedSnapshots[0]?.id);
+  assert.equal(parsedSnapshots[2]?.prevId, parsedSnapshots[1]?.id);
 
   const snapshot22 = readFileSync(
     new URL("meta/0022_snapshot.json", directory),
     "utf8"
   );
-  assert.match(snapshot22, /"plannedOperationId"/u);
-  assert.match(snapshot22, /"plannedRunnerRunId"/u);
-  assert.match(snapshot22, /"RTStep_childReservation_valid"/u);
+  assert.match(snapshot22, /"agentInstructions"/u);
+  assert.match(snapshot22, /"approvalActorUserId"/u);
+  assert.doesNotMatch(snapshot22, /"plannedOperationId"|"plannedRunnerRunId"/u);
+
+  const snapshot23 = readFileSync(
+    new URL("meta/0023_snapshot.json", directory),
+    "utf8"
+  );
+  assert.match(snapshot23, /"plannedOperationId"/u);
+  assert.match(snapshot23, /"plannedRunnerRunId"/u);
+  assert.match(snapshot23, /"RTStep_childReservation_valid"/u);
 });

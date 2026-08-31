@@ -6,6 +6,8 @@ import { ABUSE_ROUTES, type AbusePolicy, type AbuseRoute } from "./types";
 const EXPECTED_ROUTES = [
   "auth_start",
   "auth_callback",
+  "auth_session_update_ip",
+  "auth_session_update",
   "chat",
   "chat_delete",
   "document_read",
@@ -19,6 +21,7 @@ const EXPECTED_ROUTES = [
   "vote_write",
   "upload",
   "checkout",
+  "subscription_read",
   "avatar_read",
   "avatar_write",
   "credential_list",
@@ -54,6 +57,8 @@ const EXPECTED_ROUTES = [
 const EXPECTED_POLICIES = {
   analytics_read: expectedPolicy(["ip", "user"], 0, 20, 60, 100, 3600),
   auth_callback: expectedPolicy(["ip"], 16_384, 10, 60, 40, 3600),
+  auth_session_update: expectedPolicy(["user"], 16_384, 20, 60, 100, 3600),
+  auth_session_update_ip: expectedPolicy(["ip"], 16_384, 120, 60, 1200, 3600),
   auth_start: expectedPolicy(["ip"], 0, 5, 60, 20, 3600),
   avatar_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   avatar_write: expectedPolicy(["ip", "user"], 8192, 10, 60, 40, 3600),
@@ -91,7 +96,8 @@ const EXPECTED_POLICIES = {
   skill_delete: expectedPolicy(["ip", "tenant"], 0, 5, 60, 20, 3600),
   skill_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   skill_write: expectedPolicy(["ip", "tenant"], 8192, 10, 60, 40, 3600),
-  stripe_webhook: expectedPolicy(["ip"], 262_144, 60, 60, 600, 3600),
+  stripe_webhook: expectedPolicy(["ip"], 262_144, 600, 60, 10_000, 3600),
+  subscription_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   suggestions_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   team_delete: expectedPolicy(["ip", "tenant"], 0, 5, 60, 20, 3600),
   team_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
@@ -124,6 +130,13 @@ test("every declared route initially fails closed", () => {
   for (const route of EXPECTED_ROUTES) {
     assert.equal(abusePolicyFor(route).failureMode, "closed", route);
   }
+});
+
+test("Stripe webhook admission is IP-only and preserves the registered budget", () => {
+  assert.deepEqual(
+    abusePolicyFor("stripe_webhook"),
+    expectedPolicy(["ip"], 262_144, 600, 60, 10_000, 3600)
+  );
 });
 
 test("every policy has valid finite integer bounds and subjects", () => {

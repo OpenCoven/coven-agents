@@ -7,7 +7,10 @@ import {
   validAuthVersion,
 } from "@/lib/auth/session-revocation";
 import { findOrCreateFederatedUser, findUserById } from "@/lib/db/queries";
-import { refreshTokenType } from "@/lib/session-claims";
+import {
+  refreshClaimsForSessionUpdate,
+  refreshTokenType,
+} from "@/lib/session-claims";
 import { userTypeFor } from "@/lib/subscription";
 import { authConfig } from "./auth.config";
 
@@ -51,18 +54,18 @@ export const {
   callbacks: {
     async jwt({ token, user, account, trigger, session: updated }) {
       /**
-       * A changed avatar reaches the token here rather than by re-reading the
-       * user row on every request. Only the picture is accepted from the
-       * client: `id`, `type`, and `subscribedUntil` decide who may write to
-       * the owner's database, and taking any of those from a caller-supplied
-       * payload would let the browser grant itself a subscription.
+       * `useSession().update()` is only a signal to reload the stored user.
+       * The browser payload is never an authority source: the avatar route
+       * commits its image first, and this refresh then picks up that image
+       * together with the current subscription and revocation version.
        */
       if (trigger === "update") {
-        const image = (updated as { image?: unknown } | undefined)?.image;
-
-        token.picture = typeof image === "string" && image ? image : null;
-
-        return refreshTokenType(token, new Date());
+        return refreshClaimsForSessionUpdate(
+          token,
+          updated,
+          findUserById,
+          new Date()
+        );
       }
 
       /**

@@ -64,6 +64,18 @@ const protectedHandlers: RouteExpectation[] = [
     implementation: "checkoutResponse",
     implementationFile: "lib/billing/checkout-response.ts",
   },
+  {
+    ...route(
+      "app/api/subscription/route.ts",
+      "GET",
+      "dependencies.authenticate(",
+      ["dependencies.findUser("],
+      "subscription_read"
+    ),
+    admissionMarker: "dependencies.enforceAbuse({",
+    implementation: "subscriptionResponse",
+    implementationFile: "lib/billing/subscription-status.ts",
+  },
   route(
     "app/api/credentials/device/route.ts",
     "POST",
@@ -205,8 +217,6 @@ const protectedHandlers: RouteExpectation[] = [
   ),
 ];
 
-const excludedRoutes = ["app/api/stripe/webhook/route.ts"];
-
 test("resource-bearing handlers admit after identity and before expensive work", () => {
   for (const expectation of protectedHandlers) {
     const source = read(expectation.file);
@@ -265,10 +275,99 @@ test("resource-bearing handlers admit after identity and before expensive work",
   }
 });
 
-test("deferred webhook routes stay untouched", () => {
-  for (const file of excludedRoutes) {
-    assert.doesNotMatch(read(file), /enforceAbusePolicy/);
+test("Stripe webhook admission precedes body and provider work", () => {
+  const routeSource = read("app/api/stripe/webhook/route.ts");
+  const webhookSource = read("lib/billing/webhook.ts");
+  const handler = exportedFunctionBlock(routeSource, "POST");
+  const response = exportedFunctionBlock(
+    webhookSource,
+    "stripeWebhookResponse"
+  );
+  const admissionIndex = response.indexOf("dependencies.enforceAbuse({");
+  const bodyIndex = response.indexOf("readBoundedBytes(");
+  const providerIndex = response.indexOf("dependencies.createProvider(");
+
+  assert.match(routeSource, /from "@\/lib\/abuse\/enforce"/);
+  assert.match(routeSource, /from "@vercel\/functions"/);
+  assert.match(handler, /ipAddress\(request\)/);
+  assert.match(handler, /stripeWebhookResponse\(/);
+  assert.ok(admissionIndex >= 0);
+  assert.match(response, /route: "stripe_webhook"/);
+  assert.ok(bodyIndex > admissionIndex);
+  assert.ok(providerIndex > bodyIndex);
+  assert.match(response, /status: 413/);
+});
+
+test("Stripe webhook path never reads the Checkout launch flag", () => {
+  for (const file of [
+    "app/api/stripe/webhook/route.ts",
+    "lib/billing/webhook.ts",
+  ]) {
+    const source = read(file);
+    assert.doesNotMatch(source, /SUBSCRIPTION_CHECKOUT_ENABLED/);
+    assert.doesNotMatch(source, /@\/lib\/billing\/config/);
   }
+  assert.match(
+    read("app/api/stripe/webhook/route.ts"),
+    /process\.env\.STRIPE_PRICE_ID/
+  );
+});
+
+test("Stripe event claims, User row locks, decisions, and writes share one transaction", () => {
+  const source = read("lib/db/queries.ts");
+  const start = source.indexOf("export async function applyStripeEventUpdate");
+  const end = source.indexOf(
+    "export const databaseCheckoutAttemptLeaseStore",
+    start
+  );
+  const update = source.slice(start, end);
+
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  assert.match(update, /db\.transaction\(/);
+  assert.match(update, /\.insert\(stripeEvent\)/);
+  assert.match(update, /\.onConflictDoNothing\(\)/);
+  assert.match(update, /\.select\(\)/);
+  assert.match(update, /\.from\(user\)/);
+  assert.match(update, /\.for\("update"\)/);
+  assert.match(update, /stripeEventMutation\(owner, input\)/);
+  assert.match(update, /\.insert\(stripeReconciliation\)/);
+  assert.match(update, /\.update\(user\)/);
+  assert.match(update, /\.returning\(\{ id: user\.id \}\)/);
+  assert.match(update, /throw new Error/);
+
+  const claimIndex = update.indexOf(".insert(stripeEvent)");
+  const lockIndex = update.indexOf('.for("update")');
+  const decisionIndex = update.indexOf("stripeEventMutation(owner, input)");
+  const writeIndex = update.indexOf(".update(user)");
+  assert.ok(lockIndex > claimIndex);
+  assert.ok(decisionIndex > lockIndex);
+  assert.ok(writeIndex > decisionIndex);
+});
+
+test("manual Stripe dispositions persist event and reconciliation evidence atomically", () => {
+  const source = read("lib/db/queries.ts");
+  const start = source.indexOf(
+    "export async function recordStripeReconciliation"
+  );
+  const end = source.indexOf("export async function applyStripeEventUpdate");
+  const claim = source.slice(start, end);
+
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  assert.match(claim, /db\.transaction\(/);
+  assert.match(claim, /\.insert\(stripeEvent\)/);
+  assert.match(claim, /\.onConflictDoNothing\(\)/);
+  assert.match(claim, /\.returning\(\{ id: stripeEvent\.id \}\)/);
+  assert.match(claim, /\.insert\(stripeReconciliation\)/);
+  assert.match(claim, /status: "pending"/);
+  assert.doesNotMatch(claim, /\.update\(user\)/);
+  assert.doesNotMatch(claim, /\.from\(user\)/);
+
+  assert.ok(
+    claim.indexOf(".insert(stripeReconciliation)") >
+      claim.indexOf(".insert(stripeEvent)")
+  );
 });
 
 test("analytics revalidates subscriber authority before reading history", () => {
@@ -615,6 +714,14 @@ test("checkout leases preserve attempt identity and fence renewals and releases"
 test("Auth.js handlers use method-aware abuse classification", () => {
   const routeSource = read("app/(auth)/api/auth/[...nextauth]/route.ts");
   const wrapperSource = read("lib/auth/abuse.ts");
+  const sessionUpdate = functionBlock(wrapperSource, "withAuthAbusePolicy");
+  const ipAdmission = sessionUpdate.indexOf('route: "auth_session_update_ip"');
+  const bodyRead = sessionUpdate.indexOf("readBoundedBytes(");
+  const identity = sessionUpdate.indexOf(
+    "options.readIdentity ?? readVerifiedJwtIdentity"
+  );
+  const userAdmission = sessionUpdate.indexOf('route: "auth_session_update",');
+  const handler = sessionUpdate.indexOf("return handler(boundedRequest");
 
   assert.match(
     routeSource,
@@ -628,6 +735,11 @@ test("Auth.js handlers use method-aware abuse classification", () => {
     wrapperSource,
     /authAbuseRoute\(\s*request\.method,\s*new URL\(request\.url\)\.pathname,\s*options\.basePath \?\? process\.env\.NEXT_PUBLIC_BASE_PATH\s*\)/
   );
+  assert.ok(ipAdmission >= 0);
+  assert.ok(bodyRead > ipAdmission);
+  assert.ok(identity > bodyRead);
+  assert.ok(userAdmission > identity);
+  assert.ok(handler > userAdmission);
 });
 
 test("handler extraction does not include markers from a later handler", () => {

@@ -79,6 +79,13 @@ const checkoutDependencies: CheckoutDependencies = {
           hasMore: sessions.has_more,
         };
       },
+      async listCustomers(input) {
+        const customers = await stripe.customers.list(input);
+        return {
+          data: customers.data.map(({ id, metadata }) => ({ id, metadata })),
+          hasMore: customers.has_more,
+        };
+      },
       async retrieveCheckoutSession(sessionId) {
         return checkoutSessionSnapshot(
           await stripe.checkout.sessions.retrieve(sessionId)

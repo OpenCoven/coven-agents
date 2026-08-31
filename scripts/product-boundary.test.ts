@@ -75,6 +75,7 @@ const applicationRouteFiles = [
   "app/api/skills/[id]/route.ts",
   "app/api/skills/route.ts",
   "app/api/stripe/webhook/route.ts",
+  "app/api/subscription/route.ts",
   "app/api/team-runs/[id]/approve/route.ts",
   "app/api/team-runs/[id]/route.ts",
   "app/api/team-runs/[id]/stop/route.ts",
@@ -514,11 +515,17 @@ test("the living subscription policy records current billing authorities", () =>
     "app/api/checkout/route.ts",
     "app/api/stripe/webhook/route.ts",
     "lib/credentials/runner-credential.ts",
+    "StripeReconciliation",
+    "pending",
+    "acknowledged",
+    "resolved",
   ]) {
     assert.equal(policy.includes(decision), true, decision);
   }
 
   assert.match(policy, /not.*production certification/is);
+  assert.match(policy, /no (user|Customer|Subscription).*stored/is);
+  assert.match(policy, /retention.*operator/is);
 });
 
 test("the README links the living subscription policy", () => {
@@ -933,12 +940,22 @@ test("subscription checkout secrets remain behind a server-only boundary", () =>
     new URL("scripts/runtime-config-validation.ts", repositoryRoot),
     "utf8"
   );
+  const subscriptionRoute = readFileSync(
+    new URL("app/api/subscription/route.ts", repositoryRoot),
+    "utf8"
+  );
 
   assert.match(billingConfig, /^import "server-only";/m);
   assert.doesNotMatch(billingConfigCore, /server-only/);
   assert.doesNotMatch(billingConfigCore, /\b(?:apiKey|webhookSecret)\b/);
   assert.match(runtimeValidation, /billing\/config-core/);
   assert.doesNotMatch(runtimeValidation, /billing\/config["']/);
+  assert.match(subscriptionRoute, /from "@\/lib\/billing\/config"/);
+  assert.match(
+    subscriptionRoute,
+    /subscriptionCheckoutEnabled\(\s*process\.env/
+  );
+  assert.doesNotMatch(subscriptionRoute, /billing\/config-core/);
 });
 
 test("agent contracts expose the current tenant identity primitives", () => {

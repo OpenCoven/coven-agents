@@ -1,6 +1,8 @@
 export const ABUSE_ROUTES = Object.freeze([
   "auth_start",
   "auth_callback",
+  "auth_session_update_ip",
+  "auth_session_update",
   "chat",
   "chat_delete",
   "document_read",
@@ -14,6 +16,7 @@ export const ABUSE_ROUTES = Object.freeze([
   "vote_write",
   "upload",
   "checkout",
+  "subscription_read",
   "avatar_read",
   "avatar_write",
   "credential_list",
@@ -24,6 +27,7 @@ export const ABUSE_ROUTES = Object.freeze([
   "usage_read",
   "analytics_read",
   "model_list",
+  // Stripe authenticates the payload; abuse admission still limits its source.
   "stripe_webhook",
   "run_start",
   "internal_credential",

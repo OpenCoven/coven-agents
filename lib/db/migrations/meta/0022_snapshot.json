@@ -1,6 +1,6 @@
 {
-  "id": "3c64e164-1bdd-4ed3-a7cc-d7c1590ddda7",
-  "prevId": "5be12d3b-f530-421f-9d46-a0caf69132a6",
+  "id": "3136868f-d4f5-44b8-a7df-6b7855b3aa72",
+  "prevId": "df58ecf6-d9c7-4f78-9d2e-3fdf0e358a8d",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2927,18 +2927,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "plannedOperationId": {
-          "name": "plannedOperationId",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "plannedRunnerRunId": {
-          "name": "plannedRunnerRunId",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "position": {
           "name": "position",
           "type": "integer",
@@ -3023,36 +3011,6 @@
           "columns": [
             {
               "expression": "runnerRunId",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "RTStep_plannedOperation_uq": {
-          "name": "RTStep_plannedOperation_uq",
-          "columns": [
-            {
-              "expression": "plannedOperationId",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "RTStep_plannedRunnerRun_uq": {
-          "name": "RTStep_plannedRunnerRun_uq",
-          "columns": [
-            {
-              "expression": "plannedRunnerRunId",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -3162,10 +3120,6 @@
           "name": "RTStep_approval_audit_valid",
           "value": "((\"RunnerTeamStep\".\"approvalStatus\" in ('not_required', 'pending')) and \"RunnerTeamStep\".\"approvalActorUserId\" is null and \"RunnerTeamStep\".\"approvalDecidedAt\" is null and jsonb_array_length(\"RunnerTeamStep\".\"approvedCapabilities\") = 0) or (\"RunnerTeamStep\".\"approvalStatus\" = 'approved' and \"RunnerTeamStep\".\"approvalActorUserId\" is not null and \"RunnerTeamStep\".\"approvalDecidedAt\" is not null and \"RunnerTeamStep\".\"approvalDecidedAt\" >= \"RunnerTeamStep\".\"createdAt\" and jsonb_array_length(\"RunnerTeamStep\".\"approvedCapabilities\") between 1 and 8) or (\"RunnerTeamStep\".\"approvalStatus\" = 'rejected' and \"RunnerTeamStep\".\"approvalActorUserId\" is not null and \"RunnerTeamStep\".\"approvalDecidedAt\" is not null and \"RunnerTeamStep\".\"approvalDecidedAt\" >= \"RunnerTeamStep\".\"createdAt\" and jsonb_array_length(\"RunnerTeamStep\".\"approvedCapabilities\") = 0)"
         },
-        "RTStep_childReservation_valid": {
-          "name": "RTStep_childReservation_valid",
-          "value": "((\"RunnerTeamStep\".\"plannedOperationId\" is null and \"RunnerTeamStep\".\"plannedRunnerRunId\" is null) or (\"RunnerTeamStep\".\"plannedOperationId\" is not null and \"RunnerTeamStep\".\"plannedRunnerRunId\" is not null)) and (\"RunnerTeamStep\".\"runnerRunId\" is null or \"RunnerTeamStep\".\"runnerRunId\" = \"RunnerTeamStep\".\"plannedRunnerRunId\")"
-        },
         "RTStep_agentSnapshot_valid": {
           "name": "RTStep_agentSnapshot_valid",
           "value": "char_length(btrim(\"RunnerTeamStep\".\"agentInstructions\")) between 1 and 12000 and char_length(btrim(\"RunnerTeamStep\".\"agentModel\")) between 1 and 120 and \"RunnerTeamStep\".\"agentRuntime\" in ('codex', 'claude', 'copilot')"
@@ -3268,6 +3222,74 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.StripeReconciliation": {
+      "name": "StripeReconciliation",
+      "schema": "",
+      "columns": {
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "eventId": {
+          "name": "eventId",
+          "type": "varchar(64)",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "eventType": {
+          "name": "eventType",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "reason": {
+          "name": "reason",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "StripeReconciliation_eventId_StripeEvent_id_fk": {
+          "name": "StripeReconciliation_eventId_StripeEvent_id_fk",
+          "tableFrom": "StripeReconciliation",
+          "tableTo": "StripeEvent",
+          "columnsFrom": ["eventId"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "StripeReconciliation_eventType_check": {
+          "name": "StripeReconciliation_eventType_check",
+          "value": "\"StripeReconciliation\".\"eventType\" in ('invoice.paid', 'invoice.payment_failed')"
+        },
+        "StripeReconciliation_reason_check": {
+          "name": "StripeReconciliation_reason_check",
+          "value": "\"StripeReconciliation\".\"reason\" in ('invoice_ambiguous_entitlement', 'invoice_conflicting_paid_interval', 'invoice_contradictory_subscription', 'invoice_invalid_period', 'invoice_invalid_reference')"
+        },
+        "StripeReconciliation_status_check": {
+          "name": "StripeReconciliation_status_check",
+          "value": "\"StripeReconciliation\".\"status\" in ('pending', 'acknowledged', 'resolved')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.Suggestion": {

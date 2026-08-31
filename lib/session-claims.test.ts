@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { refreshTokenType } from "./session-claims";
+import type { JWT } from "next-auth/jwt";
+import { ChatbotError } from "./errors";
+import {
+  claimsFromStoredUser,
+  refreshClaimsForSessionUpdate,
+  refreshTokenType,
+} from "./session-claims";
 
 const NOW = new Date("2026-08-24T12:00:00.000Z");
 const LATER = new Date("2026-09-24T12:00:00.000Z");
+const USER_ID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
 test("a subscriber whose subscription has lapsed loses the type", () => {
   // The shipped defect: `type` was written once at sign-in and never
@@ -85,3 +92,209 @@ test("a client session update cannot change auth version or subscription date", 
     type: "demo",
   });
 });
+
+test("stored claims overwrite authority and avatar while preserving safe fields", () => {
+  const refreshed = claimsFromStoredUser(
+    {
+      authVersion: 2,
+      email: "person@example.com",
+      id: USER_ID,
+      name: "Person",
+      picture: "https://attacker.test/avatar.png",
+      subscribedUntil: null,
+      type: "demo",
+    },
+    {
+      authVersion: 7,
+      image: "https://images.test/stored.png",
+      subscribedUntil: LATER,
+    },
+    NOW
+  );
+
+  assert.equal(refreshed.authVersion, 7);
+  assert.equal(refreshed.picture, "https://images.test/stored.png");
+  assert.equal(refreshed.subscribedUntil, LATER.toISOString());
+  assert.equal(refreshed.type, "subscriber");
+  assert.equal(refreshed.email, "person@example.com");
+  assert.equal(refreshed.name, "Person");
+  assert.equal(refreshed.id, USER_ID);
+});
+
+test("expired or absent stored periods refresh to demo", () => {
+  for (const subscribedUntil of [NOW, null]) {
+    const refreshed = claimsFromStoredUser(
+      sessionToken(),
+      { authVersion: 4, image: null, subscribedUntil },
+      NOW
+    );
+
+    assert.equal(refreshed.type, "demo");
+    assert.equal(
+      refreshed.subscribedUntil,
+      subscribedUntil?.toISOString() ?? null
+    );
+  }
+});
+
+test("client update fields cannot change stored authority, image, or Stripe data", async () => {
+  const refreshed = await refreshClaimsForSessionUpdate(
+    sessionToken(),
+    {
+      authVersion: 999,
+      image: "https://attacker.test/avatar.png",
+      picture: "https://attacker.test/picture.png",
+      stripeCustomerId: "cus_attacker",
+      stripeSubscriptionId: "sub_attacker",
+      subscribedUntil: LATER.toISOString(),
+      type: "subscriber",
+    },
+    () =>
+      Promise.resolve({
+        authVersion: 4,
+        image: "https://images.test/stored.png",
+        subscribedUntil: null,
+      }),
+    NOW
+  );
+
+  assert.ok(refreshed);
+  assert.equal(refreshed.authVersion, 4);
+  assert.equal(refreshed.picture, "https://images.test/stored.png");
+  assert.equal(refreshed.subscribedUntil, null);
+  assert.equal(refreshed.type, "demo");
+  assert.equal("stripeCustomerId" in refreshed, false);
+  assert.equal("stripeSubscriptionId" in refreshed, false);
+});
+
+test("stored paid period promotes a current session update", async () => {
+  let lookedUpUserId: string | null = null;
+  const refreshed = await refreshClaimsForSessionUpdate(
+    sessionToken(),
+    {},
+    (userId) => {
+      lookedUpUserId = userId;
+      return Promise.resolve({
+        authVersion: 4,
+        image: null,
+        subscribedUntil: LATER,
+      });
+    },
+    NOW
+  );
+
+  assert.equal(lookedUpUserId, USER_ID);
+  assert.equal(refreshed?.type, "subscriber");
+  assert.equal(refreshed?.subscribedUntil, LATER.toISOString());
+});
+
+test("invalid IDs and missing users clear the update without promotion", async () => {
+  let lookupCalls = 0;
+  const invalidUpdates = await Promise.all(
+    [undefined, "", "not-a-uuid"].map((id) =>
+      refreshClaimsForSessionUpdate(
+        { ...sessionToken(), id } as JWT,
+        {},
+        () => {
+          lookupCalls += 1;
+          return Promise.resolve({
+            authVersion: 4,
+            image: null,
+            subscribedUntil: LATER,
+          });
+        },
+        NOW
+      )
+    )
+  );
+  for (const invalid of invalidUpdates) {
+    assert.equal(invalid, null);
+  }
+  assert.equal(lookupCalls, 0);
+
+  const missing = await refreshClaimsForSessionUpdate(
+    sessionToken(),
+    {},
+    () => Promise.resolve(null),
+    NOW
+  );
+  assert.equal(missing, null);
+});
+
+test("an invalid token auth version clears before stored-user lookup", async () => {
+  let lookupCalls = 0;
+  const refreshed = await refreshClaimsForSessionUpdate(
+    { ...sessionToken(), authVersion: Number.NaN },
+    {},
+    () => {
+      lookupCalls += 1;
+      return Promise.resolve({
+        authVersion: 4,
+        image: null,
+        subscribedUntil: LATER,
+      });
+    },
+    NOW
+  );
+
+  assert.equal(refreshed, null);
+  assert.equal(lookupCalls, 0);
+});
+
+test("a changed auth version revokes rather than refreshing the stale token", async () => {
+  const refreshed = await refreshClaimsForSessionUpdate(
+    sessionToken(),
+    {},
+    () =>
+      Promise.resolve({
+        authVersion: 5,
+        image: null,
+        subscribedUntil: LATER,
+      }),
+    NOW
+  );
+
+  assert.equal(refreshed, null);
+});
+
+test("a classified database lookup failure preserves the exact existing token", async () => {
+  const token = sessionToken();
+  const refreshed = await refreshClaimsForSessionUpdate(
+    token,
+    {
+      authVersion: 999,
+      image: "https://attacker.test/avatar.png",
+      picture: "https://attacker.test/picture.png",
+      subscribedUntil: LATER.toISOString(),
+      type: "subscriber",
+    },
+    () => Promise.reject(new ChatbotError("bad_request:database")),
+    NOW
+  );
+
+  assert.strictEqual(refreshed, token);
+  assert.deepEqual(refreshed, sessionToken());
+  assert.equal("image" in refreshed, false);
+});
+
+test("unclassified stored-user lookup failures still propagate", async () => {
+  await assert.rejects(
+    refreshClaimsForSessionUpdate(
+      sessionToken(),
+      {},
+      () => Promise.reject(new Error("database unavailable")),
+      NOW
+    ),
+    /database unavailable/
+  );
+});
+
+function sessionToken(): JWT {
+  return {
+    authVersion: 4,
+    id: USER_ID,
+    picture: null,
+    subscribedUntil: null,
+    type: "demo",
+  };
+}

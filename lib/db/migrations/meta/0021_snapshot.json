@@ -1,5 +1,5 @@
 {
-  "id": "5be12d3b-f530-421f-9d46-a0caf69132a6",
+  "id": "df58ecf6-d9c7-4f78-9d2e-3fdf0e358a8d",
   "prevId": "34ac7f3c-998c-4328-8a1e-0f307c4543cd",
   "version": "7",
   "dialect": "postgresql",
@@ -1580,30 +1580,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "agentInstructions": {
-          "name": "agentInstructions",
-          "type": "varchar(12000)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "agentModel": {
-          "name": "agentModel",
-          "type": "varchar(120)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "agentRuntime": {
-          "name": "agentRuntime",
-          "type": "varchar(16)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "agentWorkspace": {
-          "name": "agentWorkspace",
-          "type": "varchar(1024)",
-          "primaryKey": false,
-          "notNull": false
-        },
         "authVersion": {
           "name": "authVersion",
           "type": "integer",
@@ -2018,10 +1994,6 @@
         "RunnerRun_authVersion_valid": {
           "name": "RunnerRun_authVersion_valid",
           "value": "\"RunnerRun\".\"authVersion\" is null or \"RunnerRun\".\"authVersion\" >= 0"
-        },
-        "RunnerRun_agentSnapshot_valid": {
-          "name": "RunnerRun_agentSnapshot_valid",
-          "value": "char_length(btrim(\"RunnerRun\".\"agentInstructions\")) between 1 and 12000 and char_length(btrim(\"RunnerRun\".\"agentModel\")) between 1 and 120 and \"RunnerRun\".\"agentRuntime\" in ('codex', 'claude', 'copilot')"
         },
         "RunnerRun_timestamps_valid": {
           "name": "RunnerRun_timestamps_valid",
@@ -2612,12 +2584,6 @@
       "name": "RunnerTeamRun",
       "schema": "",
       "columns": {
-        "authVersion": {
-          "name": "authVersion",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
         "completedAt": {
           "name": "completedAt",
           "type": "timestamp",
@@ -2630,12 +2596,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "createdByUserId": {
-          "name": "createdByUserId",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
         },
         "currentPosition": {
           "name": "currentPosition",
@@ -2768,15 +2728,6 @@
           "columnsTo": ["id", "tenant"],
           "onDelete": "restrict",
           "onUpdate": "no action"
-        },
-        "RTRun_createdByUser_fk": {
-          "name": "RTRun_createdByUser_fk",
-          "tableFrom": "RunnerTeamRun",
-          "tableTo": "User",
-          "columnsFrom": ["createdByUserId"],
-          "columnsTo": ["id"],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2810,10 +2761,6 @@
           "name": "RTRun_version_valid",
           "value": "\"RunnerTeamRun\".\"version\" >= 0"
         },
-        "RTRun_authVersion_valid": {
-          "name": "RTRun_authVersion_valid",
-          "value": "\"RunnerTeamRun\".\"authVersion\" >= 0"
-        },
         "RTRun_requestHash_valid": {
           "name": "RTRun_requestHash_valid",
           "value": "\"RunnerTeamRun\".\"requestHash\" ~ '^[a-f0-9]{64}$'"
@@ -2839,55 +2786,12 @@
           "primaryKey": false,
           "notNull": true
         },
-        "agentInstructions": {
-          "name": "agentInstructions",
-          "type": "varchar(12000)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "agentModel": {
-          "name": "agentModel",
-          "type": "varchar(120)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "agentRuntime": {
-          "name": "agentRuntime",
-          "type": "varchar(16)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "agentWorkspace": {
-          "name": "agentWorkspace",
-          "type": "varchar(1024)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "approvalActorUserId": {
-          "name": "approvalActorUserId",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "approvalDecidedAt": {
-          "name": "approvalDecidedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
-        },
         "approvalStatus": {
           "name": "approvalStatus",
           "type": "varchar(16)",
           "primaryKey": false,
           "notNull": true,
           "default": "'not_required'"
-        },
-        "approvedCapabilities": {
-          "name": "approvedCapabilities",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
         },
         "completedAt": {
           "name": "completedAt",
@@ -3070,15 +2974,6 @@
           "columnsTo": ["id", "tenant"],
           "onDelete": "restrict",
           "onUpdate": "no action"
-        },
-        "RTStep_approvalActorUser_fk": {
-          "name": "RTStep_approvalActorUser_fk",
-          "tableFrom": "RunnerTeamStep",
-          "tableTo": "User",
-          "columnsFrom": ["approvalActorUserId"],
-          "columnsTo": ["id"],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3112,18 +3007,6 @@
           "name": "RTStep_approval_valid",
           "value": "\"RunnerTeamStep\".\"approvalStatus\" in ('not_required', 'pending', 'approved', 'rejected')"
         },
-        "RTStep_approvedCapabilities_valid": {
-          "name": "RTStep_approvedCapabilities_valid",
-          "value": "jsonb_typeof(\"RunnerTeamStep\".\"approvedCapabilities\") = 'array' and jsonb_array_length(\"RunnerTeamStep\".\"approvedCapabilities\") <= 8 and \"RunnerTeamStep\".\"approvedCapabilities\" <@ '[\"github.issues.read\",\"github.issues.write\",\"github.pull_requests.read\",\"github.pull_requests.write\",\"github.projects.read\",\"github.projects.write\"]'::jsonb"
-        },
-        "RTStep_approval_audit_valid": {
-          "name": "RTStep_approval_audit_valid",
-          "value": "((\"RunnerTeamStep\".\"approvalStatus\" in ('not_required', 'pending')) and \"RunnerTeamStep\".\"approvalActorUserId\" is null and \"RunnerTeamStep\".\"approvalDecidedAt\" is null and jsonb_array_length(\"RunnerTeamStep\".\"approvedCapabilities\") = 0) or (\"RunnerTeamStep\".\"approvalStatus\" = 'approved' and \"RunnerTeamStep\".\"approvalActorUserId\" is not null and \"RunnerTeamStep\".\"approvalDecidedAt\" is not null and \"RunnerTeamStep\".\"approvalDecidedAt\" >= \"RunnerTeamStep\".\"createdAt\" and jsonb_array_length(\"RunnerTeamStep\".\"approvedCapabilities\") between 1 and 8) or (\"RunnerTeamStep\".\"approvalStatus\" = 'rejected' and \"RunnerTeamStep\".\"approvalActorUserId\" is not null and \"RunnerTeamStep\".\"approvalDecidedAt\" is not null and \"RunnerTeamStep\".\"approvalDecidedAt\" >= \"RunnerTeamStep\".\"createdAt\" and jsonb_array_length(\"RunnerTeamStep\".\"approvedCapabilities\") = 0)"
-        },
-        "RTStep_agentSnapshot_valid": {
-          "name": "RTStep_agentSnapshot_valid",
-          "value": "char_length(btrim(\"RunnerTeamStep\".\"agentInstructions\")) between 1 and 12000 and char_length(btrim(\"RunnerTeamStep\".\"agentModel\")) between 1 and 120 and \"RunnerTeamStep\".\"agentRuntime\" in ('codex', 'claude', 'copilot')"
-        },
         "RTStep_version_valid": {
           "name": "RTStep_version_valid",
           "value": "\"RunnerTeamStep\".\"version\" >= 0"
@@ -3138,7 +3021,7 @@
         },
         "RTStep_handoff_bounded": {
           "name": "RTStep_handoff_bounded",
-          "value": "\"RunnerTeamStep\".\"handoff\" is null or (jsonb_typeof(\"RunnerTeamStep\".\"handoff\") = 'object' and \"RunnerTeamStep\".\"handoff\" ?& array['output', 'commandEvidence', 'fileEvidence'] and (\"RunnerTeamStep\".\"handoff\" - 'output' - 'commandEvidence' - 'fileEvidence') = '{}'::jsonb and octet_length(\"RunnerTeamStep\".\"handoff\"::text) <= 24576 and jsonb_typeof(\"RunnerTeamStep\".\"handoff\"->'output') = 'string' and jsonb_typeof(\"RunnerTeamStep\".\"handoff\"->'commandEvidence') = 'array' and jsonb_array_length(\"RunnerTeamStep\".\"handoff\"->'commandEvidence') <= 256 and jsonb_typeof(\"RunnerTeamStep\".\"handoff\"->'fileEvidence') = 'array' and jsonb_array_length(\"RunnerTeamStep\".\"handoff\"->'fileEvidence') <= 256)"
+          "value": "\"RunnerTeamStep\".\"handoff\" is null or (jsonb_typeof(\"RunnerTeamStep\".\"handoff\") = 'object' and \"RunnerTeamStep\".\"handoff\" ?& array['output', 'commandEvidence', 'fileEvidence'] and (\"RunnerTeamStep\".\"handoff\" - 'output' - 'commandEvidence' - 'fileEvidence') = '{}'::jsonb and octet_length(\"RunnerTeamStep\".\"handoff\"::text) <= 16384 and jsonb_typeof(\"RunnerTeamStep\".\"handoff\"->'output') = 'string' and jsonb_typeof(\"RunnerTeamStep\".\"handoff\"->'commandEvidence') = 'array' and jsonb_array_length(\"RunnerTeamStep\".\"handoff\"->'commandEvidence') <= 256 and jsonb_typeof(\"RunnerTeamStep\".\"handoff\"->'fileEvidence') = 'array' and jsonb_array_length(\"RunnerTeamStep\".\"handoff\"->'fileEvidence') <= 256)"
         },
         "RTStep_error_bounded": {
           "name": "RTStep_error_bounded",
@@ -3222,6 +3105,74 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.StripeReconciliation": {
+      "name": "StripeReconciliation",
+      "schema": "",
+      "columns": {
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "eventId": {
+          "name": "eventId",
+          "type": "varchar(64)",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "eventType": {
+          "name": "eventType",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "reason": {
+          "name": "reason",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "StripeReconciliation_eventId_StripeEvent_id_fk": {
+          "name": "StripeReconciliation_eventId_StripeEvent_id_fk",
+          "tableFrom": "StripeReconciliation",
+          "tableTo": "StripeEvent",
+          "columnsFrom": ["eventId"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "StripeReconciliation_eventType_check": {
+          "name": "StripeReconciliation_eventType_check",
+          "value": "\"StripeReconciliation\".\"eventType\" in ('invoice.paid', 'invoice.payment_failed')"
+        },
+        "StripeReconciliation_reason_check": {
+          "name": "StripeReconciliation_reason_check",
+          "value": "\"StripeReconciliation\".\"reason\" in ('invoice_ambiguous_entitlement', 'invoice_conflicting_paid_interval', 'invoice_contradictory_subscription', 'invoice_invalid_period', 'invoice_invalid_reference')"
+        },
+        "StripeReconciliation_status_check": {
+          "name": "StripeReconciliation_status_check",
+          "value": "\"StripeReconciliation\".\"status\" in ('pending', 'acknowledged', 'resolved')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.Suggestion": {
