@@ -274,18 +274,18 @@ class MemoryIdempotencyStore implements IdempotencyStore {
     });
   }
 
-  complete(input: IdempotencyCompleteInput): Promise<void> {
+  complete(input: IdempotencyCompleteInput): Promise<"completed" | "lost"> {
     const record = this.records.get(idempotencyScope(input.claim));
     assert.ok(record);
     record.expiresAt = input.expiresAt;
     record.response = input.response;
     record.state = "completed";
-    return Promise.resolve();
+    return Promise.resolve("completed");
   }
 
-  release(input: IdempotencyReleaseInput): Promise<void> {
+  release(input: IdempotencyReleaseInput): Promise<"lost" | "released"> {
     this.records.delete(idempotencyScope(input.claim));
-    return Promise.resolve();
+    return Promise.resolve("released");
   }
 }
 
