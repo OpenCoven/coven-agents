@@ -1235,10 +1235,52 @@ test.describe("Subscriber checkout", () => {
 
     await page.waitForTimeout(100);
     await expect(credential).toBeVisible();
-    await expect(credential).toHaveValue("belongs-to-new-auth-version");
+    await expect(credential).toHaveValue("");
     expect(serverRefreshes).toBe(1);
 
     releaseRefresh();
+  });
+
+  test("account credential memory clears before a new subscriber response arrives", async ({
+    page,
+  }) => {
+    const secondUserId = "9d2c6c20-406e-4ae0-b31a-5e44fc84b3aa";
+    let currentSession = sessionFor("subscriber");
+    await setServerSession(page.context(), "subscriber");
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    let releaseSecondCredentials!: () => void;
+    const secondCredentialsGate = new Promise<void>((resolve) => {
+      releaseSecondCredentials = resolve;
+    });
+    let credentialGets = 0;
+    await page.route("**/api/credentials", async (route) => {
+      credentialGets += 1;
+      if (credentialGets === 1) {
+        return route.fulfill({ json: { harnessIds: ["copilot"] } });
+      }
+      await secondCredentialsGate;
+      return route.fulfill({ json: { harnessIds: [] } });
+    });
+
+    await page.goto("/account");
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    const initialCredentialGets = credentialGets;
+
+    await setServerSession(page.context(), "subscriber", { id: secondUserId });
+    currentSession = sessionFor("subscriber", {
+      email: "second@example.invalid",
+      id: secondUserId,
+    });
+    await notifySessionChange(page);
+
+    await expect(page.getByLabel("GitHub Copilot CLI")).toBeVisible();
+    await expect.poll(() => credentialGets > initialCredentialGets).toBe(true);
+    await expect(page.getByText("Connected", { exact: true })).toHaveCount(0);
+
+    releaseSecondCredentials();
+    await expect(page.getByText("Connected", { exact: true })).toHaveCount(0);
   });
 
   test("agents ignores subscriber authority belonging to another current client identity", async ({

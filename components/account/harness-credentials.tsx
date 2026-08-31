@@ -2,7 +2,13 @@
 
 import { HARNESS_SPECS } from "@opencoven/harness";
 import { Check, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { ConnectCopilot } from "@/components/account/connect-copilot";
 import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
@@ -70,11 +76,22 @@ export function HarnessCredentials({
   const authorityContext = `${userId}:${authVersion ?? ""}:${authorityRevision ?? ""}:${isSubscriber ? "subscriber" : "demo"}`;
   const authorityContextRef = useRef(authorityContext);
   authorityContextRef.current = authorityContext;
+  const credentialMemoryContextRef = useRef(authorityContext);
   const locked = isSubscriber
     ? lockedAuthority?.context === authorityContext
       ? lockedAuthority.kind
       : null
     : "subscription";
+
+  useLayoutEffect(() => {
+    if (credentialMemoryContextRef.current === authorityContext) {
+      return;
+    }
+    credentialMemoryContextRef.current = authorityContext;
+    setConfigured([]);
+    setValues({});
+    setBusy(null);
+  }, [authorityContext]);
 
   const closeForAuthorityLoss = useCallback(
     (status: number, requestAuthorityContext: string) => {
@@ -119,6 +136,9 @@ export function HarnessCredentials({
     }
 
     const body = (await response.json()) as { harnessIds?: string[] };
+    if (authorityContextRef.current !== requestAuthorityContext) {
+      return;
+    }
     setConfigured(body.harnessIds ?? []);
   }, [authorityContext, closeForAuthorityLoss, isSubscriber]);
 
@@ -167,6 +187,9 @@ export function HarnessCredentials({
           // rather than folded into a generic failure. The typed value is
           // deliberately kept so they can see and correct it.
           const body = (await response.json()) as { message?: string };
+          if (authorityContextRef.current !== requestAuthorityContext) {
+            return false;
+          }
 
           toast({
             description: body.message ?? "That token was rejected.",
@@ -186,13 +209,17 @@ export function HarnessCredentials({
         await refresh();
         return true;
       } catch {
-        toast({
-          description: "Could not store the credential.",
-          type: "error",
-        });
+        if (authorityContextRef.current === requestAuthorityContext) {
+          toast({
+            description: "Could not store the credential.",
+            type: "error",
+          });
+        }
         return false;
       } finally {
-        setBusy(null);
+        if (authorityContextRef.current === requestAuthorityContext) {
+          setBusy(null);
+        }
       }
     },
     [closeForAuthorityLoss, refresh, values]
@@ -227,12 +254,16 @@ export function HarnessCredentials({
         toast({ description: "Credential removed.", type: "success" });
         await refresh();
       } catch {
-        toast({
-          description: "Could not remove the credential.",
-          type: "error",
-        });
+        if (authorityContextRef.current === requestAuthorityContext) {
+          toast({
+            description: "Could not remove the credential.",
+            type: "error",
+          });
+        }
       } finally {
-        setBusy(null);
+        if (authorityContextRef.current === requestAuthorityContext) {
+          setBusy(null);
+        }
       }
     },
     [closeForAuthorityLoss, refresh]
@@ -260,7 +291,7 @@ export function HarnessCredentials({
             busy={busy === harness.id}
             configured={configured.includes(harness.id)}
             harness={harness}
-            key={harness.id}
+            key={`${authorityContext}:${harness.id}`}
             onChange={change}
             onConnected={reload}
             onRemove={remove}
