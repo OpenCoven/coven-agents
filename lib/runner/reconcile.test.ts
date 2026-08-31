@@ -23,6 +23,10 @@ const attemptId =
 function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
   return {
     agentId: "00000000-0000-4000-8000-000000000001",
+    agentInstructions: "safe instructions",
+    agentModel: "auto",
+    agentRuntime: "copilot",
+    agentWorkspace: null,
     authVersion: 1,
     cancellationRequestedAt: null,
     commandEvidence: [],
@@ -36,6 +40,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     dispatchLeaseToken: "expired-lease",
     dispatchState: "dispatching",
     error: null,
+    executionPermission: "unrestricted",
     fileEvidence: [],
     id: "00000000-0000-4000-8000-000000000002",
     logCursor: 1,
@@ -52,6 +57,127 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
   };
 }
 
+test("reconciliation projects and claims teams before dispatch and retries terminal cleanup last", async () => {
+  const calls: string[] = [];
+  const claimedRun = run({ executionPermission: "workspace_write" });
+  const claimed = {
+    authority: {
+      expectedVersion: claimedRun.version,
+      leaseToken: claimedRun.dispatchLeaseToken as string,
+      runId: claimedRun.id,
+    } as RunnerDispatchAuthority,
+    run: claimedRun,
+  };
+
+  const result = await reconcileAndDispatch({
+    claimTeamRuns: async () => {
+      calls.push("claim-team");
+      return { claimedDispatches: [claimed], deferred: 0, failures: 0 };
+    },
+    dispatch: async () => {
+      calls.push("dispatch-queued");
+      return { kind: "idle" as const };
+    },
+    dispatchClaim: async (value) => {
+      calls.push("dispatch-team-claim");
+      assert.equal(value, claimed);
+      assert.equal(value.run.executionPermission, "workspace_write");
+      return { kind: "started" as const, runId: value.run.id };
+    },
+    operator,
+    projectTeamRuns: async () => {
+      calls.push("project-team");
+      return { cancellationDeferred: 0, failures: 0 };
+    },
+    provider: {
+      resolveSandbox: async () => null,
+      stop: async () => ({ kind: "stopped" as const }),
+    },
+    store: {
+      scanExpiredDispatchLeases: async () => {
+        calls.push("repair-runner-leases");
+        return [];
+      },
+      scanTerminalDaytonaAttemptCleanups: async () => {
+        calls.push("retry-terminal-attempt-cleanup");
+        return [];
+      },
+      scanTerminalLeaseCleanups: async () => {
+        calls.push("retry-terminal-lease-cleanup");
+        return [];
+      },
+    } as never,
+  });
+
+  assert.deepEqual(calls, [
+    "repair-runner-leases",
+    "project-team",
+    "claim-team",
+    "dispatch-team-claim",
+    "dispatch-queued",
+    "retry-terminal-lease-cleanup",
+    "retry-terminal-attempt-cleanup",
+  ]);
+  assert.equal(result.dispatched, 1);
+  assert.equal(result.failures, 0);
+});
+
+test("one team projection failure does not abort claims or unrelated runner dispatch", async () => {
+  const calls: string[] = [];
+
+  const result = await reconcileAndDispatch({
+    claimTeamRuns: async () => {
+      calls.push("claim-team");
+      return { claimedDispatches: [], deferred: 0, failures: 0 };
+    },
+    dispatch: async () => {
+      calls.push("dispatch");
+      return { kind: "started" as const, runId: run().id };
+    },
+    operator,
+    projectTeamRuns: async () => {
+      calls.push("project-team");
+      throw new Error("one team failed");
+    },
+    provider: {
+      resolveSandbox: async () => null,
+      stop: async () => ({ kind: "stopped" as const }),
+    },
+    store: {
+      scanExpiredDispatchLeases: async () => [],
+    } as never,
+  });
+
+  assert.deepEqual(calls, ["project-team", "claim-team", "dispatch"]);
+  assert.equal(result.dispatched, 1);
+  assert.equal(result.failures, 1);
+});
+
+test("team claim and cancellation deferrals accumulate without becoming failures", async () => {
+  const result = await reconcileAndDispatch({
+    claimTeamRuns: async () => ({
+      claimedDispatches: [],
+      deferred: 2,
+      failures: 3,
+    }),
+    operator,
+    projectTeamRuns: async () => ({
+      cancellationDeferred: 5,
+      failures: 7,
+    }),
+    provider: {
+      resolveSandbox: async () => null,
+      stop: async () => ({ kind: "stopped" as const }),
+    },
+    store: {
+      scanExpiredDispatchLeases: async () => [],
+    } as never,
+  });
+
+  assert.equal(result.deferred, 7);
+  assert.equal(result.failures, 10);
+});
+
 function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
   return {
     createdAt: new Date("2026-08-28T15:00:00.000Z"),
@@ -65,6 +191,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     runtime: "copilot",
     sandboxGeneration: 1,
     sandboxLifecycle: "provisioning_ambiguous",
+    sandboxTrust: "clean",
     sandboxUpdatedAt: new Date("2026-08-28T14:00:00.000Z"),
     status: "idle",
     tenant: "tenant_a",

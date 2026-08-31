@@ -46,6 +46,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     runtime: "copilot",
     sandboxGeneration: 0,
     sandboxLifecycle: "unprovisioned",
+    sandboxTrust: "clean",
     sandboxUpdatedAt: new Date(),
     status: "idle",
     tenant: principal.tenant,

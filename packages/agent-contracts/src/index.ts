@@ -39,6 +39,7 @@ export const TEAM_LIMITS = Object.freeze({
   maxNameLength: 64,
   maxSkillInstructionsLength: 4000,
   maxSkillsPerMember: 8,
+  maxTeamRunsPerPage: 10,
   maxTotalHandoffLength: 49_152,
 });
 
@@ -304,6 +305,26 @@ export const expectedVersionInputSchema = z
   })
   .strict();
 
+function workspaceStaysInsideSandbox(value: string): boolean {
+  if (!value) {
+    return true;
+  }
+  const base = value.startsWith("/") ? value : `/workspace/${value}`;
+  const parts: string[] = [];
+  for (const segment of base.split("/")) {
+    if (!segment || segment === ".") {
+      continue;
+    }
+    if (segment === "..") {
+      parts.pop();
+    } else {
+      parts.push(segment);
+    }
+  }
+  const resolved = `/${parts.join("/")}`;
+  return resolved === "/workspace" || resolved.startsWith("/workspace/");
+}
+
 const agentDefinitionInputShape = {
   backend: backendSchema,
   description: z
@@ -323,6 +344,10 @@ const agentDefinitionInputShape = {
     .string()
     .trim()
     .max(AGENT_RUNNER_LIMITS.maxWorkspaceLength)
+    .refine(
+      workspaceStaysInsideSandbox,
+      "Workspace must stay inside /workspace."
+    )
     .optional(),
 };
 
@@ -500,16 +525,49 @@ export const githubOperationStatusSchema = z.enum([
 
 export const createTeamRunInputSchema = z
   .object({
-    mission: boundedString(TEAM_LIMITS.maxMissionLength),
     operationId: z.string().uuid(),
+    task: boundedString(TEAM_LIMITS.maxMissionLength),
   })
   .strict();
 
-export const approveTeamRunInputSchema = z
+const approveTeamRunDecisionInputSchema = z
   .object({
-    decision: z.enum(["approve", "reject"]),
+    capabilities: z
+      .array(
+        teamCapabilitySchema.refine(
+          (capability) => capability.startsWith("github."),
+          "Only declared GitHub capabilities may be approved."
+        )
+      )
+      .min(1)
+      .max(TEAM_LIMITS.maxSkillsPerMember)
+      .superRefine((capabilities, context) => {
+        distinctValues(capabilities, context, "Capabilities must be unique.");
+        if (!capabilities.some((capability) => capability.endsWith(".write"))) {
+          context.addIssue({
+            code: "custom",
+            message:
+              "Approval must include a declared GitHub write capability.",
+          });
+        }
+      }),
+    decision: z.literal("approve"),
+    expectedVersion: z.number().int().nonnegative(),
   })
   .strict();
+
+const rejectTeamRunDecisionInputSchema = z
+  .object({
+    capabilities: z.array(teamCapabilitySchema).length(0).default([]),
+    decision: z.literal("reject"),
+    expectedVersion: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const approveTeamRunInputSchema = z.discriminatedUnion("decision", [
+  approveTeamRunDecisionInputSchema,
+  rejectTeamRunDecisionInputSchema,
+]);
 
 export const teamHandoffSchema = z
   .object({
@@ -560,6 +618,7 @@ export const teamStepSchema = z
     startedAt: datetimeSchema.nullable(),
     status: teamStepStatusSchema,
     updatedAt: datetimeSchema,
+    version: z.number().int().nonnegative(),
   })
   .strict();
 
@@ -598,6 +657,7 @@ export const teamRunSchema = z
       }),
     teamId: teamIdSchema,
     updatedAt: datetimeSchema,
+    version: z.number().int().nonnegative(),
   })
   .strict();
 
@@ -824,6 +884,19 @@ export const teamEnvelopeSchema = z
   })
   .strict();
 
+export const teamRunsEnvelopeSchema = z
+  .object({
+    nextCursor: teamRunIdSchema.nullable(),
+    teamRuns: z.array(teamRunSchema).max(TEAM_LIMITS.maxTeamRunsPerPage),
+  })
+  .strict();
+
+export const teamRunEnvelopeSchema = z
+  .object({
+    teamRun: teamRunSchema,
+  })
+  .strict();
+
 /**
  * Projects a run snapshot onto the older `RunResult` shape.
  *
@@ -908,6 +981,7 @@ export type RunSnapshotEnvelope = z.infer<typeof runSnapshotEnvelopeSchema>;
 export type CreateSkillInput = z.input<typeof createSkillInputSchema>;
 export type CreateTeamInput = z.input<typeof createTeamInputSchema>;
 export type CreateTeamRunInput = z.input<typeof createTeamRunInputSchema>;
+export type ApproveTeamRunInput = z.input<typeof approveTeamRunInputSchema>;
 export type ExpectedVersionInput = z.input<typeof expectedVersionInputSchema>;
 export type GitHubOperationKind = z.infer<typeof githubOperationKindSchema>;
 export type GitHubOperationReceipt = z.output<
@@ -923,7 +997,9 @@ export type TeamResource = z.output<typeof teamResourceSchema>;
 export type TeamHandoff = z.output<typeof teamHandoffSchema>;
 export type TeamMember = z.output<typeof teamMemberSchema>;
 export type TeamRun = z.output<typeof teamRunSchema>;
+export type TeamRunEnvelope = z.output<typeof teamRunEnvelopeSchema>;
 export type TeamRunStatus = z.infer<typeof teamRunStatusSchema>;
+export type TeamRunsEnvelope = z.output<typeof teamRunsEnvelopeSchema>;
 export type TeamStep = z.output<typeof teamStepSchema>;
 export type TeamStepStatus = z.infer<typeof teamStepStatusSchema>;
 export type UpdateSkillInput = z.input<typeof updateSkillInputSchema>;

@@ -26,6 +26,124 @@ test("copilot runs headless with pre-approved tools", () => {
   );
 });
 
+test("workspace-read Copilot runs expose only read tools", () => {
+  assert.throws(
+    () =>
+      buildInvocation({
+        ...BASE,
+        harness: "copilot",
+        permissionMode: "workspace_read",
+      }),
+    /isolated config directory/u
+  );
+  const invocation = buildInvocation({
+    ...BASE,
+    configDir: "/run/coven-agents/attempt/copilot",
+    harness: "copilot",
+    permissionMode: "workspace_read",
+  });
+
+  assert.ok(!invocation.args.includes("--yolo"));
+  assert.deepEqual(
+    invocation.args.slice(
+      invocation.args.indexOf("--available-tools"),
+      invocation.args.indexOf("--available-tools") + 2
+    ),
+    ["--available-tools", "view,grep,glob"]
+  );
+  assert.equal(invocation.args.includes("--allow-tool"), false);
+  assert.equal(
+    invocation.args.some((argument) => argument === "edit"),
+    false
+  );
+  assert.equal(
+    invocation.args.some((argument) => argument.includes("write")),
+    false
+  );
+  assert.ok(invocation.args.includes("--no-ask-user"));
+  assert.deepEqual(
+    invocation.args.slice(
+      invocation.args.indexOf("--config-dir"),
+      invocation.args.indexOf("--config-dir") + 2
+    ),
+    ["--config-dir", "/run/coven-agents/attempt/copilot"]
+  );
+  assert.equal(
+    invocation.args.some((argument) => argument.includes("shell")),
+    false
+  );
+  assert.equal(
+    invocation.args.some((argument) =>
+      argument.toLowerCase().includes("github")
+    ),
+    false
+  );
+  for (const flag of [
+    "--disable-builtin-mcps",
+    "--no-custom-instructions",
+    "--disallow-temp-dir",
+    "--no-bash-env",
+  ]) {
+    assert.ok(invocation.args.includes(flag), flag);
+  }
+});
+
+test("workspace-write Copilot runs add bounded edit permission without shell or network", () => {
+  const invocation = buildInvocation({
+    ...BASE,
+    configDir: "/run/coven-agents/attempt/copilot",
+    harness: "copilot",
+    permissionMode: "workspace_write",
+  });
+
+  assert.ok(!invocation.args.includes("--yolo"));
+  assert.deepEqual(
+    invocation.args.slice(
+      invocation.args.indexOf("--available-tools"),
+      invocation.args.indexOf("--available-tools") + 4
+    ),
+    ["--available-tools", "view,edit,grep,glob", "--allow-tool", "write"]
+  );
+  assert.equal(
+    invocation.args.some((argument) => argument.includes("shell")),
+    false
+  );
+  assert.equal(
+    invocation.args.some((argument) => argument.includes("url")),
+    false
+  );
+  assert.ok(invocation.args.includes("--disable-builtin-mcps"));
+  assert.ok(invocation.args.includes("--disallow-temp-dir"));
+});
+
+test("restricted non-Copilot invocations fail instead of using dangerous bypass flags", () => {
+  for (const harness of ["codex", "claude"]) {
+    assert.throws(
+      () =>
+        buildInvocation({
+          ...BASE,
+          configDir: "/run/coven-agents/attempt/copilot",
+          harness,
+          permissionMode: "workspace_read",
+        }),
+      /cannot enforce workspace_read permissions/u
+    );
+  }
+});
+
+test("ordinary Codex and Claude invocations retain their existing unrestricted behavior", () => {
+  assert.ok(
+    buildInvocation({ ...BASE, harness: "codex" }).args.includes(
+      "--dangerously-bypass-approvals-and-sandbox"
+    )
+  );
+  assert.ok(
+    buildInvocation({ ...BASE, harness: "claude" }).args.includes(
+      "--dangerously-skip-permissions"
+    )
+  );
+});
+
 test("`auto` passes no --model flag so the harness picks", () => {
   const invocation = buildInvocation({ ...BASE, harness: "copilot" });
   assert.ok(!invocation.args.includes("--model"));

@@ -39,6 +39,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     runtime: "copilot",
     sandboxGeneration: 0,
     sandboxLifecycle: "unprovisioned",
+    sandboxTrust: "clean",
     sandboxUpdatedAt: new Date("2026-08-28T15:00:00.000Z"),
     status: "idle",
     tenant: PRINCIPAL.tenant,
@@ -688,6 +689,10 @@ test("reconciliation recovers a cancelled terminal row after lease cleanup faile
   let cleanupAttempts = 0;
   let persisted: RunnerRunRecord = {
     agentId: AGENT_ID,
+    agentInstructions: "Do the thing.",
+    agentModel: "auto",
+    agentRuntime: "copilot",
+    agentWorkspace: null,
     authVersion: 1,
     cancellationRequestedAt: null,
     commandEvidence: [],
@@ -701,6 +706,7 @@ test("reconciliation recovers a cancelled terminal row after lease cleanup faile
     dispatchLeaseToken: "initial-lease",
     dispatchState: "dispatching",
     error: null,
+    executionPermission: "unrestricted",
     fileEvidence: [],
     id: RUN_ID,
     logCursor: 1,

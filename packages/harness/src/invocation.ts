@@ -6,13 +6,22 @@ export interface Invocation {
   readonly cwd: string;
 }
 
+export type HarnessExecutionPermission =
+  | "unrestricted"
+  | "workspace_read"
+  | "workspace_write";
+
 export interface InvocationRequest {
+  /** Fresh configuration directory outside caller-controlled workspace files. */
+  configDir?: string;
   /** Working directory the harness runs in. Callers resolve and sandbox this. */
   cwd: string;
   harness: string;
   instructions: string;
   /** `auto` lets the harness pick, so no `--model` flag is passed. */
   model: string;
+  /** Restrict tools for tasks that must not inherit broad harness authority. */
+  permissionMode?: HarnessExecutionPermission;
   /** Ask for the harness's structured event stream instead of a text blob. */
   stream?: boolean;
   task: string;
@@ -27,12 +36,38 @@ function modelArgs(model: string): string[] {
 }
 
 function copilotArgs(request: InvocationRequest): string[] {
+  const permissionMode = request.permissionMode ?? "unrestricted";
+  if (permissionMode !== "unrestricted" && !request.configDir) {
+    throw new Error(
+      "Restricted Copilot runs require an isolated config directory."
+    );
+  }
+  const permissionArgs =
+    permissionMode === "workspace_read"
+      ? ["--available-tools", "view,grep,glob"]
+      : permissionMode === "workspace_write"
+        ? ["--available-tools", "view,edit,grep,glob", "--allow-tool", "write"]
+        : ["--yolo"];
+  const restrictedArgs =
+    permissionMode === "unrestricted"
+      ? []
+      : [
+          "--disable-builtin-mcps",
+          "--no-custom-instructions",
+          "--disallow-temp-dir",
+          "--no-bash-env",
+        ];
+  const configArgs = request.configDir
+    ? ["--config-dir", request.configDir]
+    : [];
   return [
     "-s",
     "-p",
     buildMission(request.instructions, request.task),
-    "--yolo",
+    ...permissionArgs,
     "--no-ask-user",
+    ...configArgs,
+    ...restrictedArgs,
     "--no-auto-update",
     "--no-color",
     // JSONL carries tool calls, file writes and usage. Plain text collapses all
@@ -89,6 +124,12 @@ export function buildInvocation(request: InvocationRequest): Invocation {
   const build = spec ? ARG_BUILDERS[spec.id] : undefined;
   if (!(spec && build)) {
     throw new Error(`Unsupported harness: ${request.harness}`);
+  }
+  const permissionMode = request.permissionMode ?? "unrestricted";
+  if (permissionMode !== "unrestricted" && spec.id !== "copilot") {
+    throw new Error(
+      `${spec.label} cannot enforce ${permissionMode} permissions.`
+    );
   }
   return { args: build(request), command: spec.command, cwd: request.cwd };
 }

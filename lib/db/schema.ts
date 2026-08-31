@@ -51,7 +51,7 @@ const runnerMaxFileOperationsSql = sql.raw(
 const runnerMaxMessageLengthSql = sql.raw(
   String(AGENT_RUNNER_LIMITS.maxMessageLength)
 );
-const teamMaxHandoffLengthSql = sql.raw(String(TEAM_LIMITS.maxHandoffLength));
+const teamMaxPersistedHandoffLengthSql = sql.raw("24576");
 const teamMaxMembersSql = sql.raw(String(TEAM_LIMITS.maxMembers));
 const teamMaxSkillsPerMemberSql = sql.raw(
   String(TEAM_LIMITS.maxSkillsPerMember)
@@ -540,6 +540,12 @@ export const runnerAgent = pgTable(
     })
       .notNull()
       .default("unprovisioned"),
+    sandboxTrust: varchar("sandboxTrust", {
+      enum: ["clean", "restricted", "unrestricted"],
+      length: 16,
+    })
+      .notNull()
+      .default("clean"),
     sandboxUpdatedAt: timestamp("sandboxUpdatedAt").notNull().defaultNow(),
     status: varchar("status", {
       enum: ["idle", "running", "error"],
@@ -592,6 +598,10 @@ export const runnerAgent = pgTable(
       sql`${table.sandboxLifecycle} in ('unprovisioned', 'provisioning', 'provisioning_ambiguous', 'ready', 'resetting', 'decommissioning', 'decommission_failed')`
     ),
     check(
+      "RunnerAgent_sandboxTrust_valid",
+      sql`${table.sandboxTrust} in ('clean', 'restricted', 'unrestricted')`
+    ),
+    check(
       "RunnerAgent_warmStatus_valid",
       sql`${table.warmStatus} in ('not_started', 'provisioning', 'ready', 'failed')`
     ),
@@ -613,6 +623,19 @@ export const runnerRun = pgTable(
   "RunnerRun",
   {
     agentId: uuid("agentId").notNull(),
+    agentInstructions: varchar("agentInstructions", {
+      length: AGENT_RUNNER_LIMITS.maxInstructionsLength,
+    }).notNull(),
+    agentModel: varchar("agentModel", {
+      length: AGENT_RUNNER_LIMITS.maxModelLength,
+    }).notNull(),
+    agentRuntime: varchar("agentRuntime", {
+      enum: ["codex", "claude", "copilot"],
+      length: 16,
+    }).notNull(),
+    agentWorkspace: varchar("agentWorkspace", {
+      length: AGENT_RUNNER_LIMITS.maxWorkspaceLength,
+    }),
     authVersion: integer("authVersion"),
     cancellationRequestedAt: timestamp("cancellationRequestedAt"),
     commandEvidence: jsonb("commandEvidence")
@@ -636,6 +659,12 @@ export const runnerRun = pgTable(
       .notNull()
       .default("queued"),
     error: jsonb("error").$type<RunError>(),
+    executionPermission: varchar("executionPermission", {
+      enum: ["unrestricted", "workspace_read", "workspace_write"],
+      length: 32,
+    })
+      .notNull()
+      .default("unrestricted"),
     fileEvidence: jsonb("fileEvidence")
       .$type<FileEvidence[]>()
       .notNull()
@@ -716,6 +745,10 @@ export const runnerRun = pgTable(
       "RunnerRun_dispatchState_valid",
       sql`${table.dispatchState} in ('queued', 'dispatching', 'running', 'terminal')`
     ),
+    check(
+      "RunnerRun_executionPermission_valid",
+      sql`${table.executionPermission} in ('unrestricted', 'workspace_read', 'workspace_write')`
+    ),
     check("RunnerRun_queueSequence_positive", sql`${table.queueSequence} > 0`),
     check("RunnerRun_logCursor_nonnegative", sql`${table.logCursor} >= 0`),
     check(
@@ -726,6 +759,10 @@ export const runnerRun = pgTable(
     check(
       "RunnerRun_authVersion_valid",
       sql`${table.authVersion} is null or ${table.authVersion} >= 0`
+    ),
+    check(
+      "RunnerRun_agentSnapshot_valid",
+      sql`char_length(btrim(${table.agentInstructions})) between 1 and ${sql.raw(String(AGENT_RUNNER_LIMITS.maxInstructionsLength))} and char_length(btrim(${table.agentModel})) between 1 and ${sql.raw(String(AGENT_RUNNER_LIMITS.maxModelLength))} and ${table.agentRuntime} in ('codex', 'claude', 'copilot')`
     ),
     check(
       "RunnerRun_timestamps_valid",
@@ -916,8 +953,10 @@ export type RunnerTeamMemberSkill = InferSelectModel<
 export const runnerTeamRun = pgTable(
   "RunnerTeamRun",
   {
+    authVersion: integer("authVersion").notNull(),
     completedAt: timestamp("completedAt"),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
+    createdByUserId: uuid("createdByUserId").notNull(),
     currentPosition: integer("currentPosition").notNull().default(0),
     error: jsonb("error").$type<RunError>(),
     id: uuid("id").primaryKey().notNull().defaultRandom(),
@@ -958,6 +997,11 @@ export const runnerTeamRun = pgTable(
       foreignColumns: [runnerTeam.id, runnerTeam.tenant],
       name: "RTRun_team_fk",
     }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.createdByUserId],
+      foreignColumns: [user.id],
+      name: "RTRun_createdByUser_fk",
+    }).onDelete("restrict"),
     index("RTRun_tenant_created_idx").on(table.tenant, table.createdAt),
     index("RTRun_status_updated_idx").on(table.status, table.updatedAt),
     check("RTRun_tenant_valid", sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`),
@@ -970,6 +1014,7 @@ export const runnerTeamRun = pgTable(
       sql`${table.currentPosition} >= 0 and ${table.currentPosition} <= ${teamMaxMembersSql}`
     ),
     check("RTRun_version_valid", sql`${table.version} >= 0`),
+    check("RTRun_authVersion_valid", sql`${table.authVersion} >= 0`),
     check(
       "RTRun_requestHash_valid",
       sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`
@@ -991,18 +1036,39 @@ export const runnerTeamStep = pgTable(
   "RunnerTeamStep",
   {
     agentId: uuid("agentId").notNull(),
+    agentInstructions: varchar("agentInstructions", {
+      length: AGENT_RUNNER_LIMITS.maxInstructionsLength,
+    }).notNull(),
+    agentModel: varchar("agentModel", {
+      length: AGENT_RUNNER_LIMITS.maxModelLength,
+    }).notNull(),
+    agentRuntime: varchar("agentRuntime", {
+      enum: ["codex", "claude", "copilot"],
+      length: 16,
+    }).notNull(),
+    agentWorkspace: varchar("agentWorkspace", {
+      length: AGENT_RUNNER_LIMITS.maxWorkspaceLength,
+    }),
+    approvalActorUserId: uuid("approvalActorUserId"),
+    approvalDecidedAt: timestamp("approvalDecidedAt"),
     approvalStatus: varchar("approvalStatus", {
       enum: ["not_required", "pending", "approved", "rejected"],
       length: 16,
     })
       .notNull()
       .default("not_required"),
+    approvedCapabilities: jsonb("approvedCapabilities")
+      .$type<TeamCapability[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
     completedAt: timestamp("completedAt"),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
     error: jsonb("error").$type<RunError>(),
     handoff: jsonb("handoff").$type<TeamHandoff>(),
     id: uuid("id").primaryKey().notNull().defaultRandom(),
     memberId: uuid("memberId").notNull(),
+    plannedOperationId: uuid("plannedOperationId"),
+    plannedRunnerRunId: uuid("plannedRunnerRunId"),
     position: integer("position").notNull(),
     required: boolean("required").notNull(),
     responsibility: varchar("responsibility", {
@@ -1046,6 +1112,8 @@ export const runnerTeamStep = pgTable(
       table.position
     ),
     uniqueIndex("RTStep_runnerRun_uq").on(table.runnerRunId),
+    uniqueIndex("RTStep_plannedOperation_uq").on(table.plannedOperationId),
+    uniqueIndex("RTStep_plannedRunnerRun_uq").on(table.plannedRunnerRunId),
     foreignKey({
       columns: [table.teamRunId, table.tenant],
       foreignColumns: [runnerTeamRun.id, runnerTeamRun.tenant],
@@ -1061,6 +1129,11 @@ export const runnerTeamStep = pgTable(
       foreignColumns: [runnerRun.id, runnerRun.tenant],
       name: "RTStep_runnerRun_fk",
     }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.approvalActorUserId],
+      foreignColumns: [user.id],
+      name: "RTStep_approvalActorUser_fk",
+    }).onDelete("restrict"),
     index("RTStep_status_updated_idx").on(table.status, table.updatedAt),
     check("RTStep_tenant_valid", sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`),
     check(
@@ -1075,6 +1148,22 @@ export const runnerTeamStep = pgTable(
       "RTStep_approval_valid",
       sql`${table.approvalStatus} in ('not_required', 'pending', 'approved', 'rejected')`
     ),
+    check(
+      "RTStep_approvedCapabilities_valid",
+      sql`jsonb_typeof(${table.approvedCapabilities}) = 'array' and jsonb_array_length(${table.approvedCapabilities}) <= ${teamMaxSkillsPerMemberSql} and ${table.approvedCapabilities} <@ '["github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb`
+    ),
+    check(
+      "RTStep_approval_audit_valid",
+      sql`((${table.approvalStatus} in ('not_required', 'pending')) and ${table.approvalActorUserId} is null and ${table.approvalDecidedAt} is null and jsonb_array_length(${table.approvedCapabilities}) = 0) or (${table.approvalStatus} = 'approved' and ${table.approvalActorUserId} is not null and ${table.approvalDecidedAt} is not null and ${table.approvalDecidedAt} >= ${table.createdAt} and jsonb_array_length(${table.approvedCapabilities}) between 1 and ${teamMaxSkillsPerMemberSql}) or (${table.approvalStatus} = 'rejected' and ${table.approvalActorUserId} is not null and ${table.approvalDecidedAt} is not null and ${table.approvalDecidedAt} >= ${table.createdAt} and jsonb_array_length(${table.approvedCapabilities}) = 0)`
+    ),
+    check(
+      "RTStep_childReservation_valid",
+      sql`((${table.plannedOperationId} is null and ${table.plannedRunnerRunId} is null) or (${table.plannedOperationId} is not null and ${table.plannedRunnerRunId} is not null)) and (${table.runnerRunId} is null or ${table.runnerRunId} = ${table.plannedRunnerRunId})`
+    ),
+    check(
+      "RTStep_agentSnapshot_valid",
+      sql`char_length(btrim(${table.agentInstructions})) between 1 and ${sql.raw(String(AGENT_RUNNER_LIMITS.maxInstructionsLength))} and char_length(btrim(${table.agentModel})) between 1 and ${sql.raw(String(AGENT_RUNNER_LIMITS.maxModelLength))} and ${table.agentRuntime} in ('codex', 'claude', 'copilot')`
+    ),
     check("RTStep_version_valid", sql`${table.version} >= 0`),
     check(
       "RTStep_skillIds_valid",
@@ -1086,7 +1175,7 @@ export const runnerTeamStep = pgTable(
     ),
     check(
       "RTStep_handoff_bounded",
-      sql`${table.handoff} is null or (jsonb_typeof(${table.handoff}) = 'object' and ${table.handoff} ?& array['output', 'commandEvidence', 'fileEvidence'] and (${table.handoff} - 'output' - 'commandEvidence' - 'fileEvidence') = '{}'::jsonb and octet_length(${table.handoff}::text) <= ${teamMaxHandoffLengthSql} and jsonb_typeof(${table.handoff}->'output') = 'string' and jsonb_typeof(${table.handoff}->'commandEvidence') = 'array' and jsonb_array_length(${table.handoff}->'commandEvidence') <= ${runnerMaxCommandResultsSql} and jsonb_typeof(${table.handoff}->'fileEvidence') = 'array' and jsonb_array_length(${table.handoff}->'fileEvidence') <= ${runnerMaxFileOperationsSql})`
+      sql`${table.handoff} is null or (jsonb_typeof(${table.handoff}) = 'object' and ${table.handoff} ?& array['output', 'commandEvidence', 'fileEvidence'] and (${table.handoff} - 'output' - 'commandEvidence' - 'fileEvidence') = '{}'::jsonb and octet_length(${table.handoff}::text) <= ${teamMaxPersistedHandoffLengthSql} and jsonb_typeof(${table.handoff}->'output') = 'string' and jsonb_typeof(${table.handoff}->'commandEvidence') = 'array' and jsonb_array_length(${table.handoff}->'commandEvidence') <= ${runnerMaxCommandResultsSql} and jsonb_typeof(${table.handoff}->'fileEvidence') = 'array' and jsonb_array_length(${table.handoff}->'fileEvidence') <= ${runnerMaxFileOperationsSql})`
     ),
     check(
       "RTStep_error_bounded",

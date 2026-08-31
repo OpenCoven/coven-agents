@@ -82,6 +82,20 @@ test("core runtime has no diagnostic composition dependency", () => {
   assert.doesNotMatch(runtime, /diagnostic|OPERATOR_DIAGNOSTIC/u);
 });
 
+test("production reconciliation wires durable team projection and claim hooks", () => {
+  const runtime = readFileSync(
+    new URL("./runtime.ts", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(runtime, /import\(["']@\/lib\/teams\/orchestrate["']\)/u);
+  assert.match(runtime, /import\(["']@\/lib\/teams\/store["']\)/u);
+  assert.match(runtime, /createTeamOrchestrator/u);
+  assert.match(runtime, /projectTeamRuns/u);
+  assert.match(runtime, /claimTeamRuns/u);
+  assert.match(runtime, /dispatchClaim/u);
+});
+
 test("concurrent leased reconciliation skips before reconciliation work", async () => {
   const { runLeasedReconciliation } = await import("./runtime");
   let activeLease: RunnerReconciliationLease | null = null;
