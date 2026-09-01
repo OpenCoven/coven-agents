@@ -46,8 +46,9 @@ supported Stripe event into database entitlement state.
 `pnpm subscription grant|revoke|status` is an authorized operator override for
 bootstrap or complimentary access, not Stripe evidence or production
 certification. `status` is read-only. Each `grant` or `revoke` requires a
-bounded `--reference <value>`; the command hashes that value with SHA-256
-before persistence and never prints or stores the raw value.
+bounded `--reference-stdin`; mutations read one bounded printable UTF-8 value
+from standard input, then hash it with SHA-256 before any database lookup or
+mutation. The raw value is never accepted through command arguments or printed.
 
 `grant` defaults to 365 days and is finite: the exported
 `MAX_SUBSCRIPTION_OVERRIDE_DAYS = 3650` upper bound prevents an indefinite

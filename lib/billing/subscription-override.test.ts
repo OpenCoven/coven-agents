@@ -5,6 +5,7 @@ import {
   MAX_SUBSCRIPTION_OVERRIDE_DAYS,
   MAX_SUBSCRIPTION_OVERRIDE_REFERENCE_LENGTH,
   parseSubscriptionCliArguments,
+  readSubscriptionOverrideReference,
   runSubscriptionCli,
   type SubscriptionOverrideAuditRecord,
   type SubscriptionOverrideStore,
@@ -14,6 +15,8 @@ import {
 const NOW = new Date("2026-08-31T20:00:00.000Z");
 const USER_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 const REFERENCE = "case-2026-08-31";
+const REFERENCE_DIGEST =
+  "ecdec34cdc2aa092362fa4292fab97814b746403ae2dbccd2df8f96f97747eac";
 
 type State = {
   audit: SubscriptionOverrideAuditRecord[];
@@ -101,7 +104,7 @@ function grant(days = 30) {
     expectedBillingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
     expectedSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
     operation: "grant" as const,
-    reference: REFERENCE,
+    referenceDigest: REFERENCE_DIGEST,
     userId: USER_ID,
   };
 }
@@ -137,8 +140,7 @@ test("grant locks its exact owner and writes bounded entitlement plus immutable 
       newSubscribedUntil: new Date("2026-09-30T20:00:00.000Z"),
       previousAuthVersion: 4,
       previousSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
-      referenceDigest:
-        "ecdec34cdc2aa092362fa4292fab97814b746403ae2dbccd2df8f96f97747eac",
+      referenceDigest: REFERENCE_DIGEST,
       userId: USER_ID,
     },
   ]);
@@ -154,7 +156,7 @@ test("revoke clears paid authority immediately and invalidates exactly one autho
     expectedBillingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
     expectedSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
     operation: "revoke",
-    reference: REFERENCE,
+    referenceDigest: REFERENCE_DIGEST,
     userId: USER_ID,
   });
 
@@ -174,8 +176,7 @@ test("revoke clears paid authority immediately and invalidates exactly one autho
     newSubscribedUntil: null,
     previousAuthVersion: 4,
     previousSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
-    referenceDigest:
-      "ecdec34cdc2aa092362fa4292fab97814b746403ae2dbccd2df8f96f97747eac",
+    referenceDigest: REFERENCE_DIGEST,
     userId: USER_ID,
   });
 });
@@ -196,17 +197,17 @@ test("grant duration is finite and has a defensible maximum", async () => {
   );
 });
 
-test("missing and invalid references fail before a database mutation", async () => {
+test("missing and invalid reference digests fail before a database mutation", async () => {
   const store = new MemoryOverrideStore();
 
   await assert.rejects(
-    applySubscriptionOverride(store, { ...grant(), reference: "" }),
+    applySubscriptionOverride(store, { ...grant(), referenceDigest: "" }),
     /reference/i
   );
   await assert.rejects(
     applySubscriptionOverride(store, {
       ...grant(),
-      reference: "x".repeat(MAX_SUBSCRIPTION_OVERRIDE_REFERENCE_LENGTH + 1),
+      referenceDigest: "x".repeat(64),
     }),
     /reference/i
   );
@@ -271,21 +272,19 @@ test("an entitlement change without an authority-version change is rejected with
   );
 });
 
-test("CLI arguments require an external reference for mutations but not status", () => {
+test("CLI mutation arguments require stdin references but status needs none", () => {
   assert.deepEqual(
     parseSubscriptionCliArguments([
       "grant",
       "person@example.com",
       "30",
-      "--reference",
-      REFERENCE,
+      "--reference-stdin",
     ]),
     {
       durationDays: 30,
       email: "person@example.com",
       kind: "override",
       operation: "grant",
-      reference: REFERENCE,
     }
   );
   assert.deepEqual(
@@ -304,38 +303,96 @@ test("CLI arguments require an external reference for mutations but not status",
       parseSubscriptionCliArguments([
         "status",
         "person@example.com",
-        "--reference",
-        REFERENCE,
+        "--reference-stdin",
       ]),
     /usage/i
   );
+  assert.throws(
+    () =>
+      parseSubscriptionCliArguments([
+        "grant",
+        "person@example.com",
+        "--reference",
+        REFERENCE,
+      ]),
+    /reference/i
+  );
 });
 
-test("CLI output never reveals the reference and confirms authority invalidation", async () => {
-  const seen: unknown[] = [];
-  const response = await runSubscriptionCli(
-    ["grant", "person@example.com", "30", "--reference", REFERENCE],
-    {
-      applyOverride: (input) => {
-        seen.push(input);
-        return Promise.resolve({
-          kind: "applied",
-          operation: "grant",
-          subscribedUntil: new Date("2026-09-30T20:00:00.000Z"),
-        });
-      },
-      findUserByEmail: () =>
-        Promise.resolve({
-          authVersion: 4,
-          billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
-          id: USER_ID,
-          subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
-        }),
-      now: () => NOW,
-    }
+async function* referenceInput(
+  ...chunks: Uint8Array[]
+): AsyncGenerator<Uint8Array> {
+  yield* chunks;
+}
+
+test("reference stdin accepts one bounded printable UTF-8 value", async () => {
+  assert.equal(
+    await readSubscriptionOverrideReference(
+      referenceInput(Buffer.from(`${REFERENCE}\r\n`))
+    ),
+    REFERENCE
   );
+});
+
+test("reference stdin rejects missing, oversized, and invalid input without buffering it", async () => {
+  await assert.rejects(
+    readSubscriptionOverrideReference(referenceInput()),
+    /reference/i
+  );
+  let oversizedChunksRead = 0;
+  async function* oversizedInput(): AsyncGenerator<Uint8Array> {
+    oversizedChunksRead += 1;
+    yield await Promise.resolve(
+      Buffer.from("x".repeat(MAX_SUBSCRIPTION_OVERRIDE_REFERENCE_LENGTH))
+    );
+    oversizedChunksRead += 1;
+    yield Buffer.from("x");
+    oversizedChunksRead += 1;
+    throw new Error("reader must stop at the reference cap");
+  }
+  await assert.rejects(
+    readSubscriptionOverrideReference(oversizedInput()),
+    /reference/i
+  );
+  assert.equal(oversizedChunksRead, 2);
+  await assert.rejects(
+    readSubscriptionOverrideReference(referenceInput(new Uint8Array([0xff]))),
+    /reference/i
+  );
+});
+
+test("CLI reads an audit reference outside argv and never outputs it", async () => {
+  const seen: unknown[] = [];
+  let referenceReads = 0;
+  const args = ["grant", "person@example.com", "30", "--reference-stdin"];
+  assert.equal(args.includes(REFERENCE), false);
+  const response = await runSubscriptionCli(args, {
+    applyOverride: (input) => {
+      seen.push(input);
+      return Promise.resolve({
+        kind: "applied",
+        operation: "grant",
+        subscribedUntil: new Date("2026-09-30T20:00:00.000Z"),
+      });
+    },
+    findUserByEmail: () =>
+      Promise.resolve({
+        authVersion: 4,
+        billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+        id: USER_ID,
+        subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+      }),
+    now: () => NOW,
+    readReference: () => {
+      referenceReads += 1;
+      return readSubscriptionOverrideReference(
+        referenceInput(Buffer.from(`${REFERENCE}\n`))
+      );
+    },
+  });
 
   assert.equal(response.code, 0);
+  assert.equal(referenceReads, 1);
   assert.match(response.output, /Existing authority was invalidated/u);
   assert.equal(response.output.includes(REFERENCE), false);
   assert.equal(response.output.includes(USER_ID), false);
@@ -346,8 +403,34 @@ test("CLI output never reveals the reference and confirms authority invalidation
       expectedBillingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
       expectedSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
       operation: "grant",
-      reference: REFERENCE,
+      referenceDigest: REFERENCE_DIGEST,
       userId: USER_ID,
     },
   ]);
+});
+
+test("status does not read a reference and retains its read-only response", async () => {
+  let referenceReads = 0;
+  const response = await runSubscriptionCli(["status", "person@example.com"], {
+    applyOverride: () => Promise.reject(new Error("must not mutate")),
+    findUserByEmail: () =>
+      Promise.resolve({
+        authVersion: 4,
+        billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+        id: USER_ID,
+        subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+      }),
+    now: () => NOW,
+    readReference: () => {
+      referenceReads += 1;
+      return Promise.resolve(REFERENCE);
+    },
+  });
+
+  assert.equal(response.code, 0);
+  assert.equal(
+    response.output,
+    "Subscription status: subscriber (subscribedUntil=2026-09-01T00:00:00.000Z)\n"
+  );
+  assert.equal(referenceReads, 0);
 });

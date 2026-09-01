@@ -12,6 +12,8 @@ test("subscription CLI delegates mutation to the audited server-only override mo
   assert.match(source, /databaseSubscriptionOverrideStore/);
   assert.match(source, /findSubscriptionOverrideUserByEmail/);
   assert.match(source, /applySubscriptionOverride/);
+  assert.match(source, /readSubscriptionOverrideReference\(process\.stdin\)/);
+  assert.doesNotMatch(source, /--reference(?:\s|["'])/);
   assert.doesNotMatch(source, /\.update\(user\)/);
   assert.doesNotMatch(source, /Sign out and back in/);
 });

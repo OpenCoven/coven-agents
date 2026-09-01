@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import {
   applySubscriptionOverride,
+  readSubscriptionOverrideReference,
   runSubscriptionCli,
 } from "@/lib/billing/subscription-override";
 import {
@@ -14,6 +15,7 @@ async function main(): Promise<number> {
       applySubscriptionOverride(databaseSubscriptionOverrideStore, input),
     findUserByEmail: findSubscriptionOverrideUserByEmail,
     now: () => new Date(),
+    readReference: () => readSubscriptionOverrideReference(process.stdin),
   });
   (response.code === 0 ? process.stdout : process.stderr).write(
     response.output

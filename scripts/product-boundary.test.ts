@@ -529,7 +529,7 @@ test("the living subscription policy records current billing authorities", () =>
     "StripeReconciliation",
     "SubscriptionOverrideAudit",
     "MAX_SUBSCRIPTION_OVERRIDE_DAYS = 3650",
-    "--reference <value>",
+    "--reference-stdin",
     "authorized operator override",
     "pending",
     "acknowledged",

@@ -1,5 +1,6 @@
 import "server-only";
 
+import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 
 const DAY_MS = 86_400_000;
@@ -62,7 +63,7 @@ export type SubscriptionOverrideInput =
       expectedBillingPeriodStart: Date | null;
       expectedSubscribedUntil: Date | null;
       operation: "grant";
-      reference: string;
+      referenceDigest: string;
       userId: string;
     }
   | {
@@ -70,7 +71,7 @@ export type SubscriptionOverrideInput =
       expectedBillingPeriodStart: Date | null;
       expectedSubscribedUntil: Date | null;
       operation: "revoke";
-      reference: string;
+      referenceDigest: string;
       userId: string;
     };
 
@@ -90,13 +91,11 @@ export type SubscriptionCliCommand =
       email: string;
       kind: "override";
       operation: "grant";
-      reference: string;
     }
   | {
       email: string;
       kind: "override";
       operation: "revoke";
-      reference: string;
     };
 
 export class SubscriptionOverrideInputError extends Error {}
@@ -112,6 +111,7 @@ export type SubscriptionOverrideCliDependencies = {
     subscribedUntil: Date | null;
   } | null>;
   now: () => Date;
+  readReference: () => Promise<string>;
 };
 
 export type SubscriptionCliResponse = {
@@ -125,7 +125,7 @@ export function parseSubscriptionCliArguments(
   const [command, email, ...argumentsAfterEmail] = args;
   if (!(command && email)) {
     throw new SubscriptionOverrideInputError(
-      "Usage: pnpm subscription <grant|revoke|status> <email> [days] --reference <value>"
+      "Usage: pnpm subscription <grant|revoke|status> <email> [days] --reference-stdin"
     );
   }
 
@@ -142,19 +142,19 @@ export function parseSubscriptionCliArguments(
     throw new SubscriptionOverrideInputError("Unknown subscription command.");
   }
 
-  const reference = extractReference(argumentsAfterEmail);
+  extractReferenceStdinFlag(argumentsAfterEmail);
   if (command === "revoke") {
     if (argumentsAfterEmail.length !== 0) {
       throw new SubscriptionOverrideInputError(
-        "Usage: pnpm subscription revoke <email> --reference <value>"
+        "Usage: pnpm subscription revoke <email> --reference-stdin"
       );
     }
-    return { email, kind: "override", operation: "revoke", reference };
+    return { email, kind: "override", operation: "revoke" };
   }
 
   if (argumentsAfterEmail.length > 1) {
     throw new SubscriptionOverrideInputError(
-      "Usage: pnpm subscription grant <email> [days] --reference <value>"
+      "Usage: pnpm subscription grant <email> [days] --reference-stdin"
     );
   }
   const durationDays = parseDurationDays(
@@ -165,7 +165,6 @@ export function parseSubscriptionCliArguments(
     email,
     kind: "override",
     operation: "grant",
-    reference,
   };
 }
 
@@ -186,11 +185,11 @@ export async function runSubscriptionCli(
     };
   }
 
-  const user = await dependencies.findUserByEmail(command.email);
-  if (!user) {
-    return { code: 1, output: "No matching user.\n" };
-  }
   if (command.kind === "status") {
+    const user = await dependencies.findUserByEmail(command.email);
+    if (!user) {
+      return { code: 1, output: "No matching user.\n" };
+    }
     const subscribed = Boolean(
       user.subscribedUntil &&
         user.subscribedUntil.getTime() > dependencies.now().getTime()
@@ -201,6 +200,23 @@ export async function runSubscriptionCli(
     };
   }
 
+  let referenceDigest: string;
+  try {
+    referenceDigest = digestReference(await dependencies.readReference());
+  } catch (error) {
+    return {
+      code: 2,
+      output:
+        error instanceof SubscriptionOverrideInputError
+          ? `${error.message}\n`
+          : "Invalid subscription reference.\n",
+    };
+  }
+
+  const user = await dependencies.findUserByEmail(command.email);
+  if (!user) {
+    return { code: 1, output: "No matching user.\n" };
+  }
   const result = await dependencies.applyOverride(
     command.operation === "grant"
       ? {
@@ -209,7 +225,7 @@ export async function runSubscriptionCli(
           expectedBillingPeriodStart: user.billingPeriodStart,
           expectedSubscribedUntil: user.subscribedUntil,
           operation: "grant",
-          reference: command.reference,
+          referenceDigest,
           userId: user.id,
         }
       : {
@@ -217,7 +233,7 @@ export async function runSubscriptionCli(
           expectedBillingPeriodStart: user.billingPeriodStart,
           expectedSubscribedUntil: user.subscribedUntil,
           operation: "revoke",
-          reference: command.reference,
+          referenceDigest,
           userId: user.id,
         }
   );
@@ -245,7 +261,6 @@ export async function applySubscriptionOverride(
   input: SubscriptionOverrideInput
 ): Promise<SubscriptionOverrideResult> {
   assertOverrideInput(input);
-  const referenceDigest = digestReference(input.reference);
 
   return await store.transaction(async (transaction) => {
     const owner = await transaction.findUserForUpdate(input.userId);
@@ -294,27 +309,24 @@ export async function applySubscriptionOverride(
       newSubscribedUntil: subscribedUntil,
       previousAuthVersion: owner.authVersion,
       previousSubscribedUntil: owner.subscribedUntil,
-      referenceDigest,
+      referenceDigest: input.referenceDigest,
       userId: owner.id,
     });
     return { kind: "applied", operation: input.operation, subscribedUntil };
   });
 }
 
-function extractReference(argumentsAfterEmail: string[]): string {
-  const referenceIndex = argumentsAfterEmail.indexOf("--reference");
+function extractReferenceStdinFlag(argumentsAfterEmail: string[]): void {
+  const referenceIndex = argumentsAfterEmail.indexOf("--reference-stdin");
   if (
     referenceIndex < 0 ||
-    referenceIndex !== argumentsAfterEmail.lastIndexOf("--reference") ||
-    referenceIndex === argumentsAfterEmail.length - 1
+    referenceIndex !== argumentsAfterEmail.lastIndexOf("--reference-stdin")
   ) {
     throw new SubscriptionOverrideInputError(
-      "Mutations require a valid --reference value."
+      "Mutations require --reference-stdin."
     );
   }
-  const [, reference] = argumentsAfterEmail.splice(referenceIndex, 2);
-  assertReference(reference);
-  return reference;
+  argumentsAfterEmail.splice(referenceIndex, 1);
 }
 
 function parseDurationDays(value: string): number {
@@ -333,7 +345,7 @@ function parseDurationDays(value: string): number {
 }
 
 function assertOverrideInput(input: SubscriptionOverrideInput): void {
-  assertReference(input.reference);
+  assertReferenceDigest(input.referenceDigest);
   if (
     !Number.isInteger(input.expectedAuthVersion) ||
     input.expectedAuthVersion < 0 ||
@@ -348,6 +360,53 @@ function assertOverrideInput(input: SubscriptionOverrideInput): void {
   }
 }
 
+export async function readSubscriptionOverrideReference(
+  input: AsyncIterable<Uint8Array>
+): Promise<string> {
+  const referenceBytes: number[] = [];
+  let completed = false;
+  let pendingCarriageReturn = false;
+
+  for await (const chunk of input) {
+    for (const byte of chunk) {
+      if (completed) {
+        throwInvalidReference();
+      }
+      if (pendingCarriageReturn) {
+        if (byte !== 0x0a) {
+          throwInvalidReference();
+        }
+        pendingCarriageReturn = false;
+        completed = true;
+        continue;
+      }
+      if (byte === 0x0a) {
+        completed = true;
+        continue;
+      }
+      if (byte === 0x0d) {
+        pendingCarriageReturn = true;
+        continue;
+      }
+      if (
+        byte < 0x20 ||
+        byte > 0x7e ||
+        referenceBytes.length >= MAX_SUBSCRIPTION_OVERRIDE_REFERENCE_LENGTH
+      ) {
+        throwInvalidReference();
+      }
+      referenceBytes.push(byte);
+    }
+  }
+
+  if (pendingCarriageReturn) {
+    throwInvalidReference();
+  }
+  const reference = Buffer.from(referenceBytes).toString("utf8");
+  assertReference(reference);
+  return reference;
+}
+
 function assertReference(reference: string): void {
   if (
     reference.length === 0 ||
@@ -359,6 +418,20 @@ function assertReference(reference: string): void {
       "External reference must be a bounded printable value."
     );
   }
+}
+
+function assertReferenceDigest(referenceDigest: string): void {
+  if (!/^[0-9a-f]{64}$/u.test(referenceDigest)) {
+    throw new SubscriptionOverrideInputError(
+      "External reference digest is invalid."
+    );
+  }
+}
+
+function throwInvalidReference(): never {
+  throw new SubscriptionOverrideInputError(
+    "External reference must be a bounded printable value."
+  );
 }
 
 function assertValidDate(value: Date, label: string): void {
@@ -375,5 +448,6 @@ function sameTimestamp(left: Date | null, right: Date | null): boolean {
 }
 
 function digestReference(reference: string): string {
+  assertReference(reference);
   return createHash("sha256").update(reference, "utf8").digest("hex");
 }
