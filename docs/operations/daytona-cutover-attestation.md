@@ -29,6 +29,9 @@ credentials, private planning content, or provider output.
 | [PR #144](https://github.com/OpenCoven/coven-agents/pull/144) | `6b6cc950350aeed526c0affc376e2a187ccbd676` | 2026-08-30 |
 | [PR #145](https://github.com/OpenCoven/coven-agents/pull/145) | `e8b9a83d37eb3bb099b0ffac34957b3a460b5c47` | 2026-08-30 |
 | [PR #146](https://github.com/OpenCoven/coven-agents/pull/146) | `09fe0702e2403733b560cf14c7110c8392c17982` | 2026-08-30 |
+| [PR #183](https://github.com/OpenCoven/coven-agents/pull/183) | `52fe9f8a28b5b06099ad70c25eb6504d70597ee4` | 2026-09-01 |
+| [PR #184](https://github.com/OpenCoven/coven-agents/pull/184) | `3ad1232f061b5eaf4440b6fd3c7c13967a6c423f` | 2026-09-01 |
+| [PR #185](https://github.com/OpenCoven/coven-agents/pull/185) | `8d151e212fbc372c31ba46a4ca67650ac33a3fd2` | 2026-09-01 |
 
 The fully gated PR #134 head and its squash-merge commit both have tree
 `a8bb0a82efb6ffb7f754d03519f0d381e72fb88e`. These artifacts and results prove
@@ -84,6 +87,40 @@ Repository evidence checklist:
 - [x] Documentation and tracked-filename residue scan is clean under the
       documented exceptions.
 - [x] Exact local gate results are recorded above.
+
+### P0 repository and exact-build deployment evidence
+
+PR #183 merged the provider-neutral execution, billing, entitlement,
+credential-materialization, guest-replay, and hermetic certification work as
+commit `52fe9f8a28b5b06099ad70c25eb6504d70597ee4`. The reviewed pull-request head
+and squash merge both resolve to tree
+`28ec05d475ff8464a4fbe2f09e4416714fced78a`. PR #184 updated the console and
+guest replay timeline implementation and merged as application baseline
+`3ad1232f061b5eaf4440b6fd3c7c13967a6c423f`, tree
+`e5696dd81ca6a5d6a6e6c9f80cd4af06d20c98f0`. PR #185 records the separate
+credential-free public exact-build replay receipt.
+
+Deployment from a linked Git worktree was rejected as evidence after its route
+manifest showed that Vercel had uploaded the parent checkout. The retained
+application previews were instead built from immutable `git archive` exports
+of the stated commits in non-Git directories:
+
+- deployment `dpl_GGN1brsTesysTpzQWJpVdaLkUyZr` built PR #183 merge commit
+  `52fe9f8a28b5b06099ad70c25eb6504d70597ee4` with tree
+  `28ec05d475ff8464a4fbe2f09e4416714fced78a`;
+- its 42-page route manifest includes the internal runner inventory and Stripe
+  reconciliation routes;
+- the bounded v1 cloud health descriptor returned HTTP 200 and an anonymous
+  agents request was refused with HTTP 401;
+- the bounded Daytona diagnostic and read-only resource inventory each
+  returned a sanitized retryable HTTP 503. These are safe failures, not
+  successful provider lifecycle or resource-inventory evidence.
+
+The final live environment-name inventory removed the two remaining retired
+runtime entries: the Preview browser runner URL marker and the Production
+scoped identity-write toggle. Temporary branch-scoped preview variables and
+automation bypasses used during diagnosis were removed. No deployed credential
+value was copied into this record.
 
 ## Accepted credential materialization policy
 

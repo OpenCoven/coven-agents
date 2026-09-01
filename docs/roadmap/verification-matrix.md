@@ -1,11 +1,11 @@
 # Verification Matrix
 
 This matrix records implemented source and retained evidence as of 2026-09-01
-for application baseline `690dcfe897127b638def9c03a9de83c17fc376a2`
+for application baseline `3ad1232f061b5eaf4440b6fd3c7c13967a6c423f`
 and the documentation-only candidate that updates this matrix. Repository and
 local contract procedures are verified; infrastructure cutover evidence is
-retained; deployed Daytona lifecycle, observation, and full product release
-certification remain pending.
+retained; public guest replay is verified; deployed Daytona lifecycle,
+observation, and full product release certification remain pending.
 
 ## State vocabulary
 
@@ -32,7 +32,7 @@ certification remain pending.
 | Same-origin execution session | `Verified` | Browser transport, runner authorization, product-boundary, and browser contract tests | Production-equivalent Auth.js request evidence |
 | Tenant credential custody | `Verified` | Credential, isolation, and evidence-safety unit suites | Retained production-equivalent isolation and redaction exercise |
 | Cross-surface evidence redaction | `Verified` | `packages/agent-contracts/src/evidence-safety.test.ts`, `lib/runner/evidence.test.ts`, `lib/runner/daytona/process.test.ts`, `lib/runner/reconcile.test.ts`, `lib/runner/http.test.ts`, `lib/runner/daytona/resource-inventory.test.ts`, `lib/runner/resource-observability.test.ts`, and `lib/runner/production.test.ts` prove bounded exact redaction, adapter and neutral defense in depth, categorical observability, safe failures, and tenant-B refusal | Dated deployed Daytona attempt plus retained credential-free browser API/SSE, internal inventory/diagnostic, provider-failure, and cross-tenant refusal captures. This row is a focused local verification slice, not full release or security-program closure. |
-| Hermetic PostgreSQL browser certification | `Verified` | On 2026-09-01, `pnpm test:e2e:hermetic` passed 11 browser cases against disposable PostgreSQL for `690dcfe897127b638def9c03a9de83c17fc376a2`: signed Auth.js sessions, current `authVersion`, real API/SSE/cancellation/reconciliation, tenant-cap admission, launched and queued revocation, anonymous replay, hostile anonymous route calls, fixture separation, and unchanged application-table fingerprints | Deployed Daytona staging and production-safe evidence; hermetic certification does not replace provider or deployment proof |
+| Hermetic PostgreSQL browser certification | `Verified` | On 2026-09-01, `pnpm test:e2e:hermetic` passed 11 browser cases against disposable PostgreSQL for the PR #183 certification tree: signed Auth.js sessions, current `authVersion`, real API/SSE/cancellation/reconciliation, tenant-cap admission, launched and queued revocation, anonymous replay, hostile anonymous route calls, fixture separation, and unchanged application-table fingerprints | Deployed Daytona staging and production-safe evidence; hermetic certification does not replace provider or deployment proof |
 | Daytona lifecycle | `Verified` | Daytona adapter and runner service unit suites | Dated provider create, reuse, run, stop, delete, and cleanup artifact |
 | Idempotent starts | `Verified` | Admission, store, and browser retry unit suites | Retry exercise against release-equivalent PostgreSQL |
 | Cursor-safe SSE | `Verified` | Server and browser reconnect/cursor unit suites | Release-equivalent reconnect exercise with retained cursor evidence |

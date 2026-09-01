@@ -14,7 +14,7 @@ test("the current-state snapshot covers merged product and planning surfaces", (
   assert.match(currentState, /Snapshot date: 2026-09-01/u);
   assert.match(
     currentState,
-    /Application baseline: `690dcfe897127b638def9c03a9de83c17fc376a2`/u
+    /Application baseline: `3ad1232f061b5eaf4440b6fd3c7c13967a6c423f`/u
   );
 
   for (const evidence of [
@@ -55,7 +55,7 @@ test("the verification matrix records the newly verified repository boundaries",
   assert.match(matrix, /as of 2026-09-01/u);
   assert.match(
     matrix,
-    /application baseline `690dcfe897127b638def9c03a9de83c17fc376a2`/u
+    /application baseline `3ad1232f061b5eaf4440b6fd3c7c13967a6c423f`/u
   );
 
   for (const capability of [
