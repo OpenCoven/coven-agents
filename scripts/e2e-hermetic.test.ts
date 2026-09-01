@@ -314,3 +314,38 @@ test("database certification helper source does not select or read credential ci
   assert.doesNotMatch(source, /SELECT\s+"ciphertext"/u);
   assert.doesNotMatch(source, /SELECT\s+\*/u);
 });
+
+test("adversarial probes run only after the immutable demo replay fingerprint", async () => {
+  const source = await import("node:fs/promises").then(({ readFile }) =>
+    readFile(new URL("./e2e-hermetic.ts", import.meta.url), "utf8")
+  );
+  const replay = source.indexOf('await playwright("tests/e2e/demo.test.ts",');
+  const replayFingerprint = source.indexOf("const afterDemo", replay);
+  const replayInvariant = source.indexOf(
+    "JSON.stringify(beforeDemo) !== JSON.stringify(afterDemo)",
+    replayFingerprint
+  );
+  const adversarial = source.indexOf(
+    'await playwright("tests/e2e/demo-adversarial.test.ts",',
+    replayInvariant
+  );
+  const adversarialFingerprint = source.indexOf(
+    "const afterAdversarial",
+    adversarial
+  );
+  const adversarialInvariant = source.indexOf(
+    "JSON.stringify(beforeAdversarial) !== JSON.stringify(afterAdversarial)",
+    adversarialFingerprint
+  );
+
+  assert.ok(replay >= 0);
+  assert.ok(replayFingerprint > replay);
+  assert.ok(replayInvariant > replayFingerprint);
+  assert.ok(adversarial > replayInvariant);
+  assert.ok(adversarialFingerprint > adversarial);
+  assert.ok(adversarialInvariant > adversarialFingerprint);
+  assert.match(
+    source,
+    /Anonymous adversarial demo probes wrote to the hermetic database\./u
+  );
+});

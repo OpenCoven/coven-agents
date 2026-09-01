@@ -555,6 +555,17 @@ export async function runHermeticE2E(
     if (JSON.stringify(beforeDemo) !== JSON.stringify(afterDemo)) {
       throw new Error("Anonymous demo replay wrote to the hermetic database.");
     }
+
+    const beforeAdversarial = await applicationTableInventory(database.url);
+    await playwright("tests/e2e/demo-adversarial.test.ts", testEnvironment);
+    const afterAdversarial = await applicationTableInventory(database.url);
+    if (
+      JSON.stringify(beforeAdversarial) !== JSON.stringify(afterAdversarial)
+    ) {
+      throw new Error(
+        "Anonymous adversarial demo probes wrote to the hermetic database."
+      );
+    }
   } finally {
     await removePlaywrightArtifacts();
     await database.cleanup();
