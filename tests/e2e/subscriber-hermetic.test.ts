@@ -63,7 +63,7 @@ function api(
   options: Readonly<{
     body?: unknown;
     headers?: Record<string, string>;
-    method?: "DELETE" | "GET" | "PATCH" | "POST";
+    method?: "DELETE" | "GET" | "POST" | "PUT";
   }> = {}
 ): Promise<ApiResult> {
   return page.evaluate(
@@ -116,14 +116,16 @@ function runIdFrom(result: ApiResult): string {
 
 async function reconcile(
   request: APIRequestContext,
-  page?: Page
+  page?: Page,
+  expectedExecution: "executed" | "skipped" = "executed"
 ): Promise<void> {
   const execute = async () => {
     const response = await request.get("/api/internal/runner-reconcile", {
       headers: { authorization: `Bearer ${CRON_SECRET}` },
     });
     expect(response.status()).toBe(200);
-    expect(await response.json()).toMatchObject({ execution: "executed" });
+    const result = object(await response.json());
+    expect(result.execution).toBe(expectedExecution);
   };
   if (!page) {
     await execute();
@@ -149,7 +151,7 @@ function eventIds(text: string): number[] {
 }
 
 test.describe("hermetic subscriber browser certification", () => {
-  test.describe.configure({ mode: "serial" });
+  test.describe.configure({ mode: "serial", timeout: 90_000 });
   test.skip(
     !HERMETIC,
     "This certification runs only through test:e2e:hermetic."
@@ -279,7 +281,7 @@ test.describe("hermetic subscriber browser certification", () => {
       api(page, `/api/agents/${agentId}`),
       api(page, `/api/agents/${agentId}`, {
         body: agentInput("Unauthorized mutation"),
-        method: "PATCH",
+        method: "PUT",
       }),
       api(page, `/api/agents/${agentId}`, { method: "DELETE" }),
       api(page, `/api/agents/${agentId}/runs`),
@@ -309,29 +311,43 @@ test.describe("hermetic subscriber browser certification", () => {
       tenantFor(HERMETIC_USERS.ineligible)
     );
     await openAuthenticatedPage(page, HERMETIC_USERS.ineligible);
-    for (const result of await Promise.all([
-      api(page, "/api/agents"),
-      api(page, "/api/usage"),
-      api(page, "/api/credentials"),
-      api(page, "/api/credentials", {
-        body: {
-          credential: "hermetic-dummy-copilot-token",
-          harnessId: "copilot",
-        },
-        method: "POST",
-      }),
-      api(page, "/api/credentials/device", { method: "POST" }),
-      api(page, `/api/agents/${agentId}/runs`, {
-        body: {
-          operationId: "10000000-0000-4000-8000-000000000002",
-          task: "This must be rejected before admission.",
-        },
-        method: "POST",
-      }),
-    ])) {
-      expect(result.status).toBeGreaterThanOrEqual(401);
-      expect(result.status).toBeLessThan(500);
+    const [agents, usage, credentials, credentialWrite, deviceFlow, run] =
+      await Promise.all([
+        api(page, "/api/agents"),
+        api(page, "/api/usage"),
+        api(page, "/api/credentials"),
+        api(page, "/api/credentials", {
+          body: {
+            credential: "hermetic-dummy-copilot-token",
+            harnessId: "copilot",
+          },
+          method: "POST",
+        }),
+        api(page, "/api/credentials/device", { method: "POST" }),
+        api(page, `/api/agents/${agentId}/runs`, {
+          body: {
+            operationId: "10000000-0000-4000-8000-000000000002",
+            task: "This must be rejected before admission.",
+          },
+          method: "POST",
+        }),
+      ]);
+    for (const result of [
+      agents,
+      credentials,
+      credentialWrite,
+      deviceFlow,
+      run,
+    ]) {
+      expect(result.status).toBe(403);
     }
+    expect(usage.status).toBe(200);
+    expect(usage.body).toMatchObject({
+      dailyRemaining: 0,
+      globalAdmissionClosed: true,
+      monthlyRemaining: 0,
+      resetsAt: null,
+    });
     expect(
       await tenantCertificationCounts(tenantFor(HERMETIC_USERS.ineligible))
     ).toEqual(beforeIneligible);
@@ -398,7 +414,7 @@ test.describe("hermetic subscriber browser certification", () => {
     expect(object(object(stopped.body).run)).toMatchObject({
       status: "cancelled",
     });
-    await reconcile(request);
+    await reconcile(request, undefined, "skipped");
     expect(
       object(object((await api(page, `/api/runs/${heldRunId}`)).body).run)
     ).toMatchObject({

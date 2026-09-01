@@ -12,6 +12,7 @@ import {
   hermeticEnvironment,
   mappedPort,
   PORT_ALLOCATION_TIMEOUT_MS,
+  utcDatabaseUrl,
   waitForPlaywrightExit,
 } from "./e2e-hermetic";
 
@@ -270,6 +271,19 @@ test("hermetic port override rejects a foreign IPv6 loopback listener", async (t
 
 test("Docker operations use a short bounded timeout", () => {
   assert.equal(DOCKER_COMMAND_TIMEOUT_MS, 10_000);
+});
+
+test("disposable database URLs force UTC for every connection", () => {
+  const configured = new URL(
+    utcDatabaseUrl(
+      "postgres://postgres@example.invalid/e2e?application_name=hermetic&options=-c%20statement_timeout%3D5000"
+    )
+  );
+  assert.equal(configured.searchParams.get("application_name"), "hermetic");
+  assert.equal(
+    configured.searchParams.get("options"),
+    "-c statement_timeout=5000 -c timezone=UTC"
+  );
 });
 
 test("hermetic seed accounts are fixed non-personal subscriber and denial identities", () => {

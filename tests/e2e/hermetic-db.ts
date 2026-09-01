@@ -162,8 +162,8 @@ export async function applicationTableInventory(
     `;
     const counts = await Promise.all(
       tables.map(async ({ tablename }) => {
-        const [row] = await sql.unsafe<{ checksum: string; count: string }[]>(
-          `SELECT count(*)::text AS "count",
+        const [row] = await sql<{ checksum: string; count: string }[]>`
+          SELECT count(*)::text AS "count",
              md5(COALESCE(
                string_agg(
                  row_to_json("application_row")::text,
@@ -171,8 +171,8 @@ export async function applicationTableInventory(
                ),
                ''
              )) AS "checksum"
-           FROM ${sql(tablename)} AS "application_row"`
-        );
+          FROM ${sql(tablename)} AS "application_row"
+        `;
         return [
           tablename,
           {
