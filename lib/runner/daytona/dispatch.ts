@@ -1,5 +1,6 @@
 import "server-only";
 
+import type { RunnerExecutionProvenance } from "../execution-provenance";
 import { runnerDispatchAuthorizers } from "../executor";
 import type { RunnerStore } from "../store";
 import type { RunnerDispatchAuthority, RunnerOperator } from "../types";
@@ -31,7 +32,13 @@ export function daytonaDispatchAuthorizers(
     | "releaseDaytonaPreparation"
   >,
   operator: RunnerOperator,
-  authority: RunnerDispatchAuthority
+  authority: RunnerDispatchAuthority,
+  executionProvenance: RunnerExecutionProvenance
 ): DaytonaDispatchAuthorizers {
-  return runnerDispatchAuthorizers(store, operator, authority);
+  return runnerDispatchAuthorizers(
+    store,
+    operator,
+    authority,
+    executionProvenance
+  );
 }

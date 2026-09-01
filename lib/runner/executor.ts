@@ -1,5 +1,6 @@
 import "server-only";
 
+import type { RunnerExecutionProvenance } from "./execution-provenance";
 import type { HarnessCredential } from "./harness";
 import type { RunnerStore } from "./store";
 import type {
@@ -89,6 +90,7 @@ export type RunnerStartedExecution = Readonly<{
 }>;
 
 export type RunnerExecutor = Readonly<{
+  executionProvenance: RunnerExecutionProvenance;
   ensureExecutionContext: (authority: RunnerDispatchAuthority) => Promise<
     Readonly<{
       agent: RunnerAgentRecord;
@@ -115,7 +117,8 @@ type DispatchAuthorizerStore = Pick<
 export function runnerDispatchAuthorizers(
   store: DispatchAuthorizerStore,
   operator: RunnerOperator,
-  authority: RunnerDispatchAuthority
+  authority: RunnerDispatchAuthority,
+  executionProvenance: RunnerExecutionProvenance
 ): RunnerExecutionAuthorizers {
   let prepared: RunnerDispatchAuthority | undefined;
   let latest = authority;
@@ -150,7 +153,8 @@ export function runnerDispatchAuthorizers(
       }
       const result = await store.authorizeDaytonaPreparation(
         operator,
-        authority
+        authority,
+        { executionProvenance }
       );
       if (result.kind !== "authorized") {
         return null;

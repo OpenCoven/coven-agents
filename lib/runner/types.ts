@@ -7,6 +7,7 @@ import type {
   RunEvent,
   RunSnapshot,
 } from "@opencoven/agent-contracts";
+import type { RunnerExecutionProvenance } from "./execution-provenance";
 
 /**
  * A subscriber's authority to access only their tenant's runner records.
@@ -162,6 +163,7 @@ export type RunnerRunRecord = Omit<
   dispatchState: RunnerDispatchState;
   error: RunError | null;
   executionPermission: RunnerExecutionPermission;
+  executionProvenance: RunnerExecutionProvenance | null;
   logCursor: number;
   queueSequence: number;
   requestHash: string;
@@ -320,6 +322,10 @@ export type ExpiredDispatchLeaseAdoptionInput = ExpiredDispatchRequeueInput & {
 export type ReleaseDaytonaAttemptInput = {
   attemptId: RunnerDaytonaAttemptId;
 };
+
+export type AuthorizeDaytonaPreparationInput = Readonly<{
+  executionProvenance: RunnerExecutionProvenance;
+}>;
 
 export type ReleaseExpiredDaytonaAttemptInput = ExpiredDispatchRequeueInput & {
   attemptId: RunnerDaytonaAttemptId;

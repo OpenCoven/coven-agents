@@ -14,6 +14,7 @@ import { probeDaytonaHarnesses } from "./process";
 import {
   classifyDaytonaProviderError,
   classifyDaytonaSandboxCreateError,
+  type DaytonaSandboxConfiguration,
   DaytonaSandboxLifecycleError,
   daytonaSandboxConfiguration,
   deleteDaytonaSandbox,
@@ -27,10 +28,11 @@ const principal: RunnerPrincipal = {
   tenant: "private_tenant",
   userId: "user",
 };
-const config = {
+const config: DaytonaSandboxConfiguration = {
   autoArchiveInterval: 10_080,
   autoStopInterval: 15,
   snapshotName: "coven-agents-copilot-1",
+  target: "us",
 };
 
 function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
@@ -1709,6 +1711,7 @@ test("production Daytona egress configuration is required and normalized", () =>
     daytonaSandboxConfiguration(environment).domainAllowList,
     "github.com,api.github.com"
   );
+  assert.equal(daytonaSandboxConfiguration(environment).target, "us");
   for (const invalidValue of [
     undefined,
     "",

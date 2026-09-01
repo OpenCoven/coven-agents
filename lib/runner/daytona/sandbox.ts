@@ -60,6 +60,7 @@ export type DaytonaSandboxConfiguration = Readonly<{
   autoStopInterval: number;
   domainAllowList?: string;
   snapshotName: string;
+  target: "eu" | "us";
 }>;
 
 export type DaytonaSandboxLifecycleDependencies = Readonly<{
@@ -122,6 +123,7 @@ export function daytonaSandboxConfiguration(
   environment: NodeJS.ProcessEnv = process.env
 ): DaytonaSandboxConfiguration {
   const domainAllowList = daytonaDomainAllowList(environment);
+  const snapshotConfiguration = daytonaSnapshotConfiguration(environment);
   return {
     autoArchiveInterval: nonNegativeMinutes(
       environment,
@@ -134,7 +136,8 @@ export function daytonaSandboxConfiguration(
       DEFAULT_AUTO_STOP_MINUTES
     ),
     ...(domainAllowList ? { domainAllowList } : {}),
-    snapshotName: daytonaSnapshotConfiguration(environment).snapshotName,
+    snapshotName: snapshotConfiguration.snapshotName,
+    target: snapshotConfiguration.target,
   };
 }
 

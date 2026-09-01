@@ -35,6 +35,7 @@ import {
   STRIPE_RECONCILIATION_REASONS,
   STRIPE_RECONCILIATION_STATUSES,
 } from "../billing/stripe-reconciliation";
+import type { RunnerExecutionProvenance } from "../runner/execution-provenance";
 
 const runnerMaxCommandResultsSql = sql.raw(
   String(AGENT_RUNNER_LIMITS.maxCommandResults)
@@ -711,6 +712,9 @@ export const runnerRun = pgTable(
     })
       .notNull()
       .default("unrestricted"),
+    executionProvenance: jsonb(
+      "executionProvenance"
+    ).$type<RunnerExecutionProvenance>(),
     fileEvidence: jsonb("fileEvidence")
       .$type<FileEvidence[]>()
       .notNull()
@@ -794,6 +798,24 @@ export const runnerRun = pgTable(
     check(
       "RunnerRun_executionPermission_valid",
       sql`${table.executionPermission} in ('unrestricted', 'workspace_read', 'workspace_write')`
+    ),
+    check(
+      "RunnerRun_executionProvenance_valid",
+      sql`${table.executionProvenance} is null or (
+        jsonb_typeof(${table.executionProvenance}) = 'object'
+        and ${table.executionProvenance} ?& array['productExecutionClass', 'provider', 'capabilityContractVersion', 'adapterVersion', 'pinnedSnapshot', 'target', 'lifecycle']
+        and (${table.executionProvenance} - 'productExecutionClass' - 'provider' - 'capabilityContractVersion' - 'adapterVersion' - 'pinnedSnapshot' - 'target' - 'lifecycle') = '{}'::jsonb
+        and ${table.executionProvenance}->>'productExecutionClass' = 'hosted'
+        and ${table.executionProvenance}->>'provider' = 'daytona'
+        and jsonb_typeof(${table.executionProvenance}->'capabilityContractVersion') = 'string'
+        and ${table.executionProvenance}->>'capabilityContractVersion' ~ '^hosted-v[1-9][0-9]{0,2}$'
+        and jsonb_typeof(${table.executionProvenance}->'adapterVersion') = 'string'
+        and ${table.executionProvenance}->>'adapterVersion' ~ '^daytona-adapter-v[1-9][0-9]{0,2}$'
+        and jsonb_typeof(${table.executionProvenance}->'pinnedSnapshot') = 'string'
+        and ${table.executionProvenance}->>'pinnedSnapshot' ~ '^coven-agents-copilot-[0-9]{1,10}$'
+        and ${table.executionProvenance}->>'target' in ('eu', 'us')
+        and ${table.executionProvenance}->>'lifecycle' = 'persistent'
+      )`
     ),
     check("RunnerRun_queueSequence_positive", sql`${table.queueSequence} > 0`),
     check("RunnerRun_logCursor_nonnegative", sql`${table.logCursor} >= 0`),

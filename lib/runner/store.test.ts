@@ -19,6 +19,7 @@ import {
   MAX_EVENTS_PER_RUN,
   MAX_PERSISTED_EVENT_BYTES_PER_RUN,
 } from "./evidence";
+import type { RunnerExecutionProvenance } from "./execution-provenance";
 import {
   createRunnerStore,
   type RunnerStoreDatabase,
@@ -40,6 +41,20 @@ const principal: RunnerPrincipal = {
 };
 const operator: RunnerOperator = { kind: "runner-operator" };
 const dialect = new PgDialect();
+const executionProvenance: RunnerExecutionProvenance = {
+  adapterVersion: "daytona-adapter-v1",
+  capabilityContractVersion: "hosted-v1",
+  lifecycle: "persistent",
+  pinnedSnapshot: "coven-agents-copilot-1",
+  productExecutionClass: "hosted",
+  provider: "daytona",
+  target: "us",
+};
+const retryExecutionProvenance: RunnerExecutionProvenance = {
+  ...executionProvenance,
+  pinnedSnapshot: "coven-agents-copilot-2",
+  target: "eu",
+};
 
 function queryText(statement: RunnerStoreStatement): string {
   return dialect.sqlToQuery(statement.query).sql;
@@ -77,6 +92,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     dispatchState: "dispatching",
     error: null,
     executionPermission: "unrestricted",
+    executionProvenance: null,
     fileEvidence: [],
     id: "00000000-0000-4000-8000-000000000002",
     logCursor: 3,
@@ -2056,6 +2072,7 @@ test("terminal cleanup retains ownership until the exact attempt is released", a
     daytonaCommandId: "command",
     daytonaSessionId: daytonaRunSessionName(run().id, attemptId),
     dispatchState: "terminal",
+    executionProvenance,
     status: "completed",
   });
   const authority = {
@@ -2090,6 +2107,8 @@ test("terminal cleanup retains ownership until the exact attempt is released", a
   assert.match(releaseQuery, /"daytonaAttemptId" = NULL/);
   assert.match(releaseQuery, /"daytonaSessionId" = NULL/);
   assert.match(releaseQuery, /"daytonaCommandId" = NULL/);
+  assert.doesNotMatch(releaseQuery, /"executionProvenance" = NULL/);
+  assert.deepEqual(released.executionProvenance, executionProvenance);
 });
 
 test("terminal lease cleanup refuses unresolved provider ownership", async () => {
@@ -2735,7 +2754,8 @@ test("dispatch store methods fence preparation, attachment, and release", async 
 
   const claim = await preparation.store.authorizeDaytonaPreparation(
     operator,
-    authority
+    authority,
+    { executionProvenance }
   );
   assert.equal(claim.kind, "authorized");
   assert.match(
@@ -2753,6 +2773,11 @@ test("dispatch store methods fence preparation, attachment, and release", async 
   assert.match(
     queryText(preparation.statements[1] as RunnerStoreStatement),
     /"version" = "version" \+ 1/
+  );
+  assert.deepEqual(
+    (preparation.statements[1] as RunnerStoreStatement).args
+      .executionProvenance,
+    executionProvenance
   );
   assert.equal(claim.kind, "authorized");
   if (claim.kind !== "authorized") {
@@ -2835,6 +2860,33 @@ test("dispatch store methods fence preparation, attachment, and release", async 
     queryText(release.statements[1] as RunnerStoreStatement),
     /"dispatchLeaseExpiresAt" > clock_timestamp\(\)/
   );
+  assert.match(
+    queryText(release.statements[1] as RunnerStoreStatement),
+    /"executionProvenance" = NULL/
+  );
+
+  const retryCurrent = run({
+    executionProvenance: null,
+    version: releaseUpdated.version,
+  });
+  const retryUpdated = run({
+    daytonaAttemptId: claim.attemptId,
+    executionProvenance: retryExecutionProvenance,
+    version: retryCurrent.version + 1,
+  });
+  const retry = scripted([retryCurrent], [retryUpdated]);
+  assert.equal(
+    (
+      await retry.store.authorizeDaytonaPreparation(operator, authority, {
+        executionProvenance: retryExecutionProvenance,
+      })
+    ).kind,
+    "authorized"
+  );
+  assert.deepEqual(
+    (retry.statements[1] as RunnerStoreStatement).args.executionProvenance,
+    retryExecutionProvenance
+  );
 
   let callbackLaunched = false;
   const callbacks = daytonaDispatchAuthorizers(
@@ -2858,7 +2910,8 @@ test("dispatch store methods fence preparation, attachment, and release", async 
         Promise.resolve({ authority, kind: "released" as const }),
     },
     operator,
-    authority
+    authority,
+    executionProvenance
   );
   const callbackClaim = await callbacks.authorizePreparation({
     runId: dispatching.id,
@@ -2897,15 +2950,24 @@ test("attempt ownership excludes parallel attempts and stale releases", async ()
   const parallel = scripted([
     run({
       daytonaAttemptId: existingClaim,
+      executionProvenance,
       version: authority.expectedVersion,
     }),
   ]);
 
   assert.deepEqual(
-    await parallel.store.authorizeDaytonaPreparation(operator, authority),
+    await parallel.store.authorizeDaytonaPreparation(operator, authority, {
+      executionProvenance: retryExecutionProvenance,
+    }),
     { kind: "not_live" }
   );
   assert.equal(parallel.statements.length, 1);
+  assert.equal(
+    "executionProvenance" in
+      (parallel.statements[0] as RunnerStoreStatement).args,
+    false,
+    "a claimed attempt cannot be overwritten with a different descriptor"
+  );
 
   const staleAuthority = {
     ...authority,
@@ -2942,7 +3004,9 @@ test("dispatch callbacks deny a run with durable cancellation intent", async () 
   ]);
 
   assert.deepEqual(
-    await store.authorizeDaytonaPreparation(operator, authority),
+    await store.authorizeDaytonaPreparation(operator, authority, {
+      executionProvenance,
+    }),
     { kind: "not_live" }
   );
   assert.equal(statements.length, 1);

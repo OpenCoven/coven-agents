@@ -27,6 +27,57 @@ test("migration 0015 adds nullable fail-closed run authority without a default",
   );
 });
 
+test("migration 0026 adds nullable, strict execution provenance without history rewrites", () => {
+  const migrationDirectory = new URL("../db/migrations/", import.meta.url);
+  const provenanceMigrationName = readdirSync(migrationDirectory).find((name) =>
+    name.startsWith("0026_")
+  );
+  assert.ok(
+    provenanceMigrationName,
+    "execution provenance requires migration 0026"
+  );
+  const provenanceMigration = readFileSync(
+    new URL(provenanceMigrationName, migrationDirectory),
+    "utf8"
+  );
+
+  assert.match(
+    provenanceMigration,
+    /ALTER TABLE "RunnerRun" ADD COLUMN "executionProvenance" jsonb/u
+  );
+  assert.match(provenanceMigration, /RunnerRun_executionProvenance_valid/u);
+  assert.match(
+    provenanceMigration,
+    /productExecutionClass.*provider.*pinnedSnapshot/u
+  );
+  assert.match(provenanceMigration, /"executionProvenance" is null/u);
+  assert.doesNotMatch(
+    provenanceMigration,
+    /"executionProvenance"[^;]*DEFAULT/iu
+  );
+  assert.doesNotMatch(provenanceMigration, /UPDATE "RunnerRun"/u);
+  assert.doesNotMatch(provenanceMigration, /apiKey|apiUrl|secret|token/iu);
+
+  const provenanceJournal = JSON.parse(
+    readFileSync(new URL("meta/_journal.json", migrationDirectory), "utf8")
+  ) as { entries: { idx: number; tag: string }[] };
+  const provenanceEntry = provenanceJournal.entries.find(
+    (candidate) => candidate.idx === 26
+  );
+  assert.deepEqual(provenanceEntry, {
+    ...provenanceEntry,
+    idx: 26,
+    tag: provenanceMigrationName.replace(/\.sql$/u, ""),
+  });
+
+  const provenanceSnapshot = readFileSync(
+    new URL("meta/0026_snapshot.json", migrationDirectory),
+    "utf8"
+  );
+  assert.match(provenanceSnapshot, /"executionProvenance"/u);
+  assert.match(provenanceSnapshot, /RunnerRun_executionProvenance_valid/u);
+});
+
 test("generated migration 0016 adds the fenced reconciliation lease consistently", () => {
   const directory = new URL("../db/migrations/", import.meta.url);
   const migrationName = readdirSync(directory).find((name) =>

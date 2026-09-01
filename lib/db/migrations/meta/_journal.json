@@ -183,6 +183,13 @@
       "when": 1788232323689,
       "tag": "0025_cynical_scourge",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1788236341307,
+      "tag": "0026_slippery_zarda",
+      "breakpoints": true
     }
   ]
 }

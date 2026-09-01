@@ -659,7 +659,8 @@ export async function dispatchRunnerClaim(
   const callbacks = runnerDispatchAuthorizers(
     dependencies.store,
     dependencies.operator,
-    authority
+    authority,
+    dependencies.executor.executionProvenance
   );
   let started: Awaited<ReturnType<RunnerExecutor["start"]>>;
   try {

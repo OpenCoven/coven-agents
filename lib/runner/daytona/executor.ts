@@ -7,6 +7,10 @@ import {
   type RunnerCredentialDependencies,
 } from "@/lib/credentials/runner-credential";
 import type { RunnerDispatchDependencies } from "../admission";
+import {
+  HOSTED_EXECUTION_CAPABILITY_CONTRACT_VERSION,
+  type RunnerExecutionProvenance,
+} from "../execution-provenance";
 import type { RunnerExecutionContext, RunnerExecutor } from "../executor";
 import type { RunnerStore } from "../store";
 import type { RunnerDispatchAuthority, RunnerOperator } from "../types";
@@ -23,6 +27,7 @@ import {
 } from "./sandbox";
 
 type DaytonaExecutorOperations = Readonly<{
+  executionProvenance: RunnerExecutionProvenance;
   ensureContext: (authority: RunnerDispatchAuthority) => Promise<{
     agent: Awaited<ReturnType<typeof ensureDaytonaSandboxForDispatch>>["agent"];
     sandbox: DaytonaProcessSandbox;
@@ -30,6 +35,22 @@ type DaytonaExecutorOperations = Readonly<{
   inspectWorkspace: typeof inspectRestrictedWorkspace;
   startProcess: typeof startDaytonaProcess;
 }>;
+
+export const DAYTONA_EXECUTOR_ADAPTER_VERSION = "daytona-adapter-v1";
+
+export function daytonaExecutionProvenance(
+  configuration: DaytonaSandboxConfiguration
+): RunnerExecutionProvenance {
+  return Object.freeze({
+    adapterVersion: DAYTONA_EXECUTOR_ADAPTER_VERSION,
+    capabilityContractVersion: HOSTED_EXECUTION_CAPABILITY_CONTRACT_VERSION,
+    lifecycle: "persistent",
+    pinnedSnapshot: configuration.snapshotName,
+    productExecutionClass: "hosted",
+    provider: "daytona",
+    target: configuration.target,
+  });
+}
 
 function runnerExecutionContext(
   sandbox: DaytonaProcessSandbox
@@ -59,6 +80,7 @@ export function daytonaRunnerExecutor(
         context: runnerExecutionContext(ensured.sandbox),
       };
     },
+    executionProvenance: operations.executionProvenance,
     inspectWorkspaceSafety: (context, workspace) =>
       operations.inspectWorkspace(daytonaProcessSandbox(context), workspace),
     isCleanupPending: (error) =>
@@ -109,6 +131,9 @@ export function configuredDaytonaRunnerExecutor(
         sandbox: ensured.sandbox as DaytonaProcessSandbox,
       };
     },
+    executionProvenance: daytonaExecutionProvenance(
+      configuration.sandboxConfiguration
+    ),
     inspectWorkspace: inspectRestrictedWorkspace,
     startProcess: startDaytonaProcess,
   });

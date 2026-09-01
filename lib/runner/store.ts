@@ -24,6 +24,7 @@ import type {
   AdoptExpiredDaytonaProcessInput,
   AppendRunnerEventBatchInput,
   AppendRunnerEventInput,
+  AuthorizeDaytonaPreparationInput,
   BeginDaytonaSandboxDecommissionInput,
   BeginDaytonaSandboxWarmInput,
   ClaimExpiredDaytonaAttemptCleanupInput,
@@ -182,6 +183,7 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
     dispatchState: column(row, "dispatchState"),
     error: column(row, "error"),
     executionPermission: column(row, "executionPermission"),
+    executionProvenance: column(row, "executionProvenance"),
     fileEvidence: column(row, "fileEvidence"),
     id: column(row, "id"),
     logCursor: column(row, "logCursor"),
@@ -1833,7 +1835,8 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
 
     authorizeDaytonaPreparation: (
       _operator: RunnerOperator,
-      authority: RunnerDispatchAuthority
+      authority: RunnerDispatchAuthority,
+      input: AuthorizeDaytonaPreparationInput
     ): Promise<
       | {
           authority: RunnerDispatchAuthority;
@@ -1858,6 +1861,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             "claim-daytona-process-preparation",
             {
               attemptId,
+              executionProvenance: input.executionProvenance,
               expectedVersion: authority.expectedVersion,
               leaseToken: authority.leaseToken,
               runId: run.id,
@@ -1865,6 +1869,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             },
             sql`UPDATE "RunnerRun"
               SET "daytonaAttemptId" = ${attemptId},
+                  "executionProvenance" = ${JSON.stringify(input.executionProvenance)}::jsonb,
                   "updatedAt" = now(),
                   "version" = "version" + 1
               WHERE "id" = ${run.id}
@@ -3441,6 +3446,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             },
             sql`UPDATE "RunnerRun"
               SET "daytonaAttemptId" = NULL,
+                  "executionProvenance" = NULL,
                   "updatedAt" = now(),
                   "version" = "version" + 1
               WHERE "id" = ${run.id}

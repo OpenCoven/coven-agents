@@ -9,6 +9,7 @@ import {
   dispatchRunnerClaim,
   RunnerAdmissionConfigurationError,
 } from "./admission";
+import type { RunnerExecutionProvenance } from "./execution-provenance";
 import type {
   RunnerExecutionContext,
   RunnerExecutor,
@@ -29,6 +30,15 @@ const operator: RunnerOperator = { kind: "runner-operator" };
 const attemptId =
   "53af1a29-4e98-43d6-ac5b-3b9dcba5e730" as RunnerDaytonaAttemptId;
 const executionContext = {} as RunnerExecutionContext;
+const executionProvenance: RunnerExecutionProvenance = {
+  adapterVersion: "fake-adapter-v1",
+  capabilityContractVersion: "hosted-v1",
+  lifecycle: "persistent",
+  pinnedSnapshot: "fake-snapshot-v1",
+  productExecutionClass: "hosted",
+  provider: "fake",
+  target: "test",
+};
 
 function executor(overrides: Partial<RunnerExecutor> = {}): RunnerExecutor {
   return {
@@ -36,6 +46,7 @@ function executor(overrides: Partial<RunnerExecutor> = {}): RunnerExecutor {
       agent: agent(),
       context: executionContext,
     }),
+    executionProvenance,
     inspectWorkspaceSafety: async () => ({ kind: "safe" }),
     isCleanupPending: () => false,
     start: async (_input: RunnerExecutorStartInput) => {
@@ -65,6 +76,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     dispatchState: "dispatching",
     error: null,
     executionPermission: "unrestricted",
+    executionProvenance: null,
     fileEvidence: [],
     id: "00000000-0000-4000-8000-000000000002",
     logCursor: 1,

@@ -707,6 +707,7 @@ test("reconciliation recovers a cancelled terminal row after lease cleanup faile
     dispatchState: "dispatching",
     error: null,
     executionPermission: "unrestricted",
+    executionProvenance: null,
     fileEvidence: [],
     id: RUN_ID,
     logCursor: 1,

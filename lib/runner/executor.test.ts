@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { daytonaRunnerExecutor } from "./daytona/executor";
+import {
+  DAYTONA_EXECUTOR_ADAPTER_VERSION,
+  daytonaExecutionProvenance,
+  daytonaRunnerExecutor,
+} from "./daytona/executor";
 import type { DaytonaProcessSandbox } from "./daytona/process";
 import { DaytonaProcessError } from "./daytona/process";
+import {
+  HOSTED_EXECUTION_CAPABILITY_CONTRACT_VERSION,
+  type RunnerExecutionProvenance,
+} from "./execution-provenance";
 import type {
   RestrictedWorkspaceInspection,
   RunnerExecutionContext,
@@ -25,6 +33,24 @@ const dispatchAuthority = {
   attemptId: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730" as RunnerDaytonaAttemptId,
   expectedVersion: 5,
 } as RunnerDispatchAuthority;
+const fakeExecutionProvenance: RunnerExecutionProvenance = {
+  adapterVersion: "fake-adapter-v1",
+  capabilityContractVersion: "hosted-v1",
+  lifecycle: "persistent",
+  pinnedSnapshot: "fake-snapshot-v1",
+  productExecutionClass: "hosted",
+  provider: "fake",
+  target: "test",
+};
+const daytonaProvenance: RunnerExecutionProvenance = {
+  adapterVersion: "daytona-adapter-v1",
+  capabilityContractVersion: "hosted-v1",
+  lifecycle: "persistent",
+  pinnedSnapshot: "coven-agents-copilot-1",
+  productExecutionClass: "hosted",
+  provider: "daytona",
+  target: "us",
+};
 
 function agent(): RunnerAgentRecord {
   return {
@@ -92,6 +118,7 @@ class DeterministicFakeExecutor implements RunnerExecutor {
   readonly calls: ExecutorExercise["calls"] = {};
   readonly cleanupPendingError = new Error("cleanup remains pending");
   readonly context = {} as RunnerExecutionContext;
+  readonly executionProvenance = fakeExecutionProvenance;
   inspection: RestrictedWorkspaceInspection = { kind: "safe" };
 
   ensureExecutionContext(forwarded: RunnerDispatchAuthority) {
@@ -158,6 +185,7 @@ function daytonaExecutorExercise(): ExecutorExercise {
         calls.ensured = forwarded;
         return Promise.resolve({ agent: agent(), sandbox });
       },
+      executionProvenance: daytonaProvenance,
       inspectWorkspace: (forwarded, workspace) => {
         assert.equal(forwarded, sandbox);
         calls.inspected = workspace;
@@ -182,6 +210,38 @@ function daytonaExecutorExercise(): ExecutorExercise {
     },
   };
 }
+
+test("Daytona adapter derives immutable, sanitized hosted provenance", () => {
+  const provenance = daytonaExecutionProvenance({
+    autoArchiveInterval: 10_080,
+    autoStopInterval: 15,
+    snapshotName: "coven-agents-copilot-42",
+    target: "eu",
+  });
+
+  assert.deepEqual(provenance, {
+    adapterVersion: DAYTONA_EXECUTOR_ADAPTER_VERSION,
+    capabilityContractVersion: HOSTED_EXECUTION_CAPABILITY_CONTRACT_VERSION,
+    lifecycle: "persistent",
+    pinnedSnapshot: "coven-agents-copilot-42",
+    productExecutionClass: "hosted",
+    provider: "daytona",
+    target: "eu",
+  });
+  assert.equal(Object.isFrozen(provenance), true);
+  assert.deepEqual(Object.keys(provenance).sort(), [
+    "adapterVersion",
+    "capabilityContractVersion",
+    "lifecycle",
+    "pinnedSnapshot",
+    "productExecutionClass",
+    "provider",
+    "target",
+  ]);
+  assert.equal("apiKey" in provenance, false);
+  assert.equal("apiUrl" in provenance, false);
+  assert.equal("secret" in provenance, false);
+});
 
 function executorContract(
   name: string,
