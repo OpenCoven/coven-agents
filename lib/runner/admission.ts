@@ -380,11 +380,13 @@ export async function admitRunnerRun(
       ...(input.agentSnapshot ? { agentSnapshot: input.agentSnapshot } : {}),
       authVersion: input.authVersion,
       executionPermission: input.executionPermission ?? "unrestricted",
+      githubBrokerPolicy: input.githubBrokerPolicy ?? null,
       id: input.id,
       ...(initialDispatch ? { initialDispatch } : {}),
       operationId: input.operationId,
       requestHash: input.requestHash,
       task: input.task,
+      teamStepId: input.teamStepId ?? null,
     });
   } catch {
     return {
