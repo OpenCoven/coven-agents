@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 const IS_DEMO = process.env.IS_DEMO === "1";
+const LOCAL_ORIGIN = process.env.APP_ORIGIN ?? "http://localhost:3100";
 
 test.describe("Anonymous fixture demo", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
@@ -12,10 +13,7 @@ test.describe("Anonymous fixture demo", () => {
     const prohibitedRequests: string[] = [];
     page.on("request", (request) => {
       const url = new URL(request.url());
-      if (
-        url.origin !== "http://localhost:3100" ||
-        url.pathname.includes("/api/")
-      ) {
+      if (url.origin !== LOCAL_ORIGIN || url.pathname.includes("/api/")) {
         prohibitedRequests.push(`${request.method()} ${url.href}`);
       }
     });

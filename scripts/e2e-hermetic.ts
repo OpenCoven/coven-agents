@@ -1,7 +1,8 @@
 #!/usr/bin/env tsx
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { rm } from "node:fs/promises";
+import { createServer } from "node:net";
 import { promisify } from "node:util";
 import { HARNESS_SPECS } from "@opencoven/harness";
 import {
@@ -13,6 +14,8 @@ const executeFile = promisify(execFile);
 const COMMAND_TIMEOUT_MS = 120_000;
 const DATABASE_READY_TIMEOUT_MS = 30_000;
 export const DOCKER_COMMAND_TIMEOUT_MS = 10_000;
+export const PORT_ALLOCATION_TIMEOUT_MS = 5000;
+const PROCESS_TERMINATION_GRACE_MS = 5000;
 const POSTGRES_IMAGE = "postgres:16-alpine";
 const POSTGRES_DATABASE = "coven_hermetic_e2e";
 const POSTGRES_PASSWORD = "test-hermetic-postgres";
@@ -108,8 +111,97 @@ type CommandOptions = Readonly<{
   timeout?: number;
 }>;
 
+type Environment = Readonly<Record<string, string | undefined>>;
+
+function localOrigin(port: number): string {
+  return `http://localhost:${port}`;
+}
+
 function executable(name: string): string {
   return process.platform === "win32" ? `${name}.cmd` : name;
+}
+
+export function explicitHermeticPort(
+  environment: Environment = process.env
+): number | undefined {
+  const value = environment.E2E_HERMETIC_PORT;
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!/^[1-9]\d{0,4}$/u.test(value)) {
+    throw new Error(
+      "E2E_HERMETIC_PORT must be a decimal loopback port from 1 through 65535."
+    );
+  }
+  const port = Number(value);
+  if (port > 65_535) {
+    throw new Error(
+      "E2E_HERMETIC_PORT must be a decimal loopback port from 1 through 65535."
+    );
+  }
+  return port;
+}
+
+async function bindAvailableLoopbackPort(
+  requestedPort: number
+): Promise<number> {
+  const server = createServer();
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      timeout = setTimeout(() => {
+        reject(
+          new Error(
+            `Timed out while reserving hermetic loopback port ${requestedPort || "automatically"}.`
+          )
+        );
+      }, PORT_ALLOCATION_TIMEOUT_MS);
+      server.once("error", (error) => {
+        reject(
+          new Error(
+            requestedPort
+              ? `E2E_HERMETIC_PORT ${requestedPort} is unavailable on 127.0.0.1.`
+              : "Could not allocate a free hermetic loopback port.",
+            { cause: error }
+          )
+        );
+      });
+      server.listen({ host: "127.0.0.1", port: requestedPort }, () => {
+        resolve();
+      });
+    });
+    const address = server.address();
+    if (!address || typeof address === "string" || address.port < 1) {
+      throw new Error("Could not allocate a usable hermetic loopback port.");
+    }
+    return address.port;
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => {
+        if (
+          (error as NodeJS.ErrnoException | undefined)?.code ===
+          "ERR_SERVER_NOT_RUNNING"
+        ) {
+          resolve();
+          return;
+        }
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+}
+
+export function allocateHermeticPort(
+  environment: Environment = process.env
+): Promise<number> {
+  return bindAvailableLoopbackPort(explicitHermeticPort(environment) ?? 0);
 }
 
 async function command(
@@ -204,11 +296,10 @@ async function waitForPostgres(name: string): Promise<void> {
 
 export function hermeticEnvironment(
   url: string,
-  inherited: NodeJS.ProcessEnv = process.env
+  inherited: Environment = process.env,
+  port = 3100
 ): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = {
-    ...inherited,
-  };
+  const environment = { ...inherited } as NodeJS.ProcessEnv;
   for (const name of Object.keys(environment)) {
     if (isExternalEnvironmentVariable(name)) {
       environment[name] = "";
@@ -220,13 +311,14 @@ export function hermeticEnvironment(
   for (const name of HARNESS_AUTH_ENVIRONMENT_VARIABLES) {
     environment[name] = "";
   }
+  const origin = localOrigin(port);
   return {
     ...environment,
     ABUSE_CONTROL: "",
     ABUSE_KEY_SECRET: "test-hermetic-abuse",
-    APP_ORIGIN: "http://localhost:3100",
+    APP_ORIGIN: origin,
     AUTH_SECRET: "test-hermetic-auth",
-    AUTH_URL: "http://localhost:3100",
+    AUTH_URL: origin,
     COVEN_HERMETIC_RUNNER: "1",
     CREDENTIAL_KEK_CURRENT_VERSION: "v1",
     CREDENTIAL_KEK_V1: TEST_KEK,
@@ -235,10 +327,10 @@ export function hermeticEnvironment(
     GLOBAL_DAILY_RUN_CAP: "100",
     IS_DEMO: "",
     NEXT_TELEMETRY_DISABLED: "1",
-    NEXTAUTH_URL: "http://localhost:3100",
+    NEXTAUTH_URL: origin,
     NODE_ENV: "development",
     OPERATOR_DIAGNOSTIC_TOKEN: "test-hermetic-diagnostic",
-    PORT: "3100",
+    PORT: String(port),
     POSTGRES_URL: url,
     REDIS_URL: "",
     RUN_ADMISSION_CONSECUTIVE_MAX: "2",
@@ -263,11 +355,73 @@ async function playwright(
   file: string,
   environment: NodeJS.ProcessEnv
 ): Promise<void> {
-  await command(
+  const child = spawn(
     executable("pnpm"),
     ["exec", "playwright", "test", file, "--project=e2e", "--workers=1"],
-    { env: environment, timeout: COMMAND_TIMEOUT_MS }
+    {
+      detached: process.platform !== "win32",
+      env: environment,
+      stdio: "inherit",
+    }
   );
+  const completion = new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(
+        new Error(
+          `Focused Playwright test ${file} failed${signal ? ` from ${signal}` : ` with exit code ${code ?? "unknown"}`}; its output is shown above.`
+        )
+      );
+    });
+  });
+  const terminateProcessTree = async (): Promise<void> => {
+    const { pid } = child;
+    if (!pid) {
+      return;
+    }
+    const signal = (value: NodeJS.Signals): void => {
+      try {
+        if (process.platform === "win32") {
+          child.kill(value);
+        } else {
+          process.kill(-pid, value);
+        }
+      } catch {
+        // The exact Playwright process group may already have exited.
+      }
+    };
+    signal("SIGTERM");
+    await new Promise((resolve) => {
+      setTimeout(resolve, PROCESS_TERMINATION_GRACE_MS);
+    });
+    signal("SIGKILL");
+  };
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      completion,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(
+            new Error(
+              `Focused Playwright test ${file} timed out after ${COMMAND_TIMEOUT_MS / 1000} seconds; its output is shown above.`
+            )
+          );
+        }, COMMAND_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (error) {
+    await terminateProcessTree();
+    throw error;
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 async function removePlaywrightArtifacts(): Promise<void> {
@@ -333,9 +487,16 @@ export async function runHermeticE2E(
 ): Promise<void> {
   const database = await createDisposableDatabase(environment);
   try {
-    const testEnvironment = hermeticEnvironment(database.url, environment);
     await migrate(database.url, environment);
     await seedHermeticUsers(database.url);
+    // Allocate immediately before Playwright starts its owned web server, which
+    // minimizes the unavoidable release-to-bind race for a dynamically chosen port.
+    const port = await allocateHermeticPort(environment);
+    const testEnvironment = hermeticEnvironment(
+      database.url,
+      environment,
+      port
+    );
     await playwright("tests/e2e/subscriber-hermetic.test.ts", testEnvironment);
 
     const beforeDemo = await applicationTableInventory(database.url);

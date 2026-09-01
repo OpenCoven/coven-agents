@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:net";
 import test from "node:test";
 import { HARNESS_SPECS } from "@opencoven/harness";
 import { HERMETIC_TENANTS, HERMETIC_USERS } from "../tests/e2e/hermetic-db";
 import {
+  allocateHermeticPort,
   DOCKER_COMMAND_TIMEOUT_MS,
   dockerRunArguments,
+  explicitHermeticPort,
   hermeticEnvironment,
   mappedPort,
+  PORT_ALLOCATION_TIMEOUT_MS,
 } from "./e2e-hermetic";
 
 test("hermetic Docker command names and publishes only its exact disposable container", () => {
@@ -112,6 +116,55 @@ test("hermetic runner environment explicitly blanks external configuration", asy
   }
 });
 
+test("hermetic port override is strictly validated", () => {
+  assert.equal(explicitHermeticPort({}), undefined);
+  assert.equal(explicitHermeticPort({ E2E_HERMETIC_PORT: "43123" }), 43_123);
+  for (const value of ["", "0", "65536", "-1", "3100.5", " 3100"]) {
+    assert.throws(
+      () => explicitHermeticPort({ E2E_HERMETIC_PORT: value }),
+      /E2E_HERMETIC_PORT/u
+    );
+  }
+});
+
+test("hermetic port allocation is bounded and configures one local origin", async () => {
+  assert.equal(PORT_ALLOCATION_TIMEOUT_MS, 5000);
+  const port = await allocateHermeticPort();
+  assert.ok(port >= 1 && port <= 65_535);
+  const environment = hermeticEnvironment(
+    "postgres://example.invalid/e2e",
+    {},
+    port
+  );
+  const origin = `http://localhost:${port}`;
+  assert.equal(environment.PORT, String(port));
+  assert.equal(environment.APP_ORIGIN, origin);
+  assert.equal(environment.AUTH_URL, origin);
+  assert.equal(environment.NEXTAUTH_URL, origin);
+});
+
+test("hermetic port override rejects an occupied loopback port", async () => {
+  const server = createServer();
+  await new Promise<void>((resolve) => {
+    server.listen({ host: "127.0.0.1", port: 0 }, resolve);
+  });
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    await assert.rejects(
+      () =>
+        allocateHermeticPort({
+          E2E_HERMETIC_PORT: String(address.port),
+        }),
+      /is unavailable/u
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
 test("Docker operations use a short bounded timeout", () => {
   assert.equal(DOCKER_COMMAND_TIMEOUT_MS, 10_000);
 });
@@ -133,6 +186,11 @@ test("hermetic seed accounts are fixed non-personal subscriber and denial identi
 test("database certification helper source does not select or read credential ciphertext", async () => {
   const source = await import("node:fs/promises").then(({ readFile }) =>
     readFile(new URL("../tests/e2e/hermetic-db.ts", import.meta.url), "utf8")
+  );
+  assert.equal(
+    source.match(/SELECT "id"::text FROM "RunnerRun"/gu)?.length,
+    2,
+    "varchar reservation run IDs must compare against UUID run IDs as text"
   );
   assert.match(source, /"executionProvenance"->>'provider'/u);
   assert.match(source, /row_to_json\("application_row"\)/u);

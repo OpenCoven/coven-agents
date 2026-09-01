@@ -119,8 +119,8 @@ export default defineConfig({
   /* Run your local dev server before starting the tests */
   webServer: {
     command: useProductionBuild
-      ? `pnpm validate:runtime && exec ${nextCommand} start --port ${PORT}`
-      : `exec ${nextCommand} dev --turbo --port ${PORT}`,
+      ? `pnpm validate:runtime && exec ${nextCommand} start --hostname 127.0.0.1 --port ${PORT}`
+      : `exec ${nextCommand} dev --turbo --hostname 127.0.0.1 --port ${PORT}`,
     env: playwrightWebServerEnvironment(),
     reuseExistingServer: false,
     timeout: 120 * 1000,

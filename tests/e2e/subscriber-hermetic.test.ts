@@ -16,6 +16,7 @@ import { sessionCookies } from "./session";
 
 const CRON_SECRET = "test-hermetic-cron";
 const HERMETIC = process.env.E2E_HERMETIC_RUNNER === "1";
+const LOCAL_ORIGIN = process.env.APP_ORIGIN ?? "http://localhost:3100";
 const PROVIDER_FIELDS = new Set([
   "adapterVersion",
   "daytona",
@@ -161,10 +162,7 @@ test.describe("hermetic subscriber browser certification", () => {
       [];
     page.on("request", (browserRequest) => {
       const url = new URL(browserRequest.url());
-      if (
-        url.origin !== "http://localhost:3100" ||
-        !url.pathname.includes("/api/")
-      ) {
+      if (url.origin !== LOCAL_ORIGIN || !url.pathname.includes("/api/")) {
         return;
       }
       let body: unknown = null;

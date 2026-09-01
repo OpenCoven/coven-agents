@@ -49,7 +49,7 @@ export async function seedHermeticUsers(url: string): Promise<void> {
     const users = Object.values(HERMETIC_USERS);
     const tenants = users.map(({ id }) => tenantForUser(id));
     await sql`DELETE FROM "RunReservation" WHERE "runId" IN (
-      SELECT "id" FROM "RunnerRun" WHERE "tenant" = ANY(${tenants})
+      SELECT "id"::text FROM "RunnerRun" WHERE "tenant" = ANY(${tenants})
     )`;
     await sql`DELETE FROM "RunUsage" WHERE "tenant" = ANY(${tenants})`;
     await sql`DELETE FROM "RunnerAgent" WHERE "tenant" = ANY(${tenants})`;
@@ -91,7 +91,7 @@ export async function tenantCertificationCounts(
     const [reservations] = await sql<
       { count: string }[]
     >`SELECT count(*)::text AS "count" FROM "RunReservation" WHERE "tenantHash" IS NOT NULL AND "runId" IN (
-        SELECT "id" FROM "RunnerRun" WHERE "tenant" = ${tenant}
+        SELECT "id"::text FROM "RunnerRun" WHERE "tenant" = ${tenant}
       )`;
     const [runs] = await sql<
       { count: string }[]
