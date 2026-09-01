@@ -69,6 +69,7 @@ function run(authVersion: number | null): RunnerRunRecord {
     error: null,
     executionPermission: "unrestricted",
     fileEvidence: [],
+    githubBrokerPolicy: null,
     id: "00000000-0000-4000-8000-000000000002",
     logCursor: 1,
     operationId: "00000000-0000-4000-8000-000000000003",
@@ -78,6 +79,7 @@ function run(authVersion: number | null): RunnerRunRecord {
     startedAt: null,
     status: "queued",
     task: "safe task",
+    teamStepId: null,
     tenant: "u_9c8589018a57479181fe4c455b099bc9",
     version: 1,
   };

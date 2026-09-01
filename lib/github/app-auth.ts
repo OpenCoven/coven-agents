@@ -16,7 +16,7 @@ export const GITHUB_MAX_REPOSITORIES = 16;
 const MAX_INSTALLATION_TOKEN_BYTES = 4096;
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
-type PermissionLevel = "admin" | "read" | "write";
+export type GitHubPermissionLevel = "admin" | "read" | "write";
 type JsonObject = Record<string, unknown>;
 
 export type GitHubInstallation = Readonly<{
@@ -28,7 +28,7 @@ export type GitHubInstallation = Readonly<{
   appId: string;
   appSlug: string;
   id: string;
-  permissions: Readonly<Record<string, PermissionLevel>>;
+  permissions: Readonly<Record<string, GitHubPermissionLevel>>;
   repositorySelection: "all" | "selected";
   suspendedAt: string | null;
 }>;
@@ -51,7 +51,19 @@ export type GitHubAppClient = Readonly<{
     installationId: string,
     repositoryIds?: readonly string[]
   ) => Promise<GitHubRepositorySelection>;
+  withInstallationAuthorization: <T>(
+    input: Readonly<{
+      installationId: string;
+      permissions: Readonly<Record<string, GitHubPermissionLevel>>;
+      repositoryIds: readonly string[];
+    }>,
+    operation: (authorization: string) => Promise<T>
+  ) => Promise<T>;
 }>;
+export type GitHubConnectionAppClient = Pick<
+  GitHubAppClient,
+  "getInstallation" | "listInstallationRepositories"
+>;
 
 export class GitHubProviderError extends Error {
   readonly code: string;
@@ -117,10 +129,10 @@ export function createGitHubAppJwt(
 }
 
 export function githubInstallationTokenRequest(
-  permissions: Readonly<Record<string, PermissionLevel>>,
+  permissions: Readonly<Record<string, GitHubPermissionLevel>>,
   repositoryIds?: readonly string[]
 ): Readonly<{
-  permissions: Readonly<Record<string, PermissionLevel>>;
+  permissions: Readonly<Record<string, GitHubPermissionLevel>>;
   repository_ids?: number[];
 }> {
   const entries = Object.entries(permissions);
@@ -288,6 +300,7 @@ export function createGitHubAppClient(
 
   async function withInstallationToken<T>(
     installationId: string,
+    permissions: Readonly<Record<string, GitHubPermissionLevel>>,
     repositoryIds: readonly string[] | undefined,
     operation: (authorization: string) => Promise<T>
   ): Promise<T> {
@@ -295,7 +308,7 @@ export function createGitHubAppClient(
     const body = object(
       await appJson(`/app/installations/${installationId}/access_tokens`, {
         body: JSON.stringify(
-          githubInstallationTokenRequest({ metadata: "read" }, repositoryIds)
+          githubInstallationTokenRequest(permissions, repositoryIds)
         ),
         method: "POST",
       }),
@@ -333,6 +346,7 @@ export function createGitHubAppClient(
     listInstallationRepositories(installationId, repositoryIds) {
       return withInstallationToken(
         installationId,
+        { metadata: "read" },
         repositoryIds,
         async (authorization) => {
           const repositories: GitHubRepository[] = [];
@@ -403,6 +417,15 @@ export function createGitHubAppClient(
         }
       );
     },
+
+    withInstallationAuthorization(scope, operation) {
+      return withInstallationToken(
+        scope.installationId,
+        scope.permissions,
+        scope.repositoryIds,
+        operation
+      );
+    },
   };
 }
 
@@ -425,7 +448,7 @@ function parseInstallation(value: unknown): GitHubInstallation {
     body.permissions,
     "GitHub installation permissions"
   );
-  const permissions: Record<string, PermissionLevel> = {};
+  const permissions: Record<string, GitHubPermissionLevel> = {};
   if (Object.keys(permissionsBody).length > 128) {
     throw invalidResponse();
   }

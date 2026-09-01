@@ -708,6 +708,7 @@ test("reconciliation recovers a cancelled terminal row after lease cleanup faile
     error: null,
     executionPermission: "unrestricted",
     fileEvidence: [],
+    githubBrokerPolicy: null,
     id: RUN_ID,
     logCursor: 1,
     operationId: OPERATION_ID,
@@ -717,6 +718,7 @@ test("reconciliation recovers a cancelled terminal row after lease cleanup faile
     startedAt: null,
     status: "queued",
     task: "Do the thing.",
+    teamStepId: null,
     tenant: PRINCIPAL.tenant,
     version: 1,
   };

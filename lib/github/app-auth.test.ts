@@ -158,6 +158,7 @@ test("repository enumeration exchanges a metadata-only token immediately before 
     ],
     repositorySelection: "selected",
   });
+
   assert.equal(requests.length, 2);
   assert.equal(
     requests[0]?.url,
@@ -176,6 +177,39 @@ test("repository enumeration exchanges a metadata-only token immediately before 
     requests[1]?.url,
     "https://api.github.com/installation/repositories?page=1&per_page=100"
   );
+});
+
+test("gateway operations mint only the requested repository-scoped permission set", async () => {
+  const requests: CapturedRequest[] = [];
+  const client = clientFor(
+    sequenceFetch(requests, [
+      response({
+        expires_at: "2026-08-31T19:00:00.000Z",
+        token: INSTALLATION_TOKEN,
+      }),
+    ])
+  );
+  let observedAuthorization = "";
+
+  const value = await client.withInstallationAuthorization(
+    {
+      installationId: INSTALLATION_ID,
+      permissions: { issues: "write", metadata: "read" },
+      repositoryIds: ["24680"],
+    },
+    (authorization) => {
+      observedAuthorization = authorization;
+      return Promise.resolve("completed");
+    }
+  );
+
+  assert.equal(value, "completed");
+  assert.equal(observedAuthorization, `Bearer ${INSTALLATION_TOKEN}`);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(JSON.parse(requests[0]?.body ?? ""), {
+    permissions: { issues: "write", metadata: "read" },
+    repository_ids: [24_680],
+  });
 });
 
 test("provider requests time out through an abort signal", async () => {

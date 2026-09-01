@@ -183,6 +183,7 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
     error: column(row, "error"),
     executionPermission: column(row, "executionPermission"),
     fileEvidence: column(row, "fileEvidence"),
+    githubBrokerPolicy: column(row, "githubBrokerPolicy"),
     id: column(row, "id"),
     logCursor: column(row, "logCursor"),
     operationId: column(row, "operationId"),
@@ -192,6 +193,7 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
     startedAt: nullableTimestampColumn(row, "startedAt"),
     status: column(row, "status"),
     task: column(row, "task"),
+    teamStepId: column(row, "teamStepId"),
     tenant: column(row, "tenant"),
     version: column(row, "version"),
   };
@@ -640,6 +642,13 @@ function matchesRunRequest(
   executionPermission: RunnerRunRecord["executionPermission"]
 ): boolean {
   if (run.executionPermission !== executionPermission) {
+    return false;
+  }
+  if (
+    run.teamStepId !== (input.teamStepId ?? null) ||
+    JSON.stringify(run.githubBrokerPolicy) !==
+      JSON.stringify(input.githubBrokerPolicy ?? null)
+  ) {
     return false;
   }
   if (run.requestHash === input.requestHash) {
@@ -4264,6 +4273,8 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         }
     > => {
       const executionPermission = input.executionPermission ?? "unrestricted";
+      const githubBrokerPolicy = input.githubBrokerPolicy ?? null;
+      const teamStepId = input.teamStepId ?? null;
       return database.transaction(async (transaction) => {
         const [agent] = await transaction.execute(
           statement(
@@ -4375,22 +4386,26 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               agentWorkspace: agentSnapshot.workspace,
               authVersion: input.authVersion,
               executionPermission,
+              githubBrokerPolicy,
               id: input.id,
               operationId: input.operationId,
               requestHash: input.requestHash,
               task: input.task,
+              teamStepId,
               tenant: principal.tenant,
             },
             sql`INSERT INTO "RunnerRun" (
               "id", "agentId", "tenant", "agentInstructions", "agentModel",
               "agentRuntime", "agentWorkspace", "authVersion", "operationId",
-              "requestHash", "task", "executionPermission"
+              "requestHash", "task", "executionPermission", "teamStepId",
+              "githubBrokerPolicy"
             ) VALUES (
               ${input.id}, ${input.agentId}, ${principal.tenant},
               ${agentSnapshot.instructions}, ${agentSnapshot.model},
               ${agentSnapshot.runtime}, ${agentSnapshot.workspace},
               ${input.authVersion}, ${input.operationId}, ${input.requestHash},
-              ${input.task}, ${executionPermission}
+              ${input.task}, ${executionPermission}, ${teamStepId},
+              CAST(${JSON.stringify(githubBrokerPolicy)} AS jsonb)
             ) ON CONFLICT ("agentId", "operationId") DO NOTHING RETURNING *`
           )
         );

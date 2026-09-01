@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noShadow: Isolated nested fixtures intentionally reuse conventional record names.
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -78,6 +79,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     error: null,
     executionPermission: "unrestricted",
     fileEvidence: [],
+    githubBrokerPolicy: null,
     id: "00000000-0000-4000-8000-000000000002",
     logCursor: 3,
     operationId: "00000000-0000-4000-8000-000000000003",
@@ -87,6 +89,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     startedAt: null,
     status: "queued",
     task: "test task",
+    teamStepId: null,
     tenant: "tenant_a",
     version: 7,
     ...overrides,
@@ -813,6 +816,104 @@ test("new restricted runs persist the exact execution permission", async () => {
     operationId: inserted.operationId,
     requestHash: inserted.requestHash,
     task: inserted.task,
+  });
+
+  test("team child runs persist exact step linkage and immutable broker policy", async () => {
+    const teamStepId = "10000000-0000-4000-8000-000000000001";
+    const brokerPolicy = {
+      actorUserId: "9c858901-8a57-4791-81fe-4c455b099bc9",
+      allowedCapabilities: ["github.issues.read" as const],
+      approvedCapabilities: [],
+      authVersion: 8,
+      connectionGeneration: 3,
+      declaredCapabilities: ["github.issues.read" as const],
+      maxCallCount: 32,
+      repositories: [
+        {
+          accountId: "123",
+          accountLogin: "OpenCoven",
+          accountType: "Organization" as const,
+          connectionId: "10000000-0000-4000-8000-000000000002",
+          installationId: "456",
+          repository: "opencoven/coven-agents",
+          repositoryId: "789",
+          repositoryName: "coven-agents",
+          repositoryNodeId: "R_kgDOExample",
+          repositoryOwner: "OpenCoven",
+        },
+      ],
+      teamRunId: "10000000-0000-4000-8000-000000000003",
+      teamStepId,
+      version: 1 as const,
+    };
+    const inserted = run({
+      authVersion: 8,
+      executionPermission: "github_only",
+      githubBrokerPolicy: brokerPolicy,
+      teamStepId,
+    });
+    const accepted = {
+      createdAt: inserted.createdAt,
+      event: {},
+      eventId: 1,
+      runId: inserted.id,
+    };
+    const creation = scripted(
+      [agent({ id: inserted.agentId, sandboxLifecycle: "ready" })],
+      [],
+      [],
+      [inserted],
+      [accepted],
+      [{ ...inserted, logCursor: 1, version: inserted.version + 1 }]
+    );
+
+    const result = await creation.store.startRun(principal, {
+      agentId: inserted.agentId,
+      authVersion: 8,
+      executionPermission: "github_only",
+      githubBrokerPolicy: brokerPolicy,
+      id: inserted.id,
+      operationId: inserted.operationId,
+      requestHash: inserted.requestHash,
+      task: inserted.task,
+      teamStepId,
+    });
+
+    assert.equal(result.kind, "created");
+    const insert = creation.statements.find(
+      (statement) => statement.name === "insert-run"
+    );
+    assert.equal(insert?.args.teamStepId, teamStepId);
+    assert.deepEqual(insert?.args.githubBrokerPolicy, brokerPolicy);
+    assert.match(
+      queryText(insert as RunnerStoreStatement),
+      /"teamStepId"[\s\S]*"githubBrokerPolicy"/u
+    );
+
+    const changedPolicy = {
+      ...brokerPolicy,
+      connectionGeneration: 4,
+    };
+    const duplicate = scripted(
+      [agent({ id: inserted.agentId, sandboxLifecycle: "ready" })],
+      [inserted]
+    );
+    assert.equal(
+      (
+        await duplicate.store.startRun(principal, {
+          agentId: inserted.agentId,
+          authVersion: 8,
+          executionPermission: "github_only",
+          githubBrokerPolicy: changedPolicy,
+          id: inserted.id,
+          operationId: inserted.operationId,
+          requestHash: inserted.requestHash,
+          task: inserted.task,
+          teamStepId,
+        })
+      ).kind,
+      "conflict"
+    );
   });
 
   assert.equal(result.kind, "created");

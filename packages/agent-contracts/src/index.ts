@@ -43,6 +43,19 @@ export const TEAM_LIMITS = Object.freeze({
   maxTotalHandoffLength: 49_152,
 });
 
+export const GITHUB_TOOL_LIMITS = Object.freeze({
+  bodyBytes: 60_000,
+  branchBytes: 200,
+  maxAssignees: 10,
+  maxLabels: 10,
+  maxSearchResults: 30,
+  queryBytes: 256,
+  resultBodyBytes: 8192,
+  resultTitleBytes: 512,
+  textFieldBytes: 8192,
+  titleBytes: 256,
+});
+
 /**
  * Stable Agent Runner v1 deployment-class discriminator. `cloud` means the
  * runner is remotely deployed; it is not an execution-provider identity or
@@ -523,6 +536,366 @@ export const githubOperationStatusSchema = z.enum([
   "failed",
 ]);
 
+const githubRepositoryPartSchema = z
+  .string()
+  .min(1)
+  .max(100)
+  .regex(/^[A-Za-z0-9_.-]+$/u);
+const githubDecimalSchema = z.string().regex(/^[1-9][0-9]{0,19}$/u);
+const githubNodeIdSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9_=-]+$/u);
+const githubTextSchema = (maxBytes: number, maxLength = maxBytes) =>
+  z
+    .string()
+    .min(1)
+    .max(maxLength)
+    .refine(
+      (value) => new TextEncoder().encode(value).byteLength <= maxBytes,
+      `Text must not exceed ${maxBytes} UTF-8 bytes.`
+    );
+const githubOptionalTextSchema = (maxBytes: number, maxLength = maxBytes) =>
+  z
+    .string()
+    .max(maxLength)
+    .refine(
+      (value) => new TextEncoder().encode(value).byteLength <= maxBytes,
+      `Text must not exceed ${maxBytes} UTF-8 bytes.`
+    );
+const githubBranchSchema = githubTextSchema(
+  GITHUB_TOOL_LIMITS.branchBytes
+).refine(
+  (value) =>
+    /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(value) &&
+    !value.includes("..") &&
+    !value.includes("//") &&
+    !value.includes("@{") &&
+    !value.endsWith(".") &&
+    !value.endsWith("/") &&
+    !value.endsWith(".lock") &&
+    !value.startsWith("refs/"),
+  "Branch must be a canonical repository-relative ref."
+);
+const githubLabelSchema = githubTextSchema(100, 100);
+const githubLoginSchema = z
+  .string()
+  .min(1)
+  .max(100)
+  .regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$/u);
+const githubRepositoryOperationShape = {
+  owner: githubRepositoryPartSchema,
+  repo: githubRepositoryPartSchema,
+};
+const issueGetOperationSchema = z
+  .object({
+    issueNumber: githubDecimalSchema,
+    kind: z.literal("issue.get"),
+    ...githubRepositoryOperationShape,
+  })
+  .strict();
+const issueSearchOperationSchema = z
+  .object({
+    kind: z.literal("issue.search"),
+    limit: z.number().int().min(1).max(GITHUB_TOOL_LIMITS.maxSearchResults),
+    ...githubRepositoryOperationShape,
+    query: githubTextSchema(GITHUB_TOOL_LIMITS.queryBytes),
+    state: z.enum(["all", "closed", "open"]),
+  })
+  .strict();
+const issueCreateOperationSchema = z
+  .object({
+    assignees: z
+      .array(githubLoginSchema)
+      .max(GITHUB_TOOL_LIMITS.maxAssignees)
+      .superRefine((values, context) =>
+        distinctValues(values, context, "Assignees must be unique.")
+      ),
+    body: githubOptionalTextSchema(GITHUB_TOOL_LIMITS.bodyBytes),
+    kind: z.literal("issue.create"),
+    labels: z
+      .array(githubLabelSchema)
+      .max(GITHUB_TOOL_LIMITS.maxLabels)
+      .superRefine((values, context) =>
+        distinctValues(values, context, "Labels must be unique.")
+      ),
+    ...githubRepositoryOperationShape,
+    title: githubTextSchema(GITHUB_TOOL_LIMITS.titleBytes),
+  })
+  .strict();
+const issueCommentOperationSchema = z
+  .object({
+    body: githubTextSchema(GITHUB_TOOL_LIMITS.bodyBytes),
+    issueNumber: githubDecimalSchema,
+    kind: z.literal("issue.comment"),
+    ...githubRepositoryOperationShape,
+  })
+  .strict();
+const pullGetOperationSchema = z
+  .object({
+    kind: z.literal("pull.get"),
+    ...githubRepositoryOperationShape,
+    pullNumber: githubDecimalSchema,
+  })
+  .strict();
+const pullCreateOperationSchema = z
+  .object({
+    base: githubBranchSchema,
+    body: githubOptionalTextSchema(GITHUB_TOOL_LIMITS.bodyBytes),
+    draft: z.boolean(),
+    head: githubBranchSchema,
+    kind: z.literal("pull.create"),
+    ...githubRepositoryOperationShape,
+    title: githubTextSchema(GITHUB_TOOL_LIMITS.titleBytes),
+  })
+  .strict()
+  .refine((value) => value.base !== value.head, {
+    message: "Pull request base and head must differ.",
+    path: ["head"],
+  });
+const pullCommentOperationSchema = z
+  .object({
+    body: githubTextSchema(GITHUB_TOOL_LIMITS.bodyBytes),
+    kind: z.literal("pull.comment"),
+    ...githubRepositoryOperationShape,
+    pullNumber: githubDecimalSchema,
+  })
+  .strict();
+const pullReviewOperationSchema = z
+  .object({
+    body: githubOptionalTextSchema(GITHUB_TOOL_LIMITS.bodyBytes),
+    event: z.enum(["approve", "comment", "request_changes"]),
+    kind: z.literal("pull.review"),
+    ...githubRepositoryOperationShape,
+    pullNumber: githubDecimalSchema,
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.event !== "request_changes" || value.body.trim().length > 0,
+    {
+      message: "Requested changes require a review body.",
+      path: ["body"],
+    }
+  );
+const projectItemAddOperationSchema = z
+  .object({
+    contentId: githubNodeIdSchema,
+    contentType: z.enum(["issue", "pull"]),
+    kind: z.literal("project.item.add"),
+    ...githubRepositoryOperationShape,
+    projectId: githubNodeIdSchema,
+  })
+  .strict();
+const githubProjectFieldValueSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("clear") }).strict(),
+  z
+    .object({
+      date: z
+        .string()
+        .regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/u)
+        .refine(
+          (value) =>
+            new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) ===
+            value,
+          "Date must be a real calendar date."
+        ),
+      kind: z.literal("date"),
+    })
+    .strict(),
+  z
+    .object({
+      iterationId: githubNodeIdSchema,
+      kind: z.literal("iteration"),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("number"),
+      number: z
+        .number()
+        .finite()
+        .min(-1_000_000_000_000)
+        .max(1_000_000_000_000),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("single_select"),
+      optionId: githubNodeIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("text"),
+      text: githubOptionalTextSchema(GITHUB_TOOL_LIMITS.textFieldBytes),
+    })
+    .strict(),
+]);
+const projectItemFieldUpdateOperationSchema = z
+  .object({
+    contentId: githubNodeIdSchema,
+    contentType: z.enum(["issue", "pull"]),
+    fieldId: githubNodeIdSchema,
+    itemId: githubNodeIdSchema,
+    kind: z.literal("project.item.field.update"),
+    ...githubRepositoryOperationShape,
+    projectId: githubNodeIdSchema,
+    value: githubProjectFieldValueSchema,
+  })
+  .strict();
+
+export const githubToolOperationSchema = z.discriminatedUnion("kind", [
+  issueGetOperationSchema,
+  issueSearchOperationSchema,
+  issueCreateOperationSchema,
+  issueCommentOperationSchema,
+  pullGetOperationSchema,
+  pullCreateOperationSchema,
+  pullCommentOperationSchema,
+  pullReviewOperationSchema,
+  projectItemAddOperationSchema,
+  projectItemFieldUpdateOperationSchema,
+]);
+
+export const githubToolRequestSchema = z
+  .object({
+    operation: githubToolOperationSchema,
+    operationId: z.string().uuid(),
+  })
+  .strict();
+
+const githubResultRepositorySchema = z
+  .string()
+  .min(3)
+  .max(201)
+  .regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u);
+const githubResultUrlSchema = z
+  .url()
+  .max(2048)
+  .refine((value) => {
+    try {
+      const parsed = new URL(value);
+      return (
+        parsed.protocol === "https:" &&
+        parsed.hostname === "github.com" &&
+        !parsed.username &&
+        !parsed.password
+      );
+    } catch {
+      return false;
+    }
+  }, "Result URL must be a public github.com URL.");
+const githubResultBodySchema = githubOptionalTextSchema(
+  GITHUB_TOOL_LIMITS.resultBodyBytes
+);
+const githubIssueSummarySchema = z
+  .object({
+    nodeId: githubNodeIdSchema,
+    number: githubDecimalSchema,
+    state: z.enum(["closed", "open"]),
+    title: githubTextSchema(GITHUB_TOOL_LIMITS.resultTitleBytes),
+    url: githubResultUrlSchema,
+  })
+  .strict();
+const githubIssueResultSchema = githubIssueSummarySchema.extend({
+  body: githubResultBodySchema,
+});
+const githubPullResultSchema = githubIssueResultSchema.extend({
+  base: githubBranchSchema,
+  draft: z.boolean(),
+  head: githubBranchSchema,
+  merged: z.boolean(),
+});
+const githubCommentResultSchema = z
+  .object({
+    nodeId: githubNodeIdSchema,
+    url: githubResultUrlSchema,
+  })
+  .strict();
+const githubReviewResultSchema = githubCommentResultSchema.extend({
+  state: z.enum(["approved", "commented", "changes_requested"]),
+});
+
+export const githubToolResultSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      issue: githubIssueResultSchema,
+      kind: z.literal("issue.get"),
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      items: z
+        .array(githubIssueSummarySchema)
+        .max(GITHUB_TOOL_LIMITS.maxSearchResults),
+      kind: z.literal("issue.search"),
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      issue: githubIssueResultSchema,
+      kind: z.literal("issue.create"),
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      comment: githubCommentResultSchema,
+      kind: z.literal("issue.comment"),
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("pull.get"),
+      pull: githubPullResultSchema,
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("pull.create"),
+      pull: githubPullResultSchema,
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      comment: githubCommentResultSchema,
+      kind: z.literal("pull.comment"),
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("pull.review"),
+      repository: githubResultRepositorySchema,
+      review: githubReviewResultSchema,
+    })
+    .strict(),
+  z
+    .object({
+      itemId: githubNodeIdSchema,
+      kind: z.literal("project.item.add"),
+      projectId: githubNodeIdSchema,
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      fieldId: githubNodeIdSchema,
+      itemId: githubNodeIdSchema,
+      kind: z.literal("project.item.field.update"),
+      projectId: githubNodeIdSchema,
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+]);
+
 export const createTeamRunInputSchema = z
   .object({
     operationId: z.string().uuid(),
@@ -988,6 +1361,12 @@ export type GitHubOperationReceipt = z.output<
   typeof githubOperationReceiptSchema
 >;
 export type GitHubOperationStatus = z.infer<typeof githubOperationStatusSchema>;
+export type GitHubProjectFieldValue = z.infer<
+  typeof githubProjectFieldValueSchema
+>;
+export type GitHubToolOperation = z.infer<typeof githubToolOperationSchema>;
+export type GitHubToolRequest = z.infer<typeof githubToolRequestSchema>;
+export type GitHubToolResult = z.infer<typeof githubToolResultSchema>;
 export type SkillDefinition = z.output<typeof skillDefinitionSchema>;
 export type SkillResource = z.output<typeof skillResourceSchema>;
 export type TeamApprovalStatus = z.infer<typeof teamApprovalStatusSchema>;

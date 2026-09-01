@@ -496,8 +496,9 @@ test("migration 0025 adds a durable monotonic GitHub connection fence without re
   const journal = JSON.parse(
     readFileSync(new URL("meta/_journal.json", directory), "utf8")
   ) as { entries: { idx: number; tag: string }[] };
-  assert.deepEqual(journal.entries.at(-1), {
-    ...journal.entries.at(-1),
+  const entry = journal.entries.find(({ idx }) => idx === 25);
+  assert.deepEqual(entry, {
+    ...entry,
     idx: 25,
     tag: migrationName.replace(/\.sql$/u, ""),
   });

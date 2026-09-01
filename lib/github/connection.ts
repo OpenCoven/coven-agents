@@ -39,7 +39,7 @@ import type {
 } from "@/lib/teams/store";
 import {
   GITHUB_MAX_REPOSITORIES,
-  type GitHubAppClient,
+  type GitHubConnectionAppClient,
   type GitHubInstallation,
   GitHubProviderError,
   type GitHubRepositorySelection,
@@ -140,7 +140,7 @@ export type GitHubConnectionDependencies = Readonly<{
   appBasePath: () => string;
   appOrigin: () => string | null;
   auth: Pick<RunnerAuth, "authorizeSubscriber">;
-  createProvider: (config: GitHubAppConfig) => GitHubAppClient;
+  createProvider: (config: GitHubAppConfig) => GitHubConnectionAppClient;
   createUserAuthorizationClient: (
     config: GitHubAppConfig
   ) => GitHubUserAuthorizationClient;
@@ -1125,7 +1125,7 @@ type VerifiedInstallationAuthority = Readonly<{
 }>;
 
 async function verifiedInstallationAuthority(
-  provider: GitHubAppClient,
+  provider: GitHubConnectionAppClient,
   config: GitHubAppConfig,
   installationId: string,
   repositoryIds?: readonly string[]

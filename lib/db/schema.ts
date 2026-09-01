@@ -3,6 +3,7 @@ import {
   type CommandEvidence,
   type FileEvidence,
   type GitHubOperationKind,
+  type GitHubToolResult,
   type RunError,
   type RunEvent,
   TEAM_LIMITS,
@@ -35,6 +36,7 @@ import {
   STRIPE_RECONCILIATION_REASONS,
   STRIPE_RECONCILIATION_STATUSES,
 } from "../billing/stripe-reconciliation";
+import type { GitHubBrokerPolicy } from "../github/capability";
 
 const runnerMaxCommandResultsSql = sql.raw(
   String(AGENT_RUNNER_LIMITS.maxCommandResults)
@@ -660,7 +662,12 @@ export const runnerRun = pgTable(
       .default("queued"),
     error: jsonb("error").$type<RunError>(),
     executionPermission: varchar("executionPermission", {
-      enum: ["unrestricted", "workspace_read", "workspace_write"],
+      enum: [
+        "unrestricted",
+        "workspace_read",
+        "workspace_write",
+        "github_only",
+      ],
       length: 32,
     })
       .notNull()
@@ -669,6 +676,7 @@ export const runnerRun = pgTable(
       .$type<FileEvidence[]>()
       .notNull()
       .default(sql`'[]'::jsonb`),
+    githubBrokerPolicy: jsonb("githubBrokerPolicy").$type<GitHubBrokerPolicy>(),
     id: uuid("id").primaryKey().notNull().defaultRandom(),
     logCursor: integer("logCursor").notNull().default(0),
     operationId: uuid("operationId").notNull(),
@@ -687,6 +695,7 @@ export const runnerRun = pgTable(
     task: varchar("task", {
       length: AGENT_RUNNER_LIMITS.maxTaskLength,
     }).notNull(),
+    teamStepId: uuid("teamStepId"),
     tenant: varchar("tenant", { length: 64 }).notNull(),
     updatedAt: timestamp("updatedAt").notNull().defaultNow(),
     version: integer("version").notNull().default(0),
@@ -747,7 +756,11 @@ export const runnerRun = pgTable(
     ),
     check(
       "RunnerRun_executionPermission_valid",
-      sql`${table.executionPermission} in ('unrestricted', 'workspace_read', 'workspace_write')`
+      sql`${table.executionPermission} in ('unrestricted', 'workspace_read', 'workspace_write', 'github_only')`
+    ),
+    check(
+      "RunnerRun_githubBrokerPolicy_valid",
+      sql`${table.githubBrokerPolicy} is null or (${table.teamStepId} is not null and jsonb_typeof(${table.githubBrokerPolicy}) = 'object' and ${table.githubBrokerPolicy}->>'version' = '1' and ${table.githubBrokerPolicy}->>'teamStepId' = ${table.teamStepId}::text and ${table.githubBrokerPolicy}->>'authVersion' = ${table.authVersion}::text and (${table.githubBrokerPolicy}->>'actorUserId') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' and jsonb_typeof(${table.githubBrokerPolicy}->'allowedCapabilities') = 'array' and jsonb_array_length(${table.githubBrokerPolicy}->'allowedCapabilities') between 1 and ${teamMaxSkillsPerMemberSql} and jsonb_typeof(${table.githubBrokerPolicy}->'repositories') = 'array' and jsonb_array_length(${table.githubBrokerPolicy}->'repositories') between 1 and 16)`
     ),
     check("RunnerRun_queueSequence_positive", sql`${table.queueSequence} > 0`),
     check("RunnerRun_logCursor_nonnegative", sql`${table.logCursor} >= 0`),
@@ -1261,10 +1274,21 @@ export type RunnerGitHubConnection = InferSelectModel<
 export const runnerGitHubCapability = pgTable(
   "RunnerGitHubCapability",
   {
+    allowedCapabilities: jsonb("allowedCapabilities")
+      .$type<TeamCapability[]>()
+      .notNull(),
     approvedCapabilities: jsonb("approvedCapabilities")
       .$type<TeamCapability[]>()
       .notNull(),
+    attemptId: uuid("attemptId").notNull(),
+    authVersion: integer("authVersion").notNull(),
+    connectionGeneration: bigint("connectionGeneration", {
+      mode: "number",
+    }).notNull(),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
+    declaredCapabilities: jsonb("declaredCapabilities")
+      .$type<TeamCapability[]>()
+      .notNull(),
     expiresAt: timestamp("expiresAt").notNull(),
     id: uuid("id").primaryKey().notNull().defaultRandom(),
     maxCallCount: integer("maxCallCount").notNull(),
@@ -1272,6 +1296,8 @@ export const runnerGitHubCapability = pgTable(
       .$type<string[]>()
       .notNull(),
     revokedAt: timestamp("revokedAt"),
+    runnerRunId: uuid("runnerRunId").notNull(),
+    teamRunId: uuid("teamRunId").notNull(),
     teamStepId: uuid("teamStepId").notNull(),
     tenant: varchar("tenant", { length: 64 }).notNull(),
     tokenHash: varchar("tokenHash", { length: 64 }).notNull(),
@@ -1282,17 +1308,30 @@ export const runnerGitHubCapability = pgTable(
     unique("RGHCap_id_tenant_uq").on(table.id, table.tenant),
     unique("RGHCap_step_owner_uq").on(table.id, table.tenant, table.teamStepId),
     unique("RGHCap_tokenHash_uq").on(table.tokenHash),
+    uniqueIndex("RGHCap_active_runnerRun_uq")
+      .on(table.runnerRunId)
+      .where(sql`${table.revokedAt} is null`),
     foreignKey({
       columns: [table.teamStepId, table.tenant],
       foreignColumns: [runnerTeamStep.id, runnerTeamStep.tenant],
       name: "RGHCap_step_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.runnerRunId, table.tenant],
+      foreignColumns: [runnerRun.id, runnerRun.tenant],
+      name: "RunnerGitHubCapability_runnerRun_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.teamRunId, table.tenant],
+      foreignColumns: [runnerTeamRun.id, runnerTeamRun.tenant],
+      name: "RunnerGitHubCapability_teamRun_fk",
     }).onDelete("cascade"),
     index("RGHCap_expiry_idx").on(table.expiresAt),
     check("RGHCap_tenant_valid", sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`),
     check("RGHCap_tokenHash_valid", sql`${table.tokenHash} ~ '^[a-f0-9]{64}$'`),
     check(
       "RGHCap_caps_valid",
-      sql`jsonb_typeof(${table.approvedCapabilities}) = 'array' and jsonb_array_length(${table.approvedCapabilities}) between 1 and ${teamMaxSkillsPerMemberSql} and ${table.approvedCapabilities} <@ '["github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb`
+      sql`jsonb_typeof(${table.declaredCapabilities}) = 'array' and jsonb_array_length(${table.declaredCapabilities}) between 1 and ${teamMaxSkillsPerMemberSql} and ${table.declaredCapabilities} <@ '["github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb and jsonb_typeof(${table.approvedCapabilities}) = 'array' and jsonb_array_length(${table.approvedCapabilities}) <= ${teamMaxSkillsPerMemberSql} and ${table.approvedCapabilities} <@ ${table.declaredCapabilities} and jsonb_typeof(${table.allowedCapabilities}) = 'array' and jsonb_array_length(${table.allowedCapabilities}) between 1 and ${teamMaxSkillsPerMemberSql} and ${table.allowedCapabilities} <@ ${table.declaredCapabilities} and ${table.allowedCapabilities} <@ (jsonb_path_query_array(${table.declaredCapabilities}, '$[*] ? (@ like_regex "read$")') || ${table.approvedCapabilities})`
     ),
     check(
       "RGHCap_repos_valid",
@@ -1303,8 +1342,12 @@ export const runnerGitHubCapability = pgTable(
       sql`${table.maxCallCount} between 1 and 32 and ${table.usedCallCount} between 0 and ${table.maxCallCount}`
     ),
     check(
+      "RGHCap_binding_valid",
+      sql`${table.authVersion} >= 0 and ${table.connectionGeneration} >= 0`
+    ),
+    check(
       "RGHCap_timestamps_valid",
-      sql`${table.expiresAt} > ${table.createdAt} and (${table.revokedAt} is null or ${table.revokedAt} >= ${table.createdAt})`
+      sql`${table.expiresAt} > ${table.createdAt} and ${table.expiresAt} <= ${table.createdAt} + interval '15 minutes' and (${table.revokedAt} is null or ${table.revokedAt} >= ${table.createdAt})`
     ),
     check("RGHCap_version_valid", sql`${table.version} >= 0`),
   ]
@@ -1319,8 +1362,13 @@ export const runnerGitHubOperation = pgTable(
   {
     capabilityId: uuid("capabilityId").notNull(),
     completedAt: timestamp("completedAt"),
+    connectionGeneration: bigint("connectionGeneration", {
+      mode: "number",
+    }).notNull(),
+    connectionId: uuid("connectionId").notNull(),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
     error: jsonb("error").$type<RunError>(),
+    executionLeaseExpiresAt: timestamp("executionLeaseExpiresAt").notNull(),
     id: uuid("id").primaryKey().notNull().defaultRandom(),
     kind: varchar("kind", {
       enum: [
@@ -1340,8 +1388,24 @@ export const runnerGitHubOperation = pgTable(
       .$type<GitHubOperationKind>()
       .notNull(),
     operationId: uuid("operationId").notNull(),
+    operationMarker: varchar("operationMarker", { length: 80 }),
     providerRequestId: varchar("providerRequestId", { length: 256 }),
+    repository: varchar("repository", { length: 201 }).notNull(),
     requestHash: varchar("requestHash", { length: 64 }).notNull(),
+    requiredCapability: varchar("requiredCapability", {
+      enum: [
+        "github.issues.read",
+        "github.issues.write",
+        "github.pull_requests.read",
+        "github.pull_requests.write",
+        "github.projects.read",
+        "github.projects.write",
+      ],
+      length: 40,
+    })
+      .$type<TeamCapability>()
+      .notNull(),
+    resultJson: jsonb("resultJson").$type<GitHubToolResult>(),
     resultNodeId: varchar("resultNodeId", { length: 256 }),
     resultUrl: varchar("resultUrl", { length: 2048 }),
     startedAt: timestamp("startedAt"),
@@ -1364,6 +1428,7 @@ export const runnerGitHubOperation = pgTable(
       table.tenant,
       table.operationId
     ),
+    unique("RGHOp_tenant_operation_uq").on(table.tenant, table.operationId),
     foreignKey({
       columns: [table.teamStepId, table.tenant],
       foreignColumns: [runnerTeamStep.id, runnerTeamStep.tenant],
@@ -1378,6 +1443,14 @@ export const runnerGitHubOperation = pgTable(
       ],
       name: "RGHOp_capability_fk",
     }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.connectionId, table.tenant],
+      foreignColumns: [
+        runnerGitHubConnection.id,
+        runnerGitHubConnection.tenant,
+      ],
+      name: "RunnerGitHubOperation_connection_fk",
+    }).onDelete("restrict"),
     index("RGHOp_status_updated_idx").on(table.status, table.updatedAt),
     check("RGHOp_tenant_valid", sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`),
     check(
@@ -1391,6 +1464,22 @@ export const runnerGitHubOperation = pgTable(
     check(
       "RGHOp_requestHash_valid",
       sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`
+    ),
+    check(
+      "RGHOp_binding_valid",
+      sql`${table.connectionGeneration} >= 0 and ${table.repository} ~ '^[a-z0-9_.-]{1,100}/[a-z0-9_.-]{1,100}$' and ${table.requiredCapability} in ('github.issues.read','github.issues.write','github.pull_requests.read','github.pull_requests.write','github.projects.read','github.projects.write')`
+    ),
+    check(
+      "RGHOp_capability_mapping_valid",
+      sql`${table.requiredCapability} = CASE WHEN ${table.kind} in ('issue.get','issue.search') THEN 'github.issues.read' WHEN ${table.kind} in ('issue.create','issue.comment') THEN 'github.issues.write' WHEN ${table.kind} = 'pull.get' THEN 'github.pull_requests.read' WHEN ${table.kind} in ('pull.create','pull.comment','pull.review') THEN 'github.pull_requests.write' WHEN ${table.kind} in ('project.item.add','project.item.field.update') THEN 'github.projects.write' ELSE '' END`
+    ),
+    check(
+      "RGHOp_marker_valid",
+      sql`(${table.kind} in ('issue.get','issue.search','pull.get') and ${table.operationMarker} is null) or (${table.kind} not in ('issue.get','issue.search','pull.get') and ${table.operationMarker} ~ '^<!-- coven-github:v1:[a-f0-9]{40} -->$')`
+    ),
+    check(
+      "RGHOp_result_valid",
+      sql`(${table.status} = 'completed' and ${table.resultJson} is not null and jsonb_typeof(${table.resultJson}) = 'object') or (${table.status} <> 'completed' and ${table.resultJson} is null)`
     ),
     check("RGHOp_version_valid", sql`${table.version} >= 0`),
     check(
