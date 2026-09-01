@@ -73,7 +73,10 @@ function fakeTransport(
     listRuns: async () => [],
     prewarmTenant: async () => undefined,
     startRun: async () => snapshot("queued"),
-    stopRun: async () => snapshot("cancelled"),
+    stopRun: async () => ({
+      pending: false,
+      run: snapshot("cancelled"),
+    }),
     streamRunEvents: async () => snapshot("completed"),
     updateAgent: async () => agent,
     ...overrides,
@@ -125,7 +128,10 @@ test("delegates browser operations to the injected transport", async () => {
     },
     stopRun: (id, signal) => {
       calls.push(`stop:${id}:${String(signal === controller.signal)}`);
-      return Promise.resolve(snapshot("cancelled"));
+      return Promise.resolve({
+        pending: false,
+        run: snapshot("cancelled"),
+      });
     },
     streamRunEvents: (id, options) => {
       calls.push(

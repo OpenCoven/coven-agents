@@ -207,7 +207,9 @@ function authorizedAuth(): RunnerAuth {
 function handlers(
   options: {
     admission?: AbuseAdmission;
-    after?: ((callback: () => void | Promise<void>) => void) | null;
+    after?:
+      | ((task: Promise<unknown> | (() => void | Promise<void>)) => void)
+      | null;
     appOrigin?: string | (() => string | null);
     auth?: RunnerAuth;
     onAbuse?: (input: AbuseEnforcementInput) => void;
@@ -228,8 +230,14 @@ function handlers(
       : {
           after:
             options.after ??
-            ((callback) => {
-              after.push(callback);
+            ((task) => {
+              after.push(
+                typeof task === "function"
+                  ? task
+                  : async () => {
+                      await task;
+                    }
+              );
             }),
         }),
     ...(Object.hasOwn(options, "appOrigin")
@@ -1030,6 +1038,78 @@ test("agent, run, and harness reads preserve their v1 envelopes", async () => {
   });
 });
 
+test("live event reads start reconciliation before the stream closes", async () => {
+  let reconciled = 0;
+  const live = run({ status: "running" });
+  const fixture = handlers({
+    service: service({
+      getRun: async () => ({ kind: "found", run: live }),
+      listAgentRuns: async () => ({ kind: "found", runs: [live] }),
+      readRunEvents: async () => ({
+        events: [],
+        kind: "found",
+        terminal: false,
+      }),
+      reconcileAndDispatch: () => {
+        reconciled += 1;
+        return Promise.resolve(counts());
+      },
+    }),
+  });
+
+  await fixture.handlers.getRun(
+    new Request(`https://app.test/api/runs/${RUN_ID}`),
+    RUN_ID
+  );
+  await fixture.handlers.listAgentRuns(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`),
+    AGENT_ID
+  );
+  const eventResponse = await fixture.handlers.getRunEvents(
+    new Request(`https://app.test/api/runs/${RUN_ID}/events`),
+    RUN_ID
+  );
+
+  assert.equal(fixture.after.length, 3);
+  await Promise.resolve();
+  assert.equal(reconciled, 1);
+  await Promise.all(fixture.after.map((callback) => callback()));
+  assert.equal(reconciled, 3);
+  await eventResponse.body?.cancel();
+
+  const terminalRun = run({
+    completedAt: "2026-08-28T15:01:00.000Z",
+    status: "completed",
+  });
+  const terminal = handlers({
+    service: service({
+      getRun: async () => ({ kind: "found", run: terminalRun }),
+      listAgentRuns: async () => ({ kind: "found", runs: [terminalRun] }),
+      readRunEvents: async () => ({
+        events: [],
+        kind: "found",
+        terminal: true,
+      }),
+    }),
+  });
+
+  await terminal.handlers.getRun(
+    new Request(`https://app.test/api/runs/${RUN_ID}`),
+    RUN_ID
+  );
+  await terminal.handlers.listAgentRuns(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`),
+    AGENT_ID
+  );
+  const terminalEventResponse = await terminal.handlers.getRunEvents(
+    new Request(`https://app.test/api/runs/${RUN_ID}/events`),
+    RUN_ID
+  );
+
+  assert.equal(terminal.after.length, 0);
+  await terminalEventResponse.body?.cancel();
+});
+
 test("agent and run IDs reject malformed values without reaching service methods", async () => {
   let reads = 0;
   const fixture = handlers({
@@ -1296,8 +1376,9 @@ test("run start returns before a pending claimed dispatch and hides scheduling a
   });
   let scheduled: void | Promise<void> = Promise.resolve();
   const fixture = handlers({
-    after: (callback) => {
-      scheduled = callback();
+    after: (task) => {
+      scheduled =
+        typeof task === "function" ? task() : task.then(() => undefined);
     },
     service: service({
       dispatchClaim: (value) => {
