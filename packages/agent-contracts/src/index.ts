@@ -30,6 +30,14 @@ export const compareAgentTimestamps = (left: string, right: string) =>
 export const agentRunnerApiVersionSchema = z.literal(AGENT_RUNNER_API_VERSION);
 const boundedString = (max: number) => z.string().trim().min(1).max(max);
 const datetimeSchema = z.string().datetime();
+export const CANONICAL_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+export const canonicalUuidSchema = z
+  .string()
+  .regex(CANONICAL_UUID_PATTERN, "UUID must use canonical lowercase form.");
+export function isCanonicalUuid(value: unknown): value is string {
+  return typeof value === "string" && CANONICAL_UUID_PATTERN.test(value);
+}
 
 export const TEAM_LIMITS = Object.freeze({
   maxDescriptionLength: AGENT_RUNNER_LIMITS.maxDescriptionLength,
@@ -65,7 +73,7 @@ export const GITHUB_TOOL_SERVER_DEADLINE_MS = 60_000;
 export const backendSchema = z.literal("cloud");
 export const runtimeSchema = z.enum(["codex", "claude", "copilot"]);
 export const agentStatusSchema = z.enum(["idle", "running", "error"]);
-export const agentIdSchema = z.string().uuid();
+export const agentIdSchema = canonicalUuidSchema;
 
 export const agentRunnerCapabilitySchema = z.enum(AGENT_RUNNER_CAPABILITIES);
 export const agentRunnerCapabilitiesSchema = z
@@ -183,10 +191,10 @@ export const teamStepStatusSchema = z.enum([
   "cancelled",
   "skipped",
 ]);
-export const skillIdSchema = z.string().uuid();
-export const teamIdSchema = z.string().uuid();
-export const teamRunIdSchema = z.string().uuid();
-export const teamStepIdSchema = z.string().uuid();
+export const skillIdSchema = canonicalUuidSchema;
+export const teamIdSchema = canonicalUuidSchema;
+export const teamRunIdSchema = canonicalUuidSchema;
+export const teamStepIdSchema = canonicalUuidSchema;
 
 const distinctValues = <T>(
   values: readonly T[],
@@ -284,7 +292,7 @@ export const updateTeamInputSchema = createTeamInputSchema
   .strict();
 
 export const teamMemberSchema = createTeamMemberInputSchema.extend({
-  id: z.string().uuid(),
+  id: canonicalUuidSchema,
   position: z.number().int().nonnegative(),
 });
 
@@ -438,7 +446,7 @@ export const runAgentInputSchema = z.object({
 
 export const startRunInputSchema = z
   .object({
-    operationId: z.string().uuid(),
+    operationId: canonicalUuidSchema,
     task: z.string().trim().min(1).max(AGENT_RUNNER_LIMITS.maxTaskLength),
   })
   .strict();
@@ -503,8 +511,8 @@ export const runSnapshotSchema = z
     fileEvidence: z
       .array(fileEvidenceSchema)
       .max(AGENT_RUNNER_LIMITS.maxFileOperations),
-    id: z.string().uuid(),
-    operationId: z.string().uuid(),
+    id: canonicalUuidSchema,
+    operationId: canonicalUuidSchema,
     output: z.string().max(AGENT_RUNNER_LIMITS.maxEventOutputLength),
     startedAt: datetimeSchema.nullable().default(null),
     status: runStatusSchema,
@@ -763,7 +771,7 @@ export const githubToolOperationSchema = z.discriminatedUnion("kind", [
 export const githubToolRequestSchema = z
   .object({
     operation: githubToolOperationSchema,
-    operationId: z.string().uuid(),
+    operationId: canonicalUuidSchema,
   })
   .strict();
 
@@ -899,7 +907,7 @@ export const githubToolResultSchema = z.discriminatedUnion("kind", [
 
 export const createTeamRunInputSchema = z
   .object({
-    operationId: z.string().uuid(),
+    operationId: canonicalUuidSchema,
     task: boundedString(TEAM_LIMITS.maxMissionLength),
   })
   .strict();
@@ -958,7 +966,7 @@ export const teamHandoffSchema = z
 export const githubOperationReceiptSchema = z
   .object({
     completedAt: datetimeSchema.nullable(),
-    id: z.string().uuid(),
+    id: canonicalUuidSchema,
     kind: githubOperationKindSchema,
     providerRequestId: z.string().trim().max(256).nullable(),
     requestHash: z.string().regex(/^[a-f0-9]{64}$/u),
@@ -982,7 +990,7 @@ export const teamStepSchema = z
     position: z.number().int().nonnegative(),
     required: z.boolean(),
     responsibility: boundedString(AGENT_RUNNER_LIMITS.maxInstructionsLength),
-    runnerRunId: z.string().uuid().nullable(),
+    runnerRunId: canonicalUuidSchema.nullable(),
     skillIds: z
       .array(skillIdSchema)
       .max(TEAM_LIMITS.maxSkillsPerMember)
@@ -1004,7 +1012,7 @@ export const teamRunSchema = z
     error: runErrorSchema.nullable(),
     id: teamRunIdSchema,
     mission: boundedString(TEAM_LIMITS.maxMissionLength),
-    operationId: z.string().uuid(),
+    operationId: canonicalUuidSchema,
     startedAt: datetimeSchema.nullable(),
     status: teamRunStatusSchema,
     steps: z
@@ -1050,8 +1058,8 @@ export const runEventSchema = z.discriminatedUnion("type", [
   z
     .object({
       ...runEventBaseSchema,
-      operationId: z.string().uuid(),
-      runId: z.string().uuid(),
+      operationId: canonicalUuidSchema,
+      runId: canonicalUuidSchema,
       type: z.literal("accepted"),
     })
     .strict(),
@@ -1172,7 +1180,7 @@ export const runResultSchema = z.object({
   fileOperations: z
     .array(fileOperationSchema)
     .max(AGENT_RUNNER_LIMITS.maxFileOperations),
-  id: z.string().uuid(),
+  id: canonicalUuidSchema,
   output: z.string(),
   startedAt: datetimeSchema,
   status: z.enum(["completed", "failed"]),

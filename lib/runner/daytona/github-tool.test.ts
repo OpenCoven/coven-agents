@@ -2,7 +2,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { GITHUB_TOOL_SERVER_DEADLINE_MS } from "@opencoven/agent-contracts";
+import {
+  CANONICAL_UUID_PATTERN,
+  GITHUB_TOOL_SERVER_DEADLINE_MS,
+} from "@opencoven/agent-contracts";
 import {
   cleanupGitHubToolCapability,
   GITHUB_TOOL_CLIENT_MAX_BYTES,
@@ -45,6 +48,7 @@ test("the versioned client is a fixed bounded stdin-only gateway executable", ()
   assert.match(artifact.content, /Authorization/u);
   assert.match(artifact.content, /redirect:\s*"error"/u);
   assert.match(artifact.content, /process\.argv\.length !== 2/u);
+  assert.ok(artifact.content.includes(CANONICAL_UUID_PATTERN.toString()));
   assert.match(artifact.content, /AbortController/u);
   assert.doesNotMatch(artifact.content, /\bgh\b|api\.github\.com|graphql/u);
   assert.doesNotMatch(artifact.content, new RegExp(RAW_CAPABILITY, "u"));

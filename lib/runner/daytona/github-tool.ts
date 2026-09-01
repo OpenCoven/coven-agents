@@ -2,6 +2,7 @@
 import "server-only";
 
 import {
+  CANONICAL_UUID_PATTERN,
   GITHUB_TOOL_SERVER_DEADLINE_MS,
   githubToolRequestSchema,
 } from "@opencoven/agent-contracts";
@@ -46,7 +47,7 @@ function clientSource(expectedEndpoint: string): string {
 const MAX_BYTES = ${GITHUB_TOOL_CLIENT_MAX_BYTES};
 const TIMEOUT_MS = ${GITHUB_TOOL_CLIENT_TIMEOUT_MS};
 const EXPECTED_ENDPOINT = ${JSON.stringify(expectedEndpoint)};
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const UUID = ${CANONICAL_UUID_PATTERN.toString()};
 const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 function write(value, ok) {
   let encoded = JSON.stringify(value);

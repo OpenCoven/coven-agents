@@ -6,6 +6,7 @@ import {
   type GitHubOperationKind,
   type GitHubOperationStatus,
   githubOperationKindSchema,
+  isCanonicalUuid,
   type RunError,
   runErrorSchema,
   TEAM_LIMITS,
@@ -27,8 +28,6 @@ import type {
 import { teamChildRunnerIds } from "./child-ids";
 import { buildTeamHandoff } from "./handoff";
 
-const UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const DECIMAL_ID = /^(0|[1-9][0-9]{0,19})$/u;
 const REPOSITORY = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u;
@@ -701,7 +700,7 @@ function asGitHubOperation(
 }
 
 function assertUuid(value: string, field: string): void {
-  if (!UUID.test(value)) {
+  if (!isCanonicalUuid(value)) {
     throw new Error(`${field} must be a UUID.`);
   }
 }

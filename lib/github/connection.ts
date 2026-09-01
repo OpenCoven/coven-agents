@@ -8,6 +8,7 @@ import {
   randomUUID,
   timingSafeEqual,
 } from "node:crypto";
+import { isCanonicalUuid } from "@opencoven/agent-contracts";
 import type {
   AbuseAdmission,
   AbuseEnforcementInput,
@@ -64,8 +65,6 @@ const MAX_STATE_PAYLOAD_BYTES = Math.floor(
 );
 export const GITHUB_RETURN_PATH_MAX_ENCODED_BYTES = 2048;
 const RANDOM_STATE_BYTES = 32;
-const UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const TENANT = /^[A-Za-z0-9_]{1,64}$/u;
 const DECIMAL_ID = /^[1-9][0-9]{0,19}$/u;
 const JTI = /^[A-Za-z0-9_-]{43}$/u;
@@ -1644,7 +1643,7 @@ function assertValidStateIdentity(
     !Number.isSafeInteger(input.authVersion) ||
     input.authVersion < 0 ||
     Number.isNaN(input.now.getTime()) ||
-    !UUID.test(input.userId) ||
+    !isCanonicalUuid(input.userId) ||
     !TENANT.test(input.tenant) ||
     !canonicalSameOriginPath(input.returnPath)
   ) {
@@ -1674,7 +1673,7 @@ function validClaims(value: unknown): value is GitHubInstallStateClaims {
     typeof claims.jti === "string" &&
     JTI.test(claims.jti) &&
     typeof claims.userId === "string" &&
-    UUID.test(claims.userId) &&
+    isCanonicalUuid(claims.userId) &&
     typeof claims.tenant === "string" &&
     TENANT.test(claims.tenant) &&
     typeof claims.returnPath === "string" &&
@@ -1714,7 +1713,7 @@ function validStateIdentityClaims(claims: Record<string, unknown>): boolean {
     typeof claims.jti === "string" &&
     JTI.test(claims.jti) &&
     typeof claims.userId === "string" &&
-    UUID.test(claims.userId) &&
+    isCanonicalUuid(claims.userId) &&
     typeof claims.tenant === "string" &&
     TENANT.test(claims.tenant) &&
     typeof claims.returnPath === "string" &&
