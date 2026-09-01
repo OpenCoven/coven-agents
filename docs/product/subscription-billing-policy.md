@@ -68,9 +68,9 @@ failures roll the whole transaction back. A successful override invalidates
 existing authority rather than relying on a sign-out/in instruction.
 
 This override is intentionally separate from normal Stripe webhook authority,
-checkout, run admission, and mid-run transition policy. It does not implement
-automatic Stripe reconciliation; that requires separate work and operational
-evidence.
+checkout, run admission, and mid-run transition policy. It remains stronger
+than automatic Stripe positive repair: a reconciliation snapshot that sees an
+override's changed `authVersion` or entitlement tuple cannot write over it.
 
 Auth.js carries `subscribedUntil` in its server-managed session token and
 recomputes the derived type on every callback, so expiry is exact without
@@ -245,6 +245,73 @@ period, an unknown billing reason, or a second failure inside grace grants
 nothing. Stripe dunning may continue, but this application does not extend
 again. `customer.subscription.deleted` also changes nothing because the
 already-paid period expires through its stored timestamp.
+
+## Automatic bounded Stripe reconciliation
+
+`GET /api/internal/stripe-reconcile` is an authenticated scheduled-machine
+surface, not a browser or operator override endpoint. It accepts only the
+existing `CRON_SECRET` bearer credential, applies its IP-only abuse admission
+before credential validation or billing construction, accepts an empty body,
+and returns aggregate counts only. It has no subscriber session, manual runner
+credential, provider selection, or browser-controlled inputs. Missing billing
+configuration fails closed. This route is repository behavior, not evidence
+that a scheduler, Stripe credential, or live reconciliation has been deployed.
+
+The service is deliberately a **positive-repair sweep**, not Stripe event
+replay. It scans only local `User` rows which already hold a Stripe Customer or
+Subscription reference, selecting only the local ID, `authVersion`,
+`billingPeriodStart`, `subscribedUntil`, and those two existing mappings. It
+never lists Customers globally. A stored valid Subscription is retrieved first;
+only an absent, not-found, or appropriate terminal Subscription causes a
+strictly bounded Subscription list under that exact stored Customer. The list
+must yield one unambiguous configured-Price candidate. A verified Customer may
+therefore gain its verified missing Subscription ID, but reconciliation does
+not invent a Customer mapping.
+
+An automatic mutation requires all of the following at once:
+
+1. the exact stored Customer and one exact Subscription agree in the provider
+   observations;
+2. that Subscription is `active`, contains the configured Price, and names one
+   latest invoice;
+3. the latest invoice is paid, has the same Customer and Subscription, and has
+   a supported `subscription_create`, `subscription_cycle`, or
+   `subscription_update` billing reason; and
+4. exactly one non-proration subscription-item line for the configured Price
+   supplies a valid start/end interval for that Subscription.
+
+The exact paid interval is then evaluated by the same pure ordering rule as
+`invoice.paid`: duplicates, stale intervals, and contained intervals are
+no-ops; a later valid interval advances the exact tuple; an overlapping or
+crossing replacement is deferred. Normal reconciliation does **not** increment
+`authVersion`, matching webhook semantics.
+
+Subscription status is a search filter, never payment evidence. `trialing`,
+`past_due`, `unpaid`, `canceled`, `incomplete`, `incomplete_expired`, `paused`,
+and future/unknown statuses are deferred rather than granting entitlement.
+The service does not grant trials, infer grace from `past_due`, shorten or
+clear a period, revoke from canceled/unpaid status, or resolve a conflict.
+Malformed/deleted references, Customer or Subscription disagreement, multiple
+candidates, unavailable or unbounded provider pages, missing/ambiguous lines,
+unpaid latest invoices, unsupported reasons, and provider failures are all
+deferred with finite in-memory reason codes. No provider payload, amount,
+metadata, payment detail, arbitrary error, Customer, Subscription, invoice,
+or reason code is persisted for automatic work.
+
+`StripeReconciliationRun` is a singleton coordination row containing only a
+local cursor plus lease owner, fence, expiry, and update time. It acquires,
+takes over, renews, and releases by exact owner-and-fence checks against
+database time; no database transaction stays open across Stripe calls. Each
+completed user commits its cursor advance and any positive mutation in one
+transaction under both that lease fence and a null-safe exact snapshot of
+`authVersion`, paid interval, Customer ID, and Subscription ID. A webhook or
+administrative change therefore produces a conflict instead of an overwrite;
+an expired or taken-over worker cannot commit. A crash before that transaction
+leaves the row eligible for a later sweep. Cursor scans are ordered and wrap at
+the end, so deferred rows retry in later sweeps without permanently starving
+later local rows. Batch size, total users/batches, provider concurrency,
+provider pages/results, invoice-line pages/results, and lease TTL are finite
+validated bounds; a per-user provider failure does not stop later users.
 
 ## Reconciliation evidence and runbook
 

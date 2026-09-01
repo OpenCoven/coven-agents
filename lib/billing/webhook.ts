@@ -18,6 +18,12 @@ import {
   checkoutProviderIdempotencyKey,
 } from "./checkout-lease";
 import { graceExtension } from "./grace";
+import {
+  type PaidInvoiceDecision,
+  type PaidInvoiceMutation,
+  type PaidInvoiceUser,
+  paidInvoiceMutation,
+} from "./paid-invoice";
 import type {
   StripeReconciliationReason,
   StripeReconciliationRecord,
@@ -65,27 +71,14 @@ export type StripeEventUpdateInput =
       eventType: "invoice_payment_failed";
     });
 
-export type WebhookUser = {
-  billingPeriodStart: Date | null;
+export type WebhookUser = PaidInvoiceUser & {
   id: string;
-  stripeCustomerId: string | null;
-  stripeSubscriptionId: string | null;
-  subscribedUntil: Date | null;
 };
 
-export type StripeUserMutation = Partial<
-  Pick<
-    WebhookUser,
-    | "billingPeriodStart"
-    | "stripeCustomerId"
-    | "stripeSubscriptionId"
-    | "subscribedUntil"
-  >
->;
+export type StripeUserMutation = PaidInvoiceMutation;
 
 export type StripeEventMutationDecision =
-  | StripeUserMutation
-  | null
+  | PaidInvoiceDecision
   | {
       kind: "manual_reconciliation";
       reason: StripeWebhookManualReconciliationReason;
@@ -786,52 +779,6 @@ function supportedBillingReason(
     default:
       return null;
   }
-}
-
-function paidInvoiceMutation(
-  current: WebhookUser,
-  input: Extract<StripeEventUpdateInput, { eventType: "invoice_paid" }>
-): StripeEventMutationDecision {
-  const currentStart = current.billingPeriodStart?.getTime() ?? null;
-  const incomingStart = input.periodStart.getTime();
-  const incomingEnd = input.periodEnd.getTime();
-  const currentEnd = current.subscribedUntil?.getTime() ?? null;
-  const hasBackedPaidInterval =
-    currentStart !== null &&
-    currentEnd !== null &&
-    current.stripeSubscriptionId !== null;
-  const sameSubscription =
-    current.stripeSubscriptionId === input.stripeSubscriptionId;
-
-  if (hasBackedPaidInterval && sameSubscription) {
-    if (incomingEnd <= incomingStart || incomingEnd <= currentEnd) {
-      return null;
-    }
-    if (incomingStart < currentStart) {
-      return {
-        kind: "manual_reconciliation",
-        reason: "invoice_conflicting_paid_interval",
-      };
-    }
-  } else if (
-    hasBackedPaidInterval &&
-    !sameSubscription &&
-    (incomingStart < currentEnd ||
-      incomingEnd <= currentEnd ||
-      incomingEnd <= incomingStart)
-  ) {
-    return {
-      kind: "manual_reconciliation",
-      reason: "invoice_conflicting_paid_interval",
-    };
-  }
-
-  return {
-    ...customerMutation(current, input.customerId),
-    billingPeriodStart: input.periodStart,
-    stripeSubscriptionId: input.stripeSubscriptionId,
-    subscribedUntil: input.periodEnd,
-  };
 }
 
 function failedInvoiceMutation(

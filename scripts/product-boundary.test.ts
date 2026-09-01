@@ -70,6 +70,7 @@ const applicationRouteFiles = [
   "app/api/harnesses/route.ts",
   "app/api/health/route.ts",
   "app/api/internal/runner-reconcile/route.ts",
+  "app/api/internal/stripe-reconcile/route.ts",
   "app/api/runs/[id]/events/route.ts",
   "app/api/runs/[id]/route.ts",
   "app/api/runs/[id]/stop/route.ts",
@@ -508,6 +509,7 @@ test("the living subscription policy records current billing authorities", () =>
     "## Entitlement authority and timing",
     "## Checkout responsibilities",
     "## Webhook responsibilities",
+    "## Automatic bounded Stripe reconciliation",
     "## Usage cap and run accounting",
     "## Failure and recovery",
     "## Verification",
@@ -525,6 +527,7 @@ test("the living subscription policy records current billing authorities", () =>
     "lib/billing/webhook.ts",
     "app/api/checkout/route.ts",
     "app/api/stripe/webhook/route.ts",
+    "GET /api/internal/stripe-reconcile",
     "lib/credentials/runner-credential.ts",
     "StripeReconciliation",
     "SubscriptionOverrideAudit",
@@ -540,10 +543,11 @@ test("the living subscription policy records current billing authorities", () =>
 
   assert.match(policy, /not.*production certification/is);
   assert.match(policy, /not Stripe evidence/is);
-  assert.match(
-    policy,
-    /does not implement\s+automatic Stripe reconciliation/is
-  );
+  assert.match(policy, /positive-repair sweep/is);
+  assert.match(policy, /StripeReconciliationRun/);
+  assert.match(policy, /database time/is);
+  assert.match(policy, /exact snapshot/is);
+  assert.match(policy, /never lists Customers globally/is);
   assert.match(policy, /no (user|Customer|Subscription).*stored/is);
   assert.match(policy, /retention.*operator/is);
 });

@@ -452,6 +452,39 @@ export type StripeReconciliation = InferSelectModel<
   typeof stripeReconciliation
 >;
 
+/**
+ * Singleton lease and cursor for bounded automatic Stripe reconciliation.
+ *
+ * This contains coordination metadata only. In particular, it deliberately
+ * retains no provider payloads or identifiers beyond the local User cursor.
+ */
+export const stripeReconciliationRun = pgTable(
+  "StripeReconciliationRun",
+  {
+    cursor: uuid("cursor"),
+    id: integer("id").primaryKey().notNull(),
+    leaseExpiresAt: timestamp("leaseExpiresAt"),
+    leaseFence: integer("leaseFence").notNull().default(0),
+    leaseOwner: varchar("leaseOwner", { length: 64 }),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [
+    check("StripeReconciliationRun_singleton", sql`${table.id} = 1`),
+    check(
+      "StripeReconciliationRun_fence_nonnegative",
+      sql`${table.leaseFence} >= 0`
+    ),
+    check(
+      "StripeReconciliationRun_lease_shape",
+      sql`(${table.leaseOwner} is null and ${table.leaseExpiresAt} is null) or (${table.leaseOwner} is not null and ${table.leaseExpiresAt} is not null)`
+    ),
+  ]
+);
+
+export type StripeReconciliationRun = InferSelectModel<
+  typeof stripeReconciliationRun
+>;
+
 export const subscriptionOverrideAudit = pgTable(
   "SubscriptionOverrideAudit",
   {
