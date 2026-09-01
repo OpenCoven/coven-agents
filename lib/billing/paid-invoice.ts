@@ -3,10 +3,13 @@ export type PaidInvoiceUser = {
   stripeCustomerId: string | null;
   stripeSubscriptionId: string | null;
   subscribedUntil: Date | null;
+  subscriptionOverrideAction?: "grant" | "revoke" | null;
+  subscriptionOverrideAt?: Date | null;
 };
 
 export type PaidInvoiceEvidence = {
   customerId: string;
+  eventCreatedAt: Date;
   periodEnd: Date;
   periodStart: Date;
   stripeSubscriptionId: string;
@@ -19,6 +22,8 @@ export type PaidInvoiceMutation = Partial<
     | "stripeCustomerId"
     | "stripeSubscriptionId"
     | "subscribedUntil"
+    | "subscriptionOverrideAction"
+    | "subscriptionOverrideAt"
   >
 >;
 
@@ -39,6 +44,10 @@ export function paidInvoiceMutation(
   current: PaidInvoiceUser,
   input: PaidInvoiceEvidence
 ): PaidInvoiceDecision {
+  const supersedesOverride = paidEvidenceSupersedesOverride(current, input);
+  if (supersedesOverride === false) {
+    return null;
+  }
   const currentStart = current.billingPeriodStart?.getTime() ?? null;
   const incomingStart = input.periodStart.getTime();
   const incomingEnd = input.periodEnd.getTime();
@@ -78,7 +87,38 @@ export function paidInvoiceMutation(
     billingPeriodStart: input.periodStart,
     stripeSubscriptionId: input.stripeSubscriptionId,
     subscribedUntil: input.periodEnd,
+    ...(supersedesOverride
+      ? {
+          subscriptionOverrideAction: null,
+          subscriptionOverrideAt: null,
+        }
+      : {}),
   };
+}
+
+function paidEvidenceSupersedesOverride(
+  current: PaidInvoiceUser,
+  input: PaidInvoiceEvidence
+): boolean | null {
+  if (
+    (current.subscriptionOverrideAction === undefined &&
+      current.subscriptionOverrideAt === undefined) ||
+    (current.subscriptionOverrideAction === null &&
+      current.subscriptionOverrideAt === null)
+  ) {
+    return null;
+  }
+  const overrideAt = current.subscriptionOverrideAt?.getTime();
+  const evidenceAt = input.eventCreatedAt.getTime();
+  if (
+    (current.subscriptionOverrideAction !== "grant" &&
+      current.subscriptionOverrideAction !== "revoke") ||
+    !Number.isFinite(overrideAt) ||
+    !Number.isFinite(evidenceAt)
+  ) {
+    return false;
+  }
+  return evidenceAt > (overrideAt as number);
 }
 
 function customerMutation(

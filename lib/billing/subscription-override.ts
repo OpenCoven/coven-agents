@@ -30,15 +30,21 @@ export type SubscriptionOverrideUser = {
   billingPeriodStart: Date | null;
   id: string;
   subscribedUntil: Date | null;
+  subscriptionOverrideAction: SubscriptionOverrideAction | null;
+  subscriptionOverrideAt: Date | null;
 };
 
 export type SubscriptionOverrideUserUpdate = {
   billingPeriodStart: Date | null;
   expectedAuthVersion: number;
   expectedBillingPeriodStart: Date | null;
+  expectedSubscriptionOverrideAction: SubscriptionOverrideAction | null;
+  expectedSubscriptionOverrideAt: Date | null;
   expectedSubscribedUntil: Date | null;
   newAuthVersion: number;
   subscribedUntil: Date | null;
+  subscriptionOverrideAction: SubscriptionOverrideAction;
+  subscriptionOverrideAt: Date;
   userId: string;
 };
 
@@ -62,6 +68,8 @@ export type SubscriptionOverrideInput =
       durationDays: number;
       expectedAuthVersion: number;
       expectedBillingPeriodStart: Date | null;
+      expectedSubscriptionOverrideAction: SubscriptionOverrideAction | null;
+      expectedSubscriptionOverrideAt: Date | null;
       expectedSubscribedUntil: Date | null;
       operation: "grant";
       referenceDigest: string;
@@ -70,6 +78,8 @@ export type SubscriptionOverrideInput =
   | {
       expectedAuthVersion: number;
       expectedBillingPeriodStart: Date | null;
+      expectedSubscriptionOverrideAction: SubscriptionOverrideAction | null;
+      expectedSubscriptionOverrideAt: Date | null;
       expectedSubscribedUntil: Date | null;
       operation: "revoke";
       referenceDigest: string;
@@ -110,6 +120,8 @@ export type SubscriptionOverrideCliDependencies = {
     billingPeriodStart: Date | null;
     id: string;
     subscribedUntil: Date | null;
+    subscriptionOverrideAction: SubscriptionOverrideAction | null;
+    subscriptionOverrideAt: Date | null;
   } | null>;
   now: () => Date;
   readReference: () => Promise<string>;
@@ -225,6 +237,8 @@ export async function runSubscriptionCli(
           expectedAuthVersion: user.authVersion,
           expectedBillingPeriodStart: user.billingPeriodStart,
           expectedSubscribedUntil: user.subscribedUntil,
+          expectedSubscriptionOverrideAction: user.subscriptionOverrideAction,
+          expectedSubscriptionOverrideAt: user.subscriptionOverrideAt,
           operation: "grant",
           referenceDigest,
           userId: user.id,
@@ -233,6 +247,8 @@ export async function runSubscriptionCli(
           expectedAuthVersion: user.authVersion,
           expectedBillingPeriodStart: user.billingPeriodStart,
           expectedSubscribedUntil: user.subscribedUntil,
+          expectedSubscriptionOverrideAction: user.subscriptionOverrideAction,
+          expectedSubscriptionOverrideAt: user.subscriptionOverrideAt,
           operation: "revoke",
           referenceDigest,
           userId: user.id,
@@ -274,6 +290,12 @@ export async function applySubscriptionOverride(
         owner.billingPeriodStart,
         input.expectedBillingPeriodStart
       ) ||
+      owner.subscriptionOverrideAction !==
+        input.expectedSubscriptionOverrideAction ||
+      !sameTimestamp(
+        owner.subscriptionOverrideAt,
+        input.expectedSubscriptionOverrideAt
+      ) ||
       !sameTimestamp(owner.subscribedUntil, input.expectedSubscribedUntil)
     ) {
       return { kind: "authority_changed" };
@@ -294,8 +316,13 @@ export async function applySubscriptionOverride(
       expectedAuthVersion: owner.authVersion,
       expectedBillingPeriodStart: input.expectedBillingPeriodStart,
       expectedSubscribedUntil: input.expectedSubscribedUntil,
+      expectedSubscriptionOverrideAction:
+        input.expectedSubscriptionOverrideAction,
+      expectedSubscriptionOverrideAt: input.expectedSubscriptionOverrideAt,
       newAuthVersion,
       subscribedUntil,
+      subscriptionOverrideAction: input.operation,
+      subscriptionOverrideAt: now,
       userId: owner.id,
     });
     if (!updated) {

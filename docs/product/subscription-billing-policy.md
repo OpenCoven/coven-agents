@@ -58,7 +58,8 @@ arguments or printed.
 entitlement. `revoke` immediately clears the paid period. Both commands run
 one transaction that locks the exact tenant-owner `User` row, fences a stale
 authority version, increments `authVersion` exactly once, updates
-`subscribedUntil` and `billingPeriodStart`, and inserts one immutable
+`subscribedUntil` and `billingPeriodStart`, sets the finite paired active
+override marker (`grant` or `revoke` plus its transaction time), and inserts one immutable
 `SubscriptionOverrideAudit` record. The audit stores only its ID, owner
 reference, `grant` or `revoke` action, prior and new paid-through timestamps,
 prior and new authority versions, creation time, and the reference digest.
@@ -69,8 +70,15 @@ existing authority rather than relying on a sign-out/in instruction.
 
 This override is intentionally separate from normal Stripe webhook authority,
 checkout, run admission, and mid-run transition policy. It remains stronger
-than automatic Stripe positive repair: a reconciliation snapshot that sees an
-override's changed `authVersion` or entitlement tuple cannot write over it.
+than delayed automatic Stripe evidence. A paid invoice event must be strictly
+newer than the marker's authenticated event (or normalized invoice) creation
+time and must independently satisfy the exact interval rule before it can
+supersede an override and atomically clear the marker. Checkout-reference,
+failed, stale, no-op, ambiguous, and rejected events never clear it. The
+reconciliation snapshot and write fence include both marker fields, so an
+administrative change cannot be overwritten between provider observation and
+commit. The marker contains neither the operator reference nor a digest; the
+immutable audit table is the only override evidence record.
 
 Auth.js carries `subscribedUntil` in its server-managed session token and
 recomputes the derived type on every callback, so expiry is exact without
@@ -212,11 +220,14 @@ state.
    exact Customer and Checkout Session IDs.
 6. Allow-list entitlement changes through `lib/billing/webhook.ts`.
    `invoice.paid` accepts the subscription ID, billing-period start, and
-   period end as one exact interval. A same-subscription renewal may advance
-   it. A different subscription may replace it only when no paid interval is
-   backed, or when its start is at or after the stored end and its end advances.
+   period end as one exact interval and carries the signature-authenticated
+   Stripe event creation time. A same-subscription renewal may advance it. A
+   different subscription may replace it only when no paid interval is backed,
+   or when its start is at or after the stored end and its end advances.
    Overlapping replacement intervals never merge or reset usage; they enter
-   manual reconciliation. Unknown events change nothing.
+   manual reconciliation. An active administrative override rejects evidence
+   created at or before its marker and is cleared only by a strictly newer
+   successful paid application. Unknown events change nothing.
 7. Persist manual dispositions by inserting `StripeEvent` and
    `StripeReconciliation` together. A redelivery conflicts on the event ID and
    returns `deduped`; a reconciliation insert or commit failure rolls both rows
@@ -260,13 +271,16 @@ that a scheduler, Stripe credential, or live reconciliation has been deployed.
 The service is deliberately a **positive-repair sweep**, not Stripe event
 replay. It scans only local `User` rows which already hold a Stripe Customer or
 Subscription reference, selecting only the local ID, `authVersion`,
-`billingPeriodStart`, `subscribedUntil`, and those two existing mappings. It
-never lists Customers globally. A stored valid Subscription is retrieved first;
-only an absent, not-found, or appropriate terminal Subscription causes a
-strictly bounded Subscription list under that exact stored Customer. The list
-must yield one unambiguous configured-Price candidate. A verified Customer may
-therefore gain its verified missing Subscription ID, but reconciliation does
-not invent a Customer mapping.
+`billingPeriodStart`, `subscribedUntil`, both existing mappings, and the
+active override marker. It never lists Customers globally. A stored valid
+Subscription is retrieved first; only an absent, not-found, or appropriate
+terminal Subscription causes a strictly bounded Subscription list under that
+exact stored Customer. The list selects exactly one `active` configured-Price
+candidate: terminal and known ineligible statuses do not make that candidate
+ambiguous, while malformed observations, unknown future statuses, duplicate
+configured-Price items, and multiple active candidates still defer. A verified
+Customer may therefore gain its verified missing Subscription ID, but
+reconciliation does not invent a Customer mapping.
 
 An automatic mutation requires all of the following at once:
 
@@ -276,7 +290,8 @@ An automatic mutation requires all of the following at once:
    latest invoice;
 3. the latest invoice is paid, has the same Customer and Subscription, and has
    a supported `subscription_create`, `subscription_cycle`, or
-   `subscription_update` billing reason; and
+   `subscription_update` billing reason plus a finite normalized invoice
+   creation time; and
 4. exactly one non-proration subscription-item line for the configured Price
    supplies a valid start/end interval for that Subscription.
 
@@ -304,14 +319,17 @@ takes over, renews, and releases by exact owner-and-fence checks against
 database time; no database transaction stays open across Stripe calls. Each
 completed user commits its cursor advance and any positive mutation in one
 transaction under both that lease fence and a null-safe exact snapshot of
-`authVersion`, paid interval, Customer ID, and Subscription ID. A webhook or
-administrative change therefore produces a conflict instead of an overwrite;
-an expired or taken-over worker cannot commit. A crash before that transaction
-leaves the row eligible for a later sweep. Cursor scans are ordered and wrap at
-the end, so deferred rows retry in later sweeps without permanently starving
-later local rows. Batch size, total users/batches, provider concurrency,
-provider pages/results, invoice-line pages/results, and lease TTL are finite
-validated bounds; a per-user provider failure does not stop later users.
+`authVersion`, paid interval, Customer ID, Subscription ID, and override
+marker. A webhook or administrative change therefore produces a conflict
+instead of an overwrite; an expired or taken-over worker cannot commit. A
+crash before that transaction leaves the row eligible for a later sweep. Cursor
+scans are ordered and wrap at the end, so deferred rows retry in later sweeps
+without permanently starving later local rows. Batch size, total users/batches,
+provider concurrency, provider pages/results, invoice-line pages/results, and
+lease TTL are finite validated bounds; a per-user provider failure does not
+stop later users. Stripe `401` and `403` configuration or permission failures
+are instead systemic: the run aborts and the route returns a sanitized
+`503 billing_provider_unauthorized`, never an ordinary deferred aggregate.
 
 ## Reconciliation evidence and runbook
 
@@ -373,6 +391,7 @@ the accounting read fails, the endpoint returns `capacity_unavailable`.
 | Obsolete open Checkout Session cannot be expired | Checkout returns `checkout_session_conflict`; no replacement Session is created. | Restore Stripe access, retry cleanup with the same application key, and confirm only the current Price/version remains payable. |
 | An open subscription Checkout Session lacks current ownership markers | Checkout returns `checkout_session_conflict` and does not expire or replace the Session. | An operator must verify the Customer, user, mode, and creation history in Stripe, then expire or otherwise resolve the unowned Session before retrying. |
 | Missing billing configuration | Checkout or webhook returns `billing_unavailable`. | Restore the deployment secrets and verify configuration without logging values. |
+| Stripe Invoice, Invoice Line Item, Subscription, or Customer read is unauthorized | Stripe reconciliation aborts with sanitized `503 billing_provider_unauthorized`; it does not report ordinary per-user deferrals. | Restore least-privilege key access for Customer read/write, Subscription read, Invoice read, Invoice Line Item read, and Checkout Session write; retry after validating access without logging key or Stripe error details. |
 | Missing or invalid webhook signature | `400`; no event is trusted. | Correct the endpoint secret or delivery configuration, then request a provider redelivery. |
 | Duplicate Stripe event | The event ID conflicts and the delivery returns `deduped`. | Confirm the original event produced the intended database period; do not bypass deduplication. |
 | Persisted Customer mapping is absent but valid checkout metadata could still converge | The delivery remains unclaimed and returns `503` until local attempt provenance proves the same owner and Customer. | Let checkout attachment or recovery settle, then accept Stripe's redelivery. Never attach ownership from metadata alone. |

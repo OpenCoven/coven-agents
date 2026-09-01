@@ -39,7 +39,9 @@ export function stripeReconciliationSnapshotWhere(
     sql`${user.billingPeriodStart} is not distinct from ${snapshot.billingPeriodStart}`,
     sql`${user.subscribedUntil} is not distinct from ${snapshot.subscribedUntil}`,
     sql`${user.stripeCustomerId} is not distinct from ${snapshot.stripeCustomerId}`,
-    sql`${user.stripeSubscriptionId} is not distinct from ${snapshot.stripeSubscriptionId}`
+    sql`${user.stripeSubscriptionId} is not distinct from ${snapshot.stripeSubscriptionId}`,
+    sql`${user.subscriptionOverrideAction} is not distinct from ${snapshot.subscriptionOverrideAction ?? null}`,
+    sql`${user.subscriptionOverrideAt} is not distinct from ${snapshot.subscriptionOverrideAt ?? null}`
   ) as SQL<unknown>;
 }
 
@@ -213,6 +215,8 @@ export const databaseStripeReconciliationStore: StripeReconciliationStore = {
           stripeCustomerId: user.stripeCustomerId,
           stripeSubscriptionId: user.stripeSubscriptionId,
           subscribedUntil: user.subscribedUntil,
+          subscriptionOverrideAction: user.subscriptionOverrideAction,
+          subscriptionOverrideAt: user.subscriptionOverrideAt,
         })
         .from(user)
         .where(

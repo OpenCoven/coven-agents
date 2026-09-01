@@ -4,7 +4,10 @@ import {
   type AbuseEnforcementInput,
   abuseAdmissionResponse,
 } from "@/lib/abuse/enforce";
-import type { StripeReconciliationResult } from "./stripe-reconciliation";
+import {
+  StripeReconciliationProviderUnauthorizedError,
+  type StripeReconciliationResult,
+} from "./stripe-reconciliation";
 
 export type StripeReconciliationRouteDependencies<Provider = unknown> = {
   authorize: (request: Request) => "allowed" | "unavailable" | "unauthorized";
@@ -93,7 +96,10 @@ export async function stripeReconciliationResponse<Provider>(
       await dependencies.reconcile({ priceId: config.priceId, provider })
     );
     return aggregate ? Response.json(aggregate) : unavailableResponse();
-  } catch {
+  } catch (error) {
+    if (error instanceof StripeReconciliationProviderUnauthorizedError) {
+      return providerUnauthorizedResponse();
+    }
     return unavailableResponse();
   }
 }
@@ -127,4 +133,11 @@ function reconciliationAggregate(
 
 function unavailableResponse(): Response {
   return Response.json({ error: "reconcile_unavailable" }, { status: 503 });
+}
+
+function providerUnauthorizedResponse(): Response {
+  return Response.json(
+    { error: "billing_provider_unauthorized" },
+    { status: 503 }
+  );
 }

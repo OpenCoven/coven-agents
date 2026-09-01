@@ -40,6 +40,7 @@ test("Stripe invoice owner lookup falls back to the unique Customer reference", 
   const { params, sql } = ownerLockSql({
     billingReason: "subscription_cycle",
     customerId: "cus_webhook",
+    eventCreatedAt: new Date("2026-09-26T00:00:00.000Z"),
     eventId: "evt_invoice",
     eventType: "invoice_paid",
     periodEnd: new Date("2026-10-20T12:00:00.000Z"),

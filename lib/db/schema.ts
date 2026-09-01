@@ -98,10 +98,19 @@ export const user = pgTable(
      * set this; until then it is set by `pnpm subscription`.
      */
     subscribedUntil: timestamp("subscribedUntil"),
+    subscriptionOverrideAction: varchar("subscriptionOverrideAction", {
+      enum: ["grant", "revoke"],
+      length: 6,
+    }),
+    subscriptionOverrideAt: timestamp("subscriptionOverrideAt"),
     updatedAt: timestamp("updatedAt").notNull().defaultNow(),
   },
   (table) => [
     uniqueIndex("User_stripeCustomerId_idx").on(table.stripeCustomerId),
+    check(
+      "User_subscriptionOverride_shape",
+      sql`(${table.subscriptionOverrideAction} is null and ${table.subscriptionOverrideAt} is null) or (${table.subscriptionOverrideAction} in ('grant', 'revoke') and ${table.subscriptionOverrideAt} is not null and isfinite(${table.subscriptionOverrideAt}))`
+    ),
   ]
 );
 

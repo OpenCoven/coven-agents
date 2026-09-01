@@ -31,6 +31,13 @@ export type StripeReconciliationRecord = {
   status: StripeReconciliationStatus;
 };
 
+export class StripeReconciliationProviderUnauthorizedError extends Error {
+  constructor() {
+    super("Stripe billing provider is unauthorized.");
+    this.name = "StripeReconciliationProviderUnauthorizedError";
+  }
+}
+
 import {
   type PaidInvoiceMutation,
   type PaidInvoiceUser,
@@ -95,6 +102,7 @@ export type StripeInvoiceLineObservation = {
 export type StripeInvoiceObservation = {
   billingReason: string | null;
   customerId: string | null;
+  evidenceCreatedAt: Date | null;
   id: string;
   lines: StripeReconciliationPage<StripeInvoiceLineObservation>;
   paid: boolean;
@@ -185,6 +193,7 @@ type DeferredReason =
   | "invoice_contradictory_subscription"
   | "invoice_conflicting_paid_interval"
   | "invoice_customer_mismatch"
+  | "invoice_invalid_evidence_time"
   | "invoice_invalid_period"
   | "invoice_invalid_reference"
   | "invoice_missing_latest"
@@ -445,6 +454,7 @@ async function reconcileUser(
   }
   const decision = paidInvoiceMutation(user, {
     customerId: user.stripeCustomerId as string,
+    eventCreatedAt: invoice.invoice.evidenceCreatedAt as Date,
     periodEnd: entitlement.periodEnd,
     periodStart: entitlement.periodStart,
     stripeSubscriptionId: subscription.id,
@@ -466,7 +476,10 @@ async function safelyReconcileUser(
 ): Promise<UserDisposition> {
   try {
     return await reconcileUser(user, provider, priceId, bounds);
-  } catch {
+  } catch (error) {
+    if (error instanceof StripeReconciliationProviderUnauthorizedError) {
+      throw error;
+    }
     return { kind: "deferred", reason: "provider_unavailable" };
   }
 }
@@ -494,7 +507,10 @@ async function selectSubscription(
     let retrieved: StripeSubscriptionObservation | null;
     try {
       retrieved = await provider.retrieveSubscription(storedSubscriptionId);
-    } catch {
+    } catch (error) {
+      if (error instanceof StripeReconciliationProviderUnauthorizedError) {
+        throw error;
+      }
       return { kind: "deferred", reason: "provider_unavailable" };
     }
     if (retrieved) {
@@ -507,10 +523,19 @@ async function selectSubscription(
         return { kind: "deferred", reason: validation };
       }
       const status = subscriptionStatus(retrieved.status);
+      if (!validSubscriptionPriceIds(retrieved.priceIds)) {
+        return { kind: "deferred", reason: "subscription_invalid_reference" };
+      }
+      const configuredPriceCount = configuredPriceCountFor(
+        retrieved.priceIds,
+        priceId
+      );
       if (status === "active") {
-        return retrieved.priceIds.includes(priceId)
+        return configuredPriceCount === 1
           ? { kind: "candidate", subscription: retrieved }
-          : { kind: "deferred", reason: "subscription_price_mismatch" };
+          : configuredPriceCount > 1
+            ? { kind: "deferred", reason: "subscription_ambiguous" }
+            : { kind: "deferred", reason: "subscription_price_mismatch" };
       }
       if (!isTerminalSubscriptionStatus(status)) {
         return { kind: "deferred", reason: status };
@@ -561,7 +586,10 @@ async function listedSubscription(
         ),
         ...(startingAfter ? { startingAfter } : {}),
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof StripeReconciliationProviderUnauthorizedError) {
+        throw error;
+      }
       return { kind: "deferred", reason: "provider_unavailable" };
     }
     if (
@@ -588,31 +616,55 @@ async function listedSubscription(
     startingAfter = next;
   }
 
-  const matching: StripeSubscriptionObservation[] = [];
+  const activeCandidates: StripeSubscriptionObservation[] = [];
+  let inactiveReason: DeferredReason | null = null;
+  let sawActive = false;
   for (const subscription of subscriptions) {
     const validation = subscriptionMatches(subscription, customerId, null);
     if (validation) {
       return { kind: "deferred", reason: validation };
     }
-    if (!subscription.priceIds.includes(priceId)) {
+    if (!validSubscriptionPriceIds(subscription.priceIds)) {
+      return { kind: "deferred", reason: "subscription_invalid_reference" };
+    }
+    const configuredPriceCount = configuredPriceCountFor(
+      subscription.priceIds,
+      priceId
+    );
+    const status = subscriptionStatus(subscription.status);
+    if (status === "subscription_unknown_status" && configuredPriceCount > 0) {
+      return { kind: "deferred", reason: status };
+    }
+    if (status !== "active") {
+      if (configuredPriceCount > 0 && !inactiveReason) {
+        inactiveReason = status;
+      }
       continue;
     }
-    matching.push(subscription);
+    sawActive = true;
+    if (configuredPriceCount > 1) {
+      return { kind: "deferred", reason: "subscription_ambiguous" };
+    }
+    if (configuredPriceCount === 1) {
+      activeCandidates.push(subscription);
+    }
   }
-  if (matching.length !== 1) {
+  if (activeCandidates.length !== 1) {
     return {
       kind: "deferred",
       reason:
-        matching.length > 1
+        activeCandidates.length > 1
           ? "subscription_ambiguous"
-          : "subscription_unknown_status",
+          : (inactiveReason ??
+            (sawActive
+              ? "subscription_price_mismatch"
+              : "subscription_unknown_status")),
     };
   }
-  const subscription = matching[0] as StripeSubscriptionObservation;
-  const status = subscriptionStatus(subscription.status);
-  return status === "active"
-    ? { kind: "candidate", subscription }
-    : { kind: "deferred", reason: status };
+  return {
+    kind: "candidate",
+    subscription: activeCandidates[0] as StripeSubscriptionObservation,
+  };
 }
 
 function subscriptionStatus(status: string): DeferredReason | "active" {
@@ -662,7 +714,10 @@ async function invoiceForSubscription(
   let invoice: StripeInvoiceObservation | null;
   try {
     invoice = await provider.retrieveInvoice(invoiceId);
-  } catch {
+  } catch (error) {
+    if (error instanceof StripeReconciliationProviderUnauthorizedError) {
+      throw error;
+    }
     return { kind: "deferred", reason: "provider_unavailable" };
   }
   if (
@@ -674,6 +729,9 @@ async function invoiceForSubscription(
   }
   if (!invoice.paid) {
     return { kind: "deferred", reason: "invoice_not_paid" };
+  }
+  if (!validEvidenceCreatedAt(invoice.evidenceCreatedAt)) {
+    return { kind: "deferred", reason: "invoice_invalid_evidence_time" };
   }
   if (invoice.customerId !== subscription.customerId) {
     return { kind: "deferred", reason: "invoice_customer_mismatch" };
@@ -776,7 +834,10 @@ async function paidInvoiceEntitlement(
         limit: Math.min(100, bounds.invoiceLineResultLimit - inspected),
         startingAfter: next,
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof StripeReconciliationProviderUnauthorizedError) {
+        throw error;
+      }
       return { kind: "deferred", reason: "provider_unavailable" };
     }
   }
@@ -823,6 +884,24 @@ function supportedBillingReason(reason: string | null): boolean {
     reason === "subscription_cycle" ||
     reason === "subscription_update"
   );
+}
+
+function validEvidenceCreatedAt(value: Date | null): value is Date {
+  return Boolean(value && Number.isFinite(value.getTime()));
+}
+
+function validSubscriptionPriceIds(priceIds: readonly string[]): boolean {
+  return (
+    Array.isArray(priceIds) &&
+    priceIds.every((priceId) => validStripeId(priceId, "price_"))
+  );
+}
+
+function configuredPriceCountFor(
+  priceIds: readonly string[],
+  priceId: string
+): number {
+  return priceIds.filter((candidate) => candidate === priceId).length;
 }
 
 function validStripeId(

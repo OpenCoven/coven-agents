@@ -8,6 +8,8 @@ export function subscriptionOverrideOwnerWhere(userId: string): SQL<unknown> {
 export function subscriptionOverrideWriteFenceWhere(input: {
   expectedAuthVersion: number;
   expectedBillingPeriodStart: Date | null;
+  expectedSubscriptionOverrideAction: "grant" | "revoke" | null;
+  expectedSubscriptionOverrideAt: Date | null;
   expectedSubscribedUntil: Date | null;
   userId: string;
 }): SQL<unknown> {
@@ -15,6 +17,8 @@ export function subscriptionOverrideWriteFenceWhere(input: {
     eq(user.id, input.userId),
     eq(user.authVersion, input.expectedAuthVersion),
     sql`${user.billingPeriodStart} is not distinct from ${input.expectedBillingPeriodStart}`,
-    sql`${user.subscribedUntil} is not distinct from ${input.expectedSubscribedUntil}`
+    sql`${user.subscribedUntil} is not distinct from ${input.expectedSubscribedUntil}`,
+    sql`${user.subscriptionOverrideAction} is not distinct from ${input.expectedSubscriptionOverrideAction}`,
+    sql`${user.subscriptionOverrideAt} is not distinct from ${input.expectedSubscriptionOverrideAt}`
   ) as SQL<unknown>;
 }

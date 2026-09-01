@@ -197,6 +197,13 @@
       "when": 1788239227081,
       "tag": "0027_brave_sentinel",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1788241070247,
+      "tag": "0028_groovy_northstar",
+      "breakpoints": true
     }
   ]
 }

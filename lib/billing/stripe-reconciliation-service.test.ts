@@ -8,6 +8,7 @@ import {
   type StripeInvoiceObservation,
   type StripeReconciliationLease,
   type StripeReconciliationProvider,
+  StripeReconciliationProviderUnauthorizedError,
   type StripeReconciliationStore,
   type StripeReconciliationUser,
 } from "./stripe-reconciliation";
@@ -18,6 +19,7 @@ const SUBSCRIPTION_ID = "sub_reconcile";
 const USER_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 const PERIOD_START = new Date("2026-09-01T00:00:00.000Z");
 const PERIOD_END = new Date("2026-10-01T00:00:00.000Z");
+const OVERRIDE_AT = new Date("2026-09-25T00:00:00.000Z");
 
 test("a paid latest invoice repairs the exact interval and attaches its verified subscription", async () => {
   const user: StripeReconciliationUser = {
@@ -68,6 +70,7 @@ test("a paid latest invoice repairs the exact interval and attaches its verified
         return {
           billingReason: "subscription_cycle",
           customerId: CUSTOMER_ID,
+          evidenceCreatedAt: new Date("2026-09-26T00:00:00.000Z"),
           id: invoiceId,
           lines: {
             data: [
@@ -112,6 +115,72 @@ test("a paid latest invoice repairs the exact interval and attaches its verified
   ]);
 });
 
+test("reconciliation keeps an active override for invoice evidence at or before it", async () => {
+  const user: StripeReconciliationUser = {
+    authVersion: 7,
+    billingPeriodStart: null,
+    id: USER_ID,
+    stripeCustomerId: CUSTOMER_ID,
+    stripeSubscriptionId: SUBSCRIPTION_ID,
+    subscribedUntil: null,
+    subscriptionOverrideAction: "revoke",
+    subscriptionOverrideAt: new Date("2026-09-26T00:00:00.000Z"),
+  };
+  const store = new MemoryStore([user]);
+
+  const result = await reconcileStripeSubscriptions({
+    bounds: minimalBounds(),
+    owner: "11111111-1111-4111-8111-111111111111",
+    priceId: PRICE_ID,
+    provider: paidProvider(),
+    store,
+  });
+
+  assert.deepEqual(result, {
+    applied: 0,
+    conflicts: 0,
+    deferred: 0,
+    execution: "executed",
+    failures: 0,
+    scanned: 1,
+    unchanged: 1,
+  });
+  assert.deepEqual(store.users, [user]);
+});
+
+test("strictly newer reconciled paid evidence clears an active revoke atomically", async () => {
+  const user: StripeReconciliationUser = {
+    authVersion: 7,
+    billingPeriodStart: null,
+    id: USER_ID,
+    stripeCustomerId: CUSTOMER_ID,
+    stripeSubscriptionId: SUBSCRIPTION_ID,
+    subscribedUntil: null,
+    subscriptionOverrideAction: "revoke",
+    subscriptionOverrideAt: OVERRIDE_AT,
+  };
+  const store = new MemoryStore([user]);
+
+  const result = await reconcileStripeSubscriptions({
+    bounds: minimalBounds(),
+    owner: "11111111-1111-4111-8111-111111111111",
+    priceId: PRICE_ID,
+    provider: paidProvider(),
+    store,
+  });
+
+  assert.equal(result.applied, 1);
+  assert.deepEqual(store.users, [
+    {
+      ...user,
+      billingPeriodStart: PERIOD_START,
+      subscribedUntil: PERIOD_END,
+      subscriptionOverrideAction: null,
+      subscriptionOverrideAt: null,
+    },
+  ]);
+});
+
 test("a provider outage for one user defers that user and continues later users", async () => {
   const first: StripeReconciliationUser = {
     authVersion: 1,
@@ -151,6 +220,7 @@ test("a provider outage for one user defers that user and continues later users"
       retrieveInvoice: async () => ({
         billingReason: "subscription_cycle",
         customerId: CUSTOMER_ID,
+        evidenceCreatedAt: new Date("2026-09-26T00:00:00.000Z"),
         id: "in_reconcile",
         lines: {
           data: [
@@ -201,6 +271,37 @@ test("a provider outage for one user defers that user and continues later users"
     store.users[1]?.subscribedUntil?.getTime(),
     PERIOD_END.getTime()
   );
+});
+
+test("a provider authorization failure aborts reconciliation without committing a user deferral", async () => {
+  const user: StripeReconciliationUser = {
+    authVersion: 1,
+    billingPeriodStart: null,
+    id: USER_ID,
+    stripeCustomerId: CUSTOMER_ID,
+    stripeSubscriptionId: SUBSCRIPTION_ID,
+    subscribedUntil: null,
+  };
+  const store = new MemoryStore([user]);
+
+  await assert.rejects(
+    reconcileStripeSubscriptions({
+      bounds: minimalBounds(),
+      owner: "11111111-1111-4111-8111-111111111111",
+      priceId: PRICE_ID,
+      provider: {
+        ...paidProvider(),
+        retrieveSubscription: async () => {
+          throw new StripeReconciliationProviderUnauthorizedError();
+        },
+      },
+      store,
+    }),
+    StripeReconciliationProviderUnauthorizedError
+  );
+
+  assert.equal(store.cursor, null);
+  assert.deepEqual(store.users, [user]);
 });
 
 test("a truncated subscription result set is deferred without fetching an unbounded next page", async () => {
@@ -456,6 +557,198 @@ test("missing subscriptions and multiple configured-price candidates are deferre
     assert.equal(result.deferred, 1);
     assert.equal(result.applied, 0);
   }
+});
+
+test("a canceled stored subscription falls back to one active replacement", async () => {
+  const user: StripeReconciliationUser = {
+    authVersion: 1,
+    billingPeriodStart: null,
+    id: USER_ID,
+    stripeCustomerId: CUSTOMER_ID,
+    stripeSubscriptionId: "sub_canceled",
+    subscribedUntil: null,
+  };
+  const store = new MemoryStore([user]);
+  const replacement = "sub_active_replacement";
+
+  const result = await reconcileStripeSubscriptions({
+    bounds: minimalBounds(),
+    owner: "11111111-1111-4111-8111-111111111111",
+    priceId: PRICE_ID,
+    provider: {
+      ...paidProvider(),
+      listSubscriptions: async () => ({
+        data: [
+          {
+            customerId: CUSTOMER_ID,
+            id: "sub_canceled",
+            latestInvoiceId: "in_canceled",
+            priceIds: [PRICE_ID],
+            status: "canceled",
+          },
+          {
+            customerId: CUSTOMER_ID,
+            id: replacement,
+            latestInvoiceId: "in_active_replacement",
+            priceIds: [PRICE_ID],
+            status: "active",
+          },
+        ],
+        hasMore: false,
+      }),
+      retrieveInvoice: async () => ({
+        ...paidInvoice(),
+        id: "in_active_replacement",
+        lines: {
+          data: [
+            invoiceLine({
+              id: "il_active_replacement",
+              stripeSubscriptionId: replacement,
+            }),
+          ],
+          hasMore: false,
+        },
+        stripeSubscriptionId: replacement,
+      }),
+      retrieveSubscription: async () => ({
+        customerId: CUSTOMER_ID,
+        id: "sub_canceled",
+        latestInvoiceId: "in_canceled",
+        priceIds: [PRICE_ID],
+        status: "canceled",
+      }),
+    },
+    store,
+  });
+
+  assert.equal(result.applied, 1);
+  assert.equal(store.users[0]?.stripeSubscriptionId, replacement);
+});
+
+test("only terminal subscriptions defer without attempting an invoice", async () => {
+  const user: StripeReconciliationUser = {
+    authVersion: 1,
+    billingPeriodStart: null,
+    id: USER_ID,
+    stripeCustomerId: CUSTOMER_ID,
+    stripeSubscriptionId: null,
+    subscribedUntil: null,
+  };
+  const store = new MemoryStore([user]);
+  let invoiceReads = 0;
+
+  const result = await reconcileStripeSubscriptions({
+    bounds: minimalBounds(),
+    owner: "11111111-1111-4111-8111-111111111111",
+    priceId: PRICE_ID,
+    provider: {
+      ...paidProvider(),
+      listSubscriptions: async () => ({
+        data: [
+          {
+            customerId: CUSTOMER_ID,
+            id: "sub_canceled",
+            latestInvoiceId: "in_canceled",
+            priceIds: [PRICE_ID],
+            status: "canceled",
+          },
+        ],
+        hasMore: false,
+      }),
+      retrieveInvoice: async () => {
+        invoiceReads += 1;
+        throw new Error("terminal subscriptions are not invoice evidence");
+      },
+      retrieveSubscription: async () => null,
+    },
+    store,
+  });
+
+  assert.equal(result.deferred, 1);
+  assert.equal(result.applied, 0);
+  assert.equal(invoiceReads, 0);
+});
+
+test("an active subscription with duplicate configured-price items defers", async () => {
+  const user: StripeReconciliationUser = {
+    authVersion: 1,
+    billingPeriodStart: null,
+    id: USER_ID,
+    stripeCustomerId: CUSTOMER_ID,
+    stripeSubscriptionId: null,
+    subscribedUntil: null,
+  };
+  const store = new MemoryStore([user]);
+  let invoiceReads = 0;
+
+  const result = await reconcileStripeSubscriptions({
+    bounds: minimalBounds(),
+    owner: "11111111-1111-4111-8111-111111111111",
+    priceId: PRICE_ID,
+    provider: {
+      ...paidProvider(),
+      listSubscriptions: async () => ({
+        data: [
+          {
+            customerId: CUSTOMER_ID,
+            id: SUBSCRIPTION_ID,
+            latestInvoiceId: "in_reconcile",
+            priceIds: [PRICE_ID, PRICE_ID],
+            status: "active",
+          },
+        ],
+        hasMore: false,
+      }),
+      retrieveInvoice: async () => {
+        invoiceReads += 1;
+        throw new Error("ambiguous configured Price is not invoice evidence");
+      },
+      retrieveSubscription: async () => null,
+    },
+    store,
+  });
+
+  assert.equal(result.applied, 0);
+  assert.equal(result.deferred, 1);
+  assert.equal(invoiceReads, 0);
+});
+
+test("unknown future subscription statuses defer even when their price matches", async () => {
+  const user: StripeReconciliationUser = {
+    authVersion: 1,
+    billingPeriodStart: null,
+    id: USER_ID,
+    stripeCustomerId: CUSTOMER_ID,
+    stripeSubscriptionId: null,
+    subscribedUntil: null,
+  };
+  const store = new MemoryStore([user]);
+
+  const result = await reconcileStripeSubscriptions({
+    bounds: minimalBounds(),
+    owner: "11111111-1111-4111-8111-111111111111",
+    priceId: PRICE_ID,
+    provider: {
+      ...paidProvider(),
+      listSubscriptions: async () => ({
+        data: [
+          {
+            customerId: CUSTOMER_ID,
+            id: "sub_future",
+            latestInvoiceId: "in_future",
+            priceIds: [PRICE_ID],
+            status: "future_status",
+          },
+        ],
+        hasMore: false,
+      }),
+      retrieveSubscription: async () => null,
+    },
+    store,
+  });
+
+  assert.equal(result.deferred, 1);
+  assert.equal(result.applied, 0);
 });
 
 test("an invoice-line page may provide exact paid evidence within its strict bound", async () => {
@@ -723,6 +1016,7 @@ function invoiceLine(
   overrides: Partial<{
     id: string;
     priceId: string;
+    stripeSubscriptionId: string;
   }> = {}
 ) {
   return {
@@ -763,6 +1057,7 @@ function paidInvoice(): StripeInvoiceObservation {
   return {
     billingReason: "subscription_cycle",
     customerId: CUSTOMER_ID,
+    evidenceCreatedAt: new Date("2026-09-26T00:00:00.000Z"),
     id: "in_reconcile",
     lines: {
       data: [
@@ -794,6 +1089,9 @@ function sameSnapshot(
       right.billingPeriodStart?.getTime() &&
     left.stripeCustomerId === right.stripeCustomerId &&
     left.stripeSubscriptionId === right.stripeSubscriptionId &&
-    left.subscribedUntil?.getTime() === right.subscribedUntil?.getTime()
+    left.subscribedUntil?.getTime() === right.subscribedUntil?.getTime() &&
+    left.subscriptionOverrideAction === right.subscriptionOverrideAction &&
+    left.subscriptionOverrideAt?.getTime() ===
+      right.subscriptionOverrideAt?.getTime()
   );
 }

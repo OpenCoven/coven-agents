@@ -1,6 +1,7 @@
 // biome-ignore-all lint/suspicious/useAwait: dependency doubles keep async signatures for clarity.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { StripeReconciliationProviderUnauthorizedError } from "./stripe-reconciliation";
 import { stripeReconciliationResponse } from "./stripe-reconciliation-route";
 
 test("reconciliation route admits abuse before secret validation and service construction", async () => {
@@ -187,6 +188,26 @@ test("reconciliation route rejects malformed service aggregates without returnin
 
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), { error: "reconcile_unavailable" });
+});
+
+test("reconciliation route fails closed without Stripe error details on provider authorization failure", async () => {
+  const response = await stripeReconciliationResponse(
+    new Request("https://app.test/api/internal/stripe-reconcile"),
+    {
+      authorize: () => "allowed",
+      createProvider: () => ({}),
+      enforceAbuse: () => Promise.resolve({ kind: "allowed" as const }),
+      getConfig: () => ({ apiKey: "sk_test", priceId: "price_test" }),
+      reconcile: () =>
+        Promise.reject(new StripeReconciliationProviderUnauthorizedError()),
+    },
+    "203.0.113.9"
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    error: "billing_provider_unauthorized",
+  });
 });
 
 function successfulResult() {

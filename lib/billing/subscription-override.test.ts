@@ -25,6 +25,8 @@ type State = {
     billingPeriodStart: Date | null;
     id: string;
     subscribedUntil: Date | null;
+    subscriptionOverrideAction: "grant" | "revoke" | null;
+    subscriptionOverrideAt: Date | null;
   };
 };
 
@@ -42,10 +44,13 @@ class MemoryOverrideStore implements SubscriptionOverrideStore {
       billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
       id: USER_ID,
       subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+      subscriptionOverrideAction: null,
+      subscriptionOverrideAt: null,
     },
   };
   transactions = 0;
   updates = 0;
+  lastUpdate: unknown = null;
 
   async transaction<T>(
     callback: (transaction: SubscriptionOverrideTransaction) => Promise<T>
@@ -73,11 +78,16 @@ class MemoryOverrideStore implements SubscriptionOverrideStore {
       now: () => NOW,
       updateUser: (input) => {
         this.updates += 1;
+        this.lastUpdate = input;
         if (
           draft.user.id !== input.userId ||
           draft.user.authVersion !== input.expectedAuthVersion ||
           draft.user.billingPeriodStart?.getTime() !==
             input.expectedBillingPeriodStart?.getTime() ||
+          draft.user.subscriptionOverrideAction !==
+            input.expectedSubscriptionOverrideAction ||
+          draft.user.subscriptionOverrideAt?.getTime() !==
+            input.expectedSubscriptionOverrideAt?.getTime() ||
           draft.user.subscribedUntil?.getTime() !==
             input.expectedSubscribedUntil?.getTime()
         ) {
@@ -88,6 +98,8 @@ class MemoryOverrideStore implements SubscriptionOverrideStore {
           authVersion: input.newAuthVersion,
           billingPeriodStart: input.billingPeriodStart,
           subscribedUntil: input.subscribedUntil,
+          subscriptionOverrideAction: input.subscriptionOverrideAction,
+          subscriptionOverrideAt: input.subscriptionOverrideAt,
         };
         return Promise.resolve(true);
       },
@@ -103,6 +115,8 @@ function grant(days = 30) {
     expectedAuthVersion: 4,
     expectedBillingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
     expectedSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+    expectedSubscriptionOverrideAction: null,
+    expectedSubscriptionOverrideAt: null,
     operation: "grant" as const,
     referenceDigest: REFERENCE_DIGEST,
     userId: USER_ID,
@@ -131,6 +145,24 @@ test("grant locks its exact owner and writes bounded entitlement plus immutable 
     store.state.user.subscribedUntil?.toISOString(),
     "2026-09-30T20:00:00.000Z"
   );
+  assert.equal(store.state.user.subscriptionOverrideAction, "grant");
+  assert.equal(
+    store.state.user.subscriptionOverrideAt?.getTime(),
+    NOW.getTime()
+  );
+  assert.deepEqual(store.lastUpdate, {
+    billingPeriodStart: NOW,
+    expectedAuthVersion: 4,
+    expectedBillingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+    expectedSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+    expectedSubscriptionOverrideAction: null,
+    expectedSubscriptionOverrideAt: null,
+    newAuthVersion: 5,
+    subscribedUntil: new Date("2026-09-30T20:00:00.000Z"),
+    subscriptionOverrideAction: "grant",
+    subscriptionOverrideAt: NOW,
+    userId: USER_ID,
+  });
   assert.deepEqual(store.state.audit, [
     {
       action: "grant",
@@ -155,6 +187,8 @@ test("revoke clears paid authority immediately and invalidates exactly one autho
     expectedAuthVersion: 4,
     expectedBillingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
     expectedSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+    expectedSubscriptionOverrideAction: null,
+    expectedSubscriptionOverrideAt: null,
     operation: "revoke",
     referenceDigest: REFERENCE_DIGEST,
     userId: USER_ID,
@@ -168,6 +202,24 @@ test("revoke clears paid authority immediately and invalidates exactly one autho
   assert.equal(store.state.user.authVersion, 5);
   assert.equal(store.state.user.billingPeriodStart, null);
   assert.equal(store.state.user.subscribedUntil, null);
+  assert.equal(store.state.user.subscriptionOverrideAction, "revoke");
+  assert.equal(
+    store.state.user.subscriptionOverrideAt?.getTime(),
+    NOW.getTime()
+  );
+  assert.deepEqual(store.lastUpdate, {
+    billingPeriodStart: null,
+    expectedAuthVersion: 4,
+    expectedBillingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+    expectedSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+    expectedSubscriptionOverrideAction: null,
+    expectedSubscriptionOverrideAt: null,
+    newAuthVersion: 5,
+    subscribedUntil: null,
+    subscriptionOverrideAction: "revoke",
+    subscriptionOverrideAt: NOW,
+    userId: USER_ID,
+  });
   assert.deepEqual(store.state.audit[0], {
     action: "revoke",
     createdAt: NOW,
@@ -487,6 +539,8 @@ test("CLI reads an audit reference outside argv and never outputs it", async () 
         billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
         id: USER_ID,
         subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+        subscriptionOverrideAction: null,
+        subscriptionOverrideAt: null,
       }),
     now: () => NOW,
     readReference: () => {
@@ -508,6 +562,8 @@ test("CLI reads an audit reference outside argv and never outputs it", async () 
       expectedAuthVersion: 4,
       expectedBillingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
       expectedSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+      expectedSubscriptionOverrideAction: null,
+      expectedSubscriptionOverrideAt: null,
       operation: "grant",
       referenceDigest: REFERENCE_DIGEST,
       userId: USER_ID,
@@ -525,6 +581,8 @@ test("status does not read a reference and retains its read-only response", asyn
         billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
         id: USER_ID,
         subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+        subscriptionOverrideAction: null,
+        subscriptionOverrideAt: null,
       }),
     now: () => NOW,
     readReference: () => {

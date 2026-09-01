@@ -5,6 +5,7 @@ import { paidInvoiceMutation } from "./paid-invoice";
 const START = new Date("2026-09-01T00:00:00.000Z");
 const END = new Date("2026-10-01T00:00:00.000Z");
 const NEXT_END = new Date("2026-11-01T00:00:00.000Z");
+const EVIDENCE_AT = new Date("2026-09-26T00:00:00.000Z");
 
 const current = {
   billingPeriodStart: START,
@@ -25,6 +26,7 @@ test("paid interval ordering preserves exact webhook precedence", () => {
     assert.equal(
       paidInvoiceMutation(current, {
         customerId: "cus_paid",
+        eventCreatedAt: EVIDENCE_AT,
         stripeSubscriptionId: "sub_paid",
         ...input,
       }),
@@ -35,6 +37,7 @@ test("paid interval ordering preserves exact webhook precedence", () => {
   assert.deepEqual(
     paidInvoiceMutation(current, {
       customerId: "cus_paid",
+      eventCreatedAt: EVIDENCE_AT,
       periodEnd: NEXT_END,
       periodStart: END,
       stripeSubscriptionId: "sub_paid",
@@ -48,6 +51,7 @@ test("paid interval ordering preserves exact webhook precedence", () => {
   assert.deepEqual(
     paidInvoiceMutation(current, {
       customerId: "cus_paid",
+      eventCreatedAt: EVIDENCE_AT,
       periodEnd: NEXT_END,
       periodStart: new Date("2026-08-01T00:00:00.000Z"),
       stripeSubscriptionId: "sub_paid",
@@ -63,6 +67,7 @@ test("a non-overlapping paid replacement carries the exact new subscription inte
   assert.deepEqual(
     paidInvoiceMutation(current, {
       customerId: "cus_paid",
+      eventCreatedAt: EVIDENCE_AT,
       periodEnd: NEXT_END,
       periodStart: END,
       stripeSubscriptionId: "sub_replacement",

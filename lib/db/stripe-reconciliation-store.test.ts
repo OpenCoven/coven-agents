@@ -13,6 +13,8 @@ const snapshot: StripeReconciliationUser = {
   stripeCustomerId: "cus_store",
   stripeSubscriptionId: null,
   subscribedUntil: null,
+  subscriptionOverrideAction: "revoke",
+  subscriptionOverrideAt: new Date("2026-09-25T00:00:00.000Z"),
 };
 
 test("reconciliation write snapshots compare every entitlement authority field null-safely", () => {
@@ -40,6 +42,14 @@ test("reconciliation write snapshots compare every entitlement authority field n
     query.sql,
     /"User"\."stripeSubscriptionId" is not distinct from \$6/u
   );
+  assert.match(
+    query.sql,
+    /"User"\."subscriptionOverrideAction" is not distinct from \$7/u
+  );
+  assert.match(
+    query.sql,
+    /"User"\."subscriptionOverrideAt" is not distinct from \$8/u
+  );
   assert.deepEqual(query.params, [
     snapshot.id,
     snapshot.authVersion,
@@ -47,6 +57,8 @@ test("reconciliation write snapshots compare every entitlement authority field n
     null,
     snapshot.stripeCustomerId,
     null,
+    snapshot.subscriptionOverrideAction,
+    snapshot.subscriptionOverrideAt,
   ]);
 });
 

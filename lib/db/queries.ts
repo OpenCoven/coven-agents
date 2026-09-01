@@ -98,6 +98,8 @@ export const databaseSubscriptionOverrideStore: SubscriptionOverrideStore = {
               billingPeriodStart: user.billingPeriodStart,
               id: user.id,
               subscribedUntil: user.subscribedUntil,
+              subscriptionOverrideAction: user.subscriptionOverrideAction,
+              subscriptionOverrideAt: user.subscriptionOverrideAt,
             })
             .from(user)
             .where(subscriptionOverrideOwnerWhere(userId))
@@ -116,6 +118,8 @@ export const databaseSubscriptionOverrideStore: SubscriptionOverrideStore = {
               authVersion: sql`${user.authVersion} + 1`,
               billingPeriodStart: input.billingPeriodStart,
               subscribedUntil: input.subscribedUntil,
+              subscriptionOverrideAction: input.subscriptionOverrideAction,
+              subscriptionOverrideAt: input.subscriptionOverrideAt,
             })
             .where(subscriptionOverrideWriteFenceWhere(input))
             .returning({ authVersion: user.authVersion });
@@ -154,6 +158,8 @@ export async function findSubscriptionOverrideUserByEmail(
   billingPeriodStart: Date | null;
   id: string;
   subscribedUntil: Date | null;
+  subscriptionOverrideAction: "grant" | "revoke" | null;
+  subscriptionOverrideAt: Date | null;
 } | null> {
   try {
     const matches = await db
@@ -162,6 +168,8 @@ export async function findSubscriptionOverrideUserByEmail(
         billingPeriodStart: user.billingPeriodStart,
         id: user.id,
         subscribedUntil: user.subscribedUntil,
+        subscriptionOverrideAction: user.subscriptionOverrideAction,
+        subscriptionOverrideAt: user.subscriptionOverrideAt,
       })
       .from(user)
       .where(emailMatches(normalizeEmail(email)))

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { QueryBuilder } from "drizzle-orm/pg-core";
 import { user } from "./schema";
@@ -33,20 +33,54 @@ test("subscription overrides lock exactly the selected User and fence their writ
         expectedAuthVersion: 4,
         expectedBillingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
         expectedSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+        expectedSubscriptionOverrideAction: null,
+        expectedSubscriptionOverrideAt: null,
         userId: USER_ID,
       })
     )
     .toSQL();
   assert.match(
     fenced.sql,
-    /where \("User"\."id" = \$1 and "User"\."authVersion" = \$2 and "User"\."billingPeriodStart" is not distinct from \$3 and "User"\."subscribedUntil" is not distinct from \$4\)/u
+    /where \("User"\."id" = \$1 and "User"\."authVersion" = \$2 and "User"\."billingPeriodStart" is not distinct from \$3 and "User"\."subscribedUntil" is not distinct from \$4 and "User"\."subscriptionOverrideAction" is not distinct from \$5 and "User"\."subscriptionOverrideAt" is not distinct from \$6\)/u
   );
   assert.deepEqual(fenced.params, [
     USER_ID,
     4,
     new Date("2026-08-01T00:00:00.000Z"),
     new Date("2026-09-01T00:00:00.000Z"),
+    null,
+    null,
   ]);
+});
+
+test("User persists a finite paired active override marker in generated migration 0028", () => {
+  const schema = readFileSync(new URL("./schema.ts", import.meta.url), "utf8");
+  const migrationName = readdirSync(
+    new URL("./migrations/", import.meta.url)
+  ).find((name) => /^0028_.+\.sql$/u.test(name));
+
+  assert.ok(migrationName, "missing generated 0028 override migration");
+  const migration = readFileSync(
+    new URL(`./migrations/${migrationName}`, import.meta.url),
+    "utf8"
+  );
+  const journal = readFileSync(
+    new URL("./migrations/meta/_journal.json", import.meta.url),
+    "utf8"
+  );
+
+  for (const source of [schema, migration]) {
+    assert.match(source, /subscriptionOverrideAction/);
+    assert.match(source, /subscriptionOverrideAt/);
+    assert.match(source, /subscriptionOverride.*shape/i);
+    assert.match(source, /isfinite/i);
+  }
+  const userSchema = schema.slice(
+    schema.indexOf("export const user = pgTable("),
+    schema.indexOf("export type User")
+  );
+  assert.doesNotMatch(userSchema, /referenceDigest|referenceText|digest/i);
+  assert.match(journal, new RegExp(migrationName.replace(/\.sql$/u, "")));
 });
 
 test("subscription override audit schema and generated migration retain only bounded operational evidence", () => {

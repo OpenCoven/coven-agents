@@ -9,6 +9,7 @@ import type {
   StripeReconciliationProvider,
   StripeSubscriptionObservation,
 } from "./stripe-reconciliation";
+import { StripeReconciliationProviderUnauthorizedError } from "./stripe-reconciliation";
 
 type StripeReconciliationStripeClient = Pick<
   Stripe,
@@ -33,23 +34,33 @@ export function createStripeReconciliationProviderFromClient(
 ): StripeReconciliationProvider {
   return {
     async listInvoiceLines(invoiceId, input) {
-      const page = await stripe.invoices.listLineItems(invoiceId, {
-        limit: input.limit,
-        starting_after: input.startingAfter,
-      });
-      return invoiceLinePage(page);
+      try {
+        const page = await stripe.invoices.listLineItems(invoiceId, {
+          limit: input.limit,
+          starting_after: input.startingAfter,
+        });
+        return invoiceLinePage(page);
+      } catch (error) {
+        throwProviderFailure(error);
+      }
     },
     async listSubscriptions(customerId, input) {
-      const page = await stripe.subscriptions.list({
-        customer: customerId,
-        limit: input.limit,
-        ...(input.startingAfter ? { starting_after: input.startingAfter } : {}),
-        status: "all",
-      });
-      return {
-        data: page.data.map(subscriptionObservation),
-        hasMore: page.has_more,
-      };
+      try {
+        const page = await stripe.subscriptions.list({
+          customer: customerId,
+          limit: input.limit,
+          ...(input.startingAfter
+            ? { starting_after: input.startingAfter }
+            : {}),
+          status: "all",
+        });
+        return {
+          data: page.data.map(subscriptionObservation),
+          hasMore: page.has_more,
+        };
+      } catch (error) {
+        throwProviderFailure(error);
+      }
     },
     async retrieveInvoice(invoiceId) {
       try {
@@ -58,7 +69,7 @@ export function createStripeReconciliationProviderFromClient(
         if (isNotFound(error)) {
           return null;
         }
-        throw error;
+        throwProviderFailure(error);
       }
     },
     async retrieveSubscription(subscriptionId) {
@@ -70,7 +81,7 @@ export function createStripeReconciliationProviderFromClient(
         if (isNotFound(error)) {
           return null;
         }
-        throw error;
+        throwProviderFailure(error);
       }
     },
   };
@@ -98,6 +109,7 @@ function invoiceObservation(invoice: Stripe.Invoice): StripeInvoiceObservation {
         ? invoice.billing_reason
         : null,
     customerId: stripeId(invoice.customer, "cus_"),
+    evidenceCreatedAt: dateFromStripeSeconds(invoice.created),
     id: invoice.id,
     lines: invoiceLinePage(invoice.lines),
     paid: invoice.status === "paid",
@@ -188,4 +200,14 @@ function isNotFound(error: unknown): boolean {
     error instanceof Stripe.errors.StripeInvalidRequestError &&
     error.statusCode === 404
   );
+}
+
+function throwProviderFailure(error: unknown): never {
+  if (
+    error instanceof Stripe.errors.StripeError &&
+    (error.statusCode === 401 || error.statusCode === 403)
+  ) {
+    throw new StripeReconciliationProviderUnauthorizedError();
+  }
+  throw error;
 }

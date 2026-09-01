@@ -1,6 +1,7 @@
 // biome-ignore-all lint/suspicious/useAwait: dependency doubles keep async signatures for clarity.
 import assert from "node:assert/strict";
 import test from "node:test";
+import Stripe from "stripe";
 import { createStripeReconciliationProviderFromClient } from "./stripe-reconciliation-provider";
 
 test("Stripe adapter emits normalized observations without provider payloads", async () => {
@@ -12,6 +13,7 @@ test("Stripe adapter emits normalized observations without provider payloads", a
       }),
       retrieve: async () => ({
         billing_reason: "subscription_cycle",
+        created: 1_790_380_800,
         customer: "cus_adapter",
         id: "in_adapter",
         lines: {
@@ -66,6 +68,7 @@ test("Stripe adapter emits normalized observations without provider payloads", a
   assert.deepEqual(await provider.retrieveInvoice("in_adapter"), {
     billingReason: "subscription_cycle",
     customerId: "cus_adapter",
+    evidenceCreatedAt: new Date("2026-09-26T00:00:00.000Z"),
     id: "in_adapter",
     lines: {
       data: [
@@ -124,4 +127,39 @@ test("Stripe adapter makes customer-scoped bounded list calls only", async () =>
     starting_after: "sub_before",
     status: "all",
   });
+});
+
+test("Stripe adapter turns 401 and 403 provider failures into a finite systemic error", async () => {
+  await Promise.all(
+    [401, 403].map(async (statusCode) => {
+      const provider = createStripeReconciliationProviderFromClient({
+        invoices: {
+          listLineItems: async () => ({ data: [], has_more: false }),
+          retrieve: async () => {
+            throw new Error("not reached");
+          },
+        },
+        subscriptions: {
+          list: async () => {
+            const error = Object.create(
+              Stripe.errors.StripeAuthenticationError.prototype
+            ) as Stripe.errors.StripeAuthenticationError;
+            Object.assign(error, { statusCode });
+            throw error;
+          },
+          retrieve: async () => {
+            throw new Error("not reached");
+          },
+        },
+      } as never);
+
+      await assert.rejects(
+        provider.listSubscriptions("cus_adapter", { limit: 1 }),
+        (error: unknown) =>
+          error instanceof Error &&
+          error.name === "StripeReconciliationProviderUnauthorizedError" &&
+          error.message === "Stripe billing provider is unauthorized."
+      );
+    })
+  );
 });

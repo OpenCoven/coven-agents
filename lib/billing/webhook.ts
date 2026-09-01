@@ -57,6 +57,7 @@ type StripeInvoiceEventUpdateBase = StripeEventUpdateBase & {
     | "subscription_create"
     | "subscription_cycle"
     | "subscription_update";
+  eventCreatedAt: Date;
   periodEnd: Date;
   periodStart: Date;
 };
@@ -206,7 +207,16 @@ export function stripeEventMutation(
     return paidInvoiceMutation(current, input);
   }
 
+  if (hasActiveSubscriptionOverride(current)) {
+    return null;
+  }
   return failedInvoiceMutation(current, input);
+}
+
+function hasActiveSubscriptionOverride(current: WebhookUser): boolean {
+  return Boolean(
+    current.subscriptionOverrideAction || current.subscriptionOverrideAt
+  );
 }
 
 export async function stripeWebhookResponse(
@@ -402,6 +412,13 @@ async function applyInvoiceEvent(
   priceId: string
 ): Promise<WebhookEventResult> {
   const invoice = event.data.object;
+  const eventCreatedAt = dateFromStripeSeconds(event.created);
+  if (!eventCreatedAt) {
+    return {
+      kind: "manual_reconciliation",
+      reason: "invoice_invalid_period",
+    };
+  }
   const billingReason = supportedBillingReason(invoice.billing_reason);
   if (!billingReason) {
     return {
@@ -466,6 +483,7 @@ async function applyInvoiceEvent(
     write: await dependencies.applyEventUpdate({
       billingReason,
       customerId: customer.id,
+      eventCreatedAt,
       eventId: event.id,
       eventType:
         event.type === "invoice.paid"
