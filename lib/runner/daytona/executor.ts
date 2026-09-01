@@ -23,6 +23,7 @@ import {
 import {
   type DaytonaSandboxConfiguration,
   type DaytonaSandboxDependencies,
+  DaytonaSandboxLifecycleError,
   ensureDaytonaSandboxForDispatch,
 } from "./sandbox";
 
@@ -84,9 +85,11 @@ export function daytonaRunnerExecutor(
     inspectWorkspaceSafety: (context, workspace) =>
       operations.inspectWorkspace(daytonaProcessSandbox(context), workspace),
     isCleanupPending: (error) =>
-      error instanceof DaytonaProcessError &&
-      (error.code === "durable_release_failed" ||
-        error.code === "sandbox_reset_required"),
+      (error instanceof DaytonaProcessError &&
+        (error.code === "durable_release_failed" ||
+          error.code === "sandbox_reset_required")) ||
+      (error instanceof DaytonaSandboxLifecycleError &&
+        error.kind === "cleanup_needed"),
     start: async (input) => {
       const started = await operations.startProcess({
         ...input.authorizers,

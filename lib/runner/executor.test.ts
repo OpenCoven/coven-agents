@@ -7,6 +7,7 @@ import {
 } from "./daytona/executor";
 import type { DaytonaProcessSandbox } from "./daytona/process";
 import { DaytonaProcessError } from "./daytona/process";
+import { DaytonaSandboxLifecycleError } from "./daytona/sandbox";
 import {
   HOSTED_EXECUTION_CAPABILITY_CONTRACT_VERSION,
   type RunnerExecutionProvenance,
@@ -330,3 +331,34 @@ function executorContract(
 
 executorContract("deterministic fake executor", fakeExecutorExercise);
 executorContract("Daytona executor adapter", daytonaExecutorExercise);
+
+test("Daytona adapter treats only proven ambiguous sandbox lifecycle errors as cleanup-pending", () => {
+  const exercise = daytonaExecutorExercise();
+
+  assert.equal(
+    exercise.executor.isCleanupPending(
+      new DaytonaSandboxLifecycleError("ambiguous creation", {
+        kind: "cleanup_needed",
+        retryable: true,
+      })
+    ),
+    true
+  );
+  assert.equal(
+    exercise.executor.isCleanupPending(
+      new DaytonaSandboxLifecycleError("ordinary lifecycle state", {
+        retryable: true,
+      })
+    ),
+    false
+  );
+  assert.equal(
+    exercise.executor.isCleanupPending(
+      new DaytonaSandboxLifecycleError("in-progress creation", {
+        kind: "lifecycle",
+        retryable: true,
+      })
+    ),
+    false
+  );
+});

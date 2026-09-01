@@ -8,6 +8,7 @@ import {
   dispatchNextRunnerRun,
   dispatchRunnerClaim,
   RunnerAdmissionConfigurationError,
+  type RunnerDispatchResult,
 } from "./admission";
 import type { RunnerExecutionProvenance } from "./execution-provenance";
 import type {
@@ -635,7 +636,7 @@ test("a failed preparation reservation prevents all executor and credential I/O"
   assert.deepEqual(calls, ["get-agent", "prepare"]);
 });
 
-test("an ensure failure releases the reserved attempt before requeueing with its returned authority", async () => {
+test("a definite ensure failure releases the reserved attempt before requeueing with its returned authority", async () => {
   const calls: string[] = [];
   const claimedRun = run();
   const authority = {
@@ -716,6 +717,133 @@ test("an ensure failure releases the reserved attempt before requeueing with its
     "ensure",
     "release:2",
     "requeue:3",
+  ]);
+});
+
+test("a cleanup-pending ensure failure retains its exact attempt and provenance", async () => {
+  const calls: string[] = [];
+  const claimedRun = run();
+  const authority = {
+    expectedVersion: claimedRun.version,
+    leaseToken: claimedRun.dispatchLeaseToken as string,
+    runId: claimedRun.id,
+  } as RunnerDispatchAuthority;
+  const retainedAuthority = {
+    ...authority,
+    attemptId,
+    expectedVersion: authority.expectedVersion + 1,
+  } as RunnerDispatchAuthority;
+  const cleanupPending = new Error("ambiguous sandbox creation");
+  const replacementProvenance = {
+    ...executionProvenance,
+    target: "replacement",
+  };
+  let retainedProvenance: RunnerExecutionProvenance | undefined;
+
+  const store = {
+    authorizeDaytonaPreparation: async (
+      _operator: RunnerOperator,
+      _authority: RunnerDispatchAuthority,
+      input: { executionProvenance: RunnerExecutionProvenance }
+    ) => {
+      calls.push(`prepare:${input.executionProvenance.target}`);
+      if (retainedProvenance) {
+        assert.equal(
+          retainedProvenance,
+          executionProvenance,
+          "the first attempt's provenance remains stored"
+        );
+        assert.notDeepEqual(
+          input.executionProvenance,
+          retainedProvenance,
+          "a changed executor cannot replace a retained attempt"
+        );
+        return { kind: "not_live" as const };
+      }
+      retainedProvenance = input.executionProvenance;
+      return {
+        attemptId,
+        authority: retainedAuthority,
+        kind: "authorized" as const,
+      };
+    },
+    getDispatchAgent: async () => {
+      calls.push("get-agent");
+      return { agent: agent(), kind: "found" as const, run: claimedRun };
+    },
+    releaseDaytonaPreparation: async () => {
+      calls.push("release");
+      return { kind: "not_live" as const };
+    },
+    releaseUnstartedDispatch: async () => {
+      calls.push("requeue");
+      return { kind: "released" as const, value: claimedRun };
+    },
+  };
+
+  const first = await dispatchRunnerClaim(
+    { authority, run: claimedRun },
+    {
+      acquireCredential: async () => {
+        calls.push("credential");
+        throw new Error("must not acquire");
+      },
+      credentialInput: () => {
+        calls.push("credential-input");
+        throw new Error("must not construct");
+      },
+      executor: executor({
+        ensureExecutionContext: async () => {
+          calls.push("ensure");
+          throw cleanupPending;
+        },
+        isCleanupPending: (error) => error === cleanupPending,
+      }),
+      limits: admissionLimitsFromEnvironment({}),
+      operator,
+      store: store as never,
+    }
+  );
+  const second = await dispatchRunnerClaim(
+    { authority, run: claimedRun },
+    {
+      acquireCredential: async () => {
+        calls.push("replacement-credential");
+        throw new Error("must not acquire");
+      },
+      credentialInput: () => {
+        calls.push("replacement-credential-input");
+        throw new Error("must not construct");
+      },
+      executor: executor({
+        ensureExecutionContext: async () => {
+          calls.push("replacement-ensure");
+          throw new Error("must not ensure");
+        },
+        executionProvenance: replacementProvenance,
+      }),
+      limits: admissionLimitsFromEnvironment({}),
+      operator,
+      store: store as never,
+    }
+  );
+
+  assert.deepEqual(first, {
+    kind: "retained",
+    reason: "cleanup_pending",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(second, {
+    kind: "retained",
+    reason: "launch_fenced",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(calls, [
+    "get-agent",
+    "prepare:test",
+    "ensure",
+    "get-agent",
+    "prepare:replacement",
   ]);
 });
 
@@ -1092,6 +1220,124 @@ test("restricted dispatch rejects repository hook policy before credentials", as
     "release-preparation",
     "finalize",
     "cleanup",
+  ]);
+});
+
+test("restricted inspection errors retain only provider-reported cleanup-pending attempts", async () => {
+  const claimedRun = run({
+    agentWorkspace: "/workspace/repo",
+    executionPermission: "workspace_read",
+  });
+  const authority = {
+    expectedVersion: claimedRun.version,
+    leaseToken: claimedRun.dispatchLeaseToken as string,
+    runId: claimedRun.id,
+  } as RunnerDispatchAuthority;
+  const preparedAuthority = {
+    ...authority,
+    attemptId,
+    expectedVersion: authority.expectedVersion + 1,
+  } as RunnerDispatchAuthority;
+
+  async function dispatchInspection(
+    inspection: () => ReturnType<RunnerExecutor["inspectWorkspaceSafety"]>,
+    isCleanupPending: (error: unknown) => boolean
+  ): Promise<{ calls: string[]; result: RunnerDispatchResult }> {
+    const calls: string[] = [];
+    const result = await dispatchRunnerClaim(
+      { authority, run: claimedRun },
+      {
+        acquireCredential: async () => {
+          calls.push("credential");
+          throw new Error("must not acquire");
+        },
+        credentialInput: () => {
+          calls.push("credential-input");
+          throw new Error("must not construct");
+        },
+        executor: executor({
+          ensureExecutionContext: async () => {
+            calls.push("ensure");
+            return { agent: agent(), context: executionContext };
+          },
+          inspectWorkspaceSafety: async () => {
+            calls.push("inspect");
+            return await inspection();
+          },
+          isCleanupPending,
+        }),
+        limits: admissionLimitsFromEnvironment({}),
+        operator,
+        store: {
+          authorizeDaytonaPreparation: async () => {
+            calls.push("prepare");
+            return {
+              attemptId,
+              authority: preparedAuthority,
+              kind: "authorized" as const,
+            };
+          },
+          getDispatchAgent: async () => {
+            calls.push("get-agent");
+            return { agent: agent(), kind: "found" as const, run: claimedRun };
+          },
+          releaseDaytonaPreparation: async () => {
+            calls.push("release");
+            return {
+              authority: {
+                ...authority,
+                expectedVersion: authority.expectedVersion + 2,
+              } as RunnerDispatchAuthority,
+              kind: "released" as const,
+            };
+          },
+          releaseUnstartedDispatch: async () => {
+            calls.push("requeue");
+            return { kind: "released" as const, value: claimedRun };
+          },
+        } as never,
+      }
+    );
+    return { calls, result };
+  }
+
+  const cleanupPending = new Error("ambiguous provider mutation");
+  const ambiguous = await dispatchInspection(
+    async () => {
+      throw cleanupPending;
+    },
+    (error) => error === cleanupPending
+  );
+  const unavailable = await dispatchInspection(
+    async () => ({ kind: "unavailable" }),
+    () => {
+      throw new Error("semantic unavailable must not be classified");
+    }
+  );
+
+  assert.deepEqual(ambiguous.result, {
+    kind: "retained",
+    reason: "cleanup_pending",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(ambiguous.calls, [
+    "get-agent",
+    "prepare",
+    "ensure",
+    "inspect",
+  ]);
+  assert.deepEqual(unavailable.result, {
+    kind: "retryable",
+    reason: "sandbox_unavailable",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(unavailable.calls, [
+    "get-agent",
+    "prepare",
+    "ensure",
+    "inspect",
+    "release",
+    "requeue",
   ]);
 });
 

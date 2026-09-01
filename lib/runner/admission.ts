@@ -577,7 +577,10 @@ export async function dispatchRunnerClaim(
     ensured = await dependencies.executor.ensureExecutionContext(
       callbacks.currentAuthority()
     );
-  } catch {
+  } catch (error) {
+    if (dependencies.executor.isCleanupPending(error)) {
+      return { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
     return (await requeuePreparedDispatch(
       dependencies,
       callbacks,
@@ -625,7 +628,10 @@ export async function dispatchRunnerClaim(
         ensured.context,
         run.agentWorkspace as string
       );
-    } catch {
+    } catch (error) {
+      if (dependencies.executor.isCleanupPending(error)) {
+        return { kind: "retained", reason: "cleanup_pending", runId: run.id };
+      }
       return (await requeuePreparedDispatch(
         dependencies,
         callbacks,
