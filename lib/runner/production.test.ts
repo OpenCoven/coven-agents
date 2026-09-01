@@ -23,6 +23,7 @@ import type {
 } from "./types";
 
 const operator: RunnerOperator = { kind: "runner-operator" };
+const ACTIVE_SUBSCRIPTION_UNTIL = new Date("2999-01-01T00:00:00.000Z");
 
 function fakeDiagnosticDeadline(timeoutMilliseconds = 240_000) {
   let nowMilliseconds = 0;
@@ -671,12 +672,12 @@ test("production terminalizes revoked, legacy, and unsubscribed authority before
     {
       accountAuthVersion: 5,
       authVersion: 4,
-      subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+      subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
     },
     {
       accountAuthVersion: 5,
       authVersion: null,
-      subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+      subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
     },
     {
       accountAuthVersion: 5,
@@ -766,7 +767,7 @@ test("production dispatches only a currently subscribed matching authority", asy
       Promise.resolve({
         authVersion: 5,
         billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
-        subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+        subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
       }),
     operator,
     store: {} as never,
