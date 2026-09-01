@@ -1,7 +1,10 @@
 // biome-ignore-all lint/style/useErrorCause: Staging and client failures deliberately discard provider details that may contain authority.
 import "server-only";
 
-import { githubToolRequestSchema } from "@opencoven/agent-contracts";
+import {
+  GITHUB_TOOL_SERVER_DEADLINE_MS,
+  githubToolRequestSchema,
+} from "@opencoven/agent-contracts";
 import {
   COVEN_GITHUB_MCP_PATH,
   COVEN_GITHUB_TOOL_PATH,
@@ -11,7 +14,8 @@ import { daytonaRunSessionName } from "./names";
 
 export const GITHUB_TOOL_CLIENT_VERSION = "v1";
 export const GITHUB_TOOL_CLIENT_MAX_BYTES = 512 * 1024;
-export const GITHUB_TOOL_CLIENT_TIMEOUT_MS = 10_000;
+export const GITHUB_TOOL_CLIENT_TIMEOUT_MS =
+  GITHUB_TOOL_SERVER_DEADLINE_MS + 15_000;
 const GITHUB_TOOL_DIRECTORY = `/tmp/coven-tools/${GITHUB_TOOL_CLIENT_VERSION}`;
 const FILE_OPERATION_TIMEOUT_SECONDS = 15;
 const RAW_CAPABILITY = /^[A-Za-z0-9_-]{43}$/u;
@@ -115,7 +119,7 @@ const CLIENT_PATH = ${JSON.stringify(COVEN_GITHUB_TOOL_PATH)};
 const EXPECTED_ENDPOINT = ${JSON.stringify(expectedEndpoint)};
 const INPUT_SCHEMA = ${JSON.stringify(inputSchema)};
 const MAX_BYTES = ${GITHUB_TOOL_CLIENT_MAX_BYTES};
-const TIMEOUT_MS = ${GITHUB_TOOL_CLIENT_TIMEOUT_MS + 2000};
+const TIMEOUT_MS = ${GITHUB_TOOL_CLIENT_TIMEOUT_MS + 5000};
 const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 let capability = process.env.COVEN_GITHUB_CAPABILITY || "";
 const endpoint = process.env.COVEN_GITHUB_TOOL_URL || "";

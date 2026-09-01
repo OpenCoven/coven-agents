@@ -309,6 +309,7 @@ const productionDependencies = [
 ] as const;
 const developmentDependencies = [
   "@biomejs/biome",
+  "@github/copilot",
   "@playwright/test",
   "@tailwindcss/postcss",
   "@tailwindcss/typography",

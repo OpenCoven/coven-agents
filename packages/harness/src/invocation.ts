@@ -1,3 +1,4 @@
+import { GITHUB_TOOL_SERVER_DEADLINE_MS } from "@opencoven/agent-contracts";
 import { type HarnessSpec, harnessSpec } from "./registry";
 
 export interface Invocation {
@@ -13,7 +14,21 @@ export type HarnessExecutionPermission =
   | "github_only";
 export const COVEN_GITHUB_TOOL_PATH = "/tmp/coven-tools/v1/coven-github";
 export const COVEN_GITHUB_MCP_PATH = "/tmp/coven-tools/v1/coven-github-mcp";
-export const COVEN_GITHUB_MCP_TOOL = "CovenGitHub(execute)";
+export const COVEN_GITHUB_MCP_MODEL_TOOL = "CovenGitHub-execute";
+export const COVEN_GITHUB_MCP_PERMISSION = "CovenGitHub(execute)";
+export const COVEN_GITHUB_MCP_TIMEOUT_MS =
+  GITHUB_TOOL_SERVER_DEADLINE_MS + 25_000;
+
+function environmentReference(name: string): string {
+  return `\${${name}}`;
+}
+
+export const COVEN_GITHUB_CAPABILITY_ENV_REFERENCE = environmentReference(
+  "COVEN_GITHUB_CAPABILITY"
+);
+export const COVEN_GITHUB_TOOL_URL_ENV_REFERENCE = environmentReference(
+  "COVEN_GITHUB_TOOL_URL"
+);
 
 export interface InvocationRequest {
   /** Fresh configuration directory outside caller-controlled workspace files. */
@@ -66,7 +81,7 @@ function copilotArgs(request: InvocationRequest): string[] {
           ? []
           : null;
   if (githubTool) {
-    availableTools?.push(COVEN_GITHUB_MCP_TOOL);
+    availableTools?.push(COVEN_GITHUB_MCP_MODEL_TOOL);
   }
   const permissionArgs =
     availableTools === null
@@ -77,7 +92,7 @@ function copilotArgs(request: InvocationRequest): string[] {
           ...(permissionMode === "workspace_write"
             ? ["--allow-tool", "write"]
             : []),
-          ...(githubTool ? ["--allow-tool", COVEN_GITHUB_MCP_TOOL] : []),
+          ...(githubTool ? ["--allow-tool", COVEN_GITHUB_MCP_PERMISSION] : []),
         ];
   const restrictedArgs =
     permissionMode === "unrestricted"
@@ -100,6 +115,11 @@ function copilotArgs(request: InvocationRequest): string[] {
             CovenGitHub: {
               args: [],
               command: COVEN_GITHUB_MCP_PATH,
+              env: {
+                COVEN_GITHUB_CAPABILITY: COVEN_GITHUB_CAPABILITY_ENV_REFERENCE,
+                COVEN_GITHUB_TOOL_URL: COVEN_GITHUB_TOOL_URL_ENV_REFERENCE,
+              },
+              timeout: COVEN_GITHUB_MCP_TIMEOUT_MS,
               tools: ["execute"],
               type: "local",
             },

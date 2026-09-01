@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { GITHUB_TOOL_SERVER_DEADLINE_MS } from "@opencoven/agent-contracts";
 import {
   cleanupGitHubToolCapability,
   GITHUB_TOOL_CLIENT_MAX_BYTES,
@@ -22,7 +23,9 @@ const RAW_CAPABILITY = Buffer.alloc(32, 0x5c).toString("base64url");
 test("the versioned client is a fixed bounded stdin-only gateway executable", () => {
   assert.equal(GITHUB_TOOL_CLIENT_VERSION, "v1");
   assert.equal(GITHUB_TOOL_CLIENT_MAX_BYTES, 512 * 1024);
-  assert.equal(GITHUB_TOOL_CLIENT_TIMEOUT_MS, 10_000);
+  assert.ok(
+    GITHUB_TOOL_CLIENT_TIMEOUT_MS >= GITHUB_TOOL_SERVER_DEADLINE_MS + 15_000
+  );
   assert.equal(githubToolClientPath(), "/tmp/coven-tools/v1/coven-github");
   assert.equal(githubToolMcpPath(), "/tmp/coven-tools/v1/coven-github-mcp");
   const artifact = githubToolClientArtifact(
@@ -58,6 +61,13 @@ test("the versioned client is a fixed bounded stdin-only gateway executable", ()
   assert.match(mcp.content, /"execute"/u);
   assert.match(mcp.content, /spawn\(CLIENT_PATH, \[\]/u);
   assert.match(mcp.content, /shell:\s*false/u);
+  assert.match(
+    mcp.content,
+    new RegExp(
+      `const TIMEOUT_MS = ${GITHUB_TOOL_CLIENT_TIMEOUT_MS + 5000}`,
+      "u"
+    )
+  );
   assert.doesNotMatch(mcp.content, /\.\.\.process\.env/u);
   assert.doesNotMatch(mcp.content, /COPILOT_GITHUB_TOKEN/u);
   for (const kind of [

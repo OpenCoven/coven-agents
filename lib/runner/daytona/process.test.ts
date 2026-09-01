@@ -1133,11 +1133,11 @@ test("restricted process launches use the persisted permission instead of task t
     );
     assert.match(
       launch,
-      /--available-tools' 'CovenGitHub\(execute\)' '--allow-tool' 'CovenGitHub\(execute\)'/u
+      /--available-tools' 'CovenGitHub-execute' '--allow-tool' 'CovenGitHub\(execute\)'/u
     );
     assert.match(
       launch,
-      /--additional-mcp-config' '\{"mcpServers":\{"CovenGitHub":\{"args":\[\],"command":"\/tmp\/coven-tools\/v1\/coven-github-mcp","tools":\["execute"\],"type":"local"\}\}\}'/u
+      /--additional-mcp-config' '\{"mcpServers":\{"CovenGitHub":\{"args":\[\],"command":"\/tmp\/coven-tools\/v1\/coven-github-mcp","env":\{"COVEN_GITHUB_CAPABILITY":"\$\{COVEN_GITHUB_CAPABILITY\}","COVEN_GITHUB_TOOL_URL":"\$\{COVEN_GITHUB_TOOL_URL\}"\},"timeout":85000,"tools":\["execute"\],"type":"local"\}\}\}'/u
     );
     assert.doesNotMatch(
       launch,

@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   buildInvocation,
   buildMission,
+  COVEN_GITHUB_CAPABILITY_ENV_REFERENCE,
+  COVEN_GITHUB_TOOL_URL_ENV_REFERENCE,
   shellQuote,
   toShellCommand,
 } from "./invocation";
@@ -138,7 +140,7 @@ test("GitHub-only Copilot runs expose one exact executable permission and zero w
     ),
     [
       "--available-tools",
-      "CovenGitHub(execute)",
+      "CovenGitHub-execute",
       "--allow-tool",
       "CovenGitHub(execute)",
     ]
@@ -166,6 +168,11 @@ test("GitHub-only Copilot runs expose one exact executable permission and zero w
       CovenGitHub: {
         args: [],
         command: "/tmp/coven-tools/v1/coven-github-mcp",
+        env: {
+          COVEN_GITHUB_CAPABILITY: COVEN_GITHUB_CAPABILITY_ENV_REFERENCE,
+          COVEN_GITHUB_TOOL_URL: COVEN_GITHUB_TOOL_URL_ENV_REFERENCE,
+        },
+        timeout: 85_000,
         tools: ["execute"],
         type: "local",
       },
@@ -198,7 +205,7 @@ test("workspace permissions compose with only the exact GitHub executable", () =
     ),
     [
       "--available-tools",
-      "view,grep,glob,CovenGitHub(execute)",
+      "view,grep,glob,CovenGitHub-execute",
       "--allow-tool",
       "CovenGitHub(execute)",
     ]
@@ -218,7 +225,7 @@ test("workspace permissions compose with only the exact GitHub executable", () =
     ),
     [
       "--available-tools",
-      "view,edit,grep,glob,CovenGitHub(execute)",
+      "view,edit,grep,glob,CovenGitHub-execute",
       "--allow-tool",
       "write",
       "--allow-tool",
