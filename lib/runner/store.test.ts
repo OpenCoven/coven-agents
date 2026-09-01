@@ -612,6 +612,122 @@ test("duplicate starts return the immutable matching request", async () => {
   assert.equal(existing.authVersion, 4);
 });
 
+test("broker policy duplicate equality ignores JSON object key order but preserves array order", async () => {
+  const teamStepId = "10000000-0000-4000-8000-000000000001";
+  const repositories = [
+    {
+      accountId: "123",
+      accountLogin: "OpenCoven",
+      accountType: "Organization" as const,
+      connectionId: "10000000-0000-4000-8000-000000000002",
+      installationId: "456",
+      repository: "opencoven/a-repository",
+      repositoryId: "789",
+      repositoryName: "a-repository",
+      repositoryNodeId: "R_a",
+      repositoryOwner: "OpenCoven",
+    },
+    {
+      accountId: "123",
+      accountLogin: "OpenCoven",
+      accountType: "Organization" as const,
+      connectionId: "10000000-0000-4000-8000-000000000003",
+      installationId: "456",
+      repository: "opencoven/z-repository",
+      repositoryId: "790",
+      repositoryName: "z-repository",
+      repositoryNodeId: "R_z",
+      repositoryOwner: "OpenCoven",
+    },
+  ];
+  const policy = {
+    actorUserId: "9c858901-8a57-4791-81fe-4c455b099bc9",
+    allowedCapabilities: ["github.issues.read" as const],
+    approvedCapabilities: [],
+    authVersion: 8,
+    connectionGeneration: 3,
+    declaredCapabilities: ["github.issues.read" as const],
+    maxCallCount: 32,
+    repositories,
+    teamRunId: "10000000-0000-4000-8000-000000000004",
+    teamStepId,
+    version: 1 as const,
+  };
+  const reorderedFromJsonb = {
+    actorUserId: policy.actorUserId,
+    allowedCapabilities: ["github.issues.read" as const],
+    approvedCapabilities: [],
+    authVersion: 8,
+    connectionGeneration: 3,
+    declaredCapabilities: ["github.issues.read" as const],
+    maxCallCount: 32,
+    repositories: repositories.map((repository) => ({
+      accountId: repository.accountId,
+      accountLogin: repository.accountLogin,
+      accountType: repository.accountType,
+      connectionId: repository.connectionId,
+      installationId: repository.installationId,
+      repository: repository.repository,
+      repositoryId: repository.repositoryId,
+      repositoryName: repository.repositoryName,
+      repositoryNodeId: repository.repositoryNodeId,
+      repositoryOwner: repository.repositoryOwner,
+    })),
+    teamRunId: policy.teamRunId,
+    teamStepId,
+    version: 1 as const,
+  };
+  const existing = run({
+    authVersion: 8,
+    executionPermission: "github_only",
+    githubBrokerPolicy: reorderedFromJsonb,
+    teamStepId,
+  });
+  const start = async (githubBrokerPolicy: typeof policy) => {
+    const fixture = scripted(
+      [
+        agent({
+          id: existing.agentId,
+          sandboxLifecycle: "ready",
+          sandboxTrust: "restricted",
+        }),
+      ],
+      [existing]
+    );
+    return await fixture.store.startRun(principal, {
+      agentId: existing.agentId,
+      authVersion: 8,
+      executionPermission: "github_only",
+      githubBrokerPolicy,
+      id: existing.id,
+      operationId: existing.operationId,
+      requestHash: existing.requestHash,
+      task: existing.task,
+      teamStepId,
+    });
+  };
+
+  assert.equal((await start(policy)).kind, "duplicate");
+  assert.equal(
+    (
+      await start({
+        ...policy,
+        connectionGeneration: policy.connectionGeneration + 1,
+      })
+    ).kind,
+    "conflict"
+  );
+  assert.equal(
+    (
+      await start({
+        ...policy,
+        repositories: [...policy.repositories].reverse(),
+      })
+    ).kind,
+    "conflict"
+  );
+});
+
 test("duplicate starts conflict when execution permission differs", async () => {
   const existing = run({ executionPermission: "workspace_read" });
   const { store } = scripted(

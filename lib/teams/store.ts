@@ -18,6 +18,7 @@ import {
   teamHandoffSchema,
 } from "@opencoven/agent-contracts";
 import { type SQL, sql } from "drizzle-orm";
+import { compareAscii } from "@/lib/ascii";
 import type { databaseFor } from "@/lib/db/access";
 import type {
   RunnerAgentExecutionSnapshot,
@@ -1165,7 +1166,7 @@ function normalizedReplacementConnections(
       accountType: input.accountType,
       installationId: input.installationId,
     }))
-    .sort((left, right) => left.repositoryId.localeCompare(right.repositoryId));
+    .sort((left, right) => compareAscii(left.repositoryId, right.repositoryId));
   if (
     new Set(connections.map(({ repositoryId }) => repositoryId)).size !==
     connections.length
@@ -1190,7 +1191,7 @@ function sameConnectionAuthority(
     return false;
   }
   const sortedCurrent = [...current].sort((left, right) =>
-    left.repositoryId.localeCompare(right.repositoryId)
+    compareAscii(left.repositoryId, right.repositoryId)
   );
   return sortedCurrent.every((connection, index) => {
     const candidate = next[index];
@@ -1412,7 +1413,7 @@ async function replaceFencedGitHubInstallationConnections(
     return {
       changed: true,
       connections: stored.sort((left, right) =>
-        left.repositoryId.localeCompare(right.repositoryId)
+        compareAscii(left.repositoryId, right.repositoryId)
       ),
       generation,
       kind: mode === "connect" ? "connected" : "refreshed",

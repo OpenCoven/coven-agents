@@ -168,6 +168,43 @@ test("broker policy requires a current bounded verified repository snapshot", ()
   }
 });
 
+test("broker policy repository ordering is deterministic ASCII byte order", () => {
+  const connections = [
+    {
+      ...CONNECTIONS[0],
+      id: "60000000-0000-4000-8000-000000000001",
+      repositoryId: "791",
+      repositoryName: "a_a",
+    },
+    {
+      ...CONNECTIONS[0],
+      id: "60000000-0000-4000-8000-000000000002",
+      repositoryId: "790",
+      repositoryName: "a.a",
+    },
+    {
+      ...CONNECTIONS[0],
+      id: "60000000-0000-4000-8000-000000000003",
+      repositoryId: "789",
+      repositoryName: "a-a",
+    },
+  ];
+  const built = buildGitHubBrokerPolicy({
+    actorUserId: USER_ID,
+    approvedCapabilities: [],
+    authVersion: 7,
+    connectionSnapshot: { connections, generation: 9 },
+    declaredCapabilities: ["github.issues.read"],
+    teamRunId: TEAM_RUN_ID,
+    teamStepId: TEAM_STEP_ID,
+  });
+
+  assert.deepEqual(
+    built.repositories.map(({ repository }) => repository),
+    ["opencoven/a-a", "opencoven/a.a", "opencoven/a_a"]
+  );
+});
+
 test("step capability returns 256-bit entropy once and persists only its SHA-256 hash", async () => {
   const writes: unknown[] = [];
   const rawBytes = Buffer.alloc(32, 0x5a);

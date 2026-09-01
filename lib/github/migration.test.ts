@@ -320,15 +320,24 @@ test("0030 persists pre-send versus sent provider dispatch and releasable write 
   );
 
   const journal = JSON.parse(journalText) as {
-    entries: Array<{ idx: number; tag: string }>;
+    entries: Array<{
+      breakpoints: boolean;
+      idx: number;
+      tag: string;
+      version: string;
+      when: number;
+    }>;
   };
-  assert.deepEqual(journal.entries.at(-1), {
-    breakpoints: true,
-    idx: 30,
-    tag: "0030_github_provider_dispatch_phase",
-    version: "7",
-    when: 1_788_254_163_084,
-  });
+  assert.deepEqual(
+    journal.entries.find(({ idx }) => idx === 30),
+    {
+      breakpoints: true,
+      idx: 30,
+      tag: "0030_github_provider_dispatch_phase",
+      version: "7",
+      when: 1_788_254_163_084,
+    }
+  );
 
   const snapshot = JSON.parse(snapshotText) as {
     tables: Record<
@@ -348,4 +357,39 @@ test("0030 persists pre-send versus sent provider dispatch and releasable write 
     operation.indexes.RGHOp_step_write_intent_uq.where ?? "",
     /writeIntentActive/u
   );
+});
+
+test("0031 makes durable repository ordering use C collation", async () => {
+  const migrationUrl = new URL(
+    "0031_deterministic_repository_ordering.sql",
+    migrations
+  );
+  assert.equal(existsSync(migrationUrl), true);
+  const [migration, journalText, snapshotText] = await Promise.all([
+    readFile(migrationUrl, "utf8"),
+    readFile(new URL("meta/_journal.json", migrations), "utf8"),
+    readFile(new URL("meta/0031_snapshot.json", migrations), "utf8"),
+  ]);
+
+  assert.match(
+    migration,
+    /ORDER BY lower\("connection"\."repositoryOwner"\) COLLATE "C",\s*lower\("connection"\."repositoryName"\) COLLATE "C"/u
+  );
+  assert.doesNotMatch(
+    migration,
+    /ALTER TABLE "RunnerGitHubConnection".*COLLATE/u
+  );
+
+  const journal = JSON.parse(journalText) as {
+    entries: Array<{ idx: number; tag: string; version: string }>;
+  };
+  const latest = journal.entries.at(-1);
+  assert.equal(latest?.idx, 31);
+  assert.equal(latest?.tag, "0031_deterministic_repository_ordering");
+  assert.equal(latest?.version, "7");
+
+  const snapshot = JSON.parse(snapshotText) as {
+    tables: Record<string, unknown>;
+  };
+  assert.ok(snapshot.tables["public.RunnerRun"]);
 });

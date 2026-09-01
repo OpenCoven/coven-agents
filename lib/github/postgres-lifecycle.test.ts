@@ -71,6 +71,16 @@ test("disconnect advances generation, revokes capability, and preserves an immut
   ];
 
   try {
+    const [ordering] = await sql<{ definition: string }[]>`
+      SELECT pg_get_functiondef(
+        '"RunnerRun_enforce_team_execution_permission"()'::regprocedure
+      ) AS "definition"
+    `;
+    assert.match(
+      ordering?.definition ?? "",
+      /repositoryOwner"\) COLLATE "C"[\s\S]*repositoryName"\) COLLATE "C"/u
+    );
+
     await sql.begin(async (transaction) => {
       await transaction`
           INSERT INTO "User" ("id", "email", "authVersion")

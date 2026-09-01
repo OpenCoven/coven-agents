@@ -1,6 +1,7 @@
 import "server-only";
 
 import { type KeyObject, sign } from "node:crypto";
+import { compareAscii } from "@/lib/ascii";
 
 const GITHUB_API_ORIGIN = "https://api.github.com";
 const GITHUB_API_VERSION = "2022-11-28";
@@ -520,7 +521,7 @@ function deduplicateRepositories(
     ids.add(repository.id);
   }
   return [...repositories].sort((left, right) =>
-    left.id.localeCompare(right.id)
+    compareAscii(left.id, right.id)
   );
 }
 

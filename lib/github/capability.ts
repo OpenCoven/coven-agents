@@ -15,6 +15,7 @@ import {
   type TeamCapability,
 } from "@opencoven/agent-contracts";
 import { type SQL, sql } from "drizzle-orm";
+import { compareAscii } from "@/lib/ascii";
 import type { RunnerOperator } from "@/lib/runner/types";
 import type {
   GitHubConnectionSnapshot,
@@ -236,7 +237,7 @@ export function buildGitHubBrokerPolicy(
 
   const repositories = input.connectionSnapshot.connections
     .map(brokerRepository)
-    .sort((left, right) => left.repository.localeCompare(right.repository));
+    .sort((left, right) => compareAscii(left.repository, right.repository));
   if (
     new Set(repositories.map(({ repository }) => repository)).size !==
     repositories.length

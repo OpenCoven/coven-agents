@@ -22,6 +22,7 @@ import {
   applicationHomePath,
   safeApplicationCallbackPath,
 } from "@/lib/application-path";
+import { compareAscii } from "@/lib/ascii";
 import { parseCanonicalApplicationOrigin } from "@/lib/auth/application-origin";
 import type {
   RunnerAuth,
@@ -1187,7 +1188,7 @@ function replacementInput(
         repositoryOwner: repository.owner,
       }))
       .sort((left, right) =>
-        left.repositoryId.localeCompare(right.repositoryId)
+        compareAscii(left.repositoryId, right.repositoryId)
       ),
   };
 }
@@ -1371,7 +1372,8 @@ function publicConnections(connections: readonly GitHubConnectionRecord[]) {
       connected: connections.length > 0,
       connections: [...connections]
         .sort((left, right) =>
-          `${left.repositoryOwner}/${left.repositoryName}`.localeCompare(
+          compareAscii(
+            `${left.repositoryOwner}/${left.repositoryName}`,
             `${right.repositoryOwner}/${right.repositoryName}`
           )
         )

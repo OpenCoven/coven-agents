@@ -7,6 +7,7 @@ import {
   githubToolOperationSchema as operationSchema,
   type TeamCapability,
 } from "@opencoven/agent-contracts";
+import { compareAscii } from "@/lib/ascii";
 
 export {
   GITHUB_TOOL_LIMITS,
@@ -82,7 +83,7 @@ function canonicalValue(value: unknown): unknown {
   if (value && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => compareAscii(left, right))
         .map(([key, entry]) => [key, canonicalValue(entry)])
     );
   }

@@ -9,6 +9,7 @@ import type {
 } from "@opencoven/agent-contracts";
 import { AGENT_RUNNER_API_VERSION } from "@opencoven/agent-contracts";
 import { type SQL, sql } from "drizzle-orm";
+import { canonicalJsonStringify } from "@/lib/canonical-json";
 import type { databaseFor } from "@/lib/db/access";
 import { daytonaRunSessionName } from "./daytona/names";
 import {
@@ -646,8 +647,8 @@ function matchesRunRequest(
   }
   if (
     run.teamStepId !== (input.teamStepId ?? null) ||
-    JSON.stringify(run.githubBrokerPolicy) !==
-      JSON.stringify(input.githubBrokerPolicy ?? null)
+    canonicalJsonStringify(run.githubBrokerPolicy) !==
+      canonicalJsonStringify(input.githubBrokerPolicy ?? null)
   ) {
     return false;
   }
