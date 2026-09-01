@@ -1030,7 +1030,7 @@ test("live event reads start reconciliation before the stream closes", async () 
     new Request(`https://app.test/api/agents/${AGENT_ID}/runs`),
     AGENT_ID
   );
-  await fixture.handlers.getRunEvents(
+  const eventResponse = await fixture.handlers.getRunEvents(
     new Request(`https://app.test/api/runs/${RUN_ID}/events`),
     RUN_ID
   );
@@ -1040,6 +1040,7 @@ test("live event reads start reconciliation before the stream closes", async () 
   assert.equal(reconciled, 1);
   await Promise.all(fixture.after.map((callback) => callback()));
   assert.equal(reconciled, 3);
+  await eventResponse.body?.cancel();
 
   const terminalRun = run({
     completedAt: "2026-08-28T15:01:00.000Z",
@@ -1065,12 +1066,13 @@ test("live event reads start reconciliation before the stream closes", async () 
     new Request(`https://app.test/api/agents/${AGENT_ID}/runs`),
     AGENT_ID
   );
-  await terminal.handlers.getRunEvents(
+  const terminalEventResponse = await terminal.handlers.getRunEvents(
     new Request(`https://app.test/api/runs/${RUN_ID}/events`),
     RUN_ID
   );
 
   assert.equal(terminal.after.length, 0);
+  await terminalEventResponse.body?.cancel();
 });
 
 test("agent and run IDs reject malformed values without reaching service methods", async () => {
