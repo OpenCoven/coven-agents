@@ -10,11 +10,13 @@
  * the route enforce that authority itself without opening descendants or
  * future `/api/diagnostics/*` routes.
  *
- * `/api/internal/runner-reconcile` and `/api/internal/stripe-reconcile` are
- * machine-triggered routes that carry no Auth.js cookie. Gating either would
- * disable recovery instead of closing the beta. Each authenticates itself
- * with its route-specific machine credential. No other `/api/internal/*`
- * route inherits this exemption.
+ * `/api/internal/runner-reconcile`,
+ * `/api/internal/runner-resource-inventory`, and
+ * `/api/internal/stripe-reconcile` are machine-triggered routes that carry no
+ * Auth.js cookie. Gating them would disable recovery or operator inventory
+ * instead of closing the beta. Each authenticates itself with its
+ * route-specific machine credential. No other `/api/internal/*` route inherits
+ * this exemption.
  *
  * `/api/stripe` is exempt for the same reason and is not optional: Stripe does
  * not follow redirects when delivering a webhook, so a gated endpoint turns
@@ -42,6 +44,7 @@ const EXEMPT_PATHS = new Set([
   "/api/diagnostics/sandbox",
   "/api/health",
   "/api/internal/runner-reconcile",
+  "/api/internal/runner-resource-inventory",
   "/api/internal/stripe-reconcile",
 ]);
 

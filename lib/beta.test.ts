@@ -93,6 +93,26 @@ test("the machine-triggered reconciliation path is exempt", () => {
   );
 });
 
+test("the runner resource inventory machine route is exactly exempt", () => {
+  assert.equal(isBetaExempt("/api/internal/runner-resource-inventory"), true);
+  assert.equal(
+    betaVerdict(
+      readBetaGate(ON),
+      "/api/internal/runner-resource-inventory",
+      null
+    ),
+    "allow"
+  );
+  assert.equal(
+    isBetaExempt("/api/internal/runner-resource-inventory/extra"),
+    false
+  );
+  assert.equal(
+    isBetaExempt("/api/internal/runner-resource-inventory-now"),
+    false
+  );
+});
+
 test("the Stripe reconciliation machine route is exactly exempt", () => {
   assert.equal(isBetaExempt("/api/internal/stripe-reconcile"), true);
   assert.equal(
