@@ -363,9 +363,10 @@ function configuredClaimDispatcher(
   findAccount?: ProductionAccountFinder
 ): (claimed: RunnerClaimedDispatch) => Promise<RunnerDispatchResult> {
   return async (claimed) => {
-    const [admission, credentials, sandbox] = await Promise.all([
+    const [admission, credentials, executor, sandbox] = await Promise.all([
       import("./admission"),
       import("@/lib/credentials/runner-credential"),
+      import("./daytona/executor"),
       import("./daytona/sandbox"),
     ]);
     const resolvedLimits = limits ?? admission.admissionLimitsFromEnvironment();
@@ -373,7 +374,7 @@ function configuredClaimDispatcher(
       dispatch: (authorized, context) => {
         const credentialDependencies =
           credentials.drizzleRunnerCredentialDependencies(database);
-        const dependencies = admission.daytonaRunnerDispatchDependencies({
+        const dependencies = executor.daytonaRunnerDispatchDependencies({
           credentialDependencies,
           credentialInput: (run, _agent) => ({
             ...context,

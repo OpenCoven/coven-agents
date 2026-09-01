@@ -48,6 +48,9 @@ export type RunnerDaytonaAttemptId = string & {
   readonly [runnerDaytonaAttemptIdBrand]: "RunnerDaytonaAttemptId";
 };
 
+/** Provider-neutral name for an attempt fenced by runner storage. */
+export type RunnerExecutionAttemptId = RunnerDaytonaAttemptId;
+
 export type RunnerReconciliationLease = Readonly<{
   expiresAt: Date;
   fence: number;

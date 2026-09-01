@@ -9,7 +9,11 @@ import {
   dispatchRunnerClaim,
   RunnerAdmissionConfigurationError,
 } from "./admission";
-import { DaytonaProcessError } from "./daytona/process";
+import type {
+  RunnerExecutionContext,
+  RunnerExecutor,
+  RunnerExecutorStartInput,
+} from "./executor";
 import type {
   RunnerAgentRecord,
   RunnerClaimedDispatch,
@@ -24,6 +28,22 @@ import type {
 const operator: RunnerOperator = { kind: "runner-operator" };
 const attemptId =
   "53af1a29-4e98-43d6-ac5b-3b9dcba5e730" as RunnerDaytonaAttemptId;
+const executionContext = {} as RunnerExecutionContext;
+
+function executor(overrides: Partial<RunnerExecutor> = {}): RunnerExecutor {
+  return {
+    ensureExecutionContext: async () => ({
+      agent: agent(),
+      context: executionContext,
+    }),
+    inspectWorkspaceSafety: async () => ({ kind: "safe" }),
+    isCleanupPending: () => false,
+    start: async (_input: RunnerExecutorStartInput) => {
+      throw new Error("Executor start was not configured.");
+    },
+    ...overrides,
+  };
+}
 
 function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
   return {
@@ -311,9 +331,11 @@ test("dispatch claim outages do not expose store errors", async () => {
     credentialInput: () => {
       throw new Error("must not build input");
     },
-    ensureSandbox: async () => {
-      throw new Error("must not resolve");
-    },
+    executor: executor({
+      ensureExecutionContext: async () => {
+        throw new Error("must not resolve");
+      },
+    }),
     limits: admissionLimitsFromEnvironment({}),
     operator,
     randomToken: () => "lease",
@@ -333,7 +355,7 @@ test("dispatch claim outages do not expose store errors", async () => {
 test("dispatch claims before sandbox and credential acquisition", async () => {
   const calls: string[] = [];
   let persistedRedaction: unknown;
-  const processInputs: Record<string, unknown>[] = [];
+  const processInputs: RunnerExecutorStartInput[] = [];
   const claimedRun = run({ executionPermission: "workspace_read" });
   const authority = {
     expectedVersion: claimedRun.version,
@@ -453,22 +475,48 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
         runId: claimedRun.id,
         tenant: claimedRun.tenant,
       }) as never,
-    ensureSandbox: async () => {
-      calls.push("sandbox");
-      return {
-        agent: agent({
-          instructions: "mutated live instructions",
-          model: "mutated-live-model",
-          runtime: "codex",
-          workspace: "/workspace/mutated",
-        }),
-        sandbox: {} as never,
-      };
-    },
-    inspectRestrictedWorkspace: async () => {
-      calls.push("inspect-workspace");
-      return { kind: "safe" as const };
-    },
+    executor: executor({
+      ensureExecutionContext: async () => {
+        calls.push("sandbox");
+        return {
+          agent: agent({
+            instructions: "mutated live instructions",
+            model: "mutated-live-model",
+            runtime: "codex",
+            workspace: "/workspace/mutated",
+          }),
+          context: executionContext,
+        };
+      },
+      inspectWorkspaceSafety: async () => {
+        calls.push("inspect-workspace");
+        return { kind: "safe" };
+      },
+      start: async (input) => {
+        calls.push("start");
+        processInputs.push(input);
+        const prepared = await input.authorizers.authorizePreparation({
+          runId: input.runId,
+        });
+        assert.equal(prepared, attemptId);
+        assert.equal(
+          await input.persistAttemptRedaction({
+            attemptId,
+            credential: "secret",
+            runId: input.runId,
+          }),
+          true
+        );
+        const launched = await input.authorizers.authorizeLaunch({
+          attemptId,
+          commandId: "command",
+          runId: input.runId,
+          sessionId: "session",
+        });
+        assert.ok(launched);
+        return { dispatchAuthority: startedAuthority };
+      },
+    }),
     limits: admissionLimitsFromEnvironment({}),
     operator,
     randomToken: () => "next-lease",
@@ -481,35 +529,6 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
         iv: "iv",
         kekVersion: "v1",
         wrappedKey: "wrapped-key",
-      };
-    },
-    startProcess: async (input) => {
-      calls.push("start");
-      processInputs.push(input as unknown as Record<string, unknown>);
-      const prepared = await input.authorizePreparation({ runId: input.runId });
-      assert.equal(prepared, attemptId);
-      assert.equal(
-        await input.persistAttemptRedaction({
-          attemptId,
-          credential: "secret",
-          runId: input.runId,
-        }),
-        true
-      );
-      const launched = await input.authorizeLaunch({
-        attemptId,
-        commandId: "command",
-        runId: input.runId,
-        sessionId: "session",
-      });
-      assert.ok(launched);
-      return {
-        attemptId,
-        commandId: "command",
-        credentialPath: "/credential",
-        dispatchAuthority: startedAuthority,
-        sessionId: "session",
-        workspace: "/workspace",
       };
     },
     store,
@@ -575,16 +594,9 @@ test("snapshotted unsupported harness dispatch claims terminalize before sandbox
       calls.push("credential-input");
       throw new Error("must not build credential input");
     },
-    ensureSandbox: async () => {
-      calls.push("sandbox");
-      throw new Error("must not ensure a sandbox");
-    },
+    executor: executor(),
     limits: admissionLimitsFromEnvironment({}),
     operator,
-    startProcess: async () => {
-      calls.push("provider");
-      throw new Error("must not start provider work");
-    },
     store: {
       cleanupTerminalLease: async (
         _operator: RunnerOperator,
@@ -675,16 +687,9 @@ test("restricted dispatch rejects a missing persisted workspace before sandbox o
         calls.push("credential-input");
         throw new Error("must not build credential input");
       },
-      ensureSandbox: async () => {
-        calls.push("sandbox");
-        throw new Error("must not ensure a sandbox");
-      },
+      executor: executor(),
       limits: admissionLimitsFromEnvironment({}),
       operator,
-      startProcess: async () => {
-        calls.push("provider");
-        throw new Error("must not start provider work");
-      },
       store: {
         cleanupTerminalLease: async () => {
           calls.push("cleanup");
@@ -765,20 +770,18 @@ test("restricted dispatch rejects repository hook policy before credentials", as
         calls.push("credential-input");
         throw new Error("must not build credential input");
       },
-      ensureSandbox: async () => {
-        calls.push("sandbox");
-        return { agent: agent(), sandbox: {} as never };
-      },
-      inspectRestrictedWorkspace: async () => {
-        calls.push("inspect-workspace");
-        return { kind: "unsafe" as const };
-      },
+      executor: executor({
+        ensureExecutionContext: async () => {
+          calls.push("sandbox");
+          return { agent: agent(), context: executionContext };
+        },
+        inspectWorkspaceSafety: async () => {
+          calls.push("inspect-workspace");
+          return { kind: "unsafe" };
+        },
+      }),
       limits: admissionLimitsFromEnvironment({}),
       operator,
-      startProcess: async () => {
-        calls.push("provider");
-        throw new Error("must not start provider work");
-      },
       store: {
         cleanupTerminalLease: async () => {
           calls.push("cleanup");
@@ -866,23 +869,17 @@ test("restricted dispatch waits for an in-progress sandbox warm before inspectio
         calls.push("credential-input");
         throw new Error("must not build credential input");
       },
-      ensureSandbox: async () => {
-        calls.push("sandbox");
-        return {
-          agent: agent({ warmStatus: "provisioning" }),
-          sandbox: {} as never,
-        };
-      },
-      inspectRestrictedWorkspace: async () => {
-        calls.push("inspect-workspace");
-        throw new Error("must not inspect during a warm");
-      },
+      executor: executor({
+        ensureExecutionContext: async () => {
+          calls.push("sandbox");
+          return {
+            agent: agent({ warmStatus: "provisioning" }),
+            context: executionContext,
+          };
+        },
+      }),
       limits: admissionLimitsFromEnvironment({}),
       operator,
-      startProcess: async () => {
-        calls.push("provider");
-        throw new Error("must not start provider work");
-      },
       store: {
         getDispatchAgent: async () => {
           calls.push("get-agent");
@@ -931,23 +928,17 @@ test("restricted dispatch rejects an unrestricted sandbox trust profile before c
         calls.push("credential-input");
         throw new Error("must not build credential input");
       },
-      ensureSandbox: async () => {
-        calls.push("sandbox");
-        return {
-          agent: agent({ sandboxTrust: "unrestricted" }),
-          sandbox: {} as never,
-        };
-      },
-      inspectRestrictedWorkspace: async () => {
-        calls.push("inspect-workspace");
-        throw new Error("must not inspect an unrestricted sandbox");
-      },
+      executor: executor({
+        ensureExecutionContext: async () => {
+          calls.push("sandbox");
+          return {
+            agent: agent({ sandboxTrust: "unrestricted" }),
+            context: executionContext,
+          };
+        },
+      }),
       limits: admissionLimitsFromEnvironment({}),
       operator,
-      startProcess: async () => {
-        calls.push("provider");
-        throw new Error("must not start provider work");
-      },
       store: {
         cleanupTerminalLease: async () => {
           calls.push("cleanup");
@@ -1071,19 +1062,19 @@ test("a proven failed launch compensates accounting with the callback's current 
       kind: "acquired" as const,
     }),
     credentialInput: () => ({}) as never,
-    ensureSandbox: async () => ({ agent: agent(), sandbox: {} as never }),
+    executor: executor({
+      start: async (input) => {
+        await input.authorizers.authorizePreparation({ runId: input.runId });
+        await input.authorizers.releasePreparation({
+          attemptId,
+          runId: input.runId,
+        });
+        throw new Error("safe failed start");
+      },
+    }),
     limits: admissionLimitsFromEnvironment({}),
     operator,
     randomToken: () => "lease",
-    startProcess: async (input) => {
-      await input.authorizePreparation({ runId: input.runId });
-      await input.releasePreparation({ attemptId, runId: input.runId });
-      throw new DaytonaProcessError(
-        "safe failed start",
-        "process_start_failed",
-        true
-      );
-    },
     store: store as never,
   });
 
@@ -1127,14 +1118,10 @@ test("an accounting commit outage never starts an unaccounted provider command",
       kind: "acquired" as const,
     }),
     credentialInput: () => ({}) as never,
-    ensureSandbox: async () => ({ agent: agent(), sandbox: {} as never }),
+    executor: executor(),
     limits: admissionLimitsFromEnvironment({}),
     operator,
     randomToken: () => "lease",
-    startProcess: async () => {
-      calls.push("start");
-      throw new Error("provider must not start");
-    },
     store: {
       claimNextDispatch: async () => ({ authority, run: claimedRun }),
       getDispatchAgent: async () => ({
@@ -1216,16 +1203,14 @@ test("missing credentials clean pre-launch state and terminalize without provide
         runId: claimedRun.id,
         tenant: claimedRun.tenant,
       }) as never,
-    ensureSandbox: async () => {
-      calls.push("sandbox");
-      return { agent: agent(), sandbox: {} as never };
-    },
+    executor: executor({
+      ensureExecutionContext: async () => {
+        calls.push("sandbox");
+        return { agent: agent(), context: executionContext };
+      },
+    }),
     limits: admissionLimitsFromEnvironment({}),
     operator,
-    startProcess: async () => {
-      calls.push("start");
-      throw new Error("provider must not start");
-    },
     store: {
       claimNextDispatch: async () => {
         calls.push("claim");
@@ -1319,7 +1304,7 @@ test("capacity refusal terminalizes the claimed run before freeing its lease", a
       reason: "global_daily_cap" as const,
     }),
     credentialInput: () => ({}) as never,
-    ensureSandbox: async () => ({ agent: agent(), sandbox: {} as never }),
+    executor: executor(),
     limits: admissionLimitsFromEnvironment({}),
     operator,
     randomToken: () => "lease",

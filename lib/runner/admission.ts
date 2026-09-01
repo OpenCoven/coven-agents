@@ -6,30 +6,15 @@ import {
   isRunnableHarness,
   UNSUPPORTED_HARNESS_RUN_ERROR,
 } from "@opencoven/harness";
-import {
-  acquireRunnerCredential,
-  type RunnerCredentialAcquireInput,
-  type RunnerCredentialAcquireResult,
-  type RunnerCredentialDependencies,
+import type {
+  RunnerCredentialAcquireInput,
+  RunnerCredentialAcquireResult,
 } from "@/lib/credentials/runner-credential";
 import {
   type RunnerAttemptRedactionEnvelope,
   sealRunnerAttemptRedactionFromEnvironment,
 } from "./attempt-redaction";
-import { daytonaDispatchAuthorizers } from "./daytona/dispatch";
-import {
-  DaytonaProcessError,
-  type DaytonaProcessSandbox,
-  type DaytonaStartedProcess,
-  inspectRestrictedWorkspace,
-  type RestrictedWorkspaceInspection,
-  startDaytonaProcess,
-} from "./daytona/process";
-import {
-  type DaytonaSandboxConfiguration,
-  type DaytonaSandboxDependencies,
-  ensureDaytonaSandboxForDispatch,
-} from "./daytona/sandbox";
+import { type RunnerExecutor, runnerDispatchAuthorizers } from "./executor";
 import type { RunnerStore } from "./store";
 import {
   DEFAULT_RUNNER_ADMISSION_LIMITS,
@@ -167,13 +152,7 @@ export type RunnerDispatchDependencies = Readonly<{
     agent: RunnerAgentRecord
   ) => RunnerCredentialAcquireInput;
   dispatchLeaseMs?: number;
-  ensureSandbox: (
-    authority: RunnerDispatchAuthority
-  ) => Promise<{ agent: RunnerAgentRecord; sandbox: DaytonaProcessSandbox }>;
-  inspectRestrictedWorkspace?: (
-    sandbox: DaytonaProcessSandbox,
-    workspace: string
-  ) => Promise<RestrictedWorkspaceInspection>;
+  executor: RunnerExecutor;
   limits: RunnerAdmissionLimits;
   operator: RunnerOperator;
   randomToken?: () => string;
@@ -183,49 +162,8 @@ export type RunnerDispatchDependencies = Readonly<{
     runId: string;
     tenant: string;
   }) => Promise<RunnerAttemptRedactionEnvelope>;
-  startProcess?: (
-    input: Parameters<typeof startDaytonaProcess>[0]
-  ) => Promise<DaytonaStartedProcess>;
   store: DispatchStore;
 }>;
-
-export type DaytonaRunnerDispatchDependencies = Omit<
-  RunnerDispatchDependencies,
-  "acquireCredential" | "ensureSandbox" | "store"
-> &
-  Readonly<{
-    credentialDependencies: RunnerCredentialDependencies;
-    sandboxConfiguration: DaytonaSandboxConfiguration;
-    sandboxDependencies: Omit<DaytonaSandboxDependencies, "store">;
-    store: RunnerStore;
-  }>;
-
-/**
- * Production composition for the injectable dispatcher. The lower-level
- * service remains testable without a Daytona SDK or database, while this
- * adapter guarantees dispatch uses the run-fenced sandbox lifecycle.
- */
-export function daytonaRunnerDispatchDependencies(
-  dependencies: DaytonaRunnerDispatchDependencies
-): RunnerDispatchDependencies {
-  return {
-    ...dependencies,
-    acquireCredential: (input) =>
-      acquireRunnerCredential(input, dependencies.credentialDependencies),
-    ensureSandbox: async (authority) => {
-      const ensured = await ensureDaytonaSandboxForDispatch(
-        dependencies.operator,
-        authority,
-        dependencies.sandboxConfiguration,
-        { ...dependencies.sandboxDependencies, store: dependencies.store }
-      );
-      return {
-        agent: ensured.agent,
-        sandbox: ensured.sandbox as unknown as DaytonaProcessSandbox,
-      };
-    },
-  };
-}
 
 function configuredLimit(
   environment: RunnerAdmissionEnvironment,
@@ -521,17 +459,9 @@ export async function terminalizeUnstartedDispatchFailure(
   }
 }
 
-function cleanupMayRemain(error: unknown): boolean {
-  return (
-    error instanceof DaytonaProcessError &&
-    (error.code === "durable_release_failed" ||
-      error.code === "sandbox_reset_required")
-  );
-}
-
 /**
- * Starts one already-claimed run. It holds no plaintext credential outside
- * the `startProcess` call and never converts provider errors into output.
+ * Starts one already-claimed run. It holds no plaintext credential outside the
+ * executor start boundary and never converts provider errors into output.
  */
 export async function dispatchRunnerClaim(
   claimed: RunnerClaimedDispatch,
@@ -573,9 +503,9 @@ export async function dispatchRunnerClaim(
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
 
-  let ensured: { agent: RunnerAgentRecord; sandbox: DaytonaProcessSandbox };
+  let ensured: Awaited<ReturnType<RunnerExecutor["ensureExecutionContext"]>>;
   try {
-    ensured = await dependencies.ensureSandbox(authority);
+    ensured = await dependencies.executor.ensureExecutionContext(authority);
   } catch {
     return (await releaseUnstarted(dependencies, authority))
       ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }
@@ -605,9 +535,10 @@ export async function dispatchRunnerClaim(
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
   if (run.executionPermission !== "unrestricted") {
-    const inspection = await (
-      dependencies.inspectRestrictedWorkspace ?? inspectRestrictedWorkspace
-    )(ensured.sandbox, run.agentWorkspace as string);
+    const inspection = await dependencies.executor.inspectWorkspaceSafety(
+      ensured.context,
+      run.agentWorkspace as string
+    );
     if (inspection.kind === "unavailable") {
       return (await releaseUnstarted(dependencies, authority))
         ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }
@@ -725,16 +656,17 @@ export async function dispatchRunnerClaim(
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
 
-  const callbacks = daytonaDispatchAuthorizers(
+  const callbacks = runnerDispatchAuthorizers(
     dependencies.store,
     dependencies.operator,
     authority
   );
-  let started: DaytonaStartedProcess;
+  let started: Awaited<ReturnType<RunnerExecutor["start"]>>;
   try {
     started = await credential.acquisition.use((credentialAtBoundary) =>
-      (dependencies.startProcess ?? startDaytonaProcess)({
-        ...callbacks,
+      dependencies.executor.start({
+        authorizers: callbacks,
+        context: ensured.context,
         credential: credentialAtBoundary,
         deleteAttemptRedaction: async () =>
           (
@@ -772,13 +704,12 @@ export async function dispatchRunnerClaim(
         },
         runId: run.id,
         runtime: run.agentRuntime,
-        sandbox: ensured.sandbox,
         task: run.task,
         workspace: run.agentWorkspace ?? undefined,
       })
     );
   } catch (error) {
-    if (cleanupMayRemain(error)) {
+    if (dependencies.executor.isCleanupPending(error)) {
       return { kind: "retained", reason: "cleanup_pending", runId: run.id };
     }
     try {

@@ -14,16 +14,16 @@ import {
   releaseRunnerCredentialResources,
   rollbackRunnerCredentialResources,
 } from "@/lib/credentials/runner-credential";
-import {
-  type DaytonaRunnerDispatchDependencies,
-  daytonaRunnerDispatchDependencies,
-  dispatchNextRunnerRun,
-} from "./admission";
+import { dispatchNextRunnerRun } from "./admission";
 import {
   openRunnerAttemptRedactionFromEnvironment,
   type RunnerAttemptRedactionEnvelope,
   type RunnerAttemptRedactionScope,
 } from "./attempt-redaction";
+import {
+  type DaytonaRunnerDispatchDependencies,
+  daytonaRunnerDispatchDependencies,
+} from "./daytona/executor";
 import { daytonaProbeSessionName, daytonaSandboxName } from "./daytona/names";
 import {
   cleanupDaytonaProbeSession,
