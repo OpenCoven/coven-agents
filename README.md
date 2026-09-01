@@ -121,9 +121,11 @@ pnpm account revoke-sessions <email>
 
 [`ROADMAP.md`](ROADMAP.md) is the public strategic view. Current evidence,
 sequencing, release gates, and capability status live in
-[`docs/roadmap`](docs/roadmap/). The published [Wave 1 delivery report](docs/roadmap/wave-1-delivery.md)
-records public delivery artifacts without replacing the private planning
-authority.
+[`docs/roadmap`](docs/roadmap/). The
+[planning document registry](docs/roadmap/README.md) classifies living plans,
+proposals, historical evidence, decision logs, and superseded specifications.
+The published [Wave 1 delivery report](docs/roadmap/wave-1-delivery.md) records
+public delivery artifacts without replacing the private planning authority.
 
 Run the repository gates:
 

@@ -1,5 +1,11 @@
 # Daytona Run Diagnostics Proposal
 
+- Status: proposed; not authorized for delivery
+- Decision authority: private Beads/DoltHub
+- Last reviewed: 2026-08-31
+- Entry gate: an approved private task with bounded evidence requirements
+- Registry: [planning document registry](../roadmap/README.md)
+
 ## Goal
 
 Explain run and recovery failures from PostgreSQL and Daytona evidence without

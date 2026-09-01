@@ -11,6 +11,16 @@ const readmeUrl = new URL("../README.md", import.meta.url);
 test("the Wave 1 report records delivery evidence and residual risks", () => {
   const report = readFileSync(reportUrl, "utf8");
 
+  assert.match(
+    report,
+    /Status: Historical report — bounded 2026-08-25 tranche complete/u
+  );
+  assert.match(
+    report,
+    /The checked-in public roadmap snapshot reports public wave status/u
+  );
+  assert.match(report, /private reconciliation remains pending/u);
+
   for (const heading of [
     "# Wave 1 Delivery Report",
     "## Delivered outcomes",

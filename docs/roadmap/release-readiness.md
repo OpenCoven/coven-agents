@@ -5,9 +5,11 @@ deployment, migration, provider action, or resource deletion occurred.
 
 ## Current release disposition
 
-**No production approval is recorded in this document.** Promotion remains
-pending until every required item has a dated sanitized artifact and named
-operator.
+**Infrastructure cutover is complete; full product release approval is
+pending.** The Daytona control-plane and retired-provider evidence is retained
+in the [cutover attestation](../operations/daytona-cutover-attestation.md).
+Promotion remains pending until every remaining product item has a dated
+sanitized artifact and named operator.
 
 ## Automatic no-go rules
 
@@ -15,9 +17,15 @@ Do not promote when:
 
 - any repository gate fails;
 - a worktree is `AT RISK`;
+- private Beads-to-Project reconciliation has not completed with a final no-op
+  preview;
 - release audience configuration is ambiguous;
 - database migration compatibility is unproved;
 - subscriber or tenant authority can be supplied by request input;
+- checkout or credential controls remain enabled after current subscription
+  authority is invalidated or expires;
+- a team child can exceed its immutable workspace/tool authority or a
+  GitHub-capable step can run without the approved capability broker;
 - Daytona credentials, snapshot, target, or domain policy are missing;
 - an active run lacks durable PostgreSQL ownership;
 - lifecycle, SSE, rollback, or reconciliation evidence is absent;
@@ -54,6 +62,8 @@ pnpm validate:release
 Only an authorized maintainer may update private planning data. Run the
 repository's documented preview/apply sequence and retain only sanitized
 aggregate results. A delivery artifact never overrides the private authority.
+Do not promote until private Beads-to-Project reconciliation has completed with
+a final no-op preview and `ROADMAP.md` passes its freshness check.
 
 ## Required local gates
 
@@ -72,8 +82,15 @@ Record the candidate SHA and exact exit status for every command.
 - health and authenticated account access;
 - guest refusal for protected resources;
 - subscriber agent create, read, update, and delete;
+- subscriber skill and team create, read, update, and delete;
+- checkout-disabled and checkout-enabled account and console subscription
+  states, including delayed authority refresh and paid-through expiry;
+- owner-bound Copilot device authorization, lost-response replay, and
+  authorization loss before credential commit;
 - Daytona sandbox create and reuse;
 - idempotent run start;
+- workspace-only team run, bounded handoff, approval, cancellation, terminal
+  projection, and reconciliation;
 - SSE reconnect from `Last-Event-ID`;
 - stop and terminal convergence;
 - credential acquisition compensation on injected launch failure;
@@ -83,10 +100,35 @@ Record the candidate SHA and exact exit status for every command.
 ## Same-origin runner session boundary
 
 - Browser requests use relative `/api` paths.
+- Login, checkout, account, credential, and runner navigation resolves through
+  the configured canonical application base path.
 - The Auth.js session is the only browser execution credential.
-- Subscriber state and tenant identity are derived and revalidated server-side.
+- Subscriber state and tenant identity are derived and revalidated server-side
+  for standalone and coordinated-team routes.
 - Browser code receives no provider credential or tenant harness plaintext.
 - Mutation origin and media type checks run before body work.
+
+## Deployment posture
+
+Git-triggered Vercel deployments remain intentionally disabled by the deny-only
+root `vercel.json`. Restoring Git deployment behavior requires the separately
+reviewed deployment runbook described in
+[`vercel-git-deployment-disablement.md`](../operations/vercel-git-deployment-disablement.md).
+Repository build evidence does not prove a deployment occurred.
+
+## Coordinated team execution
+
+- Team and skill resources remain tenant-fenced and exclude tenant identifiers,
+  token hashes, and provider internals from public responses.
+- Every child uses immutable authority, agent, skill, workspace, and tool
+  snapshots plus deterministic reserved run and operation IDs.
+- Handoffs remain within aggregate and per-handoff UTF-8 byte budgets and
+  reject or redact operational metadata.
+- Workspace-only Copilot steps receive no shell, network, or GitHub tools.
+- GitHub-capable steps fail closed until approval is enforced through a bounded
+  production capability broker.
+- Cancellation, crash recovery, terminal projection, and retained-child
+  cleanup must be exercised against release-equivalent PostgreSQL.
 
 ## Stripe webhook delivery
 
@@ -101,6 +143,13 @@ When billing is enabled:
 ## Credential and identity isolation
 
 - Cross-tenant reads return nondisclosing refusals.
+- Shared subscription authority is scoped to user, auth version, paid-through
+  boundary, and unique server resolution.
+- Current `401` or `403` credential refusals invalidate shared authority;
+  stale auth-version or resolution refusals cannot invalidate replacements.
+- Device polling is bound to the initiating subscriber, claims idempotency
+  before provider exchange, and rechecks authority inside the credential
+  commit transaction.
 - Credential rows remain tenant-and-harness scoped.
 - Run acquisition binds the credential to one durable attempt.
 - Failed launches compensate the exact usage reservation and lease.

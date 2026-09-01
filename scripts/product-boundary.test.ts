@@ -338,6 +338,7 @@ const scriptNames = [
   "dev",
   "fix",
   "hygiene",
+  "planning:check",
   "prepare",
   "roadmap:status",
   "secret:scan",

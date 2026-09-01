@@ -10,6 +10,14 @@ credentials, Daytona execution, PostgreSQL run state, and bounded evidence.
 Other OpenCoven authorities remain external and are consumed through versioned
 references and adapters.
 
+## Authority freshness
+
+The public outcome order below was reviewed but not reordered on 2026-08-31
+because private planning authority was unavailable. Repository evidence and
+operating policy may be corrected independently, but task status, dependency
+order, priority, assignment, and promotion remain unchanged until an authorized
+Beads-to-Project reconciliation ends with a final no-op preview.
+
 ## Promotion model
 
 An outcome advances only when:

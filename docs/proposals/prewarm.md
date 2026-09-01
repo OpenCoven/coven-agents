@@ -1,5 +1,11 @@
 # Daytona Prewarm Proposal
 
+- Status: proposed; not authorized for delivery
+- Decision authority: private Beads/DoltHub
+- Last reviewed: 2026-08-31
+- Entry gate: an approved private task and measured cold-start evidence
+- Registry: [planning document registry](../roadmap/README.md)
+
 ## Goal
 
 Reduce first-run latency without weakening tenant isolation, idempotency,

@@ -1,5 +1,9 @@
 # Historical Specification Tombstones
 
+This specialized deleted-document index is classified in the
+[planning document registry](../roadmap/README.md). It does not index tracked
+living plans, proposals, audits, or decision logs.
+
 On 2026-08-29, the repository adopted the reviewed supersession exception in
 [delivery governance](../roadmap/delivery-governance.md#supersession-policy-evolution--2026-08-29).
 The mixed-content plans and specifications below were removed because obsolete
