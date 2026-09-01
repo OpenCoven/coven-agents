@@ -1971,8 +1971,10 @@ export function createGitHubToolGateway(
       >;
       try {
         reservation = await runDatabasePhase(
-          () =>
+          (abortSignal) =>
             input.store.reserveOperation(input.operator, {
+              abortSignal,
+              deadlineAt,
               executionLeaseExpiresAt: new Date(deadlineAt + 5000),
               id: createId(),
               operation: parsed.operation,
@@ -2026,8 +2028,10 @@ export function createGitHubToolGateway(
         });
         if (context.operation.operationMarker !== expectedMarker) {
           const failed = await runDatabasePhase(
-            () =>
+            (abortSignal) =>
               input.store.failOperation(input.operator, {
+                abortSignal,
+                deadlineAt,
                 error: {
                   code: "github_operation_conflict",
                   message: "GitHub operation marker binding is invalid.",
@@ -2069,6 +2073,7 @@ export function createGitHubToolGateway(
                 (abortSignal) =>
                   input.store.authorizeMutation(input.operator, {
                     abortSignal,
+                    deadlineAt,
                     expectedVersion: executionContext.operation.version,
                     id: executionContext.operation.id,
                   }),
@@ -2094,6 +2099,17 @@ export function createGitHubToolGateway(
         });
       } catch (error) {
         const failure = providerFailure(error);
+        const knownSent =
+          executionContext.operation.providerDispatchPhase === "sent" ||
+          executionContext.operation.providerSentAt !== null;
+        const persistedFailure = knownSent
+          ? {
+              code: "github_write_uncertain",
+              message:
+                "GitHub may have accepted the write; it was not replayed.",
+              retryable: false,
+            }
+          : failure.error;
         if (classification === "write" && dispatchStateUncertain) {
           throw new GitHubToolGatewayError(
             "github_write_uncertain",
@@ -2111,8 +2127,10 @@ export function createGitHubToolGateway(
           >;
           try {
             released = await runDatabasePhase(
-              () =>
+              (abortSignal) =>
                 input.store.releaseOperationForRetry(input.operator, {
+                  abortSignal,
+                  deadlineAt,
                   error: { ...failure.error, retryable: true },
                   expectedVersion: executionContext.operation.version,
                   id: executionContext.operation.id,
@@ -2148,9 +2166,11 @@ export function createGitHubToolGateway(
         >;
         try {
           failed = await runDatabasePhase(
-            () =>
+            (abortSignal) =>
               input.store.failOperation(input.operator, {
-                error: failure.error,
+                abortSignal,
+                deadlineAt,
+                error: persistedFailure,
                 expectedVersion: executionContext.operation.version,
                 id: executionContext.operation.id,
                 providerRequestId: failure.providerRequestId,
@@ -2175,11 +2195,11 @@ export function createGitHubToolGateway(
           return terminalResponse(failed.operation);
         }
         throw new GitHubToolGatewayError(
-          failure.error.code,
-          failure.error.message,
+          persistedFailure.code,
+          persistedFailure.message,
           {
-            retryable: failure.error.retryable,
-            status: failure.status,
+            retryable: persistedFailure.retryable,
+            status: knownSent ? 409 : failure.status,
           }
         );
       }
@@ -2205,24 +2225,21 @@ export function createGitHubToolGateway(
           }
         );
       }
-      let completionTimer: ReturnType<typeof setTimeout> | undefined;
       try {
-        completed = await Promise.race([
-          input.store.completeOperation(input.operator, {
-            expectedVersion: executionContext.operation.version,
-            id: executionContext.operation.id,
-            providerRequestId: providerResult.providerRequestId,
-            result: providerResult.result,
-            resultNodeId: providerResult.resultNodeId,
-            resultUrl: providerResult.resultUrl,
-          }),
-          new Promise<never>((_resolve, reject) => {
-            completionTimer = globalThis.setTimeout(
-              () => reject(new Error("GitHub completion deadline exceeded.")),
-              completionRemaining
-            );
-          }),
-        ]);
+        completed = await runDatabasePhase(
+          (abortSignal) =>
+            input.store.completeOperation(input.operator, {
+              abortSignal,
+              deadlineAt,
+              expectedVersion: executionContext.operation.version,
+              id: executionContext.operation.id,
+              providerRequestId: providerResult.providerRequestId,
+              result: providerResult.result,
+              resultNodeId: providerResult.resultNodeId,
+              resultUrl: providerResult.resultUrl,
+            }),
+          completionRemaining
+        );
       } catch {
         throw new GitHubToolGatewayError(
           classification === "write"
@@ -2236,10 +2253,6 @@ export function createGitHubToolGateway(
             status: classification === "write" ? 409 : 503,
           }
         );
-      } finally {
-        if (completionTimer !== undefined) {
-          globalThis.clearTimeout(completionTimer);
-        }
       }
       if (completed.kind !== "completed") {
         throw new GitHubToolGatewayError(
@@ -2269,6 +2282,11 @@ async function readBoundedRequestBody(
     contentLength &&
     (!/^[0-9]+$/u.test(contentLength) || Number(contentLength) > maximum)
   ) {
+    try {
+      await request.body?.cancel();
+    } catch {
+      // Cancellation is best-effort; the request is rejected regardless.
+    }
     throw new GitHubToolGatewayError(
       "request_too_large",
       "GitHub tool request is too large.",
@@ -2279,7 +2297,8 @@ async function readBoundedRequestBody(
     return "";
   }
   const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let body = "";
   let total = 0;
   try {
     while (true) {
@@ -2295,18 +2314,36 @@ async function readBoundedRequestBody(
           { retryable: false, status: 413 }
         );
       }
-      chunks.push(value);
+      try {
+        body += decoder.decode(value, { stream: true });
+      } catch {
+        throw new GitHubToolGatewayError(
+          "request_invalid",
+          "GitHub tool request is invalid.",
+          { retryable: false, status: 400 }
+        );
+      }
     }
+    try {
+      body += decoder.decode();
+    } catch {
+      throw new GitHubToolGatewayError(
+        "request_invalid",
+        "GitHub tool request is invalid.",
+        { retryable: false, status: 400 }
+      );
+    }
+    return body;
+  } catch (error) {
+    try {
+      await reader.cancel();
+    } catch {
+      // Cancellation is best-effort; preserve the bounded public error.
+    }
+    throw error;
   } finally {
     reader.releaseLock();
   }
-  const body = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(body);
 }
 
 function jsonResponse(body: unknown, status: number): Response {

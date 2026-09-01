@@ -52,6 +52,10 @@ export const GITHUB_GATEWAY_DB_LOCK_TIMEOUT_MS = 1000;
 export const GITHUB_GATEWAY_DB_STATEMENT_TIMEOUT_MS = 5000;
 export const GITHUB_GATEWAY_DATABASE_PHASE_TIMEOUT_MS = 6000;
 const SAFE_DATABASE_TIMEOUT_CODES = new Set(["55P03", "57014"]);
+type GitHubDatabasePhaseControl = Readonly<{
+  abortSignal?: AbortSignal;
+  deadlineAt?: number;
+}>;
 
 export function isGitHubDatabaseStatementTimeout(error: unknown): boolean {
   let current = error;
@@ -269,7 +273,9 @@ export function githubTaskCapability(
 }
 
 export type ReplaceGitHubCapabilityInput = Readonly<{
+  abortSignal?: AbortSignal;
   attemptId: string;
+  deadlineAt?: number;
   expiresAt: Date;
   id: string;
   policy: GitHubBrokerPolicy;
@@ -437,25 +443,49 @@ function statement(
 function gatewayTransaction<T>(
   database: TeamStoreDatabase,
   callback: (transaction: TeamStoreTransaction) => Promise<T>,
-  abortSignal?: AbortSignal
+  control: GitHubDatabasePhaseControl = {}
 ): Promise<T> {
+  const assertLive = () => {
+    control.abortSignal?.throwIfAborted();
+    if (
+      control.deadlineAt !== undefined &&
+      (!(control.deadlineAt > Date.now()) ||
+        !Number.isSafeInteger(control.deadlineAt))
+    ) {
+      throw Object.assign(new Error("GitHub database deadline exceeded."), {
+        code: "57014",
+      });
+    }
+  };
   return database.transaction(async (transaction) => {
-    abortSignal?.throwIfAborted();
+    assertLive();
+    const remaining =
+      control.deadlineAt === undefined
+        ? GITHUB_GATEWAY_DB_STATEMENT_TIMEOUT_MS
+        : control.deadlineAt - Date.now();
+    const statementTimeoutMs = Math.max(
+      1,
+      Math.min(GITHUB_GATEWAY_DB_STATEMENT_TIMEOUT_MS, remaining)
+    );
+    const lockTimeoutMs = Math.max(
+      1,
+      Math.min(GITHUB_GATEWAY_DB_LOCK_TIMEOUT_MS, statementTimeoutMs)
+    );
     await transaction.execute(
       statement(
         "configure-github-database-deadlines",
         {
-          lockTimeoutMs: GITHUB_GATEWAY_DB_LOCK_TIMEOUT_MS,
-          statementTimeoutMs: GITHUB_GATEWAY_DB_STATEMENT_TIMEOUT_MS,
+          lockTimeoutMs,
+          statementTimeoutMs,
         },
         sql`SELECT
-          set_config('lock_timeout', ${`${GITHUB_GATEWAY_DB_LOCK_TIMEOUT_MS}ms`}, true),
-          set_config('statement_timeout', ${`${GITHUB_GATEWAY_DB_STATEMENT_TIMEOUT_MS}ms`}, true)`
+          set_config('lock_timeout', ${`${lockTimeoutMs}ms`}, true),
+          set_config('statement_timeout', ${`${statementTimeoutMs}ms`}, true)`
       )
     );
-    abortSignal?.throwIfAborted();
+    assertLive();
     const result = await callback(transaction);
-    abortSignal?.throwIfAborted();
+    assertLive();
     return result;
   });
 }
@@ -708,6 +738,7 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
       operator: RunnerOperator,
       input: Readonly<{
         abortSignal?: AbortSignal;
+        deadlineAt?: number;
         expectedVersion: number;
         id: string;
       }>
@@ -819,13 +850,18 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
               }
             : { kind: "unauthorized" as const };
         },
-        input.abortSignal
+        {
+          abortSignal: input.abortSignal,
+          deadlineAt: input.deadlineAt,
+        }
       );
     },
 
     completeOperation: async (
       operator: RunnerOperator,
       input: Readonly<{
+        abortSignal?: AbortSignal;
+        deadlineAt?: number;
         expectedVersion: number;
         id: string;
         providerRequestId: string | null;
@@ -847,37 +883,39 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
       ) {
         throw new Error("GitHub operation completion is invalid.");
       }
-      return gatewayTransaction(database, async (transaction) => {
-        const [currentRow] = await transaction.execute(
-          statement(
-            "lock-github-operation-for-completion",
-            { id: input.id },
-            sql`SELECT *
+      return gatewayTransaction(
+        database,
+        async (transaction) => {
+          const [currentRow] = await transaction.execute(
+            statement(
+              "lock-github-operation-for-completion",
+              { id: input.id },
+              sql`SELECT *
               FROM "RunnerGitHubOperation"
               WHERE "id" = ${input.id}
               FOR UPDATE`
-          )
-        );
-        if (!currentRow) {
-          return { kind: "not_found" as const };
-        }
-        const current = asOperation(currentRow);
-        if (
-          current.version !== input.expectedVersion ||
-          current.status !== "running" ||
-          current.kind !== result.kind
-        ) {
-          return { kind: "stale" as const };
-        }
-        const [updated] = await transaction.execute(
-          statement(
-            "complete-github-operation",
-            {
-              ...input,
-              result,
-              tenant: current.tenant,
-            },
-            sql`UPDATE "RunnerGitHubOperation"
+            )
+          );
+          if (!currentRow) {
+            return { kind: "not_found" as const };
+          }
+          const current = asOperation(currentRow);
+          if (
+            current.version !== input.expectedVersion ||
+            current.status !== "running" ||
+            current.kind !== result.kind
+          ) {
+            return { kind: "stale" as const };
+          }
+          const [updated] = await transaction.execute(
+            statement(
+              "complete-github-operation",
+              {
+                ...input,
+                result,
+                tenant: current.tenant,
+              },
+              sql`UPDATE "RunnerGitHubOperation"
               SET "status" = 'completed',
                   "resultJson" = CAST(${JSON.stringify(result)} AS jsonb),
                   "providerRequestId" = ${input.providerRequestId},
@@ -892,20 +930,27 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                 AND "version" = ${input.expectedVersion}
                 AND "status" = 'running'
               RETURNING *`
-          )
-        );
-        return updated
-          ? {
-              kind: "completed" as const,
-              operation: asOperation(updated),
-            }
-          : { kind: "stale" as const };
-      });
+            )
+          );
+          return updated
+            ? {
+                kind: "completed" as const,
+                operation: asOperation(updated),
+              }
+            : { kind: "stale" as const };
+        },
+        {
+          abortSignal: input.abortSignal,
+          deadlineAt: input.deadlineAt,
+        }
+      );
     },
 
     failOperation: async (
       operator: RunnerOperator,
       input: Readonly<{
+        abortSignal?: AbortSignal;
+        deadlineAt?: number;
         error: RunError;
         expectedVersion: number;
         id: string;
@@ -923,38 +968,40 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
       ) {
         throw new Error("GitHub operation failure is invalid.");
       }
-      return gatewayTransaction(database, async (transaction) => {
-        const [currentRow] = await transaction.execute(
-          statement(
-            "lock-github-operation-for-failure",
-            { id: input.id },
-            sql`SELECT *
+      return gatewayTransaction(
+        database,
+        async (transaction) => {
+          const [currentRow] = await transaction.execute(
+            statement(
+              "lock-github-operation-for-failure",
+              { id: input.id },
+              sql`SELECT *
               FROM "RunnerGitHubOperation"
               WHERE "id" = ${input.id}
               FOR UPDATE`
-          )
-        );
-        if (!currentRow) {
-          return { kind: "not_found" as const };
-        }
-        const current = asOperation(currentRow);
-        if (
-          current.version !== input.expectedVersion ||
-          current.status !== "running"
-        ) {
-          return { kind: "stale" as const };
-        }
-        const [updated] = await transaction.execute(
-          statement(
-            "fail-github-operation",
-            {
-              error,
-              expectedVersion: input.expectedVersion,
-              id: input.id,
-              providerRequestId: input.providerRequestId,
-              tenant: current.tenant,
-            },
-            sql`UPDATE "RunnerGitHubOperation"
+            )
+          );
+          if (!currentRow) {
+            return { kind: "not_found" as const };
+          }
+          const current = asOperation(currentRow);
+          if (
+            current.version !== input.expectedVersion ||
+            current.status !== "running"
+          ) {
+            return { kind: "stale" as const };
+          }
+          const [updated] = await transaction.execute(
+            statement(
+              "fail-github-operation",
+              {
+                error,
+                expectedVersion: input.expectedVersion,
+                id: input.id,
+                providerRequestId: input.providerRequestId,
+                tenant: current.tenant,
+              },
+              sql`UPDATE "RunnerGitHubOperation"
               SET "status" = 'failed',
                   "resultJson" = NULL,
                   "providerRequestId" = ${input.providerRequestId},
@@ -969,17 +1016,24 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                 AND "version" = ${input.expectedVersion}
                 AND "status" = 'running'
               RETURNING *`
-          )
-        );
-        return updated
-          ? { kind: "failed" as const, operation: asOperation(updated) }
-          : { kind: "stale" as const };
-      });
+            )
+          );
+          return updated
+            ? { kind: "failed" as const, operation: asOperation(updated) }
+            : { kind: "stale" as const };
+        },
+        {
+          abortSignal: input.abortSignal,
+          deadlineAt: input.deadlineAt,
+        }
+      );
     },
 
     releaseOperationForRetry: async (
       operator: RunnerOperator,
       input: Readonly<{
+        abortSignal?: AbortSignal;
+        deadlineAt?: number;
         error: RunError & Readonly<{ retryable: true }>;
         expectedVersion: number;
         id: string;
@@ -998,41 +1052,43 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
       ) {
         throw new Error("GitHub operation retry release is invalid.");
       }
-      return gatewayTransaction(database, async (transaction) => {
-        const [currentRow] = await transaction.execute(
-          statement(
-            "lock-github-operation-for-retry-release",
-            { id: input.id },
-            sql`SELECT *
+      return gatewayTransaction(
+        database,
+        async (transaction) => {
+          const [currentRow] = await transaction.execute(
+            statement(
+              "lock-github-operation-for-retry-release",
+              { id: input.id },
+              sql`SELECT *
               FROM "RunnerGitHubOperation"
               WHERE "id" = ${input.id}
               FOR UPDATE`
-          )
-        );
-        if (!currentRow) {
-          return { kind: "not_found" as const };
-        }
-        const current = asOperation(currentRow);
-        if (
-          current.version !== input.expectedVersion ||
-          current.status !== "running" ||
-          current.providerDispatchPhase !== "pre_send" ||
-          current.providerSentAt !== null ||
-          !current.writeIntentActive
-        ) {
-          return { kind: "stale" as const };
-        }
-        const [updated] = await transaction.execute(
-          statement(
-            "release-github-operation-for-retry",
-            {
-              error,
-              expectedVersion: input.expectedVersion,
-              id: input.id,
-              providerRequestId: input.providerRequestId,
-              tenant: current.tenant,
-            },
-            sql`UPDATE "RunnerGitHubOperation"
+            )
+          );
+          if (!currentRow) {
+            return { kind: "not_found" as const };
+          }
+          const current = asOperation(currentRow);
+          if (
+            current.version !== input.expectedVersion ||
+            current.status !== "running" ||
+            current.providerDispatchPhase !== "pre_send" ||
+            current.providerSentAt !== null ||
+            !current.writeIntentActive
+          ) {
+            return { kind: "stale" as const };
+          }
+          const [updated] = await transaction.execute(
+            statement(
+              "release-github-operation-for-retry",
+              {
+                error,
+                expectedVersion: input.expectedVersion,
+                id: input.id,
+                providerRequestId: input.providerRequestId,
+                tenant: current.tenant,
+              },
+              sql`UPDATE "RunnerGitHubOperation"
               SET "status" = 'pending',
                   "providerRequestId" = ${input.providerRequestId},
                   "error" = CAST(${JSON.stringify(error)} AS jsonb),
@@ -1048,12 +1104,17 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                 AND "providerSentAt" IS NULL
                 AND "writeIntentActive" = true
               RETURNING *`
-          )
-        );
-        return updated
-          ? { kind: "released" as const, operation: asOperation(updated) }
-          : { kind: "stale" as const };
-      });
+            )
+          );
+          return updated
+            ? { kind: "released" as const, operation: asOperation(updated) }
+            : { kind: "stale" as const };
+        },
+        {
+          abortSignal: input.abortSignal,
+          deadlineAt: input.deadlineAt,
+        }
+      );
     },
 
     replaceCapability: async (
@@ -1071,19 +1132,21 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
       ) {
         throw new Error("GitHub capability replacement binding is invalid.");
       }
-      return gatewayTransaction(database, async (transaction) => {
-        const [run] = await transaction.execute(
-          statement(
-            "validate-github-capability-run",
-            {
-              attemptId: input.attemptId,
-              expiresAt: input.expiresAt,
-              policy: input.policy,
-              runnerRunId: input.runnerRunId,
-              tenant: input.tenant,
-              userId: input.userId,
-            },
-            sql`SELECT "runnerRun"."id"
+      return gatewayTransaction(
+        database,
+        async (transaction) => {
+          const [run] = await transaction.execute(
+            statement(
+              "validate-github-capability-run",
+              {
+                attemptId: input.attemptId,
+                expiresAt: input.expiresAt,
+                policy: input.policy,
+                runnerRunId: input.runnerRunId,
+                tenant: input.tenant,
+                userId: input.userId,
+              },
+              sql`SELECT "runnerRun"."id"
               FROM "RunnerRun" AS "runnerRun"
               JOIN "RunnerTeamStep" AS "step"
                 ON "step"."id" = "runnerRun"."teamStepId"
@@ -1120,16 +1183,16 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                   clock_timestamp() + interval '15 minutes'
               FOR UPDATE OF "runnerRun", "step", "teamRun"
               FOR SHARE OF "connectionFence", "actor"`
-          )
-        );
-        if (!run) {
-          return { kind: "conflict" as const };
-        }
-        await transaction.execute(
-          statement(
-            "revoke-prior-github-capabilities",
-            { runnerRunId: input.runnerRunId, tenant: input.tenant },
-            sql`UPDATE "RunnerGitHubCapability"
+            )
+          );
+          if (!run) {
+            return { kind: "conflict" as const };
+          }
+          await transaction.execute(
+            statement(
+              "revoke-prior-github-capabilities",
+              { runnerRunId: input.runnerRunId, tenant: input.tenant },
+              sql`UPDATE "RunnerGitHubCapability"
               SET "revokedAt" = COALESCE("revokedAt", clock_timestamp()),
                   "updatedAt" = clock_timestamp(),
                   "version" = "version" + 1
@@ -1137,22 +1200,22 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                 AND "tenant" = ${input.tenant}
                 AND "revokedAt" IS NULL
               RETURNING "id"`
-          )
-        );
-        const [inserted] = await transaction.execute(
-          statement(
-            "insert-github-capability",
-            {
-              attemptId: input.attemptId,
-              expiresAt: input.expiresAt,
-              id: input.id,
-              policy: input.policy,
-              runnerRunId: input.runnerRunId,
-              tenant: input.tenant,
-              tokenHash: input.tokenHash,
-              userId: input.userId,
-            },
-            sql`INSERT INTO "RunnerGitHubCapability" (
+            )
+          );
+          const [inserted] = await transaction.execute(
+            statement(
+              "insert-github-capability",
+              {
+                attemptId: input.attemptId,
+                expiresAt: input.expiresAt,
+                id: input.id,
+                policy: input.policy,
+                runnerRunId: input.runnerRunId,
+                tenant: input.tenant,
+                tokenHash: input.tokenHash,
+                userId: input.userId,
+              },
+              sql`INSERT INTO "RunnerGitHubCapability" (
                 "id", "tenant", "teamStepId", "teamRunId", "runnerRunId",
                 "attemptId", "authVersion", "connectionGeneration",
                 "tokenHash", "expiresAt", "declaredCapabilities",
@@ -1172,17 +1235,24 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
               )
               ON CONFLICT DO NOTHING
               RETURNING *`
-          )
-        );
-        return inserted
-          ? { kind: "created" as const }
-          : { kind: "conflict" as const };
-      });
+            )
+          );
+          return inserted
+            ? { kind: "created" as const }
+            : { kind: "conflict" as const };
+        },
+        {
+          abortSignal: input.abortSignal,
+          deadlineAt: input.deadlineAt,
+        }
+      );
     },
 
     reserveOperation: async (
       operator: RunnerOperator,
       input: Readonly<{
+        abortSignal?: AbortSignal;
+        deadlineAt?: number;
         executionLeaseExpiresAt: Date;
         id: string;
         operation: GitHubToolOperation;
@@ -1222,16 +1292,18 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
         throw new Error("GitHub operation reservation is invalid.");
       }
 
-      return gatewayTransaction(database, async (transaction) => {
-        const [row] = await transaction.execute(
-          statement(
-            "lock-github-capability-authority",
-            {
-              repository,
-              requiredCapability: authority.capability,
-              tokenHash: input.tokenHash,
-            },
-            sql`SELECT
+      return gatewayTransaction(
+        database,
+        async (transaction) => {
+          const [row] = await transaction.execute(
+            statement(
+              "lock-github-capability-authority",
+              {
+                repository,
+                requiredCapability: authority.capability,
+                tokenHash: input.tokenHash,
+              },
+              sql`SELECT
                 "capability".*,
                 clock_timestamp() AS "databaseNow",
                 "runnerRun"."id" AS "runnerRunId",
@@ -1291,104 +1363,104 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
               WHERE "capability"."tokenHash" = ${input.tokenHash}
               FOR UPDATE OF "capability"
               FOR SHARE OF "runnerRun", "step", "teamRun", "connectionFence", "connection", "actor"`
-          )
-        );
-        if (
-          !row ||
-          !capabilityAuthorityIsLive(
-            row,
-            input.tokenHash,
-            authority.capability,
-            authority.classification,
-            repository
-          )
-        ) {
-          return { kind: "unauthorized" as const };
-        }
-        const capability = asCapability(row);
-        const operationMarker =
-          authority.classification === "write"
-            ? githubOperationMarker({
-                capabilityBinding: input.tokenHash,
-                operationId: input.operationId,
-                requestHash: input.requestHash,
-                teamStepId: capability.teamStepId,
-              })
-            : null;
-        const databaseNow = dateColumn(row, "databaseNow");
-        if (
-          input.executionLeaseExpiresAt <= databaseNow ||
-          input.executionLeaseExpiresAt.getTime() - databaseNow.getTime() >
-            MAX_GITHUB_OPERATION_LEASE_MS
-        ) {
-          throw new Error("GitHub operation execution lease is invalid.");
-        }
-        if (authority.classification === "write") {
-          await transaction.execute(
-            statement(
-              "lock-github-write-intent-key",
-              {
-                kind: operation.kind,
-                requestHash: input.requestHash,
-                teamStepId: capability.teamStepId,
-                tenant: capability.tenant,
-              },
-              sql`SELECT pg_advisory_xact_lock(
+            )
+          );
+          if (
+            !row ||
+            !capabilityAuthorityIsLive(
+              row,
+              input.tokenHash,
+              authority.capability,
+              authority.classification,
+              repository
+            )
+          ) {
+            return { kind: "unauthorized" as const };
+          }
+          const capability = asCapability(row);
+          const operationMarker =
+            authority.classification === "write"
+              ? githubOperationMarker({
+                  capabilityBinding: input.tokenHash,
+                  operationId: input.operationId,
+                  requestHash: input.requestHash,
+                  teamStepId: capability.teamStepId,
+                })
+              : null;
+          const databaseNow = dateColumn(row, "databaseNow");
+          if (
+            input.executionLeaseExpiresAt <= databaseNow ||
+            input.executionLeaseExpiresAt.getTime() - databaseNow.getTime() >
+              MAX_GITHUB_OPERATION_LEASE_MS
+          ) {
+            throw new Error("GitHub operation execution lease is invalid.");
+          }
+          if (authority.classification === "write") {
+            await transaction.execute(
+              statement(
+                "lock-github-write-intent-key",
+                {
+                  kind: operation.kind,
+                  requestHash: input.requestHash,
+                  teamStepId: capability.teamStepId,
+                  tenant: capability.tenant,
+                },
+                sql`SELECT pg_advisory_xact_lock(
                 hashtextextended(
                   ${`${capability.tenant}\0${capability.teamStepId}\0${operation.kind}\0${input.requestHash}`},
                   0
                 )
               )`
-            )
-          );
-        }
-        const [existingRow] = await transaction.execute(
-          statement(
-            "lock-existing-github-operation",
-            {
-              operationId: input.operationId,
-              tenant: capability.tenant,
-            },
-            sql`SELECT *
+              )
+            );
+          }
+          const [existingRow] = await transaction.execute(
+            statement(
+              "lock-existing-github-operation",
+              {
+                operationId: input.operationId,
+                tenant: capability.tenant,
+              },
+              sql`SELECT *
               FROM "RunnerGitHubOperation"
               WHERE "tenant" = ${capability.tenant}
                 AND "operationId" = ${input.operationId}
               FOR UPDATE`
-          )
-        );
-        if (existingRow) {
-          const existing = asOperation(existingRow);
-          if (
-            !operationMatches(existing, {
-              capabilityId: capability.id,
-              kind: operation.kind,
-              operationMarker,
-              repository,
-              requestHash: input.requestHash,
-              requiredCapability: authority.capability,
-              target: input.target,
-              teamStepId: capability.teamStepId,
-            })
-          ) {
-            return { kind: "conflict" as const };
-          }
-          if (
-            existing.status === "pending" &&
-            existing.providerDispatchPhase === "pre_send" &&
-            existing.providerSentAt === null &&
-            !existing.writeIntentActive &&
-            existing.error?.retryable === true
-          ) {
-            const [retryRow] = await transaction.execute(
-              statement(
-                "claim-github-operation-pre-send-retry",
-                {
-                  executionLeaseExpiresAt: input.executionLeaseExpiresAt,
-                  expectedVersion: existing.version,
-                  id: existing.id,
-                  tenant: existing.tenant,
-                },
-                sql`UPDATE "RunnerGitHubOperation"
+            )
+          );
+          if (existingRow) {
+            const existing = asOperation(existingRow);
+            if (
+              !operationMatches(existing, {
+                capabilityId: capability.id,
+                kind: operation.kind,
+                operationMarker,
+                repository,
+                requestHash: input.requestHash,
+                requiredCapability: authority.capability,
+                target: input.target,
+                teamStepId: capability.teamStepId,
+              })
+            ) {
+              return { kind: "conflict" as const };
+            }
+            if (
+              existing.status === "pending" &&
+              existing.providerDispatchPhase === "pre_send" &&
+              existing.providerSentAt === null &&
+              !existing.writeIntentActive &&
+              existing.error?.retryable === true
+            ) {
+              const [retryRow] = await transaction.execute(
+                statement(
+                  "claim-github-operation-pre-send-retry",
+                  {
+                    executionLeaseExpiresAt: input.executionLeaseExpiresAt,
+                    expectedVersion: existing.version,
+                    id: existing.id,
+                    tenant: existing.tenant,
+                  },
+                  sql`UPDATE "RunnerGitHubOperation"
                   SET "status" = 'running',
                       "error" = NULL,
                       "providerRequestId" = NULL,
@@ -1417,20 +1489,20 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                         AND "activeIntent"."id" <> ${existing.id}
                     )
                   RETURNING *`
-              )
-            );
-            if (!retryRow) {
-              const [activeIntent] = await transaction.execute(
-                statement(
-                  "lock-conflicting-github-write-intent-for-retry",
-                  {
-                    id: existing.id,
-                    kind: operation.kind,
-                    requestHash: input.requestHash,
-                    teamStepId: capability.teamStepId,
-                    tenant: capability.tenant,
-                  },
-                  sql`SELECT *
+                )
+              );
+              if (!retryRow) {
+                const [activeIntent] = await transaction.execute(
+                  statement(
+                    "lock-conflicting-github-write-intent-for-retry",
+                    {
+                      id: existing.id,
+                      kind: operation.kind,
+                      requestHash: input.requestHash,
+                      teamStepId: capability.teamStepId,
+                      tenant: capability.tenant,
+                    },
+                    sql`SELECT *
                     FROM "RunnerGitHubOperation"
                     WHERE "tenant" = ${capability.tenant}
                       AND "teamStepId" = ${capability.teamStepId}
@@ -1441,40 +1513,43 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                     ORDER BY "createdAt", "id"
                     LIMIT 1
                     FOR UPDATE`
-                )
-              );
-              if (activeIntent) {
-                return {
-                  kind: "intent_conflict" as const,
-                  operation: asOperation(activeIntent),
-                };
+                  )
+                );
+                if (activeIntent) {
+                  return {
+                    kind: "intent_conflict" as const,
+                    operation: asOperation(activeIntent),
+                  };
+                }
+                return { kind: "in_progress" as const };
               }
+              return {
+                context: contextFromRows(row, asOperation(retryRow)),
+                kind: "reserved" as const,
+              };
+            }
+            if (
+              existing.status === "completed" ||
+              existing.status === "failed"
+            ) {
+              return { kind: "terminal" as const, operation: existing };
+            }
+            if (
+              existing.status !== "running" ||
+              existing.executionLeaseExpiresAt > databaseNow
+            ) {
               return { kind: "in_progress" as const };
             }
-            return {
-              context: contextFromRows(row, asOperation(retryRow)),
-              kind: "reserved" as const,
-            };
-          }
-          if (existing.status === "completed" || existing.status === "failed") {
-            return { kind: "terminal" as const, operation: existing };
-          }
-          if (
-            existing.status !== "running" ||
-            existing.executionLeaseExpiresAt > databaseNow
-          ) {
-            return { kind: "in_progress" as const };
-          }
-          const [recoveryRow] = await transaction.execute(
-            statement(
-              "claim-github-operation-recovery",
-              {
-                executionLeaseExpiresAt: input.executionLeaseExpiresAt,
-                expectedVersion: existing.version,
-                id: existing.id,
-                tenant: existing.tenant,
-              },
-              sql`UPDATE "RunnerGitHubOperation"
+            const [recoveryRow] = await transaction.execute(
+              statement(
+                "claim-github-operation-recovery",
+                {
+                  executionLeaseExpiresAt: input.executionLeaseExpiresAt,
+                  expectedVersion: existing.version,
+                  id: existing.id,
+                  tenant: existing.tenant,
+                },
+                sql`UPDATE "RunnerGitHubOperation"
                 SET "executionLeaseExpiresAt" =
                       ${input.executionLeaseExpiresAt.toISOString()},
                     "updatedAt" = clock_timestamp(),
@@ -1485,30 +1560,30 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                   AND "status" = 'running'
                   AND "executionLeaseExpiresAt" <= clock_timestamp()
                 RETURNING *`
-            )
-          );
-          if (!recoveryRow) {
-            return { kind: "in_progress" as const };
+              )
+            );
+            if (!recoveryRow) {
+              return { kind: "in_progress" as const };
+            }
+            return {
+              context: contextFromRows(row, asOperation(recoveryRow)),
+              kind:
+                existing.providerDispatchPhase === "pre_send"
+                  ? ("reserved" as const)
+                  : ("recover" as const),
+            };
           }
-          return {
-            context: contextFromRows(row, asOperation(recoveryRow)),
-            kind:
-              existing.providerDispatchPhase === "pre_send"
-                ? ("reserved" as const)
-                : ("recover" as const),
-          };
-        }
-        if (authority.classification === "write") {
-          const [intentRow] = await transaction.execute(
-            statement(
-              "lock-existing-github-write-intent",
-              {
-                kind: operation.kind,
-                requestHash: input.requestHash,
-                teamStepId: capability.teamStepId,
-                tenant: capability.tenant,
-              },
-              sql`SELECT *
+          if (authority.classification === "write") {
+            const [intentRow] = await transaction.execute(
+              statement(
+                "lock-existing-github-write-intent",
+                {
+                  kind: operation.kind,
+                  requestHash: input.requestHash,
+                  teamStepId: capability.teamStepId,
+                  tenant: capability.tenant,
+                },
+                sql`SELECT *
                 FROM "RunnerGitHubOperation"
                 WHERE "tenant" = ${capability.tenant}
                   AND "teamStepId" = ${capability.teamStepId}
@@ -1518,52 +1593,52 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                 ORDER BY "createdAt", "id"
                 LIMIT 1
                 FOR UPDATE`
-            )
-          );
-          if (intentRow) {
-            return {
-              kind: "intent_conflict" as const,
-              operation: asOperation(intentRow),
-            };
+              )
+            );
+            if (intentRow) {
+              return {
+                kind: "intent_conflict" as const,
+                operation: asOperation(intentRow),
+              };
+            }
           }
-        }
-        if (capability.usedCallCount >= capability.maxCallCount) {
-          return { kind: "unauthorized" as const };
-        }
+          if (capability.usedCallCount >= capability.maxCallCount) {
+            return { kind: "unauthorized" as const };
+          }
 
-        const [insertedRow] = await transaction.execute(
-          statement(
-            "reserve-github-operation",
-            {
-              accountId: column(row, "accountId"),
-              accountLogin: column(row, "accountLogin"),
-              accountType: column(row, "accountType"),
-              capabilityId: capability.id,
-              connectionGeneration: capability.connectionGeneration,
-              connectionId: column(row, "connectionId"),
-              executionLeaseExpiresAt: input.executionLeaseExpiresAt,
-              id: input.id,
-              installationId: column(row, "installationId"),
-              kind: operation.kind,
-              operationId: input.operationId,
-              operationMarker,
-              providerDispatchPhase:
-                authority.classification === "write"
-                  ? "pre_send"
-                  : "not_applicable",
-              repository,
-              repositoryId: column(row, "repositoryId"),
-              repositoryName: column(row, "repositoryName"),
-              repositoryNodeId: column(row, "repositoryNodeId"),
-              repositoryOwner: column(row, "repositoryOwner"),
-              requestHash: input.requestHash,
-              requiredCapability: authority.capability,
-              target: input.target,
-              teamStepId: capability.teamStepId,
-              tenant: capability.tenant,
-              writeIntentActive: authority.classification === "write",
-            },
-            sql`WITH "operation" AS (
+          const [insertedRow] = await transaction.execute(
+            statement(
+              "reserve-github-operation",
+              {
+                accountId: column(row, "accountId"),
+                accountLogin: column(row, "accountLogin"),
+                accountType: column(row, "accountType"),
+                capabilityId: capability.id,
+                connectionGeneration: capability.connectionGeneration,
+                connectionId: column(row, "connectionId"),
+                executionLeaseExpiresAt: input.executionLeaseExpiresAt,
+                id: input.id,
+                installationId: column(row, "installationId"),
+                kind: operation.kind,
+                operationId: input.operationId,
+                operationMarker,
+                providerDispatchPhase:
+                  authority.classification === "write"
+                    ? "pre_send"
+                    : "not_applicable",
+                repository,
+                repositoryId: column(row, "repositoryId"),
+                repositoryName: column(row, "repositoryName"),
+                repositoryNodeId: column(row, "repositoryNodeId"),
+                repositoryOwner: column(row, "repositoryOwner"),
+                requestHash: input.requestHash,
+                requiredCapability: authority.capability,
+                target: input.target,
+                teamStepId: capability.teamStepId,
+                tenant: capability.tenant,
+                writeIntentActive: authority.classification === "write",
+              },
+              sql`WITH "operation" AS (
                 INSERT INTO "RunnerGitHubOperation" (
                   "id", "tenant", "teamStepId", "capabilityId", "operationId",
                   "kind", "requestHash", "target", "repository",
@@ -1610,20 +1685,20 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
               FROM "operation"
               JOIN "consumed"
                 ON "consumed"."id" = "operation"."capabilityId"`
-          )
-        );
-        if (!insertedRow) {
-          if (authority.classification === "write") {
-            const [racedIntent] = await transaction.execute(
-              statement(
-                "lock-raced-github-write-intent",
-                {
-                  kind: operation.kind,
-                  requestHash: input.requestHash,
-                  teamStepId: capability.teamStepId,
-                  tenant: capability.tenant,
-                },
-                sql`SELECT *
+            )
+          );
+          if (!insertedRow) {
+            if (authority.classification === "write") {
+              const [racedIntent] = await transaction.execute(
+                statement(
+                  "lock-raced-github-write-intent",
+                  {
+                    kind: operation.kind,
+                    requestHash: input.requestHash,
+                    teamStepId: capability.teamStepId,
+                    tenant: capability.tenant,
+                  },
+                  sql`SELECT *
                   FROM "RunnerGitHubOperation"
                   WHERE "tenant" = ${capability.tenant}
                     AND "teamStepId" = ${capability.teamStepId}
@@ -1633,27 +1708,37 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                   ORDER BY "createdAt", "id"
                   LIMIT 1
                   FOR UPDATE`
-              )
-            );
-            if (racedIntent) {
-              return {
-                kind: "intent_conflict" as const,
-                operation: asOperation(racedIntent),
-              };
+                )
+              );
+              if (racedIntent) {
+                return {
+                  kind: "intent_conflict" as const,
+                  operation: asOperation(racedIntent),
+                };
+              }
             }
+            return { kind: "conflict" as const };
           }
-          return { kind: "conflict" as const };
+          return {
+            context: contextFromRows(row, asOperation(insertedRow)),
+            kind: "reserved" as const,
+          };
+        },
+        {
+          abortSignal: input.abortSignal,
+          deadlineAt: input.deadlineAt,
         }
-        return {
-          context: contextFromRows(row, asOperation(insertedRow)),
-          kind: "reserved" as const,
-        };
-      });
+      );
     },
 
     revokeCapability: async (
       operator: RunnerOperator,
-      input: Readonly<{ attemptId: string; runnerRunId: string }>
+      input: Readonly<{
+        abortSignal?: AbortSignal;
+        attemptId: string;
+        deadlineAt?: number;
+        runnerRunId: string;
+      }>
     ): Promise<Readonly<{ kind: "not_found" | "revoked" }>> => {
       assertOperator(operator);
       if (
@@ -1662,12 +1747,14 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
       ) {
         throw new Error("GitHub capability revocation binding is invalid.");
       }
-      return gatewayTransaction(database, async (transaction) => {
-        const [revoked] = await transaction.execute(
-          statement(
-            "revoke-github-capability",
-            input,
-            sql`UPDATE "RunnerGitHubCapability"
+      return gatewayTransaction(
+        database,
+        async (transaction) => {
+          const [revoked] = await transaction.execute(
+            statement(
+              "revoke-github-capability",
+              input,
+              sql`UPDATE "RunnerGitHubCapability"
               SET "revokedAt" = COALESCE("revokedAt", clock_timestamp()),
                   "updatedAt" = clock_timestamp(),
                   "version" = "version" + 1
@@ -1675,12 +1762,17 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                 AND "attemptId" = ${input.attemptId}
                 AND "revokedAt" IS NULL
               RETURNING "id"`
-          )
-        );
-        return revoked
-          ? { kind: "revoked" as const }
-          : { kind: "not_found" as const };
-      });
+            )
+          );
+          return revoked
+            ? { kind: "revoked" as const }
+            : { kind: "not_found" as const };
+        },
+        {
+          abortSignal: input.abortSignal,
+          deadlineAt: input.deadlineAt,
+        }
+      );
     },
   };
 }

@@ -494,6 +494,145 @@ test("aborted mutation authorization rolls back before transaction commit", asyn
   assert.equal(transactionCommitted, false);
 });
 
+test("pre-aborted reservation and completion transactions perform no database work", async () => {
+  const controller = new AbortController();
+  controller.abort(new Error("database phase expired"));
+  const operation = {
+    issueNumber: "42",
+    kind: "issue.get" as const,
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const inserted = operationRow();
+  const reservation = scripted([authorityRow()], [], [inserted]);
+  await assert.rejects(
+    reservation.store.reserveOperation(operator, {
+      abortSignal: controller.signal,
+      deadlineAt: Date.now() + 1000,
+      executionLeaseExpiresAt: inserted.executionLeaseExpiresAt,
+      id: OPERATION_ROW_ID,
+      operation,
+      operationId: OPERATION_ID,
+      requestHash: inserted.requestHash,
+      target: inserted.target,
+      tokenHash: "a".repeat(64),
+    } as never),
+    /database phase expired/u
+  );
+  assert.equal(reservation.allStatements.length, 0);
+
+  const completion = scripted([inserted]);
+  await assert.rejects(
+    completion.store.completeOperation(operator, {
+      abortSignal: controller.signal,
+      deadlineAt: Date.now() + 1000,
+      expectedVersion: 0,
+      id: OPERATION_ROW_ID,
+      providerRequestId: null,
+      result: {
+        issue: {
+          body: "",
+          nodeId: "I_kwDOExample",
+          number: "42",
+          state: "open",
+          title: "Gateway",
+          url: "https://github.com/OpenCoven/coven-agents/issues/42",
+        },
+        kind: "issue.get",
+        repository: "OpenCoven/coven-agents",
+      },
+      resultNodeId: "I_kwDOExample",
+      resultUrl: "https://github.com/OpenCoven/coven-agents/issues/42",
+    } as never),
+    /database phase expired/u
+  );
+  assert.equal(completion.allStatements.length, 0);
+
+  const failure = scripted([inserted]);
+  await assert.rejects(
+    failure.store.failOperation(operator, {
+      abortSignal: controller.signal,
+      deadlineAt: Date.now() + 1000,
+      error: {
+        code: "github_write_uncertain",
+        message: "GitHub write outcome is uncertain.",
+        retryable: false,
+      },
+      expectedVersion: 0,
+      id: OPERATION_ROW_ID,
+      providerRequestId: null,
+    }),
+    /database phase expired/u
+  );
+  assert.equal(failure.allStatements.length, 0);
+
+  const release = scripted([inserted]);
+  await assert.rejects(
+    release.store.releaseOperationForRetry(operator, {
+      abortSignal: controller.signal,
+      deadlineAt: Date.now() + 1000,
+      error: {
+        code: "github_provider_unavailable",
+        message: "GitHub provider execution failed.",
+        retryable: true,
+      },
+      expectedVersion: 0,
+      id: OPERATION_ROW_ID,
+      providerRequestId: null,
+    }),
+    /database phase expired/u
+  );
+  assert.equal(release.allStatements.length, 0);
+
+  const replacement = scripted([]);
+  await assert.rejects(
+    replacement.store.replaceCapability(operator, {
+      abortSignal: controller.signal,
+      attemptId: ATTEMPT_ID,
+      deadlineAt: Date.now() + 1000,
+      expiresAt: new Date("2030-08-31T20:10:00.000Z"),
+      id: CAPABILITY_ID,
+      policy: policy(),
+      runnerRunId: RUNNER_RUN_ID,
+      tenant: TENANT,
+      tokenHash: "a".repeat(64),
+      userId: USER_ID,
+    }),
+    /database phase expired/u
+  );
+  assert.equal(replacement.allStatements.length, 0);
+
+  const revocation = scripted([]);
+  await assert.rejects(
+    revocation.store.revokeCapability(operator, {
+      abortSignal: controller.signal,
+      attemptId: ATTEMPT_ID,
+      deadlineAt: Date.now() + 1000,
+      runnerRunId: RUNNER_RUN_ID,
+    }),
+    /database phase expired/u
+  );
+  assert.equal(revocation.allStatements.length, 0);
+
+  const expired = scripted([authorityRow()]);
+  await assert.rejects(
+    expired.store.reserveOperation(operator, {
+      deadlineAt: Date.now() - 1,
+      executionLeaseExpiresAt: inserted.executionLeaseExpiresAt,
+      id: OPERATION_ROW_ID,
+      operation,
+      operationId: OPERATION_ID,
+      requestHash: inserted.requestHash,
+      target: inserted.target,
+      tokenHash: "a".repeat(64),
+    }),
+    (error: unknown) =>
+      error instanceof Error &&
+      (error as Error & { code?: string }).code === "57014"
+  );
+  assert.equal(expired.allStatements.length, 0);
+});
+
 test("durable replacement revokes prior hashes and binds the new token to the exact live child", async () => {
   const created = capabilityRow();
   const replacement = scripted(
