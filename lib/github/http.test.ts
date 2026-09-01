@@ -583,6 +583,49 @@ test("pull review recovery checks the newest paginated reviews", async () => {
   );
 });
 
+test("issue comment recovery checks the newest paginated comments", async () => {
+  const marker =
+    "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->";
+  const operation = {
+    body: "Issue comment.",
+    issueNumber: "42",
+    kind: "issue.comment" as const,
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const sequence = sequenceProvider([
+    Response.json([], {
+      headers: {
+        link: '<https://api.github.com/repositories/789/issues/42/comments?per_page=100&page=4>; rel="last"',
+      },
+    }),
+    Response.json([
+      {
+        body: `Issue comment.\n\n${marker}`,
+        html_url:
+          "https://github.com/OpenCoven/coven-agents/issues/42#issuecomment-4",
+        node_id: "IC_kwDOExample4",
+      },
+    ]),
+  ]);
+
+  const result = await sequence.provider.execute({
+    authorizeMutation: () => Promise.resolve(false),
+    context: context(operation, marker),
+    mode: "recover",
+    operation,
+  });
+
+  assert.equal(result.result.kind, "issue.comment");
+  assert.deepEqual(
+    sequence.requests.map(({ url }) => url),
+    [
+      "https://api.github.com/repos/OpenCoven/coven-agents/issues/42/comments?per_page=100&page=1",
+      "https://api.github.com/repos/OpenCoven/coven-agents/issues/42/comments?per_page=100&page=4",
+    ]
+  );
+});
+
 test("pull.get is bounded and rejects an issue-shaped target", async () => {
   const operation = {
     kind: "pull.get" as const,
@@ -1665,7 +1708,7 @@ test("same-operation recovery after completion persistence failure performs at m
       ],
       [
         "GET",
-        "https://api.github.com/repos/OpenCoven/coven-agents/issues/42/comments?sort=created&direction=desc&per_page=100&page=1",
+        "https://api.github.com/repos/OpenCoven/coven-agents/issues/42/comments?per_page=100&page=1",
       ],
     ]
   );

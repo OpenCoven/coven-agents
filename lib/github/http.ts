@@ -37,7 +37,7 @@ const NODE_ID = /^[A-Za-z0-9_=-]{1,256}$/u;
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_TOOL_REQUEST_BYTES = 512 * 1024;
-const MAX_RECOVERY_PAGES = 32;
+const MAX_PROJECT_ITEM_PAGES = 500;
 const RAW_CAPABILITY = /^[A-Za-z0-9_-]{43}$/u;
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -1149,22 +1149,37 @@ export function createGitHubOperationProvider(
       case "issue.comment": {
         const operationMarker = marker(context);
         const recover = async () => {
-          const response = await request(
+          const firstPage = await request(
             authorization,
-            `${basePath}/issues/${operation.issueNumber}/comments?sort=created&direction=desc&per_page=100&page=1`,
+            `${basePath}/issues/${operation.issueNumber}/comments?per_page=100&page=1`,
             { method: "GET" }
           );
-          const found = array(response.body).find((item) => {
+          let response = firstPage;
+          let found = array(response.body).find((item) => {
             const candidate = object(item);
             return (
               typeof candidate.body === "string" &&
               candidate.body.includes(operationMarker)
             );
           });
+          if (!found && firstPage.lastPage && firstPage.lastPage > 1) {
+            response = await request(
+              authorization,
+              `${basePath}/issues/${operation.issueNumber}/comments?per_page=100&page=${firstPage.lastPage}`,
+              { method: "GET" }
+            );
+            found = array(response.body).find((item) => {
+              const candidate = object(item);
+              return (
+                typeof candidate.body === "string" &&
+                candidate.body.includes(operationMarker)
+              );
+            });
+          }
           return found
             ? withRequestId(
                 commentResult(context, found, "issue.comment"),
-                response.requestId
+                response.requestId ?? firstPage.requestId
               )
             : null;
         };
@@ -1274,22 +1289,37 @@ export function createGitHubOperationProvider(
       case "pull.comment": {
         const operationMarker = marker(context);
         const recover = async () => {
-          const response = await request(
+          const firstPage = await request(
             authorization,
-            `${basePath}/issues/${operation.pullNumber}/comments?sort=created&direction=desc&per_page=100&page=1`,
+            `${basePath}/issues/${operation.pullNumber}/comments?per_page=100&page=1`,
             { method: "GET" }
           );
-          const found = array(response.body).find((item) => {
+          let response = firstPage;
+          let found = array(response.body).find((item) => {
             const candidate = object(item);
             return (
               typeof candidate.body === "string" &&
               candidate.body.includes(operationMarker)
             );
           });
+          if (!found && firstPage.lastPage && firstPage.lastPage > 1) {
+            response = await request(
+              authorization,
+              `${basePath}/issues/${operation.pullNumber}/comments?per_page=100&page=${firstPage.lastPage}`,
+              { method: "GET" }
+            );
+            found = array(response.body).find((item) => {
+              const candidate = object(item);
+              return (
+                typeof candidate.body === "string" &&
+                candidate.body.includes(operationMarker)
+              );
+            });
+          }
           return found
             ? withRequestId(
                 commentResult(context, found, "pull.comment"),
-                response.requestId
+                response.requestId ?? firstPage.requestId
               )
             : null;
         };
@@ -1413,7 +1443,7 @@ export function createGitHubOperationProvider(
           let after: string | null = null;
           let requestId: string | null = null;
           const seenCursors = new Set<string>();
-          for (let page = 0; page < MAX_RECOVERY_PAGES; page += 1) {
+          for (let page = 0; page < MAX_PROJECT_ITEM_PAGES; page += 1) {
             const response = await graphql(
               authorization,
               "CovenProjectItemAddTargets",
