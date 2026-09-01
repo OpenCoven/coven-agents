@@ -73,6 +73,35 @@ test("the verification matrix records the newly verified repository boundaries",
   }
 });
 
+test("the cutover attestation matches the exact preview receipt", () => {
+  const attestation = read("docs/operations/daytona-cutover-attestation.md");
+  const receipt = JSON.parse(
+    read("docs/operations/p0-exact-preview-receipt-2026-09-01.json")
+  );
+
+  assert.equal(receipt.schemaVersion, 1);
+  assert.equal(receipt.deployment.routeCount, 42);
+  assert.equal(receipt.containsCredentialMaterial, false);
+  assert.equal(receipt.providerLifecycleCertified, false);
+
+  for (const value of [
+    receipt.deployment.id,
+    receipt.deployment.sourceCommit,
+    receipt.deployment.sourceTree,
+    ...receipt.deployment.requiredRoutes,
+    ...receipt.checks.flatMap(
+      (check: { outcome: string; requestId?: string }) => [
+        check.outcome,
+        check.requestId,
+      ]
+    ),
+  ]) {
+    if (value) {
+      assert.match(attestation, new RegExp(value.replaceAll("/", "\\/"), "u"));
+    }
+  }
+});
+
 test("release readiness separates infrastructure cutover from product approval", () => {
   const readiness = read("docs/roadmap/release-readiness.md");
 

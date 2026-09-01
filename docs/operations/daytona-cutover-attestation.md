@@ -103,18 +103,22 @@ credential-free public exact-build replay receipt.
 Deployment from a linked Git worktree was rejected as evidence after its route
 manifest showed that Vercel had uploaded the parent checkout. The retained
 application previews were instead built from immutable `git archive` exports
-of the stated commits in non-Git directories:
+of the stated commits in non-Git directories. The
+[sanitized exact-preview receipt](p0-exact-preview-receipt-2026-09-01.json)
+retains the machine-readable relationships below:
 
 - deployment `dpl_83qug3pWqY3rHQRsJRcjYEABAaqo` built PR #183 merge commit
   `52fe9f8a28b5b06099ad70c25eb6504d70597ee4` with tree
   `28ec05d475ff8464a4fbe2f09e4416714fced78a`;
-- its 42-page route manifest includes the internal runner inventory and Stripe
-  reconciliation routes;
-- the bounded v1 cloud health descriptor returned HTTP 200 and an anonymous
-  agents request was refused with HTTP 401;
-- the bounded Daytona diagnostic returned sanitized retryable HTTP 503 request
+- its 42-page route manifest includes
+  `/api/internal/runner-resource-inventory` and
+  `/api/internal/stripe-reconcile`;
+- the bounded `cloud_health_v1` descriptor returned HTTP 200 and an anonymous
+  agents request was refused with HTTP 401 `unauthorized`;
+- the bounded Daytona diagnostic returned sanitized retryable HTTP 503
+  `diagnostic_unavailable` request
   `2be60f00-5882-4909-af1d-8f1de5c40695`, and the read-only resource inventory
-  returned sanitized retryable HTTP 503 request
+  returned sanitized retryable HTTP 503 `reconcile_unavailable` request
   `b091ba86-b3df-4cb0-be21-e13df7e0de45`. These are safe failures, not
   successful provider lifecycle or resource-inventory evidence.
 
