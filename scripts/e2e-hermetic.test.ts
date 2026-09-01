@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { HARNESS_SPECS } from "@opencoven/harness";
 import { HERMETIC_TENANTS, HERMETIC_USERS } from "../tests/e2e/hermetic-db";
 import {
   DOCKER_COMMAND_TIMEOUT_MS,
@@ -41,6 +42,9 @@ test("hermetic runner environment explicitly blanks external configuration", asy
   const poisoned = Object.fromEntries(
     exampleNames.map((name) => [name, `must-not-reach-${name}`])
   );
+  const harnessAuthNames = [
+    ...new Set(HARNESS_SPECS.flatMap((spec) => spec.authEnvVars)),
+  ];
   const environment = hermeticEnvironment("postgres://example.invalid/e2e", {
     ...poisoned,
     AI_GATEWAY_API_KEY: "must-not-reach-provider",
@@ -53,6 +57,9 @@ test("hermetic runner environment explicitly blanks external configuration", asy
     DAYTONA_SNAPSHOT: "coven-agents-copilot-1",
     DAYTONA_UNDOCUMENTED_SETTING: "must-not-reach-fake",
     E2E_PRODUCTION: "1",
+    ...Object.fromEntries(
+      harnessAuthNames.map((name) => [name, `must-not-reach-${name}`])
+    ),
     NODE_ENV: "production",
     OPENAI_API_KEY: "must-not-reach-provider",
     REDIS_URL: "redis://must-not-reach",
@@ -80,6 +87,17 @@ test("hermetic runner environment explicitly blanks external configuration", asy
   assert.equal(environment.CREDENTIAL_KEK_V1?.length, 43);
   assert.equal(environment.CREDENTIAL_KEK_CURRENT_VERSION, "v1");
   assert.equal(environment.POSTGRES_URL, "postgres://example.invalid/e2e");
+  assert.ok(harnessAuthNames.includes("COPILOT_GITHUB_TOKEN"));
+  assert.ok(harnessAuthNames.includes("GH_TOKEN"));
+  assert.ok(harnessAuthNames.includes("CODEX_API_KEY"));
+  assert.ok(harnessAuthNames.includes("CLAUDE_CODE_OAUTH_TOKEN"));
+  for (const name of harnessAuthNames) {
+    assert.equal(
+      environment[name],
+      "",
+      `${name} must not retain an inherited harness credential`
+    );
+  }
   for (const name of exampleNames) {
     assert.equal(
       typeof environment[name],

@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { promisify } from "node:util";
+import { HARNESS_SPECS } from "@opencoven/harness";
 import {
   applicationTableInventory,
   seedHermeticUsers,
@@ -17,6 +18,9 @@ const POSTGRES_DATABASE = "coven_hermetic_e2e";
 const POSTGRES_PASSWORD = "test-hermetic-postgres";
 const POSTGRES_USER = "postgres";
 const TEST_KEK = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const HARNESS_AUTH_ENVIRONMENT_VARIABLES = [
+  ...new Set(HARNESS_SPECS.flatMap((spec) => spec.authEnvVars)),
+];
 const EXAMPLE_ENVIRONMENT_VARIABLES = [
   "AI_GATEWAY_API_KEY",
   "AUTH_GITHUB_ID",
@@ -211,6 +215,9 @@ export function hermeticEnvironment(
     }
   }
   for (const name of EXAMPLE_ENVIRONMENT_VARIABLES) {
+    environment[name] = "";
+  }
+  for (const name of HARNESS_AUTH_ENVIRONMENT_VARIABLES) {
     environment[name] = "";
   }
   return {

@@ -47,12 +47,19 @@ function hasExactHermeticProvenance(run: RunnerRunRecord): boolean {
 function contextFor(
   run: RunnerRunRecord,
   authority: RunnerDispatchAuthority
-): RunnerReconciliationContext {
+): RunnerReconciliationContext | null {
   const { attemptId } = authority;
   if (
     !attemptId ||
     !hasExactHermeticProvenance(run) ||
-    run.daytonaAttemptId !== attemptId ||
+    run.daytonaAttemptId !== attemptId
+  ) {
+    throw unavailable("attempt ownership is ambiguous");
+  }
+  if (run.daytonaSessionId === null && run.daytonaCommandId === null) {
+    return null;
+  }
+  if (
     run.daytonaCommandId !== hermeticCommandId(run.id, attemptId) ||
     run.daytonaSessionId !== daytonaRunSessionName(run.id, attemptId)
   ) {
@@ -177,7 +184,9 @@ export function hermeticReconciliationProvider(): RunnerReconciliationProvider {
     resolveExecutionContext: (run, authority) => {
       try {
         const context = contextFor(run, authority);
-        contexts.add(context);
+        if (context) {
+          contexts.add(context);
+        }
         return Promise.resolve(context);
       } catch (error) {
         return Promise.reject(error);

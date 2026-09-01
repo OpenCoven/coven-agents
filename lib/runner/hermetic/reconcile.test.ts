@@ -126,6 +126,23 @@ test("hermetic held run stays running until generic cancellation stops its exact
   );
 });
 
+test("hermetic reconciliation confirms an exact prepared-only attempt has no process", async () => {
+  const provider = hermeticReconciliationProvider();
+
+  assert.equal(
+    await provider.resolveExecutionContext(
+      {
+        ...run(),
+        daytonaCommandId: null,
+        daytonaSessionId: null,
+        dispatchState: "dispatching",
+      },
+      authority
+    ),
+    null
+  );
+});
+
 test("hermetic recovery rejects foreign, incomplete, and mismatched provider identities", async () => {
   const provider = hermeticReconciliationProvider();
   const cases = [
@@ -143,6 +160,14 @@ test("hermetic recovery rejects foreign, incomplete, and mismatched provider ide
         provider: "hermetic",
       } as never,
     },
+    {
+      ...run(),
+      daytonaAttemptId: "foreign-attempt" as RunnerDaytonaAttemptId,
+      daytonaCommandId: null,
+      daytonaSessionId: null,
+    },
+    { ...run(), daytonaCommandId: null },
+    { ...run(), daytonaSessionId: null },
     { ...run(), daytonaCommandId: "foreign-command" },
     { ...run(), daytonaSessionId: "foreign-session" },
   ];
@@ -155,6 +180,14 @@ test("hermetic recovery rejects foreign, incomplete, and mismatched provider ide
           /unavailable|ambiguous/u
         )
     )
+  );
+  await assert.rejects(
+    provider.resolveExecutionContext(run(), {
+      ...authority,
+      attemptId:
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" as RunnerDaytonaAttemptId,
+    }),
+    /unavailable|ambiguous/u
   );
 });
 
