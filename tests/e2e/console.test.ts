@@ -1629,6 +1629,81 @@ test.describe("Run console", () => {
     await releaseEvents();
   });
 
+  test("a pending stop stays honest and the live record can be closed", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let releaseEvents!: () => Promise<void>;
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const request = route.request();
+      const { pathname } = new URL(request.url());
+      if (pathname === "/api/agents") {
+        return route.fulfill({
+          json: { agents: [{ ...retainedAgent, status: "running" }] },
+        });
+      }
+      if (pathname === `/api/agents/${AGENT_ID}/runs`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", runs: [liveRun()] },
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}/events`) {
+        return new Promise<void>((resolve) => {
+          releaseEvents = async () => {
+            await route.fulfill({
+              body: "",
+              contentType: "text/event-stream",
+            });
+            resolve();
+          };
+        });
+      }
+      if (
+        pathname === `/api/runs/${RUN_ID}/stop` &&
+        request.method() === "POST"
+      ) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", run: liveRun() },
+          status: 202,
+        });
+      }
+      if (pathname === `/api/runs/${RUN_ID}`) {
+        return route.fulfill({
+          json: { apiVersion: "1.0", run: liveRun() },
+        });
+      }
+      return route.fulfill({ json: {}, status: 404 });
+    });
+
+    await page.goto("/agents");
+    await page
+      .locator(".oc-agent-rail")
+      .getByRole("button", { name: /running Verify timeline/ })
+      .click();
+    await page.getByRole("button", { exact: true, name: "Stop" }).click();
+
+    await expect(page.getByText("Stop requested.")).toBeVisible();
+    await expect(
+      page.getByRole("button", { exact: true, name: "Retry stop" }).first()
+    ).toBeVisible();
+    await expect(page.getByText("Run cancelled.")).toHaveCount(0);
+
+    await page
+      .getByRole("button", { exact: true, name: "Close run view" })
+      .click();
+    await expect(
+      page.getByRole("region", { name: "Live run activity" })
+    ).toHaveCount(0);
+    await releaseEvents();
+  });
+
   test("a completed live event leaves the owning agent idle", async ({
     context,
     page,

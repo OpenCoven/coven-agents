@@ -177,6 +177,10 @@ export function RunConsole({
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [threadOpenRevision, setThreadOpenRevision] = useState(0);
   const [streamingRunId, setStreamingRunId] = useState<string | null>(null);
+  const [stoppingRunId, setStoppingRunId] = useState<string | null>(null);
+  const [pendingStopRunIds, setPendingStopRunIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
 
   const [view, setView] = useState<View>("composer");
   const [draft, setDraft] = useState("");
@@ -505,6 +509,8 @@ export function RunConsole({
     setPendingRunHistoryAgentIds(new Set());
     setSelectedRunId(null);
     setStreamingRunId(null);
+    setStoppingRunId(null);
+    setPendingStopRunIds(new Set());
     setStarting(false);
     setBusy(false);
     setRenaming(false);
@@ -655,6 +661,21 @@ export function RunConsole({
                   : currentRun.snapshot.status,
         });
       }
+      if (
+        event.type === "completed" ||
+        event.type === "failed" ||
+        (event.type === "status" && isTerminal(event.status))
+      ) {
+        setPendingStopRunIds((current) => {
+          if (!current.has(runId)) {
+            return current;
+          }
+          const next = new Set(current);
+          next.delete(runId);
+          return next;
+        });
+        setStoppingRunId((current) => (current === runId ? null : current));
+      }
     },
     [reconcileTerminalAgent]
   );
@@ -710,6 +731,19 @@ export function RunConsole({
           )
         );
         reconcileTerminalAgent(snapshot);
+        if (isTerminal(snapshot.status)) {
+          setPendingStopRunIds((current) => {
+            if (!current.has(streamingRunId)) {
+              return current;
+            }
+            const next = new Set(current);
+            next.delete(streamingRunId);
+            return next;
+          });
+          setStoppingRunId((current) =>
+            current === streamingRunId ? null : current
+          );
+        }
         setStreamingRunId(null);
       } catch (error) {
         if (cancelled || controller.signal.aborted || !sessionIsCurrent()) {
@@ -797,6 +831,10 @@ export function RunConsole({
   const running = selectedRun
     ? !isTerminal(selectedRun.snapshot.status)
     : false;
+  const stopRequestInFlight =
+    selectedRun !== null && stoppingRunId === selectedRun.snapshot.id;
+  const stopPending =
+    selectedRun !== null && pendingStopRunIds.has(selectedRun.snapshot.id);
   const threadRevision = selectedRun
     ? `${view}:${threadOpenRevision}:${selectedRun.snapshot.id}:${selectedRun.snapshot.status}:${selectedRun.events.length}`
     : "";
@@ -888,24 +926,54 @@ export function RunConsole({
     if (!context) {
       return;
     }
+    const runId = selectedRun.snapshot.id;
+    setStoppingRunId(runId);
     try {
-      const snapshot = await client.stopRun(
-        selectedRun.snapshot.id,
-        context.signal
-      );
+      const outcome = await client.stopRun(runId, context.signal);
       if (!isCurrentSession(context.generation, context.signal)) {
         return;
       }
       setRuns((current) =>
         current.map((run) =>
-          run.snapshot.id === snapshot.id ? { ...run, snapshot } : run
+          run.snapshot.id === outcome.run.id
+            ? { ...run, snapshot: outcome.run }
+            : run
         )
       );
-      reconcileTerminalAgent(snapshot);
-      toast.success("Run cancelled.");
+      reconcileTerminalAgent(outcome.run);
+      if (outcome.pending) {
+        setPendingStopRunIds((current) => new Set(current).add(runId));
+        setStreamingRunId((current) => current ?? runId);
+        toast.info("Stop requested.", {
+          description: "Cleanup is continuing in the background.",
+        });
+      } else {
+        setPendingStopRunIds((current) => {
+          const next = new Set(current);
+          next.delete(runId);
+          return next;
+        });
+        toast.success("Run cancelled.");
+      }
     } catch (error) {
       if (isCurrentSession(context.generation, context.signal)) {
-        reportRunnerError(error, "Could not stop the run.");
+        if (
+          error instanceof RunnerApiError &&
+          (error.code === "cleanup_required" ||
+            error.code === "provider_unavailable")
+        ) {
+          setPendingStopRunIds((current) => new Set(current).add(runId));
+          setStreamingRunId((current) => current ?? runId);
+          toast.warning("Stop requested.", {
+            description: "Cleanup is retrying in the background.",
+          });
+        } else {
+          reportRunnerError(error, "Could not stop the run.");
+        }
+      }
+    } finally {
+      if (isCurrentSession(context.generation, context.signal)) {
+        setStoppingRunId((current) => (current === runId ? null : current));
       }
     }
   };
@@ -1605,8 +1673,16 @@ export function RunConsole({
                     )}
 
                     {running ? (
-                      <Btn onClick={stopRun} variant="danger-ghost">
-                        Stop
+                      <Btn
+                        disabled={stopRequestInFlight}
+                        onClick={stopRun}
+                        variant="danger-ghost"
+                      >
+                        {stopRequestInFlight
+                          ? "Stopping…"
+                          : stopPending
+                            ? "Retry stop"
+                            : "Stop"}
                       </Btn>
                     ) : null}
 
@@ -1868,11 +1944,29 @@ export function RunConsole({
                                   font: "500 13px/1 var(--font-ui)",
                                 }}
                               >
-                                {projection.nowDoing}
+                                {stopPending
+                                  ? "Stop requested — cleanup is retrying."
+                                  : projection.nowDoing}
                               </span>
                               <div style={{ flex: 1 }} />
-                              <Btn onClick={stopRun} variant="danger-ghost">
-                                Stop run
+                              <Btn
+                                onClick={() =>
+                                  openComposer(selectedRun.agentId)
+                                }
+                                variant="ghost"
+                              >
+                                Close run view
+                              </Btn>
+                              <Btn
+                                disabled={stopRequestInFlight}
+                                onClick={stopRun}
+                                variant="danger-ghost"
+                              >
+                                {stopRequestInFlight
+                                  ? "Stopping…"
+                                  : stopPending
+                                    ? "Retry stop"
+                                    : "Stop run"}
                               </Btn>
                             </div>
                           ) : (
