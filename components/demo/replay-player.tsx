@@ -14,7 +14,7 @@ import {
   RotateCcw,
   Terminal,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { planPlayback } from "@/lib/demo/player";
 import { schedulePlayback } from "@/lib/demo/replay";
@@ -206,19 +206,25 @@ export function ReplayPlayer({ transcript }: { transcript: DemoTranscript }) {
   );
   const [visibleEvents, setVisibleEvents] = useState<RunEvent[]>([]);
   const [isComplete, setIsComplete] = useState(false);
+  const playbackGeneration = useRef(0);
 
-  useEffect(
-    () =>
-      schedulePlayback(playback.steps, {
-        onComplete: () => setIsComplete(true),
-        onReveal: (event) => setVisibleEvents((current) => [...current, event]),
-      }),
-    [playback]
-  );
-
-  const restart = useCallback(() => {
+  useEffect(() => {
+    playbackGeneration.current += 1;
+    const generation = playbackGeneration.current;
     setVisibleEvents([]);
     setIsComplete(false);
+    return schedulePlayback(
+      playback.steps,
+      {
+        onComplete: () => setIsComplete(true),
+        onReveal: (event) => setVisibleEvents((current) => [...current, event]),
+      },
+      undefined,
+      () => playbackGeneration.current === generation
+    );
+  }, [playback]);
+
+  const restart = useCallback(() => {
     setReplayKey((current) => current + 1);
   }, []);
 

@@ -1123,6 +1123,17 @@ test.describe("Run console", () => {
         name: /^01 completed Verify timeline/,
       });
     await retainedRunButton.click();
+    const runRecord = page.getByRole("log", { name: "Run record" });
+    await expect(
+      runRecord.getByRole("heading", { level: 3, name: "Agent output" })
+    ).toBeVisible();
+    await expect(
+      runRecord.getByRole("heading", { level: 3, name: "Command finished" })
+    ).toBeVisible();
+    await expect(
+      runRecord.getByRole("heading", { level: 3, name: "Run completed" })
+    ).toBeVisible();
+    await expect(runRecord.locator(".oc-run-event-card")).toHaveCount(3);
 
     const navigationRail = page.locator(".oc-agent-rail");
     const navigationWidth = await navigationRail.evaluate(
@@ -1271,7 +1282,6 @@ test.describe("Run console", () => {
       .click();
     await expect(reportReader).toHaveCount(0);
     await expect(reportStep).toBeFocused();
-    const runRecord = page.getByRole("log", { name: "Run record" });
     await expect
       .poll(() =>
         runRecord.evaluate(
@@ -1401,6 +1411,48 @@ test.describe("Run console", () => {
     }
 
     await page.setViewportSize({ height: 844, width: 390 });
+    const commandCard = runRecord
+      .getByRole("heading", { level: 3, name: "Command finished" })
+      .locator("..")
+      .locator("..");
+    await expect
+      .poll(() =>
+        commandCard.evaluate(
+          (element) => element.scrollWidth <= element.clientWidth
+        )
+      )
+      .toBe(true);
+    await expect
+      .poll(() =>
+        runRecord
+          .locator(".oc-run-event-card")
+          .evaluateAll((elements) =>
+            elements.every(
+              (element) => element.scrollWidth <= element.clientWidth
+            )
+          )
+      )
+      .toBe(true);
+    const completionCard = runRecord
+      .getByRole("heading", { level: 3, name: "Run completed" })
+      .locator("..")
+      .locator("..");
+    const copyReceiptButton = completionCard.getByRole("button", {
+      name: "Copy receipt",
+    });
+    await expect
+      .poll(async () => {
+        const [cardBox, buttonBox] = await Promise.all([
+          completionCard.boundingBox(),
+          copyReceiptButton.boundingBox(),
+        ]);
+        return Boolean(
+          cardBox &&
+            buttonBox &&
+            buttonBox.x + buttonBox.width <= cardBox.x + cardBox.width
+        );
+      })
+      .toBe(true);
     await expect(
       page.getByRole("button", { name: "Expand the steps panel" })
     ).toBeVisible();
@@ -1448,7 +1500,7 @@ test.describe("Run console", () => {
       agentStatus: "idle",
       event: {
         error: {
-          code: "historical_failure",
+          code: "historical_failure_code_that_wraps_on_narrow_screens",
           message: "Historical failure transcript.",
           retryable: false,
         },
@@ -1524,7 +1576,15 @@ test.describe("Run console", () => {
         return route.fulfill({ json: {}, status: 404 });
       });
 
+      if (scenario.historicalStatus === "failed") {
+        await page.setViewportSize({ height: 844, width: 390 });
+      }
       await page.goto("/agents");
+      if (scenario.historicalStatus === "failed") {
+        await page
+          .getByRole("button", { name: "Expand the navigation" })
+          .click();
+      }
       await page
         .locator(".oc-agent-rail")
         .getByRole("button", {
@@ -1533,6 +1593,15 @@ test.describe("Run console", () => {
         .click();
 
       await expect(page.getByText(scenario.transcript).first()).toBeVisible();
+      if (scenario.historicalStatus === "failed") {
+        await expect
+          .poll(() =>
+            page
+              .locator('.oc-run-event-card[role="alert"]')
+              .evaluate((element) => element.scrollWidth <= element.clientWidth)
+          )
+          .toBe(true);
+      }
       await expect(
         page
           .getByRole("button", { name: retainedAgent.name })

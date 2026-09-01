@@ -12,6 +12,15 @@ test.describe("Anonymous fixture demo", () => {
   }) => {
     test.skip(!IS_DEMO, "This contract runs with IS_DEMO=1.");
     const prohibitedRequests: string[] = [];
+    const duplicateKeyErrors: string[] = [];
+    page.on("console", (message) => {
+      if (
+        message.type() === "error" &&
+        message.text().includes("children with the same key")
+      ) {
+        duplicateKeyErrors.push(message.text());
+      }
+    });
     page.on("request", (request) => {
       const url = new URL(request.url());
       if (url.origin !== LOCAL_ORIGIN || url.pathname.includes("/api/")) {
@@ -39,5 +48,6 @@ test.describe("Anonymous fixture demo", () => {
     ).toBeVisible();
 
     expect(prohibitedRequests).toEqual([]);
+    expect(duplicateKeyErrors).toEqual([]);
   });
 });
