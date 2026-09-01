@@ -34,6 +34,8 @@ const currentCredentialEnvironment = [
   "CREDENTIAL_KEK_V2",
   "CRON_SECRET",
   "DAYTONA_API_KEY",
+  "GITHUB_APP_PRIVATE_KEY",
+  "GITHUB_STATE_SIGNING_SECRET",
   "OPERATOR_DIAGNOSTIC_TOKEN",
   "RUNNER_MANUAL_RECONCILE_SECRET",
   "STRIPE_SECRET_KEY",
@@ -138,6 +140,8 @@ test("the incident runbooks name every secret that exists", () => {
     "CRON_SECRET",
     "DAYTONA_API_KEY",
     "AUTH_GITHUB_SECRET",
+    "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_STATE_SIGNING_SECRET",
     "STRIPE_SECRET_KEY",
     "STRIPE_WEBHOOK_SECRET",
   ]) {

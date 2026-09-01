@@ -317,6 +317,20 @@ export type CreateGitHubCapabilityInput = {
   tokenHash: string;
 };
 
+export type ReplaceGitHubInstallationConnectionsInput = {
+  accountId: string;
+  accountLogin: string;
+  accountType: "Organization" | "User";
+  installationId: string;
+  repositories: Array<{
+    id: string;
+    repositoryId: string;
+    repositoryName: string;
+    repositoryNodeId: string;
+    repositoryOwner: string;
+  }>;
+};
+
 export type BeginGitHubOperationInput = {
   capabilityId: string;
   id: string;
@@ -334,6 +348,19 @@ function statement(
   query: SQL
 ): TeamStoreStatement {
   return { args, name, query };
+}
+
+function lockGitHubTenantConnections(
+  transaction: TeamStoreTransaction,
+  tenant: string
+): Promise<Record<string, unknown>[]> {
+  return transaction.execute(
+    statement(
+      "lock-github-tenant-connections",
+      { tenant },
+      sql`SELECT pg_advisory_xact_lock(hashtextextended(${tenant}, 0))`
+    )
+  );
 }
 
 function column<T>(row: Record<string, unknown>, name: string): T {
@@ -996,6 +1023,79 @@ function validateConnectionInput(input: {
   ) {
     throw new Error("GitHub connection metadata is invalid.");
   }
+}
+
+function normalizedReplacementConnections(
+  input: ReplaceGitHubInstallationConnectionsInput
+): Array<
+  ReplaceGitHubInstallationConnectionsInput["repositories"][number] & {
+    accountId: string;
+    accountLogin: string;
+    accountType: "Organization" | "User";
+    installationId: string;
+  }
+> {
+  if (input.accountType !== "Organization" && input.accountType !== "User") {
+    throw new Error("GitHub account type is invalid.");
+  }
+  if (
+    input.repositories.length < 1 ||
+    input.repositories.length > MAX_REPOSITORIES
+  ) {
+    throw new Error(
+      `GitHub installation must select 1-${MAX_REPOSITORIES} repositories.`
+    );
+  }
+
+  const connections = input.repositories
+    .map((repository) => ({
+      ...repository,
+      accountId: input.accountId,
+      accountLogin: input.accountLogin,
+      accountType: input.accountType,
+      installationId: input.installationId,
+    }))
+    .sort((left, right) => left.repositoryId.localeCompare(right.repositoryId));
+  if (
+    new Set(connections.map(({ repositoryId }) => repositoryId)).size !==
+    connections.length
+  ) {
+    throw new Error("GitHub installation contains duplicate repositories.");
+  }
+  for (const connection of connections) {
+    validateConnectionInput(connection);
+  }
+  return connections;
+}
+
+type NormalizedGitHubConnection = ReturnType<
+  typeof normalizedReplacementConnections
+>[number];
+
+function sameConnectionAuthority(
+  current: readonly GitHubConnectionRecord[],
+  next: readonly NormalizedGitHubConnection[]
+): boolean {
+  if (current.length !== next.length) {
+    return false;
+  }
+  const sortedCurrent = [...current].sort((left, right) =>
+    left.repositoryId.localeCompare(right.repositoryId)
+  );
+  return sortedCurrent.every((connection, index) => {
+    const candidate = next[index];
+    return (
+      candidate !== undefined &&
+      connection.installationId === candidate.installationId &&
+      connection.accountId === candidate.accountId &&
+      connection.accountLogin === candidate.accountLogin &&
+      connection.accountType === candidate.accountType &&
+      connection.repositoryId === candidate.repositoryId &&
+      connection.repositoryNodeId === candidate.repositoryNodeId &&
+      connection.repositoryOwner === candidate.repositoryOwner &&
+      connection.repositoryName === candidate.repositoryName
+    );
+  });
 }
 
 function validateReceipt(input: {
@@ -2690,6 +2790,37 @@ export function createTeamStore(database: TeamStoreDatabase) {
           : { kind: "stale_version" as const };
       }),
 
+    disconnectGitHubConnections: async (principal: RunnerPrincipal) =>
+      database.transaction(async (transaction) => {
+        await lockGitHubTenantConnections(transaction, principal.tenant);
+        const removed = await transaction.execute(
+          statement(
+            "disconnect-github-connections",
+            { tenant: principal.tenant },
+            sql`DELETE FROM "RunnerGitHubConnection"
+              WHERE "tenant" = ${principal.tenant}
+              RETURNING "id"`
+          )
+        );
+        const revoked = await transaction.execute(
+          statement(
+            "revoke-github-capabilities-on-disconnect",
+            { tenant: principal.tenant },
+            sql`UPDATE "RunnerGitHubCapability"
+              SET "revokedAt" = COALESCE("revokedAt", now()),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "tenant" = ${principal.tenant}
+                AND "revokedAt" IS NULL
+              RETURNING "id"`
+          )
+        );
+        return {
+          removed: removed.length,
+          revokedCapabilities: revoked.length,
+        };
+      }),
+
     failTeamStepAdmission: (
       _operator: RunnerOperator,
       input: {
@@ -2933,6 +3064,28 @@ export function createTeamStore(database: TeamStoreDatabase) {
           )
         );
         return row ? asRun(row) : null;
+      }),
+
+    listGitHubConnections: (principal: RunnerPrincipal, limit: number) =>
+      database.transaction(async (transaction) => {
+        if (
+          !Number.isSafeInteger(limit) ||
+          limit < 1 ||
+          limit > MAX_REPOSITORIES + 1
+        ) {
+          throw new Error("GitHub connection list limit is invalid.");
+        }
+        const rows = await transaction.execute(
+          statement(
+            "list-github-connections",
+            { limit, tenant: principal.tenant },
+            sql`SELECT * FROM "RunnerGitHubConnection"
+              WHERE "tenant" = ${principal.tenant}
+              ORDER BY "repositoryOwner", "repositoryName", "repositoryId"
+              LIMIT ${limit}`
+          )
+        );
+        return rows.map(asConnection);
       }),
 
     listSkills: (principal: RunnerPrincipal) =>
@@ -3182,6 +3335,174 @@ export function createTeamStore(database: TeamStoreDatabase) {
         );
         return { kind: "projected" as const, teamRunId };
       }),
+
+    removeGitHubInstallationConnections: async (
+      principal: RunnerPrincipal,
+      installationId: string
+    ) => {
+      if (!DECIMAL_ID.test(installationId)) {
+        throw new Error("GitHub installation id must be a decimal string.");
+      }
+      return await database.transaction(async (transaction) => {
+        await lockGitHubTenantConnections(transaction, principal.tenant);
+        const removed = await transaction.execute(
+          statement(
+            "delete-github-installation-connections",
+            { installationId, tenant: principal.tenant },
+            sql`DELETE FROM "RunnerGitHubConnection"
+              WHERE "installationId" = ${installationId}
+                AND "tenant" = ${principal.tenant}
+              RETURNING "id"`
+          )
+        );
+        const revoked = await transaction.execute(
+          statement(
+            "revoke-github-capabilities-after-installation-removal",
+            { installationId, tenant: principal.tenant },
+            sql`UPDATE "RunnerGitHubCapability"
+              SET "revokedAt" = COALESCE("revokedAt", now()),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "tenant" = ${principal.tenant}
+                AND "revokedAt" IS NULL
+              RETURNING "id"`
+          )
+        );
+        return {
+          removed: removed.length,
+          revokedCapabilities: revoked.length,
+        };
+      });
+    },
+
+    replaceGitHubInstallationConnections: async (
+      principal: RunnerPrincipal,
+      input: ReplaceGitHubInstallationConnectionsInput
+    ) => {
+      const connections = normalizedReplacementConnections(input);
+      return await database.transaction(async (transaction) => {
+        await lockGitHubTenantConnections(transaction, principal.tenant);
+        const tenantRows = await transaction.execute(
+          statement(
+            "list-github-tenant-connections-for-update",
+            {
+              installationId: input.installationId,
+              tenant: principal.tenant,
+            },
+            sql`SELECT * FROM "RunnerGitHubConnection"
+              WHERE "tenant" = ${principal.tenant}
+              ORDER BY "installationId", "repositoryId"
+              FOR UPDATE`
+          )
+        );
+        const tenantConnections = tenantRows.map(asConnection);
+        const existing = tenantConnections.filter(
+          (connection) => connection.installationId === input.installationId
+        );
+        const projectedRepositoryIds = new Set(
+          tenantConnections
+            .filter(
+              (connection) => connection.installationId !== input.installationId
+            )
+            .map(({ repositoryId }) => repositoryId)
+        );
+        for (const connection of connections) {
+          projectedRepositoryIds.add(connection.repositoryId);
+        }
+        if (projectedRepositoryIds.size > MAX_REPOSITORIES) {
+          throw new Error(
+            `GitHub tenant connections cannot exceed ${MAX_REPOSITORIES} repositories.`
+          );
+        }
+        if (sameConnectionAuthority(existing, connections)) {
+          return { changed: false as const, connections: existing };
+        }
+
+        const stored: GitHubConnectionRecord[] = [];
+        for (const connection of connections) {
+          // biome-ignore lint/performance/noAwaitInLoops: bounded writes share one tenant-fenced replacement transaction
+          const [row] = await transaction.execute(
+            statement(
+              "upsert-github-installation-connection",
+              { ...connection, tenant: principal.tenant },
+              sql`INSERT INTO "RunnerGitHubConnection" (
+                  "id", "tenant", "installationId", "accountId", "accountLogin",
+                  "accountType", "repositoryId", "repositoryNodeId",
+                  "repositoryOwner", "repositoryName"
+                ) VALUES (
+                  ${connection.id}, ${principal.tenant}, ${connection.installationId},
+                  ${connection.accountId}, ${connection.accountLogin},
+                  ${connection.accountType}, ${connection.repositoryId},
+                  ${connection.repositoryNodeId}, ${connection.repositoryOwner},
+                  ${connection.repositoryName}
+                )
+                ON CONFLICT ("tenant", "repositoryId") DO UPDATE
+                SET "installationId" = EXCLUDED."installationId",
+                    "accountId" = EXCLUDED."accountId",
+                    "accountLogin" = EXCLUDED."accountLogin",
+                    "accountType" = EXCLUDED."accountType",
+                    "repositoryNodeId" = EXCLUDED."repositoryNodeId",
+                    "repositoryOwner" = EXCLUDED."repositoryOwner",
+                    "repositoryName" = EXCLUDED."repositoryName",
+                    "updatedAt" = now(),
+                    "version" = "RunnerGitHubConnection"."version" + 1
+                RETURNING *`
+            )
+          );
+          if (!row) {
+            throw new Error("GitHub connection replacement returned no row.");
+          }
+          stored.push(asConnection(row));
+        }
+
+        const repositoryIds = connections.map(
+          ({ repositoryId }) => repositoryId
+        );
+        await transaction.execute(
+          statement(
+            "delete-stale-github-installation-connections",
+            {
+              installationId: input.installationId,
+              repositoryIds,
+              tenant: principal.tenant,
+            },
+            sql`DELETE FROM "RunnerGitHubConnection"
+              WHERE "installationId" = ${input.installationId}
+                AND "tenant" = ${principal.tenant}
+                AND NOT (
+                  "repositoryId" = ANY (
+                    SELECT jsonb_array_elements_text(
+                      CAST(${jsonParameter(repositoryIds)} AS jsonb)
+                    )
+                  )
+                )
+              RETURNING "id"`
+          )
+        );
+        await transaction.execute(
+          statement(
+            "revoke-github-capabilities-after-connection-change",
+            {
+              installationId: input.installationId,
+              tenant: principal.tenant,
+            },
+            sql`UPDATE "RunnerGitHubCapability"
+              SET "revokedAt" = COALESCE("revokedAt", now()),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "tenant" = ${principal.tenant}
+                AND "revokedAt" IS NULL
+              RETURNING "id"`
+          )
+        );
+        return {
+          changed: true as const,
+          connections: stored.sort((left, right) =>
+            left.repositoryId.localeCompare(right.repositoryId)
+          ),
+        };
+      });
+    },
 
     revokeGitHubCapability: (
       principal: RunnerPrincipal,

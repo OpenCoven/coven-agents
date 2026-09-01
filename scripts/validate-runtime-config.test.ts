@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +11,11 @@ const validatorPath = fileURLToPath(
 );
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const TEST_KEK = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const TEST_GITHUB_SIGNER_PEM = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  privateKeyEncoding: { format: "pem", type: "pkcs8" },
+  publicKeyEncoding: { format: "pem", type: "spki" },
+}).privateKey;
 const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
   ABUSE_KEY_SECRET: "subprocess-test-abuse-key-secret",
   APP_ORIGIN: "https://app.example",
@@ -36,6 +42,14 @@ const VALID_STRIPE_ENV: Partial<NodeJS.ProcessEnv> = {
   STRIPE_SECRET_KEY: "sk_test",
   STRIPE_WEBHOOK_SECRET: "whsec_test",
   SUBSCRIPTION_CHECKOUT_ENABLED: "on",
+};
+const VALID_GITHUB_ENV: Partial<NodeJS.ProcessEnv> = {
+  GITHUB_APP_ID: "123456",
+  GITHUB_APP_PRIVATE_KEY: TEST_GITHUB_SIGNER_PEM,
+  GITHUB_APP_SLUG: "opencoven-delivery",
+  GITHUB_STATE_SIGNING_SECRET:
+    "0123456789abcdefghijklmnopqrstuvwxyz-STATE-SIGNING",
+  GITHUB_TEAMS_ENABLED: "on",
 };
 const NON_PRODUCTION_RUNTIME_MODES = [
   {
@@ -73,6 +87,7 @@ const ADMISSION_LIMIT_MAXIMUMS = {
 const RUNTIME_CONFIGURATION_KEYS = [
   "ABUSE_KEY_SECRET",
   "APP_ORIGIN",
+  "AUTH_SECRET",
   "AUTH_URL",
   "BETA_ALLOWLIST",
   "BETA_MODE",
@@ -90,6 +105,11 @@ const RUNTIME_CONFIGURATION_KEYS = [
   "DAYTONA_SNAPSHOT",
   "DAYTONA_TARGET",
   "GLOBAL_DAILY_RUN_CAP",
+  "GITHUB_APP_ID",
+  "GITHUB_APP_PRIVATE_KEY",
+  "GITHUB_APP_SLUG",
+  "GITHUB_STATE_SIGNING_SECRET",
+  "GITHUB_TEAMS_ENABLED",
   "NEXTAUTH_URL",
   "NODE_ENV",
   "OPERATOR_DIAGNOSTIC_TOKEN",
@@ -183,6 +203,77 @@ test("rejects missing required production configuration", () => {
       `Missing required production environment variables: ${variableName}.`
     );
   }
+});
+
+test("GitHub teams configuration is gated by an exact server-side flag", () => {
+  for (const value of [undefined, "", "  ", "off"]) {
+    const result = runValidator({ GITHUB_TEAMS_ENABLED: value });
+    assert.equal(result.status, 0, result.stderr);
+  }
+
+  for (const value of ["true", "1", "ON", "on ", "disabled"]) {
+    assertRejectedWithMessage(
+      runValidator({ GITHUB_TEAMS_ENABLED: value }),
+      'GITHUB_TEAMS_ENABLED must be exactly "on" or "off" when configured.'
+    );
+  }
+});
+
+test("enabled GitHub teams requires every app authority variable", () => {
+  for (const name of [
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_APP_SLUG",
+    "GITHUB_STATE_SIGNING_SECRET",
+  ] as const) {
+    for (const value of [undefined, "", "  "]) {
+      const result = runValidator({
+        ...VALID_GITHUB_ENV,
+        [name]: value,
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, new RegExp(name, "u"));
+    }
+  }
+});
+
+test("enabled GitHub teams validates identifiers, RSA key material, and state entropy", () => {
+  for (const overrides of [
+    { GITHUB_APP_ID: "01" },
+    { GITHUB_APP_SLUG: "OpenCoven_Delivery" },
+    { GITHUB_APP_PRIVATE_KEY: "not-a-key" },
+    { GITHUB_STATE_SIGNING_SECRET: "weak" },
+  ]) {
+    const result = runValidator({ ...VALID_GITHUB_ENV, ...overrides });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /GITHUB_APP_|GITHUB_STATE_SIGNING_SECRET/u);
+    assert.doesNotMatch(result.stderr, /BEGIN .*PRIVATE KEY|STATE-SIGNING/u);
+  }
+});
+
+test("GitHub state signing authority cannot alias another server secret", () => {
+  const shared = "0123456789abcdefghijklmnopqrstuvwxyz-SHARED-STATE-AUTHORITY";
+  for (const name of [
+    "AUTH_SECRET",
+    "ABUSE_KEY_SECRET",
+    "CRON_SECRET",
+    "OPERATOR_DIAGNOSTIC_TOKEN",
+    "RUNNER_MANUAL_RECONCILE_SECRET",
+  ] as const) {
+    const result = runValidator({
+      ...VALID_GITHUB_ENV,
+      GITHUB_STATE_SIGNING_SECRET: shared,
+      [name]: shared,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /GITHUB_STATE_SIGNING_SECRET|distinct/u);
+    assert.doesNotMatch(result.stderr, /SHARED-STATE-AUTHORITY/u);
+  }
+});
+
+test("valid enabled GitHub teams configuration passes runtime validation", () => {
+  const result = runValidator(VALID_GITHUB_ENV);
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("rejects blank required production configuration", () => {

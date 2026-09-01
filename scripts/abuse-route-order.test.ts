@@ -291,6 +291,38 @@ test("subscription status admits IP before verification and user before database
   );
 });
 
+test("GitHub connection handlers establish subscriber identity and admission before provider or store work", () => {
+  const implementation = read("lib/github/connection.ts");
+  for (const [handler, policy, marker] of [
+    ["install", "github_install", "createGitHubInstallState("],
+    ["callback", "github_callback", "runIdempotentOperation("],
+    ["getConnection", "github_connection_read", "createProvider("],
+    ["disconnect", "github_connection_delete", "disconnectGitHubConnections("],
+  ] as const) {
+    const start = implementation.indexOf(`async ${handler}(`);
+    assert.ok(start >= 0, `${handler} must exist`);
+    const next = implementation.indexOf("\n    async ", start + 1);
+    const block = implementation.slice(
+      start,
+      next === -1 ? implementation.length : next
+    );
+    const identity = block.indexOf("authorize()");
+    const admission = block.indexOf(`"${policy}"`);
+    const expensive = block.indexOf(marker);
+    assert.ok(identity >= 0, `${handler} must authorize`);
+    assert.ok(admission > identity, `${handler} must admit after identity`);
+    assert.ok(expensive > admission, `${handler} must admit before ${marker}`);
+  }
+
+  for (const routePath of [
+    "app/api/github/install/route.ts",
+    "app/api/github/callback/route.ts",
+    "app/api/github/connection/route.ts",
+  ]) {
+    assert.match(read(routePath), /ipAddress\(request\)/u);
+  }
+});
+
 test("Stripe webhook admission precedes body and provider work", () => {
   const routeSource = read("app/api/stripe/webhook/route.ts");
   const webhookSource = read("lib/billing/webhook.ts");

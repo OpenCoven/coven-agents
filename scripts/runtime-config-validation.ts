@@ -2,6 +2,7 @@ import { validateAbuseConfig } from "../lib/abuse/config";
 import { approvedApplicationOrigin } from "../lib/auth/application-origin";
 import { validateSubscriptionCheckoutEnvironment } from "../lib/billing/config-core";
 import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
+import { validateGitHubEnvironment } from "../lib/github/config";
 import {
   daytonaDomainAllowList,
   daytonaRequestTimeout,
@@ -292,6 +293,7 @@ export async function validateRuntimeConfig(
   explicitRelease: boolean
 ): Promise<void> {
   validateSubscriptionCheckoutEnvironment(env);
+  validateGitHubEnvironment(env);
 
   const productionRelease = isProductionRelease(env, explicitRelease);
   validateReleaseAudience(env, explicitRelease);

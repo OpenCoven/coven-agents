@@ -61,6 +61,14 @@ const POLICIES = Object.freeze({
   document_delete: closedPolicy(["ip", "user"], 0, DESTRUCTIVE_WRITE),
   document_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   document_write: closedPolicy(["ip", "user"], 262_144, STANDARD_WRITE),
+  github_callback: closedPolicy(["ip", "user"], 0, rateClass(10, 60, 40, 3600)),
+  github_connection_delete: closedPolicy(
+    ["ip", "tenant"],
+    0,
+    DESTRUCTIVE_WRITE
+  ),
+  github_connection_read: closedPolicy(["ip", "user"], 0, SENSITIVE_READ),
+  github_install: closedPolicy(["ip", "user"], 0, rateClass(2, 300, 5, 3600)),
   history_delete: closedPolicy(["ip", "user"], 0, DESTRUCTIVE_WRITE),
   history_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   internal_credential: closedPolicy(
