@@ -4,7 +4,6 @@ import { DaytonaNotFoundError } from "@daytona/sdk";
 import type {
   RunnerAttemptLogSnapshot,
   RunnerAttemptSnapshotInput,
-  RunnerExecutionContextResetResult,
   RunnerReconciliationContext,
   RunnerReconciliationProvider,
   RunnerStopAttemptResult,
@@ -53,7 +52,6 @@ const snapshot: RunnerAttemptLogSnapshot = {
 
 type ProviderExercise = Readonly<{
   provider: RunnerReconciliationProvider;
-  setReset: (result: RunnerExecutionContextResetResult) => void;
   setResolve: (result: "absent" | "error" | "present") => void;
   setStop: (result: RunnerStopAttemptResult) => void;
   snapshotInput: () => RunnerAttemptSnapshotInput | undefined;
@@ -63,7 +61,6 @@ class DeterministicFakeRecoveryProvider
   implements RunnerReconciliationProvider
 {
   readonly context = {} as RunnerReconciliationContext;
-  private reset: RunnerExecutionContextResetResult = { kind: "reset" };
   private resolve: "absent" | "error" | "present" = "present";
   private stopResult: RunnerStopAttemptResult = { kind: "stopped" };
   lastSnapshot: RunnerAttemptSnapshotInput | undefined;
@@ -84,14 +81,6 @@ class DeterministicFakeRecoveryProvider
     return Promise.resolve(this.stopResult);
   }
 
-  resetExecutionContext() {
-    return Promise.resolve(this.reset);
-  }
-
-  setReset(result: RunnerExecutionContextResetResult): void {
-    this.reset = result;
-  }
-
   setResolve(result: "absent" | "error" | "present"): void {
     this.resolve = result;
   }
@@ -105,9 +94,6 @@ function deterministicFakeRecoveryProvider(): ProviderExercise {
   const provider = new DeterministicFakeRecoveryProvider();
   return {
     provider,
-    setReset: (result) => {
-      provider.setReset(result);
-    },
     setResolve: (result) => {
       provider.setResolve(result);
     },
@@ -119,7 +105,6 @@ function deterministicFakeRecoveryProvider(): ProviderExercise {
 }
 
 function daytonaRecoveryProvider(): ProviderExercise {
-  let reset: RunnerExecutionContextResetResult = { kind: "reset" };
   let resolve: "absent" | "error" | "present" = "present";
   let stopResult: RunnerStopAttemptResult = { kind: "stopped" };
   let lastSnapshot: RunnerAttemptSnapshotInput | undefined;
@@ -178,13 +163,9 @@ function daytonaRecoveryProvider(): ProviderExercise {
         return Promise.resolve(sandbox as never);
       },
     },
-    resetExecutionContext: () => Promise.resolve(reset),
   });
   return {
     provider,
-    setReset: (result) => {
-      reset = result;
-    },
     setResolve: (result) => {
       resolve = result;
     },
@@ -243,7 +224,7 @@ function reconciliationProviderContract(
     assert.equal(exercise.snapshotInput()?.commandId, "command");
   });
 
-  test(`${name} preserves stop and reset outcomes`, async () => {
+  test(`${name} preserves stop outcomes`, async () => {
     const outcomes = await Promise.all(
       (
         [
@@ -272,29 +253,6 @@ function reconciliationProviderContract(
       { kind: "provider_unavailable" },
       { kind: "sandbox_reset_required" },
     ]);
-    const resets: readonly RunnerExecutionContextResetResult[] = [
-      { kind: "reset" },
-      { kind: "provider_not_found" },
-      { kind: "in_progress" },
-      { kind: "not_found" },
-      { kind: "sandbox_reset_required" },
-      { kind: "stale_version" },
-      { kind: "unavailable", source: "database" },
-      { kind: "unavailable", source: "provider" },
-    ];
-    assert.deepEqual(
-      await Promise.all(
-        resets.map(async (result) => {
-          const isolated = createExercise();
-          isolated.setReset(result);
-          return await isolated.provider.resetExecutionContext?.(
-            run,
-            authority
-          );
-        })
-      ),
-      resets
-    );
   });
 }
 

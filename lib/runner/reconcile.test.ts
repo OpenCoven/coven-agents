@@ -4,7 +4,7 @@ import test from "node:test";
 import { DaytonaNotFoundError } from "@daytona/sdk";
 import { cancelRunnerRun, reconcileAndDispatch } from "./attempt-reconcile";
 import { daytonaProbeSessionName } from "./daytona/names";
-import { reconcileDaytonaSandboxes } from "./reconcile";
+import { reconcileDaytonaSandboxes } from "./daytona/resource-recovery";
 import type {
   RunnerAgentRecord,
   RunnerDaytonaAttemptId,
@@ -301,11 +301,6 @@ test("command-free recovery resets a fenced sandbox before requeueing", async ()
   const result = await reconcileAndDispatch({
     operator,
     provider: {
-      resetExecutionContext: async (_run, resetAuthority) => {
-        calls.push("reset");
-        assert.equal(resetAuthority, authority);
-        return { kind: "reset" as const };
-      },
       resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
@@ -316,6 +311,13 @@ test("command-free recovery resets a fenced sandbox before requeueing", async ()
       },
     },
     randomToken: () => "cleanup-lease",
+    resourceLifecycle: {
+      reset: async (_run, resetAuthority) => {
+        calls.push("reset");
+        assert.equal(resetAuthority, authority);
+        return { kind: "reset" as const };
+      },
+    },
     rollbackCredentialResources: async () => {
       calls.push("rollback-credential");
     },
@@ -374,10 +376,6 @@ test("retryable provider stop failure defers without resetting the sandbox", asy
   const result = await reconcileAndDispatch({
     operator,
     provider: {
-      resetExecutionContext: async () => {
-        calls.push("reset");
-        return { kind: "reset" as const };
-      },
       resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
@@ -388,6 +386,12 @@ test("retryable provider stop failure defers without resetting the sandbox", asy
       },
     },
     randomToken: () => "cleanup-lease",
+    resourceLifecycle: {
+      reset: async () => {
+        calls.push("reset");
+        return { kind: "reset" as const };
+      },
+    },
     store: {
       claimExpiredDaytonaAttemptCleanup: async () => {
         calls.push("claim-cleanup");
@@ -948,10 +952,6 @@ test("terminal cleanup retries only after claiming the exact expired attempt", a
     dispatchLimit: 1,
     operator,
     provider: {
-      resetExecutionContext: async () => {
-        calls.push("reset");
-        return { kind: "reset" as const };
-      },
       resolveExecutionContext: async () => {
         calls.push("resolve");
         return null;
@@ -964,6 +964,12 @@ test("terminal cleanup retries only after claiming the exact expired attempt", a
     randomToken: () => "terminal-cleanup",
     releaseCredentialResources: async () => {
       calls.push("release-credential");
+    },
+    resourceLifecycle: {
+      reset: async () => {
+        calls.push("reset");
+        return { kind: "reset" as const };
+      },
     },
     store: {
       claimTerminalDaytonaAttemptCleanup: async () => {
@@ -1037,10 +1043,6 @@ test("terminal cleanup resets a fenced sandbox before releasing its exact attemp
   const result = await reconcileAndDispatch({
     operator,
     provider: {
-      resetExecutionContext: async () => {
-        calls.push("reset");
-        return { kind: "reset" as const };
-      },
       resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
@@ -1053,6 +1055,12 @@ test("terminal cleanup resets a fenced sandbox before releasing its exact attemp
     randomToken: () => "terminal-cleanup",
     releaseCredentialResources: async () => {
       calls.push("release-credential");
+    },
+    resourceLifecycle: {
+      reset: async () => {
+        calls.push("reset");
+        return { kind: "reset" as const };
+      },
     },
     store: {
       claimTerminalDaytonaAttemptCleanup: async () => {
@@ -1123,10 +1131,6 @@ test("terminal reset failure records one safe diagnostic and defers later recove
   const result = await reconcileAndDispatch({
     operator,
     provider: {
-      resetExecutionContext: async () => {
-        calls.push("reset");
-        return { kind: "sandbox_reset_required" as const };
-      },
       resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
@@ -1137,6 +1141,12 @@ test("terminal reset failure records one safe diagnostic and defers later recove
       },
     },
     randomToken: () => "terminal-cleanup",
+    resourceLifecycle: {
+      reset: async () => {
+        calls.push("reset");
+        return { kind: "sandbox_reset_required" as const };
+      },
+    },
     store: {
       appendTerminalCleanupDiagnostic: async () => {
         calls.push("diagnostic");
@@ -2048,10 +2058,6 @@ test("cancellation keeps durable intent and records a safe diagnostic when reset
   const result = await cancelRunnerRun(active.id, {
     operator,
     provider: {
-      resetExecutionContext: async () => {
-        calls.push("reset");
-        return { kind: "sandbox_reset_required" as const };
-      },
       resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
@@ -2062,6 +2068,12 @@ test("cancellation keeps durable intent and records a safe diagnostic when reset
       },
     },
     randomToken: () => "cancel-lease",
+    resourceLifecycle: {
+      reset: async () => {
+        calls.push("reset");
+        return { kind: "sandbox_reset_required" as const };
+      },
+    },
     store: {
       appendCancellationDiagnostic: async () => {
         calls.push("diagnostic");
@@ -2404,9 +2416,11 @@ test("cancellation preserves a stale sandbox reset fence", async () => {
   const result = await cancelRunnerRun(active.id, {
     operator,
     provider: {
-      resetExecutionContext: async () => ({ kind: "stale_version" as const }),
       resolveExecutionContext: async () => ({}) as never,
       stop: async () => ({ kind: "sandbox_reset_required" as const }),
+    },
+    resourceLifecycle: {
+      reset: async () => ({ kind: "stale_version" as const }),
     },
     store: {
       requestRunCancellation: async () => ({
@@ -2559,10 +2573,6 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
     },
     operator,
     provider: {
-      resetExecutionContext: async () => {
-        calls.push("reset");
-        return { kind: "reset" as const };
-      },
       resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
@@ -2623,6 +2633,12 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
     randomToken: () => "adopted-lease",
     releaseCredentialResources: async () => {
       calls.push("release-credential");
+    },
+    resourceLifecycle: {
+      reset: async () => {
+        calls.push("reset");
+        return { kind: "reset" as const };
+      },
     },
     store: {
       adoptExpiredDaytonaProcess: async () => {

@@ -1,7 +1,6 @@
 import "server-only";
 
 import { randomBytes } from "node:crypto";
-import type { Daytona } from "@daytona/sdk";
 import {
   HARNESS_SPECS,
   type HarnessStatus,
@@ -21,12 +20,7 @@ import type {
   RunnerReconciliationResult,
 } from "./attempt-reconcile";
 import { COPILOT_CLI_VERSION } from "./copilot-version";
-import type {
-  RunnerDeleteAgentResult,
-  RunnerPrewarmOptions,
-  RunnerService,
-  RunnerWarmSandboxResult,
-} from "./service";
+import type { RunnerService } from "./service";
 import type { RunnerStore } from "./store";
 import type {
   RunnerClaimedDispatch,
@@ -51,7 +45,7 @@ const EMPTY_RECONCILIATION_COUNTS: RunnerReconciliationResult = {
   terminalLeaseCleaned: 0,
 };
 
-type ProductionDatabase = ReturnType<typeof databaseFor>;
+export type ProductionDatabase = ReturnType<typeof databaseFor>;
 
 type CredentialContext = Readonly<{
   globalDailyCap: number;
@@ -70,11 +64,11 @@ type ProductionDispatchAccount = Readonly<{
   subscribedUntil: Date | null;
 }>;
 
-type ProductionDatabasePrincipal = SubscriberSession | RunnerOperator;
-type ProductionDatabaseFactory = (
+export type ProductionDatabasePrincipal = SubscriberSession | RunnerOperator;
+export type ProductionDatabaseFactory = (
   principal: ProductionDatabasePrincipal
 ) => ProductionDatabase | Promise<ProductionDatabase>;
-type ProductionAccountFinder = (
+export type ProductionAccountFinder = (
   userId: string
 ) => Promise<ProductionDispatchAccount | null>;
 
@@ -166,7 +160,7 @@ export async function runLeasedReconciliation(
   }
 }
 
-async function productionDatabase(
+export async function productionDatabase(
   principal: ProductionDatabasePrincipal
 ): Promise<ProductionDatabase> {
   const access = await import("@/lib/db/access");
@@ -323,83 +317,7 @@ function nextDispatchLease(leaseMilliseconds: number): Readonly<{
   };
 }
 
-function configuredDispatcher(
-  database: ProductionDatabase,
-  store: RunnerStore,
-  daytona: Daytona,
-  findAccount?: ProductionAccountFinder
-): () => Promise<RunnerDispatchResult> {
-  return async () => {
-    const admission = await import("./admission");
-    let claimed: RunnerClaimedDispatch | null;
-    let limits: RunnerAdmissionLimits;
-    try {
-      limits = admission.admissionLimitsFromEnvironment();
-      claimed = await store.claimNextDispatch(OPERATOR, {
-        ...nextDispatchLease(admission.DEFAULT_DISPATCH_LEASE_MS),
-        limits,
-      });
-    } catch {
-      return { kind: "unavailable", reason: "admission_unavailable" };
-    }
-    if (!claimed) {
-      return { kind: "idle" };
-    }
-
-    return configuredClaimDispatcher(
-      database,
-      store,
-      daytona,
-      limits,
-      findAccount
-    )(claimed);
-  };
-}
-
-function configuredClaimDispatcher(
-  database: ProductionDatabase,
-  store: RunnerStore,
-  daytona: Daytona,
-  limits?: RunnerAdmissionLimits,
-  findAccount?: ProductionAccountFinder
-): (claimed: RunnerClaimedDispatch) => Promise<RunnerDispatchResult> {
-  return async (claimed) => {
-    const [admission, credentials, executor, sandbox] = await Promise.all([
-      import("./admission"),
-      import("@/lib/credentials/runner-credential"),
-      import("./daytona/executor"),
-      import("./daytona/sandbox"),
-    ]);
-    const resolvedLimits = limits ?? admission.admissionLimitsFromEnvironment();
-    return dispatchProductionClaim(claimed, {
-      dispatch: (authorized, context) => {
-        const credentialDependencies =
-          credentials.drizzleRunnerCredentialDependencies(database);
-        const dependencies = executor.daytonaRunnerDispatchDependencies({
-          credentialDependencies,
-          credentialInput: (run, _agent) => ({
-            ...context,
-            harnessId: run.agentRuntime,
-            operationId: run.operationId,
-            runId: run.id,
-            tenant: run.tenant,
-          }),
-          limits: resolvedLimits,
-          operator: OPERATOR,
-          sandboxConfiguration: sandbox.daytonaSandboxConfiguration(),
-          sandboxDependencies: { daytona },
-          store,
-        });
-        return admission.dispatchRunnerClaim(authorized, dependencies);
-      },
-      findAccount,
-      operator: OPERATOR,
-      store,
-    });
-  };
-}
-
-function registryHarnesses(): readonly HarnessStatus[] {
+export function registryHarnesses(): readonly HarnessStatus[] {
   return HARNESS_SPECS.map((spec) =>
     harnessStatus(spec, {
       installed: spec.id === "copilot",
@@ -408,7 +326,7 @@ function registryHarnesses(): readonly HarnessStatus[] {
   );
 }
 
-function reconciliationFailure(
+export function reconciliationFailure(
   error: unknown,
   stage: RunnerReconciliationFailure["stage"],
   runnerError: boolean
@@ -452,240 +370,6 @@ function reconciliationFailure(
     ...(name ? { name } : {}),
     stage,
   };
-}
-
-function daytonaProductionReconcile(
-  database: ProductionDatabase,
-  store: RunnerStore,
-  findAccount?: ProductionAccountFinder,
-  reportFailure?: (failure: RunnerReconciliationFailure) => void
-): RunnerService["reconcileAndDispatch"] {
-  return async () => {
-    let stage: RunnerReconciliationFailure["stage"] = "lease";
-    try {
-      return await runLeasedReconciliation({
-        reconcile: async () => {
-          stage = "composition";
-          const [
-            admission,
-            client,
-            credentials,
-            errors,
-            reconciliation,
-            sandbox,
-            daytonaReconciliation,
-            teamOrchestration,
-            teamStoreModule,
-          ] = await Promise.all([
-            import("./admission"),
-            import("./daytona/client"),
-            import("@/lib/credentials/runner-credential"),
-            import("./errors"),
-            import("./attempt-reconcile"),
-            import("./daytona/sandbox"),
-            import("./daytona/reconcile"),
-            import("@/lib/teams/orchestrate"),
-            import("@/lib/teams/store"),
-          ]);
-          const daytona = client.daytonaClient();
-          const credentialDependencies =
-            credentials.drizzleRunnerCredentialDependencies(database);
-          const composition =
-            daytonaReconciliation.daytonaRunnerReconciliationDependencies({
-              credentialDependencies,
-              credentialInput: () => {
-                throw new errors.RunnerServiceError(
-                  "reconcile_unavailable",
-                  "Reconciliation dispatch must resolve account credentials first."
-                );
-              },
-              daytona,
-              limits: admission.admissionLimitsFromEnvironment(),
-              operator: OPERATOR,
-              sandboxConfiguration: sandbox.daytonaSandboxConfiguration(),
-              store,
-            });
-          const teams = teamOrchestration.createTeamOrchestrator({
-            admit: (input) => admission.admitRunnerRun(input, { store }),
-            cancelRun: (_principal, runId) =>
-              reconciliation.cancelRunnerRun(
-                runId,
-                daytonaReconciliation.daytonaRunnerCancellationDependencies({
-                  credentialDependencies,
-                  daytona,
-                  operator: OPERATOR,
-                  store,
-                })
-              ),
-            operator: OPERATOR,
-            store: teamStoreModule.createTeamStore(
-              teamStoreModule.drizzleTeamStoreDatabase(database)
-            ),
-          });
-          const dispatchClaim = configuredClaimDispatcher(
-            database,
-            store,
-            daytona,
-            undefined,
-            findAccount
-          );
-          stage = "reconcile";
-          return reconciliation.reconcileAndDispatch({
-            ...composition,
-            claimTeamRuns: teams.claimReadySteps,
-            dispatch: configuredDispatcher(
-              database,
-              store,
-              daytona,
-              findAccount
-            ),
-            dispatchClaim,
-            projectTeamRuns: teams.projectTerminalSteps,
-          });
-        },
-        store,
-      });
-    } catch (error) {
-      const { RunnerServiceError: RuntimeServiceError } = await import(
-        "./errors"
-      );
-      const runnerError = error instanceof RuntimeServiceError;
-      reportFailure?.(reconciliationFailure(error, stage, runnerError));
-      if (runnerError) {
-        throw error;
-      }
-      // biome-ignore lint/style/useErrorCause: The custom error preserves the sanitized cause through its options.
-      throw new RuntimeServiceError(
-        "reconcile_unavailable",
-        "Runner reconciliation is unavailable.",
-        true,
-        { cause: error }
-      );
-    }
-  };
-}
-
-async function createDaytonaRunnerServiceForPrincipal(
-  databasePrincipal: ProductionDatabasePrincipal,
-  dependencies: ProductionRunnerRuntimeDependencies
-) {
-  const database = await (dependencies.databaseFor ?? productionDatabase)(
-    databasePrincipal
-  );
-  const [
-    client,
-    credentials,
-    process,
-    reconciliation,
-    sandbox,
-    service,
-    daytonaReconciliation,
-    storeModule,
-  ] = await Promise.all([
-    import("./daytona/client"),
-    import("@/lib/credentials/runner-credential"),
-    import("./daytona/process"),
-    import("./attempt-reconcile"),
-    import("./daytona/sandbox"),
-    import("./service"),
-    import("./daytona/reconcile"),
-    import("./store"),
-  ]);
-  const store = storeModule.createRunnerStore(
-    storeModule.drizzleRunnerStoreDatabase(database)
-  );
-  const credentialDependencies =
-    credentials.drizzleRunnerCredentialDependencies(database);
-
-  return service.createRunnerService({
-    cancelRun: (runId) =>
-      reconciliation.cancelRunnerRun(
-        runId,
-        daytonaReconciliation.daytonaRunnerCancellationDependencies({
-          credentialDependencies,
-          daytona: client.daytonaClient(),
-          operator: OPERATOR,
-          store,
-        })
-      ),
-    deleteSandbox: async (
-      principal,
-      agentId
-    ): Promise<RunnerDeleteAgentResult> => {
-      try {
-        const result = await sandbox.deleteDaytonaSandbox(principal, agentId, {
-          daytona: client.daytonaClient(),
-          store,
-        });
-        if (result.kind === "failed") {
-          return result.error === "non_retryable"
-            ? { kind: "provider_rejected" }
-            : { kind: "unavailable", source: "provider" };
-        }
-        return result;
-      } catch {
-        return { kind: "unavailable", source: "database" };
-      }
-    },
-    dispatchClaim: (claimed) => {
-      const daytona = client.daytonaClient();
-      return configuredClaimDispatcher(
-        database,
-        store,
-        daytona,
-        undefined,
-        dependencies.findAccount
-      )(claimed);
-    },
-    listHarnesses: async () => registryHarnesses(),
-    reconcileAndDispatch: daytonaProductionReconcile(
-      database,
-      store,
-      dependencies.findAccount,
-      dependencies.reportReconciliationFailure
-    ),
-    store,
-    warmSandbox: async (
-      principal,
-      agent,
-      options?: RunnerPrewarmOptions
-    ): Promise<RunnerWarmSandboxResult> => {
-      try {
-        const daytona = options?.deadline
-          ? client.daytonaClientForDeadline(options.deadline)
-          : client.daytonaClient();
-        const result = await sandbox.warmDaytonaSandbox(
-          principal,
-          agent,
-          sandbox.daytonaSandboxConfiguration(),
-          {
-            daytona,
-            lifecycle: {
-              deadline: options?.deadline,
-              signal: options?.signal,
-            },
-            probe: async (sandboxHandle, signal, timeoutSeconds, sessionId) => {
-              await process.probeDaytonaHarnesses(sandboxHandle, {
-                deadline: options?.deadline,
-                sessionId,
-                signal,
-                timeoutSeconds,
-              });
-            },
-            store,
-          }
-        );
-        if (result.kind === "failed") {
-          return result.error === "non_retryable"
-            ? { kind: "provider_rejected" }
-            : { kind: "unavailable", source: "provider" };
-        }
-        return result;
-      } catch {
-        return { kind: "unavailable", source: "database" };
-      }
-    },
-  });
 }
 
 function hermeticConfiguredDispatcher(
@@ -774,6 +458,7 @@ function hermeticProductionReconcile(
             credentials,
             reconciliation,
             composition,
+            resourceLifecycleModule,
             teamOrchestration,
             teamStoreModule,
           ] = await Promise.all([
@@ -781,11 +466,14 @@ function hermeticProductionReconcile(
             import("@/lib/credentials/runner-credential"),
             import("./attempt-reconcile"),
             import("./hermetic/composition"),
+            import("./hermetic/resource-lifecycle"),
             import("@/lib/teams/orchestrate"),
             import("@/lib/teams/store"),
           ]);
           const credentialDependencies =
             credentials.drizzleRunnerCredentialDependencies(database);
+          const resourceLifecycle =
+            resourceLifecycleModule.hermeticPersistentResourceLifecycle(store);
           const dependencies =
             composition.hermeticRunnerReconciliationDependencies({
               credentialDependencies,
@@ -796,6 +484,7 @@ function hermeticProductionReconcile(
               },
               limits: admission.admissionLimitsFromEnvironment(),
               operator: OPERATOR,
+              resourceLifecycle,
               store,
             });
           const teams = teamOrchestration.createTeamOrchestrator({
@@ -806,6 +495,7 @@ function hermeticProductionReconcile(
                 composition.hermeticRunnerCancellationDependencies({
                   credentialDependencies,
                   operator: OPERATOR,
+                  resourceLifecycle,
                   store,
                 })
               ),
@@ -865,14 +555,14 @@ async function createHermeticRunnerServiceForPrincipal(
     credentials,
     reconciliation,
     composition,
-    sandbox,
+    resourceLifecycleModule,
     service,
     storeModule,
   ] = await Promise.all([
     import("@/lib/credentials/runner-credential"),
     import("./attempt-reconcile"),
     import("./hermetic/composition"),
-    import("./hermetic/sandbox"),
+    import("./hermetic/resource-lifecycle"),
     import("./service"),
     import("./store"),
   ]);
@@ -881,6 +571,8 @@ async function createHermeticRunnerServiceForPrincipal(
   );
   const credentialDependencies =
     credentials.drizzleRunnerCredentialDependencies(database);
+  const resourceLifecycle =
+    resourceLifecycleModule.hermeticPersistentResourceLifecycle(store);
 
   return service.createRunnerService({
     cancelRun: (runId) =>
@@ -889,11 +581,10 @@ async function createHermeticRunnerServiceForPrincipal(
         composition.hermeticRunnerCancellationDependencies({
           credentialDependencies,
           operator: OPERATOR,
+          resourceLifecycle,
           store,
         })
       ),
-    deleteSandbox: (principal, agentId) =>
-      sandbox.deleteHermeticSandbox(principal, agentId, store),
     dispatchClaim: hermeticConfiguredClaimDispatcher(
       database,
       store,
@@ -907,9 +598,8 @@ async function createHermeticRunnerServiceForPrincipal(
       dependencies.findAccount,
       dependencies.reportReconciliationFailure
     ),
+    resourceLifecycle,
     store,
-    warmSandbox: (principal, agent) =>
-      sandbox.warmHermeticSandbox(principal, agent, store),
   });
 }
 
@@ -918,9 +608,14 @@ async function createProductionRunnerServiceForPrincipal(
   dependencies: ProductionRunnerRuntimeDependencies
 ) {
   const { hermeticRunnerMode } = await import("./hermetic/mode");
-  return hermeticRunnerMode() === "hermetic"
-    ? createHermeticRunnerServiceForPrincipal(databasePrincipal, dependencies)
-    : createDaytonaRunnerServiceForPrincipal(databasePrincipal, dependencies);
+  if (hermeticRunnerMode() === "hermetic") {
+    return createHermeticRunnerServiceForPrincipal(
+      databasePrincipal,
+      dependencies
+    );
+  }
+  const provider = await import("./provider-composition");
+  return provider.createHostedRunnerService(databasePrincipal, dependencies);
 }
 
 export function createProductionRunnerRuntime(

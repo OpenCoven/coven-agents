@@ -15,6 +15,7 @@ import type {
   CancelRunnerRunDependencies,
   ReconcileAndDispatchDependencies,
 } from "../attempt-reconcile";
+import type { RunnerPersistentResourceLifecycle } from "../resource-lifecycle";
 import type { RunnerStore } from "../store";
 import type { RunnerOperator } from "../types";
 import { hermeticRunnerExecutor } from "./executor";
@@ -52,6 +53,10 @@ export type HermeticRunnerReconciliationDependencies = Omit<
   Readonly<{
     batchSize?: number;
     providerConcurrency?: number;
+    resourceLifecycle: Pick<
+      RunnerPersistentResourceLifecycle,
+      "recover" | "reset"
+    >;
   }>;
 
 /**
@@ -80,16 +85,12 @@ export function hermeticRunnerReconciliationDependencies(
         run.id,
         dependencies.credentialDependencies
       ),
+    resourceLifecycle: dependencies.resourceLifecycle,
     rollbackCredentialResources: (run) =>
       rollbackRunnerCredentialResources(
         { runId: run.id, tenant: run.tenant },
         dependencies.credentialDependencies
       ),
-    sandboxRecovery: async () => ({
-      deferred: 0,
-      failures: 0,
-      recovered: 0,
-    }),
     store: dependencies.store,
   };
 }
@@ -99,6 +100,7 @@ export type HermeticRunnerCancellationDependencies = Readonly<{
   credentialDependencies: RunnerCredentialDependencies;
   operator: RunnerOperator;
   randomToken?: () => string;
+  resourceLifecycle: Pick<RunnerPersistentResourceLifecycle, "reset">;
   store: RunnerStore;
 }>;
 
@@ -115,6 +117,7 @@ export function hermeticRunnerCancellationDependencies(
         run.id,
         dependencies.credentialDependencies
       ),
+    resourceLifecycle: dependencies.resourceLifecycle,
     rollbackCredentialResources: (run) =>
       rollbackRunnerCredentialResources(
         { runId: run.id, tenant: run.tenant },

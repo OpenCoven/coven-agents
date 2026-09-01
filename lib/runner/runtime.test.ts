@@ -116,6 +116,7 @@ test("hermetic provider files retain no Daytona SDK boundary", () => {
     "./hermetic/composition.ts",
     "./hermetic/executor.ts",
     "./hermetic/reconcile.ts",
+    "./hermetic/resource-lifecycle.ts",
     "./hermetic/sandbox.ts",
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
@@ -125,7 +126,8 @@ test("hermetic provider files retain no Daytona SDK boundary", () => {
     new URL("./runtime.ts", import.meta.url),
     "utf8"
   );
-  assert.doesNotMatch(runtime, /from ["']\.\/daytona\//u);
+  assert.doesNotMatch(runtime, /(?:@daytona\/sdk|["']\.\/daytona\/)/u);
+  assert.match(runtime, /hermeticPersistentResourceLifecycle/u);
 });
 
 test("core runtime has no diagnostic composition dependency", () => {

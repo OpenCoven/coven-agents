@@ -1,19 +1,19 @@
 import "server-only";
 
 import type { Sandbox } from "@daytona/sdk";
-import { daytonaProbeSessionName, daytonaSandboxName } from "./daytona/names";
+import type { RunnerStore } from "../store";
+import type { RunnerAgentRecord, RunnerOperator } from "../types";
+import { daytonaProbeSessionName, daytonaSandboxName } from "./names";
 import {
   cleanupDaytonaProbeSession,
   type DaytonaProcessSandbox,
-} from "./daytona/process";
+} from "./process";
 import {
   classifyDaytonaProviderError,
   type DaytonaSandboxService,
   SANDBOX_PROVISIONING_TIMEOUT_MS,
   SANDBOX_WARM_TIMEOUT_MS,
-} from "./daytona/sandbox";
-import type { RunnerStore } from "./store";
-import type { RunnerAgentRecord, RunnerOperator } from "./types";
+} from "./sandbox";
 
 const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_PROVIDER_CONCURRENCY = 4;

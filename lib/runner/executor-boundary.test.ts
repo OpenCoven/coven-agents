@@ -5,11 +5,16 @@ import { fileURLToPath } from "node:url";
 
 const admissionPath = fileURLToPath(new URL("./admission.ts", import.meta.url));
 const executorPath = fileURLToPath(new URL("./executor.ts", import.meta.url));
+const resourceLifecyclePath = fileURLToPath(
+  new URL("./resource-lifecycle.ts", import.meta.url)
+);
+const servicePath = fileURLToPath(new URL("./service.ts", import.meta.url));
+const runtimePath = fileURLToPath(new URL("./runtime.ts", import.meta.url));
 const attemptReconcilePath = fileURLToPath(
   new URL("./attempt-reconcile.ts", import.meta.url)
 );
-const deferredDaytonaRecoveryPath = fileURLToPath(
-  new URL("./reconcile.ts", import.meta.url)
+const daytonaResourceRecoveryPath = fileURLToPath(
+  new URL("./daytona/resource-recovery.ts", import.meta.url)
 );
 const daytonaExecutorPath = fileURLToPath(
   new URL("./daytona/executor.ts", import.meta.url)
@@ -45,13 +50,28 @@ test("core attempt reconciliation cannot expose or import Daytona boundaries", (
   );
 });
 
-test("Daytona sandbox recovery remains explicitly deferred outside core attempts", () => {
-  const reconcile = readFileSync(deferredDaytonaRecoveryPath, "utf8");
+test("neutral product modules cannot import Daytona SDK or adapter modules", () => {
+  for (const path of [
+    attemptReconcilePath,
+    executorPath,
+    resourceLifecyclePath,
+    runtimePath,
+    servicePath,
+  ]) {
+    const source = readFileSync(path, "utf8");
+
+    assert.doesNotMatch(source, /@daytona\/sdk/u);
+    assert.doesNotMatch(source, /["']\.\/daytona\//u);
+  }
+});
+
+test("Daytona resource recovery stays inside the provider adapter", () => {
+  const reconcile = readFileSync(daytonaResourceRecoveryPath, "utf8");
 
   assert.match(
     reconcile,
     /reconcileDaytonaSandboxes/u,
-    "provider-specific warm/provision/decommission recovery remains deferred"
+    "provider-specific warm/provision/decommission recovery remains adapter-owned"
   );
 });
 

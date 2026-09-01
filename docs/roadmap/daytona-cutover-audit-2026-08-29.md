@@ -33,7 +33,8 @@ Candidate base:
 - Daytona lifecycle: `lib/runner/daytona/`
 - Durable ownership: `lib/runner/store.ts`
 - SSE recovery: `lib/runner/sse.ts`
-- Reconciliation: `lib/runner/reconcile.ts`
+- Attempt reconciliation: `lib/runner/attempt-reconcile.ts`
+- Persistent resource recovery: `lib/runner/daytona/resource-recovery.ts`
 
 ## Verification procedure
 

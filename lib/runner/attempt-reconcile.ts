@@ -19,6 +19,10 @@ import {
   truncateUtf8,
 } from "./evidence";
 import type { RunEvent, RunSummary } from "./harness";
+import type {
+  RunnerPersistentResourceLifecycle,
+  RunnerResourceResetResult,
+} from "./resource-lifecycle";
 import type { RunnerStore } from "./store";
 import type {
   RunnerClaimedDispatch,
@@ -68,20 +72,6 @@ export type RunnerStopAttemptResult = Readonly<{
     | "stopped";
 }>;
 
-export type RunnerExecutionContextResetResult =
-  | Readonly<{ kind: "provider_not_found" | "reset" }>
-  | Readonly<{
-      kind:
-        | "in_progress"
-        | "not_found"
-        | "sandbox_reset_required"
-        | "stale_version";
-    }>
-  | Readonly<{
-      kind: "unavailable";
-      source: "database" | "provider";
-    }>;
-
 /**
  * Provider-neutral attempt recovery boundary. Only confirmed absence is null;
  * all provider failures throw so callers preserve the durable retry record.
@@ -107,11 +97,6 @@ export type RunnerReconciliationProvider = Readonly<{
       runId: string;
     }>
   ) => Promise<RunnerStopAttemptResult>;
-  /** Fenced reset outcome after a stop cannot confirm exact cleanup. */
-  resetExecutionContext?: (
-    run: RunnerRunRecord,
-    authority: RunnerDispatchAuthority
-  ) => Promise<RunnerExecutionContextResetResult>;
 }>;
 
 type ReconciliationStore = Pick<
@@ -160,12 +145,6 @@ export type RunnerReconciliationExecutionResult =
   | (RunnerReconciliationResult &
       Readonly<{ execution: "skipped"; reason: "overlap" }>);
 
-export type RunnerSandboxRecoveryResult = Readonly<{
-  deferred: number;
-  failures: number;
-  recovered: number;
-}>;
-
 export type ReconcileAndDispatchDependencies = Readonly<{
   batchSize?: number;
   claimTeamRuns?: () => Promise<
@@ -195,8 +174,10 @@ export type ReconcileAndDispatchDependencies = Readonly<{
     Readonly<{ cancellationDeferred: number; failures: number }>
   >;
   releaseCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
+  resourceLifecycle?: Partial<
+    Pick<RunnerPersistentResourceLifecycle, "recover" | "reset">
+  >;
   rollbackCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
-  sandboxRecovery?: (clock: () => Date) => Promise<RunnerSandboxRecoveryResult>;
   store: ReconciliationStore;
 }>;
 
@@ -220,6 +201,7 @@ export type CancelRunnerRunDependencies = Readonly<{
   randomToken?: () => string;
   rollbackCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
   releaseCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
+  resourceLifecycle?: Partial<Pick<RunnerPersistentResourceLifecycle, "reset">>;
   store: CancellationStore;
 }>;
 
@@ -388,19 +370,16 @@ async function retireAttemptRedaction(
   }
 }
 
-async function resetExecutionContextAfterStopFailure(
+async function resetResourceAfterStopFailure(
   run: RunnerRunRecord,
   authority: RunnerDispatchAuthority,
   dependencies: Pick<
     ReconcileAndDispatchDependencies | CancelRunnerRunDependencies,
-    "provider"
+    "resourceLifecycle"
   >
 ): Promise<boolean> {
   try {
-    const reset = await dependencies.provider.resetExecutionContext?.(
-      run,
-      authority
-    );
+    const reset = await dependencies.resourceLifecycle?.reset?.(run, authority);
     return reset?.kind === "reset" || reset?.kind === "provider_not_found";
   } catch {
     return false;
@@ -431,7 +410,7 @@ async function stopTerminalAttempt(
   }
   if (
     stopped.kind === "sandbox_reset_required" &&
-    (await resetExecutionContextAfterStopFailure(run, authority, dependencies))
+    (await resetResourceAfterStopFailure(run, authority, dependencies))
   ) {
     return true;
   }
@@ -563,7 +542,7 @@ async function reconcileAttachedProcess(
       if (
         !providerStopConfirmed(stopped) &&
         (stopped.kind !== "sandbox_reset_required" ||
-          !(await resetExecutionContextAfterStopFailure(
+          !(await resetResourceAfterStopFailure(
             adopted.run,
             adopted.authority,
             dependencies
@@ -885,7 +864,7 @@ async function recoverExpiredDispatch(
     }
     if (
       !providerStopConfirmed(stopped) &&
-      !(await resetExecutionContextAfterStopFailure(
+      !(await resetResourceAfterStopFailure(
         claimed.run,
         claimed.authority,
         dependencies
@@ -1158,17 +1137,14 @@ async function retireCancellationAttemptRedaction(
   }
 }
 
-async function resetExecutionContextForCancellation(
+async function resetResourceForCancellation(
   run: RunnerRunRecord,
   authority: RunnerDispatchAuthority,
   dependencies: CancelRunnerRunDependencies
 ): Promise<CancelRunnerRunResult | null> {
-  let reset: RunnerExecutionContextResetResult;
+  let reset: RunnerResourceResetResult;
   try {
-    reset = (await dependencies.provider.resetExecutionContext?.(
-      run,
-      authority
-    )) ?? {
+    reset = (await dependencies.resourceLifecycle?.reset?.(run, authority)) ?? {
       kind: "sandbox_reset_required",
     };
   } catch {
@@ -1267,7 +1243,7 @@ export async function cancelRunnerRun(
       return { kind: "unavailable", runId, source: "provider" };
     }
     if (stopped.kind === "sandbox_reset_required") {
-      const reset = await resetExecutionContextForCancellation(
+      const reset = await resetResourceForCancellation(
         run,
         authority,
         dependencies
@@ -1390,8 +1366,8 @@ export async function reconcileAndDispatch(
     }
   }
 
-  if (dependencies.sandboxRecovery) {
-    const sandbox = await dependencies.sandboxRecovery(clock);
+  if (dependencies.resourceLifecycle?.recover) {
+    const sandbox = await dependencies.resourceLifecycle.recover(clock);
     result.deferred += sandbox.deferred;
     result.failures += sandbox.failures;
     result.sandboxRecovered += sandbox.recovered;

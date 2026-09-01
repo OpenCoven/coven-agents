@@ -16,16 +16,23 @@ remains in PostgreSQL.
 
 ## Decision
 
-1. **Daytona is the sole execution provider.** Every supported agent lifecycle
-   and run attempt is dispatched through the server-side Daytona adapter.
+1. **Daytona is the sole execution provider.** Every supported production
+   agent lifecycle and run attempt is dispatched through its server-side
+   adapter. The hermetic adapter is certification-only and is unavailable in
+   production.
 2. **Browser APIs are relative and same-origin.** Browser code calls `/api`
    routes and authenticates only with the httpOnly Auth.js application session.
 3. **Authority is server-derived.** Route handlers revalidate the current
    subscriber account and derive the tenant; request bodies cannot select
    either value.
-4. **Credentials and dispatch stay server-only.** Tenant harness credentials
-   are acquired through server-only custody, staged for one attempt, and never
-   returned to browser code. Daytona configuration is server-only.
+4. **Credentials and dispatch stay server-only behind three neutral
+   contracts.** `RunnerExecutor` owns dispatch preparation and starts;
+   `RunnerReconciliationProvider` owns fenced per-attempt inspection and stop;
+   and `RunnerPersistentResourceLifecycle` owns per-agent prewarm,
+   decommission, stale/ambiguous recovery, and reset. Tenant harness
+   credentials are acquired through server-only custody, staged for one
+   attempt, and never returned to browser code. Daytona SDK configuration,
+   identifiers, and handles remain in the adapter.
 5. **PostgreSQL owns execution truth.** Agent, run, event, operation,
    admission, dispatch, attempt, cancellation, sandbox, and reconciliation
    records are durable database state. Provider observations update those
@@ -96,15 +103,18 @@ Costs:
 
 - Browser routes and headers: `lib/agents/browser-transport.ts`
 - Session and tenant enforcement: `lib/runner/http.ts`
-- Dispatch-time authority: `lib/runner/runtime.ts`
+- Provider-neutral runtime composition: `lib/runner/runtime.ts`
+- Provider lifecycle contract: `lib/runner/resource-lifecycle.ts`
 - Daytona lifecycle: `lib/runner/daytona/`
 - Durable ownership: `lib/runner/store.ts`
 - Idempotent admission: `lib/runner/admission.ts`
 - Cursor-safe events: `lib/runner/sse.ts`
-- Recovery and cleanup: `lib/runner/reconcile.ts`
+- Attempt recovery and cleanup: `lib/runner/attempt-reconcile.ts`
+- Persistent resource recovery: `lib/runner/daytona/resource-recovery.ts`
 - Executable guardrails: `scripts/product-boundary.test.ts`,
   `lib/runner/service.test.ts`, `lib/runner/store.test.ts`,
-  `lib/runner/sse.test.ts`, and `lib/runner/reconcile.test.ts`
+  `lib/runner/sse.test.ts`, `lib/runner/reconcile.test.ts`, and
+  `lib/runner/resource-lifecycle.test.ts`
 
 Review this ADR for any browser transport, credential acquisition, provider,
 run-state, SSE, reconciliation, or backend-schema change.
