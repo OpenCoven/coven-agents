@@ -488,7 +488,12 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
         tenant: claimedRun.tenant,
       }) as never,
     executor: executor({
-      ensureExecutionContext: async () => {
+      ensureExecutionContext: async (ensuredAuthority) => {
+        assert.equal(ensuredAuthority.attemptId, attemptId);
+        assert.equal(
+          ensuredAuthority.expectedVersion,
+          authority.expectedVersion + 1
+        );
         calls.push("sandbox");
         return {
           agent: agent({
@@ -511,6 +516,10 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
           runId: input.runId,
         });
         assert.equal(prepared, attemptId);
+        assert.equal(
+          await input.authorizers.authorizePreparation({ runId: input.runId }),
+          attemptId
+        );
         assert.equal(
           await input.persistAttemptRedaction({
             attemptId,
@@ -550,12 +559,12 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
   assert.deepEqual(calls, [
     "claim",
     "get-agent",
+    "authorize-preparation",
     "sandbox",
     "inspect-workspace",
     "credential",
     "commit",
     "start",
-    "authorize-preparation",
     "seal-redaction",
     "persist-redaction",
     "authorize-launch",
@@ -571,6 +580,208 @@ test("dispatch claims before sandbox and credential acquisition", async () => {
     claimedRun.executionPermission
   );
   assert.equal(processInputs[0]?.workspace, claimedRun.agentWorkspace);
+});
+
+test("a failed preparation reservation prevents all executor and credential I/O", async () => {
+  const calls: string[] = [];
+  const claimedRun = run({ executionPermission: "workspace_read" });
+  const authority = {
+    expectedVersion: claimedRun.version,
+    leaseToken: claimedRun.dispatchLeaseToken as string,
+    runId: claimedRun.id,
+  } as RunnerDispatchAuthority;
+
+  const result = await dispatchRunnerClaim(
+    { authority, run: claimedRun },
+    {
+      acquireCredential: async () => {
+        calls.push("credential");
+        throw new Error("must not acquire");
+      },
+      credentialInput: () => {
+        calls.push("credential-input");
+        throw new Error("must not construct");
+      },
+      executor: executor({
+        ensureExecutionContext: async () => {
+          calls.push("ensure");
+          throw new Error("must not ensure");
+        },
+        inspectWorkspaceSafety: async () => {
+          calls.push("inspect");
+          return { kind: "safe" };
+        },
+      }),
+      limits: admissionLimitsFromEnvironment({}),
+      operator,
+      store: {
+        authorizeDaytonaPreparation: async () => {
+          calls.push("prepare");
+          return { kind: "not_live" as const };
+        },
+        getDispatchAgent: async () => {
+          calls.push("get-agent");
+          return { agent: agent(), kind: "found" as const, run: claimedRun };
+        },
+      } as never,
+    }
+  );
+
+  assert.deepEqual(result, {
+    kind: "retained",
+    reason: "launch_fenced",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(calls, ["get-agent", "prepare"]);
+});
+
+test("an ensure failure releases the reserved attempt before requeueing with its returned authority", async () => {
+  const calls: string[] = [];
+  const claimedRun = run();
+  const authority = {
+    expectedVersion: claimedRun.version,
+    leaseToken: claimedRun.dispatchLeaseToken as string,
+    runId: claimedRun.id,
+  } as RunnerDispatchAuthority;
+  const releasedAuthority = {
+    expectedVersion: authority.expectedVersion + 2,
+    leaseToken: authority.leaseToken,
+    runId: authority.runId,
+  } as RunnerDispatchAuthority;
+
+  const result = await dispatchRunnerClaim(
+    { authority, run: claimedRun },
+    {
+      acquireCredential: async () => {
+        calls.push("credential");
+        throw new Error("must not acquire");
+      },
+      credentialInput: () => {
+        calls.push("credential-input");
+        throw new Error("must not construct");
+      },
+      executor: executor({
+        ensureExecutionContext: async () => {
+          calls.push("ensure");
+          throw new Error("sandbox unavailable");
+        },
+      }),
+      limits: admissionLimitsFromEnvironment({}),
+      operator,
+      store: {
+        authorizeDaytonaPreparation: async () => {
+          calls.push("prepare");
+          return {
+            attemptId,
+            authority: {
+              ...authority,
+              attemptId,
+              expectedVersion: authority.expectedVersion + 1,
+            } as RunnerDispatchAuthority,
+            kind: "authorized" as const,
+          };
+        },
+        getDispatchAgent: async () => {
+          calls.push("get-agent");
+          return { agent: agent(), kind: "found" as const, run: claimedRun };
+        },
+        releaseDaytonaPreparation: async (
+          _operator: RunnerOperator,
+          prepared: RunnerDispatchAuthority
+        ) => {
+          calls.push(`release:${prepared.expectedVersion}`);
+          assert.equal(prepared.attemptId, attemptId);
+          return { authority: releasedAuthority, kind: "released" as const };
+        },
+        releaseUnstartedDispatch: async (
+          _operator: RunnerOperator,
+          released: RunnerDispatchAuthority
+        ) => {
+          calls.push(`requeue:${released.expectedVersion}`);
+          assert.equal(released, releasedAuthority);
+          return { kind: "released" as const, value: claimedRun };
+        },
+      } as never,
+    }
+  );
+
+  assert.deepEqual(result, {
+    kind: "retryable",
+    reason: "sandbox_unavailable",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(calls, [
+    "get-agent",
+    "prepare",
+    "ensure",
+    "release:2",
+    "requeue:3",
+  ]);
+});
+
+test("an unprovable preparation release retains its attempt for recovery", async () => {
+  const calls: string[] = [];
+  const claimedRun = run();
+  const authority = {
+    expectedVersion: claimedRun.version,
+    leaseToken: claimedRun.dispatchLeaseToken as string,
+    runId: claimedRun.id,
+  } as RunnerDispatchAuthority;
+
+  const result = await dispatchRunnerClaim(
+    { authority, run: claimedRun },
+    {
+      acquireCredential: async () => {
+        calls.push("credential");
+        throw new Error("must not acquire");
+      },
+      credentialInput: () => {
+        calls.push("credential-input");
+        throw new Error("must not construct");
+      },
+      executor: executor({
+        ensureExecutionContext: async () => {
+          calls.push("ensure");
+          throw new Error("sandbox unavailable");
+        },
+      }),
+      limits: admissionLimitsFromEnvironment({}),
+      operator,
+      store: {
+        authorizeDaytonaPreparation: async () => {
+          calls.push("prepare");
+          return {
+            attemptId,
+            authority: {
+              ...authority,
+              attemptId,
+              expectedVersion: authority.expectedVersion + 1,
+            } as RunnerDispatchAuthority,
+            kind: "authorized" as const,
+          };
+        },
+        getDispatchAgent: async () => {
+          calls.push("get-agent");
+          return { agent: agent(), kind: "found" as const, run: claimedRun };
+        },
+        releaseDaytonaPreparation: async () => {
+          calls.push("release");
+          return { kind: "not_live" as const };
+        },
+        releaseUnstartedDispatch: async () => {
+          calls.push("requeue");
+          return { kind: "released" as const, value: claimedRun };
+        },
+      } as never,
+    }
+  );
+
+  assert.deepEqual(result, {
+    kind: "retained",
+    reason: "cleanup_pending",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(calls, ["get-agent", "prepare", "ensure", "release"]);
 });
 
 test("snapshotted unsupported harness dispatch claims terminalize before sandbox, credential, accounting, or provider work", async () => {
@@ -795,6 +1006,18 @@ test("restricted dispatch rejects repository hook policy before credentials", as
       limits: admissionLimitsFromEnvironment({}),
       operator,
       store: {
+        authorizeDaytonaPreparation: async () => {
+          calls.push("prepare");
+          return {
+            attemptId,
+            authority: {
+              ...authority,
+              attemptId,
+              expectedVersion: authority.expectedVersion + 1,
+            } as RunnerDispatchAuthority,
+            kind: "authorized" as const,
+          };
+        },
         cleanupTerminalLease: async () => {
           calls.push("cleanup");
           return {
@@ -817,9 +1040,11 @@ test("restricted dispatch rejects repository hook policy before credentials", as
               message: string;
               retryable: boolean;
             } | null;
+            expectedVersion: number;
           }
         ) => {
           calls.push("finalize");
+          assert.equal(input.expectedVersion, authority.expectedVersion + 2);
           assert.deepEqual(input.error, {
             code: "workspace_configuration_unsafe",
             message:
@@ -840,6 +1065,16 @@ test("restricted dispatch rejects repository hook policy before credentials", as
             run: claimedRun,
           };
         },
+        releaseDaytonaPreparation: async () => {
+          calls.push("release-preparation");
+          return {
+            authority: {
+              ...authority,
+              expectedVersion: authority.expectedVersion + 2,
+            } as RunnerDispatchAuthority,
+            kind: "released" as const,
+          };
+        },
       } as never,
     }
   );
@@ -851,8 +1086,10 @@ test("restricted dispatch rejects repository hook policy before credentials", as
   });
   assert.deepEqual(calls, [
     "get-agent",
+    "prepare",
     "sandbox",
     "inspect-workspace",
+    "release-preparation",
     "finalize",
     "cleanup",
   ]);
@@ -893,12 +1130,34 @@ test("restricted dispatch waits for an in-progress sandbox warm before inspectio
       limits: admissionLimitsFromEnvironment({}),
       operator,
       store: {
+        authorizeDaytonaPreparation: async () => {
+          calls.push("prepare");
+          return {
+            attemptId,
+            authority: {
+              ...authority,
+              attemptId,
+              expectedVersion: authority.expectedVersion + 1,
+            } as RunnerDispatchAuthority,
+            kind: "authorized" as const,
+          };
+        },
         getDispatchAgent: async () => {
           calls.push("get-agent");
           return {
             agent: agent(),
             kind: "found" as const,
             run: claimedRun,
+          };
+        },
+        releaseDaytonaPreparation: async () => {
+          calls.push("release-preparation");
+          return {
+            authority: {
+              ...authority,
+              expectedVersion: authority.expectedVersion + 2,
+            } as RunnerDispatchAuthority,
+            kind: "released" as const,
           };
         },
         releaseUnstartedDispatch: async () => {
@@ -914,7 +1173,13 @@ test("restricted dispatch waits for an in-progress sandbox warm before inspectio
     reason: "sandbox_unavailable",
     runId: claimedRun.id,
   });
-  assert.deepEqual(calls, ["get-agent", "sandbox", "release"]);
+  assert.deepEqual(calls, [
+    "get-agent",
+    "prepare",
+    "sandbox",
+    "release-preparation",
+    "release",
+  ]);
 });
 
 test("restricted dispatch rejects an unrestricted sandbox trust profile before credentials", async () => {
@@ -952,6 +1217,18 @@ test("restricted dispatch rejects an unrestricted sandbox trust profile before c
       limits: admissionLimitsFromEnvironment({}),
       operator,
       store: {
+        authorizeDaytonaPreparation: async () => {
+          calls.push("prepare");
+          return {
+            attemptId,
+            authority: {
+              ...authority,
+              attemptId,
+              expectedVersion: authority.expectedVersion + 1,
+            } as RunnerDispatchAuthority,
+            kind: "authorized" as const,
+          };
+        },
         cleanupTerminalLease: async () => {
           calls.push("cleanup");
           return {
@@ -997,6 +1274,16 @@ test("restricted dispatch rejects an unrestricted sandbox trust profile before c
             run: claimedRun,
           };
         },
+        releaseDaytonaPreparation: async () => {
+          calls.push("release-preparation");
+          return {
+            authority: {
+              ...authority,
+              expectedVersion: authority.expectedVersion + 2,
+            } as RunnerDispatchAuthority,
+            kind: "released" as const,
+          };
+        },
       } as never,
     }
   );
@@ -1006,7 +1293,14 @@ test("restricted dispatch rejects an unrestricted sandbox trust profile before c
     reason: "workspace",
     runId: claimedRun.id,
   });
-  assert.deepEqual(calls, ["get-agent", "sandbox", "finalize", "cleanup"]);
+  assert.deepEqual(calls, [
+    "get-agent",
+    "prepare",
+    "sandbox",
+    "release-preparation",
+    "finalize",
+    "cleanup",
+  ]);
 });
 
 test("a proven failed launch compensates accounting with the callback's current fence", async () => {
@@ -1096,8 +1390,8 @@ test("a proven failed launch compensates accounting with the callback's current 
     runId: claimedRun.id,
   });
   assert.deepEqual(calls, [
-    "commit",
     "prepare",
+    "commit",
     "release-preparation",
     "compensate",
     "release:3",
@@ -1135,12 +1429,34 @@ test("an accounting commit outage never starts an unaccounted provider command",
     operator,
     randomToken: () => "lease",
     store: {
+      authorizeDaytonaPreparation: async () => {
+        calls.push("prepare-dispatch");
+        return {
+          attemptId,
+          authority: {
+            ...authority,
+            attemptId,
+            expectedVersion: authority.expectedVersion + 1,
+          } as RunnerDispatchAuthority,
+          kind: "authorized" as const,
+        };
+      },
       claimNextDispatch: async () => ({ authority, run: claimedRun }),
       getDispatchAgent: async () => ({
         agent: agent(),
         kind: "found" as const,
         run: claimedRun,
       }),
+      releaseDaytonaPreparation: async () => {
+        calls.push("release-preparation");
+        return {
+          authority: {
+            ...authority,
+            expectedVersion: authority.expectedVersion + 2,
+          } as RunnerDispatchAuthority,
+          kind: "released" as const,
+        };
+      },
       releaseUnstartedDispatch: async () => {
         calls.push("release");
         return { kind: "released" as const, value: claimedRun };
@@ -1153,7 +1469,13 @@ test("an accounting commit outage never starts an unaccounted provider command",
     reason: "credential_unavailable",
     runId: claimedRun.id,
   });
-  assert.deepEqual(calls, ["commit", "compensate", "release"]);
+  assert.deepEqual(calls, [
+    "prepare-dispatch",
+    "commit",
+    "release-preparation",
+    "compensate",
+    "release",
+  ]);
 });
 
 test("missing credentials clean pre-launch state and terminalize without provider work", async () => {
@@ -1224,6 +1546,18 @@ test("missing credentials clean pre-launch state and terminalize without provide
     limits: admissionLimitsFromEnvironment({}),
     operator,
     store: {
+      authorizeDaytonaPreparation: async () => {
+        calls.push("prepare-dispatch");
+        return {
+          attemptId,
+          authority: {
+            ...authority,
+            attemptId,
+            expectedVersion: authority.expectedVersion + 1,
+          } as RunnerDispatchAuthority,
+          kind: "authorized" as const,
+        };
+      },
       claimNextDispatch: async () => {
         calls.push("claim");
         return { authority, run: claimedRun };
@@ -1252,6 +1586,16 @@ test("missing credentials clean pre-launch state and terminalize without provide
           run: claimedRun,
         };
       },
+      releaseDaytonaPreparation: async () => {
+        calls.push("release-preparation");
+        return {
+          authority: {
+            ...authority,
+            expectedVersion: authority.expectedVersion + 2,
+          } as RunnerDispatchAuthority,
+          kind: "released" as const,
+        };
+      },
     } as never,
   });
 
@@ -1268,12 +1612,14 @@ test("missing credentials clean pre-launch state and terminalize without provide
   assert.deepEqual(calls, [
     "claim",
     "get-agent",
+    "prepare-dispatch",
     "sandbox",
     "reserve",
     "issue",
     "lease",
     "prepare",
     "cleanup-prelaunch",
+    "release-preparation",
     "finalize",
     "cleanup-terminal",
   ]);
@@ -1295,6 +1641,18 @@ test("capacity refusal terminalizes the claimed run before freeing its lease", a
     version: authority.expectedVersion + 1,
   });
   const store = {
+    authorizeDaytonaPreparation: async () => {
+      calls.push("prepare");
+      return {
+        attemptId,
+        authority: {
+          ...authority,
+          attemptId,
+          expectedVersion: authority.expectedVersion + 1,
+        } as RunnerDispatchAuthority,
+        kind: "authorized" as const,
+      };
+    },
     claimNextDispatch: async () => ({ authority, run: claimedRun }),
     cleanupTerminalLease: async () => {
       calls.push("cleanup");
@@ -1309,6 +1667,16 @@ test("capacity refusal terminalizes the claimed run before freeing its lease", a
       kind: "found" as const,
       run: claimedRun,
     }),
+    releaseDaytonaPreparation: async () => {
+      calls.push("release-preparation");
+      return {
+        authority: {
+          ...authority,
+          expectedVersion: authority.expectedVersion + 2,
+        } as RunnerDispatchAuthority,
+        kind: "released" as const,
+      };
+    },
   };
   const result = await dispatchNextRunnerRun({
     acquireCredential: async () => ({
@@ -1328,5 +1696,10 @@ test("capacity refusal terminalizes the claimed run before freeing its lease", a
     reason: "capacity",
     runId: claimedRun.id,
   });
-  assert.deepEqual(calls, ["finalize", "cleanup"]);
+  assert.deepEqual(calls, [
+    "prepare",
+    "release-preparation",
+    "finalize",
+    "cleanup",
+  ]);
 });

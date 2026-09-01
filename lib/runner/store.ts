@@ -1849,7 +1849,12 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         const run = await lockedLiveDispatchRun(transaction, authority, [
           "dispatching",
         ]);
-        if (!run || run.daytonaSessionId || run.daytonaCommandId) {
+        if (
+          !run ||
+          run.executionProvenance ||
+          run.daytonaSessionId ||
+          run.daytonaCommandId
+        ) {
           return { kind: "not_live" };
         }
         if (run.daytonaAttemptId) {
@@ -1880,6 +1885,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "dispatchState" = 'dispatching'
                 AND "status" = 'queued'
                 AND "daytonaAttemptId" IS NULL
+                AND "executionProvenance" IS NULL
                 AND "daytonaSessionId" IS NULL
                 AND "daytonaCommandId" IS NULL
               RETURNING *`
@@ -3517,6 +3523,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               SET "daytonaAttemptId" = NULL,
                   "daytonaSessionId" = NULL,
                   "daytonaCommandId" = NULL,
+                  "executionProvenance" = NULL,
                   "updatedAt" = now(),
                   "version" = "version" + 1
               WHERE "id" = ${input.runId}
@@ -3830,6 +3837,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                   "daytonaSessionId" = NULL,
                   "daytonaCommandId" = NULL,
                   "daytonaLogCursor" = 0,
+                  "executionProvenance" = NULL,
                   "dispatchLeaseToken" = NULL,
                   "dispatchLeaseExpiresAt" = NULL,
                   "dispatchState" = 'queued',
@@ -3919,6 +3927,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                   "dispatchState" = 'queued',
                   "status" = 'queued',
                   "startedAt" = NULL,
+                  "executionProvenance" = NULL,
                   "updatedAt" = now(),
                   "version" = "version" + 1
               WHERE "id" = ${input.runId}

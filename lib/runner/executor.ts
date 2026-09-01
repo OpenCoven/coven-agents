@@ -151,6 +151,9 @@ export function runnerDispatchAuthorizers(
       if (preparation.runId !== authority.runId) {
         return null;
       }
+      if (prepared) {
+        return prepared.attemptId as RunnerExecutionAttemptId;
+      }
       const result = await store.authorizeDaytonaPreparation(
         operator,
         authority,

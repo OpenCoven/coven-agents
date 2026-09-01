@@ -1869,6 +1869,7 @@ test("expired attempt recovery requires exact cleanup before requeue", async () 
   assert.match(releaseQuery, /"daytonaAttemptId" = NULL/);
   assert.match(releaseQuery, /"daytonaSessionId" = NULL/);
   assert.match(releaseQuery, /"daytonaCommandId" = NULL/);
+  assert.match(releaseQuery, /"executionProvenance" = NULL/);
   assert.match(releaseQuery, /"daytonaAttemptId" = \$\d+/);
   assert.match(
     releaseQuery,
@@ -1900,6 +1901,7 @@ test("expired attempt recovery requires exact cleanup before requeue", async () 
   assert.match(requeueQuery, /"daytonaAttemptId" IS NULL/);
   assert.match(requeueQuery, /"daytonaSessionId" IS NULL/);
   assert.match(requeueQuery, /"daytonaCommandId" IS NULL/);
+  assert.match(requeueQuery, /"executionProvenance" = NULL/);
 });
 
 test("expired attempt cleanup rotates durable ownership before provider cleanup", async () => {
@@ -2016,6 +2018,7 @@ test("confirmed attempt cleanup releases ownership and requeues atomically", asy
   );
   const update = statements[1] as RunnerStoreStatement;
   assert.match(queryText(update), /"daytonaAttemptId" = NULL/u);
+  assert.match(queryText(update), /"executionProvenance" = NULL/u);
   assert.match(queryText(update), /"daytonaLogCursor" = 0/u);
   assert.match(queryText(update), /"dispatchState" = 'queued'/u);
   assert.match(
@@ -2967,6 +2970,27 @@ test("attempt ownership excludes parallel attempts and stale releases", async ()
       (parallel.statements[0] as RunnerStoreStatement).args,
     false,
     "a claimed attempt cannot be overwritten with a different descriptor"
+  );
+
+  const staleProvenance = scripted([
+    run({
+      daytonaAttemptId: null,
+      executionProvenance,
+      version: authority.expectedVersion,
+    }),
+  ]);
+  assert.deepEqual(
+    await staleProvenance.store.authorizeDaytonaPreparation(
+      operator,
+      authority,
+      { executionProvenance: retryExecutionProvenance }
+    ),
+    { kind: "not_live" }
+  );
+  assert.equal(
+    staleProvenance.statements.length,
+    1,
+    "stale provenance must fence a new attempt before an attachment write"
   );
 
   const staleAuthority = {
