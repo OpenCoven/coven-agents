@@ -20,7 +20,7 @@ function lockSql() {
     .toSQL();
 }
 
-test("subscription overrides lock exactly the selected User and fence their write by authority version", () => {
+test("subscription overrides lock exactly the selected User and fence their write by full authority", () => {
   const locked = lockSql();
   assert.match(locked.sql, /where "User"\."id" = \$1 limit \$2 for update/u);
   assert.deepEqual(locked.params, [USER_ID, 1]);
@@ -31,15 +31,22 @@ test("subscription overrides lock exactly the selected User and fence their writ
     .where(
       subscriptionOverrideWriteFenceWhere({
         expectedAuthVersion: 4,
+        expectedBillingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+        expectedSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
         userId: USER_ID,
       })
     )
     .toSQL();
   assert.match(
     fenced.sql,
-    /where \("User"\."id" = \$1 and "User"\."authVersion" = \$2\)/u
+    /where \("User"\."id" = \$1 and "User"\."authVersion" = \$2 and "User"\."billingPeriodStart" is not distinct from \$3 and "User"\."subscribedUntil" is not distinct from \$4\)/u
   );
-  assert.deepEqual(fenced.params, [USER_ID, 4]);
+  assert.deepEqual(fenced.params, [
+    USER_ID,
+    4,
+    new Date("2026-08-01T00:00:00.000Z"),
+    new Date("2026-09-01T00:00:00.000Z"),
+  ]);
 });
 
 test("subscription override audit schema and generated migration retain only bounded operational evidence", () => {

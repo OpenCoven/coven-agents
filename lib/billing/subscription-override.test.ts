@@ -27,6 +27,10 @@ type State = {
 
 class MemoryOverrideStore implements SubscriptionOverrideStore {
   auditFails = false;
+  entitlementChangeBeforeLock: {
+    billingPeriodStart: Date | null;
+    subscribedUntil: Date | null;
+  } | null = null;
   locks: string[] = [];
   state: State = {
     audit: [],
@@ -48,6 +52,12 @@ class MemoryOverrideStore implements SubscriptionOverrideStore {
     const result = await callback({
       findUserForUpdate: (id) => {
         this.locks.push(id);
+        if (this.entitlementChangeBeforeLock) {
+          draft.user = {
+            ...draft.user,
+            ...this.entitlementChangeBeforeLock,
+          };
+        }
         return Promise.resolve(draft.user.id === id ? draft.user : null);
       },
       insertAudit: (record) => {
@@ -62,7 +72,11 @@ class MemoryOverrideStore implements SubscriptionOverrideStore {
         this.updates += 1;
         if (
           draft.user.id !== input.userId ||
-          draft.user.authVersion !== input.expectedAuthVersion
+          draft.user.authVersion !== input.expectedAuthVersion ||
+          draft.user.billingPeriodStart?.getTime() !==
+            input.expectedBillingPeriodStart?.getTime() ||
+          draft.user.subscribedUntil?.getTime() !==
+            input.expectedSubscribedUntil?.getTime()
         ) {
           return Promise.resolve(false);
         }
@@ -84,6 +98,8 @@ function grant(days = 30) {
   return {
     durationDays: days,
     expectedAuthVersion: 4,
+    expectedBillingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+    expectedSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
     operation: "grant" as const,
     reference: REFERENCE,
     userId: USER_ID,
@@ -135,6 +151,8 @@ test("revoke clears paid authority immediately and invalidates exactly one autho
 
   const result = await applySubscriptionOverride(store, {
     expectedAuthVersion: 4,
+    expectedBillingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+    expectedSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
     operation: "revoke",
     reference: REFERENCE,
     userId: USER_ID,
@@ -230,6 +248,29 @@ test("a stale authority decision is rejected after the owner lock without anothe
   assert.equal(store.updates, 1);
 });
 
+test("an entitlement change without an authority-version change is rejected without an update or audit", async () => {
+  const store = new MemoryOverrideStore();
+  store.entitlementChangeBeforeLock = {
+    billingPeriodStart: new Date("2026-08-15T00:00:00.000Z"),
+    subscribedUntil: new Date("2026-10-01T00:00:00.000Z"),
+  };
+
+  const result = await applySubscriptionOverride(store, grant());
+
+  assert.deepEqual(result, { kind: "authority_changed" });
+  assert.equal(store.updates, 0);
+  assert.deepEqual(store.state.audit, []);
+  assert.equal(store.state.user.authVersion, 4);
+  assert.equal(
+    store.state.user.billingPeriodStart?.toISOString(),
+    "2026-08-15T00:00:00.000Z"
+  );
+  assert.equal(
+    store.state.user.subscribedUntil?.toISOString(),
+    "2026-10-01T00:00:00.000Z"
+  );
+});
+
 test("CLI arguments require an external reference for mutations but not status", () => {
   assert.deepEqual(
     parseSubscriptionCliArguments([
@@ -286,8 +327,9 @@ test("CLI output never reveals the reference and confirms authority invalidation
       findUserByEmail: () =>
         Promise.resolve({
           authVersion: 4,
+          billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
           id: USER_ID,
-          subscribedUntil: null,
+          subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
         }),
       now: () => NOW,
     }
@@ -301,6 +343,8 @@ test("CLI output never reveals the reference and confirms authority invalidation
     {
       durationDays: 30,
       expectedAuthVersion: 4,
+      expectedBillingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+      expectedSubscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
       operation: "grant",
       reference: REFERENCE,
       userId: USER_ID,

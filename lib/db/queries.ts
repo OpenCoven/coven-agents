@@ -151,6 +151,7 @@ export async function findSubscriptionOverrideUserByEmail(
   email: string
 ): Promise<{
   authVersion: number;
+  billingPeriodStart: Date | null;
   id: string;
   subscribedUntil: Date | null;
 } | null> {
@@ -158,6 +159,7 @@ export async function findSubscriptionOverrideUserByEmail(
     const matches = await db
       .select({
         authVersion: user.authVersion,
+        billingPeriodStart: user.billingPeriodStart,
         id: user.id,
         subscribedUntil: user.subscribedUntil,
       })

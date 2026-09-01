@@ -33,6 +33,8 @@ export type SubscriptionOverrideUser = {
 export type SubscriptionOverrideUserUpdate = {
   billingPeriodStart: Date | null;
   expectedAuthVersion: number;
+  expectedBillingPeriodStart: Date | null;
+  expectedSubscribedUntil: Date | null;
   newAuthVersion: number;
   subscribedUntil: Date | null;
   userId: string;
@@ -57,12 +59,16 @@ export type SubscriptionOverrideInput =
   | {
       durationDays: number;
       expectedAuthVersion: number;
+      expectedBillingPeriodStart: Date | null;
+      expectedSubscribedUntil: Date | null;
       operation: "grant";
       reference: string;
       userId: string;
     }
   | {
       expectedAuthVersion: number;
+      expectedBillingPeriodStart: Date | null;
+      expectedSubscribedUntil: Date | null;
       operation: "revoke";
       reference: string;
       userId: string;
@@ -101,6 +107,7 @@ export type SubscriptionOverrideCliDependencies = {
   ) => Promise<SubscriptionOverrideResult>;
   findUserByEmail: (email: string) => Promise<{
     authVersion: number;
+    billingPeriodStart: Date | null;
     id: string;
     subscribedUntil: Date | null;
   } | null>;
@@ -199,12 +206,16 @@ export async function runSubscriptionCli(
       ? {
           durationDays: command.durationDays,
           expectedAuthVersion: user.authVersion,
+          expectedBillingPeriodStart: user.billingPeriodStart,
+          expectedSubscribedUntil: user.subscribedUntil,
           operation: "grant",
           reference: command.reference,
           userId: user.id,
         }
       : {
           expectedAuthVersion: user.authVersion,
+          expectedBillingPeriodStart: user.billingPeriodStart,
+          expectedSubscribedUntil: user.subscribedUntil,
           operation: "revoke",
           reference: command.reference,
           userId: user.id,
@@ -241,7 +252,14 @@ export async function applySubscriptionOverride(
     if (!owner) {
       return { kind: "user_not_found" };
     }
-    if (owner.authVersion !== input.expectedAuthVersion) {
+    if (
+      owner.authVersion !== input.expectedAuthVersion ||
+      !sameTimestamp(
+        owner.billingPeriodStart,
+        input.expectedBillingPeriodStart
+      ) ||
+      !sameTimestamp(owner.subscribedUntil, input.expectedSubscribedUntil)
+    ) {
       return { kind: "authority_changed" };
     }
     if (owner.authVersion >= MAX_AUTH_VERSION) {
@@ -258,6 +276,8 @@ export async function applySubscriptionOverride(
     const updated = await transaction.updateUser({
       billingPeriodStart: input.operation === "grant" ? now : null,
       expectedAuthVersion: owner.authVersion,
+      expectedBillingPeriodStart: input.expectedBillingPeriodStart,
+      expectedSubscribedUntil: input.expectedSubscribedUntil,
       newAuthVersion,
       subscribedUntil,
       userId: owner.id,
@@ -345,6 +365,13 @@ function assertValidDate(value: Date, label: string): void {
   if (!Number.isFinite(value.getTime())) {
     throw new Error(`Subscription ${label} is invalid.`);
   }
+}
+
+function sameTimestamp(left: Date | null, right: Date | null): boolean {
+  return (
+    left === right ||
+    (left !== null && right !== null && left.getTime() === right.getTime())
+  );
 }
 
 function digestReference(reference: string): string {
