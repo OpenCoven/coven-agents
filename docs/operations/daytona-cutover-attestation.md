@@ -105,15 +105,17 @@ manifest showed that Vercel had uploaded the parent checkout. The retained
 application previews were instead built from immutable `git archive` exports
 of the stated commits in non-Git directories:
 
-- deployment `dpl_GGN1brsTesysTpzQWJpVdaLkUyZr` built PR #183 merge commit
+- deployment `dpl_83qug3pWqY3rHQRsJRcjYEABAaqo` built PR #183 merge commit
   `52fe9f8a28b5b06099ad70c25eb6504d70597ee4` with tree
   `28ec05d475ff8464a4fbe2f09e4416714fced78a`;
 - its 42-page route manifest includes the internal runner inventory and Stripe
   reconciliation routes;
 - the bounded v1 cloud health descriptor returned HTTP 200 and an anonymous
   agents request was refused with HTTP 401;
-- the bounded Daytona diagnostic and read-only resource inventory each
-  returned a sanitized retryable HTTP 503. These are safe failures, not
+- the bounded Daytona diagnostic returned sanitized retryable HTTP 503 request
+  `2be60f00-5882-4909-af1d-8f1de5c40695`, and the read-only resource inventory
+  returned sanitized retryable HTTP 503 request
+  `b091ba86-b3df-4cb0-be21-e13df7e0de45`. These are safe failures, not
   successful provider lifecycle or resource-inventory evidence.
 
 The final live environment-name inventory removed the two remaining retired
