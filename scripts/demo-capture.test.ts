@@ -16,6 +16,7 @@ const AGENT_ID = "53af1a29-4e98-43d6-ac5b-3b9dcba5e730";
 const RUN_ID = "3a3f2c72-9b1b-47f7-8c83-28d5f94bf4ce";
 const OPERATION_ID = "3f1a0f4e-1f4d-4a2e-9c1b-7d2f5a6b8c90";
 const CREATED_AT = "2026-08-24T19:03:49.798Z";
+const RECORDER_SUBSCRIBED_UNTIL = new Date("2999-01-01T00:00:00.000Z");
 const RECORDING_CREDENTIAL = "recording-credential-sensitive";
 const AUTH_SECRET = "application-auth-secret-sensitive";
 const SESSION_COOKIE = "session-cookie-sensitive";
@@ -184,7 +185,7 @@ const recorderLookup = {
     email: RECORDER_EMAIL.toLowerCase(),
     emailVerified: true,
     id: RECORDER_ID,
-    subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+    subscribedUntil: RECORDER_SUBSCRIBED_UNTIL,
   }),
 };
 
@@ -501,7 +502,7 @@ test("recorder session cookies come from the verified account authority", async 
             email: RECORDER_EMAIL.toLowerCase(),
             emailVerified: true,
             id: RECORDER_ID,
-            subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+            subscribedUntil: RECORDER_SUBSCRIBED_UNTIL,
           }),
           randomUUID: () => OPERATION_ID,
           request: async () => Response.json({}, { status: 500 }),
@@ -514,7 +515,7 @@ test("recorder session cookies come from the verified account authority", async 
     authVersion: 12,
     email: RECORDER_EMAIL.toLowerCase(),
     id: RECORDER_ID,
-    subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+    subscribedUntil: RECORDER_SUBSCRIBED_UNTIL,
   });
 });
 
@@ -609,7 +610,7 @@ test("sends one authenticated same-origin session cookie on every request includ
         email: RECORDER_EMAIL.toLowerCase(),
         emailVerified: true,
         id: RECORDER_ID,
-        subscribedUntil: new Date("2026-09-01T00:00:00.000Z"),
+        subscribedUntil: RECORDER_SUBSCRIBED_UNTIL,
       }),
       randomUUID: () => OPERATION_ID,
       request,
