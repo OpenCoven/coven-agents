@@ -130,28 +130,50 @@ export function githubOperationMarker(
 
 export function githubOperationTarget(operation: GitHubToolOperation): string {
   const repository = githubOperationRepository(operation);
+  const digest = (value: string) =>
+    `sha256:${createHash("sha256").update(value, "utf8").digest("hex").slice(0, 40)}`;
+  let resource: string;
   switch (operation.kind) {
     case "issue.get":
-      return `${repository}#issue:${operation.issueNumber}`;
+      resource = operation.issueNumber;
+      break;
     case "issue.search":
-      return `${repository}#issue:search`;
+      resource = digest(
+        `${operation.state}\0${operation.limit}\0${operation.query}`
+      );
+      break;
     case "issue.create":
-      return `${repository}#issue:new`;
+      resource = digest(hashGitHubOperation(operation));
+      break;
     case "issue.comment":
-      return `${repository}#issue:${operation.issueNumber}:comment`;
+      resource = operation.issueNumber;
+      break;
     case "pull.get":
-      return `${repository}#pull:${operation.pullNumber}`;
+      resource = operation.pullNumber;
+      break;
     case "pull.create":
-      return `${repository}#pull:new:${operation.head}->${operation.base}`;
+      resource = digest(`${operation.head}\0${operation.base}`);
+      break;
     case "pull.comment":
-      return `${repository}#pull:${operation.pullNumber}:comment`;
+      resource = operation.pullNumber;
+      break;
     case "pull.review":
-      return `${repository}#pull:${operation.pullNumber}:review`;
+      resource = operation.pullNumber;
+      break;
     case "project.item.add":
-      return `${repository}#project:${operation.projectId}:add:${operation.contentId}`;
+      resource = digest(`${operation.projectId}\0${operation.contentId}`);
+      break;
     case "project.item.field.update":
-      return `${repository}#project:${operation.projectId}:item:${operation.itemId}:field:${operation.fieldId}`;
+      resource = digest(
+        `${operation.projectId}\0${operation.itemId}\0${operation.fieldId}`
+      );
+      break;
     default:
       throw new TypeError("Unsupported GitHub operation target.");
   }
+  const target = `${repository}#${operation.kind}:${resource}`;
+  if (Buffer.byteLength(target, "utf8") > 512) {
+    throw new TypeError("GitHub operation target exceeds its audit bound.");
+  }
+  return target;
 }

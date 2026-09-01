@@ -1301,6 +1301,7 @@ export const runnerGitHubCapability = pgTable(
     teamStepId: uuid("teamStepId").notNull(),
     tenant: varchar("tenant", { length: 64 }).notNull(),
     tokenHash: varchar("tokenHash", { length: 64 }).notNull(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
     usedCallCount: integer("usedCallCount").notNull().default(0),
     version: integer("version").notNull().default(0),
   },
@@ -1360,16 +1361,23 @@ export type RunnerGitHubCapability = InferSelectModel<
 export const runnerGitHubOperation = pgTable(
   "RunnerGitHubOperation",
   {
+    accountId: varchar("accountId", { length: 20 }).notNull(),
+    accountLogin: varchar("accountLogin", { length: 100 }).notNull(),
+    accountType: varchar("accountType", {
+      enum: ["Organization", "User"],
+      length: 16,
+    }).notNull(),
     capabilityId: uuid("capabilityId").notNull(),
     completedAt: timestamp("completedAt"),
     connectionGeneration: bigint("connectionGeneration", {
       mode: "number",
     }).notNull(),
-    connectionId: uuid("connectionId").notNull(),
+    connectionId: uuid("connectionId"),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
     error: jsonb("error").$type<RunError>(),
     executionLeaseExpiresAt: timestamp("executionLeaseExpiresAt").notNull(),
     id: uuid("id").primaryKey().notNull().defaultRandom(),
+    installationId: varchar("installationId", { length: 20 }).notNull(),
     kind: varchar("kind", {
       enum: [
         "issue.get",
@@ -1391,6 +1399,12 @@ export const runnerGitHubOperation = pgTable(
     operationMarker: varchar("operationMarker", { length: 80 }),
     providerRequestId: varchar("providerRequestId", { length: 256 }),
     repository: varchar("repository", { length: 201 }).notNull(),
+    repositoryId: varchar("repositoryId", { length: 20 }).notNull(),
+    repositoryName: varchar("repositoryName", { length: 100 }).notNull(),
+    repositoryNodeId: varchar("repositoryNodeId", {
+      length: 256,
+    }).notNull(),
+    repositoryOwner: varchar("repositoryOwner", { length: 100 }).notNull(),
     requestHash: varchar("requestHash", { length: 64 }).notNull(),
     requiredCapability: varchar("requiredCapability", {
       enum: [
@@ -1429,6 +1443,11 @@ export const runnerGitHubOperation = pgTable(
       table.operationId
     ),
     unique("RGHOp_tenant_operation_uq").on(table.tenant, table.operationId),
+    uniqueIndex("RGHOp_step_write_intent_uq")
+      .on(table.tenant, table.teamStepId, table.kind, table.requestHash)
+      .where(
+        sql`${table.kind} in ('issue.create','issue.comment','pull.create','pull.comment','pull.review','project.item.add','project.item.field.update')`
+      ),
     foreignKey({
       columns: [table.teamStepId, table.tenant],
       foreignColumns: [runnerTeamStep.id, runnerTeamStep.tenant],
@@ -1444,13 +1463,10 @@ export const runnerGitHubOperation = pgTable(
       name: "RGHOp_capability_fk",
     }).onDelete("restrict"),
     foreignKey({
-      columns: [table.connectionId, table.tenant],
-      foreignColumns: [
-        runnerGitHubConnection.id,
-        runnerGitHubConnection.tenant,
-      ],
+      columns: [table.connectionId],
+      foreignColumns: [runnerGitHubConnection.id],
       name: "RunnerGitHubOperation_connection_fk",
-    }).onDelete("restrict"),
+    }).onDelete("set null"),
     index("RGHOp_status_updated_idx").on(table.status, table.updatedAt),
     check("RGHOp_tenant_valid", sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`),
     check(
@@ -1468,6 +1484,10 @@ export const runnerGitHubOperation = pgTable(
     check(
       "RGHOp_binding_valid",
       sql`${table.connectionGeneration} >= 0 and ${table.repository} ~ '^[a-z0-9_.-]{1,100}/[a-z0-9_.-]{1,100}$' and ${table.requiredCapability} in ('github.issues.read','github.issues.write','github.pull_requests.read','github.pull_requests.write','github.projects.read','github.projects.write')`
+    ),
+    check(
+      "RGHOp_connectionSnapshot_valid",
+      sql`${table.installationId} ~ '^[1-9][0-9]{0,19}$' and ${table.accountId} ~ '^[1-9][0-9]{0,19}$' and ${table.repositoryId} ~ '^[1-9][0-9]{0,19}$' and ${table.accountType} in ('Organization','User') and char_length(${table.repositoryNodeId}) between 1 and 256 and ${table.repositoryNodeId} ~ '^[A-Za-z0-9_=-]+$'`
     ),
     check(
       "RGHOp_capability_mapping_valid",

@@ -337,6 +337,9 @@ function authorityRow(overrides: Record<string, unknown> = {}) {
 
 function operationRow(overrides: Record<string, unknown> = {}) {
   return {
+    accountId: "123",
+    accountLogin: "OpenCoven",
+    accountType: "Organization",
     capabilityId: CAPABILITY_ID,
     completedAt: null,
     connectionGeneration: 9,
@@ -345,11 +348,16 @@ function operationRow(overrides: Record<string, unknown> = {}) {
     error: null,
     executionLeaseExpiresAt: new Date("2026-08-31T20:00:30.000Z"),
     id: OPERATION_ROW_ID,
+    installationId: "456",
     kind: "issue.get",
     operationId: OPERATION_ID,
     operationMarker: null,
     providerRequestId: null,
     repository: "opencoven/coven-agents",
+    repositoryId: "789",
+    repositoryName: "coven-agents",
+    repositoryNodeId: "R_kgDOExample",
+    repositoryOwner: "OpenCoven",
     requestHash: hashGitHubOperation({
       issueNumber: "42",
       kind: "issue.get",
@@ -362,7 +370,7 @@ function operationRow(overrides: Record<string, unknown> = {}) {
     resultUrl: null,
     startedAt: NOW,
     status: "running",
-    target: "opencoven/coven-agents#issue:42",
+    target: "opencoven/coven-agents#issue.get:42",
     teamStepId: TEAM_STEP_ID,
     tenant: TENANT,
     updatedAt: NOW,
@@ -536,9 +544,77 @@ test("operation id reuse conflicts across request, capability, step, or reposito
       tokenHash: "a".repeat(64),
       ...scenario.changed,
     });
+
     assert.equal(result.kind, "conflict");
     assert.equal(conflict.statements.length, 2);
   }
+});
+
+test("a different operation id cannot reserve the same write intent in one step", async () => {
+  const operation = {
+    body: "Approved change.",
+    issueNumber: "42",
+    kind: "issue.comment" as const,
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const requestHash = hashGitHubOperation(operation);
+  const existingIntent = operationRow({
+    kind: operation.kind,
+    operationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    operationMarker:
+      "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->",
+    requestHash,
+    requiredCapability: "github.issues.write",
+  });
+  const intentConflict = scripted(
+    [
+      authorityRow({
+        allowedCapabilities: ["github.issues.write"],
+        approvedCapabilities: ["github.issues.write"],
+        declaredCapabilities: ["github.issues.write"],
+        persistedBrokerPolicy: policy(
+          ["github.issues.write"],
+          ["github.issues.write"]
+        ),
+        runnerBrokerPolicy: policy(
+          ["github.issues.write"],
+          ["github.issues.write"]
+        ),
+        stepApprovalStatus: "approved",
+        stepApprovedCapabilities: ["github.issues.write"],
+        stepDeclaredCapabilities: ["github.issues.write"],
+      }),
+    ],
+    [],
+    [existingIntent]
+  );
+
+  const result = await intentConflict.store.reserveOperation(operator, {
+    executionLeaseExpiresAt: new Date("2026-08-31T20:00:30.000Z"),
+    id: OPERATION_ROW_ID,
+    operation,
+    operationId: OPERATION_ID,
+    operationMarker:
+      "<!-- coven-github:v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->",
+    requestHash,
+    target: "opencoven/coven-agents#issue.comment:42",
+    tokenHash: "a".repeat(64),
+  });
+
+  assert.equal(result.kind, "intent_conflict");
+  assert.equal(
+    result.kind === "intent_conflict" && result.operation.operationId,
+    existingIntent.operationId
+  );
+  assert.deepEqual(
+    intentConflict.statements.map(({ name }) => name),
+    [
+      "lock-github-capability-authority",
+      "lock-existing-github-operation",
+      "lock-existing-github-write-intent",
+    ]
+  );
 });
 
 test("revocation, expiry, cancellation, auth version, generation, approval, and budget fences fail closed", async () => {
@@ -583,7 +659,7 @@ test("revocation, expiry, cancellation, auth version, generation, approval, and 
       operationMarker:
         "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->",
       requestHash: hashGitHubOperation(operation),
-      target: "opencoven/coven-agents#issue:42",
+      target: "opencoven/coven-agents#issue.get:42",
       tokenHash: "a".repeat(64),
     });
     assert.equal(result.kind, "unauthorized");

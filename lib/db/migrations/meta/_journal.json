@@ -204,6 +204,13 @@
       "when": 1788237080001,
       "tag": "0028_gateway_security_fences",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1788243716559,
+      "tag": "0029_preserve_github_operation_receipts",
+      "breakpoints": true
     }
   ]
 }

@@ -198,3 +198,75 @@ test("0028 adds database-level capability, marker, mapping, expiry, and immutabi
     assert.match(migration, new RegExp(trigger, "u"));
   }
 });
+
+test("0029 preserves immutable operation receipts while live connections can be deleted", async () => {
+  const [migration, snapshotText] = await Promise.all([
+    readFile(
+      new URL("0029_preserve_github_operation_receipts.sql", migrations),
+      "utf8"
+    ),
+    readFile(new URL("meta/0029_snapshot.json", migrations), "utf8"),
+  ]);
+  for (const column of [
+    "accountId",
+    "accountLogin",
+    "accountType",
+    "installationId",
+    "repositoryId",
+    "repositoryName",
+    "repositoryNodeId",
+    "repositoryOwner",
+  ]) {
+    assert.match(
+      migration,
+      new RegExp(
+        `ALTER TABLE "RunnerGitHubOperation" ADD COLUMN "${column}"`,
+        "u"
+      )
+    );
+  }
+  assert.match(
+    migration,
+    /DROP CONSTRAINT "RunnerGitHubOperation_connection_fk"/u
+  );
+  assert.match(migration, /ALTER COLUMN "connectionId" DROP NOT NULL/u);
+  assert.match(migration, /ON DELETE set null/iu);
+  assert.match(
+    migration,
+    /RunnerGitHubOperation_validate_live_connection[\s\S]*"tenant" = NEW\."tenant"/u
+  );
+  assert.match(migration, /RGHOp_step_write_intent_uq/u);
+  assert.match(
+    migration,
+    /CREATE OR REPLACE FUNCTION "RunnerGitHubOperation_reject_request_change"/u
+  );
+  assert.match(
+    migration,
+    /CREATE OR REPLACE FUNCTION "RunnerGitHubOperation_enforce_terminal_state"[\s\S]*to_jsonb\(NEW\) - 'connectionId'/u
+  );
+
+  const snapshot = JSON.parse(snapshotText) as {
+    tables: Record<
+      string,
+      {
+        columns: Record<string, { notNull: boolean }>;
+        foreignKeys: Record<string, { onDelete: string }>;
+        indexes: Record<string, { isUnique: boolean; where?: string }>;
+      }
+    >;
+  };
+  const operation = snapshot.tables["public.RunnerGitHubOperation"];
+  const capability = snapshot.tables["public.RunnerGitHubCapability"];
+  assert.equal(capability.columns.updatedAt.notNull, true);
+  assert.equal(operation.columns.connectionId.notNull, false);
+  assert.equal(operation.columns.installationId.notNull, true);
+  assert.equal(
+    operation.foreignKeys.RunnerGitHubOperation_connection_fk.onDelete,
+    "set null"
+  );
+  assert.equal(operation.indexes.RGHOp_step_write_intent_uq.isUnique, true);
+  assert.match(
+    operation.indexes.RGHOp_step_write_intent_uq.where ?? "",
+    /issue\.create|pull\.create|project\.item/u
+  );
+});

@@ -4,6 +4,7 @@ import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 import {
   GITHUB_TOOL_LIMITS,
+  GITHUB_TOOL_SERVER_DEADLINE_MS,
   type GitHubOperationReceipt,
   type GitHubToolOperation,
   type GitHubToolResult,
@@ -50,6 +51,7 @@ export type GitHubOperationProvider = Readonly<{
     input: Readonly<{
       authorizeMutation: () => Promise<boolean>;
       context: GitHubOperationExecutionContext;
+      deadlineAt?: number;
       mode: "execute" | "recover";
       operation: GitHubToolOperation;
     }>
@@ -58,6 +60,7 @@ export type GitHubOperationProvider = Readonly<{
 
 export class GitHubToolProviderError extends Error {
   readonly code: string;
+  readonly mutationMayHaveReached: boolean;
   readonly providerRequestId: string | null;
   readonly retryable: boolean;
   readonly status: number;
@@ -67,6 +70,7 @@ export class GitHubToolProviderError extends Error {
     code: string,
     input: Readonly<{
       providerRequestId?: string | null;
+      mutationMayHaveReached?: boolean;
       retryable: boolean;
       status: number;
       uncertain?: boolean;
@@ -75,6 +79,7 @@ export class GitHubToolProviderError extends Error {
     super("GitHub tool provider request failed.");
     this.name = "GitHubToolProviderError";
     this.code = code;
+    this.mutationMayHaveReached = input.mutationMayHaveReached ?? false;
     this.providerRequestId = input.providerRequestId ?? null;
     this.retryable = input.retryable;
     this.status = input.status;
@@ -442,11 +447,20 @@ const PROJECT_FIELD_TARGETS = `query CovenProjectItemFieldTargets($projectId: ID
         }
         fieldValues(first: 100) {
           nodes {
+            __typename
             ... on ProjectV2ItemFieldTextValue { field { ... on ProjectV2FieldCommon { id } } text }
             ... on ProjectV2ItemFieldNumberValue { field { ... on ProjectV2FieldCommon { id } } number }
             ... on ProjectV2ItemFieldDateValue { field { ... on ProjectV2FieldCommon { id } } date }
             ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2FieldCommon { id } } optionId }
             ... on ProjectV2ItemFieldIterationValue { field { ... on ProjectV2FieldCommon { id } } iterationId }
+            ... on ProjectV2ItemFieldLabelValue { field { ... on ProjectV2FieldCommon { id } } }
+            ... on ProjectV2ItemFieldMilestoneValue { field { ... on ProjectV2FieldCommon { id } } }
+            ... on ProjectV2ItemFieldMultiSelectValue { field { ... on ProjectV2FieldCommon { id } } }
+            ... on ProjectV2ItemFieldPullRequestValue { field { ... on ProjectV2FieldCommon { id } } }
+            ... on ProjectV2ItemFieldRepositoryValue { field { ... on ProjectV2FieldCommon { id } } }
+            ... on ProjectV2ItemFieldReviewerValue { field { ... on ProjectV2FieldCommon { id } } }
+            ... on ProjectV2ItemFieldUserValue { field { ... on ProjectV2FieldCommon { id } } }
+            ... on ProjectV2ItemIssueFieldValue { field { ... on ProjectV2FieldCommon { id } } }
           }
         }
       }
@@ -465,6 +479,7 @@ const PROJECT_FIELD_CLEAR = `mutation CovenProjectItemFieldClear($projectId: ID!
 
 export function createGitHubOperationProvider(
   input: Readonly<{
+    clock?: () => number;
     fetch?: FetchLike;
     maxResponseBytes?: number;
     timeoutMs?: number;
@@ -472,14 +487,26 @@ export function createGitHubOperationProvider(
   }>
 ): GitHubOperationProvider {
   const fetchImpl = input.fetch ?? ((url, init) => fetch(url, init));
+  const clock = input.clock ?? Date.now;
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxResponseBytes = input.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
 
-  async function request(
+  async function requestJson(
     authorization: string,
     path: string,
-    init: RequestInit = {}
+    init: RequestInit = {},
+    requestKind: "mutation" | "read" = "read",
+    deadlineAt = Number.POSITIVE_INFINITY
   ): Promise<Readonly<{ body: unknown; requestId: string | null }>> {
+    const remaining = deadlineAt - clock();
+    if (!(remaining > 0)) {
+      throw new GitHubToolProviderError("github_provider_timeout", {
+        mutationMayHaveReached: requestKind === "mutation",
+        retryable: requestKind === "read",
+        status: 503,
+      });
+    }
+    const effectiveTimeout = Math.min(timeoutMs, remaining);
     const controller = new AbortController();
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -489,11 +516,12 @@ export function createGitHubOperationProvider(
         controller.abort();
         reject(
           new GitHubToolProviderError("github_provider_timeout", {
+            mutationMayHaveReached: requestKind === "mutation",
             retryable: true,
             status: 503,
           })
         );
-      }, timeoutMs);
+      }, effectiveTimeout);
     });
     const operation = async () => {
       let response: Response;
@@ -517,6 +545,7 @@ export function createGitHubOperationProvider(
             ? "github_provider_timeout"
             : "github_provider_unavailable",
           {
+            mutationMayHaveReached: requestKind === "mutation",
             retryable: true,
             status: 503,
           }
@@ -538,6 +567,9 @@ export function createGitHubOperationProvider(
                 ? "github_provider_unavailable"
                 : "github_provider_rejected",
           {
+            mutationMayHaveReached:
+              requestKind === "mutation" &&
+              (response.status >= 500 || rateLimited),
             providerRequestId: requestId,
             retryable: rateLimited || response.status >= 500,
             status: rateLimited
@@ -548,14 +580,37 @@ export function createGitHubOperationProvider(
           }
         );
       }
-      const text = await readBoundedText(response, maxResponseBytes);
+      let text: string;
+      try {
+        text = await readBoundedText(response, maxResponseBytes);
+      } catch (error) {
+        if (error instanceof GitHubToolProviderError) {
+          throw new GitHubToolProviderError(error.code, {
+            mutationMayHaveReached: requestKind === "mutation",
+            providerRequestId: requestId ?? error.providerRequestId,
+            retryable: error.retryable,
+            status: error.status,
+          });
+        }
+        throw new GitHubToolProviderError("github_provider_response_reset", {
+          mutationMayHaveReached: requestKind === "mutation",
+          providerRequestId: requestId,
+          retryable: requestKind === "read",
+          status: 502,
+        });
+      }
       try {
         return {
           body: text ? (JSON.parse(text) as unknown) : null,
           requestId,
         };
       } catch {
-        throw invalidResponse();
+        throw new GitHubToolProviderError("github_provider_invalid_response", {
+          mutationMayHaveReached: requestKind === "mutation",
+          providerRequestId: requestId,
+          retryable: requestKind === "read",
+          status: 502,
+        });
       }
     };
     try {
@@ -659,6 +714,31 @@ export function createGitHubOperationProvider(
     });
   }
 
+  function parseMutationResult<T>(
+    response: Readonly<{ body: unknown; requestId: string | null }>,
+    parse: () => T
+  ): T {
+    try {
+      return parse();
+    } catch (error) {
+      if (error instanceof GitHubToolProviderError) {
+        throw new GitHubToolProviderError(error.code, {
+          mutationMayHaveReached: true,
+          providerRequestId: response.requestId ?? error.providerRequestId,
+          retryable: error.retryable,
+          status: error.status,
+          uncertain: error.uncertain,
+        });
+      }
+      throw new GitHubToolProviderError("github_provider_invalid_response", {
+        mutationMayHaveReached: true,
+        providerRequestId: response.requestId,
+        retryable: false,
+        status: 502,
+      });
+    }
+  }
+
   async function executeWrite(
     execution: Parameters<GitHubOperationProvider["execute"]>[0],
     mutate: () => Promise<GitHubProviderOperationResult>,
@@ -677,10 +757,7 @@ export function createGitHubOperationProvider(
       if (
         !(
           error instanceof GitHubToolProviderError &&
-          (error.code === "github_provider_timeout" ||
-            error.code === "github_provider_unavailable" ||
-            error.code === "github_provider_invalid_response" ||
-            error.code === "github_provider_response_too_large")
+          error.mutationMayHaveReached
         )
       ) {
         throw error;
@@ -701,16 +778,24 @@ export function createGitHubOperationProvider(
     }
   }
 
-  async function graphql(
+  async function graphqlJson(
     authorization: string,
     operationName: string,
     query: string,
-    variables: Readonly<Record<string, unknown>>
+    variables: Readonly<Record<string, unknown>>,
+    requestKind: "mutation" | "read" = "read",
+    deadlineAt = Number.POSITIVE_INFINITY
   ) {
-    return request(authorization, "/graphql", {
-      body: JSON.stringify({ operationName, query, variables }),
-      method: "POST",
-    });
+    return requestJson(
+      authorization,
+      "/graphql",
+      {
+        body: JSON.stringify({ operationName, query, variables }),
+        method: "POST",
+      },
+      requestKind,
+      deadlineAt
+    );
   }
 
   function validateContentIdentity(
@@ -810,8 +895,21 @@ export function createGitHubOperationProvider(
       { kind: "project.item.field.update" }
     >
   ): boolean {
+    const supportedTypes = new Set([
+      "ProjectV2ItemFieldTextValue",
+      "ProjectV2ItemFieldNumberValue",
+      "ProjectV2ItemFieldDateValue",
+      "ProjectV2ItemFieldSingleSelectValue",
+      "ProjectV2ItemFieldIterationValue",
+    ]);
     const matching = nodes.filter((node) => {
       const body = object(node);
+      if (
+        typeof body.__typename !== "string" ||
+        !supportedTypes.has(body.__typename)
+      ) {
+        return false;
+      }
       return object(body.field).id === operation.fieldId;
     });
     if (operation.value.kind === "clear") {
@@ -821,15 +919,30 @@ export function createGitHubOperationProvider(
       const body = object(node);
       switch (operation.value.kind) {
         case "date":
-          return body.date === operation.value.date;
+          return (
+            body.__typename === "ProjectV2ItemFieldDateValue" &&
+            body.date === operation.value.date
+          );
         case "iteration":
-          return body.iterationId === operation.value.iterationId;
+          return (
+            body.__typename === "ProjectV2ItemFieldIterationValue" &&
+            body.iterationId === operation.value.iterationId
+          );
         case "number":
-          return body.number === operation.value.number;
+          return (
+            body.__typename === "ProjectV2ItemFieldNumberValue" &&
+            body.number === operation.value.number
+          );
         case "single_select":
-          return body.optionId === operation.value.optionId;
+          return (
+            body.__typename === "ProjectV2ItemFieldSingleSelectValue" &&
+            body.optionId === operation.value.optionId
+          );
         case "text":
-          return body.text === operation.value.text;
+          return (
+            body.__typename === "ProjectV2ItemFieldTextValue" &&
+            body.text === operation.value.text
+          );
         default:
           return false;
       }
@@ -842,6 +955,29 @@ export function createGitHubOperationProvider(
     authorization: string
   ): Promise<GitHubProviderOperationResult> {
     const { context } = execution;
+    const deadlineAt =
+      execution.deadlineAt ?? clock() + GITHUB_TOOL_SERVER_DEADLINE_MS;
+    const request = (
+      requestAuthorization: string,
+      path: string,
+      init: RequestInit = {},
+      requestKind: "mutation" | "read" = "read"
+    ) => requestJson(requestAuthorization, path, init, requestKind, deadlineAt);
+    const graphql = (
+      requestAuthorization: string,
+      operationName: string,
+      query: string,
+      variables: Readonly<Record<string, unknown>>,
+      requestKind: "mutation" | "read" = "read"
+    ) =>
+      graphqlJson(
+        requestAuthorization,
+        operationName,
+        query,
+        variables,
+        requestKind,
+        deadlineAt
+      );
     const basePath = repositoryPath(context);
     switch (operation.kind) {
       case "issue.get": {
@@ -967,11 +1103,14 @@ export function createGitHubOperationProvider(
                   title: operation.title,
                 }),
                 method: "POST",
-              }
+              },
+              "mutation"
             );
-            return withRequestId(
-              issueResult(context, response.body, "issue.create"),
-              response.requestId
+            return parseMutationResult(response, () =>
+              withRequestId(
+                issueResult(context, response.body, "issue.create"),
+                response.requestId
+              )
             );
           },
           recover
@@ -1025,11 +1164,14 @@ export function createGitHubOperationProvider(
                   body: appendMarker(operation.body, operationMarker),
                 }),
                 method: "POST",
-              }
+              },
+              "mutation"
             );
-            return withRequestId(
-              commentResult(context, response.body, "issue.comment"),
-              response.requestId
+            return parseMutationResult(response, () =>
+              withRequestId(
+                commentResult(context, response.body, "issue.comment"),
+                response.requestId
+              )
             );
           },
           recover
@@ -1074,19 +1216,26 @@ export function createGitHubOperationProvider(
           execution,
           async () => {
             await authorizeMutation(execution.authorizeMutation);
-            const response = await request(authorization, `${basePath}/pulls`, {
-              body: JSON.stringify({
-                base: operation.base,
-                body: appendMarker(operation.body, operationMarker),
-                draft: operation.draft,
-                head: operation.head,
-                title: operation.title,
-              }),
-              method: "POST",
-            });
-            return withRequestId(
-              pullResult(context, response.body, "pull.create"),
-              response.requestId
+            const response = await request(
+              authorization,
+              `${basePath}/pulls`,
+              {
+                body: JSON.stringify({
+                  base: operation.base,
+                  body: appendMarker(operation.body, operationMarker),
+                  draft: operation.draft,
+                  head: operation.head,
+                  title: operation.title,
+                }),
+                method: "POST",
+              },
+              "mutation"
+            );
+            return parseMutationResult(response, () =>
+              withRequestId(
+                pullResult(context, response.body, "pull.create"),
+                response.requestId
+              )
             );
           },
           recover
@@ -1137,11 +1286,14 @@ export function createGitHubOperationProvider(
                   body: appendMarker(operation.body, operationMarker),
                 }),
                 method: "POST",
-              }
+              },
+              "mutation"
             );
-            return withRequestId(
-              commentResult(context, response.body, "pull.comment"),
-              response.requestId
+            return parseMutationResult(response, () =>
+              withRequestId(
+                commentResult(context, response.body, "pull.comment"),
+                response.requestId
+              )
             );
           },
           recover
@@ -1195,11 +1347,14 @@ export function createGitHubOperationProvider(
                         : "COMMENT",
                 }),
                 method: "POST",
-              }
+              },
+              "mutation"
             );
-            return withRequestId(
-              reviewResult(context, response.body),
-              response.requestId
+            return parseMutationResult(response, () =>
+              withRequestId(
+                reviewResult(context, response.body),
+                response.requestId
+              )
             );
           },
           recover
@@ -1260,19 +1415,22 @@ export function createGitHubOperationProvider(
               {
                 contentId: operation.contentId,
                 projectId: operation.projectId,
-              }
+              },
+              "mutation"
             );
-            const item = object(
-              object(graphqlData(response.body).addProjectV2ItemById).item
-            );
-            return withRequestId(
-              projectResult(context, {
-                itemId: string(item.id, 256, NODE_ID),
-                kind: operation.kind,
-                projectId: operation.projectId,
-              }),
-              response.requestId
-            );
+            return parseMutationResult(response, () => {
+              const item = object(
+                object(graphqlData(response.body).addProjectV2ItemById).item
+              );
+              return withRequestId(
+                projectResult(context, {
+                  itemId: string(item.id, 256, NODE_ID),
+                  kind: operation.kind,
+                  projectId: operation.projectId,
+                }),
+                response.requestId
+              );
+            });
           },
           async () => {
             const recovered = await inspect();
@@ -1393,28 +1551,31 @@ export function createGitHubOperationProvider(
                 itemId: operation.itemId,
                 projectId: operation.projectId,
                 ...(value ? { value } : {}),
+              },
+              "mutation"
+            );
+            return parseMutationResult(response, () => {
+              const mutation = object(
+                graphqlData(response.body)[
+                  clear
+                    ? "clearProjectV2ItemFieldValue"
+                    : "updateProjectV2ItemFieldValue"
+                ]
+              );
+              const item = object(mutation.projectV2Item);
+              if (item.id !== operation.itemId) {
+                throw invalidResponse();
               }
-            );
-            const mutation = object(
-              graphqlData(response.body)[
-                clear
-                  ? "clearProjectV2ItemFieldValue"
-                  : "updateProjectV2ItemFieldValue"
-              ]
-            );
-            const item = object(mutation.projectV2Item);
-            if (item.id !== operation.itemId) {
-              throw invalidResponse();
-            }
-            return withRequestId(
-              projectResult(context, {
-                fieldId: operation.fieldId,
-                itemId: operation.itemId,
-                kind: operation.kind,
-                projectId: operation.projectId,
-              }),
-              response.requestId
-            );
+              return withRequestId(
+                projectResult(context, {
+                  fieldId: operation.fieldId,
+                  itemId: operation.itemId,
+                  kind: operation.kind,
+                  projectId: operation.projectId,
+                }),
+                response.requestId
+              );
+            });
           },
           async () => {
             const recovered = await inspect();
@@ -1443,6 +1604,14 @@ export function createGitHubOperationProvider(
   return {
     async execute(execution) {
       const operation = githubToolOperationSchema.parse(execution.operation);
+      const deadlineAt =
+        execution.deadlineAt ?? clock() + GITHUB_TOOL_SERVER_DEADLINE_MS;
+      if (!(deadlineAt > clock())) {
+        throw new GitHubToolProviderError("github_provider_timeout", {
+          retryable: true,
+          status: 503,
+        });
+      }
       if (
         operation.kind !== execution.context.operation.kind ||
         githubOperationRepository(operation) !==
@@ -1472,7 +1641,11 @@ export function createGitHubOperationProvider(
           repositoryIds: [execution.context.repositoryId],
         },
         (authorization) =>
-          executeWithAuthorization(execution, operation, authorization)
+          executeWithAuthorization(
+            { ...execution, deadlineAt },
+            operation,
+            authorization
+          )
       );
     },
   };
@@ -1637,6 +1810,7 @@ export function createGitHubToolGateway(
           { retryable: true, status: 503 }
         );
       }
+      const deadlineAt = now.getTime() + GITHUB_TOOL_SERVER_DEADLINE_MS;
       const requestHash = hashGitHubOperation(parsed.operation);
       const tokenHash = createHash("sha256")
         .update(request.rawCapability, "utf8")
@@ -1645,7 +1819,7 @@ export function createGitHubToolGateway(
         parsed.operation.kind
       ).classification;
       const reservation = await input.store.reserveOperation(input.operator, {
-        executionLeaseExpiresAt: new Date(now.getTime() + 30_000),
+        executionLeaseExpiresAt: new Date(deadlineAt + 5000),
         id: createId(),
         operation: parsed.operation,
         operationId: parsed.operationId,
@@ -1671,6 +1845,13 @@ export function createGitHubToolGateway(
       }
       if (reservation.kind === "terminal") {
         return terminalResponse(reservation.operation);
+      }
+      if (reservation.kind === "intent_conflict") {
+        throw new GitHubToolGatewayError(
+          "github_write_intent_conflict",
+          "An equivalent GitHub write intent already exists for this step.",
+          { retryable: false, status: 409 }
+        );
       }
       if (!("context" in reservation)) {
         throw new GitHubToolGatewayError(
@@ -1706,8 +1887,9 @@ export function createGitHubToolGateway(
         }
       }
 
+      let providerResult: GitHubProviderOperationResult;
       try {
-        const providerResult = await input.provider.execute({
+        providerResult = await input.provider.execute({
           authorizeMutation: async () =>
             (
               await input.store.authorizeMutation(input.operator, {
@@ -1716,38 +1898,38 @@ export function createGitHubToolGateway(
               })
             ).kind === "authorized",
           context,
+          deadlineAt,
           mode: reservation.kind === "recover" ? "recover" : "execute",
           operation: parsed.operation,
         });
-        const completed = await input.store.completeOperation(input.operator, {
-          expectedVersion: context.operation.version,
-          id: context.operation.id,
-          providerRequestId: providerResult.providerRequestId,
-          result: providerResult.result,
-          resultNodeId: providerResult.resultNodeId,
-          resultUrl: providerResult.resultUrl,
-        });
-        if (completed.kind !== "completed") {
+      } catch (error) {
+        const failure = providerFailure(error);
+        let failed: Awaited<
+          ReturnType<GitHubToolGatewayStore["failOperation"]>
+        >;
+        try {
+          failed = await input.store.failOperation(input.operator, {
+            error: failure.error,
+            expectedVersion: context.operation.version,
+            id: context.operation.id,
+            providerRequestId: failure.providerRequestId,
+          });
+        } catch {
           throw new GitHubToolGatewayError(
-            "github_operation_completion_conflict",
-            "GitHub operation completion could not be persisted.",
-            { retryable: true, status: 409 }
+            classification === "write"
+              ? "github_write_uncertain"
+              : "github_provider_unavailable",
+            classification === "write"
+              ? "GitHub write outcome remains uncertain."
+              : "GitHub provider execution failed.",
+            {
+              retryable: classification === "read" && failure.error.retryable,
+              status: classification === "write" ? 409 : 503,
+            }
           );
         }
-        return terminalResponse(completed.operation);
-      } catch (error) {
-        if (error instanceof GitHubToolGatewayError) {
-          throw error;
-        }
-        const failure = providerFailure(error);
-        const failed = await input.store.failOperation(input.operator, {
-          error: failure.error,
-          expectedVersion: context.operation.version,
-          id: context.operation.id,
-          providerRequestId: failure.providerRequestId,
-        });
         if (failed.kind === "failed") {
-          terminalResponse(failed.operation);
+          return terminalResponse(failed.operation);
         }
         throw new GitHubToolGatewayError(
           failure.error.code,
@@ -1758,6 +1940,76 @@ export function createGitHubToolGateway(
           }
         );
       }
+
+      let completed: Awaited<
+        ReturnType<GitHubToolGatewayStore["completeOperation"]>
+      >;
+      const completionRemaining = deadlineAt - clock().getTime();
+      if (!(completionRemaining > 0)) {
+        throw new GitHubToolGatewayError(
+          classification === "write"
+            ? "github_write_uncertain"
+            : "github_read_completion_pending",
+          classification === "write"
+            ? "GitHub write completion remains pending recovery."
+            : "GitHub read completion remains pending recovery.",
+          {
+            retryable: classification === "read",
+            status: classification === "write" ? 409 : 503,
+          }
+        );
+      }
+      let completionTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        completed = await Promise.race([
+          input.store.completeOperation(input.operator, {
+            expectedVersion: context.operation.version,
+            id: context.operation.id,
+            providerRequestId: providerResult.providerRequestId,
+            result: providerResult.result,
+            resultNodeId: providerResult.resultNodeId,
+            resultUrl: providerResult.resultUrl,
+          }),
+          new Promise<never>((_resolve, reject) => {
+            completionTimer = globalThis.setTimeout(
+              () => reject(new Error("GitHub completion deadline exceeded.")),
+              completionRemaining
+            );
+          }),
+        ]);
+      } catch {
+        throw new GitHubToolGatewayError(
+          classification === "write"
+            ? "github_write_uncertain"
+            : "github_read_completion_pending",
+          classification === "write"
+            ? "GitHub write completion remains pending recovery."
+            : "GitHub read completion remains pending recovery.",
+          {
+            retryable: classification === "read",
+            status: classification === "write" ? 409 : 503,
+          }
+        );
+      } finally {
+        if (completionTimer !== undefined) {
+          globalThis.clearTimeout(completionTimer);
+        }
+      }
+      if (completed.kind !== "completed") {
+        throw new GitHubToolGatewayError(
+          classification === "write"
+            ? "github_write_uncertain"
+            : "github_read_completion_pending",
+          classification === "write"
+            ? "GitHub write completion remains pending recovery."
+            : "GitHub read completion remains pending recovery.",
+          {
+            retryable: classification === "read",
+            status: classification === "write" ? 409 : 503,
+          }
+        );
+      }
+      return terminalResponse(completed.operation);
     },
   };
 }

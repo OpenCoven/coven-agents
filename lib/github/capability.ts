@@ -3,6 +3,7 @@ import "server-only";
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
+  GITHUB_TOOL_SERVER_DEADLINE_MS,
   type GitHubOperationKind,
   type GitHubToolOperation,
   type GitHubToolResult,
@@ -45,7 +46,8 @@ const GITHUB_CAPABILITIES = new Set<TeamCapability>([
 const MAX_REPOSITORIES = 16;
 export const MAX_GITHUB_CAPABILITY_CALLS = 32;
 export const MAX_GITHUB_CAPABILITY_LIFETIME_MS = 15 * 60_000;
-export const MAX_GITHUB_OPERATION_LEASE_MS = 30_000;
+export const MAX_GITHUB_OPERATION_LEASE_MS =
+  GITHUB_TOOL_SERVER_DEADLINE_MS + 5000;
 
 export type GitHubBrokerRepository = Readonly<{
   accountId: string;
@@ -350,19 +352,27 @@ export type GitHubGatewayCapabilityRecord = Readonly<{
 }>;
 
 export type GitHubGatewayOperationRecord = Readonly<{
+  accountId: string;
+  accountLogin: string;
+  accountType: "Organization" | "User";
   capabilityId: string;
   completedAt: Date | null;
   connectionGeneration: number;
-  connectionId: string;
+  connectionId: string | null;
   createdAt: Date;
   error: RunError | null;
   executionLeaseExpiresAt: Date;
   id: string;
+  installationId: string;
   kind: GitHubOperationKind;
   operationId: string;
   operationMarker: string | null;
   providerRequestId: string | null;
   repository: string;
+  repositoryId: string;
+  repositoryName: string;
+  repositoryNodeId: string;
+  repositoryOwner: string;
   requestHash: string;
   requiredCapability: TeamCapability;
   result: GitHubToolResult | null;
@@ -454,6 +464,9 @@ function asOperation(
 ): GitHubGatewayOperationRecord {
   const result = column<unknown>(row, "resultJson");
   return {
+    accountId: column(row, "accountId"),
+    accountLogin: column(row, "accountLogin"),
+    accountType: column(row, "accountType"),
     capabilityId: column(row, "capabilityId"),
     completedAt: nullableDateColumn(row, "completedAt"),
     connectionGeneration: Number(column(row, "connectionGeneration")),
@@ -462,11 +475,16 @@ function asOperation(
     error: column(row, "error"),
     executionLeaseExpiresAt: dateColumn(row, "executionLeaseExpiresAt"),
     id: column(row, "id"),
+    installationId: column(row, "installationId"),
     kind: column(row, "kind"),
     operationId: column(row, "operationId"),
     operationMarker: column(row, "operationMarker"),
     providerRequestId: column(row, "providerRequestId"),
     repository: column(row, "repository"),
+    repositoryId: column(row, "repositoryId"),
+    repositoryName: column(row, "repositoryName"),
+    repositoryNodeId: column(row, "repositoryNodeId"),
+    repositoryOwner: column(row, "repositoryOwner"),
     requestHash: column(row, "requestHash"),
     requiredCapability: column(row, "requiredCapability"),
     result: result === null ? null : githubToolResultSchema.parse(result),
@@ -1020,6 +1038,10 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
           kind: "terminal";
           operation: GitHubGatewayOperationRecord;
         }>
+      | Readonly<{
+          kind: "intent_conflict";
+          operation: GitHubGatewayOperationRecord;
+        }>
     > => {
       assertOperator(operator);
       const operation = githubToolOperationSchema.parse(input.operation);
@@ -1199,6 +1221,34 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
             kind: "recover" as const,
           };
         }
+        if (authority.classification === "write") {
+          const [intentRow] = await transaction.execute(
+            statement(
+              "lock-existing-github-write-intent",
+              {
+                kind: operation.kind,
+                requestHash: input.requestHash,
+                teamStepId: capability.teamStepId,
+                tenant: capability.tenant,
+              },
+              sql`SELECT *
+                FROM "RunnerGitHubOperation"
+                WHERE "tenant" = ${capability.tenant}
+                  AND "teamStepId" = ${capability.teamStepId}
+                  AND "kind" = ${operation.kind}
+                  AND "requestHash" = ${input.requestHash}
+                ORDER BY "createdAt", "id"
+                LIMIT 1
+                FOR UPDATE`
+            )
+          );
+          if (intentRow) {
+            return {
+              kind: "intent_conflict" as const,
+              operation: asOperation(intentRow),
+            };
+          }
+        }
         if (capability.usedCallCount >= capability.maxCallCount) {
           return { kind: "unauthorized" as const };
         }
@@ -1207,15 +1257,23 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
           statement(
             "reserve-github-operation",
             {
+              accountId: column(row, "accountId"),
+              accountLogin: column(row, "accountLogin"),
+              accountType: column(row, "accountType"),
               capabilityId: capability.id,
               connectionGeneration: capability.connectionGeneration,
               connectionId: column(row, "connectionId"),
               executionLeaseExpiresAt: input.executionLeaseExpiresAt,
               id: input.id,
+              installationId: column(row, "installationId"),
               kind: operation.kind,
               operationId: input.operationId,
               operationMarker: input.operationMarker,
               repository,
+              repositoryId: column(row, "repositoryId"),
+              repositoryName: column(row, "repositoryName"),
+              repositoryNodeId: column(row, "repositoryNodeId"),
+              repositoryOwner: column(row, "repositoryOwner"),
               requestHash: input.requestHash,
               requiredCapability: authority.capability,
               target: input.target,
@@ -1228,7 +1286,10 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                   "kind", "requestHash", "target", "repository",
                   "requiredCapability", "connectionId",
                   "connectionGeneration", "operationMarker", "status",
-                  "startedAt", "executionLeaseExpiresAt"
+                  "startedAt", "executionLeaseExpiresAt", "accountId",
+                  "accountLogin", "accountType", "installationId",
+                  "repositoryId", "repositoryName", "repositoryNodeId",
+                  "repositoryOwner"
                 ) VALUES (
                   ${input.id}, ${capability.tenant}, ${capability.teamStepId},
                   ${capability.id}, ${input.operationId}, ${operation.kind},
@@ -1236,7 +1297,11 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                   ${authority.capability}, ${column(row, "connectionId")},
                   ${capability.connectionGeneration}, ${input.operationMarker},
                   'running', clock_timestamp(),
-                  ${input.executionLeaseExpiresAt.toISOString()}
+                  ${input.executionLeaseExpiresAt.toISOString()},
+                  ${column(row, "accountId")}, ${column(row, "accountLogin")},
+                  ${column(row, "accountType")}, ${column(row, "installationId")},
+                  ${column(row, "repositoryId")}, ${column(row, "repositoryName")},
+                  ${column(row, "repositoryNodeId")}, ${column(row, "repositoryOwner")}
                 )
                 ON CONFLICT DO NOTHING
                 RETURNING *
@@ -1262,6 +1327,34 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
           )
         );
         if (!insertedRow) {
+          if (authority.classification === "write") {
+            const [racedIntent] = await transaction.execute(
+              statement(
+                "lock-raced-github-write-intent",
+                {
+                  kind: operation.kind,
+                  requestHash: input.requestHash,
+                  teamStepId: capability.teamStepId,
+                  tenant: capability.tenant,
+                },
+                sql`SELECT *
+                  FROM "RunnerGitHubOperation"
+                  WHERE "tenant" = ${capability.tenant}
+                    AND "teamStepId" = ${capability.teamStepId}
+                    AND "kind" = ${operation.kind}
+                    AND "requestHash" = ${input.requestHash}
+                  ORDER BY "createdAt", "id"
+                  LIMIT 1
+                  FOR UPDATE`
+              )
+            );
+            if (racedIntent) {
+              return {
+                kind: "intent_conflict" as const,
+                operation: asOperation(racedIntent),
+              };
+            }
+          }
           return { kind: "conflict" as const };
         }
         return {

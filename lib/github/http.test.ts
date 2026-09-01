@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import type { GitHubToolOperation } from "@opencoven/agent-contracts";
+import { GITHUB_TOOL_SERVER_DEADLINE_MS } from "@opencoven/agent-contracts";
 import type { GitHubOperationExecutionContext } from "./capability";
 import {
   createGitHubOperationProvider,
@@ -60,6 +61,9 @@ function context(
     connectionId: "66666666-6666-4666-8666-666666666666",
     installationId: "456",
     operation: {
+      accountId: "123",
+      accountLogin: "OpenCoven",
+      accountType: "Organization",
       capabilityId: "22222222-2222-4222-8222-222222222222",
       completedAt: null,
       connectionGeneration: 3,
@@ -68,11 +72,16 @@ function context(
       error: null,
       executionLeaseExpiresAt: new Date("2026-08-31T20:00:30.000Z"),
       id: "77777777-7777-4777-8777-777777777777",
+      installationId: "456",
       kind: operation.kind,
       operationId: "88888888-8888-4888-8888-888888888888",
       operationMarker: marker,
       providerRequestId: null,
       repository: "opencoven/coven-agents",
+      repositoryId: "789",
+      repositoryName: "coven-agents",
+      repositoryNodeId: "R_kgDOExample",
+      repositoryOwner: "OpenCoven",
       requestHash: "b".repeat(64),
       requiredCapability: requiredCapability as never,
       result: null,
@@ -80,7 +89,7 @@ function context(
       resultUrl: null,
       startedAt: new Date("2026-08-31T20:00:00.000Z"),
       status: "running",
-      target: "opencoven/coven-agents#issue:42",
+      target: "opencoven/coven-agents#issue.get:42",
       teamStepId: "55555555-5555-4555-8555-555555555555",
       tenant: "u_9c8589018a57479181fe4c455b099bc9",
       updatedAt: new Date("2026-08-31T20:00:00.000Z"),
@@ -743,6 +752,145 @@ test("project operations request only verified organization project authority an
   assert.equal(tokenRequests, 0);
 });
 
+test("project field recovery ignores unsupported mixed union values and compares only typed supported shapes", async () => {
+  const marker =
+    "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->";
+  const operation = {
+    contentId: "I_kwDOExample",
+    contentType: "issue" as const,
+    fieldId: "PVTF_lADOExample",
+    itemId: "PVTI_lADOExample",
+    kind: "project.item.field.update" as const,
+    owner: "OpenCoven",
+    projectId: "PVT_kwDOExample",
+    repo: "coven-agents",
+    value: { kind: "text" as const, text: "Ready" },
+  };
+  const mixedValues = [
+    {
+      __typename: "ProjectV2ItemFieldRepositoryValue",
+      field: { id: "PVTF_repository" },
+    },
+    {
+      __typename: "ProjectV2ItemFieldLabelValue",
+      field: { id: "PVTF_labels" },
+    },
+    {
+      __typename: "ProjectV2ItemFieldMilestoneValue",
+      field: { id: "PVTF_milestone" },
+    },
+    {
+      __typename: "ProjectV2ItemFieldMultiSelectValue",
+      field: { id: "PVTF_multi_select" },
+    },
+    {
+      __typename: "ProjectV2ItemFieldPullRequestValue",
+      field: { id: "PVTF_pull_requests" },
+    },
+    {
+      __typename: "ProjectV2ItemFieldUserValue",
+      field: { id: "PVTF_assignees" },
+    },
+    {
+      __typename: "ProjectV2ItemFieldReviewerValue",
+      field: { id: "PVTF_reviewers" },
+    },
+    {
+      __typename: "ProjectV2ItemIssueFieldValue",
+      field: { id: "PVTF_issue_field" },
+    },
+    {
+      __typename: "ProjectV2ItemFieldTextValue",
+      field: { id: "PVTF_other" },
+      text: "Ready",
+    },
+  ];
+  const targetResponse = (fieldValues: unknown[]) =>
+    Response.json({
+      data: {
+        item: {
+          content: {
+            __typename: "Issue",
+            id: operation.contentId,
+            repository: {
+              databaseId: 789,
+              nameWithOwner: "OpenCoven/coven-agents",
+            },
+          },
+          fieldValues: { nodes: fieldValues },
+          id: operation.itemId,
+          project: { id: operation.projectId },
+        },
+        project: {
+          fields: { nodes: [{ id: operation.fieldId }] },
+          id: operation.projectId,
+          owner: { login: "OpenCoven" },
+        },
+      },
+    });
+  const execute = sequenceProvider([
+    targetResponse(mixedValues),
+    Response.json({
+      data: {
+        updateProjectV2ItemFieldValue: {
+          projectV2Item: { id: operation.itemId },
+        },
+      },
+    }),
+  ]);
+
+  const updated = await execute.provider.execute({
+    authorizeMutation: () => Promise.resolve(true),
+    context: context(operation, marker),
+    mode: "execute",
+    operation,
+  });
+  assert.equal(updated.result.kind, "project.item.field.update");
+  assert.equal(
+    execute.requests.filter(({ method }) => method === "POST").length,
+    2
+  );
+  const query = JSON.parse(execute.requests[0]?.body ?? "").query as string;
+  assert.match(query, /nodes \{\s*__typename/u);
+  for (const typename of [
+    "ProjectV2ItemFieldLabelValue",
+    "ProjectV2ItemFieldMilestoneValue",
+    "ProjectV2ItemFieldMultiSelectValue",
+    "ProjectV2ItemFieldPullRequestValue",
+    "ProjectV2ItemFieldRepositoryValue",
+    "ProjectV2ItemFieldReviewerValue",
+    "ProjectV2ItemFieldUserValue",
+    "ProjectV2ItemIssueFieldValue",
+  ]) {
+    assert.match(
+      query,
+      new RegExp(
+        `\\.\\.\\. on ${typename} \\{ field \\{ \\.\\.\\. on ProjectV2FieldCommon \\{ id \\} \\} \\}`,
+        "u"
+      )
+    );
+  }
+
+  const recovered = sequenceProvider([
+    targetResponse([
+      ...mixedValues,
+      {
+        __typename: "ProjectV2ItemFieldTextValue",
+        field: { id: operation.fieldId },
+        text: "Ready",
+      },
+    ]),
+  ]);
+  const result = await recovered.provider.execute({
+    authorizeMutation: () => Promise.resolve(false),
+    context: context(operation, marker),
+    mode: "recover",
+    operation,
+  });
+  assert.equal(result.result.kind, "project.item.field.update");
+  assert.equal(recovered.requests.length, 1);
+});
+
 test("provider timeout, rate limits, oversize bodies, malformed JSON, and unsafe request ids are sanitized", async () => {
   const hanging = createGitHubOperationProvider({
     fetch: (_url, init) =>
@@ -824,6 +972,41 @@ test("provider timeout bounds a response body that sends headers and never compl
       callback("Bearer installation-token"),
   });
 
+  {
+    let now = 10_000;
+    const deadlineProvider = createGitHubOperationProvider({
+      clock: () => now,
+      fetch: () => {
+        now = 69_999;
+        return Promise.resolve(Response.json(issue()));
+      },
+      timeoutMs: 5000,
+      withInstallationAuthorization: (_scope, callback) =>
+        callback("Bearer installation-token"),
+    });
+    await assert.rejects(
+      deadlineProvider.execute({
+        authorizeMutation: () => Promise.resolve(false),
+        context: context(),
+        deadlineAt: 9999,
+        mode: "execute",
+        operation: OPERATION,
+      }),
+      (error: unknown) =>
+        error instanceof GitHubToolProviderError &&
+        error.code === "github_provider_timeout"
+    );
+
+    const result = await deadlineProvider.execute({
+      authorizeMutation: () => Promise.resolve(false),
+      context: context(),
+      deadlineAt: 70_000,
+      mode: "execute",
+      operation: OPERATION,
+    });
+    assert.equal(result.result.kind, "issue.get");
+  }
+
   await assert.rejects(
     provider.execute({
       authorizeMutation: () => Promise.resolve(false),
@@ -894,6 +1077,142 @@ test("an ambiguous write response recovers by marker or terminates uncertain wit
   );
 });
 
+test("a 2xx mutation body reset is recovered by marker and never becomes replayable", async () => {
+  const marker =
+    "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->";
+  const operation = {
+    assignees: [] as string[],
+    body: "Issue body.",
+    kind: "issue.create" as const,
+    labels: [] as string[],
+    owner: "OpenCoven",
+    repo: "coven-agents",
+    title: "Gateway issue",
+  };
+  const resetBody = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"number":'));
+      controller.error(new Error("response reset after provider commit"));
+    },
+  });
+  const recovered = sequenceProvider([
+    new Response(resetBody, { status: 201 }),
+    Response.json({
+      items: [issue({ body: `Issue body.\n\n${marker}` })],
+      total_count: 1,
+    }),
+  ]);
+
+  const result = await recovered.provider.execute({
+    authorizeMutation: () => Promise.resolve(true),
+    context: context(operation, marker),
+    mode: "execute",
+    operation,
+  });
+
+  assert.equal(result.result.kind, "issue.create");
+  assert.equal(
+    recovered.requests.filter(({ method }) => method === "POST").length,
+    1
+  );
+  assert.equal(
+    recovered.requests.filter(({ method }) => method === "GET").length,
+    1
+  );
+});
+
+test("a structurally malformed 2xx mutation result recovers before any replay", async () => {
+  const marker =
+    "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->";
+  const operation = {
+    assignees: [] as string[],
+    body: "Issue body.",
+    kind: "issue.create" as const,
+    labels: [] as string[],
+    owner: "OpenCoven",
+    repo: "coven-agents",
+    title: "Gateway issue",
+  };
+  const recovered = sequenceProvider([
+    Response.json({ number: 42 }, { status: 201 }),
+    Response.json({
+      items: [issue({ body: `Issue body.\n\n${marker}` })],
+      total_count: 1,
+    }),
+  ]);
+
+  const result = await recovered.provider.execute({
+    authorizeMutation: () => Promise.resolve(true),
+    context: context(operation, marker),
+    mode: "execute",
+    operation,
+  });
+
+  assert.equal(result.result.kind, "issue.create");
+  assert.equal(
+    recovered.requests.filter(({ method }) => method === "POST").length,
+    1
+  );
+  assert.equal(
+    recovered.requests.filter(({ method }) => method === "GET").length,
+    1
+  );
+});
+
+test("timeout after mutation send becomes terminal uncertainty after one recovery probe", async () => {
+  const marker =
+    "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->";
+  const operation = {
+    assignees: [] as string[],
+    body: "Issue body.",
+    kind: "issue.create" as const,
+    labels: [] as string[],
+    owner: "OpenCoven",
+    repo: "coven-agents",
+    title: "Gateway issue",
+  };
+  const requests: string[] = [];
+  const provider = createGitHubOperationProvider({
+    fetch: (url, init) => {
+      requests.push(`${init?.method ?? "GET"} ${url}`);
+      if ((init?.method ?? "GET") === "POST") {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("aborted", "AbortError")),
+            { once: true }
+          );
+        });
+      }
+      return Promise.resolve(Response.json({ items: [], total_count: 0 }));
+    },
+    timeoutMs: 5,
+    withInstallationAuthorization: (_scope, callback) =>
+      callback("Bearer installation-token"),
+  });
+
+  await assert.rejects(
+    provider.execute({
+      authorizeMutation: () => Promise.resolve(true),
+      context: context(operation, marker),
+      mode: "execute",
+      operation,
+    }),
+    (error: unknown) =>
+      error instanceof GitHubToolProviderError &&
+      error.code === "github_write_uncertain" &&
+      error.retryable === false
+  );
+  assert.equal(
+    requests.filter((request) => request.startsWith("POST ")).length,
+    1
+  );
+  assert.equal(
+    requests.filter((request) => request.startsWith("GET ")).length,
+    1
+  );
+});
+
 test("gateway hashes the raw capability, reserves once, revalidates mutations, and persists the bounded receipt", async () => {
   const rawCapability = Buffer.alloc(32, 0x4a).toString("base64url");
   const operation = {
@@ -941,6 +1260,11 @@ test("gateway hashes the raw capability, reserves once, revalidates mutations, a
     provider: {
       execute: async (input) => {
         calls.push(["provider", input]);
+        assert.equal(
+          input.deadlineAt,
+          new Date("2026-08-31T20:00:00.000Z").getTime() +
+            GITHUB_TOOL_SERVER_DEADLINE_MS
+        );
         assert.equal(await input.authorizeMutation(), true);
         return {
           providerRequestId: "ABC1:DEF2",
@@ -1014,6 +1338,137 @@ test("gateway hashes the raw capability, reserves once, revalidates mutations, a
   });
 });
 
+test("same-operation recovery after completion persistence failure performs at most one provider write", async () => {
+  const rawCapability = Buffer.alloc(32, 0x4e).toString("base64url");
+  const operation = {
+    body: "Issue comment.",
+    issueNumber: "42",
+    kind: "issue.comment" as const,
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const requestHash = hashGitHubOperation(operation);
+  const tokenHash = createHash("sha256")
+    .update(rawCapability, "utf8")
+    .digest("hex");
+  const seedContext = context();
+  const {
+    capability: { teamStepId },
+    operation: { operationId },
+  } = seedContext;
+  const operationMarker = githubOperationMarker({
+    capabilityBinding: tokenHash,
+    operationId,
+    requestHash,
+    teamStepId,
+  });
+  const boundContext = context(operation, operationMarker);
+  const initialContext = {
+    ...boundContext,
+    operation: {
+      ...boundContext.operation,
+      requestHash,
+      target: "opencoven/coven-agents#issue.comment:42",
+    },
+  };
+  const recoveryContext = {
+    ...initialContext,
+    operation: {
+      ...initialContext.operation,
+      executionLeaseExpiresAt: new Date("2026-08-31T20:01:30.000Z"),
+      updatedAt: new Date("2026-08-31T20:01:00.000Z"),
+      version: 1,
+    },
+  };
+  const comment = {
+    body: `Issue comment.\n\n${operationMarker}`,
+    html_url:
+      "https://github.com/OpenCoven/coven-agents/issues/42#issuecomment-1",
+    node_id: "IC_kwDOExample",
+  };
+  const sequence = sequenceProvider([
+    Response.json(issue()),
+    Response.json(comment),
+    Response.json([comment]),
+  ]);
+  let completionCalls = 0;
+  let failureCalls = 0;
+  let reservationCalls = 0;
+  const gateway = createGitHubToolGateway({
+    clock: () => new Date("2030-08-31T20:00:00.000Z"),
+    createId: () => initialContext.operation.id,
+    operator: { kind: "runner-operator" },
+    provider: sequence.provider,
+    store: {
+      authorizeMutation: async () => ({ kind: "authorized" as const }),
+      completeOperation: async (_operator, input) => {
+        completionCalls += 1;
+        if (completionCalls === 1) {
+          throw new Error("database reset after provider success");
+        }
+        return {
+          kind: "completed" as const,
+          operation: {
+            ...recoveryContext.operation,
+            completedAt: new Date("2026-08-31T20:00:02.000Z"),
+            providerRequestId: input.providerRequestId,
+            result: input.result,
+            resultNodeId: input.resultNodeId,
+            resultUrl: input.resultUrl,
+            status: "completed" as const,
+            version: 2,
+          },
+        };
+      },
+      failOperation: async () => {
+        failureCalls += 1;
+        throw new Error("completion ambiguity must not call failOperation");
+      },
+      reserveOperation: async () => {
+        reservationCalls += 1;
+        return reservationCalls === 1
+          ? { context: initialContext, kind: "reserved" as const }
+          : { context: recoveryContext, kind: "recover" as const };
+      },
+    },
+  });
+
+  await assert.rejects(
+    gateway.execute({ operation, operationId, rawCapability }),
+    (error: unknown) =>
+      error instanceof GitHubToolGatewayError &&
+      error.code === "github_write_uncertain" &&
+      error.retryable === false
+  );
+  const recovered = await gateway.execute({
+    operation,
+    operationId,
+    rawCapability,
+  });
+
+  assert.equal(recovered.result.kind, "issue.comment");
+  assert.equal(completionCalls, 2);
+  assert.equal(failureCalls, 0);
+  assert.equal(
+    sequence.requests.filter(({ method }) => method === "POST").length,
+    1
+  );
+  assert.deepEqual(
+    sequence.requests.map(({ method, url }) => [method, url]),
+    [
+      ["GET", "https://api.github.com/repos/OpenCoven/coven-agents/issues/42"],
+      [
+        "POST",
+        "https://api.github.com/repos/OpenCoven/coven-agents/issues/42/comments",
+      ],
+      [
+        "GET",
+        "https://api.github.com/repos/OpenCoven/coven-agents/issues/42/comments?per_page=100&page=1",
+      ],
+    ]
+  );
+});
+
 test("gateway serializes duplicates and never success-shapes conflicts, active calls, or uncertainty", async () => {
   const rawCapability = Buffer.alloc(32, 0x4b).toString("base64url");
   const operation = OPERATION;
@@ -1038,6 +1493,7 @@ test("gateway serializes duplicates and never success-shapes conflicts, active c
   const gatewayFor = (
     reservation:
       | { kind: "conflict" | "in_progress" | "unauthorized" }
+      | { kind: "intent_conflict"; operation: typeof terminal }
       | { kind: "terminal"; operation: typeof terminal }
       | {
           context: GitHubOperationExecutionContext;
@@ -1087,6 +1543,22 @@ test("gateway serializes duplicates and never success-shapes conflicts, active c
   });
   assert.equal(replay.result.kind, "issue.get");
   assert.equal(providerCalls, 0);
+
+  await assert.rejects(
+    gatewayFor({
+      kind: "intent_conflict",
+      operation: terminal,
+    }).execute({
+      operation,
+      operationId: terminal.operationId,
+      rawCapability,
+    }),
+    (error: unknown) =>
+      error instanceof GitHubToolGatewayError &&
+      error.code === "github_write_intent_conflict" &&
+      error.status === 409 &&
+      error.retryable === false
+  );
 
   for (const [kind, status] of [
     ["unauthorized", 401],
@@ -1141,7 +1613,7 @@ test("internal HTTP accepts only bounded strict capability-authenticated POST bo
           resultUrl: "https://github.com/OpenCoven/coven-agents/issues/42",
           status: "completed" as const,
           stepId: "55555555-5555-4555-8555-555555555555",
-          target: "opencoven/coven-agents#issue:42",
+          target: "opencoven/coven-agents#issue.get:42",
         },
         result: {
           issue: {

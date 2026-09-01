@@ -384,16 +384,16 @@ test("public receipt targets are deterministic and exclude caller-authored text"
       githubOperationTarget(githubToolOperationSchema.parse(operation))
     ),
     [
-      "opencoven/coven-agents#issue:42",
-      "opencoven/coven-agents#issue:search",
-      "opencoven/coven-agents#issue:new",
-      "opencoven/coven-agents#issue:42:comment",
-      "opencoven/coven-agents#pull:181",
-      "opencoven/coven-agents#pull:new:feat/github-tool-gateway->main",
-      "opencoven/coven-agents#pull:181:comment",
-      "opencoven/coven-agents#pull:181:review",
-      "opencoven/coven-agents#project:PVT_kwDOExample:add:I_kwDOExample",
-      "opencoven/coven-agents#project:PVT_kwDOExample:item:PVTI_lADOExample:field:PVTF_lADOExample",
+      "opencoven/coven-agents#issue.get:42",
+      "opencoven/coven-agents#issue.search:sha256:5e9dd94abfa9dffc6701eabdba20bee87c6c1e5a",
+      "opencoven/coven-agents#issue.create:sha256:8dd76f1f1b9a18803caa96f1778faf21886d8715",
+      "opencoven/coven-agents#issue.comment:42",
+      "opencoven/coven-agents#pull.get:181",
+      "opencoven/coven-agents#pull.create:sha256:400fe64d166eb2f09f296204c3eca66d1b433218",
+      "opencoven/coven-agents#pull.comment:181",
+      "opencoven/coven-agents#pull.review:181",
+      "opencoven/coven-agents#project.item.add:sha256:95f359366c4c7636804374db762ff8be3d100f61",
+      "opencoven/coven-agents#project.item.field.update:sha256:59c6cbc1bfe5b2ef41e65d616bbbb39fe5ef425b",
     ]
   );
   assert.doesNotMatch(
@@ -402,6 +402,103 @@ test("public receipt targets are deterministic and exclude caller-authored text"
     ).join("\n"),
     /Gateway regression|Reproduction steps|Approved/u
   );
+});
+
+test("every maximum valid operation has a deterministic UTF-8 receipt target within 512 bytes", () => {
+  const owner = "o".repeat(100);
+  const repo = "r".repeat(100);
+  const node = "N".repeat(256);
+  const maximumOperations = [
+    {
+      issueNumber: "9".repeat(20),
+      kind: "issue.get",
+      owner,
+      repo,
+    },
+    {
+      kind: "issue.search",
+      limit: GITHUB_TOOL_LIMITS.maxSearchResults,
+      owner,
+      query: "q".repeat(GITHUB_TOOL_LIMITS.queryBytes),
+      repo,
+      state: "all",
+    },
+    {
+      assignees: [],
+      body: "",
+      kind: "issue.create",
+      labels: [],
+      owner,
+      repo,
+      title: "t".repeat(GITHUB_TOOL_LIMITS.titleBytes),
+    },
+    {
+      body: "b",
+      issueNumber: "9".repeat(20),
+      kind: "issue.comment",
+      owner,
+      repo,
+    },
+    {
+      kind: "pull.get",
+      owner,
+      pullNumber: "9".repeat(20),
+      repo,
+    },
+    {
+      base: `b${"x".repeat(GITHUB_TOOL_LIMITS.branchBytes - 1)}`,
+      body: "",
+      draft: false,
+      head: `h${"y".repeat(GITHUB_TOOL_LIMITS.branchBytes - 1)}`,
+      kind: "pull.create",
+      owner,
+      repo,
+      title: "t",
+    },
+    {
+      body: "b",
+      kind: "pull.comment",
+      owner,
+      pullNumber: "9".repeat(20),
+      repo,
+    },
+    {
+      body: "",
+      event: "approve",
+      kind: "pull.review",
+      owner,
+      pullNumber: "9".repeat(20),
+      repo,
+    },
+    {
+      contentId: node,
+      contentType: "issue",
+      kind: "project.item.add",
+      owner,
+      projectId: node,
+      repo,
+    },
+    {
+      contentId: node,
+      contentType: "pull",
+      fieldId: node,
+      itemId: node,
+      kind: "project.item.field.update",
+      owner,
+      projectId: node,
+      repo,
+      value: { kind: "clear" },
+    },
+  ] as const;
+
+  for (const value of maximumOperations) {
+    const operation = githubToolOperationSchema.parse(value);
+    const first = githubOperationTarget(operation);
+    const second = githubOperationTarget(operation);
+    assert.equal(first, second);
+    assert.ok(Buffer.byteLength(first, "utf8") <= 512, operation.kind);
+    assert.match(first, new RegExp(`^${owner}/${repo}#${operation.kind}`, "u"));
+  }
 });
 
 test("public operation results are discriminated, strict, and bounded", () => {

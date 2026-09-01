@@ -55,6 +55,7 @@ export const GITHUB_TOOL_LIMITS = Object.freeze({
   textFieldBytes: 8192,
   titleBytes: 256,
 });
+export const GITHUB_TOOL_SERVER_DEADLINE_MS = 60_000;
 
 /**
  * Stable Agent Runner v1 deployment-class discriminator. `cloud` means the
