@@ -27,31 +27,116 @@ test("migration 0015 adds nullable fail-closed run authority without a default",
   );
 });
 
-test("migration 0028 backfills only the latest matching subscription override audit before constraining its marker", () => {
+test("migration 0028 remains schema-only and 0029 backfills only matching latest subscription override audits", () => {
   const directory = new URL("../db/migrations/", import.meta.url);
-  const migrationName = readdirSync(directory).find((name) =>
+  const schemaMigrationName = readdirSync(directory).find((name) =>
     name.startsWith("0028_")
   );
-  assert.ok(migrationName, "migration 0028 must exist");
-  const migration = readFileSync(new URL(migrationName, directory), "utf8");
-  const update = 'UPDATE "User" AS "user"';
+  const backfillMigrationName = readdirSync(directory).find((name) =>
+    name.startsWith("0029_")
+  );
+  assert.ok(schemaMigrationName, "migration 0028 must exist");
+  assert.ok(backfillMigrationName, "migration 0029 must exist");
+  const schemaMigration = readFileSync(
+    new URL(schemaMigrationName, directory),
+    "utf8"
+  );
+  const backfillMigration = readFileSync(
+    new URL(backfillMigrationName, directory),
+    "utf8"
+  );
   const constraint =
     'ALTER TABLE "User" ADD CONSTRAINT "User_subscriptionOverride_shape"';
 
+  assert.equal(
+    sha256(schemaMigration),
+    "3b90f75ecced677fd1a999b5f7f5bb60308f7c0bb8f37857d308ab90b28922ff",
+    "0028 is already applied in production and must remain byte-for-byte schema-only"
+  );
+  assert.match(schemaMigration, /ADD COLUMN "subscriptionOverrideAction"/u);
+  assert.match(schemaMigration, /ADD COLUMN "subscriptionOverrideAt"/u);
+  assert.match(schemaMigration, /User_subscriptionOverride_shape/u);
+  assert.doesNotMatch(schemaMigration, /\bUPDATE\b/u);
+
+  // 0029 applies after an already-applied 0028, choosing the monotonic audit
+  // authority rather than a wall-clock or random identifier ordering.
   assert.match(
-    migration,
-    /SELECT DISTINCT ON \("userId"\)[\s\S]*FROM "SubscriptionOverrideAudit"[\s\S]*ORDER BY "userId", "createdAt" DESC, "id" DESC/u
+    backfillMigration,
+    /SELECT DISTINCT ON \("userId"\)[\s\S]*FROM "SubscriptionOverrideAudit"[\s\S]*ORDER BY "userId", "newAuthVersion" DESC, "createdAt" DESC, "id" DESC/u
   );
   assert.match(
-    migration,
+    backfillMigration,
     /SET "subscriptionOverrideAction" = "audit"\."action",\s+"subscriptionOverrideAt" = "audit"\."createdAt"/u
   );
   assert.match(
-    migration,
-    /"user"\."authVersion" = "audit"\."newAuthVersion"[\s\S]*"user"\."subscribedUntil" IS NOT DISTINCT FROM "audit"\."newSubscribedUntil"/u
+    backfillMigration,
+    /"user"\."authVersion" >= "audit"\."newAuthVersion"[\s\S]*"user"\."subscribedUntil" IS NOT DISTINCT FROM "audit"\."newSubscribedUntil"/u
   );
-  assert.ok(migration.indexOf(update) < migration.indexOf(constraint));
-  assert.doesNotMatch(migration, /\bemail\b/iu);
+  assert.doesNotMatch(
+    backfillMigration,
+    /"newSubscribedUntil" IS NOT NULL|"action" = 'grant'/u,
+    "null revokes and grants must both remain eligible"
+  );
+  assert.doesNotMatch(backfillMigration, /\bemail\b/iu);
+
+  // A later session-only increment still permits both null revokes and grants;
+  // a later webhook entitlement change does not. Equal timestamps fall through
+  // only after newAuthVersion to the deterministic id tie-breaker.
+  for (const scenario of [
+    "later session revocation increment",
+    "later webhook entitlement drift",
+    "later override wins",
+    "equal timestamps",
+    "null revoke",
+    "grant",
+  ]) {
+    assert.match(backfillMigration, /"newAuthVersion" DESC/u, scenario);
+    assert.match(
+      backfillMigration,
+      /"authVersion" >= "audit"\."newAuthVersion"/u,
+      scenario
+    );
+    assert.match(
+      backfillMigration,
+      /"subscribedUntil" IS NOT DISTINCT FROM "audit"\."newSubscribedUntil"/u,
+      scenario
+    );
+  }
+
+  const journal = JSON.parse(
+    readFileSync(new URL("meta/_journal.json", directory), "utf8")
+  ) as { entries: { idx: number; tag: string }[] };
+  assert.deepEqual(
+    journal.entries.find((entry) => entry.idx === 29),
+    {
+      ...journal.entries.find((entry) => entry.idx === 29),
+      idx: 29,
+      tag: backfillMigrationName.replace(/\.sql$/u, ""),
+    }
+  );
+  const snapshot29 = JSON.parse(
+    readFileSync(new URL("meta/0029_snapshot.json", directory), "utf8")
+  ) as { id: string; prevId: string; [key: string]: unknown };
+  const snapshot28 = JSON.parse(
+    readFileSync(new URL("meta/0028_snapshot.json", directory), "utf8")
+  ) as { id: string; prevId: string; [key: string]: unknown };
+  assert.equal(snapshot29.prevId, snapshot28.id);
+  const {
+    id: _snapshot29Id,
+    prevId: _snapshot29PrevId,
+    ...schema29
+  } = snapshot29;
+  const {
+    id: _snapshot28Id,
+    prevId: _snapshot28PrevId,
+    ...schema28
+  } = snapshot28;
+  assert.deepEqual(
+    schema29,
+    schema28,
+    "custom data-only migration preserves the generated schema snapshot"
+  );
+  assert.ok(schemaMigration.indexOf(constraint) >= 0);
 });
 
 test("migration 0026 adds nullable, strict execution provenance without history rewrites", () => {

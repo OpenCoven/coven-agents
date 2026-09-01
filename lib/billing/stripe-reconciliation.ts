@@ -525,6 +525,17 @@ async function selectSubscription(
         return { kind: "deferred", reason: validation };
       }
       const status = subscriptionStatus(retrieved.status);
+      if (status !== "active") {
+        if (isKnownIneligibleSubscriptionStatus(status)) {
+          return await listedSubscription(
+            customerId,
+            provider,
+            priceId,
+            bounds
+          );
+        }
+        return { kind: "deferred", reason: status };
+      }
       if (retrieved.itemsComplete !== true) {
         return { kind: "deferred", reason: "subscription_items_incomplete" };
       }
@@ -535,16 +546,11 @@ async function selectSubscription(
         retrieved.priceIds,
         priceId
       );
-      if (status === "active") {
-        return configuredPriceCount === 1
-          ? { kind: "candidate", subscription: retrieved }
-          : configuredPriceCount > 1
-            ? { kind: "deferred", reason: "subscription_ambiguous" }
-            : { kind: "deferred", reason: "subscription_price_mismatch" };
-      }
-      if (!isTerminalSubscriptionStatus(status)) {
-        return { kind: "deferred", reason: status };
-      }
+      return configuredPriceCount === 1
+        ? { kind: "candidate", subscription: retrieved }
+        : configuredPriceCount > 1
+          ? { kind: "deferred", reason: "subscription_ambiguous" }
+          : { kind: "deferred", reason: "subscription_price_mismatch" };
     }
   }
   return await listedSubscription(customerId, provider, priceId, bounds);
@@ -629,6 +635,10 @@ async function listedSubscription(
     if (validation) {
       return { kind: "deferred", reason: validation };
     }
+    const status = subscriptionStatus(subscription.status);
+    if (status !== "active" && isKnownIneligibleSubscriptionStatus(status)) {
+      continue;
+    }
     if (subscription.itemsComplete !== true) {
       return { kind: "deferred", reason: "subscription_items_incomplete" };
     }
@@ -639,7 +649,6 @@ async function listedSubscription(
       subscription.priceIds,
       priceId
     );
-    const status = subscriptionStatus(subscription.status);
     if (status === "subscription_unknown_status" && configuredPriceCount > 0) {
       return { kind: "deferred", reason: status };
     }
@@ -698,12 +707,16 @@ function subscriptionStatus(status: string): DeferredReason | "active" {
   }
 }
 
-function isTerminalSubscriptionStatus(
+function isKnownIneligibleSubscriptionStatus(
   status: DeferredReason | "active"
 ): boolean {
   return (
     status === "subscription_canceled" ||
+    status === "subscription_incomplete" ||
     status === "subscription_incomplete_expired" ||
+    status === "subscription_past_due" ||
+    status === "subscription_paused" ||
+    status === "subscription_trialing" ||
     status === "subscription_unpaid"
   );
 }
