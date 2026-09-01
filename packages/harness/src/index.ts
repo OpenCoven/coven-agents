@@ -7,6 +7,9 @@ export {
 export {
   buildInvocation,
   buildMission,
+  COVEN_GITHUB_MCP_PATH,
+  COVEN_GITHUB_MCP_TOOL,
+  COVEN_GITHUB_TOOL_PATH,
   type HarnessExecutionPermission,
   type Invocation,
   type InvocationRequest,

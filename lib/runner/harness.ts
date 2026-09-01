@@ -26,6 +26,7 @@ import {
   toShellCommand,
 } from "@opencoven/harness";
 import { ZodError } from "zod";
+import { decodeRunnerAttemptRedactionSecrets } from "./redaction-secrets";
 
 export type {
   HarnessId,
@@ -125,7 +126,10 @@ export function harnessesFromProbe(
 }
 
 function redact(value: string, credential: string | null): string {
-  return sanitizeEvidenceText(value, credential ? [credential] : []);
+  return sanitizeEvidenceText(
+    value,
+    credential ? decodeRunnerAttemptRedactionSecrets(credential) : []
+  );
 }
 
 function canonicalTimestamp(
@@ -340,6 +344,7 @@ export function parseHarnessLog(
 export function buildHarnessCommand(input: {
   configDirectory?: string;
   executionPermission?: HarnessExecutionPermission;
+  githubTool?: boolean;
   harness: HarnessId;
   instructions: string;
   model: string;
@@ -350,6 +355,7 @@ export function buildHarnessCommand(input: {
     buildInvocation({
       configDir: input.configDirectory,
       cwd: input.workspace,
+      githubTool: input.githubTool ?? false,
       harness: input.harness,
       instructions: input.instructions,
       model: input.model,

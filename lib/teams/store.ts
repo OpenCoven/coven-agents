@@ -337,7 +337,7 @@ export type FencedGitHubInstallationConnectionsInput =
   };
 
 export type GitHubConnectionSnapshot = {
-  connections: GitHubConnectionRecord[];
+  connections: readonly GitHubConnectionRecord[];
   generation: number;
 };
 
@@ -1019,7 +1019,12 @@ function teamExecutionPermission(
   if (capabilities.includes("workspace.write")) {
     return "workspace_write";
   }
-  return capabilities.includes("workspace.read") ? "workspace_read" : null;
+  if (capabilities.includes("workspace.read")) {
+    return "workspace_read";
+  }
+  return capabilities.some((capability) => capability.startsWith("github."))
+    ? "github_only"
+    : null;
 }
 
 function validApprovalCapabilities(

@@ -1,6 +1,11 @@
 // biome-ignore-all lint/performance/noAwaitInLoops: Team claims, attachments, cancellations, and projections are intentionally serialized.
 import "server-only";
 
+import {
+  buildGitHubBrokerPolicy,
+  type GitHubBrokerPolicy,
+  githubTaskCapability,
+} from "@/lib/github/capability";
 import type {
   AdmitRunnerRunInput,
   AdmitRunnerRunResult,
@@ -27,7 +32,10 @@ type TeamOrchestrationStore = Pick<
   | "failTeamStepAdmission"
   | "findNextCancelledTeamChild"
   | "projectNextTerminalTeamStep"
->;
+> &
+  Partial<
+    Pick<ReturnType<typeof createTeamStore>, "readGitHubConnectionSnapshot">
+  >;
 
 export type TeamClaimReconciliationResult = Readonly<{
   admitted: number;
@@ -141,24 +149,82 @@ export function createTeamOrchestrator(
           }
           break;
         }
-        if (
-          claim.declaredCapabilities.some((capability) =>
-            capability.startsWith("github.")
-          )
-        ) {
-          failures += 1;
-          if (
-            await failAdmission(claim, {
-              code: "github_broker_unavailable",
-              message: "GitHub operations require brokered execution.",
-              retryable: false,
-            })
-          ) {
-            continue;
+        const hasGitHubCapabilities = claim.declaredCapabilities.some(
+          (capability) => capability.startsWith("github.")
+        );
+        let githubBrokerPolicy: GitHubBrokerPolicy | null = null;
+        if (hasGitHubCapabilities) {
+          let snapshot: Awaited<
+            ReturnType<
+              NonNullable<
+                TeamOrchestrationStore["readGitHubConnectionSnapshot"]
+              >
+            >
+          >;
+          try {
+            if (!dependencies.store.readGitHubConnectionSnapshot) {
+              throw new Error("GitHub connection store is unavailable.");
+            }
+            snapshot = await dependencies.store.readGitHubConnectionSnapshot(
+              claim.principal,
+              17
+            );
+          } catch {
+            failures += 1;
+            if (
+              await failAdmission(claim, {
+                code: "github_connection_unavailable",
+                message: "GitHub connection authority could not be verified.",
+                retryable: false,
+              })
+            ) {
+              continue;
+            }
+            break;
           }
-          break;
+          if (snapshot.connections.length === 0) {
+            failures += 1;
+            if (
+              await failAdmission(claim, {
+                code: "github_connection_required",
+                message:
+                  "GitHub operations require a current verified connection.",
+                retryable: false,
+              })
+            ) {
+              continue;
+            }
+            break;
+          }
+          try {
+            githubBrokerPolicy = buildGitHubBrokerPolicy({
+              actorUserId: claim.principal.userId,
+              approvedCapabilities: claim.approvedCapabilities,
+              authVersion: claim.authVersion,
+              connectionSnapshot: snapshot,
+              declaredCapabilities: claim.declaredCapabilities,
+              teamRunId: claim.teamRunId,
+              teamStepId: claim.teamStepId,
+            });
+          } catch {
+            failures += 1;
+            if (
+              await failAdmission(claim, {
+                code: "github_broker_policy_invalid",
+                message:
+                  "GitHub operation authority could not be bounded safely.",
+                retryable: false,
+              })
+            ) {
+              continue;
+            }
+            break;
+          }
         }
-        if (claim.executionPermission === null) {
+        const executionPermission =
+          claim.executionPermission ??
+          (githubBrokerPolicy ? ("github_only" as const) : null);
+        if (executionPermission === null) {
           failures += 1;
           if (
             await failAdmission(claim, {
@@ -172,7 +238,11 @@ export function createTeamOrchestrator(
           }
           break;
         }
-        if (!claim.agentSnapshot.workspace?.trim()) {
+        if (
+          (executionPermission === "workspace_read" ||
+            executionPermission === "workspace_write") &&
+          !claim.agentSnapshot.workspace?.trim()
+        ) {
           failures += 1;
           if (
             await failAdmission(claim, {
@@ -193,7 +263,7 @@ export function createTeamOrchestrator(
         let result: AdmitRunnerRunResult;
         try {
           const task = buildTeamStepTask({
-            githubCapability: "none",
+            githubCapability: githubTaskCapability(githubBrokerPolicy),
             memberResponsibility: claim.responsibility,
             mission: claim.mission,
             priorHandoffs: claim.priorHandoffs,
@@ -204,16 +274,18 @@ export function createTeamOrchestrator(
             agentId: claim.agentId,
             agentSnapshot: claim.agentSnapshot,
             authVersion: claim.authVersion,
-            executionPermission: claim.executionPermission,
+            executionPermission,
+            githubBrokerPolicy,
             id: ids.runId,
             operationId: ids.operationId,
             principal: claim.principal,
             requestHash: hashRunRequest(
               claim.agentId,
               task,
-              claim.executionPermission
+              executionPermission
             ),
             task,
+            teamStepId: claim.teamStepId,
           });
         } catch {
           failures += 1;

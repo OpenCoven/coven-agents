@@ -9,13 +9,19 @@ export interface Invocation {
 export type HarnessExecutionPermission =
   | "unrestricted"
   | "workspace_read"
-  | "workspace_write";
+  | "workspace_write"
+  | "github_only";
+export const COVEN_GITHUB_TOOL_PATH = "/tmp/coven-tools/v1/coven-github";
+export const COVEN_GITHUB_MCP_PATH = "/tmp/coven-tools/v1/coven-github-mcp";
+export const COVEN_GITHUB_MCP_TOOL = "CovenGitHub(execute)";
 
 export interface InvocationRequest {
   /** Fresh configuration directory outside caller-controlled workspace files. */
   configDir?: string;
   /** Working directory the harness runs in. Callers resolve and sandbox this. */
   cwd: string;
+  /** Expose only the server-brokered coven-github executable. */
+  githubTool?: boolean;
   harness: string;
   instructions: string;
   /** `auto` lets the harness pick, so no `--model` flag is passed. */
@@ -37,17 +43,42 @@ function modelArgs(model: string): string[] {
 
 function copilotArgs(request: InvocationRequest): string[] {
   const permissionMode = request.permissionMode ?? "unrestricted";
-  if (permissionMode !== "unrestricted" && !request.configDir) {
+  const githubTool = request.githubTool ?? false;
+  if (githubTool && permissionMode === "unrestricted") {
+    throw new Error(
+      "A restricted GitHub tool cannot be added to unrestricted execution."
+    );
+  }
+  if (permissionMode === "github_only" && !githubTool) {
+    throw new Error("GitHub-only execution requires the typed GitHub tool.");
+  }
+  if ((permissionMode !== "unrestricted" || githubTool) && !request.configDir) {
     throw new Error(
       "Restricted Copilot runs require an isolated config directory."
     );
   }
-  const permissionArgs =
+  const availableTools =
     permissionMode === "workspace_read"
-      ? ["--available-tools", "view,grep,glob"]
+      ? ["view", "grep", "glob"]
       : permissionMode === "workspace_write"
-        ? ["--available-tools", "view,edit,grep,glob", "--allow-tool", "write"]
-        : ["--yolo"];
+        ? ["view", "edit", "grep", "glob"]
+        : permissionMode === "github_only"
+          ? []
+          : null;
+  if (githubTool) {
+    availableTools?.push(COVEN_GITHUB_MCP_TOOL);
+  }
+  const permissionArgs =
+    availableTools === null
+      ? ["--yolo"]
+      : [
+          "--available-tools",
+          availableTools.join(","),
+          ...(permissionMode === "workspace_write"
+            ? ["--allow-tool", "write"]
+            : []),
+          ...(githubTool ? ["--allow-tool", COVEN_GITHUB_MCP_TOOL] : []),
+        ];
   const restrictedArgs =
     permissionMode === "unrestricted"
       ? []
@@ -56,9 +87,25 @@ function copilotArgs(request: InvocationRequest): string[] {
           "--no-custom-instructions",
           "--disallow-temp-dir",
           "--no-bash-env",
+          ...(githubTool ? ["--secret-env-vars", "COPILOT_GITHUB_TOKEN"] : []),
         ];
   const configArgs = request.configDir
     ? ["--config-dir", request.configDir]
+    : [];
+  const mcpArgs = githubTool
+    ? [
+        "--additional-mcp-config",
+        JSON.stringify({
+          mcpServers: {
+            CovenGitHub: {
+              args: [],
+              command: COVEN_GITHUB_MCP_PATH,
+              tools: ["execute"],
+              type: "local",
+            },
+          },
+        }),
+      ]
     : [];
   return [
     "-s",
@@ -67,6 +114,7 @@ function copilotArgs(request: InvocationRequest): string[] {
     ...permissionArgs,
     "--no-ask-user",
     ...configArgs,
+    ...mcpArgs,
     ...restrictedArgs,
     "--no-auto-update",
     "--no-color",
@@ -126,7 +174,10 @@ export function buildInvocation(request: InvocationRequest): Invocation {
     throw new Error(`Unsupported harness: ${request.harness}`);
   }
   const permissionMode = request.permissionMode ?? "unrestricted";
-  if (permissionMode !== "unrestricted" && spec.id !== "copilot") {
+  if (
+    (permissionMode !== "unrestricted" || request.githubTool) &&
+    spec.id !== "copilot"
+  ) {
     throw new Error(
       `${spec.label} cannot enforce ${permissionMode} permissions.`
     );

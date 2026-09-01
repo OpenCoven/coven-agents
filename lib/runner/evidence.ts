@@ -18,6 +18,7 @@ import {
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
 import type { RunEvent as HarnessRunEvent } from "@opencoven/harness";
+import { decodeRunnerAttemptRedactionSecrets } from "./redaction-secrets";
 import type { RunnerExecutionPermission } from "./types";
 
 export const MAX_COMMAND_RESULTS_PER_RUN =
@@ -127,7 +128,7 @@ export function truncateUtf8(
 }
 
 function credentialSecrets(credential: string | null): Iterable<string> {
-  return credential ? [credential] : [];
+  return credential ? decodeRunnerAttemptRedactionSecrets(credential) : [];
 }
 
 function boundedDiagnostic(message: string): string {

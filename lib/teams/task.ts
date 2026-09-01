@@ -95,6 +95,7 @@ function capabilitySection(capability: GitHubCapability): string {
       return [
         "Scope: read-only",
         "Approval: GitHub reads are approved; writes are not.",
+        "Use only the typed CovenGitHub execute tool. Each call must provide a fresh operationId UUID and one strict operation object.",
         "Do not create, edit, comment on, review, merge, or delete GitHub resources.",
       ].join("\n");
     case "write":
@@ -102,6 +103,7 @@ function capabilitySection(capability: GitHubCapability): string {
         "Scope: read and write",
         "Approval: GitHub writes require explicit actor-attributed approval before execution.",
         "Capability assignment alone does not grant approval.",
+        "Use only the typed CovenGitHub execute tool. Each call must provide a fresh operationId UUID and one strict operation object.",
         "Use only the minimum GitHub operations required by the mission; never merge, delete branches, or alter repository settings.",
       ].join("\n");
     default:

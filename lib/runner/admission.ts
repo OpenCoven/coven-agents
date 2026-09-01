@@ -18,6 +18,7 @@ import {
 } from "./attempt-redaction";
 import { daytonaDispatchAuthorizers } from "./daytona/dispatch";
 import {
+  type DaytonaGitHubTool,
   DaytonaProcessError,
   type DaytonaProcessSandbox,
   type DaytonaStartedProcess,
@@ -30,12 +31,14 @@ import {
   type DaytonaSandboxDependencies,
   ensureDaytonaSandboxForDispatch,
 } from "./daytona/sandbox";
+import { encodeRunnerAttemptRedactionSecrets } from "./redaction-secrets";
 import type { RunnerStore } from "./store";
 import {
   DEFAULT_RUNNER_ADMISSION_LIMITS,
   type RunnerAdmissionLimits,
   type RunnerAgentRecord,
   type RunnerClaimedDispatch,
+  type RunnerDaytonaAttemptId,
   type RunnerDispatchAuthority,
   type RunnerOperator,
   type RunnerPrincipal,
@@ -170,6 +173,21 @@ export type RunnerDispatchDependencies = Readonly<{
   ensureSandbox: (
     authority: RunnerDispatchAuthority
   ) => Promise<{ agent: RunnerAgentRecord; sandbox: DaytonaProcessSandbox }>;
+  githubTool?: Readonly<{
+    issueCapability: (
+      input: Readonly<{
+        attemptId: RunnerDaytonaAttemptId;
+        run: RunnerRunRecord;
+      }>
+    ) => Promise<Readonly<{ rawCapability: string }>>;
+    revokeCapability: (
+      input: Readonly<{
+        attemptId: RunnerDaytonaAttemptId;
+        run: RunnerRunRecord;
+      }>
+    ) => Promise<boolean>;
+    url: string;
+  }>;
   inspectRestrictedWorkspace?: (
     sandbox: DaytonaProcessSandbox,
     workspace: string
@@ -475,6 +493,7 @@ export async function terminalizeUnstartedDispatchFailure(
     | "capacity_refused"
     | "credential_unavailable"
     | "dispatch_failed"
+    | "github_broker_unavailable"
     | "harness_unsupported"
     | "no_credential"
     | "sandbox_trust_conflict"
@@ -538,6 +557,9 @@ export async function dispatchRunnerClaim(
   dependencies: RunnerDispatchDependencies
 ): Promise<RunnerDispatchResult> {
   const { authority, run } = claimed;
+  const workspaceRestricted =
+    run.executionPermission === "workspace_read" ||
+    run.executionPermission === "workspace_write";
   const associated = await dependencies.store.getDispatchAgent(
     dependencies.operator,
     authority
@@ -557,10 +579,7 @@ export async function dispatchRunnerClaim(
       ? { kind: "refused", reason: "harness", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
-  if (
-    run.executionPermission !== "unrestricted" &&
-    !run.agentWorkspace?.trim()
-  ) {
+  if (workspaceRestricted && !run.agentWorkspace?.trim()) {
     return (await terminalizeUnstartedDispatchFailure(
       dependencies,
       authority,
@@ -570,6 +589,22 @@ export async function dispatchRunnerClaim(
       false
     ))
       ? { kind: "refused", reason: "workspace", runId: run.id }
+      : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
+  if (
+    (run.githubBrokerPolicy !== null && !dependencies.githubTool) ||
+    (run.executionPermission === "github_only" &&
+      run.githubBrokerPolicy === null)
+  ) {
+    return (await terminalizeUnstartedDispatchFailure(
+      dependencies,
+      authority,
+      run,
+      "github_broker_unavailable",
+      "GitHub broker authority is unavailable for this team step.",
+      false
+    ))
+      ? { kind: "refused", reason: "authority", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
 
@@ -604,7 +639,7 @@ export async function dispatchRunnerClaim(
       ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
-  if (run.executionPermission !== "unrestricted") {
+  if (workspaceRestricted) {
     const inspection = await (
       dependencies.inspectRestrictedWorkspace ?? inspectRestrictedWorkspace
     )(ensured.sandbox, run.agentWorkspace as string);
@@ -744,13 +779,28 @@ export async function dispatchRunnerClaim(
             )
           ).kind === "deleted",
         executionPermission: run.executionPermission,
+        ...(run.githubBrokerPolicy && dependencies.githubTool
+          ? {
+              githubTool: {
+                issueCapability: ({ attemptId }) =>
+                  dependencies.githubTool?.issueCapability({
+                    attemptId,
+                    run,
+                  }) as ReturnType<DaytonaGitHubTool["issueCapability"]>,
+                revokeCapability: ({ attemptId }) =>
+                  dependencies.githubTool?.revokeCapability({
+                    attemptId,
+                    run,
+                  }) as Promise<boolean>,
+                url: dependencies.githubTool.url,
+              },
+            }
+          : {}),
         instructions: run.agentInstructions,
         model: run.agentModel,
-        persistAttemptRedaction: async ({
-          attemptId,
-          credential: credentialForRedaction,
-          runId,
-        }) => {
+        persistAttemptRedaction: async ({ attemptId, runId, secrets }) => {
+          const credentialForRedaction =
+            encodeRunnerAttemptRedactionSecrets(secrets);
           const envelope = await (
             dependencies.sealAttemptRedaction ??
             sealRunnerAttemptRedactionFromEnvironment

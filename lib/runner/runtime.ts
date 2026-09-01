@@ -1,6 +1,6 @@
 import "server-only";
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { Daytona } from "@daytona/sdk";
 import {
   HARNESS_SPECS,
@@ -11,6 +11,8 @@ import {
   globalDailyRunCapFromEnv,
   requireNonemptyAbuseKeySecret,
 } from "@/lib/abuse/config";
+import { configuredApplicationBasePath } from "@/lib/application-path";
+import { configuredApplicationOrigin } from "@/lib/auth/application-origin";
 import { sessionAuthorityMatches } from "@/lib/auth/session-revocation";
 import { periodStart } from "@/lib/billing/period";
 import type { databaseFor } from "@/lib/db/access";
@@ -363,11 +365,14 @@ function configuredClaimDispatcher(
   findAccount?: ProductionAccountFinder
 ): (claimed: RunnerClaimedDispatch) => Promise<RunnerDispatchResult> {
   return async (claimed) => {
-    const [admission, credentials, sandbox] = await Promise.all([
-      import("./admission"),
-      import("@/lib/credentials/runner-credential"),
-      import("./daytona/sandbox"),
-    ]);
+    const [admission, credentials, githubCapability, sandbox, teamStore] =
+      await Promise.all([
+        import("./admission"),
+        import("@/lib/credentials/runner-credential"),
+        import("@/lib/github/capability"),
+        import("./daytona/sandbox"),
+        import("@/lib/teams/store"),
+      ]);
     const resolvedLimits = limits ?? admission.admissionLimitsFromEnvironment();
     return dispatchProductionClaim(claimed, {
       dispatch: (authorized, context) => {
@@ -387,6 +392,59 @@ function configuredClaimDispatcher(
           sandboxConfiguration: sandbox.daytonaSandboxConfiguration(),
           sandboxDependencies: { daytona },
           store,
+          ...(githubToolEndpoint()
+            ? {
+                githubTool: {
+                  issueCapability: async ({ attemptId, run }) => {
+                    if (!run.githubBrokerPolicy) {
+                      throw new Error(
+                        "GitHub capability issuance requires persisted policy."
+                      );
+                    }
+                    const now = new Date();
+                    const issued =
+                      await githubCapability.issueGitHubStepCapability(
+                        {
+                          attemptId,
+                          capabilityId: randomUUID(),
+                          expiresAt: new Date(
+                            now.getTime() +
+                              githubCapability.MAX_GITHUB_CAPABILITY_LIFETIME_MS
+                          ),
+                          now,
+                          policy: run.githubBrokerPolicy,
+                          runnerRunId: run.id,
+                          tenant: run.tenant,
+                          userId: run.githubBrokerPolicy.actorUserId,
+                        },
+                        {
+                          replaceCapability: (input) =>
+                            githubCapability
+                              .createGitHubGatewayStore(
+                                teamStore.drizzleTeamStoreDatabase(database)
+                              )
+                              .replaceCapability(OPERATOR, input),
+                        }
+                      );
+                    return { rawCapability: issued.rawToken };
+                  },
+                  revokeCapability: async ({ attemptId, run }) => {
+                    const revoked = await githubCapability
+                      .createGitHubGatewayStore(
+                        teamStore.drizzleTeamStoreDatabase(database)
+                      )
+                      .revokeCapability(OPERATOR, {
+                        attemptId,
+                        runnerRunId: run.id,
+                      });
+                    return (
+                      revoked.kind === "revoked" || revoked.kind === "not_found"
+                    );
+                  },
+                  url: githubToolEndpoint() as string,
+                },
+              }
+            : {}),
         });
         return admission.dispatchRunnerClaim(authorized, dependencies);
       },
@@ -395,6 +453,22 @@ function configuredClaimDispatcher(
       store,
     });
   };
+}
+
+function githubToolEndpoint(): string | null {
+  try {
+    const origin = configuredApplicationOrigin(process.env);
+    if (!origin) {
+      return null;
+    }
+    const basePath = configuredApplicationBasePath(process.env);
+    return new URL(
+      `${basePath}/api/internal/github-tool`.replace(/\/+/gu, "/"),
+      origin
+    ).toString();
+  } catch {
+    return null;
+  }
 }
 
 function registryHarnesses(): readonly HarnessStatus[] {
