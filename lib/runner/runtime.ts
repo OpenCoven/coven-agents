@@ -16,11 +16,11 @@ import { periodStart } from "@/lib/billing/period";
 import type { databaseFor } from "@/lib/db/access";
 import type { SubscriberSession } from "@/lib/session";
 import type { RunnerAdmissionLimits, RunnerDispatchResult } from "./admission";
-import { COPILOT_CLI_VERSION } from "./daytona/image";
 import type {
   RunnerReconciliationExecutionResult,
   RunnerReconciliationResult,
-} from "./reconcile";
+} from "./attempt-reconcile";
+import { COPILOT_CLI_VERSION } from "./daytona/image";
 import type {
   RunnerDeleteAgentResult,
   RunnerPrewarmOptions,
@@ -472,6 +472,7 @@ function productionReconcile(
             errors,
             reconciliation,
             sandbox,
+            daytonaReconciliation,
             teamOrchestration,
             teamStoreModule,
           ] = await Promise.all([
@@ -479,8 +480,9 @@ function productionReconcile(
             import("./daytona/client"),
             import("@/lib/credentials/runner-credential"),
             import("./errors"),
-            import("./reconcile"),
+            import("./attempt-reconcile"),
             import("./daytona/sandbox"),
+            import("./daytona/reconcile"),
             import("@/lib/teams/orchestrate"),
             import("@/lib/teams/store"),
           ]);
@@ -488,7 +490,7 @@ function productionReconcile(
           const credentialDependencies =
             credentials.drizzleRunnerCredentialDependencies(database);
           const composition =
-            reconciliation.daytonaRunnerReconciliationDependencies({
+            daytonaReconciliation.daytonaRunnerReconciliationDependencies({
               credentialDependencies,
               credentialInput: () => {
                 throw new errors.RunnerServiceError(
@@ -507,7 +509,7 @@ function productionReconcile(
             cancelRun: (_principal, runId) =>
               reconciliation.cancelRunnerRun(
                 runId,
-                reconciliation.daytonaRunnerCancellationDependencies({
+                daytonaReconciliation.daytonaRunnerCancellationDependencies({
                   credentialDependencies,
                   daytona,
                   operator: OPERATOR,
@@ -576,14 +578,16 @@ async function createProductionRunnerServiceForPrincipal(
     reconciliation,
     sandbox,
     service,
+    daytonaReconciliation,
     storeModule,
   ] = await Promise.all([
     import("./daytona/client"),
     import("@/lib/credentials/runner-credential"),
     import("./daytona/process"),
-    import("./reconcile"),
+    import("./attempt-reconcile"),
     import("./daytona/sandbox"),
     import("./service"),
+    import("./daytona/reconcile"),
     import("./store"),
   ]);
   const store = storeModule.createRunnerStore(
@@ -596,7 +600,7 @@ async function createProductionRunnerServiceForPrincipal(
     cancelRun: (runId) =>
       reconciliation.cancelRunnerRun(
         runId,
-        reconciliation.daytonaRunnerCancellationDependencies({
+        daytonaReconciliation.daytonaRunnerCancellationDependencies({
           credentialDependencies,
           daytona: client.daytonaClient(),
           operator: OPERATOR,

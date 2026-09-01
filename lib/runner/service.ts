@@ -25,12 +25,12 @@ import {
   type RunnerAdmissionLimits,
   type RunnerDispatchResult,
 } from "./admission";
-import { RunnerServiceError } from "./errors";
-import { hashRunRequest, isTerminalRun } from "./evidence";
 import type {
   CancelRunnerRunResult,
   RunnerReconciliationExecutionResult,
-} from "./reconcile";
+} from "./attempt-reconcile";
+import { RunnerServiceError } from "./errors";
+import { hashRunRequest, isTerminalRun } from "./evidence";
 import type { RunnerStore } from "./store";
 import type {
   RunnerAgentRecord,

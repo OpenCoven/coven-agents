@@ -23,6 +23,7 @@ import type {
   AbuseEnforcementInput,
 } from "@/lib/abuse/enforce";
 import { admitAndScheduleRunnerRun } from "./admit-and-schedule";
+import type { RunnerReconciliationExecutionResult } from "./attempt-reconcile";
 import type {
   RunnerAuth,
   RunnerAuthenticatedSubscriber,
@@ -30,7 +31,6 @@ import type {
   RunnerSubscriberAuthorization,
 } from "./auth";
 import { RunnerServiceError } from "./errors";
-import type { RunnerReconciliationExecutionResult } from "./reconcile";
 import type { RunnerDiagnosticResult, RunnerService } from "./service";
 import { createRunEventStream } from "./sse";
 import {

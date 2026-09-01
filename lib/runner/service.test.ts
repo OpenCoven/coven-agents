@@ -4,7 +4,7 @@ import {
   AGENT_RUNNER_API_VERSION,
   type RunSnapshot,
 } from "@opencoven/agent-contracts";
-import { cancelRunnerRun, reconcileAndDispatch } from "./reconcile";
+import { cancelRunnerRun, reconcileAndDispatch } from "./attempt-reconcile";
 import { createRunnerService } from "./service";
 import type {
   RunnerAgentRecord,
@@ -811,7 +811,8 @@ test("reconciliation recovers a cancelled terminal row after lease cleanup faile
       clock: () => new Date("2026-08-28T15:00:00.000Z"),
       operator: OPERATOR,
       provider: {
-        resolveSandbox: () => Promise.reject(new Error("must not resolve")),
+        resolveExecutionContext: () =>
+          Promise.reject(new Error("must not resolve")),
         stop: () => Promise.reject(new Error("must not stop")),
       },
       rollbackCredentialResources: () => Promise.resolve(),
@@ -833,7 +834,8 @@ test("reconciliation recovers a cancelled terminal row after lease cleanup faile
   const reconciliation = await reconcileAndDispatch({
     operator: OPERATOR,
     provider: {
-      resolveSandbox: () => Promise.reject(new Error("must not resolve")),
+      resolveExecutionContext: () =>
+        Promise.reject(new Error("must not resolve")),
       stop: () => Promise.reject(new Error("must not stop")),
     },
     store: {
