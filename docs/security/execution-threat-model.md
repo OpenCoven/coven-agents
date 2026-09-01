@@ -95,6 +95,15 @@ authority is gone. This closes the dispatch-time race for fresh acquisition
 and launch; it does not alter one exact attempt already durably running under
 `finish_current`.
 
+The Daytona adapter is currently in-process. It does not accept a transferable
+run token: admission mints an opaque `RunnerDispatchAuthority` from an exact
+database dispatch claim, and preparation and launch recheck its run, attempt,
+version, lease token, and durable state in SQL. Browser input cannot construct
+or serialize that capability. Moving the adapter to another process would add
+a new trust boundary and requires a strict signed, algorithm-pinned,
+short-lived, replay-fenced contract that binds the same immutable dispatch
+scope before any provider I/O.
+
 The tenant harness credential is intentionally sent once from the server to
 its authorized sandbox, but only through the fixed process staging command's
 single per-call harness-auth environment value. That command uses `umask 077`,

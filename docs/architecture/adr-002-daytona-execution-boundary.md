@@ -27,7 +27,15 @@ remains in PostgreSQL.
    either value. Every unlaunched dispatch rechecks the current account before
    effects. The provider-neutral runner policy permits only a durable,
    `running` attempt to `finish_current` within its 15-minute bound after a
-   later entitlement loss; it grants no new authorization.
+   later entitlement loss; it grants no new authorization. The Daytona adapter
+   currently runs in the same server process as admission and receives only an
+   opaque, lease-bearing `RunnerDispatchAuthority` minted from the exact
+   database claim. It is re-fenced in SQL before preparation and launch and is
+   never serialized to a browser, sandbox, queue, or provider. A separately
+   deployed adapter would cross a trust boundary and therefore must replace
+   this in-process capability with a strict, algorithm-pinned, short-lived,
+   replay-fenced signed contract that binds the same tenant, agent, harness,
+   operation, run, attempt, and authority-version scope.
 4. **Credentials and dispatch stay server-only behind three neutral
    contracts.** `RunnerExecutor` owns dispatch preparation and starts;
    `RunnerReconciliationProvider` owns fenced per-attempt inspection and stop;
@@ -158,6 +166,8 @@ A provider adapter may be replaced only through a superseding ADR and a
 versioned migration that proves:
 
 - tenant and subscriber authority remain server-derived;
+- an out-of-process adapter verifies a bounded signed dispatch contract before
+  provider I/O rather than accepting a transferable in-process capability;
 - tenant harness plaintext crosses only through an equivalent explicit,
   attempt-scoped transport with no browser, provider-configuration, or
   control-plane-secret exposure;

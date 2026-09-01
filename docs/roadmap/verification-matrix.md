@@ -1,10 +1,11 @@
 # Verification Matrix
 
-This matrix records implemented source and retained evidence as of 2026-08-31
-for application baseline `f0ffb3124ab6a39d776bd9f7b5e77fd652b4c27e`
-and the planning-document candidate that updates this matrix. Repository and
+This matrix records implemented source and retained evidence as of 2026-09-01
+for application baseline `690dcfe897127b638def9c03a9de83c17fc376a2`
+and the documentation-only candidate that updates this matrix. Repository and
 local contract procedures are verified; infrastructure cutover evidence is
-retained; full product release certification remains pending.
+retained; deployed Daytona lifecycle, observation, and full product release
+certification remain pending.
 
 ## State vocabulary
 
@@ -26,12 +27,12 @@ retained; full product release certification remains pending.
 | Subscriber checkout surfaces | `Verified` | Account and console subscription components, authoritative run-cap rendering, canonical-path handling, checkout confirmation recovery, and checkout-enabled/disabled browser matrices | Retained release-equivalent account and console exercise across reload, identity transition, delayed webhook authority, and disabled billing |
 | Credential authorization lifecycle | `Verified` | Owner-bound device-flow binding, abortable canonical-path polling, claim-before-provider ordering, atomic credential/replay commit, authority-scoped caching, and refusal invalidation coverage | Real OAuth device authorization with authority loss, retry, lost-response replay, and cross-user refusal evidence |
 | Coordinated team execution | `Verified` | Strict contracts, tenant-fenced CRUD and persistence, deterministic child reservations, bounded handoffs, durable orchestration, cancellation, approval, migration, and production-route coverage | Release-equivalent workspace-only team run with approval, cancellation, recovery, redaction, and cross-tenant evidence; brokered operations before GitHub-capable steps |
-| Guest replay | `Verified` | `lib/demo/`, `components/demo/`, `scripts/demo-route.test.ts`; final unit gate | Retained release-equivalent replay artifact |
+| Guest replay | `Verified` | `lib/demo/`, `components/demo/`, `scripts/demo-route.test.ts`, `tests/e2e/demo.test.ts`, and `tests/e2e/demo-adversarial.test.ts` prove bounded fixture replay, zero replay API/external traffic, zero application-table writes, tampered-session refusal, and fixture/product identifier separation | Retained exact-build public replay artifact |
 | Subscriber classification | `Verified` | Auth unit coverage and 28-case authenticated browser contract | Real OAuth and active/expired account exercise |
 | Same-origin execution session | `Verified` | Browser transport, runner authorization, product-boundary, and browser contract tests | Production-equivalent Auth.js request evidence |
 | Tenant credential custody | `Verified` | Credential, isolation, and evidence-safety unit suites | Retained production-equivalent isolation and redaction exercise |
 | Cross-surface evidence redaction | `Verified` | `packages/agent-contracts/src/evidence-safety.test.ts`, `lib/runner/evidence.test.ts`, `lib/runner/daytona/process.test.ts`, `lib/runner/reconcile.test.ts`, `lib/runner/http.test.ts`, `lib/runner/daytona/resource-inventory.test.ts`, `lib/runner/resource-observability.test.ts`, and `lib/runner/production.test.ts` prove bounded exact redaction, adapter and neutral defense in depth, categorical observability, safe failures, and tenant-B refusal | Dated deployed Daytona attempt plus retained credential-free browser API/SSE, internal inventory/diagnostic, provider-failure, and cross-tenant refusal captures. This row is a focused local verification slice, not full release or security-program closure. |
-| Hermetic PostgreSQL browser certification | `Implemented` | `pnpm test:e2e:hermetic`, guarded server-only executor, disposable PostgreSQL seed, signed Auth.js cookies, real API/browser assertions, and demo zero-write inventory | Dated successful local command record; this does not replace Daytona or deployed-environment evidence |
+| Hermetic PostgreSQL browser certification | `Verified` | On 2026-09-01, `pnpm test:e2e:hermetic` passed 11 browser cases against disposable PostgreSQL for `690dcfe897127b638def9c03a9de83c17fc376a2`: signed Auth.js sessions, current `authVersion`, real API/SSE/cancellation/reconciliation, tenant-cap admission, launched and queued revocation, anonymous replay, hostile anonymous route calls, fixture separation, and unchanged application-table fingerprints | Deployed Daytona staging and production-safe evidence; hermetic certification does not replace provider or deployment proof |
 | Daytona lifecycle | `Verified` | Daytona adapter and runner service unit suites | Dated provider create, reuse, run, stop, delete, and cleanup artifact |
 | Idempotent starts | `Verified` | Admission, store, and browser retry unit suites | Retry exercise against release-equivalent PostgreSQL |
 | Cursor-safe SSE | `Verified` | Server and browser reconnect/cursor unit suites | Release-equivalent reconnect exercise with retained cursor evidence |

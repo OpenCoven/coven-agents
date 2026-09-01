@@ -1,13 +1,16 @@
 # Current Repository State
 
-- Snapshot date: 2026-08-31
-- Application baseline: `f0ffb3124ab6a39d776bd9f7b5e77fd652b4c27e`
+- Snapshot date: 2026-09-01
+- Application baseline: `690dcfe897127b638def9c03a9de83c17fc376a2`
 - Evidence class: verified repository and local contract evidence plus retained
   infrastructure cutover evidence
 
-This snapshot distinguishes the completed infrastructure cutover from pending
-full product release certification. Private planning reconciliation remains
-pending and is not inferred from repository or Project evidence.
+This snapshot includes the `fix/open-p0-gates` code candidate plus the
+documentation-only commit that updates this record. It distinguishes the
+completed infrastructure cutover and repository certification from pending
+deployed Daytona lifecycle, observation-window, and full product release
+approval. Private planning reconciliation remains pending and is not inferred
+from repository or Project evidence.
 
 ## Implemented surfaces
 
@@ -23,9 +26,9 @@ pending and is not inferred from repository or Project evidence.
 | Coordinated teams | Authenticated tenants can manage bounded skill and team definitions and start durable team runs. Immutable authority, agent, skill, and child-run snapshots fence execution; handoffs are UTF-8 byte-bounded and sanitized; workspace-only Copilot steps are orchestrated durably while GitHub-capable steps fail closed until brokered. | `packages/agent-contracts/src/index.ts`, `lib/teams/`, `app/api/teams/`, `app/api/team-runs/` |
 | Hosted execution boundary | Daytona is the sole production execution provider. Each agent owns a persistent tenant-scoped sandbox with explicit bounded CPU, memory, disk, auto-stop, and auto-archive policy; TTL and auto-delete are disabled so fenced recovery and decommission remain deletion authority. Attempts use short-lived process sessions. Dispatch, per-attempt reconciliation, and persistent-resource lifecycle pass through server-only provider-neutral contracts; hermetic certification uses the same resource lifecycle contract without a hosted provider resource. | `lib/runner/executor.ts`, `lib/runner/attempt-reconcile.ts`, `lib/runner/resource-lifecycle.ts`, `lib/runner/daytona/` |
 | Durable ownership | PostgreSQL stores agent, run, event, admission, dispatch, attempt, cancellation, and reconciliation state. | `lib/runner/store.ts`, `lib/db/schema.ts` |
-| Credential custody | Tenant harness credentials are encrypted, AAD-bound, acquired server-side, and compensated on failed launch. | `lib/credentials/`, `lib/runner/runtime.ts` |
+| Credential custody | Tenant harness credentials are encrypted, AAD-bound, acquired as immutable one-use snapshots, staged through one fixed per-call environment value into a mode-`0600` attempt path, removed before harness execution, and compensated or retained for fenced recovery on failed launch. Daytona Secrets and operator credentials are not used for tenant runs. | `lib/credentials/`, `lib/runner/daytona/process.ts`, `lib/runner/runtime.ts` |
 | Run reliability | Starts are operation-idempotent, SSE resumes from numeric cursors, and reconciliation uses database-time leases and exact fences. | `lib/runner/admission.ts`, `lib/runner/sse.ts`, `lib/runner/attempt-reconcile.ts`, `lib/runner/daytona/resource-recovery.ts` |
-| Guest replay | A committed sanitized replay can render without starting an agent, creating a sandbox, or using subscriber resources. | `lib/demo/`, `components/demo/` |
+| Guest replay | A committed bounded, provenance-marked replay renders without API, external-network, database-write, credential, billing, or provider effects. Anonymous route manipulation and tampered session material cannot promote fixture identifiers into product authority. | `lib/demo/`, `components/demo/`, `tests/e2e/demo.test.ts`, `tests/e2e/demo-adversarial.test.ts` |
 | Security operations | Separate credentials protect diagnostics, scheduled reconciliation, and manual reconciliation. A read-only internal resource inventory uses reconciliation authorization, scans only the app label and bounded durable mappings, returns versioned aggregate categories, and never deletes or adopts provider-only observations. | `lib/runner/auth.ts`, `lib/runner/http.ts`, `lib/runner/daytona/resource-inventory.ts`, `docs/security/incident-response.md` |
 | Deployment posture | Git-triggered Vercel deployments are denied by repository configuration; reintroduction requires a separately reviewed runbook. | `vercel.json`, `docs/operations/vercel-git-deployment-disablement.md`, `scripts/deployment-documentation-policy.ts` |
 | Planning documents | A canonical registry classifies current, proposed, historical, and superseded planning artifacts, with a local coverage and supersession check. | `docs/roadmap/README.md`, `scripts/planning-docs-policy.ts` |
@@ -59,8 +62,9 @@ pending and is not inferred from repository or Project evidence.
 
 The application baseline also includes the merged console, billing,
 deployment-policy, branding, runner-reliability, coordinated-team, dependency,
-subscriber-surface, credential-lifecycle, and session-path corrections through
-`f0ffb3124ab6a39d776bd9f7b5e77fd652b4c27e`. The
+subscriber-surface, credential-lifecycle, and session-path corrections plus
+the P0 repository-certification candidate through
+`690dcfe897127b638def9c03a9de83c17fc376a2`. The
 [cutover attestation](../operations/daytona-cutover-attestation.md) records
 infrastructure production evidence while preserving the remaining product
 certification and approval gates.
@@ -70,8 +74,9 @@ certification and approval gates.
 - No retained full subscriber create, standalone and coordinated run, stream,
   stop, delete, and cross-tenant production-equivalent artifact exists.
 - Complete outbound policy evidence remains open.
-- End-to-end evidence redaction, restart recovery, retention, export, and
-  deletion require broader certification.
+- Deployed evidence redaction, provider restart recovery, retention, export,
+  and deletion require release-equivalent certification; local cross-surface
+  redaction and hermetic recovery are verified.
 - Checkout, authority refresh, expiry, and owner-bound device authorization
   have deterministic local and browser coverage but still require retained
   release-equivalent provider evidence.
