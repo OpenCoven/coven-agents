@@ -103,6 +103,43 @@ Record the candidate SHA and exact exit status for every command.
 - scheduled and manual reconciliation;
 - diagnostics with its distinct operator credential.
 
+## Machine-readable readiness receipt
+
+Create one sanitized JSON receipt for the exact deployment candidate and
+validate it before requesting approval:
+
+```bash
+pnpm readiness:check path/to/readiness-receipt.json \
+  --expected-sha "$(git rev-parse HEAD)"
+```
+
+The strict version-1 contract is defined in
+`scripts/readiness-receipt.ts`. It records:
+
+- the exact source SHA, app build, migration, executor contract, adapter,
+  Daytona SDK/API, snapshot, target, region, and configuration digest;
+- synthetic tenant, account, and run correlation digests rather than raw
+  identifiers;
+- bounded test results for the hermetic application, deployed staging, and
+  production smoke layers;
+- explicit failure or recovery dispositions, evidence digests, and retention
+  classes;
+- the evidence-redaction result, retired-provider evidence result, rollback
+  target, open blockers, and the three required approval roles.
+
+Every object is strict, so unrecognized fields such as raw tokens or provider
+output are rejected. A `go` decision is invalid unless all three certification
+layers have passing evidence, every passing or failing result retains at least
+one evidence digest, every result passes or is explicitly not applicable,
+redaction and retirement evidence pass, no blocker remains, and the release
+operator, security reviewer, and product owner approve. A not-applicable result
+does not satisfy a required certification layer. Pending receipts may retain
+deferred evidence and blockers without implying release approval.
+
+Store the receipt only in the approved evidence system. Do not commit
+production identifiers, credentials, provider output, private repository
+content, prompts, payment data, or environment dumps.
+
 ## Same-origin runner session boundary
 
 - Browser requests use relative `/api` paths.

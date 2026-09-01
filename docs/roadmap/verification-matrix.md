@@ -39,6 +39,7 @@ certification remain pending.
 | Persisted recovery | `Verified` | Reconciliation, store, and hermetic browser suites prove a bounded finish-current recovery for one exact launched attempt, while revoked unlaunched work remains refused | Interrupted deployed provider-attempt convergence following an entitlement revocation and idempotent rerun |
 | Outbound policy | `Implemented` | Daytona domain configuration and tests | Enforced denial and recovery evidence |
 | Planning document registry | `Verified` | `docs/roadmap/README.md`, `scripts/planning-docs-policy.ts`, and focused policy coverage | Final Beads-to-Project no-op reconciliation before authority-derived status refresh |
+| Machine-readable readiness receipt | `Implemented` | `scripts/readiness-receipt.ts`, focused strict-schema and go/no-go policy coverage, and the [release readiness](release-readiness.md) operator procedure | Exact-deployment staging and production-safe receipt validated against the candidate SHA with retained approvals |
 | Vercel Git deployment disablement | `Verified` | `vercel.json`, deployment documentation policy, and focused unit coverage | Account-level project disconnection only if full Vercel retirement is separately approved |
 | Production smoke and rollback | `Pending` | [release readiness](release-readiness.md), [cutover attestation](../operations/daytona-cutover-attestation.md) | Authorized promotion and rollback record |
 
