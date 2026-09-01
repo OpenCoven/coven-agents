@@ -866,6 +866,15 @@ test("package dependencies and scripts match the current application contract", 
   ]);
 });
 
+test("the required local check gate includes retired-platform residue validation", () => {
+  const manifest = readManifest("package.json");
+
+  assert.equal(
+    manifest.scripts?.check,
+    "pnpm validate:platform-residue && ultracite check && pnpm planning:check"
+  );
+});
+
 test("the development server uses the documented localhost origin", () => {
   const manifest = readManifest("package.json");
   const readme = readFileSync(readmeUrl, "utf8");
