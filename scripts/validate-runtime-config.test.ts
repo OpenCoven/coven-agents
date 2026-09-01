@@ -16,6 +16,9 @@ const TEST_GITHUB_SIGNER_PEM = generateKeyPairSync("rsa", {
   privateKeyEncoding: { format: "pem", type: "pkcs8" },
   publicKeyEncoding: { format: "pem", type: "spki" },
 }).privateKey;
+const TEST_GITHUB_CLIENT_VALUE = `github-app-client-${"0123456789abcdef".repeat(
+  3
+)}`;
 const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
   ABUSE_KEY_SECRET: "subprocess-test-abuse-key-secret",
   APP_ORIGIN: "https://app.example",
@@ -44,6 +47,8 @@ const VALID_STRIPE_ENV: Partial<NodeJS.ProcessEnv> = {
   SUBSCRIPTION_CHECKOUT_ENABLED: "on",
 };
 const VALID_GITHUB_ENV: Partial<NodeJS.ProcessEnv> = {
+  GITHUB_APP_CLIENT_ID: "Iv1.0123456789abcdef",
+  GITHUB_APP_CLIENT_SECRET: TEST_GITHUB_CLIENT_VALUE,
   GITHUB_APP_ID: "123456",
   GITHUB_APP_PRIVATE_KEY: TEST_GITHUB_SIGNER_PEM,
   GITHUB_APP_SLUG: "opencoven-delivery",
@@ -87,6 +92,8 @@ const ADMISSION_LIMIT_MAXIMUMS = {
 const RUNTIME_CONFIGURATION_KEYS = [
   "ABUSE_KEY_SECRET",
   "APP_ORIGIN",
+  "AUTH_GITHUB_ID",
+  "AUTH_GITHUB_SECRET",
   "AUTH_SECRET",
   "AUTH_URL",
   "BETA_ALLOWLIST",
@@ -105,6 +112,8 @@ const RUNTIME_CONFIGURATION_KEYS = [
   "DAYTONA_SNAPSHOT",
   "DAYTONA_TARGET",
   "GLOBAL_DAILY_RUN_CAP",
+  "GITHUB_APP_CLIENT_ID",
+  "GITHUB_APP_CLIENT_SECRET",
   "GITHUB_APP_ID",
   "GITHUB_APP_PRIVATE_KEY",
   "GITHUB_APP_SLUG",
@@ -221,6 +230,8 @@ test("GitHub teams configuration is gated by an exact server-side flag", () => {
 
 test("enabled GitHub teams requires every app authority variable", () => {
   for (const name of [
+    "GITHUB_APP_CLIENT_ID",
+    "GITHUB_APP_CLIENT_SECRET",
     "GITHUB_APP_ID",
     "GITHUB_APP_PRIVATE_KEY",
     "GITHUB_APP_SLUG",
@@ -240,6 +251,8 @@ test("enabled GitHub teams requires every app authority variable", () => {
 test("enabled GitHub teams validates identifiers, RSA key material, and state entropy", () => {
   for (const overrides of [
     { GITHUB_APP_ID: "01" },
+    { GITHUB_APP_CLIENT_ID: "not a client id" },
+    { GITHUB_APP_CLIENT_SECRET: "weak" },
     { GITHUB_APP_SLUG: "OpenCoven_Delivery" },
     { GITHUB_APP_PRIVATE_KEY: "not-a-key" },
     { GITHUB_STATE_SIGNING_SECRET: "weak" },
@@ -254,16 +267,27 @@ test("enabled GitHub teams validates identifiers, RSA key material, and state en
 test("GitHub state signing authority cannot alias another server secret", () => {
   const shared = "0123456789abcdefghijklmnopqrstuvwxyz-SHARED-STATE-AUTHORITY";
   for (const name of [
+    "AI_GATEWAY_API_KEY",
     "AUTH_SECRET",
+    "AUTH_GITHUB_SECRET",
     "ABUSE_KEY_SECRET",
+    "BLOB_READ_WRITE_TOKEN",
+    "CREDENTIAL_KEK_V2",
     "CRON_SECRET",
+    "DAYTONA_API_KEY",
+    "DEMO_RECORDING_CREDENTIAL",
+    "GITHUB_APP_CLIENT_SECRET",
     "OPERATOR_DIAGNOSTIC_TOKEN",
+    "POSTGRES_URL",
+    "REDIS_URL",
     "RUNNER_MANUAL_RECONCILE_SECRET",
+    "STRIPE_SECRET_KEY",
+    "STRIPE_WEBHOOK_SECRET",
   ] as const) {
     const result = runValidator({
       ...VALID_GITHUB_ENV,
       GITHUB_STATE_SIGNING_SECRET: shared,
-      [name]: shared,
+      [name]: name === "GITHUB_APP_CLIENT_SECRET" ? shared : `  ${shared}  `,
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /GITHUB_STATE_SIGNING_SECRET|distinct/u);

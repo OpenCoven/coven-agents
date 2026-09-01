@@ -1,6 +1,9 @@
 import { createPrivateKey, createSecretKey, type KeyObject } from "node:crypto";
 
 const APP_ID = /^[1-9][0-9]{0,19}$/u;
+const CLIENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const CLIENT_VALUE_PATTERN = /^[\x21-\x7e]+$/u;
+const ENVIRONMENT_NAME = /^[A-Z][A-Z0-9_]{0,127}$/u;
 const APP_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/u;
 const PRIVATE_KEY_BEGIN = "-----BEGIN";
 const PRIVATE_KEY_HEADERS = [
@@ -11,19 +14,24 @@ const MAX_PRIVATE_KEY_BYTES = 16_384;
 const MAX_STATE_SECRET_BYTES = 1024;
 const MIN_STATE_SECRET_BYTES = 32;
 const MIN_STATE_SECRET_CHARACTERS = 16;
-const STATE_SECRET_PEERS = [
-  "AUTH_SECRET",
-  "ABUSE_KEY_SECRET",
-  "CRON_SECRET",
-  "OPERATOR_DIAGNOSTIC_TOKEN",
-  "RUNNER_MANUAL_RECONCILE_SECRET",
-] as const;
+const MAX_CLIENT_SECRET_BYTES = 1024;
+const MIN_CLIENT_SECRET_BYTES = 32;
+const MIN_CLIENT_SECRET_CHARACTERS = 8;
+const CREDENTIAL_URL_NAMES = new Set(["POSTGRES_URL", "REDIS_URL"]);
+const NON_SECRET_AUTHORITY_NAMES = new Set([
+  "CREDENTIAL_KEK_CURRENT_VERSION",
+  "GITHUB_STATE_SIGNING_SECRET",
+]);
+const SECRET_AUTHORITY_NAME =
+  /(?:^AUTH_SECRET$|_(?:CREDENTIAL|KEK|KEY|PASSWORD|PASSWD|SECRET|TOKEN)(?:_|$))/u;
 
 type GitHubEnvironment = Readonly<Record<string, string | undefined>>;
 
 export type GitHubAppConfig = Readonly<{
   appId: string;
   appSlug: string;
+  clientId: string;
+  clientSecret: KeyObject;
   enabled: true;
   privateKey: KeyObject;
   stateSigningKey: KeyObject;
@@ -60,6 +68,8 @@ export function validateGitHubEnvironment(
   }
 
   const missing = [
+    "GITHUB_APP_CLIENT_ID",
+    "GITHUB_APP_CLIENT_SECRET",
     "GITHUB_APP_ID",
     "GITHUB_APP_PRIVATE_KEY",
     "GITHUB_APP_SLUG",
@@ -78,17 +88,38 @@ export function validateGitHubEnvironment(
     );
   }
 
+  const clientId = environment.GITHUB_APP_CLIENT_ID?.trim() ?? "";
+  if (
+    !CLIENT_ID.test(clientId) ||
+    clientId !== environment.GITHUB_APP_CLIENT_ID
+  ) {
+    throw new Error("GITHUB_APP_CLIENT_ID must be a canonical client id.");
+  }
+  const signInClientId = environment.AUTH_GITHUB_ID?.trim();
+  if (signInClientId && signInClientId === clientId) {
+    throw new Error(
+      "GITHUB_APP_CLIENT_ID must be distinct from AUTH_GITHUB_ID."
+    );
+  }
+
   const appSlug = environment.GITHUB_APP_SLUG?.trim() ?? "";
   if (!APP_SLUG.test(appSlug)) {
     throw new Error("GITHUB_APP_SLUG must be a canonical GitHub App slug.");
   }
 
   const privateKey = parsePrivateKey(environment.GITHUB_APP_PRIVATE_KEY ?? "");
+  const clientSecretValue = environment.GITHUB_APP_CLIENT_SECRET ?? "";
+  const clientSecret = parseClientSecret(clientSecretValue);
+  const signInSecret = environment.AUTH_GITHUB_SECRET?.trim();
+  if (signInSecret && signInSecret === clientSecretValue.trim()) {
+    throw new Error(
+      "GITHUB_APP_CLIENT_SECRET must be distinct from AUTH_GITHUB_SECRET."
+    );
+  }
   const stateSecret = environment.GITHUB_STATE_SIGNING_SECRET ?? "";
   const stateSigningKey = parseStateSigningKey(stateSecret);
-  for (const name of STATE_SECRET_PEERS) {
-    const peer = environment[name]?.trim();
-    if (peer && peer === stateSecret) {
+  for (const [name, peer] of configuredSecretAuthorities(environment)) {
+    if (peer === stateSecret.trim()) {
       throw new Error(
         `GITHUB_STATE_SIGNING_SECRET must be distinct from ${name}.`
       );
@@ -98,6 +129,8 @@ export function validateGitHubEnvironment(
   return {
     appId,
     appSlug,
+    clientId,
+    clientSecret,
     enabled: true,
     privateKey,
     stateSigningKey,
@@ -112,6 +145,47 @@ export function githubAppConfig(
     throw new Error("GitHub teams are disabled.");
   }
   return state;
+}
+
+function configuredSecretAuthorities(
+  environment: GitHubEnvironment
+): Array<readonly [string, string]> {
+  const configured: Array<readonly [string, string]> = [];
+  for (const [name, raw] of Object.entries(environment)) {
+    if (
+      raw === undefined ||
+      !ENVIRONMENT_NAME.test(name) ||
+      NON_SECRET_AUTHORITY_NAMES.has(name) ||
+      (!SECRET_AUTHORITY_NAME.test(name) && !CREDENTIAL_URL_NAMES.has(name))
+    ) {
+      continue;
+    }
+    const normalized = raw.trim();
+    if (normalized) {
+      configured.push([name, normalized]);
+    }
+  }
+  return configured;
+}
+
+function parseClientSecret(value: string): KeyObject {
+  const bytes = Buffer.from(value, "utf8");
+  if (
+    value !== value.trim() ||
+    !CLIENT_VALUE_PATTERN.test(value) ||
+    bytes.length < MIN_CLIENT_SECRET_BYTES ||
+    bytes.length > MAX_CLIENT_SECRET_BYTES ||
+    new Set(value).size < MIN_CLIENT_SECRET_CHARACTERS
+  ) {
+    throw new Error(
+      `GITHUB_APP_CLIENT_SECRET must be ${MIN_CLIENT_SECRET_BYTES}-${MAX_CLIENT_SECRET_BYTES} printable ASCII bytes with high entropy.`
+    );
+  }
+  try {
+    return createSecretKey(bytes);
+  } finally {
+    bytes.fill(0);
+  }
 }
 
 function parsePrivateKey(value: string): KeyObject {
@@ -152,5 +226,9 @@ function parseStateSigningKey(value: string): KeyObject {
       `GITHUB_STATE_SIGNING_SECRET must be ${MIN_STATE_SECRET_BYTES}-${MAX_STATE_SECRET_BYTES} UTF-8 bytes with high entropy.`
     );
   }
-  return createSecretKey(bytes);
+  try {
+    return createSecretKey(bytes);
+  } finally {
+    bytes.fill(0);
+  }
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 import type { AbuseAdmission } from "@/lib/abuse/enforce";
 import type {
@@ -23,6 +23,7 @@ import { githubAppConfig } from "./config";
 import {
   createGitHubConnectionHandlers,
   createGitHubInstallState,
+  GITHUB_RETURN_PATH_MAX_ENCODED_BYTES,
   type GitHubConnectionStore,
   verifyGitHubInstallState,
 } from "./connection";
@@ -33,12 +34,20 @@ const OTHER_USER_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const TENANT = "u_aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa";
 const OTHER_TENANT = "u_bbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb";
 const INSTALLATION_ID = "987654321";
+const OTHER_INSTALLATION_ID = "987654322";
+const OAUTH_CODE = "oauth-code-0123456789abcdef";
+const RETURN_PATH_ENCODED_BYTE_BOUND = GITHUB_RETURN_PATH_MAX_ENCODED_BYTES;
+const TEST_APP_CLIENT_VALUE = `github-app-client-${"0123456789abcdef".repeat(
+  3
+)}`;
 const keys = generateKeyPairSync("rsa", {
   modulusLength: 2048,
   privateKeyEncoding: { format: "pem", type: "pkcs8" },
   publicKeyEncoding: { format: "pem", type: "spki" },
 });
 const CONFIG = githubAppConfig({
+  GITHUB_APP_CLIENT_ID: "Iv1.0123456789abcdef",
+  GITHUB_APP_CLIENT_SECRET: TEST_APP_CLIENT_VALUE,
   GITHUB_APP_ID: "123456",
   GITHUB_APP_PRIVATE_KEY: keys.privateKey,
   GITHUB_APP_SLUG: "opencoven-delivery",
@@ -181,6 +190,74 @@ test("install rejects open redirects and duplicate query parameters", async () =
   }
 });
 
+test("install enforces the encoded UTF-8 return-path bound before state creation", async () => {
+  const handlers = createGitHubConnectionHandlers(dependencies());
+  const exact = encodedReturnPath(RETURN_PATH_ENCODED_BYTE_BOUND);
+  const exactResponse = await handlers.install(installRequest(exact), null);
+  assert.equal(exactResponse.status, 302);
+  const installState = new URL(
+    exactResponse.headers.get("location") ?? ""
+  ).searchParams.get("state");
+  assert.ok(installState);
+  assert.equal(
+    verifyGitHubInstallState({
+      now: NOW,
+      state: installState,
+      stateSigningKey: CONFIG.stateSigningKey,
+    }).kind,
+    "valid"
+  );
+  const authorization = await beginUserAuthorization(handlers, installState);
+  const completed = await handlers.callback(
+    oauthCallbackRequest(authorization.state),
+    null
+  );
+  assert.equal(completed.status, 303);
+  assert.equal(
+    completed.headers.get("location"),
+    `https://app.example${exact}`
+  );
+
+  for (const value of [
+    `${exact}a`,
+    encodedReturnPath(RETURN_PATH_ENCODED_BYTE_BOUND, "\\"),
+    `${encodedReturnPath(RETURN_PATH_ENCODED_BYTE_BOUND, "\\")}\\`,
+    "/account?note=é",
+    encodedReturnPath(RETURN_PATH_ENCODED_BYTE_BOUND, "%F0%9F%98%80"),
+    `${encodedReturnPath(RETURN_PATH_ENCODED_BYTE_BOUND, "%F0%9F%98%80")}%41`,
+  ]) {
+    // biome-ignore lint/performance/noAwaitInLoops: each boundary value must produce its own response
+    const response = await handlers.install(installRequest(value), null);
+    const encodedBytes = returnPathEncodedBytes(value);
+    if (encodedBytes === RETURN_PATH_ENCODED_BYTE_BOUND) {
+      assert.equal(response.status, 302, value.slice(0, 40));
+      continue;
+    }
+    assert.equal(response.status, 400, value.slice(0, 40));
+    assert.equal(await errorCode(response), "github_invalid_return_path");
+  }
+});
+
+test("install applies the same return-path bound with the configured base path", async () => {
+  const handlers = createGitHubConnectionHandlers(
+    dependencies({ appBasePath: () => "/demo" })
+  );
+  const exact = encodedReturnPath(
+    RETURN_PATH_ENCODED_BYTE_BOUND,
+    "a",
+    "/demo/account?next="
+  );
+  assert.equal(
+    (await handlers.install(installRequest(exact, "/demo"), null)).status,
+    302
+  );
+
+  const over = `${exact}a`;
+  const rejected = await handlers.install(installRequest(over, "/demo"), null);
+  assert.equal(rejected.status, 400);
+  assert.equal(await errorCode(rejected), "github_invalid_return_path");
+});
+
 test("install and callback preserve a canonical configured base path", async () => {
   const basePath = "/demo";
   const handlers = createGitHubConnectionHandlers(
@@ -201,7 +278,20 @@ test("install and callback preserve a canonical configured base path", async () 
   );
   assert.ok(state);
 
-  const callback = await handlers.callback(callbackRequest(state), null);
+  const setup = await handlers.callback(callbackRequest(state, "/demo"), null);
+  assert.equal(setup.status, 302);
+  const authorization = new URL(setup.headers.get("location") ?? "");
+  assert.equal(
+    authorization.searchParams.get("redirect_uri"),
+    "https://app.example/demo/api/github/callback"
+  );
+  const authorizationState = authorization.searchParams.get("state");
+  assert.ok(authorizationState);
+
+  const callback = await handlers.callback(
+    oauthCallbackRequest(authorizationState, OAUTH_CODE, "/demo"),
+    null
+  );
   assert.equal(callback.status, 303);
   assert.equal(
     callback.headers.get("location"),
@@ -322,7 +412,8 @@ test("callback verifies provider authority, persists only provider metadata, and
       idempotencyStore: idempotency,
     })
   );
-  const request = callbackRequest(state);
+  const authorization = await beginUserAuthorization(handlers, state);
+  const request = oauthCallbackRequest(authorization.state);
 
   const first = await handlers.callback(request, "203.0.113.30");
   const replay = await handlers.callback(request, "203.0.113.30");
@@ -342,8 +433,8 @@ test("callback verifies provider authority, persists only provider metadata, and
   assert.equal(repositoryCalls, 1);
   assert.equal(
     authCalls,
-    3,
-    "initial + persistence revalidation + replay auth"
+    4,
+    "setup + OAuth callback + persistence revalidation + replay auth"
   );
   assert.equal(store.replacements.length, 1);
   assert.equal(store.replacements[0]?.principal.tenant, TENANT);
@@ -372,11 +463,359 @@ test("callback verifies provider authority, persists only provider metadata, and
   for (const repository of store.replacements[0]?.input.repositories ?? []) {
     assert.match(repository.id, /^[0-9a-f-]{36}$/u);
   }
-  assert.equal(idempotency.claims.length, 2);
+  assert.equal(idempotency.claims.length, 3);
   assert.doesNotMatch(
     JSON.stringify(idempotency.claims),
     new RegExp(escapeRegExp(state), "u")
   );
+});
+
+test("setup callback requires user authorization before provider access or persistence", async () => {
+  const store = new MemoryConnectionStore();
+  let providerCalls = 0;
+  let proofCalls = 0;
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      {
+        createProvider: () => {
+          providerCalls += 1;
+          return provider();
+        },
+        createStore: () => store,
+      },
+      {
+        proveInstallationAccess: () => {
+          proofCalls += 1;
+          return Promise.resolve();
+        },
+      }
+    )
+  );
+
+  const request = callbackRequest(stateFor());
+  const response = await handlers.callback(request, null);
+  const replay = await handlers.callback(request, null);
+
+  assert.equal(response.status, 302);
+  assert.equal(replay.status, 302);
+  assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+  assert.equal(
+    replay.headers.get("location"),
+    response.headers.get("location")
+  );
+  assert.equal(replay.headers.get("github-callback-replayed"), "true");
+  const location = response.headers.get("location");
+  assert.ok(location);
+  const authorization = new URL(location);
+  assert.equal(
+    authorization.origin + authorization.pathname,
+    "https://github.com/login/oauth/authorize"
+  );
+  assert.deepEqual([...authorization.searchParams.keys()].sort(), [
+    "allow_signup",
+    "client_id",
+    "code_challenge",
+    "code_challenge_method",
+    "prompt",
+    "redirect_uri",
+    "state",
+  ]);
+  assert.equal(authorization.searchParams.get("client_id"), CONFIG.clientId);
+  assert.equal(
+    authorization.searchParams.get("redirect_uri"),
+    "https://app.example/api/github/callback"
+  );
+  assert.equal(authorization.searchParams.get("code_challenge_method"), "S256");
+  assert.match(
+    authorization.searchParams.get("code_challenge") ?? "",
+    /^[A-Za-z0-9_-]{43}$/u
+  );
+  assert.ok(authorization.searchParams.get("state"));
+  assert.doesNotMatch(location, /access_token|client_secret|ghu_|token=/iu);
+  assert.equal(providerCalls, 0);
+  assert.equal(proofCalls, 0);
+  assert.equal(store.replacements.length, 0);
+});
+
+test("OAuth callback persists only after exact user installation access is proved", async () => {
+  const store = new MemoryConnectionStore();
+  const proofs: unknown[] = [];
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      { createStore: () => store },
+      {
+        proveInstallationAccess: (input) => {
+          proofs.push(input);
+          return Promise.resolve();
+        },
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+  const response = await handlers.callback(
+    oauthCallbackRequest(authorization.state),
+    null
+  );
+
+  assert.equal(response.status, 303);
+  assert.equal(
+    response.headers.get("location"),
+    "https://app.example/account?tab=github"
+  );
+  assert.equal(proofs.length, 1);
+  assert.deepEqual(proofs[0], {
+    code: OAUTH_CODE,
+    codeVerifier: (proofs[0] as { codeVerifier: string }).codeVerifier,
+    installationId: INSTALLATION_ID,
+    redirectUri: "https://app.example/api/github/callback",
+  });
+  assert.match(
+    (proofs[0] as { codeVerifier: string }).codeVerifier,
+    /^[A-Za-z0-9_-]{43}$/u
+  );
+  assert.equal(
+    createHash("sha256")
+      .update((proofs[0] as { codeVerifier: string }).codeVerifier, "ascii")
+      .digest("base64url"),
+    authorization.codeChallenge
+  );
+  assert.equal(store.replacements.length, 1);
+  assert.equal(store.replacements[0]?.input.installationId, INSTALLATION_ID);
+});
+
+test("foreign valid installation proof is rejected without metadata persistence", async () => {
+  const store = new MemoryConnectionStore();
+  let providerCalls = 0;
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      {
+        createProvider: () => {
+          providerCalls += 1;
+          return provider();
+        },
+        createStore: () => store,
+      },
+      {
+        proveInstallationAccess: () =>
+          Promise.reject(
+            new GitHubProviderError("github_user_installation_inaccessible", {
+              retryable: false,
+              status: 403,
+            })
+          ),
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+
+  const response = await handlers.callback(
+    oauthCallbackRequest(authorization.state),
+    null
+  );
+
+  assert.equal(response.status, 403);
+  assert.equal(await errorCode(response), "github_installation_access_denied");
+  assert.equal(providerCalls, 0);
+  assert.equal(store.replacements.length, 0);
+});
+
+test("OAuth state is phase-bound and rejects installation substitution", async () => {
+  let proofCalls = 0;
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      {},
+      {
+        proveInstallationAccess: () => {
+          proofCalls += 1;
+          return Promise.resolve();
+        },
+      }
+    )
+  );
+  const installState = stateFor();
+  const authorization = await beginUserAuthorization(handlers, installState);
+
+  const installAsOAuth = await handlers.callback(
+    oauthCallbackRequest(installState),
+    null
+  );
+  assert.equal(installAsOAuth.status, 400);
+  assert.equal(await errorCode(installAsOAuth), "github_state_invalid");
+
+  const oauthAsInstall = await handlers.callback(
+    callbackRequest(authorization.state),
+    null
+  );
+  assert.equal(oauthAsInstall.status, 400);
+  assert.equal(await errorCode(oauthAsInstall), "github_state_invalid");
+
+  const substituted = await handlers.callback(
+    new Request(
+      `${oauthCallbackRequest(authorization.state).url}&installation_id=${OTHER_INSTALLATION_ID}`
+    ),
+    null
+  );
+  assert.equal(substituted.status, 400);
+  assert.equal(await errorCode(substituted), "github_callback_invalid");
+  assert.equal(proofCalls, 0);
+});
+
+test("OAuth callback binds user, tenant, and auth version across both phases", async () => {
+  for (const mismatched of [
+    subscriberFor(OTHER_USER_ID, TENANT, 4),
+    subscriberFor(USER_ID, OTHER_TENANT, 4),
+    subscriberFor(USER_ID, TENANT, 5),
+  ]) {
+    let current = subscriber;
+    let proofCalls = 0;
+    const handlers = createGitHubConnectionHandlers(
+      dependenciesWithUserAuthorization(
+        {
+          authorizeSubscriber: () => Promise.resolve(current),
+        },
+        {
+          proveInstallationAccess: () => {
+            proofCalls += 1;
+            return Promise.resolve();
+          },
+        }
+      )
+    );
+    // biome-ignore lint/performance/noAwaitInLoops: each mismatch owns isolated durable state
+    const authorization = await beginUserAuthorization(handlers);
+    current = mismatched;
+    const response = await handlers.callback(
+      oauthCallbackRequest(authorization.state),
+      null
+    );
+    assert.equal(response.status, 403);
+    assert.equal(await errorCode(response), "github_state_mismatch");
+    assert.equal(proofCalls, 0);
+  }
+});
+
+test("OAuth state expires independently before code exchange", async () => {
+  let currentTime = NOW;
+  let proofCalls = 0;
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      { now: () => currentTime },
+      {
+        proveInstallationAccess: () => {
+          proofCalls += 1;
+          return Promise.resolve();
+        },
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+  currentTime = new Date(NOW.getTime() + 601_000);
+
+  const response = await handlers.callback(
+    oauthCallbackRequest(authorization.state),
+    null
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal(await errorCode(response), "github_state_expired");
+  assert.equal(proofCalls, 0);
+});
+
+test("subscriber authority is revalidated after user proof and before persistence", async () => {
+  const store = new MemoryConnectionStore();
+  let current = subscriber;
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      {
+        authorizeSubscriber: () => Promise.resolve(current),
+        createStore: () => store,
+      },
+      {
+        proveInstallationAccess: () => {
+          current = subscriberFor(USER_ID, TENANT, 5);
+          return Promise.resolve();
+        },
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+
+  const response = await handlers.callback(
+    oauthCallbackRequest(authorization.state),
+    null
+  );
+
+  assert.equal(response.status, 403);
+  assert.equal(await errorCode(response), "github_state_mismatch");
+  assert.equal(store.replacements.length, 0);
+});
+
+test("installation substitution on a replayed setup state is rejected", async () => {
+  const handlers = createGitHubConnectionHandlers(dependencies());
+  const state = stateFor();
+  const first = await handlers.callback(callbackRequest(state), null);
+  assert.equal(first.status, 302);
+
+  const substituted = await handlers.callback(
+    callbackRequest(state, "", OTHER_INSTALLATION_ID),
+    null
+  );
+  assert.equal(substituted.status, 400);
+  assert.equal(await errorCode(substituted), "github_state_invalid");
+});
+
+test("OAuth code and state replay cannot repeat exchange or provider mutation", async () => {
+  const store = new MemoryConnectionStore();
+  const idempotency = new MemoryIdempotencyStore();
+  let proofCalls = 0;
+  let installationCalls = 0;
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      {
+        createProvider: () =>
+          provider({
+            getInstallation: () => {
+              installationCalls += 1;
+              return Promise.resolve(installation());
+            },
+          }),
+        createStore: () => store,
+        idempotencyStore: idempotency,
+      },
+      {
+        proveInstallationAccess: () => {
+          proofCalls += 1;
+          return Promise.resolve();
+        },
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+  const request = oauthCallbackRequest(authorization.state);
+
+  const first = await handlers.callback(request, null);
+  const replay = await handlers.callback(request, null);
+  assert.equal(first.status, 303);
+  assert.equal(replay.status, 303);
+  assert.equal(replay.headers.get("github-callback-replayed"), "true");
+  assert.equal(proofCalls, 1);
+  assert.equal(installationCalls, 1);
+  assert.equal(store.replacements.length, 1);
+  assert.doesNotMatch(
+    JSON.stringify(idempotency.claims),
+    new RegExp(
+      `${escapeRegExp(OAUTH_CODE)}|${escapeRegExp(authorization.state)}`,
+      "u"
+    )
+  );
+
+  const substitutedCode = await handlers.callback(
+    oauthCallbackRequest(authorization.state, `${OAUTH_CODE}-different`),
+    null
+  );
+  assert.equal(substitutedCode.status, 400);
+  assert.equal(await errorCode(substitutedCode), "github_state_invalid");
+  assert.equal(proofCalls, 1);
 });
 
 test("callback rejects tamper, expiry, user, tenant, and auth-version mismatches before provider access", async () => {
@@ -454,6 +893,39 @@ test("callback rejects forged callback fields, invalid installation ids, and set
   }
 });
 
+test("OAuth denial details and provider tokens are never reflected by the callback", async () => {
+  let proofCalls = 0;
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      {},
+      {
+        proveInstallationAccess: () => {
+          proofCalls += 1;
+          return Promise.resolve();
+        },
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+  const token = `ghu_${"A".repeat(32)}`;
+  const query = new URLSearchParams({
+    error: "access_denied",
+    error_description: token,
+    state: authorization.state,
+  });
+
+  const response = await handlers.callback(
+    new Request(`https://app.example/api/github/callback?${query}`),
+    null
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+  assert.equal(await errorCode(response.clone()), "github_callback_invalid");
+  assert.doesNotMatch(await response.text(), new RegExp(token, "u"));
+  assert.equal(proofCalls, 0);
+});
+
 test("missing, suspended, under-permissioned, all-repository, and excessive installations clear local authority", async () => {
   const cases: Array<{
     provider: () => ReturnType<typeof provider>;
@@ -528,13 +1000,18 @@ test("missing, suspended, under-permissioned, all-repository, and excessive inst
 
   for (const current of cases) {
     const store = new MemoryConnectionStore();
-    // biome-ignore lint/performance/noAwaitInLoops: each authority case owns isolated durable state
-    const response = await createGitHubConnectionHandlers(
+    const handlers = createGitHubConnectionHandlers(
       dependencies({
         createProvider: current.provider,
         createStore: () => store,
       })
-    ).callback(callbackRequest(stateFor()), null);
+    );
+    // biome-ignore lint/performance/noAwaitInLoops: each authority case owns isolated durable state
+    const authorization = await beginUserAuthorization(handlers);
+    const response = await handlers.callback(
+      oauthCallbackRequest(authorization.state),
+      null
+    );
 
     assert.equal(response.status, 409);
     assert.equal(await errorCode(response), "github_installation_unusable");
@@ -546,8 +1023,7 @@ test("missing, suspended, under-permissioned, all-repository, and excessive inst
   }
 });
 
-test("transient provider failures are sanitized, retryable, and do not consume state", async () => {
-  const state = stateFor();
+test("transient provider failures are sanitized and cannot repeat a consumed OAuth exchange", async () => {
   const idempotency = new MemoryIdempotencyStore();
   const store = new MemoryConnectionStore();
   let attempts = 0;
@@ -571,16 +1047,19 @@ test("transient provider failures are sanitized, retryable, and do not consume s
       idempotencyStore: idempotency,
     })
   );
+  const authorization = await beginUserAuthorization(handlers);
+  const request = oauthCallbackRequest(authorization.state);
 
-  const failed = await handlers.callback(callbackRequest(state), null);
+  const failed = await handlers.callback(request, null);
   assert.equal(failed.status, 503);
   assert.equal(await errorCode(failed.clone()), "github_provider_unavailable");
   assert.doesNotMatch(await failed.clone().text(), /installation-local-token/u);
 
-  const retried = await handlers.callback(callbackRequest(state), null);
-  assert.equal(retried.status, 303);
-  assert.equal(attempts, 2);
-  assert.equal(store.replacements.length, 1);
+  const retried = await handlers.callback(request, null);
+  assert.equal(retried.status, 503);
+  assert.equal(await errorCode(retried), "github_provider_unavailable");
+  assert.equal(attempts, 1);
+  assert.equal(store.replacements.length, 0);
 });
 
 test("connection GET revalidates provider authority and returns bounded public metadata only", async () => {
@@ -714,6 +1193,9 @@ function dependencies(
     createProvider: () => provider(),
     createRequestId: () => "request-1",
     createStore: () => store,
+    createUserAuthorizationClient: () => ({
+      proveInstallationAccess: () => Promise.resolve(),
+    }),
     enforceAbuse: () => Promise.resolve({ kind: "allowed" }),
     getConfig: () => CONFIG,
     idempotencyStore: new MemoryIdempotencyStore(),
@@ -742,13 +1224,99 @@ function stateFor(
   });
 }
 
-function callbackRequest(state: string): Request {
+function callbackRequest(
+  state: string,
+  basePath = "",
+  installationId = INSTALLATION_ID
+): Request {
   const query = new URLSearchParams({
-    installation_id: INSTALLATION_ID,
+    installation_id: installationId,
     setup_action: "install",
     state,
   });
-  return new Request(`https://app.example/api/github/callback?${query}`);
+  return new Request(
+    `https://app.example${basePath}/api/github/callback?${query}`
+  );
+}
+
+function oauthCallbackRequest(
+  state: string,
+  code = OAUTH_CODE,
+  basePath = ""
+): Request {
+  const query = new URLSearchParams({ code, state });
+  return new Request(
+    `https://app.example${basePath}/api/github/callback?${query}`
+  );
+}
+
+function installRequest(returnPath: string, basePath = ""): Request {
+  const query = new URLSearchParams({ returnTo: returnPath });
+  return new Request(
+    `https://app.example${basePath}/api/github/install?${query}`
+  );
+}
+
+function returnPathEncodedBytes(value: string): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8") - 2;
+}
+
+function encodedReturnPath(
+  encodedBytes: number,
+  unit = "a",
+  prefix = "/account?next="
+): string {
+  const prefixBytes = returnPathEncodedBytes(prefix);
+  const unitBytes = returnPathEncodedBytes(unit);
+  assert.ok(prefixBytes < encodedBytes);
+  assert.ok(unitBytes > 0);
+  const available = encodedBytes - prefixBytes;
+  const unitCount = Math.floor(available / unitBytes);
+  const remainder = available - unitCount * unitBytes;
+  const value = `${prefix}${unit.repeat(unitCount)}${"a".repeat(remainder)}`;
+  assert.equal(returnPathEncodedBytes(value), encodedBytes);
+  return value;
+}
+
+async function beginUserAuthorization(
+  handlers: ReturnType<typeof createGitHubConnectionHandlers>,
+  installState = stateFor()
+): Promise<{ codeChallenge: string; state: string }> {
+  const response = await handlers.callback(callbackRequest(installState), null);
+  assert.equal(response.status, 302);
+  const location = response.headers.get("location");
+  assert.ok(location);
+  const authorization = new URL(location);
+  assert.equal(
+    authorization.origin + authorization.pathname,
+    "https://github.com/login/oauth/authorize"
+  );
+  const state = authorization.searchParams.get("state");
+  const codeChallenge = authorization.searchParams.get("code_challenge");
+  assert.ok(state);
+  assert.ok(codeChallenge);
+  return { codeChallenge, state };
+}
+
+type UserAuthorizationProofClient = Readonly<{
+  proveInstallationAccess: (
+    input: Readonly<{
+      code: string;
+      codeVerifier: string;
+      installationId: string;
+      redirectUri: string;
+    }>
+  ) => Promise<void>;
+}>;
+
+function dependenciesWithUserAuthorization(
+  overrides: Parameters<typeof dependencies>[0],
+  client: UserAuthorizationProofClient
+): Parameters<typeof createGitHubConnectionHandlers>[0] {
+  return {
+    ...dependencies(overrides),
+    createUserAuthorizationClient: () => client,
+  } as Parameters<typeof createGitHubConnectionHandlers>[0];
 }
 
 function installation(
@@ -925,17 +1493,20 @@ class MemoryConnectionStore implements GitHubConnectionStore {
 
 class MemoryIdempotencyStore implements IdempotencyStore {
   readonly claims: IdempotencyClaimInput[] = [];
-  #record:
-    | {
-        claim: IdempotencyClaimResult & { kind: "claimed" };
-        response?: IdempotencyCompleteInput["response"];
-        state: "completed" | "in_progress";
-      }
-    | undefined;
+  readonly #records = new Map<
+    string,
+    {
+      claim: Extract<IdempotencyClaimResult, { kind: "claimed" }>["claim"];
+      response?: IdempotencyCompleteInput["response"];
+      state: "completed" | "in_progress";
+    }
+  >();
 
   claim(input: IdempotencyClaimInput): Promise<IdempotencyClaimResult> {
     this.claims.push(input);
-    if (!this.#record) {
+    const scope = idempotencyScope(input);
+    const record = this.#records.get(scope);
+    if (!record) {
       const result = {
         claim: {
           claimExpiresAt: input.claimExpiresAt,
@@ -946,24 +1517,22 @@ class MemoryIdempotencyStore implements IdempotencyStore {
         },
         kind: "claimed" as const,
       };
-      this.#record = { claim: result, state: "in_progress" };
+      this.#records.set(scope, {
+        claim: result.claim,
+        state: "in_progress",
+      });
       return Promise.resolve(result);
     }
-    if (
-      this.#record.claim.claim.keyHash !== input.keyHash ||
-      this.#record.claim.claim.ownerId !== input.ownerId ||
-      this.#record.claim.claim.operation !== input.operation ||
-      this.#record.claim.claim.requestHash !== input.requestHash
-    ) {
+    if (record.claim.requestHash !== input.requestHash) {
       return Promise.resolve({ kind: "conflict" });
     }
-    if (this.#record.state === "in_progress") {
+    if (record.state === "in_progress") {
       return Promise.resolve({ kind: "in_progress" });
     }
-    assert.ok(this.#record.response);
+    assert.ok(record.response);
     return Promise.resolve({
       kind: "completed",
-      response: this.#record.response,
+      response: record.response,
     });
   }
 
@@ -972,16 +1541,39 @@ class MemoryIdempotencyStore implements IdempotencyStore {
   }
 
   complete(input: IdempotencyCompleteInput): Promise<"completed" | "lost"> {
-    assert.ok(this.#record);
-    this.#record.state = "completed";
-    this.#record.response = input.response;
+    const record = this.#records.get(idempotencyScope(input.claim));
+    if (record?.state !== "in_progress") {
+      return Promise.resolve("lost");
+    }
+    record.state = "completed";
+    record.response = input.response;
     return Promise.resolve("completed");
   }
 
-  release(_input: IdempotencyReleaseInput): Promise<"lost" | "released"> {
-    this.#record = undefined;
-    return Promise.resolve("released");
+  release(input: IdempotencyReleaseInput): Promise<"lost" | "released"> {
+    return Promise.resolve(
+      this.#records.delete(idempotencyScope(input.claim)) ? "released" : "lost"
+    );
   }
+
+  replaceCompleted(
+    input: IdempotencyCompleteInput
+  ): Promise<"lost" | "replaced"> {
+    const record = this.#records.get(idempotencyScope(input.claim));
+    if (record?.state !== "completed") {
+      return Promise.resolve("lost");
+    }
+    record.response = input.response;
+    return Promise.resolve("replaced");
+  }
+}
+
+function idempotencyScope(input: {
+  keyHash: string;
+  operation: string;
+  ownerId: string;
+}): string {
+  return `${input.ownerId}\0${input.operation}\0${input.keyHash}`;
 }
 
 async function errorCode(response: Response): Promise<string> {

@@ -14,6 +14,7 @@ import {
   createGitHubConnectionHandlers,
   type GitHubConnectionHandlers,
 } from "./connection";
+import { createGitHubUserAuthorizationClient } from "./user-auth";
 
 export function productionGitHubConnectionHandlers(): GitHubConnectionHandlers {
   return createGitHubConnectionHandlers({
@@ -33,6 +34,13 @@ export function productionGitHubConnectionHandlers(): GitHubConnectionHandlers {
       createTeamStore(
         drizzleTeamStoreDatabase(databaseFor(subscriber.session))
       ),
+    createUserAuthorizationClient: (config) =>
+      createGitHubUserAuthorizationClient({
+        appId: config.appId,
+        appSlug: config.appSlug,
+        clientId: config.clientId,
+        clientSecret: config.clientSecret,
+      }),
     enforceAbuse: async (input) => {
       const abuse = await import("@/lib/abuse/enforce");
       return abuse.enforceAbusePolicy(input);

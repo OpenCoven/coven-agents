@@ -814,6 +814,39 @@ export const databaseIdempotencyStore: IdempotencyStore = {
       throw new ChatbotError("bad_request:database", { cause: error });
     }
   },
+
+  async replaceCompleted(input) {
+    try {
+      if (!input.claim.recordId) {
+        return "lost";
+      }
+      const replaced = await db
+        .update(idempotencyRecord)
+        .set({
+          expiresAt: input.expiresAt,
+          responseJson: input.response.envelope,
+          responseStatus: input.response.status,
+          updatedAt: input.completedAt,
+        })
+        .where(
+          and(
+            eq(idempotencyRecord.id, input.claim.recordId),
+            eq(idempotencyRecord.ownerId, input.claim.ownerId),
+            eq(idempotencyRecord.operation, input.claim.operation),
+            eq(idempotencyRecord.keyHash, input.claim.keyHash),
+            eq(
+              idempotencyRecord.requestHash,
+              storedIdempotencyClaimHash(input.claim)
+            ),
+            eq(idempotencyRecord.state, "completed")
+          )
+        )
+        .returning({ id: idempotencyRecord.id });
+      return replaced.length === 1 ? "replaced" : "lost";
+    } catch (error) {
+      throw new ChatbotError("bad_request:database", { cause: error });
+    }
+  },
 };
 
 export const databaseCredentialDevicePollStore: CredentialDevicePollStore<PreparedCredentialWrite> =

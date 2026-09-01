@@ -295,7 +295,7 @@ test("GitHub connection handlers establish subscriber identity and admission bef
   const implementation = read("lib/github/connection.ts");
   for (const [handler, policy, marker] of [
     ["install", "github_install", "createGitHubInstallState("],
-    ["callback", "github_callback", "runIdempotentOperation("],
+    ["callback", "github_callback", "installationSetupCallback("],
     ["getConnection", "github_connection_read", "createProvider("],
     ["disconnect", "github_connection_delete", "disconnectGitHubConnections("],
   ] as const) {
@@ -313,6 +313,27 @@ test("GitHub connection handlers establish subscriber identity and admission bef
     assert.ok(admission > identity, `${handler} must admit after identity`);
     assert.ok(expensive > admission, `${handler} must admit before ${marker}`);
   }
+
+  const setup = functionBlock(implementation, "installationSetupCallback");
+  assert.ok(
+    setup.indexOf("runIdempotentOperation(") >= 0,
+    "installation setup must consume durable state"
+  );
+  const authorization = functionBlock(
+    implementation,
+    "userAuthorizationCallback"
+  );
+  assert.ok(
+    authorization.indexOf("runIdempotentOperation(") <
+      authorization.indexOf("completeUserAuthorization("),
+    "OAuth state must be durably consumed before code exchange"
+  );
+  const proof = functionBlock(implementation, "completeUserAuthorization");
+  assert.ok(
+    proof.indexOf(".proveInstallationAccess(") <
+      proof.indexOf(".createProvider("),
+    "user installation proof must precede app-level provider access"
+  );
 
   for (const routePath of [
     "app/api/github/install/route.ts",

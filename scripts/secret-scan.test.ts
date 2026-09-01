@@ -174,6 +174,7 @@ test("a secret with no vendor prefix is still caught, by its name", () => {
     "RUNNER_MANUAL_RECONCILE_SECRET",
     "STRIPE_WEBHOOK_SECRET",
     "AUTH_GITHUB_SECRET",
+    "GITHUB_APP_CLIENT_SECRET",
     "PGPASSWORD",
   ]) {
     const findings = scanText(".env", `${name}=${RANDOM_BASE64}`);

@@ -13,6 +13,7 @@ import type {
   AbuseEnforcementInput,
 } from "@/lib/abuse/enforce";
 import {
+  type IdempotencyCompleteInput,
   type IdempotencyStore,
   runIdempotentOperation,
 } from "@/lib/abuse/idempotency";
@@ -39,10 +40,24 @@ import {
   type GitHubRepositorySelection,
 } from "./app-auth";
 import type { GitHubAppConfig, GitHubEnvironmentState } from "./config";
+import type { GitHubUserAuthorizationClient } from "./user-auth";
 
-const STATE_VERSION = "v1";
+const INSTALL_STATE_VERSION = "v1";
+const USER_AUTHORIZATION_STATE_VERSION = "v2";
 const STATE_TTL_SECONDS = 10 * 60;
 const MAX_STATE_BYTES = 4096;
+const STATE_SIGNATURE_CHARACTERS = 43;
+const STATE_ENVELOPE_CHARACTERS =
+  Math.max(
+    INSTALL_STATE_VERSION.length,
+    USER_AUTHORIZATION_STATE_VERSION.length
+  ) +
+  2 +
+  STATE_SIGNATURE_CHARACTERS;
+const MAX_STATE_PAYLOAD_BYTES = Math.floor(
+  ((MAX_STATE_BYTES - STATE_ENVELOPE_CHARACTERS) * 3) / 4
+);
+export const GITHUB_RETURN_PATH_MAX_ENCODED_BYTES = 2048;
 const RANDOM_STATE_BYTES = 32;
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -54,8 +69,10 @@ const CALLBACK_PARAMETERS = new Set([
   "setup_action",
   "state",
 ]);
+const OAUTH_CALLBACK_PARAMETERS = new Set(["code", "state"]);
 const INSTALL_PARAMETERS = new Set(["returnTo"]);
 const IDEMPOTENCY_RETENTION_FLOOR_MS = 1000;
+const OAUTH_CODE = /^[A-Za-z0-9._~-]{1,1024}$/u;
 
 export type GitHubInstallStateClaims = Readonly<{
   authVersion: number;
@@ -70,6 +87,25 @@ export type GitHubInstallStateClaims = Readonly<{
 
 export type GitHubInstallStateVerification =
   | Readonly<{ claims: GitHubInstallStateClaims; kind: "valid" }>
+  | Readonly<{ kind: "expired" | "invalid" }>;
+
+type GitHubUserAuthorizationStateClaims = Readonly<{
+  authVersion: number;
+  exp: number;
+  iat: number;
+  installationId: string;
+  jti: string;
+  returnPath: string;
+  tenant: string;
+  userId: string;
+  v: 2;
+}>;
+
+type GitHubUserAuthorizationStateVerification =
+  | Readonly<{
+      claims: GitHubUserAuthorizationStateClaims;
+      kind: "valid";
+    }>
   | Readonly<{ kind: "expired" | "invalid" }>;
 
 export type GitHubConnectionStore = Readonly<{
@@ -98,6 +134,9 @@ export type GitHubConnectionDependencies = Readonly<{
   appOrigin: () => string | null;
   auth: Pick<RunnerAuth, "authorizeSubscriber">;
   createProvider: (config: GitHubAppConfig) => GitHubAppClient;
+  createUserAuthorizationClient: (
+    config: GitHubAppConfig
+  ) => GitHubUserAuthorizationClient;
   createRequestId?: () => string;
   createStore: (
     subscriber: RunnerAuthenticatedSubscriber
@@ -121,6 +160,7 @@ type GitHubErrorCode =
   | "github_callback_invalid"
   | "github_configuration_invalid"
   | "github_feature_disabled"
+  | "github_installation_access_denied"
   | "github_installation_unusable"
   | "github_invalid_return_path"
   | "github_provider_unavailable"
@@ -134,6 +174,12 @@ type GitHubErrorCode =
   | "unauthorized";
 
 type CallbackOutcome =
+  | Readonly<{ authorizationState: string; kind: "authorize" }>
+  | Readonly<{
+      installationId: string;
+      kind: "consumed";
+      returnPath: string;
+    }>
   | Readonly<{ code: GitHubErrorCode; kind: "error" }>
   | Readonly<{ kind: "redirect"; returnPath: string }>;
 
@@ -157,6 +203,11 @@ const ERROR_DEFINITIONS = {
     message: "GitHub connections are not enabled.",
     retryable: false,
     status: 404,
+  },
+  github_installation_access_denied: {
+    message: "The GitHub installation is not accessible to this user.",
+    retryable: false,
+    status: 403,
   },
   github_installation_unusable: {
     message: "The GitHub installation cannot be used.",
@@ -245,14 +296,11 @@ export function createGitHubInstallState(
     userId: input.userId,
     v: 1,
   };
-  const payload = Buffer.from(JSON.stringify(claims), "utf8").toString(
-    "base64url"
+  return createSignedState(
+    INSTALL_STATE_VERSION,
+    claims,
+    input.stateSigningKey
   );
-  const signed = `${STATE_VERSION}.${payload}`;
-  const signature = createHmac("sha256", input.stateSigningKey)
-    .update(signed, "utf8")
-    .digest("base64url");
-  return `${signed}.${signature}`;
 }
 
 export function verifyGitHubInstallState(
@@ -270,7 +318,7 @@ export function verifyGitHubInstallState(
   }
   const [version, payload, signature, extra] = input.state.split(".");
   if (
-    version !== STATE_VERSION ||
+    version !== INSTALL_STATE_VERSION ||
     !payload ||
     !signature ||
     extra !== undefined ||
@@ -299,7 +347,10 @@ export function verifyGitHubInstallState(
   let claims: unknown;
   try {
     const decoded = Buffer.from(payload, "base64url");
-    if (decoded.toString("base64url") !== payload || decoded.length > 2048) {
+    if (
+      decoded.toString("base64url") !== payload ||
+      decoded.length > MAX_STATE_PAYLOAD_BYTES
+    ) {
       return { kind: "invalid" };
     }
     claims = JSON.parse(decoded.toString("utf8"));
@@ -313,6 +364,125 @@ export function verifyGitHubInstallState(
     return { kind: "expired" };
   }
   return { claims, kind: "valid" };
+}
+
+function createGitHubUserAuthorizationState(
+  input: Readonly<{
+    authVersion: number;
+    installationId: string;
+    now: Date;
+    randomBytes?: (size: number) => Uint8Array;
+    returnPath: string;
+    stateSigningKey: KeyObject;
+    tenant: string;
+    userId: string;
+  }>
+): string {
+  assertValidStateIdentity(input);
+  if (!DECIMAL_ID.test(input.installationId)) {
+    throw new Error("GitHub user authorization installation is invalid.");
+  }
+  const nowSeconds = Math.floor(input.now.getTime() / 1000);
+  const entropy = (input.randomBytes ?? randomBytes)(RANDOM_STATE_BYTES);
+  if (entropy.byteLength !== RANDOM_STATE_BYTES) {
+    throw new Error("GitHub state entropy source returned an invalid length.");
+  }
+  const claims: GitHubUserAuthorizationStateClaims = {
+    authVersion: input.authVersion,
+    exp: nowSeconds + STATE_TTL_SECONDS,
+    iat: nowSeconds,
+    installationId: input.installationId,
+    jti: Buffer.from(entropy).toString("base64url"),
+    returnPath: input.returnPath,
+    tenant: input.tenant,
+    userId: input.userId,
+    v: 2,
+  };
+  return createSignedState(
+    USER_AUTHORIZATION_STATE_VERSION,
+    claims,
+    input.stateSigningKey
+  );
+}
+
+function verifyGitHubUserAuthorizationState(
+  input: Readonly<{
+    now: Date;
+    state: string;
+    stateSigningKey: KeyObject;
+  }>
+): GitHubUserAuthorizationStateVerification {
+  if (
+    Number.isNaN(input.now.getTime()) ||
+    Buffer.byteLength(input.state, "utf8") > MAX_STATE_BYTES
+  ) {
+    return { kind: "invalid" };
+  }
+  const [version, payload, signature, extra] = input.state.split(".");
+  if (
+    version !== USER_AUTHORIZATION_STATE_VERSION ||
+    !payload ||
+    !signature ||
+    extra !== undefined ||
+    !/^[A-Za-z0-9_-]+$/u.test(payload) ||
+    !/^[A-Za-z0-9_-]{43}$/u.test(signature)
+  ) {
+    return { kind: "invalid" };
+  }
+  const expected = createHmac("sha256", input.stateSigningKey)
+    .update(`${version}.${payload}`, "utf8")
+    .digest();
+  let supplied: Buffer;
+  try {
+    supplied = Buffer.from(signature, "base64url");
+  } catch {
+    return { kind: "invalid" };
+  }
+  if (
+    supplied.length !== expected.length ||
+    !timingSafeEqual(supplied, expected)
+  ) {
+    return { kind: "invalid" };
+  }
+  let claims: unknown;
+  try {
+    const decoded = Buffer.from(payload, "base64url");
+    if (
+      decoded.toString("base64url") !== payload ||
+      decoded.length > MAX_STATE_PAYLOAD_BYTES
+    ) {
+      return { kind: "invalid" };
+    }
+    claims = JSON.parse(decoded.toString("utf8"));
+  } catch {
+    return { kind: "invalid" };
+  }
+  if (!validUserAuthorizationClaims(claims)) {
+    return { kind: "invalid" };
+  }
+  if (Math.floor(input.now.getTime() / 1000) >= claims.exp) {
+    return { kind: "expired" };
+  }
+  return { claims, kind: "valid" };
+}
+
+function createSignedState(
+  version: string,
+  claims: GitHubInstallStateClaims | GitHubUserAuthorizationStateClaims,
+  stateSigningKey: KeyObject
+): string {
+  const payload = Buffer.from(JSON.stringify(claims), "utf8").toString(
+    "base64url"
+  );
+  const signed = `${version}.${payload}`;
+  const signature = createHmac("sha256", stateSigningKey)
+    .update(signed, "utf8")
+    .digest("base64url");
+  const state = `${signed}.${signature}`;
+  if (Buffer.byteLength(state, "utf8") > MAX_STATE_BYTES) {
+    throw new Error("GitHub state exceeds its encoded bound.");
+  }
+  return state;
 }
 
 export function createGitHubConnectionHandlers(
@@ -401,84 +571,21 @@ export function createGitHubConnectionHandlers(
       if (configured instanceof Response) {
         return configured;
       }
-      const checkedState = verifyGitHubInstallState({
-        now: now(),
-        state: callback.state,
-        stateSigningKey: configured.stateSigningKey,
-      });
-      if (checkedState.kind !== "valid") {
-        return errorResponse(
-          dependencies,
-          checkedState.kind === "expired"
-            ? "github_state_expired"
-            : "github_state_invalid"
-        );
-      }
-      if (!stateMatchesSubscriber(checkedState.claims, subscriber)) {
-        return errorResponse(dependencies, "github_state_mismatch");
-      }
-      const returnPath = currentReturnPath(
-        checkedState.claims.returnPath,
-        dependencies
-      );
-      if (!returnPath) {
-        return errorResponse(dependencies, "github_state_invalid");
-      }
-
-      try {
-        const result = await runIdempotentOperation({
-          idempotencyKey: sha256(callback.state),
-          operation: `github_callback:${sha256(
-            subscriber.principal.tenant
-          ).slice(0, 16)}`,
-          ownerId: subscriber.userId,
-          perform: async () => ({
-            body: await completeCallback({
-              callback,
-              claims: checkedState.claims,
-              config: configured,
-              dependencies,
-              subscriber,
-            }),
-            status: 200,
-          }),
-          request: {
-            installationId: callback.installationId,
-            jti: checkedState.claims.jti,
-            setupAction: callback.setupAction,
-          },
-          retentionMs: Math.max(
-            IDEMPOTENCY_RETENTION_FLOOR_MS,
-            checkedState.claims.exp * 1000 - now().getTime()
-          ),
-          store: dependencies.idempotencyStore,
-        });
-
-        if (result.kind === "in_progress") {
-          return errorResponse(dependencies, "request_in_progress");
-        }
-        if (result.kind !== "response") {
-          return errorResponse(dependencies, "github_state_invalid");
-        }
-        const outcome = callbackOutcome(result.response.body);
-        if (!outcome) {
-          return errorResponse(dependencies, "github_configuration_invalid");
-        }
-        if (outcome.kind === "error") {
-          return errorResponse(dependencies, outcome.code);
-        }
-        const origin = configuredOrigin(dependencies);
-        if (!origin || outcome.returnPath !== returnPath) {
-          return errorResponse(dependencies, "github_configuration_invalid");
-        }
-        return redirectResponse(
-          `${origin}${outcome.returnPath}`,
-          303,
-          result.replayed
-        );
-      } catch (error) {
-        return providerOrStoreError(dependencies, error);
-      }
+      return callback.kind === "installation"
+        ? installationSetupCallback({
+            callback,
+            config: configured,
+            dependencies,
+            now,
+            subscriber,
+          })
+        : userAuthorizationCallback({
+            callback,
+            config: configured,
+            dependencies,
+            now,
+            subscriber,
+          });
     },
 
     async disconnect(request, ip) {
@@ -615,49 +722,335 @@ export function createGitHubConnectionHandlers(
   };
 }
 
-async function completeCallback(
+async function installationSetupCallback(
   input: Readonly<{
     callback: Readonly<{
+      kind: "installation";
       installationId: string;
       setupAction: "install" | "update";
+      state: string;
     }>;
-    claims: GitHubInstallStateClaims;
+    config: GitHubAppConfig;
+    dependencies: GitHubConnectionDependencies;
+    now: () => Date;
+    subscriber: RunnerAuthenticatedSubscriber;
+  }>
+): Promise<Response> {
+  const checkedState = verifyGitHubInstallState({
+    now: input.now(),
+    state: input.callback.state,
+    stateSigningKey: input.config.stateSigningKey,
+  });
+  if (checkedState.kind !== "valid") {
+    return errorResponse(
+      input.dependencies,
+      checkedState.kind === "expired"
+        ? "github_state_expired"
+        : "github_state_invalid"
+    );
+  }
+  if (!stateMatchesSubscriber(checkedState.claims, input.subscriber)) {
+    return errorResponse(input.dependencies, "github_state_mismatch");
+  }
+  const returnPath = currentReturnPath(
+    checkedState.claims.returnPath,
+    input.dependencies
+  );
+  const callbackUrl = configuredGitHubCallbackUrl(input.dependencies);
+  if (!returnPath) {
+    return errorResponse(input.dependencies, "github_state_invalid");
+  }
+  if (!callbackUrl) {
+    return errorResponse(input.dependencies, "github_configuration_invalid");
+  }
+
+  try {
+    const result = await runIdempotentOperation({
+      idempotencyKey: sha256(input.callback.state),
+      operation: callbackOperation(
+        "github_install_setup",
+        input.subscriber.principal.tenant
+      ),
+      ownerId: input.subscriber.userId,
+      perform: async () => ({
+        body: {
+          authorizationState: createGitHubUserAuthorizationState({
+            authVersion: checkedState.claims.authVersion,
+            installationId: input.callback.installationId,
+            now: input.now(),
+            randomBytes: input.dependencies.randomBytes,
+            returnPath,
+            stateSigningKey: input.config.stateSigningKey,
+            tenant: checkedState.claims.tenant,
+            userId: checkedState.claims.userId,
+          }),
+          kind: "authorize",
+        },
+        status: 200,
+      }),
+      request: {
+        installationId: input.callback.installationId,
+        jti: checkedState.claims.jti,
+        setupAction: input.callback.setupAction,
+      },
+      retentionMs: stateRetentionMs(checkedState.claims.exp, input.now()),
+      store: input.dependencies.idempotencyStore,
+    });
+    if (result.kind === "in_progress") {
+      return errorResponse(input.dependencies, "request_in_progress");
+    }
+    if (result.kind !== "response") {
+      return errorResponse(input.dependencies, "github_state_invalid");
+    }
+    const outcome = callbackOutcome(result.response.body);
+    if (outcome?.kind !== "authorize") {
+      return errorResponse(input.dependencies, "github_configuration_invalid");
+    }
+    const authorizationState = verifyGitHubUserAuthorizationState({
+      now: input.now(),
+      state: outcome.authorizationState,
+      stateSigningKey: input.config.stateSigningKey,
+    });
+    if (
+      authorizationState.kind !== "valid" ||
+      authorizationState.claims.installationId !==
+        input.callback.installationId ||
+      authorizationState.claims.returnPath !== returnPath ||
+      !stateMatchesSubscriber(authorizationState.claims, input.subscriber)
+    ) {
+      return errorResponse(input.dependencies, "github_configuration_invalid");
+    }
+    return redirectResponse(
+      githubUserAuthorizationUrl({
+        callbackUrl,
+        clientId: input.config.clientId,
+        codeChallenge: githubCodeChallenge(
+          githubCodeVerifier(
+            authorizationState.claims,
+            input.config.stateSigningKey
+          )
+        ),
+        state: outcome.authorizationState,
+      }),
+      302,
+      result.replayed
+    );
+  } catch (error) {
+    return providerOrStoreError(input.dependencies, error);
+  }
+}
+
+async function userAuthorizationCallback(
+  input: Readonly<{
+    callback: Readonly<{ code: string; kind: "oauth"; state: string }>;
+    config: GitHubAppConfig;
+    dependencies: GitHubConnectionDependencies;
+    now: () => Date;
+    subscriber: RunnerAuthenticatedSubscriber;
+  }>
+): Promise<Response> {
+  const checkedState = verifyGitHubUserAuthorizationState({
+    now: input.now(),
+    state: input.callback.state,
+    stateSigningKey: input.config.stateSigningKey,
+  });
+  if (checkedState.kind !== "valid") {
+    return errorResponse(
+      input.dependencies,
+      checkedState.kind === "expired"
+        ? "github_state_expired"
+        : "github_state_invalid"
+    );
+  }
+  if (!stateMatchesSubscriber(checkedState.claims, input.subscriber)) {
+    return errorResponse(input.dependencies, "github_state_mismatch");
+  }
+  const returnPath = currentReturnPath(
+    checkedState.claims.returnPath,
+    input.dependencies
+  );
+  const callbackUrl = configuredGitHubCallbackUrl(input.dependencies);
+  if (!returnPath) {
+    return errorResponse(input.dependencies, "github_state_invalid");
+  }
+  if (!callbackUrl) {
+    return errorResponse(input.dependencies, "github_configuration_invalid");
+  }
+
+  let consumedCompletion: IdempotencyCompleteInput | null = null;
+  let result: Awaited<ReturnType<typeof runIdempotentOperation>>;
+  try {
+    result = await runIdempotentOperation({
+      completeSuccessfulResponse: async (completion) => {
+        const completed =
+          await input.dependencies.idempotencyStore.complete(completion);
+        if (completed === "completed") {
+          consumedCompletion = completion;
+        }
+        return completed;
+      },
+      idempotencyKey: sha256(input.callback.state),
+      operation: callbackOperation(
+        "github_user_authorization",
+        input.subscriber.principal.tenant
+      ),
+      ownerId: input.subscriber.userId,
+      perform: async () => ({
+        body: {
+          installationId: checkedState.claims.installationId,
+          kind: "consumed",
+          returnPath,
+        },
+        status: 200,
+      }),
+      request: {
+        codeHash: sha256(input.callback.code),
+        installationId: checkedState.claims.installationId,
+        jti: checkedState.claims.jti,
+      },
+      retentionMs: stateRetentionMs(checkedState.claims.exp, input.now()),
+      store: input.dependencies.idempotencyStore,
+    });
+  } catch (error) {
+    return providerOrStoreError(input.dependencies, error);
+  }
+  if (result.kind === "in_progress") {
+    return errorResponse(input.dependencies, "request_in_progress");
+  }
+  if (result.kind !== "response") {
+    return errorResponse(input.dependencies, "github_state_invalid");
+  }
+  const storedOutcome = callbackOutcome(result.response.body);
+  if (!storedOutcome) {
+    return errorResponse(input.dependencies, "github_configuration_invalid");
+  }
+  if (result.replayed) {
+    if (
+      storedOutcome.kind === "redirect" &&
+      storedOutcome.returnPath === returnPath
+    ) {
+      return redirectResponse(
+        `${callbackUrl.origin}${storedOutcome.returnPath}`,
+        303,
+        true
+      );
+    }
+    if (storedOutcome.kind === "error") {
+      return errorResponse(input.dependencies, storedOutcome.code);
+    }
+    return errorResponse(input.dependencies, "github_state_invalid");
+  }
+  if (
+    storedOutcome.kind !== "consumed" ||
+    storedOutcome.installationId !== checkedState.claims.installationId ||
+    storedOutcome.returnPath !== returnPath ||
+    consumedCompletion === null
+  ) {
+    return errorResponse(input.dependencies, "github_configuration_invalid");
+  }
+
+  const outcome = await completeUserAuthorization({
+    callback: input.callback,
+    callbackUrl: callbackUrl.url,
+    claims: checkedState.claims,
+    config: input.config,
+    dependencies: input.dependencies,
+    subscriber: input.subscriber,
+  });
+  try {
+    await replaceConsumedOutcome(
+      input.dependencies.idempotencyStore,
+      consumedCompletion,
+      outcome,
+      input.now()
+    );
+  } catch {
+    return errorResponse(input.dependencies, "github_provider_unavailable");
+  }
+  if (outcome.kind === "error") {
+    return errorResponse(input.dependencies, outcome.code);
+  }
+  return redirectResponse(`${callbackUrl.origin}${outcome.returnPath}`, 303);
+}
+
+async function completeUserAuthorization(
+  input: Readonly<{
+    callback: Readonly<{ code: string }>;
+    callbackUrl: string;
+    claims: GitHubUserAuthorizationStateClaims;
     config: GitHubAppConfig;
     dependencies: GitHubConnectionDependencies;
     subscriber: RunnerAuthenticatedSubscriber;
   }>
-): Promise<CallbackOutcome> {
-  const store = await input.dependencies.createStore(input.subscriber);
-  const provider = input.dependencies.createProvider(input.config);
+): Promise<Extract<CallbackOutcome, { kind: "error" | "redirect" }>> {
+  try {
+    await input.dependencies
+      .createUserAuthorizationClient(input.config)
+      .proveInstallationAccess({
+        code: input.callback.code,
+        codeVerifier: githubCodeVerifier(
+          input.claims,
+          input.config.stateSigningKey
+        ),
+        installationId: input.claims.installationId,
+        redirectUri: input.callbackUrl,
+      });
+  } catch (error) {
+    return {
+      code: callbackErrorCode(error),
+      kind: "error",
+    };
+  }
+
+  let store: GitHubConnectionStore;
+  try {
+    store = await input.dependencies.createStore(input.subscriber);
+  } catch (error) {
+    return { code: callbackErrorCode(error), kind: "error" };
+  }
+
   let authority: VerifiedInstallationAuthority;
   try {
     authority = await verifiedInstallationAuthority(
-      provider,
+      input.dependencies.createProvider(input.config),
       input.config,
-      input.callback.installationId
+      input.claims.installationId
     );
   } catch (error) {
     if (!terminalInstallationError(error)) {
-      throw error;
+      return { code: callbackErrorCode(error), kind: "error" };
     }
-    await store.removeGitHubInstallationConnections(
-      input.subscriber.principal,
-      input.callback.installationId
-    );
+    try {
+      await store.removeGitHubInstallationConnections(
+        input.subscriber.principal,
+        input.claims.installationId
+      );
+    } catch {
+      return { code: "github_provider_unavailable", kind: "error" };
+    }
     return { code: "github_installation_unusable", kind: "error" };
   }
 
-  const current = await input.dependencies.auth.authorizeSubscriber();
+  let current: RunnerSubscriberAuthorization;
+  try {
+    current = await input.dependencies.auth.authorizeSubscriber();
+  } catch {
+    return { code: "github_state_mismatch", kind: "error" };
+  }
   if (
     current.kind !== "allowed" ||
     !stateMatchesSubscriber(input.claims, current)
   ) {
     return { code: "github_state_mismatch", kind: "error" };
   }
-  await store.replaceGitHubInstallationConnections(
-    input.subscriber.principal,
-    replacementInput(input.subscriber.principal, authority)
-  );
+  try {
+    await store.replaceGitHubInstallationConnections(
+      input.subscriber.principal,
+      replacementInput(input.subscriber.principal, authority)
+    );
+  } catch {
+    return { code: "github_provider_unavailable", kind: "error" };
+  }
   return { kind: "redirect", returnPath: input.claims.returnPath };
 }
 
@@ -772,33 +1165,58 @@ function permissionAtLeast(
   return value === "write" || value === "admin";
 }
 
-function callbackParameters(request: Request): Readonly<{
-  installationId: string;
-  setupAction: "install" | "update";
-  state: string;
-}> | null {
-  const entries = [...new URL(request.url).searchParams.entries()];
-  if (
-    entries.length !== CALLBACK_PARAMETERS.size ||
-    entries.some(([name]) => !CALLBACK_PARAMETERS.has(name)) ||
-    new Set(entries.map(([name]) => name)).size !== entries.length
-  ) {
-    return null;
-  }
+function callbackParameters(request: Request):
+  | Readonly<{
+      installationId: string;
+      kind: "installation";
+      setupAction: "install" | "update";
+      state: string;
+    }>
+  | Readonly<{ code: string; kind: "oauth"; state: string }>
+  | null {
   const parameters = new URL(request.url).searchParams;
-  const installationId = parameters.get("installation_id");
-  const setupAction = parameters.get("setup_action");
-  const state = parameters.get("state");
-  if (
-    !installationId ||
-    !DECIMAL_ID.test(installationId) ||
-    (setupAction !== "install" && setupAction !== "update") ||
-    !state ||
-    Buffer.byteLength(state, "utf8") > MAX_STATE_BYTES
-  ) {
+  const entries = [...parameters.entries()];
+  const names = new Set(entries.map(([name]) => name));
+  if (names.size !== entries.length) {
     return null;
   }
-  return { installationId, setupAction, state };
+  if (
+    entries.length === CALLBACK_PARAMETERS.size &&
+    entries.every(([name]) => CALLBACK_PARAMETERS.has(name))
+  ) {
+    const installationId = parameters.get("installation_id");
+    const setupAction = parameters.get("setup_action");
+    const state = parameters.get("state");
+    if (
+      !installationId ||
+      !DECIMAL_ID.test(installationId) ||
+      (setupAction !== "install" && setupAction !== "update") ||
+      !validCallbackState(state)
+    ) {
+      return null;
+    }
+    return { installationId, kind: "installation", setupAction, state };
+  }
+  if (
+    entries.length === OAUTH_CALLBACK_PARAMETERS.size &&
+    entries.every(([name]) => OAUTH_CALLBACK_PARAMETERS.has(name))
+  ) {
+    const code = parameters.get("code");
+    const state = parameters.get("state");
+    if (!code || !OAUTH_CODE.test(code) || !validCallbackState(state)) {
+      return null;
+    }
+    return { code, kind: "oauth", state };
+  }
+  return null;
+}
+
+function validCallbackState(value: string | null): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    Buffer.byteLength(value, "utf8") <= MAX_STATE_BYTES
+  );
 }
 
 function installReturnPath(
@@ -823,7 +1241,7 @@ function installReturnPath(
     return applicationHomePath(basePath);
   }
   const safe = safeApplicationCallbackPath(supplied, basePath);
-  return safe === supplied
+  return safe === supplied && canonicalSameOriginPath(supplied)
     ? safe
     : errorResponse(dependencies, "github_invalid_return_path");
 }
@@ -834,7 +1252,7 @@ function currentReturnPath(
 ): string | null {
   try {
     const safe = safeApplicationCallbackPath(value, dependencies.appBasePath());
-    return safe === value ? safe : null;
+    return safe === value && canonicalSameOriginPath(value) ? safe : null;
   } catch {
     return null;
   }
@@ -910,14 +1328,124 @@ function publicConnections(connections: readonly GitHubConnectionRecord[]) {
   );
 }
 
+function configuredGitHubCallbackUrl(
+  dependencies: GitHubConnectionDependencies
+): Readonly<{ origin: string; url: string }> | null {
+  const origin = configuredOrigin(dependencies);
+  if (!origin) {
+    return null;
+  }
+  try {
+    const home = applicationHomePath(dependencies.appBasePath());
+    const basePath = home === "/" ? "" : home;
+    return {
+      origin,
+      url: `${origin}${basePath}/api/github/callback`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function githubUserAuthorizationUrl(
+  input: Readonly<{
+    callbackUrl: Readonly<{ url: string }>;
+    clientId: string;
+    codeChallenge: string;
+    state: string;
+  }>
+): string {
+  const location = new URL("https://github.com/login/oauth/authorize");
+  location.searchParams.set("client_id", input.clientId);
+  location.searchParams.set("redirect_uri", input.callbackUrl.url);
+  location.searchParams.set("state", input.state);
+  location.searchParams.set("code_challenge", input.codeChallenge);
+  location.searchParams.set("code_challenge_method", "S256");
+  location.searchParams.set("allow_signup", "false");
+  location.searchParams.set("prompt", "select_account");
+  return location.toString();
+}
+
+function githubCodeVerifier(
+  claims: GitHubUserAuthorizationStateClaims,
+  stateSigningKey: KeyObject
+): string {
+  return createHmac("sha256", stateSigningKey)
+    .update("github-user-authorization-pkce\0", "utf8")
+    .update(claims.jti, "utf8")
+    .update("\0", "utf8")
+    .update(claims.installationId, "utf8")
+    .digest("base64url");
+}
+
+function githubCodeChallenge(verifier: string): string {
+  return createHash("sha256").update(verifier, "ascii").digest("base64url");
+}
+
+function callbackOperation(kind: string, tenant: string): string {
+  return `${kind}:${sha256(tenant).slice(0, 16)}`;
+}
+
+function stateRetentionMs(exp: number, now: Date): number {
+  return Math.max(IDEMPOTENCY_RETENTION_FLOOR_MS, exp * 1000 - now.getTime());
+}
+
+async function replaceConsumedOutcome(
+  store: IdempotencyStore,
+  completion: IdempotencyCompleteInput,
+  outcome: Extract<CallbackOutcome, { kind: "error" | "redirect" }>,
+  completedAt: Date
+): Promise<void> {
+  if (!store.replaceCompleted || Number.isNaN(completedAt.getTime())) {
+    throw new Error("GitHub callback completion storage is unavailable.");
+  }
+  const result = await store.replaceCompleted({
+    ...completion,
+    completedAt,
+    response: {
+      envelope: { body: outcome, kind: "plain_json" },
+      status: 200,
+    },
+  });
+  if (result !== "replaced") {
+    throw new Error("GitHub callback completion was lost.");
+  }
+}
+
 function callbackOutcome(value: unknown): CallbackOutcome | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
   const body = value as Record<string, unknown>;
   if (
+    body.kind === "authorize" &&
+    typeof body.authorizationState === "string" &&
+    validCallbackState(body.authorizationState) &&
+    Object.keys(body).length === 2
+  ) {
+    return {
+      authorizationState: body.authorizationState,
+      kind: "authorize",
+    };
+  }
+  if (
+    body.kind === "consumed" &&
+    typeof body.installationId === "string" &&
+    DECIMAL_ID.test(body.installationId) &&
+    typeof body.returnPath === "string" &&
+    canonicalSameOriginPath(body.returnPath) &&
+    Object.keys(body).length === 3
+  ) {
+    return {
+      installationId: body.installationId,
+      kind: "consumed",
+      returnPath: body.returnPath,
+    };
+  }
+  if (
     body.kind === "redirect" &&
     typeof body.returnPath === "string" &&
+    canonicalSameOriginPath(body.returnPath) &&
     Object.keys(body).length === 2
   ) {
     return { kind: "redirect", returnPath: body.returnPath };
@@ -946,13 +1474,32 @@ function providerOrStoreError(
   return errorResponse(dependencies, "github_provider_unavailable");
 }
 
+function callbackErrorCode(error: unknown): GitHubErrorCode {
+  if (!(error instanceof GitHubProviderError)) {
+    return "github_provider_unavailable";
+  }
+  if (error.code === "github_user_installation_inaccessible") {
+    return "github_installation_access_denied";
+  }
+  if (error.code === "github_oauth_exchange_rejected") {
+    return "github_callback_invalid";
+  }
+  if (error.code === "github_provider_rate_limited") {
+    return "rate_limited";
+  }
+  return "github_provider_unavailable";
+}
+
 function errorResponse(
   dependencies: GitHubConnectionDependencies,
   code: GitHubErrorCode,
   options: Readonly<{ retryAfterSeconds?: number }> = {}
 ): Response {
   const definition = ERROR_DEFINITIONS[code];
-  const headers = new Headers({ "cache-control": "no-store" });
+  const headers = new Headers({
+    "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
+  });
   if (
     options.retryAfterSeconds !== undefined &&
     Number.isSafeInteger(options.retryAfterSeconds) &&
@@ -981,6 +1528,7 @@ function redirectResponse(
   const headers = new Headers({
     "cache-control": "no-store",
     location,
+    "referrer-policy": "no-referrer",
   });
   if (replayed) {
     headers.set("github-callback-replayed", "true");
@@ -997,7 +1545,7 @@ function safeRequestId(dependencies: GitHubConnectionDependencies): string {
 }
 
 function stateMatchesSubscriber(
-  claims: GitHubInstallStateClaims,
+  claims: GitHubInstallStateClaims | GitHubUserAuthorizationStateClaims,
   subscriber: RunnerAuthenticatedSubscriber
 ): boolean {
   return (
@@ -1058,10 +1606,50 @@ function validClaims(value: unknown): value is GitHubInstallStateClaims {
   );
 }
 
+function validUserAuthorizationClaims(
+  value: unknown
+): value is GitHubUserAuthorizationStateClaims {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const claims = value as Record<string, unknown>;
+  if (
+    Object.keys(claims).sort().join(",") !==
+    "authVersion,exp,iat,installationId,jti,returnPath,tenant,userId,v"
+  ) {
+    return false;
+  }
+  return (
+    claims.v === 2 &&
+    validStateIdentityClaims(claims) &&
+    typeof claims.installationId === "string" &&
+    DECIMAL_ID.test(claims.installationId)
+  );
+}
+
+function validStateIdentityClaims(claims: Record<string, unknown>): boolean {
+  return (
+    Number.isSafeInteger(claims.authVersion) &&
+    Number(claims.authVersion) >= 0 &&
+    Number.isSafeInteger(claims.iat) &&
+    Number.isSafeInteger(claims.exp) &&
+    Number(claims.exp) > Number(claims.iat) &&
+    Number(claims.exp) - Number(claims.iat) <= STATE_TTL_SECONDS &&
+    typeof claims.jti === "string" &&
+    JTI.test(claims.jti) &&
+    typeof claims.userId === "string" &&
+    UUID.test(claims.userId) &&
+    typeof claims.tenant === "string" &&
+    TENANT.test(claims.tenant) &&
+    typeof claims.returnPath === "string" &&
+    canonicalSameOriginPath(claims.returnPath)
+  );
+}
+
 function canonicalSameOriginPath(value: string): boolean {
   if (
     value.length === 0 ||
-    value.length > 2048 ||
+    encodedReturnPathBytes(value) > GITHUB_RETURN_PATH_MAX_ENCODED_BYTES ||
     value !== value.trim() ||
     !value.startsWith("/") ||
     value.startsWith("//") ||
@@ -1079,6 +1667,10 @@ function canonicalSameOriginPath(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function encodedReturnPathBytes(value: string): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8") - 2;
 }
 
 function sha256(value: string): string {
