@@ -1,7 +1,12 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
 import { isAdminEmail } from "./lib/admin/access";
-import { betaVerdict, isAllowedIdentity, readBetaGate } from "./lib/beta";
+import {
+  betaVerdict,
+  isAllowedIdentity,
+  isCookielessGitHubToolRoute,
+  readBetaGate,
+} from "./lib/beta";
 import { guestRegex, isDevelopmentEnvironment } from "./lib/constants";
 import { DEMO_COOKIE_NAME, isCanonicalUuid } from "./lib/session";
 
@@ -44,6 +49,10 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
+  if (isCookielessGitHubToolRoute(pathname, base)) {
+    return NextResponse.next();
+  }
+
   const token = await getToken({
     req: request,
     secret: process.env.AUTH_SECRET,
@@ -77,7 +86,7 @@ export async function proxy(request: NextRequest) {
   // credentials were wrong.
   const invited = isAllowedIdentity(gate, token?.email);
 
-  if (betaVerdict(gate, pathname, token?.email) === "deny") {
+  if (betaVerdict(gate, pathname, token?.email, base) === "deny") {
     const login = new URL(`${base}/login`, request.url);
     login.searchParams.set("beta", "1");
 

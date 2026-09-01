@@ -3034,12 +3034,19 @@ test("internal HTTP accepts only bounded strict capability-authenticated POST bo
   );
   assert.equal(escapedResponse.status, 200);
 
-  for (const request of [
+  const callsBeforeUnauthorized = calls.length;
+  const unauthorized = await handler(
     new Request("https://app.example/api/internal/github-tool", {
       body,
       headers: { cookie: "session=not-authority" },
       method: "POST",
-    }),
+    })
+  );
+  assert.equal(unauthorized.status, 401);
+  assert.equal(unauthorized.headers.get("location"), null);
+  assert.equal(calls.length, callsBeforeUnauthorized);
+
+  for (const request of [
     new Request("https://app.example/api/internal/github-tool", {
       body: JSON.stringify({
         operation: { ...OPERATION, method: "DELETE" },

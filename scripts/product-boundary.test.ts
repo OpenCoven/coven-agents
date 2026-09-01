@@ -864,6 +864,25 @@ test("browser execution uses only current same-origin routes and headers", () =>
   assert.deepEqual(importedSpecifiers(source), [...browserTransportImports]);
 });
 
+test("the cookieless GitHub tool route is an exact pre-session proxy exemption", () => {
+  const betaSource = readFileSync(
+    new URL("lib/beta.ts", repositoryRoot),
+    "utf8"
+  );
+  const proxySource = readFileSync(new URL("proxy.ts", repositoryRoot), "utf8");
+  const exemption = "isCookielessGitHubToolRoute(pathname, base)";
+  const exemptionIndex = proxySource.indexOf(exemption);
+  const sessionIndex = proxySource.indexOf("await getToken(");
+
+  assert.match(betaSource, /"\/api\/internal\/github-tool"/u);
+  assert.doesNotMatch(
+    betaSource,
+    /startsWith\([^)]*\/api\/internal\/github-tool/u
+  );
+  assert.ok(exemptionIndex >= 0);
+  assert.ok(sessionIndex > exemptionIndex);
+});
+
 test("package dependencies and scripts match the current application contract", () => {
   const manifest = readManifest("package.json");
 

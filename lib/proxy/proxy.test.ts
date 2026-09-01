@@ -103,6 +103,49 @@ test("closed beta keeps reconciliation reachable with a query string", async () 
   assert.equal(response.headers.get("location"), null);
 });
 
+test("closed beta passes only the exact GitHub tool machine route without session fallback", async () => {
+  for (const [path, basePath] of [
+    ["/api/internal/github-tool", ""],
+    ["/demo/api/internal/github-tool", "/demo"],
+  ] as const) {
+    // biome-ignore lint/performance/noAwaitInLoops: each case owns process-wide base-path configuration.
+    await withClosedBeta(async () => {
+      const responses = await Promise.all(
+        [undefined, "Bearer invalid"].map((authorization) =>
+          proxy(
+            new NextRequest(`https://app.test${path}`, {
+              headers: authorization ? { authorization } : {},
+            })
+          )
+        )
+      );
+      for (const response of responses as Response[]) {
+        assert.equal(response.headers.get("location"), null, path);
+        assert.equal(response.headers.get("x-middleware-next"), "1", path);
+        assert.equal(response.headers.get("set-cookie"), null, path);
+      }
+    }, basePath);
+  }
+});
+
+test("closed beta keeps GitHub tool descendants and lookalikes gated", async () => {
+  await withClosedBeta(async () => {
+    const paths = [
+      "/api/internal/github-tool/",
+      "/api/internal/github-tool/extra",
+      "/api/internal/github-tooling",
+    ];
+    const responses = await Promise.all(
+      paths.map((path) => visit(undefined, path))
+    );
+    for (const [index, response] of responses.entries()) {
+      const path = paths[index] as string;
+      assert.equal(response.status, 307, path);
+      assert.match(response.headers.get("location") ?? "", /\/login\?beta=1$/u);
+    }
+  });
+});
+
 test("closed beta keeps exact runner machine routes reachable with query strings", async () => {
   await withClosedBeta(async () => {
     await Promise.all(

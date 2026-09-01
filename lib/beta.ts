@@ -16,6 +16,10 @@
  * manual-recovery credential. No other `/api/internal/*` route inherits this
  * exemption.
  *
+ * `/api/internal/github-tool` is the exact cookieless agent gateway. Proxy
+ * must let the route enforce its step capability instead of redirecting it to
+ * browser login. Siblings, descendants, and lookalikes remain gated.
+ *
  * `/api/stripe` is exempt for the same reason and is not optional: Stripe does
  * not follow redirects when delivering a webhook, so a gated endpoint turns
  * every event into a delivery failure and subscriptions silently stop being
@@ -41,6 +45,7 @@ const EXEMPT_PREFIXES = [
 const EXEMPT_PATHS = new Set([
   "/api/diagnostics/sandbox",
   "/api/health",
+  "/api/internal/github-tool",
   "/api/internal/runner-reconcile",
 ]);
 
@@ -80,11 +85,25 @@ export function readBetaGate(env: {
  * Prefix exemptions are anchored on a segment boundary; exact exemptions do
  * not authorize descendants or lookalike paths.
  */
-export function isBetaExempt(pathname: string): boolean {
+function applicationPath(pathname: string, basePath: string): string {
+  return basePath && pathname.startsWith(`${basePath}/`)
+    ? pathname.slice(basePath.length)
+    : pathname;
+}
+
+export function isCookielessGitHubToolRoute(
+  pathname: string,
+  basePath = ""
+): boolean {
+  return applicationPath(pathname, basePath) === "/api/internal/github-tool";
+}
+
+export function isBetaExempt(pathname: string, basePath = ""): boolean {
+  const path = applicationPath(pathname, basePath);
   return (
-    EXEMPT_PATHS.has(pathname) ||
+    EXEMPT_PATHS.has(path) ||
     EXEMPT_PREFIXES.some(
-      (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
+      (prefix) => path === prefix || path.startsWith(`${prefix}/`)
     )
   );
 }
@@ -129,13 +148,14 @@ export function isAllowedIdentity(
 export function betaVerdict(
   gate: BetaGate,
   pathname: string,
-  email: string | null | undefined
+  email: string | null | undefined,
+  basePath = ""
 ): "allow" | "deny" {
   if (!gate.enabled) {
     return "allow";
   }
 
-  if (isBetaExempt(pathname)) {
+  if (isBetaExempt(pathname, basePath)) {
     return "allow";
   }
 
