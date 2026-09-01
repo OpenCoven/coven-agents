@@ -28,7 +28,7 @@ const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
   DAYTONA_API_URL: "https://app.daytona.io/api",
   DAYTONA_AUTO_ARCHIVE_MINUTES: "10080",
   DAYTONA_AUTO_STOP_MINUTES: "15",
-  DAYTONA_DOMAIN_ALLOW_LIST: "github.com,api.github.com",
+  DAYTONA_DOMAIN_ALLOW_LIST: "github.com,api.github.com,app.example",
   DAYTONA_SNAPSHOT: "coven-agents-copilot-1",
   DAYTONA_TARGET: "us",
   OPERATOR_DIAGNOSTIC_TOKEN: "subprocess-test-operator-token",
@@ -298,6 +298,24 @@ test("GitHub state signing authority cannot alias another server secret", () => 
 test("valid enabled GitHub teams configuration passes runtime validation", () => {
   const result = runValidator(VALID_GITHUB_ENV);
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("enabled GitHub teams requires APP_ORIGIN hostname in restrictive Daytona egress", () => {
+  const rejected = runValidator({
+    ...VALID_GITHUB_ENV,
+    DAYTONA_DOMAIN_ALLOW_LIST: "github.com,api.github.com",
+  });
+  assertRejectedWithMessage(
+    rejected,
+    "DAYTONA_DOMAIN_ALLOW_LIST must include the APP_ORIGIN hostname when GitHub teams are enabled."
+  );
+
+  const accepted = runValidator({
+    ...VALID_GITHUB_ENV,
+    DAYTONA_DOMAIN_ALLOW_LIST: "github.com,api.github.com,app.example",
+  });
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.doesNotMatch(rejected.stderr, /https:\/\/|app\.example/u);
 });
 
 test("rejects blank required production configuration", () => {

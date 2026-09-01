@@ -5,6 +5,7 @@ import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
 import { validateGitHubEnvironment } from "../lib/github/config";
 import {
   daytonaDomainAllowList,
+  daytonaGitHubGatewayHostname,
   daytonaRequestTimeout,
   daytonaSnapshotConfiguration,
 } from "../lib/runner/daytona/config";
@@ -117,7 +118,8 @@ function validateProductionDaytonaConfig(environment: NodeJS.ProcessEnv): void {
   approvedApplicationOrigin(environment);
 
   daytonaRequestTimeout(environment);
-  daytonaDomainAllowList(environment);
+  const domainAllowList = daytonaDomainAllowList(environment);
+  daytonaGitHubGatewayHostname(environment, domainAllowList);
   daytonaSnapshotConfiguration(environment);
   validateDaytonaIntervals(environment);
   validateAdmissionSettings(environment);
@@ -303,6 +305,13 @@ export async function validateRuntimeConfig(
     validateConfiguredPreviewDaytonaConfig(env);
     if (env.APP_ORIGIN !== undefined) {
       approvedApplicationOrigin(env);
+    }
+
+    if (
+      env.GITHUB_TEAMS_ENABLED === "on" &&
+      env.DAYTONA_DOMAIN_ALLOW_LIST?.trim()
+    ) {
+      daytonaGitHubGatewayHostname(env);
     }
   }
 

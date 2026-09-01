@@ -1,3 +1,5 @@
+import { approvedApplicationOrigin } from "@/lib/auth/application-origin";
+
 export const DAYTONA_DEFAULT_API_URL = "https://app.daytona.io/api";
 export const DAYTONA_DEFAULT_TARGET = "us";
 export const DAYTONA_DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -114,6 +116,7 @@ export function daytonaDomainAllowList(
         "Missing required Daytona environment variable: DAYTONA_DOMAIN_ALLOW_LIST."
       );
     }
+
     return undefined;
   }
   if (containsControlCharacter(configured)) {
@@ -137,6 +140,25 @@ export function daytonaDomainAllowList(
     );
   }
   return [...new Set(domains.map((domain) => domain.toLowerCase()))].join(",");
+}
+
+export function daytonaGitHubGatewayHostname(
+  environment: NodeJS.ProcessEnv = process.env,
+  configuredAllowList = daytonaDomainAllowList(environment)
+): string | undefined {
+  if (
+    environment.GITHUB_TEAMS_ENABLED !== "on" ||
+    configuredAllowList === undefined
+  ) {
+    return undefined;
+  }
+  const { hostname } = new URL(approvedApplicationOrigin(environment));
+  if (!configuredAllowList.split(",").includes(hostname)) {
+    throw new Error(
+      "DAYTONA_DOMAIN_ALLOW_LIST must include the APP_ORIGIN hostname when GitHub teams are enabled."
+    );
+  }
+  return hostname;
 }
 
 function containsControlCharacter(value: string): boolean {

@@ -18,6 +18,7 @@ import {
   daytonaSandboxConfiguration,
   deleteDaytonaSandbox,
   ensureDaytonaSandbox,
+  ensureDaytonaSandboxForDispatch,
   resetDaytonaSandboxForCancellation,
   warmDaytonaSandbox,
 } from "./sandbox";
@@ -137,6 +138,112 @@ test("stored provider IDs are resolved and stopped or archived sandboxes start",
       assert.equal(starts, 1);
     })
   );
+});
+
+test("dispatch replaces a sandbox when gateway egress configuration identity changes", async () => {
+  const calls: string[] = [];
+  const currentAgent = agent({
+    daytonaSandboxId: "stored",
+    sandboxGeneration: 2,
+    sandboxLifecycle: "ready",
+    version: 4,
+  });
+  const reservedAgent = agent({
+    ...currentAgent,
+    daytonaSandboxId: null,
+    sandboxGeneration: 3,
+    sandboxLifecycle: "provisioning",
+    version: 5,
+  });
+  const attachedAgent = agent({
+    ...reservedAgent,
+    daytonaSandboxId: "replacement",
+    sandboxLifecycle: "ready",
+    version: 6,
+  });
+  const oldSandbox = Object.assign(
+    sandbox(SandboxState.STARTED, {
+      delete: () => {
+        calls.push("delete");
+        return Promise.resolve();
+      },
+    }),
+    { labels: { configurationId: "old-configuration" } }
+  );
+  const replacement = Object.assign(sandbox(SandboxState.STARTED), {
+    id: "replacement",
+    labels: { configurationId: "new-configuration" },
+  });
+  const configuration = {
+    ...config,
+    configurationId: "new-configuration",
+    domainAllowList: "api.github.com,app.example",
+    gatewayHostname: "app.example",
+  };
+
+  const result = await ensureDaytonaSandboxForDispatch(
+    { kind: "runner-operator" },
+    {
+      expectedVersion: 1,
+      leaseToken: "dispatch-lease",
+      runId: "00000000-0000-4000-8000-000000000002",
+    } as never,
+    configuration,
+    {
+      daytona: {
+        create: (parameters) => {
+          calls.push("create");
+          assert.equal(
+            parameters.labels?.configurationId,
+            configuration.configurationId
+          );
+          return Promise.resolve(replacement);
+        },
+        get: (identifier) => {
+          calls.push(`get:${identifier}`);
+          return identifier === "stored"
+            ? Promise.resolve(oldSandbox)
+            : Promise.reject(new DaytonaNotFoundError("replacement absent"));
+        },
+      },
+      store: store({
+        attachDaytonaSandboxForDispatch: () => {
+          calls.push("attach");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: attachedAgent,
+          });
+        },
+        getDispatchAgent: () => {
+          calls.push("get-dispatch");
+          return Promise.resolve({
+            agent: currentAgent,
+            kind: "found" as const,
+            run: {} as never,
+          });
+        },
+        reserveDaytonaSandboxForDispatch: () => {
+          calls.push("reserve");
+          return Promise.resolve({
+            kind: "reserved" as const,
+            value: reservedAgent,
+          });
+        },
+      }),
+    }
+  );
+
+  assert.equal(result.agent.sandboxGeneration, 3);
+  assert.equal(result.sandbox, replacement);
+  assert.deepEqual(calls, [
+    "get-dispatch",
+    "get:stored",
+    "delete",
+    "reserve",
+    `get:${daytonaSandboxName(principal.tenant, currentAgent.id)}`,
+    "create",
+    "attach",
+  ]);
 });
 
 test("cancellation reset fences the sandbox before clearing its generation", async () => {
@@ -1726,6 +1833,46 @@ test("production Daytona egress configuration is required and normalized", () =>
       /DAYTONA_DOMAIN_ALLOW_LIST/u
     );
   }
+});
+
+test("sandbox configuration identity includes required GitHub gateway egress", () => {
+  const environment = {
+    APP_ORIGIN: "https://app.example",
+    AUTH_URL: "https://app.example",
+    DAYTONA_API_KEY: "test-key",
+    DAYTONA_DOMAIN_ALLOW_LIST:
+      "github.com,api.github.com,app.example,next.example",
+    DAYTONA_SNAPSHOT: "coven-agents-copilot-1",
+    GITHUB_TEAMS_ENABLED: "on",
+    NODE_ENV: "production",
+  } as NodeJS.ProcessEnv;
+  const current = daytonaSandboxConfiguration(environment);
+  const next = daytonaSandboxConfiguration({
+    ...environment,
+    APP_ORIGIN: "https://next.example",
+    AUTH_URL: "https://next.example",
+  });
+  const reordered = daytonaSandboxConfiguration({
+    ...environment,
+    DAYTONA_DOMAIN_ALLOW_LIST:
+      "next.example,app.example,api.github.com,github.com",
+  });
+
+  assert.equal(current.gatewayHostname, "app.example");
+  assert.equal(next.gatewayHostname, "next.example");
+  assert.match(current.configurationId ?? "", /^[a-f0-9]{64}$/u);
+  assert.notEqual(current.configurationId, next.configurationId);
+  assert.equal(current.configurationId, reordered.configurationId);
+
+  const unrestricted = daytonaSandboxConfiguration({
+    DAYTONA_API_KEY: "test-key",
+    DAYTONA_DOMAIN_ALLOW_LIST: "",
+    DAYTONA_SNAPSHOT: "coven-agents-copilot-1",
+    GITHUB_TEAMS_ENABLED: "off",
+    NODE_ENV: "development",
+  });
+  assert.equal(unrestricted.domainAllowList, undefined);
+  assert.equal(unrestricted.gatewayHostname, undefined);
 });
 
 test("a timeout after Daytona may have accepted creation remains durable until deterministic reconciliation attaches it", async () => {
