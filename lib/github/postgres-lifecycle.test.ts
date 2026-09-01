@@ -26,6 +26,9 @@ test("disconnect advances generation, revokes capability, and preserves an immut
   const connectionId = "10000000-0000-4000-8000-000000000010";
   const capabilityId = "10000000-0000-4000-8000-000000000011";
   const operationId = "10000000-0000-4000-8000-000000000012";
+  const releasedWriteId = "10000000-0000-4000-8000-000000000017";
+  const freshWriteId = "10000000-0000-4000-8000-000000000018";
+  const writeRequestHash = "e".repeat(64);
   const installationId = "456";
   const accountId = "123";
   const repositoryId = "789";
@@ -33,11 +36,11 @@ test("disconnect advances generation, revokes capability, and preserves an immut
   const requestHash = "b".repeat(64);
   const policy = {
     actorUserId: userId,
-    allowedCapabilities: ["github.issues.read"],
-    approvedCapabilities: [],
+    allowedCapabilities: ["github.issues.read", "github.issues.write"],
+    approvedCapabilities: ["github.issues.write"],
     authVersion: 7,
     connectionGeneration: 0,
-    declaredCapabilities: ["github.issues.read"],
+    declaredCapabilities: ["github.issues.read", "github.issues.write"],
     maxCallCount: 32,
     repositories: [
       {
@@ -63,7 +66,7 @@ test("disconnect advances generation, revokes capability, and preserves an immut
       id: "10000000-0000-4000-8000-000000000013",
       instructions: "Read issues.",
       name: "Issue reader",
-      requiredCapabilities: ["github.issues.read"],
+      requiredCapabilities: ["github.issues.read", "github.issues.write"],
     },
   ];
 
@@ -100,13 +103,16 @@ test("disconnect advances generation, revokes capability, and preserves an immut
             "id", "tenant", "teamRunId", "memberId", "agentId", "position",
             "required", "responsibility", "skillIds", "skillSnapshots",
             "agentInstructions", "agentModel", "agentRuntime",
-            "approvalStatus", "approvedCapabilities", "status", "startedAt",
+            "approvalStatus", "approvedCapabilities", "approvalActorUserId",
+            "approvalDecidedAt", "status", "startedAt",
             "plannedOperationId", "plannedRunnerRunId"
           ) VALUES (
             ${teamStepId}, ${tenant}, ${teamRunId}, ${memberId}, ${agentId}, 0,
             true, 'Read one issue.', ${transaction.json([])},
             ${transaction.json(skillSnapshots)}, 'Read issues.', 'auto',
-            'copilot', 'not_required', ${transaction.json([])}, 'running',
+            'copilot', 'approved',
+            ${transaction.json(["github.issues.write"])}, ${userId},
+            clock_timestamp(), 'running',
             clock_timestamp(), ${runnerOperationId}, ${runnerRunId}
           )
         `;
@@ -162,9 +168,9 @@ test("disconnect advances generation, revokes capability, and preserves an immut
             ${capabilityId}, ${tenant}, ${teamStepId}, ${teamRunId},
             ${runnerRunId}, ${attemptId}, 7, 0, ${tokenHash},
             clock_timestamp() + interval '10 minutes',
-            ${transaction.json(["github.issues.read"])},
-            ${transaction.json([])},
-            ${transaction.json(["github.issues.read"])},
+            ${transaction.json(["github.issues.read", "github.issues.write"])},
+            ${transaction.json(["github.issues.write"])},
+            ${transaction.json(["github.issues.read", "github.issues.write"])},
             ${transaction.json(["opencoven/coven-agents"])}, 32
           )
         `;
@@ -210,7 +216,132 @@ test("disconnect advances generation, revokes capability, and preserves an immut
                 'https://github.com/OpenCoven/coven-agents/issues/42'
           WHERE "id" = ${operationId}
         `;
+      await transaction`
+          INSERT INTO "RunnerGitHubOperation" (
+            "id", "tenant", "teamStepId", "capabilityId", "operationId",
+            "kind", "requestHash", "target", "repository",
+            "requiredCapability", "connectionId", "connectionGeneration",
+            "operationMarker", "status", "startedAt",
+            "executionLeaseExpiresAt", "accountId", "accountLogin",
+            "accountType", "installationId", "repositoryId",
+            "repositoryName", "repositoryNodeId", "repositoryOwner",
+            "providerDispatchPhase", "writeIntentActive"
+          ) VALUES (
+            ${releasedWriteId}, ${tenant}, ${teamStepId}, ${capabilityId},
+            '10000000-0000-4000-8000-000000000019', 'issue.comment',
+            ${writeRequestHash}, 'opencoven/coven-agents#issue.comment:42',
+            'opencoven/coven-agents', 'github.issues.write', ${connectionId}, 0,
+            '<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->',
+            'running', clock_timestamp(), clock_timestamp() + interval '1 minute',
+            ${accountId}, 'OpenCoven', 'Organization', ${installationId},
+            ${repositoryId}, 'coven-agents', 'R_kgDOExample', 'OpenCoven',
+            'pre_send', true
+          )
+        `;
+      await transaction`
+          UPDATE "RunnerGitHubOperation"
+          SET "status" = 'pending',
+              "error" = ${transaction.json({
+                code: "github_provider_rate_limited",
+                message: "GitHub provider execution failed.",
+                retryable: true,
+              })},
+              "writeIntentActive" = false,
+              "updatedAt" = clock_timestamp(),
+              "version" = "version" + 1
+          WHERE "id" = ${releasedWriteId}
+        `;
+      await transaction`
+          INSERT INTO "RunnerGitHubOperation" (
+            "id", "tenant", "teamStepId", "capabilityId", "operationId",
+            "kind", "requestHash", "target", "repository",
+            "requiredCapability", "connectionId", "connectionGeneration",
+            "operationMarker", "status", "startedAt",
+            "executionLeaseExpiresAt", "accountId", "accountLogin",
+            "accountType", "installationId", "repositoryId",
+            "repositoryName", "repositoryNodeId", "repositoryOwner",
+            "providerDispatchPhase", "writeIntentActive"
+          ) VALUES (
+            ${freshWriteId}, ${tenant}, ${teamStepId}, ${capabilityId},
+            '10000000-0000-4000-8000-000000000020', 'issue.comment',
+            ${writeRequestHash}, 'opencoven/coven-agents#issue.comment:42',
+            'opencoven/coven-agents', 'github.issues.write', ${connectionId}, 0,
+            '<!-- coven-github:v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->',
+            'running', clock_timestamp(), clock_timestamp() + interval '1 minute',
+            ${accountId}, 'OpenCoven', 'Organization', ${installationId},
+            ${repositoryId}, 'coven-agents', 'R_kgDOExample', 'OpenCoven',
+            'pre_send', true
+          )
+        `;
     });
+
+    const [capabilityModule, teamStoreModule] = await Promise.all([
+      import("./capability"),
+      import("@/lib/teams/store"),
+    ]);
+    const operator = { kind: "runner-operator" as const };
+    const store = capabilityModule.createGitHubGatewayStore(
+      teamStoreModule.drizzleTeamStoreDatabase(drizzle(sql))
+    );
+    const dispatched = await store.authorizeMutation(operator, {
+      expectedVersion: 0,
+      id: freshWriteId,
+    });
+    assert.equal(dispatched.kind, "authorized");
+    assert.equal(
+      dispatched.kind === "authorized" &&
+        dispatched.operation.providerDispatchPhase,
+      "sent"
+    );
+    assert.equal(
+      dispatched.kind === "authorized" && dispatched.operation.version,
+      1
+    );
+
+    await assert.rejects(
+      sql`
+          UPDATE "RunnerGitHubOperation"
+          SET "status" = 'pending',
+              "error" = jsonb_build_object(
+                'code', 'github_provider_rate_limited',
+                'message', 'GitHub provider execution failed.',
+                'retryable', true
+              ),
+              "writeIntentActive" = false
+          WHERE "id" = ${freshWriteId}
+        `,
+      /Sent GitHub operation dispatch state is immutable/u
+    );
+    const writeStates = await sql<
+      {
+        id: string;
+        providerDispatchPhase: string;
+        status: string;
+        writeIntentActive: boolean;
+      }[]
+    >`
+        SELECT "id", "providerDispatchPhase", "status", "writeIntentActive"
+        FROM "RunnerGitHubOperation"
+        WHERE "id" IN (${releasedWriteId}, ${freshWriteId})
+        ORDER BY "id"
+    `;
+    assert.deepEqual(
+      [...writeStates],
+      [
+        {
+          id: releasedWriteId,
+          providerDispatchPhase: "pre_send",
+          status: "pending",
+          writeIntentActive: false,
+        },
+        {
+          id: freshWriteId,
+          providerDispatchPhase: "sent",
+          status: "running",
+          writeIntentActive: true,
+        },
+      ]
+    );
 
     await sql`
         UPDATE "RunnerGitHubConnectionFence"
@@ -245,6 +376,7 @@ test("disconnect advances generation, revokes capability, and preserves an immut
         JOIN "RunnerGitHubOperation" AS "operation"
           ON "operation"."capabilityId" = "capability"."id"
         WHERE "capability"."id" = ${capabilityId}
+          AND "operation"."id" = ${operationId}
       `;
     assert.ok(state?.revokedAt);
     assert.equal(state.connectionId, null);
@@ -264,14 +396,6 @@ test("disconnect advances generation, revokes capability, and preserves an immut
       repository: "OpenCoven/coven-agents",
     });
 
-    const [capabilityModule, teamStoreModule] = await Promise.all([
-      import("./capability"),
-      import("@/lib/teams/store"),
-    ]);
-    const operator = { kind: "runner-operator" as const };
-    const store = capabilityModule.createGitHubGatewayStore(
-      teamStoreModule.drizzleTeamStoreDatabase(drizzle(sql))
-    );
     const stale = await store.reserveOperation(operator, {
       executionLeaseExpiresAt: new Date(Date.now() + 30_000),
       id: "10000000-0000-4000-8000-000000000016",
@@ -282,7 +406,6 @@ test("disconnect advances generation, revokes capability, and preserves an immut
         repo: "coven-agents",
       },
       operationId: "10000000-0000-4000-8000-000000000015",
-      operationMarker: null,
       requestHash,
       target: "opencoven/coven-agents#issue.get:42",
       tokenHash,

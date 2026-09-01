@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -276,5 +277,75 @@ test("0029 preserves immutable operation receipts while live connections can be 
   assert.match(
     operation.indexes.RGHOp_step_write_intent_uq.where ?? "",
     /issue\.create|pull\.create|project\.item/u
+  );
+});
+
+test("0030 persists pre-send versus sent provider dispatch and releasable write intents", async () => {
+  const migrationUrl = new URL(
+    "0030_github_provider_dispatch_phase.sql",
+    migrations
+  );
+  assert.equal(existsSync(migrationUrl), true);
+  const [migration, journalText, snapshotText] = await Promise.all([
+    readFile(migrationUrl, "utf8"),
+    readFile(new URL("meta/_journal.json", migrations), "utf8"),
+    readFile(new URL("meta/0030_snapshot.json", migrations), "utf8"),
+  ]);
+
+  for (const column of [
+    "providerDispatchPhase",
+    "providerSentAt",
+    "writeIntentActive",
+  ]) {
+    assert.match(
+      migration,
+      new RegExp(
+        `ALTER TABLE "RunnerGitHubOperation" ADD COLUMN "${column}"`,
+        "u"
+      )
+    );
+  }
+  assert.match(
+    migration,
+    /UPDATE "RunnerGitHubOperation"[\s\S]*"providerDispatchPhase" = 'sent'[\s\S]*"providerSentAt" = COALESCE\("startedAt", "createdAt"\)/u
+  );
+  assert.match(
+    migration,
+    /DROP INDEX "RGHOp_step_write_intent_uq"[\s\S]*WHERE[^\n]*"writeIntentActive"/u
+  );
+  assert.match(migration, /RGHOp_dispatch_phase_valid/u);
+  assert.match(
+    migration,
+    /OLD\."providerDispatchPhase" = 'pre_send'[\s\S]*NEW\."status" = 'pending'/u
+  );
+
+  const journal = JSON.parse(journalText) as {
+    entries: Array<{ idx: number; tag: string }>;
+  };
+  assert.deepEqual(journal.entries.at(-1), {
+    breakpoints: true,
+    idx: 30,
+    tag: "0030_github_provider_dispatch_phase",
+    version: "7",
+    when: 1_788_254_163_084,
+  });
+
+  const snapshot = JSON.parse(snapshotText) as {
+    tables: Record<
+      string,
+      {
+        columns: Record<string, { notNull: boolean }>;
+        indexes: Record<string, { isUnique: boolean; where?: string }>;
+      }
+    >;
+  };
+  const operation = snapshot.tables["public.RunnerGitHubOperation"];
+  assert.equal(operation.columns.providerDispatchPhase.notNull, true);
+  assert.equal(operation.columns.providerSentAt.notNull, false);
+  assert.equal(operation.columns.writeIntentActive.notNull, true);
+  assert.equal(operation.indexes.RGHOp_step_write_intent_uq.isUnique, true);
+  assert.match(
+    operation.indexes.RGHOp_step_write_intent_uq.where ?? "",
+    /writeIntentActive/u
   );
 });

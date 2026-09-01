@@ -76,7 +76,9 @@ function context(
       kind: operation.kind,
       operationId: "88888888-8888-4888-8888-888888888888",
       operationMarker: marker,
+      providerDispatchPhase: write ? "pre_send" : "not_applicable",
       providerRequestId: null,
+      providerSentAt: null,
       repository: "opencoven/coven-agents",
       repositoryId: "789",
       repositoryName: "coven-agents",
@@ -94,6 +96,7 @@ function context(
       tenant: "u_9c8589018a57479181fe4c455b099bc9",
       updatedAt: new Date("2026-08-31T20:00:00.000Z"),
       version: 0,
+      writeIntentActive: write,
     },
     repositoryId: "789",
     repositoryName: "coven-agents",
@@ -278,6 +281,7 @@ test("issue and pull writes use exact REST endpoints, marker bodies, and mutatio
   const cases: Array<{
     expectedBody: Record<string, unknown>;
     expectedMutationPath: string;
+    expectedPermissions: Record<string, "read" | "write">;
     operation: GitHubToolOperation;
     responses: Response[];
   }> = [
@@ -289,6 +293,7 @@ test("issue and pull writes use exact REST endpoints, marker bodies, and mutatio
         title: "Gateway issue",
       },
       expectedMutationPath: "/repos/OpenCoven/coven-agents/issues",
+      expectedPermissions: { issues: "write", metadata: "read" },
       operation: {
         assignees: ["BunsDev"],
         body: "Issue body.",
@@ -303,6 +308,7 @@ test("issue and pull writes use exact REST endpoints, marker bodies, and mutatio
     {
       expectedBody: { body: `Issue comment.\n\n${marker}` },
       expectedMutationPath: "/repos/OpenCoven/coven-agents/issues/42/comments",
+      expectedPermissions: { issues: "write", metadata: "read" },
       operation: {
         body: "Issue comment.",
         issueNumber: "42",
@@ -328,6 +334,10 @@ test("issue and pull writes use exact REST endpoints, marker bodies, and mutatio
         title: "Gateway pull",
       },
       expectedMutationPath: "/repos/OpenCoven/coven-agents/pulls",
+      expectedPermissions: {
+        metadata: "read",
+        pull_requests: "write",
+      },
       operation: {
         base: "main",
         body: "Pull body.",
@@ -343,6 +353,10 @@ test("issue and pull writes use exact REST endpoints, marker bodies, and mutatio
     {
       expectedBody: { body: `Pull comment.\n\n${marker}` },
       expectedMutationPath: "/repos/OpenCoven/coven-agents/issues/181/comments",
+      expectedPermissions: {
+        metadata: "read",
+        pull_requests: "write",
+      },
       operation: {
         body: "Pull comment.",
         kind: "pull.comment",
@@ -365,6 +379,10 @@ test("issue and pull writes use exact REST endpoints, marker bodies, and mutatio
         event: "APPROVE",
       },
       expectedMutationPath: "/repos/OpenCoven/coven-agents/pulls/181/reviews",
+      expectedPermissions: {
+        metadata: "read",
+        pull_requests: "write",
+      },
       operation: {
         body: "Approved.",
         event: "approve",
@@ -405,6 +423,13 @@ test("issue and pull writes use exact REST endpoints, marker bodies, and mutatio
       value.expectedMutationPath
     );
     assert.deepEqual(JSON.parse(mutation?.body ?? ""), value.expectedBody);
+    assert.deepEqual(sequence.scopes, [
+      {
+        installationId: "456",
+        permissions: value.expectedPermissions,
+        repositoryIds: ["789"],
+      },
+    ]);
     assert.equal(authorizations, 1);
   }
 });
@@ -532,6 +557,13 @@ test("pull.get is bounded and rejects an issue-shaped target", async () => {
     new URL(sequence.requests[0]?.url ?? "").pathname,
     "/repos/OpenCoven/coven-agents/pulls/181"
   );
+  assert.deepEqual(sequence.scopes, [
+    {
+      installationId: "456",
+      permissions: { metadata: "read", pull_requests: "read" },
+      repositoryIds: ["789"],
+    },
+  ]);
 
   for (const [targetOperation, response] of [
     [OPERATION, Response.json(issue({ number: 43 }))],
@@ -976,6 +1008,48 @@ test("provider timeout, rate limits, oversize bodies, malformed JSON, and unsafe
   }
 });
 
+test("pull preflight rate limits remain proven pre-send", async () => {
+  const operation = {
+    body: "Pull comment.",
+    kind: "pull.comment" as const,
+    owner: "OpenCoven",
+    pullNumber: "181",
+    repo: "coven-agents",
+  };
+  const sequence = sequenceProvider([
+    new Response("rate limited", {
+      headers: { "retry-after": "1" },
+      status: 429,
+    }),
+  ]);
+  let authorizationCalls = 0;
+
+  await assert.rejects(
+    sequence.provider.execute({
+      authorizeMutation: async () => {
+        authorizationCalls += 1;
+        return true;
+      },
+      context: context(
+        operation,
+        "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"
+      ),
+      mode: "execute",
+      operation,
+    }),
+    (error: unknown) =>
+      error instanceof GitHubToolProviderError &&
+      error.code === "github_provider_rate_limited" &&
+      error.retryable === true &&
+      error.mutationMayHaveReached === false
+  );
+  assert.equal(authorizationCalls, 0);
+  assert.deepEqual(
+    sequence.requests.map(({ method }) => method),
+    ["GET"]
+  );
+});
+
 test("provider timeout bounds a response body that sends headers and never completes", {
   timeout: 150,
 }, async () => {
@@ -1258,8 +1332,14 @@ test("gateway hashes the raw capability, reserves once, revalidates mutations, a
       teamStepId: "55555555-5555-4555-8555-555555555555",
     })
   );
-  const completedOperation = {
+  const dispatchedOperation = {
     ...reservedContext.operation,
+    providerDispatchPhase: "sent" as const,
+    providerSentAt: new Date("2026-08-31T20:00:01.000Z"),
+    version: 1,
+  };
+  const completedOperation = {
+    ...dispatchedOperation,
     completedAt: new Date("2026-08-31T20:00:02.000Z"),
     providerRequestId: "ABC1:DEF2",
     result: {
@@ -1274,7 +1354,7 @@ test("gateway hashes the raw capability, reserves once, revalidates mutations, a
     resultUrl:
       "https://github.com/OpenCoven/coven-agents/issues/42#issuecomment-1",
     status: "completed" as const,
-    version: 1,
+    version: 2,
   };
   const calls: [string, unknown][] = [];
   const gateway = createGitHubToolGateway({
@@ -1301,7 +1381,10 @@ test("gateway hashes the raw capability, reserves once, revalidates mutations, a
     store: {
       authorizeMutation: async (_operator, input) => {
         calls.push(["authorizeMutation", input]);
-        return { kind: "authorized" as const };
+        return {
+          kind: "authorized" as const,
+          operation: dispatchedOperation,
+        };
       },
       completeOperation: async (_operator, input) => {
         calls.push(["complete", input]);
@@ -1312,6 +1395,9 @@ test("gateway hashes the raw capability, reserves once, revalidates mutations, a
       },
       failOperation: async () => {
         throw new Error("successful execution must not fail");
+      },
+      releaseOperationForRetry: async () => {
+        throw new Error("successful execution must not release");
       },
       reserveOperation: async (_operator, input) => {
         calls.push(["reserve", input]);
@@ -1338,13 +1424,14 @@ test("gateway hashes the raw capability, reserves once, revalidates mutations, a
   );
   assert.equal(JSON.stringify(calls).includes(rawCapability), false);
   assert.equal(reservation.requestHash, hashGitHubOperation(operation));
-  assert.match(
-    String(reservation.operationMarker),
-    /^<!-- coven-github:v1:[a-f0-9]{40} -->$/u
-  );
+  assert.equal("operationMarker" in reservation, false);
   const providerCall = calls.find(([name]) => name === "provider");
   assert.ok(providerCall);
   assert.equal((providerCall[1] as { mode: string }).mode, "execute");
+  const completion = calls.find(([name]) => name === "complete")?.[1] as {
+    expectedVersion?: number;
+  };
+  assert.equal(completion.expectedVersion, dispatchedOperation.version);
   assert.deepEqual(response, {
     receipt: {
       completedAt: "2026-08-31T20:00:02.000Z",
@@ -1395,13 +1482,22 @@ test("same-operation recovery after completion persistence failure performs at m
       target: "opencoven/coven-agents#issue.comment:42",
     },
   };
-  const recoveryContext = {
+  const dispatchedContext = {
     ...initialContext,
     operation: {
       ...initialContext.operation,
+      providerDispatchPhase: "sent" as const,
+      providerSentAt: new Date("2026-08-31T20:00:01.000Z"),
+      version: 1,
+    },
+  };
+  const recoveryContext = {
+    ...dispatchedContext,
+    operation: {
+      ...dispatchedContext.operation,
       executionLeaseExpiresAt: new Date("2026-08-31T20:01:30.000Z"),
       updatedAt: new Date("2026-08-31T20:01:00.000Z"),
-      version: 1,
+      version: 2,
     },
   };
   const comment = {
@@ -1424,7 +1520,10 @@ test("same-operation recovery after completion persistence failure performs at m
     operator: { kind: "runner-operator" },
     provider: sequence.provider,
     store: {
-      authorizeMutation: async () => ({ kind: "authorized" as const }),
+      authorizeMutation: async () => ({
+        kind: "authorized" as const,
+        operation: dispatchedContext.operation,
+      }),
       completeOperation: async (_operator, input) => {
         completionCalls += 1;
         if (completionCalls === 1) {
@@ -1440,13 +1539,16 @@ test("same-operation recovery after completion persistence failure performs at m
             resultNodeId: input.resultNodeId,
             resultUrl: input.resultUrl,
             status: "completed" as const,
-            version: 2,
+            version: 3,
           },
         };
       },
       failOperation: async () => {
         failureCalls += 1;
         throw new Error("completion ambiguity must not call failOperation");
+      },
+      releaseOperationForRetry: async () => {
+        throw new Error("sent writes must not release");
       },
       reserveOperation: async () => {
         reservationCalls += 1;
@@ -1491,6 +1593,559 @@ test("same-operation recovery after completion persistence failure performs at m
       ],
     ]
   );
+});
+
+test("retryable pre-send provider failure releases the write intent and permits the same operation retry", async () => {
+  const rawCapability = Buffer.alloc(32, 0x53).toString("base64url");
+  const operation = {
+    body: "Issue comment.",
+    issueNumber: "42",
+    kind: "issue.comment" as const,
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const tokenHash = createHash("sha256")
+    .update(rawCapability, "utf8")
+    .digest("hex");
+  const {
+    operation: { operationId },
+  } = context();
+  const marker = githubOperationMarker({
+    capabilityBinding: tokenHash,
+    operationId,
+    requestHash: hashGitHubOperation(operation),
+    teamStepId: context().capability.teamStepId,
+  });
+  const initial = context(operation, marker);
+  const retried = {
+    ...initial,
+    operation: {
+      ...initial.operation,
+      executionLeaseExpiresAt: new Date("2030-08-31T20:01:00.000Z"),
+      version: 2,
+    },
+  };
+  let failures = 0;
+  let providerCalls = 0;
+  let releases = 0;
+  let reservations = 0;
+  const gateway = createGitHubToolGateway({
+    clock: () => new Date("2030-08-31T20:00:00.000Z"),
+    createId: () => initial.operation.id,
+    operator: { kind: "runner-operator" },
+    provider: {
+      execute: async () => {
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          throw new GitHubToolProviderError("github_provider_rate_limited", {
+            retryable: true,
+            status: 429,
+          });
+        }
+        return {
+          providerRequestId: "ABC1:DEF2",
+          result: {
+            comment: {
+              nodeId: "IC_kwDOExample",
+              url: "https://github.com/OpenCoven/coven-agents/issues/42#issuecomment-1",
+            },
+            kind: "issue.comment",
+            repository: "OpenCoven/coven-agents",
+          },
+          resultNodeId: "IC_kwDOExample",
+          resultUrl:
+            "https://github.com/OpenCoven/coven-agents/issues/42#issuecomment-1",
+        };
+      },
+    },
+    store: {
+      authorizeMutation: async () => ({
+        kind: "authorized" as const,
+        operation: retried.operation,
+      }),
+      completeOperation: async (_operator, input) => ({
+        kind: "completed" as const,
+        operation: {
+          ...retried.operation,
+          completedAt: new Date("2030-08-31T20:00:02.000Z"),
+          providerRequestId: input.providerRequestId,
+          result: input.result,
+          resultNodeId: input.resultNodeId,
+          resultUrl: input.resultUrl,
+          status: "completed" as const,
+          version: 3,
+        },
+      }),
+      failOperation: async () => {
+        failures += 1;
+        return { kind: "stale" as const };
+      },
+      releaseOperationForRetry: async () => {
+        releases += 1;
+        return {
+          kind: "released" as const,
+          operation: {
+            ...initial.operation,
+            error: {
+              code: "github_provider_rate_limited",
+              message: "GitHub provider execution failed.",
+              retryable: true,
+            },
+            status: "pending" as const,
+            version: 1,
+            writeIntentActive: false,
+          },
+        };
+      },
+      reserveOperation: async () => {
+        reservations += 1;
+        return reservations === 1
+          ? { context: initial, kind: "reserved" as const }
+          : { context: retried, kind: "reserved" as const };
+      },
+    },
+  });
+
+  await assert.rejects(
+    gateway.execute({ operation, operationId, rawCapability }),
+    (error: unknown) =>
+      error instanceof GitHubToolGatewayError &&
+      error.code === "github_provider_rate_limited" &&
+      error.retryable === true
+  );
+  const response = await gateway.execute({
+    operation,
+    operationId,
+    rawCapability,
+  });
+
+  assert.equal(response.result.kind, "issue.comment");
+  assert.equal(releases, 1);
+  assert.equal(failures, 0);
+  assert.equal(providerCalls, 2);
+});
+
+test("installation-token failure releases the pre-send write without touching the provider endpoint", async () => {
+  const rawCapability = Buffer.alloc(32, 0x54).toString("base64url");
+  const operation = {
+    assignees: [] as string[],
+    body: "Issue body.",
+    kind: "issue.create" as const,
+    labels: [] as string[],
+    owner: "OpenCoven",
+    repo: "coven-agents",
+    title: "Gateway issue",
+  };
+  const tokenHash = createHash("sha256")
+    .update(rawCapability, "utf8")
+    .digest("hex");
+  const {
+    operation: { operationId },
+  } = context();
+  const reservedContext = context(
+    operation,
+    githubOperationMarker({
+      capabilityBinding: tokenHash,
+      operationId,
+      requestHash: hashGitHubOperation(operation),
+      teamStepId: context().capability.teamStepId,
+    })
+  );
+  let endpointCalls = 0;
+  let releases = 0;
+  const gateway = createGitHubToolGateway({
+    clock: () => new Date("2030-08-31T20:00:00.000Z"),
+    createId: () => reservedContext.operation.id,
+    operator: { kind: "runner-operator" },
+    provider: createGitHubOperationProvider({
+      fetch: () => {
+        endpointCalls += 1;
+        throw new Error("provider endpoint must not be called");
+      },
+      withInstallationAuthorization: async () => {
+        throw new Error("installation token rate limited");
+      },
+    }),
+    store: {
+      authorizeMutation: async () => {
+        throw new Error("token mint must precede mutation dispatch");
+      },
+      completeOperation: async () => ({ kind: "stale" as const }),
+      failOperation: async () => {
+        throw new Error("pre-send retry must not become terminal");
+      },
+      releaseOperationForRetry: async () => {
+        releases += 1;
+        return {
+          kind: "released" as const,
+          operation: {
+            ...reservedContext.operation,
+            error: {
+              code: "github_provider_unavailable",
+              message: "GitHub provider execution failed.",
+              retryable: true,
+            },
+            status: "pending" as const,
+            version: 1,
+            writeIntentActive: false,
+          },
+        };
+      },
+      reserveOperation: async () => ({
+        context: reservedContext,
+        kind: "reserved" as const,
+      }),
+    },
+  });
+
+  await assert.rejects(
+    gateway.execute({ operation, operationId, rawCapability }),
+    (error: unknown) =>
+      error instanceof GitHubToolGatewayError &&
+      error.code === "github_provider_unavailable" &&
+      error.retryable === true
+  );
+  assert.equal(endpointCalls, 0);
+  assert.equal(releases, 1);
+});
+
+test("blocked operation reservation fails inside the server database phase budget", {
+  timeout: 250,
+}, async () => {
+  let providerCalls = 0;
+  const gateway = createGitHubToolGateway({
+    clock: () => new Date("2030-08-31T20:00:00.000Z"),
+    createId: () => context().operation.id,
+    databasePhaseTimeoutMs: 5,
+    operator: { kind: "runner-operator" },
+    provider: {
+      execute: async () => {
+        providerCalls += 1;
+        throw new Error("blocked reservation must not reach provider");
+      },
+    },
+    store: {
+      authorizeMutation: async () => ({ kind: "unauthorized" as const }),
+      completeOperation: async () => ({ kind: "stale" as const }),
+      failOperation: async () => ({ kind: "stale" as const }),
+      reserveOperation: () => new Promise(() => undefined),
+    },
+  } as never);
+
+  await assert.rejects(
+    gateway.execute({
+      operation: OPERATION,
+      operationId: context().operation.operationId,
+      rawCapability: Buffer.alloc(32, 0x51).toString("base64url"),
+    }),
+    (error: unknown) =>
+      error instanceof GitHubToolGatewayError &&
+      error.code === "github_gateway_unavailable" &&
+      error.retryable === true &&
+      error.status === 503
+  );
+  assert.equal(providerCalls, 0);
+});
+
+test("ambiguous dispatch-phase persistence never sends or releases the write", {
+  timeout: 250,
+}, async () => {
+  const rawCapability = Buffer.alloc(32, 0x55).toString("base64url");
+  const operation = {
+    body: "Issue comment.",
+    issueNumber: "42",
+    kind: "issue.comment" as const,
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const tokenHash = createHash("sha256")
+    .update(rawCapability, "utf8")
+    .digest("hex");
+  const {
+    operation: { operationId },
+  } = context();
+  const reservedContext = context(
+    operation,
+    githubOperationMarker({
+      capabilityBinding: tokenHash,
+      operationId,
+      requestHash: hashGitHubOperation(operation),
+      teamStepId: context().capability.teamStepId,
+    })
+  );
+  const sequence = sequenceProvider([Response.json(issue())]);
+  let failures = 0;
+  let releases = 0;
+  const gateway = createGitHubToolGateway({
+    clock: () => new Date("2030-08-31T20:00:00.000Z"),
+    createId: () => reservedContext.operation.id,
+    databasePhaseTimeoutMs: 5,
+    operator: { kind: "runner-operator" },
+    provider: sequence.provider,
+    store: {
+      authorizeMutation: () => new Promise(() => undefined),
+      completeOperation: async () => ({ kind: "stale" as const }),
+      failOperation: async () => {
+        failures += 1;
+        return { kind: "stale" as const };
+      },
+      releaseOperationForRetry: async () => {
+        releases += 1;
+        return { kind: "stale" as const };
+      },
+      reserveOperation: async () => ({
+        context: reservedContext,
+        kind: "reserved" as const,
+      }),
+    },
+  } as never);
+
+  await assert.rejects(
+    gateway.execute({ operation, operationId, rawCapability }),
+    (error: unknown) =>
+      error instanceof GitHubToolGatewayError &&
+      error.code === "github_write_uncertain" &&
+      error.retryable === false
+  );
+  assert.equal(failures, 0);
+  assert.equal(releases, 0);
+  assert.deepEqual(
+    sequence.requests.map(({ method }) => method),
+    ["GET"]
+  );
+});
+
+test("blocked mutation authorization returns dispatch uncertainty without provider execution", {
+  timeout: 250,
+}, async () => {
+  const rawCapability = Buffer.alloc(32, 0x54).toString("base64url");
+  const operation = {
+    body: "Issue comment.",
+    issueNumber: "42",
+    kind: "issue.comment" as const,
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const tokenHash = createHash("sha256")
+    .update(rawCapability, "utf8")
+    .digest("hex");
+  const {
+    operation: { operationId },
+  } = context();
+  const reservedContext = context(
+    operation,
+    githubOperationMarker({
+      capabilityBinding: tokenHash,
+      operationId,
+      requestHash: hashGitHubOperation(operation),
+      teamStepId: context().capability.teamStepId,
+    })
+  );
+  let failures = 0;
+  let mutations = 0;
+  let releases = 0;
+  const gateway = createGitHubToolGateway({
+    clock: () => new Date("2030-08-31T20:00:00.000Z"),
+    createId: () => reservedContext.operation.id,
+    databasePhaseTimeoutMs: 5,
+    operator: { kind: "runner-operator" },
+    provider: {
+      execute: async (input) => {
+        if (await input.authorizeMutation()) {
+          mutations += 1;
+        }
+        throw new Error("authorization timeout must stop provider execution");
+      },
+    },
+    store: {
+      authorizeMutation: () => new Promise(() => undefined),
+      completeOperation: async () => ({ kind: "stale" as const }),
+      failOperation: async () => {
+        failures += 1;
+        return { kind: "stale" as const };
+      },
+      releaseOperationForRetry: async () => {
+        releases += 1;
+        return { kind: "stale" as const };
+      },
+      reserveOperation: async () => ({
+        context: reservedContext,
+        kind: "reserved" as const,
+      }),
+    },
+  });
+
+  await assert.rejects(
+    gateway.execute({ operation, operationId, rawCapability }),
+    (error: unknown) =>
+      error instanceof GitHubToolGatewayError &&
+      error.code === "github_write_uncertain" &&
+      error.retryable === false
+  );
+  assert.equal(mutations, 0);
+  assert.equal(failures, 0);
+  assert.equal(releases, 0);
+});
+
+test("a proven PostgreSQL lock timeout before dispatch releases the write for retry", async () => {
+  const rawCapability = Buffer.alloc(32, 0x56).toString("base64url");
+  const operation = {
+    body: "Issue comment.",
+    issueNumber: "42",
+    kind: "issue.comment" as const,
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const tokenHash = createHash("sha256")
+    .update(rawCapability, "utf8")
+    .digest("hex");
+  const {
+    operation: { operationId },
+  } = context();
+  const reservedContext = context(
+    operation,
+    githubOperationMarker({
+      capabilityBinding: tokenHash,
+      operationId,
+      requestHash: hashGitHubOperation(operation),
+      teamStepId: context().capability.teamStepId,
+    })
+  );
+  let failures = 0;
+  let mutations = 0;
+  let releases = 0;
+  const gateway = createGitHubToolGateway({
+    clock: () => new Date("2030-08-31T20:00:00.000Z"),
+    createId: () => reservedContext.operation.id,
+    databasePhaseTimeoutMs: 25,
+    operator: { kind: "runner-operator" },
+    provider: {
+      execute: async (input) => {
+        if (await input.authorizeMutation()) {
+          mutations += 1;
+        }
+        throw new Error("lock timeout must stop provider execution");
+      },
+    },
+    store: {
+      authorizeMutation: async () => {
+        throw Object.assign(new Error("lock timeout"), { code: "55P03" });
+      },
+      completeOperation: async () => ({ kind: "stale" as const }),
+      failOperation: async () => {
+        failures += 1;
+        return { kind: "stale" as const };
+      },
+      releaseOperationForRetry: async () => {
+        releases += 1;
+        return {
+          kind: "released" as const,
+          operation: {
+            ...reservedContext.operation,
+            error: {
+              code: "github_gateway_unavailable",
+              message: "GitHub provider execution failed.",
+              retryable: true,
+            },
+            status: "pending" as const,
+            version: 1,
+            writeIntentActive: false,
+          },
+        };
+      },
+      reserveOperation: async () => ({
+        context: reservedContext,
+        kind: "reserved" as const,
+      }),
+    },
+  });
+
+  await assert.rejects(
+    gateway.execute({ operation, operationId, rawCapability }),
+    (error: unknown) =>
+      error instanceof GitHubToolGatewayError &&
+      error.code === "github_provider_unavailable" &&
+      error.retryable === true
+  );
+  assert.equal(mutations, 0);
+  assert.equal(failures, 0);
+  assert.equal(releases, 1);
+});
+
+test("blocked completion persistence returns write uncertainty before the client deadline", {
+  timeout: 250,
+}, async () => {
+  const rawCapability = Buffer.alloc(32, 0x52).toString("base64url");
+  const operation = {
+    body: "Issue comment.",
+    issueNumber: "42",
+    kind: "issue.comment" as const,
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const tokenHash = createHash("sha256")
+    .update(rawCapability, "utf8")
+    .digest("hex");
+  const reservedContext = context(
+    operation,
+    githubOperationMarker({
+      capabilityBinding: tokenHash,
+      operationId: context().operation.operationId,
+      requestHash: hashGitHubOperation(operation),
+      teamStepId: context().capability.teamStepId,
+    })
+  );
+  let failures = 0;
+  const gateway = createGitHubToolGateway({
+    clock: () => new Date("2030-08-31T20:00:00.000Z"),
+    createId: () => reservedContext.operation.id,
+    databasePhaseTimeoutMs: 5,
+    operator: { kind: "runner-operator" },
+    provider: {
+      execute: async () => ({
+        providerRequestId: "ABC1:DEF2",
+        result: {
+          comment: {
+            nodeId: "IC_kwDOExample",
+            url: "https://github.com/OpenCoven/coven-agents/issues/42#issuecomment-1",
+          },
+          kind: "issue.comment",
+          repository: "OpenCoven/coven-agents",
+        },
+        resultNodeId: "IC_kwDOExample",
+        resultUrl:
+          "https://github.com/OpenCoven/coven-agents/issues/42#issuecomment-1",
+      }),
+    },
+    store: {
+      authorizeMutation: async () => ({
+        kind: "authorized" as const,
+        operation: context().operation,
+      }),
+      completeOperation: () => new Promise(() => undefined),
+      failOperation: async () => {
+        failures += 1;
+        return { kind: "stale" as const };
+      },
+      reserveOperation: async () => ({
+        context: reservedContext,
+        kind: "reserved" as const,
+      }),
+    },
+  } as never);
+
+  await assert.rejects(
+    gateway.execute({
+      operation,
+      operationId: reservedContext.operation.operationId,
+      rawCapability,
+    }),
+    (error: unknown) =>
+      error instanceof GitHubToolGatewayError &&
+      error.code === "github_write_uncertain" &&
+      error.retryable === false
+  );
+  assert.equal(failures, 0);
 });
 
 test("gateway serializes duplicates and never success-shapes conflicts, active calls, or uncertainty", async () => {
@@ -1539,7 +2194,10 @@ test("gateway serializes duplicates and never success-shapes conflicts, active c
         },
       },
       store: {
-        authorizeMutation: async () => ({ kind: "authorized" as const }),
+        authorizeMutation: async () => ({
+          kind: "authorized" as const,
+          operation: context().operation,
+        }),
         completeOperation: async () => {
           throw new Error("failed provider must not complete");
         },
@@ -1552,6 +2210,9 @@ test("gateway serializes duplicates and never success-shapes conflicts, active c
             status: "failed" as const,
             version: 1,
           },
+        }),
+        releaseOperationForRetry: async () => ({
+          kind: "stale" as const,
         }),
         reserveOperation: async () => reservation as never,
       },

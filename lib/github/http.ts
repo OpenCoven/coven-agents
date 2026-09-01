@@ -15,10 +15,12 @@ import {
 } from "@opencoven/agent-contracts";
 import type { RunnerOperator } from "@/lib/runner/types";
 import type { GitHubAppClient, GitHubPermissionLevel } from "./app-auth";
-import type {
-  createGitHubGatewayStore,
-  GitHubGatewayOperationRecord,
-  GitHubOperationExecutionContext,
+import {
+  type createGitHubGatewayStore,
+  GITHUB_GATEWAY_DATABASE_PHASE_TIMEOUT_MS,
+  type GitHubGatewayOperationRecord,
+  type GitHubOperationExecutionContext,
+  isGitHubDatabaseStatementTimeout,
 } from "./capability";
 import {
   githubOperationAuthority,
@@ -635,17 +637,7 @@ export function createGitHubOperationProvider(
       case "pull.get":
         return { metadata: "read", pull_requests: "read" };
       case "pull.create":
-        return {
-          contents: "read",
-          metadata: "read",
-          pull_requests: "write",
-        };
       case "pull.comment":
-        return {
-          issues: "write",
-          metadata: "read",
-          pull_requests: "read",
-        };
       case "pull.review":
         return { metadata: "read", pull_requests: "write" };
       case "project.item.add":
@@ -689,11 +681,14 @@ export function createGitHubOperationProvider(
   async function authorizeMutation(
     callback: () => Promise<boolean>
   ): Promise<void> {
-    let authorized = false;
+    let authorized: boolean;
     try {
       authorized = await callback();
     } catch {
-      authorized = false;
+      throw new GitHubToolProviderError("github_gateway_unavailable", {
+        retryable: true,
+        status: 503,
+      });
     }
     if (!authorized) {
       throw new GitHubToolProviderError("github_operation_authority_changed", {
@@ -1670,8 +1665,31 @@ type GitHubToolGatewayStore = Pick<
   | "authorizeMutation"
   | "completeOperation"
   | "failOperation"
+  | "releaseOperationForRetry"
   | "reserveOperation"
 >;
+
+async function runDatabasePhase<T>(
+  operation: () => Promise<T>,
+  timeoutMs: number
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_resolve, reject) => {
+        timer = globalThis.setTimeout(
+          () => reject(new Error("GitHub database phase deadline exceeded.")),
+          timeoutMs
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      globalThis.clearTimeout(timer);
+    }
+  }
+}
 
 export class GitHubToolGatewayError extends Error {
   readonly code: string;
@@ -1790,6 +1808,7 @@ export function createGitHubToolGateway(
   input: Readonly<{
     clock?: () => Date;
     createId?: () => string;
+    databasePhaseTimeoutMs?: number;
     operator: RunnerOperator;
     provider: GitHubOperationProvider;
     store: GitHubToolGatewayStore;
@@ -1797,6 +1816,15 @@ export function createGitHubToolGateway(
 ) {
   const clock = input.clock ?? (() => new Date());
   const createId = input.createId ?? randomUUID;
+  const databasePhaseTimeoutMs =
+    input.databasePhaseTimeoutMs ?? GITHUB_GATEWAY_DATABASE_PHASE_TIMEOUT_MS;
+  if (
+    !Number.isSafeInteger(databasePhaseTimeoutMs) ||
+    databasePhaseTimeoutMs < 1 ||
+    databasePhaseTimeoutMs >= GITHUB_TOOL_SERVER_DEADLINE_MS
+  ) {
+    throw new Error("GitHub gateway database phase timeout is invalid.");
+  }
   return {
     execute: async (
       request: Readonly<{
@@ -1832,24 +1860,30 @@ export function createGitHubToolGateway(
       const classification = githubOperationAuthority(
         parsed.operation.kind
       ).classification;
-      const reservation = await input.store.reserveOperation(input.operator, {
-        executionLeaseExpiresAt: new Date(deadlineAt + 5000),
-        id: createId(),
-        operation: parsed.operation,
-        operationId: parsed.operationId,
-        operationMarker:
-          classification === "write"
-            ? githubOperationMarker({
-                capabilityBinding: tokenHash,
-                operationId: parsed.operationId,
-                requestHash,
-                teamStepId: "00000000-0000-4000-8000-000000000000",
-              })
-            : null,
-        requestHash,
-        target: githubOperationTarget(parsed.operation),
-        tokenHash,
-      });
+      let reservation: Awaited<
+        ReturnType<GitHubToolGatewayStore["reserveOperation"]>
+      >;
+      try {
+        reservation = await runDatabasePhase(
+          () =>
+            input.store.reserveOperation(input.operator, {
+              executionLeaseExpiresAt: new Date(deadlineAt + 5000),
+              id: createId(),
+              operation: parsed.operation,
+              operationId: parsed.operationId,
+              requestHash,
+              target: githubOperationTarget(parsed.operation),
+              tokenHash,
+            }),
+          databasePhaseTimeoutMs
+        );
+      } catch {
+        throw new GitHubToolGatewayError(
+          "github_gateway_unavailable",
+          "GitHub tool execution is unavailable.",
+          { retryable: true, status: 503 }
+        );
+      }
       if (
         reservation.kind === "unauthorized" ||
         reservation.kind === "conflict" ||
@@ -1876,6 +1910,7 @@ export function createGitHubToolGateway(
       }
 
       const { context } = reservation;
+      let executionContext = context;
       if (classification === "write") {
         const expectedMarker = githubOperationMarker({
           capabilityBinding: tokenHash,
@@ -1884,16 +1919,20 @@ export function createGitHubToolGateway(
           teamStepId: context.capability.teamStepId,
         });
         if (context.operation.operationMarker !== expectedMarker) {
-          const failed = await input.store.failOperation(input.operator, {
-            error: {
-              code: "github_operation_conflict",
-              message: "GitHub operation marker binding is invalid.",
-              retryable: false,
-            },
-            expectedVersion: context.operation.version,
-            id: context.operation.id,
-            providerRequestId: null,
-          });
+          const failed = await runDatabasePhase(
+            () =>
+              input.store.failOperation(input.operator, {
+                error: {
+                  code: "github_operation_conflict",
+                  message: "GitHub operation marker binding is invalid.",
+                  retryable: false,
+                },
+                expectedVersion: context.operation.version,
+                id: context.operation.id,
+                providerRequestId: null,
+              }),
+            databasePhaseTimeoutMs
+          );
           if (failed.kind === "failed") {
             return terminalResponse(failed.operation);
           }
@@ -1902,32 +1941,105 @@ export function createGitHubToolGateway(
       }
 
       let providerResult: GitHubProviderOperationResult;
+      let dispatchStateUncertain = false;
       try {
         providerResult = await input.provider.execute({
-          authorizeMutation: async () =>
-            (
-              await input.store.authorizeMutation(input.operator, {
-                expectedVersion: context.operation.version,
-                id: context.operation.id,
-              })
-            ).kind === "authorized",
-          context,
+          authorizeMutation: async () => {
+            let authorization: Awaited<
+              ReturnType<GitHubToolGatewayStore["authorizeMutation"]>
+            >;
+            try {
+              authorization = await runDatabasePhase(
+                () =>
+                  input.store.authorizeMutation(input.operator, {
+                    expectedVersion: executionContext.operation.version,
+                    id: executionContext.operation.id,
+                  }),
+                databasePhaseTimeoutMs
+              );
+            } catch (error) {
+              dispatchStateUncertain = !isGitHubDatabaseStatementTimeout(error);
+              throw error;
+            }
+            if (authorization.kind !== "authorized") {
+              return false;
+            }
+            executionContext = {
+              ...executionContext,
+              operation: authorization.operation ?? executionContext.operation,
+            };
+            return true;
+          },
+          context: executionContext,
           deadlineAt,
           mode: reservation.kind === "recover" ? "recover" : "execute",
           operation: parsed.operation,
         });
       } catch (error) {
         const failure = providerFailure(error);
+        if (classification === "write" && dispatchStateUncertain) {
+          throw new GitHubToolGatewayError(
+            "github_write_uncertain",
+            "GitHub write dispatch state remains uncertain.",
+            { retryable: false, status: 409 }
+          );
+        }
+        if (
+          classification === "write" &&
+          executionContext.operation.providerDispatchPhase === "pre_send" &&
+          failure.error.retryable
+        ) {
+          let released: Awaited<
+            ReturnType<GitHubToolGatewayStore["releaseOperationForRetry"]>
+          >;
+          try {
+            released = await runDatabasePhase(
+              () =>
+                input.store.releaseOperationForRetry(input.operator, {
+                  error: { ...failure.error, retryable: true },
+                  expectedVersion: executionContext.operation.version,
+                  id: executionContext.operation.id,
+                  providerRequestId: failure.providerRequestId,
+                }),
+              databasePhaseTimeoutMs
+            );
+          } catch {
+            throw new GitHubToolGatewayError(
+              "github_gateway_unavailable",
+              "GitHub tool execution is unavailable.",
+              { retryable: true, status: 503 }
+            );
+          }
+          if (released.kind === "released") {
+            throw new GitHubToolGatewayError(
+              failure.error.code,
+              failure.error.message,
+              {
+                retryable: true,
+                status: failure.status,
+              }
+            );
+          }
+          throw new GitHubToolGatewayError(
+            "github_gateway_unavailable",
+            "GitHub tool execution is unavailable.",
+            { retryable: true, status: 503 }
+          );
+        }
         let failed: Awaited<
           ReturnType<GitHubToolGatewayStore["failOperation"]>
         >;
         try {
-          failed = await input.store.failOperation(input.operator, {
-            error: failure.error,
-            expectedVersion: context.operation.version,
-            id: context.operation.id,
-            providerRequestId: failure.providerRequestId,
-          });
+          failed = await runDatabasePhase(
+            () =>
+              input.store.failOperation(input.operator, {
+                error: failure.error,
+                expectedVersion: executionContext.operation.version,
+                id: executionContext.operation.id,
+                providerRequestId: failure.providerRequestId,
+              }),
+            databasePhaseTimeoutMs
+          );
         } catch {
           throw new GitHubToolGatewayError(
             classification === "write"
@@ -1958,7 +2070,10 @@ export function createGitHubToolGateway(
       let completed: Awaited<
         ReturnType<GitHubToolGatewayStore["completeOperation"]>
       >;
-      const completionRemaining = deadlineAt - clock().getTime();
+      const completionRemaining = Math.min(
+        deadlineAt - clock().getTime(),
+        databasePhaseTimeoutMs
+      );
       if (!(completionRemaining > 0)) {
         throw new GitHubToolGatewayError(
           classification === "write"
@@ -1977,8 +2092,8 @@ export function createGitHubToolGateway(
       try {
         completed = await Promise.race([
           input.store.completeOperation(input.operator, {
-            expectedVersion: context.operation.version,
-            id: context.operation.id,
+            expectedVersion: executionContext.operation.version,
+            id: executionContext.operation.id,
             providerRequestId: providerResult.providerRequestId,
             result: providerResult.result,
             resultNodeId: providerResult.resultNodeId,

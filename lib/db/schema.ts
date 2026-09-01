@@ -1397,7 +1397,14 @@ export const runnerGitHubOperation = pgTable(
       .notNull(),
     operationId: uuid("operationId").notNull(),
     operationMarker: varchar("operationMarker", { length: 80 }),
+    providerDispatchPhase: varchar("providerDispatchPhase", {
+      enum: ["not_applicable", "pre_send", "sent"],
+      length: 16,
+    })
+      .notNull()
+      .default("not_applicable"),
     providerRequestId: varchar("providerRequestId", { length: 256 }),
+    providerSentAt: timestamp("providerSentAt"),
     repository: varchar("repository", { length: 201 }).notNull(),
     repositoryId: varchar("repositoryId", { length: 20 }).notNull(),
     repositoryName: varchar("repositoryName", { length: 100 }).notNull(),
@@ -1434,6 +1441,7 @@ export const runnerGitHubOperation = pgTable(
     tenant: varchar("tenant", { length: 64 }).notNull(),
     updatedAt: timestamp("updatedAt").notNull().defaultNow(),
     version: integer("version").notNull().default(0),
+    writeIntentActive: boolean("writeIntentActive").notNull().default(false),
   },
   (table) => [
     unique("RGHOp_id_tenant_uq").on(table.id, table.tenant),
@@ -1445,9 +1453,7 @@ export const runnerGitHubOperation = pgTable(
     unique("RGHOp_tenant_operation_uq").on(table.tenant, table.operationId),
     uniqueIndex("RGHOp_step_write_intent_uq")
       .on(table.tenant, table.teamStepId, table.kind, table.requestHash)
-      .where(
-        sql`${table.kind} in ('issue.create','issue.comment','pull.create','pull.comment','pull.review','project.item.add','project.item.field.update')`
-      ),
+      .where(sql`${table.writeIntentActive} = true`),
     foreignKey({
       columns: [table.teamStepId, table.tenant],
       foreignColumns: [runnerTeamStep.id, runnerTeamStep.tenant],
@@ -1498,6 +1504,10 @@ export const runnerGitHubOperation = pgTable(
       sql`(${table.kind} in ('issue.get','issue.search','pull.get') and ${table.operationMarker} is null) or (${table.kind} not in ('issue.get','issue.search','pull.get') and ${table.operationMarker} ~ '^<!-- coven-github:v1:[a-f0-9]{40} -->$')`
     ),
     check(
+      "RGHOp_dispatch_phase_valid",
+      sql`(${table.kind} in ('issue.get','issue.search','pull.get') and ${table.providerDispatchPhase} = 'not_applicable' and ${table.providerSentAt} is null and ${table.writeIntentActive} = false) or (${table.kind} not in ('issue.get','issue.search','pull.get') and ((${table.providerDispatchPhase} = 'pre_send' and ${table.providerSentAt} is null) or (${table.providerDispatchPhase} = 'sent' and ${table.providerSentAt} is not null)) and (${table.writeIntentActive} = true or (${table.providerDispatchPhase} = 'pre_send' and ${table.status} = 'pending' and (${table.error}->>'retryable')::boolean = true)))`
+    ),
+    check(
       "RGHOp_result_valid",
       sql`(${table.status} = 'completed' and ${table.resultJson} is not null and jsonb_typeof(${table.resultJson}) = 'object') or (${table.status} <> 'completed' and ${table.resultJson} is null)`
     ),
@@ -1508,7 +1518,7 @@ export const runnerGitHubOperation = pgTable(
     ),
     check(
       "RGHOp_timestamps_valid",
-      sql`(${table.startedAt} is null or ${table.startedAt} >= ${table.createdAt}) and (${table.completedAt} is null or (${table.completedAt} >= ${table.createdAt} and (${table.startedAt} is null or ${table.completedAt} >= ${table.startedAt})))`
+      sql`(${table.startedAt} is null or ${table.startedAt} >= ${table.createdAt}) and (${table.providerSentAt} is null or (${table.providerSentAt} >= ${table.createdAt} and (${table.startedAt} is null or ${table.providerSentAt} >= ${table.startedAt}))) and (${table.completedAt} is null or (${table.completedAt} >= ${table.createdAt} and (${table.startedAt} is null or ${table.completedAt} >= ${table.startedAt})))`
     ),
     check(
       "RGHOp_error_bounded",

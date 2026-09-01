@@ -12,7 +12,7 @@ import {
   githubTaskCapability,
   issueGitHubStepCapability,
 } from "./capability";
-import { hashGitHubOperation } from "./operations";
+import { githubOperationMarker, hashGitHubOperation } from "./operations";
 
 const TENANT = "u_9c8589018a57479181fe4c455b099bc9";
 const USER_ID = "9c858901-8a57-4791-81fe-4c455b099bc9";
@@ -259,17 +259,26 @@ test("capability issuance rejects weak entropy, expired bounds, and durable conf
 });
 
 function scripted(...responses: Record<string, unknown>[][]) {
+  const allStatements: TeamStoreStatement[] = [];
   const statements: TeamStoreStatement[] = [];
   const database: TeamStoreDatabase = {
     transaction: async (callback) =>
       callback({
         execute: async (statement) => {
+          allStatements.push(statement);
+          if (
+            statement.name === "configure-github-database-deadlines" ||
+            statement.name === "lock-github-write-intent-key"
+          ) {
+            return [] as never[];
+          }
           statements.push(statement);
           return (responses.shift() ?? []) as never[];
         },
       }),
   };
   return {
+    allStatements,
     statements,
     store: createGitHubGatewayStore(database),
   };
@@ -336,6 +345,8 @@ function authorityRow(overrides: Record<string, unknown> = {}) {
 }
 
 function operationRow(overrides: Record<string, unknown> = {}) {
+  const kind = String(overrides.kind ?? "issue.get");
+  const write = !["issue.get", "issue.search", "pull.get"].includes(kind);
   return {
     accountId: "123",
     accountLogin: "OpenCoven",
@@ -352,7 +363,9 @@ function operationRow(overrides: Record<string, unknown> = {}) {
     kind: "issue.get",
     operationId: OPERATION_ID,
     operationMarker: null,
+    providerDispatchPhase: write ? "pre_send" : "not_applicable",
     providerRequestId: null,
+    providerSentAt: null,
     repository: "opencoven/coven-agents",
     repositoryId: "789",
     repositoryName: "coven-agents",
@@ -375,9 +388,67 @@ function operationRow(overrides: Record<string, unknown> = {}) {
     tenant: TENANT,
     updatedAt: NOW,
     version: 0,
+    writeIntentActive: write,
     ...overrides,
   };
 }
+
+test("gateway transactions set bounded PostgreSQL lock and statement deadlines", async () => {
+  const operation = {
+    issueNumber: "42",
+    kind: "issue.get" as const,
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const inserted = operationRow();
+  const reservation = scripted([authorityRow()], [], [inserted]);
+  await reservation.store.reserveOperation(operator, {
+    executionLeaseExpiresAt: inserted.executionLeaseExpiresAt,
+    id: OPERATION_ROW_ID,
+    operation,
+    operationId: OPERATION_ID,
+    requestHash: inserted.requestHash,
+    target: inserted.target,
+    tokenHash: "a".repeat(64),
+  });
+
+  const completed = operationRow({
+    completedAt: new Date("2026-08-31T20:00:02.000Z"),
+    resultJson: {
+      issue: {
+        body: "",
+        nodeId: "I_kwDOExample",
+        number: "42",
+        state: "open",
+        title: "Gateway",
+        url: "https://github.com/OpenCoven/coven-agents/issues/42",
+      },
+      kind: "issue.get",
+      repository: "OpenCoven/coven-agents",
+    },
+    status: "completed",
+    version: 1,
+  });
+  const completion = scripted([inserted], [completed]);
+  await completion.store.completeOperation(operator, {
+    expectedVersion: 0,
+    id: OPERATION_ROW_ID,
+    providerRequestId: null,
+    result: completed.resultJson as never,
+    resultNodeId: "I_kwDOExample",
+    resultUrl: "https://github.com/OpenCoven/coven-agents/issues/42",
+  });
+
+  for (const fixture of [reservation, completion]) {
+    assert.equal(
+      fixture.allStatements[0]?.name,
+      "configure-github-database-deadlines"
+    );
+    const query = queryText(fixture.allStatements[0] as TeamStoreStatement);
+    assert.match(query, /set_config\('lock_timeout'/u);
+    assert.match(query, /set_config\('statement_timeout'/u);
+  }
+});
 
 test("durable replacement revokes prior hashes and binds the new token to the exact live child", async () => {
   const created = capabilityRow();
@@ -438,7 +509,6 @@ test("operation reservation authenticates by hash, locks the call budget, and co
     id: OPERATION_ROW_ID,
     operation,
     operationId: OPERATION_ID,
-    operationMarker: null,
     requestHash: inserted.requestHash,
     target: inserted.target,
     tokenHash: "a".repeat(64),
@@ -487,7 +557,6 @@ test("operation reservation authenticates by hash, locks the call budget, and co
     id: OPERATION_ROW_ID,
     operation,
     operationId: OPERATION_ID,
-    operationMarker: null,
     requestHash: inserted.requestHash,
     target: inserted.target,
     tokenHash: "a".repeat(64),
@@ -538,7 +607,6 @@ test("operation id reuse conflicts across request, capability, step, or reposito
       id: OPERATION_ROW_ID,
       operation,
       operationId: OPERATION_ID,
-      operationMarker: null,
       requestHash: existing.requestHash,
       target: existing.target,
       tokenHash: "a".repeat(64),
@@ -595,8 +663,6 @@ test("a different operation id cannot reserve the same write intent in one step"
     id: OPERATION_ROW_ID,
     operation,
     operationId: OPERATION_ID,
-    operationMarker:
-      "<!-- coven-github:v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->",
     requestHash,
     target: "opencoven/coven-agents#issue.comment:42",
     tokenHash: "a".repeat(64),
@@ -614,6 +680,76 @@ test("a different operation id cannot reserve the same write intent in one step"
       "lock-existing-github-operation",
       "lock-existing-github-write-intent",
     ]
+  );
+  assert.match(
+    queryText(intentConflict.statements[2]),
+    /"writeIntentActive" = true/u
+  );
+});
+
+test("write reservations derive the operation marker from durable step authority", async () => {
+  const operation = {
+    body: "Approved change.",
+    issueNumber: "42",
+    kind: "issue.comment" as const,
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const requestHash = hashGitHubOperation(operation);
+  const tokenHash = "a".repeat(64);
+  const expectedMarker = githubOperationMarker({
+    capabilityBinding: tokenHash,
+    operationId: OPERATION_ID,
+    requestHash,
+    teamStepId: TEAM_STEP_ID,
+  });
+  const inserted = operationRow({
+    kind: operation.kind,
+    operationMarker: expectedMarker,
+    providerDispatchPhase: "pre_send",
+    requestHash,
+    requiredCapability: "github.issues.write",
+    target: "opencoven/coven-agents#issue.comment:42",
+    writeIntentActive: true,
+  });
+  const reservation = scripted(
+    [
+      authorityRow({
+        allowedCapabilities: ["github.issues.write"],
+        approvedCapabilities: ["github.issues.write"],
+        declaredCapabilities: ["github.issues.write"],
+        persistedBrokerPolicy: policy(
+          ["github.issues.write"],
+          ["github.issues.write"]
+        ),
+        runnerBrokerPolicy: policy(
+          ["github.issues.write"],
+          ["github.issues.write"]
+        ),
+        stepApprovalStatus: "approved",
+        stepApprovedCapabilities: ["github.issues.write"],
+        stepDeclaredCapabilities: ["github.issues.write"],
+      }),
+    ],
+    [],
+    [],
+    [inserted]
+  );
+
+  const result = await reservation.store.reserveOperation(operator, {
+    executionLeaseExpiresAt: inserted.executionLeaseExpiresAt,
+    id: OPERATION_ROW_ID,
+    operation,
+    operationId: OPERATION_ID,
+    requestHash,
+    target: inserted.target,
+    tokenHash,
+  });
+
+  assert.equal(result.kind, "reserved");
+  assert.equal(
+    reservation.statements.at(-1)?.args.operationMarker,
+    expectedMarker
   );
 });
 
@@ -656,8 +792,6 @@ test("revocation, expiry, cancellation, auth version, generation, approval, and 
       id: OPERATION_ROW_ID,
       operation,
       operationId: OPERATION_ID,
-      operationMarker:
-        "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->",
       requestHash: hashGitHubOperation(operation),
       target: "opencoven/coven-agents#issue.get:42",
       tokenHash: "a".repeat(64),
@@ -675,12 +809,19 @@ test("an expired running operation recovers without a second budget charge or mu
     owner: "OpenCoven",
     repo: "coven-agents",
   };
+  const requestHash = hashGitHubOperation(operation);
   const existing = operationRow({
     executionLeaseExpiresAt: new Date("2026-08-31T19:59:59.000Z"),
     kind: operation.kind,
-    operationMarker:
-      "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->",
-    requestHash: hashGitHubOperation(operation),
+    operationMarker: githubOperationMarker({
+      capabilityBinding: "a".repeat(64),
+      operationId: OPERATION_ID,
+      requestHash,
+      teamStepId: TEAM_STEP_ID,
+    }),
+    providerDispatchPhase: "sent",
+    providerSentAt: new Date("2026-08-31T20:00:01.000Z"),
+    requestHash,
     requiredCapability: "github.issues.write",
   });
   const recovery = scripted(
@@ -716,7 +857,6 @@ test("an expired running operation recovers without a second budget charge or mu
     id: OPERATION_ROW_ID,
     operation,
     operationId: OPERATION_ID,
-    operationMarker: existing.operationMarker,
     requestHash: existing.requestHash,
     target: existing.target,
     tokenHash: "a".repeat(64),
@@ -737,16 +877,117 @@ test("an expired running operation recovers without a second budget charge or mu
   );
 });
 
-test("provider mutation authorization rechecks every live fence immediately before the write", async () => {
-  const authorized = scripted([{ id: OPERATION_ROW_ID }]);
-  assert.deepEqual(
-    await authorized.store.authorizeMutation(operator, {
-      expectedVersion: 0,
-      id: OPERATION_ROW_ID,
+test("a released pre-send operation can retry with the same operation id without another budget charge", async () => {
+  const operation = {
+    body: "Approved change.",
+    issueNumber: "42",
+    kind: "issue.comment" as const,
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const requestHash = hashGitHubOperation(operation);
+  const released = operationRow({
+    error: {
+      code: "github_provider_rate_limited",
+      message: "GitHub provider execution failed.",
+      retryable: true,
+    },
+    executionLeaseExpiresAt: new Date("2026-08-31T19:59:59.000Z"),
+    kind: operation.kind,
+    operationMarker: githubOperationMarker({
+      capabilityBinding: "a".repeat(64),
+      operationId: OPERATION_ID,
+      requestHash,
+      teamStepId: TEAM_STEP_ID,
     }),
-    { kind: "authorized" }
+    requestHash,
+    requiredCapability: "github.issues.write",
+    status: "pending",
+    version: 1,
+    writeIntentActive: false,
+  });
+  const retried = {
+    ...released,
+    error: null,
+    executionLeaseExpiresAt: new Date("2026-08-31T20:00:30.000Z"),
+    status: "running",
+    version: 2,
+    writeIntentActive: true,
+  };
+  const retry = scripted(
+    [
+      authorityRow({
+        allowedCapabilities: ["github.issues.write"],
+        approvedCapabilities: ["github.issues.write"],
+        declaredCapabilities: ["github.issues.write"],
+        persistedBrokerPolicy: policy(
+          ["github.issues.write"],
+          ["github.issues.write"]
+        ),
+        runnerBrokerPolicy: policy(
+          ["github.issues.write"],
+          ["github.issues.write"]
+        ),
+        stepApprovalStatus: "approved",
+        stepApprovedCapabilities: ["github.issues.write"],
+        stepDeclaredCapabilities: ["github.issues.write"],
+      }),
+    ],
+    [released],
+    [retried]
+  );
+
+  const result = await retry.store.reserveOperation(operator, {
+    executionLeaseExpiresAt: retried.executionLeaseExpiresAt,
+    id: OPERATION_ROW_ID,
+    operation,
+    operationId: OPERATION_ID,
+    requestHash: released.requestHash,
+    target: released.target,
+    tokenHash: "a".repeat(64),
+  });
+
+  assert.equal(result.kind, "reserved");
+  assert.deepEqual(
+    retry.statements.map(({ name }) => name),
+    [
+      "lock-github-capability-authority",
+      "lock-existing-github-operation",
+      "claim-github-operation-pre-send-retry",
+    ]
+  );
+  assert.doesNotMatch(queryText(retry.statements[2]), /usedCallCount/u);
+});
+
+test("provider mutation authorization rechecks every live fence immediately before the write", async () => {
+  const sent = operationRow({
+    kind: "issue.comment",
+    operationMarker:
+      "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->",
+    providerDispatchPhase: "sent",
+    providerSentAt: new Date("2026-08-31T20:00:01.000Z"),
+    requiredCapability: "github.issues.write",
+    version: 1,
+  });
+  const authorized = scripted([sent]);
+  const authorization = await authorized.store.authorizeMutation(operator, {
+    expectedVersion: 0,
+    id: OPERATION_ROW_ID,
+  });
+  assert.equal(authorization.kind, "authorized");
+  assert.equal(
+    authorization.kind === "authorized" &&
+      authorization.operation.providerDispatchPhase,
+    "sent"
+  );
+  assert.equal(
+    authorization.kind === "authorized" && authorization.operation.version,
+    sent.version
   );
   const query = queryText(authorized.statements[0]);
+  assert.match(query, /UPDATE "RunnerGitHubOperation"/u);
+  assert.match(query, /"providerDispatchPhase" = 'sent'/u);
+  assert.match(query, /"providerSentAt" = clock_timestamp\(\)/u);
   for (const fence of [
     '"operation"."status" = \'running\'',
     '"capability"."revokedAt" IS NULL',
@@ -754,6 +995,7 @@ test("provider mutation authorization rechecks every live fence immediately befo
     '"runnerRun"."cancellationRequestedAt" IS NULL',
     '"runnerRun"."status" = \'running\'',
     '"runnerRun"."dispatchState" = \'running\'',
+    '"runnerRun"."daytonaAttemptId" =\\s*"capability"."attemptId"::text',
     '"actor"."authVersion" = "capability"."authVersion"',
     '"connectionFence"."generation" =\\s*"capability"."connectionGeneration"',
     '"step"."status" = \'running\'',
@@ -769,6 +1011,56 @@ test("provider mutation authorization rechecks every live fence immediately befo
       id: OPERATION_ROW_ID,
     }),
     { kind: "unauthorized" }
+  );
+});
+
+test("retryable pre-send failure persistence releases only the write-intent fence", async () => {
+  const running = operationRow({
+    kind: "issue.comment",
+    operationMarker:
+      "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->",
+    requiredCapability: "github.issues.write",
+  });
+  const released = operationRow({
+    ...running,
+    error: {
+      code: "github_provider_rate_limited",
+      message: "GitHub provider execution failed.",
+      retryable: true,
+    },
+    status: "pending",
+    version: 1,
+    writeIntentActive: false,
+  });
+  const fixture = scripted([running], [released]);
+  const store = fixture.store as typeof fixture.store & {
+    releaseOperationForRetry: (
+      operator: RunnerOperator,
+      input: {
+        error: {
+          code: string;
+          message: string;
+          retryable: true;
+        };
+        expectedVersion: number;
+        id: string;
+        providerRequestId: string | null;
+      }
+    ) => Promise<
+      { kind: "released"; operation: typeof released } | { kind: "stale" }
+    >;
+  };
+  assert.equal(typeof store.releaseOperationForRetry, "function");
+  const result = await store.releaseOperationForRetry(operator, {
+    error: released.error as never,
+    expectedVersion: 0,
+    id: OPERATION_ROW_ID,
+    providerRequestId: null,
+  });
+  assert.equal(result.kind, "released");
+  assert.match(
+    queryText(fixture.statements[1]),
+    /"status" = 'pending'[\s\S]*"writeIntentActive" = false/u
   );
 });
 
