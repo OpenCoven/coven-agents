@@ -502,6 +502,89 @@ test("callback verifies provider authority, persists only provider metadata, and
   );
 });
 
+test("personal installation connects without organization projects permission", async () => {
+  const store = new MemoryConnectionStore();
+  const handlers = createGitHubConnectionHandlers(
+    dependencies({
+      createProvider: () =>
+        provider({
+          getInstallation: () =>
+            Promise.resolve(
+              installation({
+                account: { id: "24682", login: "BunsDev", type: "User" },
+                permissions: {
+                  issues: "write",
+                  metadata: "read",
+                  pull_requests: "write",
+                },
+              })
+            ),
+          listInstallationRepositories: () =>
+            Promise.resolve({
+              repositories: [
+                {
+                  id: "24683",
+                  name: "personal-repository",
+                  nodeId: "R_24683",
+                  owner: "BunsDev",
+                },
+              ],
+              repositorySelection: "selected",
+            }),
+        }),
+      createStore: () => store,
+    })
+  );
+  const authorization = await beginUserAuthorization(handlers);
+  const response = await handlers.callback(
+    oauthCallbackRequest(authorization.state),
+    null
+  );
+
+  assert.equal(response.status, 303);
+  assert.equal(store.replacements.length, 1);
+  assert.equal(store.replacements[0]?.input.accountType, "User");
+  assert.equal(
+    store.replacements[0]?.input.repositories[0]?.repositoryOwner,
+    "BunsDev"
+  );
+  assert.equal(store.removals.length, 0);
+});
+
+test("organization installation without organization projects permission is rejected", async () => {
+  const store = new MemoryConnectionStore();
+  const handlers = createGitHubConnectionHandlers(
+    dependencies({
+      createProvider: () =>
+        provider({
+          getInstallation: () =>
+            Promise.resolve(
+              installation({
+                permissions: {
+                  issues: "write",
+                  metadata: "read",
+                  pull_requests: "write",
+                },
+              })
+            ),
+        }),
+      createStore: () => store,
+    })
+  );
+  const authorization = await beginUserAuthorization(handlers);
+  const response = await handlers.callback(
+    oauthCallbackRequest(authorization.state),
+    null
+  );
+
+  assert.equal(response.status, 409);
+  assert.equal(await errorCode(response), "github_installation_unusable");
+  assert.equal(store.replacements.length, 0);
+  assert.deepEqual(store.removals, [
+    { installationId: INSTALLATION_ID, tenant: TENANT },
+  ]);
+});
+
 test("setup callback requires user authorization before provider access or persistence", async () => {
   const store = new MemoryConnectionStore();
   let providerCalls = 0;

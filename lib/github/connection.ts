@@ -1139,7 +1139,11 @@ async function verifiedInstallationAuthority(
     !permissionAtLeast(installation.permissions.metadata, "read") ||
     !permissionAtLeast(installation.permissions.issues, "write") ||
     !permissionAtLeast(installation.permissions.pull_requests, "write") ||
-    !permissionAtLeast(installation.permissions.organization_projects, "write")
+    (installation.account.type === "Organization" &&
+      !permissionAtLeast(
+        installation.permissions.organization_projects,
+        "write"
+      ))
   ) {
     throw new GitHubProviderError("github_installation_unusable", {
       retryable: false,
