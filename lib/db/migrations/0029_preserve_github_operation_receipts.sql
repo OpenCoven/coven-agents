@@ -84,6 +84,13 @@ BEGIN
     OR NEW."repository" IS DISTINCT FROM OLD."repository"
     OR NEW."requiredCapability" IS DISTINCT FROM OLD."requiredCapability"
     OR NEW."connectionGeneration" IS DISTINCT FROM OLD."connectionGeneration"
+    OR NOT (
+      NEW."connectionId" IS NOT DISTINCT FROM OLD."connectionId"
+      OR (
+        OLD."connectionId" IS NOT NULL
+        AND NEW."connectionId" IS NULL
+      )
+    )
     OR NEW."operationMarker" IS DISTINCT FROM OLD."operationMarker"
     OR NEW."accountId" IS DISTINCT FROM OLD."accountId"
     OR NEW."accountLogin" IS DISTINCT FROM OLD."accountLogin"

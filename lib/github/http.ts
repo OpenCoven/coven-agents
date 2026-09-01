@@ -902,11 +902,22 @@ export function createGitHubOperationProvider(
       "ProjectV2ItemFieldSingleSelectValue",
       "ProjectV2ItemFieldIterationValue",
     ]);
+    const queriedTypes = new Set([
+      ...supportedTypes,
+      "ProjectV2ItemFieldLabelValue",
+      "ProjectV2ItemFieldMilestoneValue",
+      "ProjectV2ItemFieldMultiSelectValue",
+      "ProjectV2ItemFieldPullRequestValue",
+      "ProjectV2ItemFieldRepositoryValue",
+      "ProjectV2ItemFieldReviewerValue",
+      "ProjectV2ItemFieldUserValue",
+      "ProjectV2ItemIssueFieldValue",
+    ]);
     const matching = nodes.filter((node) => {
       const body = object(node);
       if (
         typeof body.__typename !== "string" ||
-        !supportedTypes.has(body.__typename)
+        !queriedTypes.has(body.__typename)
       ) {
         return false;
       }
@@ -917,6 +928,9 @@ export function createGitHubOperationProvider(
     }
     return matching.some((node) => {
       const body = object(node);
+      if (!supportedTypes.has(String(body.__typename))) {
+        return false;
+      }
       switch (operation.value.kind) {
         case "date":
           return (

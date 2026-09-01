@@ -889,6 +889,30 @@ test("project field recovery ignores unsupported mixed union values and compares
   });
   assert.equal(result.result.kind, "project.item.field.update");
   assert.equal(recovered.requests.length, 1);
+
+  const clearOperation = {
+    ...operation,
+    value: { kind: "clear" as const },
+  };
+  const unclearedUnsupportedValue = sequenceProvider([
+    targetResponse([
+      {
+        __typename: "ProjectV2ItemFieldRepositoryValue",
+        field: { id: operation.fieldId },
+      },
+    ]),
+  ]);
+  await assert.rejects(
+    unclearedUnsupportedValue.provider.execute({
+      authorizeMutation: () => Promise.resolve(false),
+      context: context(clearOperation, marker),
+      mode: "recover",
+      operation: clearOperation,
+    }),
+    (error: unknown) =>
+      error instanceof GitHubToolProviderError &&
+      error.code === "github_write_uncertain"
+  );
 });
 
 test("provider timeout, rate limits, oversize bodies, malformed JSON, and unsafe request ids are sanitized", async () => {

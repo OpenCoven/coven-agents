@@ -240,6 +240,14 @@ test("0029 preserves immutable operation receipts while live connections can be 
     migration,
     /CREATE OR REPLACE FUNCTION "RunnerGitHubOperation_reject_request_change"/u
   );
+  const requestGuard =
+    migration.match(
+      /CREATE OR REPLACE FUNCTION "RunnerGitHubOperation_reject_request_change"[\s\S]*?\$\$ LANGUAGE plpgsql/u
+    )?.[0] ?? "";
+  assert.match(
+    requestGuard,
+    /OLD\."connectionId" IS NOT NULL[\s\S]*NEW\."connectionId" IS NULL/u
+  );
   assert.match(
     migration,
     /CREATE OR REPLACE FUNCTION "RunnerGitHubOperation_enforce_terminal_state"[\s\S]*to_jsonb\(NEW\) - 'connectionId'/u
