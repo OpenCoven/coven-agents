@@ -592,8 +592,9 @@ test("GitHub broker callbacks reach only the claimed child process and issue raw
   const rawCapability = Buffer.alloc(32, 0x6c).toString("base64url");
 
   const result = await dispatchRunnerClaim(claimed, {
-    acquireCredential: async () =>
-      ({
+    acquireCredential: async () => {
+      calls.push("credential");
+      return {
         acquisition: {
           commit: async () => undefined,
           compensate: async () => undefined,
@@ -602,12 +603,19 @@ test("GitHub broker callbacks reach only the claimed child process and issue raw
           ) => boundary({ credential: "copilot-credential" }),
         },
         kind: "acquired",
-      }) as never,
-    credentialInput: () => ({}) as never,
-    ensureSandbox: async () => ({
-      agent: agent({ sandboxTrust: "restricted" }),
-      sandbox: {} as never,
-    }),
+      } as never;
+    },
+    credentialInput: () => {
+      calls.push("credential-input");
+      return {} as never;
+    },
+    ensureSandbox: async () => {
+      calls.push("sandbox");
+      return {
+        agent: agent({ sandboxTrust: "restricted" }),
+        sandbox: {} as never,
+      };
+    },
     githubTool: {
       issueCapability: async ({
         attemptId: issuedAttempt,
@@ -623,6 +631,10 @@ test("GitHub broker callbacks reach only the claimed child process and issue raw
         return true;
       },
       url: "https://app.example/api/internal/github-tool",
+    },
+    inspectRestrictedWorkspace: async (_sandbox, workspace) => {
+      calls.push(`inspect:${workspace}`);
+      return { kind: "safe" as const };
     },
     limits: admissionLimitsFromEnvironment({}),
     operator,
@@ -663,7 +675,14 @@ test("GitHub broker callbacks reach only the claimed child process and issue raw
   });
 
   assert.deepEqual(result, { kind: "started", runId: claimedRun.id });
-  assert.deepEqual(calls, ["start", "issue"]);
+  assert.deepEqual(calls, [
+    "sandbox",
+    "inspect:/workspace",
+    "credential-input",
+    "credential",
+    "start",
+    "issue",
+  ]);
 });
 
 test("snapshotted unsupported harness dispatch claims terminalize before sandbox, credential, accounting, or provider work", async () => {

@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createHash } from "node:crypto";
+import { isCanonicalUuid } from "@opencoven/agent-contracts";
 
 const DAYTONA_SANDBOX_NAME_PREFIX = "coven-agent-";
 const DAYTONA_SANDBOX_NAME_DIGEST_LENGTH = 40;
@@ -38,24 +39,20 @@ export function daytonaSessionName(tenant: string, agentId: string): string {
   return `${daytonaSandboxName(tenant, agentId)}-session`;
 }
 
-const RUN_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-const ATTEMPT_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const DAYTONA_RUN_ATTEMPT_DIGEST_LENGTH = 40;
 
 function requireRunId(runId: string): string {
-  if (!RUN_ID_PATTERN.test(runId)) {
+  if (!isCanonicalUuid(runId)) {
     throw new Error("Daytona run names require a UUID run id.");
   }
-  return runId.toLowerCase();
+  return runId;
 }
 
 function requireAttemptId(attemptId: string): string {
-  if (!ATTEMPT_ID_PATTERN.test(attemptId)) {
+  if (!isCanonicalUuid(attemptId)) {
     throw new Error("Daytona run names require a UUID attempt id.");
   }
-  return attemptId.toLowerCase();
+  return attemptId;
 }
 
 function requireProbeFence(value: number, name: string): number {
@@ -84,7 +81,7 @@ export function daytonaProbeSessionName(
   warmAttemptVersion: number,
   warmUpdatedAt: Date
 ): string {
-  if (!RUN_ID_PATTERN.test(agentId)) {
+  if (!isCanonicalUuid(agentId)) {
     throw new Error("Daytona probe names require a UUID agent id.");
   }
   const generation = requireProbeFence(sandboxGeneration, "generation");
@@ -94,7 +91,7 @@ export function daytonaProbeSessionName(
     throw new Error("Daytona probe names require a valid warm timestamp.");
   }
   return `coven-probe-${sha256(
-    `${agentId.toLowerCase()}\0${generation}\0${version}\0${warmEpoch}`
+    `${agentId}\0${generation}\0${version}\0${warmEpoch}`
   ).slice(0, DAYTONA_RUN_ATTEMPT_DIGEST_LENGTH)}`;
 }
 
@@ -112,4 +109,12 @@ export function daytonaRunConfigDirectory(
   attemptId: string
 ): string {
   return `/run/coven-agents/${daytonaRunSessionName(runId, attemptId)}/copilot`;
+}
+
+/** Guaranteed-empty restricted working directory outside every workspace. */
+export function daytonaRunWorkingDirectory(
+  runId: string,
+  attemptId: string
+): string {
+  return `/run/coven-agents/${daytonaRunSessionName(runId, attemptId)}/work`;
 }

@@ -85,6 +85,7 @@ test("quotes Copilot invocation and keeps incomplete JSONL outside the cursor", 
 
 test("explicit workspace permissions restrict tools without inspecting task text", () => {
   const readCommand = buildHarnessCommand({
+    attemptDirectory: "/run/coven-agents/attempt/work",
     configDirectory: "/run/coven-agents/attempt/copilot",
     executionPermission: "workspace_read",
     harness: "copilot",
@@ -94,6 +95,7 @@ test("explicit workspace permissions restrict tools without inspecting task text
     workspace: "/workspace/repo",
   });
   const writeCommand = buildHarnessCommand({
+    attemptDirectory: "/run/coven-agents/attempt/work",
     configDirectory: "/run/coven-agents/attempt/copilot",
     executionPermission: "workspace_write",
     harness: "copilot",

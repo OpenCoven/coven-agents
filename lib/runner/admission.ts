@@ -557,6 +557,7 @@ export async function dispatchRunnerClaim(
   dependencies: RunnerDispatchDependencies
 ): Promise<RunnerDispatchResult> {
   const { authority, run } = claimed;
+  const restricted = run.executionPermission !== "unrestricted";
   const workspaceRestricted =
     run.executionPermission === "workspace_read" ||
     run.executionPermission === "workspace_write";
@@ -639,10 +640,10 @@ export async function dispatchRunnerClaim(
       ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
-  if (workspaceRestricted) {
+  if (restricted) {
     const inspection = await (
       dependencies.inspectRestrictedWorkspace ?? inspectRestrictedWorkspace
-    )(ensured.sandbox, run.agentWorkspace as string);
+    )(ensured.sandbox, run.agentWorkspace ?? "/workspace");
     if (inspection.kind === "unavailable") {
       return (await releaseUnstarted(dependencies, authority))
         ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }

@@ -1,3 +1,4 @@
+import { isAbsolute, relative, resolve } from "node:path";
 import { GITHUB_TOOL_SERVER_DEADLINE_MS } from "@opencoven/agent-contracts";
 import { type HarnessSpec, harnessSpec } from "./registry";
 
@@ -31,6 +32,8 @@ export const COVEN_GITHUB_TOOL_URL_ENV_REFERENCE = environmentReference(
 );
 
 export interface InvocationRequest {
+  /** Guaranteed-empty, non-workspace working directory for restricted runs. */
+  attemptDir?: string;
   /** Fresh configuration directory outside caller-controlled workspace files. */
   configDir?: string;
   /** Working directory the harness runs in. Callers resolve and sandbox this. */
@@ -56,8 +59,16 @@ function modelArgs(model: string): string[] {
   return model === "auto" ? [] : ["--model", model];
 }
 
+function containsPath(parent: string, child: string): boolean {
+  const path = relative(resolve(parent), resolve(child));
+  return path === "" || (!path.startsWith("..") && !isAbsolute(path));
+}
+
 function copilotArgs(request: InvocationRequest): string[] {
   const permissionMode = request.permissionMode ?? "unrestricted";
+  const restricted = permissionMode !== "unrestricted";
+  const workspaceRestricted =
+    permissionMode === "workspace_read" || permissionMode === "workspace_write";
   const githubTool = request.githubTool ?? false;
   if (githubTool && permissionMode === "unrestricted") {
     throw new Error(
@@ -67,9 +78,27 @@ function copilotArgs(request: InvocationRequest): string[] {
   if (permissionMode === "github_only" && !githubTool) {
     throw new Error("GitHub-only execution requires the typed GitHub tool.");
   }
-  if ((permissionMode !== "unrestricted" || githubTool) && !request.configDir) {
+  if ((restricted || githubTool) && !request.configDir) {
     throw new Error(
       "Restricted Copilot runs require an isolated config directory."
+    );
+  }
+  if (
+    restricted &&
+    (!request.attemptDir ||
+      !request.configDir ||
+      !isAbsolute(request.attemptDir) ||
+      !isAbsolute(request.configDir) ||
+      !isAbsolute(request.cwd) ||
+      containsPath(request.cwd, request.attemptDir) ||
+      containsPath(request.attemptDir, request.cwd) ||
+      containsPath(request.cwd, request.configDir) ||
+      containsPath(request.configDir, request.cwd) ||
+      containsPath(request.configDir, request.attemptDir) ||
+      containsPath(request.attemptDir, request.configDir))
+  ) {
+    throw new Error(
+      "Restricted Copilot runs require an isolated attempt directory."
     );
   }
   const availableTools =
@@ -94,18 +123,25 @@ function copilotArgs(request: InvocationRequest): string[] {
             : []),
           ...(githubTool ? ["--allow-tool", COVEN_GITHUB_MCP_PERMISSION] : []),
         ];
-  const restrictedArgs =
-    permissionMode === "unrestricted"
-      ? []
-      : [
-          "--disable-builtin-mcps",
-          "--no-custom-instructions",
-          "--disallow-temp-dir",
-          "--no-bash-env",
-          ...(githubTool ? ["--secret-env-vars", "COPILOT_GITHUB_TOKEN"] : []),
-        ];
+  const restrictedArgs = restricted
+    ? [
+        "--disable-builtin-mcps",
+        "--no-custom-instructions",
+        "--disallow-temp-dir",
+        "--no-bash-env",
+        "--secret-env-vars",
+        "COPILOT_GITHUB_TOKEN",
+      ]
+    : [];
   const configArgs = request.configDir
     ? ["--config-dir", request.configDir]
+    : [];
+  const directoryArgs = restricted
+    ? [
+        "-C",
+        request.attemptDir as string,
+        ...(workspaceRestricted ? ["--add-dir", request.cwd] : []),
+      ]
     : [];
   const mcpArgs = githubTool
     ? [
@@ -134,6 +170,7 @@ function copilotArgs(request: InvocationRequest): string[] {
     ...permissionArgs,
     "--no-ask-user",
     ...configArgs,
+    ...directoryArgs,
     ...mcpArgs,
     ...restrictedArgs,
     "--no-auto-update",
@@ -202,7 +239,14 @@ export function buildInvocation(request: InvocationRequest): Invocation {
       `${spec.label} cannot enforce ${permissionMode} permissions.`
     );
   }
-  return { args: build(request), command: spec.command, cwd: request.cwd };
+  return {
+    args: build(request),
+    command: spec.command,
+    cwd:
+      permissionMode === "unrestricted"
+        ? request.cwd
+        : (request.attemptDir as string),
+  };
 }
 
 /**

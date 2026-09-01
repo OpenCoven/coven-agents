@@ -11,6 +11,7 @@ import {
 } from "./invocation";
 
 const BASE = {
+  attemptDir: "/run/coven-agents/attempt/work",
   cwd: "/workspace",
   instructions: "Be careful.",
   model: "auto",
@@ -70,16 +71,22 @@ test("workspace-read Copilot runs expose only read tools", () => {
     ),
     ["--config-dir", "/run/coven-agents/attempt/copilot"]
   );
+  assert.deepEqual(
+    invocation.args.slice(
+      invocation.args.indexOf("-C"),
+      invocation.args.indexOf("-C") + 4
+    ),
+    ["-C", "/run/coven-agents/attempt/work", "--add-dir", "/workspace"]
+  );
   assert.equal(
     invocation.args[invocation.args.indexOf("--available-tools") + 1]?.includes(
       "shell"
     ),
     false
   );
+  assert.equal(invocation.args.includes("--additional-mcp-config"), false);
   assert.equal(
-    invocation.args.some((argument) =>
-      argument.toLowerCase().includes("github")
-    ),
+    invocation.args.some((argument) => argument.includes("CovenGitHub")),
     false
   );
   for (const flag of [
@@ -120,6 +127,13 @@ test("workspace-write Copilot runs add bounded edit permission without shell or 
   );
   assert.ok(invocation.args.includes("--disable-builtin-mcps"));
   assert.ok(invocation.args.includes("--disallow-temp-dir"));
+  assert.deepEqual(
+    invocation.args.slice(
+      invocation.args.indexOf("--secret-env-vars"),
+      invocation.args.indexOf("--secret-env-vars") + 2
+    ),
+    ["--secret-env-vars", "COPILOT_GITHUB_TOKEN"]
+  );
 });
 
 test("GitHub-only Copilot runs expose one exact executable permission and zero workspace tools", () => {
@@ -161,6 +175,14 @@ test("GitHub-only Copilot runs expose one exact executable permission and zero w
   const availableTools =
     invocation.args[invocation.args.indexOf("--available-tools") + 1] ?? "";
   assert.equal(availableTools.includes("shell"), false);
+  assert.deepEqual(
+    invocation.args.slice(
+      invocation.args.indexOf("-C"),
+      invocation.args.indexOf("-C") + 2
+    ),
+    ["-C", "/run/coven-agents/attempt/work"]
+  );
+  assert.equal(invocation.args.includes("--add-dir"), false);
   const mcpConfig =
     invocation.args[invocation.args.indexOf("--additional-mcp-config") + 1];
   assert.deepEqual(JSON.parse(mcpConfig ?? ""), {
@@ -188,6 +210,24 @@ test("GitHub-only Copilot runs expose one exact executable permission and zero w
     ),
     ["--secret-env-vars", "COPILOT_GITHUB_TOKEN"]
   );
+
+  for (const attemptDir of [
+    "/workspace",
+    "/workspace/.coven-attempt",
+    "/run/coven-agents/attempt/copilot",
+  ]) {
+    assert.throws(
+      () =>
+        buildInvocation({
+          ...BASE,
+          attemptDir,
+          configDir: "/run/coven-agents/attempt/copilot",
+          harness: "copilot",
+          permissionMode: "workspace_read",
+        }),
+      /isolated attempt directory/u
+    );
+  }
 });
 
 test("workspace permissions compose with only the exact GitHub executable", () => {

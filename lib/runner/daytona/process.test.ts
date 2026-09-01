@@ -8,7 +8,11 @@ import {
   type Sandbox,
 } from "@daytona/sdk";
 import type { RunnerDispatchAuthority } from "../types";
-import { daytonaRunCredentialPath, daytonaRunSessionName } from "./names";
+import {
+  daytonaRunCredentialPath,
+  daytonaRunSessionName,
+  daytonaRunWorkingDirectory,
+} from "./names";
 import type { DaytonaAttemptId, DaytonaProcessSandbox } from "./process";
 import {
   DaytonaProbeCleanupPendingError,
@@ -29,6 +33,7 @@ const PREPARATION_CLAIM =
 const SESSION = daytonaRunSessionName(RUN_ID, PREPARATION_CLAIM);
 const PATH = daytonaRunCredentialPath(RUN_ID, PREPARATION_CLAIM);
 const CONFIG_DIRECTORY = `/run/coven-agents/${SESSION}/copilot`;
+const ATTEMPT_DIRECTORY = daytonaRunWorkingDirectory(RUN_ID, PREPARATION_CLAIM);
 const PROBE_SESSION_ID = `coven-probe-${"a".repeat(40)}`;
 const LAUNCH_AUTHORITY = {
   expectedVersion: 9,
@@ -821,6 +826,7 @@ function processDouble(
     deleteError?: Error;
     deleteErrorOnCall?: number;
     deleteLeavesSession?: boolean;
+    inspectionExitCode?: number;
     listError?: Error;
     listErrorOnCall?: number;
     logs?: Readonly<{ output?: string; stderr?: string; stdout?: string }>;
@@ -833,7 +839,6 @@ function processDouble(
 ) {
   const calls: Call[] = [];
   const fileCalls: FileCall[] = [];
-  let commandCalls = 0;
   let deleteCalls = 0;
   let listCalls = 0;
   let sessions = [...(options.sessions ?? [])];
@@ -895,8 +900,13 @@ function processDouble(
       },
       executeCommand: (command, _cwd, env) => {
         calls.push({ command, env, kind: "command" });
-        commandCalls += 1;
-        if (commandCalls === 1 && command.includes("umask 077")) {
+        if (
+          options.inspectionExitCode !== undefined &&
+          command.includes('root="$(pwd -P)"')
+        ) {
+          return Promise.resolve({ exitCode: options.inspectionExitCode });
+        }
+        if (command.includes("umask 077")) {
           if (options.stageError) {
             return Promise.reject(options.stageError);
           }
@@ -1216,8 +1226,23 @@ test("restricted process launches use the persisted permission instead of task t
           Number.MIN_SAFE_INTEGER)
   );
   assert.ok(
-    (readLaunch?.indexOf(".github/hooks") ?? -1) >= 0 &&
-      (readLaunch?.indexOf(".github/hooks") ?? Number.MAX_SAFE_INTEGER) <
+    (readLaunch?.indexOf(`chmod 500 '${ATTEMPT_DIRECTORY}'`) ?? -1) >= 0 &&
+      (readLaunch?.indexOf(`chmod 500 '${ATTEMPT_DIRECTORY}'`) ??
+        Number.MAX_SAFE_INTEGER) <
+        (readLaunch?.indexOf('COPILOT_GITHUB_TOKEN="$(cat') ??
+          Number.MIN_SAFE_INTEGER)
+  );
+  assert.match(
+    readLaunch ?? "",
+    new RegExp(`'-C' '${ATTEMPT_DIRECTORY}' '--add-dir' '/workspace/repo'`, "u")
+  );
+  assert.match(
+    readLaunch ?? "",
+    new RegExp(`cd -- '${ATTEMPT_DIRECTORY}'`, "u")
+  );
+  assert.ok(
+    (readLaunch?.indexOf(".mcp.json") ?? -1) >= 0 &&
+      (readLaunch?.indexOf(".mcp.json") ?? Number.MAX_SAFE_INTEGER) <
         (readLaunch?.indexOf('COPILOT_GITHUB_TOKEN="$(cat') ??
           Number.MIN_SAFE_INTEGER)
   );
@@ -1283,6 +1308,68 @@ test("restricted process launches reject a missing workspace before provider mut
   assert.deepEqual(calls, []);
 });
 
+test("restricted workspace configuration is rejected before preparation or credential staging", async () => {
+  const { calls, sandbox } = processDouble({ inspectionExitCode: 42 });
+  let preparations = 0;
+
+  await assert.rejects(
+    startDaytonaProcess({
+      ...startInput(sandbox),
+      authorizePreparation: async () => {
+        preparations += 1;
+        return PREPARATION_CLAIM;
+      },
+      executionPermission: "workspace_read",
+    }),
+    (error: unknown) =>
+      error instanceof DaytonaProcessError &&
+      error.code === "process_start_failed" &&
+      error.retryable === false
+  );
+
+  assert.equal(preparations, 0);
+  assert.equal(
+    calls.some(({ command }) => command.includes("umask 077")),
+    false
+  );
+});
+
+test("GitHub-only workspace configuration is rejected before capability issuance", async () => {
+  const { fileCalls, sandbox } = processDouble({ inspectionExitCode: 42 });
+  let issued = 0;
+  let preparations = 0;
+
+  await assert.rejects(
+    startDaytonaProcess({
+      ...startInput(sandbox),
+      authorizePreparation: async () => {
+        preparations += 1;
+        return PREPARATION_CLAIM;
+      },
+      executionPermission: "github_only",
+      githubTool: {
+        issueCapability: async () => {
+          issued += 1;
+          return {
+            rawCapability: Buffer.alloc(32, 0x5f).toString("base64url"),
+          };
+        },
+        revokeCapability: async () => true,
+        url: "https://app.example/api/internal/github-tool",
+      },
+      workspace: undefined,
+    }),
+    (error: unknown) =>
+      error instanceof DaytonaProcessError &&
+      error.code === "process_start_failed" &&
+      error.retryable === false
+  );
+
+  assert.equal(preparations, 0);
+  assert.equal(issued, 0);
+  assert.deepEqual(fileCalls, []);
+});
+
 test("restricted workspace inspection rejects repository hook and settings sources", async () => {
   const commands: string[] = [];
   const inspectionCwds: (string | undefined)[] = [];
@@ -1306,8 +1393,13 @@ test("restricted workspace inspection rejects repository hook and settings sourc
     ".github/copilot/settings.local.json",
     ".mcp.json",
     ".github/mcp.json",
+    ".vscode/mcp.json",
     ".github/extensions",
     ".github/lsp.json",
+    ".github/agents",
+    ".github/skills",
+    ".copilot/mcp-config.json",
+    ".copilot/settings.json",
     ".claude/settings.json",
     ".claude/settings.local.json",
   ]) {

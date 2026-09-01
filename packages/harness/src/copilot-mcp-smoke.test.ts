@@ -1,7 +1,7 @@
 // biome-ignore-all lint/performance/noAwaitInLoops lint/suspicious/useAwait: The smoke server and subprocess preserve asynchronous lifecycle boundaries.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -86,8 +86,8 @@ function providerResponse(): string {
   });
 }
 
-test("Copilot 1.0.80 expands explicit MCP env references and exposes only the typed tool", {
-  timeout: 30_000,
+test("Copilot 1.0.80 isolates workspace MCP and exposes only bounded tools", {
+  timeout: 60_000,
 }, async () => {
   const scratch = join(
     dirname(fileURLToPath(import.meta.url)),
@@ -95,7 +95,14 @@ test("Copilot 1.0.80 expands explicit MCP env references and exposes only the ty
   );
   await rm(scratch, { force: true, recursive: true });
   await mkdir(scratch, { recursive: true });
+  const attemptDir = join(scratch, "attempt");
+  const workspace = join(scratch, "workspace");
+  await mkdir(attemptDir, { recursive: true });
+  await mkdir(workspace, { recursive: true });
+  await chmod(attemptDir, 0o500);
   const observedEnvPath = join(scratch, "observed-env.json");
+  const maliciousObservedPath = join(scratch, "malicious-started.json");
+  const maliciousProbePath = join(scratch, "malicious-probe.cjs");
   const probePath = join(scratch, "probe.cjs");
   const probeSource = `
 const fs = require("node:fs");
@@ -135,15 +142,37 @@ lines.on("line", (line) => {
 });
 `;
   await writeFile(probePath, probeSource, { mode: 0o600 });
+  await writeFile(
+    maliciousProbePath,
+    probeSource.replace(
+      JSON.stringify(observedEnvPath),
+      JSON.stringify(maliciousObservedPath)
+    ),
+    { mode: 0o600 }
+  );
+  await writeFile(
+    join(workspace, ".mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        WorkspaceOwned: {
+          args: [maliciousProbePath],
+          command: process.execPath,
+          type: "local",
+        },
+      },
+    }),
+    { mode: 0o600 }
+  );
 
   const invocation = buildInvocation({
+    attemptDir,
     configDir: join(scratch, "copilot-home"),
-    cwd: scratch,
+    cwd: workspace,
     githubTool: true,
     harness: "copilot",
     instructions: "Return smoke complete.",
     model: "gpt-5.4",
-    permissionMode: "github_only",
+    permissionMode: "workspace_read",
     stream: true,
     task: "Do not call tools.",
   });
@@ -164,6 +193,12 @@ lines.on("line", (line) => {
   config.mcpServers.CovenGitHub.command = process.execPath;
   config.mcpServers.CovenGitHub.args = [probePath];
   args[configIndex] = JSON.stringify(config);
+  assert.deepEqual(args.slice(args.indexOf("-C"), args.indexOf("-C") + 4), [
+    "-C",
+    attemptDir,
+    "--add-dir",
+    workspace,
+  ]);
   assert.deepEqual(config.mcpServers.CovenGitHub.env, {
     COVEN_GITHUB_CAPABILITY: COVEN_GITHUB_CAPABILITY_ENV_REFERENCE,
     COVEN_GITHUB_TOOL_URL: COVEN_GITHUB_TOOL_URL_ENV_REFERENCE,
@@ -192,7 +227,7 @@ lines.on("line", (line) => {
   assert.ok(address && typeof address === "object");
 
   const child = spawn(process.execPath, [app, ...args], {
-    cwd: scratch,
+    cwd: workspace,
     env: {
       ...process.env,
       COPILOT_GITHUB_TOKEN: "copilot-credential-must-not-reach-mcp",
@@ -207,7 +242,7 @@ lines.on("line", (line) => {
   });
 
   try {
-    const deadline = Date.now() + 20_000;
+    const deadline = Date.now() + 45_000;
     while (Date.now() < deadline) {
       try {
         if (requests.length > 0) {
@@ -229,6 +264,7 @@ lines.on("line", (line) => {
       hasCopilotCredential: false,
       toolUrl: TOOL_URL,
     });
+    await assert.rejects(readFile(maliciousObservedPath, "utf8"));
     assert.ok(requests.length > 0);
     const visibleTools = [
       ...new Set(
@@ -241,7 +277,11 @@ lines.on("line", (line) => {
         )
       ),
     ];
-    assert.deepEqual(visibleTools, ["CovenGitHub-execute"]);
+    assert.deepEqual(visibleTools.sort(), [
+      "CovenGitHub-execute",
+      "glob",
+      "view",
+    ]);
     assert.equal(
       visibleTools.some((name) =>
         /bash|shell|web|url|curl|network/iu.test(name)

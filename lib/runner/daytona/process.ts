@@ -38,6 +38,7 @@ import {
   daytonaRunConfigDirectory,
   daytonaRunCredentialPath,
   daytonaRunSessionName,
+  daytonaRunWorkingDirectory,
 } from "./names";
 import { classifyDaytonaProviderError } from "./sandbox";
 
@@ -46,15 +47,22 @@ const WORKSPACE_INSPECTION_TIMEOUT_SECONDS = 15;
 const PROBE_SESSION_PATTERN = /^coven-probe-[0-9a-f]{40}$/u;
 const RESTRICTED_WORKSPACE_CONTROL_PATHS = [
   ".mcp.json",
+  ".vscode/mcp.json",
   ".github/hooks",
   ".github/mcp.json",
   ".github/extensions",
   ".github/lsp.json",
+  ".github/agents",
+  ".github/skills",
   ".github/copilot/settings.json",
   ".github/copilot/settings.local.json",
   ".github/copilot/config.json",
   ".github/copilot/plugins",
   ".github/plugins",
+  ".copilot/mcp-config.json",
+  ".copilot/settings.json",
+  ".copilot/hooks",
+  ".copilot/extensions",
   ".copilot/plugins",
   ".claude/settings.json",
   ".claude/settings.local.json",
@@ -196,6 +204,7 @@ function restrictedWorkspaceInspectionCommand(): string {
 function asyncCommand(
   authName: string,
   credentialPath: string,
+  attemptDirectory: string,
   configDirectory: string,
   executionPermission: RunnerExecutionPermission,
   workspace: string,
@@ -228,8 +237,11 @@ function asyncCommand(
   return [
     "set -eu",
     `rm -rf -- ${shellQuote(configDirectory)}`,
+    ...(restricted ? [`rm -rf -- ${shellQuote(attemptDirectory)}`] : []),
     `mkdir -p -- ${shellQuote(configDirectory)}`,
+    ...(restricted ? [`mkdir -p -- ${shellQuote(attemptDirectory)}`] : []),
     `chmod 700 ${shellQuote(configDirectory)}`,
+    ...(restricted ? [`chmod 500 ${shellQuote(attemptDirectory)}`] : []),
     `export HOME=${shellQuote(configDirectory)}`,
     ...(restricted
       ? [
@@ -238,11 +250,11 @@ function asyncCommand(
           `chmod 600 ${shellQuote(settingsPath)}`,
           ...(workspaceRestricted
             ? [
-                `mkdir -p -- ${shellQuote(workspace)}`,
                 `cd -- ${shellQuote(workspace)}`,
                 restrictedWorkspaceInspectionCommand(),
               ]
-            : [`cd -- ${shellQuote(workspace)}`]),
+            : []),
+          `cd -- ${shellQuote(attemptDirectory)}`,
           "unset COPILOT_ALLOW_ALL GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS",
         ]
       : []),
@@ -580,6 +592,7 @@ export async function startDaytonaProcess(input: {
   workspace?: string;
 }): Promise<DaytonaStartedProcess> {
   const { auth, spec } = requireHarness(input.runtime, input.credential);
+  const restricted = input.executionPermission !== "unrestricted";
   const workspaceRestricted =
     input.executionPermission === "workspace_read" ||
     input.executionPermission === "workspace_write";
@@ -671,6 +684,21 @@ export async function startDaytonaProcess(input: {
       false
     );
   }
+  if (restricted) {
+    const inspection = await inspectRestrictedWorkspace(
+      input.sandbox,
+      workspace
+    );
+    if (inspection.kind !== "safe") {
+      throw new DaytonaProcessError(
+        inspection.kind === "unsafe"
+          ? "Restricted runner workspace configuration is unsafe."
+          : "Restricted runner workspace inspection is unavailable.",
+        "process_start_failed",
+        inspection.kind === "unavailable"
+      );
+    }
+  }
   let attemptId: DaytonaAttemptId | null;
   try {
     attemptId = await input.authorizePreparation({
@@ -695,6 +723,7 @@ export async function startDaytonaProcess(input: {
   const sessionId = daytonaRunSessionName(input.runId, attemptId);
   const credentialPath = daytonaRunCredentialPath(input.runId, attemptId);
   const configDirectory = daytonaRunConfigDirectory(input.runId, attemptId);
+  const attemptDirectory = daytonaRunWorkingDirectory(input.runId, attemptId);
   let githubCapability = "";
   let githubCapabilityTouched = false;
   let githubFileStagingAttempted = false;
@@ -985,10 +1014,12 @@ export async function startDaytonaProcess(input: {
       command: asyncCommand(
         auth.name,
         credentialPath,
+        attemptDirectory,
         configDirectory,
         input.executionPermission,
         workspace,
         buildHarnessCommand({
+          attemptDirectory,
           configDirectory,
           executionPermission: input.executionPermission,
           githubTool: Boolean(stagedGitHubTool),
