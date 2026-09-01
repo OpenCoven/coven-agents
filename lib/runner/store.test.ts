@@ -2338,6 +2338,30 @@ test("sandbox recovery scans durable ambiguous lifecycle rows with skip locking"
   assert.match(queryText(scan), /FOR UPDATE SKIP LOCKED/u);
 });
 
+test("operator inventory scans only bounded durable lifecycle mappings in stable order", async () => {
+  const { statements, store } = scripted([]);
+  await store.scanDaytonaSandboxInventory(operator, 10);
+
+  const [scan] = statements;
+  assert.ok(scan);
+  assert.equal(scan.name, "scan-daytona-sandbox-inventory");
+  const query = queryText(scan);
+  assert.match(query, /"daytonaSandboxId" IS NOT NULL/u);
+  assert.match(query, /'provisioning_ambiguous'/u);
+  assert.match(query, /'decommission_failed'/u);
+  assert.match(query, /ORDER BY "sandboxUpdatedAt" ASC, "id" ASC/u);
+  assert.match(query, /LIMIT \$\d+/u);
+  assert.doesNotMatch(query, /FOR UPDATE|SKIP LOCKED/u);
+  assert.deepEqual(scan.args, { limit: 10 });
+
+  for (const invalidLimit of [0, 101, 1.5]) {
+    assert.throws(
+      () => store.scanDaytonaSandboxInventory(operator, invalidLimit),
+      /Resource inventory limit/u
+    );
+  }
+});
+
 test("warm recovery has an independent bounded oldest-first scan", async () => {
   const { statements, store } = scripted([]);
   const staleBefore = new Date("2026-08-28T15:00:00.000Z");

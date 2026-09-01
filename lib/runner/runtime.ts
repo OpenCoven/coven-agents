@@ -20,6 +20,7 @@ import type {
   RunnerReconciliationResult,
 } from "./attempt-reconcile";
 import { COPILOT_CLI_VERSION } from "./copilot-version";
+import type { RunnerResourceOperationObservation } from "./resource-observability";
 import type { RunnerService } from "./service";
 import type { RunnerStore } from "./store";
 import type {
@@ -90,6 +91,9 @@ export type ProductionClaimDependencies = Readonly<{
 export type ProductionRunnerRuntimeDependencies = Readonly<{
   databaseFor?: ProductionDatabaseFactory;
   findAccount?: ProductionAccountFinder;
+  reportResourceOperation?: (
+    observation: RunnerResourceOperationObservation
+  ) => void;
   reportReconciliationFailure?: (failure: RunnerReconciliationFailure) => void;
 }>;
 
@@ -445,7 +449,10 @@ function hermeticProductionReconcile(
   database: ProductionDatabase,
   store: RunnerStore,
   findAccount?: ProductionAccountFinder,
-  reportFailure?: (failure: RunnerReconciliationFailure) => void
+  reportFailure?: (failure: RunnerReconciliationFailure) => void,
+  reportResourceOperation?: (
+    observation: RunnerResourceOperationObservation
+  ) => void
 ): RunnerService["reconcileAndDispatch"] {
   return async () => {
     let stage: RunnerReconciliationFailure["stage"] = "lease";
@@ -473,7 +480,10 @@ function hermeticProductionReconcile(
           const credentialDependencies =
             credentials.drizzleRunnerCredentialDependencies(database);
           const resourceLifecycle =
-            resourceLifecycleModule.hermeticPersistentResourceLifecycle(store);
+            resourceLifecycleModule.hermeticPersistentResourceLifecycle(
+              store,
+              reportResourceOperation
+            );
           const dependencies =
             composition.hermeticRunnerReconciliationDependencies({
               credentialDependencies,
@@ -572,7 +582,10 @@ async function createHermeticRunnerServiceForPrincipal(
   const credentialDependencies =
     credentials.drizzleRunnerCredentialDependencies(database);
   const resourceLifecycle =
-    resourceLifecycleModule.hermeticPersistentResourceLifecycle(store);
+    resourceLifecycleModule.hermeticPersistentResourceLifecycle(
+      store,
+      dependencies.reportResourceOperation
+    );
 
   return service.createRunnerService({
     cancelRun: (runId) =>
@@ -596,7 +609,8 @@ async function createHermeticRunnerServiceForPrincipal(
       database,
       store,
       dependencies.findAccount,
-      dependencies.reportReconciliationFailure
+      dependencies.reportReconciliationFailure,
+      dependencies.reportResourceOperation
     ),
     resourceLifecycle,
     store,
@@ -632,6 +646,9 @@ export function createProductionRunnerRuntime(
 const productionRunnerRuntime = createProductionRunnerRuntime({
   reportReconciliationFailure: (failure) => {
     console.error("Runner reconciliation failed.", failure);
+  },
+  reportResourceOperation: (observation) => {
+    console.info("Runner resource operation.", observation);
   },
 });
 

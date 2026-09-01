@@ -31,7 +31,11 @@ import type {
   RunnerSubscriberAuthorization,
 } from "./auth";
 import { RunnerServiceError } from "./errors";
-import type { RunnerDiagnosticResult, RunnerService } from "./service";
+import type {
+  RunnerDiagnosticResult,
+  RunnerInventoryResourcesResult,
+  RunnerService,
+} from "./service";
 import { createRunEventStream } from "./sse";
 import {
   readRunnerJson as boundedJson,
@@ -49,6 +53,27 @@ const diagnosticResponseSchema = z
     exitCode: z.number().int().min(0).max(255),
     ok: z.boolean(),
     output: z.string().max(1024),
+  })
+  .strict();
+const resourceInventoryResponseSchema = z
+  .object({
+    ambiguous: z.number().int().nonnegative(),
+    appOwnedMappings: z.number().int().nonnegative(),
+    databaseCapped: z.boolean(),
+    examined: z.number().int().nonnegative(),
+    matched: z.number().int().nonnegative(),
+    providerCapped: z.boolean(),
+    states: z
+      .object({
+        active: z.number().int().nonnegative(),
+        archived: z.number().int().nonnegative(),
+        other: z.number().int().nonnegative(),
+        stopped: z.number().int().nonnegative(),
+      })
+      .strict(),
+    status: z.enum(["bounded", "complete"]),
+    unowned: z.number().int().nonnegative(),
+    version: z.literal(1),
   })
   .strict();
 
@@ -86,6 +111,7 @@ export type RunnerHttpHandlers = Readonly<{
   health: (request: Request) => Promise<Response>;
   listAgentRuns: (request: Request, agentId: string) => Promise<Response>;
   listAgents: (request: Request) => Promise<Response>;
+  inventoryResources: (request: Request) => Promise<Response>;
   prewarmTenant: (request: Request) => Promise<Response>;
   reconcile: (request: Request) => Promise<Response>;
   startAgentRun: (request: Request, agentId: string) => Promise<Response>;
@@ -339,6 +365,13 @@ function reconciliationCounts(
     );
   }
   return { ...counts, execution: "executed" };
+}
+
+function resourceInventoryCounts(
+  result: Exclude<RunnerInventoryResourcesResult, { kind: "unavailable" }>
+) {
+  const { kind: _kind, ...counts } = result;
+  return resourceInventoryResponseSchema.parse(counts);
 }
 
 function serviceFailure(
@@ -630,6 +663,32 @@ export function createRunnerHttpHandlers(
           capabilities: [...AGENT_RUNNER_CAPABILITIES],
           minimumClientVersion: "1.0.0",
           mode: "cloud",
+        });
+      }),
+
+    inventoryResources: (request) =>
+      safely(dependencies, async () => {
+        const rejected = await authorizeSecret(
+          request,
+          "runner_reconcile",
+          dependencies
+        );
+        if (rejected) {
+          return rejected;
+        }
+        const body = await emptyBody(request, "runner_reconcile", dependencies);
+        if (body.kind !== "ok") {
+          return body.response;
+        }
+        const service = await dependencies.createOperatorService();
+        const result = await service.inventoryResources();
+        if (result.kind === "unavailable") {
+          return result.source === "provider"
+            ? providerUnavailable(dependencies)
+            : runnerUnavailable(dependencies);
+        }
+        return Response.json(resourceInventoryCounts(result), {
+          headers: { "cache-control": "no-store" },
         });
       }),
 

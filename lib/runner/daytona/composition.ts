@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import type { Daytona } from "@daytona/sdk";
 import type { RunnerAdmissionLimits, RunnerDispatchResult } from "../admission";
 import type { RunnerPersistentResourceLifecycle } from "../resource-lifecycle";
+import type { RunnerResourceOperationObserver } from "../resource-observability";
 import {
   dispatchProductionClaim,
   type ProductionAccountFinder,
@@ -36,7 +37,8 @@ function configuredDispatcher(
   database: ProductionDatabase,
   store: RunnerStore,
   daytona: Daytona,
-  findAccount?: ProductionAccountFinder
+  findAccount?: ProductionAccountFinder,
+  observe?: RunnerResourceOperationObserver
 ): () => Promise<RunnerDispatchResult> {
   return async () => {
     const admission = await import("../admission");
@@ -59,7 +61,8 @@ function configuredDispatcher(
       store,
       daytona,
       limits,
-      findAccount
+      findAccount,
+      observe
     )(claimed);
   };
 }
@@ -69,7 +72,8 @@ function configuredClaimDispatcher(
   store: RunnerStore,
   daytona: Daytona,
   limits?: RunnerAdmissionLimits,
-  findAccount?: ProductionAccountFinder
+  findAccount?: ProductionAccountFinder,
+  observe?: RunnerResourceOperationObserver
 ): (claimed: RunnerClaimedDispatch) => Promise<RunnerDispatchResult> {
   return async (claimed) => {
     const [admission, credentials, executor, sandbox] = await Promise.all([
@@ -95,7 +99,7 @@ function configuredClaimDispatcher(
           limits: resolvedLimits,
           operator: OPERATOR,
           sandboxConfiguration: sandbox.daytonaSandboxConfiguration(),
-          sandboxDependencies: { daytona },
+          sandboxDependencies: { daytona, observe },
           store,
         });
         return admission.dispatchRunnerClaim(authorized, dependencies);
@@ -111,6 +115,7 @@ function persistentResourceLifecycle(
   store: RunnerStore,
   options: Readonly<{
     batchSize?: number;
+    observe?: RunnerResourceOperationObserver;
     providerConcurrency?: number;
   }> = {}
 ): Promise<RunnerPersistentResourceLifecycle> {
@@ -126,6 +131,8 @@ function persistentResourceLifecycle(
         prewarmOptions?.deadline
           ? client.daytonaClientForDeadline(prewarmOptions.deadline)
           : client.daytonaClient(),
+      inventoryDaytona: () => client.daytonaClient(),
+      observe: options.observe,
       operator: OPERATOR,
       providerConcurrency: options.providerConcurrency,
       store,
@@ -137,7 +144,8 @@ function daytonaProductionReconcile(
   database: ProductionDatabase,
   store: RunnerStore,
   findAccount?: ProductionAccountFinder,
-  reportFailure?: (failure: RunnerReconciliationFailure) => void
+  reportFailure?: (failure: RunnerReconciliationFailure) => void,
+  observe?: RunnerResourceOperationObserver
 ): RunnerService["reconcileAndDispatch"] {
   return async () => {
     let stage: RunnerReconciliationFailure["stage"] = "lease";
@@ -169,7 +177,9 @@ function daytonaProductionReconcile(
           const daytona = client.daytonaClient();
           const credentialDependencies =
             credentials.drizzleRunnerCredentialDependencies(database);
-          const resourceLifecycle = await persistentResourceLifecycle(store);
+          const resourceLifecycle = await persistentResourceLifecycle(store, {
+            observe,
+          });
           const composition =
             daytonaReconciliation.daytonaRunnerReconciliationDependencies({
               credentialDependencies,
@@ -213,7 +223,8 @@ function daytonaProductionReconcile(
             store,
             daytona,
             undefined,
-            findAccount
+            findAccount,
+            observe
           );
           stage = "reconcile";
           return reconciliation.reconcileAndDispatch({
@@ -223,7 +234,8 @@ function daytonaProductionReconcile(
               database,
               store,
               daytona,
-              findAccount
+              findAccount,
+              observe
             ),
             dispatchClaim,
             projectTeamRuns: teams.projectTerminalSteps,
@@ -289,6 +301,8 @@ export async function createDaytonaRunnerServiceForPrincipal(
         options?.deadline
           ? client.daytonaClientForDeadline(options.deadline)
           : client.daytonaClient(),
+      inventoryDaytona: () => client.daytonaClient(),
+      observe: dependencies.reportResourceOperation,
       operator: OPERATOR,
       store,
     });
@@ -315,14 +329,16 @@ export async function createDaytonaRunnerServiceForPrincipal(
         store,
         client.daytonaClient(),
         undefined,
-        dependencies.findAccount
+        dependencies.findAccount,
+        dependencies.reportResourceOperation
       )(claimed),
     listHarnesses: async () => registryHarnesses(),
     reconcileAndDispatch: daytonaProductionReconcile(
       database,
       store,
       dependencies.findAccount,
-      dependencies.reportReconciliationFailure
+      dependencies.reportReconciliationFailure,
+      dependencies.reportResourceOperation
     ),
     resourceLifecycle,
     store,

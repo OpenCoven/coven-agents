@@ -191,6 +191,24 @@ for removal of the superseded provider.
 
 ## Resource inventory and revocation
 
+- The repository provides `GET`/`POST`
+  `/api/internal/runner-resource-inventory` as a read-only bounded inventory:
+  it uses the existing reconciliation credentials, lists Daytona only by the
+  application label, then hydrates only an exact durable provider mapping. It
+  compares observations to bounded durable mappings and returns versioned
+  aggregate matched, ambiguous, unowned, and lifecycle-state counts. It does
+  not expose resource identifiers, names, labels, tenant digests, messages, or
+  credentials. An observation with no exact durable mapping, duplicate identity
+  label, pending ownership, or policy drift is not adopted or deleted.
+- The same repository policy explicitly requests 2 CPU cores, 4 GiB memory,
+  20 GiB disk, 15-minute auto-stop, and seven-day auto-archive defaults,
+  bounded by 4 cores, 8 GiB, 40 GiB, 60 minutes, and 30 days respectively.
+  Persistent sandbox TTL is fixed at zero and auto-delete at negative one;
+  public previews, volumes, linked/forked resources, and warm pools are not
+  configured.
+- This is repository behavior, not a new deployed inventory or offboarding
+  receipt. Execute and retain a sanitized operator result before treating a
+  production resource-offboarding exercise as evidenced.
 - [ ] Inventory account-wide Daytona API keys, roles, and administrative
       resources through the Daytona control plane; encrypted deployment
       credentials cannot be exported for local inspection.
@@ -206,6 +224,19 @@ for removal of the superseded provider.
 
 Production deployment, credential revocation, and superseded resource deletion
 are complete.
+
+### Application-owned resource offboarding
+
+1. Invoke the bounded internal inventory with the appropriate reconciliation
+   credential and record only its aggregate response.
+2. For a matched app-owned resource, request agent deletion through the
+   application lifecycle and allow its durable, generation/version-fenced
+   decommission or recovery transition to confirm provider absence.
+3. Treat every ambiguous or unowned count as an operator investigation. Do not
+   delete, reset, relabel, or adopt any provider resource based on labels,
+   names, or inventory observations alone.
+4. Rerun the inventory after the approved action. A bounded result signals
+   that the report is incomplete and requires an operator-scoped follow-up.
 
 ## Rollback
 

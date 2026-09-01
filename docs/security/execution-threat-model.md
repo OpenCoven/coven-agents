@@ -23,6 +23,9 @@ Goals:
 5. Evidence is bounded and redacted before persistence or display.
 6. Starts, streams, cancellation, and recovery remain safe under retries.
 7. Missing identity, configuration, or ownership fails closed.
+8. A persistent sandbox cannot be silently destroyed by provider TTL or
+   auto-delete behavior, and unowned provider observations remain
+   non-destructive.
 
 ## Actors and assumptions
 
@@ -82,6 +85,21 @@ Scheduled reconciliation, manual reconciliation, and diagnostics use distinct
 credentials. Reconciliation uses database time, bounded leases, bounded event
 pages, exact cleanup claims, and validated aggregate responses.
 
+### B6. Resource policy, inventory, and offboarding
+
+Sandbox creation requests server-owned CPU, memory, disk, auto-stop, and
+auto-archive values rather than accepting provider defaults. Public previews
+are false; no volume, linked/forked sandbox, or warm-pool setting is used. TTL
+is explicitly disabled and automatic deletion is disabled because each agent's
+persistent workspace is deleted only by an existing database-fenced lifecycle
+transition. The internal resource-inventory route uses reconciliation
+credentials, lists only the application provider label, then hydrates only
+list items that exactly match one durable provider mapping. It bounds both
+provider and database scans and returns versioned aggregate counts only. It
+does not adopt, reset, or delete a listed resource. Labels, names, and provider
+IDs are observations; unmatched, duplicate, and policy-mismatched observations
+require operator review.
+
 ### B5. Evidence to storage, UI, guest preview, and Git
 
 `packages/agent-contracts/src/evidence.ts` redacts recognized secrets and
@@ -105,6 +123,7 @@ line, and category.
 | T10 | Cancellation or recovery reports false success | Durable intent, exact cleanup, leased reconciliation | Provider outages can delay convergence |
 | T11 | Capacity exhaustion harms availability | Abuse budgets and deployment/tenant queue limits | Tune from measured provider behavior |
 | T12 | Operator credential gains tenant authority | Operator credentials authorize only bounded operational routes | Protect operator machines and deployment secrets |
+| T13 | A provider-only or drifted sandbox is adopted or deleted by label | Read-only app-label inventory, exact durable mapping comparison, aggregate ambiguous/unowned categories, existing fenced recovery only | An operator must investigate and separately authorize any unmatched provider resource |
 
 ## Incident and recovery expectations
 
@@ -115,6 +134,10 @@ line, and category.
 - Keep recovery idempotent, cursor-bounded, lease-bounded, and exact-attempt
   fenced.
 - Never turn ambiguous provider state into a success result.
+- Use the bounded internal inventory before a resource-offboarding exercise;
+  it is evidence only. Decommission app-owned resources through the durable
+  application lifecycle, and never delete or adopt a resource from a label,
+  name, or provider list result alone.
 - Follow [Security incident response](incident-response.md).
 
 ## Verification and review

@@ -34,6 +34,7 @@ import { hashRunRequest, isTerminalRun } from "./evidence";
 import type {
   RunnerPersistentResourceLifecycle,
   RunnerResourceDecommissionResult,
+  RunnerResourceInventoryResult,
   RunnerResourcePrewarmOptions,
   RunnerResourcePrewarmResult,
 } from "./resource-lifecycle";
@@ -57,6 +58,7 @@ type RunnerServiceStore = Pick<
 >;
 
 export type RunnerDeleteAgentResult = RunnerResourceDecommissionResult;
+export type RunnerInventoryResourcesResult = RunnerResourceInventoryResult;
 export type RunnerWarmSandboxResult = RunnerResourcePrewarmResult;
 export type RunnerPrewarmOptions = RunnerResourcePrewarmOptions;
 
@@ -88,7 +90,8 @@ export type RunnerServiceDependencies = Readonly<{
   resourceLifecycle?: Pick<
     RunnerPersistentResourceLifecycle,
     "decommission" | "prewarm"
-  >;
+  > &
+    Partial<Pick<RunnerPersistentResourceLifecycle, "inventory">>;
   store: RunnerServiceStore;
 }>;
 
@@ -234,6 +237,7 @@ export type RunnerService = Readonly<{
     principal: RunnerPrincipal,
     runId: string
   ) => Promise<RunnerReadRunResult>;
+  inventoryResources: () => Promise<RunnerInventoryResourcesResult>;
   listAgentRuns: (
     principal: RunnerPrincipal,
     agentId: string
@@ -517,6 +521,13 @@ export function createRunnerService(
       return run
         ? { kind: "found", run: requireSnapshot(run) }
         : { kind: "not_found" };
+    },
+
+    inventoryResources: () => {
+      if (!dependencies.resourceLifecycle?.inventory) {
+        throw configuredError("resource inventory");
+      }
+      return dependencies.resourceLifecycle.inventory();
     },
 
     listAgentRuns: async (principal, agentId) => {

@@ -29,14 +29,16 @@ remains in PostgreSQL.
    contracts.** `RunnerExecutor` owns dispatch preparation and starts;
    `RunnerReconciliationProvider` owns fenced per-attempt inspection and stop;
    and `RunnerPersistentResourceLifecycle` owns per-agent prewarm,
-   decommission, stale/ambiguous recovery, and reset. Tenant harness
-   credentials are acquired through server-only custody, staged for one
-   attempt, and never returned to browser code. Daytona SDK configuration,
-   identifiers, and handles remain in the adapter.
+   decommission, stale/ambiguous recovery, reset, and bounded resource
+   inventory. Tenant harness credentials are acquired through server-only
+   custody, staged for one attempt, and never returned to browser code.
+   Daytona SDK configuration, identifiers, and handles remain in the adapter.
 5. **PostgreSQL owns execution truth.** Agent, run, event, operation,
    admission, dispatch, attempt, cancellation, sandbox, and reconciliation
    records are durable database state. Provider observations update those
-   records only through exact fences.
+   records only through exact fences. A label, deterministic name, or
+   provider-list result is an observation rather than deletion or adoption
+   authority.
 6. **There is one execution path.** Unavailable Daytona configuration or
    provider service produces an explicit unavailable result; the application
    does not switch to another executor.
@@ -47,7 +49,15 @@ remains in PostgreSQL.
    closes on terminal state, and uses a bounded idle timeout.
 9. **Recovery is bounded.** Reconciliation uses database-time leases,
    generation and attempt fencing, bounded event pages, exact cleanup claims,
-   and explicit cleanup-required outcomes.
+   and explicit cleanup-required outcomes. Inventory is separately read-only,
+   list-bounded, and returns only versioned aggregate ownership and lifecycle
+   categories.
+10. **Persistent resources use explicit server policy.** Sandbox creation
+    always requests bounded CPU, memory, disk, auto-stop, and auto-archive
+    values. Public previews are false; volumes, linked/forked sandboxes, and
+    warm pools are not configured. TTL is explicitly disabled and automatic
+    deletion remains disabled so valid persistent work cannot disappear
+    outside fenced database recovery and decommission.
 
 ## Provider adapter and rollback criteria
 
@@ -92,6 +102,8 @@ Positive:
 - PostgreSQL provides one recoverable source of execution truth;
 - lifecycle failures are explicit and testable;
 - duplicate requests and reconnecting streams are safe.
+- resource cost and lifecycle values do not silently inherit provider defaults;
+- unmatched provider observations are visible without becoming destructive.
 
 Costs:
 
@@ -111,6 +123,7 @@ Costs:
 - Cursor-safe events: `lib/runner/sse.ts`
 - Attempt recovery and cleanup: `lib/runner/attempt-reconcile.ts`
 - Persistent resource recovery: `lib/runner/daytona/resource-recovery.ts`
+- Read-only resource inventory: `lib/runner/daytona/resource-inventory.ts`
 - Executable guardrails: `scripts/product-boundary.test.ts`,
   `lib/runner/service.test.ts`, `lib/runner/store.test.ts`,
   `lib/runner/sse.test.ts`, `lib/runner/reconcile.test.ts`, and

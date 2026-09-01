@@ -128,6 +128,19 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     }),
     getAgent: async () => ({ agent: definition(), kind: "found" }),
     getRun: async () => ({ kind: "found", run: run() }),
+    inventoryResources: async () => ({
+      ambiguous: 0,
+      appOwnedMappings: 0,
+      databaseCapped: false,
+      examined: 0,
+      kind: "available",
+      matched: 0,
+      providerCapped: false,
+      states: { active: 0, archived: 0, other: 0, stopped: 0 },
+      status: "complete",
+      unowned: 0,
+      version: 1,
+    }),
     listAgentRuns: async () => ({ kind: "found", runs: [run()] }),
     listAgents: async () => [definition()],
     listHarnesses: async () => [
@@ -289,6 +302,12 @@ const operatorRouteCases: readonly {
     invoke: (runnerHandlers, request) => runnerHandlers.reconcile(request),
     name: "reconcile",
   },
+  {
+    abuseRoute: "runner_reconcile",
+    invoke: (runnerHandlers, request) =>
+      runnerHandlers.inventoryResources(request),
+    name: "resource inventory",
+  },
 ];
 
 function orderedOperatorRequest(events: string[]): Request {
@@ -324,6 +343,22 @@ function orderedOperatorHandlers(
         exitCode: 0,
         ok: true,
         output: "coven-agents",
+      });
+    },
+    inventoryResources: () => {
+      events.push("provider");
+      return Promise.resolve({
+        ambiguous: 0,
+        appOwnedMappings: 0,
+        databaseCapped: false,
+        examined: 0,
+        kind: "available" as const,
+        matched: 0,
+        providerCapped: false,
+        states: { active: 0, archived: 0, other: 0, stopped: 0 },
+        status: "complete" as const,
+        unowned: 0,
+        version: 1 as const,
       });
     },
     reconcileAndDispatch: () => {
@@ -2195,6 +2230,71 @@ test("reconciliation exposes validated counts only and hides malformed values", 
     },
     requestId: REQUEST_ID,
   });
+});
+
+test("resource inventory exposes only bounded aggregate counts with no-store", async () => {
+  const fixture = handlers({
+    service: service({
+      inventoryResources: async () => ({
+        ambiguous: 2,
+        appOwnedMappings: 4,
+        databaseCapped: false,
+        examined: 5,
+        kind: "available",
+        matched: 2,
+        providerCapped: false,
+        states: { active: 1, archived: 1, other: 1, stopped: 2 },
+        status: "complete",
+        unowned: 1,
+        version: 1,
+      }),
+    }),
+  });
+
+  const response = await fixture.handlers.inventoryResources(
+    new Request("https://app.test/api/internal/runner-resource-inventory", {
+      method: "POST",
+    })
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await response.json(), {
+    ambiguous: 2,
+    appOwnedMappings: 4,
+    databaseCapped: false,
+    examined: 5,
+    matched: 2,
+    providerCapped: false,
+    states: { active: 1, archived: 1, other: 1, stopped: 2 },
+    status: "complete",
+    unowned: 1,
+    version: 1,
+  });
+});
+
+test("resource inventory maps unavailable providers to the safe operator error", async () => {
+  const fixture = handlers({
+    service: service({
+      inventoryResources: async () => ({
+        kind: "unavailable",
+        source: "provider",
+        version: 1,
+      }),
+    }),
+  });
+
+  const response = await fixture.handlers.inventoryResources(
+    new Request("https://app.test/api/internal/runner-resource-inventory", {
+      method: "POST",
+    })
+  );
+  assert.equal(response.status, 503);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "provider_unavailable"
+  );
+  assert.equal(fixture.operatorRequests(), 1);
 });
 
 test("unrecognized failures are sanitized in their response and logs", async () => {

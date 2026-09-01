@@ -7,6 +7,48 @@ import type {
   RunnerRunRecord,
 } from "./types";
 
+export const DEFAULT_RUNNER_RESOURCE_INVENTORY_LIMIT = 50;
+export const MAX_RUNNER_RESOURCE_INVENTORY_LIMIT = 100;
+
+export type RunnerResourceInventoryResult =
+  | Readonly<{
+      appOwnedMappings: number;
+      databaseCapped: boolean;
+      examined: number;
+      kind: "available";
+      matched: number;
+      providerCapped: boolean;
+      status: "bounded" | "complete";
+      states: Readonly<{
+        active: number;
+        archived: number;
+        other: number;
+        stopped: number;
+      }>;
+      unowned: number;
+      ambiguous: number;
+      version: 1;
+    }>
+  | Readonly<{
+      kind: "unavailable";
+      source: "database" | "provider";
+      version: 1;
+    }>;
+
+export function runnerResourceInventoryLimit(limit?: number): number {
+  const selected = limit ?? DEFAULT_RUNNER_RESOURCE_INVENTORY_LIMIT;
+  if (
+    !Number.isSafeInteger(selected) ||
+    selected < 1 ||
+    selected > MAX_RUNNER_RESOURCE_INVENTORY_LIMIT
+  ) {
+    throw new Error(
+      `Resource inventory limit must be an integer between 1 and ${MAX_RUNNER_RESOURCE_INVENTORY_LIMIT}.`
+    );
+  }
+  return selected;
+}
+
 /**
  * Server-only contract for the persistent resource owned by one agent. The
  * provider keeps its resource identifiers, SDK handles, and configuration
@@ -17,6 +59,7 @@ export type RunnerPersistentResourceLifecycle = Readonly<{
     principal: RunnerPrincipal,
     agentId: string
   ) => Promise<RunnerResourceDecommissionResult>;
+  inventory: () => Promise<RunnerResourceInventoryResult>;
   prewarm: (
     principal: RunnerPrincipal,
     agent: RunnerAgentRecord,

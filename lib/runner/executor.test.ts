@@ -215,9 +215,12 @@ function daytonaExecutorExercise(): ExecutorExercise {
 test("Daytona adapter derives immutable, sanitized hosted provenance", () => {
   const provenance = daytonaExecutionProvenance({
     autoArchiveInterval: 10_080,
+    autoDeleteInterval: -1,
     autoStopInterval: 15,
+    resources: { cpu: 2, disk: 20, memory: 4 },
     snapshotName: "coven-agents-copilot-42",
     target: "eu",
+    ttlMinutes: 0,
   });
 
   assert.deepEqual(provenance, {

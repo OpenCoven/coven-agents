@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { DaytonaSandboxInventoryItem } from "./daytona/resource-inventory";
 import { daytonaPersistentResourceLifecycle } from "./daytona/resource-lifecycle";
 import { hermeticSandboxId } from "./hermetic/executor";
 import { hermeticPersistentResourceLifecycle } from "./hermetic/resource-lifecycle";
@@ -112,6 +113,13 @@ function resourceLifecycleContract(
     const deleted = await lifecycle.decommission(principal, agentId);
     assert.equal(deleted.kind, "deleted");
 
+    const inventory = await lifecycle.inventory();
+    assert.equal(inventory.kind, "available");
+    if (inventory.kind === "available") {
+      assert.equal(inventory.version, 1);
+      assert.equal(inventory.examined, 0);
+    }
+
     assert.deepEqual(
       await lifecycle.recover(() => new Date("2026-09-01T00:05:00.000Z")),
       recovery
@@ -158,13 +166,27 @@ resourceLifecycleContract("Daytona-shaped fake", () => {
   return daytonaPersistentResourceLifecycle({
     configuration: () => ({
       autoArchiveInterval: 10_080,
+      autoDeleteInterval: -1,
       autoStopInterval: 15,
+      resources: { cpu: 2, disk: 20, memory: 4 },
       snapshotName: "coven-agents-copilot-1",
       target: "us",
+      ttlMinutes: 0,
     }),
     daytona: () => ({
       create: () => Promise.resolve(sandbox as never),
       get: () => Promise.resolve(sandbox as never),
+    }),
+    inventoryDaytona: () => ({
+      get: () =>
+        Promise.reject(new Error("Inventory fixture must not hydrate.")),
+      async *list() {
+        await Promise.resolve();
+        const sandboxes: DaytonaSandboxInventoryItem[] = [];
+        for (const inventorySandbox of sandboxes) {
+          yield inventorySandbox;
+        }
+      },
     }),
     operator,
     probe: () => Promise.resolve(),
@@ -204,6 +226,7 @@ resourceLifecycleContract("Daytona-shaped fake", () => {
           version: 1,
         }),
       }),
+      scanDaytonaSandboxInventory: async () => [],
       scanDaytonaSandboxRecoveries: async () => [],
       scanDaytonaWarmRecoveries: async () => [],
     } as never,

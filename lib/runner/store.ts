@@ -18,6 +18,7 @@ import {
   MAX_EVENTS_PER_RUN,
   MAX_PERSISTED_EVENT_BYTES_PER_RUN,
 } from "./evidence";
+import { runnerResourceInventoryLimit } from "./resource-lifecycle";
 import type {
   AcquireRunnerReconciliationLeaseInput,
   AcquireRunnerReconciliationLeaseResult,
@@ -4133,6 +4134,33 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         );
         return current ? { kind: "stale_version" } : { kind: "not_found" };
       }),
+
+    scanDaytonaSandboxInventory: (
+      _operator: RunnerOperator,
+      requestedLimit: number
+    ) => {
+      const limit = runnerResourceInventoryLimit(requestedLimit);
+      return database.transaction(async (transaction) => {
+        const rows = await transaction.execute(
+          statement(
+            "scan-daytona-sandbox-inventory",
+            { limit },
+            sql`SELECT * FROM "RunnerAgent"
+              WHERE "daytonaSandboxId" IS NOT NULL
+                OR "sandboxLifecycle" IN (
+                  'provisioning',
+                  'provisioning_ambiguous',
+                  'resetting',
+                  'decommissioning',
+                  'decommission_failed'
+                )
+              ORDER BY "sandboxUpdatedAt" ASC, "id" ASC
+              LIMIT ${limit}`
+          )
+        );
+        return rows.map(asAgent);
+      });
+    },
 
     scanDaytonaSandboxRecoveries: (_operator: RunnerOperator, limit: number) =>
       database.transaction(async (transaction) => {

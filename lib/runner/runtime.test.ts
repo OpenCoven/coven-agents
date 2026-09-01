@@ -130,6 +130,20 @@ test("hermetic provider files retain no Daytona SDK boundary", () => {
   assert.match(runtime, /hermeticPersistentResourceLifecycle/u);
 });
 
+test("hermetic inventory is deterministic and has no Daytona configuration access", () => {
+  const lifecycle = readFileSync(
+    new URL("./hermetic/resource-lifecycle.ts", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(lifecycle, /NO_HOSTED_RESOURCE_INVENTORY/u);
+  assert.match(lifecycle, /inventory:\s*\(\)\s*=>/u);
+  assert.doesNotMatch(
+    lifecycle,
+    /(?:@daytona\/sdk|daytonaSandboxConfiguration|DAYTONA_|process\.env)/u
+  );
+});
+
 test("core runtime has no diagnostic composition dependency", () => {
   const runtime = readFileSync(
     new URL("./runtime.ts", import.meta.url),
