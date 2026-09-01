@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import type { EventEmitter } from "node:events";
 import { rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { promisify } from "node:util";
@@ -15,7 +16,6 @@ const COMMAND_TIMEOUT_MS = 120_000;
 const DATABASE_READY_TIMEOUT_MS = 30_000;
 export const DOCKER_COMMAND_TIMEOUT_MS = 10_000;
 export const PORT_ALLOCATION_TIMEOUT_MS = 5000;
-const PROCESS_TERMINATION_GRACE_MS = 5000;
 const POSTGRES_IMAGE = "postgres:16-alpine";
 const POSTGRES_DATABASE = "coven_hermetic_e2e";
 const POSTGRES_PASSWORD = "test-hermetic-postgres";
@@ -112,9 +112,10 @@ type CommandOptions = Readonly<{
 }>;
 
 type Environment = Readonly<Record<string, string | undefined>>;
+type PlaywrightChild = EventEmitter;
 
 function localOrigin(port: number): string {
-  return `http://localhost:${port}`;
+  return `http://127.0.0.1:${port}`;
 }
 
 function executable(name: string): string {
@@ -351,20 +352,11 @@ async function migrate(
   });
 }
 
-async function playwright(
+export function waitForPlaywrightExit(
   file: string,
-  environment: NodeJS.ProcessEnv
+  child: PlaywrightChild
 ): Promise<void> {
-  const child = spawn(
-    executable("pnpm"),
-    ["exec", "playwright", "test", file, "--project=e2e", "--workers=1"],
-    {
-      detached: process.platform !== "win32",
-      env: environment,
-      stdio: "inherit",
-    }
-  );
-  const completion = new Promise<void>((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     child.once("error", reject);
     child.once("exit", (code, signal) => {
       if (code === 0) {
@@ -378,50 +370,22 @@ async function playwright(
       );
     });
   });
-  const terminateProcessTree = async (): Promise<void> => {
-    const { pid } = child;
-    if (!pid) {
-      return;
+}
+
+async function playwright(
+  file: string,
+  environment: NodeJS.ProcessEnv
+): Promise<void> {
+  const child = spawn(
+    executable("pnpm"),
+    ["exec", "playwright", "test", file, "--project=e2e", "--workers=1"],
+    {
+      detached: process.platform !== "win32",
+      env: environment,
+      stdio: "inherit",
     }
-    const signal = (value: NodeJS.Signals): void => {
-      try {
-        if (process.platform === "win32") {
-          child.kill(value);
-        } else {
-          process.kill(-pid, value);
-        }
-      } catch {
-        // The exact Playwright process group may already have exited.
-      }
-    };
-    signal("SIGTERM");
-    await new Promise((resolve) => {
-      setTimeout(resolve, PROCESS_TERMINATION_GRACE_MS);
-    });
-    signal("SIGKILL");
-  };
-  let timeout: NodeJS.Timeout | undefined;
-  try {
-    await Promise.race([
-      completion,
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => {
-          reject(
-            new Error(
-              `Focused Playwright test ${file} timed out after ${COMMAND_TIMEOUT_MS / 1000} seconds; its output is shown above.`
-            )
-          );
-        }, COMMAND_TIMEOUT_MS);
-      }),
-    ]);
-  } catch (error) {
-    await terminateProcessTree();
-    throw error;
-  } finally {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
-  }
+  );
+  await waitForPlaywrightExit(file, child);
 }
 
 async function removePlaywrightArtifacts(): Promise<void> {

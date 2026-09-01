@@ -12,11 +12,12 @@ import {
   providerProvenanceForRun,
   tenantCertificationCounts,
 } from "./hermetic-db";
+import { e2eOrigin } from "./origin";
 import { sessionCookies } from "./session";
 
 const CRON_SECRET = "test-hermetic-cron";
 const HERMETIC = process.env.E2E_HERMETIC_RUNNER === "1";
-const LOCAL_ORIGIN = process.env.APP_ORIGIN ?? "http://localhost:3100";
+const LOCAL_ORIGIN = e2eOrigin();
 const PROVIDER_FIELDS = new Set([
   "adapterVersion",
   "daytona",

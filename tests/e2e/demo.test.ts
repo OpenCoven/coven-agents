@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
+import { e2eOrigin } from "./origin";
 
 const IS_DEMO = process.env.IS_DEMO === "1";
-const LOCAL_ORIGIN = process.env.APP_ORIGIN ?? "http://localhost:3100";
+const LOCAL_ORIGIN = e2eOrigin();
 
 test.describe("Anonymous fixture demo", () => {
   test.use({ storageState: { cookies: [], origins: [] } });

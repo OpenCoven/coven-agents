@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   loadPlaywrightLocalEnvironment,
+  playwrightSettings,
   playwrightWebServerEnvironment,
 } from "../playwright.config";
 
@@ -36,4 +37,31 @@ test("normal Playwright config still loads .env.local", () => {
     true
   );
   assert.deepEqual(received, { path: ".env.local" });
+});
+
+test("hermetic Playwright config uses one IPv4 origin and a bounded suite timeout", () => {
+  assert.deepEqual(
+    playwrightSettings({
+      E2E_HERMETIC_RUNNER: "1",
+      IS_DEMO: "1",
+      PORT: "43123",
+    }),
+    {
+      baseURL: "http://127.0.0.1:43123",
+      globalTimeout: 120_000,
+      webServerCommand:
+        "exec node node_modules/next/dist/bin/next dev --turbo --hostname 127.0.0.1 --port 43123",
+      webServerURL: "http://127.0.0.1:43123/demo/ping",
+    }
+  );
+});
+
+test("normal Playwright config retains localhost defaults without a global timeout", () => {
+  assert.deepEqual(playwrightSettings({}), {
+    baseURL: "http://localhost:3100",
+    globalTimeout: undefined,
+    webServerCommand:
+      "exec node node_modules/next/dist/bin/next dev --turbo --port 3100",
+    webServerURL: "http://localhost:3100/ping",
+  });
 });

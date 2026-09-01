@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { createServer } from "node:net";
 import test from "node:test";
 import { HARNESS_SPECS } from "@opencoven/harness";
@@ -11,6 +12,7 @@ import {
   hermeticEnvironment,
   mappedPort,
   PORT_ALLOCATION_TIMEOUT_MS,
+  waitForPlaywrightExit,
 } from "./e2e-hermetic";
 
 test("hermetic Docker command names and publishes only its exact disposable container", () => {
@@ -136,11 +138,28 @@ test("hermetic port allocation is bounded and configures one local origin", asyn
     {},
     port
   );
-  const origin = `http://localhost:${port}`;
+  const origin = `http://127.0.0.1:${port}`;
   assert.equal(environment.PORT, String(port));
   assert.equal(environment.APP_ORIGIN, origin);
   assert.equal(environment.AUTH_URL, origin);
   assert.equal(environment.NEXTAUTH_URL, origin);
+});
+
+test("Playwright failure exits surface output without a harness process-group kill", async () => {
+  const child = new EventEmitter();
+  const completion = waitForPlaywrightExit(
+    "tests/e2e/subscriber-hermetic.test.ts",
+    child
+  );
+  child.emit("exit", 2, null);
+  await assert.rejects(completion, /exit code 2.*output is shown above/u);
+
+  const source = await import("node:fs/promises").then(({ readFile }) =>
+    readFile(new URL("./e2e-hermetic.ts", import.meta.url), "utf8")
+  );
+  assert.match(source, /stdio: "inherit"/u);
+  assert.doesNotMatch(source, /process\.kill\(/u);
+  assert.doesNotMatch(source, /Promise\.race\(\[\s*completion/u);
 });
 
 test("hermetic port override rejects an occupied loopback port", async () => {
