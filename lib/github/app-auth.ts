@@ -233,7 +233,10 @@ export function createGitHubAppClient(
           signal: controller.signal,
         });
         if (!response.ok) {
-          throw providerStatusError(response);
+          throw providerStatusError(response, {
+            method: options.method ?? "GET",
+            path,
+          });
         }
         const text = await readBoundedText(response, maxResponseBytes);
         try {
@@ -498,33 +501,42 @@ function deduplicateRepositories(
   );
 }
 
-function providerStatusError(response: Response): GitHubProviderError {
+function providerStatusError(
+  response: Response,
+  request: Readonly<{ method: string; path: string }>
+): GitHubProviderError {
   const requestIdValue = response.headers.get("x-github-request-id");
   const requestId =
     requestIdValue && REQUEST_ID.test(requestIdValue) ? requestIdValue : null;
   const rateLimited =
     response.status === 429 ||
-    (response.status === 403 &&
+    ((response.status === 403 || response.status === 422) &&
       (response.headers.has("retry-after") ||
         response.headers.get("x-ratelimit-remaining") === "0"));
+  const confirmedMissingInstallation =
+    response.status === 404 &&
+    request.method === "GET" &&
+    /^\/app\/installations\/[1-9][0-9]{0,19}$/u.test(request.path);
   const classified = rateLimited
     ? { code: "github_provider_rate_limited", retryable: true }
     : response.status === 401
       ? { code: "github_provider_unauthorized", retryable: false }
       : response.status === 403
-        ? { code: "github_provider_forbidden", retryable: false }
-        : response.status === 404
+        ? { code: "github_provider_forbidden", retryable: true }
+        : confirmedMissingInstallation
           ? { code: "github_installation_missing", retryable: false }
-          : response.status === 409
-            ? { code: "github_provider_conflict", retryable: false }
-            : response.status === 422
-              ? { code: "github_provider_rejected", retryable: false }
-              : response.status >= 500
-                ? { code: "github_provider_unavailable", retryable: true }
-                : {
-                    code: "github_provider_invalid_response",
-                    retryable: false,
-                  };
+          : response.status === 404
+            ? { code: "github_provider_not_found", retryable: false }
+            : response.status === 409
+              ? { code: "github_provider_conflict", retryable: false }
+              : response.status === 422
+                ? { code: "github_provider_rejected", retryable: true }
+                : response.status >= 500
+                  ? { code: "github_provider_unavailable", retryable: true }
+                  : {
+                      code: "github_provider_invalid_response",
+                      retryable: false,
+                    };
   return new GitHubProviderError(classified.code, {
     requestId,
     retryable: classified.retryable,

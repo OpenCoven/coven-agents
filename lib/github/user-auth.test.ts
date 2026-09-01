@@ -9,13 +9,15 @@ const APP_SLUG = "opencoven-delivery";
 const CLIENT_ID = "Iv1.0123456789abcdef";
 const CLIENT_SECRET_VALUE = `github-app-client-${"0123456789abcdef".repeat(3)}`;
 const CODE = "oauth-code-0123456789abcdef";
+const SECOND_CODE = "oauth-code-fedcba9876543210";
 const CODE_VERIFIER = "A".repeat(43);
 const INSTALLATION_ID = "987654321";
 const OTHER_INSTALLATION_ID = "987654322";
 const REDIRECT_URI = "https://app.example/api/github/callback";
 const USER_TOKEN = `ghu_${"A".repeat(32)}`;
+const SECOND_USER_TOKEN = `ghu_${"C".repeat(32)}`;
 
-test("user authorization proves an exact accessible installation and revokes the grant", async () => {
+test("user authorization proves an exact accessible installation and revokes only its token", async () => {
   const requests: CapturedRequest[] = [];
   const client = clientFor(
     sequenceFetch(requests, [
@@ -59,13 +61,17 @@ test("user authorization proves an exact accessible installation and revokes the
   );
   assert.equal(
     requests[2]?.url,
-    `https://api.github.com/applications/${CLIENT_ID}/grant`
+    `https://api.github.com/applications/${CLIENT_ID}/token`
   );
   assert.equal(requests[2]?.method, "DELETE");
   assert.match(requests[2]?.headers.get("authorization") ?? "", /^Basic /u);
   assert.deepEqual(JSON.parse(requests[2]?.body ?? ""), {
     access_token: USER_TOKEN,
   });
+  assert.equal(
+    requests.some(({ url }) => url.endsWith("/grant")),
+    false
+  );
 });
 
 test("user authorization accepts canonical loopback callback URLs for development", async () => {
@@ -220,7 +226,7 @@ test("user installation responses are byte-bounded, well-formed, and time-bounde
   );
   assert.equal(
     requests.at(-1)?.url,
-    `https://api.github.com/applications/${CLIENT_ID}/grant`
+    `https://api.github.com/applications/${CLIENT_ID}/token`
   );
 });
 
@@ -319,7 +325,7 @@ test("a valid token in a malformed exchange response is revoked before failure",
   assert.equal(requests.length, 2);
   assert.equal(
     requests[1]?.url,
-    `https://api.github.com/applications/${CLIENT_ID}/grant`
+    `https://api.github.com/applications/${CLIENT_ID}/token`
   );
 });
 
@@ -343,7 +349,7 @@ test("a bounded malformed token candidate is revoked without being used", async 
   assert.equal(requests.length, 2);
   assert.equal(
     requests[1]?.url,
-    `https://api.github.com/applications/${CLIENT_ID}/grant`
+    `https://api.github.com/applications/${CLIENT_ID}/token`
   );
   assert.equal(
     requests.some(({ url }) => url.includes("/user/installations")),
@@ -410,6 +416,60 @@ test("user tokens and provider bodies cannot leak through lookup or revocation e
       }
     );
   }
+});
+
+test("concurrent user proofs revoke only their own token authority", async () => {
+  const requests: CapturedRequest[] = [];
+  const client = clientFor(concurrentTokenFetch(requests));
+
+  await Promise.all([
+    client.proveInstallationAccess(proofInput()),
+    client.proveInstallationAccess({
+      ...proofInput(),
+      code: SECOND_CODE,
+    }),
+  ]);
+
+  const cleanup = requests.filter(({ method }) => method === "DELETE");
+  assert.equal(cleanup.length, 2);
+  assert.deepEqual(
+    cleanup.map(({ body }) => JSON.parse(body ?? "{}").access_token).sort(),
+    [SECOND_USER_TOKEN, USER_TOKEN].sort()
+  );
+  assert.ok(
+    cleanup.every(
+      ({ url }) =>
+        url === `https://api.github.com/applications/${CLIENT_ID}/token`
+    )
+  );
+});
+
+test("expiring-token refresh authority is validated but never persisted or sent to another cleanup", async () => {
+  const refreshToken = `ghr_${"B".repeat(32)}`;
+  const requests: CapturedRequest[] = [];
+  const client = clientFor(
+    sequenceFetch(requests, [
+      jsonResponse(tokenBody(USER_TOKEN, refreshToken)),
+      jsonResponse(installationsBody([INSTALLATION_ID])),
+      new Response(null, { status: 204 }),
+    ])
+  );
+
+  await client.proveInstallationAccess(proofInput());
+
+  assert.equal(requests.length, 3);
+  const serializedRequests = JSON.stringify(
+    requests.map(({ body, headers, method, url }) => ({
+      body,
+      headers: Object.fromEntries(headers),
+      method,
+      url,
+    }))
+  );
+  assert.doesNotMatch(serializedRequests, new RegExp(refreshToken, "u"));
+  assert.deepEqual(JSON.parse(requests[2]?.body ?? ""), {
+    access_token: USER_TOKEN,
+  });
 });
 
 test("user authorization errors retain only canonical GitHub request ids", async () => {
@@ -485,11 +545,14 @@ function proofInput() {
   };
 }
 
-function tokenBody() {
+function tokenBody(
+  accessToken = USER_TOKEN,
+  refreshToken = `ghr_${"B".repeat(32)}`
+) {
   return {
-    access_token: USER_TOKEN,
+    access_token: accessToken,
     expires_in: 28_800,
-    refresh_token: `ghr_${"B".repeat(32)}`,
+    refresh_token: refreshToken,
     refresh_token_expires_in: 15_897_600,
     scope: "",
     token_type: "bearer",
@@ -552,6 +615,58 @@ function userInstallationTimeoutFetch(captured: CapturedRequest[]): FetchLike {
       return abortable(init);
     }
     return Promise.resolve(new Response(null, { status: 204 }));
+  };
+}
+
+function concurrentTokenFetch(captured: CapturedRequest[]): FetchLike {
+  const active = new Set([USER_TOKEN, SECOND_USER_TOKEN]);
+  let signalFirstCleanup!: () => void;
+  const firstCleanup = new Promise<void>((resolve) => {
+    signalFirstCleanup = resolve;
+  });
+
+  return async (input, init = {}) => {
+    captured.push(capturedRequest(input, init));
+    if (input === "https://github.com/login/oauth/access_token") {
+      const code = new URLSearchParams(
+        typeof init.body === "string" ? init.body : ""
+      ).get("code");
+      return jsonResponse(
+        tokenBody(
+          code === SECOND_CODE ? SECOND_USER_TOKEN : USER_TOKEN,
+          code === SECOND_CODE
+            ? `ghr_${"D".repeat(32)}`
+            : `ghr_${"B".repeat(32)}`
+        )
+      );
+    }
+    if (input.includes("/user/installations")) {
+      const token = new Headers(init.headers)
+        .get("authorization")
+        ?.split(" ")
+        .at(-1);
+      if (token === SECOND_USER_TOKEN) {
+        await firstCleanup;
+      }
+      return active.has(token ?? "")
+        ? jsonResponse(installationsBody([INSTALLATION_ID]))
+        : new Response(null, { status: 401 });
+    }
+    if (init.method === "DELETE") {
+      const token = JSON.parse(
+        typeof init.body === "string" ? init.body : "{}"
+      ).access_token;
+      if (input.endsWith("/grant")) {
+        active.clear();
+      } else if (typeof token === "string") {
+        active.delete(token);
+      }
+      if (token === USER_TOKEN) {
+        signalFirstCleanup();
+      }
+      return new Response(null, { status: 204 });
+    }
+    assert.fail(`Unexpected request to ${input}`);
   };
 }
 

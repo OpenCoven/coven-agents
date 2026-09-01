@@ -29,7 +29,12 @@ import type {
 } from "@/lib/runner/auth";
 import type { RunnerPrincipal } from "@/lib/runner/types";
 import type {
+  ConnectGitHubInstallationConnectionsResult,
+  FencedGitHubInstallationConnectionsInput,
   GitHubConnectionRecord,
+  GitHubConnectionSnapshot,
+  RefreshGitHubInstallationConnectionsResult,
+  RemoveGitHubInstallationConnectionsResult,
   ReplaceGitHubInstallationConnectionsInput,
 } from "@/lib/teams/store";
 import {
@@ -72,6 +77,7 @@ const CALLBACK_PARAMETERS = new Set([
 const OAUTH_CALLBACK_PARAMETERS = new Set(["code", "state"]);
 const INSTALL_PARAMETERS = new Set(["returnTo"]);
 const IDEMPOTENCY_RETENTION_FLOOR_MS = 1000;
+const CALLBACK_PROCESSING_LEASE_MS = 10 * 60_000;
 const OAUTH_CODE = /^[A-Za-z0-9._~-]{1,1024}$/u;
 
 export type GitHubInstallStateClaims = Readonly<{
@@ -109,24 +115,25 @@ type GitHubUserAuthorizationStateVerification =
   | Readonly<{ kind: "expired" | "invalid" }>;
 
 export type GitHubConnectionStore = Readonly<{
+  connectGitHubInstallationConnections: (
+    principal: RunnerPrincipal,
+    input: FencedGitHubInstallationConnectionsInput
+  ) => Promise<ConnectGitHubInstallationConnectionsResult>;
   disconnectGitHubConnections: (
     principal: RunnerPrincipal
   ) => Promise<{ removed: number; revokedCapabilities: number }>;
-  listGitHubConnections: (
+  readGitHubConnectionSnapshot: (
     principal: RunnerPrincipal,
     limit: number
-  ) => Promise<GitHubConnectionRecord[]>;
-  removeGitHubInstallationConnections: (
+  ) => Promise<GitHubConnectionSnapshot>;
+  refreshGitHubInstallationConnections: (
     principal: RunnerPrincipal,
-    installationId: string
-  ) => Promise<{ removed: number; revokedCapabilities: number }>;
-  replaceGitHubInstallationConnections: (
+    input: FencedGitHubInstallationConnectionsInput
+  ) => Promise<RefreshGitHubInstallationConnectionsResult>;
+  removeGitHubInstallationConnectionsIfCurrent: (
     principal: RunnerPrincipal,
-    input: ReplaceGitHubInstallationConnectionsInput
-  ) => Promise<{
-    changed: boolean;
-    connections: GitHubConnectionRecord[];
-  }>;
+    input: { expectedGeneration: number; installationId: string }
+  ) => Promise<RemoveGitHubInstallationConnectionsResult>;
 }>;
 
 export type GitHubConnectionDependencies = Readonly<{
@@ -338,6 +345,7 @@ export function verifyGitHubInstallState(
     return { kind: "invalid" };
   }
   if (
+    supplied.toString("base64url") !== signature ||
     supplied.length !== expected.length ||
     !timingSafeEqual(supplied, expected)
   ) {
@@ -439,6 +447,7 @@ function verifyGitHubUserAuthorizationState(
     return { kind: "invalid" };
   }
   if (
+    supplied.toString("base64url") !== signature ||
     supplied.length !== expected.length ||
     !timingSafeEqual(supplied, expected)
   ) {
@@ -627,16 +636,18 @@ export function createGitHubConnectionHandlers(
       }
 
       let store: GitHubConnectionStore;
-      let local: GitHubConnectionRecord[];
+      let snapshot: GitHubConnectionSnapshot;
       try {
         store = await dependencies.createStore(subscriber);
-        local = await store.listGitHubConnections(
+        snapshot = await store.readGitHubConnectionSnapshot(
           subscriber.principal,
           GITHUB_MAX_REPOSITORIES + 1
         );
       } catch {
         return errorResponse(dependencies, "github_provider_unavailable");
       }
+      const { connections: local } = snapshot;
+      let { generation } = snapshot;
       if (local.length > GITHUB_MAX_REPOSITORIES) {
         return errorResponse(dependencies, "github_installation_unusable");
       }
@@ -662,17 +673,36 @@ export function createGitHubConnectionHandlers(
               )
               .map(({ repositoryId }) => repositoryId)
           );
-          const replacement = await store.replaceGitHubInstallationConnections(
+          const replacement = await store.refreshGitHubInstallationConnections(
             subscriber.principal,
-            replacementInput(subscriber.principal, authority)
+            {
+              ...replacementInput(subscriber.principal, authority),
+              expectedGeneration: generation,
+            }
           );
+          if (replacement.kind === "stale") {
+            return errorResponse(dependencies, "request_in_progress");
+          }
+          ({ generation } = replacement);
           refreshed.push(...replacement.connections);
         } catch (error) {
           if (terminalInstallationError(error)) {
-            await store.removeGitHubInstallationConnections(
-              subscriber.principal,
-              installationId
-            );
+            let removal: RemoveGitHubInstallationConnectionsResult;
+            try {
+              removal =
+                await store.removeGitHubInstallationConnectionsIfCurrent(
+                  subscriber.principal,
+                  {
+                    expectedGeneration: generation,
+                    installationId,
+                  }
+                );
+            } catch {
+              return errorResponse(dependencies, "github_provider_unavailable");
+            }
+            if (removal.kind === "stale") {
+              return errorResponse(dependencies, "request_in_progress");
+            }
             return errorResponse(dependencies, "github_installation_unusable");
           }
           return providerOrStoreError(dependencies, error);
@@ -766,7 +796,8 @@ async function installationSetupCallback(
 
   try {
     const result = await runIdempotentOperation({
-      idempotencyKey: sha256(input.callback.state),
+      idempotencyKey: stateIdempotencyKey(checkedState.claims),
+      now: input.now,
       operation: callbackOperation(
         "github_install_setup",
         input.subscriber.principal.tenant
@@ -882,14 +913,23 @@ async function userAuthorizationCallback(
   try {
     result = await runIdempotentOperation({
       completeSuccessfulResponse: async (completion) => {
+        const processingCompletion = {
+          ...completion,
+          expiresAt: new Date(
+            completion.completedAt.getTime() + CALLBACK_PROCESSING_LEASE_MS
+          ),
+        };
         const completed =
-          await input.dependencies.idempotencyStore.complete(completion);
+          await input.dependencies.idempotencyStore.complete(
+            processingCompletion
+          );
         if (completed === "completed") {
-          consumedCompletion = completion;
+          consumedCompletion = processingCompletion;
         }
         return completed;
       },
-      idempotencyKey: sha256(input.callback.state),
+      idempotencyKey: stateIdempotencyKey(checkedState.claims),
+      now: input.now,
       operation: callbackOperation(
         "github_user_authorization",
         input.subscriber.principal.tenant
@@ -938,6 +978,9 @@ async function userAuthorizationCallback(
     if (storedOutcome.kind === "error") {
       return errorResponse(input.dependencies, storedOutcome.code);
     }
+    if (storedOutcome.kind === "consumed") {
+      return errorResponse(input.dependencies, "request_in_progress");
+    }
     return errorResponse(input.dependencies, "github_state_invalid");
   }
   if (
@@ -958,11 +1001,13 @@ async function userAuthorizationCallback(
     subscriber: input.subscriber,
   });
   try {
+    const completedAt = input.now();
     await replaceConsumedOutcome(
       input.dependencies.idempotencyStore,
       consumedCompletion,
       outcome,
-      input.now()
+      completedAt,
+      stateRetentionMs(checkedState.claims.exp, completedAt)
     );
   } catch {
     return errorResponse(input.dependencies, "github_provider_unavailable");
@@ -983,6 +1028,21 @@ async function completeUserAuthorization(
     subscriber: RunnerAuthenticatedSubscriber;
   }>
 ): Promise<Extract<CallbackOutcome, { kind: "error" | "redirect" }>> {
+  let store: GitHubConnectionStore;
+  let snapshot: GitHubConnectionSnapshot;
+  try {
+    store = await input.dependencies.createStore(input.subscriber);
+    snapshot = await store.readGitHubConnectionSnapshot(
+      input.subscriber.principal,
+      GITHUB_MAX_REPOSITORIES + 1
+    );
+  } catch (error) {
+    return { code: callbackErrorCode(error), kind: "error" };
+  }
+  if (snapshot.connections.length > GITHUB_MAX_REPOSITORIES) {
+    return { code: "github_installation_unusable", kind: "error" };
+  }
+
   try {
     await input.dependencies
       .createUserAuthorizationClient(input.config)
@@ -1002,13 +1062,6 @@ async function completeUserAuthorization(
     };
   }
 
-  let store: GitHubConnectionStore;
-  try {
-    store = await input.dependencies.createStore(input.subscriber);
-  } catch (error) {
-    return { code: callbackErrorCode(error), kind: "error" };
-  }
-
   let authority: VerifiedInstallationAuthority;
   try {
     authority = await verifiedInstallationAuthority(
@@ -1021,10 +1074,16 @@ async function completeUserAuthorization(
       return { code: callbackErrorCode(error), kind: "error" };
     }
     try {
-      await store.removeGitHubInstallationConnections(
+      const removal = await store.removeGitHubInstallationConnectionsIfCurrent(
         input.subscriber.principal,
-        input.claims.installationId
+        {
+          expectedGeneration: snapshot.generation,
+          installationId: input.claims.installationId,
+        }
       );
+      if (removal.kind === "stale") {
+        return { code: "request_in_progress", kind: "error" };
+      }
     } catch {
       return { code: "github_provider_unavailable", kind: "error" };
     }
@@ -1044,10 +1103,16 @@ async function completeUserAuthorization(
     return { code: "github_state_mismatch", kind: "error" };
   }
   try {
-    await store.replaceGitHubInstallationConnections(
+    const connected = await store.connectGitHubInstallationConnections(
       input.subscriber.principal,
-      replacementInput(input.subscriber.principal, authority)
+      {
+        ...replacementInput(input.subscriber.principal, authority),
+        expectedGeneration: snapshot.generation,
+      }
     );
+    if (connected.kind === "stale") {
+      return { code: "request_in_progress", kind: "error" };
+    }
   } catch {
     return { code: "github_provider_unavailable", kind: "error" };
   }
@@ -1148,8 +1213,6 @@ function terminalInstallationError(error: unknown): boolean {
     [
       "github_installation_missing",
       "github_installation_unusable",
-      "github_provider_forbidden",
-      "github_provider_rejected",
       "github_repository_limit",
     ].includes(error.code)
   );
@@ -1386,6 +1449,12 @@ function callbackOperation(kind: string, tenant: string): string {
   return `${kind}:${sha256(tenant).slice(0, 16)}`;
 }
 
+function stateIdempotencyKey(
+  claims: GitHubInstallStateClaims | GitHubUserAuthorizationStateClaims
+): string {
+  return sha256(`github-state\0${claims.v}\0${claims.jti}`);
+}
+
 function stateRetentionMs(exp: number, now: Date): number {
   return Math.max(IDEMPOTENCY_RETENTION_FLOOR_MS, exp * 1000 - now.getTime());
 }
@@ -1394,14 +1463,21 @@ async function replaceConsumedOutcome(
   store: IdempotencyStore,
   completion: IdempotencyCompleteInput,
   outcome: Extract<CallbackOutcome, { kind: "error" | "redirect" }>,
-  completedAt: Date
+  completedAt: Date,
+  retentionMs: number
 ): Promise<void> {
-  if (!store.replaceCompleted || Number.isNaN(completedAt.getTime())) {
+  if (
+    !store.replaceCompleted ||
+    Number.isNaN(completedAt.getTime()) ||
+    !Number.isFinite(retentionMs) ||
+    retentionMs <= 0
+  ) {
     throw new Error("GitHub callback completion storage is unavailable.");
   }
   const result = await store.replaceCompleted({
     ...completion,
     completedAt,
+    expiresAt: new Date(completedAt.getTime() + retentionMs),
     response: {
       envelope: { body: outcome, kind: "plain_json" },
       status: 200,

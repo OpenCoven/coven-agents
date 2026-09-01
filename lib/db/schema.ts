@@ -1190,6 +1190,30 @@ export const runnerTeamStep = pgTable(
 
 export type RunnerTeamStep = InferSelectModel<typeof runnerTeamStep>;
 
+export const runnerGitHubConnectionFence = pgTable(
+  "RunnerGitHubConnectionFence",
+  {
+    generation: bigint("generation", { mode: "number" }).notNull().default(0),
+    tenant: varchar("tenant", { length: 64 }).primaryKey().notNull(),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("RGHConnFence_tenant_generation_uq").on(
+      table.tenant,
+      table.generation
+    ),
+    check(
+      "RGHConnFence_tenant_valid",
+      sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`
+    ),
+    check("RGHConnFence_generation_nonnegative", sql`${table.generation} >= 0`),
+  ]
+);
+
+export type RunnerGitHubConnectionFence = InferSelectModel<
+  typeof runnerGitHubConnectionFence
+>;
+
 export const runnerGitHubConnection = pgTable(
   "RunnerGitHubConnection",
   {

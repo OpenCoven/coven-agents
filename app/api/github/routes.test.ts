@@ -61,3 +61,11 @@ test("the connection route maps DELETE only to disconnect", async () => {
   assert.match(deleteBlock, /\.disconnect\(\s*request,/u);
   assert.doesNotMatch(deleteBlock, /\.getConnection\(\s*request,/u);
 });
+
+test("the OAuth callback has an explicit bounded execution window", async () => {
+  const source = await readFile(
+    new URL("./callback/route.ts", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /export const maxDuration = 300;/u);
+});

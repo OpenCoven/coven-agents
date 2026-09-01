@@ -310,10 +310,10 @@ test("repository enumeration rejects excessive installation scope", async () => 
 test("provider statuses are classified without exposing response bodies or unsafe request ids", async () => {
   const cases = [
     [401, "github_provider_unauthorized", false],
-    [403, "github_provider_forbidden", false],
+    [403, "github_provider_forbidden", true],
     [404, "github_installation_missing", false],
     [409, "github_provider_conflict", false],
-    [422, "github_provider_rejected", false],
+    [422, "github_provider_rejected", true],
     [429, "github_provider_rate_limited", true],
     [500, "github_provider_unavailable", true],
   ] as const;
@@ -354,6 +354,61 @@ test("provider statuses are classified without exposing response bodies or unsaf
       }
     );
   }
+});
+
+test("explicit rate headers classify ambiguous 403 and 422 responses as throttling", async () => {
+  for (const status of [403, 422]) {
+    const client = clientFor(
+      sequenceFetch(
+        [],
+        [
+          new Response(JSON.stringify({ message: INSTALLATION_TOKEN }), {
+            headers: {
+              "retry-after": "60",
+              "x-github-request-id": "ABC1:234",
+            },
+            status,
+          }),
+        ]
+      )
+    );
+
+    // biome-ignore lint/performance/noAwaitInLoops: each status owns an isolated provider sequence
+    await assert.rejects(
+      client.getInstallation(INSTALLATION_ID),
+      (error: unknown) =>
+        error instanceof GitHubProviderError &&
+        error.code === "github_provider_rate_limited" &&
+        error.requestId === "ABC1:234" &&
+        error.retryable
+    );
+  }
+});
+
+test("only a 404 from the exact installation endpoint confirms installation absence", async () => {
+  const missingInstallation = clientFor(
+    sequenceFetch([], [new Response(null, { status: 404 })])
+  );
+  await assert.rejects(
+    missingInstallation.getInstallation(INSTALLATION_ID),
+    (error: unknown) =>
+      error instanceof GitHubProviderError &&
+      error.code === "github_installation_missing" &&
+      !error.retryable
+  );
+
+  const ambiguousRepositoryLookup = clientFor(
+    sequenceFetch([], [new Response(null, { status: 404 })])
+  );
+  await assert.rejects(
+    ambiguousRepositoryLookup.listInstallationRepositories(INSTALLATION_ID, [
+      "24680",
+    ]),
+    (error: unknown) =>
+      error instanceof GitHubProviderError &&
+      error.code === "github_provider_not_found" &&
+      !error.retryable
+  );
 });
 
 test("installation tokens cannot escape through returned records or downstream errors", async () => {

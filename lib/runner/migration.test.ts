@@ -405,8 +405,9 @@ test("migration 0024 adds fail-closed runner execution permission after existing
   const journal = JSON.parse(
     readFileSync(new URL("meta/_journal.json", directory), "utf8")
   ) as { entries: { idx: number; tag: string }[] };
-  assert.deepEqual(journal.entries.at(-1), {
-    ...journal.entries.at(-1),
+  const journalEntry24 = journal.entries.find(({ idx }) => idx === 24);
+  assert.deepEqual(journalEntry24, {
+    ...journalEntry24,
     idx: 24,
     tag: migrationName.replace(/\.sql$/u, ""),
   });
@@ -452,4 +453,67 @@ test("migration 0024 adds fail-closed runner execution permission after existing
       notNull: true,
     }
   );
+});
+
+test("migration 0025 adds a durable monotonic GitHub connection fence without rewriting history", () => {
+  const directory = new URL("../db/migrations/", import.meta.url);
+  const immutable = {
+    "0020_coordinated_teams.sql":
+      "6630a8b27858286e8ebf7e983b91d307871bddeee1f6e74da979ac13e7a4bbab",
+    "0021_lovely_loners.sql":
+      "76ad7a4b2c322498eda12b7397ab52c5027e17ed9a4eb3ef81333020a056bdb0",
+    "0022_salty_the_stranger.sql":
+      "d059af4b4ca696721528f77b5a4556d713584f4a0e219d3a5340795c9739f94c",
+    "0023_jittery_cardiac.sql":
+      "bcd87f5f5d2f63d8e7cf12fa58fd981fb2d0c25792cfddc048743f6bc98cc38d",
+    "0024_runner_execution_permissions.sql":
+      "4761a526b2c3d13bbdbf5f03f138d852c8f9453f66deb2b70d4fa73df32bd2cb",
+  } as const;
+  for (const [name, expected] of Object.entries(immutable)) {
+    assert.equal(
+      sha256(readFileSync(new URL(name, directory), "utf8")),
+      expected
+    );
+  }
+
+  const migrationNames = readdirSync(directory).filter((name) =>
+    name.startsWith("0025_")
+  );
+  assert.equal(migrationNames.length, 1);
+  const [migrationName] = migrationNames;
+  assert.ok(migrationName);
+  const migration = readFileSync(new URL(migrationName, directory), "utf8");
+  assert.match(migration, /CREATE TABLE "RunnerGitHubConnectionFence"/u);
+  assert.match(migration, /"generation" bigint DEFAULT 0 NOT NULL/u);
+  assert.match(migration, /RGHConnFence_generation_nonnegative/u);
+  assert.match(migration, /RGHConnFence_tenant_valid/u);
+  assert.match(
+    migration,
+    /INSERT INTO "RunnerGitHubConnectionFence"[\s\S]*SELECT DISTINCT "tenant", 0[\s\S]*FROM "RunnerGitHubConnection"[\s\S]*ON CONFLICT \("tenant"\) DO NOTHING/u
+  );
+  assert.match(migration, /RGHConnFence_tenant_generation_uq/u);
+
+  const journal = JSON.parse(
+    readFileSync(new URL("meta/_journal.json", directory), "utf8")
+  ) as { entries: { idx: number; tag: string }[] };
+  assert.deepEqual(journal.entries.at(-1), {
+    ...journal.entries.at(-1),
+    idx: 25,
+    tag: migrationName.replace(/\.sql$/u, ""),
+  });
+
+  const snapshot24 = JSON.parse(
+    readFileSync(new URL("meta/0024_snapshot.json", directory), "utf8")
+  ) as { id: string };
+  const snapshot25Source = readFileSync(
+    new URL("meta/0025_snapshot.json", directory),
+    "utf8"
+  );
+  const snapshot25 = JSON.parse(snapshot25Source) as {
+    prevId: string;
+    tables: Record<string, unknown>;
+  };
+  assert.equal(snapshot25.prevId, snapshot24.id);
+  assert.ok(snapshot25.tables["public.RunnerGitHubConnectionFence"]);
+  assert.match(snapshot25Source, /RGHConnFence_tenant_generation_uq/u);
 });

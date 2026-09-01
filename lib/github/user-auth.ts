@@ -282,14 +282,14 @@ export function createGitHubUserAuthorizationClient(
     });
   }
 
-  async function revokeGrant(token: string): Promise<void> {
+  async function revokeToken(token: string): Promise<void> {
     await withClientSecret(input.clientSecret, async (clientSecret) => {
       const basic = Buffer.from(
         `${input.clientId}:${clientSecret}`,
         "utf8"
       ).toString("base64");
       await timedRequest(
-        `${GITHUB_API_ORIGIN}/applications/${input.clientId}/grant`,
+        `${GITHUB_API_ORIGIN}/applications/${input.clientId}/token`,
         {
           body: JSON.stringify({ access_token: token }),
           headers: apiHeaders(`Basic ${basic}`),
@@ -318,7 +318,7 @@ export function createGitHubUserAuthorizationClient(
 
       let revocationError: unknown;
       try {
-        await revokeGrant(token);
+        await revokeToken(token);
       } catch (error) {
         revocationError = error;
       } finally {
