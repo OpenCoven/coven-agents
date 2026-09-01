@@ -358,7 +358,7 @@ export function waitForPlaywrightExit(
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     child.once("error", reject);
-    child.once("exit", (code, signal) => {
+    child.once("close", (code, signal) => {
       if (code === 0) {
         resolve();
         return;
@@ -380,12 +380,31 @@ async function playwright(
     executable("pnpm"),
     ["exec", "playwright", "test", file, "--project=e2e", "--workers=1"],
     {
-      detached: process.platform !== "win32",
+      detached: false,
       env: environment,
       stdio: "inherit",
     }
   );
-  await waitForPlaywrightExit(file, child);
+  let childExited = child.exitCode !== null || child.signalCode !== null;
+  const markChildExited = () => {
+    childExited = true;
+  };
+  const forwardSignal = (signal: NodeJS.Signals) => {
+    if (!childExited) {
+      child.kill(signal);
+    }
+  };
+
+  child.once("exit", markChildExited);
+  process.on("SIGINT", forwardSignal);
+  process.on("SIGTERM", forwardSignal);
+  try {
+    await waitForPlaywrightExit(file, child);
+  } finally {
+    process.off("SIGINT", forwardSignal);
+    process.off("SIGTERM", forwardSignal);
+    child.off("exit", markChildExited);
+  }
 }
 
 async function removePlaywrightArtifacts(): Promise<void> {

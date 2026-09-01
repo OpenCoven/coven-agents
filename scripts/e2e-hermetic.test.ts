@@ -145,19 +145,26 @@ test("hermetic port allocation is bounded and configures one local origin", asyn
   assert.equal(environment.NEXTAUTH_URL, origin);
 });
 
-test("Playwright failure exits surface output without a harness process-group kill", async () => {
+test("Playwright failure close surfaces output after Playwright can tear down its web server", async () => {
   const child = new EventEmitter();
   const completion = waitForPlaywrightExit(
     "tests/e2e/subscriber-hermetic.test.ts",
     child
   );
-  child.emit("exit", 2, null);
+  child.emit("close", 2, null);
   await assert.rejects(completion, /exit code 2.*output is shown above/u);
 
   const source = await import("node:fs/promises").then(({ readFile }) =>
     readFile(new URL("./e2e-hermetic.ts", import.meta.url), "utf8")
   );
   assert.match(source, /stdio: "inherit"/u);
+  assert.match(source, /detached: false/u);
+  assert.match(source, /child\.once\("close",/u);
+  assert.match(source, /if \(!childExited\) \{\s*child\.kill\(signal\)/u);
+  assert.match(source, /process\.on\("SIGINT", forwardSignal\)/u);
+  assert.match(source, /process\.on\("SIGTERM", forwardSignal\)/u);
+  assert.match(source, /process\.off\("SIGINT", forwardSignal\)/u);
+  assert.match(source, /process\.off\("SIGTERM", forwardSignal\)/u);
   assert.doesNotMatch(source, /process\.kill\(/u);
   assert.doesNotMatch(source, /Promise\.race\(\[\s*completion/u);
 });

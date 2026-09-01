@@ -44,7 +44,7 @@ export function playwrightSettings(
   const basePath = environment.IS_DEMO === "1" ? "/demo" : "";
   const useProductionBuild = environment.E2E_PRODUCTION === "1";
   const nextCommand = "node node_modules/next/dist/bin/next";
-  const hostname = hermetic ? ` --hostname ${host}` : "";
+  const hostname = ` --hostname ${host}`;
 
   return {
     baseURL,

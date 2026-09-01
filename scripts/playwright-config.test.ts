@@ -61,7 +61,34 @@ test("normal Playwright config retains localhost defaults without a global timeo
     baseURL: "http://localhost:3100",
     globalTimeout: undefined,
     webServerCommand:
-      "exec node node_modules/next/dist/bin/next dev --turbo --port 3100",
+      "exec node node_modules/next/dist/bin/next dev --turbo --hostname localhost --port 3100",
+    webServerURL: "http://localhost:3100/ping",
+  });
+});
+
+test("hermetic production Playwright config binds Next to IPv4 loopback", () => {
+  assert.deepEqual(
+    playwrightSettings({
+      E2E_HERMETIC_RUNNER: "1",
+      E2E_PRODUCTION: "1",
+      PORT: "43123",
+    }),
+    {
+      baseURL: "http://127.0.0.1:43123",
+      globalTimeout: 120_000,
+      webServerCommand:
+        "pnpm validate:runtime && exec node node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 43123",
+      webServerURL: "http://127.0.0.1:43123/ping",
+    }
+  );
+});
+
+test("normal production Playwright config binds Next to localhost", () => {
+  assert.deepEqual(playwrightSettings({ E2E_PRODUCTION: "1" }), {
+    baseURL: "http://localhost:3100",
+    globalTimeout: undefined,
+    webServerCommand:
+      "pnpm validate:runtime && exec node node_modules/next/dist/bin/next start --hostname localhost --port 3100",
     webServerURL: "http://localhost:3100/ping",
   });
 });
