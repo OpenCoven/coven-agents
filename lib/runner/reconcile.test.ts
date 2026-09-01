@@ -3,9 +3,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DaytonaNotFoundError } from "@daytona/sdk";
 import { sanitizeEvidenceText } from "@opencoven/agent-contracts";
-import { cancelRunnerRun, reconcileAndDispatch } from "./attempt-reconcile";
+import {
+  cancelRunnerRun,
+  type ReconcileAndDispatchDependencies,
+  reconcileAndDispatch,
+} from "./attempt-reconcile";
 import { daytonaProbeSessionName } from "./daytona/names";
 import { reconcileDaytonaSandboxes } from "./daytona/resource-recovery";
+import { RUNNER_MID_RUN_ENTITLEMENT_POLICY } from "./entitlement-policy";
 import type {
   RunnerAgentRecord,
   RunnerDaytonaAttemptId,
@@ -1546,7 +1551,7 @@ test("a terminal command with a persistently unsettled tail releases capacity af
   } as RunnerDispatchAuthority;
   const result = await reconcileAndDispatch({
     clock: () => new Date("2026-08-28T15:00:00.000Z"),
-    maxRunDurationMs: 15 * 60_000,
+    maxRunDurationMs: RUNNER_MID_RUN_ENTITLEMENT_POLICY.maxDurationMs,
     openAttemptRedaction: async () => "redaction-secret",
     operator,
     provider: {
@@ -1719,7 +1724,7 @@ test("the watchdog captures available evidence and terminalizes an overlong runn
   } as RunnerDispatchAuthority;
   const result = await reconcileAndDispatch({
     clock: () => new Date("2026-08-28T15:00:00.000Z"),
-    maxRunDurationMs: 15 * 60_000,
+    maxRunDurationMs: RUNNER_MID_RUN_ENTITLEMENT_POLICY.maxDurationMs,
     openAttemptRedaction: async () => "redaction-secret",
     operator,
     provider: {
@@ -1869,6 +1874,160 @@ test("the watchdog captures available evidence and terminalizes an overlong runn
   ]);
   assert.equal(result.terminalized, 1);
   assert.equal(result.logEvents, 1);
+  assert.equal(result.failures, 0);
+});
+
+test("finish-current recovery converges an exact running attempt without billing authority", async () => {
+  const calls: string[] = [];
+  let billingLookups = 0;
+  const attached = run({
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+    dispatchState: "running",
+    executionProvenance: { provider: "durable-test" } as never,
+    startedAt: new Date("2026-08-28T14:59:00.000Z"),
+    status: "running",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: attached.version + 1,
+    leaseToken: "finish-current-lease",
+    runId: attached.id,
+  } as RunnerDispatchAuthority;
+  const afterEvent = {
+    ...authority,
+    expectedVersion: authority.expectedVersion + 1,
+  } as RunnerDispatchAuthority;
+  const afterTerminal = {
+    ...afterEvent,
+    expectedVersion: afterEvent.expectedVersion + 1,
+  } as RunnerDispatchAuthority;
+
+  const dependencies: ReconcileAndDispatchDependencies & {
+    findAccount: () => never;
+  } = {
+    clock: () => new Date("2026-08-28T15:00:00.000Z"),
+    consumeCredentialReservation: async () => {
+      calls.push("consume-existing-reservation");
+    },
+    // Reconciliation has no entitlement dependency. This sentinel proves the
+    // exact running-attempt path neither reads nor needs one.
+    findAccount: () => {
+      billingLookups += 1;
+      throw new Error("running attempt must not revalidate billing");
+    },
+    operator,
+    provider: {
+      requiresAttemptRedaction: false,
+      resolveExecutionContext: async () => {
+        calls.push("resolve");
+        return {} as never;
+      },
+      snapshot: async () => {
+        calls.push("snapshot");
+        return {
+          cursor: 1,
+          events: [],
+          exitCode: 0,
+          logsSettled: true,
+          status: "completed" as const,
+          summary: {
+            fileOperations: [],
+            output: "Finished after entitlement revocation.",
+            premiumRequests: 0,
+            sessionId: null,
+            status: "completed" as const,
+            toolCalls: [],
+          },
+        };
+      },
+      stop: async () => {
+        calls.push("stop");
+        return { kind: "stopped" as const };
+      },
+    },
+    randomToken: () => "finish-current-lease",
+    releaseCredentialResources: async () => {
+      calls.push("release-credential");
+    },
+    store: {
+      adoptExpiredDaytonaProcess: async () => {
+        calls.push("adopt");
+        return {
+          authority,
+          kind: "adopted" as const,
+          run: {
+            ...attached,
+            dispatchLeaseToken: authority.leaseToken,
+            version: authority.expectedVersion,
+          },
+        };
+      },
+      appendDispatchEventBatch: async () => {
+        calls.push("append-batch");
+        return {
+          authority: afterEvent,
+          events: [],
+          kind: "appended" as const,
+          run: attached,
+        };
+      },
+      cleanupTerminalLease: async () => {
+        calls.push("cleanup-lease");
+        return { kind: "updated" as const, value: attached };
+      },
+      deleteAttemptRedaction: async () => {
+        calls.push("delete-redaction");
+        return { kind: "deleted" as const };
+      },
+      finalizeRun: async () => {
+        calls.push("finalize");
+        return {
+          kind: "finalized" as const,
+          prunedRunIds: [],
+          run: {
+            ...attached,
+            completedAt: new Date("2026-08-28T15:00:00.000Z"),
+            dispatchState: "terminal",
+            status: "completed",
+            version: afterTerminal.expectedVersion,
+          },
+        };
+      },
+      readAttemptRedaction: async () => {
+        calls.push("read-redaction");
+        return { kind: "not_found" as const };
+      },
+      releaseTerminalDaytonaAttempt: async () => {
+        calls.push("release-attempt");
+        return { authority: afterTerminal, kind: "released" as const };
+      },
+      scanExpiredDispatchLeases: async () => {
+        calls.push("scan");
+        return [attached];
+      },
+    } as never,
+  };
+  const result = await reconcileAndDispatch(dependencies);
+
+  assert.equal(billingLookups, 0);
+  assert.deepEqual(calls, [
+    "scan",
+    "adopt",
+    "resolve",
+    "consume-existing-reservation",
+    "read-redaction",
+    "snapshot",
+    "append-batch",
+    "finalize",
+    "stop",
+    "release-credential",
+    "delete-redaction",
+    "release-attempt",
+    "cleanup-lease",
+  ]);
+  assert.equal(result.adopted, 1);
+  assert.equal(result.terminalized, 1);
   assert.equal(result.failures, 0);
 });
 

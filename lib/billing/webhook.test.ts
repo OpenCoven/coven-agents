@@ -1162,7 +1162,7 @@ test("duplicate events do not update a User twice", async () => {
   assert.equal(writer.updateCount, 1);
 });
 
-test("a failed database application rolls back its event claim for retry", async () => {
+test("a failed owner mutation rolls back its atomic event claim for retry", async () => {
   const writer = new MemoryStripeEventWriter([
     {
       billingPeriodStart: PAID_FROM,

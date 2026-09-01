@@ -16,6 +16,10 @@ import {
   type RunnerAttemptRedactionScope,
 } from "./attempt-redaction";
 import {
+  RUNNER_MID_RUN_ENTITLEMENT_POLICY,
+  runnerEntitlementContinuation,
+} from "./entitlement-policy";
+import {
   projectHarnessRunEvent,
   sanitizeRunText,
   truncateUtf8,
@@ -38,7 +42,6 @@ const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_DISPATCH_LIMIT = 1;
 const DEFAULT_PROVIDER_CONCURRENCY = 4;
 const DISPATCH_LEASE_MS = 60_000;
-export const RUNNER_MAX_RUN_DURATION_MS = 15 * 60_000;
 
 declare const runnerReconciliationContextBrand: unique symbol;
 
@@ -692,8 +695,18 @@ async function reconcileAttachedProcess(
 
     const completedAt = clock();
     const runWindowExpired =
-      liveRun.startedAt !== null &&
-      completedAt.getTime() - liveRun.startedAt.getTime() >= maxRunDurationMs;
+      runnerEntitlementContinuation({
+        dispatchState: liveRun.dispatchState,
+        hasDurablyAuthorizedLaunch: Boolean(
+          liveRun.daytonaAttemptId && liveRun.daytonaCommandId
+        ),
+        now: completedAt,
+        policy: {
+          ...RUNNER_MID_RUN_ENTITLEMENT_POLICY,
+          maxDurationMs: maxRunDurationMs,
+        },
+        startedAt: liveRun.startedAt,
+      }) === "max_duration_elapsed";
     const timedOut = snapshot.status === "running" && runWindowExpired;
     const terminalOutputIncomplete =
       snapshot.status !== "running" &&
@@ -1328,7 +1341,7 @@ export async function reconcileAndDispatch(
   const randomToken = dependencies.randomToken ?? secureToken;
   const maxRunDurationMs = boundedInteger(
     dependencies.maxRunDurationMs,
-    RUNNER_MAX_RUN_DURATION_MS,
+    RUNNER_MID_RUN_ENTITLEMENT_POLICY.maxDurationMs,
     "Maximum run duration",
     24 * 60 * 60 * 1000
   );

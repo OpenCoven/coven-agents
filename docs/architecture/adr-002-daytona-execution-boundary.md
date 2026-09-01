@@ -24,7 +24,10 @@ remains in PostgreSQL.
    routes and authenticates only with the httpOnly Auth.js application session.
 3. **Authority is server-derived.** Route handlers revalidate the current
    subscriber account and derive the tenant; request bodies cannot select
-   either value.
+   either value. Every unlaunched dispatch rechecks the current account before
+   effects. The provider-neutral runner policy permits only a durable,
+   `running` attempt to `finish_current` within its 15-minute bound after a
+   later entitlement loss; it grants no new authorization.
 4. **Credentials and dispatch stay server-only behind three neutral
    contracts.** `RunnerExecutor` owns dispatch preparation and starts;
    `RunnerReconciliationProvider` owns fenced per-attempt inspection and stop;
@@ -49,9 +52,11 @@ remains in PostgreSQL.
    closes on terminal state, and uses a bounded idle timeout.
 9. **Recovery is bounded.** Reconciliation uses database-time leases,
    generation and attempt fencing, bounded event pages, exact cleanup claims,
-   and explicit cleanup-required outcomes. Inventory is separately read-only,
-   list-bounded, and returns only versioned aggregate ownership and lifecycle
-   categories.
+   and explicit cleanup-required outcomes. It may converge or clean one exact
+   `finish_current` attempt without consulting billing again, but may not
+   create a replacement attempt after entitlement loss. Inventory is separately
+   read-only, list-bounded, and returns only versioned aggregate ownership and
+   lifecycle categories.
 10. **Persistent resources use explicit server policy.** Sandbox creation
     always requests bounded CPU, memory, disk, auto-stop, and auto-archive
     values. Public previews are false; volumes, linked/forked sandboxes, and

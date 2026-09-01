@@ -86,7 +86,41 @@ trusting a client-supplied plan. Protected routes then call
 `authorizeSubscriberAccess`, which checks both the session classification and
 the current database `authVersion` and subscription timestamp. Dispatch
 revalidates those authorities again in `lib/runner/runtime.ts` before capacity,
-credential, or Daytona work.
+credential, sandbox, or provider work.
+
+### Runner mid-run entitlement
+
+`RUNNER_MID_RUN_ENTITLEMENT_POLICY` in
+`lib/runner/entitlement-policy.ts` codifies two distinct execution states:
+unlaunched work is `revalidate_before_effects`, while one exact,
+durably-authorized, `running` attempt is `finish_current` for at most
+`maxDurationMs` (15 minutes). Before every queued or otherwise unlaunched
+dispatch, the runner reads the current account row and requires matching
+`authVersion` plus a strictly active stored paid period or the existing
+renewal-only grace period. Revoked, expired, unknown, or unavailable authority
+therefore terminalizes or defer-closes before capacity accounting, credential
+access or write, prewarm, sandbox creation, and provider I/O. A stale browser
+session also fails its normal `authVersion` revalidation before any product
+operation.
+
+`finish_current` is neither new eligibility nor renewal grace. Once the exact
+launch has been persisted and the run is `running`, a later cancellation,
+downgrade, refund, or administrative revoke does not itself stop that process.
+Reconciliation may use only its durable attempt identity to collect bounded
+output, finish it, or perform its existing cleanup; it never re-acquires
+entitlement, credentials, or a fresh provider attempt for that running work.
+The existing maximum duration, command timeout, output bounds, exact cleanup,
+and explicit authorized cancellation paths (including operator/security
+cancellation) remain in force. A user stop request continues to require the
+existing product-access policy; entitlement loss does not create a new stop
+capability.
+If the provider proves the launched process absent, any requeue is still an
+unlaunched dispatch and must revalidate before it can do anything; current
+ineligibility prevents a second launch.
+
+This policy changes neither product read access nor data/export behavior.
+State, data, and any existing export surface remain readable only under their
+existing product-access policy; `finish_current` grants no such access.
 
 A successful payment does not make a browser redirect authoritative. The
 verified webhook must first update the database. A token minted before payment
@@ -207,9 +241,12 @@ state.
 1. Require both Stripe secrets and the `stripe-signature` header.
 2. Verify the signature against the exact raw request body before reading any
    event as authority.
-3. Claim the Stripe event ID in `StripeEvent` inside the same transaction that
-   locks and updates the owner. Any claim, lock, decision, update, or commit
-   failure rolls the claim back so Stripe receives a retryable `503`.
+3. Claim the Stripe event ID in `StripeEvent` inside the same atomic
+   transaction that locks and mutates the owner (or inserts a manual
+   reconciliation record). This is not a claim-before-processing design: any
+   claim, lock, decision, owner mutation, reconciliation insert, or commit
+   failure rolls the claim back so Stripe receives a retryable `503` and the
+   same event remains redeliverable.
 4. Resolve invoice ownership by the unique persisted
    `User.stripeCustomerId` first. That path does not retrieve the Stripe
    Customer and ignores stale provider metadata. Only an unmapped Customer may
@@ -402,7 +439,7 @@ the accounting read fails, the endpoint returns `capacity_unavailable`.
 | Renewal payment fails | One three-day renewal-only grace extension may be written. | Verify the event reason, prior paid period, stored period end, and that grace did not compound. |
 | Initial payment fails | No entitlement is granted. | Complete payment successfully; never use renewal grace as a trial. |
 | Usage or reservation storage fails | New run admission fails closed before credential access. | Restore PostgreSQL/admission dependencies and retry the same run ID so deduplication and compensation remain effective. |
-| Subscription expires or is revoked during later work | New protected operations fail authority checks. | Re-establish the session after a legitimate renewal; investigate stale authority rather than extending timestamps speculatively. |
+| Subscription expires or is revoked during later work | Queued or unlaunched work fails its current-authority recheck before any credential or provider effect. One already-running, durably authorized attempt may only `finish_current` within the 15-minute runner bound; an authorized operator/security cancellation remains explicit. | Re-establish the session after a legitimate renewal; reconcile or explicitly cancel the exact existing attempt, and investigate stale authority rather than extending timestamps speculatively. |
 
 Administrative repair must use verified Stripe records and the current database
 state. Never accept a browser-supplied plan, period, Customer ID, or webhook

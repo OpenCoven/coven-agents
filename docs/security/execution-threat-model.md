@@ -74,10 +74,14 @@ handle. Pre-launch failure compensates the exact usage, lease, and reservation.
 
 ### B3. Control plane to Daytona
 
-`lib/runner/runtime.ts` revalidates account authority before credential or
-provider work. Each agent owns one tenant-scoped persistent sandbox. Every
-attempt has exact process and cleanup fences so stale work cannot mutate a
-replacement attempt.
+`lib/runner/runtime.ts` revalidates account authority before capacity,
+credential, sandbox, or provider work. Each agent owns one tenant-scoped
+persistent sandbox. Every attempt has exact process and cleanup fences so
+stale work cannot mutate a replacement attempt. The neutral
+`RUNNER_MID_RUN_ENTITLEMENT_POLICY` distinguishes this pre-launch recheck from
+a bounded `finish_current` continuation: only an exact, durable, running
+attempt can reconcile after a later entitlement loss, and it still reaches the
+15-minute run-duration bound.
 
 The tenant harness credential is the only secret sent through the process
 staging environment. `DAYTONA_API_KEY`, `RUNNER_MANUAL_RECONCILE_SECRET`,
@@ -93,7 +97,11 @@ control-plane value it was never given.
 
 Scheduled reconciliation, manual reconciliation, and diagnostics use distinct
 credentials. Reconciliation uses database time, bounded leases, bounded event
-pages, exact cleanup claims, and validated aggregate responses.
+pages, exact cleanup claims, and validated aggregate responses. It uses no
+billing lookup to converge one already-authorized running attempt, and cannot
+turn that recovery into a new credential acquisition or provider launch. A
+provider or billing outage remains a deferral or refusal for unlaunched work,
+not an eligibility upgrade.
 
 ### B6. Resource policy, inventory, and offboarding
 
@@ -149,7 +157,7 @@ and parsed forms. Repository scanning reports only path, line, and category.
 | ID | Threat | Controls | Residual work |
 | --- | --- | --- | --- |
 | T1 | Forged or stale identity reaches another tenant | Live account revalidation, server-derived tenant, scoped store methods | Session compromise remains useful until revocation |
-| T2 | Guest or lapsed authority reaches execution | Fail-closed session union and dispatch-time recheck | Complete provider-event transition hardening |
+| T2 | Guest, revoked, or lapsed authority reaches execution | Fail-closed session union, dispatch-time current-authority recheck, and bounded `finish_current` only after durable launch | Retain deployed revocation-before-launch and revocation-during-run evidence |
 | T3 | Credential crosses tenant scope | Tenant+harness AAD, one-use acquisition, exact compensation | Plaintext exists briefly in server and process memory |
 | T4 | Database and KEK are both compromised | Per-row AES-GCM data keys and versioned wrapping | Combined compromise defeats encryption |
 | T5 | Stale provider work mutates a replacement | Sandbox generation, attempt ID, version, and lease fences | New adapters must preserve equivalent fencing |

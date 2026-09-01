@@ -54,6 +54,20 @@ test("Stripe invoice owner lookup falls back to the unique Customer reference", 
   assert.deepEqual(params, ["cus_webhook", 1]);
 });
 
+test("Stripe owner mutation keeps its event claim inside the same transaction", () => {
+  const source = readFileSync(new URL("./queries.ts", import.meta.url), "utf8");
+  const apply = source.slice(
+    source.indexOf("export async function applyStripeEventUpdate"),
+    source.indexOf("export const databaseCheckoutAttemptLeaseStore")
+  );
+
+  assert.match(apply, /return await db\.transaction\(async \(transaction\)/u);
+  assert.match(
+    apply,
+    /transaction\s*\.insert\(stripeEvent\)[\s\S]*?transaction\s*\.select\(\)[\s\S]*?\.for\("update"\)[\s\S]*?transaction\s*\.update\(user\)/u
+  );
+});
+
 test("checkout attempt provenance lookup is scoped by attempt, operation, and owner", () => {
   const { params, sql } = new QueryBuilder()
     .select({ requestHash: idempotencyRecord.requestHash })

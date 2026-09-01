@@ -125,6 +125,23 @@ export async function incrementHermeticAuthVersion(
   }
 }
 
+export async function revokeHermeticEntitlement(
+  userId: string,
+  url = process.env.POSTGRES_URL
+): Promise<void> {
+  const sql = database(url);
+  try {
+    await sql`UPDATE "User"
+      SET "authVersion" = "authVersion" + 1,
+          "billingPeriodStart" = NULL,
+          "subscribedUntil" = NULL,
+          "updatedAt" = now()
+      WHERE "id" = ${userId}`;
+  } finally {
+    await sql.end({ timeout: 2 });
+  }
+}
+
 export async function providerProvenanceForRun(
   runId: string,
   url = process.env.POSTGRES_URL
@@ -138,6 +155,37 @@ export async function providerProvenanceForRun(
       FROM "RunnerRun" WHERE "id" = ${runId}
     `;
     return row ?? { provider: null, status: null };
+  } finally {
+    await sql.end({ timeout: 2 });
+  }
+}
+
+export async function runnerRunOutcomeForRun(
+  runId: string,
+  url = process.env.POSTGRES_URL
+): Promise<
+  Readonly<{
+    errorCode: string | null;
+    provider: string | null;
+    status: string | null;
+  }>
+> {
+  const sql = database(url);
+  try {
+    const [row] = await sql<
+      {
+        errorCode: string | null;
+        provider: string | null;
+        status: string | null;
+      }[]
+    >`
+      SELECT
+        "error"->>'code' AS "errorCode",
+        "executionProvenance"->>'provider' AS "provider",
+        "status"
+      FROM "RunnerRun" WHERE "id" = ${runId}
+    `;
+    return row ?? { errorCode: null, provider: null, status: null };
   } finally {
     await sql.end({ timeout: 2 });
   }
