@@ -3,6 +3,7 @@ import "server-only";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import {
+  DEMO_TRANSCRIPT_LIMITS,
   type DemoTranscript,
   demoTranscriptSchema,
 } from "@opencoven/agent-contracts";
@@ -10,6 +11,9 @@ import {
 const FIXTURES_DIRECTORY = path.join(process.cwd(), "lib/demo/fixtures");
 
 export function loadTranscript(raw: string): DemoTranscript | null {
+  if (Buffer.byteLength(raw, "utf8") > DEMO_TRANSCRIPT_LIMITS.maxRawBytes) {
+    return null;
+  }
   try {
     const parsed = demoTranscriptSchema.safeParse(JSON.parse(raw));
     return parsed.success ? parsed.data : null;

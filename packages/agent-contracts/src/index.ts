@@ -43,6 +43,12 @@ export const TEAM_LIMITS = Object.freeze({
   maxTotalHandoffLength: 49_152,
 });
 
+export const DEMO_TRANSCRIPT_LIMITS = Object.freeze({
+  maxEvents: 256,
+  maxRawBytes: 256 * 1024,
+  maxReplayDurationMs: 2 * 60 * 1000,
+});
+
 /**
  * Stable Agent Runner v1 deployment-class discriminator. `cloud` means the
  * runner is remotely deployed; it is not an execution-provider identity or
@@ -804,6 +810,58 @@ export const runResultSchema = z.object({
   status: z.enum(["completed", "failed"]),
 });
 
+export const demoProvenanceSchema = z
+  .object({
+    fixture: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[a-z0-9-]+$/),
+    kind: z.literal("synthetic-demo"),
+  })
+  .strict();
+
+const demoArtifactPathSchema = boundedString(
+  AGENT_RUNNER_LIMITS.maxPathLength
+).refine(
+  (value) =>
+    !/^(?:[a-z][a-z0-9+.-]*:|[\\/])/iu.test(value) &&
+    !value.split(/[\\/]/u).includes(".."),
+  "Demo artifact paths must stay relative to the synthetic workspace."
+);
+
+const demoCommandResultSchema = z
+  .object({
+    command: z.string().max(AGENT_RUNNER_LIMITS.maxCommandLength).optional(),
+    exitCode: z.number().int().nullable().optional(),
+    provenance: demoProvenanceSchema,
+    stderr: z.string().max(AGENT_RUNNER_LIMITS.maxEventOutputLength).optional(),
+    stdout: z.string().max(AGENT_RUNNER_LIMITS.maxEventOutputLength).optional(),
+    timestamp: z.union([z.number(), z.string()]).optional(),
+  })
+  .strict();
+
+const demoFileOperationSchema = z
+  .object({
+    operation: boundedString(64),
+    path: demoArtifactPathSchema,
+    provenance: demoProvenanceSchema,
+    timestamp: z.union([z.number(), z.string()]).optional(),
+  })
+  .strict();
+
+const demoRunResultSchema = runResultSchema
+  .extend({
+    commandResults: z
+      .array(demoCommandResultSchema)
+      .max(AGENT_RUNNER_LIMITS.maxCommandResults),
+    fileOperations: z
+      .array(demoFileOperationSchema)
+      .max(AGENT_RUNNER_LIMITS.maxFileOperations),
+    output: z.string().max(AGENT_RUNNER_LIMITS.maxEventOutputLength),
+  })
+  .strict();
+
 export const demoTranscriptSchema = z
   .object({
     events: z
@@ -811,11 +869,17 @@ export const demoTranscriptSchema = z
         z
           .object({
             event: runEventSchema,
-            offsetMs: z.number().int().nonnegative(),
+            offsetMs: z
+              .number()
+              .int()
+              .nonnegative()
+              .max(DEMO_TRANSCRIPT_LIMITS.maxReplayDurationMs),
+            provenance: demoProvenanceSchema,
           })
           .strict()
       )
       .min(1)
+      .max(DEMO_TRANSCRIPT_LIMITS.maxEvents)
       .superRefine((events, context) => {
         for (let index = 1; index < events.length; index += 1) {
           if (events[index].event.id <= events[index - 1].event.id) {
@@ -825,6 +889,13 @@ export const demoTranscriptSchema = z
               path: [index, "event", "id"],
             });
           }
+          if (events[index].offsetMs < events[index - 1].offsetMs) {
+            context.addIssue({
+              code: "custom",
+              message: "Run event offsets must increase monotonically.",
+              path: [index, "offsetMs"],
+            });
+          }
         }
       }),
     name: z
@@ -832,11 +903,51 @@ export const demoTranscriptSchema = z
       .min(1)
       .max(64)
       .regex(/^[a-z0-9-]+$/),
+    provenance: demoProvenanceSchema,
     recordedAt: datetimeSchema,
-    result: runResultSchema,
-    task: z.string().min(1),
+    result: demoRunResultSchema,
+    task: z.string().min(1).max(AGENT_RUNNER_LIMITS.maxTaskLength),
   })
-  .strict();
+  .strict()
+  .superRefine((transcript, context) => {
+    if (transcript.provenance.fixture !== transcript.name) {
+      context.addIssue({
+        code: "custom",
+        message: "Transcript provenance must match the fixture name.",
+        path: ["provenance", "fixture"],
+      });
+    }
+    for (const [index, entry] of transcript.events.entries()) {
+      if (entry.provenance.fixture !== transcript.name) {
+        context.addIssue({
+          code: "custom",
+          message: "Event provenance must match the fixture name.",
+          path: ["events", index, "provenance", "fixture"],
+        });
+      }
+    }
+    for (const [index, result] of transcript.result.commandResults.entries()) {
+      if (result.provenance.fixture !== transcript.name) {
+        context.addIssue({
+          code: "custom",
+          message: "Command provenance must match the fixture name.",
+          path: ["result", "commandResults", index, "provenance", "fixture"],
+        });
+      }
+    }
+    for (const [
+      index,
+      operation,
+    ] of transcript.result.fileOperations.entries()) {
+      if (operation.provenance.fixture !== transcript.name) {
+        context.addIssue({
+          code: "custom",
+          message: "File provenance must match the fixture name.",
+          path: ["result", "fileOperations", index, "provenance", "fixture"],
+        });
+      }
+    }
+  });
 export type DemoTranscript = z.infer<typeof demoTranscriptSchema>;
 
 export const agentRunnerHealthSchema = z

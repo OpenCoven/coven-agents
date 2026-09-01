@@ -7,7 +7,11 @@
         "runId": "1d866c35-a83b-4f12-ae61-ce56c6d74c41",
         "type": "accepted"
       },
-      "offsetMs": 0
+      "offsetMs": 0,
+      "provenance": {
+        "fixture": "task-summary-demo",
+        "kind": "synthetic-demo"
+      }
     },
     {
       "event": {
@@ -16,7 +20,11 @@
         "status": "running",
         "type": "status"
       },
-      "offsetMs": 400
+      "offsetMs": 400,
+      "provenance": {
+        "fixture": "task-summary-demo",
+        "kind": "synthetic-demo"
+      }
     },
     {
       "event": {
@@ -25,7 +33,11 @@
         "output": "Inspecting the task formatter and its focused test coverage.",
         "type": "output"
       },
-      "offsetMs": 1100
+      "offsetMs": 1100,
+      "provenance": {
+        "fixture": "task-summary-demo",
+        "kind": "synthetic-demo"
+      }
     },
     {
       "event": {
@@ -41,7 +53,11 @@
         "id": 4,
         "type": "command"
       },
-      "offsetMs": 2300
+      "offsetMs": 2300,
+      "provenance": {
+        "fixture": "task-summary-demo",
+        "kind": "synthetic-demo"
+      }
     },
     {
       "event": {
@@ -55,7 +71,11 @@
         "id": 5,
         "type": "file"
       },
-      "offsetMs": 3000
+      "offsetMs": 3000,
+      "provenance": {
+        "fixture": "task-summary-demo",
+        "kind": "synthetic-demo"
+      }
     },
     {
       "event": {
@@ -69,7 +89,11 @@
         "id": 6,
         "type": "file"
       },
-      "offsetMs": 3600
+      "offsetMs": 3600,
+      "provenance": {
+        "fixture": "task-summary-demo",
+        "kind": "synthetic-demo"
+      }
     },
     {
       "event": {
@@ -78,7 +102,11 @@
         "output": "Added empty-input handling and concise task-summary coverage.",
         "type": "output"
       },
-      "offsetMs": 4200
+      "offsetMs": 4200,
+      "provenance": {
+        "fixture": "task-summary-demo",
+        "kind": "synthetic-demo"
+      }
     },
     {
       "event": {
@@ -94,7 +122,11 @@
         "id": 8,
         "type": "command"
       },
-      "offsetMs": 5500
+      "offsetMs": 5500,
+      "provenance": {
+        "fixture": "task-summary-demo",
+        "kind": "synthetic-demo"
+      }
     },
     {
       "event": {
@@ -103,7 +135,11 @@
         "output": "Implementation and focused verification are complete.",
         "type": "output"
       },
-      "offsetMs": 6100
+      "offsetMs": 6100,
+      "provenance": {
+        "fixture": "task-summary-demo",
+        "kind": "synthetic-demo"
+      }
     },
     {
       "event": {
@@ -155,10 +191,18 @@
         },
         "type": "completed"
       },
-      "offsetMs": 6500
+      "offsetMs": 6500,
+      "provenance": {
+        "fixture": "task-summary-demo",
+        "kind": "synthetic-demo"
+      }
     }
   ],
   "name": "task-summary-demo",
+  "provenance": {
+    "fixture": "task-summary-demo",
+    "kind": "synthetic-demo"
+  },
   "recordedAt": "2026-08-25T12:00:06.500Z",
   "result": {
     "agentId": "c8ff2f76-9f28-469a-939d-5ad7d8a982ea",
@@ -166,6 +210,10 @@
       {
         "command": "pnpm test:unit -- format-task",
         "exitCode": 0,
+        "provenance": {
+          "fixture": "task-summary-demo",
+          "kind": "synthetic-demo"
+        },
         "stderr": "",
         "stdout": "Tests: 12 passed, 0 failed",
         "timestamp": "2026-08-25T12:00:02.300Z"
@@ -173,6 +221,10 @@
       {
         "command": "pnpm test:unit -- format-task",
         "exitCode": 0,
+        "provenance": {
+          "fixture": "task-summary-demo",
+          "kind": "synthetic-demo"
+        },
         "stderr": "",
         "stdout": "Tests: 14 passed, 0 failed",
         "timestamp": "2026-08-25T12:00:05.500Z"
@@ -183,11 +235,19 @@
       {
         "operation": "create",
         "path": "src/lib/format-task.ts",
+        "provenance": {
+          "fixture": "task-summary-demo",
+          "kind": "synthetic-demo"
+        },
         "timestamp": "2026-08-25T12:00:03.000Z"
       },
       {
         "operation": "modify",
         "path": "src/lib/format-task.test.ts",
+        "provenance": {
+          "fixture": "task-summary-demo",
+          "kind": "synthetic-demo"
+        },
         "timestamp": "2026-08-25T12:00:03.600Z"
       }
     ],

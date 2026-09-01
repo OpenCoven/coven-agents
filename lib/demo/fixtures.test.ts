@@ -10,6 +10,10 @@ import {
 const fixturesDirectory = path.join(import.meta.dirname, "fixtures");
 // secret-scan: allow-next-line -- synthetic escaped-credential fixture
 const PROVIDER_CREDENTIAL = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+const PROVENANCE = {
+  fixture: "encoded-credential",
+  kind: "synthetic-demo",
+} as const;
 const validTranscript = {
   events: [
     {
@@ -20,9 +24,11 @@ const validTranscript = {
         type: "accepted",
       },
       offsetMs: 0,
+      provenance: PROVENANCE,
     },
   ],
   name: "encoded-credential",
+  provenance: PROVENANCE,
   recordedAt: "2026-08-24T19:03:49.798Z",
   result: {
     agentId: "53af1a29-4e98-43d6-ac5b-3b9dcba5e730",
