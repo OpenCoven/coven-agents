@@ -523,8 +523,8 @@ export function createGitHubOperationProvider(
     const remaining = deadlineAt - clock();
     if (!(remaining > 0)) {
       throw new GitHubToolProviderError("github_provider_timeout", {
-        mutationMayHaveReached: requestKind === "mutation",
-        retryable: requestKind === "read",
+        mutationMayHaveReached: false,
+        retryable: true,
         status: 503,
       });
     }
@@ -700,8 +700,16 @@ export function createGitHubOperationProvider(
   }
 
   async function authorizeMutation(
-    callback: () => Promise<boolean>
+    callback: () => Promise<boolean>,
+    deadlineAt: number
   ): Promise<void> {
+    if (!(deadlineAt - clock() > 0)) {
+      throw new GitHubToolProviderError("github_provider_timeout", {
+        mutationMayHaveReached: false,
+        retryable: true,
+        status: 503,
+      });
+    }
     let authorized: boolean;
     try {
       authorized = await callback();
@@ -1121,7 +1129,7 @@ export function createGitHubOperationProvider(
         return executeWrite(
           execution,
           async () => {
-            await authorizeMutation(execution.authorizeMutation);
+            await authorizeMutation(execution.authorizeMutation, deadlineAt);
             const response = await request(
               authorization,
               `${basePath}/issues`,
@@ -1200,7 +1208,7 @@ export function createGitHubOperationProvider(
                 status: 409,
               });
             }
-            await authorizeMutation(execution.authorizeMutation);
+            await authorizeMutation(execution.authorizeMutation, deadlineAt);
             const response = await request(
               authorization,
               `${basePath}/issues/${operation.issueNumber}/comments`,
@@ -1260,7 +1268,7 @@ export function createGitHubOperationProvider(
         return executeWrite(
           execution,
           async () => {
-            await authorizeMutation(execution.authorizeMutation);
+            await authorizeMutation(execution.authorizeMutation, deadlineAt);
             const response = await request(
               authorization,
               `${basePath}/pulls`,
@@ -1337,7 +1345,7 @@ export function createGitHubOperationProvider(
                 status: 409,
               });
             }
-            await authorizeMutation(execution.authorizeMutation);
+            await authorizeMutation(execution.authorizeMutation, deadlineAt);
             const response = await request(
               authorization,
               `${basePath}/issues/${operation.pullNumber}/comments`,
@@ -1410,7 +1418,7 @@ export function createGitHubOperationProvider(
                 status: 409,
               });
             }
-            await authorizeMutation(execution.authorizeMutation);
+            await authorizeMutation(execution.authorizeMutation, deadlineAt);
             const response = await request(
               authorization,
               `${basePath}/pulls/${operation.pullNumber}/reviews`,
@@ -1512,7 +1520,7 @@ export function createGitHubOperationProvider(
         return executeWrite(
           execution,
           async () => {
-            await authorizeMutation(execution.authorizeMutation);
+            await authorizeMutation(execution.authorizeMutation, deadlineAt);
             const response = await graphql(
               authorization,
               "CovenProjectItemAdd",
@@ -1642,7 +1650,7 @@ export function createGitHubOperationProvider(
         return executeWrite(
           execution,
           async () => {
-            await authorizeMutation(execution.authorizeMutation);
+            await authorizeMutation(execution.authorizeMutation, deadlineAt);
             const value = projectValue(operation);
             const clear = value === null;
             const response = await graphql(
@@ -2047,6 +2055,16 @@ export function createGitHubToolGateway(
               ReturnType<GitHubToolGatewayStore["authorizeMutation"]>
             >;
             try {
+              const phaseNow = clock();
+              if (
+                Number.isNaN(phaseNow.valueOf()) ||
+                deadlineAt - phaseNow.getTime() <= databasePhaseTimeoutMs
+              ) {
+                throw Object.assign(
+                  new Error("GitHub database phase deadline exceeded."),
+                  { code: "57014" }
+                );
+              }
               authorization = await runDatabasePhase(
                 (abortSignal) =>
                   input.store.authorizeMutation(input.operator, {

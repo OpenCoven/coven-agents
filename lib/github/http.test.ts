@@ -825,6 +825,69 @@ test("project add and field update use fixed GraphQL documents and verify reposi
   });
 });
 
+test("project add deadline exhaustion remains proven pre-send", async () => {
+  const operation = {
+    contentId: "I_kwDOExample",
+    contentType: "issue" as const,
+    kind: "project.item.add" as const,
+    owner: "OpenCoven",
+    projectId: "PVT_kwDOExample",
+    repo: "coven-agents",
+  };
+  let authorizations = 0;
+  let now = 0;
+  let requests = 0;
+  const provider = createGitHubOperationProvider({
+    clock: () => now,
+    fetch: async () => {
+      requests += 1;
+      now = 101;
+      return Response.json({
+        data: {
+          content: {
+            __typename: "Issue",
+            id: operation.contentId,
+            repository: {
+              databaseId: 789,
+              nameWithOwner: "OpenCoven/coven-agents",
+            },
+          },
+          project: {
+            id: operation.projectId,
+            items: {
+              nodes: [],
+              pageInfo: { endCursor: null, hasNextPage: false },
+            },
+            owner: { login: "OpenCoven" },
+          },
+        },
+      });
+    },
+    withInstallationAuthorization: async (_scope, callback) =>
+      callback("******"),
+  });
+
+  await assert.rejects(
+    provider.execute({
+      authorizeMutation: () => {
+        authorizations += 1;
+        return Promise.resolve(true);
+      },
+      context: context(operation),
+      deadlineAt: 100,
+      mode: "execute",
+      operation,
+    }),
+    (error: unknown) =>
+      error instanceof GitHubToolProviderError &&
+      error.code === "github_provider_timeout" &&
+      error.mutationMayHaveReached === false &&
+      error.retryable
+  );
+  assert.equal(authorizations, 0);
+  assert.equal(requests, 1);
+});
+
 test("project operations request only verified organization project authority and reject user installations", async () => {
   const operation = {
     contentId: "I_kwDOExample",
@@ -2200,6 +2263,93 @@ test("a proven PostgreSQL lock timeout before dispatch releases the write for re
   );
   assert.equal(mutations, 0);
   assert.equal(failures, 0);
+  assert.equal(releases, 1);
+});
+
+test("an exhausted authorization margin releases before marking a write sent", async () => {
+  const rawCapability = Buffer.alloc(32, 0x57).toString("base64url");
+  const operation = {
+    body: "Issue comment.",
+    issueNumber: "42",
+    kind: "issue.comment" as const,
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const tokenHash = createHash("sha256")
+    .update(rawCapability, "utf8")
+    .digest("hex");
+  const {
+    operation: { operationId },
+  } = context();
+  const reservedContext = context(
+    operation,
+    githubOperationMarker({
+      capabilityBinding: tokenHash,
+      operationId,
+      requestHash: hashGitHubOperation(operation),
+      teamStepId: context().capability.teamStepId,
+    })
+  );
+  const startedAt = Date.parse("2030-08-31T20:00:00.000Z");
+  let clockCalls = 0;
+  let authorizations = 0;
+  let releases = 0;
+  const gateway = createGitHubToolGateway({
+    clock: () => {
+      const call = clockCalls;
+      clockCalls += 1;
+      return new Date(
+        startedAt + (call === 0 ? 0 : GITHUB_TOOL_SERVER_DEADLINE_MS - 10)
+      );
+    },
+    createId: () => reservedContext.operation.id,
+    databasePhaseTimeoutMs: 25,
+    operator: { kind: "runner-operator" },
+    provider: {
+      execute: async (input) => {
+        await input.authorizeMutation();
+        throw new Error("deadline margin must stop provider execution");
+      },
+    },
+    store: {
+      authorizeMutation: async () => {
+        authorizations += 1;
+        throw new Error("must not mark the operation sent");
+      },
+      completeOperation: async () => ({ kind: "stale" as const }),
+      failOperation: async () => ({ kind: "stale" as const }),
+      releaseOperationForRetry: async () => {
+        releases += 1;
+        return {
+          kind: "released" as const,
+          operation: {
+            ...reservedContext.operation,
+            error: {
+              code: "github_provider_unavailable",
+              message: "GitHub provider execution failed.",
+              retryable: true,
+            },
+            status: "pending" as const,
+            version: 1,
+            writeIntentActive: false,
+          },
+        };
+      },
+      reserveOperation: async () => ({
+        context: reservedContext,
+        kind: "reserved" as const,
+      }),
+    },
+  });
+
+  await assert.rejects(
+    gateway.execute({ operation, operationId, rawCapability }),
+    (error: unknown) =>
+      error instanceof GitHubToolGatewayError &&
+      error.code === "github_provider_unavailable" &&
+      error.retryable
+  );
+  assert.equal(authorizations, 0);
   assert.equal(releases, 1);
 });
 
