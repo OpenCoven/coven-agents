@@ -451,6 +451,52 @@ export type StripeReconciliation = InferSelectModel<
   typeof stripeReconciliation
 >;
 
+export const subscriptionOverrideAudit = pgTable(
+  "SubscriptionOverrideAudit",
+  {
+    action: varchar("action", {
+      enum: ["grant", "revoke"],
+      length: 6,
+    }).notNull(),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    newAuthVersion: integer("newAuthVersion").notNull(),
+    newSubscribedUntil: timestamp("newSubscribedUntil"),
+    previousAuthVersion: integer("previousAuthVersion").notNull(),
+    previousSubscribedUntil: timestamp("previousSubscribedUntil"),
+    referenceDigest: varchar("referenceDigest", { length: 64 }).notNull(),
+    userId: uuid("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+  },
+  (table) => [
+    index("SubscriptionOverrideAudit_user_createdAt_idx").on(
+      table.userId,
+      table.createdAt
+    ),
+    check(
+      "SubscriptionOverrideAudit_action_check",
+      sql`${table.action} in ('grant', 'revoke')`
+    ),
+    check(
+      "SubscriptionOverrideAudit_referenceDigest_check",
+      sql`${table.referenceDigest} ~ '^[0-9a-f]{64}$'`
+    ),
+    check(
+      "SubscriptionOverrideAudit_authVersion_check",
+      sql`${table.previousAuthVersion} >= 0 and ${table.newAuthVersion} = ${table.previousAuthVersion} + 1`
+    ),
+    check(
+      "SubscriptionOverrideAudit_paidThrough_check",
+      sql`(${table.action} = 'grant' and ${table.newSubscribedUntil} is not null) or (${table.action} = 'revoke' and ${table.newSubscribedUntil} is null)`
+    ),
+  ]
+);
+
+export type SubscriptionOverrideAudit = InferSelectModel<
+  typeof subscriptionOverrideAudit
+>;
+
 /**
  * One durable claim for a costly request.
  *

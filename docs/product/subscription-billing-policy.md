@@ -39,10 +39,34 @@ or expired state is guest state.
 
 Stripe is evidence for paid periods, but it does not directly authorize an
 application request. Only the signature-verified webhook route may translate a
-supported Stripe event into database entitlement state. The administrative
-`pnpm subscription grant|revoke|status` command remains an explicit operator
-override for bootstrap or complimentary access and writes the same authority
-columns.
+supported Stripe event into database entitlement state.
+
+### Administrative overrides
+
+`pnpm subscription grant|revoke|status` is an authorized operator override for
+bootstrap or complimentary access, not Stripe evidence or production
+certification. `status` is read-only. Each `grant` or `revoke` requires a
+bounded `--reference <value>`; the command hashes that value with SHA-256
+before persistence and never prints or stores the raw value.
+
+`grant` defaults to 365 days and is finite: the exported
+`MAX_SUBSCRIPTION_OVERRIDE_DAYS = 3650` upper bound prevents an indefinite
+entitlement. `revoke` immediately clears the paid period. Both commands run
+one transaction that locks the exact tenant-owner `User` row, fences a stale
+authority version, increments `authVersion` exactly once, updates
+`subscribedUntil` and `billingPeriodStart`, and inserts one immutable
+`SubscriptionOverrideAudit` record. The audit stores only its ID, owner
+reference, `grant` or `revoke` action, prior and new paid-through timestamps,
+prior and new authority versions, creation time, and the reference digest.
+It has no email, raw reference, arbitrary operator text, Stripe identifiers,
+payload, secret, or payment data. Audit, entitlement, authority, and commit
+failures roll the whole transaction back. A successful override invalidates
+existing authority rather than relying on a sign-out/in instruction.
+
+This override is intentionally separate from normal Stripe webhook authority,
+checkout, run admission, and mid-run transition policy. It does not implement
+automatic Stripe reconciliation; that requires separate work and operational
+evidence.
 
 Auth.js carries `subscribedUntil` in its server-managed session token and
 recomputes the derived type on every callback, so expiry is exact without
@@ -55,8 +79,8 @@ credential, or Daytona work.
 A successful payment does not make a browser redirect authoritative. The
 verified webhook must first update the database. A token minted before payment
 still carries its earlier date because ordinary callbacks do not poll the user
-row; it must be re-established, currently by signing out and back in, before it
-can carry subscriber type. Cancellation does not revoke an already paid
+row; a later authenticated session carries the updated type. Cancellation does
+not revoke an already paid
 period; authority ends when `subscribedUntil` passes. An explicit
 administrative revoke clears the period immediately.
 

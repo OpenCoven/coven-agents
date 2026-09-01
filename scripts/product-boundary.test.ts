@@ -527,6 +527,10 @@ test("the living subscription policy records current billing authorities", () =>
     "app/api/stripe/webhook/route.ts",
     "lib/credentials/runner-credential.ts",
     "StripeReconciliation",
+    "SubscriptionOverrideAudit",
+    "MAX_SUBSCRIPTION_OVERRIDE_DAYS = 3650",
+    "--reference <value>",
+    "authorized operator override",
     "pending",
     "acknowledged",
     "resolved",
@@ -535,6 +539,11 @@ test("the living subscription policy records current billing authorities", () =>
   }
 
   assert.match(policy, /not.*production certification/is);
+  assert.match(policy, /not Stripe evidence/is);
+  assert.match(
+    policy,
+    /does not implement\s+automatic Stripe reconciliation/is
+  );
   assert.match(policy, /no (user|Customer|Subscription).*stored/is);
   assert.match(policy, /retention.*operator/is);
 });

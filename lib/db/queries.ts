@@ -40,6 +40,10 @@ import {
   drizzleRunReservationDatabase,
   reservationUsage,
 } from "../billing/run-reservations";
+import type {
+  SubscriptionOverrideStore,
+  SubscriptionOverrideUserUpdate,
+} from "../billing/subscription-override";
 import { countRun, usageFor } from "../billing/usage";
 import {
   type StripeEventUpdateInput,
@@ -65,6 +69,7 @@ import {
   stream,
   stripeEvent,
   stripeReconciliation,
+  subscriptionOverrideAudit,
   suggestion,
   type User,
   user,
@@ -74,9 +79,54 @@ import {
   checkoutAttemptProvenanceWhere,
   stripeEventOwnerWhere,
 } from "./stripe-event";
+import {
+  subscriptionOverrideOwnerWhere,
+  subscriptionOverrideWriteFenceWhere,
+} from "./subscription-override";
 
 const client = postgres(process.env.POSTGRES_URL ?? "");
 export const db = drizzle(client);
+
+export const databaseSubscriptionOverrideStore: SubscriptionOverrideStore = {
+  transaction: async (callback) =>
+    await db.transaction(async (transaction) =>
+      callback({
+        findUserForUpdate: async (userId) => {
+          const [owner] = await transaction
+            .select({
+              authVersion: user.authVersion,
+              billingPeriodStart: user.billingPeriodStart,
+              id: user.id,
+              subscribedUntil: user.subscribedUntil,
+            })
+            .from(user)
+            .where(subscriptionOverrideOwnerWhere(userId))
+            .for("update")
+            .limit(1);
+          return owner ?? null;
+        },
+        insertAudit: async (record) => {
+          await transaction.insert(subscriptionOverrideAudit).values(record);
+        },
+        now: () => new Date(),
+        updateUser: async (input: SubscriptionOverrideUserUpdate) => {
+          const updated = await transaction
+            .update(user)
+            .set({
+              authVersion: sql`${user.authVersion} + 1`,
+              billingPeriodStart: input.billingPeriodStart,
+              subscribedUntil: input.subscribedUntil,
+            })
+            .where(subscriptionOverrideWriteFenceWhere(input))
+            .returning({ authVersion: user.authVersion });
+          return (
+            updated.length === 1 &&
+            updated[0]?.authVersion === input.newAuthVersion
+          );
+        },
+      })
+    ),
+};
 
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -92,6 +142,29 @@ export async function getUser(email: string): Promise<User[]> {
       .select()
       .from(user)
       .where(emailMatches(normalizeEmail(email)));
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
+export async function findSubscriptionOverrideUserByEmail(
+  email: string
+): Promise<{
+  authVersion: number;
+  id: string;
+  subscribedUntil: Date | null;
+} | null> {
+  try {
+    const matches = await db
+      .select({
+        authVersion: user.authVersion,
+        id: user.id,
+        subscribedUntil: user.subscribedUntil,
+      })
+      .from(user)
+      .where(emailMatches(normalizeEmail(email)))
+      .limit(2);
+    return matches.length === 1 ? (matches[0] ?? null) : null;
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
   }

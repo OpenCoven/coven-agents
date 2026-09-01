@@ -405,8 +405,11 @@ test("migration 0024 adds fail-closed runner execution permission after existing
   const journal = JSON.parse(
     readFileSync(new URL("meta/_journal.json", directory), "utf8")
   ) as { entries: { idx: number; tag: string }[] };
-  assert.deepEqual(journal.entries.at(-1), {
-    ...journal.entries.at(-1),
+  const journalEntry = journal.entries.find(
+    (entry) => entry.tag === migrationName.replace(/\.sql$/u, "")
+  );
+  assert.deepEqual(journalEntry, {
+    ...journalEntry,
     idx: 24,
     tag: migrationName.replace(/\.sql$/u, ""),
   });

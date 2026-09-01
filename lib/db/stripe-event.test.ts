@@ -79,6 +79,10 @@ test("checkout attempt provenance lookup is scoped by attempt, operation, and ow
 
 test("Stripe reconciliation schema and generated migration retain only bounded operational evidence", () => {
   const schema = readFileSync(new URL("./schema.ts", import.meta.url), "utf8");
+  const reconciliationSchema = schema.slice(
+    schema.indexOf("export const stripeReconciliation"),
+    schema.indexOf("export const subscriptionOverrideAudit")
+  );
   const migrationTag = "0021_lovely_loners";
   const migration = readFileSync(
     new URL(`./migrations/${migrationTag}.sql`, import.meta.url),
@@ -90,18 +94,18 @@ test("Stripe reconciliation schema and generated migration retain only bounded o
   );
 
   assert.match(
-    schema,
+    reconciliationSchema,
     /stripeReconciliation = pgTable\(\s*"StripeReconciliation"/
   );
   assert.match(
-    schema,
+    reconciliationSchema,
     /eventId: varchar\("eventId", \{ length: 64 \}\)[\s\S]*primaryKey\(\)[\s\S]*references\(\(\) => stripeEvent\.id, \{ onDelete: "restrict" \}\)/
   );
-  assert.match(schema, /StripeReconciliation_eventType_check/);
-  assert.match(schema, /StripeReconciliation_reason_check/);
-  assert.match(schema, /StripeReconciliation_status_check/);
+  assert.match(reconciliationSchema, /StripeReconciliation_eventType_check/);
+  assert.match(reconciliationSchema, /StripeReconciliation_reason_check/);
+  assert.match(reconciliationSchema, /StripeReconciliation_status_check/);
   assert.doesNotMatch(
-    schema,
+    reconciliationSchema,
     /StripeReconciliation[\s\S]{0,1600}(userId|customerId|subscriptionId|payload|secret|metadata):/
   );
 
