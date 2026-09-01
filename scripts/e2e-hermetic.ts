@@ -115,7 +115,7 @@ type Environment = Readonly<Record<string, string | undefined>>;
 type PlaywrightChild = EventEmitter;
 
 function localOrigin(port: number): string {
-  return `http://127.0.0.1:${port}`;
+  return `http://localhost:${port}`;
 }
 
 function executable(name: string): string {
@@ -143,60 +143,109 @@ export function explicitHermeticPort(
   return port;
 }
 
+function errorCode(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException | undefined)?.code;
+}
+
+function unavailablePortError(
+  requestedPort: number,
+  host: string,
+  cause: unknown
+): Error {
+  return new Error(
+    requestedPort
+      ? `E2E_HERMETIC_PORT ${requestedPort} is unavailable on ${host}.`
+      : "Could not allocate a free hermetic loopback port.",
+    { cause }
+  );
+}
+
+async function closeServer(
+  server: ReturnType<typeof createServer>
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (errorCode(error) === "ERR_SERVER_NOT_RUNNING") {
+        resolve();
+        return;
+      }
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+async function listenOnLoopback(
+  server: ReturnType<typeof createServer>,
+  host: string,
+  port: number,
+  deadline: number
+): Promise<void> {
+  let timeout: NodeJS.Timeout | undefined;
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => {
+      clearTimeout(timeout);
+      reject(error);
+    };
+    timeout = setTimeout(
+      () => {
+        server.off("error", onError);
+        reject(
+          new Error(
+            `Timed out while reserving hermetic loopback port ${port || "automatically"}.`
+          )
+        );
+      },
+      Math.max(1, deadline - Date.now())
+    );
+    server.once("error", onError);
+    server.listen({ host, ipv6Only: host === "::1", port }, () => {
+      clearTimeout(timeout);
+      server.off("error", onError);
+      resolve();
+    });
+  });
+}
+
 async function bindAvailableLoopbackPort(
   requestedPort: number
 ): Promise<number> {
-  const server = createServer();
-  let timeout: NodeJS.Timeout | undefined;
-  try {
-    await new Promise<void>((resolve, reject) => {
-      timeout = setTimeout(() => {
-        reject(
-          new Error(
-            `Timed out while reserving hermetic loopback port ${requestedPort || "automatically"}.`
-          )
-        );
-      }, PORT_ALLOCATION_TIMEOUT_MS);
-      server.once("error", (error) => {
-        reject(
-          new Error(
-            requestedPort
-              ? `E2E_HERMETIC_PORT ${requestedPort} is unavailable on 127.0.0.1.`
-              : "Could not allocate a free hermetic loopback port.",
-            { cause: error }
-          )
-        );
-      });
-      server.listen({ host: "127.0.0.1", port: requestedPort }, () => {
-        resolve();
-      });
-    });
-    const address = server.address();
-    if (!address || typeof address === "string" || address.port < 1) {
-      throw new Error("Could not allocate a usable hermetic loopback port.");
-    }
-    return address.port;
-  } finally {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => {
-        if (
-          (error as NodeJS.ErrnoException | undefined)?.code ===
-          "ERR_SERVER_NOT_RUNNING"
-        ) {
-          resolve();
-          return;
+  const deadline = Date.now() + PORT_ALLOCATION_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const ipv4 = createServer();
+    const ipv6 = createServer();
+    try {
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: Retry only after releasing a port unavailable on IPv6.
+        await listenOnLoopback(ipv4, "127.0.0.1", requestedPort, deadline);
+      } catch (error) {
+        throw unavailablePortError(requestedPort, "127.0.0.1", error);
+      }
+      const address = ipv4.address();
+      if (!address || typeof address === "string" || address.port < 1) {
+        throw new Error("Could not allocate a usable hermetic loopback port.");
+      }
+      const { port } = address;
+      try {
+        await listenOnLoopback(ipv6, "::1", port, deadline);
+      } catch (error) {
+        if (errorCode(error) === "EAFNOSUPPORT") {
+          return port;
         }
-        if (error) {
-          reject(error);
-          return;
+        if (!requestedPort && errorCode(error) === "EADDRINUSE") {
+          continue;
         }
-        resolve();
-      });
-    });
+        throw unavailablePortError(requestedPort, "::1", error);
+      }
+      return port;
+    } finally {
+      await Promise.all([closeServer(ipv4), closeServer(ipv6)]);
+    }
   }
+  throw new Error("Could not allocate a free hermetic loopback port.");
 }
 
 export function allocateHermeticPort(

@@ -129,7 +129,7 @@ test("hermetic port override is strictly validated", () => {
   }
 });
 
-test("hermetic port allocation is bounded and configures one local origin", async () => {
+test("hermetic port allocation is bounded and configures one localhost origin", async () => {
   assert.equal(PORT_ALLOCATION_TIMEOUT_MS, 5000);
   const port = await allocateHermeticPort();
   assert.ok(port >= 1 && port <= 65_535);
@@ -138,11 +138,57 @@ test("hermetic port allocation is bounded and configures one local origin", asyn
     {},
     port
   );
-  const origin = `http://127.0.0.1:${port}`;
+  const origin = `http://localhost:${port}`;
   assert.equal(environment.PORT, String(port));
   assert.equal(environment.APP_ORIGIN, origin);
   assert.equal(environment.AUTH_URL, origin);
   assert.equal(environment.NEXTAUTH_URL, origin);
+});
+
+test("hermetic automatic port allocation checks both loopback families", async (t) => {
+  const port = await allocateHermeticPort();
+  const ipv4 = createServer();
+  const ipv6 = createServer();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ipv4.once("error", reject);
+      ipv4.listen({ host: "127.0.0.1", port }, resolve);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        ipv6.once("error", reject);
+        ipv6.listen({ host: "::1", ipv6Only: true, port }, resolve);
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EAFNOSUPPORT") {
+        t.skip("IPv6 loopback is unsupported on this host");
+        return;
+      }
+      throw error;
+    }
+  } finally {
+    await Promise.all(
+      [ipv4, ipv6].map(
+        (server) =>
+          new Promise<void>((resolve, reject) => {
+            server.close((error) => {
+              if (
+                (error as NodeJS.ErrnoException | undefined)?.code ===
+                "ERR_SERVER_NOT_RUNNING"
+              ) {
+                resolve();
+                return;
+              }
+              if (error) {
+                reject(error);
+                return;
+              }
+              resolve();
+            });
+          })
+      )
+    );
+  }
 });
 
 test("Playwright failure close surfaces output after Playwright can tear down its web server", async () => {
@@ -169,7 +215,7 @@ test("Playwright failure close surfaces output after Playwright can tear down it
   assert.doesNotMatch(source, /Promise\.race\(\[\s*completion/u);
 });
 
-test("hermetic port override rejects an occupied loopback port", async () => {
+test("hermetic port override rejects a foreign IPv4 loopback listener", async () => {
   const server = createServer();
   await new Promise<void>((resolve) => {
     server.listen({ host: "127.0.0.1", port: 0 }, resolve);
@@ -183,6 +229,37 @@ test("hermetic port override rejects an occupied loopback port", async () => {
           E2E_HERMETIC_PORT: String(address.port),
         }),
       /is unavailable/u
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test("hermetic port override rejects a foreign IPv6 loopback listener", async (t) => {
+  const server = createServer();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen({ host: "::1", ipv6Only: true, port: 0 }, resolve);
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EAFNOSUPPORT") {
+      t.skip("IPv6 loopback is unsupported on this host");
+      return;
+    }
+    throw error;
+  }
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    await assert.rejects(
+      () =>
+        allocateHermeticPort({
+          E2E_HERMETIC_PORT: String(address.port),
+        }),
+      /is unavailable on ::1/u
     );
   } finally {
     await new Promise<void>((resolve, reject) => {

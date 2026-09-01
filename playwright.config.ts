@@ -39,7 +39,7 @@ export function playwrightSettings(
 ) {
   const port = environment.PORT || "3100";
   const hermetic = environment.E2E_HERMETIC_RUNNER === "1";
-  const host = hermetic ? "127.0.0.1" : "localhost";
+  const host = "localhost";
   const baseURL = `http://${host}:${port}`;
   const basePath = environment.IS_DEMO === "1" ? "/demo" : "";
   const useProductionBuild = environment.E2E_PRODUCTION === "1";

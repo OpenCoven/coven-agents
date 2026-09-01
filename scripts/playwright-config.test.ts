@@ -39,7 +39,7 @@ test("normal Playwright config still loads .env.local", () => {
   assert.deepEqual(received, { path: ".env.local" });
 });
 
-test("hermetic Playwright config uses one IPv4 origin and a bounded suite timeout", () => {
+test("hermetic Playwright config uses a localhost origin and a bounded suite timeout", () => {
   assert.deepEqual(
     playwrightSettings({
       E2E_HERMETIC_RUNNER: "1",
@@ -47,11 +47,11 @@ test("hermetic Playwright config uses one IPv4 origin and a bounded suite timeou
       PORT: "43123",
     }),
     {
-      baseURL: "http://127.0.0.1:43123",
+      baseURL: "http://localhost:43123",
       globalTimeout: 120_000,
       webServerCommand:
-        "exec node node_modules/next/dist/bin/next dev --turbo --hostname 127.0.0.1 --port 43123",
-      webServerURL: "http://127.0.0.1:43123/demo/ping",
+        "exec node node_modules/next/dist/bin/next dev --turbo --hostname localhost --port 43123",
+      webServerURL: "http://localhost:43123/demo/ping",
     }
   );
 });
@@ -66,7 +66,7 @@ test("normal Playwright config retains localhost defaults without a global timeo
   });
 });
 
-test("hermetic production Playwright config binds Next to IPv4 loopback", () => {
+test("hermetic production Playwright config binds Next to localhost", () => {
   assert.deepEqual(
     playwrightSettings({
       E2E_HERMETIC_RUNNER: "1",
@@ -74,11 +74,11 @@ test("hermetic production Playwright config binds Next to IPv4 loopback", () => 
       PORT: "43123",
     }),
     {
-      baseURL: "http://127.0.0.1:43123",
+      baseURL: "http://localhost:43123",
       globalTimeout: 120_000,
       webServerCommand:
-        "pnpm validate:runtime && exec node node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 43123",
-      webServerURL: "http://127.0.0.1:43123/ping",
+        "pnpm validate:runtime && exec node node_modules/next/dist/bin/next start --hostname localhost --port 43123",
+      webServerURL: "http://localhost:43123/ping",
     }
   );
 });

@@ -141,7 +141,7 @@ async function openAuthenticatedPage(
   authVersion: number = account.authVersion
 ): Promise<void> {
   await signIn(page.context(), account, authVersion);
-  await page.goto("/login");
+  await page.goto("/ping");
 }
 
 function eventIds(text: string): number[] {
@@ -190,7 +190,10 @@ test.describe("hermetic subscriber browser certification", () => {
       body: agentInput(),
       method: "POST",
     });
-    expect(created.status).toBe(201);
+    expect(
+      created.status,
+      `${created.text}; page=${await page.evaluate(() => location.origin)}; expected=${LOCAL_ORIGIN}; origin=${requests.at(-1)?.headers.origin ?? "missing"}`
+    ).toBe(201);
     agentId = object(object(created.body).agent).id as string;
     const prewarm = await api(page, "/api/tenant/prewarm", { method: "POST" });
     expect([202, 204]).toContain(prewarm.status);
