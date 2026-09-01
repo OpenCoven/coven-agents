@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import NextAuth, { type DefaultSession, type Session } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
 import GitHub from "next-auth/providers/github";
@@ -7,11 +8,17 @@ import {
   validAuthVersion,
 } from "@/lib/auth/session-revocation";
 import { findOrCreateFederatedUser, findUserById } from "@/lib/db/queries";
+import { ChatbotError } from "@/lib/errors";
+import { isCanonicalUuid } from "@/lib/session";
 import {
   refreshClaimsForSessionUpdate,
   refreshTokenType,
 } from "@/lib/session-claims";
-import { userTypeFor } from "@/lib/subscription";
+import { isSubscribedAt, userTypeFor } from "@/lib/subscription";
+import {
+  type SubscriptionAuthority,
+  serializeSubscriptionAuthority,
+} from "@/lib/subscription-authority";
 import { authConfig } from "./auth.config";
 
 export type UserType = "demo" | "subscriber";
@@ -21,6 +28,7 @@ declare module "next-auth" {
     user: {
       authVersion: number;
       id: string;
+      subscriptionAuthorityExpiresAt?: string | null;
       type: UserType;
     } & DefaultSession["user"];
   }
@@ -54,10 +62,10 @@ export const {
   callbacks: {
     async jwt({ token, user, account, trigger, session: updated }) {
       /**
-       * `useSession().update()` is only a signal to reload the stored user.
-       * The browser payload is never an authority source: the avatar route
-       * commits its image first, and this refresh then picks up that image
-       * together with the current subscription and revocation version.
+       * A session update POST is only a signal to reload the stored user. The
+       * browser payload is never an authority source: the avatar route commits
+       * its image first, and this refresh then picks up that image together
+       * with the current subscription and revocation version.
        */
       if (trigger === "update") {
         return refreshClaimsForSessionUpdate(
@@ -121,6 +129,10 @@ export const {
         }
         session.user.type = token.type;
         session.user.image = token.picture ?? null;
+        session.user.subscriptionAuthorityExpiresAt =
+          typeof token.subscribedUntil === "string"
+            ? token.subscribedUntil
+            : null;
       }
 
       return session;
@@ -153,7 +165,18 @@ export const {
  * revocation. Every server-side authorization helper calls this wrapper,
  * which re-reads the user row and rejects stale or malformed versions.
  */
-export async function auth() {
+type ResolvedAuth =
+  | {
+      kind: "authorized";
+      session: Session;
+      user: NonNullable<Awaited<ReturnType<typeof findUserById>>>;
+    }
+  | {
+      kind: "storage-unavailable";
+      session: Session;
+    };
+
+async function resolveAuth(now?: Date): Promise<ResolvedAuth | null> {
   let session: Session | null;
   try {
     session = await nextAuth();
@@ -165,7 +188,7 @@ export async function auth() {
     return null;
   }
   const userId = session?.user?.id;
-  if (!userId) {
+  if (!(userId && isCanonicalUuid(userId))) {
     return null;
   }
 
@@ -174,18 +197,67 @@ export async function auth() {
     return null;
   }
 
+  if (!process.env.POSTGRES_URL) {
+    return { kind: "storage-unavailable", session };
+  }
+
   let owner: Awaited<ReturnType<typeof findUserById>>;
   try {
     owner = await findUserById(userId);
-  } catch {
+  } catch (error) {
+    if (error instanceof ChatbotError && error.surface === "database") {
+      return { kind: "storage-unavailable", session };
+    }
     return null;
   }
   if (!owner || !authVersionMatches(owner.authVersion, tokenAuthVersion)) {
     return null;
   }
 
+  const resolvedNow = now ?? new Date();
   session.user.authVersion = owner.authVersion;
-  session.user.type = userTypeFor(owner, new Date());
+  session.user.type = userTypeFor(owner, resolvedNow);
   session.user.image = owner.image ?? null;
-  return session;
+  return { kind: "authorized", session, user: owner };
+}
+
+export async function auth() {
+  const resolved = await resolveAuth();
+  return resolved?.kind === "authorized" ? resolved.session : null;
+}
+
+export async function subscriptionPageAuthority(
+  now: Date
+): Promise<SubscriptionAuthority> {
+  const resolved = await resolveAuth(now);
+  const resolutionId = randomUUID();
+  if (!resolved) {
+    return serializeSubscriptionAuthority({
+      authVersion: null,
+      checkedAt: now,
+      isSubscriber: false,
+      resolutionId,
+      subscribedUntil: null,
+      userId: null,
+    });
+  }
+  if (resolved.kind === "storage-unavailable") {
+    return serializeSubscriptionAuthority({
+      authVersion: resolved.session.user.authVersion,
+      checkedAt: now,
+      isSubscriber: resolved.session.user.type === "subscriber",
+      resolutionId,
+      subscribedUntil:
+        resolved.session.user.subscriptionAuthorityExpiresAt ?? null,
+      userId: resolved.session.user.id,
+    });
+  }
+  return serializeSubscriptionAuthority({
+    authVersion: resolved.session.user.authVersion,
+    checkedAt: now,
+    isSubscriber: isSubscribedAt(resolved.user, now),
+    resolutionId,
+    subscribedUntil: resolved.user.subscribedUntil,
+    userId: resolved.session.user.id,
+  });
 }

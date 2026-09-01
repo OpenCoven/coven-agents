@@ -17,7 +17,7 @@ const FUTURE = new Date("2026-09-30T12:00:00.000Z");
 const AUTH_SECRET = "subscription-route-verified-jwt-secret";
 const SECURE_SESSION_COOKIE = "__Secure-authjs.session-token";
 
-test("missing and noncanonical verified identities are rejected before admission", async () => {
+test("missing and noncanonical verified identities consume only the IP budget", async () => {
   await Promise.all(
     [
       null,
@@ -32,8 +32,12 @@ test("missing and noncanonical verified identities are rejected before admission
             calls.push("authenticate");
             return Promise.resolve(identityCandidate);
           },
-          enforceAbuse: () => {
-            calls.push("abuse");
+          enforceAbuse: (input) => {
+            calls.push(`abuse:${input.route}`);
+            assert.deepEqual(input, {
+              ip: null,
+              route: "subscription_read_ip",
+            });
             return Promise.resolve({ kind: "allowed" });
           },
           findUser: () => {
@@ -50,13 +54,14 @@ test("missing and noncanonical verified identities are rejected before admission
       assert.equal(response.status, 401);
       assert.deepEqual(await response.json(), { error: "unauthorized" });
       assertNoStore(response);
-      assert.deepEqual(calls, ["authenticate"]);
+      assert.deepEqual(calls, ["abuse:subscription_read_ip", "authenticate"]);
     })
   );
 });
 
-test("admission uses IP and authenticated user before the database read", async () => {
+test("admission runs IP then verification then user then one database read", async () => {
   const calls: string[] = [];
+  const admissions: unknown[] = [];
   const response = await subscriptionResponse(
     request(),
     dependenciesFor({
@@ -66,12 +71,8 @@ test("admission uses IP and authenticated user before the database read", async 
         return Promise.resolve(identity());
       },
       enforceAbuse: (input) => {
-        calls.push("abuse");
-        assert.deepEqual(input, {
-          ip: "203.0.113.10",
-          route: "subscription_read",
-          userId: USER_ID,
-        });
+        calls.push(`abuse:${input.route}`);
+        admissions.push(input);
         return Promise.resolve({ kind: "allowed" });
       },
       findUser: (userId) => {
@@ -83,20 +84,99 @@ test("admission uses IP and authenticated user before the database read", async 
   );
 
   assert.equal(response.status, 200);
-  assert.deepEqual(calls, ["authenticate", "abuse", `database:${USER_ID}`]);
+  assert.deepEqual(calls, [
+    "abuse:subscription_read_ip",
+    "authenticate",
+    "abuse:subscription_read",
+    `database:${USER_ID}`,
+  ]);
+  assert.deepEqual(admissions, [
+    {
+      ip: "203.0.113.10",
+      route: "subscription_read_ip",
+    },
+    {
+      ip: null,
+      route: "subscription_read",
+      userId: USER_ID,
+    },
+  ]);
+  assertNoStore(response);
 });
 
-test("admission denial performs no database or configuration work", async () => {
+test("IP denial or error performs no verification, database, or configuration work", async () => {
+  await Promise.all(
+    (
+      [
+        {
+          kind: "denied",
+          responseStatus: 429,
+          retryAfterSeconds: 9,
+        },
+        { kind: "unavailable", responseStatus: 503 },
+      ] as const
+    ).map(async (admission) => {
+      const calls: string[] = [];
+      const response = await subscriptionResponse(
+        request(),
+        dependenciesFor({
+          authenticate: () => {
+            calls.push("authenticate");
+            return Promise.resolve(identity());
+          },
+          checkoutEnabled: () => {
+            calls.push("configuration");
+            return true;
+          },
+          enforceAbuse: (input) => {
+            calls.push(`abuse:${input.route}`);
+            assert.deepEqual(input, {
+              ip: "203.0.113.20",
+              route: "subscription_read_ip",
+            });
+            return Promise.resolve(admission);
+          },
+          findUser: () => {
+            calls.push("database");
+            return Promise.resolve({
+              authVersion: 4,
+              subscribedUntil: FUTURE,
+            });
+          },
+        }),
+        "203.0.113.20"
+      );
+
+      assert.equal(response.status, admission.responseStatus);
+      assertNoStore(response);
+      assert.deepEqual(calls, ["abuse:subscription_read_ip"]);
+    })
+  );
+});
+
+test("user denial performs no database or configuration work", async () => {
   const calls: string[] = [];
   const response = await subscriptionResponse(
     request(),
     dependenciesFor({
+      authenticate: () => {
+        calls.push("authenticate");
+        return Promise.resolve(identity());
+      },
       checkoutEnabled: () => {
         calls.push("configuration");
         return true;
       },
-      enforceAbuse: () => {
-        calls.push("abuse");
+      enforceAbuse: (input) => {
+        calls.push(`abuse:${input.route}`);
+        if (input.route === "subscription_read_ip") {
+          return Promise.resolve({ kind: "allowed" });
+        }
+        assert.deepEqual(input, {
+          ip: null,
+          route: "subscription_read",
+          userId: USER_ID,
+        });
         return Promise.resolve({
           kind: "denied",
           responseStatus: 429,
@@ -108,12 +188,16 @@ test("admission denial performs no database or configuration work", async () => 
         return Promise.resolve({ authVersion: 4, subscribedUntil: FUTURE });
       },
     }),
-    null
+    "203.0.113.21"
   );
 
   assert.equal(response.status, 429);
   assertNoStore(response);
-  assert.deepEqual(calls, ["abuse"]);
+  assert.deepEqual(calls, [
+    "abuse:subscription_read_ip",
+    "authenticate",
+    "abuse:subscription_read",
+  ]);
 });
 
 test("active and inactive status come from the database, not token type", async () => {
@@ -248,7 +332,7 @@ test("an auth-version mismatch is revoked after exactly one admitted lookup", as
   assertNoStore(response);
 });
 
-test("verified-token infrastructure failure is unavailable without admission or database work", async () => {
+test("verified-token infrastructure failure is unavailable after IP admission without database work", async () => {
   const calls: string[] = [];
   const response = await subscriptionResponse(
     request(),
@@ -257,8 +341,8 @@ test("verified-token infrastructure failure is unavailable without admission or 
         calls.push("authenticate");
         return Promise.reject(new Error("AUTH_SECRET missing"));
       },
-      enforceAbuse: () => {
-        calls.push("abuse");
+      enforceAbuse: (input) => {
+        calls.push(`abuse:${input.route}`);
         return Promise.resolve({ kind: "allowed" });
       },
       findUser: () => {
@@ -273,7 +357,7 @@ test("verified-token infrastructure failure is unavailable without admission or 
   assert.deepEqual(await response.json(), {
     error: "subscription_unavailable",
   });
-  assert.deepEqual(calls, ["authenticate"]);
+  assert.deepEqual(calls, ["abuse:subscription_read_ip", "authenticate"]);
   assertNoStore(response);
 });
 
@@ -316,14 +400,23 @@ test("browser-supplied identity cannot select the database user", async () => {
 
 test("the production route verifies Auth.js JWT directly instead of calling auth()", () => {
   const source = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
+  const service = readFileSync(
+    new URL("../../../lib/billing/subscription-status.ts", import.meta.url),
+    "utf8"
+  );
 
   assert.match(source, /verifiedJwtIdentity/);
   assert.doesNotMatch(source, /from ["']@\/app\/\(auth\)\/auth["']/);
   assert.doesNotMatch(source, /authenticate:\s*auth/);
+  assert.doesNotMatch(
+    service,
+    /request\.(?:arrayBuffer|blob|bytes|formData|json|text)\(/
+  );
 });
 
-test("production-style JWT verification rejects invalid, expired, missing-id, and demo tokens before abuse", async () => {
+test("production-style JWT verification rejects missing, invalid, expired, missing-id, and demo tokens after IP-only admission", async () => {
   const requests = [
+    request(),
     await signedSubscriptionRequest(identityToken(), {
       secret: "subscription-route-wrong-secret",
     }),
@@ -351,8 +444,12 @@ test("production-style JWT verification rejects invalid, expired, missing-id, an
               },
             });
           },
-          enforceAbuse: () => {
-            calls.push("abuse");
+          enforceAbuse: (input) => {
+            calls.push(`abuse:${input.route}`);
+            assert.deepEqual(input, {
+              ip: "203.0.113.49",
+              route: "subscription_read_ip",
+            });
             return Promise.resolve({ kind: "allowed" });
           },
           findUser: () => {
@@ -360,17 +457,17 @@ test("production-style JWT verification rejects invalid, expired, missing-id, an
             return Promise.resolve({ authVersion: 4, subscribedUntil: FUTURE });
           },
         }),
-        null
+        "203.0.113.49"
       );
 
       assert.equal(response.status, 401);
-      assert.deepEqual(calls, ["verify"]);
+      assert.deepEqual(calls, ["abuse:subscription_read_ip", "verify"]);
       assertNoStore(response);
     })
   );
 });
 
-test("production-style JWT verification admits before one authority lookup", async () => {
+test("production-style JWT verification follows IP then verify then user then one authority lookup", async () => {
   const calls: string[] = [];
   let lookups = 0;
   const response = await subscriptionResponse(
@@ -385,8 +482,8 @@ test("production-style JWT verification admits before one authority lookup", asy
           },
         });
       },
-      enforceAbuse: () => {
-        calls.push("abuse");
+      enforceAbuse: (input) => {
+        calls.push(`abuse:${input.route}`);
         return Promise.resolve({ kind: "allowed" });
       },
       findUser: () => {
@@ -399,8 +496,14 @@ test("production-style JWT verification admits before one authority lookup", asy
   );
 
   assert.equal(response.status, 200);
-  assert.deepEqual(calls, ["verify", "abuse", "database"]);
+  assert.deepEqual(calls, [
+    "abuse:subscription_read_ip",
+    "verify",
+    "abuse:subscription_read",
+    "database",
+  ]);
   assert.equal(lookups, 1);
+  assertNoStore(response);
 });
 
 function dependenciesFor(

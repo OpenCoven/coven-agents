@@ -52,6 +52,7 @@ import {
   type as type_,
   well,
 } from "@/components/console/styles";
+import { useSubscriptionAuthorityRefresh } from "@/hooks/use-subscription-authority-refresh";
 import { RunnerApiError, RunnerClient } from "@/lib/agents/client";
 import {
   type ApplicationRunnerStatusKind,
@@ -60,6 +61,7 @@ import {
 } from "@/lib/agents/connection-status";
 import type { Formation } from "@/lib/agents/formations";
 import { memberName } from "@/lib/agents/formations";
+import { browserApplicationLoginHref } from "@/lib/application-path";
 import { avatarFor } from "@/lib/avatar";
 import { isTerminal, projectRun } from "@/lib/console/blocks";
 import { formatDuration, glyphFor, spanBetween } from "@/lib/console/format";
@@ -70,6 +72,7 @@ import {
   resetCredentialCache,
   updateCredentialEligibility,
 } from "@/lib/credentials/client";
+import type { SubscriptionAuthority } from "@/lib/subscription-authority";
 
 const TICK_MS = 1000;
 const COMPACT_VIEWPORT_MAX = 720;
@@ -106,7 +109,13 @@ type View = "analytics" | "composer" | "create" | "settings" | "thread";
  * it on the right. The record is the product — everything else is a way to get
  * to one, or a way to start one that will produce another.
  */
-export function RunConsole() {
+export function RunConsole({
+  checkoutEnabled,
+  subscriptionAuthority,
+}: {
+  checkoutEnabled: boolean;
+  subscriptionAuthority: SubscriptionAuthority;
+}) {
   const session = useSession();
   /**
    * Who the console attributes a mission to.
@@ -124,12 +133,31 @@ export function RunConsole() {
    * change when someone changes their address.
    */
   const accountId = session.data?.user?.id ?? null;
+  const {
+    authorityRevision,
+    invalidateAndRefresh,
+    isSubscriber,
+    subscribedUntil,
+  } = useSubscriptionAuthorityRefresh({
+    authority: subscriptionAuthority,
+    authVersion: session.data?.user?.authVersion,
+    status: session.status,
+    type: session.data?.user?.type,
+    userId: accountId,
+  });
   const sessionIdentity = [
     session.status,
     accountId ?? "",
-    session.data?.user?.type ?? "",
+    isSubscriber ? "subscriber" : "demo",
     session.data?.user?.authVersion ?? "",
+    authorityRevision ?? "",
   ].join(":");
+  const credentialOwner = accountId
+    ? `${accountId}:${session.data?.user?.authVersion ?? ""}`
+    : null;
+  const credentialRequestAuthority = credentialOwner
+    ? `${credentialOwner}:${authorityRevision ?? ""}`
+    : null;
   const avatarSrc = accountId
     ? avatarFor({ id: accountId, image: session.data?.user?.image })
     : null;
@@ -495,7 +523,7 @@ export function RunConsole() {
       resetCredentialCache();
       return () => controller.abort();
     }
-    if (session.data.user.type !== "subscriber") {
+    if (!isSubscriber) {
       setRunnerStatus("subscription_required");
       setHasCredential(null);
       credentialOwnerRef.current = null;
@@ -509,13 +537,23 @@ export function RunConsole() {
       isCurrent: () => isCurrentSession(generation, controller.signal),
       signal: controller.signal,
     });
-    if (credentialOwnerRef.current !== accountId) {
-      credentialOwnerRef.current = accountId;
+    if (credentialOwnerRef.current !== credentialOwner) {
+      credentialOwnerRef.current = credentialOwner;
       resetCredentialCache();
     }
-    fetchHasCredential()
+    fetchHasCredential(undefined, credentialRequestAuthority)
       .then((has) => {
-        if (has !== null && isCurrentSession(generation, controller.signal)) {
+        if (!isCurrentSession(generation, controller.signal)) {
+          return;
+        }
+        if (
+          has === "authentication_required" ||
+          has === "subscription_required"
+        ) {
+          invalidateAndRefresh();
+          return;
+        }
+        if (has !== null) {
           setHasCredential(has);
         }
       })
@@ -530,38 +568,33 @@ export function RunConsole() {
   }, [
     accountId,
     client,
+    credentialOwner,
+    credentialRequestAuthority,
     isCurrentSession,
     refresh,
-    session.data?.user?.type,
+    isSubscriber,
+    invalidateAndRefresh,
     session.status,
     sessionIdentity,
   ]);
 
   const refreshCurrent = useCallback(() => {
     const controller = sessionAbortRef.current;
-    if (
-      !(
-        controller &&
-        session.status === "authenticated" &&
-        session.data.user.type === "subscriber"
-      )
-    ) {
+    if (!(controller && session.status === "authenticated" && isSubscriber)) {
       return Promise.resolve();
     }
     return refresh(sessionGenerationRef.current, controller.signal);
-  }, [refresh, session.data?.user?.type, session.status]);
+  }, [isSubscriber, refresh, session.status]);
 
   const currentSessionContext = useCallback(() => {
     const controller = sessionAbortRef.current;
-    return controller &&
-      session.status === "authenticated" &&
-      session.data.user.type === "subscriber"
+    return controller && session.status === "authenticated" && isSubscriber
       ? {
           generation: sessionGenerationRef.current,
           signal: controller.signal,
         }
       : null;
-  }, [session.data?.user?.type, session.status]);
+  }, [isSubscriber, session.status]);
 
   useEffect(() => {
     if (session.status !== "authenticated" || runnerStatus !== "rate_limited") {
@@ -1102,7 +1135,11 @@ export function RunConsole() {
 
   const openCreate = useCallback(() => {
     if (session.status !== "authenticated") {
-      window.location.assign("/login");
+      window.location.assign(
+        browserApplicationLoginHref(
+          `${window.location.pathname}${window.location.search}${window.location.hash}`
+        )
+      );
       return;
     }
     setView("create");
@@ -1389,8 +1426,13 @@ export function RunConsole() {
         ) : view === "settings" ? (
           <Settings
             account={account}
+            authorityRevision={authorityRevision}
+            checkoutEnabled={checkoutEnabled}
+            invalidateSubscriptionAuthority={invalidateAndRefresh}
+            isSubscriber={isSubscriber}
             onCredentialsChange={onCredentialsChange}
             operationContext={settingsOperationContext}
+            subscribedUntil={subscribedUntil}
           />
         ) : view === "create" ? (
           <CreateAgent

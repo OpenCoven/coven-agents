@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { abusePolicyFor } from "./policy";
+import { MemoryAbuseStore } from "./store";
 import { ABUSE_ROUTES, type AbusePolicy, type AbuseRoute } from "./types";
 
 const EXPECTED_ROUTES = [
   "auth_start",
   "auth_callback",
+  "auth_session_read_ip",
   "auth_session_update_ip",
   "auth_session_update",
   "chat",
@@ -21,6 +23,7 @@ const EXPECTED_ROUTES = [
   "vote_write",
   "upload",
   "checkout",
+  "subscription_read_ip",
   "subscription_read",
   "avatar_read",
   "avatar_write",
@@ -57,6 +60,7 @@ const EXPECTED_ROUTES = [
 const EXPECTED_POLICIES = {
   analytics_read: expectedPolicy(["ip", "user"], 0, 20, 60, 100, 3600),
   auth_callback: expectedPolicy(["ip"], 16_384, 10, 60, 40, 3600),
+  auth_session_read_ip: expectedPolicy(["ip"], 0, 600, 60, 10_000, 3600),
   auth_session_update: expectedPolicy(["user"], 16_384, 20, 60, 100, 3600),
   auth_session_update_ip: expectedPolicy(["ip"], 16_384, 120, 60, 1200, 3600),
   auth_start: expectedPolicy(["ip"], 0, 5, 60, 20, 3600),
@@ -69,9 +73,9 @@ const EXPECTED_POLICIES = {
   credential_device_poll: expectedPolicy(
     ["ip", "user"],
     8192,
-    12,
+    90,
     60,
-    60,
+    1200,
     3600
   ),
   credential_device_start: expectedPolicy(["ip", "user"], 0, 2, 300, 5, 3600),
@@ -97,7 +101,8 @@ const EXPECTED_POLICIES = {
   skill_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   skill_write: expectedPolicy(["ip", "tenant"], 8192, 10, 60, 40, 3600),
   stripe_webhook: expectedPolicy(["ip"], 262_144, 600, 60, 10_000, 3600),
-  subscription_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
+  subscription_read: expectedPolicy(["user"], 0, 60, 60, 600, 3600),
+  subscription_read_ip: expectedPolicy(["ip"], 0, 600, 60, 10_000, 3600),
   suggestions_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   team_delete: expectedPolicy(["ip", "tenant"], 0, 5, 60, 20, 3600),
   team_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
@@ -137,6 +142,64 @@ test("Stripe webhook admission is IP-only and preserves the registered budget", 
     abusePolicyFor("stripe_webhook"),
     expectedPolicy(["ip"], 262_144, 600, 60, 10_000, 3600)
   );
+});
+
+test("subscription reads use a generous IP gate before the existing user budget", () => {
+  assert.deepEqual(
+    abusePolicyFor("subscription_read_ip"),
+    expectedPolicy(["ip"], 0, 600, 60, 10_000, 3600)
+  );
+  assert.deepEqual(
+    abusePolicyFor("subscription_read"),
+    expectedPolicy(["user"], 0, 60, 60, 600, 3600)
+  );
+});
+
+test("session reads use the dedicated high-headroom IP-only budget", () => {
+  assert.deepEqual(
+    abusePolicyFor("auth_session_read_ip"),
+    expectedPolicy(["ip"], 0, 600, 60, 10_000, 3600)
+  );
+});
+
+test("credential device polling admits complete flows with bounded retry and reconnect headroom", async () => {
+  const store = new MemoryAbuseStore();
+  const cadencePolls = 900 / 5;
+  const completeFlowEquivalents = abusePolicyFor("credential_device_start")
+    .sustained.limit;
+  let admitted = 0;
+
+  assert.equal(cadencePolls, 180);
+  assert.equal(completeFlowEquivalents, 5);
+
+  for (let poll = 0; poll < cadencePolls; poll += 1) {
+    const nowMs = poll * 5000;
+    const retryPolls = poll < 120 ? 2 : 1;
+
+    for (
+      let attempt = 0;
+      attempt < completeFlowEquivalents + retryPolls;
+      attempt += 1
+    ) {
+      // biome-ignore lint/performance/noAwaitInLoops: fixed-window simulation must consume in timestamp order
+      assert.equal(await consumeCredentialDevicePoll(store, nowMs), true);
+      admitted += 1;
+    }
+  }
+
+  assert.equal(admitted, 1200);
+  assert.equal(await consumeCredentialDevicePoll(store, 895_000), false);
+});
+
+test("credential device polling still rejects an excessive one-minute flood", async () => {
+  const store = new MemoryAbuseStore();
+
+  for (let attempt = 0; attempt < 90; attempt += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: fixed-window simulation must consume in request order
+    assert.equal(await consumeCredentialDevicePoll(store, 0), true);
+  }
+
+  assert.equal(await consumeCredentialDevicePoll(store, 0), false);
 });
 
 test("every policy has valid finite integer bounds and subjects", () => {
@@ -240,4 +303,29 @@ function assertPositiveWindow(
     window.windowSeconds > 0,
     `${label}.windowSeconds must be positive`
   );
+}
+
+async function consumeCredentialDevicePoll(
+  store: MemoryAbuseStore,
+  nowMs: number
+): Promise<boolean> {
+  const policy = abusePolicyFor("credential_device_poll");
+  const results = await Promise.all(
+    policy.subjects.flatMap((subject) => [
+      store.consume(
+        `credential_device_poll:burst:${subject}:shared`,
+        policy.burst.limit,
+        policy.burst.windowSeconds,
+        nowMs
+      ),
+      store.consume(
+        `credential_device_poll:sustained:${subject}:shared`,
+        policy.sustained.limit,
+        policy.sustained.windowSeconds,
+        nowMs
+      ),
+    ])
+  );
+
+  return results.every((result) => result.allowed);
 }

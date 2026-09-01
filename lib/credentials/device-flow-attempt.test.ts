@@ -56,3 +56,76 @@ test("a lost response retries the request key and rotates only after success", a
   assert.deepEqual(requestedKeys, ["attempt-one", "attempt-one"]);
   assert.equal(attempt.key(), "attempt-two");
 });
+
+test("device flow starts beneath the configured application base path", async () => {
+  const previous = process.env.NEXT_PUBLIC_BASE_PATH;
+  process.env.NEXT_PUBLIC_BASE_PATH = "/demo";
+  const inputs: string[] = [];
+  try {
+    await requestDeviceFlowStart({
+      attempt: createDeviceFlowAttempt(() => "attempt-one"),
+      fetcher: (input) => {
+        inputs.push(String(input));
+        return Promise.resolve(
+          Response.json({
+            deviceCode: "device-secret",
+            interval: 5,
+            userCode: "ABCD-EFGH",
+            verificationUri: "https://github.com/login/device",
+          })
+        );
+      },
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.NEXT_PUBLIC_BASE_PATH;
+    } else {
+      process.env.NEXT_PUBLIC_BASE_PATH = previous;
+    }
+  }
+  assert.deepEqual(inputs, ["/demo/api/credentials/device"]);
+});
+
+test("device flow start errors preserve authorization refusal status", async () => {
+  const attempt = createDeviceFlowAttempt(() => "attempt-one");
+
+  await assert.rejects(
+    requestDeviceFlowStart({
+      attempt,
+      fetcher: () =>
+        Promise.resolve(
+          Response.json({ error: "authentication_required" }, { status: 401 })
+        ),
+    }),
+    (error: unknown) =>
+      error instanceof Error && "status" in error && error.status === 401
+  );
+});
+
+test("a stale start success cannot reset a replacement attempt key", async () => {
+  const generated = ["attempt-one", "attempt-two", "attempt-three"];
+  const attempt = createDeviceFlowAttempt(() => generated.shift() ?? "extra");
+  let resolveResponse!: (response: Response) => void;
+  const response = new Promise<Response>((resolve) => {
+    resolveResponse = resolve;
+  });
+
+  const stale = requestDeviceFlowStart({
+    attempt,
+    fetcher: () => response,
+  });
+  attempt.reset();
+  assert.equal(attempt.key(), "attempt-two");
+  resolveResponse(
+    Response.json({
+      binding: "stale-owner-binding",
+      deviceCode: "stale-device-secret",
+      interval: 5,
+      userCode: "ABCD-EFGH",
+      verificationUri: "https://github.com/login/device",
+    })
+  );
+
+  await stale;
+  assert.equal(attempt.key(), "attempt-two");
+});

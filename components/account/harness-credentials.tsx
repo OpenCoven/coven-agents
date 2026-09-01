@@ -2,12 +2,13 @@
 
 import { HARNESS_SPECS } from "@opencoven/harness";
 import { Check, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { ConnectCopilot } from "@/components/account/connect-copilot";
 import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { browserApplicationPath } from "@/lib/application-path";
 
 /**
  * Where a tenant supplies their own harness credential.
@@ -45,38 +46,180 @@ const HARNESSES = HARNESS_SPECS.filter((spec) => spec.supported).map(
     label: spec.label,
   })
 );
+const CREDENTIAL_ENDPOINT = browserApplicationPath("/api/credentials");
 
-export function HarnessCredentials() {
+type CredentialOperation = Readonly<{
+  authorityContext: string;
+  controller: AbortController;
+  generation: number;
+}>;
+
+type CredentialLock = Readonly<{
+  authorityContext: string;
+  reason: "session" | "subscription";
+}>;
+
+export function HarnessCredentials({
+  authorityContextRevision,
+  authorityRevision,
+  isSubscriber,
+  onAuthorityInvalidated,
+}: {
+  authorityContextRevision: string;
+  authorityRevision: string | null;
+  isSubscriber: boolean;
+  onAuthorityInvalidated: () => void;
+}) {
   const [configured, setConfigured] = useState<string[]>([]);
   const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
-  const [locked, setLocked] = useState(false);
+  const [stateAuthorityContext, setStateAuthorityContext] = useState<
+    string | null
+  >(null);
+  const [credentialLock, setCredentialLock] = useState<CredentialLock | null>(
+    null
+  );
+  const authorityContext = `${authorityContextRevision}:${isSubscriber ? "subscriber" : "demo"}`;
+  const authorityContextRef = useRef(authorityContext);
+  authorityContextRef.current = authorityContext;
+  const authorityInvalidatedRef = useRef(onAuthorityInvalidated);
+  authorityInvalidatedRef.current = onAuthorityInvalidated;
+  const isSubscriberRef = useRef(isSubscriber);
+  isSubscriberRef.current = isSubscriber;
+  const activeControllerRef = useRef<AbortController | null>(null);
+  const generationRef = useRef(0);
+  const mountedRef = useRef(false);
+  const scheduledLoadRef = useRef(0);
+  const stateIsCurrent = stateAuthorityContext === authorityContext;
+  const visibleConfigured = stateIsCurrent ? configured : [];
+  const visibleValues = stateIsCurrent ? values : {};
+  const visibleBusy = stateIsCurrent ? busy : null;
+  const currentLock =
+    stateIsCurrent && credentialLock?.authorityContext === authorityContext
+      ? credentialLock
+      : null;
+  const locked = !isSubscriber || currentLock !== null;
+
+  const abortActiveOperation = useCallback(() => {
+    generationRef.current += 1;
+    activeControllerRef.current?.abort();
+    activeControllerRef.current = null;
+  }, []);
+
+  const beginOperation = useCallback((): CredentialOperation | null => {
+    const requestAuthorityContext = authorityContextRef.current;
+    if (!isSubscriberRef.current) {
+      return null;
+    }
+    abortActiveOperation();
+    const controller = new AbortController();
+    activeControllerRef.current = controller;
+    return {
+      authorityContext: requestAuthorityContext,
+      controller,
+      generation: generationRef.current,
+    };
+  }, [abortActiveOperation]);
+
+  const operationIsCurrent = useCallback(
+    (operation: CredentialOperation): boolean =>
+      mountedRef.current &&
+      !operation.controller.signal.aborted &&
+      activeControllerRef.current === operation.controller &&
+      generationRef.current === operation.generation &&
+      authorityContextRef.current === operation.authorityContext &&
+      isSubscriberRef.current,
+    []
+  );
+
+  const finishOperation = useCallback((operation: CredentialOperation) => {
+    if (activeControllerRef.current === operation.controller) {
+      activeControllerRef.current = null;
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
-    const response = await fetch("/api/credentials");
+    const operation = beginOperation();
+    if (!operation) {
+      return;
+    }
+    setBusy(null);
+    let response: Response;
+    try {
+      response = await fetch(CREDENTIAL_ENDPOINT, {
+        signal: operation.controller.signal,
+      });
+    } catch {
+      if (operationIsCurrent(operation)) {
+        finishOperation(operation);
+      }
+      return;
+    }
+    if (!operationIsCurrent(operation)) {
+      return;
+    }
 
-    if (response.status === 403) {
-      // A guest account cannot store one, and saying so beats a form that
-      // fails on submit.
-      setLocked(true);
+    if (response.status === 401 || response.status === 403) {
+      setCredentialLock({
+        authorityContext: operation.authorityContext,
+        reason: response.status === 401 ? "session" : "subscription",
+      });
+      setConfigured([]);
+      setValues({});
+      finishOperation(operation);
+      authorityInvalidatedRef.current();
       return;
     }
 
     if (!response.ok) {
+      finishOperation(operation);
       return;
     }
 
     const body = (await response.json()) as { harnessIds?: string[] };
+    if (!operationIsCurrent(operation)) {
+      return;
+    }
     setConfigured(body.harnessIds ?? []);
-  }, []);
+    finishOperation(operation);
+  }, [beginOperation, finishOperation, operationIsCurrent]);
 
   const reload = useCallback(() => {
     refresh().catch(() => undefined);
   }, [refresh]);
 
-  useEffect(() => {
-    reload();
-  }, [reload]);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      scheduledLoadRef.current += 1;
+      abortActiveOperation();
+    };
+  }, [abortActiveOperation]);
+
+  useLayoutEffect(() => {
+    abortActiveOperation();
+    setStateAuthorityContext(authorityContext);
+    setConfigured([]);
+    setValues({});
+    setBusy(null);
+    setCredentialLock(null);
+    scheduledLoadRef.current += 1;
+    const scheduledLoad = scheduledLoadRef.current;
+    if (!isSubscriber) {
+      return;
+    }
+    queueMicrotask(() => {
+      if (
+        mountedRef.current &&
+        scheduledLoadRef.current === scheduledLoad &&
+        authorityContextRef.current === authorityContext &&
+        isSubscriberRef.current
+      ) {
+        reload();
+      }
+    });
+  }, [abortActiveOperation, authorityContext, isSubscriber, reload]);
 
   const change = useCallback((harnessId: string, next: string) => {
     setValues((current) => ({ ...current, [harnessId]: next }));
@@ -91,22 +234,52 @@ export function HarnessCredentials() {
       }
 
       setBusy(harnessId);
+      const operation = beginOperation();
+      if (!operation) {
+        setBusy(null);
+        return false;
+      }
 
       try {
-        const response = await fetch("/api/credentials", {
+        const response = await fetch(CREDENTIAL_ENDPOINT, {
           body: JSON.stringify({ credential, harnessId }),
           headers: { "content-type": "application/json" },
           method: "POST",
+          signal: operation.controller.signal,
         });
+        if (!operationIsCurrent(operation)) {
+          return false;
+        }
 
         if (response.status === 422) {
           // A rejected token is the person's to fix, so it is shown verbatim
           // rather than folded into a generic failure. The typed value is
           // deliberately kept so they can see and correct it.
           const body = (await response.json()) as { message?: string };
+          if (!operationIsCurrent(operation)) {
+            return false;
+          }
 
           toast({
             description: body.message ?? "That token was rejected.",
+            type: "error",
+          });
+          return false;
+        }
+
+        if (response.status === 401 || response.status === 403) {
+          setCredentialLock({
+            authorityContext: operation.authorityContext,
+            reason: response.status === 401 ? "session" : "subscription",
+          });
+          setConfigured([]);
+          setValues({});
+          authorityInvalidatedRef.current();
+          toast({
+            description:
+              response.status === 401
+                ? "Sign in again."
+                : "Storing a credential needs an active subscription.",
             type: "error",
           });
           return false;
@@ -120,48 +293,87 @@ export function HarnessCredentials() {
         // component state after the write succeeded.
         setValues((current) => ({ ...current, [harnessId]: "" }));
         toast({ description: "Credential stored.", type: "success" });
+        finishOperation(operation);
         await refresh();
         return true;
       } catch {
-        toast({
-          description: "Could not store the credential.",
-          type: "error",
-        });
+        if (operationIsCurrent(operation)) {
+          toast({
+            description: "Could not store the credential.",
+            type: "error",
+          });
+        }
         return false;
       } finally {
-        setBusy(null);
+        if (operationIsCurrent(operation)) {
+          setBusy(null);
+          finishOperation(operation);
+        }
       }
     },
-    [refresh, values]
+    [beginOperation, finishOperation, operationIsCurrent, refresh, values]
   );
 
   const remove = useCallback(
     async (harnessId: string) => {
       setBusy(harnessId);
+      const operation = beginOperation();
+      if (!operation) {
+        setBusy(null);
+        return;
+      }
 
       try {
-        const response = await fetch("/api/credentials", {
+        const response = await fetch(CREDENTIAL_ENDPOINT, {
           body: JSON.stringify({ harnessId }),
           headers: { "content-type": "application/json" },
           method: "DELETE",
+          signal: operation.controller.signal,
         });
+        if (!operationIsCurrent(operation)) {
+          return;
+        }
+
+        if (response.status === 401 || response.status === 403) {
+          setCredentialLock({
+            authorityContext: operation.authorityContext,
+            reason: response.status === 401 ? "session" : "subscription",
+          });
+          setConfigured([]);
+          setValues({});
+          authorityInvalidatedRef.current();
+          toast({
+            description:
+              response.status === 401
+                ? "Sign in again."
+                : "Storing a credential needs an active subscription.",
+            type: "error",
+          });
+          return;
+        }
 
         if (!response.ok) {
           throw new Error(String(response.status));
         }
 
         toast({ description: "Credential removed.", type: "success" });
+        finishOperation(operation);
         await refresh();
       } catch {
-        toast({
-          description: "Could not remove the credential.",
-          type: "error",
-        });
+        if (operationIsCurrent(operation)) {
+          toast({
+            description: "Could not remove the credential.",
+            type: "error",
+          });
+        }
       } finally {
-        setBusy(null);
+        if (operationIsCurrent(operation)) {
+          setBusy(null);
+          finishOperation(operation);
+        }
       }
     },
-    [refresh]
+    [beginOperation, finishOperation, operationIsCurrent, refresh]
   );
 
   return (
@@ -176,20 +388,26 @@ export function HarnessCredentials() {
 
       {locked ? (
         <p className="text-[13px] text-muted-foreground">
-          Storing a credential needs an active subscription.
+          {currentLock?.reason === "session"
+            ? "Sign in again to manage harness credentials."
+            : "Storing a credential needs an active subscription."}
         </p>
       ) : (
         HARNESSES.map((harness) => (
           <HarnessRow
-            busy={busy === harness.id}
-            configured={configured.includes(harness.id)}
+            authorityContextRevision={authorityContextRevision}
+            authorityRevision={authorityRevision}
+            busy={visibleBusy === harness.id}
+            configured={visibleConfigured.includes(harness.id)}
             harness={harness}
+            isSubscriber={isSubscriber}
             key={harness.id}
+            onAuthorityInvalidated={onAuthorityInvalidated}
             onChange={change}
             onConnected={reload}
             onRemove={remove}
             onSave={save}
-            value={values[harness.id] ?? ""}
+            value={visibleValues[harness.id] ?? ""}
           />
         ))
       )}
@@ -198,17 +416,25 @@ export function HarnessCredentials() {
 }
 
 function HarnessRow({
+  authorityContextRevision,
+  authorityRevision,
   busy,
   configured,
   harness,
+  isSubscriber,
   onChange,
+  onAuthorityInvalidated,
   onConnected,
   onRemove,
   onSave,
   value,
 }: {
+  authorityContextRevision: string;
+  authorityRevision: string | null;
   busy: boolean;
   configured: boolean;
+  isSubscriber: boolean;
+  onAuthorityInvalidated: () => void;
   onConnected: () => void;
   harness: { help: string; id: string; label: string };
   onChange: (harnessId: string, next: string) => void;
@@ -225,7 +451,9 @@ function HarnessRow({
    * credential is already working, so the common case is doing nothing; the
    * ways to change it are worth one click.
    */
-  const [replacing, setReplacing] = useState(false);
+  const rowAuthorityContext = `${authorityContextRevision}:${authorityRevision ?? ""}:${isSubscriber ? "subscriber" : "demo"}`;
+  const [replacingFor, setReplacingFor] = useState<string | null>(null);
+  const replacing = replacingFor === rowAuthorityContext;
   const showEditor = !configured || replacing;
 
   // Bound here rather than at the call site so the parent passes stable
@@ -242,7 +470,7 @@ function HarnessRow({
     onSave(harness.id)
       .then((stored) => {
         if (stored) {
-          setReplacing(false);
+          setReplacingFor(null);
         }
       })
       .catch(() => undefined);
@@ -253,16 +481,16 @@ function HarnessRow({
   const handleConnected = useCallback(() => {
     // Device flow succeeded, so the editor has done its job and closes with
     // the same gesture a successful paste uses.
-    setReplacing(false);
+    setReplacingFor(null);
     onConnected();
   }, [onConnected]);
   const stopReplacing = useCallback(() => {
-    setReplacing(false);
+    setReplacingFor(null);
     onChange(harness.id, "");
   }, [harness.id, onChange]);
   const startReplacing = useCallback(() => {
-    setReplacing(true);
-  }, []);
+    setReplacingFor(rowAuthorityContext);
+  }, [rowAuthorityContext]);
 
   return (
     <div className="flex flex-col gap-2">
@@ -314,7 +542,11 @@ function HarnessRow({
       {showEditor && harness.id === "copilot" ? (
         <>
           <ConnectCopilot
+            authorityContextRevision={authorityContextRevision}
+            authorityRevision={authorityRevision}
             configured={configured}
+            isSubscriber={isSubscriber}
+            onAuthorityInvalidated={onAuthorityInvalidated}
             onConnected={handleConnected}
           />
           <div className="flex items-center gap-3 py-1">

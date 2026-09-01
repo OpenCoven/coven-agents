@@ -3,9 +3,37 @@ import test from "node:test";
 import {
   createCredentialRefreshFence,
   fetchHasCredential,
+  isCredentialAuthorityRequestCurrent,
   resetCredentialCache,
   updateCredentialEligibility,
 } from "./client";
+
+test("credential responses require both their operation and authority contexts to remain current", () => {
+  assert.equal(
+    isCredentialAuthorityRequestCurrent({
+      currentAuthorityContext: "user:revision-2",
+      operationIsCurrent: true,
+      requestAuthorityContext: "user:revision-1",
+    }),
+    false
+  );
+  assert.equal(
+    isCredentialAuthorityRequestCurrent({
+      currentAuthorityContext: "user:revision-1",
+      operationIsCurrent: false,
+      requestAuthorityContext: "user:revision-1",
+    }),
+    false
+  );
+  assert.equal(
+    isCredentialAuthorityRequestCurrent({
+      currentAuthorityContext: "user:revision-1",
+      operationIsCurrent: true,
+      requestAuthorityContext: "user:revision-1",
+    }),
+    true
+  );
+});
 
 test("the browser credential summary is fetched once", async () => {
   resetCredentialCache();
@@ -22,6 +50,28 @@ test("the browser credential summary is fetched once", async () => {
   assert.equal(calls, 1);
 });
 
+test("the browser credential summary uses the configured application base path", async () => {
+  resetCredentialCache();
+  const previous = process.env.NEXT_PUBLIC_BASE_PATH;
+  process.env.NEXT_PUBLIC_BASE_PATH = "/demo";
+  const paths: string[] = [];
+  try {
+    await fetchHasCredential((input) => {
+      paths.push(input);
+      return Promise.resolve(
+        Response.json({ harnessIds: [] }, { status: 200 })
+      );
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.NEXT_PUBLIC_BASE_PATH;
+    } else {
+      process.env.NEXT_PUBLIC_BASE_PATH = previous;
+    }
+  }
+  assert.deepEqual(paths, ["/demo/api/credentials"]);
+});
+
 test("an unreadable credential summary is not cached", async () => {
   resetCredentialCache();
   let calls = 0;
@@ -33,6 +83,32 @@ test("an unreadable credential summary is not cached", async () => {
   assert.equal(await fetchHasCredential(failing), null);
   assert.equal(await fetchHasCredential(failing), null);
   assert.equal(calls, 2);
+});
+
+test("a subscription-refused credential summary is exposed to the authority owner", async () => {
+  resetCredentialCache();
+
+  assert.equal(
+    await fetchHasCredential(() =>
+      Promise.resolve(
+        Response.json({ error: "subscription_required" }, { status: 403 })
+      )
+    ),
+    "subscription_required"
+  );
+});
+
+test("an authentication-refused credential summary is exposed to the authority owner", async () => {
+  resetCredentialCache();
+
+  assert.equal(
+    await fetchHasCredential(() =>
+      Promise.resolve(
+        Response.json({ error: "authentication_required" }, { status: 401 })
+      )
+    ),
+    "authentication_required"
+  );
 });
 
 test("successful credential refreshes replace cached run eligibility", async () => {
@@ -69,6 +145,50 @@ test("an older in-flight summary cannot overwrite a successful credential update
   assert.equal(await pending, true);
   assert.equal(await fetchHasCredential(), true);
 });
+
+test("a replacement authority never attaches to an older in-flight refusal", async () => {
+  resetCredentialCache();
+  let resolveOld!: (response: Response) => void;
+  const oldResponse = new Promise<Response>((resolve) => {
+    resolveOld = resolve;
+  });
+  let newCalls = 0;
+
+  const old = fetchHasCredential(() => oldResponse, "user:1:resolution-one");
+  const replacement = fetchHasCredential(() => {
+    newCalls += 1;
+    return Promise.resolve(Response.json({ harnessIds: ["copilot"] }));
+  }, "user:1:resolution-two");
+  resolveOld(
+    Response.json({ error: "subscription_required" }, { status: 403 })
+  );
+
+  assert.equal(await replacement, true);
+  assert.equal(await old, "subscription_required");
+  assert.equal(newCalls, 1);
+});
+
+for (const refusal of [
+  { result: "authentication_required", status: 401 },
+  { result: "subscription_required", status: 403 },
+] as const) {
+  test(`an in-flight ${refusal.status} remains authoritative after a credential cache update`, async () => {
+    resetCredentialCache();
+    let resolveResponse!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => {
+      resolveResponse = resolve;
+    });
+
+    const pending = fetchHasCredential(() => response);
+    updateCredentialEligibility(["copilot"]);
+    resolveResponse(
+      Response.json({ error: refusal.result }, { status: refusal.status })
+    );
+
+    assert.equal(await pending, refusal.result);
+    assert.equal(await fetchHasCredential(), true);
+  });
+}
 
 test("credential refresh fencing rejects stale epochs, overlapping reads, and unmounted updates", () => {
   const fence = createCredentialRefreshFence();

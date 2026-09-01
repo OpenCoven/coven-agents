@@ -20,6 +20,7 @@ import {
   harnessesEnvelopeSchema,
 } from "@opencoven/harness";
 import { z } from "zod";
+import { browserApplicationPath } from "@/lib/application-path";
 
 const DEFAULT_RECONNECT_DELAY_MS = 1000;
 const DEFAULT_START_RETRY_DELAY_MS = 250;
@@ -440,7 +441,7 @@ export class BrowserRunnerTransport implements RunnerTransport {
     }
 
     try {
-      const response = await this.request(path, {
+      const response = await this.request(browserApplicationPath(path), {
         body: options.body,
         credentials: "same-origin",
         headers: {

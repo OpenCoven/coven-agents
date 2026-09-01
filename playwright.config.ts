@@ -20,6 +20,7 @@ const nextCommand = "node node_modules/next/dist/bin/next";
  * of the WebServer respecting the correct set port
  */
 const baseURL = `http://localhost:${PORT}`;
+const basePath = process.env.IS_DEMO === "1" ? "/demo" : "";
 
 /**
  * See https://playwright.dev/docs/test-configuration.
@@ -101,7 +102,7 @@ export default defineConfig({
     },
     reuseExistingServer: false,
     timeout: 120 * 1000,
-    url: `${baseURL}/ping`,
+    url: `${baseURL}${basePath}/ping`,
   },
   /* Limit workers to prevent browser crashes */
   workers: process.env.CI ? 2 : 2,

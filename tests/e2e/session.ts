@@ -5,7 +5,20 @@ export const E2E_USER_ID = "00000000-0000-4000-8000-000000000001";
 const SESSION_COOKIE = "authjs.session-token";
 const SECURE_SESSION_COOKIE = "__Secure-authjs.session-token";
 
-export function subscriberCookies(email = "e2e-user@example.invalid") {
+export function sessionCookies(
+  type: "demo" | "subscriber",
+  {
+    authVersion = 1,
+    email = "e2e-user@example.invalid",
+    id = E2E_USER_ID,
+    subscribedUntil = type === "subscriber" ? "2099-01-01T00:00:00.000Z" : null,
+  }: {
+    authVersion?: number;
+    email?: string;
+    id?: string;
+    subscribedUntil?: string | null;
+  } = {}
+) {
   const secret = process.env.AUTH_SECRET;
   if (!secret) {
     throw new Error("AUTH_SECRET is required for subscriber browser contracts");
@@ -27,13 +40,18 @@ export function subscriberCookies(email = "e2e-user@example.invalid") {
         salt: name,
         secret,
         token: {
+          authVersion,
           email,
-          id: E2E_USER_ID,
+          id,
           name: "E2E subscriber",
-          subscribedUntil: "2099-01-01T00:00:00.000Z",
-          type: "subscriber",
+          subscribedUntil,
+          type,
         },
       }),
     }))
   );
+}
+
+export function subscriberCookies(email = "e2e-user@example.invalid") {
+  return sessionCookies("subscriber", { email });
 }

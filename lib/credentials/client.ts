@@ -1,4 +1,20 @@
+import { browserApplicationPath } from "@/lib/application-path";
+
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+
+export function isCredentialAuthorityRequestCurrent({
+  currentAuthorityContext,
+  operationIsCurrent,
+  requestAuthorityContext,
+}: {
+  currentAuthorityContext: string;
+  operationIsCurrent: boolean;
+  requestAuthorityContext: string;
+}): boolean {
+  return (
+    operationIsCurrent && requestAuthorityContext === currentAuthorityContext
+  );
+}
 
 export type CredentialRefreshTicket = Readonly<{
   generation: number;
@@ -46,24 +62,49 @@ export function createCredentialRefreshFence(): CredentialRefreshFence {
   };
 }
 
-let credentialsInFlight: Promise<boolean | null> | null = null;
+export type CredentialEligibility =
+  | "authentication_required"
+  | boolean
+  | "subscription_required"
+  | null;
+
+let credentialsInFlight: Promise<CredentialEligibility> | null = null;
+let credentialAuthorityContext: string | null = null;
 let credentialEligibility: boolean | null = null;
 let credentialVersion = 0;
 
 export function fetchHasCredential(
-  fetchImpl: FetchLike = (input, init) => fetch(input, init)
-): Promise<boolean | null> {
+  fetchImpl: FetchLike = (input, init) => fetch(input, init),
+  authorityContext: string | null = null
+): Promise<CredentialEligibility> {
+  if (
+    authorityContext !== null &&
+    authorityContext !== credentialAuthorityContext
+  ) {
+    credentialAuthorityContext = authorityContext;
+    credentialVersion += 1;
+    credentialEligibility = null;
+    credentialsInFlight = null;
+  }
   credentialsInFlight ??= (async () => {
     const requestVersion = credentialVersion;
     try {
-      const response = await fetchImpl("/api/credentials");
+      const response = await fetchImpl(
+        browserApplicationPath("/api/credentials")
+      );
 
       if (!response.ok) {
+        const authorityRefusal =
+          response.status === 401
+            ? "authentication_required"
+            : response.status === 403
+              ? "subscription_required"
+              : null;
         if (requestVersion === credentialVersion) {
           credentialsInFlight = null;
           credentialEligibility = null;
         }
-        return credentialEligibility;
+        return authorityRefusal ?? credentialEligibility;
       }
 
       const body = (await response.json()) as { harnessIds?: string[] };
@@ -98,6 +139,7 @@ export function updateCredentialEligibility(
 /** Test seam. */
 export function resetCredentialCache(): void {
   credentialVersion += 1;
+  credentialAuthorityContext = null;
   credentialEligibility = null;
   credentialsInFlight = null;
 }
