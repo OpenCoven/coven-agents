@@ -43,6 +43,12 @@ export type TenantCertificationCounts = Readonly<{
   usage: number;
 }>;
 
+export type RunCertificationCounts = Readonly<{
+  provenance: number;
+  records: number;
+  usage: number;
+}>;
+
 export async function seedHermeticUsers(url: string): Promise<void> {
   const sql = database(url);
   try {
@@ -114,12 +120,17 @@ export async function tenantCertificationCounts(
 export async function incrementHermeticAuthVersion(
   userId: string,
   url = process.env.POSTGRES_URL
-): Promise<void> {
+): Promise<number> {
   const sql = database(url);
   try {
-    await sql`UPDATE "User"
+    const [updated] = await sql<{ authVersion: number }[]>`UPDATE "User"
       SET "authVersion" = "authVersion" + 1, "updatedAt" = now()
-      WHERE "id" = ${userId}`;
+      WHERE "id" = ${userId}
+      RETURNING "authVersion"`;
+    if (!updated) {
+      throw new Error("Hermetic user was not found.");
+    }
+    return updated.authVersion;
   } finally {
     await sql.end({ timeout: 2 });
   }
@@ -128,15 +139,70 @@ export async function incrementHermeticAuthVersion(
 export async function revokeHermeticEntitlement(
   userId: string,
   url = process.env.POSTGRES_URL
-): Promise<void> {
+): Promise<number> {
   const sql = database(url);
   try {
-    await sql`UPDATE "User"
+    const [updated] = await sql<{ authVersion: number }[]>`UPDATE "User"
       SET "authVersion" = "authVersion" + 1,
           "billingPeriodStart" = NULL,
           "subscribedUntil" = NULL,
           "updatedAt" = now()
-      WHERE "id" = ${userId}`;
+      WHERE "id" = ${userId}
+      RETURNING "authVersion"`;
+    if (!updated) {
+      throw new Error("Hermetic user was not found.");
+    }
+    return updated.authVersion;
+  } finally {
+    await sql.end({ timeout: 2 });
+  }
+}
+
+export async function restoreHermeticSubscriberEntitlement(
+  userId: string,
+  url = process.env.POSTGRES_URL
+): Promise<number> {
+  const sql = database(url);
+  try {
+    const [updated] = await sql<{ authVersion: number }[]>`UPDATE "User"
+      SET "authVersion" = "authVersion" + 1,
+          "billingPeriodStart" = ${"2098-12-01T00:00:00.000Z"},
+          "subscribedUntil" = ${HERMETIC_USERS.subscriberA.subscribedUntil},
+          "updatedAt" = now()
+      WHERE "id" = ${userId}
+      RETURNING "authVersion"`;
+    if (!updated) {
+      throw new Error("Hermetic user was not found.");
+    }
+    return updated.authVersion;
+  } finally {
+    await sql.end({ timeout: 2 });
+  }
+}
+
+export async function runCertificationCounts(
+  runId: string,
+  url = process.env.POSTGRES_URL
+): Promise<RunCertificationCounts> {
+  const sql = database(url);
+  try {
+    const [run] = await sql<{ provenance: string; records: string }[]>`
+      SELECT
+        count(*) FILTER (WHERE "executionProvenance" IS NOT NULL)::text AS "provenance",
+        count(*)::text AS "records"
+      FROM "RunnerRun"
+      WHERE "id" = ${runId}
+    `;
+    const [usage] = await sql<{ count: string }[]>`
+      SELECT count(*)::text AS "count"
+      FROM "RunUsage"
+      WHERE "runId" = ${runId}
+    `;
+    return {
+      provenance: Number(run?.provenance ?? 0),
+      records: Number(run?.records ?? 0),
+      usage: Number(usage?.count ?? 0),
+    };
   } finally {
     await sql.end({ timeout: 2 });
   }

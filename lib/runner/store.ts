@@ -164,6 +164,10 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
     agentModel: column(row, "agentModel"),
     agentRuntime: column(row, "agentRuntime"),
     agentWorkspace: column(row, "agentWorkspace"),
+    authorityRevalidation:
+      row.authorityRevalidation === undefined
+        ? false
+        : column(row, "authorityRevalidation"),
     authVersion: column(row, "authVersion"),
     cancellationRequestedAt: nullableTimestampColumn(
       row,
@@ -434,7 +438,11 @@ async function activeDispatchCount(
       {},
       sql`SELECT count(*)::integer AS "activeCount"
         FROM "RunnerRun"
-        WHERE "dispatchState" IN ('dispatching', 'running')
+        WHERE (
+          (
+            "dispatchState" IN ('dispatching', 'running')
+            AND "authorityRevalidation" = false
+          )
           OR (
             "dispatchState" = 'terminal'
             AND (
@@ -442,7 +450,8 @@ async function activeDispatchCount(
               OR "daytonaCommandId" IS NOT NULL
               OR "daytonaSessionId" IS NOT NULL
             )
-          )`
+          )
+        )`
     )
   );
   return row ? numericColumn(row, "activeCount") : 0;
@@ -459,8 +468,14 @@ async function queuedTenantCount(
       sql`SELECT count(*)::integer AS "queuedCount"
         FROM "RunnerRun"
         WHERE "tenant" = ${tenant}
-          AND "dispatchState" = 'queued'
-          AND "status" = 'queued'`
+          AND "status" = 'queued'
+          AND (
+            "dispatchState" = 'queued'
+            OR (
+              "dispatchState" = 'dispatching'
+              AND "authorityRevalidation" = true
+            )
+          )`
     )
   );
   return row ? numericColumn(row, "queuedCount") : 0;
@@ -494,10 +509,20 @@ async function selectEligibleDispatch(
             AND "queued"."status" = 'queued'
             AND NOT EXISTS (
               SELECT 1
+              FROM "RunnerRun" AS "revalidating"
+              WHERE "revalidating"."dispatchState" = 'dispatching'
+                AND "revalidating"."authorityRevalidation" = true
+                AND "revalidating"."queueSequence" < "queued"."queueSequence"
+            )
+            AND NOT EXISTS (
+              SELECT 1
               FROM "RunnerRun" AS "agentActive"
               WHERE "agentActive"."agentId" = "queued"."agentId"
                 AND (
-                  "agentActive"."dispatchState" IN ('dispatching', 'running')
+                  (
+                    "agentActive"."dispatchState" IN ('dispatching', 'running')
+                    AND "agentActive"."authorityRevalidation" = false
+                  )
                   OR (
                     "agentActive"."dispatchState" = 'terminal'
                     AND (
@@ -513,7 +538,10 @@ async function selectEligibleDispatch(
               FROM "RunnerRun" AS "tenantActive"
               WHERE "tenantActive"."tenant" = "queued"."tenant"
                 AND (
-                  "tenantActive"."dispatchState" IN ('dispatching', 'running')
+                  (
+                    "tenantActive"."dispatchState" IN ('dispatching', 'running')
+                    AND "tenantActive"."authorityRevalidation" = false
+                  )
                   OR (
                     "tenantActive"."dispatchState" = 'terminal'
                     AND (
@@ -555,21 +583,61 @@ async function selectEligibleDispatch(
   return row ? asRun(row) : null;
 }
 
+/**
+ * An authority preflight claims no execution capacity. It deliberately skips
+ * scheduler fairness and active-run filters so a revoked queued run is closed
+ * even when other runs currently occupy the tenant's execution slots.
+ */
+async function selectQueuedDispatchForRevalidation(
+  transaction: RunnerStoreTransaction,
+  excludedRunIds: readonly string[]
+): Promise<RunnerRunRecord | null> {
+  const excluded = excludedRunIds.length
+    ? sql`AND "id" NOT IN (${sql.join(
+        excludedRunIds.map((runId) => sql`${runId}`),
+        sql`, `
+      )})`
+    : sql``;
+  const [row] = await transaction.execute(
+    statement(
+      "lock-queued-dispatch-for-revalidation",
+      {},
+      sql`SELECT *
+        FROM "RunnerRun"
+        WHERE "dispatchState" = 'queued'
+          AND "status" = 'queued'
+          ${excluded}
+        ORDER BY "updatedAt" ASC, "queueSequence" ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED`
+    )
+  );
+  return row ? asRun(row) : null;
+}
+
+type ClaimedDispatchInput = DispatchClaimInput &
+  Readonly<{ authorityRevalidation?: boolean }>;
+
+type RevalidationDispatchClaimInput = ClaimedDispatchInput &
+  Readonly<{ excludedRunIds?: readonly string[] }>;
+
 async function claimLockedDispatch(
   transaction: RunnerStoreTransaction,
   candidate: RunnerRunRecord,
-  input: DispatchClaimInput
+  input: ClaimedDispatchInput
 ): Promise<RunnerRunRecord | null> {
   const [updated] = await transaction.execute(
     statement(
       "claim-next-dispatch",
       {
+        authorityRevalidation: input.authorityRevalidation ?? false,
         leaseExpiresAt: input.leaseExpiresAt,
         leaseToken: input.leaseToken,
         runId: candidate.id,
       },
       sql`UPDATE "RunnerRun"
         SET "dispatchState" = 'dispatching',
+            "authorityRevalidation" = ${input.authorityRevalidation ?? false},
             "dispatchLeaseToken" = ${input.leaseToken},
             "dispatchLeaseExpiresAt" = ${timestampParameter(input.leaseExpiresAt)},
             "updatedAt" = clock_timestamp(),
@@ -577,6 +645,7 @@ async function claimLockedDispatch(
         WHERE "id" = ${candidate.id}
           AND "dispatchState" = 'queued'
           AND "status" = 'queued'
+          AND "authorityRevalidation" = false
         RETURNING *`
     )
   );
@@ -2341,6 +2410,30 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         } satisfies RunnerClaimedDispatch;
       }),
 
+    claimQueuedDispatchForRevalidation: (
+      _operator: RunnerOperator,
+      input: RevalidationDispatchClaimInput
+    ) =>
+      database.transaction(async (transaction) => {
+        const candidate = await selectQueuedDispatchForRevalidation(
+          transaction,
+          input.excludedRunIds ?? []
+        );
+        if (!candidate) {
+          return null;
+        }
+        const claimed = await claimLockedDispatch(transaction, candidate, {
+          ...input,
+          authorityRevalidation: true,
+        });
+        return claimed
+          ? {
+              authority: dispatchAuthority(claimed),
+              run: claimed,
+            }
+          : null;
+      }),
+
     /**
      * Terminal rows retain their attempt until the provider session and staged
      * credential are gone. An expired terminal lease can be safely claimed by
@@ -2823,6 +2916,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               SET "commandEvidence" = CAST(${JSON.stringify(input.commandEvidence)} AS jsonb),
                   "completedAt" = ${timestampParameter(input.completedAt)},
                   "dispatchState" = 'terminal',
+                  "authorityRevalidation" = false,
                   "error" = CAST(${input.error ? JSON.stringify(input.error) : null} AS jsonb),
                   "fileEvidence" = CAST(${JSON.stringify(input.fileEvidence)} AS jsonb),
                   "logCursor" = ${eventId},
@@ -2853,6 +2947,25 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             },
             sql`UPDATE "RunnerAgent"
               SET "status" = CASE
+                    WHEN EXISTS (
+                      SELECT 1
+                      FROM "RunnerRun" AS "otherActive"
+                      WHERE "otherActive"."agentId" = ${finalized.agentId}
+                        AND "otherActive"."tenant" = ${finalized.tenant}
+                        AND "otherActive"."id" <> ${finalized.id}
+                        AND "otherActive"."authorityRevalidation" = false
+                        AND (
+                          "otherActive"."dispatchState" IN ('dispatching', 'running')
+                          OR (
+                            "otherActive"."dispatchState" = 'terminal'
+                            AND (
+                              "otherActive"."daytonaAttemptId" IS NOT NULL
+                              OR "otherActive"."daytonaCommandId" IS NOT NULL
+                              OR "otherActive"."daytonaSessionId" IS NOT NULL
+                            )
+                          )
+                        )
+                    ) THEN 'running'
                     WHEN ${input.status} = 'failed' THEN 'error'
                     ELSE 'idle'
                   END,
@@ -3664,6 +3777,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               SET "dispatchLeaseToken" = NULL,
                   "dispatchLeaseExpiresAt" = NULL,
                   "dispatchState" = 'queued',
+                  "authorityRevalidation" = false,
                   "updatedAt" = clock_timestamp(),
                   "version" = "version" + 1
               WHERE "id" = ${run.id}
@@ -3839,6 +3953,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                   "daytonaSessionId" = NULL,
                   "daytonaCommandId" = NULL,
                   "daytonaLogCursor" = 0,
+                  "authorityRevalidation" = false,
                   "executionProvenance" = NULL,
                   "dispatchLeaseToken" = NULL,
                   "dispatchLeaseExpiresAt" = NULL,
@@ -3929,6 +4044,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                   "dispatchState" = 'queued',
                   "status" = 'queued',
                   "startedAt" = NULL,
+                  "authorityRevalidation" = false,
                   "executionProvenance" = NULL,
                   "updatedAt" = now(),
                   "version" = "version" + 1

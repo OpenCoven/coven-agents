@@ -555,6 +555,7 @@ test("migration 0024 adds fail-closed runner execution permission after existing
   assert.ok(
     migration.indexOf(backfillTeam) < migration.indexOf(backfillOrdinary)
   );
+
   assert.ok(
     migration.indexOf(backfillOrdinary) < migration.indexOf(setDefault)
   );
@@ -618,4 +619,36 @@ test("migration 0024 adds fail-closed runner execution permission after existing
       notNull: true,
     }
   );
+});
+
+test("migration 0031 adds the capacity-neutral authority revalidation marker", () => {
+  const directory = new URL("../db/migrations/", import.meta.url);
+  const migrationName = readdirSync(directory).find((name) =>
+    name.startsWith("0031_")
+  );
+
+  assert.ok(migrationName, "authority revalidation migration must exist");
+  const migration = readFileSync(new URL(migrationName, directory), "utf8");
+  assert.match(
+    migration,
+    /ALTER TABLE "RunnerRun" ADD COLUMN "authorityRevalidation" boolean DEFAULT false NOT NULL/u
+  );
+
+  const journal = JSON.parse(
+    readFileSync(new URL("meta/_journal.json", directory), "utf8")
+  ) as { entries: { idx: number; tag: string }[] };
+  assert.deepEqual(
+    journal.entries.find((entry) => entry.idx === 31),
+    {
+      ...journal.entries.find((entry) => entry.idx === 31),
+      idx: 31,
+      tag: migrationName.replace(/\.sql$/u, ""),
+    }
+  );
+
+  const snapshot = readFileSync(
+    new URL("meta/0031_snapshot.json", directory),
+    "utf8"
+  );
+  assert.match(snapshot, /"authorityRevalidation"/u);
 });

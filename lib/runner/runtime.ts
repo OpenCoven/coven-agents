@@ -32,6 +32,7 @@ import type {
 const OPERATOR: RunnerOperator = { kind: "runner-operator" };
 const RECONCILIATION_LEASE_TTL_SECONDS = 360;
 const HERMETIC_DISPATCH_LEASE_MS = 1000;
+const QUEUED_AUTHORITY_PREFLIGHT_BATCH_SIZE = 20;
 const EMPTY_RECONCILIATION_COUNTS: RunnerReconciliationResult = {
   adopted: 0,
   deferred: 0,
@@ -87,6 +88,11 @@ export type ProductionClaimDependencies = Readonly<{
     "cleanupTerminalLease" | "finalizeRun" | "releaseUnstartedDispatch"
   >;
 }>;
+
+type ProductionQueuedAuthorityPreflightDependencies = Pick<
+  ProductionClaimDependencies,
+  "clock" | "environment" | "findAccount" | "operator" | "store"
+>;
 
 export type ProductionRunnerRuntimeDependencies = Readonly<{
   databaseFor?: ProductionDatabaseFactory;
@@ -269,6 +275,104 @@ async function releaseUnstartedClaim(
   }
 }
 
+async function terminalizeRevokedProductionClaim(
+  claimed: RunnerClaimedDispatch,
+  dependencies: ProductionQueuedAuthorityPreflightDependencies
+): Promise<RunnerDispatchResult> {
+  const { terminalizeUnstartedDispatchFailure } = await import("./admission");
+  const terminalized = await terminalizeUnstartedDispatchFailure(
+    dependencies,
+    claimed.authority,
+    claimed.run,
+    "authority_revoked",
+    "Run authority is no longer valid.",
+    false
+  );
+  return terminalized
+    ? { kind: "refused", reason: "authority", runId: claimed.run.id }
+    : {
+        kind: "retained",
+        reason: "cleanup_pending",
+        runId: claimed.run.id,
+      };
+}
+
+/**
+ * Revalidates a claimed queued run without obtaining credentials or reaching
+ * the executor. Eligible work is put back exactly where the scheduler found
+ * it; revoked work is terminalized before capacity can defer that decision.
+ */
+export async function preflightQueuedProductionClaim(
+  claimed: RunnerClaimedDispatch,
+  dependencies: ProductionQueuedAuthorityPreflightDependencies
+): Promise<"released" | "retained" | "terminalized"> {
+  let decision: CredentialContextDecision;
+  try {
+    decision = await credentialContextForRun(claimed.run, dependencies);
+  } catch {
+    decision = { kind: "unavailable" };
+  }
+  if (decision.kind === "authority_revoked") {
+    return (await terminalizeRevokedProductionClaim(claimed, dependencies))
+      .kind === "refused"
+      ? "terminalized"
+      : "retained";
+  }
+  return (
+    await releaseUnstartedClaim(
+      dependencies.store,
+      claimed,
+      dependencies.operator
+    )
+  ).kind === "retained"
+    ? "retained"
+    : "released";
+}
+
+/**
+ * Performs bounded capacity-independent queued authority checks per
+ * reconciliation. The normal scheduler still owns all execution admission.
+ */
+export async function preflightQueuedProductionDispatch(
+  dependencies: ProductionQueuedAuthorityPreflightDependencies &
+    Readonly<{
+      dispatchLeaseMs: number;
+      store: Pick<
+        RunnerStore,
+        | "claimQueuedDispatchForRevalidation"
+        | "cleanupTerminalLease"
+        | "finalizeRun"
+        | "releaseUnstartedDispatch"
+      >;
+    }>
+): Promise<void> {
+  const excludedRunIds: string[] = [];
+  for (
+    let index = 0;
+    index < QUEUED_AUTHORITY_PREFLIGHT_BATCH_SIZE;
+    index += 1
+  ) {
+    // biome-ignore lint/performance/noAwaitInLoops: Claims must stay sequential so each revalidation lease is fenced.
+    const claimed = await dependencies.store.claimQueuedDispatchForRevalidation(
+      dependencies.operator,
+      {
+        ...nextDispatchLease(dependencies.dispatchLeaseMs),
+        excludedRunIds,
+      }
+    );
+    if (!claimed) {
+      return;
+    }
+    excludedRunIds.push(claimed.run.id);
+    if (
+      (await preflightQueuedProductionClaim(claimed, dependencies)) ===
+      "retained"
+    ) {
+      throw new Error("Queued authority preflight cleanup is pending.");
+    }
+  }
+}
+
 export async function dispatchProductionClaim(
   claimed: RunnerClaimedDispatch,
   dependencies: ProductionClaimDependencies
@@ -284,22 +388,7 @@ export async function dispatchProductionClaim(
     );
   }
   if (decision.kind === "authority_revoked") {
-    const { terminalizeUnstartedDispatchFailure } = await import("./admission");
-    const terminalized = await terminalizeUnstartedDispatchFailure(
-      dependencies,
-      claimed.authority,
-      claimed.run,
-      "authority_revoked",
-      "Run authority is no longer valid.",
-      false
-    );
-    return terminalized
-      ? { kind: "refused", reason: "authority", runId: claimed.run.id }
-      : {
-          kind: "retained",
-          reason: "cleanup_pending",
-          runId: claimed.run.id,
-        };
+    return terminalizeRevokedProductionClaim(claimed, dependencies);
   }
   if (decision.kind === "unavailable") {
     return releaseUnstartedClaim(
@@ -529,6 +618,13 @@ function hermeticProductionReconcile(
               undefined,
               findAccount
             ),
+            preflightQueuedDispatch: () =>
+              preflightQueuedProductionDispatch({
+                dispatchLeaseMs: HERMETIC_DISPATCH_LEASE_MS,
+                findAccount,
+                operator: OPERATOR,
+                store,
+              }),
             projectTeamRuns: teams.projectTerminalSteps,
           });
         },

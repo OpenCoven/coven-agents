@@ -10,7 +10,9 @@ import {
   HERMETIC_USERS,
   incrementHermeticAuthVersion,
   providerProvenanceForRun,
+  restoreHermeticSubscriberEntitlement,
   revokeHermeticEntitlement,
+  runCertificationCounts,
   runnerRunOutcomeForRun,
   tenantCertificationCounts,
 } from "./hermetic-db";
@@ -35,6 +37,11 @@ type ApiResult = Readonly<{
   text: string;
 }>;
 
+type ReconciliationResult = Readonly<{
+  dispatched: number;
+  execution: "executed" | "skipped";
+}>;
+
 let agentId = "";
 let completedRunId = "";
 
@@ -47,14 +54,15 @@ function tenantFor(
 async function signIn(
   context: BrowserContext,
   account: (typeof HERMETIC_USERS)[keyof typeof HERMETIC_USERS],
-  authVersion: number = account.authVersion
+  authVersion: number = account.authVersion,
+  subscribedUntil: string | null = account.subscribedUntil
 ): Promise<void> {
   await context.addCookies(
     await sessionCookies("subscriber", {
       authVersion,
       email: account.email,
       id: account.id,
-      subscribedUntil: account.subscribedUntil,
+      subscribedUntil,
     })
   );
 }
@@ -116,63 +124,74 @@ function runIdFrom(result: ApiResult): string {
   return run.id as string;
 }
 
-async function reconcileOnce(request: APIRequestContext): Promise<void> {
+async function reconcileOnce(
+  request: APIRequestContext
+): Promise<ReconciliationResult> {
   const response = await request.get("/api/internal/runner-reconcile", {
     headers: { authorization: `Bearer ${CRON_SECRET}` },
   });
   expect(response.status()).toBe(200);
   const result = object(await response.json());
-  expect(["executed", "skipped"]).toContain(result.execution);
+  const { execution } = result;
+  expect(["executed", "skipped"]).toContain(execution);
   expect(result.failures).toBe(0);
+  expect(result.dispatched).toEqual(expect.any(Number));
+  return {
+    dispatched: result.dispatched as number,
+    execution: execution as ReconciliationResult["execution"],
+  };
 }
 
-async function reconcileUntilRunning(
+async function reconcileUntilExecuted(
+  request: APIRequestContext,
+  page: Page,
+  remaining = 40
+): Promise<ReconciliationResult> {
+  const result = await reconcileOnce(request);
+  if (result.execution === "executed") {
+    return result;
+  }
+  if (remaining === 1) {
+    throw new Error("Operator reconciliation remained overlapped.");
+  }
+  await page.waitForTimeout(50);
+  return reconcileUntilExecuted(request, page, remaining - 1);
+}
+
+async function reconcileUntilRunStatus(
   request: APIRequestContext,
   page: Page,
   runId: string,
-  remaining = 5
-): Promise<boolean> {
-  await reconcileOnce(request);
-  const run = object(object((await api(page, `/api/runs/${runId}`)).body).run);
-  if (run.status === "running") {
-    return true;
-  }
-  if (remaining === 1) {
-    return false;
-  }
-  await page.waitForTimeout(50);
-  return reconcileUntilRunning(request, page, runId, remaining - 1);
-}
-
-async function reconcile(
-  request: APIRequestContext,
-  page?: Page
+  expectedStatus: "completed" | "failed" | "running",
+  remaining = 120
 ): Promise<void> {
-  const execute = async () => {
-    const response = await request.get("/api/internal/runner-reconcile", {
-      headers: { authorization: `Bearer ${CRON_SECRET}` },
-    });
-    expect(response.status()).toBe(200);
-    const result = object(await response.json());
-    expect(result.execution).toBe("executed");
-    expect(result.failures).toBe(0);
-  };
-  if (!page) {
-    await execute();
+  const run = await providerProvenanceForRun(runId);
+  if (run.status === expectedStatus) {
     return;
   }
-  await page.waitForTimeout(1100);
-  await execute();
-  await page.waitForTimeout(1100);
-  await execute();
+  expect(["queued", "running"]).toContain(run.status);
+  if (remaining === 1) {
+    expect(run.status).toBe(expectedStatus);
+    return;
+  }
+  await reconcileUntilExecuted(request, page);
+  await page.waitForTimeout(50);
+  return reconcileUntilRunStatus(
+    request,
+    page,
+    runId,
+    expectedStatus,
+    remaining - 1
+  );
 }
 
 async function openAuthenticatedPage(
   page: Page,
   account: (typeof HERMETIC_USERS)[keyof typeof HERMETIC_USERS],
-  authVersion: number = account.authVersion
+  authVersion: number = account.authVersion,
+  subscribedUntil: string | null = account.subscribedUntil
 ): Promise<void> {
-  await signIn(page.context(), account, authVersion);
+  await signIn(page.context(), account, authVersion, subscribedUntil);
   await page.goto("/ping");
 }
 
@@ -240,7 +259,7 @@ test.describe("hermetic subscriber browser certification", () => {
     expect(started.status).toBe(202);
     completedRunId = runIdFrom(started);
 
-    await reconcile(request, page);
+    await reconcileUntilRunStatus(request, page, completedRunId, "completed");
     const completed = await api(page, `/api/runs/${completedRunId}`);
     expect(completed.status).toBe(200);
     expect(object(object(completed.body).run)).toMatchObject({
@@ -430,7 +449,7 @@ test.describe("hermetic subscriber browser certification", () => {
     });
     expect(started.status).toBe(202);
     const heldRunId = runIdFrom(started);
-    await reconcile(request, page);
+    await reconcileUntilRunStatus(request, page, heldRunId, "running");
     expect(
       object(object((await api(page, `/api/runs/${heldRunId}`)).body).run)
     ).toMatchObject({
@@ -444,7 +463,7 @@ test.describe("hermetic subscriber browser certification", () => {
     expect(object(object(stopped.body).run)).toMatchObject({
       status: "cancelled",
     });
-    await reconcile(request, page);
+    await reconcileUntilExecuted(request, page);
     expect(
       object(object((await api(page, `/api/runs/${heldRunId}`)).body).run)
     ).toMatchObject({
@@ -460,15 +479,20 @@ test.describe("hermetic subscriber browser certification", () => {
     });
   });
 
-  test("finishes one launched attempt after revocation without admitting another", async ({
+  test("finishes one durably launched attempt after revocation", async ({
     page,
     request,
   }) => {
-    const eligibleAuthVersion = HERMETIC_USERS.subscriberA.authVersion + 1;
+    const eligibleAuthVersion = await restoreHermeticSubscriberEntitlement(
+      HERMETIC_USERS.subscriberA.id
+    );
     await openAuthenticatedPage(
       page,
       HERMETIC_USERS.subscriberA,
       eligibleAuthVersion
+    );
+    const beforeStart = await tenantCertificationCounts(
+      tenantFor(HERMETIC_USERS.subscriberA)
     );
     const started = await api(page, `/api/agents/${agentId}/runs`, {
       body: {
@@ -480,112 +504,238 @@ test.describe("hermetic subscriber browser certification", () => {
     expect(started.status).toBe(202);
     const runId = runIdFrom(started);
 
-    expect(await reconcileUntilRunning(request, page, runId)).toBe(true);
-    const capacityHolder = await api(page, `/api/agents/${agentId}/runs`, {
+    await reconcileUntilRunStatus(request, page, runId, "running");
+    expect(await providerProvenanceForRun(runId)).toEqual({
+      provider: "hermetic",
+      status: "running",
+    });
+    expect(await runCertificationCounts(runId)).toEqual({
+      provenance: 1,
+      records: 1,
+      usage: 1,
+    });
+
+    const revokedAuthVersion = await revokeHermeticEntitlement(
+      HERMETIC_USERS.subscriberA.id
+    );
+    expect(revokedAuthVersion).toBeGreaterThan(eligibleAuthVersion);
+    await reconcileUntilRunStatus(request, page, runId, "completed");
+
+    expect(await providerProvenanceForRun(runId)).toEqual({
+      provider: "hermetic",
+      status: "completed",
+    });
+    expect(await runCertificationCounts(runId)).toEqual({
+      provenance: 1,
+      records: 1,
+      usage: 1,
+    });
+    const afterCompletion = await tenantCertificationCounts(
+      tenantFor(HERMETIC_USERS.subscriberA)
+    );
+    expect(afterCompletion).toMatchObject({
+      agents: beforeStart.agents,
+      credentials: beforeStart.credentials,
+      runs: beforeStart.runs + 1,
+      usage: beforeStart.usage + 1,
+    });
+
+    for (const result of await Promise.all([
+      api(page, `/api/runs/${runId}`),
+      api(page, "/api/credentials"),
+      api(page, "/api/credentials", {
+        body: {
+          credential: "hermetic-dummy-copilot-token",
+          harnessId: "copilot",
+        },
+        method: "POST",
+      }),
+      api(page, "/api/tenant/prewarm", { method: "POST" }),
+      api(page, `/api/agents/${agentId}/runs`, {
+        body: {
+          operationId: "10000000-0000-4000-8000-000000000005",
+          task: "Old authority must not dispatch.",
+        },
+        method: "POST",
+      }),
+    ])) {
+      expect(result.status).toBe(401);
+    }
+
+    await page.context().clearCookies();
+    await openAuthenticatedPage(
+      page,
+      HERMETIC_USERS.subscriberA,
+      revokedAuthVersion,
+      null
+    );
+    for (const result of await Promise.all([
+      api(page, `/api/runs/${runId}`),
+      api(page, "/api/credentials"),
+      api(page, "/api/credentials", {
+        body: {
+          credential: "hermetic-dummy-copilot-token",
+          harnessId: "copilot",
+        },
+        method: "POST",
+      }),
+      api(page, "/api/tenant/prewarm", { method: "POST" }),
+      api(page, `/api/agents/${agentId}/runs`, {
+        body: {
+          operationId: "10000000-0000-4000-8000-000000000006",
+          task: "Fresh ineligible authority must not dispatch.",
+        },
+        method: "POST",
+      }),
+    ])) {
+      expect(result.status).toBe(403);
+    }
+    expect(
+      await tenantCertificationCounts(tenantFor(HERMETIC_USERS.subscriberA))
+    ).toEqual(afterCompletion);
+
+    await restoreHermeticSubscriberEntitlement(HERMETIC_USERS.subscriberA.id);
+  });
+
+  test("revokes tenant-cap queued work before provider effects", async ({
+    page,
+    request,
+  }) => {
+    const eligibleAuthVersion = await restoreHermeticSubscriberEntitlement(
+      HERMETIC_USERS.subscriberA.id
+    );
+    await openAuthenticatedPage(
+      page,
+      HERMETIC_USERS.subscriberA,
+      eligibleAuthVersion
+    );
+
+    const agentIds = await Promise.all(
+      [
+        "Hermetic held tenant capacity one",
+        "Hermetic held tenant capacity two",
+        "Hermetic queued tenant capacity",
+      ].map(async (name) => {
+        const created = await api(page, "/api/agents", {
+          body: agentInput(name),
+          method: "POST",
+        });
+        expect(created.status).toBe(201);
+        const { id } = object(object(created.body).agent);
+        expect(id).toEqual(expect.any(String));
+        return id as string;
+      })
+    );
+    const [firstAgentId, secondAgentId, queuedAgentId] = agentIds;
+
+    const firstHeld = await api(page, `/api/agents/${firstAgentId}/runs`, {
       body: {
-        operationId: "10000000-0000-4000-8000-000000000005",
-        task: "Hold queued capacity for revocation certification.",
+        operationId: "10000000-0000-4000-8000-000000000007",
+        task: "Hold tenant capacity one [[hermetic:hold]]",
       },
       method: "POST",
     });
-    expect(capacityHolder.status).toBe(202);
-    const capacityHolderRunId = runIdFrom(capacityHolder);
-    expect(
-      await reconcileUntilRunning(request, page, capacityHolderRunId)
-    ).toBe(true);
-    const queued = await api(page, `/api/agents/${agentId}/runs`, {
+    expect(firstHeld.status).toBe(202);
+    const firstHeldRunId = runIdFrom(firstHeld);
+    await reconcileUntilRunStatus(request, page, firstHeldRunId, "running");
+
+    const secondHeld = await api(page, `/api/agents/${secondAgentId}/runs`, {
       body: {
-        operationId: "10000000-0000-4000-8000-000000000006",
-        task: "Must not launch after revocation.",
+        operationId: "10000000-0000-4000-8000-000000000008",
+        task: "Hold tenant capacity two [[hermetic:hold]]",
+      },
+      method: "POST",
+    });
+    expect(secondHeld.status).toBe(202);
+    const secondHeldRunId = runIdFrom(secondHeld);
+    await reconcileUntilRunStatus(request, page, secondHeldRunId, "running");
+
+    const queued = await api(page, `/api/agents/${queuedAgentId}/runs`, {
+      body: {
+        operationId: "10000000-0000-4000-8000-000000000009",
+        task: "Fail before provider admission after authority revocation.",
       },
       method: "POST",
     });
     expect(queued.status).toBe(202);
     const queuedRunId = runIdFrom(queued);
-    expect(
-      object(object((await api(page, `/api/runs/${queuedRunId}`)).body).run)
-    ).toMatchObject({ status: "queued" });
-    expect(await providerProvenanceForRun(runId)).toEqual({
-      provider: "hermetic",
-      status: "running",
+
+    const capacityReconciliation = await reconcileUntilExecuted(request, page);
+    expect(capacityReconciliation.dispatched).toBe(0);
+    for (const provenance of await Promise.all(
+      [firstHeldRunId, secondHeldRunId].map((heldRunId) =>
+        providerProvenanceForRun(heldRunId)
+      )
+    )) {
+      expect(provenance).toEqual({
+        provider: "hermetic",
+        status: "running",
+      });
+    }
+    expect(await runnerRunOutcomeForRun(queuedRunId)).toEqual({
+      errorCode: null,
+      provider: null,
+      status: "queued",
     });
-    const beforeRevocation = await tenantCertificationCounts(
-      tenantFor(HERMETIC_USERS.subscriberA)
+    expect(await runCertificationCounts(queuedRunId)).toEqual({
+      provenance: 0,
+      records: 1,
+      usage: 0,
+    });
+
+    const revokedAuthVersion = await revokeHermeticEntitlement(
+      HERMETIC_USERS.subscriberA.id
     );
-
-    await revokeHermeticEntitlement(HERMETIC_USERS.subscriberA.id);
-    await page.waitForTimeout(1100);
-    await reconcile(request, page);
-
-    expect(await providerProvenanceForRun(runId)).toEqual({
-      provider: "hermetic",
-      status: "completed",
-    });
-    expect(await providerProvenanceForRun(capacityHolderRunId)).toEqual({
-      provider: "hermetic",
-      status: "completed",
-    });
+    expect(revokedAuthVersion).toBeGreaterThan(eligibleAuthVersion);
+    await reconcileUntilRunStatus(request, page, queuedRunId, "failed");
     expect(await runnerRunOutcomeForRun(queuedRunId)).toEqual({
       errorCode: "authority_revoked",
       provider: null,
       status: "failed",
     });
-    expect(
-      await tenantCertificationCounts(tenantFor(HERMETIC_USERS.subscriberA))
-    ).toEqual(beforeRevocation);
-
-    const oldSessionRead = await api(page, `/api/runs/${runId}`);
-    const oldSessionStart = await api(page, `/api/agents/${agentId}/runs`, {
-      body: {
-        operationId: "10000000-0000-4000-8000-000000000007",
-        task: "Old authority must not dispatch.",
-      },
-      method: "POST",
+    expect(await runCertificationCounts(queuedRunId)).toEqual({
+      provenance: 0,
+      records: 1,
+      usage: 0,
     });
-    expect(oldSessionRead.status).toBe(401);
-    expect(oldSessionStart.status).toBe(401);
-
-    await page.context().clearCookies();
-    await page.context().addCookies(
-      await sessionCookies("subscriber", {
-        authVersion: eligibleAuthVersion + 1,
-        email: HERMETIC_USERS.subscriberA.email,
-        id: HERMETIC_USERS.subscriberA.id,
-        subscribedUntil: null,
-      })
-    );
-    await page.goto("/ping");
-    const [agents, credentialRead, credentialWrite, prewarm, freshStart] =
-      await Promise.all([
-        api(page, "/api/agents"),
-        api(page, "/api/credentials"),
-        api(page, "/api/credentials", {
-          body: {
-            credential: "hermetic-dummy-copilot-token",
-            harnessId: "copilot",
-          },
-          method: "POST",
-        }),
-        api(page, "/api/tenant/prewarm", { method: "POST" }),
-        api(page, `/api/agents/${agentId}/runs`, {
-          body: {
-            operationId: "10000000-0000-4000-8000-000000000008",
-            task: "Fresh ineligible authority must not dispatch.",
-          },
-          method: "POST",
-        }),
-      ]);
-    for (const result of [
-      agents,
-      credentialRead,
-      credentialWrite,
-      prewarm,
-      freshStart,
-    ]) {
-      expect(result.status).toBe(403);
+    for (const provenance of await Promise.all(
+      [firstHeldRunId, secondHeldRunId].map((heldRunId) =>
+        providerProvenanceForRun(heldRunId)
+      )
+    )) {
+      expect(provenance).toEqual({
+        provider: "hermetic",
+        status: "running",
+      });
     }
-    expect(
-      await tenantCertificationCounts(tenantFor(HERMETIC_USERS.subscriberA))
-    ).toEqual(beforeRevocation);
+
+    const restoredAuthVersion = await restoreHermeticSubscriberEntitlement(
+      HERMETIC_USERS.subscriberA.id
+    );
+    await page.context().clearCookies();
+    await openAuthenticatedPage(
+      page,
+      HERMETIC_USERS.subscriberA,
+      restoredAuthVersion
+    );
+    for (const stopped of await Promise.all(
+      [firstHeldRunId, secondHeldRunId].map((heldRunId) =>
+        api(page, `/api/runs/${heldRunId}/stop`, { method: "POST" })
+      )
+    )) {
+      expect(stopped.status).toBe(200);
+      expect(object(object(stopped.body).run)).toMatchObject({
+        status: "cancelled",
+      });
+    }
+    await reconcileUntilExecuted(request, page);
+    for (const deleted of await Promise.all(
+      agentIds.map((temporaryAgentId) =>
+        api(page, `/api/agents/${temporaryAgentId}`, { method: "DELETE" })
+      )
+    )) {
+      expect(deleted.status).toBe(200);
+      expect(deleted.body).toEqual({ ok: true });
+    }
   });
 });

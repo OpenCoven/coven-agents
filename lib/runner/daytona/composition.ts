@@ -11,6 +11,7 @@ import {
   type ProductionDatabase,
   type ProductionDatabasePrincipal,
   type ProductionRunnerRuntimeDependencies,
+  preflightQueuedProductionDispatch,
   productionDatabase,
   type RunnerReconciliationFailure,
   reconciliationFailure,
@@ -238,6 +239,13 @@ function daytonaProductionReconcile(
               observe
             ),
             dispatchClaim,
+            preflightQueuedDispatch: () =>
+              preflightQueuedProductionDispatch({
+                dispatchLeaseMs: admission.DEFAULT_DISPATCH_LEASE_MS,
+                findAccount,
+                operator: OPERATOR,
+                store,
+              }),
             projectTeamRuns: teams.projectTerminalSteps,
           });
         },

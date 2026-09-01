@@ -169,6 +169,7 @@ export type ReconcileAndDispatchDependencies = Readonly<{
   provider: RunnerReconciliationProvider;
   providerConcurrency?: number;
   maxRunDurationMs?: number;
+  preflightQueuedDispatch?: () => Promise<void>;
   randomToken?: () => string;
   consumeCredentialReservation?: (run: RunnerRunRecord) => Promise<void>;
   openAttemptRedaction?: (
@@ -1414,6 +1415,14 @@ export async function reconcileAndDispatch(
       const projected = await dependencies.projectTeamRuns();
       result.deferred += projected.cancellationDeferred;
       result.failures += projected.failures;
+    } catch {
+      result.failures += 1;
+    }
+  }
+
+  if (dependencies.preflightQueuedDispatch) {
+    try {
+      await dependencies.preflightQueuedDispatch();
     } catch {
       result.failures += 1;
     }

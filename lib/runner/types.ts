@@ -151,6 +151,7 @@ export type RunnerRunRecord = Omit<
   agentRuntime: RunnerRuntime;
   agentWorkspace: string | null;
   authVersion: number | null;
+  authorityRevalidation?: boolean;
   cancellationRequestedAt: Date | null;
   completedAt: Date | null;
   createdAt: Date;

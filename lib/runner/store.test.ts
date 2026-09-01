@@ -78,6 +78,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     agentModel: "test-model",
     agentRuntime: "copilot",
     agentWorkspace: null,
+    authorityRevalidation: false,
     authVersion: 1,
     cancellationRequestedAt: null,
     commandEvidence: [],
@@ -1484,6 +1485,10 @@ test("finalization retains the terminal event when the live history is at capaci
   const terminalEvent = JSON.parse(
     String((statements[3] as RunnerStoreStatement).args.event)
   );
+  const agentStatus = queryText(statements[2] as RunnerStoreStatement);
+  assert.match(agentStatus, /"otherActive"\."agentId" = \$\d+/u);
+  assert.match(agentStatus, /"otherActive"\."authorityRevalidation" = false/u);
+  assert.match(agentStatus, /THEN 'running'/u);
   assert.equal(terminalEvent.id, MAX_EVENTS_PER_RUN + 1);
   assert.equal(terminalEvent.type, "completed");
   const prune = statements[4] as RunnerStoreStatement;
@@ -2643,12 +2648,15 @@ test("fair dispatch selection locks scheduler and enforces tenant and agent capa
   const activeCount = queryText(statements[1] as RunnerStoreStatement);
   const candidate = queryText(statements[2] as RunnerStoreStatement);
   assert.match(activeCount, /"dispatchState" = 'terminal'/u);
+  assert.match(activeCount, /"authorityRevalidation" = false/u);
   assert.match(activeCount, /"daytonaAttemptId" IS NOT NULL/u);
   assert.match(activeCount, /"daytonaCommandId" IS NOT NULL/u);
   assert.match(activeCount, /"daytonaSessionId" IS NOT NULL/u);
   assert.match(candidate, /FOR UPDATE OF "queued" SKIP LOCKED/u);
   assert.match(candidate, /"agentActive"/u);
   assert.match(candidate, /"tenantActive"/u);
+  assert.match(candidate, /"agentActive"\."authorityRevalidation" = false/u);
+  assert.match(candidate, /"tenantActive"\."authorityRevalidation" = false/u);
   assert.match(
     candidate,
     /"agentActive"\."dispatchState" = 'terminal'[\s\S]*"agentActive"\."daytonaAttemptId" IS NOT NULL/u
@@ -2698,6 +2706,54 @@ test("queue selection stays globally FIFO until the consecutive tenant cap requi
   assert.equal(statements[2]?.args.consecutiveDispatches, 2);
   assert.match(selection, /FROM eligible_tenants AS "otherTenant"/u);
   assert.doesNotMatch(selection, /lastTenantEligible|lastHeadSequence/u);
+});
+
+test("authority revalidation claims queued work without scheduler capacity", async () => {
+  const queued = run({
+    dispatchLeaseExpiresAt: null,
+    dispatchLeaseToken: null,
+    dispatchState: "queued",
+    version: 1,
+  });
+  const claimed = run({
+    ...queued,
+    dispatchLeaseExpiresAt: new Date("2026-01-01T00:01:00.000Z"),
+    dispatchLeaseToken: "lease-revalidation",
+    dispatchState: "dispatching",
+    version: 2,
+  });
+  const { statements, store } = scripted([queued], [claimed]);
+
+  const result = await store.claimQueuedDispatchForRevalidation(operator, {
+    leaseExpiresAt: claimed.dispatchLeaseExpiresAt as Date,
+    leaseToken: claimed.dispatchLeaseToken as string,
+  });
+
+  assert.equal(result?.run.id, queued.id);
+  assert.deepEqual(
+    statements.map((entry) => entry.name),
+    ["lock-queued-dispatch-for-revalidation", "claim-next-dispatch"]
+  );
+  assert.equal(statements[1]?.args.authorityRevalidation, true);
+  const selection = queryText(statements[0] as RunnerStoreStatement);
+  assert.match(selection, /"dispatchState" = 'queued'/u);
+  assert.match(selection, /FOR UPDATE SKIP LOCKED/u);
+  assert.match(selection, /ORDER BY "updatedAt" ASC, "queueSequence" ASC/u);
+  assert.doesNotMatch(selection, /"RunnerScheduler"|tenantActive|agentActive/u);
+  await store.claimQueuedDispatchForRevalidation(operator, {
+    excludedRunIds: [
+      "00000000-0000-4000-8000-000000000010",
+      "00000000-0000-4000-8000-000000000011",
+    ],
+    leaseExpiresAt: claimed.dispatchLeaseExpiresAt as Date,
+    leaseToken: claimed.dispatchLeaseToken as string,
+  });
+  const exclusions = statements[2] as RunnerStoreStatement;
+  assert.match(queryText(exclusions), /"id" NOT IN \(\$1, \$2\)/u);
+  assert.deepEqual(queryParams(exclusions), [
+    "00000000-0000-4000-8000-000000000010",
+    "00000000-0000-4000-8000-000000000011",
+  ]);
 });
 
 test("dispatch authority cannot access unleased, expired, or another run", async () => {
@@ -4107,9 +4163,11 @@ test("admission-aware starts serialize tenant depth and preserve queue refusal",
     /ON CONFLICT .* DO UPDATE/u
   );
   assert.match(queryText(statements[1] as RunnerStoreStatement), /FOR UPDATE/u);
+  const queuedCapacity = queryText(statements[4] as RunnerStoreStatement);
+  assert.match(queuedCapacity, /"dispatchState" = 'queued'/u);
   assert.match(
-    queryText(statements[4] as RunnerStoreStatement),
-    /"dispatchState" = 'queued'/u
+    queuedCapacity,
+    /"dispatchState" = 'dispatching'[\s\S]*"authorityRevalidation" = true/u
   );
 });
 

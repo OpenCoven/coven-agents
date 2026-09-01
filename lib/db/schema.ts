@@ -725,6 +725,9 @@ export const runnerRun = pgTable(
     agentWorkspace: varchar("agentWorkspace", {
       length: AGENT_RUNNER_LIMITS.maxWorkspaceLength,
     }),
+    authorityRevalidation: boolean("authorityRevalidation")
+      .notNull()
+      .default(false),
     authVersion: integer("authVersion"),
     cancellationRequestedAt: timestamp("cancellationRequestedAt"),
     commandEvidence: jsonb("commandEvidence")

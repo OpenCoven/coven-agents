@@ -12,6 +12,8 @@ import { diagnoseDaytonaSandbox, runEphemeralDiagnostic } from "./production";
 import {
   createProductionRunnerRuntime,
   dispatchProductionClaim,
+  preflightQueuedProductionClaim,
+  preflightQueuedProductionDispatch,
 } from "./runtime";
 import { RunnerServiceError } from "./service";
 import type { RunnerStore } from "./store";
@@ -767,6 +769,133 @@ test("production terminalizes revoked, legacy, and unsubscribed authority before
       assert.equal(dispatchCalls, 0);
     })
   );
+});
+
+test("production queued authority preflight terminalizes revocation before capacity", async () => {
+  const current = claimed(4);
+  let cleanupCalls = 0;
+  let finalizedError: unknown;
+
+  const result = await preflightQueuedProductionClaim(current, {
+    clock: () => new Date("2026-08-28T15:00:30.000Z"),
+    environment: {},
+    findAccount: () =>
+      Promise.resolve({
+        authVersion: 5,
+        billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+        subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
+      }),
+    operator,
+    store: {
+      cleanupTerminalLease: () => {
+        cleanupCalls += 1;
+        return Promise.resolve({
+          kind: "updated" as const,
+          value: run(current.run.authVersion),
+        });
+      },
+      finalizeRun: (
+        _operator: RunnerOperator,
+        input: Parameters<RunnerStore["finalizeRun"]>[1]
+      ) => {
+        finalizedError = input.error;
+        return Promise.resolve({
+          kind: "finalized" as const,
+          prunedRunIds: [],
+          run: run(current.run.authVersion),
+        });
+      },
+      releaseUnstartedDispatch: () =>
+        Promise.reject(new Error("revoked authority must not be requeued")),
+    },
+  });
+
+  assert.equal(result, "terminalized");
+  assert.equal(cleanupCalls, 1);
+  assert.deepEqual(finalizedError, {
+    code: "authority_revoked",
+    message: "Run authority is no longer valid.",
+    retryable: false,
+  });
+});
+
+test("queued authority preflight moves past eligible capacity-blocked work", async () => {
+  const allowedRun = {
+    ...run(5),
+    id: "00000000-0000-4000-8000-000000000004",
+    queueSequence: 1,
+  };
+  const allowed = {
+    authority: {
+      ...claimed(5).authority,
+      runId: allowedRun.id,
+    } as RunnerDispatchAuthority,
+    run: allowedRun,
+  };
+  const revokedRun = {
+    ...run(4),
+    id: "00000000-0000-4000-8000-000000000005",
+    queueSequence: 2,
+  };
+  const revoked = {
+    authority: {
+      ...claimed(4).authority,
+      runId: revokedRun.id,
+    } as RunnerDispatchAuthority,
+    run: revokedRun,
+  };
+  const pending = [allowed, revoked];
+  const claimInputs: Array<{ excludedRunIds?: readonly string[] }> = [];
+  const releasedRunIds: string[] = [];
+  const finalizedRunIds: string[] = [];
+
+  await preflightQueuedProductionDispatch({
+    dispatchLeaseMs: 1000,
+    environment: {},
+    findAccount: () =>
+      Promise.resolve({
+        authVersion: 5,
+        billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+        subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
+      }),
+    operator,
+    store: {
+      claimQueuedDispatchForRevalidation: (_operator, input) => {
+        claimInputs.push({
+          excludedRunIds: [...(input.excludedRunIds ?? [])],
+        });
+        return Promise.resolve(pending.shift() ?? null);
+      },
+      cleanupTerminalLease: (_operator, input) =>
+        Promise.resolve({
+          kind: "updated" as const,
+          value: input.runId === revoked.run.id ? revoked.run : allowed.run,
+        }),
+      finalizeRun: (_operator, input) => {
+        finalizedRunIds.push(input.runId);
+        return Promise.resolve({
+          kind: "finalized" as const,
+          prunedRunIds: [],
+          run: input.runId === revoked.run.id ? revoked.run : allowed.run,
+        });
+      },
+      releaseUnstartedDispatch: (_operator, input) => {
+        releasedRunIds.push(input.runId);
+        return Promise.resolve({
+          kind: "released" as const,
+          value: input.runId === allowed.run.id ? allowed.run : revoked.run,
+        });
+      },
+    },
+  });
+
+  assert.deepEqual(releasedRunIds, [allowed.run.id]);
+  assert.deepEqual(finalizedRunIds, [revoked.run.id]);
+  assert.deepEqual(claimInputs, [
+    { excludedRunIds: [] },
+    { excludedRunIds: [allowed.run.id] },
+    { excludedRunIds: [allowed.run.id, revoked.run.id] },
+  ]);
 });
 
 test("production dispatches only a currently subscribed matching authority", async () => {
