@@ -2,7 +2,12 @@ import { z } from "zod";
 import { contractDescriptor } from "../contract-descriptor";
 
 export { contractDescriptor } from "../contract-descriptor";
+export type { EvidenceRedactionInput } from "./evidence";
 export {
+  ExactEvidenceRedactions,
+  exactEvidenceRedactions,
+  MAX_EXACT_EVIDENCE_REDACTION_LENGTH,
+  MAX_EXACT_EVIDENCE_REDACTION_VALUES,
   sanitizeEvidencePath,
   sanitizeEvidenceText,
 } from "./evidence";

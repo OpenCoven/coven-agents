@@ -4,6 +4,8 @@ import { randomBytes } from "node:crypto";
 import {
   AGENT_RUNNER_LIMITS,
   type CommandEvidence,
+  type EvidenceRedactionInput,
+  exactEvidenceRedactions,
   type FileEvidence,
   type RunError,
   type RunEvent as RunnerPersistedEvent,
@@ -58,7 +60,7 @@ export type RunnerAttemptSnapshotInput = Readonly<{
   attemptId: RunnerExecutionAttemptId;
   commandId: string;
   context: RunnerReconciliationContext;
-  credential: string | null;
+  credential: EvidenceRedactionInput;
   cursor: number;
   harness: "copilot";
   runId: string;
@@ -430,7 +432,7 @@ async function stopTerminalAttempt(
 
 function terminalEvidence(
   snapshot: RunnerAttemptLogSnapshot,
-  credential: string | null
+  credential: EvidenceRedactionInput
 ): Readonly<{
   commandEvidence: CommandEvidence[];
   error: RunError | null;
@@ -472,6 +474,23 @@ function terminalEvidence(
       AGENT_RUNNER_LIMITS.maxEventOutputLength
     ),
   };
+}
+
+/**
+ * Provider identifiers stay internal for fenced provider calls, but are exact
+ * redactions at the neutral evidence boundary in case an adapter regresses.
+ * Product run IDs are intentionally not included in public evidence redaction.
+ */
+function attemptEvidenceRedactions(
+  run: RunnerRunRecord,
+  credential: string | null
+): EvidenceRedactionInput {
+  return exactEvidenceRedactions(
+    credential,
+    run.daytonaAttemptId,
+    run.daytonaSessionId,
+    run.daytonaCommandId
+  );
 }
 
 function withoutEventId(
@@ -633,11 +652,15 @@ async function reconcileAttachedProcess(
     if (!dependencies.provider.snapshot) {
       return { adopted: true, kind: "deferred" };
     }
+    const evidenceRedactions = attemptEvidenceRedactions(
+      liveRun,
+      credentialForRedaction
+    );
     const snapshot = await dependencies.provider.snapshot({
       attemptId: run.daytonaAttemptId,
       commandId: run.daytonaCommandId,
       context,
-      credential: credentialForRedaction,
+      credential: evidenceRedactions,
       cursor: liveRun.daytonaLogCursor,
       harness: "copilot",
       runId: run.id,
@@ -645,10 +668,10 @@ async function reconcileAttachedProcess(
     const toolNames = new Map<string, string>();
     const projected = snapshot.events
       .map((event) =>
-        projectHarnessRunEvent(event, 0, credentialForRedaction, toolNames)
+        projectHarnessRunEvent(event, 0, evidenceRedactions, toolNames)
       )
       .filter((event): event is RunnerPersistedEvent => event !== null);
-    const evidence = terminalEvidence(snapshot, credentialForRedaction);
+    const evidence = terminalEvidence(snapshot, evidenceRedactions);
     const appended = await dependencies.store.appendDispatchEventBatch(
       dependencies.operator,
       authority,

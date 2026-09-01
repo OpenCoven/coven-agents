@@ -3,6 +3,7 @@ import {
   agentIdSchema,
   agentsEnvelopeSchema,
   createAgentInputSchema,
+  exactEvidenceRedactions,
   okEnvelopeSchema,
   type RunEvent,
   type RunResult,
@@ -231,7 +232,9 @@ function sanitizedError(
   fallback: string
 ): Error {
   const message = error instanceof Error ? error.message : fallback;
-  return new Error(sanitizeEvidenceText(message, secrets));
+  return new Error(
+    sanitizeEvidenceText(message, exactEvidenceRedactions(...secrets))
+  );
 }
 
 function isTerminalEvent(event: RunEvent): boolean {

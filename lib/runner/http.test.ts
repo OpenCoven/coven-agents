@@ -1148,6 +1148,66 @@ test("cross-tenant/missing resources remain nondisclosing 404s", async () => {
   assert.equal(stops, 1);
 });
 
+test("tenant B cannot fetch tenant A evidence containing tenant B provider markers", async () => {
+  const tenantB = "u_8c8589018a57479181fe4c455b099bc9";
+  const tenantBProviderMarker = "daytona-tenant-b-provider-marker";
+  const tenantAOutput = `untrusted output ${tenantB} ${tenantBProviderMarker}`;
+  const tenantARun = run({
+    completedAt: "2026-08-28T15:01:00.000Z",
+    output: tenantAOutput,
+    status: "completed",
+  });
+  const tenantAEvent: RunEvent = {
+    at: "2026-08-28T15:01:00.000Z",
+    id: 1,
+    output: tenantAOutput,
+    type: "output",
+  };
+  const tenantBSubscriber: RunnerAuthenticatedSubscriber = {
+    ...subscriber,
+    principal: { ...subscriber.principal, tenant: tenantB },
+    session: { ...subscriber.session, tenant: tenantB },
+  };
+  const fixture = handlers({
+    auth: {
+      authorizeDiagnostic: () => ({ kind: "allowed" }),
+      authorizeReconcile: () => ({ kind: "allowed" }),
+      authorizeSubscriber: async () => tenantBSubscriber,
+    },
+    service: service({
+      getRun: async (principal) =>
+        principal.tenant === TENANT
+          ? { kind: "found", run: tenantARun }
+          : { kind: "not_found" },
+      readRunEvents: async (principal) =>
+        principal.tenant === TENANT
+          ? { events: [tenantAEvent], kind: "found", terminal: true }
+          : { kind: "not_found" },
+    }),
+  });
+  const [snapshot, events] = await Promise.all([
+    fixture.handlers.getRun(
+      new Request(`https://app.test/api/runs/${RUN_ID}`),
+      RUN_ID
+    ),
+    fixture.handlers.getRunEvents(
+      new Request(`https://app.test/api/runs/${RUN_ID}/events`),
+      RUN_ID
+    ),
+  ]);
+
+  const bodies = await Promise.all(
+    [snapshot, events].map(async (response) => {
+      assert.equal(response.status, 404);
+      return JSON.stringify(await response.json());
+    })
+  );
+  for (const body of bodies) {
+    assert.equal(body.includes(tenantB), false);
+    assert.equal(body.includes(tenantBProviderMarker), false);
+  }
+});
+
 test("run start returns 202 and schedules bounded recovery for a created run", async () => {
   let reconciled = 0;
   const fixture = handlers({
@@ -2297,21 +2357,87 @@ test("resource inventory maps unavailable providers to the safe operator error",
   assert.equal(fixture.operatorRequests(), 1);
 });
 
-test("unrecognized failures are sanitized in their response and logs", async () => {
-  const secret = "credential=do-not-log";
+test("unrecognized provider failures are absent from runner envelopes and logs", async () => {
+  const tenantCredential = "tenant-credential-http-boundary";
+  const daytonaApiKey = [
+    "sk",
+    "proj",
+    "syntheticdaytonaapikeyfixture000000",
+  ].join("-");
+  const reconcileBearer = "manual-reconcile-service-bearer";
+  const signedClaim = [
+    "eyJhbGciOiJIUzI1NiJ9",
+    "eyJzdWIiOiJmaXh0dXJlIn0",
+    "c2lnbmVkLWh0dHAtYm91bmRhcnk",
+  ].join(".");
+  const sandboxId = "daytona-sandbox-http-id";
+  const sandboxName = "daytona-sandbox-http-name";
+  const sessionId = "daytona-session-http-id";
+  const commandId = "daytona-command-http-id";
+  const attemptId = "daytona-attempt-http-id";
+  const tenantBMarker = "tenant-b-http-marker";
+  const privateValues = [
+    tenantCredential,
+    daytonaApiKey,
+    reconcileBearer,
+    signedClaim,
+    sandboxId,
+    sandboxName,
+    sessionId,
+    commandId,
+    attemptId,
+    tenantBMarker,
+  ];
+  const providerFailure = Object.assign(new Error(privateValues.join(" | ")), {
+    name: `DaytonaProviderFailure-${sandboxId}`,
+  });
   const fixture = handlers({
     service: service({
-      listAgents: () => Promise.reject(new Error(secret)),
+      diagnoseSandbox: () => Promise.reject(providerFailure),
+      inventoryResources: () => Promise.reject(providerFailure),
+      listAgents: () => Promise.reject(providerFailure),
     }),
   });
 
-  const response = await fixture.handlers.listAgents(
-    new Request("https://app.test/api/agents")
-  );
-  const serialized = JSON.stringify(await response.json());
+  const responses = await Promise.all([
+    fixture.handlers.listAgents(new Request("https://app.test/api/agents")),
+    fixture.handlers.diagnoseSandbox(
+      new Request("https://app.test/api/diagnostics/sandbox", {
+        method: "POST",
+      })
+    ),
+    fixture.handlers.inventoryResources(
+      new Request("https://app.test/api/internal/runner-resource-inventory", {
+        method: "POST",
+      })
+    ),
+  ]);
 
-  assert.equal(response.status, 500);
-  assert.equal(serialized.includes(secret), false);
-  assert.equal(JSON.stringify(fixture.logs).includes(secret), false);
-  assert.deepEqual(fixture.logs, [{ name: "Error" }]);
+  const bodies = await Promise.all(
+    responses.map(async (response) => {
+      assert.equal(response.status, 500);
+      return JSON.stringify(await response.json());
+    })
+  );
+  for (const serialized of bodies) {
+    for (const value of privateValues) {
+      assert.equal(
+        serialized.includes(value),
+        false,
+        `response leaked ${value}`
+      );
+    }
+  }
+  for (const value of privateValues) {
+    assert.equal(
+      JSON.stringify(fixture.logs).includes(value),
+      false,
+      `logger leaked ${value}`
+    );
+  }
+  assert.deepEqual(fixture.logs, [
+    { name: "unknown" },
+    { name: "unknown" },
+    { name: "unknown" },
+  ]);
 });

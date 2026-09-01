@@ -26,3 +26,26 @@ test("resource operation observability permits only identifier-free categories",
     "outcome",
   ]);
 });
+
+test("resource operation observability discards untyped provider data", () => {
+  const observations: unknown[] = [];
+  const privateIdentifier = "daytona-resource-observability-id";
+  const providerMessage = "provider=manual-reconcile-service-bearer";
+  const untypedObservation = {
+    identifier: privateIdentifier,
+    message: providerMessage,
+    operation: "inventory" as const,
+    outcome: "deferred" as const,
+  };
+
+  observeRunnerResourceOperation((observation) => {
+    observations.push(observation);
+  }, untypedObservation);
+
+  const serialized = JSON.stringify(observations);
+  assert.equal(serialized.includes(privateIdentifier), false);
+  assert.equal(serialized.includes(providerMessage), false);
+  assert.deepEqual(observations, [
+    { operation: "inventory", outcome: "deferred" },
+  ]);
+});

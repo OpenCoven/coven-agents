@@ -1,6 +1,71 @@
 const REDACTED = "[REDACTED]";
 const ENVIRONMENT_OUTPUT_REDACTED = "[environment output redacted]";
 
+export const MAX_EXACT_EVIDENCE_REDACTION_VALUES = 16;
+export const MAX_EXACT_EVIDENCE_REDACTION_LENGTH = 4096;
+const MAX_EXACT_EVIDENCE_REDACTION_INPUTS = 32;
+
+export type EvidenceRedactionInput =
+  | ExactEvidenceRedactions
+  | string
+  | null
+  | undefined;
+
+/**
+ * A bounded, provider-neutral collection of opaque strings that must not
+ * cross an evidence boundary. Instances are constructed through
+ * `exactEvidenceRedactions` so unbounded caller arrays cannot be retained.
+ */
+export class ExactEvidenceRedactions {
+  readonly #values: readonly string[];
+
+  private constructor(values: readonly string[]) {
+    this.#values = Object.freeze([...values]);
+  }
+
+  get values(): readonly string[] {
+    return this.#values;
+  }
+
+  static from(
+    ...inputs: readonly EvidenceRedactionInput[]
+  ): ExactEvidenceRedactions {
+    const values: string[] = [];
+    const seen = new Set<string>();
+
+    for (const input of inputs.slice(0, MAX_EXACT_EVIDENCE_REDACTION_INPUTS)) {
+      const candidates =
+        input instanceof ExactEvidenceRedactions
+          ? input.values
+          : typeof input === "string"
+            ? [input]
+            : [];
+      for (const candidate of candidates) {
+        if (
+          candidate.trim().length === 0 ||
+          candidate.length > MAX_EXACT_EVIDENCE_REDACTION_LENGTH ||
+          seen.has(candidate)
+        ) {
+          continue;
+        }
+        values.push(candidate);
+        seen.add(candidate);
+        if (values.length === MAX_EXACT_EVIDENCE_REDACTION_VALUES) {
+          return new ExactEvidenceRedactions(values);
+        }
+      }
+    }
+
+    return new ExactEvidenceRedactions(values);
+  }
+}
+
+export function exactEvidenceRedactions(
+  ...inputs: readonly EvidenceRedactionInput[]
+): ExactEvidenceRedactions {
+  return ExactEvidenceRedactions.from(...inputs);
+}
+
 const doubleQuotedValue = String.raw`"(?:\\[^\r\n]|[^"\\\r\n])*"`;
 const singleQuotedValue = String.raw`'(?:\\[^\r\n]|[^'\\\r\n])*'`;
 const secretValue = String.raw`(?:${doubleQuotedValue}|${singleQuotedValue}|[^\s,;\r\n]+)`;
@@ -314,7 +379,7 @@ function removeUnsafeControlCharacters(value: string): string {
  */
 export function sanitizeEvidenceText(
   value: string,
-  additionalSecrets: Iterable<string> = []
+  redactions: EvidenceRedactionInput = null
 ): string {
   const withoutTerminalControls = removeUnsafeControlCharacters(
     value.replace(terminalControlSequence, "")
@@ -322,10 +387,8 @@ export function sanitizeEvidenceText(
   let sanitized = redactEnvironmentDumps(
     withoutTerminalControls.replace(privateKeyBlock, "[PRIVATE KEY REDACTED]")
   );
-  for (const secret of additionalSecrets) {
-    if (secret) {
-      sanitized = sanitized.replaceAll(secret, REDACTED);
-    }
+  for (const secret of exactEvidenceRedactions(redactions).values) {
+    sanitized = sanitized.replaceAll(secret, REDACTED);
   }
   sanitized = redactSensitiveAssignments(sanitized)
     .replace(authorizationHeader, `$1${REDACTED}`)
@@ -351,6 +414,9 @@ export function sanitizeEvidenceText(
     .replace(windowsHomeRoot, "$1~");
 }
 
-export function sanitizeEvidencePath(value: string): string {
-  return sanitizeEvidenceText(value);
+export function sanitizeEvidencePath(
+  value: string,
+  redactions: EvidenceRedactionInput = null
+): string {
+  return sanitizeEvidenceText(value, redactions);
 }

@@ -1,5 +1,6 @@
 import {
   type DemoTranscript,
+  exactEvidenceRedactions,
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
 
@@ -18,7 +19,10 @@ function containsSecret(value: unknown, secrets: readonly string[]): boolean {
 
 export function redactDeep<T>(value: T, secrets: readonly string[]): T {
   if (typeof value === "string") {
-    return sanitizeEvidenceText(value, secrets) as T;
+    return sanitizeEvidenceText(
+      value,
+      exactEvidenceRedactions(...secrets)
+    ) as T;
   }
   if (Array.isArray(value)) {
     return value.map((item) => redactDeep(item, secrets)) as T;
@@ -51,7 +55,12 @@ export function assertNoSecrets(
     throw new Error("Guest transcript contains a provided secret.");
   }
   const serialized = JSON.stringify(transcript);
-  if (sanitizeEvidenceText(serialized) !== serialized) {
+  if (
+    sanitizeEvidenceText(
+      serialized,
+      exactEvidenceRedactions(...nonemptySecrets)
+    ) !== serialized
+  ) {
     throw new Error("Guest transcript contains sanitizer-recognized evidence.");
   }
 }

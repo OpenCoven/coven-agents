@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import {
   type DemoTranscript,
   demoTranscriptSchema,
+  exactEvidenceRedactions,
   type RunResult,
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
@@ -58,7 +59,7 @@ function safeErrorMessage(error: unknown, secrets: readonly string[]): string {
   }
   const message =
     error instanceof Error ? error.message : "Demo recording failed.";
-  return sanitizeEvidenceText(message, secrets);
+  return sanitizeEvidenceText(message, exactEvidenceRedactions(...secrets));
 }
 
 function buildTranscript(

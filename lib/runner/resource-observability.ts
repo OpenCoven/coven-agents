@@ -41,5 +41,8 @@ export function observeRunnerResourceOperation(
   observer: RunnerResourceOperationObserver | undefined,
   observation: RunnerResourceOperationObservation
 ): void {
-  observer?.(observation);
+  observer?.({
+    operation: observation.operation,
+    outcome: observation.outcome,
+  });
 }

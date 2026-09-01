@@ -968,6 +968,19 @@ test("stages only through per-call env and starts a safe asynchronous session", 
     workspace: "/workspace/repo",
   });
   assert.deepEqual(stage?.env, { COPILOT_GITHUB_TOKEN: SECRET });
+  for (const serverOnlySecret of [
+    "AUTH_SECRET",
+    "CREDENTIAL_KEK",
+    "DAYTONA_API_KEY",
+    "OPERATOR_DIAGNOSTIC_TOKEN",
+    "RUNNER_MANUAL_RECONCILE_SECRET",
+  ]) {
+    assert.equal(
+      Object.hasOwn(stage?.env ?? {}, serverOnlySecret),
+      false,
+      `${serverOnlySecret} must not enter the sandbox`
+    );
+  }
   assert.ok(stage?.command.includes("umask 077"));
   assert.ok(
     stage?.command.includes(`printf '%s' "$COPILOT_GITHUB_TOKEN" > '${PATH}'`)
@@ -1741,6 +1754,98 @@ test("snapshots complete JSONL once, flushes terminal fragments, and redacts mal
     }).sandbox,
   });
   assert.deepEqual(noDuplicate.events, []);
+});
+
+test("redacts exact Daytona identifiers before returning an attempt log snapshot", async () => {
+  const tenantCredential = "tenant-credential-daytona-adapter";
+  const daytonaApiKey = [
+    "sk",
+    "proj",
+    "syntheticdaytonaapikeyfixture000000",
+  ].join("-");
+  const reconcileBearer = "manual-reconcile-service-bearer";
+  const signedClaim = [
+    "eyJhbGciOiJIUzI1NiJ9",
+    "eyJzdWIiOiJmaXh0dXJlIn0",
+    "c2lnbmVkLWRheXRvbmEtYWRhcHRlcg",
+  ].join(".");
+  const sandboxId = "daytona-sandbox-adapter-id";
+  const sandboxName = "daytona-sandbox-adapter-name";
+  const commandId = "daytona-command-adapter-id";
+  const attemptId = "63af1a29-4e98-43d6-ac5b-3b9dcba5e730" as DaytonaAttemptId;
+  const sessionId = daytonaRunSessionName(RUN_ID, attemptId);
+  const planted = [
+    tenantCredential,
+    daytonaApiKey,
+    `Bearer ${reconcileBearer}`,
+    signedClaim,
+    sandboxId,
+    sandboxName,
+    sessionId,
+    commandId,
+    attemptId,
+  ].join(" | ");
+  const stdout = [
+    JSON.stringify({
+      data: { content: planted, model: planted },
+      type: "assistant.message",
+    }),
+    JSON.stringify({
+      data: {
+        arguments: { command: planted },
+        toolCallId: planted,
+        toolName: planted,
+      },
+      type: "tool.execution_start",
+    }),
+    JSON.stringify({
+      data: {
+        result: { content: planted },
+        success: false,
+        toolCallId: planted,
+      },
+      type: "tool.execution_complete",
+    }),
+    JSON.stringify({
+      data: { infoType: "file_edited", message: `/workspace/${planted}.md` },
+      type: "session.info",
+    }),
+    JSON.stringify({
+      exitCode: 1,
+      sessionId,
+      type: "result",
+      usage: { codeChanges: { filesModified: [`/workspace/${planted}.md`] } },
+    }),
+  ].join("\n");
+  const { sandbox } = processDouble({
+    command: { exitCode: 1 },
+    logs: { stdout: `${stdout}\n` },
+  });
+
+  const snapshot = await snapshotDaytonaProcess({
+    attemptId,
+    commandId,
+    credential: tenantCredential,
+    cursor: 0,
+    harness: "copilot",
+    runId: RUN_ID,
+    sandbox: { ...sandbox, id: sandboxId, name: sandboxName },
+  });
+  const returned = JSON.stringify(snapshot);
+
+  for (const value of [
+    tenantCredential,
+    daytonaApiKey,
+    reconcileBearer,
+    signedClaim,
+    sandboxId,
+    sandboxName,
+    sessionId,
+    commandId,
+    attemptId,
+  ]) {
+    assert.equal(returned.includes(value), false, `leaked ${value}`);
+  }
 });
 
 test("continues polling after malformed structured JSONL records", async () => {

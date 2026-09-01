@@ -78,7 +78,10 @@ const resourceInventoryResponseSchema = z
   .strict();
 
 type RunnerHttpLogger = Readonly<{
-  error: (message: string, details: Readonly<{ name: string }>) => void;
+  error: (
+    message: string,
+    details: Readonly<{ name: "runner_service" | "unknown" }>
+  ) => void;
 }>;
 
 type After = (callback: () => void | Promise<void>) => void;
@@ -387,11 +390,10 @@ function serviceFailure(
       case "service_unavailable":
         return runnerUnavailable(dependencies);
       default: {
-        const unsupportedCode: never = error.code;
         dependencies.logger?.error(
           "Runner service error code is unsupported.",
           {
-            name: String(unsupportedCode),
+            name: "runner_service",
           }
         );
         return runnerErrorResponse(dependencies, "internal_error");
@@ -399,7 +401,7 @@ function serviceFailure(
     }
   }
   dependencies.logger?.error("Runner HTTP request failed.", {
-    name: error instanceof Error ? error.name : typeof error,
+    name: "unknown",
   });
   return runnerErrorResponse(dependencies, "internal_error");
 }

@@ -79,6 +79,16 @@ provider work. Each agent owns one tenant-scoped persistent sandbox. Every
 attempt has exact process and cleanup fences so stale work cannot mutate a
 replacement attempt.
 
+The tenant harness credential is the only secret sent through the process
+staging environment. `DAYTONA_API_KEY`, `RUNNER_MANUAL_RECONCILE_SECRET`,
+diagnostic bearers, credential KEKs, Auth.js signing material, and other
+control-plane claims stay in the server-side provider/client dependencies;
+they are not process inputs or sandbox environment values. This is enforced by
+the per-call staging-environment assertion in
+`lib/runner/daytona/process.test.ts` and the neutral/provider dependency
+guards in `lib/runner/executor-boundary.test.ts`. A sandbox cannot echo a
+control-plane value it was never given.
+
 ### B4. Reconciliation and diagnostics
 
 Scheduled reconciliation, manual reconciliation, and diagnostics use distinct
@@ -103,9 +113,36 @@ require operator review.
 ### B5. Evidence to storage, UI, guest preview, and Git
 
 `packages/agent-contracts/src/evidence.ts` redacts recognized secrets and
-sensitive headers. Persistence applies size and count bounds. Guest fixtures
-are validated in raw and parsed forms. Repository scanning reports only path,
-line, and category.
+sensitive headers. `ExactEvidenceRedactions` is a neutral, immutable value
+that examines at most 32 inputs and retains at most 16 nonblank, deduplicated
+strings of at most 4096 UTF-16 code units; over-limit and empty candidates are
+ignored. String and `null` credential call sites remain valid inputs.
+
+Before `RunnerAttemptLogSnapshot` can cross the Daytona adapter,
+`lib/runner/daytona/process.ts` adds the exact sandbox ID and name when the
+SDK provides them, the deterministic session ID, command ID, and attempt ID
+to this redaction value. `lib/runner/attempt-reconcile.ts` independently
+rebuilds a bundle from persisted attempt/session/command IDs before it
+projects events, summaries, errors, command evidence, or file paths into
+neutral storage. The public product run ID is deliberately excluded: it is a
+documented API identifier rather than provider-secret material.
+
+Provider exceptions and messages do not enter persisted evidence or runner
+envelopes. Diagnostics retain bounded category, status, and validated
+machine-code fields only; inventory returns aggregate counts only; resource
+observability copies only finite operation/outcome categories; and HTTP
+failure logging uses only `runner_service` or `unknown`. Tenant-scoped store
+reads make a foreign run and its event stream a nondisclosing 404. Daytona
+reconciliation in `lib/runner/daytona/reconcile.ts` resolves one context by
+the current run's deterministic tenant/agent sandbox name and has no
+provider-inventory input, so another tenant's provider values cannot reach
+that adapter. The adversarial fixtures use synthetic values only and cover an
+attempt's credential, API-key-shaped text, reconcile bearer, signed claim,
+sandbox ID/name, session, command, and attempt IDs; a tenant-B marker is
+tested both as an exact redaction and as inaccessible tenant-A evidence.
+
+Persistence applies size and count bounds. Guest fixtures are validated in raw
+and parsed forms. Repository scanning reports only path, line, and category.
 
 ## Threat register
 
@@ -119,7 +156,7 @@ line, and category.
 | T6 | Harness exfiltrates data | Daytona isolation and domain allowlist | Complete `coven-agents-cloud.4` |
 | T7 | Retries create duplicate work | Operation IDs, request hashes, durable admission | Prove against release-equivalent persistence |
 | T8 | SSE reconnect loses or duplicates events | Persisted numeric event IDs and `Last-Event-ID` | Retain production-equivalent reconnect evidence |
-| T9 | Output leaks secrets | Shared redaction, bounded evidence, sanitized errors | Extend `coven-agents-security.3` |
+| T9 | Output leaks secrets or provider correlations | Shared shape and bounded exact redaction, adapter and neutral-projection defense in depth, sanitized errors, categorical diagnostics/logs | `coven-agents-security.3` remains open: retain a deployed Daytona attempt and browser/API inspection proving the provider and cross-tenant paths behave equivalently; this local slice does not close the broader security program |
 | T10 | Cancellation or recovery reports false success | Durable intent, exact cleanup, leased reconciliation | Provider outages can delay convergence |
 | T11 | Capacity exhaustion harms availability | Abuse budgets and deployment/tenant queue limits | Tune from measured provider behavior |
 | T12 | Operator credential gains tenant authority | Operator credentials authorize only bounded operational routes | Protect operator machines and deployment secrets |
@@ -152,9 +189,20 @@ Primary executable evidence:
 - `lib/runner/store.test.ts`
 - `lib/runner/sse.test.ts`
 - `lib/runner/reconcile.test.ts`
+- `lib/runner/evidence.test.ts`
+- `lib/runner/daytona/process.test.ts`
+- `lib/runner/daytona/resource-inventory.test.ts`
+- `lib/runner/resource-observability.test.ts`
+- `lib/runner/http.test.ts`
+- `lib/runner/production.test.ts`
+- `lib/runner/executor-boundary.test.ts`
+- `packages/agent-contracts/src/evidence-safety.test.ts`
 - `scripts/product-boundary.test.ts`
 - `scripts/security-docs.test.ts`
 
 Run the repository gates before merging a security-boundary change. These gates
-verify repository behavior; production certification requires the separate
-operator attestation.
+verify repository behavior only. Production certification still requires a
+separate operator attestation with a credential-free, retained deployed
+Daytona attempt, internal inventory/diagnostic response capture, browser
+runner envelope/SSE capture, and a cross-tenant refusal check. No deployed
+proof is represented by these local assertions.

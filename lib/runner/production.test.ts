@@ -126,6 +126,22 @@ test("ephemeral diagnostics delete the sandbox after a bounded probe", async () 
 test("ephemeral diagnostics clean up after probe failure and hide provider output", async () => {
   const calls: string[] = [];
   const failures: unknown[] = [];
+  const privateValues = [
+    "tenant-credential-diagnostic",
+    ["sk", "proj", "syntheticdaytonaapikeyfixture000000"].join("-"),
+    "manual-reconcile-service-bearer",
+    [
+      "eyJhbGciOiJIUzI1NiJ9",
+      "eyJzdWIiOiJmaXh0dXJlIn0",
+      "c2lnbmVkLWRpYWdub3N0aWMtYm91bmRhcnk",
+    ].join("."),
+    "daytona-sandbox-diagnostic-id",
+    "daytona-sandbox-diagnostic-name",
+    "daytona-session-diagnostic-id",
+    "daytona-command-diagnostic-id",
+    "daytona-attempt-diagnostic-id",
+    "tenant-b-diagnostic-marker",
+  ];
 
   await assert.rejects(
     runEphemeralDiagnostic({
@@ -138,7 +154,7 @@ test("ephemeral diagnostics clean up after probe failure and hide provider outpu
           },
           execute: () => {
             calls.push("execute");
-            return Promise.reject(new Error("provider=private-detail"));
+            return Promise.reject(new Error(privateValues.join(" | ")));
           },
         });
       },
@@ -149,14 +165,18 @@ test("ephemeral diagnostics clean up after probe failure and hide provider outpu
     (error: unknown) => {
       assert.ok(error instanceof RunnerServiceError);
       assert.equal(error.code, "diagnostic_unavailable");
-      assert.equal(error.message.includes("private-detail"), false);
+      for (const value of privateValues) {
+        assert.equal(error.message.includes(value), false);
+      }
       return true;
     }
   );
 
   assert.deepEqual(calls, ["create", "execute", "delete"]);
   assert.deepEqual(failures, [{ category: "unknown", stage: "execute" }]);
-  assert.equal(JSON.stringify(failures).includes("private-detail"), false);
+  for (const value of privateValues) {
+    assert.equal(JSON.stringify(failures).includes(value), false);
+  }
 });
 
 test("ephemeral diagnostics classify provider authentication failures safely", async () => {

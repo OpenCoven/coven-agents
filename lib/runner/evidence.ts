@@ -6,6 +6,7 @@ import {
   AGENT_RUNNER_LIMITS,
   type CommandEvidence,
   commandEvidenceSchema,
+  type EvidenceRedactionInput,
   type FileEvidence,
   fileEvidenceSchema,
   type RunError,
@@ -59,7 +60,7 @@ export type QueuedRunInput = {
 export type TerminalRunResult = {
   commandEvidence?: readonly unknown[];
   completedAt: string;
-  credential: string | null;
+  credential: EvidenceRedactionInput;
   error?: RunError | null;
   fileEvidence?: readonly unknown[];
   output: string;
@@ -126,10 +127,6 @@ export function truncateUtf8(
   return `${result}${safeSuffix}`;
 }
 
-function credentialSecrets(credential: string | null): Iterable<string> {
-  return credential ? [credential] : [];
-}
-
 function boundedDiagnostic(message: string): string {
   return truncateUtf8(
     message,
@@ -166,7 +163,7 @@ function normalizedText(
   value: unknown,
   field: "stderr" | "stdout",
   diagnostics: string[],
-  credential: string | null
+  credential: EvidenceRedactionInput
 ): string {
   if (typeof value !== "string") {
     diagnostics.push(
@@ -239,11 +236,11 @@ function fileResultsFromEvidence(evidence: readonly unknown[]): unknown[] {
 
 function normalizeRunError(
   error: RunError,
-  credential: string | null
+  credential: EvidenceRedactionInput
 ): RunError {
   return runErrorSchema.parse({
     code: truncateUtf8(
-      sanitizeEvidenceText(error.code, credentialSecrets(credential)),
+      sanitizeEvidenceText(error.code, credential),
       64,
       64,
       ""
@@ -251,7 +248,7 @@ function normalizeRunError(
     ...(error.details
       ? {
           details: truncateUtf8(
-            sanitizeEvidenceText(error.details, credentialSecrets(credential)),
+            sanitizeEvidenceText(error.details, credential),
             AGENT_RUNNER_LIMITS.maxDetailsLength,
             AGENT_RUNNER_LIMITS.maxDetailsLength,
             ""
@@ -259,7 +256,7 @@ function normalizeRunError(
         }
       : {}),
     message: truncateUtf8(
-      sanitizeEvidenceText(error.message, credentialSecrets(credential)),
+      sanitizeEvidenceText(error.message, credential),
       AGENT_RUNNER_LIMITS.maxMessageLength,
       AGENT_RUNNER_LIMITS.maxMessageLength,
       ""
@@ -359,10 +356,10 @@ export function retainRunSnapshots(
  */
 export function sanitizeRunText(
   value: string,
-  credential: string | null
+  credential: EvidenceRedactionInput
 ): string {
   return truncateUtf8(
-    sanitizeEvidenceText(value, credentialSecrets(credential)),
+    sanitizeEvidenceText(value, credential),
     AGENT_RUNNER_LIMITS.maxEventOutputLength,
     AGENT_RUNNER_LIMITS.maxEventOutputLength
   );
@@ -370,7 +367,7 @@ export function sanitizeRunText(
 
 export function normalizeCommandEvidence(
   results: readonly unknown[],
-  credential: string | null
+  credential: EvidenceRedactionInput
 ): NormalizedCommandEvidence {
   const diagnostics: string[] = [];
   const evidence: CommandEvidence[] = [];
@@ -426,7 +423,7 @@ export function normalizeCommandEvidence(
     const completedAt = normalizeTimestamp(candidate.timestamp, diagnostics);
     const parsed = commandEvidenceSchema.safeParse({
       command: truncateUtf8(
-        sanitizeEvidenceText(command, credentialSecrets(credential)),
+        sanitizeEvidenceText(command, credential),
         AGENT_RUNNER_LIMITS.maxCommandLength,
         AGENT_RUNNER_LIMITS.maxCommandLength,
         COMMAND_TRUNCATED
@@ -450,7 +447,7 @@ export function normalizeCommandEvidence(
 
 export function normalizeFileEvidence(
   results: readonly unknown[],
-  credential: string | null
+  credential: EvidenceRedactionInput
 ): NormalizedFileEvidence {
   const diagnostics: string[] = [];
   const evidence: FileEvidence[] = [];
@@ -497,10 +494,7 @@ export function normalizeFileEvidence(
         boundedDiagnostic("Runner omitted an invalid file byte length.")
       );
     }
-    const path = sanitizeEvidenceText(
-      sanitizeEvidencePath(candidate.path.trim()),
-      credentialSecrets(credential)
-    );
+    const path = sanitizeEvidencePath(candidate.path.trim(), credential);
     const parsed = fileEvidenceSchema.safeParse({
       ...(byteLengthValue === undefined ? {} : { byteLength: byteLengthValue }),
       ...(occurredAt ? { occurredAt } : {}),
@@ -531,7 +525,7 @@ export function normalizeFileEvidence(
 export function projectHarnessRunEvent(
   event: HarnessRunEvent,
   id: number,
-  credential: string | null,
+  credential: EvidenceRedactionInput,
   toolNames: Map<string, string>
 ): RunEvent | null {
   switch (event.kind) {
@@ -559,7 +553,7 @@ export function projectHarnessRunEvent(
           command: truncateUtf8(
             sanitizeEvidenceText(
               toolNames.get(event.callId) ?? "tool",
-              credentialSecrets(credential)
+              credential
             ),
             AGENT_RUNNER_LIMITS.maxCommandLength,
             AGENT_RUNNER_LIMITS.maxCommandLength
@@ -581,10 +575,7 @@ export function projectHarnessRunEvent(
         evidence: {
           operation,
           path: truncateUtf8(
-            sanitizeEvidenceText(
-              sanitizeEvidencePath(event.path),
-              credentialSecrets(credential)
-            ),
+            sanitizeEvidencePath(event.path, credential),
             AGENT_RUNNER_LIMITS.maxPathLength,
             AGENT_RUNNER_LIMITS.maxPathLength
           ),

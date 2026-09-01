@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DaytonaNotFoundError } from "@daytona/sdk";
+import { sanitizeEvidenceText } from "@opencoven/agent-contracts";
 import { cancelRunnerRun, reconcileAndDispatch } from "./attempt-reconcile";
 import { daytonaProbeSessionName } from "./daytona/names";
 import { reconcileDaytonaSandboxes } from "./daytona/resource-recovery";
@@ -2542,13 +2543,22 @@ test("dirty terminal cancellation is cleanup-required, not stopped", async () =>
 test("reconciliation appends only fresh logs and terminalizes a settled command", async () => {
   const calls: string[] = [];
   const credential = "attempt-redaction-secret";
+  const commandId = "daytona-command-neutral-projection";
+  const sessionId = "daytona-session-neutral-projection";
   const attached = run({
-    daytonaCommandId: "command",
-    daytonaSessionId: "session",
+    daytonaCommandId: commandId,
+    daytonaSessionId: sessionId,
     dispatchState: "running",
     startedAt: new Date("2026-08-28T14:58:00.000Z"),
     status: "running",
   });
+  const privateValues = [
+    credential,
+    attached.daytonaAttemptId,
+    commandId,
+    sessionId,
+  ].filter((value): value is string => value !== null);
+  const planted = privateValues.join(" | ");
   const authority = {
     attemptId,
     expectedVersion: 2,
@@ -2579,7 +2589,13 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
       },
       snapshot: async (input) => {
         calls.push("snapshot");
-        assert.equal(input.credential, credential);
+        for (const value of privateValues) {
+          assert.equal(
+            sanitizeEvidenceText(planted, input.credential).includes(value),
+            false,
+            `provider snapshot input must redact ${value}`
+          );
+        }
         return {
           cursor: 42,
           events: [
@@ -2587,41 +2603,39 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
               at: "2026-08-28T15:00:00.000Z",
               kind: "message",
               model: null,
-              text: `message ${credential}`,
+              text: `message ${planted}`,
             },
             {
               at: "2026-08-28T15:00:00.000Z",
-              callId: credential,
+              callId: planted,
               kind: "tool-start",
-              summary: credential,
-              tool: credential,
+              summary: planted,
+              tool: planted,
             },
             {
               at: "2026-08-28T15:00:00.000Z",
-              callId: credential,
+              callId: planted,
               kind: "tool-end",
               success: true,
-              summary: credential,
+              summary: planted,
             },
             {
               at: "2026-08-28T15:00:00.000Z",
               kind: "file",
               operation: "edit",
-              path: `/workspace/${credential}`,
+              path: `/workspace/${planted}`,
             },
           ],
           exitCode: 0,
           logsSettled: true,
           status: "completed",
           summary: {
-            fileOperations: [{ operation: "modify", path: credential }],
-            output: `output ${credential}`,
+            fileOperations: [{ operation: "modify", path: planted }],
+            output: `output ${planted}`,
             premiumRequests: null,
             sessionId: null,
             status: "completed",
-            toolCalls: [
-              { success: true, summary: credential, tool: credential },
-            ],
+            toolCalls: [{ success: true, summary: planted, tool: planted }],
           },
         };
       },
@@ -2663,11 +2677,13 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
           (batch as { daytonaLogCursor: number }).daytonaLogCursor,
           42
         );
-        assert.equal(
-          JSON.stringify(batch).includes(credential),
-          false,
-          "provider events must be redacted before persistence"
-        );
+        for (const value of privateValues) {
+          assert.equal(
+            JSON.stringify(batch).includes(value),
+            false,
+            `provider events must redact ${value} before persistence`
+          );
+        }
         return {
           authority: afterEvent,
           events: [],
@@ -2685,11 +2701,13 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
       },
       finalizeRun: async (_operator: unknown, finalization: unknown) => {
         calls.push("finalize");
-        assert.equal(
-          JSON.stringify(finalization).includes(credential),
-          false,
-          "terminal evidence must be redacted before persistence"
-        );
+        for (const value of privateValues) {
+          assert.equal(
+            JSON.stringify(finalization).includes(value),
+            false,
+            `terminal evidence must redact ${value} before persistence`
+          );
+        }
         return {
           kind: "finalized" as const,
           prunedRunIds: [],

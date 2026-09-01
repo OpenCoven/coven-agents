@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { DaytonaNotFoundError } from "@daytona/sdk";
 import type {
@@ -264,3 +265,13 @@ reconciliationProviderContract(
   "Daytona recovery provider",
   daytonaRecoveryProvider
 );
+
+test("Daytona reconciliation has no cross-tenant provider inventory input", () => {
+  const source = readFileSync(
+    new URL("./daytona/reconcile.ts", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(source, /daytonaSandboxName\(run\.tenant, run\.agentId\)/u);
+  assert.doesNotMatch(source, /\.list\(/u);
+});

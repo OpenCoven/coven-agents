@@ -114,6 +114,22 @@ function inventoryStore(
 }
 
 test("inventory queries only the app label and returns privacy-safe aggregate matches", async () => {
+  const privateValues = [
+    "tenant-credential-inventory",
+    ["sk", "proj", "syntheticdaytonaapikeyfixture000000"].join("-"),
+    "manual-reconcile-service-bearer",
+    [
+      "eyJhbGciOiJIUzI1NiJ9",
+      "eyJzdWIiOiJmaXh0dXJlIn0",
+      "c2lnbmVkLWludmVudG9yeS1ib3VuZGFyeQ",
+    ].join("."),
+    "daytona-sandbox-inventory-id",
+    "daytona-sandbox-inventory-name",
+    "daytona-session-inventory-id",
+    "daytona-command-inventory-id",
+    "daytona-attempt-inventory-id",
+    "tenant-b-inventory-marker",
+  ] as const;
   const matched = agent();
   const provisioning = agent({
     daytonaSandboxId: null,
@@ -121,9 +137,9 @@ test("inventory queries only the app label and returns privacy-safe aggregate ma
     sandboxLifecycle: "provisioning_ambiguous",
   });
   const providerOnly = sandbox(provisioning, {
-    id: "provider-only",
-    labels: { app: "coven-agents" },
-    name: "not-an-app-owned-name",
+    id: privateValues[4],
+    labels: { app: "coven-agents", opaque: privateValues.join("|") },
+    name: privateValues[5],
     state: SandboxState.ARCHIVED,
   });
   let query: Parameters<DaytonaSandboxInventoryService["list"]>[0] | undefined;
@@ -160,12 +176,7 @@ test("inventory queries only the app label and returns privacy-safe aggregate ma
     version: 1,
   });
   const serialized = JSON.stringify(result);
-  for (const privateValue of [
-    matched.id,
-    matched.tenant,
-    providerOnly.id,
-    providerOnly.name,
-  ]) {
+  for (const privateValue of [matched.id, matched.tenant, ...privateValues]) {
     assert.equal(serialized.includes(privateValue), false);
   }
   const storedSandboxId = matched.daytonaSandboxId;

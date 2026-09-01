@@ -5,7 +5,11 @@ import type {
   SessionCommandLogsResponse,
   SessionExecuteResponse,
 } from "@daytona/sdk";
-import { sanitizeEvidenceText } from "@opencoven/agent-contracts";
+import {
+  type EvidenceRedactionInput,
+  exactEvidenceRedactions,
+  sanitizeEvidenceText,
+} from "@opencoven/agent-contracts";
 import { harnessStatus } from "@opencoven/harness";
 import {
   buildHarnessCommand,
@@ -98,6 +102,8 @@ export type DaytonaProcessService = Readonly<{
 }>;
 
 export type DaytonaProcessSandbox = Readonly<{
+  id?: string;
+  name?: string;
   process: DaytonaProcessService;
 }>;
 
@@ -954,7 +960,7 @@ function isTerminalDaytonaCommand(
 export async function snapshotDaytonaProcess(input: {
   attemptId: DaytonaAttemptId;
   commandId: string;
-  credential: string | null;
+  credential: EvidenceRedactionInput;
   cursor: number;
   harness: "copilot";
   now?: () => Date;
@@ -962,6 +968,14 @@ export async function snapshotDaytonaProcess(input: {
   runId: string;
 }): Promise<DaytonaLogSnapshot> {
   const sessionId = daytonaRunSessionName(input.runId, input.attemptId);
+  const redactions = exactEvidenceRedactions(
+    input.attemptId,
+    input.commandId,
+    sessionId,
+    input.sandbox.id,
+    input.sandbox.name,
+    input.credential
+  );
   const normalizedCommand = normalizeDaytonaCommand(
     await input.sandbox.process.getSessionCommand(sessionId, input.commandId)
   );
@@ -977,7 +991,7 @@ export async function snapshotDaytonaProcess(input: {
     normalizedLogs.stdout,
     input.cursor,
     terminal,
-    input.credential,
+    redactions,
     (input.now?.() ?? new Date()).toISOString()
   );
   // Daytona returns cumulative logs. Parse the complete sanitized transcript
@@ -988,7 +1002,7 @@ export async function snapshotDaytonaProcess(input: {
     normalizedLogs.stdout,
     0,
     terminal,
-    input.credential,
+    redactions,
     (input.now?.() ?? new Date()).toISOString()
   );
   const { events } = parsed;
@@ -1448,7 +1462,7 @@ async function probeDaytonaHarnessesInSession(
 /** A final defensive check for error payloads that cross this module boundary. */
 export function sanitizeDaytonaProcessMessage(
   message: string,
-  credential: string | null
+  credential: EvidenceRedactionInput
 ): string {
-  return sanitizeEvidenceText(message, credential ? [credential] : []);
+  return sanitizeEvidenceText(message, credential);
 }
