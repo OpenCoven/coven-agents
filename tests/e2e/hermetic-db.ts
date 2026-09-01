@@ -171,7 +171,7 @@ export async function applicationTableInventory(
                ),
                ''
              )) AS "checksum"
-          FROM ${sql(tablename)} AS "application_row"
+          FROM ${sql("public")}.${sql(tablename)} AS "application_row"
         `;
         return [
           tablename,

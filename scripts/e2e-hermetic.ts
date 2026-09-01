@@ -301,12 +301,14 @@ function postgresUrl(port: number): string {
   return `postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${port}/${POSTGRES_DATABASE}`;
 }
 
-export function utcDatabaseUrl(value: string): string {
+export function hermeticDatabaseUrl(value: string): string {
   const url = new URL(value);
-  const existingOptions = url.searchParams.get("options")?.trim();
+  const existingOptions = url.searchParams.getAll("options").at(-1)?.trim();
   url.searchParams.set(
     "options",
-    [existingOptions, "-c timezone=UTC"].filter(Boolean).join(" ")
+    [existingOptions, "-c search_path=public", "-c timezone=UTC"]
+      .filter(Boolean)
+      .join(" ")
   );
   return url.toString();
 }
@@ -484,7 +486,10 @@ async function createDisposableDatabase(
         "E2E_POSTGRES_URL requires E2E_POSTGRES_DISPOSABLE=1; refusing an unconfirmed database."
       );
     }
-    return { cleanup: async () => undefined, url: utcDatabaseUrl(external) };
+    return {
+      cleanup: async () => undefined,
+      url: hermeticDatabaseUrl(external),
+    };
   }
 
   const name = containerName();
@@ -510,7 +515,7 @@ async function createDisposableDatabase(
           timeout: DOCKER_COMMAND_TIMEOUT_MS,
         });
       },
-      url: utcDatabaseUrl(postgresUrl(mappedPort(output))),
+      url: hermeticDatabaseUrl(postgresUrl(mappedPort(output))),
     };
   } catch (error) {
     try {

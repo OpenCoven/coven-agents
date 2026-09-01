@@ -116,8 +116,7 @@ function runIdFrom(result: ApiResult): string {
 
 async function reconcile(
   request: APIRequestContext,
-  page?: Page,
-  expectedExecution: "executed" | "skipped" = "executed"
+  page?: Page
 ): Promise<void> {
   const execute = async () => {
     const response = await request.get("/api/internal/runner-reconcile", {
@@ -125,7 +124,8 @@ async function reconcile(
     });
     expect(response.status()).toBe(200);
     const result = object(await response.json());
-    expect(result.execution).toBe(expectedExecution);
+    expect(result.execution).toBe("executed");
+    expect(result.failures).toBe(0);
   };
   if (!page) {
     await execute();
@@ -414,7 +414,7 @@ test.describe("hermetic subscriber browser certification", () => {
     expect(object(object(stopped.body).run)).toMatchObject({
       status: "cancelled",
     });
-    await reconcile(request, undefined, "skipped");
+    await reconcile(request, page);
     expect(
       object(object((await api(page, `/api/runs/${heldRunId}`)).body).run)
     ).toMatchObject({
