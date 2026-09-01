@@ -48,7 +48,10 @@ bootstrap or complimentary access, not Stripe evidence or production
 certification. `status` is read-only. Each `grant` or `revoke` requires a
 bounded `--reference-stdin`; mutations read one bounded printable UTF-8 value
 from standard input, then hash it with SHA-256 before any database lookup or
-mutation. The raw value is never accepted through command arguments or printed.
+mutation. The value is capped at 128 encoded bytes and may include printable
+Unicode; control, format, surrogate, and Unicode line- or paragraph-separator
+characters are rejected. The raw value is never accepted through command
+arguments or printed.
 
 `grant` defaults to 365 days and is finite: the exported
 `MAX_SUBSCRIPTION_OVERRIDE_DAYS = 3650` upper bound prevents an indefinite

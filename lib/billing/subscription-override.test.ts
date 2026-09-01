@@ -334,6 +334,112 @@ test("reference stdin accepts one bounded printable UTF-8 value", async () => {
   );
 });
 
+test("reference stdin resolves and releases an open source after an LF or CRLF line", async () => {
+  await Promise.all(
+    ["\n", "\r\n"].map(async (terminator) => {
+      let released = false;
+      let yielded = false;
+      const input: AsyncIterable<Uint8Array> = {
+        [Symbol.asyncIterator]() {
+          return {
+            next(): Promise<IteratorResult<Uint8Array>> {
+              if (!yielded) {
+                yielded = true;
+                return Promise.resolve({
+                  done: false,
+                  value: Buffer.from(`${REFERENCE}${terminator}`),
+                });
+              }
+              return new Promise<IteratorResult<Uint8Array>>(() => {
+                // Simulate a stdin source that remains open indefinitely.
+              });
+            },
+            return(): Promise<IteratorResult<Uint8Array>> {
+              released = true;
+              return Promise.resolve({ done: true, value: undefined });
+            },
+          };
+        },
+      };
+
+      const reference = await Promise.race([
+        readSubscriptionOverrideReference(input),
+        new Promise<never>((_, reject) => {
+          setTimeout(
+            () => reject(new Error("reference reader did not resolve")),
+            50
+          );
+        }),
+      ]);
+
+      assert.equal(reference, REFERENCE);
+      assert.equal(released, true);
+    })
+  );
+});
+
+test("reference stdin accepts CRLF but rejects trailing bytes in its terminating chunk", async () => {
+  assert.equal(
+    await readSubscriptionOverrideReference(
+      referenceInput(Buffer.from(`${REFERENCE}\r\n`))
+    ),
+    REFERENCE
+  );
+  await assert.rejects(
+    readSubscriptionOverrideReference(
+      referenceInput(Buffer.from(`${REFERENCE}\ntrailing`))
+    ),
+    /reference/i
+  );
+  await assert.rejects(
+    readSubscriptionOverrideReference(
+      referenceInput(Buffer.from(`${REFERENCE}\r\ntrailing`))
+    ),
+    /reference/i
+  );
+});
+
+test("reference stdin decodes split printable Unicode UTF-8 and enforces its byte cap", async () => {
+  const reference = "référence";
+  const bytes = Buffer.from(`${reference}\n`);
+  assert.equal(
+    await readSubscriptionOverrideReference(
+      referenceInput(
+        bytes.subarray(0, 2),
+        bytes.subarray(2, 5),
+        bytes.subarray(5)
+      )
+    ),
+    reference
+  );
+
+  await assert.rejects(
+    readSubscriptionOverrideReference(
+      referenceInput(Buffer.from(`${"x".repeat(127)}é\n`))
+    ),
+    /reference/i
+  );
+});
+
+test("reference stdin rejects malformed UTF-8 and non-printable Unicode", async () => {
+  await assert.rejects(
+    readSubscriptionOverrideReference(
+      referenceInput(new Uint8Array([0xc3, 0x28, 0x0a]))
+    ),
+    /reference/i
+  );
+  await Promise.all(
+    ["case\t123", "case\u200B123", "case\u2028123"].map((reference) =>
+      assert.rejects(
+        readSubscriptionOverrideReference(
+          referenceInput(Buffer.from(`${reference}\n`))
+        ),
+        /reference/i
+      )
+    )
+  );
+});
+
 test("reference stdin rejects missing, oversized, and invalid input without buffering it", async () => {
   await assert.rejects(
     readSubscriptionOverrideReference(referenceInput()),

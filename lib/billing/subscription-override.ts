@@ -6,6 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 const DAY_MS = 86_400_000;
 const DEFAULT_SUBSCRIPTION_OVERRIDE_DAYS = 365;
 const MAX_AUTH_VERSION = 2_147_483_647;
+const NON_PRINTABLE_REFERENCE_CHARACTERS = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
 
 export const MAX_SUBSCRIPTION_OVERRIDE_DAYS = 3650;
 export const MAX_SUBSCRIPTION_OVERRIDE_REFERENCE_LENGTH = 128;
@@ -364,45 +365,69 @@ export async function readSubscriptionOverrideReference(
   input: AsyncIterable<Uint8Array>
 ): Promise<string> {
   const referenceBytes: number[] = [];
-  let completed = false;
   let pendingCarriageReturn = false;
+  const iterator = input[Symbol.asyncIterator]();
+  let iteratorFinished = false;
 
-  for await (const chunk of input) {
-    for (const byte of chunk) {
-      if (completed) {
-        throwInvalidReference();
-      }
-      if (pendingCarriageReturn) {
-        if (byte !== 0x0a) {
+  try {
+    while (true) {
+      // Async iterator chunks must be read in order.
+      // biome-ignore lint/performance/noAwaitInLoops: sequential consumption is required.
+      const { done, value: chunk } = await iterator.next();
+      if (done) {
+        iteratorFinished = true;
+        if (pendingCarriageReturn) {
           throwInvalidReference();
         }
-        pendingCarriageReturn = false;
-        completed = true;
-        continue;
+        return decodeReference(referenceBytes);
       }
-      if (byte === 0x0a) {
-        completed = true;
-        continue;
+
+      for (let index = 0; index < chunk.length; index += 1) {
+        const byte = chunk[index];
+        if (pendingCarriageReturn) {
+          if (byte !== 0x0a) {
+            throwInvalidReference();
+          }
+          if (index !== chunk.length - 1) {
+            throwInvalidReference();
+          }
+          return decodeReference(referenceBytes);
+        }
+        if (byte === 0x0a) {
+          if (index !== chunk.length - 1) {
+            throwInvalidReference();
+          }
+          return decodeReference(referenceBytes);
+        }
+        if (byte === 0x0d) {
+          pendingCarriageReturn = true;
+          continue;
+        }
+        if (
+          byte < 0x20 ||
+          referenceBytes.length >= MAX_SUBSCRIPTION_OVERRIDE_REFERENCE_LENGTH
+        ) {
+          throwInvalidReference();
+        }
+        referenceBytes.push(byte);
       }
-      if (byte === 0x0d) {
-        pendingCarriageReturn = true;
-        continue;
-      }
-      if (
-        byte < 0x20 ||
-        byte > 0x7e ||
-        referenceBytes.length >= MAX_SUBSCRIPTION_OVERRIDE_REFERENCE_LENGTH
-      ) {
-        throwInvalidReference();
-      }
-      referenceBytes.push(byte);
+    }
+  } finally {
+    if (!iteratorFinished) {
+      await iterator.return?.();
     }
   }
+}
 
-  if (pendingCarriageReturn) {
+function decodeReference(referenceBytes: number[]): string {
+  let reference: string;
+  try {
+    reference = new TextDecoder("utf-8", { fatal: true }).decode(
+      Uint8Array.from(referenceBytes)
+    );
+  } catch {
     throwInvalidReference();
   }
-  const reference = Buffer.from(referenceBytes).toString("utf8");
   assertReference(reference);
   return reference;
 }
@@ -410,9 +435,10 @@ export async function readSubscriptionOverrideReference(
 function assertReference(reference: string): void {
   if (
     reference.length === 0 ||
-    reference.length > MAX_SUBSCRIPTION_OVERRIDE_REFERENCE_LENGTH ||
+    Buffer.byteLength(reference, "utf8") >
+      MAX_SUBSCRIPTION_OVERRIDE_REFERENCE_LENGTH ||
     reference.trim() !== reference ||
-    !/^[\x20-\x7e]+$/u.test(reference)
+    NON_PRINTABLE_REFERENCE_CHARACTERS.test(reference)
   ) {
     throw new SubscriptionOverrideInputError(
       "External reference must be a bounded printable value."
