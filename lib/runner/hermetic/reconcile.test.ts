@@ -7,7 +7,11 @@ import type {
   RunnerDispatchAuthority,
   RunnerRunRecord,
 } from "../types";
-import { HERMETIC_HOLD_TASK_MARKER, hermeticCommandId } from "./executor";
+import {
+  HERMETIC_EXECUTION_PROVENANCE,
+  HERMETIC_HOLD_TASK_MARKER,
+  hermeticCommandId,
+} from "./executor";
 import { hermeticReconciliationProvider } from "./reconcile";
 
 const runId = "00000000-0000-4000-8000-000000000002";
@@ -41,7 +45,7 @@ function run(task = "complete certification"): RunnerRunRecord {
     dispatchState: "running",
     error: null,
     executionPermission: "unrestricted",
-    executionProvenance: null,
+    executionProvenance: HERMETIC_EXECUTION_PROVENANCE,
     fileEvidence: [],
     id: runId,
     logCursor: 0,
@@ -118,6 +122,73 @@ test("hermetic held run stays running until generic cancellation stops its exact
       attemptId,
       runId,
     }),
-    { kind: "provider_not_found" }
+    { kind: "provider_unavailable" }
+  );
+});
+
+test("hermetic recovery rejects foreign, incomplete, and mismatched provider identities", async () => {
+  const provider = hermeticReconciliationProvider();
+  const cases = [
+    {
+      ...run(),
+      executionProvenance: {
+        ...HERMETIC_EXECUTION_PROVENANCE,
+        provider: "daytona",
+      },
+    },
+    { ...run(), executionProvenance: null },
+    {
+      ...run(),
+      executionProvenance: {
+        provider: "hermetic",
+      } as never,
+    },
+    { ...run(), daytonaCommandId: "foreign-command" },
+    { ...run(), daytonaSessionId: "foreign-session" },
+  ];
+
+  await Promise.all(
+    cases.map(
+      async (candidate) =>
+        await assert.rejects(
+          provider.resolveExecutionContext(candidate, authority),
+          /unavailable|ambiguous/u
+        )
+    )
+  );
+});
+
+test("hermetic fake cannot snapshot or stop a spoofed context", async () => {
+  const provider = hermeticReconciliationProvider();
+  const context = await provider.resolveExecutionContext(run(), authority);
+  assert.ok(context);
+  await assert.rejects(async () =>
+    provider.snapshot?.({
+      attemptId,
+      commandId: "foreign-command",
+      context,
+      credential: null,
+      cursor: 0,
+      harness: "copilot",
+      runId,
+    })
+  );
+  assert.deepEqual(
+    await provider.stop(context, {
+      attemptId:
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" as RunnerDaytonaAttemptId,
+      runId,
+    }),
+    { kind: "provider_unavailable" }
+  );
+  assert.deepEqual(
+    await provider.stop(
+      {
+        attemptId,
+        runId,
+      } as unknown as RunnerReconciliationContext,
+      { attemptId, runId }
+    ),
+    { kind: "provider_unavailable" }
   );
 });

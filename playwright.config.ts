@@ -6,9 +6,34 @@ import { defineConfig, devices } from "@playwright/test";
  */
 import { config } from "dotenv";
 
-config({
-  path: ".env.local",
-});
+type PlaywrightEnvironment = Readonly<Record<string, string | undefined>>;
+
+export function loadPlaywrightLocalEnvironment(
+  environment: PlaywrightEnvironment = process.env,
+  load: typeof config = config
+): boolean {
+  if (environment.E2E_HERMETIC_RUNNER === "1") {
+    return false;
+  }
+  load({ path: ".env.local" });
+  return true;
+}
+
+export function playwrightWebServerEnvironment(
+  environment: PlaywrightEnvironment = process.env
+): Record<string, string> {
+  const childEnvironment: Record<string, string> = {};
+  for (const [name, value] of Object.entries(environment)) {
+    if (value !== undefined) {
+      childEnvironment[name] = value;
+    }
+  }
+  childEnvironment.ADMIN_EMAILS =
+    environment.ADMIN_EMAILS || "e2e-admin@example.invalid";
+  return childEnvironment;
+}
+
+loadPlaywrightLocalEnvironment();
 
 /* Keep E2E isolated from the app developers commonly run on port 3000. */
 const PORT = process.env.PORT || 3100;
@@ -96,10 +121,7 @@ export default defineConfig({
     command: useProductionBuild
       ? `pnpm validate:runtime && exec ${nextCommand} start --port ${PORT}`
       : `exec ${nextCommand} dev --turbo --port ${PORT}`,
-    env: {
-      ...process.env,
-      ADMIN_EMAILS: process.env.ADMIN_EMAILS || "e2e-admin@example.invalid",
-    },
+    env: playwrightWebServerEnvironment(),
     reuseExistingServer: false,
     timeout: 120 * 1000,
     url: `${baseURL}${basePath}/ping`,

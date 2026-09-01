@@ -11,11 +11,93 @@ import {
 const executeFile = promisify(execFile);
 const COMMAND_TIMEOUT_MS = 120_000;
 const DATABASE_READY_TIMEOUT_MS = 30_000;
+export const DOCKER_COMMAND_TIMEOUT_MS = 10_000;
 const POSTGRES_IMAGE = "postgres:16-alpine";
 const POSTGRES_DATABASE = "coven_hermetic_e2e";
 const POSTGRES_PASSWORD = "test-hermetic-postgres";
 const POSTGRES_USER = "postgres";
 const TEST_KEK = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const EXAMPLE_ENVIRONMENT_VARIABLES = [
+  "AI_GATEWAY_API_KEY",
+  "AUTH_GITHUB_ID",
+  "AUTH_GITHUB_SECRET",
+  "AUTH_SECRET",
+  "AUTH_URL",
+  "ABUSE_CONTROL",
+  "ABUSE_KEY_SECRET",
+  "ADMIN_EMAILS",
+  "APP_ORIGIN",
+  "BETA_ALLOWLIST",
+  "BETA_MODE",
+  "BLOB_READ_WRITE_TOKEN",
+  "CRON_SECRET",
+  "CREDENTIAL_AAD_WRITES_ENABLED",
+  "CREDENTIAL_KEK",
+  "CREDENTIAL_KEK_CURRENT_VERSION",
+  "CREDENTIAL_KEK_V1",
+  "CREDENTIAL_KEK_V2",
+  "DAYTONA_API_KEY",
+  "DAYTONA_API_URL",
+  "DAYTONA_AUTO_ARCHIVE_MINUTES",
+  "DAYTONA_AUTO_STOP_MINUTES",
+  "DAYTONA_DOMAIN_ALLOW_LIST",
+  "DAYTONA_SNAPSHOT",
+  "DAYTONA_TARGET",
+  "DEMO_RECORDER_ACCOUNT_EMAIL",
+  "DEMO_RECORDING_CREDENTIAL",
+  "DEMO_RECORDING_TIMEOUT_MS",
+  "GLOBAL_DAILY_RUN_CAP",
+  "OPERATOR_DIAGNOSTIC_TOKEN",
+  "POSTGRES_URL",
+  "REDIS_URL",
+  "RELEASE_AUDIENCE",
+  "RUN_ADMISSION_CONSECUTIVE_MAX",
+  "RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX",
+  "RUN_ADMISSION_MODE",
+  "RUN_ADMISSION_TENANT_ACTIVE_MAX",
+  "RUN_ADMISSION_TENANT_QUEUE_MAX",
+  "RUNNER_MANUAL_RECONCILE_SECRET",
+  "STRIPE_PRICE_ID",
+  "STRIPE_SECRET_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+  "SUBSCRIPTION_CHECKOUT_ENABLED",
+] as const;
+const EXTERNAL_ENVIRONMENT_PREFIXES = [
+  "AI_",
+  "ANTHROPIC_",
+  "AWS_",
+  "AZURE_",
+  "BLOB_",
+  "COHERE_",
+  "CREDENTIAL_KEK",
+  "DATABASE_",
+  "DAYTONA_",
+  "DEEPSEEK_",
+  "E2E_",
+  "FIREWORKS_",
+  "GITHUB_",
+  "GOOGLE_",
+  "GROQ_",
+  "MISTRAL_",
+  "NEON_",
+  "NEXT_PUBLIC_",
+  "OPENAI_",
+  "PERPLEXITY_",
+  "PINECONE_",
+  "POSTGRES_",
+  "QDRANT_",
+  "R2_",
+  "REDIS_",
+  "S3_",
+  "STRIPE_",
+  "SUPABASE_",
+  "TOGETHER_",
+  "TURSO_",
+  "UPSTASH_",
+  "VERCEL_",
+  "WEAVIATE_",
+  "XAI_",
+] as const;
 
 type CommandOptions = Readonly<{
   env?: NodeJS.ProcessEnv;
@@ -82,6 +164,12 @@ export function mappedPort(output: string): number {
   return port;
 }
 
+function isExternalEnvironmentVariable(name: string): boolean {
+  return EXTERNAL_ENVIRONMENT_PREFIXES.some((prefix) =>
+    name.startsWith(prefix)
+  );
+}
+
 async function waitForPostgres(name: string): Promise<void> {
   const deadline = Date.now() + DATABASE_READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -98,7 +186,7 @@ async function waitForPostgres(name: string): Promise<void> {
           "--dbname",
           POSTGRES_DATABASE,
         ],
-        { timeout: 5000 }
+        { timeout: DOCKER_COMMAND_TIMEOUT_MS }
       );
       return;
     } catch {
@@ -116,28 +204,36 @@ export function hermeticEnvironment(
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
     ...inherited,
-    ABUSE_CONTROL: undefined,
+  };
+  for (const name of Object.keys(environment)) {
+    if (isExternalEnvironmentVariable(name)) {
+      environment[name] = "";
+    }
+  }
+  for (const name of EXAMPLE_ENVIRONMENT_VARIABLES) {
+    environment[name] = "";
+  }
+  return {
+    ...environment,
+    ABUSE_CONTROL: "",
     ABUSE_KEY_SECRET: "test-hermetic-abuse",
     APP_ORIGIN: "http://localhost:3100",
     AUTH_SECRET: "test-hermetic-auth",
     AUTH_URL: "http://localhost:3100",
     COVEN_HERMETIC_RUNNER: "1",
-    CREDENTIAL_KEK: undefined,
     CREDENTIAL_KEK_CURRENT_VERSION: "v1",
     CREDENTIAL_KEK_V1: TEST_KEK,
-    CREDENTIAL_KEK_V2: undefined,
     CRON_SECRET: "test-hermetic-cron",
     E2E_HERMETIC_RUNNER: "1",
-    E2E_PRODUCTION: undefined,
     GLOBAL_DAILY_RUN_CAP: "100",
-    IS_DEMO: undefined,
+    IS_DEMO: "",
     NEXT_TELEMETRY_DISABLED: "1",
     NEXTAUTH_URL: "http://localhost:3100",
     NODE_ENV: "development",
     OPERATOR_DIAGNOSTIC_TOKEN: "test-hermetic-diagnostic",
     PORT: "3100",
     POSTGRES_URL: url,
-    REDIS_URL: undefined,
+    REDIS_URL: "",
     RUN_ADMISSION_CONSECUTIVE_MAX: "2",
     RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "25",
     RUN_ADMISSION_MODE: "queue",
@@ -145,12 +241,6 @@ export function hermeticEnvironment(
     RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
     RUNNER_MANUAL_RECONCILE_SECRET: "test-hermetic-manual",
   };
-  for (const name of Object.keys(environment)) {
-    if (name.startsWith("DAYTONA_")) {
-      environment[name] = undefined;
-    }
-  }
-  return environment;
 }
 
 async function migrate(
@@ -196,25 +286,34 @@ async function createDisposableDatabase(
 
   const name = containerName();
   try {
-    await command("docker", dockerRunArguments(name), { timeout: 30_000 });
+    await command("docker", ["info"], { timeout: DOCKER_COMMAND_TIMEOUT_MS });
+    await command("docker", dockerRunArguments(name), {
+      timeout: DOCKER_COMMAND_TIMEOUT_MS,
+    });
   } catch (error) {
     throw new Error(
-      "Could not start disposable PostgreSQL. Ensure Docker is running and postgres:16-alpine is available.",
+      `Could not start disposable PostgreSQL within ${DOCKER_COMMAND_TIMEOUT_MS / 1000} seconds. Ensure Docker daemon is running and postgres:16-alpine is available.`,
       { cause: error }
     );
   }
   try {
     await waitForPostgres(name);
-    const output = await command("docker", ["port", name, "5432/tcp"]);
+    const output = await command("docker", ["port", name, "5432/tcp"], {
+      timeout: DOCKER_COMMAND_TIMEOUT_MS,
+    });
     return {
       cleanup: async () => {
-        await command("docker", ["rm", "--force", name]);
+        await command("docker", ["rm", "--force", name], {
+          timeout: DOCKER_COMMAND_TIMEOUT_MS,
+        });
       },
       url: postgresUrl(mappedPort(output)),
     };
   } catch (error) {
     try {
-      await command("docker", ["rm", "--force", name]);
+      await command("docker", ["rm", "--force", name], {
+        timeout: DOCKER_COMMAND_TIMEOUT_MS,
+      });
     } catch {
       // A failed cleanup must not replace the actionable start-up error.
     }

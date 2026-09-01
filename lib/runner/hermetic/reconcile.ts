@@ -9,44 +9,76 @@ import type {
 } from "../attempt-reconcile";
 import { daytonaRunSessionName } from "../daytona/names";
 import type { RunnerDispatchAuthority, RunnerRunRecord } from "../types";
-import { HERMETIC_HOLD_TASK_MARKER } from "./executor";
+import {
+  HERMETIC_EXECUTION_PROVENANCE,
+  HERMETIC_HOLD_TASK_MARKER,
+  hermeticCommandId,
+} from "./executor";
 
 declare const hermeticReconciliationContextBrand: unique symbol;
 
 type HermeticReconciliationContext = Readonly<{
   attemptId: string;
+  commandId: string;
   held: boolean;
   runId: string;
+  sessionId: string;
   readonly [hermeticReconciliationContextBrand]: "HermeticReconciliationContext";
 }>;
 
 const EVENT_TIME = "2026-09-01T00:00:00.000Z";
 
+function unavailable(message: string): Error {
+  return new Error(`Hermetic reconciliation is unavailable: ${message}.`);
+}
+
+function hasExactHermeticProvenance(run: RunnerRunRecord): boolean {
+  const provenance = run.executionProvenance;
+  const expectedEntries = Object.entries(HERMETIC_EXECUTION_PROVENANCE);
+  return (
+    provenance !== null &&
+    Object.keys(provenance).length === expectedEntries.length &&
+    expectedEntries.every(
+      ([key, value]) => provenance[key as keyof typeof provenance] === value
+    )
+  );
+}
+
 function contextFor(
   run: RunnerRunRecord,
   authority: RunnerDispatchAuthority
-): RunnerReconciliationContext | null {
+): RunnerReconciliationContext {
+  const { attemptId } = authority;
   if (
-    !authority.attemptId ||
-    run.daytonaAttemptId !== authority.attemptId ||
-    !run.daytonaCommandId ||
-    run.daytonaSessionId !== daytonaRunSessionName(run.id, authority.attemptId)
+    !attemptId ||
+    !hasExactHermeticProvenance(run) ||
+    run.daytonaAttemptId !== attemptId ||
+    run.daytonaCommandId !== hermeticCommandId(run.id, attemptId) ||
+    run.daytonaSessionId !== daytonaRunSessionName(run.id, attemptId)
   ) {
-    return null;
+    throw unavailable("attempt ownership is ambiguous");
   }
-  return {
-    attemptId: authority.attemptId,
+  return Object.freeze({
+    attemptId,
+    commandId: hermeticCommandId(run.id, attemptId),
     held: run.task.includes(HERMETIC_HOLD_TASK_MARKER),
     runId: run.id,
-  } as unknown as RunnerReconciliationContext;
+    sessionId: daytonaRunSessionName(run.id, attemptId),
+  } as unknown as RunnerReconciliationContext);
 }
 
-function verifySnapshotInput(input: RunnerAttemptSnapshotInput): void {
+function verifySnapshotInput(
+  input: RunnerAttemptSnapshotInput,
+  contexts: WeakSet<RunnerReconciliationContext>
+): void {
   const context = input.context as unknown as HermeticReconciliationContext;
   if (
+    !contexts.has(input.context) ||
     context.runId !== input.runId ||
     context.attemptId !== input.attemptId ||
-    !input.commandId.startsWith("hermetic-command-")
+    context.commandId !== hermeticCommandId(input.runId, input.attemptId) ||
+    context.sessionId !== daytonaRunSessionName(input.runId, input.attemptId) ||
+    input.commandId !== context.commandId
   ) {
     throw new Error("Hermetic reconciliation attempt fence was rejected.");
   }
@@ -122,7 +154,6 @@ function heldSummary(): RunSummary {
 }
 
 function snapshot(input: RunnerAttemptSnapshotInput): RunnerAttemptLogSnapshot {
-  verifySnapshotInput(input);
   const events = input.cursor === 0 ? completedEvents(input) : [];
   return {
     cursor: completedEvents(input).length,
@@ -140,12 +171,20 @@ function snapshot(input: RunnerAttemptSnapshotInput): RunnerAttemptLogSnapshot {
  * deterministic and cancellation uses the same generic stop boundary.
  */
 export function hermeticReconciliationProvider(): RunnerReconciliationProvider {
+  const contexts = new WeakSet<RunnerReconciliationContext>();
   return {
     requiresAttemptRedaction: false,
-    resolveExecutionContext: async (run, authority) =>
-      contextFor(run, authority),
+    resolveExecutionContext: (run, authority) => {
+      try {
+        const context = contextFor(run, authority);
+        contexts.add(context);
+        return Promise.resolve(context);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    },
     snapshot: (input) => {
-      verifySnapshotInput(input);
+      verifySnapshotInput(input, contexts);
       if ((input.context as unknown as HermeticReconciliationContext).held) {
         return Promise.resolve({
           cursor: input.cursor,
@@ -161,10 +200,15 @@ export function hermeticReconciliationProvider(): RunnerReconciliationProvider {
     stop: (context, input) => {
       const candidate = context as unknown as HermeticReconciliationContext;
       return Promise.resolve(
-        candidate.attemptId === input.attemptId &&
-          candidate.runId === input.runId
+        contexts.has(context) &&
+          candidate.attemptId === input.attemptId &&
+          candidate.runId === input.runId &&
+          candidate.commandId ===
+            hermeticCommandId(input.runId, input.attemptId) &&
+          candidate.sessionId ===
+            daytonaRunSessionName(input.runId, input.attemptId)
           ? { kind: "stopped" }
-          : { kind: "provider_not_found" }
+          : { kind: "provider_unavailable" }
       );
     },
   };
