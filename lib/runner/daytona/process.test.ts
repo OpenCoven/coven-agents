@@ -1334,40 +1334,41 @@ test("restricted workspace configuration is rejected before preparation or crede
   );
 });
 
-test("GitHub-only workspace configuration is rejected before capability issuance", async () => {
-  const { fileCalls, sandbox } = processDouble({ inspectionExitCode: 42 });
+test("GitHub-only launches do not inspect an unmounted workspace", async () => {
+  const { calls, fileCalls, sandbox } = processDouble({
+    inspectionExitCode: 42,
+  });
   let issued = 0;
   let preparations = 0;
 
-  await assert.rejects(
-    startDaytonaProcess({
-      ...startInput(sandbox),
-      authorizePreparation: async () => {
-        preparations += 1;
-        return PREPARATION_CLAIM;
+  const result = await startDaytonaProcess({
+    ...startInput(sandbox),
+    authorizePreparation: async () => {
+      preparations += 1;
+      return PREPARATION_CLAIM;
+    },
+    executionPermission: "github_only",
+    githubTool: {
+      issueCapability: async () => {
+        issued += 1;
+        return {
+          rawCapability: Buffer.alloc(32, 0x5f).toString("base64url"),
+        };
       },
-      executionPermission: "github_only",
-      githubTool: {
-        issueCapability: async () => {
-          issued += 1;
-          return {
-            rawCapability: Buffer.alloc(32, 0x5f).toString("base64url"),
-          };
-        },
-        revokeCapability: async () => true,
-        url: "https://app.example/api/internal/github-tool",
-      },
-      workspace: undefined,
-    }),
-    (error: unknown) =>
-      error instanceof DaytonaProcessError &&
-      error.code === "process_start_failed" &&
-      error.retryable === false
-  );
+      revokeCapability: async () => true,
+      url: "https://app.example/api/internal/github-tool",
+    },
+    workspace: undefined,
+  });
 
-  assert.equal(preparations, 0);
-  assert.equal(issued, 0);
-  assert.deepEqual(fileCalls, []);
+  assert.equal(result.attemptId, PREPARATION_CLAIM);
+  assert.equal(preparations, 1);
+  assert.equal(issued, 1);
+  assert.equal(
+    calls.some(({ command }) => command.includes(".mcp.json")),
+    false
+  );
+  assert.ok(fileCalls.length > 0);
 });
 
 test("restricted workspace inspection rejects repository hook and settings sources", async () => {

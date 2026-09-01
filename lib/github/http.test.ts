@@ -538,6 +538,51 @@ test("write recovery finds deterministic markers and never issues a second mutat
   assert.equal(absent.requests.length, 1);
 });
 
+test("pull review recovery checks the newest paginated reviews", async () => {
+  const marker =
+    "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->";
+  const operation = {
+    body: "Approved.",
+    event: "approve" as const,
+    kind: "pull.review" as const,
+    owner: "OpenCoven",
+    pullNumber: "181",
+    repo: "coven-agents",
+  };
+  const sequence = sequenceProvider([
+    Response.json([], {
+      headers: {
+        link: '<https://api.github.com/repositories/789/pulls/181/reviews?per_page=100&page=3>; rel="last"',
+      },
+    }),
+    Response.json([
+      {
+        body: `Approved.\n\n${marker}`,
+        html_url:
+          "https://github.com/OpenCoven/coven-agents/pull/181#pullrequestreview-3",
+        node_id: "PRR_kwDOExample3",
+        state: "APPROVED",
+      },
+    ]),
+  ]);
+
+  const result = await sequence.provider.execute({
+    authorizeMutation: () => Promise.resolve(false),
+    context: context(operation, marker),
+    mode: "recover",
+    operation,
+  });
+
+  assert.equal(result.result.kind, "pull.review");
+  assert.deepEqual(
+    sequence.requests.map(({ url }) => url),
+    [
+      "https://api.github.com/repos/OpenCoven/coven-agents/pulls/181/reviews?per_page=100&page=1",
+      "https://api.github.com/repos/OpenCoven/coven-agents/pulls/181/reviews?per_page=100&page=3",
+    ]
+  );
+});
+
 test("pull.get is bounded and rejects an issue-shaped target", async () => {
   const operation = {
     kind: "pull.get" as const,
@@ -608,7 +653,30 @@ test("project add and field update use fixed GraphQL documents and verify reposi
         },
         project: {
           id: add.projectId,
-          items: { nodes: [] },
+          items: {
+            nodes: [],
+            pageInfo: { endCursor: "cursor-1", hasNextPage: true },
+          },
+          owner: { login: "OpenCoven" },
+        },
+      },
+    }),
+    Response.json({
+      data: {
+        content: {
+          __typename: "Issue",
+          id: add.contentId,
+          repository: {
+            databaseId: 789,
+            nameWithOwner: "OpenCoven/coven-agents",
+          },
+        },
+        project: {
+          id: add.projectId,
+          items: {
+            nodes: [],
+            pageInfo: { endCursor: null, hasNextPage: false },
+          },
           owner: { login: "OpenCoven" },
         },
       },
@@ -638,15 +706,22 @@ test("project add and field update use fixed GraphQL documents and verify reposi
   );
   assert.equal(addBodies[0].operationName, "CovenProjectItemAddTargets");
   assert.deepEqual(addBodies[0].variables, {
+    after: null,
     contentId: add.contentId,
     projectId: add.projectId,
   });
-  assert.equal(addBodies[1].operationName, "CovenProjectItemAdd");
+  assert.equal(addBodies[1].operationName, "CovenProjectItemAddTargets");
   assert.deepEqual(addBodies[1].variables, {
+    after: "cursor-1",
     contentId: add.contentId,
     projectId: add.projectId,
   });
-  assert.doesNotMatch(addBodies[1].query, /delete|merge|workflow|secret/iu);
+  assert.equal(addBodies[2].operationName, "CovenProjectItemAdd");
+  assert.deepEqual(addBodies[2].variables, {
+    contentId: add.contentId,
+    projectId: add.projectId,
+  });
+  assert.doesNotMatch(addBodies[2].query, /delete|merge|workflow|secret/iu);
 
   const update = {
     contentId: add.contentId,
@@ -736,6 +811,7 @@ test("project operations request only verified organization project authority an
                 id: "PVTI_lADOExample",
               },
             ],
+            pageInfo: { endCursor: null, hasNextPage: false },
           },
           owner: { login: "OpenCoven" },
         },
@@ -1589,7 +1665,7 @@ test("same-operation recovery after completion persistence failure performs at m
       ],
       [
         "GET",
-        "https://api.github.com/repos/OpenCoven/coven-agents/issues/42/comments?per_page=100&page=1",
+        "https://api.github.com/repos/OpenCoven/coven-agents/issues/42/comments?sort=created&direction=desc&per_page=100&page=1",
       ],
     ]
   );
@@ -1941,6 +2017,7 @@ test("blocked mutation authorization returns dispatch uncertainty without provid
       teamStepId: context().capability.teamStepId,
     })
   );
+  let authorizationAborted = false;
   let failures = 0;
   let mutations = 0;
   let releases = 0;
@@ -1958,7 +2035,17 @@ test("blocked mutation authorization returns dispatch uncertainty without provid
       },
     },
     store: {
-      authorizeMutation: () => new Promise(() => undefined),
+      authorizeMutation: (_operator, input) =>
+        new Promise((_resolve, reject) => {
+          input.abortSignal?.addEventListener(
+            "abort",
+            () => {
+              authorizationAborted = true;
+              reject(input.abortSignal?.reason);
+            },
+            { once: true }
+          );
+        }),
       completeOperation: async () => ({ kind: "stale" as const }),
       failOperation: async () => {
         failures += 1;
@@ -1982,6 +2069,7 @@ test("blocked mutation authorization returns dispatch uncertainty without provid
       error.code === "github_write_uncertain" &&
       error.retryable === false
   );
+  assert.equal(authorizationAborted, true);
   assert.equal(mutations, 0);
   assert.equal(failures, 0);
   assert.equal(releases, 0);

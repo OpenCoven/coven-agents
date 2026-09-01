@@ -450,6 +450,50 @@ test("gateway transactions set bounded PostgreSQL lock and statement deadlines",
   }
 });
 
+test("aborted mutation authorization rolls back before transaction commit", async () => {
+  let releaseAuthorization!: () => void;
+  let signalAuthorizationStarted!: () => void;
+  let transactionCommitted = false;
+  const authorizationBlocked = new Promise<void>((resolve) => {
+    releaseAuthorization = resolve;
+  });
+  const authorizationStarted = new Promise<void>((resolve) => {
+    signalAuthorizationStarted = resolve;
+  });
+  const database: TeamStoreDatabase = {
+    transaction: async (callback) => {
+      const result = await callback({
+        execute: async (query) => {
+          if (query.name === "configure-github-database-deadlines") {
+            return [];
+          }
+          signalAuthorizationStarted();
+          await authorizationBlocked;
+          return [];
+        },
+      });
+      transactionCommitted = true;
+      return result;
+    },
+  };
+  const controller = new AbortController();
+  const authorization = createGitHubGatewayStore(database).authorizeMutation(
+    operator,
+    {
+      abortSignal: controller.signal,
+      expectedVersion: 0,
+      id: OPERATION_ROW_ID,
+    }
+  );
+
+  await authorizationStarted;
+  controller.abort(new Error("authorization cancelled"));
+  releaseAuthorization();
+
+  await assert.rejects(authorization, /authorization cancelled/u);
+  assert.equal(transactionCommitted, false);
+});
+
 test("durable replacement revokes prior hashes and binds the new token to the exact live child", async () => {
   const created = capabilityRow();
   const replacement = scripted(

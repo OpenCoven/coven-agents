@@ -684,7 +684,7 @@ export async function startDaytonaProcess(input: {
       false
     );
   }
-  if (restricted) {
+  if (restricted && input.executionPermission !== "github_only") {
     const inspection = await inspectRestrictedWorkspace(
       input.sandbox,
       workspace

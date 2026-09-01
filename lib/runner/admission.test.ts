@@ -677,7 +677,6 @@ test("GitHub broker callbacks reach only the claimed child process and issue raw
   assert.deepEqual(result, { kind: "started", runId: claimedRun.id });
   assert.deepEqual(calls, [
     "sandbox",
-    "inspect:/workspace",
     "credential-input",
     "credential",
     "start",

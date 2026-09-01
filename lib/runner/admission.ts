@@ -640,7 +640,7 @@ export async function dispatchRunnerClaim(
       ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
-  if (restricted) {
+  if (restricted && run.executionPermission !== "github_only") {
     const inspection = await (
       dependencies.inspectRestrictedWorkspace ?? inspectRestrictedWorkspace
     )(ensured.sandbox, run.agentWorkspace ?? "/workspace");

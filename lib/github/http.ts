@@ -37,6 +37,7 @@ const NODE_ID = /^[A-Za-z0-9_=-]{1,256}$/u;
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_TOOL_REQUEST_BYTES = 512 * 1024;
+const MAX_RECOVERY_PAGES = 32;
 const RAW_CAPABILITY = /^[A-Za-z0-9_-]{43}$/u;
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -213,6 +214,18 @@ async function readBoundedText(
 function providerRequestId(response: Response): string | null {
   const value = response.headers.get("x-github-request-id");
   return value && REQUEST_ID.test(value) ? value : null;
+}
+
+function providerLastPage(response: Response): number | null {
+  const link = response.headers.get("link");
+  const match = link?.match(
+    /<[^>]*[?&]page=([1-9][0-9]{0,8})[^>]*>;\s*rel="last"/u
+  );
+  if (!match) {
+    return null;
+  }
+  const page = Number(match[1]);
+  return Number.isSafeInteger(page) ? page : null;
 }
 
 function issueResult(
@@ -403,12 +416,13 @@ function graphqlData(value: unknown): Record<string, unknown> {
   return object(envelope.data);
 }
 
-const PROJECT_ITEM_ADD_TARGETS = `query CovenProjectItemAddTargets($projectId: ID!, $contentId: ID!) {
+const PROJECT_ITEM_ADD_TARGETS = `query CovenProjectItemAddTargets($projectId: ID!, $contentId: ID!, $after: String) {
     project: node(id: $projectId) {
       ... on ProjectV2 {
         id
         owner { ... on Organization { login } ... on User { login } }
-        items(first: 100) {
+        items(first: 100, after: $after) {
+          pageInfo { hasNextPage endCursor }
           nodes { id content { ... on Issue { id } ... on PullRequest { id } } }
         }
       }
@@ -499,7 +513,13 @@ export function createGitHubOperationProvider(
     init: RequestInit = {},
     requestKind: "mutation" | "read" = "read",
     deadlineAt = Number.POSITIVE_INFINITY
-  ): Promise<Readonly<{ body: unknown; requestId: string | null }>> {
+  ): Promise<
+    Readonly<{
+      body: unknown;
+      lastPage: number | null;
+      requestId: string | null;
+    }>
+  > {
     const remaining = deadlineAt - clock();
     if (!(remaining > 0)) {
       throw new GitHubToolProviderError("github_provider_timeout", {
@@ -604,6 +624,7 @@ export function createGitHubOperationProvider(
       try {
         return {
           body: text ? (JSON.parse(text) as unknown) : null,
+          lastPage: providerLastPage(response),
           requestId,
         };
       } catch {
@@ -1130,7 +1151,7 @@ export function createGitHubOperationProvider(
         const recover = async () => {
           const response = await request(
             authorization,
-            `${basePath}/issues/${operation.issueNumber}/comments?per_page=100&page=1`,
+            `${basePath}/issues/${operation.issueNumber}/comments?sort=created&direction=desc&per_page=100&page=1`,
             { method: "GET" }
           );
           const found = array(response.body).find((item) => {
@@ -1255,7 +1276,7 @@ export function createGitHubOperationProvider(
         const recover = async () => {
           const response = await request(
             authorization,
-            `${basePath}/issues/${operation.pullNumber}/comments?per_page=100&page=1`,
+            `${basePath}/issues/${operation.pullNumber}/comments?sort=created&direction=desc&per_page=100&page=1`,
             { method: "GET" }
           );
           const found = array(response.body).find((item) => {
@@ -1311,20 +1332,38 @@ export function createGitHubOperationProvider(
       case "pull.review": {
         const operationMarker = marker(context);
         const recover = async () => {
-          const response = await request(
+          const firstPage = await request(
             authorization,
             `${basePath}/pulls/${operation.pullNumber}/reviews?per_page=100&page=1`,
             { method: "GET" }
           );
-          const found = array(response.body).find((item) => {
+          let response = firstPage;
+          let found = array(response.body).find((item) => {
             const candidate = object(item);
             return (
               typeof candidate.body === "string" &&
               candidate.body.includes(operationMarker)
             );
           });
+          if (!found && firstPage.lastPage && firstPage.lastPage > 1) {
+            response = await request(
+              authorization,
+              `${basePath}/pulls/${operation.pullNumber}/reviews?per_page=100&page=${firstPage.lastPage}`,
+              { method: "GET" }
+            );
+            found = array(response.body).find((item) => {
+              const candidate = object(item);
+              return (
+                typeof candidate.body === "string" &&
+                candidate.body.includes(operationMarker)
+              );
+            });
+          }
           return found
-            ? withRequestId(reviewResult(context, found), response.requestId)
+            ? withRequestId(
+                reviewResult(context, found),
+                response.requestId ?? firstPage.requestId
+              )
             : null;
         };
         return executeWrite(
@@ -1371,33 +1410,60 @@ export function createGitHubOperationProvider(
       }
       case "project.item.add": {
         const inspect = async () => {
-          const response = await graphql(
-            authorization,
-            "CovenProjectItemAddTargets",
-            PROJECT_ITEM_ADD_TARGETS,
-            {
-              contentId: operation.contentId,
-              projectId: operation.projectId,
-            }
-          );
-          const data = graphqlData(response.body);
-          const project = validateProjectIdentity(
-            context,
-            data.project,
-            operation.projectId
-          );
-          validateContentIdentity(context, data.content, operation);
-          const found = array(object(project.items).nodes).find((item) => {
-            const candidate = object(item);
-            const content = candidate.content;
-            return (
-              content !== null && object(content).id === operation.contentId
+          let after: string | null = null;
+          let requestId: string | null = null;
+          const seenCursors = new Set<string>();
+          for (let page = 0; page < MAX_RECOVERY_PAGES; page += 1) {
+            const response = await graphql(
+              authorization,
+              "CovenProjectItemAddTargets",
+              PROJECT_ITEM_ADD_TARGETS,
+              {
+                after,
+                contentId: operation.contentId,
+                projectId: operation.projectId,
+              }
             );
-          });
-          return {
-            foundId: found ? string(object(found).id, 256, NODE_ID) : null,
-            requestId: response.requestId,
-          };
+            requestId = response.requestId ?? requestId;
+            const data = graphqlData(response.body);
+            const project = validateProjectIdentity(
+              context,
+              data.project,
+              operation.projectId
+            );
+            validateContentIdentity(context, data.content, operation);
+            const items = object(project.items);
+            const found = array(items.nodes).find((item) => {
+              const candidate = object(item);
+              const content = candidate.content;
+              return (
+                content !== null && object(content).id === operation.contentId
+              );
+            });
+            if (found) {
+              return {
+                foundId: string(object(found).id, 256, NODE_ID),
+                requestId,
+              };
+            }
+            const pageInfo = object(items.pageInfo);
+            if (typeof pageInfo.hasNextPage !== "boolean") {
+              throw invalidResponse();
+            }
+            if (!pageInfo.hasNextPage) {
+              return { foundId: null, requestId };
+            }
+            const endCursor = string(pageInfo.endCursor, 512);
+            if (!endCursor || seenCursors.has(endCursor)) {
+              throw invalidResponse();
+            }
+            seenCursors.add(endCursor);
+            after = endCursor;
+          }
+          throw new GitHubToolProviderError(
+            "github_provider_response_too_large",
+            { retryable: true, status: 503 }
+          );
         };
         const initial = await inspect();
         if (initial.foundId) {
@@ -1670,18 +1736,20 @@ type GitHubToolGatewayStore = Pick<
 >;
 
 async function runDatabasePhase<T>(
-  operation: () => Promise<T>,
+  operation: (abortSignal: AbortSignal) => Promise<T>,
   timeoutMs: number
 ): Promise<T> {
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      operation(),
+      operation(controller.signal),
       new Promise<never>((_resolve, reject) => {
-        timer = globalThis.setTimeout(
-          () => reject(new Error("GitHub database phase deadline exceeded.")),
-          timeoutMs
-        );
+        timer = globalThis.setTimeout(() => {
+          const error = new Error("GitHub database phase deadline exceeded.");
+          controller.abort(error);
+          reject(error);
+        }, timeoutMs);
       }),
     ]);
   } finally {
@@ -1950,8 +2018,9 @@ export function createGitHubToolGateway(
             >;
             try {
               authorization = await runDatabasePhase(
-                () =>
+                (abortSignal) =>
                   input.store.authorizeMutation(input.operator, {
+                    abortSignal,
                     expectedVersion: executionContext.operation.version,
                     id: executionContext.operation.id,
                   }),

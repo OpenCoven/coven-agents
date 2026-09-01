@@ -436,9 +436,11 @@ function statement(
 
 function gatewayTransaction<T>(
   database: TeamStoreDatabase,
-  callback: (transaction: TeamStoreTransaction) => Promise<T>
+  callback: (transaction: TeamStoreTransaction) => Promise<T>,
+  abortSignal?: AbortSignal
 ): Promise<T> {
   return database.transaction(async (transaction) => {
+    abortSignal?.throwIfAborted();
     await transaction.execute(
       statement(
         "configure-github-database-deadlines",
@@ -451,7 +453,10 @@ function gatewayTransaction<T>(
           set_config('statement_timeout', ${`${GITHUB_GATEWAY_DB_STATEMENT_TIMEOUT_MS}ms`}, true)`
       )
     );
-    return callback(transaction);
+    abortSignal?.throwIfAborted();
+    const result = await callback(transaction);
+    abortSignal?.throwIfAborted();
+    return result;
   });
 }
 
@@ -701,7 +706,11 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
   return {
     authorizeMutation: async (
       operator: RunnerOperator,
-      input: Readonly<{ expectedVersion: number; id: string }>
+      input: Readonly<{
+        abortSignal?: AbortSignal;
+        expectedVersion: number;
+        id: string;
+      }>
     ): Promise<
       | Readonly<{
           kind: "authorized";
@@ -717,12 +726,17 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
       ) {
         throw new Error("GitHub mutation authorization input is invalid.");
       }
-      return gatewayTransaction(database, async (transaction) => {
-        const [authorized] = await transaction.execute(
-          statement(
-            "authorize-github-provider-mutation",
-            input,
-            sql`WITH "authorized" AS (
+      return gatewayTransaction(
+        database,
+        async (transaction) => {
+          const [authorized] = await transaction.execute(
+            statement(
+              "authorize-github-provider-mutation",
+              {
+                expectedVersion: input.expectedVersion,
+                id: input.id,
+              },
+              sql`WITH "authorized" AS (
                 SELECT "operation"."id"
                 FROM "RunnerGitHubOperation" AS "operation"
                 JOIN "RunnerGitHubCapability" AS "capability"
@@ -796,15 +810,17 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
               FROM "authorized"
               WHERE "operation"."id" = "authorized"."id"
               RETURNING "operation".*`
-          )
-        );
-        return authorized
-          ? {
-              kind: "authorized" as const,
-              operation: asOperation(authorized),
-            }
-          : { kind: "unauthorized" as const };
-      });
+            )
+          );
+          return authorized
+            ? {
+                kind: "authorized" as const,
+                operation: asOperation(authorized),
+              }
+            : { kind: "unauthorized" as const };
+        },
+        input.abortSignal
+      );
     },
 
     completeOperation: async (
