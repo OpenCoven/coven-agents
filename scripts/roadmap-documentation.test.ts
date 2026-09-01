@@ -14,7 +14,7 @@ test("the current-state snapshot covers merged product and planning surfaces", (
   assert.match(currentState, /Snapshot date: 2026-08-31/u);
   assert.match(
     currentState,
-    /Application baseline: `f211e49eb2c633759c63e1cb077a9e44e5bdc172`/u
+    /Application baseline: `f0ffb3124ab6a39d776bd9f7b5e77fd652b4c27e`/u
   );
 
   for (const evidence of [
@@ -22,6 +22,10 @@ test("the current-state snapshot covers merged product and planning surfaces", (
     "lib/console/agent-profile.ts",
     "Subscription authority",
     "lib/billing/checkout-lease.ts",
+    "Subscription surfaces",
+    "components/billing/subscription-card.tsx",
+    "Credential authorization",
+    "lib/credentials/device-poll-commit.ts",
     "Coordinated teams",
     "lib/teams/",
     "Deployment posture",
@@ -47,12 +51,14 @@ test("the verification matrix records the newly verified repository boundaries",
   assert.match(matrix, /as of 2026-08-31/u);
   assert.match(
     matrix,
-    /application baseline `f211e49eb2c633759c63e1cb077a9e44e5bdc172`/u
+    /application baseline `f0ffb3124ab6a39d776bd9f7b5e77fd652b4c27e`/u
   );
 
   for (const capability of [
     "Console profile execution",
     "Paid subscription authority",
+    "Subscriber checkout surfaces",
+    "Credential authorization lifecycle",
     "Coordinated team execution",
     "Planning document registry",
     "Vercel Git deployment disablement",

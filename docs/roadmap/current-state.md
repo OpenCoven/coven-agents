@@ -1,7 +1,7 @@
 # Current Repository State
 
 - Snapshot date: 2026-08-31
-- Application baseline: `f211e49eb2c633759c63e1cb077a9e44e5bdc172`
+- Application baseline: `f0ffb3124ab6a39d776bd9f7b5e77fd652b4c27e`
 - Evidence class: verified repository and local contract evidence plus retained
   infrastructure cutover evidence
 
@@ -16,8 +16,10 @@ pending and is not inferred from repository or Project evidence.
 | Product application | Next.js 16 serves authenticated account, agent, team, skill, run, analytics, settings, and administration surfaces. | `app/`, `components/` |
 | Console workspace | Every stored agent profile resolves to a bounded execution profile; the workspace presents responsive creation, resizable rails, rendered runner Markdown, and structured research-report evidence. | `lib/console/agent-profile.ts`, `components/console/`, `app/console.css` |
 | Browser execution access | Browser code calls relative same-origin `/api` routes with the Auth.js session. | `lib/agents/browser-transport.ts`, `lib/agents/client.ts` |
-| Authority | Protected routes revalidate subscriber state and derive tenant ownership on the server. | `lib/auth/subscriber-authorization.server.ts`, `lib/runner/http.ts`, `lib/runner/runtime.ts` |
+| Authority | Protected routes revalidate subscriber state and derive tenant ownership on the server. Shared browser authority is scoped to the exact user, auth version, finite paid-through boundary, and unique server resolution; current authorization refusals invalidate that authority across consumers. | `lib/auth/subscriber-authorization.server.ts`, `lib/subscription-authority.ts`, `lib/subscription-authority-refresh.ts`, `lib/runner/runtime.ts` |
 | Subscription authority | Checkout is explicitly gated, authentication-first, abuse-bounded, operation-idempotent, lease-fenced, and recoverable across uncertain provider outcomes. Signature-verified webhooks update paid intervals transactionally and persist bounded manual-reconciliation records when authority cannot be applied safely. | `lib/billing/checkout-lease.ts`, `lib/billing/checkout-response.ts`, `lib/billing/webhook.ts`, `lib/db/stripe-event.ts` |
+| Subscription surfaces | Account and console settings render the authoritative run allowance, preserve checkout confirmation ownership across reloads and identity transitions, refresh delayed server authority within bounded incidents, and fail closed at the paid-through boundary. | `components/billing/subscription-card.tsx`, `hooks/use-subscription-authority-refresh.ts`, `components/account/account-settings.tsx`, `components/console/settings.tsx` |
+| Credential authorization | Copilot device authorization is bound to its initiating subscriber and canonical application path. Polling claims owner-scoped idempotency before provider exchange, then atomically verifies current authority, stores the encrypted credential, and completes only bounded replay evidence. | `lib/credentials/device-flow-binding.ts`, `lib/credentials/device-poll.ts`, `lib/credentials/device-poll-commit.ts`, `lib/application-path.ts` |
 | Coordinated teams | Authenticated tenants can manage bounded skill and team definitions and start durable team runs. Immutable authority, agent, skill, and child-run snapshots fence execution; handoffs are UTF-8 byte-bounded and sanitized; workspace-only Copilot steps are orchestrated durably while GitHub-capable steps fail closed until brokered. | `packages/agent-contracts/src/index.ts`, `lib/teams/`, `app/api/teams/`, `app/api/team-runs/` |
 | Daytona execution | Daytona is the sole execution provider. Each agent owns a persistent tenant-scoped sandbox; attempts use short-lived process sessions. | `lib/runner/daytona/`, `lib/runner/service.ts` |
 | Durable ownership | PostgreSQL stores agent, run, event, admission, dispatch, attempt, cancellation, and reconciliation state. | `lib/runner/store.ts`, `lib/db/schema.ts` |
@@ -47,11 +49,18 @@ pending and is not inferred from repository or Project evidence.
   lease-fenced checkout recovery and transactional paid-period authority.
 - [PR #174](https://github.com/OpenCoven/coven-agents/pull/174) added bounded
   handoffs and durable workspace-only team-run orchestration.
+- [PR #178](https://github.com/OpenCoven/coven-agents/pull/178) added resilient
+  subscriber checkout surfaces, canonical application paths, and owner-bound
+  credential authorization.
+- [PR #179](https://github.com/OpenCoven/coven-agents/pull/179) and
+  [PR #180](https://github.com/OpenCoven/coven-agents/pull/180) added and
+  integrated shared subscription-authority invalidation, strict expiry, and
+  authority-scoped credential lifecycle controls.
 
 The application baseline also includes the merged console, billing,
 deployment-policy, branding, runner-reliability, coordinated-team, dependency,
-and session-path corrections through
-`f211e49eb2c633759c63e1cb077a9e44e5bdc172`. The
+subscriber-surface, credential-lifecycle, and session-path corrections through
+`f0ffb3124ab6a39d776bd9f7b5e77fd652b4c27e`. The
 [cutover attestation](../operations/daytona-cutover-attestation.md) records
 infrastructure production evidence while preserving the remaining product
 certification and approval gates.
@@ -63,6 +72,9 @@ certification and approval gates.
 - Complete outbound policy evidence remains open.
 - End-to-end evidence redaction, restart recovery, retention, export, and
   deletion require broader certification.
+- Checkout, authority refresh, expiry, and owner-bound device authorization
+  have deterministic local and browser coverage but still require retained
+  release-equivalent provider evidence.
 - Only GitHub Copilot CLI has implemented event translation.
 - GitHub-capable team steps remain intentionally blocked until approved
   operations use a bounded production capability broker.

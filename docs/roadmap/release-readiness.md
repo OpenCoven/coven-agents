@@ -22,6 +22,8 @@ Do not promote when:
 - release audience configuration is ambiguous;
 - database migration compatibility is unproved;
 - subscriber or tenant authority can be supplied by request input;
+- checkout or credential controls remain enabled after current subscription
+  authority is invalidated or expires;
 - a team child can exceed its immutable workspace/tool authority or a
   GitHub-capable step can run without the approved capability broker;
 - Daytona credentials, snapshot, target, or domain policy are missing;
@@ -81,6 +83,10 @@ Record the candidate SHA and exact exit status for every command.
 - guest refusal for protected resources;
 - subscriber agent create, read, update, and delete;
 - subscriber skill and team create, read, update, and delete;
+- checkout-disabled and checkout-enabled account and console subscription
+  states, including delayed authority refresh and paid-through expiry;
+- owner-bound Copilot device authorization, lost-response replay, and
+  authorization loss before credential commit;
 - Daytona sandbox create and reuse;
 - idempotent run start;
 - workspace-only team run, bounded handoff, approval, cancellation, terminal
@@ -94,6 +100,8 @@ Record the candidate SHA and exact exit status for every command.
 ## Same-origin runner session boundary
 
 - Browser requests use relative `/api` paths.
+- Login, checkout, account, credential, and runner navigation resolves through
+  the configured canonical application base path.
 - The Auth.js session is the only browser execution credential.
 - Subscriber state and tenant identity are derived and revalidated server-side
   for standalone and coordinated-team routes.
@@ -135,6 +143,13 @@ When billing is enabled:
 ## Credential and identity isolation
 
 - Cross-tenant reads return nondisclosing refusals.
+- Shared subscription authority is scoped to user, auth version, paid-through
+  boundary, and unique server resolution.
+- Current `401` or `403` credential refusals invalidate shared authority;
+  stale auth-version or resolution refusals cannot invalidate replacements.
+- Device polling is bound to the initiating subscriber, claims idempotency
+  before provider exchange, and rechecks authority inside the credential
+  commit transaction.
 - Credential rows remain tenant-and-harness scoped.
 - Run acquisition binds the credential to one durable attempt.
 - Failed launches compensate the exact usage reservation and lease.
