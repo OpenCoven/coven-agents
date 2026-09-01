@@ -27,6 +27,33 @@ test("migration 0015 adds nullable fail-closed run authority without a default",
   );
 });
 
+test("migration 0028 backfills only the latest matching subscription override audit before constraining its marker", () => {
+  const directory = new URL("../db/migrations/", import.meta.url);
+  const migrationName = readdirSync(directory).find((name) =>
+    name.startsWith("0028_")
+  );
+  assert.ok(migrationName, "migration 0028 must exist");
+  const migration = readFileSync(new URL(migrationName, directory), "utf8");
+  const update = 'UPDATE "User" AS "user"';
+  const constraint =
+    'ALTER TABLE "User" ADD CONSTRAINT "User_subscriptionOverride_shape"';
+
+  assert.match(
+    migration,
+    /SELECT DISTINCT ON \("userId"\)[\s\S]*FROM "SubscriptionOverrideAudit"[\s\S]*ORDER BY "userId", "createdAt" DESC, "id" DESC/u
+  );
+  assert.match(
+    migration,
+    /SET "subscriptionOverrideAction" = "audit"\."action",\s+"subscriptionOverrideAt" = "audit"\."createdAt"/u
+  );
+  assert.match(
+    migration,
+    /"user"\."authVersion" = "audit"\."newAuthVersion"[\s\S]*"user"\."subscribedUntil" IS NOT DISTINCT FROM "audit"\."newSubscribedUntil"/u
+  );
+  assert.ok(migration.indexOf(update) < migration.indexOf(constraint));
+  assert.doesNotMatch(migration, /\bemail\b/iu);
+});
+
 test("migration 0026 adds nullable, strict execution provenance without history rewrites", () => {
   const migrationDirectory = new URL("../db/migrations/", import.meta.url);
   const provenanceMigrationName = readdirSync(migrationDirectory).find((name) =>

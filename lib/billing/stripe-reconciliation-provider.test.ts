@@ -41,6 +41,7 @@ test("Stripe adapter emits normalized observations without provider payloads", a
           subscription_details: { subscription: "sub_adapter" },
         },
         status: "paid",
+        status_transitions: { paid_at: 1_790_467_200 },
       }),
     },
     subscriptions: {
@@ -51,7 +52,10 @@ test("Stripe adapter emits normalized observations without provider payloads", a
       retrieve: async () => ({
         customer: "cus_adapter",
         id: "sub_adapter",
-        items: { data: [{ price: { id: "price_adapter" } }] },
+        items: {
+          data: [{ price: { id: "price_adapter" } }],
+          has_more: false,
+        },
         latest_invoice: "in_adapter",
         status: "active",
       }),
@@ -61,6 +65,7 @@ test("Stripe adapter emits normalized observations without provider payloads", a
   assert.deepEqual(await provider.retrieveSubscription("sub_adapter"), {
     customerId: "cus_adapter",
     id: "sub_adapter",
+    itemsComplete: true,
     latestInvoiceId: "in_adapter",
     priceIds: ["price_adapter"],
     status: "active",
@@ -68,7 +73,6 @@ test("Stripe adapter emits normalized observations without provider payloads", a
   assert.deepEqual(await provider.retrieveInvoice("in_adapter"), {
     billingReason: "subscription_cycle",
     customerId: "cus_adapter",
-    evidenceCreatedAt: new Date("2026-09-26T00:00:00.000Z"),
     id: "in_adapter",
     lines: {
       data: [
@@ -87,8 +91,134 @@ test("Stripe adapter emits normalized observations without provider payloads", a
       hasMore: false,
     },
     paid: true,
+    paidAt: new Date("2026-09-27T00:00:00.000Z"),
     stripeSubscriptionId: "sub_adapter",
   });
+});
+
+test("Stripe adapter rejects incomplete items and invalid paid-transition timestamps", async () => {
+  const provider = createStripeReconciliationProviderFromClient({
+    invoices: {
+      listLineItems: async () => ({ data: [], has_more: false }),
+      retrieve: async () => ({
+        billing_reason: "subscription_cycle",
+        created: 1_790_380_800,
+        customer: "cus_adapter",
+        id: "in_adapter",
+        lines: { data: [], has_more: false },
+        parent: {
+          subscription_details: { subscription: "sub_adapter" },
+        },
+        status: "paid",
+        status_transitions: { paid_at: Number.POSITIVE_INFINITY },
+      }),
+    },
+    subscriptions: {
+      list: async () => ({ data: [], has_more: false }),
+      retrieve: async () => ({
+        customer: "cus_adapter",
+        id: "sub_adapter",
+        items: {
+          data: [
+            { price: { id: "price_adapter" } },
+            { price: { id: "not_a_price" } },
+          ],
+          has_more: true,
+        },
+        latest_invoice: "in_adapter",
+        status: "active",
+      }),
+    },
+  } as never);
+
+  assert.deepEqual(await provider.retrieveSubscription("sub_adapter"), {
+    customerId: "cus_adapter",
+    id: "sub_adapter",
+    itemsComplete: false,
+    latestInvoiceId: "in_adapter",
+    priceIds: ["price_adapter"],
+    status: "active",
+  });
+  assert.equal((await provider.retrieveInvoice("in_adapter"))?.paidAt, null);
+});
+
+test("Stripe adapter preserves only complete, bounded item observations", async () => {
+  const valid = { price: { id: "price_adapter" } };
+  const cases = [
+    {
+      complete: true,
+      items: { data: [valid], has_more: false },
+      name: "exactly one valid configured price",
+      priceIds: ["price_adapter"],
+    },
+    {
+      complete: true,
+      items: { data: [valid, valid], has_more: false },
+      name: "multiple valid configured prices",
+      priceIds: ["price_adapter", "price_adapter"],
+    },
+    {
+      complete: false,
+      items: { data: [valid], has_more: true },
+      name: "a truncated item page",
+      priceIds: ["price_adapter"],
+    },
+    {
+      complete: false,
+      items: { data: [{ price: { id: "not_a_price" } }], has_more: false },
+      name: "a malformed visible item",
+      priceIds: [],
+    },
+    {
+      complete: false,
+      items: {
+        data: [valid, { price: { id: "not_a_price" } }],
+        has_more: false,
+      },
+      name: "a malformed item hidden after a valid item",
+      priceIds: ["price_adapter"],
+    },
+    {
+      complete: false,
+      items: {
+        data: Array.from({ length: 101 }, () => valid),
+        has_more: false,
+      },
+      name: "an excessive item count",
+      priceIds: Array.from({ length: 101 }, () => "price_adapter"),
+    },
+  ] as const;
+
+  await Promise.all(
+    cases.map(async (testCase) => {
+      const provider = createStripeReconciliationProviderFromClient({
+        invoices: {
+          listLineItems: async () => ({ data: [], has_more: false }),
+          retrieve: async () => {
+            throw new Error("not reached");
+          },
+        },
+        subscriptions: {
+          list: async () => ({ data: [], has_more: false }),
+          retrieve: async () => ({
+            customer: "cus_adapter",
+            id: "sub_adapter",
+            items: testCase.items,
+            latest_invoice: "in_adapter",
+            status: "active",
+          }),
+        },
+      } as never);
+
+      const observation = await provider.retrieveSubscription("sub_adapter");
+      assert.equal(
+        observation?.itemsComplete,
+        testCase.complete,
+        testCase.name
+      );
+      assert.deepEqual(observation?.priceIds, testCase.priceIds, testCase.name);
+    })
+  );
 });
 
 test("Stripe adapter makes customer-scoped bounded list calls only", async () => {

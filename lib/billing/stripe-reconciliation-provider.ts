@@ -16,6 +16,8 @@ type StripeReconciliationStripeClient = Pick<
   "invoices" | "subscriptions"
 >;
 
+const MAX_SUBSCRIPTION_ITEMS = 100;
+
 /**
  * Keeps Stripe SDK shapes in this server-only boundary. Reconciliation itself
  * receives only the small normalized observations it needs to make a
@@ -90,11 +92,18 @@ export function createStripeReconciliationProviderFromClient(
 function subscriptionObservation(
   subscription: Stripe.Subscription
 ): StripeSubscriptionObservation {
+  const items = subscription.items?.data;
+  const itemsComplete =
+    Array.isArray(items) &&
+    items.length <= MAX_SUBSCRIPTION_ITEMS &&
+    subscription.items?.has_more === false &&
+    items.every((item) => stripeId(item?.price, "price_") !== null);
   return {
     customerId: stripeId(subscription.customer, "cus_"),
     id: subscription.id,
+    itemsComplete,
     latestInvoiceId: stripeId(subscription.latest_invoice, "in_"),
-    priceIds: subscription.items.data.flatMap((item) => {
+    priceIds: (items ?? []).flatMap((item) => {
       const id = stripeId(item.price, "price_");
       return id ? [id] : [];
     }),
@@ -109,10 +118,10 @@ function invoiceObservation(invoice: Stripe.Invoice): StripeInvoiceObservation {
         ? invoice.billing_reason
         : null,
     customerId: stripeId(invoice.customer, "cus_"),
-    evidenceCreatedAt: dateFromStripeSeconds(invoice.created),
     id: invoice.id,
     lines: invoiceLinePage(invoice.lines),
     paid: invoice.status === "paid",
+    paidAt: dateFromStripeSeconds(invoice.status_transitions?.paid_at),
     stripeSubscriptionId: stripeId(
       invoice.parent?.subscription_details?.subscription,
       "sub_"
@@ -183,8 +192,9 @@ function stripeId(
     : null;
 }
 
-function dateFromStripeSeconds(seconds: number): Date | null {
+function dateFromStripeSeconds(seconds: unknown): Date | null {
   if (
+    typeof seconds !== "number" ||
     !Number.isSafeInteger(seconds) ||
     seconds < 0 ||
     seconds > Math.floor(Date.parse("9999-12-31T23:59:59.999Z") / 1000)

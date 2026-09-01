@@ -57,6 +57,7 @@ test("a paid latest invoice repairs the exact interval and attaches its verified
             {
               customerId,
               id: SUBSCRIPTION_ID,
+              itemsComplete: true,
               latestInvoiceId: "in_reconcile",
               priceIds: [PRICE_ID],
               status: "active",
@@ -70,7 +71,6 @@ test("a paid latest invoice repairs the exact interval and attaches its verified
         return {
           billingReason: "subscription_cycle",
           customerId: CUSTOMER_ID,
-          evidenceCreatedAt: new Date("2026-09-26T00:00:00.000Z"),
           id: invoiceId,
           lines: {
             data: [
@@ -88,6 +88,7 @@ test("a paid latest invoice repairs the exact interval and attaches its verified
             hasMore: false,
           },
           paid: true,
+          paidAt: new Date("2026-09-26T00:00:00.000Z"),
           stripeSubscriptionId: SUBSCRIPTION_ID,
         };
       },
@@ -181,6 +182,63 @@ test("strictly newer reconciled paid evidence clears an active revoke atomically
   ]);
 });
 
+test("reconciliation orders override supersession by the paid transition, not invoice creation", async () => {
+  const user: StripeReconciliationUser = {
+    authVersion: 7,
+    billingPeriodStart: null,
+    id: USER_ID,
+    stripeCustomerId: CUSTOMER_ID,
+    stripeSubscriptionId: SUBSCRIPTION_ID,
+    subscribedUntil: null,
+    subscriptionOverrideAction: "revoke",
+    subscriptionOverrideAt: new Date("2026-09-25T00:00:00.000Z"),
+  };
+  const store = new MemoryStore([user]);
+
+  const result = await reconcileStripeSubscriptions({
+    bounds: minimalBounds(),
+    owner: "11111111-1111-4111-8111-111111111111",
+    priceId: PRICE_ID,
+    provider: {
+      ...paidProvider(),
+      retrieveInvoice: async () => ({
+        ...paidInvoice(),
+        paidAt: new Date("2026-09-24T00:00:00.000Z"),
+      }),
+    },
+    store,
+  });
+
+  assert.equal(result.unchanged, 1);
+  assert.deepEqual(store.users, [user]);
+});
+
+test("reconciliation defers paid invoices without a valid paid transition", async () => {
+  const user: StripeReconciliationUser = {
+    authVersion: 7,
+    billingPeriodStart: null,
+    id: USER_ID,
+    stripeCustomerId: CUSTOMER_ID,
+    stripeSubscriptionId: SUBSCRIPTION_ID,
+    subscribedUntil: null,
+  };
+  const store = new MemoryStore([user]);
+
+  const result = await reconcileStripeSubscriptions({
+    bounds: minimalBounds(),
+    owner: "11111111-1111-4111-8111-111111111111",
+    priceId: PRICE_ID,
+    provider: {
+      ...paidProvider(),
+      retrieveInvoice: async () => ({ ...paidInvoice(), paidAt: null }),
+    },
+    store,
+  });
+
+  assert.equal(result.deferred, 1);
+  assert.equal(result.applied, 0);
+});
+
 test("a provider outage for one user defers that user and continues later users", async () => {
   const first: StripeReconciliationUser = {
     authVersion: 1,
@@ -220,7 +278,6 @@ test("a provider outage for one user defers that user and continues later users"
       retrieveInvoice: async () => ({
         billingReason: "subscription_cycle",
         customerId: CUSTOMER_ID,
-        evidenceCreatedAt: new Date("2026-09-26T00:00:00.000Z"),
         id: "in_reconcile",
         lines: {
           data: [
@@ -238,6 +295,7 @@ test("a provider outage for one user defers that user and continues later users"
           hasMore: false,
         },
         paid: true,
+        paidAt: new Date("2026-09-26T00:00:00.000Z"),
         stripeSubscriptionId: SUBSCRIPTION_ID,
       }),
       retrieveSubscription: async (subscriptionId) => {
@@ -248,6 +306,7 @@ test("a provider outage for one user defers that user and continues later users"
         return {
           customerId: CUSTOMER_ID,
           id: SUBSCRIPTION_ID,
+          itemsComplete: true,
           latestInvoiceId: "in_reconcile",
           priceIds: [PRICE_ID],
           status: "active",
@@ -342,6 +401,7 @@ test("a truncated subscription result set is deferred without fetching an unboun
             {
               customerId: CUSTOMER_ID,
               id: SUBSCRIPTION_ID,
+              itemsComplete: true,
               latestInvoiceId: "in_reconcile",
               priceIds: [PRICE_ID],
               status: "active",
@@ -404,6 +464,7 @@ test("unsupported Stripe statuses are deferred and never treated as entitlement 
         retrieveSubscription: async () => ({
           customerId: CUSTOMER_ID,
           id: SUBSCRIPTION_ID,
+          itemsComplete: true,
           latestInvoiceId: "in_reconcile",
           priceIds: [PRICE_ID],
           status,
@@ -454,6 +515,7 @@ test("customer, invoice, and subscription contradictions defer without repair", 
         retrieveSubscription: async () => ({
           customerId: "cus_other",
           id: SUBSCRIPTION_ID,
+          itemsComplete: true,
           latestInvoiceId: "in_reconcile",
           priceIds: [PRICE_ID],
           status: "active",
@@ -520,6 +582,7 @@ test("missing subscriptions and multiple configured-price candidates are deferre
           {
             customerId: CUSTOMER_ID,
             id: "sub_first",
+            itemsComplete: true,
             latestInvoiceId: "in_first",
             priceIds: [PRICE_ID],
             status: "active",
@@ -527,6 +590,7 @@ test("missing subscriptions and multiple configured-price candidates are deferre
           {
             customerId: CUSTOMER_ID,
             id: "sub_second",
+            itemsComplete: true,
             latestInvoiceId: "in_second",
             priceIds: [PRICE_ID],
             status: "active",
@@ -582,6 +646,7 @@ test("a canceled stored subscription falls back to one active replacement", asyn
           {
             customerId: CUSTOMER_ID,
             id: "sub_canceled",
+            itemsComplete: true,
             latestInvoiceId: "in_canceled",
             priceIds: [PRICE_ID],
             status: "canceled",
@@ -589,6 +654,7 @@ test("a canceled stored subscription falls back to one active replacement", asyn
           {
             customerId: CUSTOMER_ID,
             id: replacement,
+            itemsComplete: true,
             latestInvoiceId: "in_active_replacement",
             priceIds: [PRICE_ID],
             status: "active",
@@ -613,6 +679,7 @@ test("a canceled stored subscription falls back to one active replacement", asyn
       retrieveSubscription: async () => ({
         customerId: CUSTOMER_ID,
         id: "sub_canceled",
+        itemsComplete: true,
         latestInvoiceId: "in_canceled",
         priceIds: [PRICE_ID],
         status: "canceled",
@@ -648,6 +715,7 @@ test("only terminal subscriptions defer without attempting an invoice", async ()
           {
             customerId: CUSTOMER_ID,
             id: "sub_canceled",
+            itemsComplete: true,
             latestInvoiceId: "in_canceled",
             priceIds: [PRICE_ID],
             status: "canceled",
@@ -692,6 +760,7 @@ test("an active subscription with duplicate configured-price items defers", asyn
           {
             customerId: CUSTOMER_ID,
             id: SUBSCRIPTION_ID,
+            itemsComplete: true,
             latestInvoiceId: "in_reconcile",
             priceIds: [PRICE_ID, PRICE_ID],
             status: "active",
@@ -711,6 +780,53 @@ test("an active subscription with duplicate configured-price items defers", asyn
   assert.equal(result.applied, 0);
   assert.equal(result.deferred, 1);
   assert.equal(invoiceReads, 0);
+});
+
+test("incomplete subscription item evidence defers before uniqueness checks or invoice reads", async () => {
+  for (const status of ["active", "canceled"] as const) {
+    const user: StripeReconciliationUser = {
+      authVersion: 1,
+      billingPeriodStart: null,
+      id: USER_ID,
+      stripeCustomerId: CUSTOMER_ID,
+      stripeSubscriptionId: SUBSCRIPTION_ID,
+      subscribedUntil: null,
+    };
+    const store = new MemoryStore([user]);
+    let invoiceReads = 0;
+    let listReads = 0;
+
+    const result = await reconcileStripeSubscriptions({
+      bounds: minimalBounds(),
+      owner: "11111111-1111-4111-8111-111111111111",
+      priceId: PRICE_ID,
+      provider: {
+        ...paidProvider(),
+        listSubscriptions: async () => {
+          listReads += 1;
+          throw new Error("incomplete terminal evidence must not fall back");
+        },
+        retrieveInvoice: async () => {
+          invoiceReads += 1;
+          throw new Error("incomplete items are not invoice evidence");
+        },
+        retrieveSubscription: async () => ({
+          customerId: CUSTOMER_ID,
+          id: SUBSCRIPTION_ID,
+          itemsComplete: false,
+          latestInvoiceId: "in_reconcile",
+          priceIds: [PRICE_ID, PRICE_ID],
+          status,
+        }),
+      },
+      store,
+    });
+
+    assert.equal(result.deferred, 1, status);
+    assert.equal(result.applied, 0, status);
+    assert.equal(invoiceReads, 0, status);
+    assert.equal(listReads, 0, status);
+  }
 });
 
 test("unknown future subscription statuses defer even when their price matches", async () => {
@@ -735,6 +851,7 @@ test("unknown future subscription statuses defer even when their price matches",
           {
             customerId: CUSTOMER_ID,
             id: "sub_future",
+            itemsComplete: true,
             latestInvoiceId: "in_future",
             priceIds: [PRICE_ID],
             status: "future_status",
@@ -822,6 +939,7 @@ test("provider work observes the configured concurrency bound", async () => {
       return {
         customerId: CUSTOMER_ID,
         id: SUBSCRIPTION_ID,
+        itemsComplete: true,
         latestInvoiceId: "in_reconcile",
         priceIds: [PRICE_ID],
         status: "trialing",
@@ -879,6 +997,7 @@ test("an exhausted ordered cursor wraps without skipping deferred users", async 
       retrieveSubscription: async () => ({
         customerId: CUSTOMER_ID,
         id: SUBSCRIPTION_ID,
+        itemsComplete: true,
         latestInvoiceId: "in_reconcile",
         priceIds: [PRICE_ID],
         status: "trialing",
@@ -1046,6 +1165,7 @@ function paidProvider(): StripeReconciliationProvider {
     retrieveSubscription: async () => ({
       customerId: CUSTOMER_ID,
       id: SUBSCRIPTION_ID,
+      itemsComplete: true,
       latestInvoiceId: "in_reconcile",
       priceIds: [PRICE_ID],
       status: "active",
@@ -1057,7 +1177,6 @@ function paidInvoice(): StripeInvoiceObservation {
   return {
     billingReason: "subscription_cycle",
     customerId: CUSTOMER_ID,
-    evidenceCreatedAt: new Date("2026-09-26T00:00:00.000Z"),
     id: "in_reconcile",
     lines: {
       data: [
@@ -1075,6 +1194,7 @@ function paidInvoice(): StripeInvoiceObservation {
       hasMore: false,
     },
     paid: true,
+    paidAt: new Date("2026-09-26T00:00:00.000Z"),
     stripeSubscriptionId: SUBSCRIPTION_ID,
   };
 }

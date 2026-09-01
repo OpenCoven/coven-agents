@@ -82,6 +82,7 @@ export type StripeReconciliationLease = {
 export type StripeSubscriptionObservation = {
   customerId: string | null;
   id: string;
+  itemsComplete: boolean;
   latestInvoiceId: string | null;
   priceIds: readonly string[];
   status: string;
@@ -102,10 +103,10 @@ export type StripeInvoiceLineObservation = {
 export type StripeInvoiceObservation = {
   billingReason: string | null;
   customerId: string | null;
-  evidenceCreatedAt: Date | null;
   id: string;
   lines: StripeReconciliationPage<StripeInvoiceLineObservation>;
   paid: boolean;
+  paidAt: Date | null;
   stripeSubscriptionId: string | null;
 };
 
@@ -211,6 +212,7 @@ type DeferredReason =
   | "subscription_incomplete"
   | "subscription_incomplete_expired"
   | "subscription_invalid_reference"
+  | "subscription_items_incomplete"
   | "subscription_paused"
   | "subscription_past_due"
   | "subscription_price_mismatch"
@@ -454,7 +456,7 @@ async function reconcileUser(
   }
   const decision = paidInvoiceMutation(user, {
     customerId: user.stripeCustomerId as string,
-    eventCreatedAt: invoice.invoice.evidenceCreatedAt as Date,
+    eventCreatedAt: invoice.invoice.paidAt as Date,
     periodEnd: entitlement.periodEnd,
     periodStart: entitlement.periodStart,
     stripeSubscriptionId: subscription.id,
@@ -523,6 +525,9 @@ async function selectSubscription(
         return { kind: "deferred", reason: validation };
       }
       const status = subscriptionStatus(retrieved.status);
+      if (retrieved.itemsComplete !== true) {
+        return { kind: "deferred", reason: "subscription_items_incomplete" };
+      }
       if (!validSubscriptionPriceIds(retrieved.priceIds)) {
         return { kind: "deferred", reason: "subscription_invalid_reference" };
       }
@@ -623,6 +628,9 @@ async function listedSubscription(
     const validation = subscriptionMatches(subscription, customerId, null);
     if (validation) {
       return { kind: "deferred", reason: validation };
+    }
+    if (subscription.itemsComplete !== true) {
+      return { kind: "deferred", reason: "subscription_items_incomplete" };
     }
     if (!validSubscriptionPriceIds(subscription.priceIds)) {
       return { kind: "deferred", reason: "subscription_invalid_reference" };
@@ -730,7 +738,7 @@ async function invoiceForSubscription(
   if (!invoice.paid) {
     return { kind: "deferred", reason: "invoice_not_paid" };
   }
-  if (!validEvidenceCreatedAt(invoice.evidenceCreatedAt)) {
+  if (!validEvidenceCreatedAt(invoice.paidAt)) {
     return { kind: "deferred", reason: "invoice_invalid_evidence_time" };
   }
   if (invoice.customerId !== subscription.customerId) {
